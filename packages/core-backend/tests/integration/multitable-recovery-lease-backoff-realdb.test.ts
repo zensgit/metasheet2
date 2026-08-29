@@ -176,7 +176,11 @@ async function sealAnchorOp(recordId: string, seq: string, snap: Record<string, 
 const activate = () => txn((query) => activateCheckpoint(query, { sheetId: SHEET }))
 
 async function wipe(): Promise<void> {
-  for (const t of ['meta_history_baselines', 'meta_history_trust_checkpoints', 'meta_recovery_token_burns', 'meta_record_version_markers', 'meta_records_trash', 'meta_record_revisions', 'meta_records'])
+  await txn(async (query) => {
+    await query('SET LOCAL session_replication_role = replica')
+    await query('DELETE FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])
+  })
+  for (const t of ['meta_history_baselines', 'meta_history_trust_checkpoints', 'meta_record_version_markers', 'meta_records_trash', 'meta_record_revisions', 'meta_records'])
     await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [SHEET]).catch(() => {})
   await q('DELETE FROM meta_record_history_operations WHERE sheet_id = $1', [SHEET]).catch(() => {})
 }

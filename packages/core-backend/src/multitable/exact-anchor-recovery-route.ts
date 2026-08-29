@@ -146,7 +146,7 @@ export interface PreviewPlanSummary {
   driftCount: number
 }
 
-interface PreviewPlanDetails {
+export interface PreviewPlanDetails {
   summary: PreviewPlanSummary
   plan: ExactAnchorRecoveryPlan
   revertWrites: ExactAnchorRevertWriteIntent[]
@@ -168,7 +168,7 @@ function normalizeLinkIds(value: unknown): string[] {
  * snapshots). May throw `ExactAnchorPlanDataError` on malformed at-anchor/live substrate —
  * callers map that to `recovery-trust-required`.
  */
-function buildPreviewPlanDetails(
+export function buildPreviewPlanDetails(
   stateMap: Map<
     string,
     {
@@ -725,6 +725,12 @@ export function mapApplyRefusal(reason: ExactAnchorApplyRefusal): { status: numb
         code: 'RECORD_LOCKED',
         message:
           'A target record is locked; exact-anchor recovery is all-or-nothing and nothing was written. Unlock and re-preview.',
+      }
+    case 'scope-too-large':
+      return {
+        status: 413,
+        code: 'ARCHIVE_SYNC_SCOPE_TOO_LARGE',
+        message: 'This archive recovery exceeds the 5,000-record synchronous ceiling; use the asynchronous restore path.',
       }
     case 'history-incomplete':
       return mapHistoryIncompleteRefusal()

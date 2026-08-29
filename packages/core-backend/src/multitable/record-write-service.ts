@@ -45,6 +45,11 @@ import {
 import { ensureRecordNotLocked } from './record-lock'
 import { insertCommittedAuditInTxn, type OapiWriteAuditContext } from './oapi-write-audit'
 import { isRetryableLiveLinkDatabaseConflict } from './live-link-projection-integrity'
+import {
+  assertLinkWriterFencePlanMatchesFieldGuards,
+  enterLinkWriterFencePlan,
+  prepareLinkWriterFencePlan,
+} from './link-writer-fence'
 
 // ---------------------------------------------------------------------------
 // Shared types (mirrors the ones in univer-meta.ts to avoid coupling)
@@ -809,12 +814,30 @@ export class RecordWriteService {
         }),
       ] as const),
     )
+    const candidateFieldIds = Array.from(
+      changesByRecord.values(),
+      (changes) => changes.map((change) => change.fieldId),
+    ).flat()
+    const linkWriterFencePlan = await prepareLinkWriterFencePlan(
+      this.pool.query.bind(this.pool),
+      sheetId,
+      candidateFieldIds,
+    )
+    if (linkWriterFencePlan) {
+      assertLinkWriterFencePlanMatchesFieldGuards(linkWriterFencePlan, fieldById)
+    }
     const updates = await this.pool.transaction(async ({ query }) => {
       // W0-1 L4 (canonical fence): fence FIRST — before the preWriteGuard check and every mutation — then
       // refuse if a recovery holds a durable block. Covers the bulk / AI / OAPI patch family in one place.
       // No-op & byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off. `bypassWriterBlock` is set only by
       // revert-execute's own in-fence patch loop (it owns the block).
-      await fenceWriterEntry(query, sheetId, { bypassBlockCheck: input.bypassWriterBlock === true })
+      if (linkWriterFencePlan) {
+        await enterLinkWriterFencePlan(query, linkWriterFencePlan, {
+          bypassBlockCheck: input.bypassWriterBlock === true,
+        })
+      } else {
+        await fenceWriterEntry(query, sheetId, { bypassBlockCheck: input.bypassWriterBlock === true })
+      }
       // W0-1 L6-a: mint the sealed operation AFTER the fence. Recovery-owned calls (bypassWriterBlock — the
       // revert-execute in-fence patch loop) are the recovery API's own writes; L6-a leaves those UNMINTED
       // (their sealing is the deferred recovery-execute lane's concern), so they keep an inert ledger.

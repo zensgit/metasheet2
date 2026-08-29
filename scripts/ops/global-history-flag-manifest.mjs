@@ -249,6 +249,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/multitable/canonical-sheet-fence.ts:137',
   },
   {
+    key: 'MULTITABLE_RECOVERY_ARCHIVE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['MULTITABLE_ENABLE_WRITER_FENCE'],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "Time Machine D2a contract flag only: exact-case-sensitive `=== 'true'`; unset, false, TRUE, and whitespace remain OFF. This slice has no production caller and does not make archive behavior available. A later D2 caller remains unreachable unless this flag and MULTITABLE_ENABLE_WRITER_FENCE are both exact ON. It intentionally has no retention conflict: D2 is the archive-before-prune handoff, not current retention behavior.",
+    source: 'packages/core-backend/src/multitable/recovery-archive-contract.ts#isMultitableRecoveryArchiveEnabled',
+  },
+  {
     key: 'MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND',
     type: 'boolean',
     activationValue: 'true',

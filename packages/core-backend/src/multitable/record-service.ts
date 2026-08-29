@@ -53,6 +53,18 @@ import { publishMultitableSheetRealtime } from './realtime-publish'
 import { mintOperation, sealOperation } from './operation-ledger'
 import { recordRecordRevision } from './record-history-service'
 import { isRetryableLiveLinkDatabaseConflict } from './live-link-projection-integrity'
+import {
+  RecordLinkFencePlanChangedError,
+  assertLinkWriterFencePlanMatchesFieldGuards,
+  assertRecordLinkRestoreTargetsLive,
+  assertRecordLinkRestoreTrashStateCurrent,
+  enterLinkWriterFencePlan,
+  enterRecordLinkDeleteFencePlan,
+  enterRecordLinkRestoreFencePlan,
+  prepareLinkWriterFencePlan,
+  prepareRecordLinkDeleteFencePlan,
+  prepareRecordLinkRestoreFencePlan,
+} from './link-writer-fence'
 import { replayInboundLinks, isRecordUndeleteInboundEnabled, type InboundReplayResult } from './inbound-link-replay'
 import {
   notifyRecordSubscribersBestEffort,
@@ -546,12 +558,21 @@ export class RecordService {
       data: patch,
       actorId,
     })
+    const linkWriterFencePlan = await prepareLinkWriterFencePlan(
+      this.pool.query.bind(this.pool),
+      sheetId,
+      Object.keys(data),
+    )
     const recordRes = await this.pool.transaction(async ({ query }) => {
       // W0-1 L4 (canonical fence): create ALREADY takes this fence unconditionally (the auto-number key,
       // now renamed to `acquireCanonicalSheetFence` — same key). Byte-identical when the flag is off. The
       // NEW, flag-gated part is the durable-block refusal AFTER the fence (fence-before-check ordering).
-      await acquireCanonicalSheetFence(query, sheetId)
-      if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, sheetId)
+      if (linkWriterFencePlan) {
+        await enterLinkWriterFencePlan(query, linkWriterFencePlan)
+      } else {
+        await acquireCanonicalSheetFence(query, sheetId)
+        if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, sheetId)
+      }
       // W0-1 L6-a: mint the sealed operation AFTER the fence (so seq reflects commit order). Inert when the
       // fence flag is off / L6 migration absent ⇒ byte-identical to L4cov.
       const op = await mintOperation(query, sheetId)
@@ -854,6 +875,12 @@ export class RecordService {
     // the ONE shared rule (`ensureRecordNotLocked`) so every mutation path enforces it identically.
     ensureRecordNotLocked(actorId, recordRow, () => new RecordPermissionError('Record is locked'))
 
+    const linkDeleteFencePlan = await prepareRecordLinkDeleteFencePlan(
+      this.pool.query.bind(this.pool),
+      sheetId,
+      recordId,
+    )
+
     // P1#2 REPLACE — build the deleted-event payload ONCE (stable `_eventId`) so the same-txn durable enqueue
     // (flag ON, inside the txn) and the legacy post-commit emit (flag OFF) carry the same event identity.
     const deletedEventPayload = withAutomationEventId({
@@ -864,7 +891,8 @@ export class RecordService {
     await this.pool.transaction(async ({ query }) => {
       // W0-1 L4 (canonical fence): fence FIRST (before any read/check), then refuse if a recovery holds a
       // durable block. No-op & byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
-      await fenceWriterEntry(query, sheetId)
+      if (linkDeleteFencePlan) await enterRecordLinkDeleteFencePlan(query, linkDeleteFencePlan)
+      else await fenceWriterEntry(query, sheetId)
       // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
       const op = await mintOperation(query, sheetId)
       const lockedRecordRes = await query(
@@ -1137,13 +1165,40 @@ export class RecordService {
 
     let inboundOut: (InboundReplayResult & { recoverable: boolean }) | undefined
     const inboundEnabled = isRecordUndeleteInboundEnabled()
+    const collectOutboundTargets = (data: Record<string, unknown>) => linkFieldIds
+      .map((fieldId) => ({ fieldId, recordIds: normalizeLinkIds(data[fieldId]) }))
+      .filter(({ recordIds }) => recordIds.length > 0)
+    const restoreLinkFencePlan = await prepareRecordLinkRestoreFencePlan(
+      this.pool.query.bind(this.pool),
+      {
+        sourceSheetId: sheetId,
+        deleteRevisionId: inboundEnabled && typeof trashRow.delete_revision_id === 'string'
+          ? trashRow.delete_revision_id
+          : null,
+        candidateFieldIds: Object.keys(snapshot),
+        outboundTargets: collectOutboundTargets(snapshot),
+      },
+    ).catch((error: unknown) => {
+      if (error instanceof RecordLinkFencePlanChangedError) {
+        throw new RecordRestoreConflictError('Cannot restore: linked records changed concurrently; retry')
+      }
+      throw error
+    })
     // P1#2 REPLACE — build the restored(created)-event payload ONCE (stable `_eventId`) so the same-txn durable
     // enqueue (flag ON, inside the txn) and the legacy post-commit emit (flag OFF) carry the same identity.
     const restoredEventPayload = withAutomationEventId({ sheetId, recordId, actorId })
     await this.pool.transaction(async ({ query }) => {
       // W0-1 L4 (canonical fence): fence FIRST, then refuse if a recovery holds a durable block. No-op &
       // byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
-      await fenceWriterEntry(query, sheetId)
+      try {
+        if (restoreLinkFencePlan) await enterRecordLinkRestoreFencePlan(query, restoreLinkFencePlan)
+        else await fenceWriterEntry(query, sheetId)
+      } catch (error) {
+        if (error instanceof RecordLinkFencePlanChangedError) {
+          throw new RecordRestoreConflictError('Cannot restore: linked records changed concurrently; retry')
+        }
+        throw error
+      }
       // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
       const op = await mintOperation(query, sheetId)
       // 4c-3 C4: the trash row is re-read FOR UPDATE inside the txn — two concurrent restores of the
@@ -1155,6 +1210,19 @@ export class RecordService {
       }
       const lockedRow = locked.rows[0] as Record<string, unknown>
       const deleteRevisionId = typeof lockedRow.delete_revision_id === 'string' ? lockedRow.delete_revision_id : null
+      if (restoreLinkFencePlan) {
+        try {
+          assertRecordLinkRestoreTrashStateCurrent(restoreLinkFencePlan, {
+            deleteRevisionId: inboundEnabled ? deleteRevisionId : null,
+            outboundTargets: collectOutboundTargets(normalizeJson(lockedRow.data)),
+          })
+        } catch (error) {
+          if (error instanceof RecordLinkFencePlanChangedError) {
+            throw new RecordRestoreConflictError('Cannot restore: linked records changed concurrently; retry')
+          }
+          throw error
+        }
+      }
       const occupied = await query('SELECT 1 FROM meta_records WHERE id = $1 FOR UPDATE', [recordId])
       if (occupied.rows.length > 0) {
         throw new RecordRestoreConflictError(`Record id is occupied, cannot restore: ${recordId}`)
@@ -1175,6 +1243,16 @@ export class RecordService {
           throw new RecordRestoreConflictError(`Record id is occupied, cannot restore: ${recordId}`)
         }
         throw err
+      }
+      if (restoreLinkFencePlan) {
+        try {
+          await assertRecordLinkRestoreTargetsLive(query, restoreLinkFencePlan)
+        } catch (error) {
+          if (error instanceof RecordLinkFencePlanChangedError) {
+            throw new RecordRestoreConflictError('Cannot restore: linked records changed concurrently; retry')
+          }
+          throw error
+        }
       }
       // Rebuild outbound meta_links from the restored snapshot (same insert shape as create/patch).
       for (const fieldId of linkFieldIds) {
@@ -1202,7 +1280,13 @@ export class RecordService {
       if (inboundEnabled) {
         if (deleteRevisionId) {
           try {
-            const replay = await replayInboundLinks(query, deleteRevisionId)
+            const replay = await replayInboundLinks(
+              query,
+              deleteRevisionId,
+              restoreLinkFencePlan
+                ? { allowedParticipantSheetIds: restoreLinkFencePlan.participantSheetIds }
+                : undefined,
+            )
             inboundOut = { ...replay, recoverable: replay.total > 0 }
           } catch (error) {
             if (isRetryableLiveLinkDatabaseConflict(error)) {
@@ -1258,6 +1342,11 @@ export class RecordService {
       throw new RecordPermissionError('Insufficient permissions')
     }
     const patchActorId = input.actorId ?? access.userId ?? null
+    const linkWriterFencePlan = await prepareLinkWriterFencePlan(
+      this.pool.query.bind(this.pool),
+      sheetId,
+      Object.keys(data),
+    )
 
     const fields = await loadFieldsForSheet(this.pool.query.bind(this.pool), sheetId)
     if (fields.length === 0) {
@@ -1265,6 +1354,9 @@ export class RecordService {
     }
 
     const fieldById = buildFieldMutationGuardMap(fields)
+    if (linkWriterFencePlan) {
+      assertLinkWriterFencePlanMatchesFieldGuards(linkWriterFencePlan, fieldById)
+    }
     const fieldErrors: Record<string, string> = {}
     const patch: Record<string, unknown> = {}
     const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
@@ -1443,7 +1535,26 @@ export class RecordService {
     await this.pool.transaction(async ({ query }) => {
       // W0-1 L4 (canonical fence): fence FIRST, then refuse if a recovery holds a durable block. No-op &
       // byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
-      await fenceWriterEntry(query, sheetId)
+      if (linkWriterFencePlan) {
+        await enterLinkWriterFencePlan(query, linkWriterFencePlan)
+        for (const [fieldId, { ids, cfg }] of linkUpdates.entries()) {
+          if (ids.length === 0) continue
+          const exists = await query(
+            'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+            [cfg.foreignSheetId, ids],
+          )
+          const found = new Set(
+            (exists.rows as Array<Record<string, unknown>>)
+              .map((row) => (typeof row.id === 'string' ? row.id : ''))
+              .filter((id) => id.length > 0),
+          )
+          if (ids.some((id) => !found.has(id))) {
+            throw new RecordPatchFieldValidationError({ [fieldId]: 'Linked record not found' })
+          }
+        }
+      } else {
+        await fenceWriterEntry(query, sheetId)
+      }
       // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
       const op = await mintOperation(query, sheetId)
       const currentRes = await query(

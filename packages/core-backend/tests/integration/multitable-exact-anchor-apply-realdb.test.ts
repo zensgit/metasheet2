@@ -29,10 +29,10 @@ import { resolveExactAnchor } from '../../src/multitable/exact-anchor-recovery'
 import {
   applyExactAnchorRecovery,
   lockExactAnchorRecoveryAuthorityScope,
-  pruneExpiredRecoveryTokenBurns,
   type ExactAnchorApplyMode,
   type ExactAnchorLockedAuthorityScope,
 } from '../../src/multitable/exact-anchor-recovery-execute'
+import { pruneEligibleRecoveryTokenBurns } from '../../src/multitable/recovery-archive-restore-jobs'
 import { countInboundLinkCaptureRows, isTombstoneCaptureEnabled } from '../../src/multitable/tombstone-capture'
 import {
   hashRecoveryAuthorizationScope,
@@ -168,7 +168,13 @@ async function wipe(): Promise<void> {
   ).catch(() => {})
   await q('DELETE FROM meta_link_tombstones WHERE sheet_id = $1', [SHEET]).catch(() => {})
   await q('DELETE FROM meta_views WHERE sheet_id = $1', [SHEET]).catch(() => {})
-  for (const t of ['meta_history_baselines', 'meta_history_trust_checkpoints', 'meta_recovery_token_burns', 'meta_record_version_markers', 'meta_records_trash', 'meta_record_revisions', 'meta_records'])
+  // D5 makes burn deletion production-authority-only. Test cleanup must bypass that trigger locally,
+  // otherwise each case inherits the previous case's burn and the suite becomes order-dependent.
+  await txn(async (query) => {
+    await query('SET LOCAL session_replication_role = replica')
+    await query('DELETE FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])
+  })
+  for (const t of ['meta_history_baselines', 'meta_history_trust_checkpoints', 'meta_record_version_markers', 'meta_records_trash', 'meta_record_revisions', 'meta_records'])
     await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [SHEET]).catch(() => {})
   await q('DELETE FROM meta_record_history_operations WHERE sheet_id = $1', [SHEET]).catch(() => {})
 }
@@ -1831,55 +1837,45 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     expect((await liveRow(R2))?.data).toEqual({ [F_STR]: 'r2-at-anchor' })
   })
 
-  // ── G1 (pre-wiring gate list): burn-retention sweep ─────────────────────────────────────────────────────
-  test('G1 BURN-RETENTION: the sweep prunes only burns older than the keep window, and the floor clamp protects any possibly-live token', async () => {
+  // ── G1: provenance-aware burn retention ────────────────────────────────────────────────────────────────
+  test('G1 BURN-RETENTION: legacy burns remain permanently ineligible without terminal D5 provenance', async () => {
     const { anchorOp } = await seedWorld()
     const pv = await preview(anchorOp, 'revert')
     expect((await applyExactAnchorRecovery(txn, applyArgs(pv.token))).ok).toBe(true)
     expect(await burnCount()).toBe(1) // the fresh burn from the successful apply
 
-    // A synthetic OLD burn (2 hours ago) — prunable at the default 60m keep.
+    // Even an arbitrarily old legacy row remains ambiguous: age alone cannot prove replay safety,
+    // legal-hold absence, archive provenance, or a terminal recovery operation.
     await q(
       `INSERT INTO meta_recovery_token_burns (token_sha256, sheet_id, actor_id, burned_at) VALUES ($1,$2,$3, now() - interval '120 minutes')`,
       [`deadold${TS}`.padEnd(64, '0'), SHEET, ACTOR],
     )
-    // A synthetic 20-minute-old burn: older than a live token's 10m TTL but INSIDE an aggressive 1-minute
-    // keep request — the 15m FLOOR clamp must protect... no: 20m > 15m floor ⇒ prunable under floor. Use a
-    // 12-minute-old burn instead: younger than the 15m floor ⇒ MUST survive even a keepMinutes=1 request
-    // (pruning it could resurrect a replayed token whose JWT is still within clock-skew of its exp).
     await q(
       `INSERT INTO meta_recovery_token_burns (token_sha256, sheet_id, actor_id, burned_at) VALUES ($1,$2,$3, now() - interval '12 minutes')`,
       [`deadmid${TS}`.padEnd(64, '1'), SHEET, ACTOR],
     )
 
-    const beforeGlobal = Number(((await q('SELECT count(*)::int AS c FROM meta_recovery_token_burns')).rows[0] as { c: number }).c)
-    const pruned = await pruneExpiredRecoveryTokenBurns(q as unknown as QueryFn, 1) // aggressive request
-    const afterGlobal = Number(((await q('SELECT count(*)::int AS c FROM meta_recovery_token_burns')).rows[0] as { c: number }).c)
-    // The production sweep is intentionally global, so a reused real-DB may contain other legitimately expired
-    // burns. Pin its reported row count to the actual global delta without claiming this fixture owns every row.
-    expect(pruned).toBe(beforeGlobal - afterGlobal)
-    expect(pruned).toBeGreaterThanOrEqual(1)
+    expect(await pruneEligibleRecoveryTokenBurns(txn, 1000)).toBe(0)
     const remaining = (await q('SELECT token_sha256 FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows as Array<{ token_sha256: string }>
     const shas = new Set(remaining.map((r) => r.token_sha256))
-    expect(shas.has(`deadold${TS}`.padEnd(64, '0'))).toBe(false) // pruned
-    expect(shas.has(`deadmid${TS}`.padEnd(64, '1'))).toBe(true) // floor-protected
-    expect(remaining.length).toBe(2) // 12m row + the real fresh burn
+    expect(shas.has(`deadold${TS}`.padEnd(64, '0'))).toBe(true)
+    expect(shas.has(`deadmid${TS}`.padEnd(64, '1'))).toBe(true)
+    expect(remaining.length).toBe(3)
   })
 
-  test('G1 BURN-INDEX: pg_indexes pins a burned_at-leading index usable by pruneExpiredRecoveryTokenBurns', async () => {
+  test('G1 BURN-INDEX: pg_indexes pins the D5 eligible-sweep partial index', async () => {
     const idxs = (await q(
       `SELECT indexname, indexdef FROM pg_indexes
        WHERE tablename = 'meta_recovery_token_burns' AND schemaname = current_schema()`,
     )).rows as Array<{ indexname: string; indexdef: string }>
     expect(idxs.length).toBeGreaterThan(0)
-    // Usable for `WHERE burned_at < …`: leading key of the btree index expression is burned_at
-    // (not merely present as a trailing column of (sheet_id, burned_at)).
-    const burnedAtLeading = idxs.filter((r) =>
-      /\(.*burned_at/i.test(r.indexdef) && !/\([^)]*sheet_id[^)]*burned_at/i.test(r.indexdef),
+    const eligibleSweep = idxs.filter((r) =>
+      /\(retain_until, token_sha256\)/i.test(r.indexdef) &&
+      /WHERE .*burn_kind.*sync.*async.*terminal_at IS NOT NULL/i.test(r.indexdef),
     )
     expect(
-      burnedAtLeading.map((r) => r.indexname),
-      `expected a burned_at-leading index on meta_recovery_token_burns; got:\n${idxs.map((r) => `  ${r.indexname}: ${r.indexdef}`).join('\n')}`,
+      eligibleSweep.map((r) => r.indexname),
+      `expected a D5 eligible-sweep partial index; got:\n${idxs.map((r) => `  ${r.indexname}: ${r.indexdef}`).join('\n')}`,
     ).not.toEqual([])
   })
 
