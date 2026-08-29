@@ -63,6 +63,8 @@ const {
   normalizeStockPreparationActionConfig,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
 const {
+  ANONYMOUS_HOLD_IDENTITY_PREFIX,
+  planStockPreparationConflicts,
   __internals: plannerInternals,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-conflict-planner.cjs'))
 
@@ -1145,6 +1147,261 @@ async function testEndToEndConfirmedDecisionDowngradesTheDuplicateHold() {
   assert.equal(ledger.records.rows(LEDGER_SHEET).length, 1)
 }
 
+// ── O1-B: the ANONYMOUS hold families reach the ledger ──────────────────────
+//
+// RED-witnessed guards (mutation table in the landing commit body):
+//   O1B-L1  identity-capable anonymous families ledger as PENDING rows, and a
+//           REPEAT RECONCILE over the same source state reproduces the same
+//           decisionId per family — zero row growth
+//   O1B-L2  a change in how many holds sit on one identity supersedes and
+//           reopens; a stale acknowledgement never rides the new input
+//   O1B-L3  the reserved identity namespace is fenced in BOTH directions
+//   O1B-L4  an anonymous-family row can NEVER downgrade a hold: the readback
+//           structurally cannot receive one, and confirming one changes nothing
+//   O1B-L5  identity-less anonymous holds stay un-ledgered under their own
+//           explicit deferral marker, disjoint from the out-of-scope tally
+
+const KEYED_OUT_OF_SCOPE_HOLD = Object.freeze({
+  decision: 'manual_confirm',
+  conflictSummary: { type: 'lineage_mismatch' },
+  idempotencyKey: 'KEY-L',
+  changedFields: ['path'],
+  source: 'existing_row',
+})
+
+// Built by the REAL planner, so the identities under test are the ones
+// production would derive — not hand-written fixtures that could drift from it.
+function anonymousPlan({ missingComponentCount = 2 } = {}) {
+  const rowErrors = []
+  for (let i = 0; i < missingComponentCount; i += 1) {
+    // Same (type, field, depth): ONE locus, N holds. The expander attaches no
+    // per-row discriminator, so folding is the honest granularity.
+    rowErrors.push({ type: 'missing_component', field: 'OBJ_ID', depth: 2 })
+  }
+  rowErrors.push({ type: 'SOURCE_VALUE_NOT_A_NUMBER', target: 'ext_weight', sourceColumn: 'WGT', expectedType: 'number', depth: 0 })
+  // Identity-less: the unvalidated umbrella fallback carries nothing at all.
+  rowErrors.push({ message: 'only a message' })
+  const plan = planStockPreparationConflicts({
+    // keyless expanded row WITH lineage -> `row` granularity identity
+    expandedRows: [{ projectNo: 'P-001', componentSourceId: 'PART-NOKEY', path: '["PART-NOKEY"]', depth: 0 }],
+    // keyless existing row with NO discriminator -> identity-less deferral
+    existingRows: [{ active: true }],
+    rowErrors,
+    runId: 'run-o1b',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+  // A KEYED out-of-scope hold rides along, so the three evidence buckets can be
+  // asserted disjoint rather than merely non-empty.
+  plan.decisions.push(clone(KEYED_OUT_OF_SCOPE_HOLD))
+  return plan
+}
+
+async function testO1bAnonymousFamiliesLedgerAsPendingAndRepeatReconcileIsStable() {
+  const env = ledgerEnv()
+  const call = (plan) => reconcileConfirmationDecisions(scopedCall(env, {
+    projectNo: 'P-001',
+    plan,
+    sourceRevision: 'rev-1',
+  }))
+
+  const first = await call(anonymousPlan())
+  // One decision row per DERIVED IDENTITY: the keyless row, the folded
+  // missing_component locus, and the coercion cell.
+  assert.equal(first.counts.created, 3)
+  assert.equal(first.counts.pending, 3)
+  assert.deepEqual(first.evidence.anonymousHoldIdentity.ledgeredByFamily, {
+    missing_expanded_idempotency_key: 1,
+    missing_component: 1,
+    SOURCE_VALUE_NOT_A_NUMBER: 1,
+  })
+  assert.equal(first.evidence.anonymousHoldIdentity.ledgeredDecisionCount, 3)
+  assert.equal(first.evidence.anonymousHoldIdentity.ledgeredHoldCount, 4, 'the locus folded 2 holds into 1 row, and says so')
+
+  // O1B-L5: the three buckets are disjoint and each names families + counts only.
+  assert.deepEqual(first.evidence.anonymousHoldIdentity.deferredByFamily, {
+    missing_existing_idempotency_key: 1,
+    c2_row_error: 1,
+  })
+  assert.equal(first.evidence.anonymousHoldIdentity.deferralCode, 'ANONYMOUS_HOLD_IDENTITY_UNAVAILABLE')
+  assert.deepEqual(first.evidence.outOfScopeManualConfirm, { lineage_mismatch: 1 })
+  assert.equal(ledgerRows(env.records).length, 3)
+
+  // VALUES-FREE: the marker carries family tokens and counts, nothing else.
+  const marker = JSON.stringify(first.evidence.anonymousHoldIdentity)
+  for (const secret of ['PART-NOKEY', 'OBJ_ID', 'WGT', 'ext_weight', 'P-001']) {
+    assert.equal(marker.includes(secret), false, `evidence marker must not carry ${secret}`)
+  }
+
+  // O1B-L1 proper: a SECOND reconcile built from an equal-but-independent plan
+  // must reproduce every decisionId. Without reconcile-reproducibility the rows
+  // would churn and no supersede/reopen semantics could hold.
+  const before = ledgerRows(env.records).map((row) => row.data.decisionId).sort()
+  const replay = await call(anonymousPlan())
+  assert.equal(replay.counts.created, 0, 'O1B-L1: repeat reconcile creates nothing')
+  assert.equal(replay.counts.existing, 3)
+  assert.equal(replay.counts.superseded, 0)
+  assert.equal(replay.counts.orphanSuperseded, 0, 'anonymous rows are in the candidate set, so the sweep leaves them alone')
+  const after = ledgerRows(env.records).map((row) => row.data.decisionId).sort()
+  assert.deepEqual(after, before, 'the same source state reproduces the same decisionIds')
+  assert.equal(ledgerRows(env.records).length, 3)
+
+  // Every anonymous row is addressed by a NAMESPACED HASH — the source ids that
+  // went into it never come back out of the stored cell.
+  for (const row of ledgerRows(env.records)) {
+    assert.ok(row.data.rowIdentity.startsWith(ANONYMOUS_HOLD_IDENTITY_PREFIX))
+    for (const secret of ['PART-NOKEY', 'OBJ_ID', 'WGT']) {
+      assert.equal(row.data.rowIdentity.includes(secret), false)
+    }
+  }
+}
+
+async function testO1bOccurrenceCountChangeSupersedesTheLocusRow() {
+  // O1B-L2. Repairing 1 of 2 errors on a locus is a material change: the same
+  // stableDecisionKey must open a NEW pending row, never keep riding the old
+  // acknowledgement.
+  const env = ledgerEnv()
+  const call = (plan) => reconcileConfirmationDecisions(scopedCall(env, {
+    projectNo: 'P-001',
+    plan,
+    sourceRevision: 'rev-1',
+    now: () => new Date('2026-08-29T10:00:00.000Z'),
+  }))
+
+  await call(anonymousPlan({ missingComponentCount: 2 }))
+  const second = await call(anonymousPlan({ missingComponentCount: 1 }))
+  assert.equal(second.counts.superseded, 1, 'the 2-occurrence locus row is superseded')
+  assert.equal(second.counts.created, 1, 'a fresh pending row opens for the 1-occurrence locus')
+
+  const locusRows = ledgerRows(env.records).filter((row) => row.data.conflictType === 'missing_component')
+  assert.equal(locusRows.length, 2)
+  assert.equal(new Set(locusRows.map((row) => row.data.stableDecisionKey)).size, 1, 'same logical decision, new input')
+  assert.equal(new Set(locusRows.map((row) => row.data.inputFingerprint)).size, 2, 'occurrenceCount is bound into the fingerprint')
+
+  // Repairing them ALL removes the conflict from the plan entirely, and the
+  // orphan sweep closes the row rather than leaving it pending forever.
+  const third = await call(anonymousPlan({ missingComponentCount: 0 }))
+  assert.equal(third.counts.orphanSuperseded, 1)
+  const stillPending = ledgerRows(env.records).filter((row) => row.data.status === STATUSES.PENDING)
+  assert.equal(stillPending.some((row) => row.data.conflictType === 'missing_component'), false)
+}
+
+async function testO1bIdentityNamespaceIsFencedBothWays() {
+  // O1B-L3. stableDecisionKey folds rowIdentity in, so a row crossing between
+  // the two addressing schemes would claim (or be claimed by) somebody else's
+  // decision history. Both directions refuse, with one fixed code.
+  const env = ledgerEnv()
+  const forged = `${ANONYMOUS_HOLD_IDENTITY_PREFIX}row:sha256:${'0'.repeat(32)}`
+
+  await rejectsWithCode(
+    () => reconcileConfirmationDecisions(scopedCall(env, {
+      projectNo: 'P-001',
+      plan: planOf([duplicateHold(forged)]),
+      sourceRevision: 'rev-1',
+    })),
+    'CONFIRMATION_DECISION_IDENTITY_NAMESPACE_VIOLATION',
+    'an idempotencyKey may not impersonate a derived identity',
+  )
+
+  await rejectsWithCode(
+    () => reconcileConfirmationDecisions(scopedCall(env, {
+      projectNo: 'P-001',
+      plan: planOf([{
+        decision: 'manual_confirm',
+        conflictSummary: { type: 'missing_component' },
+        changedFields: [],
+        source: 'c2_row_error',
+        derivedRowIdentity: 'not-namespaced',
+      }]),
+      sourceRevision: 'rev-1',
+    })),
+    'CONFIRMATION_DECISION_IDENTITY_NAMESPACE_VIOLATION',
+    'a derived identity must self-identify by its reserved prefix',
+  )
+
+  assert.equal(ledgerRows(env.records).length, 0, 'a refused plan writes nothing')
+
+  // Structural non-collision, not a probabilistic one: a real idempotencyKey is
+  // a JSON object literal, so it can never begin with the reserved prefix.
+  const realKey = JSON.stringify({ projectNo: 'P-001', componentSourceId: 'PART-A', parentSourceId: null, path: ['PART-A'] })
+  assert.equal(realKey.startsWith(ANONYMOUS_HOLD_IDENTITY_PREFIX), false)
+  assert.equal(realKey[0], '{')
+}
+
+async function testO1bAnonymousRowsCanNeverDowngradeAHold() {
+  // O1B-L4. This is the load-bearing boundary of the whole cut: O1-B adds
+  // IDENTITY, never write capability.
+  const env = ledgerEnv()
+  const plan = anonymousPlan()
+  await reconcileConfirmationDecisions(scopedCall(env, { projectNo: 'P-001', plan, sourceRevision: 'rev-1' }))
+
+  // Structural half: the readback destructures `candidates`, and anonymous rows
+  // are not in it. It cannot filter them out because it never receives them.
+  const derived = deriveDecisionCandidates({ projectNo: 'P-001', plan, sourceRevision: 'rev-1' })
+  assert.equal(derived.candidates.length, 0, 'no duplicate_expanded_key hold in this plan')
+  assert.equal(derived.anonymousCandidates.length, 3)
+  for (const candidate of derived.anonymousCandidates) {
+    assert.equal(Object.prototype.hasOwnProperty.call(candidate, 'duplicateGroupFingerprint'), false,
+      'an anonymous candidate must not carry the field the policy readback consumes')
+  }
+
+  // Runtime half #1: the EXISTING confirm boundary already refuses any conflict
+  // type outside the first cut, so an anonymous row is ledgered as a visible
+  // PENDING queue entry that cannot even be confirmed yet. O1-B leaves that
+  // boundary untouched — this cut adds identity, not a resolution surface.
+  const list = await listConfirmationDecisions(scopedCall(env, { projectNo: 'P-001', status: STATUSES.PENDING }))
+  assert.equal(list.rows.length, 3)
+  for (const row of list.rows) {
+    await rejectsWithCode(
+      () => confirmConfirmationDecision(scopedCall(env, {
+        decisionId: row.decisionId,
+        inputFingerprint: row.inputFingerprint,
+        resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+        confirmedBy: 'admin-user',
+      })),
+      'CONFIRMATION_DECISION_ACTION_CONFLICT_MISMATCH',
+      'an anonymous-family row has no implemented resolution action',
+    )
+  }
+
+  // Runtime half #2: the readback wall must NOT depend on that confirm guard.
+  // Seed an anonymous row that is already CONFIRMED with the resolving policy —
+  // whatever future path might produce one — alongside a genuine duplicate hold
+  // so the readback actually queries instead of returning early. It must still
+  // emit no policy for the anonymous row.
+  const anonymousCandidate = derived.anonymousCandidates[0]
+  const planWithDuplicate = anonymousPlan()
+  planWithDuplicate.decisions.push(duplicateHold('KEY-A'))
+  const forcedEnv = ledgerEnv({
+    rows: [seedLedgerRow({
+      decisionId: anonymousCandidate.decisionId,
+      stableDecisionKey: anonymousCandidate.stableDecisionKey,
+      projectNo: 'P-001',
+      rowIdentity: anonymousCandidate.rowIdentity,
+      conflictType: anonymousCandidate.conflictType,
+      inputFingerprint: anonymousCandidate.inputFingerprint,
+      sourceRevision: 'rev-1',
+      status: STATUSES.CONFIRMED,
+      resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+      openedAt: '2026-08-29T10:00:00.000Z',
+      confirmedBy: 'admin-user',
+      confirmedAt: '2026-08-29T10:00:00.000Z',
+    }, 'rec-forced-anonymous')],
+  })
+  const forcedReview = await loadConfirmedDuplicatePolicyReview(scopedCall(forcedEnv, {
+    projectNo: 'P-001',
+    plan: planWithDuplicate,
+    sourceRevision: 'rev-1',
+  }))
+  assert.deepEqual(forcedReview.policies, [], 'O1B-L4: even a CONFIRMED anonymous row downgrades nothing')
+
+  // The queue projection stays values-free for the new rows too.
+  const queue = await listConfirmationDecisions(scopedCall(env, { projectNo: 'P-001' }))
+  const serialized = JSON.stringify(queue)
+  for (const secret of ['PART-NOKEY', 'OBJ_ID', 'WGT', 'rowIdentity']) {
+    assert.equal(serialized.includes(secret), false, `queue surface must not carry ${secret}`)
+  }
+}
+
 async function main() {
   const tests = [
     testLedgerHoldsNoCanonicalWriteCapability,
@@ -1161,6 +1418,10 @@ async function main() {
     testReadbackDowngradesOnlyConfirmedMatchingKeepMultipleRows,
     testQueueEndpointEmitsNoCellValues,
     testEndToEndConfirmedDecisionDowngradesTheDuplicateHold,
+    testO1bAnonymousFamiliesLedgerAsPendingAndRepeatReconcileIsStable,
+    testO1bOccurrenceCountChangeSupersedesTheLocusRow,
+    testO1bIdentityNamespaceIsFencedBothWays,
+    testO1bAnonymousRowsCanNeverDowngradeAHold,
   ]
   for (const test of tests) {
     await test()
