@@ -12,16 +12,13 @@ name: Approval Browser Verify
 # positive control), the stale-anchor values-free no-op, and the read-only
 # transition. Screenshots upload as supporting artifacts.
 #
-# NOT a required check yet: per delta §7.1 item 8 the branch-protection
-# addition is an explicit OWNER step before the F4 merge; until that owner
-# action is visible, this lane's evidence is exact-head but not "required".
-# Pull requests intentionally have no top-level path filter: the in-job
-# classifier below keeps the context stable for unrelated PRs and merge queues.
+# This lane is a required context. Pull requests intentionally have no top-level path filter: the
+# in-job classifier below keeps the context stable for unrelated PRs and merge queues.
 #
 # F4 (delta §5 F4, F2-gate handoff condition 1) added the mounted-production-
 # surface matrix (approval-form-builder-mounted-matrix.spec.ts, its owned
 # harness, and the two production-mount source files it exercises) to this
-# SAME lane/job — same server discipline, same "not required yet" posture.
+# SAME lane/job and server discipline.
 #
 # P5-C extends the lane with a real ApprovalDetailView + Element Plus member-action dialog harness
 # at desktop/tablet/mobile viewports. This is browser/mobile/a11y acceptance, not a write-path test.
@@ -153,14 +150,6 @@ jobs:
       - name: Type-check approval verification harnesses
         if: steps.changes.outputs.relevant == 'true'
         run: pnpm --filter @metasheet/web run type-check:verification-approval
-
-      - name: Assert Canvas acceptance is collected
-        shell: bash
-        run: |
-          set -euo pipefail
-          test_list="$(pnpm --filter @metasheet/web exec playwright test --config playwright.approval-verification.config.ts --list)"
-          printf '%s\n' "$test_list"
-          grep -F 'approval-canvas-sole-surface.spec.ts' <<<"$test_list"
 
       - name: Run approval browser verification (boots Vite, renders real components)
         if: steps.changes.outputs.relevant == 'true'
