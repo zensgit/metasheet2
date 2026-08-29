@@ -255,4 +255,27 @@ describeIfDatabase('O1-C migration 078 real-Postgres one-shot operation claim', 
     expect(row?.run_id).toBe(input.runId)
     expect(row && new Date(row.claimed_at).toISOString()).toBe(longAgo)
   })
+
+  // NEGATIVE CONTROL (permanent, replaces a one-shot PK-drop drill): the exactly-one-winner
+  // property above comes from the PRIMARY KEY and nothing else. Prove it structurally: on a
+  // keyless clone of the claim table, the same two-connection INSERT race lets BOTH claimers
+  // land. If this control ever starts seeing one winner, something other than the PK began
+  // deciding the race and the positive tests above are no longer testing what they claim.
+  test('negative control: without the PRIMARY KEY both concurrent claimers land', async () => {
+    const ctrl = `b2a_claim_078_nopk_ctrl_${process.pid}_${Date.now()}`
+    await q(`CREATE UNLOGGED TABLE ${ctrl} (claim_key TEXT NOT NULL, run_id TEXT NOT NULL)`)
+    try {
+      const key = `ctrl-key-${Date.now()}`
+      const insert = (client: PoolClient, runId: string) =>
+        client.query(`INSERT INTO ${ctrl} (claim_key, run_id) VALUES ($1, $2)`, [key, runId])
+      const results = await Promise.allSettled([insert(clientA, 'ctrl-run-a'), insert(clientB, 'ctrl-run-b')])
+      expect(results.every((r) => r.status === 'fulfilled')).toBe(true)
+      const rows = (await q(`SELECT count(*)::int AS n FROM ${ctrl} WHERE claim_key = $1`, [key])) as {
+        rows: Array<{ n: number }>
+      }
+      expect(rows.rows[0]?.n).toBe(2) // both "won" — the PK is the entire guarantee
+    } finally {
+      await q(`DROP TABLE IF EXISTS ${ctrl}`)
+    }
+  })
 })
