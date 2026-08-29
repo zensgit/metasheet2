@@ -1521,6 +1521,7 @@ export default defineConfig({
       // so a missing DATABASE_URL cannot skip-green it; wired as a WHOLE FILE into
       // plugin-tests.yml after db:migrate on the 20.x leg.
       'tests/integration/elearning-v01-content-assessment-schema.db.test.ts',
+      'tests/integration/elearning-admin-scope-acl-migration-authority.db.test.ts',
       'tests/integration/elearning-exam-attempt-item-migration.db.test.ts',
       // E-learning V0.1 watch-progress schema gate. Requires real PostgreSQL
       // (assignment/member/session/event/progress/evidence composite FKs,

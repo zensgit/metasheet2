@@ -271,10 +271,13 @@ import { kanbanRouter } from './routes/kanban'
 import { createPlatformAppsRouter } from './routes/platform-apps'
 import {
   isElearningAssignmentSurfaceEnabled,
+  isElearningContentSurfaceEnabled,
   isElearningExamSurfaceEnabled,
+  isElearningWatchSurfaceEnabled,
   resolveElearningCatalogFeature,
 } from './elearning/feature-flags'
 import { createElearningMediaPlaybackRouter } from './routes/elearning-media-playback'
+import { isElearningCreditSurfaceEnabled } from './services/elearning-credit-ledger'
 import { getBootedElearningMediaRangeStore } from './services/elearning-media-runtime'
 import { createElearningPilotRuntime } from './services/elearning-pilot-runtime'
 import {
@@ -308,6 +311,12 @@ import plmEmbedDiscussionReadRouter from './routes/plm-embed-discussion-read'
 import { createHostPluginStorage } from './plugins/plugin-durable-storage'
 import { univerMockRouter } from './routes/univer-mock'
 import { univerMetaRouter } from './routes/univer-meta'
+import {
+  createRecoveryArchiveApplication,
+  type RecoveryArchiveApplication,
+  type RecoveryArchiveApplicationCompositionFactory,
+  type RecoveryArchiveApplicationDatabaseRuntime,
+} from './multitable/recovery-archive-application'
 import { isOapiAllowlistRequest } from './multitable/oapi-read-allowlist'
 import { dashboardRouter } from './routes/dashboard'
 import { automationWebhookJsonParser, createAutomationRoutes } from './routes/automation'
@@ -366,6 +375,26 @@ function disabledFeatureHandler(message: string): RequestHandler {
   }
 }
 
+export interface MetaSheetServerOptions {
+  readonly port?: number
+  readonly host?: string
+  readonly pluginDirs?: string[]
+  readonly createRecoveryArchiveComposition?: RecoveryArchiveApplicationCompositionFactory
+}
+
+function resolveRecoveryArchiveMainPoolRuntime(): RecoveryArchiveApplicationDatabaseRuntime {
+  const pool = poolManager.get()
+  const query = pool.query.bind(pool) as unknown as RecoveryArchiveApplicationDatabaseRuntime['query']
+  const transaction: RecoveryArchiveApplicationDatabaseRuntime['transaction'] = async (work) =>
+    pool.transaction(async ({ query: transactionQuery }) =>
+      work(transactionQuery as unknown as RecoveryArchiveApplicationDatabaseRuntime['query']))
+  return Object.freeze({
+    transaction,
+    query,
+    transactionDepthProbe: pool.transactionDepthProbe,
+  })
+}
+
 export class MetaSheetServer {
   private app: Application
   private httpServer: HttpServer
@@ -420,6 +449,7 @@ export class MetaSheetServer {
   // P2 durable-delivery S5: the outbox dispatch loop handle. null unless AUTOMATION_DURABLE_DELIVERY_ENABLED
   // is ON (bootDurableDelivery returns null when the flag is off → no loop, no reads, byte-identical startup).
   private durableDeliveryLoop: import('./multitable/automation-durable-dispatch-loop').DispatchLoopHandle | null = null
+  private readonly recoveryArchiveApplication: RecoveryArchiveApplication
 
   // IoC Container
   private injector: Injector
@@ -429,7 +459,7 @@ export class MetaSheetServer {
     return this.injector.get(IPluginLoader)
   }
 
-  constructor(options: { port?: number; host?: string; pluginDirs?: string[] } = {}) {
+  constructor(options: MetaSheetServerOptions = {}) {
     // Initialize IoC Container
     this.injector = createContainer({ pluginDirs: options.pluginDirs })
     
@@ -440,6 +470,10 @@ export class MetaSheetServer {
     this.portLocked = typeof options.port === 'number'
     this.port = options.port ?? parseInt(process.env.PORT || '7778')
     this.host = options.host ?? process.env.HOST
+    this.recoveryArchiveApplication = createRecoveryArchiveApplication(
+      options.createRecoveryArchiveComposition,
+      resolveRecoveryArchiveMainPoolRuntime,
+    )
 
     // 创建核心API
     const coreAPI = this.createCoreAPI()
@@ -1375,10 +1409,12 @@ export class MetaSheetServer {
     // global JSON parsers, request metrics/logger, and global JWT. The store is
     // lazy: getBootedElearningMediaRangeStore is the exact successfully booted
     // range store, or null until boot succeeds.
-    const elearningMediaPlaybackRouter = createElearningMediaPlaybackRouter({
-      db: poolManager.get(),
-      getStore: getBootedElearningMediaRangeStore,
-    })
+    const elearningMediaPlaybackRouter = isElearningWatchSurfaceEnabled(process.env)
+      ? createElearningMediaPlaybackRouter({
+          db: poolManager.get(),
+          getStore: getBootedElearningMediaRangeStore,
+        })
+      : null
     if (elearningMediaPlaybackRouter) {
       this.app.use(elearningMediaPlaybackRouter)
     }
@@ -1387,7 +1423,12 @@ export class MetaSheetServer {
     // returns null). Mount BEFORE the global 10 MB JSON parser so the router-local
     // 16 KiB limit stays effective. poolManager.get() is the DB handle only —
     // no startup query. Do not remount from start().
-    const elearningPilotRuntime = createElearningPilotRuntime({ db: poolManager.get() })
+    const elearningPilotRuntime = (
+      isElearningContentSurfaceEnabled(process.env)
+      || isElearningCreditSurfaceEnabled(process.env)
+    )
+      ? createElearningPilotRuntime({ db: poolManager.get() })
+      : null
     if (elearningPilotRuntime) {
       this.app.use(elearningPilotRuntime.router)
     }
@@ -1557,7 +1598,13 @@ export class MetaSheetServer {
     }
 
     // Canonical multitable API used by the frontend and OpenAPI contracts.
-    this.app.use('/api/multitable', univerMetaRouter())
+    const recoveryArchiveRouterOptions = this.recoveryArchiveApplication.routerOptions
+    this.app.use(
+      '/api/multitable',
+      recoveryArchiveRouterOptions
+        ? univerMetaRouter(recoveryArchiveRouterOptions)
+        : univerMetaRouter(),
+    )
     // Chart / Dashboard CRUD (paths: /sheets/:sheetId/charts, /sheets/:sheetId/dashboards).
     // Mounted separately from univerMetaRouter because it lives in its own
     // module with a dedicated DashboardService.
@@ -1580,7 +1627,12 @@ export class MetaSheetServer {
     this.app.use(apiTokensRouter())
     // Keep the legacy dev alias while existing tools/worktrees still reference it.
     if (process.env.NODE_ENV !== 'production') {
-      this.app.use('/api/univer-meta', univerMetaRouter())
+      this.app.use(
+        '/api/univer-meta',
+        recoveryArchiveRouterOptions
+          ? univerMetaRouter(recoveryArchiveRouterOptions)
+          : univerMetaRouter(),
+      )
     }
 
     // 路由：事件总线
@@ -2805,6 +2857,16 @@ export class MetaSheetServer {
     }
     this.stopElearningMediaWorkers = undefined
 
+    let recoveryArchiveWorkerDrained = false
+    try {
+      // This must finish before the pool-close task is even created: an in-flight chunk may still
+      // be completing its transaction while the worker loop drains.
+      await this.recoveryArchiveApplication.stopWorker()
+      recoveryArchiveWorkerDrained = true
+    } catch {
+      this.logger.warn('Recovery archive restore worker stop failed')
+    }
+
     const shutdownTasks: Promise<void>[] = []
 
     // 0. Stop background tasks
@@ -2916,18 +2978,22 @@ export class MetaSheetServer {
       }
     }))
 
-    // 2. Close database pool
-    shutdownTasks.push((async () => {
-      try {
-        const { pool } = await import('./db/pg')
-        if (pool) {
-          await pool.end()
-          this.logger.info('Database pool closed')
+    // 2. Close database pool only after the restore worker has definitely drained.
+    if (recoveryArchiveWorkerDrained) {
+      shutdownTasks.push((async () => {
+        try {
+          const { pool } = await import('./db/pg')
+          if (pool) {
+            await pool.end()
+            this.logger.info('Database pool closed')
+          }
+        } catch (err) {
+          this.logger.warn(`Database pool close error: ${err instanceof Error ? err.message : String(err)}`)
         }
-      } catch (err) {
-        this.logger.warn(`Database pool close error: ${err instanceof Error ? err.message : String(err)}`)
-      }
-    })())
+      })())
+    } else {
+      this.logger.warn('Database pool close skipped because recovery archive restore worker did not drain')
+    }
 
     // 3. Unload plugins gracefully
     shutdownTasks.push((async () => {
@@ -4000,6 +4066,14 @@ export class MetaSheetServer {
       }
     })
 
+    try {
+      // The injected worker is deliberately activated only after the HTTP listener is live.
+      this.recoveryArchiveApplication.startWorker()
+    } catch (error) {
+      await this.stop('RECOVERY_ARCHIVE_RESTORE_WORKER_BOOT_FAILED')
+      throw error
+    }
+
     // Background tasks (after server starts listening)
     if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
       this.stopOperationAuditRetention = startOperationAuditRetention({ logger: this.logger })
@@ -4021,10 +4095,22 @@ export class MetaSheetServer {
   }
 }
 
-// 启动 - 仅在直接运行时启动服务器，测试导入时不启动
-if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
-  const server = new MetaSheetServer()
-  server.start().catch((err) => {
+export function isCoreBackendDirectEntry(mainModule: unknown, currentModule: unknown): boolean {
+  return mainModule === currentModule
+}
+
+export const coreBackendIsDirectEntry = isCoreBackendDirectEntry(require.main, module)
+
+// 启动 - 仅在直接运行时启动服务器，测试或注入式 launcher 导入时不启动
+if (
+  coreBackendIsDirectEntry &&
+  process.env.NODE_ENV !== 'test' &&
+  !process.env.VITEST
+) {
+  Promise.resolve().then(async () => {
+    const server = new MetaSheetServer()
+    await server.start()
+  }).catch((err) => {
     // eslint-disable-next-line no-console
     console.error('Failed to start MetaSheet v2 core:', err)
     process.exit(1)

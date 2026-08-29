@@ -1032,6 +1032,7 @@ jobs:
             tests/integration/elearning-course-publish.db.test.ts \
             tests/integration/elearning-credit-ledger-authority.db.test.ts \
             tests/integration/elearning-credit-rules-wallet.db.test.ts \
+            tests/integration/elearning-admin-scope-acl-migration-authority.db.test.ts \
             tests/integration/elearning-exam-service.db.test.ts \
             tests/integration/elearning-learner-courses.db.test.ts \
             tests/integration/elearning-scope-access.db.test.ts \

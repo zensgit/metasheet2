@@ -267,6 +267,41 @@ test('R4 isMisconfiguredTruthy is false for empty/absent values (nothing to warn
   assert.equal(isMisconfiguredTruthy(retentionSpec, 'false'), false)
 })
 
+// ── D2a: archive contract-only flag ────────────────────────────────────────────────────────────────
+
+test('D2a recovery archive flag is exact-case-sensitive, fence-dependent, and has no retention conflict', () => {
+  const archive = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
+  assert.deepEqual(
+    {
+      key: archive.key,
+      type: archive.type,
+      activationValue: archive.activationValue,
+      caseInsensitive: archive.caseInsensitive,
+      dependsOn: archive.dependsOn,
+      conflictsWith: archive.conflictsWith,
+      danger: archive.danger,
+      source: archive.source,
+    },
+    {
+      key: 'MULTITABLE_RECOVERY_ARCHIVE_ENABLED',
+      type: 'boolean',
+      activationValue: 'true',
+      caseInsensitive: undefined,
+      dependsOn: ['MULTITABLE_ENABLE_WRITER_FENCE'],
+      conflictsWith: [],
+      danger: 'medium',
+      source: 'packages/core-backend/src/multitable/recovery-archive-contract.ts#isMultitableRecoveryArchiveEnabled',
+    },
+  )
+  assert.equal(isActivated(archive, 'true'), true)
+  for (const value of [undefined, 'false', 'TRUE', ' true ', 'true ', ' true']) {
+    assert.equal(isActivated(archive, value), false, `archive flag must remain OFF for ${String(value)}`)
+  }
+  assert.match(archive.purpose, /no production caller/i)
+  assert.match(archive.purpose, /later D2 caller/i)
+  assert.match(archive.purpose, /no retention conflict/i)
+})
+
 // ── Combined ladder rung ───────────────────────────────────────────────────────────────────────────
 
 test('positive control: a full valid L1->L3.5 ladder rung (exact activation values) has zero violations', () => {

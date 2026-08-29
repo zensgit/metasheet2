@@ -1,6 +1,8 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import type { PoolClient, PoolConfig, QueryResult, QueryResultRow } from 'pg';
 import { Pool } from 'pg'
 import { Logger } from '../../core/logger'
+import type { RecoveryArchiveTransactionDepthProbe } from '../../multitable/recovery-archive-crypto'
 import { secretManager } from '../../security/SecretManager'
 import { coreMetrics } from '../metrics/metrics'
 
@@ -44,14 +46,31 @@ interface PoolStats {
   error?: string
 }
 
-class ConnectionPool {
+interface TransactionDepthContext {
+  active: boolean
+  parent: TransactionDepthContext | undefined
+}
+
+export class ConnectionPool {
   private pool: Pool
   private slowMs: number
   private logger: Logger
   private metricsTimer?: NodeJS.Timeout
+  private readonly transactionDepth = new AsyncLocalStorage<TransactionDepthContext>()
   private queryCount = 0
   private queryErrorCount = 0
   readonly name: string
+  readonly transactionDepthProbe: RecoveryArchiveTransactionDepthProbe = Object.freeze({
+    currentTransactionDepth: () => {
+      let depth = 0
+      let context = this.transactionDepth.getStore()
+      while (context) {
+        if (context.active) depth += 1
+        context = context.parent
+      }
+      return depth
+    },
+  })
 
   constructor(opts: ConnectionPoolOptions) {
     this.pool = new Pool(opts)
@@ -154,32 +173,39 @@ class ConnectionPool {
 
   async transaction<T>(handler: (client: { query: TransactionQuery; __rawClient: PoolClient }) => Promise<T>): Promise<T> {
     const rawClient = await this.pool.connect()
-    try {
-      await rawClient.query('BEGIN')
-      const query: TransactionQuery = async <R extends QueryResultRow = QueryResultRow>(
-        sqlOrConfig: string | QueryConfig,
-        params?: unknown[],
-        options?: QueryOptions
-      ): Promise<QueryResult<R>> => {
-        if (typeof sqlOrConfig === 'string') {
-          const queryConfig = this.buildQueryConfig(sqlOrConfig, params, options)
-          return rawClient.query<R>(queryConfig)
-        }
-        return rawClient.query<R>(sqlOrConfig)
-      }
-      const result = await handler({ query, __rawClient: rawClient })
-      await rawClient.query('COMMIT')
-      return result
-    } catch (e) {
-      try {
-        await rawClient.query('ROLLBACK')
-      } catch (rollbackErr) {
-        this.logger.error('ROLLBACK failed', rollbackErr instanceof Error ? rollbackErr : undefined)
-      }
-      throw e
-    } finally {
-      rawClient.release()
+    const depthContext: TransactionDepthContext = {
+      active: true,
+      parent: this.transactionDepth.getStore(),
     }
+    return this.transactionDepth.run(depthContext, async () => {
+      try {
+        await rawClient.query('BEGIN')
+        const query: TransactionQuery = async <R extends QueryResultRow = QueryResultRow>(
+          sqlOrConfig: string | QueryConfig,
+          params?: unknown[],
+          options?: QueryOptions
+        ): Promise<QueryResult<R>> => {
+          if (typeof sqlOrConfig === 'string') {
+            const queryConfig = this.buildQueryConfig(sqlOrConfig, params, options)
+            return rawClient.query<R>(queryConfig)
+          }
+          return rawClient.query<R>(sqlOrConfig)
+        }
+        const result = await handler({ query, __rawClient: rawClient })
+        await rawClient.query('COMMIT')
+        return result
+      } catch (e) {
+        try {
+          await rawClient.query('ROLLBACK')
+        } catch (rollbackErr) {
+          this.logger.error('ROLLBACK failed', rollbackErr instanceof Error ? rollbackErr : undefined)
+        }
+        throw e
+      } finally {
+        depthContext.active = false
+        rawClient.release()
+      }
+    })
   }
 
   /**
@@ -347,4 +373,3 @@ class PoolManager {
 }
 
 export const poolManager = new PoolManager()
-export type { ConnectionPool }
