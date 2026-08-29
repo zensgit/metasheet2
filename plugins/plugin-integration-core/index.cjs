@@ -350,6 +350,13 @@ module.exports = {
       // The SAME durable store the routes hand the guard. The one-time operation claim is a record
       // in it, so route and runner must look at one store or "one operation" would mean two.
       b2aClaimStore: context.storage,
+      // MERGE-TRAIN (W-3 x W-2). The SAME DB-enforced one-shot claim the routes are handed above.
+      // Migration 078 made it mandatory for every ARMED read, and the runner's fence (W-2) landed on
+      // a branch that predated it — so without this line an armed HTTP-initiated run would be
+      // authorized by the route and then refused by the runner with `operation_claim_unavailable`.
+      // Assigned earlier in this same activation, before this call. Null on a DORMANT deployment,
+      // where the runner's fence returns before it is ever read.
+      b2aOperationClaim,
     })
 
     try {

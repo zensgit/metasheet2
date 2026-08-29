@@ -319,6 +319,18 @@ function createPipelineRunner(deps = {}) {
   // the one-time operation claim is a record in that store, and two stores would mean two claims.
   const b2aTrialRegistry = deps.b2aTrialRegistry || null
   const b2aClaimStore = deps.b2aClaimStore || null
+  // MERGE-TRAIN (W-3 x W-2). Migration 078 made the DB-enforced one-shot claim MANDATORY for every
+  // armed read: `assertB2aReadAuthorization` refuses with `operation_claim_unavailable` rather than
+  // degrading to the kv-only read-then-write path it replaced. W-2 sank the fence into this runner
+  // and W-3 added that requirement on separate branches, so neither wired this dependency here.
+  // Without it every ARMED run — including the legitimate HTTP-initiated one the route already
+  // authorized — would be refused at this layer. index.cjs hands over the SAME claim the routes
+  // use, for the same reason `b2aClaimStore` must be the same store: one operation, one claim.
+  //
+  // DORMANT IS UNCHANGED. `b2aTrialRegistry === null` returns from the fence before this value is
+  // ever read, so a runner constructed without any of the three is byte-identical to the one that
+  // shipped before either fence existed.
+  const b2aOperationClaim = deps.b2aOperationClaim || null
 
   async function loadExternalSystemForAdapter(input) {
     if (typeof externalSystemRegistry.getExternalSystemForAdapter === 'function') {
@@ -461,6 +473,10 @@ function createPipelineRunner(deps = {}) {
     return assertB2aReadAuthorization({
       registry: b2aTrialRegistry,
       store: b2aClaimStore,
+      // Migration 078 (W-3): REQUIRED when armed, never defaulted. The marker's continue leg runs
+      // through this claim's same-run continuation (`holderRunId === runId` -> continue), which is
+      // what keeps the route and the runner on ONE operation instead of two.
+      operationClaim: b2aOperationClaim,
       // The PIPELINE ROW's own tenant, not the caller's carrier — the tenant this read is authorized
       // against must be the one that owns the record.
       tenantScope: trimmedString(pipeline.tenantId) || trimmedString(tenantId),
