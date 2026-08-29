@@ -7,6 +7,7 @@ export const ELEARNING_CREDIT_WALLET_PAGE_MAX = 100 as const
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const STABLE_ERROR_CODE_RE = /^[a-z][a-z0-9_]{0,62}$/
+const CANONICAL_ISO_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const AUTOMATIC_BEHAVIORS = [
   'login',
   'complete_course',
@@ -130,7 +131,12 @@ function requireText(value: unknown, status: number): string {
 
 function requireIsoTimestamp(value: unknown, status: number): string {
   const text = requireText(value, status)
-  if (!Number.isFinite(Date.parse(text))) failShape(status)
+  const date = new Date(text)
+  if (
+    !CANONICAL_ISO_INSTANT_RE.test(text)
+    || Number.isNaN(date.getTime())
+    || date.toISOString() !== text
+  ) failShape(status)
   return text
 }
 

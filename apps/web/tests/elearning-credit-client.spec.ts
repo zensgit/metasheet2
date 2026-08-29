@@ -18,6 +18,8 @@ const REQUEST = '22222222-2222-4222-8222-222222222222'
 const DECISION = '33333333-3333-4333-8333-333333333333'
 const ADJUSTMENT = '44444444-4444-4444-8444-444444444444'
 const CREATED = '2026-08-29T01:02:03.000Z'
+const NONCANONICAL = '2026-08-29T01:02:03Z'
+const IMPOSSIBLE = '2026-02-31T01:02:03.000Z'
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -163,6 +165,40 @@ describe('e-learning credit client', () => {
       points: 3,
       reason: 'correction',
     })).rejects.toMatchObject({ code: 'invalid_response', status: 200 })
+  })
+
+  it.each([
+    ['rule createdAt', (bad: string) => ({
+      body: { items: [rule({ createdAt: bad })] },
+      request: () => listElearningCreditRules(),
+    })],
+    ['wallet occurredAt', (bad: string) => ({
+      body: wallet({
+        items: [{ ...wallet().items[0], occurredAt: bad }],
+      }),
+      request: () => getMyElearningCreditWallet(),
+    })],
+    ['wallet createdAt', (bad: string) => ({
+      body: wallet({
+        items: [{ ...wallet().items[0], createdAt: bad }],
+      }),
+      request: () => getMyElearningCreditWallet(),
+    })],
+    ['adjustment createdAt', (bad: string) => ({
+      body: adjustment({ createdAt: bad }),
+      request: () => adjustElearningCredit({
+        requestId: REQUEST,
+        userId: 'user-2',
+        points: -3,
+        reason: 'correction',
+      }),
+    })],
+  ])('rejects a noncanonical or impossible %s timestamp', async (_label, makeCase) => {
+    for (const bad of [NONCANONICAL, IMPOSSIBLE]) {
+      const { body, request } = makeCase(bad)
+      apiFetchMock.mockResolvedValueOnce(jsonResponse(200, body))
+      await expect(request()).rejects.toMatchObject({ code: 'invalid_response', status: 200 })
+    }
   })
 
   it('accepts a closed manual-adjust wallet row and rejects impossible behavior/status/points pairs', async () => {

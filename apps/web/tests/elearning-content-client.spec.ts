@@ -149,6 +149,27 @@ describe('e-learning content client', () => {
     })
   })
 
+  it.each(['deadline', 'assignedAt'] as const)(
+    'rejects noncanonical content assignment %s timestamps',
+    async (field) => {
+      for (const bad of ['2026-02-31T00:00:00.000Z', '2026-08-29T01:02:03Z']) {
+        apiFetchMock.mockResolvedValueOnce(jsonResponse(200, {
+          courses: [contentCourse({
+            access: { kind: 'assignment', required: true },
+            assignment: {
+              deadline: field === 'deadline' ? bad : CREATED,
+              assignedAt: field === 'assignedAt' ? bad : CREATED,
+            },
+          })],
+        }))
+        await expect(listMyElearningCourses()).rejects.toMatchObject({
+          code: 'invalid_response',
+          status: 200,
+        })
+      }
+    },
+  )
+
   it.each([
     assessmentCourse({ items: contentCourse().items }),
     contentCourse({ video: assessmentCourse().video, exam: assessmentCourse().exam }),

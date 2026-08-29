@@ -536,7 +536,7 @@ function parseExamStartResult(value: unknown, status: number): ElearningExamStar
     status: 'started',
     paper,
     answers: parseOwnAnswers(value.answers, paper, status),
-    deadlineAt: requireNullableString(value.deadlineAt, status),
+    deadlineAt: requireNullableCanonicalIsoInstant(value.deadlineAt, status),
     duplicate: requireBoolean(value.duplicate, status),
   }
 }
@@ -582,13 +582,7 @@ function isLearnerAttemptStatus(value: unknown): value is ElearningLearnerAttemp
     || value === 'expired'
 }
 
-function requireNullableString(value: unknown, status: number): string | null {
-  if (value === null) return null
-  return requireNonEmptyString(value, status)
-}
-
-function requireNullableCanonicalIsoInstant(value: unknown, status: number): string | null {
-  if (value === null) return null
+function requireCanonicalIsoInstant(value: unknown, status: number): string {
   const text = requireNonEmptyString(value, status)
   const date = new Date(text)
   if (
@@ -597,6 +591,11 @@ function requireNullableCanonicalIsoInstant(value: unknown, status: number): str
     || date.toISOString() !== text
   ) failShape(status)
   return text
+}
+
+function requireNullableCanonicalIsoInstant(value: unknown, status: number): string | null {
+  if (value === null) return null
+  return requireCanonicalIsoInstant(value, status)
 }
 
 function parseLatestAttempt(value: unknown, status: number): ElearningLearnerLatestAttempt | null {
@@ -622,9 +621,9 @@ function parseLatestAttempt(value: unknown, status: number): ElearningLearnerLat
     autoScore: requireNullableFinite(value.autoScore, status),
     totalScore: requireNullableFinite(value.totalScore, status),
     passed: requireNullableBoolean(value.passed, status),
-    startedAt: requireNonEmptyString(value.startedAt, status),
-    submittedAt: requireNullableString(value.submittedAt, status),
-    gradedAt: requireNullableString(value.gradedAt, status),
+    startedAt: requireCanonicalIsoInstant(value.startedAt, status),
+    submittedAt: requireNullableCanonicalIsoInstant(value.submittedAt, status),
+    gradedAt: requireNullableCanonicalIsoInstant(value.gradedAt, status),
   }
 }
 
@@ -646,7 +645,7 @@ function parseLearnerVideo(value: unknown, status: number): ElearningLearnerVide
     status: value.status,
     effectiveMs: requireSafeInt(value.effectiveMs, status, 0),
     maxPositionMs: requireSafeInt(value.maxPositionMs, status, 0),
-    completedAt: requireNullableString(value.completedAt, status),
+    completedAt: requireNullableCanonicalIsoInstant(value.completedAt, status),
   }
 }
 
@@ -716,7 +715,6 @@ function parseLearnerCourseBase(
   )) failShape(status)
   if ((accessKind === 'assignment') !== (value.assignment !== null)) failShape(status)
   const deadline = value.assignment?.deadline
-  if (deadline !== undefined && deadline !== null && typeof deadline !== 'string') failShape(status)
   return {
     courseId: requireUuid(value.courseId, status),
     courseVersionId: requireUuid(value.courseVersionId, status),
@@ -725,8 +723,8 @@ function parseLearnerCourseBase(
     assignment: value.assignment === null
       ? null
       : {
-          deadline: deadline ?? null,
-          assignedAt: requireNonEmptyString(value.assignment.assignedAt, status),
+          deadline: requireNullableCanonicalIsoInstant(deadline, status),
+          assignedAt: requireCanonicalIsoInstant(value.assignment.assignedAt, status),
         },
   }
 }
@@ -938,7 +936,7 @@ export async function issueElearningPlaybackTicket(itemId: string): Promise<Elea
   }
   return {
     token: requireNonEmptyString(payload.token, 200),
-    expiresAt: requireNonEmptyString(payload.expiresAt, 200),
+    expiresAt: requireCanonicalIsoInstant(payload.expiresAt, 200),
     ttlSeconds: requireSafeInt(payload.ttlSeconds, 200, 1),
     itemId: requireUuid(payload.itemId, 200),
     mediaId: requireUuid(payload.mediaId, 200),
