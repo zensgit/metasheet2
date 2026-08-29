@@ -1365,9 +1365,9 @@ export function createElearningPilotRouter(
 
   router.get(
     '/api/elearning/me/courses',
-    ...gate(deps.readGuard, 'exam', null),
+    ...gate(deps.readGuard, 'content', null),
     asyncHandler(async (req: Request, res: Response) => {
-      const ctx = recheck(req, res, 'exam')
+      const ctx = recheck(req, res, 'content')
       if (!ctx) return
       try {
         const result = await listLearnerCourses(deps.db, {

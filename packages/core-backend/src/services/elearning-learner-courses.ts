@@ -18,6 +18,8 @@ import {
 import { matchElearningAudienceRuleIds } from './elearning-audience-resolver'
 
 export const ELEARNING_LEARNER_COURSES_LIMIT = 100 as const
+const ELEARNING_COURSE_VERSION_MAX_ITEMS_FOR_LIST =
+  ELEARNING_LEARNER_COURSES_LIMIT * 10_000
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -98,7 +100,7 @@ export interface ElearningLearnerExam {
   latestAttempt: ElearningLearnerExamAttempt | null
 }
 
-export interface ElearningLearnerCourse {
+export interface ElearningLearnerAssessmentCourse {
   courseId: string
   courseVersionId: string
   title: string
@@ -108,6 +110,28 @@ export interface ElearningLearnerCourse {
   exam: ElearningLearnerExam
   completed: boolean
 }
+
+export interface ElearningLearnerContentItem {
+  itemId: string
+  itemType: 'article' | 'external_link'
+  title: string
+  status: 'not_started' | 'completed'
+  completedAt: string | null
+}
+
+export interface ElearningLearnerContentCourse {
+  courseId: string
+  courseVersionId: string
+  title: string
+  access: ElearningLearnerAccess
+  assignment: ElearningLearnerAssignment | null
+  items: ElearningLearnerContentItem[]
+  completed: boolean
+}
+
+export type ElearningLearnerCourse =
+  | ElearningLearnerAssessmentCourse
+  | ElearningLearnerContentCourse
 
 const DETAILS_SQL = `/* elearning-learner-courses:details */
 WITH access_input AS (
@@ -245,6 +269,92 @@ WHERE (
   )
 )
 ORDER BY access.ordinality ASC`
+
+const CONTENT_DETAILS_SQL = `/* elearning-learner-courses:content-details */
+WITH access_input AS (
+  SELECT
+    course_version_id,
+    assignment_member_id,
+    scope_revision_rule_id,
+    ordinality
+  FROM unnest($3::uuid[], $4::uuid[], $5::uuid[]) WITH ORDINALITY AS input(
+    course_version_id,
+    assignment_member_id,
+    scope_revision_rule_id,
+    ordinality
+  )
+)
+SELECT
+  c.id AS course_id,
+  v.id AS course_version_id,
+  c.title AS title,
+  item.id AS item_id,
+  item.item_type AS item_type,
+  item.position AS item_position,
+  revision.title AS item_title,
+  evidence.completed_at AS item_completed_at,
+  evidence.item_type AS evidence_item_type,
+  evidence.content_revision_id AS evidence_revision_id
+FROM access_input access
+JOIN elearning_course_versions v
+  ON v.org_id = $1 AND v.id = access.course_version_id
+JOIN elearning_courses c
+  ON c.org_id = v.org_id AND c.id = v.course_id
+JOIN elearning_course_version_items item
+  ON item.org_id = v.org_id AND item.course_version_id = v.id
+ AND item.item_type IN ('article', 'external_link')
+JOIN elearning_content_revisions revision
+  ON revision.org_id = item.org_id
+ AND revision.id = CASE
+   WHEN item.item_type = 'article' THEN item.article_revision_id
+   ELSE item.external_link_revision_id
+ END
+ AND revision.item_type = item.item_type
+LEFT JOIN elearning_completion_evidence evidence
+  ON evidence.org_id = $1
+ AND evidence.user_id = $2
+ AND evidence.course_version_item_id = item.id
+WHERE NOT EXISTS (
+  SELECT 1
+    FROM elearning_course_version_items other_item
+   WHERE other_item.org_id = item.org_id
+     AND other_item.course_version_id = item.course_version_id
+     AND other_item.item_type NOT IN ('article', 'external_link')
+)
+AND (
+  (
+    access.assignment_member_id IS NOT NULL
+    AND access.scope_revision_rule_id IS NULL
+    AND c.status IN ('active', 'archived')
+    AND v.status IN ('published', 'retired')
+    AND EXISTS (
+      SELECT 1
+        FROM elearning_assignment_members current_member
+       WHERE current_member.org_id = $1
+         AND current_member.id = access.assignment_member_id
+         AND current_member.user_id = $2
+         AND current_member.course_version_id = v.id
+         AND current_member.revoked_at IS NULL
+    )
+  ) OR (
+    access.assignment_member_id IS NULL
+    AND access.scope_revision_rule_id IS NOT NULL
+    AND c.status = 'active'
+    AND v.status = 'published'
+    AND c.active_version_id = v.id
+    AND EXISTS (
+      SELECT 1
+        FROM elearning_scopes current_scope
+        JOIN elearning_scope_revision_rules current_rule
+          ON current_rule.org_id = current_scope.org_id
+         AND current_rule.scope_revision_id = current_scope.active_revision_id
+       WHERE current_scope.org_id = $1
+         AND current_scope.id = c.scope_id
+         AND current_rule.id = access.scope_revision_rule_id
+    )
+  )
+)
+ORDER BY access.ordinality ASC, item.position ASC, item.id ASC`
 
 function fail(code: ElearningLearnerCoursesErrorCode): never {
   throw new ElearningLearnerCoursesError(code)
@@ -500,7 +610,7 @@ function mapLatestAttempt(row: Record<string, unknown>): ElearningLearnerExamAtt
 function mapCourse(
   row: Record<string, unknown>,
   candidate: ElearningCourseAccessCandidate,
-): ElearningLearnerCourse {
+): ElearningLearnerAssessmentCourse {
   const courseId = requireUuid(row.course_id)
   const courseVersionId = requireUuid(row.course_version_id)
   if (courseId !== candidate.courseId || courseVersionId !== candidate.courseVersionId) {
@@ -541,6 +651,89 @@ function mapCourse(
   }
 }
 
+function assignmentFor(
+  candidate: ElearningCourseAccessCandidate,
+): ElearningLearnerAssignment | null {
+  return candidate.basis.kind === 'assignment'
+    ? {
+        deadline: candidate.assignmentDeadline,
+        assignedAt: candidate.assignmentAssignedAt ?? fail('unavailable'),
+      }
+    : null
+}
+
+function mapContentItem(row: Record<string, unknown>): ElearningLearnerContentItem {
+  const itemId = requireUuid(row.item_id)
+  const itemType = asText(row.item_type)
+  if (itemType !== 'article' && itemType !== 'external_link') fail('unavailable')
+  const completedAt = optionalIsoTimestamp(row.item_completed_at)
+  if (completedAt === null) {
+    if (row.evidence_item_type != null || row.evidence_revision_id != null) {
+      fail('unavailable')
+    }
+  } else if (
+    row.evidence_item_type !== itemType
+    || row.evidence_revision_id == null
+  ) fail('unavailable')
+  return {
+    itemId,
+    itemType,
+    title: requireTitle(row.item_title),
+    status: completedAt === null ? 'not_started' : 'completed',
+    completedAt,
+  }
+}
+
+function mapContentCourses(
+  rows: Array<Record<string, unknown>>,
+  candidates: Map<string, ElearningCourseAccessCandidate>,
+): Map<string, ElearningLearnerContentCourse> {
+  const grouped = new Map<string, Array<Record<string, unknown>>>()
+  for (const row of rows) {
+    const versionId = requireUuid(row.course_version_id)
+    if (!candidates.has(versionId)) fail('unavailable')
+    const group = grouped.get(versionId) ?? []
+    group.push(row)
+    grouped.set(versionId, group)
+  }
+  const courses = new Map<string, ElearningLearnerContentCourse>()
+  for (const [versionId, group] of grouped) {
+    const candidate = candidates.get(versionId) ?? fail('unavailable')
+    const first = group[0] ?? fail('unavailable')
+    const courseId = requireUuid(first.course_id)
+    if (courseId !== candidate.courseId) fail('unavailable')
+    const positions = new Set<number>()
+    const itemIds = new Set<string>()
+    const items = group.map((row) => {
+      if (
+        requireUuid(row.course_id) !== courseId
+        || requireUuid(row.course_version_id) !== versionId
+        || requireTitle(row.title) !== requireTitle(first.title)
+      ) fail('unavailable')
+      const position = requirePositiveInt(row.item_position)
+      const item = mapContentItem(row)
+      if (positions.has(position) || itemIds.has(item.itemId)) fail('unavailable')
+      positions.add(position)
+      itemIds.add(item.itemId)
+      return { position, item }
+    })
+    items.sort((left, right) => left.position - right.position)
+    courses.set(versionId, {
+      courseId,
+      courseVersionId: versionId,
+      title: requireTitle(first.title),
+      access: {
+        kind: candidate.basis.kind,
+        required: candidate.basis.required,
+      },
+      assignment: assignmentFor(candidate),
+      items: items.map(({ item }) => item),
+      completed: items.every(({ item }) => item.status === 'completed'),
+    })
+  }
+  return courses
+}
+
 export async function listElearningLearnerCourses(
   db: ElearningLearnerCoursesDb,
   input: ListElearningLearnerCoursesInput,
@@ -575,19 +768,30 @@ export async function listElearningLearnerCourses(
       const versionIds = candidates.map((candidate) => candidate.courseVersionId)
       const assignmentMemberIds = candidates.map((candidate) => candidate.basis.assignmentMemberId)
       const scopeRevisionRuleIds = candidates.map((candidate) => candidate.basis.scopeRevisionRuleId)
-      const result = await tx.query(DETAILS_SQL, [
+      const queryParams = [
         orgId,
         userId,
         versionIds,
         assignmentMemberIds,
         scopeRevisionRuleIds,
-      ])
-      if (!Array.isArray(result.rows)) fail('unavailable')
-      if (result.rows.length > ELEARNING_LEARNER_COURSES_LIMIT) fail('unavailable')
+      ]
+      const contentResult = await tx.query(CONTENT_DETAILS_SQL, queryParams)
+      const result = await tx.query(DETAILS_SQL, queryParams)
+      if (!Array.isArray(result.rows) || !Array.isArray(contentResult.rows)) {
+        fail('unavailable')
+      }
+      if (
+        result.rows.length > ELEARNING_LEARNER_COURSES_LIMIT
+        || contentResult.rows.length > ELEARNING_COURSE_VERSION_MAX_ITEMS_FOR_LIST
+      ) fail('unavailable')
       const details = new Map<string, ElearningLearnerCourse>()
       const candidateByVersion = new Map(
         candidates.map((candidate) => [candidate.courseVersionId, candidate] as const),
       )
+      for (const [versionId, course] of mapContentCourses(
+        contentResult.rows,
+        candidateByVersion,
+      )) details.set(versionId, course)
       for (const row of result.rows) {
         if (!row || typeof row !== 'object' || Array.isArray(row)) fail('unavailable')
         const versionId = requireUuid(row.course_version_id)
