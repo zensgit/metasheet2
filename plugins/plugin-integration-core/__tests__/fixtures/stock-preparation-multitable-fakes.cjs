@@ -28,11 +28,13 @@ const { createHash } = require('node:crypto')
 const path = require('node:path')
 
 const {
+  STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
 } = require(path.join(__dirname, '..', '..', 'lib', 'stock-preparation-templates.cjs'))
 
 const TEMPLATE_BY_OBJECT_ID = new Map(
-  STOCK_PREPARATION_MVP_TABLE_TEMPLATES.map((template) => [template.objectId, template]),
+  [...STOCK_PREPARATION_MVP_TABLE_TEMPLATES, STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE]
+    .map((template) => [template.objectId, template]),
 )
 
 // Byte-for-byte the platform's derivation (multitable/provisioning.ts stableMetaId + getObjectFieldId).
