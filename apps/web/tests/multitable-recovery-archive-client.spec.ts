@@ -87,6 +87,19 @@ describe('MultitableApiClient recovery archive routes', () => {
     )
   })
 
+  it.each([
+    ['204 response', () => new Response(null, { status: 204 })],
+    ['empty 200 response', () => new Response('', { status: 200 })],
+  ])('rejects a successful %s with the catalog domain error', async (_label, makeResponse) => {
+    const client = new MultitableApiClient({
+      fetchFn: vi.fn().mockResolvedValue(makeResponse()),
+    })
+
+    await expect(client.listRecoveryArchiveCatalog('sheet/a')).rejects.toThrow(
+      'Invalid recovery archive catalog response',
+    )
+  })
+
   it('accepts, reads, resumes, and cancels an async job without sending plan or worker fields', async () => {
     const planned = plannedJob
     const fetchFn = vi.fn()

@@ -2387,7 +2387,9 @@ export class MultitableApiClient implements CommentsApiClient {
     )
     const data = await this.parseJson<Partial<RecoveryArchiveCatalogPage>>(res)
     if (
-      !Array.isArray(data.entries)
+      !data
+      || typeof data !== 'object'
+      || !Array.isArray(data.entries)
       || data.entries.some((entry) => !isRecoveryArchiveCatalogEntry(entry))
       || (data.nextCursor !== null && typeof data.nextCursor !== 'string')
     ) {
