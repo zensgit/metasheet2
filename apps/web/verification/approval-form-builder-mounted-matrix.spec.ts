@@ -1,4 +1,4 @@
-// F4 real-browser B1-B12 matrix (delta §5 F4, §7.2; F2-gate handoff condition 1) — driven by
+// F4 real-browser B1-B13 matrix (delta §5 F4, §7.2; F2-gate handoff condition 1) — driven by
 // GENUINE mouse drags (`locator.dragTo`), never synthetic DataTransfer, against the MOUNTED
 // PRODUCTION SURFACE: the real `TemplateAuthoringView.vue`, real Vue Router, real Element Plus,
 // flag ON (see verification/approval-form-builder-mounted-harness.ts). The F2 lane's
@@ -8,6 +8,10 @@
 // No backend is reachable. `/approval-templates/new` needs none (synchronous empty-draft branch).
 // The edit-mode rows (B11) use Playwright's `page.route()` to intercept `getTemplate` at the network
 // layer — a real request/response cycle, not a framework mock.
+// The optional ApprovalNewView payload harness is intentionally not included here: Vite's DEV
+// build sets `approvals/api.ts`'s `USE_MOCK` before either template or create calls, so a route
+// interception cannot observe the request body. Proving that body would require a production-build
+// server or a test-only API injection, both outside this approval-only verification scope.
 import { test, expect, type Page } from '@playwright/test'
 import { mkdirSync } from 'node:fs'
 
@@ -402,4 +406,109 @@ test('B12 — attachment/number boundaries: attachment remains absent from the p
   expect(inspectorHtml).not.toContain('currencySymbol')
   expect(inspectorHtml).not.toContain('thousandsSeparator')
   await page.screenshot({ path: `${OUT}/afb-mounted-b12.png` })
+})
+
+// --- B13: mounted detail/sub-form preview ----------------------------------------
+
+test('B13 — mounted detail preview: columns, disabled controls, and identity-safe middle delete plus append', async ({ page }) => {
+  await mountFields(page)
+
+  // Add a detail field through the production palette. The new field is selected, so its
+  // Inspector is the same mounted production path used by template authors.
+  await page.click('[data-testid="approval-form-palette-chip-detail"]')
+  const detailCard = page.locator('[data-testid="approval-form-builder-card"][data-field-type="detail"]').last()
+  await expect(detailCard).toHaveAttribute('data-selected', 'true')
+  const detailLocalId = await detailCard.getAttribute('data-field-local-id')
+  expect(detailLocalId).toBeTruthy()
+  const inspectorDetail = page.locator('[data-testid="approval-form-field-inspector-detail"]')
+  await expect(inspectorDetail).toBeVisible()
+
+  const columnRows = () => inspectorDetail.locator('[data-column-local-id]')
+  const columnLabel = (localId: string) =>
+    page.locator(`[data-testid="approval-form-field-inspector-column-label-${localId}"]`)
+  const preview = detailCard.locator('[data-testid="approval-form-builder-detail-preview"]')
+  const previewHeaders = () => preview.locator('thead th')
+  const previewHeaderLabels = () =>
+    previewHeaders().evaluateAll((els) => els.map((el) => el.textContent?.trim() ?? ''))
+
+  // Configure three columns so the middle-column delete/re-add sequence is observable. Each
+  // label edit is committed through the Inspector's real blur path, not a draft-side mutation.
+  const firstId = await columnRows().nth(0).getAttribute('data-column-local-id')
+  expect(firstId).toBeTruthy()
+  await columnLabel(firstId!).fill('品名')
+  await columnLabel(firstId!).blur()
+
+  await page.click('[data-testid="approval-form-field-inspector-column-add"]')
+  await expect(columnRows()).toHaveCount(2)
+  const secondId = await columnRows().nth(1).getAttribute('data-column-local-id')
+  expect(secondId).toBeTruthy()
+  await columnLabel(secondId!).fill('数量')
+  await columnLabel(secondId!).blur()
+  await page.selectOption(`[data-testid="approval-form-field-inspector-column-type-${secondId}"]`, 'select')
+
+  await page.click('[data-testid="approval-form-field-inspector-column-add"]')
+  await expect(columnRows()).toHaveCount(3)
+  const thirdId = await columnRows().nth(2).getAttribute('data-column-local-id')
+  expect(thirdId).toBeTruthy()
+  await columnLabel(thirdId!).fill('金额')
+  await columnLabel(thirdId!).blur()
+  await page.selectOption(`[data-testid="approval-form-field-inspector-column-type-${thirdId}"]`, 'number')
+
+  // Configuring columns immediately materializes the mounted builder preview. Its header order
+  // and identity attributes are the current authoring draft's column order, while all sample
+  // controls are disabled because authoring must not create instance values.
+  await expect(preview).toBeVisible()
+  await expect(previewHeaders()).toHaveCount(3)
+  expect(await previewHeaderLabels()).toEqual(['品名', '数量', '金额'])
+  await expect(preview.locator('input, select, textarea')).toHaveCount(3)
+  await expect(preview.locator('input, select, textarea').nth(0)).toBeDisabled()
+  await expect(preview.locator('select').nth(0)).toBeDisabled()
+  await expect(preview.locator('input[type="number"]').nth(0)).toBeDisabled()
+  expect(await previewHeaders().evaluateAll((els) => els.map((el) => el.getAttribute('data-column-local-id')))).toEqual([
+    firstId,
+    secondId,
+    thirdId,
+  ])
+
+  // Delete the middle column through its identity-specific Inspector action. The remaining
+  // headers must retain firstId and thirdId in order.
+  await page.click(`[data-testid="approval-form-field-inspector-column-remove-${secondId}"]`)
+  await expect(columnRows()).toHaveCount(2)
+  await expect(previewHeaders()).toHaveCount(2)
+  expect(await previewHeaderLabels()).toEqual(['品名', '金额'])
+  expect(await previewHeaders().evaluateAll((els) => els.map((el) => el.getAttribute('data-column-local-id')))).toEqual([
+    firstId,
+    thirdId,
+  ])
+
+  // Append and configure a new column. Its opaque local identity must be fresh, and changing
+  // it must update only the new preview column rather than the surviving third column.
+  await page.click('[data-testid="approval-form-field-inspector-column-add"]')
+  await expect(columnRows()).toHaveCount(3)
+  const replacementId = await columnRows().nth(2).getAttribute('data-column-local-id')
+  expect(replacementId).toBeTruthy()
+  expect(replacementId).not.toBe(secondId)
+  const ids = await columnRows().evaluateAll((rows) => rows.map((row) => row.getAttribute('data-column-local-id')))
+  expect(new Set(ids).size).toBe(ids.length)
+  await columnLabel(replacementId!).fill('税额')
+  await columnLabel(replacementId!).blur()
+
+  expect(await previewHeaderLabels()).toEqual(['品名', '金额', '税额'])
+  expect(await previewHeaders().evaluateAll((els) => els.map((el) => el.getAttribute('data-column-local-id')))).toEqual([
+    firstId,
+    thirdId,
+    replacementId,
+  ])
+  await expect(previewHeaders().nth(1)).toHaveText('金额')
+  await expect(previewHeaders().nth(2)).toHaveText('税额')
+
+  // Selection follows the rendered detail card: switching away and back rehydrates the same
+  // detail field in the Inspector and leaves its preview attached to that selected card.
+  await cards(page).first().click()
+  await expect(page.locator('[data-testid="approval-form-field-inspector-detail"]')).toHaveCount(0)
+  await detailCard.click()
+  await expect(detailCard).toHaveAttribute('data-selected', 'true')
+  await expect(page.locator('[data-testid="approval-form-field-inspector-detail"]')).toBeVisible()
+  await expect(detailCard.locator('[data-testid="approval-form-builder-detail-preview"]')).toBeVisible()
+  await page.screenshot({ path: `${OUT}/afb-mounted-b13-detail-preview.png` })
 })
