@@ -60,6 +60,7 @@ describe('MultitableApiClient recovery archive routes', () => {
   })
 
   it.each([
+    true,
     { nextCursor: null },
     { entries: {}, nextCursor: null },
     { entries: [] },
@@ -195,6 +196,19 @@ describe('MultitableApiClient recovery archive routes', () => {
   ])('rejects a malformed successful job-list response instead of treating it as absence', async (data) => {
     const client = new MultitableApiClient({
       fetchFn: vi.fn().mockResolvedValue(response({ ok: true, data })),
+    })
+
+    await expect(client.listRecoveryArchiveJobs('sheet/a')).rejects.toThrow(
+      'Invalid recovery archive job list response',
+    )
+  })
+
+  it.each([
+    ['204 response', () => new Response(null, { status: 204 })],
+    ['empty 200 response', () => new Response('', { status: 200 })],
+  ])('rejects a successful %s with the job-list domain error', async (_label, makeResponse) => {
+    const client = new MultitableApiClient({
+      fetchFn: vi.fn().mockResolvedValue(makeResponse()),
     })
 
     await expect(client.listRecoveryArchiveJobs('sheet/a')).rejects.toThrow(

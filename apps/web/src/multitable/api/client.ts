@@ -2388,7 +2388,6 @@ export class MultitableApiClient implements CommentsApiClient {
     const data = await this.parseJson<Partial<RecoveryArchiveCatalogPage>>(res)
     if (
       !data
-      || typeof data !== 'object'
       || !Array.isArray(data.entries)
       || data.entries.some((entry) => !isRecoveryArchiveCatalogEntry(entry))
       || (data.nextCursor !== null && typeof data.nextCursor !== 'string')
@@ -2446,7 +2445,8 @@ export class MultitableApiClient implements CommentsApiClient {
     )
     const data = await this.parseJson<Partial<RecoveryArchiveJobPage>>(res)
     if (
-      !Array.isArray(data.entries)
+      !data
+      || !Array.isArray(data.entries)
       || data.entries.some((entry) => !isRecoveryArchiveJobSnapshot(entry))
       || (data.nextCursor !== null && typeof data.nextCursor !== 'string')
     ) {
