@@ -45,6 +45,19 @@
 //     SUPERSEDED and a fresh pending row opens; the planner readback never
 //     honours a decision whose fingerprint no longer matches, so a stale
 //     confirmation can only ever leave the hold standing.
+//   * fingerprint RETURN on reconcile (A→B→A — the source content reverts, and
+//     the revision handle is a pure content hash, so this is normal PLM/BOM
+//     behaviour) REOPENS the returning fingerprint's superseded row to pending
+//     and CLEARS the old human resolutionAction/notes (conservative default: a
+//     revived conflict must be re-confirmed by a human, never silently
+//     re-armed with the old answer); any OTHER live row of the same stable
+//     key is still superseded in the same run.
+//   * a PENDING row whose conflict vanished from the current plan entirely is
+//     closed by reconcile's orphan sweep (status superseded; the sweep's
+//     distinguishing reason travels in the run evidence — a row-level reason
+//     column would need its own migration, like the reserved cancelled state).
+//     CONFIRMED orphans are historical human decisions and stay untouched;
+//     the readback already ignores them via the fingerprint bind.
 //   * statuses: pending / confirmed / superseded (frozen public vocabulary).
 //     A cancellation state is internally reserved for a later slice but is NOT
 //     exposed — no API accepts, emits, or filters on it until its migration,
@@ -68,6 +81,15 @@
 // reconcile is idempotent for an unchanged plan (A-01), retrying after the
 // holder finishes is a no-op. No lease configured => reconcile refuses
 // fail-closed (501), never a silent fallback to process-local locking.
+// MID-RUN, the holder re-asserts ownership with a CAS renew (extend expires_at
+// WHERE scope_key AND lease_id match) immediately before the FIRST ledger
+// write and then every RECONCILE_LEASE_RENEW_EVERY_WRITES writes; a renew that
+// matches zero rows means the lease expired and was taken over, and the run
+// ABORTS with CONFIRMATION_DECISION_RECONCILE_LEASE_LOST (partial counts in
+// the error payload). TRUE write fencing is impossible on the multitable
+// records API — no ledger write can be made conditional on the lease row — so
+// bounded abort is the ceiling here; idempotent replay (A-01) makes the writes
+// that landed before the abort harmless to the takeover reconciler.
 // The human CONFIRM path needs no lease: it patches exactly one existing row
 // and refuses any row that is not pending; simultaneous confirms of the SAME
 // decision can last-write-win on the records service, which still leaves one
@@ -128,6 +150,11 @@ const MAX_DECISIONS_PER_RECONCILE = 2000
 const CONCURRENCY_MODEL = 'db_backed_reconcile_lease'
 const RECONCILE_LEASE_TABLE = 'integration_stock_prep_confirmation_reconcile_lease'
 const RECONCILE_LEASE_TTL_MS = 60_000
+// Mid-run lease keepalive cadence: renew every this many ledger WRITES. Up to
+// MAX_DECISIONS_PER_RECONCILE sequential remote writes can far outlive one
+// 60s TTL, so the write loop re-asserts ownership at this bounded cadence and
+// aborts the moment the CAS reports the lease gone (see the CONCURRENCY note).
+const RECONCILE_LEASE_RENEW_EVERY_WRITES = 25
 
 class StockPreparationConfirmationDecisionError extends Error {
   constructor(status, code, message, details = {}) {
@@ -433,6 +460,10 @@ function deriveDecisionCandidates({ projectNo, plan, sourceRevision } = {}) {
 //     one holder at the unique index, never in JS;
 //   * takeover of an EXPIRED lease = one CAS UPDATE guarded by the previous
 //     lease_id — of two stealers exactly one updates a row;
+//   * renew = one CAS UPDATE extending expires_at, guarded by scope_key AND
+//     the caller's own lease_id (existing migration-077 columns, no new SQL).
+//     Zero rows updated means the lease expired and someone took it over: the
+//     caller has LOST the lease and must abort its writes;
 //   * release deletes ONLY the caller's own lease_id, so a stolen-then-released
 //     stale holder cannot free somebody else's lease. Release is best-effort:
 //     an unreleased lease simply expires by TTL.
@@ -486,6 +517,17 @@ function createConfirmationDecisionReconcileLease({ db, ttlMs, now } = {}) {
       const updatedRows = Array.isArray(updated) ? updated : (updated && Array.isArray(updated.rows) ? updated.rows : [])
       return updatedRows.length === 1 ? { held: true, leaseId } : { held: false }
     },
+    async renew({ scopeKey, leaseId, ttlMs: renewTtlMs } = {}) {
+      const at = clock()
+      const extension = Number.isInteger(renewTtlMs) && renewTtlMs > 0 ? renewTtlMs : ttl
+      const updated = await db.updateRow(
+        RECONCILE_LEASE_TABLE,
+        { expires_at: new Date(at.getTime() + extension).toISOString() },
+        { scope_key: scopeKey, lease_id: leaseId },
+      )
+      const updatedRows = Array.isArray(updated) ? updated : (updated && Array.isArray(updated.rows) ? updated.rows : [])
+      return { held: updatedRows.length === 1 }
+    },
     async release(scopeKey, leaseId) {
       try {
         await db.deleteRows(RECONCILE_LEASE_TABLE, { scope_key: scopeKey, lease_id: leaseId })
@@ -497,12 +539,20 @@ function createConfirmationDecisionReconcileLease({ db, ttlMs, now } = {}) {
 }
 
 function requireReconcileLease(reconcileLease) {
-  if (!reconcileLease || typeof reconcileLease.acquire !== 'function' || typeof reconcileLease.release !== 'function') {
+  // renew is REQUIRED, not optional: without mid-run renewal the write loop
+  // has no way to notice a lost lease, which is exactly the duplicate-active
+  // -row hole this gate exists to close. Fail-closed like the rest.
+  if (
+    !reconcileLease
+    || typeof reconcileLease.acquire !== 'function'
+    || typeof reconcileLease.release !== 'function'
+    || typeof reconcileLease.renew !== 'function'
+  ) {
     throw new StockPreparationConfirmationDecisionError(
       501,
       'CONFIRMATION_DECISION_RECONCILE_LEASE_UNAVAILABLE',
       'reconcile requires the durable single-reconciler lease; an in-process lock is not a concurrency guarantee',
-      { requiredMethods: ['acquire', 'release'] },
+      { requiredMethods: ['acquire', 'release', 'renew'] },
     )
   }
   return reconcileLease
@@ -534,7 +584,30 @@ async function reconcileConfirmationDecisions({ recordsApi, provisioning, target
       rows.push(record)
       byStableKey.set(key, rows)
     }
-    const counts = { created: 0, existing: 0, superseded: 0, pending: 0, confirmed: 0 }
+    const counts = { created: 0, existing: 0, superseded: 0, reopened: 0, orphanSuperseded: 0, pending: 0, confirmed: 0 }
+    // Bounded-abort write fencing (the ceiling available here — see the
+    // CONCURRENCY header note): re-assert lease ownership via the CAS renew
+    // immediately before the FIRST ledger write and then every
+    // RECONCILE_LEASE_RENEW_EVERY_WRITES writes. A renew that reports the
+    // lease gone ABORTS the run with a fixed code and the partial counts; at
+    // most one cadence window of writes can race a takeover, and idempotent
+    // replay (A-01) makes those surviving writes harmless.
+    let writesSinceRenew = RECONCILE_LEASE_RENEW_EVERY_WRITES
+    const assertLeaseBeforeWrite = async () => {
+      if (writesSinceRenew >= RECONCILE_LEASE_RENEW_EVERY_WRITES) {
+        const renewed = await lease.renew({ scopeKey, leaseId: acquired.leaseId })
+        if (!renewed || renewed.held !== true) {
+          throw new StockPreparationConfirmationDecisionError(
+            409,
+            'CONFIRMATION_DECISION_RECONCILE_LEASE_LOST',
+            'the reconcile lease was lost mid-run (expired and taken over); aborting to bound concurrent-writer damage — retry after the takeover reconciler finishes (replay is idempotent)',
+            { partial: true, counts: { ...counts } },
+          )
+        }
+        writesSinceRenew = 0
+      }
+      writesSinceRenew += 1
+    }
     const seenThisRun = new Set()
     for (const candidate of candidates) {
       // Replay guard #1: the same decisionId inside ONE reconcile run (the
@@ -542,31 +615,63 @@ async function reconcileConfirmationDecisions({ recordsApi, provisioning, target
       // plan could) collapses to a single row.
       if (seenThisRun.has(candidate.decisionId)) continue
       seenThisRun.add(candidate.decisionId)
-      // Replay guard #2: a decision row that already exists for this exact
-      // (stableDecisionKey, inputFingerprint) is left untouched — re-posting
-      // the same reconcile is a no-op, never a duplicate.
+      // Replay guard #2: a LIVE (pending/confirmed) decision row that already
+      // exists for this exact (stableDecisionKey, inputFingerprint) is left
+      // untouched — re-posting the same reconcile is a no-op, never a
+      // duplicate. A SUPERSEDED exact hit is NOT a replay: it means the
+      // fingerprint RETURNED (A→B→A) and falls through to the reopen below.
       const exact = byDecisionId.get(candidate.decisionId)
-      if (exact) {
+      const exactStatus = exact ? optionalString(readCell(exact, 'status')) : null
+      if (exact && exactStatus !== STATUSES.SUPERSEDED) {
         counts.existing += 1
-        const status = optionalString(readCell(exact, 'status'))
-        if (status === STATUSES.CONFIRMED) counts.confirmed += 1
-        else if (status === STATUSES.PENDING) counts.pending += 1
+        if (exactStatus === STATUSES.CONFIRMED) counts.confirmed += 1
+        else if (exactStatus === STATUSES.PENDING) counts.pending += 1
         continue
       }
       // Fingerprint change => SUPERSEDE: any live (pending/confirmed) row for
       // the same stable decision key whose fingerprint differs is closed.
       // Superseding touches plm_system columns only — the human's own
-      // resolutionAction/notes stay untouched on the closed row.
+      // resolutionAction/notes stay untouched on the closed row. This runs
+      // even on a superseded exact hit, so the stale intermediate
+      // fingerprint's live row still closes in the same run as the reopen.
       for (const old of byStableKey.get(candidate.stableDecisionKey) || []) {
         const status = optionalString(readCell(old, 'status'))
         const oldFingerprint = optionalString(readCell(old, 'inputFingerprint'))
         if (![STATUSES.PENDING, STATUSES.CONFIRMED].includes(status) || oldFingerprint === candidate.inputFingerprint) continue
+        await assertLeaseBeforeWrite()
         await scoped.patchRecord({
           recordId: old.id,
           changes: { status: STATUSES.SUPERSEDED, supersededAt: openedAt },
         })
         counts.superseded += 1
       }
+      if (exact) {
+        // Fingerprint RETURN (A→B→A) => REOPEN the superseded row instead of
+        // skipping it: without this the key wedges permanently (confirm
+        // requires pending; readback requires confirmed + fingerprint match).
+        // The OLD human decision is deliberately CLEARED, not carried forward
+        // — a revived conflict is a NEW question to the human (fail-safe
+        // default, flagged for the owner: O1' matrix Q5 may later rule to
+        // carry it forward). confirmedBy/confirmedAt are machine bookkeeping
+        // of that cleared confirmation and are cleared with it; openedAt
+        // stays — it truthfully records when the decision first opened.
+        await assertLeaseBeforeWrite()
+        await scoped.patchRecord({
+          recordId: exact.id,
+          changes: {
+            status: STATUSES.PENDING,
+            supersededAt: null,
+            resolutionAction: null,
+            notes: null,
+            confirmedBy: null,
+            confirmedAt: null,
+          },
+        })
+        counts.reopened += 1
+        counts.pending += 1
+        continue
+      }
+      await assertLeaseBeforeWrite()
       await scoped.createRecord({
         data: {
           decisionId: candidate.decisionId,
@@ -583,6 +688,34 @@ async function reconcileConfirmationDecisions({ recordsApi, provisioning, target
       counts.created += 1
       counts.pending += 1
     }
+    // ORPHAN SWEEP: a conflict that vanished from the source leaves its ledger
+    // row behind forever if only candidates are iterated. Close every PENDING
+    // row (same projectNo scope as this run) whose stableDecisionKey is not in
+    // the current candidate set. Reuses the frozen superseded status — the
+    // distinguishing reason travels in the run evidence, because a row-level
+    // reason column (like the reserved cancelled status) needs its own
+    // migration/UI slice. CONFIRMED orphans are historical human decisions and
+    // are left untouched (readback already ignores them via the fingerprint
+    // bind). The sweep spends the remainder of the per-run decision budget;
+    // anything beyond it closes on the next reconcile.
+    const candidateKeys = new Set(candidates.map((candidate) => candidate.stableDecisionKey))
+    const sweepBudget = MAX_DECISIONS_PER_RECONCILE - candidates.length
+    let sweepTruncated = false
+    for (const record of existing) {
+      if (optionalString(readCell(record, 'status')) !== STATUSES.PENDING) continue
+      const key = optionalString(readCell(record, 'stableDecisionKey'))
+      if (key && candidateKeys.has(key)) continue
+      if (counts.orphanSuperseded >= sweepBudget) {
+        sweepTruncated = true
+        break
+      }
+      await assertLeaseBeforeWrite()
+      await scoped.patchRecord({
+        recordId: record.id,
+        changes: { status: STATUSES.SUPERSEDED, supersededAt: openedAt },
+      })
+      counts.orphanSuperseded += 1
+    }
     return {
       ok: true,
       mode: 'confirmation_decisions_reconciled',
@@ -592,6 +725,7 @@ async function reconcileConfirmationDecisions({ recordsApi, provisioning, target
         candidateCount: candidates.length,
         outOfScopeManualConfirm: outOfScopeByConflictType,
         concurrencyModel: CONCURRENCY_MODEL,
+        orphanSweep: { closed: counts.orphanSuperseded, reason: 'conflict_vanished_from_plan', truncated: sweepTruncated },
         ...counts,
       },
     }
