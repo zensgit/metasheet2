@@ -1,0 +1,2028 @@
+# E-learning named-pilot and L3 assessment HTTP surface.
+# Live routes: content/video, assignment/watch, objective assessment authoring,
+# learner exams, auto grading, and policy-controlled review.
+# L4 incentive rules and wallet reads are present behind master+INCENTIVE.
+# Analytics and remaining incentive surfaces stay parked.
+
+paths:
+  /api/elearning/capabilities:
+    x-plugin: plugin-elearning
+    get:
+      operationId: getElearningCapabilities
+      summary: Report e-learning master and capability flags
+      description: |
+        Plugin route. JWT session is required by the global `/api` gate.
+        Returns `{ enabled, capabilities }` with keys content, assignment,
+        assessment, incentive, analytics, media. V0.1 readiness is enabled
+        plus content/assignment/assessment/media only; incentive and analytics
+        stay parked. Secondary master-off after registration is a values-free
+        404 FEATURE_DISABLED (no flag names, no capabilities object).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: Flag snapshot. Does not imply every HTTP surface is mounted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningCapabilities'
+        '401':
+          description: Missing or invalid JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '404':
+          description: Master flag is not exact 'true' after registration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                ok: false
+                error:
+                  code: FEATURE_DISABLED
+                  message: Feature is disabled
+
+  /api/elearning/admin/credit-rules:
+    get:
+      operationId: listElearningCreditRules
+      summary: List active organization credit rules
+      description: |
+        Global `elearning:admin` only. Requires master and incentive flags to
+        be exact `true`. Organization comes only from the JWT-bound session.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: Active automatic-behavior rules ordered by behavior.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningCreditRuleList'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient elearning:admin
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Incentive surface flags off
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+    post:
+      operationId: publishElearningCreditRule
+      summary: Publish a new active credit-rule version
+      description: |
+        Global `elearning:admin` only. Actor and organization are server
+        derived. Publishing atomically retires the prior active version.
+        `requestId` is organization-scoped: same normalized payload replays
+        the same closed response; a changed payload returns values-free 409.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningCreditRulePublishRequest'
+      responses:
+        '200':
+          description: Published rule or exact idempotent replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningCreditRule'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient elearning:admin
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Incentive surface flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: requestId reused with a different normalized payload
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/credits/wallet:
+    get:
+      operationId: getMyElearningCreditWallet
+      summary: Read the authenticated learner credit wallet
+      description: |
+        RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+        User and organization come only from the authenticated session. The
+        closed DTO excludes request hashes, effect keys, and raw references.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: cursor
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Own balance and stable keyset-paginated history.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningCreditWallet'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient read permission
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: User not active in the organization or flags off
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/admin/credits/wallet:
+    get:
+      operationId: getAdminElearningCreditWallet
+      summary: Read one same-organization learner wallet as global admin
+      description: |
+        Global `elearning:admin` only. `userId` must resolve to an active user
+        in the authenticated organization. Department-scoped statistics are
+        not part of this L4 endpoint.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: userId
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+        - in: query
+          name: cursor
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Same-organization target balance and history.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningCreditWallet'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient elearning:admin
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: User not active in the organization or flags off
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/media:
+    post:
+      operationId: uploadElearningMedia
+      summary: One-shot authenticated MP4 upload
+      description: |
+        Multipart field `file` only (one file part; no client metadata).
+        Duration is server-probed. RBAC `elearning:write`. Identity, org, RBAC,
+        storage, and quotas are checked before multipart ingest. 201 may be
+        `ready` or probe-rejected `rejected`; storage keys never appear.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Exactly one `file` part. MIME must be video/mp4; extension mp4; ISO-BMFF ftyp.
+            encoding:
+              file:
+                contentType: video/mp4
+      responses:
+        '201':
+          description: Ingest finished. `ready` after successful probe; `rejected` after probe/codec failure (no blob kept as ready).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningMediaUploadResult'
+        '400':
+          description: file_required, upload_failed, upload_rejected, or rejected/invalid_size
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/ElearningError'
+                  - $ref: '#/components/schemas/ElearningMediaRejectError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:write`)
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Media surface flags off
+          $ref: '#/components/responses/ElearningError'
+        '413':
+          description: file_too_large, too_many_files (extra parts/fields), or org_quota_exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningMediaRejectError'
+        '415':
+          description: MIME, extension, or ISO-BMFF ftyp rejected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningMediaRejectError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: media_unavailable (missing quotas or storage)
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/courses/publish:
+    post:
+      operationId: publishElearningCourse
+      summary: Publish a one-video plus one-exam course
+      description: |
+        Admin composite publish. RBAC `elearning:admin`. Requires watch gate plus
+        ASSESSMENT. JSON limit 1 MiB (just over is values-free 413 payload_too_large).
+        Actor/org are injected from JWT, never from the body. Unknown top-level
+        keys are invalid_input. Learner responses never echo answer keys.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningCoursePublishRequest'
+      responses:
+        '201':
+          description: Published course pointers. No paper snapshot or answer keys.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningCoursePublishResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:admin`)
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Exam/publish surface flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: media_unavailable or conflict
+          $ref: '#/components/responses/ElearningError'
+        '413':
+          description: JSON body exceeds 1 MiB
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ElearningError'
+                  - type: object
+                    properties:
+                      error:
+                        type: string
+                        enum: [payload_too_large]
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/assessment/question-banks:
+    get:
+      operationId: listElearningQuestionBanks
+      summary: List assessment question banks
+      description: |
+        Admin-only L3 assessment read. Returns organization-scoped bank
+        metadata and question counts; it never returns question content.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000000
+            default: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: Organization-scoped question-bank page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningQuestionBankListResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Assessment surface flags off
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+    post:
+      operationId: createElearningQuestionBank
+      summary: Create an assessment question bank
+      description: |
+        Admin-only L3 assessment write. Requires master, content, and
+        assessment flags plus `elearning:admin`. Actor and organization are
+        injected from the authenticated request. JSON limit 1 MiB.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningQuestionBankCreateRequest'
+      responses:
+        '201':
+          description: Created question-bank identifier.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningQuestionBankResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Assessment surface flags off
+          $ref: '#/components/responses/ElearningError'
+        '413':
+          description: JSON body exceeds 1 MiB
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/assessment/question-banks/{bankId}/questions:
+    get:
+      operationId: listElearningBankQuestions
+      summary: List the latest revision of each question in a bank
+      description: |
+        Admin-only L3 assessment read. Returns one latest immutable revision
+        per stable question, including its answer key and explanation. These
+        fields are never exposed by learner exam APIs.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: bankId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000000
+            default: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: Organization-scoped latest-question page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningQuestionBankQuestionsResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or assessment flags off
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+    post:
+      operationId: createElearningBankQuestion
+      summary: Create a stable assessment question with revision one
+      description: |
+        Admin-only L3 assessment write. Objective questions carry a closed answer
+        key. A short_answer carries options=[] and correctOptionIds=[] and is
+        scored later by the manual-grading service. The response returns identifiers only.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: bankId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningQuestionWriteRequest'
+      responses:
+        '201':
+          description: Stable question and immutable revision identifiers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningQuestionRevisionResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or assessment flags off
+          $ref: '#/components/responses/ElearningError'
+        '413':
+          description: JSON body exceeds 1 MiB
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/assessment/questions/{questionId}/revisions:
+    post:
+      operationId: appendElearningQuestionRevision
+      summary: Append one immutable assessment-question revision
+      description: |
+        Admin-only L3 assessment write. Existing revisions are never mutated.
+        The closed response returns identifiers and the new revision number.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: questionId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningQuestionWriteRequest'
+      responses:
+        '201':
+          description: Appended immutable revision.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningQuestionRevisionResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or assessment flags off
+          $ref: '#/components/responses/ElearningError'
+        '413':
+          description: JSON body exceeds 1 MiB
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/assessment/question-banks/{bankId}/import:
+    post:
+      operationId: importElearningQuestionBankXlsx
+      summary: Import objective questions from one XLSX worksheet
+      description: |
+        Admin-only L3 assessment write. The workbook is limited to 1 MiB and
+        a 64 MiB expanded archive, uses a bounded standard single-disk ZIP,
+        and must contain exactly one formula-free worksheet with at most 500
+        data rows and 25 columns. The import is committed atomically. Duplicate
+        rows create separate questions.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: bankId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '201':
+          description: Number of imported stable questions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningQuestionImportResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or assessment flags off
+          $ref: '#/components/responses/ElearningError'
+        '413':
+          description: XLSX body exceeds 1 MiB
+          $ref: '#/components/responses/ElearningError'
+        '415':
+          description: unsupported_media_type
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/assessment/papers:
+    post:
+      operationId: publishElearningFixedPaper
+      summary: Publish an immutable fixed-revision paper
+      description: |
+        Admin-only L3 assessment write. Each item pins one immutable question
+        revision. V1 accepts 1 through 200 items and rejects 201 before DB I/O.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningFixedPaperPublishRequest'
+      responses:
+        '201':
+          description: Published paper metadata without answer material.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningFixedPaperResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or assessment flags off
+          $ref: '#/components/responses/ElearningError'
+        '413':
+          description: JSON body exceeds 1 MiB
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/assessment/exams:
+    post:
+      operationId: publishElearningPaperExam
+      summary: Publish exam rules bound to an immutable paper
+      description: |
+        Admin-only L3 assessment write. Window, duration, shuffle, attempt,
+        pass-score, and review-disclosure rules are frozen at publication.
+        The response never contains paper snapshots, answer keys, or explanations.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningPaperExamPublishRequest'
+      responses:
+        '201':
+          description: Published exam metadata without answer material.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningPaperExamResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or assessment flags off
+          $ref: '#/components/responses/ElearningError'
+        '413':
+          description: JSON body exceeds 1 MiB
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/assessment/attempts/{attemptId}/manual-grades:
+    post:
+      operationId: submitElearningManualGrade
+      summary: Append one initial short-answer grade
+      description: |
+        L3 initial manual-grading command. RBAC requires `elearning:grade` or
+        `elearning:admin`; non-global graders must also cover the learner in
+        their current management scope. One immutable ledger row is appended
+        per short-answer question. When every short answer has a grade, the
+        server derives the aggregate score, pass result, and final graded
+        state in the same transaction. Replaying the same request id, actor,
+        and canonical payload returns duplicate=true without another write;
+        conflicting reuse fails closed. This endpoint does not perform
+        regrading and never returns the learner answer, grader comment, answer
+        key, or paper snapshot. JSON limit 16 KiB.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: attemptId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningManualGradeRequest'
+      responses:
+        '200':
+          description: Current initial-grading progress or completed result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningManualGradeResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED, insufficient grade permission, scope_required, or target_out_of_scope
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or assessment flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: conflict (attempt state, duplicate question, or request-id payload mismatch)
+          $ref: '#/components/responses/ElearningError'
+        '413':
+          description: payload_too_large
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/assessment/manual-grading/attempts:
+    get:
+      operationId: listElearningManualGradingAttempts
+      summary: List submitted attempts awaiting initial manual grading
+      description: |
+        L3 grader queue. RBAC requires `elearning:grade` or
+        `elearning:admin`. Global administrators may read the organization;
+        every non-global grader must have an active management scope, and
+        each row is filtered by that scope in SQL. The closed response never
+        contains learner answers, paper snapshots, answer keys, explanations,
+        rubrics, grading request ids, or attempts outside the current scope.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: page
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10000
+            default: 1
+        - in: query
+          name: pageSize
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Scope-filtered page ordered by submission time and attempt id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningManualGradingQueueResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED, insufficient grade permission, or scope_required
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: assessment flags off
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/assessment/manual-grading/attempts/{attemptId}:
+    get:
+      operationId: getElearningManualGradingAttempt
+      summary: Get the short-answer material needed for initial manual grading
+      description: |
+        L3 grader detail. RBAC and management-scope rules match the queue.
+        Out-of-scope and non-awaiting attempts are not visible. The closed
+        response contains only short-answer prompts, points, the learner's
+        corresponding answers, and any initial manual grade already appended.
+        It never returns objective questions, answer keys, explanations,
+        rubrics, request ids, raw snapshots, regrade history, or another
+        learner's attempt.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: attemptId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      responses:
+        '200':
+          description: Closed short-answer grading detail for one visible pending attempt.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningManualGradingDetail'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED, insufficient grade permission, or scope_required
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or assessment flags off
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/assignments/direct:
+    post:
+      operationId: assignElearningDirect
+      summary: Direct-assign a published course version to one user
+      description: |
+        L2 assignment operation. RBAC requires `elearning:write` or
+        `elearning:admin`; non-global actors also need the course owner role or
+        exact `assign` ACL and management-scope coverage of the target user.
+        JSON limit 16 KiB. Actor/org are injected from JWT.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningDirectAssignmentRequest'
+      responses:
+        '201':
+          description: Assignment and member ids. duplicate true on idempotent replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningDirectAssignmentResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED, insufficient write RBAC, forbidden ACL action, scope_required, or target_out_of_scope
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found (flags off or course/user missing as mapped by service)
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: target_unavailable, course_unavailable, or conflict
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/assignments/batch:
+    post:
+      operationId: assignElearningBatch
+      summary: Materialize an audience into one published-version assignment
+      description: |
+        L2 assignment operation. RBAC requires `elearning:write` or
+        `elearning:admin`; non-global actors also need the course owner role or
+        exact `assign` ACL, and every audience rule must stay within their
+        management scope. JSON limit 16 KiB. Rules are normalized and
+        resolved once from current same-org active directory state, then the
+        resulting members are stored as assignment facts. Idempotent replay does
+        not resolve the audience again. At most 10,000 members may be materialized.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningBatchAssignmentRequest'
+      responses:
+        '201':
+          description: Assignment id and bounded member count; duplicate true on replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningBatchAssignmentResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED, insufficient write RBAC, forbidden ACL action, scope_required, or target_out_of_scope
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found (flags off or course version missing)
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: course_unavailable or idempotency conflict
+          $ref: '#/components/responses/ElearningError'
+        '422':
+          description: subject_not_found, unsupported_subject, empty_audience, or audience_too_large
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/assignments/{assignmentId}:
+    get:
+      operationId: getElearningAssignmentProgress
+      summary: Look up assignment progress for every member
+      description: |
+        L2 tracking operation. RBAC requires `elearning:write` or
+        `elearning:admin`; non-global actors also need the owning course/plan
+        owner role or exact `track` ACL. Their current management scope is
+        applied in SQL before cursor/limit, so out-of-scope member rows never
+        enter the page; no intersecting member is a 403. Cursor is a member UUID
+        keyset and page size is at most 100. Closed DTO only: assignment metadata
+        plus member progress statuses. Scores, answers, answer keys, raw
+        events, revocation reason, storage data, and hidden audit values are
+        never returned. Deadline expiry is overdue, not revoke; a revoked
+        member has no current obligation and therefore reports overdue false.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: assignmentId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+        - in: query
+          name: cursor
+          required: false
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+          description: Exclusive member UUID keyset cursor from the previous nextCursor.
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 100
+      responses:
+        '200':
+          description: Assignment metadata plus one page of member progress.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningAssignmentProgressResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED, insufficient write RBAC, forbidden track ACL, scope_required, or target_out_of_scope
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found (flags off or assignment missing in this org)
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/assignments/{assignmentId}/members/{memberId}/revocation:
+    put:
+      operationId: revokeElearningAssignmentMember
+      summary: Explicitly revoke one assignment member
+      description: |
+        L2 assignment operation. RBAC requires `elearning:write` or
+        `elearning:admin`; non-global actors also need the owning course/plan
+        owner role or exact `assign` ACL and management-scope coverage of the
+        member. Body key `reason` only, trimmed length 1..500. Actor and authoritative
+        org come from JWT. First call sets revoked_at to server time. Same
+        normalized reason is duplicate true. A different reason is conflict.
+        Cross-org or missing member is 404. Progress, evidence, attempts, and
+        the parent assignment are never deleted or reset. A training-plan child
+        returns 409 and must use the plan-assignment revocation operation.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: assignmentId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+        - in: path
+          name: memberId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningAssignmentRevocationRequest'
+      responses:
+        '200':
+          description: Revoked true. duplicate true on same-reason replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningAssignmentRevocationResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED, insufficient write RBAC, forbidden assign ACL, scope_required, or target_out_of_scope
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found (flags off, or member not on this org assignment)
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: conflict (already revoked with a different reason)
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/training-plans/publish:
+    post:
+      operationId: publishElearningTrainingPlan
+      summary: Publish an ordered plan that pins course versions
+      description: |
+        Admin L2 assignment operation. RBAC `elearning:admin`; JSON limit 16 KiB.
+        Actor and authoritative org come from JWT. Items preserve request order,
+        use one-based positions, and pin currently published versions whose
+        course heads are active. At most 100 unique course versions. Idempotency
+        is scoped by authoritative org plus requestId.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningTrainingPlanPublishRequest'
+      responses:
+        '201':
+          description: Published plan/version ids and item count; duplicate true on replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningTrainingPlanPublishResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient `elearning:admin`
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Assignment surface flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: course_unavailable or idempotency conflict
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/training-plans/{planId}:
+    get:
+      operationId: getElearningTrainingPlan
+      summary: Read one plan and its pinned active version
+      description: |
+        Admin L2 assignment operation. RBAC `elearning:admin`; no JSON body.
+        Authoritative org comes from JWT. Cross-org and missing plan ids return
+        not_found. The response is closed to head metadata and ordered pinned
+        course version ids; it contains no assignments, learners, answers, or scores.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: planId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      responses:
+        '200':
+          description: Stable plan head plus its active immutable version.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningTrainingPlan'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient `elearning:admin`
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Assignment surface flags off or plan missing in this org
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/training-plans/{planId}/assign:
+    post:
+      operationId: assignElearningTrainingPlan
+      summary: Atomically assign every course in a pinned training plan
+      description: |
+        L2 assignment operation. RBAC requires `elearning:write` or
+        `elearning:admin`; non-global actors also need the plan owner role or
+        exact `assign` ACL, and every audience rule must stay within their
+        management scope. JSON limit 16 KiB. The active published plan
+        version is pinned, the audience is resolved once, and one ordinary
+        assignment with the identical materialized member set is created per
+        plan item in a single transaction. Same-key replay returns the original
+        frozen plan version and counts without re-reading current directory or
+        course state. At most 100 courses and 10,000 members.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: planId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningTrainingPlanAssignmentRequest'
+      responses:
+        '201':
+          description: Frozen plan assignment ids/counts; duplicate true on replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningTrainingPlanAssignmentResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED, insufficient write RBAC, forbidden assign ACL, scope_required, or target_out_of_scope
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Assignment flags off or plan missing in this org
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: plan_unavailable, course_unavailable, or idempotency conflict
+          $ref: '#/components/responses/ElearningError'
+        '422':
+          description: subject_not_found, unsupported_subject, empty_audience, or audience_too_large
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/admin-scopes/{userId}:
+    put:
+      operationId: replaceElearningAdminScopes
+      summary: Replace one administrator's delegated department scope
+      description: |
+        Global e-learning-admin L2 operation. RBAC `elearning:admin`; JSON limit
+        16 KiB. Actor and authoritative org come from JWT. The requested active
+        set replaces the previous set atomically; removed or changed rows are
+        one-way revoked and retained as history. Department ownership and the
+        target user's active same-org membership are checked by the server.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningAdminScopeReplaceRequest'
+      responses:
+        '200':
+          description: Current active scope count; duplicate true for an exact replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningAdminScopeReplaceResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient `elearning:admin`
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Assignment flags off, user missing, or department missing in this org
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/training-plans/{planId}/collaborators/{userId}:
+    put:
+      operationId: replaceElearningTrainingPlanCollaborator
+      summary: Replace one training-plan collaborator's closed action set
+      description: |
+        L2 assignment operation. RBAC requires `elearning:write` or
+        `elearning:admin`; the service additionally requires the plan owner or
+        an org-global e-learning admin. Actions are exactly `assign`, `scope`,
+        and `track`; they never imply edit, publish, grading, or export rights.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: planId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+        - in: path
+          name: userId
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningObjectAclReplaceRequest'
+      responses:
+        '200':
+          description: Current active action set; duplicate true for an exact replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningObjectAclReplaceResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED, insufficient write RBAC, or not owner/global admin
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Assignment flags off, plan missing, or collaborator missing in this org
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/training-plan-assignments/{planAssignmentId}/revocation:
+    put:
+      operationId: revokeElearningTrainingPlanAssignment
+      summary: Atomically revoke every child obligation in one plan assignment
+      description: |
+        L2 assignment operation. RBAC requires `elearning:write` or
+        `elearning:admin`; non-global actors also need the plan owner role or
+        exact `assign` ACL and management-scope coverage of the entire frozen
+        cohort. JSON limit 16 KiB. The operation writes one
+        plan-level revocation triplet and revokes every materialized child
+        assignment member in the same transaction. Same normalized reason is
+        duplicate true; a different reason conflicts. Individual child-member
+        revocation is rejected so one plan cohort cannot split across courses.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: planAssignmentId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningAssignmentRevocationRequest'
+      responses:
+        '200':
+          description: Revoked true. duplicate true on same-reason replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningTrainingPlanRevocationResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED, insufficient write RBAC, forbidden assign ACL, scope_required, or target_out_of_scope
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Assignment flags off or plan assignment missing in this org
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: Already revoked with a different reason
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/courses/{courseId}/collaborators/{userId}:
+    put:
+      operationId: replaceElearningCourseCollaborator
+      summary: Replace one course collaborator's closed action set
+      description: |
+        L2 assignment operation. RBAC requires `elearning:write` or
+        `elearning:admin`; the service additionally requires the course owner
+        or an org-global e-learning admin. Actions are exactly `assign`,
+        `scope`, and `track`; they never imply edit, publish, grading, or export.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: courseId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+        - in: path
+          name: userId
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningObjectAclReplaceRequest'
+      responses:
+        '200':
+          description: Current active action set; duplicate true for an exact replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningObjectAclReplaceResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED, insufficient write RBAC, or not owner/global admin
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Assignment flags off, course missing, or collaborator missing in this org
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/courses/{courseId}/scope:
+    put:
+      operationId: setElearningCourseScope
+      summary: Append and activate a course visibility-scope revision
+      description: |
+        L2 content operation. RBAC requires `elearning:write` or
+        `elearning:admin`; non-global actors also need the course owner role or
+        exact `scope` ACL, and every requested rule must stay within their
+        management scope. JSON limit 16 KiB. This changes only who may
+        discover and self-study an active published course. It never creates,
+        revokes, or reclassifies an assignment. Current live rules are `all`,
+        same-org active `department`, same-org directory `position`, and same-org
+        active `user`; an empty rule array means visible to nobody. Platform role
+        rules return unsupported_subject until org-scoped role membership exists.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: courseId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningScopeUpdateRequest'
+      responses:
+        '200':
+          description: Immutable revision and normalized rule ids now active on the course scope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningScopeUpdateResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED, insufficient write RBAC, forbidden scope ACL, scope_required, or target_out_of_scope
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Content surface flags off, course not found, or audience subject not found
+          $ref: '#/components/responses/ElearningError'
+        '422':
+          description: unsupported_subject for role rules without org-scoped role membership
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/me/courses:
+    get:
+      operationId: listMyElearningCourses
+      summary: List the current learner's assigned and visible courses
+      description: |
+        RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags (watch gate plus
+        ASSESSMENT). No JSON body. At most 100 course versions. Actor/org from JWT.
+        Assignment access wins when both bases match; visibility access is optional
+        self-study and returns assignment null.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: Accessible courses with access basis, video progress, and latest exam attempt. No answer keys.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningLearnerCourseList'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions (any of `elearning:read`, `elearning:write`, `elearning:admin`)
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Exam/learner-list surface flags off
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/watch/items/{itemId}/start:
+    post:
+      operationId: startElearningWatch
+      summary: Start or resume a verified watch session for a video item
+      description: |
+        RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Empty JSON object only. itemId is the course
+        version video item, not a media id. JSON limit 16 KiB.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: itemId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningEmptyObject'
+      responses:
+        '200':
+          description: Current watch state. Completion is server-derived.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningWatchState'
+        '400':
+          description: invalid_input, unsupported_item, or unsupported_policy
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or watch flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: course_withdrawn or conflict
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/watch/sessions/{sessionId}/heartbeat:
+    post:
+      operationId: recordElearningWatchHeartbeat
+      summary: Record a verified watch heartbeat
+      description: |
+        RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Required keys sequence (>=1), positionMs (>=0),
+        playing (boolean). Unknown keys are invalid_input. JSON limit 16 KiB.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: sessionId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningHeartbeatRequest'
+      responses:
+        '200':
+          description: Updated watch state. Credit and completion are server-derived.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningWatchState'
+        '400':
+          description: invalid_input, unsupported_item, or unsupported_policy
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or watch flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: course_withdrawn, conflict, sequence_gap, or session_inactive
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/watch/items/{itemId}/playback-ticket:
+    post:
+      operationId: issueElearningPlaybackTicket
+      summary: Issue a short-lived media playback ticket
+      description: |
+        RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Empty JSON object. Returns an opaque HMAC token
+        (not a session JWT). Token TTL is at most 600 seconds. Storage keys and
+        signing secrets never appear. JSON limit 16 KiB.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: itemId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningEmptyObject'
+      responses:
+        '200':
+          description: Opaque ticket for GET /api/elearning/media/playback?token=
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningPlaybackTicket'
+        '400':
+          description: invalid_input or unsupported_item
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated, missing JWT, invalid_token, or token_expired
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or watch flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: course_withdrawn
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/media/playback:
+    get:
+      operationId: getElearningMediaPlayback
+      summary: Stream MP4 bytes for a playback ticket
+      description: |
+        Token-auth GET. No session JWT, cookies, or bearer. Credential is the
+        single `token` query parameter issued by playback-ticket. Mounted before
+        the authenticated e-learning routers and the global JWT gate.
+
+        Range is a single `bytes=` range (commas are invalid_range). Server cap
+        is 8388608 bytes (8 MiB).
+
+        - No Range and object size ≤ cap and the returned span is the full object → 200.
+        - No Range and object size > cap → 206 of the first cap bytes with Content-Range.
+        - Range present and satisfiable → 206 with Content-Range (even if the range covers the whole object).
+        - Unsatisfiable range → 416 JSON `{ error: unsatisfiable_range }` (no Content-Range header).
+        - Malformed Range → 400 `{ error: invalid_range }`.
+
+        Successful bodies are video/mp4 with Accept-Ranges: bytes, Cache-Control:
+        private, no-store, X-Content-Type-Options: nosniff, Referrer-Policy: no-referrer.
+        Storage keys never appear.
+      parameters:
+        - in: query
+          name: token
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: Opaque playback ticket. Multiple token values are invalid_input.
+        - in: header
+          name: Range
+          required: false
+          schema:
+            type: string
+          description: Single HTTP byte range, e.g. bytes=0-1023 or bytes=-500. Multipart ranges are refused.
+      responses:
+        '200':
+          description: Full object when Range is absent and the object fits in the 8 MiB cap.
+          headers:
+            Accept-Ranges:
+              schema: { type: string, enum: [bytes] }
+            Content-Type:
+              schema: { type: string, enum: [video/mp4] }
+            Content-Length:
+              schema: { type: integer, minimum: 1, maximum: 8388608 }
+            Cache-Control:
+              schema: { type: string, enum: ['private, no-store'] }
+            X-Content-Type-Options:
+              schema: { type: string, enum: [nosniff] }
+            Referrer-Policy:
+              schema: { type: string, enum: [no-referrer] }
+          content:
+            video/mp4:
+              schema:
+                type: string
+                format: binary
+        '206':
+          description: Partial content. Used for every satisfiable Range header, and for absent Range when the object exceeds the 8 MiB cap.
+          headers:
+            Accept-Ranges:
+              schema: { type: string, enum: [bytes] }
+            Content-Type:
+              schema: { type: string, enum: [video/mp4] }
+            Content-Length:
+              schema: { type: integer, minimum: 1, maximum: 8388608 }
+            Content-Range:
+              schema:
+                type: string
+                description: bytes START-END/SIZE
+            Cache-Control:
+              schema: { type: string, enum: ['private, no-store'] }
+            X-Content-Type-Options:
+              schema: { type: string, enum: [nosniff] }
+            Referrer-Policy:
+              schema: { type: string, enum: [no-referrer] }
+          content:
+            video/mp4:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: invalid_input, invalid_range, or unsupported_item
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: invalid_token or token_expired
+          $ref: '#/components/responses/ElearningError'
+        '403':
+          description: assignment_unavailable
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or watch flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: course_withdrawn
+          $ref: '#/components/responses/ElearningError'
+        '416':
+          description: Unsatisfiable range. JSON only; Content-Range is not set.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ElearningError'
+                  - type: object
+                    properties:
+                      error:
+                        type: string
+                        enum: [unsatisfiable_range]
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable (no range store)
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/exams/items/{itemId}/start:
+    post:
+      operationId: startElearningExam
+      summary: Start an objective exam attempt
+      description: |
+        RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags. Empty JSON object.
+        itemId is the course version exam item. Returned paper is redacted
+        (no answerKey, correct ids, explanation, examId, or passScore).
+        Result includes canonical own answers for every paper question and the
+        immutable server-issued `deadlineAt` (`null` for an untimed attempt).
+        JSON limit 16 KiB.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: itemId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningEmptyObject'
+      responses:
+        '200':
+          description: Attempt plus public paper and canonical own answers. duplicate true on replay of an open attempt.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningExamStartResult'
+        '400':
+          description: invalid_input or unsupported_item
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or exam flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: course_withdrawn, prerequisite_incomplete, max_attempts, or conflict
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/exams/attempts/{attemptId}/answers:
+    put:
+      operationId: saveElearningExamAnswers
+      summary: Save draft answers for a started exam attempt
+      description: |
+        RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags. Body key `answers`
+        only (map of questionRevisionId to selected option ids or short-answer text). Only started
+        attempts may save. Same canonical body is duplicate true. Result is the
+        closed started DTO with own answers and the same immutable `deadlineAt`.
+        No answer keys. JSON limit 8 MiB; oversized bodies fail before the service.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: attemptId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningExamSubmitRequest'
+      responses:
+        '200':
+          description: Started attempt plus public paper and canonical own answers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningExamStartResult'
+        '400':
+          description: invalid_input or unsupported_item
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or exam flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: course_withdrawn, prerequisite_incomplete, max_attempts, or conflict
+          $ref: '#/components/responses/ElearningError'
+        '413':
+          description: payload_too_large
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/exams/attempts/{attemptId}/submit:
+    post:
+      operationId: submitElearningExam
+      summary: Submit an exam attempt and auto-grade its objective portion
+      description: |
+        RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Body key `answers` only (map of questionRevisionId
+        to selected option ids or short-answer text). Objective-only papers return
+        graded. Mixed papers return awaiting_manual with passed=null after the
+        objective portion is recorded. The result has no per-question key,
+        selected-answer echo, or paper snapshot. JSON limit 8 MiB; oversized
+        bodies fail before the service.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: attemptId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningExamSubmitRequest'
+      responses:
+        '200':
+          description: Objective-only graded result or mixed-paper awaiting-manual result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningExamSubmitResult'
+        '400':
+          description: invalid_input or unsupported_item
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or exam flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: course_withdrawn, prerequisite_incomplete, max_attempts, or conflict
+          $ref: '#/components/responses/ElearningError'
+        '413':
+          description: payload_too_large
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/exams/attempts/{attemptId}/review:
+    get:
+      operationId: getElearningExamReview
+      summary: Get the policy-released review for one own graded attempt
+      description: |
+        RBAC any of `elearning:read`, `elearning:write`, `elearning:admin` and
+        the exam capability gate are required. Identity and organization come
+        only from the authenticated request. `no_review` never releases a
+        review; `correctness_after_window` uses the database clock and opens at
+        the configured window end. `wrong_items_after_submit` returns only
+        incorrect rows. Current course access is re-evaluated before release,
+        so archived content still requires an effective assignment and
+        withdrawn content remains globally blocked. The closed DTO contains
+        own selections, correctness, and awarded points, but never answer keys,
+        correct option ids, explanations, examId, or passScore.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: attemptId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      responses:
+        '200':
+          description: Policy-released review for the authenticated learner's own graded attempt.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningExamReviewResult'
+        '400':
+          description: invalid_input or unsupported_item
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED, insufficient permissions, or assignment_unavailable
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or exam flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: course_withdrawn or review_unavailable
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'

@@ -4,6 +4,7 @@ import { tenantContext } from '../db/sharding/tenant-context'
 import type { PluginLoader } from '../core/plugin-loader'
 import {
   collectPlatformApps,
+  type PlatformAppCatalogFeaturePredicate,
   type PlatformAppPluginState,
   type PlatformAppSummary,
 } from '../platform/app-registry'
@@ -16,6 +17,7 @@ import {
 export interface PlatformAppsRouterOptions {
   pluginLoader: PluginLoader
   pluginStatus?: Map<string, PlatformAppPluginState>
+  isCatalogFeatureEnabled?: PlatformAppCatalogFeaturePredicate
 }
 
 type PlatformAppResponse = PlatformAppSummary & {
@@ -81,6 +83,7 @@ export function createPlatformAppsRouter(options: PlatformAppsRouterOptions): Ro
       const apps = await collectPlatformApps({
         loadedPlugins: options.pluginLoader.getPlugins().values(),
         pluginStatus: options.pluginStatus,
+        isCatalogFeatureEnabled: options.isCatalogFeatureEnabled,
       })
       const tenantId = resolveTenantId(req)
       if (!tenantId) {
@@ -118,6 +121,7 @@ export function createPlatformAppsRouter(options: PlatformAppsRouterOptions): Ro
       const apps = await collectPlatformApps({
         loadedPlugins: options.pluginLoader.getPlugins().values(),
         pluginStatus: options.pluginStatus,
+        isCatalogFeatureEnabled: options.isCatalogFeatureEnabled,
       })
       const app = apps.find((item) => item.id === req.params.appId)
       if (!app) {

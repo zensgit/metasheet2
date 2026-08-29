@@ -12,8 +12,10 @@
  *   1. required-feature gate  → redirect home
  *   2. route permission gate  → redirect home
  *   3. attendance focus mode  → exact-path allowlist + '/attendance/admin/groups/' prefix
- *      (#4711 R0, reachability only), else redirect /attendance
- *   4. plm-workbench focus    → prefix allowlist, else redirect /plm
+ *      (#4711 R0) + exact /learn and /admin/elearning (reachability only),
+ *      else redirect /attendance
+ *   4. plm-workbench focus    → prefix allowlist + exact /learn and /admin/elearning,
+ *      else redirect /plm
  *   5. allow
  */
 import { isRoutePermitted } from './routeAccess'
@@ -29,6 +31,25 @@ export const ATTENDANCE_FOCUS_ALLOWED_PATHS: readonly string[] = Object.freeze([
   '/p/plugin-attendance/attendance',
   '/settings',
 ])
+
+/**
+ * Cloud-classroom exact paths reachable inside attendance and plm-workbench focus
+ * modes. Reachability only — required-feature and route permission gates still run
+ * first. Sibling and prefix-neighbor paths stay redirected.
+ * '/elearning/grading': the L3 manual-grading surface — without this entry a
+ * grader working inside an attendance- or plm-focused org would be silently
+ * bounced to that focus mode's home instead of reaching a route they hold
+ * elearning:grade permission for.
+ */
+export const ELEARNING_FOCUS_EXACT_PATHS: readonly string[] = Object.freeze([
+  '/learn',
+  '/admin/elearning',
+  '/elearning/grading',
+])
+
+export function isElearningFocusExactPath(path: string): boolean {
+  return ELEARNING_FOCUS_EXACT_PATHS.includes(path)
+}
 
 /**
  * Attendance-focus reachability predicate (design lock §3.3, #4711 R0). The exact legacy
@@ -56,7 +77,7 @@ export const PLM_WORKBENCH_ALLOWED_PREFIXES: readonly string[] = Object.freeze([
   '/stock-prep',
 ])
 
-const KNOWN_REQUIRED_FEATURES = ['attendance', 'workflow', 'attendanceAdmin', 'attendanceImport', 'plm'] as const
+const KNOWN_REQUIRED_FEATURES = ['attendance', 'workflow', 'attendanceAdmin', 'attendanceImport', 'plm', 'elearning'] as const
 type KnownRequiredFeature = (typeof KNOWN_REQUIRED_FEATURES)[number]
 
 export type RouteGuardDecision = { action: 'allow' } | { action: 'redirect'; target: string }
@@ -131,16 +152,21 @@ export function resolveRouteGuardDecision(
 
   const path = String(input.path || '')
 
-  // 3. attendance focus: exact-path set + bounded #4711 group-context prefix.
-  if (ctx.attendanceFocused && !isAttendanceFocusAllowedPath(path)) {
+  // 3. attendance focus: exact-path set + bounded #4711 group-context prefix
+  //    + exact cloud-classroom paths.
+  if (
+    ctx.attendanceFocused
+    && !isAttendanceFocusAllowedPath(path)
+    && !isElearningFocusExactPath(path)
+  ) {
     return { action: 'redirect', target: '/attendance' }
   }
 
-  // 4. plm-workbench focus: prefix allowlist.
+  // 4. plm-workbench focus: prefix allowlist + exact cloud-classroom paths.
   if (ctx.plmWorkbenchFocused) {
     const allowed = PLM_WORKBENCH_ALLOWED_PREFIXES.some(
       (prefix) => path === prefix || path.startsWith(`${prefix}/`),
-    )
+    ) || isElearningFocusExactPath(path)
     if (!allowed) {
       return { action: 'redirect', target: '/plm' }
     }

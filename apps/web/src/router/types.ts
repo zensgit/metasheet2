@@ -300,7 +300,7 @@ export interface RouteMeta {
   retireBy?: string
 
   // Product capability guard
-  requiredFeature?: 'attendance' | 'workflow' | 'attendanceAdmin' | 'attendanceImport' | 'plm'
+  requiredFeature?: 'attendance' | 'workflow' | 'attendanceAdmin' | 'attendanceImport' | 'plm' | 'elearning'
 }
 
 /**

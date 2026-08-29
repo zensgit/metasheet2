@@ -398,6 +398,31 @@ export const appRoutes: RouteRecordRaw[] = [
     component: PluginManagerView,
     meta: { title: 'Plugins', requiresAuth: true, requiresAdmin: true, requiredFeature: 'attendanceAdmin' }
   },
+  // E-learning V0.1 named pilot. Learner is elearning:read (never admin-only).
+  // Admin is elearning:admin only — do not infer requiresAdmin from /admin/.
+  {
+    path: '/learn',
+    name: 'elearning-learner',
+    component: () => import('../views/ElearningLearnerView.vue'),
+    meta: { title: 'Learning Center', titleZh: '学习中心', requiresAuth: true, requiredFeature: 'elearning', permissions: ['elearning:read'] }
+  },
+  {
+    path: '/admin/elearning',
+    name: 'elearning-admin',
+    component: () => import('../views/ElearningAdminView.vue'),
+    meta: { title: 'Cloud Classroom Admin', titleZh: '云课堂管理', requiresAuth: true, requiredFeature: 'elearning', permissions: ['elearning:admin'] }
+  },
+  // L3 initial manual-grading queue/detail/submit UI over the already-present
+  // manual-grading endpoints. Standalone surface gated ONLY by elearning:grade —
+  // deliberately NOT nested under /admin/elearning and NOT permissions:
+  // ['elearning:admin'], so a grader without admin access can still reach it
+  // (backend gradeGuard accepts elearning:grade OR elearning:admin).
+  {
+    path: '/elearning/grading',
+    name: 'elearning-manual-grading',
+    component: () => import('../views/ElearningManualGradingView.vue'),
+    meta: { title: 'Manual Grading', titleZh: '人工阅卷', requiresAuth: true, requiredFeature: 'elearning', permissions: ['elearning:grade'] }
+  },
   {
     path: '/:pathMatch(.*)*',
     name: 'not-found',

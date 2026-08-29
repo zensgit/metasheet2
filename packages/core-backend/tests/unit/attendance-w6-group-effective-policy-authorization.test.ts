@@ -573,7 +573,7 @@ describe('org-identity derivation: each source (leg) is independently DB-free un
  *    on (`installGlobalErrorHandler`, `start`, and the plugin runtime's
  *    computed `this.app[verb](...)` dispatch reachable through
  *    `createCoreAPI`/`registerPluginRoute`) is necessarily dispatched after
- *    `setupMiddleware` has already run to completion — EXCEPT the twelve
+ *    `setupMiddleware` has already run to completion — EXCEPT the fourteen
  *    pinned pre-gate sites (they run inside `setupMiddleware`, before the
  *    gate, by design) and whatever `installMetrics(this.app)` (`:1329`,
  *    also pre-gate) itself registers, which this guard cannot see (residual
@@ -664,7 +664,7 @@ describe('the real app assembly (index.ts) registers this route behind the globa
     ])
   })
 
-  it('A5 — pre-gate prefix: the 12 sites that run before the gate, inside setupMiddleware, are exactly this frozen list (the pre-authentication surface)', () => {
+  it('A5 — pre-gate prefix: the 14 sites that run before the gate, inside setupMiddleware, are exactly this frozen list (the pre-authentication surface)', () => {
     const gateOrdinal = inSetup.findIndex((s) => s.start === subjectState(model, 'jwtAuthMiddleware').sites[0].start)
     const prefix = inSetup.slice(0, gateOrdinal).map((s) => ({ verb: s.verb, unconditional: s.unconditional, args: s.argProjection }))
     expect(prefix).toEqual([
@@ -676,6 +676,8 @@ describe('the real app assembly (index.ts) registers this route behind the globa
       { verb: 'use', unconditional: true, args: ['"/api/attendance/import"', 'express.json()'] },
       { verb: 'use', unconditional: true, args: ['"/api/multitable/automation/webhooks"', 'automationWebhookJsonParser'] },
       { verb: 'post', unconditional: false, args: ['"/api/approval/attachments/refs"', 'approvalAttachmentRefsJsonParser'] },
+      { verb: 'use', unconditional: false, args: ['elearningMediaPlaybackRouter'] },
+      { verb: 'use', unconditional: false, args: ['elearningPilotRuntime.router'] },
       { verb: 'use', unconditional: true, args: ['express.json()'] },
       { verb: 'use', unconditional: true, args: ['express.urlencoded()'] },
       { verb: 'use', unconditional: true, args: ['requestMetricsMiddleware'] },
