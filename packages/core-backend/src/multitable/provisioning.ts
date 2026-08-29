@@ -7,6 +7,7 @@ import {
   type EnsureFieldsOverwriteMode,
 } from './ensureFieldsOverwriteMode'
 import { assertRichLongTextToggleAllowed, mapFieldType, sanitizeFieldProperty } from './field-codecs'
+import { fenceWriterEntry } from './canonical-sheet-fence'
 import type { MultitableRepairTransactionSurface } from '../types/plugin'
 import type {
   MultitableProvisioningFieldDescriptor,
@@ -284,6 +285,7 @@ export async function createSheet(
 ): Promise<CreateSheetResult> {
   const query = input.query
   const baseId = input.baseId ?? await ensureLegacyBase(query)
+  await fenceWriterEntry(query, input.sheetId)
   const insert = await query(
     `INSERT INTO meta_sheets (id, base_id, name, description)
      VALUES ($1, $2, $3, $4)
@@ -308,6 +310,7 @@ export async function ensureSheet(
   const query = input.query
   const baseId = input.baseId ?? await ensureLegacyBase(query)
 
+  await fenceWriterEntry(query, input.sheetId)
   await query(
     `INSERT INTO meta_sheets (id, base_id, name, description)
      VALUES ($1, $2, $3, $4)
@@ -328,6 +331,7 @@ export async function ensureFields(
   input: EnsureFieldsInput,
 ): Promise<MultitableProvisioningField[]> {
   const fields = input.fields ?? []
+  if (fields.length > 0) await fenceWriterEntry(input.query, input.sheetId)
   // P0-S S3 — destructive-reconcile guard, FAIL-CLOSED by default (Codex round 2).
   // Default 'refuse': an EXISTING field the descriptor would mutate aborts the whole
   // ensureFields/ensureObject call with a typed, values-free error. Additive evolution
@@ -429,6 +433,7 @@ export async function patchObjectFieldProperty(
 ): Promise<MultitableProvisioningField> {
   const sheetId = getObjectSheetId(input.projectId, input.objectId)
   const physicalFieldId = getObjectFieldId(input.projectId, input.objectId, input.fieldId)
+  await fenceWriterEntry(input.query, sheetId)
   const existing = await input.query(
     `SELECT id, sheet_id, name, type, property, "order"
      FROM meta_fields
@@ -518,6 +523,7 @@ export async function ensureView(
 ): Promise<MultitableProvisioningView> {
   const descriptor = input.descriptor
   const viewId = getObjectViewId(input.projectId, descriptor.objectId, descriptor.id)
+  await fenceWriterEntry(input.query, input.sheetId)
   await input.query(
     `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
      VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)
@@ -552,6 +558,7 @@ export async function ensureView(
 export async function createView(
   input: CreateViewInput,
 ): Promise<CreateViewResult> {
+  await fenceWriterEntry(input.query, input.sheetId)
   const insert = await input.query(
     `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
      VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)
@@ -608,6 +615,7 @@ export async function ensureMissingObjectFields(
   const addedFieldIds: string[] = []
   const skippedExistingFieldIds: string[] = []
   const fields = input.fields ?? []
+  if (fields.length > 0) await fenceWriterEntry(input.query, sheetId)
   for (const [index, field] of fields.entries()) {
     const physicalId = stableMetaId('fld', input.projectId, input.objectId, field.id)
     const order = typeof field.order === 'number' ? field.order : index

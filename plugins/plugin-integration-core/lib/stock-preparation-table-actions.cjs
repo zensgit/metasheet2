@@ -27,6 +27,7 @@ const {
 } = require('./stock-preparation-conflict-policies.cjs')
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
   normalizeStockPreparationTemplate,
 } = require('./stock-preparation-templates.cjs')
@@ -509,7 +510,11 @@ async function readExistingStockPreparationRows(recordsApi, target, projectNo, o
 //                  Both of its call sites pass the mode EXPLICITLY — an opt-out you cannot fall into.
 const FIELD_ID_TRANSLATION_MODES = Object.freeze(['logical', 'pre_mapped'])
 const MVP_TEMPLATE_BY_OBJECT_ID = new Map(
-  STOCK_PREPARATION_MVP_TABLE_TEMPLATES.map((template) => [template.objectId, template]),
+  // The confirmation-decision LEDGER template rides the same registry so its
+  // scoped records API translates logical keys exactly like the MVP tables'.
+  // It is NOT thereby part of the frozen nine-table MVP surface.
+  [...STOCK_PREPARATION_MVP_TABLE_TEMPLATES, STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE]
+    .map((template) => [template.objectId, template]),
 )
 
 // Resolve the target objectId's frozen logical field ids to physical ids. Fail-closed on every step:
@@ -717,6 +722,54 @@ function buildRevision({ action, parameters, expansion, existingRows, conflictPo
         }
       : null,
   })
+}
+
+// Confirmation-ledger readback merge (FIRST CUT: duplicate_expanded_key x
+// keep_multiple_rows only). The ledger review arrives in the SAME shape the
+// stored table-scope review uses ({ policies: [{ fingerprint, policy }] }), so
+// the planner consumes ONE review vocabulary. When the stored table-scope
+// policy and a confirmed ledger decision disagree on a fingerprint, NEITHER
+// wins: the selection is dropped and the planner holds the group.
+function mergeTableScopeConflictPolicyReviews(tableScopeReview, confirmationDecisionReview) {
+  const existingRows = isPlainObject(tableScopeReview) && Array.isArray(tableScopeReview.policies)
+    ? tableScopeReview.policies
+    : []
+  const confirmedRows = isPlainObject(confirmationDecisionReview) && Array.isArray(confirmationDecisionReview.policies)
+    ? confirmationDecisionReview.policies
+    : []
+  const byFingerprint = new Map()
+  const conflicts = new Set()
+  for (const row of existingRows) {
+    if (!isPlainObject(row) || typeof row.fingerprint !== 'string' || typeof row.policy !== 'string') continue
+    byFingerprint.set(row.fingerprint, { ...row })
+  }
+  for (const row of confirmedRows) {
+    if (!isPlainObject(row) || typeof row.fingerprint !== 'string' || typeof row.policy !== 'string') continue
+    const existing = byFingerprint.get(row.fingerprint)
+    if (existing && existing.policy !== row.policy) {
+      // Two durable sources disagree. Removing the selection makes the planner
+      // hold the group; neither source silently wins.
+      byFingerprint.delete(row.fingerprint)
+      conflicts.add(row.fingerprint)
+      continue
+    }
+    if (!conflicts.has(row.fingerprint)) byFingerprint.set(row.fingerprint, { ...row })
+  }
+  return {
+    scope: 'table_scope',
+    policies: Array.from(byFingerprint.values()),
+    confirmationDecisionPolicyCount: confirmedRows.length,
+    conflictingPolicyCount: conflicts.size,
+  }
+}
+
+function confirmationDecisionEvidence(review, inputRevision) {
+  if (!isPlainObject(review)) return undefined
+  return {
+    inputRevision,
+    matchedPolicyCount: Number(review.confirmationDecisionPolicyCount || 0),
+    conflictingPolicyCount: Number(review.conflictingPolicyCount || 0),
+  }
 }
 
 function duplicateReviewEffectSummary(resolution) {
@@ -963,8 +1016,19 @@ async function assertB2aReadHardeningBeforeExpansion({ b2aTrialRegistration, b2a
     now,
   })
 }
-
-async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview, installedFieldProperties, extFieldMapping, b2aTrialRegistration, b2aClaimStore, b2aNow }) {
+// `confirmationDecisionResolver` (OPTIONAL) is the FOURTH member of the same
+// server-held input family as `installedFieldProperties` / `extFieldMapping`:
+// resolved by the route module at request time from server-side context (the
+// staging ledger sheet), threaded here as a parameter, and NEVER
+// request-supplied — the route body allowlists cannot even name it. Absent, the
+// plan is byte-identical to the pre-ledger behaviour. Present, it is consulted
+// ONLY when the first plan holds manual-confirm rows: it recomputes nothing
+// itself and returns confirmed duplicate_expanded_key x keep_multiple_rows
+// decisions for the CURRENT input revision as a table-scope policy review,
+// which is merged and the plan recomputed once. A confirmed decision therefore
+// downgrades a hold ONLY when its stored fingerprint matches today's input —
+// any stale confirmation leaves the hold standing.
+async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview, installedFieldProperties, extFieldMapping, confirmationDecisionResolver, b2aTrialRegistration, b2aClaimStore, b2aNow }) {
   assertExtFieldMappingAgreesWithAction(action, extFieldMapping)
   // R-06, BEFORE the first source row. A drifted schema refuses here, which is before `expansion`,
   // before `plan`, before `revision` and before any evidence exists to be produced.
@@ -1010,22 +1074,48 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
   }
   const existingRows = await readExistingStockPreparationRows(recordsApi, action.target, parameters.projectNo)
   const duplicateDiagnostics = duplicateExpandedKeyDiagnosticsForRows(expansion.rows)
-  const conflictPolicyReview = buildConflictPolicyReview({
+  let conflictPolicyReview = buildConflictPolicyReview({
     diagnostics: duplicateDiagnostics,
     runOnlyReview,
     tableScopeReview,
   })
-  const plan = planStockPreparationConflicts({
-    template: action.template,
-    conflictStrategy: action.conflictStrategy,
-    expandedRows: expansion.rows,
-    existingRows,
-    rowErrors: expansion.rowErrors,
-    runId: runId || `table-action:${action.actionId}`,
-    plannedAt: plannedAt || new Date().toISOString(),
-    duplicatePolicyReview: conflictPolicyReview,
-    installedFieldProperties,
-  })
+  function planWithReview(review) {
+    return planStockPreparationConflicts({
+      template: action.template,
+      conflictStrategy: action.conflictStrategy,
+      expandedRows: expansion.rows,
+      existingRows,
+      rowErrors: expansion.rowErrors,
+      runId: runId || `table-action:${action.actionId}`,
+      plannedAt: plannedAt || new Date().toISOString(),
+      duplicatePolicyReview: review,
+      installedFieldProperties,
+    })
+  }
+  let plan = planWithReview(conflictPolicyReview)
+  // The revision the LEDGER binds its decisions to is the PRE-MERGE one: it is
+  // what reconcile stores (prepareStockPreparationConfirmationDecisions calls
+  // computeDryRun WITHOUT a resolver) and it stays stable across dry-run ->
+  // reconcile -> confirm -> dry-run as long as the actual inputs are unchanged.
+  const confirmationInputRevision = buildRevision({ action, parameters, expansion, existingRows, conflictPolicyReview, plan })
+  let confirmationReview
+  if (typeof confirmationDecisionResolver === 'function' && plan.counts[DECISIONS.MANUAL_CONFIRM] > 0) {
+    const resolved = await confirmationDecisionResolver({
+      projectNo: parameters.projectNo,
+      plan,
+      sourceRevision: confirmationInputRevision,
+    })
+    const mergedTableScopeReview = mergeTableScopeConflictPolicyReviews(tableScopeReview, resolved)
+    if (mergedTableScopeReview.confirmationDecisionPolicyCount > 0 || mergedTableScopeReview.conflictingPolicyCount > 0) {
+      conflictPolicyReview = buildConflictPolicyReview({
+        diagnostics: duplicateDiagnostics,
+        runOnlyReview,
+        tableScopeReview: mergedTableScopeReview,
+      })
+      plan = planWithReview(conflictPolicyReview)
+      confirmationReview = mergedTableScopeReview
+    }
+  }
   const revision = buildRevision({ action, parameters, expansion, existingRows, conflictPolicyReview, plan })
   return {
     expansion,
@@ -1035,6 +1125,7 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     canApply: !hasGlobalErrors && !hasHardRowErrors,
     hasGlobalErrors,
     conflictPolicyReview,
+    confirmationDecision: confirmationDecisionEvidence(confirmationReview, confirmationInputRevision),
     // Returned so evidence can name WHICH mapping produced the `ext_` half of these rows. It is not
     // an input to `buildRevision`: the revision already covers the expansion the mapping produced,
     // and hashing the mapping as well would move every stored revision for deployments that have
@@ -1045,7 +1136,7 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
   }
 }
 
-function evidenceForDryRun({ action, parameters, expansion, plan, revision, canApply, conflictPolicyReview, extFieldMapping }) {
+function evidenceForDryRun({ action, parameters, expansion, plan, revision, canApply, conflictPolicyReview, extFieldMapping, confirmationDecision }) {
   const planEvidence = summarizeConflictPlanForEvidence(plan)
   if (planEvidence && conflictPolicyReview) planEvidence.conflictPolicyReview = conflictPolicyReviewForEvidence(conflictPolicyReview, plan)
   return {
@@ -1055,6 +1146,10 @@ function evidenceForDryRun({ action, parameters, expansion, plan, revision, canA
     canApply: canApply === true,
     expansion: summarizeBomExpansionForEvidence(expansion),
     plan: planEvidence,
+    // CONDITIONAL like extFieldMapping below: no ledger consultation, no key —
+    // deployments without the ledger produce byte-identical evidence. The
+    // stanza itself is values-free (a revision hash and two counts).
+    ...(confirmationDecision ? { confirmationDecision: cloneJson(confirmationDecision) } : {}),
     // CONDITIONAL, so a deployment with no mapping produces byte-identical evidence to the one it
     // produced before this key existed. With a mapping the projection is the module's own
     // values-free one: schema ids, coercion types and counts, never a source cell.
@@ -1114,6 +1209,8 @@ async function dryRunStockPreparationAction(input = {}) {
     // row shape exactly; `computeDryRun` reconciles a present one against `action.extensionFieldIds`
     // before a single row is read.
     extFieldMapping: input.extFieldMapping,
+    // Confirmation-ledger readback, same server-held family (see computeDryRun).
+    confirmationDecisionResolver: input.confirmationDecisionResolver,
     // B2a read hardening (R-05/R-06) and the full-batch guards (E3-02/E3-05). Every one of them
     // is a no-op when `b2aTrialRegistration` is null, which is the dormant case.
     b2aTrialRegistration,
@@ -1148,6 +1245,7 @@ async function dryRunStockPreparationAction(input = {}) {
         canApply: dryRun.canApply,
         conflictPolicyReview: dryRun.conflictPolicyReview,
         extFieldMapping: dryRun.extFieldMapping,
+        confirmationDecision: dryRun.confirmationDecision,
       }),
       // CONDITIONAL, and merged HERE rather than inside `evidenceForDryRun`, for two reasons: the
       // dormant payload then has provably not one extra key (the ext-field-mapping wiring suite
@@ -1160,6 +1258,46 @@ async function dryRunStockPreparationAction(input = {}) {
       // no key, so its evidence stays byte-identical to what it produced before R-06 existed.
       ...(dryRun.b2aSchemaContract ? { b2aSchemaContract: b2aSchemaContractEvidence(dryRun.b2aSchemaContract) } : {}),
     },
+  }
+}
+
+// Internal handoff for the confirmation-decision RECONCILE route. It repeats
+// the readonly table-action plan SERVER-SIDE — the request contributes only
+// parameters and the (validated) run-only policy review, never a plan or
+// revision — and returns exactly the values-free trio the ledger needs. It is
+// deliberately called WITHOUT confirmationDecisionResolver so the revision it
+// yields is the ledger's stable PRE-MERGE input revision (see computeDryRun).
+async function prepareStockPreparationConfirmationDecisions(input = {}) {
+  const action = assertStockPreparationTargetReady(input.action)
+  const parameters = normalizeActionParameters(input.parameters)
+  const runOnlyReview = normalizeRunOnlyConflictPolicyReview(input.conflictPolicyReview)
+  const tableScopeReview = input.policyStore
+    ? await loadTableScopeConflictPolicies({ action, policyStore: input.policyStore })
+    : null
+  const dryRun = await computeDryRun({
+    action,
+    parameters,
+    sourceAdapter: input.sourceAdapter,
+    recordsApi: input.recordsApi,
+    plannedAt: input.plannedAt,
+    runId: input.runId,
+    runOnlyReview,
+    tableScopeReview,
+    installedFieldProperties: input.installedFieldProperties,
+    extFieldMapping: input.extFieldMapping,
+  })
+  if (dryRun.expansion.status === 'not_found') {
+    throw new StockPreparationTableActionError(404, 'CONFIRMATION_DECISION_SOURCE_PROJECT_NOT_FOUND', 'source project was not found')
+  }
+  if (isLargeBomBoundedExpansion(dryRun.expansion)) {
+    throw new StockPreparationTableActionError(409, 'CONFIRMATION_DECISION_SOURCE_EXPANSION_BOUNDED', 'source expansion requires the large-BOM workflow')
+  }
+  return {
+    action,
+    parameters,
+    plan: dryRun.plan,
+    revision: dryRun.revision,
+    canApply: dryRun.canApply,
   }
 }
 
@@ -1232,6 +1370,7 @@ async function prepareStockPreparationMvpSnapshot(input = {}) {
         canApply: dryRun.canApply,
         conflictPolicyReview: dryRun.conflictPolicyReview,
         extFieldMapping: dryRun.extFieldMapping,
+        confirmationDecision: dryRun.confirmationDecision,
       }),
       ...(b2aTrialRegistration ? { b2aTrialRegistration } : {}),
       // R-06's values-free half: one digest, three integers and two booleans — no column name, no
@@ -1388,6 +1527,12 @@ async function applyStockPreparationAction(input = {}) {
     // expand with the SAME mapping the dry-run used. Passing it on one path and not the other would
     // turn every apply into a TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH.
     extFieldMapping: input.extFieldMapping,
+    // Same token-parity requirement for the ledger readback: a dry-run whose
+    // plan a confirmed decision downgraded minted its token on the MERGED
+    // revision, so apply must consult the same server-held resolver. A decision
+    // confirmed or superseded between the two calls changes the recomputed
+    // revision and fails the token check — fail-closed, never fail-open.
+    confirmationDecisionResolver: input.confirmationDecisionResolver,
     // B2a read hardening (R-05/R-06) and the full-batch guards (E3-02/E3-05). Every one of them
     // is a no-op when `b2aTrialRegistration` is null, which is the dormant case.
     b2aTrialRegistration,
@@ -1470,6 +1615,7 @@ module.exports = {
   resolveTargetFieldIds,
   createTargetScopedRecordsApi,
   dryRunStockPreparationAction,
+  prepareStockPreparationConfirmationDecisions,
   prepareStockPreparationMvpSnapshot,
   normalizeActionParameters,
   normalizeStockPreparationActionConfig,
@@ -1479,6 +1625,8 @@ module.exports = {
     assertExtFieldMappingAgreesWithAction,
     assertTargetFieldMapCompleteness,
     buildRevision,
+    confirmationDecisionEvidence,
+    mergeTableScopeConflictPolicyReviews,
     consumeDryRunToken,
     createDryRunToken,
     hashJson,

@@ -15,6 +15,20 @@ import * as tokenBurns from '../../src/db/migrations/zzzz20260719120000_create_m
 import * as authorityLocks from '../../src/db/migrations/zzzz20260721121000_add_recovery_authority_locks'
 import * as authorityCorrection from '../../src/db/migrations/zzzz20260728120000_correct_recovery_authority_locks'
 import * as authoritySearchPath from '../../src/db/migrations/zzzz20260821120000_recovery_authority_functions_fix_search_path'
+import * as recoveryArchiveCatalog from '../../src/db/migrations/zzzz20260826120000_create_meta_recovery_archive_catalog'
+import * as recoveryArchiveStagingCleanup from '../../src/db/migrations/zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol'
+import * as sectionCausality from '../../src/db/migrations/zzzz20260826122000_add_section_causality_substrate'
+import * as operationBinding from '../../src/db/migrations/zzzz20260826122500_add_operation_binding_to_nonrecord_history'
+import * as archiveWriterBlock from '../../src/db/migrations/zzzz20260826123000_add_archive_writer_block_ownership'
+import * as archiveCryptoRegistry from '../../src/db/migrations/zzzz20260826124000_create_recovery_archive_crypto_registry'
+import * as coverageBinding from '../../src/db/migrations/zzzz20260827120000_add_recovery_archive_coverage_binding'
+import * as snapshotReservations from '../../src/db/migrations/zzzz20260828120000_add_recovery_archive_snapshot_reservations'
+import * as archiveKeyRegistry from '../../src/db/migrations/zzzz20260828121000_add_recovery_archive_key_registry'
+import * as sourcePinAuthority from '../../src/db/migrations/zzzz20260828124000_add_recovery_archive_source_pin_authority'
+import * as objectReceiptAuthority from '../../src/db/migrations/zzzz20260828125000_add_recovery_archive_object_receipt_authority'
+import * as claimAnchorAmendment from '../../src/db/migrations/zzzz20260828126000_amend_recovery_archive_claim_anchor'
+import * as legalHoldAuthority from '../../src/db/migrations/zzzz20260828130000_add_recovery_archive_legal_hold_authority'
+import * as restoreJobs from '../../src/db/migrations/zzzz20260828131000_create_recovery_archive_restore_jobs'
 
 type MigrationModule = {
   up(db: Kysely<unknown>): Promise<void>
@@ -105,11 +119,68 @@ const MIGRATIONS: NamedMigration[] = [
     name: 'zzzz20260821120000_recovery_authority_functions_fix_search_path',
     module: authoritySearchPath,
   },
+  {
+    name: 'zzzz20260826120000_create_meta_recovery_archive_catalog',
+    module: recoveryArchiveCatalog,
+  },
+  {
+    name: 'zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol',
+    module: recoveryArchiveStagingCleanup,
+  },
+  {
+    name: 'zzzz20260826122000_add_section_causality_substrate',
+    module: sectionCausality,
+  },
+  {
+    name: 'zzzz20260826122500_add_operation_binding_to_nonrecord_history',
+    module: operationBinding,
+  },
+  {
+    name: 'zzzz20260826123000_add_archive_writer_block_ownership',
+    module: archiveWriterBlock,
+  },
+  {
+    name: 'zzzz20260826124000_create_recovery_archive_crypto_registry',
+    module: archiveCryptoRegistry,
+  },
+  {
+    name: 'zzzz20260827120000_add_recovery_archive_coverage_binding',
+    module: coverageBinding,
+  },
+  {
+    name: 'zzzz20260828120000_add_recovery_archive_snapshot_reservations',
+    module: snapshotReservations,
+  },
+  {
+    name: 'zzzz20260828121000_add_recovery_archive_key_registry',
+    module: archiveKeyRegistry,
+  },
+  {
+    name: 'zzzz20260828124000_add_recovery_archive_source_pin_authority',
+    module: sourcePinAuthority,
+  },
+  {
+    name: 'zzzz20260828125000_add_recovery_archive_object_receipt_authority',
+    module: objectReceiptAuthority,
+  },
+  {
+    name: 'zzzz20260828126000_amend_recovery_archive_claim_anchor',
+    module: claimAnchorAmendment,
+  },
+  {
+    name: 'zzzz20260828130000_add_recovery_archive_legal_hold_authority',
+    module: legalHoldAuthority,
+  },
+  {
+    name: 'zzzz20260828131000_create_recovery_archive_restore_jobs',
+    module: restoreJobs,
+  },
 ]
 
 const TOUCHED_RELATIONS = [
   'meta_field_value_tombstones',
   'meta_link_tombstones',
+  'meta_config_revisions',
   'meta_records_trash',
   'meta_record_revisions',
   'meta_record_version_markers',
@@ -126,6 +197,24 @@ const TOUCHED_RELATIONS = [
   'user_roles',
   'user_permissions',
   'users',
+  'meta_recovery_archives',
+  'meta_recovery_archive_coverage_items',
+  'meta_recovery_archive_attachment_refs',
+  'meta_recovery_archive_staging_objects',
+  'meta_sheet_section_revisions',
+  'meta_record_history_snapshot_members',
+  'meta_record_history_operation_members',
+  'meta_recovery_archive_snapshot_reservations',
+  'meta_recovery_archive_section_bootstrap_markers',
+  'meta_recovery_archive_keys',
+  'meta_recovery_archive_objects',
+  'meta_recovery_archive_legal_holds',
+  'meta_recovery_archive_nonce_reservations',
+  'meta_recovery_archive_jobs',
+  'meta_recovery_archive_job_chunks',
+  'meta_recovery_archive_restore_plans',
+  'meta_recovery_archive_sync_receipts',
+  'meta_recovery_token_burn_delete_requests',
 ]
 
 const OWNED_RELATIONS = [
@@ -137,6 +226,24 @@ const OWNED_RELATIONS = [
   'meta_record_history_operations',
   'meta_recovery_token_burns',
   'meta_record_chain_seq',
+  'meta_recovery_archives',
+  'meta_recovery_archive_coverage_items',
+  'meta_recovery_archive_attachment_refs',
+  'meta_recovery_archive_staging_objects',
+  'meta_sheet_section_revisions',
+  'meta_record_history_snapshot_members',
+  'meta_record_history_operation_members',
+  'meta_recovery_archive_snapshot_reservations',
+  'meta_recovery_archive_section_bootstrap_markers',
+  'meta_recovery_archive_keys',
+  'meta_recovery_archive_objects',
+  'meta_recovery_archive_legal_holds',
+  'meta_recovery_archive_nonce_reservations',
+  'meta_recovery_archive_jobs',
+  'meta_recovery_archive_job_chunks',
+  'meta_recovery_archive_restore_plans',
+  'meta_recovery_archive_sync_receipts',
+  'meta_recovery_token_burn_delete_requests',
 ]
 
 const OWNED_COLUMNS = [
@@ -145,7 +252,31 @@ const OWNED_COLUMNS = [
   ['meta_record_revisions', 'seq'],
   ['meta_record_revisions', 'operation_id'],
   ['meta_sheets', 'recovery_writer_state'],
+  ['meta_sheets', 'recovery_writer_owner_kind'],
+  ['meta_sheets', 'recovery_writer_owner_id'],
+  ['meta_sheets', 'recovery_writer_owner_fence'],
+  ['meta_sheets', 'recovery_writer_lease_until'],
+  ['meta_sheets', 'recovery_writer_updated_at'],
   ['meta_sheets', 'system_kind'],
+  ['meta_recovery_archive_attachment_refs', 'cleanup_owner_kind'],
+  ['meta_recovery_archive_attachment_refs', 'cleanup_owner_id'],
+  ['meta_recovery_archive_attachment_refs', 'cleanup_owner_fence'],
+  ['meta_record_history_operations', 'operation_kind'],
+  ['meta_record_history_operations', 'event_contract_version'],
+  ['meta_record_history_operations', 'component_count'],
+  ['meta_config_revisions', 'operation_id'],
+  ['meta_field_value_tombstones', 'operation_id'],
+  ['meta_link_tombstones', 'operation_id'],
+  ['meta_recovery_token_burns', 'burn_kind'],
+  ['meta_recovery_token_burns', 'job_id'],
+  ['meta_recovery_token_burns', 'sync_operation_id'],
+  ['meta_recovery_token_burns', 'archive_generation_id'],
+  ['meta_recovery_token_burns', 'archive_root_hash'],
+  ['meta_recovery_token_burns', 'source_vector_hash'],
+  ['meta_recovery_token_burns', 'token_expires_at'],
+  ['meta_recovery_token_burns', 'retain_until'],
+  ['meta_recovery_token_burns', 'terminal_at'],
+  ['meta_recovery_token_burns', 'row_version'],
 ] as const
 
 // These indexes are created on relations that predate at least one migration in this replay set.
@@ -157,13 +288,117 @@ const OWNED_INDEXES = [
   ['meta_record_version_markers', 'idx_meta_record_version_markers_sheet_record_seq'],
   ['meta_record_revisions', 'idx_meta_record_revisions_operation'],
   ['meta_record_version_markers', 'idx_meta_record_version_markers_operation'],
+  ['meta_config_revisions', 'idx_meta_config_revisions_operation'],
+  ['meta_field_value_tombstones', 'idx_meta_field_value_tombstones_operation'],
+  ['meta_link_tombstones', 'idx_meta_link_tombstones_operation'],
+  ['meta_recovery_archive_jobs', 'idx_meta_recovery_archive_jobs_claimable'],
+  ['meta_recovery_archive_jobs', 'idx_meta_recovery_archive_jobs_sheet_state'],
+  ['meta_recovery_archive_job_chunks', 'idx_meta_recovery_archive_job_chunks_pending'],
+  ['meta_recovery_token_burns', 'idx_meta_recovery_token_burns_d5_prunable'],
 ] as const
 
 const OWNED_CONSTRAINTS = [
   ['meta_sheets', 'chk_meta_sheets_recovery_writer_state'],
+  ['meta_sheets', 'chk_meta_sheets_recovery_writer_owner_kind'],
+  ['meta_sheets', 'chk_meta_sheets_recovery_writer_owner_tuple'],
+  ['meta_sheets', 'chk_meta_sheets_recovery_writer_fence'],
   ['meta_record_version_markers', 'uq_meta_record_version_markers_sheet_record_version'],
   ['meta_record_revisions', 'fk_mrr_operation'],
   ['meta_record_version_markers', 'fk_mrvm_operation'],
+  ['meta_record_history_operations', 'chk_mrho_event_contract'],
+  ['meta_sheet_section_revisions', 'fk_mssr_operation'],
+  ['meta_record_history_snapshot_members', 'fk_mrhsm_parent'],
+  ['meta_record_history_operation_members', 'fk_mrhom_parent'],
+  ['meta_config_revisions', 'fk_mcr_operation'],
+  ['meta_field_value_tombstones', 'fk_mfvt_operation'],
+  ['meta_link_tombstones', 'fk_mlt_operation'],
+  ['meta_recovery_archive_coverage_items', 'chk_meta_recovery_archive_coverage_kind_binding'],
+  ['meta_recovery_archive_snapshot_reservations', 'fk_mrasr_generation'],
+  ['meta_recovery_archive_snapshot_reservations', 'chk_mrasr_shape'],
+  ['meta_recovery_archive_section_bootstrap_markers', 'pk_mrasbm_sheet'],
+  ['meta_recovery_archive_section_bootstrap_markers', 'uq_mrasbm_generation'],
+  ['meta_recovery_archive_section_bootstrap_markers', 'uq_mrasbm_snapshot_operation'],
+  ['meta_recovery_archive_section_bootstrap_markers', 'chk_mrasbm_source_vector_hash'],
+  ['meta_recovery_archives', 'fk_meta_recovery_archives_key'],
+  ['meta_recovery_archive_nonce_reservations', 'pk_meta_recovery_archive_nonce_reservations'],
+  [
+    'meta_recovery_archive_nonce_reservations',
+    'uq_meta_recovery_archive_nonce_reservation_generation_section',
+  ],
+  [
+    'meta_recovery_archive_nonce_reservations',
+    'chk_meta_recovery_archive_nonce_reservation_fingerprint',
+  ],
+  ['meta_recovery_archive_nonce_reservations', 'chk_meta_recovery_archive_nonce_reservation_nonce'],
+  [
+    'meta_recovery_archive_nonce_reservations',
+    'chk_meta_recovery_archive_nonce_reservation_format_version',
+  ],
+  [
+    'meta_recovery_archive_nonce_reservations',
+    'chk_meta_recovery_archive_nonce_reservation_aead_algorithm',
+  ],
+  [
+    'meta_recovery_archive_nonce_reservations',
+    'chk_meta_recovery_archive_nonce_reservation_section_name',
+  ],
+  ['meta_recovery_archive_jobs', 'pk_meta_recovery_archive_jobs'],
+  ['meta_recovery_archive_jobs', 'uq_meta_recovery_archive_jobs_token'],
+  ['meta_recovery_archive_jobs', 'uq_meta_recovery_archive_jobs_id_sheet'],
+  ['meta_recovery_archive_jobs', 'fk_meta_recovery_archive_jobs_base'],
+  ['meta_recovery_archive_jobs', 'fk_meta_recovery_archive_jobs_sheet'],
+  ['meta_recovery_archive_jobs', 'fk_meta_recovery_archive_jobs_generation'],
+  ['meta_recovery_archive_jobs', 'fk_meta_recovery_archive_jobs_key'],
+  ['meta_recovery_archive_jobs', 'fk_meta_recovery_archive_jobs_terminal_operation'],
+  ['meta_recovery_archive_jobs', 'chk_meta_recovery_archive_jobs_token_sha'],
+  ['meta_recovery_archive_jobs', 'chk_meta_recovery_archive_jobs_recovery_mode'],
+  ['meta_recovery_archive_jobs', 'chk_meta_recovery_archive_jobs_scope_kind'],
+  ['meta_recovery_archive_jobs', 'chk_meta_recovery_archive_jobs_hashes'],
+  ['meta_recovery_archive_jobs', 'chk_meta_recovery_archive_jobs_opaque_ids'],
+  ['meta_recovery_archive_jobs', 'chk_meta_recovery_archive_jobs_plan_object'],
+  ['meta_recovery_archive_jobs', 'chk_meta_recovery_archive_jobs_state'],
+  ['meta_recovery_archive_jobs', 'chk_meta_recovery_archive_jobs_counts'],
+  ['meta_recovery_archive_jobs', 'chk_meta_recovery_archive_jobs_fences'],
+  ['meta_recovery_archive_jobs', 'chk_meta_recovery_archive_jobs_worker_tuple'],
+  ['meta_recovery_archive_jobs', 'chk_meta_recovery_archive_jobs_terminal_shape'],
+  ['meta_recovery_archive_jobs', 'chk_meta_recovery_archive_jobs_cancelled_zero'],
+  ['meta_recovery_archive_jobs', 'chk_meta_recovery_archive_jobs_resume_deadline'],
+  ['meta_recovery_archive_job_chunks', 'pk_meta_recovery_archive_job_chunks'],
+  ['meta_recovery_archive_job_chunks', 'uq_meta_recovery_archive_job_chunks_operation'],
+  ['meta_recovery_archive_job_chunks', 'fk_meta_recovery_archive_job_chunks_job'],
+  ['meta_recovery_archive_job_chunks', 'fk_meta_recovery_archive_job_chunks_operation'],
+  ['meta_recovery_archive_job_chunks', 'chk_meta_recovery_archive_job_chunks_index'],
+  ['meta_recovery_archive_job_chunks', 'chk_meta_recovery_archive_job_chunks_hashes'],
+  ['meta_recovery_archive_job_chunks', 'chk_meta_recovery_archive_job_chunks_object'],
+  ['meta_recovery_archive_job_chunks', 'chk_meta_recovery_archive_job_chunks_record_count'],
+  ['meta_recovery_archive_job_chunks', 'chk_meta_recovery_archive_job_chunks_state'],
+  ['meta_recovery_archive_job_chunks', 'chk_meta_recovery_archive_job_chunks_receipt'],
+  ['meta_recovery_archive_restore_plans', 'pk_meta_recovery_archive_restore_plans'],
+  ['meta_recovery_archive_restore_plans', 'uq_meta_recovery_archive_restore_plans_job'],
+  ['meta_recovery_archive_restore_plans', 'fk_meta_recovery_archive_restore_plans_base'],
+  ['meta_recovery_archive_restore_plans', 'fk_meta_recovery_archive_restore_plans_sheet'],
+  ['meta_recovery_archive_restore_plans', 'fk_meta_recovery_archive_restore_plans_generation'],
+  ['meta_recovery_archive_restore_plans', 'fk_meta_recovery_archive_restore_plans_key'],
+  ['meta_recovery_archive_restore_plans', 'fk_meta_recovery_archive_restore_plans_job'],
+  ['meta_recovery_archive_restore_plans', 'chk_meta_recovery_archive_restore_plans_hashes'],
+  ['meta_recovery_archive_restore_plans', 'chk_meta_recovery_archive_restore_plans_opaque'],
+  ['meta_recovery_archive_restore_plans', 'chk_meta_recovery_archive_restore_plans_object'],
+  ['meta_recovery_archive_restore_plans', 'chk_meta_recovery_archive_restore_plans_state'],
+  ['meta_recovery_archive_restore_plans', 'chk_meta_recovery_archive_restore_plans_shape'],
+  ['meta_recovery_archive_restore_plans', 'chk_meta_recovery_archive_restore_plans_row_version'],
+  ['meta_recovery_token_burns', 'uq_meta_recovery_token_burns_job'],
+  ['meta_recovery_token_burns', 'uq_meta_recovery_token_burns_sync_operation'],
+  ['meta_recovery_token_burns', 'fk_meta_recovery_token_burns_job'],
+  ['meta_recovery_token_burns', 'fk_meta_recovery_token_burns_sync_operation'],
+  ['meta_recovery_token_burns', 'fk_meta_recovery_token_burns_generation'],
+  ['meta_recovery_token_burns', 'chk_meta_recovery_token_burns_d5_shape'],
+  ['meta_recovery_token_burns', 'chk_meta_recovery_token_burns_d5_retention'],
+  ['meta_recovery_archive_sync_receipts', 'pk_meta_recovery_archive_sync_receipts'],
+  ['meta_recovery_archive_sync_receipts', 'uq_meta_recovery_archive_sync_receipts_operation'],
+  ['meta_recovery_archive_sync_receipts', 'fk_meta_recovery_archive_sync_receipts_operation'],
+  ['meta_recovery_archive_sync_receipts', 'fk_meta_recovery_archive_sync_receipts_generation'],
+  ['meta_recovery_archive_sync_receipts', 'chk_meta_recovery_archive_sync_receipts_hashes'],
+  ['meta_recovery_archive_sync_receipts', 'chk_meta_recovery_archive_sync_receipts_count'],
 ] as const
 
 const OPERATION_FUNCTIONS = [
@@ -183,7 +418,87 @@ const AUTHORITY_FUNCTIONS = [
   authorityLocks.AUTHORITY_SUBJECT_TRIGGER_FUNCTION,
 ]
 
-const OWNED_FUNCTIONS = [...OPERATION_FUNCTIONS, ...AUTHORITY_FUNCTIONS]
+const RECOVERY_ARCHIVE_FUNCTIONS = [
+  'meta_recovery_archives_guard_row',
+  'meta_recovery_archive_coverage_guard_row',
+  'meta_recovery_archive_attachment_ref_guard_row',
+  'meta_recovery_archive_attachment_finalize_guard_row',
+  'meta_recovery_archive_abandoned_cleanup_claim_guard_row',
+  'meta_recovery_archive_claim_abandoned_cleanup',
+  'meta_recovery_archive_staging_object_guard_row',
+  'meta_recovery_archive_staging_object_finalize_guard_row',
+  'meta_recovery_archive_attachment_ref_cleanup_guard_row',
+  'meta_recovery_archive_attachment_cleanup_finalize_guard_row',
+  'meta_recovery_archive_release_abandoned_source_pin',
+]
+
+const SECTION_CAUSALITY_FUNCTIONS = [
+  'meta_sheet_section_revisions_guard_row',
+  'meta_record_history_membership_guard_row',
+]
+const OPERATION_BINDING_FUNCTIONS = ['meta_nonrecord_history_operation_binding_guard_row']
+const SNAPSHOT_RESERVATION_FUNCTIONS = [
+  'meta_recovery_archive_snapshot_reservation_guard_row',
+  'meta_recovery_archive_snapshot_reservation_guard_set',
+  'meta_recovery_archive_snapshot_reservation_guard_truncate',
+  'meta_recovery_archive_section_bootstrap_marker_guard_row',
+  'meta_recovery_archive_section_bootstrap_marker_guard_truncate',
+]
+const ARCHIVE_KEY_REGISTRY_FUNCTIONS = [
+  'meta_recovery_archive_key_guard_row',
+  'meta_recovery_archive_key_guard_truncate',
+  'meta_recovery_archive_key_reference_guard_row',
+]
+const ARCHIVE_OBJECT_RECEIPT_FUNCTIONS = [
+  'meta_recovery_archive_object_guard_row',
+  'meta_recovery_archive_object_finalize_guard_row',
+  'meta_recovery_archive_object_parent_guard_row',
+]
+const ARCHIVE_CLAIM_ANCHOR_FUNCTIONS = [
+  'meta_recovery_archives_claim_anchor_guard_row',
+  'meta_recovery_archives_claim_anchor_reservation_guard',
+  'meta_recovery_archives_claim_anchor_operation_delete_guard',
+]
+const ARCHIVE_LEGAL_HOLD_FUNCTIONS = [
+  'meta_recovery_archive_legal_hold_guard_row',
+  'meta_recovery_archive_legal_hold_guard_truncate',
+  'meta_recovery_archive_legal_hold_expiry_guard_row',
+  'meta_recovery_archive_expiry_authorize',
+  'meta_recovery_archive_legal_hold_release_authorize',
+]
+const ARCHIVE_CRYPTO_REGISTRY_FUNCTIONS = [
+  'meta_recovery_archive_nonce_reservation_guard_row',
+  'meta_recovery_archive_nonce_reservation_guard_truncate',
+  'meta_recovery_archive_reserve_nonce',
+]
+const ARCHIVE_RESTORE_JOB_FUNCTIONS = [
+  'meta_recovery_archive_job_guard_row',
+  'meta_recovery_archive_restore_plan_guard_row',
+  'meta_recovery_archive_nonterminal_job_guard_row',
+  'meta_recovery_archive_sync_receipt_guard_row',
+  'meta_recovery_archive_job_chunk_guard_row',
+  'meta_recovery_archive_job_consistency_guard',
+  'meta_recovery_token_burn_d5_guard_row',
+  'meta_recovery_token_burn_d5_consistency_guard',
+  'meta_recovery_archive_d5_reject_truncate',
+  'meta_recovery_token_burn_delete_request_row',
+  'meta_recovery_token_burn_delete_authorize',
+]
+
+const OWNED_FUNCTIONS = [
+  ...OPERATION_FUNCTIONS,
+  ...AUTHORITY_FUNCTIONS,
+  ...RECOVERY_ARCHIVE_FUNCTIONS,
+  ...SECTION_CAUSALITY_FUNCTIONS,
+  ...OPERATION_BINDING_FUNCTIONS,
+  ...SNAPSHOT_RESERVATION_FUNCTIONS,
+  ...ARCHIVE_KEY_REGISTRY_FUNCTIONS,
+  ...ARCHIVE_OBJECT_RECEIPT_FUNCTIONS,
+  ...ARCHIVE_CLAIM_ANCHOR_FUNCTIONS,
+  ...ARCHIVE_LEGAL_HOLD_FUNCTIONS,
+  ...ARCHIVE_CRYPTO_REGISTRY_FUNCTIONS,
+  ...ARCHIVE_RESTORE_JOB_FUNCTIONS,
+]
 const OPERATION_TRIGGERS = [
   'trg_mrr_reject_append_sealed',
   'trg_mrvm_reject_append_sealed',
@@ -192,7 +507,93 @@ const OPERATION_TRIGGERS = [
   'trg_mrho_reject_delete',
 ]
 const AUTHORITY_TRIGGERS = authorityLocks.RECOVERY_AUTHORITY_TRIGGERS.map(([, trigger]) => trigger)
-const OWNED_TRIGGERS = [...OPERATION_TRIGGERS, ...AUTHORITY_TRIGGERS]
+const RECOVERY_ARCHIVE_TRIGGERS = [
+  'trg_meta_recovery_archives_guard_row',
+  'trg_meta_recovery_archive_coverage_guard_row',
+  'trg_meta_recovery_archive_attachment_ref_guard_row',
+  'trg_meta_recovery_archive_attachment_finalize_guard_row',
+  'trg_meta_recovery_archive_abandoned_cleanup_claim_guard_row',
+  'trg_meta_recovery_archive_staging_object_guard_row',
+  'trg_meta_recovery_archive_staging_object_finalize_guard_row',
+  'trg_meta_recovery_archive_attachment_cleanup_finalize_guard_row',
+]
+const SECTION_CAUSALITY_TRIGGERS = [
+  'trg_mssr_reject_append_sealed',
+  'trg_mssr_guard_row',
+  'trg_mrhsm_guard_row',
+  'trg_mrhom_guard_row',
+]
+const OPERATION_BINDING_TRIGGERS = [
+  'trg_mcr_operation_binding_immutable',
+  'trg_mfvt_operation_binding_immutable',
+  'trg_mlt_operation_binding_immutable',
+  'trg_mcr_reject_append_sealed',
+  'trg_mfvt_reject_append_sealed',
+  'trg_mlt_reject_append_sealed',
+]
+const SNAPSHOT_RESERVATION_TRIGGERS = [
+  'trg_mrasr_guard_row',
+  'trg_mrasr_guard_set',
+  'trg_mrasr_guard_truncate',
+  'trg_mrasbm_guard_row',
+  'trg_mrasbm_guard_truncate',
+]
+const ARCHIVE_KEY_REGISTRY_TRIGGERS = [
+  'trg_meta_recovery_archive_key_guard_row',
+  'trg_meta_recovery_archive_key_guard_truncate',
+  'trg_meta_recovery_archive_key_reference_guard_row',
+]
+const ARCHIVE_OBJECT_RECEIPT_TRIGGERS = [
+  'trg_meta_recovery_archive_object_guard_row',
+  'trg_meta_recovery_archive_object_finalize_guard_row',
+  'trg_meta_recovery_archives_object_parent_guard_row',
+]
+const ARCHIVE_CLAIM_ANCHOR_TRIGGERS = [
+  'trg_meta_recovery_archives_claim_anchor_guard_row',
+  'trg_meta_recovery_archives_claim_anchor_reservation_guard',
+  'trg_mrho_claim_anchor_delete_guard',
+]
+const ARCHIVE_LEGAL_HOLD_TRIGGERS = [
+  'trg_meta_recovery_archive_legal_hold_guard_row',
+  'trg_meta_recovery_archive_legal_hold_guard_truncate',
+  'trg_meta_recovery_archives_legal_hold_expiry_guard_row',
+]
+const ARCHIVE_CRYPTO_REGISTRY_TRIGGERS = [
+  'trg_meta_recovery_archive_nonce_reservation_guard_row',
+  'trg_meta_recovery_archive_nonce_reservation_guard_truncate',
+]
+const ARCHIVE_RESTORE_JOB_TRIGGERS = [
+  'trg_meta_recovery_archives_nonterminal_job_guard_row',
+  'trg_meta_recovery_archive_jobs_guard_row',
+  'trg_meta_recovery_archive_job_chunks_guard_row',
+  'trg_meta_recovery_archive_restore_plans_guard_row',
+  'trg_meta_recovery_token_burn_delete_request_row',
+  'trg_meta_recovery_token_burns_d5_guard_row',
+  'trg_meta_recovery_archive_sync_receipts_guard_row',
+  'trg_meta_recovery_archive_jobs_consistency',
+  'trg_meta_recovery_archive_job_chunks_consistency',
+  'trg_meta_recovery_archive_jobs_burn_consistency',
+  'trg_meta_recovery_token_burns_d5_consistency',
+  'trg_meta_recovery_archive_sync_receipts_consistency',
+  'trg_meta_recovery_archive_jobs_reject_truncate',
+  'trg_meta_recovery_archive_job_chunks_reject_truncate',
+  'trg_meta_recovery_archive_restore_plans_reject_truncate',
+  'trg_meta_recovery_archive_sync_receipts_reject_truncate',
+]
+const OWNED_TRIGGERS = [
+  ...OPERATION_TRIGGERS,
+  ...AUTHORITY_TRIGGERS,
+  ...RECOVERY_ARCHIVE_TRIGGERS,
+  ...SECTION_CAUSALITY_TRIGGERS,
+  ...OPERATION_BINDING_TRIGGERS,
+  ...SNAPSHOT_RESERVATION_TRIGGERS,
+  ...ARCHIVE_KEY_REGISTRY_TRIGGERS,
+  ...ARCHIVE_OBJECT_RECEIPT_TRIGGERS,
+  ...ARCHIVE_CLAIM_ANCHOR_TRIGGERS,
+  ...ARCHIVE_LEGAL_HOLD_TRIGGERS,
+  ...ARCHIVE_CRYPTO_REGISTRY_TRIGGERS,
+  ...ARCHIVE_RESTORE_JOB_TRIGGERS,
+]
 const TIME_MACHINE_REPLAY_FAILURE_ENV = 'TIME_MACHINE_REPLAY_INJECT_DOWN_FAILURE_AFTER'
 let activePhase: ReplayPhase = 'precondition'
 
@@ -299,6 +700,34 @@ async function catalogSnapshot(db: Kysely<unknown>): Promise<CatalogRow[]> {
     ...functions.rows,
     ...sequences.rows,
   ])
+}
+
+async function assertPreD2cEndpointFunctionsUnconfigured(db: Kysely<unknown>): Promise<void> {
+  const functions = await sql<{
+    proname: string
+    proconfig: string | null
+  }>`
+    SELECT procedure_row.proname::text AS proname,
+           array_to_string(procedure_row.proconfig, ',') AS proconfig
+      FROM pg_proc procedure_row
+      JOIN pg_namespace namespace ON namespace.oid = procedure_row.pronamespace
+     WHERE namespace.nspname = 'public'
+       AND procedure_row.proname IN (
+         'meta_record_history_operations_validate_endpoint',
+         'meta_record_history_operations_prune'
+       )
+     ORDER BY procedure_row.proname
+  `.execute(db)
+  requireCondition(
+    functions.rows.length === 2,
+    new ReplayFailure('down', 'pre_d2c_endpoint_function_missing', 'function', functions.rows.length),
+  )
+  for (const row of functions.rows) {
+    requireCondition(
+      row.proconfig === null || row.proconfig === '',
+      new ReplayFailure('down', 'pre_d2c_endpoint_function_configured', 'function', 1),
+    )
+  }
 }
 
 async function assertOwnedSurfaceAbsent(db: Kysely<unknown>): Promise<void> {
@@ -462,6 +891,9 @@ async function main(): Promise<void> {
     for (const migration of [...MIGRATIONS].reverse()) {
       downed.add(migration.name)
       await migration.module.down(db)
+      if (migration.name === 'zzzz20260826122000_add_section_causality_substrate') {
+        await assertPreD2cEndpointFunctionsUnconfigured(db)
+      }
       if (failureInjectionMigration === migration.name) {
         throw new ReplayFailure('down', 'injected_down_failure', 'migration', 1)
       }

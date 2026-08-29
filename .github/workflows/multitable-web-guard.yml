@@ -111,6 +111,9 @@ on:
       - 'apps/web/src/multitable/utils/batch-restore-labels.ts'
       - 'apps/web/src/multitable/views/config-revert-refresh.ts'
       - 'apps/web/tests/multitable-config-revert-refresh.spec.ts'
+      - 'apps/web/src/multitable/components/RecoveryArchiveModal.vue'
+      - 'apps/web/tests/multitable-recovery-archive-client.spec.ts'
+      - 'apps/web/tests/multitable-recovery-archive-modal.spec.ts'
       - 'apps/web/tests/multitable-sheet-cursor-state.spec.ts'
       - 'apps/web/src/multitable/components/MetaRecordPermissionManager.vue'
       - 'apps/web/src/multitable/components/MetaSheetPermissionManager.vue'
@@ -463,6 +466,9 @@ on:
       - 'apps/web/src/multitable/utils/batch-restore-labels.ts'
       - 'apps/web/src/multitable/views/config-revert-refresh.ts'
       - 'apps/web/tests/multitable-config-revert-refresh.spec.ts'
+      - 'apps/web/src/multitable/components/RecoveryArchiveModal.vue'
+      - 'apps/web/tests/multitable-recovery-archive-client.spec.ts'
+      - 'apps/web/tests/multitable-recovery-archive-modal.spec.ts'
       - 'apps/web/tests/multitable-sheet-cursor-state.spec.ts'
       - 'apps/web/src/multitable/components/MetaRecordPermissionManager.vue'
       - 'apps/web/src/multitable/components/MetaSheetPermissionManager.vue'
@@ -764,6 +770,9 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Run recovery archive web specs
+        run: pnpm --filter @metasheet/web exec vitest run multitable-recovery-archive-client multitable-recovery-archive-modal --reporter=dot
 
       - name: Run multitable web guard specs (targeted)
         # A1: meta-grid-table (windowing + infinite-scroll trigger) + multitable-grid (useMultitableGrid

@@ -554,7 +554,8 @@ record('read-back-written-key',
 // K3WiseWebApiAdapterError.details.code = 'K3_WISE_READ_BUSINESS_ERROR'
 // (adapters/k3-wise-webapi-adapter.cjs:1966/1975), which readSmokeErrorEvidence's
 // `error.details.code` fallback (read-smoke.cjs:414-415) surfaces as `errorCode` — the SAME code
-// run-mock-poc-demo.mjs's ruled-chain negative control already asserts (line 372).
+// run-mock-poc-demo.mjs's ruled-chain never-saved control already asserts (search that file for
+// MAT-NEVER-SAVED — a line number here goes stale, and did: the E4 fence conversion moved it).
 const readBackMiss = await call('POST', `/api/integration/external-systems/${targetSystemId}/read-smoke`, {
   presetId: DETAIL_PRESET,
   key: NEVER_SAVED_KEY,

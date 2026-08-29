@@ -568,6 +568,12 @@ export function hashAnchorRecoveryScope(records: Array<{ recordId: string; exist
  *  at-most-once; it is THIS binding that pins WHAT the once is. */
 export type ExactAnchorRecoveryMode = 'revert' | 'reset'
 
+/** Archive D5 keeps selection scope separate from revert/reset deletion semantics. */
+export type ExactArchiveRecoveryScopeKind =
+  | 'whole_sheet'
+  | 'selected_records'
+  | 'selected_fields'
+
 /**
  * SERVER-KEYED hash of the v1 recovery-authorization basis (owner P1-2, 2026-07-17). Whole-sheet recovery is
  * authorized by exactly one grant shape in v1 — the 4c-1 U-L8 FULL-READ gate (an actor who cannot read every
@@ -581,6 +587,44 @@ export type ExactAnchorRecoveryMode = 'revert' | 'reset'
 export function hashRecoveryAuthorizationScope(basis: { sheetId: string; actorId: string }): string {
   return createHmac('sha256', getSecret())
     .update(JSON.stringify(['recovery-auth-v1', 'full-read', basis.sheetId, basis.actorId]))
+    .digest('hex')
+}
+
+/**
+ * D5 authorization-contract hash. Selected identifiers remain HMAC-protected rather than appearing
+ * in the client-decodable archive token. Record and field arrays are ordered canonically here; the
+ * frozen plan preserves the requested execution order separately.
+ */
+export function hashArchiveRecoveryAuthorizationScope(basis: {
+  sheetId: string
+  actorId: string
+  scopeKind: ExactArchiveRecoveryScopeKind
+  recordIds?: readonly string[]
+  fieldIds?: readonly string[]
+}): string {
+  const recordIds = [...(basis.recordIds ?? [])].map(String).sort()
+  const fieldIds = [...(basis.fieldIds ?? [])].map(String).sort()
+  if (basis.scopeKind === 'whole_sheet' && (recordIds.length !== 0 || fieldIds.length !== 0)) {
+    throw new TypeError('archive recovery whole-sheet scope must not carry selected identifiers')
+  }
+  if (basis.scopeKind === 'selected_records' && (recordIds.length === 0 || fieldIds.length !== 0)) {
+    throw new TypeError('archive recovery selected-record scope is malformed')
+  }
+  if (basis.scopeKind === 'selected_fields' && (recordIds.length === 0 || fieldIds.length === 0)) {
+    throw new TypeError('archive recovery selected-field scope is malformed')
+  }
+  if (new Set(recordIds).size !== recordIds.length || new Set(fieldIds).size !== fieldIds.length) {
+    throw new TypeError('archive recovery scope contains duplicate identifiers')
+  }
+  return createHmac('sha256', getSecret())
+    .update(JSON.stringify([
+      'archive-recovery-auth-v1',
+      basis.scopeKind,
+      basis.sheetId,
+      basis.actorId,
+      recordIds,
+      fieldIds,
+    ]))
     .digest('hex')
 }
 
@@ -698,6 +742,169 @@ export interface ExactAnchorRecoveryIdentityClaims {
   /** `hashRecoveryAuthorizationScope` over the v1 full-read authorization basis (P1-2) — recomputed and
    *  compared at execute from the execute's OWN fresh adjudication, never trusted from the token alone. */
   authorizedScopeHash: string
+}
+
+/**
+ * D5 archive identity. A distinct JWT type makes every pre-archive token structurally unusable for
+ * archive restore. `mode` controls reset/revert semantics; `scopeKind` controls the selected surface.
+ */
+export interface ExactArchiveRecoveryIdentityClaims extends ExactAnchorRecoveryIdentityClaims {
+  archiveGenerationId: string
+  archiveRootHash: string
+  archiveSourceVectorHash: string
+  archiveKeyId: string
+  archivePlanHash: string
+  archivePlanObject?: ExactArchiveRecoveryPlanObjectClaims
+  scopeKind: ExactArchiveRecoveryScopeKind
+}
+
+export interface ExactArchiveRecoveryPlanObjectClaims {
+  objectId: string
+  version: string
+  sha256: string
+  size: string
+  expiresAt: string
+}
+
+export function mintExactArchiveRecoveryIdentity(
+  claims: ExactArchiveRecoveryIdentityClaims,
+  expiresIn: SignOptions['expiresIn'] = DEFAULT_TTL,
+): string {
+  return jwt.sign(
+    { type: 'exact-anchor-archive-recovery-preview-v1', ...claims },
+    getSecret(),
+    { algorithm: 'HS256', expiresIn } as SignOptions,
+  )
+}
+
+export interface ExactArchiveRecoveryVerifyResult {
+  valid: boolean
+  reason?: ExactAnchorRecoveryVerifyResult['reason'] | 'malformed_archive_claims'
+  claims?: ExactArchiveRecoveryIdentityClaims
+  /** Exact JWT expiry carried into the durable burn row. */
+  expiresAt?: string
+}
+
+export function verifyExactArchiveRecoveryIdentity(
+  token: string,
+  expected: { sheetId: string; actorId: string },
+): ExactArchiveRecoveryVerifyResult {
+  let payload: Partial<ExactArchiveRecoveryIdentityClaims> & {
+    type?: string
+    exp?: number
+  }
+  try {
+    payload = jwt.verify(token, getSecret()) as typeof payload
+  } catch (error) {
+    return {
+      valid: false,
+      reason: (error as Error)?.name === 'TokenExpiredError' ? 'expired' : 'invalid',
+    }
+  }
+  if (payload.type !== 'exact-anchor-archive-recovery-preview-v1') {
+    return { valid: false, reason: 'wrong_type' }
+  }
+  if (payload.sheetId !== expected.sheetId) return { valid: false, reason: 'mismatch_sheetId' }
+  if (payload.actorId !== expected.actorId) return { valid: false, reason: 'mismatch_actorId' }
+  if (payload.mode !== 'revert' && payload.mode !== 'reset') {
+    return { valid: false, reason: 'pre_contract_token' }
+  }
+  if (
+    payload.scopeKind !== 'whole_sheet' &&
+    payload.scopeKind !== 'selected_records' &&
+    payload.scopeKind !== 'selected_fields'
+  ) {
+    return { valid: false, reason: 'malformed_archive_claims' }
+  }
+  if (typeof payload.anchorSeq !== 'string' || !/^[0-9]+$/.test(payload.anchorSeq)) {
+    return { valid: false, reason: 'malformed_anchorSeq' }
+  }
+  const ordinaryClaims = [
+    payload.checkpointId,
+    payload.anchorOperationId,
+    payload.scopeHash,
+    payload.liveSetHash,
+    payload.schemaHash,
+    payload.authorizedScopeHash,
+  ]
+  if (ordinaryClaims.some((value) => typeof value !== 'string' || value.length === 0)) {
+    return { valid: false, reason: 'malformed_claims' }
+  }
+  const archiveIds = [payload.archiveGenerationId, payload.archiveKeyId]
+  const archiveHashes = [
+    payload.archiveRootHash,
+    payload.archiveSourceVectorHash,
+    payload.archivePlanHash,
+  ]
+  let archivePlanObject: ExactArchiveRecoveryPlanObjectClaims | undefined
+  try {
+    archivePlanObject = admitArchivePlanObjectClaims(payload.archivePlanObject)
+  } catch {
+    return { valid: false, reason: 'malformed_archive_claims' }
+  }
+  if (
+    archiveIds.some((value) => typeof value !== 'string' || value.length === 0) ||
+    archiveHashes.some((value) => typeof value !== 'string' || !/^[0-9a-f]{64}$/.test(value)) ||
+    typeof payload.exp !== 'number' || !Number.isSafeInteger(payload.exp) || payload.exp <= 0
+  ) {
+    return { valid: false, reason: 'malformed_archive_claims' }
+  }
+  return {
+    valid: true,
+    claims: {
+      sheetId: payload.sheetId,
+      anchorOperationId: payload.anchorOperationId as string,
+      anchorSeq: payload.anchorSeq,
+      checkpointId: payload.checkpointId as string,
+      scopeHash: payload.scopeHash as string,
+      liveSetHash: payload.liveSetHash as string,
+      schemaHash: payload.schemaHash as string,
+      actorId: payload.actorId as string,
+      mode: payload.mode,
+      authorizedScopeHash: payload.authorizedScopeHash as string,
+      archiveGenerationId: payload.archiveGenerationId as string,
+      archiveRootHash: payload.archiveRootHash as string,
+      archiveSourceVectorHash: payload.archiveSourceVectorHash as string,
+      archiveKeyId: payload.archiveKeyId as string,
+      archivePlanHash: payload.archivePlanHash as string,
+      ...(archivePlanObject ? { archivePlanObject } : {}),
+      scopeKind: payload.scopeKind,
+    },
+    expiresAt: new Date(payload.exp * 1000).toISOString(),
+  }
+}
+
+function admitArchivePlanObjectClaims(
+  value: unknown,
+): ExactArchiveRecoveryPlanObjectClaims | undefined {
+  if (value === undefined) return undefined
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError('malformed archive plan object')
+  }
+  const row = value as Record<string, unknown>
+  const keys = Object.keys(row).sort()
+  const expected = ['expiresAt', 'objectId', 'sha256', 'size', 'version']
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+    throw new TypeError('malformed archive plan object')
+  }
+  if (
+    typeof row.objectId !== 'string' || !/^[0-9a-f]{64}$/.test(row.objectId) ||
+    typeof row.version !== 'string' || row.version.trim().length === 0 || row.version !== row.version.trim() ||
+    typeof row.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(row.sha256) ||
+    typeof row.size !== 'string' || !/^[1-9][0-9]*$/.test(row.size) ||
+    typeof row.expiresAt !== 'string' ||
+    Number.isNaN(new Date(row.expiresAt).getTime()) ||
+    new Date(row.expiresAt).toISOString() !== row.expiresAt
+  ) {
+    throw new TypeError('malformed archive plan object')
+  }
+  return Object.freeze({
+    objectId: row.objectId,
+    version: row.version,
+    sha256: row.sha256,
+    size: row.size,
+    expiresAt: row.expiresAt,
+  })
 }
 
 export function mintExactAnchorRecoveryIdentity(claims: ExactAnchorRecoveryIdentityClaims, expiresIn: SignOptions['expiresIn'] = DEFAULT_TTL): string {

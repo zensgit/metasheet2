@@ -200,6 +200,12 @@ jobs:
       - name: W0 exact-anchor L6/L7 CI wiring contract
         run: node --test scripts/ops/multitable-exact-anchor-ci-wiring.test.mjs
 
+      # Time Machine D2a CI two-point wiring contract: the archive-catalog proof must remain
+      # excluded from no-DB collection and named exactly once by the multitable real-DB step.
+      # This pre-install half is dependency-free; the real Vitest sentinel runs after install.
+      - name: Time Machine D2a archive-catalog CI wiring contract
+        run: node --test scripts/ops/multitable-d2-archive-ci-wiring.test.mjs
+
       # Production maintenance can prune Docker data on the deploy host. Keep its SSH host-identity
       # contract in the required Node 20 context so host-key pinning cannot regress behind a green PR.
       - name: Production maintenance SSH host-identity contract (required lane)
@@ -586,6 +592,9 @@ jobs:
         with:
           name: install-log-${{ matrix.node-version }}
           path: install.log
+
+      - name: Time Machine D2 archive real-DB fail-not-skip behavior
+        run: node --test scripts/ops/multitable-d2-archive-fail-not-skip.test.mjs
 
       - name: Run attendance calculation-group W1 contract
         run: |
@@ -1060,6 +1069,20 @@ jobs:
             tests/integration/multitable-l5wire-checkpoint-activation-realdb.test.ts \
             tests/integration/multitable-exact-anchor-recovery-realdb.test.ts \
             tests/integration/multitable-exact-anchor-recovery-plan-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-catalog-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-stale-pin-cleanup-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-section-causality-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-operation-binding-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-coverage-binding-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-key-registry-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-claim-anchor-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-source-pin-authority-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-object-receipt-authority-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-crypto-registry-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-writer-block-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-reconstruction-realdb.test.ts \
             tests/integration/multitable-exact-anchor-apply-realdb.test.ts \
             tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts \
             tests/integration/multitable-recovery-authority-stability-realdb.test.ts \
@@ -1068,6 +1091,7 @@ jobs:
             tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts \
             tests/integration/recovery-conflict-classifier-realdb.test.ts \
             tests/integration/multitable-automation-marker-anchor-realdb.test.ts \
+            tests/integration/multitable-dh1-link-writer-fence-realdb.test.ts \
             tests/integration/multitable-d1c-form-submit-revision-realdb.test.ts \
             tests/integration/multitable-d1c-plugin-revision-realdb.test.ts \
             tests/integration/multitable-d1c-automation-revision-realdb.test.ts \

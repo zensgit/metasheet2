@@ -1141,6 +1141,7 @@ export default defineConfig({
       'tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts',
       'tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts',
       'tests/integration/multitable-automation-marker-anchor-realdb.test.ts',
+      'tests/integration/multitable-dh1-link-writer-fence-realdb.test.ts',
       // D-1c W0 slice ① (form-submit CREATE/EDIT public-form revision goldens): real Postgres only
       // (installs scoped failure/suppression triggers per site and drives the real submit route
       // end-to-end) — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into
@@ -1333,6 +1334,26 @@ export default defineConfig({
       // in the no-DB lane, and whole-file wired into `Run multitable real-DB integration` in
       // plugin-tests.yml. Two-point wiring: BOTH points or the file silently never runs.
       'tests/integration/multitable-d2-sidedoor-delete-recoverability-realdb.test.ts',
+      // Time Machine D2 archive-catalog, stale-pin cleanup, section-causality, operation-binding,
+      // coverage-binding, key-registry, source-pin authority, object-receipt authority,
+      // D2h crypto-registry, D2e durable writer-block, D3 legal-hold authority, and D5 durable
+      // restore-job proofs:
+      // DATABASE_URL-gated and whole-file wired into the multitable real-DB step so the no-DB
+      // job cannot skip-green them.
+      'tests/integration/multitable-recovery-archive-catalog-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-stale-pin-cleanup-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-section-causality-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-operation-binding-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-coverage-binding-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-key-registry-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-claim-anchor-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-source-pin-authority-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-object-receipt-authority-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-crypto-registry-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-writer-block-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-reconstruction-realdb.test.ts',
       // 4c-3 RB matrix: real Postgres only — whole-file wired into `Run multitable real-DB
       // integration` in plugin-tests.yml (describeIfDatabase alone would skip-green here).
       'tests/integration/multitable-undelete-inbound-replay-realdb.test.ts',

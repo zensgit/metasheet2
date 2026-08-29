@@ -29,6 +29,8 @@ const FILES = [
   'tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts',
   'tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts',
   'tests/integration/multitable-automation-marker-anchor-realdb.test.ts',
+  // D-H1 cross-sheet link writers must keep their no-skip real-DB lane in the same two-point contract.
+  'tests/integration/multitable-dh1-link-writer-fence-realdb.test.ts',
 ]
 const REAL_DB_STEP = 'Run multitable real-DB integration'
 
@@ -296,9 +298,36 @@ const TIME_MACHINE_REPLAY_MIGRATIONS = [
   'zzzz20260721121000_add_recovery_authority_locks',
   'zzzz20260728120000_correct_recovery_authority_locks',
   'zzzz20260821120000_recovery_authority_functions_fix_search_path',
+  'zzzz20260826120000_create_meta_recovery_archive_catalog',
+  'zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol',
+  'zzzz20260826122000_add_section_causality_substrate',
+  'zzzz20260826122500_add_operation_binding_to_nonrecord_history',
+  'zzzz20260826123000_add_archive_writer_block_ownership',
+  'zzzz20260826124000_create_recovery_archive_crypto_registry',
+  'zzzz20260827120000_add_recovery_archive_coverage_binding',
+  'zzzz20260828120000_add_recovery_archive_snapshot_reservations',
+  'zzzz20260828121000_add_recovery_archive_key_registry',
+  'zzzz20260828124000_add_recovery_archive_source_pin_authority',
+  'zzzz20260828125000_add_recovery_archive_object_receipt_authority',
+  'zzzz20260828126000_amend_recovery_archive_claim_anchor',
+  'zzzz20260828130000_add_recovery_archive_legal_hold_authority',
+  'zzzz20260828131000_create_recovery_archive_restore_jobs',
 ]
 const TIME_MACHINE_REPLAY_VERIFIER =
   'tests/integration/multitable-timemachine-migration-replay-realdb.verify.ts'
+const ARCHIVE_LEGAL_HOLD_MIGRATION =
+  'src/db/migrations/zzzz20260828130000_add_recovery_archive_legal_hold_authority.ts'
+const ARCHIVE_CRYPTO_REGISTRY_MIGRATION =
+  'src/db/migrations/zzzz20260826124000_create_recovery_archive_crypto_registry.ts'
+const ARCHIVE_RESTORE_JOBS_MIGRATION =
+  'src/db/migrations/zzzz20260828131000_create_recovery_archive_restore_jobs.ts'
+const ARCHIVE_LEGAL_HOLD_FUNCTIONS = [
+  'meta_recovery_archive_expiry_authorize',
+  'meta_recovery_archive_legal_hold_expiry_guard_row',
+  'meta_recovery_archive_legal_hold_guard_row',
+  'meta_recovery_archive_legal_hold_guard_truncate',
+  'meta_recovery_archive_legal_hold_release_authorize',
+]
 const TIME_MACHINE_REPLAY_FAILURE_ENV = 'TIME_MACHINE_REPLAY_INJECT_DOWN_FAILURE_AFTER'
 const TIME_MACHINE_REPLAY_FAILURE_MIGRATION =
   'zzzz20260715170000_add_meta_sheet_recovery_writer_state'
@@ -375,10 +404,15 @@ function migrationReplayContract(workflow, verifier) {
   assert.deepEqual(
     names,
     TIME_MACHINE_REPLAY_MIGRATIONS,
-    'verifier must exercise the exact 12 Time Machine migrations in causal order',
+    'verifier must exercise the exact 26 Time Machine migrations in causal order',
   )
   assert.match(verifier, /for \(const migration of \[\.\.\.MIGRATIONS\]\.reverse\(\)\)/)
   assert.match(verifier, /for \(const migration of MIGRATIONS\)/)
+  assert.match(
+    verifier,
+    /zzzz20260826122000_add_section_causality_substrate[\s\S]*assertPreD2cEndpointFunctionsUnconfigured/,
+    'verifier must assert pre-D2c endpoint function proconfig after D2c down',
+  )
   assert.match(verifier, /database_url_required/)
   assert.match(verifier, /await assertOwnedSurfaceAbsent\(db\)/)
   assert.match(verifier, /changedKeys\.length === 0/)
@@ -402,16 +436,42 @@ function migrationReplayContract(workflow, verifier) {
     'idx_meta_record_version_markers_sheet_record_seq',
     'idx_meta_record_revisions_operation',
     'idx_meta_record_version_markers_operation',
+    'idx_meta_config_revisions_operation',
+    'idx_meta_field_value_tombstones_operation',
+    'idx_meta_link_tombstones_operation',
   ]) {
     assert.match(verifier, new RegExp(`'${index}'`), `verifier must check owned index ${index}`)
   }
   for (const constraint of [
     'chk_meta_sheets_recovery_writer_state',
+    'chk_meta_sheets_recovery_writer_owner_kind',
+    'chk_meta_sheets_recovery_writer_owner_tuple',
+    'chk_meta_sheets_recovery_writer_fence',
     'uq_meta_record_version_markers_sheet_record_version',
     'fk_mrr_operation',
     'fk_mrvm_operation',
+    'fk_mcr_operation',
+    'fk_mfvt_operation',
+    'fk_mlt_operation',
+    'chk_meta_recovery_archive_coverage_kind_binding',
   ]) {
     assert.match(verifier, new RegExp(`'${constraint}'`), `verifier must check owned constraint ${constraint}`)
+  }
+  assert.match(verifier, /'meta_config_revisions'/, 'verifier must fingerprint meta_config_revisions')
+  assert.match(
+    verifier,
+    /'meta_nonrecord_history_operation_binding_guard_row'/,
+    'verifier must own the operation-binding guard function',
+  )
+  for (const trigger of [
+    'trg_mcr_operation_binding_immutable',
+    'trg_mfvt_operation_binding_immutable',
+    'trg_mlt_operation_binding_immutable',
+    'trg_mcr_reject_append_sealed',
+    'trg_mfvt_reject_append_sealed',
+    'trg_mlt_reject_append_sealed',
+  ]) {
+    assert.match(verifier, new RegExp(`'${trigger}'`), `verifier must check owned trigger ${trigger}`)
   }
 }
 
@@ -448,7 +508,123 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   )
   assert.throws(
     () => migrationReplayContract(workflow, driftedMigration),
-    /exact 12 Time Machine migrations/,
+    /exact 26 Time Machine migrations/,
+  )
+
+  const missingArchiveCleanup = verifier.replace(
+    "  {\n    name: 'zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol',\n    module: recoveryArchiveStagingCleanup,\n  },\n",
+    '',
+  )
+  assert.notEqual(missingArchiveCleanup, verifier, 'archive-cleanup removal mutation must apply')
+  assert.throws(
+    () => migrationReplayContract(workflow, missingArchiveCleanup),
+    /exact 26 Time Machine migrations/,
+  )
+
+  const missingSectionCausality = verifier.replace(
+    "  {\n    name: 'zzzz20260826122000_add_section_causality_substrate',\n    module: sectionCausality,\n  },\n",
+    '',
+  )
+  assert.notEqual(missingSectionCausality, verifier, 'section-causality removal mutation must apply')
+  assert.throws(
+    () => migrationReplayContract(workflow, missingSectionCausality),
+    /exact 26 Time Machine migrations/,
+  )
+
+  const missingOperationBinding = verifier.replace(
+    "  {\n    name: 'zzzz20260826122500_add_operation_binding_to_nonrecord_history',\n    module: operationBinding,\n  },\n",
+    '',
+  )
+  assert.notEqual(missingOperationBinding, verifier, 'operation-binding removal mutation must apply')
+  assert.throws(
+    () => migrationReplayContract(workflow, missingOperationBinding),
+    /exact 26 Time Machine migrations/,
+  )
+
+  const missingArchiveWriterBlock = verifier.replace(
+    "  {\n    name: 'zzzz20260826123000_add_archive_writer_block_ownership',\n    module: archiveWriterBlock,\n  },\n",
+    '',
+  )
+  assert.notEqual(missingArchiveWriterBlock, verifier, 'archive-writer-block removal mutation must apply')
+  assert.throws(
+    () => migrationReplayContract(workflow, missingArchiveWriterBlock),
+    /exact 26 Time Machine migrations/,
+  )
+
+  const missingCoverageBinding = verifier.replace(
+    "  {\n    name: 'zzzz20260827120000_add_recovery_archive_coverage_binding',\n    module: coverageBinding,\n  },\n",
+    '',
+  )
+  assert.notEqual(missingCoverageBinding, verifier, 'coverage-binding removal mutation must apply')
+  assert.throws(
+    () => migrationReplayContract(workflow, missingCoverageBinding),
+    /exact 26 Time Machine migrations/,
+  )
+
+  const missingObjectReceiptAuthority = verifier.replace(
+    "  {\n    name: 'zzzz20260828125000_add_recovery_archive_object_receipt_authority',\n    module: objectReceiptAuthority,\n  },\n",
+    '',
+  )
+  assert.notEqual(
+    missingObjectReceiptAuthority,
+    verifier,
+    'object-receipt-authority removal mutation must apply',
+  )
+  assert.throws(
+    () => migrationReplayContract(workflow, missingObjectReceiptAuthority),
+    /exact 26 Time Machine migrations/,
+  )
+
+  const missingClaimAnchorAmendment = verifier.replace(
+    "  {\n    name: 'zzzz20260828126000_amend_recovery_archive_claim_anchor',\n    module: claimAnchorAmendment,\n  },\n",
+    '',
+  )
+  assert.notEqual(
+    missingClaimAnchorAmendment,
+    verifier,
+    'claim-anchor-amendment removal mutation must apply',
+  )
+  assert.throws(
+    () => migrationReplayContract(workflow, missingClaimAnchorAmendment),
+    /exact 26 Time Machine migrations/,
+  )
+
+  const missingLegalHoldAuthority = verifier.replace(
+    "  {\n    name: 'zzzz20260828130000_add_recovery_archive_legal_hold_authority',\n    module: legalHoldAuthority,\n  },\n",
+    '',
+  )
+  assert.notEqual(
+    missingLegalHoldAuthority,
+    verifier,
+    'legal-hold-authority removal mutation must apply',
+  )
+  assert.throws(
+    () => migrationReplayContract(workflow, missingLegalHoldAuthority),
+    /exact 26 Time Machine migrations/,
+  )
+
+  const missingArchiveCryptoRegistry = verifier.replace(
+    "  {\n    name: 'zzzz20260826124000_create_recovery_archive_crypto_registry',\n    module: archiveCryptoRegistry,\n  },\n",
+    '',
+  )
+  assert.notEqual(
+    missingArchiveCryptoRegistry,
+    verifier,
+    'archive-crypto-registry removal mutation must apply',
+  )
+  assert.throws(
+    () => migrationReplayContract(workflow, missingArchiveCryptoRegistry),
+    /exact 26 Time Machine migrations/,
+  )
+
+  const missingRestoreJobs = verifier.replace(
+    "  {\n    name: 'zzzz20260828131000_create_recovery_archive_restore_jobs',\n    module: restoreJobs,\n  },\n",
+    '',
+  )
+  assert.notEqual(missingRestoreJobs, verifier, 'restore-jobs removal mutation must apply')
+  assert.throws(
+    () => migrationReplayContract(workflow, missingRestoreJobs),
+    /exact 26 Time Machine migrations/,
   )
 
   const driftedExclude = workflow.replace(
@@ -456,6 +632,66 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
     `MIGRATION_EXCLUDE: ${MIGRATION_REPLAY_EXCLUDE},unexpected.ts`,
   )
   assert.throws(() => migrationReplayContract(driftedExclude, verifier), /same exact exclusion set/)
+})
+
+test('migration replay census names every D3 legal-hold function owned by the migration', () => {
+  const migration = readFileSync(
+    join(repoRoot, 'packages/core-backend', ARCHIVE_LEGAL_HOLD_MIGRATION),
+    'utf8',
+  )
+  const verifier = readFileSync(
+    join(repoRoot, 'packages/core-backend', TIME_MACHINE_REPLAY_VERIFIER),
+    'utf8',
+  )
+  const migrationFunctions = [
+    ...migration.matchAll(/CREATE FUNCTION public\.([a-z0-9_]+)\(/g),
+  ].map((match) => match[1]).sort()
+  assert.deepEqual(
+    migrationFunctions,
+    ARCHIVE_LEGAL_HOLD_FUNCTIONS,
+    'the D3 migration must retain the exact five owned functions',
+  )
+
+  const rosterBlock = verifier.match(
+    /const ARCHIVE_LEGAL_HOLD_FUNCTIONS = \[([\s\S]*?)^\]/m,
+  )?.[1]
+  assert.ok(rosterBlock, 'replay verifier must declare the D3 legal-hold function roster')
+  const rosterFunctions = [...rosterBlock.matchAll(/'([^']+)'/g)]
+    .map((match) => match[1])
+    .sort()
+  assert.deepEqual(
+    rosterFunctions,
+    migrationFunctions,
+    'replay absence and fingerprint census must cover every D3 migration-owned function',
+  )
+})
+
+test('migration replay census covers every D2h and D5 catalog object', () => {
+  const verifier = readFileSync(
+    join(repoRoot, 'packages/core-backend', TIME_MACHINE_REPLAY_VERIFIER),
+    'utf8',
+  )
+
+  for (const migrationPath of [ARCHIVE_CRYPTO_REGISTRY_MIGRATION, ARCHIVE_RESTORE_JOBS_MIGRATION]) {
+    const migration = readFileSync(join(repoRoot, 'packages/core-backend', migrationPath), 'utf8')
+    const objects = [
+      ...migration.matchAll(/CREATE TABLE public\.([a-z0-9_]+)/g),
+      ...migration.matchAll(/CREATE VIEW public\.([a-z0-9_]+)/g),
+      ...migration.matchAll(/ADD COLUMN ([a-z0-9_]+)/g),
+      ...migration.matchAll(/CONSTRAINT ([a-z0-9_]+)/g),
+      ...migration.matchAll(/CREATE INDEX ([a-z0-9_]+)/g),
+      ...migration.matchAll(/CREATE (?:CONSTRAINT )?TRIGGER ([a-z0-9_]+)/g),
+      ...migration.matchAll(/CREATE FUNCTION public\.([a-z0-9_]+)/g),
+    ].map((match) => match[1])
+
+    for (const objectName of new Set(objects)) {
+      assert.match(
+        verifier,
+        new RegExp("'" + objectName + "'"),
+        'replay verifier must census ' + objectName + ' from ' + migrationPath,
+      )
+    }
+  }
 })
 
 test('migration replay contract rejects recovery, fingerprint, and values-free output drift', () => {

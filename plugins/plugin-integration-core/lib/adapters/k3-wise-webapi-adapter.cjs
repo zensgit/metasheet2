@@ -40,6 +40,11 @@ const { scrubSecretStringValue } = require('../payload-redaction.cjs')
 // Save path below owns the throw disposition, the preview owns the valid:false disposition.
 const { composeSchemaBody, findUnfilledPlaceholders, projectRecordForBody } = require('./k3-save-body-composer.cjs')
 const { recordK3WiseCall } = require('./k3-wise-call-audit.cjs')
+// E4 / G-4 LAYER 4 of FOUR (HG v1.2 §10.2.4). The deepest fence: `upsert` refuses before `login()`,
+// so the whole Save/Submit/Audit lifecycle-write leg of this adapter is unreachable regardless of
+// who holds the adapter handle. READ and previewUpsert are untouched (E4-05 / E4-06). Acceptance
+// E4-04.
+const { refuseK3ExternalWritePermanently } = require('../k3-external-write-permanent-fence.cjs')
 
 class K3WiseWebApiAdapterError extends Error {
   constructor(message, details = {}) {
@@ -2419,6 +2424,32 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
         { code: 'K3_WISE_APPLY_ROW_LIMIT_EXCEEDED', object: request.object, recordCount: request.records.length, maxApplyRows },
       )
     }
+    // ===== E4 LAYER 4 of FOUR — the DEEPEST fence, UNCONDITIONAL (HG v1.2 §10.2.4) =====
+    // Everything above this line is pure structural validation that can only throw: object
+    // configuration, the ratified named-profile arm, path shape, the save-only auto-flag hard
+    // lock, and the frozen row cap. None of it touches the network or mutates anything, so the
+    // placement costs no side effect — and it deliberately KEEPS those older refusals reachable
+    // and attributable (an over-limit batch still fails with K3_WISE_APPLY_ROW_LIMIT_EXCEEDED,
+    // a profile-less material still fails with K3_WISE_MATERIAL_PROFILE_REQUIRED) instead of
+    // being swallowed by a blanket refusal at the top of the function.
+    //
+    // The line immediately below USED to be `await login()`. That is the first byte this process
+    // would ever send to a customer K3. It is now unreachable from `upsert`: Save, Submit and
+    // Audit are all downstream of it, so this single refusal retires the entire lifecycle-write
+    // leg of the adapter — not just the Save the C6 facade drives, but the ordinary pipeline
+    // runner's `targetAdapter.upsert()` and any future in-process caller as well.
+    //
+    // `previewUpsert` is NOT fenced and must not be: it composes the same Save body and returns
+    // it, sending nothing. Preview/composition is how a human inspects what a write WOULD say,
+    // and G-4 bans the write-back, not the inspection.
+    refuseK3ExternalWritePermanently(
+      // Same shape as the layer-3 refusal: `code`/`status` ride alongside `details` so the fixed
+      // token survives every reader (valuesFreeErrorCode, the HTTP error mapper, row evidence).
+      (status, code, message, details) => Object.assign(
+        new AdapterValidationError(message, details), { code, status },
+      ),
+    )
+    // ================================================================================
     const authContext = await login()
     const results = []
     const errors = []

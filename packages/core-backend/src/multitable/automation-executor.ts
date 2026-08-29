@@ -62,7 +62,11 @@ import { computeActionFingerprint } from './automation-suspension-service'
 import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
 import { isRichLongTextProperty, normalizeJson, sanitizeRichLongText } from './field-codecs'
 import { ensureRecordNotLocked } from './record-lock'
-import { fenceWriterEntry, isWriterFenceEnabled } from './canonical-sheet-fence'
+import { fenceWriterEntriesInOrder, isWriterFenceEnabled } from './canonical-sheet-fence'
+import {
+  assertRecordLinkDeleteFencePlanCurrent,
+  prepareRecordLinkDeleteFencePlan,
+} from './link-writer-fence'
 import {
   assertTransactionalQuery,
   captureSideDoorInboundTombstones,
@@ -2508,10 +2512,20 @@ export class AutomationExecutor {
         _automationDepth: ((context.triggerEvent as Record<string, unknown>)?._automationDepth as number ?? 0) + 1,
       })
 
-      const step = await this.withTransaction(effectiveSheetId, async (query) => {
-        // #4196 Class-A claim — FIRST statement, SAME transaction as the delete+revision below. A
-        // duplicate (retry/replay) short-circuits: return the already-applied success and skip the DELETE,
-        // link cleanup, tombstones and revision entirely. The (no-op) transaction still commits cleanly.
+      const linkDeleteFencePlan = await prepareRecordLinkDeleteFencePlan(
+        this.deps.queryFn,
+        effectiveSheetId,
+        effectiveRecordId,
+      )
+      const linkDeleteFenceSheetIds = linkDeleteFencePlan?.participantSheetIds ?? effectiveSheetId
+      const step = await this.withTransaction(linkDeleteFenceSheetIds, async (query) => {
+        if (linkDeleteFencePlan) {
+          await assertRecordLinkDeleteFencePlanCurrent(query, linkDeleteFencePlan)
+        }
+        // #4196 Class-A claim — FIRST mutation/claim after the read-only fence-plan recheck, in the SAME
+        // transaction as the delete+revision below. A duplicate (retry/replay) short-circuits: return the
+        // already-applied success and skip the DELETE, link cleanup, tombstones and revision entirely. The
+        // (no-op) transaction still commits cleanly.
         if (await this.claimClassAOrSkip(query, identity, 'delete_record', config) === 'duplicate') {
           return this.alreadyAppliedResult('delete_record')
         }
@@ -2695,12 +2709,13 @@ export class AutomationExecutor {
    * the seam (`AutomationService` hard-wires `deps.transaction` to a real `poolManager.get().transaction`).
    */
   private async withTransaction<T>(
-    sheetId: string,
+    sheetIds: string | readonly string[],
     handler: (query: AutomationDeps['queryFn']) => Promise<T>,
   ): Promise<T> {
     if (this.deps.transaction) {
       return this.deps.transaction(async ({ query }) => {
-        await fenceWriterEntry(query, sheetId) // L4 fence-first; no-op when the fence flag is OFF
+        const ids = typeof sheetIds === 'string' ? [sheetIds] : sheetIds
+        await fenceWriterEntriesInOrder(query, ids) // L4 fence-first; no-op when the fence flag is OFF
         return handler(query)
       })
     }
@@ -3186,9 +3201,32 @@ export class AutomationExecutor {
     const fwbEventId = `${baseEventId}::fwb::${context.ruleId}::${actionKey}`
     const ruleCreatorId = typeof context.ruleCreatedBy === 'string' ? context.ruleCreatedBy : ''
 
-    // Transaction keyed on the RULE sheet (same as create) — the write may retarget, but the
-    // transaction seam is stable; FOR UPDATE on the bound row serializes the target mutation.
-    const result = await this.withTransaction(context.sheetId, async (query) => {
+    // With the writer fence enabled, discover the immutable pinned target before opening the writer
+    // transaction so its FIRST statements can acquire both canonical fences in sorted order. The same pin is
+    // re-read below while both fences are held; any drift fails closed before a mutation. Flag OFF performs no
+    // extra read and keeps the legacy single-sheet transaction behavior unchanged.
+    let expectedTarget: { baseId: string; sheetId: string } | null = null
+    if (isWriterFenceEnabled()) {
+      const targetRes = await this.deps.queryFn(
+        `SELECT v.form_schema
+           FROM approval_instances i
+           JOIN approval_template_versions v ON v.id = i.template_version_id
+          WHERE i.id = $1 AND i.template_id = $2 AND i.template_version_id = $3 AND i.status = 'approved'`,
+        [instanceId, templateId, templateVersionId],
+      )
+      const targetRow = targetRes.rows[0] as { form_schema?: unknown } | undefined
+      if (!targetRow) throw new Error('fwb_rejected:instance_not_found')
+      const targetSchema = targetRow.form_schema && typeof targetRow.form_schema === 'object' && !Array.isArray(targetRow.form_schema)
+        ? targetRow.form_schema
+        : (() => {
+          try { return JSON.parse(String(targetRow.form_schema ?? 'null')) as unknown } catch { return null }
+        })()
+      expectedTarget = resolveRecordLinkTargetFromSchema(targetSchema, linkField.recordLinkFieldId)
+      if (!expectedTarget) throw new Error('fwb_rejected:record_link_field')
+    }
+
+    const transactionSheetIds = expectedTarget ? [context.sheetId, expectedTarget.sheetId] : context.sheetId
+    const result = await this.withTransaction(transactionSheetIds, async (query) => {
       // D4: immutable form_snapshot + pinned template-version schema are the ONLY sources of truth.
       const snapRes = await query(
         `SELECT i.form_snapshot, v.form_schema
@@ -3208,6 +3246,12 @@ export class AutomationExecutor {
         })()
       const derived = resolveRecordLinkTargetFromSchema(rawSchema, linkField.recordLinkFieldId)
       if (!derived) throw new Error('fwb_rejected:record_link_field')
+      if (
+        expectedTarget
+        && (derived.sheetId !== expectedTarget.sheetId || derived.baseId !== expectedTarget.baseId)
+      ) {
+        throw new Error('fwb_rejected:target_schema')
+      }
 
       if (this.deps.fwbGateChecksFactory) {
         const ruleMembership = await query(

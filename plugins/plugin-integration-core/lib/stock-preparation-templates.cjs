@@ -593,6 +593,50 @@ const STOCK_PREPARATION_MAIN_TABLE_TEMPLATE = Object.freeze(normalizeStockPrepar
   ],
 }))
 
+// B-stage takeover decision ledger (FIRST CUT). This is deliberately NOT part of the frozen
+// nine-table MVP surface: canonical stock-preparation remains the only business fact table,
+// while this one supporting object stores revision-bound human decisions only. Customer-entered
+// resolution values stay strings; no customer dictionary is frozen into a contract select.
+// The field vocabulary is the full converged shape (kept identical to the agreed cross-checkout
+// reference so future slices need no schema migration), even though the first cut only ever
+// writes the subset that the duplicate_expanded_key x keep_multiple_rows flow needs.
+const STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE = Object.freeze(normalizeStockPreparationMvpTableTemplate({
+  id: 'plm.stock-preparation.confirmation-decision.v1',
+  objectId: 'plm_stock_preparation_confirmation_decision',
+  label: 'Stock Preparation Confirmation Decision',
+  version: 'v1',
+  role: 'confirmation_decision',
+  keyFields: ['decisionId'],
+  requiredFields: [
+    'decisionId',
+    'stableDecisionKey',
+    'projectNo',
+    'rowIdentity',
+    'conflictType',
+    'inputFingerprint',
+    'status',
+    'openedAt',
+  ],
+  fields: [
+    field('decisionId', 'Decision ID', 'string', 'plm_system', { required: true, key: true }),
+    field('stableDecisionKey', 'Stable Decision Key', 'string', 'plm_system', { required: true }),
+    field('projectNo', 'Project No', 'string', 'plm_system', { required: true }),
+    field('rowIdentity', 'Row Identity', 'string', 'plm_system', { required: true }),
+    field('conflictType', 'Conflict Type', 'string', 'plm_system', { required: true }),
+    field('inputFingerprint', 'Input Fingerprint', 'string', 'plm_system', { required: true }),
+    field('sourceRevision', 'Source Revision', 'string', 'plm_system'),
+    field('status', 'Status', 'string', 'plm_system', { required: true }),
+    field('openedAt', 'Opened At', 'date', 'plm_system', { required: true }),
+    field('resolutionAction', 'Resolution Action', 'string', 'human_preserved'),
+    field('resolvedValue', 'Resolved Value', 'string', 'human_preserved'),
+    field('resolvedAuxValue', 'Resolved Auxiliary Value', 'string', 'human_preserved'),
+    field('notes', 'Notes', 'string', 'human_preserved'),
+    field('confirmedBy', 'Confirmed By', 'string', 'plm_system'),
+    field('confirmedAt', 'Confirmed At', 'date', 'plm_system'),
+    field('supersededAt', 'Superseded At', 'date', 'plm_system'),
+  ],
+}))
+
 const STOCK_PREPARATION_MVP_TABLE_TEMPLATES = Object.freeze([
   normalizeStockPreparationMvpTableTemplate({
     id: 'plm.stock-preparation.project.v1',
@@ -866,6 +910,7 @@ module.exports = {
   HUMAN_PRESERVED_FIELD_IDS,
   FEASIBILITY_FORBIDDEN_MECHANISMS,
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
   STOCK_PREPARATION_MVP_REQUIRED_OBJECT_IDS,
   StockPreparationTemplateError,

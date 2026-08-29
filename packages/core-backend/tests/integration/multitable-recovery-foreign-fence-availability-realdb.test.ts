@@ -14,10 +14,10 @@
  * the SAME blocking fence their own fenced writers take, so by the time the recovery reaches its NOWAIT
  * record locks no fenced writer can be holding a record on those sheets.
  *
- * DEADLOCK-FREEDOM (must be preserved — #4654 constructively removed three deadlock classes): every writer
- * holds AT MOST ONE canonical fence, and the recovery holds ALL of its canonical fences (sorted) before ANY
- * NOWAIT row lock. A recovery blocked on a fence therefore holds no row lock another writer could wait on ⇒
- * single global ordered acquisition ⇒ no wait cycle. These tests PROVE that with constructed races, and the
+ * DEADLOCK-FREEDOM (must be preserved — #4654 constructively removed three deadlock classes): every
+ * participant in this recovery/link-write protocol acquires its complete canonical-fence set in the same
+ * sorted order before ANY row lock. A participant blocked on a fence therefore holds no row lock another
+ * protocol participant could wait on ⇒ no wait cycle. These tests PROVE that with constructed races, and the
  * `source-first` mutation proves the sorted order is load-bearing (it ABBA-deadlocks).
  *
  * WHY THE LOCK LAYER (not the full apply) is the primary instrument: the change is entirely in lock

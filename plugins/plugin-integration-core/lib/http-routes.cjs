@@ -67,6 +67,11 @@ const ROUTES = [
   ['GET', '/api/integration/table-actions/:actionId/conflict-policies', 'tableActionConflictPoliciesList'],
   ['PUT', '/api/integration/table-actions/:actionId/conflict-policies', 'tableActionConflictPoliciesSave'],
   ['DELETE', '/api/integration/table-actions/:actionId/conflict-policies', 'tableActionConflictPoliciesDelete'],
+  // B-stage confirmation-decision LEDGER, first cut (duplicate_expanded_key x keep_multiple_rows
+  // only). Reconcile repeats the readonly table-action plan SERVER-SIDE and persists values-free
+  // decision metadata into the one managed supporting ledger table — no plan row is applied and no
+  // request-supplied plan/revision is accepted. Admin-gated.
+  ['POST', '/api/integration/table-actions/:actionId/confirmation-decisions/reconcile', 'tableActionConfirmationDecisionsReconcile'],
   ['GET', '/api/integration/stock-preparation/target/readiness', 'stockPreparationTargetReadiness'],
   ['POST', '/api/integration/stock-preparation/target/ensure', 'stockPreparationTargetEnsure'],
   ['GET', '/api/integration/stock-preparation/sandbox-target/readiness', 'stockPreparationSandboxTargetReadiness'],
@@ -125,6 +130,14 @@ const ROUTES = [
   ['GET', '/api/integration/stock-preparation/prep-lines', 'stockPreparationPrepLineList'],
   // #3751 MVP W5b (#3890): values-free audit trail over the stock-prep write surface.
   ['GET', '/api/integration/stock-preparation/audit', 'stockPreparationAuditList'],
+  // B-stage confirmation-decision LEDGER surfaces (first cut). All admin-gated. Static literal
+  // segments precede the bare collection GET so they can never be mis-read as ids. The GET list is
+  // the AUTHORITATIVE values-free exception queue of the takeover line (converged ruling);
+  // canonical-sheet filter views are auxiliary only.
+  ['GET', '/api/integration/stock-preparation/confirmation-decisions/readiness', 'stockPreparationConfirmationDecisionsReadiness'],
+  ['POST', '/api/integration/stock-preparation/confirmation-decisions/ensure', 'stockPreparationConfirmationDecisionsEnsure'],
+  ['POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', 'stockPreparationConfirmationDecisionsConfirm'],
+  ['GET', '/api/integration/stock-preparation/confirmation-decisions', 'stockPreparationConfirmationDecisionsList'],
   // CUSTOMER PACK entry point — the executable surface for the config pack line. Admin-gated; the
   // pack itself is NEVER request-supplied (server-held allowlist, see
   // stock-preparation-customer-pack-catalog.cjs). Static paths precede ':packId' so the literal
@@ -254,6 +267,10 @@ const {
   createK3WiseC6WriteSource,
   deriveK3WiseC6PlannerTargetConfig,
 } = require('./adapters/k3-wise-c6-write-profile.cjs')
+// E4 / G-4 LAYER 1 of FOUR (HG v1.2 §10.2). The permanent K3 external-write fence. Required at
+// the ROUTE so the refusal happens before the request can cost anything: no credential reload, no
+// dry-run token consumption, no source read, no adapter construction, no wire call.
+const { assertK3ExternalWriteRefused } = require('./k3-external-write-permanent-fence.cjs')
 const {
   PLM_STOCK_PREPARATION_ACTION_ID,
   StockPreparationTableActionError,
@@ -266,11 +283,23 @@ const {
   createStockPreparationTableActionRegistry,
   createTargetScopedRecordsApi,
   dryRunStockPreparationAction,
+  prepareStockPreparationConfirmationDecisions,
   prepareStockPreparationMvpSnapshot,
   normalizeActionParameters,
   resolveStockPrepApplyProductionPolicy,
   resolveStockPrepApplySandboxPolicy,
 } = require('./stock-preparation-table-actions.cjs')
+// B-stage confirmation-decision LEDGER (first cut: duplicate_expanded_key x keep_multiple_rows).
+// One managed supporting table; never a canonical-sheet write capability (see the module header).
+const {
+  StockPreparationConfirmationDecisionError,
+  inspectConfirmationDecisionTarget,
+  ensureConfirmationDecisionTarget,
+  reconcileConfirmationDecisions,
+  listConfirmationDecisions,
+  confirmConfirmationDecision,
+  loadConfirmedDuplicatePolicyReview,
+} = require('./stock-preparation-confirmation-decisions.cjs')
 const {
   assertAuthoritativeLargeBomExpansion,
   cancelLargeBomBackgroundExpansionJob,
@@ -866,6 +895,9 @@ function publicRunInput(body = {}) {
 }
 
 const VALID_TABLE_ACTION_DRY_RUN_BODY_KEYS = new Set(['parameters', 'conflictPolicyReview'])
+// Confirmation-decision reconcile accepts EXACTLY the dry-run inputs: the plan/revision the ledger
+// binds to are recomputed server-side and can never be request-supplied.
+const VALID_TABLE_ACTION_CONFIRMATION_DECISION_RECONCILE_BODY_KEYS = new Set(['parameters', 'conflictPolicyReview'])
 const VALID_TABLE_ACTION_MVP_PERSIST_BODY_KEYS = new Set(['parameters'])
 const VALID_TABLE_ACTION_APPLY_BODY_KEYS = new Set(['parameters', 'confirm'])
 const VALID_TABLE_ACTION_LARGE_BOM_START_BODY_KEYS = new Set(['parameters'])
@@ -879,6 +911,21 @@ const VALID_C6_WRITE_APPLY_BODY_KEYS = new Set(['tenantId', 'workspaceId', 'conf
 const VALID_TEMPLATE_INSTANTIATE_BODY_KEYS = new Set(['tenantId', 'workspaceId', 'targetSystemId', 'sourceSystemId', 'pipelineName'])
 const VALID_C6_WRITE_APPLY_CONFIRM_KEYS = new Set(['dryRunToken'])
 const VALID_STOCK_PREPARATION_TARGET_REQUEST_KEYS = new Set(['tenantId', 'workspaceId', 'projectId', 'baseId'])
+// Confirmation-decision LEDGER request surfaces. Ensure takes NO body keys at all (the staging
+// project is auth-derived; a projectId/baseId here would be a steering vector on a write route).
+// The confirm body carries the full converged key vocabulary; resolvedValue/resolvedAuxValue are
+// then refused by the module with a NAMED first-cut error rather than a generic unknown-field 400.
+const VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_READINESS_QUERY_KEYS = new Set(['tenantId', 'workspaceId'])
+const VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_ENSURE_BODY_KEYS = new Set()
+const VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_LIST_QUERY_KEYS = new Set(['tenantId', 'workspaceId', 'projectNo', 'status'])
+const VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_CONFIRM_BODY_KEYS = new Set([
+  'decisionId',
+  'inputFingerprint',
+  'resolutionAction',
+  'resolvedValue',
+  'resolvedAuxValue',
+  'notes',
+])
 // CUSTOMER PACK install: `mode` is the ONLY accepted body key, and that is the whole point of the
 // allowlist. A `pack` key would turn an admin-authenticated request into schema authoring on the
 // canonical sheet (arbitrary `ext_` columns with arbitrary ownership bands) — packs are deploy-time
@@ -2700,6 +2747,18 @@ function createHandlers(services, options = {}) {
     }
     return stockPreparationPackInstalls
   }
+  // HG v1.2 PR-A: DB-backed single-active-reconciler lease (migration 077). Optional at
+  // registration like the two stores above; the reconcile WRITE fails closed without it — an
+  // in-process lock is not a concurrency guarantee, so reconciling without the lease is refused.
+  const stockPreparationConfirmationLease = services.stockPreparationConfirmationDecisionLease || null
+  function requireConfirmationDecisionReconcileLease() {
+    if (!stockPreparationConfirmationLease
+      || typeof stockPreparationConfirmationLease.acquire !== 'function'
+      || typeof stockPreparationConfirmationLease.release !== 'function') {
+      throw new HttpRouteError(501, 'CONFIRMATION_DECISION_RECONCILE_LEASE_UNAVAILABLE', 'confirmation-decision reconcile lease is not available; reconcile is refused without a durable concurrency guarantee')
+    }
+    return stockPreparationConfirmationLease
+  }
   const adapterRegistry = requireService('adapterRegistry', ['createAdapter', 'listAdapterKinds'])
   const pipelineRegistry = requireService('pipelineRegistry', ['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns'])
   const runner = requireService('pipelineRunner', ['runPipeline'])
@@ -2773,6 +2832,42 @@ function createHandlers(services, options = {}) {
       })
     }
     return provisioning
+  }
+
+  // Confirmation-ledger readback, resolved HERE on the server exactly like
+  // `installedFieldProperties` / `extFieldMapping`: from auth-derived tenant +
+  // server-held multitable APIs, threaded into the table-action as a parameter,
+  // NEVER request-supplied (the body allowlists cannot name it). Before the
+  // ledger table is provisioned it degrades to an empty review — the pre-ledger
+  // dry-run behaviour, byte-identical: no reusable decision, the planner holds.
+  function confirmationDecisionResolverForRequest(req) {
+    const tenantId = resolveTenantId(req, {})
+    const targetProjectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+    return async ({ projectNo, plan, sourceRevision }) => {
+      try {
+        return await loadConfirmedDuplicatePolicyReview({
+          recordsApi: getMultitableRecordsApi(),
+          provisioning: getMultitableProvisioning(),
+          targetProjectId,
+          permission: 'admin',
+          projectNo,
+          plan,
+          sourceRevision,
+        })
+      } catch (error) {
+        if (error instanceof StockPreparationConfirmationDecisionError && error.code === 'CONFIRMATION_DECISION_TARGET_NOT_READY') {
+          return { scope: 'table_scope', policies: [] }
+        }
+        // Same degradation for a host that cannot resolve the ledger object's field ids at all
+        // (no provisioning.resolveFieldIds, or no staging project) — the documented pre-ledger
+        // posture. Degrading is the FAIL-CLOSED direction here: no readback means no confirmed
+        // decision, so every manual-confirm hold simply stands.
+        if (error && error.code === 'TABLE_ACTION_FIELD_IDS_UNRESOLVED') {
+          return { scope: 'table_scope', policies: [] }
+        }
+        throw error
+      }
+    }
   }
 
   // The scoped provisioning surface the customer-pack installer asserts. Handed over as-is: the
@@ -3995,7 +4090,42 @@ function createHandlers(services, options = {}) {
           pipelineId: pipeline.id,
         })
       }
-      // B2a ENTRY POINT (2), apply half. Apply RE-RUNS the planner and therefore RE-READS the
+      // `getExternalSystem` is the credential-STRIPPED public accessor. The SOURCE has always used
+      // the adapter-capable one (below); the TARGET never did — so an adapter-backed target (K3)
+      // arrived with NO credentials and the C6 dry-run died with K3_WISE_CREDENTIALS_MISSING
+      // before a single wire call. Reproduced against the real registry: flipping this one
+      // accessor makes the whole lifecycle pass.
+      //
+      // Peek first, then re-load WITH credentials only for kinds that actually build a target
+      // adapter. Kinds served by dataSourceWrites keep the config-only load they were designed
+      // for, so this does not widen credential exposure for them.
+      const targetSystemScope = scopedAuthenticatedWriteInput(req, {
+        id: pipeline.targetSystemId,
+        tenantId: body.tenantId,
+        workspaceId: body.workspaceId,
+      })
+      let targetSystem = await externalSystems.getExternalSystem(targetSystemScope)
+      // ===== E4 LAYER 1 of FOUR — the outermost independent fence (HG v1.2 §10.2.1) =======
+      // The credential-STRIPPED peek above is hoisted ahead of the source load ON PURPOSE: it is
+      // the cheapest fact that identifies the target, and this refusal must land before the
+      // request can cost anything. At this point NOTHING has happened yet — no source system has
+      // been loaded with credentials, no adapter-backed credential RELOAD has run (that is the
+      // block just below), no source adapter exists, no run has been opened in the run logger,
+      // and `applyExternalWrite` — which is what consumes the single-use dry-run token — has not
+      // been called. A refused apply therefore burns NOTHING: a token minted before this fence
+      // shipped is still unconsumed after the refusal, and stays presentable until its own TTL
+      // expires. That property is witnessed, not asserted, in the fence suite.
+      //
+      // The three deeper fences (layer 2 `applyExternalWrite`, layer 3 the K3 write source, layer 4
+      // the K3 WebAPI adapter) do not depend on this one — a caller that skips HTTP entirely still
+      // cannot reach a K3 Save. Acceptance E4-01.
+      assertK3ExternalWriteRefused(
+        (status, code, message, details) => new HttpRouteError(status, code, message, details),
+        targetSystem,
+      )
+      // ===================================================================================
+      // B2a ENTRY POINT (2), apply half — placed AFTER the E4 layer-1 fence ON PURPOSE:
+      // a doomed K3 apply must not consume the registration's single-use operation claim. Apply RE-RUNS the planner and therefore RE-READS the
       // source, so it is a source-read Run in its own right and is gated in its own right — it does
       // not inherit the dry-run's authorization through the token.
       await assertB2aPipelineReadAuthorized(req, pipeline, {
@@ -4011,21 +4141,6 @@ function createHandlers(services, options = {}) {
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,
       }))
-      // `getExternalSystem` is the credential-STRIPPED public accessor. The SOURCE has always used
-      // the adapter-capable one (a few lines above); the TARGET never did — so an adapter-backed
-      // target (K3) arrived with NO credentials and the C6 dry-run died with
-      // K3_WISE_CREDENTIALS_MISSING before a single wire call. Reproduced against the real
-      // registry: flipping this one accessor makes the whole lifecycle pass.
-      //
-      // Peek first, then re-load WITH credentials only for kinds that actually build a target
-      // adapter. Kinds served by dataSourceWrites keep the config-only load they were designed
-      // for, so this does not widen credential exposure for them.
-      const targetSystemScope = scopedAuthenticatedWriteInput(req, {
-        id: pipeline.targetSystemId,
-        tenantId: body.tenantId,
-        workspaceId: body.workspaceId,
-      })
-      let targetSystem = await externalSystems.getExternalSystem(targetSystemScope)
       if (
         targetSystem
         && ADAPTER_BACKED_C6_TARGET_KINDS.has(targetSystem.kind)
@@ -4159,6 +4274,8 @@ function createHandlers(services, options = {}) {
         // Configured: the SAME object the apply route passes, so both routes expand the same rows
         // and agree on the dry-run revision. It is never request-influenced.
         extFieldMapping: stockPreparationExtFieldMapping,
+        // Confirmation-ledger readback (first cut). Server-resolved, see the factory above.
+        confirmationDecisionResolver: confirmationDecisionResolverForRequest(req),
         // B2a. `tenantId` is resolved the SAME way `loadTableActionSourceAdapter` scoped the
         // external-system lookup a line above (`scopedInput` -> `resolveTenantId`), so the tenant the
         // gate checks and the tenant whose source is about to be read are one value, not two that
@@ -4169,6 +4286,57 @@ function createHandlers(services, options = {}) {
         tenantId: dryRunTenantId,
         now: Date.now(),
       }))
+    },
+
+    // B-stage ledger WRITE: repeat the readonly table-action plan server-side and persist ONLY
+    // values-free manual-confirm decision metadata (duplicate_expanded_key class, first cut). No
+    // plan row is applied, no request-supplied plan/value payload is accepted, and the canonical
+    // sheet is untouched by construction (the ledger module holds no capability toward it).
+    async tableActionConfirmationDecisionsReconcile(req, res) {
+      const user = requireAccess(req, 'admin')
+      const audit = requireStockPreparationAudit()
+      const reconcileLease = requireConfirmationDecisionReconcileLease()
+      const body = normalizeTableActionBody(
+        requestBody(req),
+        VALID_TABLE_ACTION_CONFIRMATION_DECISION_RECONCILE_BODY_KEYS,
+      )
+      const tenantId = resolveAuthUserTenantId(req)
+      const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction({ tenantId, actionId }))
+      const sourceAdapter = await loadTableActionSourceAdapter(req, action, { tenantId, requireActive: true })
+      const prepared = await prepareStockPreparationConfirmationDecisions({
+        action,
+        parameters: body.parameters,
+        conflictPolicyReview: body.conflictPolicyReview,
+        sourceAdapter,
+        recordsApi: getMultitableRecordsApi(),
+        policyStore: context.storage,
+        installedFieldProperties: await resolveInstalledFieldProperties(req, action),
+        extFieldMapping: stockPreparationExtFieldMapping,
+      })
+      // The audit table's action vocabulary is migration-frozen (9 actions). Decision-candidate
+      // generation is a generation run with a fixed operation subtype, not a new action. Audit the
+      // intent BEFORE the multitable write so an audit-store refusal cannot leave a committed
+      // ledger row behind a failed HTTP response.
+      await audit.append({
+        tenantId,
+        action: 'generation_run',
+        subjectId: action.actionId,
+        mode: 'confirmation_reconcile_requested',
+        actor: user.id || user.email,
+        detail: { operation: 'confirmation_decisions_reconcile' },
+      })
+      const result = await reconcileConfirmationDecisions({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, undefined),
+        permission: 'admin',
+        projectNo: prepared.parameters.projectNo,
+        plan: prepared.plan,
+        sourceRevision: prepared.revision,
+        reconcileLease,
+      })
+      return sendOk(res, result, result.counts.created > 0 ? 201 : 200)
     },
 
     // Re-run the approved readonly table action and commit its expansion directly
@@ -4272,6 +4440,11 @@ function createHandlers(services, options = {}) {
         // compares its revision against the token. A mapping on one route and not the other would
         // make every apply fail TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH.
         extFieldMapping: stockPreparationExtFieldMapping,
+        // Same ledger readback the dry-run route consulted, for the same token-parity reason. A
+        // decision confirmed/superseded between dry-run and apply changes the recomputed revision
+        // and fails the token check — fail-closed. Production Apply remains off this line entirely
+        // (sandbox/production gates above are untouched).
+        confirmationDecisionResolver: confirmationDecisionResolverForRequest(req),
         recordsApi: getMultitableRecordsApi(),
         tokenStore: context.storage,
         policyStore: context.storage,
@@ -5516,6 +5689,108 @@ function createHandlers(services, options = {}) {
         projectId: firstString(rawQuery.projectId),
         action: firstString(rawQuery.action),
         limit: firstString(rawQuery.limit),
+      })
+      return sendOk(res, result)
+    },
+
+    // B-stage confirmation-decision LEDGER surfaces (first cut) — all admin-gated; the staging
+    // project is auth-derived and never request-steered on the write routes.
+
+    async stockPreparationConfirmationDecisionsReadiness(req, res) {
+      requireAccess(req, 'admin')
+      const input = normalizeStockPreparationConfirmBody(
+        requestQuery(req),
+        VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_READINESS_QUERY_KEYS,
+        'CONFIRMATION_DECISION_READINESS_REQUEST_INVALID',
+      )
+      const tenantId = resolveTenantId(req, input)
+      const result = await inspectConfirmationDecisionTarget({
+        context,
+        projectId: resolveIntegrationStagingProjectId(tenantId, undefined),
+        permission: 'admin',
+      })
+      return sendOk(res, result)
+    },
+
+    async stockPreparationConfirmationDecisionsEnsure(req, res) {
+      requireAccess(req, 'admin')
+      normalizeStockPreparationConfirmBody(
+        requestBody(req),
+        VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_ENSURE_BODY_KEYS,
+        'CONFIRMATION_DECISION_ENSURE_REQUEST_INVALID',
+      )
+      const tenantId = resolveAuthUserTenantId(req)
+      const result = await ensureConfirmationDecisionTarget({
+        context,
+        projectId: resolveIntegrationStagingProjectId(tenantId, undefined),
+        permission: 'admin',
+      })
+      return sendOk(res, result, result.created ? 201 : 200)
+    },
+
+    // THE authoritative exception queue (converged ruling): pending decisions with counts, ids,
+    // hashes and status enums — NEVER a source cell value. Canonical filter views stay auxiliary.
+    async stockPreparationConfirmationDecisionsList(req, res) {
+      requireAccess(req, 'admin')
+      const input = normalizeStockPreparationConfirmBody(
+        requestQuery(req),
+        VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_LIST_QUERY_KEYS,
+        'CONFIRMATION_DECISION_LIST_REQUEST_INVALID',
+      )
+      const projectNo = firstString(input.projectNo)
+      if (!projectNo) {
+        throw new HttpRouteError(400, 'CONFIRMATION_DECISION_LIST_REQUEST_INVALID', 'projectNo is required', { field: 'projectNo' })
+      }
+      const tenantId = resolveTenantId(req, input)
+      const result = await listConfirmationDecisions({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, undefined),
+        permission: 'admin',
+        projectNo,
+        status: firstString(input.status),
+      })
+      return sendOk(res, result)
+    },
+
+    async stockPreparationConfirmationDecisionsConfirm(req, res) {
+      const user = requireAccess(req, 'admin')
+      const audit = requireStockPreparationAudit()
+      const input = normalizeStockPreparationConfirmBody(
+        requestBody(req),
+        VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_CONFIRM_BODY_KEYS,
+        'CONFIRMATION_DECISION_CONFIRM_REQUEST_INVALID',
+      )
+      const tenantId = resolveAuthUserTenantId(req)
+      // A confirmation resolves a planner exception, so it rides the existing exception_resolve
+      // audit action with a fixed operation subtype (the audit vocabulary is migration-frozen).
+      // Record intent FIRST: if the SQL audit store is unavailable or refuses the payload, no
+      // multitable patch may occur.
+      await audit.append({
+        tenantId,
+        action: 'exception_resolve',
+        subjectId: firstString(input.decisionId),
+        mode: 'confirmation_decision_requested',
+        actor: user.id || user.email,
+        detail: {
+          operation: 'confirmation_decision_confirm',
+          // Enum-shaped when present; omitted (not undefined) when the request is malformed so the
+          // audit row still lands and the module's own named validation error reaches the caller.
+          ...(firstString(input.resolutionAction) ? { resolutionAction: firstString(input.resolutionAction) } : {}),
+        },
+      })
+      const result = await confirmConfirmationDecision({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, undefined),
+        permission: 'admin',
+        decisionId: input.decisionId,
+        inputFingerprint: input.inputFingerprint,
+        resolutionAction: input.resolutionAction,
+        resolvedValue: input.resolvedValue,
+        resolvedAuxValue: input.resolvedAuxValue,
+        notes: input.notes,
+        confirmedBy: user.id || user.email,
       })
       return sendOk(res, result)
     },
