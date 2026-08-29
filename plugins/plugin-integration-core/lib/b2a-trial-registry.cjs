@@ -160,6 +160,15 @@ const C6_FULL_BATCH_INCOMPLETE = 'C6_FULL_BATCH_INCOMPLETE'
 // Load-time faults are a broken DEPLOYMENT, not a refused caller, so they carry their own code and a
 // 500. They are never emitted in response to a request: the registry is built at activation.
 const B2A_REGISTRY_INVALID = 'B2A_REGISTRY_INVALID'
+// W-5, floor 1: an ARMED B2a read over a sqlserver data source configured with
+// connection.requestTimeoutMs=0 ("no timeout" — legitimate for the general adapter, MSSQLAdapter.ts's
+// `?? 30000` deliberately does not override an explicit 0) is refused BEFORE any source connection.
+// Distinct from `B2A_SOURCE_TIMEOUT` (§13/R-05, 504): that code maps a read that DID connect and then
+// timed out; this one refuses a read that would never time out at all. See
+// `refuseB2aArmedSqlServerRequestTimeoutDisabled` below — the seam that resolves an armed read's
+// source config throws this directly, never through the R-05 cause-class mapper (there is no driver
+// failure to classify here; the connection is never opened).
+const B2A_SOURCE_TIMEOUT_DISABLED_REJECTED = 'B2A_SOURCE_TIMEOUT_DISABLED_REJECTED'
 
 const B2A_ERROR_CODES = Object.freeze([
   B2A_REGISTRATION_REQUIRED,
@@ -170,6 +179,7 @@ const B2A_ERROR_CODES = Object.freeze([
   B2A_SCHEMA_DRIFT,
   C6_SAFE_LIFECYCLE_REQUIRED,
   C6_FULL_BATCH_INCOMPLETE,
+  B2A_SOURCE_TIMEOUT_DISABLED_REJECTED,
 ])
 
 // ─── THE CLOSED ENTRY-POINT VOCABULARY (§13 PR-C: "inventory and guard four entry points") ────
@@ -1242,6 +1252,52 @@ function assertB2aFullBatchComplete(authorization, errors) {
     })
 }
 
+// ─── W-5: TWO FAIL-CLOSED FLOORS FOR ARMED B2a READS OVER SQL SERVER ─────────
+//
+// Two gaps the general adapter deliberately leaves open for everyone (both are legitimate, opt-in
+// mssql conventions when there is no armed B2a trial in play): MSSQLAdapter.ts allows
+// connection.requestTimeoutMs=0 ("no timeout") through unchanged, and #5243's strict-offset-ordering
+// belt defaults OFF. Neither floor below touches that default behaviour — both are read ONLY when
+// the caller (the `data-source:sql-readonly` bridge, `lib/adapters/data-source-sql-readonly-source-
+// adapter.cjs`) is under an armed, authorized B2a read, and both are enforced BEFORE this module ever
+// sees a driver error: floor 1 is a pre-connect refusal the core-backend read-only facade throws
+// (`select(..., strict=true)`, packages/core-backend/src/data-adapters/data-source-plugin-facade.ts);
+// floor 2 is the SAME per-call override forcing MSSQLAdapter's own #5243 check on, so its refusal —
+// unchanged message, no `.code` — propagates exactly as it already does for a connection that opted
+// into `strictOffsetOrdering:true` itself. Floor 2 therefore needs nothing here: there is no new code
+// to mint, no cause class to add to a roster, and no mapper to route it through — "do not invent a
+// parallel code" is enforced by there being nothing to invent.
+//
+// Floor 1 DOES get a fixed code, because unlike floor 2 it is not reusing an existing thrown error —
+// the core-backend facade's `DATA_SOURCE_REQUEST_TIMEOUT_DISABLED_CODE` is deliberately B2a-agnostic
+// (that module knows nothing of B2a), so THIS seam is where it becomes `B2A_SOURCE_TIMEOUT_DISABLED_
+// REJECTED`. Cross-tested against the facade's literal string (see b2a-trial-registry.test.cjs) so the
+// two cannot drift silently apart — the same accepted-duplication pattern `parseStrictIsoTimestamp`
+// above uses against stock-preparation-production-policy.cjs.
+const DATA_SOURCE_REQUEST_TIMEOUT_DISABLED_CAUSE_CODE = 'DATA_SOURCE_REQUEST_TIMEOUT_DISABLED'
+
+/**
+ * True when `error` is exactly the core-backend read-only facade's floor-1 refusal (thrown by
+ * `select(..., strict=true)` before any source connection). Anything else — including every OTHER
+ * error `api.select` can throw — is not this module's concern and must propagate unchanged.
+ */
+function isDataSourceRequestTimeoutDisabledError(error) {
+  return Boolean(error) && typeof error === 'object' && error.code === DATA_SOURCE_REQUEST_TIMEOUT_DISABLED_CAUSE_CODE
+}
+
+/**
+ * Floor 1's actual refusal. DORMANT (`authorization == null`) is not a state this function can even
+ * reach in practice — the caller only invokes `select(..., strict=true)` when armed — but the guard is
+ * repeated here anyway rather than trusted to the caller, matching every other assert* in this module.
+ */
+function refuseB2aArmedSqlServerRequestTimeoutDisabled(authorization) {
+  if (authorization === null || authorization === undefined) return
+  refuse(B2A_SOURCE_TIMEOUT_DISABLED_REJECTED, 'sqlserver_request_timeout_disabled',
+    'an armed B2a read over SQL Server refuses a data source configured with ' +
+    'connection.requestTimeoutMs=0 (no timeout) before any source connection is opened; set ' +
+    'connection.requestTimeoutMs to a positive bound for this data source', b2aSourceReadEvidence(authorization))
+}
+
 // ─── R-06: THE SCHEMA CONTRACT, AND DRIFT ────────────────────────────────────
 //
 // §13 PR-C: "首次读取固定 schema contract/digest，字段缺失、类型或映射漂移在生成业务制品前返回固定错误码".
@@ -1550,6 +1606,10 @@ module.exports = {
   C6_SAFE_LIFECYCLE_REQUIRED,
   C6_FULL_BATCH_INCOMPLETE,
   B2A_REGISTRY_INVALID,
+  B2A_SOURCE_TIMEOUT_DISABLED_REJECTED,
+  DATA_SOURCE_REQUEST_TIMEOUT_DISABLED_CAUSE_CODE,
+  isDataSourceRequestTimeoutDisabledError,
+  refuseB2aArmedSqlServerRequestTimeoutDisabled,
   B2A_TIMEOUT_CAUSE_CLASSES,
   B2A_PAGE_LIMIT_CAUSE_CLASSES,
   B2A_INCOMPLETE_BATCH_CAUSE_CLASSES,
