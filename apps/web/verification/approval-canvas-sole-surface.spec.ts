@@ -149,6 +149,7 @@ async function mountFlow(
     height: number
     template?: typeof COMPLEX_TEMPLATE | typeof LINEAR_TEMPLATE
     route?: 'edit' | 'new'
+    enterFlow?: boolean
   },
 ): Promise<void> {
   const template = options.template ?? COMPLEX_TEMPLATE
@@ -183,7 +184,9 @@ async function mountFlow(
   await expect(page.locator('[data-testid="approval-template-name"]')).toHaveValue(
     route === 'edit' ? template.name : '',
   )
-  await page.click('[data-testid="approval-template-section-flow"]')
+  if (options.enterFlow ?? true) {
+    await page.click('[data-testid="approval-template-section-flow"]')
+  }
 }
 
 function canvasNode(page: Page, key: string) {
@@ -305,6 +308,31 @@ test('ordinary linear editable templates promote into Canvas without exposing th
   await page.press('[data-testid="approval-canvas-inspector-rename-input"]', 'Enter')
   await expect(canvasNodeSelector(page, 'approval_1')).toHaveAttribute('aria-label', '编辑审批节点「财务复核」')
   await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('有未保存更改')
+})
+
+test('entering Canvas preserves pre-flow edits and keeps the saved linear draft dirty', async ({ page }) => {
+  await mountFlow(page, {
+    canvasV2: true,
+    width: 1440,
+    height: 900,
+    template: LINEAR_TEMPLATE,
+    enterFlow: false,
+  })
+
+  const editedName = 'Canvas 验收线性模板（已编辑）'
+  const nameInput = page.locator('[data-testid="approval-template-name"]')
+  const saveState = page.locator('[data-testid="approval-template-save-state"]')
+  await expect(page.locator('[data-testid="approval-canvas-workspace"]')).toHaveCount(0)
+  await expect(saveState).toHaveText('已保存')
+
+  await nameInput.fill(editedName)
+  await expect(nameInput).toHaveValue(editedName)
+  await expect(saveState).toHaveText('有未保存更改')
+
+  await page.click('[data-testid="approval-template-section-flow"]')
+  await expect(page.locator('[data-testid="approval-canvas-workspace"]')).toBeVisible()
+  await expect(nameInput).toHaveValue(editedName)
+  await expect(saveState).toHaveText('有未保存更改')
 })
 
 test('/new promotes its starter flow into Canvas without manufacturing a dirty draft', async ({ page }) => {
