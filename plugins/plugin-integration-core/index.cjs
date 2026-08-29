@@ -49,6 +49,10 @@ const { createWatermarkStore } = require('./lib/watermark.cjs')
 const { createRunLogger } = require('./lib/run-log.cjs')
 const { createErpFeedbackWriter } = require('./lib/erp-feedback.cjs')
 const { createPipelineRunner } = require('./lib/pipeline-runner.cjs')
+// W-2: the B2a read-authorization registry, built HERE as well as in http-routes so the pipeline
+// runner carries the fence too. The cross-plugin communication API below enters the runner directly
+// — no route, no `requireAccess` — so a fence that lived only in the HTTP layer left that door open.
+const { createB2aRegistry, B2A_AUTHORIZED_RUN_ID } = require('./lib/b2a-trial-registry.cjs')
 const { installStaging, listStagingDescriptors } = require('./lib/staging-installer.cjs')
 const { registerIntegrationRoutes } = require('./lib/http-routes.cjs')
 const {
@@ -131,6 +135,26 @@ function redactDeadLetterForCommunication(deadLetter) {
   }
 }
 
+/**
+ * W-2. Strip the runner's already-asserted run marker off cross-plugin input.
+ *
+ * The marker is a SYMBOL, so it cannot be expressed in JSON and cannot arrive over a cross-plugin
+ * call as things stand. Stripping it anyway costs one `hasOwnProperty` and removes the assumption:
+ * "not expressible in JSON" is a property of today's transport, not a fence, and the marker decides
+ * whether the runner CONTINUES an existing operation claim or takes its own. A caller able to set it
+ * could ride an authorization somebody else was granted.
+ *
+ * Returns the input UNCHANGED — same object, not a copy — when the marker is absent, which is every
+ * real call. The dormant path therefore hands the runner exactly what it handed it before.
+ */
+function withoutB2aAuthorizedRunMarker(input) {
+  if (!input || typeof input !== 'object') return input
+  if (!Object.prototype.hasOwnProperty.call(input, B2A_AUTHORIZED_RUN_ID)) return input
+  const sanitized = { ...input }
+  delete sanitized[B2A_AUTHORIZED_RUN_ID]
+  return sanitized
+}
+
 function redactReplayResultForCommunication(result) {
   if (!result || typeof result !== 'object') return result
   return {
@@ -200,7 +224,11 @@ function buildCommunicationApi() {
       return requireInitialized(pipelineRegistry, 'pipeline registry is not initialized').listPipelineRuns(input)
     },
     async runPipeline(input) {
-      return requireInitialized(pipelineRunner, 'pipeline runner is not initialized').runPipeline(input)
+      // W-2: this is an IN-PROCESS source read. It reaches the runner without passing a route, so the
+      // B2a fence it meets is the runner's own — see `assertB2aPipelineSourceReadAuthorized`. On an
+      // armed deployment an unregistered caller is refused here before any credential reload.
+      return requireInitialized(pipelineRunner, 'pipeline runner is not initialized')
+        .runPipeline(withoutB2aAuthorizedRunMarker(input))
     },
     async listDeadLetters(input) {
       const rows = await requireInitialized(deadLetterStore, 'dead-letter store is not initialized')
@@ -217,7 +245,11 @@ function buildCommunicationApi() {
       if (typeof runner.replayDeadLetter !== 'function') {
         throw new Error('dead-letter replay is not implemented')
       }
-      return redactReplayResultForCommunication(await runner.replayDeadLetter(input))
+      // W-2: replay's source-read leg is `runPipeline`, which carries the runner's B2a fence, so this
+      // in-process door is gated on the same footing as the route.
+      return redactReplayResultForCommunication(
+        await runner.replayDeadLetter(withoutB2aAuthorizedRunMarker(input)),
+      )
     },
     async listStagingDescriptors() {
       return requireInitialized(stagingInstaller, 'staging installer is not initialized').listStagingDescriptors()
@@ -299,6 +331,13 @@ module.exports = {
         })
       },
     }
+    // W-2: the B2a registry, built ONCE here at activation from server config, exactly as
+    // http-routes builds its own copy — `createB2aRegistry` is pure in its config, so the two cannot
+    // disagree, and a malformed registry now fails activation at this line instead of a few lines
+    // later at route registration (still activation, still loudly, still before any request).
+    // Unset env -> the host omits the key -> `null` -> the runner's fence is DORMANT and costs
+    // nothing.
+    const b2aTrialRegistry = createB2aRegistry({ config: context.config })
     pipelineRunner = createPipelineRunner({
       pipelineRegistry,
       externalSystemRegistry,
@@ -307,6 +346,17 @@ module.exports = {
       watermarkStore,
       runLogger,
       erpFeedbackWriter,
+      b2aTrialRegistry,
+      // The SAME durable store the routes hand the guard. The one-time operation claim is a record
+      // in it, so route and runner must look at one store or "one operation" would mean two.
+      b2aClaimStore: context.storage,
+      // MERGE-TRAIN (W-3 x W-2). The SAME DB-enforced one-shot claim the routes are handed above.
+      // Migration 078 made it mandatory for every ARMED read, and the runner's fence (W-2) landed on
+      // a branch that predated it — so without this line an armed HTTP-initiated run would be
+      // authorized by the route and then refused by the runner with `operation_claim_unavailable`.
+      // Assigned earlier in this same activation, before this call. Null on a DORMANT deployment,
+      // where the runner's fence returns before it is ever read.
+      b2aOperationClaim,
     })
 
     try {
