@@ -1649,6 +1649,14 @@ export default defineConfig({
       // DATABASE_URL cannot skip-green it; wired as a WHOLE FILE into plugin-tests.yml
       // after Start Postgres + db:migrate (same step as the quota suite).
       'tests/integration/elearning-media-reconciler.db.test.ts',
+      // O1-C: real-Postgres proof that migration 078's claim_key PRIMARY KEY is what makes
+      // createB2aOperationClaim's exactly-one-winner property real (two independent connections
+      // racing INSERTs). DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it.
+      // NOT YET wired into a named real-DB step in any workflow — see this file's own header for why
+      // (every real-DB step in this repo enumerates whole files explicitly; there is no glob-covered
+      // CI-executed lane to land in without a workflow edit, which this change deliberately does not
+      // make). That wiring is a disclosed follow-up, not a silent gap.
+      'tests/integration/b2a-operation-claim-078-realdb.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],
