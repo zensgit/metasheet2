@@ -5,6 +5,10 @@ feature flag、UAT、部署或生产开启。
 
 **Baseline:** `origin/main@efbf0a931cd6529703a91c9c0053d4cae8217abe`。
 
+**Contract-amendment replay:** `#5183@7a9ace34dd494b5f141e58d9899d4087392cad04` 的 docs-only
+delta 已回放到 `origin/main@da1057141a8c4ee7f41fe7f55c32700f1e46a5ff`；本次只修订合同，
+不把旧 baseline 的源码证据冒充为 current-main runtime requalification。
+
 **Parents:**
 
 - `approval-lock5-node-operation-policy-20260817.md`，特别是已记录的 OD-L5-4(b)、
@@ -13,10 +17,15 @@ feature flag、UAT、部署或生产开启。
   不变量；
 - `approval-add-sign-honesty.db.test.ts` 中 B-3 的真库反例。
 
-**父锁精确修订：**父锁 B-5/OD-L5-5 把 `addSignAggregation` 同时写给真正的 `before`
-与 `after`，但当前 `before` 只是同 epoch 并加签的诚实别名，没有独立的前置轮。本文在真正
-before-sign 状态机落地前，把该字段收窄为 **after-only**；`before | parallel` 都必须缺失并
-保持当前聚合语义。本文 ratify 后，该点替代父锁 B-5/OD-L5-5，其他父锁条款不变。
+**父锁精确替代图：**本文 ratify 后，完整替代父锁 OD-L5-4(b) 与 gate B-3 所写的
+“消费 actor 席位后立即以同节点新 epoch 激活被加签人 / existing machinery”机制：产品结果仍是
+同节点、无图变异的新 epoch 轮，且新轮完成后才前进；实现机制改为先持久化 pending 延迟轮，等
+origin 轮按其原聚合规则完成后再激活。本文同时替代父锁 OD-L5-5(a) 与 gate B-5 的聚合范围：
+父锁把 `addSignAggregation` 同时写给真正的 `before` 与 `after`，但当前 `before` 只是同 epoch
+并加签的诚实别名，没有独立前置轮；在真正 before-sign 状态机落地前，该字段收窄为
+**after-only**，`before | parallel` 都必须缺失并保持当前聚合语义。父锁 B-1（双门显式模式）、
+B-2（before 诚实口径）、B-4（并行区域拒绝 after）、OD-L5-1..3/6..11 及所有普通
+before/parallel 行为继续有效；本文不得借 supersession 改写这些无关条款。
 
 本文只闭合 Lock-5B 的**后加签 runtime 半边**。`before` 仍维持已上线的诚实口径：它不是
 真正的前置节点；本文不顺带实现前加签、图变异、并行分支内后加签或移动端原生编排。
@@ -32,7 +41,7 @@ epoch，而被加签人同时活跃在新 epoch；`currentNodeEntryEpoch` 会正
 `APPROVAL_NODE_ENTRY_EPOCH_MIXED` fail closed。真实 DB reproducer 已证明下一位审批人的
 真实请求返回 500，实例进入吸收态。
 
-因此本文纠正旧锁中的一句话：**“no graph mutation”仍成立，但“existing machinery”不成立。**
+因此本文替代 OD-L5-4(b)/B-3 的激活机制：**“no graph mutation”仍成立，但“existing machinery”不成立。**
 完整后加签需要一个持久化的待激活轮。它不是同轮 assignee mutation；它是同一图节点上的
 第二个、延迟激活的审批轮。
 
@@ -379,10 +388,22 @@ CREATE TABLE approval_deferred_add_sign_rounds (
     CHECK (status IN ('pending', 'active', 'completed', 'cancelled')),
   CONSTRAINT approval_deferred_add_sign_rounds_aggregation_valid
     CHECK (aggregation IN ('all', 'any')),
-  CONSTRAINT approval_deferred_add_sign_rounds_node_key_nonblank
-    CHECK (node_key ~ '[!-~]'),
-  CONSTRAINT approval_deferred_add_sign_rounds_created_by_nonblank
-    CHECK (created_by ~ '[!-~]'),
+  CONSTRAINT approval_deferred_add_sign_rounds_node_key_trimmed_nonblank
+    CHECK (
+      node_key <> ''
+      AND node_key = btrim(
+        node_key,
+        U&'\0009\000A\000B\000C\000D\0020\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000'
+      )
+    ),
+  CONSTRAINT approval_deferred_add_sign_rounds_created_by_trimmed_nonblank
+    CHECK (
+      created_by <> ''
+      AND created_by = btrim(
+        created_by,
+        U&'\0009\000A\000B\000C\000D\0020\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000'
+      )
+    ),
   CONSTRAINT approval_deferred_add_sign_rounds_cancel_reason_valid
     CHECK (
       cancel_reason IS NULL OR cancel_reason IN (
@@ -435,13 +456,44 @@ CREATE TABLE approval_deferred_add_sign_round_seats (
   ordinal integer NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (round_id, assignee_user_id),
-  CONSTRAINT approval_deferred_add_sign_round_seats_assignee_nonblank
-    CHECK (assignee_user_id ~ '[!-~]'),
+  CONSTRAINT approval_deferred_add_sign_round_seats_assignee_trimmed_nonblank
+    CHECK (
+      assignee_user_id <> ''
+      AND assignee_user_id = btrim(
+        assignee_user_id,
+        U&'\0009\000A\000B\000C\000D\0020\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000'
+      )
+    ),
   CONSTRAINT approval_deferred_add_sign_round_seats_ordinal_nonneg
     CHECK (ordinal >= 0),
   CONSTRAINT approval_deferred_add_sign_round_seats_ordinal_unique
     UNIQUE (round_id, ordinal)
 );
+```
+
+上述三个 identity CHECK，以及本文后续 nullable `acted_by` CHECK，使用同一封闭的 Unicode
+White_Space 字符集（Unicode 15.0 `White_Space` property）进行边界规范化。**要求 canonical trim
+equality**：写入值必须已经去掉首尾空白，数据库拒绝而不是静默改写；空串与全空白拒绝。该合同不以
+ASCII printable 作为 presence oracle，因此纯 CJK/非 ASCII 标识合法；它只要求 trim canonicality，
+不要求也不执行 NFC/NFKC 归一化。规范 SQL 判别样例为：
+
+```sql
+WITH samples(value, expected) AS (
+  VALUES
+    ('', false),
+    (U&'\0020\0009\000A\000D', false),
+    ('审批节点一', true),
+    (' 审批节点一 ', false)
+)
+SELECT
+  value <> ''
+  AND value = btrim(
+    value,
+    U&'\0009\000A\000B\000C\000D\0020\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000'
+  ) AS accepted,
+  expected
+FROM samples;
+-- accepted 必须逐行等于 expected：空串/ASCII whitespace 拒绝，纯 CJK 接受，未规范化边界拒绝。
 ```
 
 目标集合在请求事务中写入，后续激活只从该表读取，不从请求、目录或当前模板重新解析。
@@ -562,17 +614,32 @@ DB gate，最后开启对应外层 admission；`generation` 只用于证据关�
 values-free 占位，不回退 raw ID。现有 `before | parallel` 记录形状不在本锁中改变。
 
 成员 history/timeline 在轮尚为 `pending` 时也必须可展示被加签人。分页的
-`routes/approval-history.ts` 与 `ApprovalBridgeService.loadLocalHistory` 必须合成同一个公开后加签动作，
-但各自保留当前 wire 基线，不能为了共享 helper 而互相扩权：分页 route 当前只投影其已公开的
-metadata aliases，它只能新增 `metadata->>'deferredRoundId'` 私有 alias，不能开始返回整块 metadata；
-bridge 当前返回完整历史 metadata，它必须保留所有既有非 after key/value，并只在返回前剥离
-`deferredRoundId` 及本功能新增的内部 key。本 delta 不得借内部 round id 收窄 bridge，也不得借
-bridge 的宽 wire 扩大 route。
-服务端用内部 alias 读取 seat rows，并用**实例 org-scoped** 的最小显示名查询解析，不得直接调用当前全局
+`routes/approval-history.ts`、任何复用该历史投影的成员详情响应，以及
+`ApprovalBridgeService.getApprovalHistory/loadLocalHistory` 必须合成同一个公开后加签动作，但各自保留
+当前 wire 基线，不能为了共享 helper 而互相扩权。这个 delta 的新增内部投影 vocabulary 是封闭集：
+
+- 源 metadata key：`deferredRoundId`；
+- 源 SQL identity：`round_id`、`assignee_user_id`、`ordinal`。seat 表没有独立 surrogate seat id，
+  这三个值共同承载 round/seat 身份，全部属于内部数据；源取消判别是 `cancel_reason`；
+- 读取器私有 aliases：`deferred_round_id_raw`、`deferred_seat_assignee_user_ids_raw`、
+  `deferred_seat_ordinals_raw`、`deferred_cancel_reason_raw`。
+
+不得再创造 `roundId`、`seatId`、`seat_id`、`assigneeUserId`、`seatOrdinal` 等另一套别名。
+分页 route 只能新增 `metadata->>'deferredRoundId' AS deferred_round_id_raw`，seat/cancel 查询也必须在
+SQL 边界立即映射为上述唯一私有 aliases；不得把原始 `round_id | assignee_user_id | ordinal |
+cancel_reason` spread 进 DTO。bridge 当前返回完整历史 metadata，必须保留所有既有非 after key/value。
+共享 helper 可以在序列化前消费私有 aliases，但每一个成员、history 或 bridge response 都必须从本功能
+产生的记录/投影中剥离完整封闭集：`deferredRoundId | round_id | assignee_user_id | ordinal |
+cancel_reason | deferred_round_id_raw | deferred_seat_assignee_user_ids_raw |
+deferred_seat_ordinals_raw | deferred_cancel_reason_raw`。这项剥离不得递归删除既有非 after metadata 中的
+同名业务 key；helper 必须把新增内部字段放在自己的中间行而不是污染既有 metadata。不得用对象 spread
+后再依赖调用方清理；剥离是每条公开 serializer 的最后一道 allow/deny boundary。本 delta 不得借内部
+round id 收窄 bridge，也不得借 bridge 的宽 wire 扩大 route。
+
+服务端用上述内部 alias 读取 seat rows，并用**实例 org-scoped** 的最小显示名查询解析，不得直接调用当前全局
 `resolveDirectoryUsersByIds`（它不按 org 限定且返回 id/name/email）。本功能新增的后加签目标摘要
 只返回显示名与目标计数，不返回 user id、email、round id 或 seat id；既有非 after metadata 仍按
-当前 wire 合同保留。内部 alias 必须像
-`lock9_attachment_ids_raw` 一样在返回前剥离。无法解析的席位使用统一 values-free 占位。FE 不得
+当前 wire 合同保留。无法解析的席位使用统一 values-free 占位。FE 不得
 等 assignment 激活后才显示姓名，否则 pending 阶段会出现“已后加签但没有对象”的不可解释状态。
 分页读取器必须先按内部 round alias 把审计对折成一个逻辑动作，再对逻辑动作执行
 `COUNT/LIMIT/OFFSET`；不得先分页再在单页内合成，否则跨页的同一动作会重复显示或改变总数。
@@ -592,6 +659,11 @@ total 是逻辑动作数，bridge 虽不分页也必须使用相同折叠与顺�
 2. `add_sign`：表示创建延迟轮，携带 `deferredRoundId`、`addSignMode:'after'`、
    `addSignAggregation` 和目标数量。普通 timeline 合成展示一次“同意并后加签”，不得显示两条
    看似独立的用户动作。
+
+投影负例必须把上述全部内部字段同时放进 route 与 bridge 的 after-sign 中间行，并让 seat 目录解析出至少一个
+CJK 显示名。公开结果仍须只有一条“同意并后加签”逻辑动作，正确返回显示名与 `targetCount`；对结果
+递归枚举 key/value 时，内部字段、round/seat/user id 必须全部不存在。只证明“删了
+`deferredRoundId`”或只断言动作数量，不算通过。
 
 不新增 `approval_records.action` 枚举成员，因此不重开 CHECK widening 链。
 
@@ -639,8 +711,17 @@ CREATE TABLE approval_timeout_reminder_dead_letter_controls (
     CHECK (resolution_state IN ('open','replayed','disposed')),
   CONSTRAINT approval_timeout_reminder_dead_letter_reason_code
     CHECK (reason_code ~ '^[a-z][a-z0-9_]{0,63}$'),
-  CONSTRAINT approval_timeout_reminder_dead_letter_actor_nonblank
-    CHECK (acted_by IS NULL OR acted_by ~ '[!-~]'),
+  CONSTRAINT approval_timeout_reminder_dead_letter_actor_trimmed_nonblank
+    CHECK (
+      acted_by IS NULL
+      OR (
+        acted_by <> ''
+        AND acted_by = btrim(
+          acted_by,
+          U&'\0009\000A\000B\000C\000D\0020\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000'
+        )
+      )
+    ),
   CONSTRAINT approval_timeout_reminder_dead_letter_disposition_code
     CHECK (
       disposition_code IS NULL OR disposition_code IN (
@@ -750,10 +831,29 @@ flag OFF 时合法 `after` 返回 409 `APPROVAL_AFTER_SIGN_DISABLED`；未知模
 `approvals:admin` 守卫，并沿用现有管理动作 body 字段 `version`，经
 `normalizeApprovalVersion` 取得 expected version。它不要求管理员先知道不可见的 round ID；事务内
 `FOR UPDATE` instance 后，必须在当前节点找到恰好一条 `pending` 轮，CAS 为 `cancelled`、写
-`operator_cancelled`、写 values-free `sign` audit 并 bump version。0 条返回 404，多条或 active/
+`operator_cancelled`、写 values-free `sign` audit 并 bump version。该 `sign` audit 的私有 metadata
+只用 `deferredRoundId` 关联刚取消的轮，不写自由 reason 或 actor/seat/target ID。0 条返回 404，多条或 active/
 completed 形状 409/500 fail closed。该端点在 after-sign flag OFF 时仍可用；普通成员不可见
 round/seat 原始 ID。取消表示放弃本次后加签并恢复 origin 轮继续处理，不代表自动重建目标；旧席位
 可直接重试完成，也可重新选择合格目标再发起 `after`。
+
+管理员取消的公开成功码固定为
+`APPROVAL_DEFERRED_AFTER_SIGN_PENDING_CANCELLED`，成员历史的 projection-only enum 固定为
+`deferred_after_sign_pending_cancelled`，成员时间线文案固定为
+**“管理员已取消待激活的后加签”**。端点 body 只接受既有 `version`，不得新增自由文本 reason；成功
+response 的业务字段固定为 `{ ok:true, code, version, targetCount }`，其中 code 必须是上述值，且不得
+返回 `cancel_reason`、管理员 user id、round/seat id 或目标 user id。
+
+历史折叠器以内部 round identity 把本次 `sign` audit 与同一 pending round 的
+`operator_cancelled` terminal transition 合成为**恰好一条**后续取消事件；原先的“同意并后加签”
+动作保留，不能被取消事件覆盖或改写，raw `sign` 与 cancelled round 也不能各自再显示一条。route 与
+bridge 必须返回相同的 enum、code、固定文案、`targetCount`、逻辑时间和稳定顺序；内部
+`operator_cancelled` 只用于判别，不作为公开 reason/code 原样透传。缺少 audit、重复 audit、状态非
+pending→cancelled 或内部 round identity 不一致均 values-free fail closed，不猜配。公开 endpoint、
+成员 history 与 bridge 的错误/证据面都不得出现任意 reason 文本、user id、round id 或 seat identity。
+取消事件以 `sign.id` 作为稳定逻辑 id、`sign.occurred_at` 作为逻辑时间，并与普通 after-sign 动作使用
+同一排序规则；route 必须在 `COUNT/LIMIT/OFFSET` 前完成该折叠，bridge 使用同一 helper，避免 raw
+`sign` 与逻辑取消事件跨页重复。
 
 ### 3.2 后加签请求的事务顺序
 
@@ -997,7 +1097,9 @@ approve 返回统一 stale 409，且该席位仍 active、轮仍 pending、audit
 激活校验开始后并发停用同一 user/membership 必须等待其 `FOR SHARE` 锁；停用先提交则 exact-set
 返回 stale。取消端点以 body `version` 成功后，该席位可直接重试前进，也可替换为合格目标重新发起 after；
 成员调用 403、无 pending 轮 404、active round 409。flag OFF 时管理员仍可取消。删除共享激活
-helper 的第二次 exact-set、激活时共享锁、事务回滚或 admin guard 时各自指定测试红。
+helper 的第二次 exact-set、激活时共享锁、事务回滚或 admin guard 时各自指定测试红。成功 response
+只能返回 `APPROVAL_DEFERRED_AFTER_SIGN_PENDING_CANCELLED`、version 与目标计数；请求/响应加入自由
+reason 或任一内部 identity 时负例必须变红。
 
 **AS-G9 事务失败注入。** 在 admission 共享锁后、provisional round/seat 后、actor consume 后、
 activation CAS/epoch bump 后、assignment insert 后、metrics reset 后、task-created outbox enqueue 后
@@ -1022,6 +1124,11 @@ anti-set（`NOT EXISTS` 不同 epoch live row）任一谓词时，只有对应 f
 路径；pending 实例 terminal 只能 cancelled，active 正常完成先 completed、外部提前终止则
 cancelled。离开节点后无 open 轮、无该轮 active assignment。从任一真实调用点删除 settle
 调用，对应测试红。`revoke` 不列入本门：after-sign 已写真实 approve，现有 revoke window 会关闭。
+管理员 pending-cancel 另证明：内部 `sign` + `operator_cancelled` 只投影一次
+`deferred_after_sign_pending_cancelled`，code 恰为
+`APPROVAL_DEFERRED_AFTER_SIGN_PENDING_CANCELLED`，成员文案逐字为“管理员已取消待激活的后加签”；
+先前“同意并后加签”事件仍在。route 与 bridge 的 event/count/order 相同，且 reason 文本与所有内部
+identity 的反例均不出 wire。
 
 **AS-G12 同节点 mutation。** 初始 activation set 与 seat rows 保持冻结；transfer、timeout
 transfer、reassign、handover 保持 active 轮 epoch，不取消、不 bump。parallel/before add-sign
@@ -1150,10 +1257,11 @@ direct notify；producer admission OFF 后 consumer 必须继续排空。管理�
 producer 事务也必须在实例锁/业务写之前拒绝；DB boolean 为 ON 而外层 flag OFF 时同样拒绝，证明
 singleton 不能独立授权。
 
-**AS-G16 DB constraints。** 非法 status/aggregation/cancel reason、负 epoch、空白 node/creator/
-assignee、状态字段错配（含 cancelled 半配 activation 字段）、重复 open round、重复 seat、重复
+**AS-G16 DB constraints。** 非法 status/aggregation/cancel reason、负 epoch、空白或首尾未规范化的
+node/creator/assignee/nullable actor、状态字段错配（含 cancelled 半配 activation 字段）、重复 open round、重复 seat、重复
 ordinal、`activation_entry_epoch <= origin_entry_epoch`、同实例/节点重复 activation epoch 均由
-具名 constraint 或 index 拒绝。仅 OD-AS-5(b) 还拒绝负 target generation，以及 dead-letter control
+具名 constraint 或 index 拒绝；纯 CJK/非 ASCII 标识作为正控被接受，证明 presence 不依赖 ASCII
+printable。仅 OD-AS-5(b) 还拒绝负 target generation，以及 dead-letter control
 的错误 consumer key、负 fence/attempt、非法 alert/resolution state 或 reason、lease/actor/replay/
 disposition 半配；迁移重放幂等。
 
@@ -1163,8 +1271,11 @@ version 均不变；普通 approve 的 legacy fallback 与 before/parallel 回�
 **AS-G17 timeline。** 一次 after-sign 在成员 timeline 合成为一个动作，但内部两条审计均存在；
 轮仍 pending、尚无 assignment 时就能显示 seat 对应的授权目录名称与计数。分页 route 继续只
 返回当前已公开的窄 metadata aliases，bridge 继续返回当前完整 metadata；两者各自另取内部 round
-alias，不能互相扩大或收窄。org-scoped 显示查询不调用全局 directory helper，内部 alias 在 wire
-前剥离，wire 不返回
+alias，不能互相扩大或收窄。内部字段与 alias 的 exhaustive set 是
+`deferredRoundId | round_id | assignee_user_id | ordinal | cancel_reason | deferred_round_id_raw |
+deferred_seat_assignee_user_ids_raw | deferred_seat_ordinals_raw | deferred_cancel_reason_raw`；org-scoped 显示查询不调用全局
+directory helper，该集合从每个本功能中间行在 member/history/bridge serializer 的 wire boundary 前
+剥离，wire 不返回
 deferred round/seat/user id/email；无法解析者只显示 values-free 占位。权限受限查看者不看到 raw
 target IDs。分页 route 与 `ApprovalBridgeService.loadLocalHistory` 必须产生同一个合成动作形状；用
 page size 1 让 `approve`/`add_sign` 原始行跨页，仍只能得到一个逻辑动作、正确 total 且任一页不泄漏
@@ -1172,7 +1283,12 @@ page size 1 让 `approve`/`add_sign` 原始行跨页，仍只能得到一个逻�
 动作按逻辑 id 稳定翻页。缺 approve、重复 add_sign、actor/node 不一致各自 values-free fail closed，
 证明 helper 不猜配。非 after 历史的 byte-compat corpus 覆盖
 两读取链当前各自已返回的 metadata key/value，升级前后逐字段一致；route 不新增整块 metadata，
-bridge 合成器只能删除本功能新增的内部 round alias，不得把既有 metadata 收窄为 allowlist。
+bridge 合成器只能从 after-sign 中间行/metadata 删除上述本功能内部集合，不得把既有非 after metadata
+收窄为 allowlist。
+投影负例在同一中间行同时注入完整内部集合，route/bridge 仍解析出相同 CJK 显示名与
+`targetCount`，但递归 key/value census 零内部 identity。管理员 pending-cancel 另在两条读取链各得
+恰好一条 `deferred_after_sign_pending_cancelled`，code 与文案“管理员已取消待激活的后加签”逐字一致，不返回
+`operator_cancelled`、自由 reason 或内部 identity，也不删除先前“同意并后加签”动作。
 下一节点的 `prior_node_approver` 继续只读取
 latest epoch，延迟轮完成后不得把 origin round deciders 重新 union 进来。
 
@@ -1227,7 +1343,8 @@ route-union completeness、claim-version filter、DB admission barrier、runtime
 Decision: PENDING
 Owner:
 Date:
-Baseline: origin/main@efbf0a931cd6529703a91c9c0053d4cae8217abe
+Source evidence baseline: origin/main@efbf0a931cd6529703a91c9c0053d4cae8217abe
+Contract-amendment replay base: origin/main@da1057141a8c4ee7f41fe7f55c32700f1e46a5ff
 
 OD-AS-1 runtime shape:
   (a) [RECOMMENDED] deferred-round ledger (§2-§3), complete multi-seat parity
@@ -1247,10 +1364,17 @@ OD-AS-3 rollout:
       then after-sign writer B; exact serving/worker-set gates, staging UAT then production
   (c) unflagged release
 
-OD-AS-4 parent aggregation wording:
-  (a) [RECOMMENDED] this delta supersedes parent B-5/OD-L5-5 only for aggregation:
-      addSignAggregation is after-only until a true before-sign state machine exists
-  (b) keep the parent before/after wording (claims a before runtime that does not exist)
+OD-AS-4 complete parent supersession:
+  (a) [RECOMMENDED] ratify the complete replacement map in the header:
+      - supersede OD-L5-4(b) and B-3's immediate same-node/new-epoch activation mechanism with
+        pending-ledger creation, origin-round completion under its existing aggregation, then same-node
+        fresh-epoch activation; preserve the product outcome of no graph mutation and advance only after
+        the deferred round completes;
+      - supersede OD-L5-5(a) and B-5's aggregation clause: addSignAggregation is after-only until
+        a true before-sign state machine exists;
+      - preserve B-1/B-2/B-4, OD-L5-1..3/6..11 and unrelated before/parallel clauses unchanged.
+  (b) keep OD-L5-4(b)/B-3's immediate activation or OD-L5-5(a)/B-5's before/after wording
+      (leaves the parent and this delta contradictory; not ratifiable together)
 
 OD-AS-5 reminder delivery:
   (a) [RECOMMENDED] split the capability: ship deferred-round core only for no-timeout and
