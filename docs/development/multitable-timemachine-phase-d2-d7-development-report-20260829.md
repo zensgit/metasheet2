@@ -2,10 +2,11 @@
 
 **Status:** MERGED FOUNDATION / LOCAL CLOSEOUT CANDIDATE HOLD. PR #5305 merged
 through `fac252067ab1c22d910266ac2ba29016c2b5fe43` on 2026-08-29. The local
-closeout candidate `0767a3781e2452c8693a33c6197a2c7bef6d9490` is replayed onto
+closeout candidate `a9835b0efa1af52408b5a8848af2247f05715e4d` is replayed onto
 then-current main `5eb83055937ebecc9be690bcf721a8cc89ca27d0`. It closes the
-disclosed malformed catalog/job-list success responses and bounds a stuck
-restore-worker drain at ten seconds. The candidate is local only: it has not
+disclosed malformed catalog/job-list/preview/execute/job success responses,
+bounds a stuck restore-worker drain at ten seconds, and makes a failed signal
+shutdown exit non-zero. The candidate is local only: it has not
 been pushed, reviewed by remote CI, staged, or deployed. No Time Machine flag is
 enabled and production was not accessed.
 
@@ -44,7 +45,9 @@ enabled and production was not accessed.
 | local true-merge replay | `c1863ea288f4a23a0736b6984c51d8dfa867b714` |
 | empty catalog response hardening | `0d5fd1adf51f0447722d9d23fb675797f108da3f` |
 | empty job-list response hardening | `0767a3781e2452c8693a33c6197a2c7bef6d9490` |
-| post-merge closeout code tree | `e9bf2e6d4bac583c846d9037d66769c7a7ebac0c` |
+| empty operation responses and shutdown failure hardening | `a9835b0efa1af52408b5a8848af2247f05715e4d` |
+| post-merge closeout code tree | `bb2571ff6a5a674a8d69df4b830136e105eab92e` |
+| prior report-only carrier | `886a24da5d1f4533a40b5310ec0dd2510523b105` |
 | post-merge closeout remote matrix | not run; local checkpoint only |
 
 The integration merge is a true two-parent merge of the final source evidence
@@ -203,6 +206,12 @@ not reveal. They were fixed on the same branch before closeout:
    `0767a3781e` then normalize successful 204/empty-body responses for both the
    archive catalog and durable job list to their fixed values-free domain errors.
    A truthy primitive catalog body is also rejected as malformed.
+7. Opus 5 found two remaining closeout defects. `a9835b0efa` makes preview,
+   execute, accept, read, resume, and cancel reject 204/empty successful bodies
+   instead of resolving `undefined`. It also propagates a worker-drain failure
+   through `server.stop()` and maps a failed SIGTERM/SIGINT shutdown to exit 1,
+   while preserving the rule that the database pool stays open until the worker
+   has definitely drained.
 
 ## 3. Architecture boundaries preserved
 
@@ -227,8 +236,9 @@ These are real residuals, not documentation polish:
 | direct-entry exact-ON has no owner-selected composition factory | startup deliberately refuses instead of silently using an unratified provider |
 | no executed staging fault/storage/KMS window | D7 cannot claim staging acceptance yet |
 | no true OS-process restart exercise | the 5,001-record test proves same-process lease takeover, not host/process recovery |
+| fixed ten-second worker-stop bound | the bound is fail-closed but is not composition-configurable; changing it is a separate runtime policy decision |
 | sheet ID discovery comparison overlaps stronger generation/job guards | defense remains, but removing that comparison alone is not mutation-discriminating |
-| post-merge closeout candidate is local only | `0767a3781e` has local gates and a Sonnet 5 review/fix-forward, but no push, PR, final exact-head review, or remote matrix |
+| post-merge closeout candidate is local only | `a9835b0efa` has local gates plus Sonnet 5 and Opus 5 fix-forwards, but no push, PR, final exact-head review, or remote matrix |
 
 The provider rows cannot be closed by choosing an adapter implicitly. D1 leaves
 KMS/key custody and the production object backend as explicit owner decisions.
@@ -249,7 +259,7 @@ failure domain.
 - PR #5305 was merged through `fac252067a`; this report now records that result
   rather than preserving the obsolete Draft claim.
 - The post-merge closeout branch remains local. It was not pushed and no PR was
-  opened for `0767a3781e`.
+  opened for `a9835b0efa`.
 - No deployment, dispatch, staging action, or production access was performed.
 - No flag was enabled or changed.
 - D7 adds only the bounded durable-list and application-runtime slices described
@@ -262,7 +272,7 @@ failure domain.
 
 1. Obtain the explicit owner choices for KMS/key custody and the staging/production
    object backend; do not infer them from another product surface.
-2. Complete final independent review of `0767a3781e`, replay again if main moves,
+2. Complete final independent review of `a9835b0efa`, replay again if main moves,
    and require complete exact-head remote checks before a separate landing
    decision. Local green evidence is not that decision.
 3. Obtain a new owner staging-only authorization and execute the D7 runbook,
