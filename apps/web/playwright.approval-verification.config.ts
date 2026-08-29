@@ -25,11 +25,7 @@ const PORT = 5175
 
 export default defineConfig({
   testDir: './verification',
-  testMatch: [
-    '**/approval-form-builder-parity.spec.ts',
-    '**/approval-form-builder-mounted-matrix.spec.ts',
-    '**/approval-member-action-dialog.spec.ts',
-  ],
+  testMatch: ['**/approval-*.spec.ts'],
   timeout: 60_000,
   fullyParallel: false,
   retries: process.env.CI ? 1 : 0,

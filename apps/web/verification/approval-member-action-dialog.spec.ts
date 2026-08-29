@@ -246,6 +246,36 @@ test('P5-C mobile keeps only supported actions and the action dialog stays insid
   await expectNoHorizontalOverflow(page)
 })
 
+test('P5-C mobile reject requires a reason and keeps modal focus inside the viewport', async ({ page }) => {
+  await openHarness(page, 390, 844)
+
+  const trigger = page.getByTestId('approval-reject-button')
+  await expect(trigger).toBeVisible()
+  await trigger.click()
+
+  const dialog = page.getByTestId('approval-action-dialog')
+  const accessibleDialog = page.getByRole('dialog', { name: '审批驳回' })
+  await expect(accessibleDialog).toBeVisible()
+  await expect(accessibleDialog).toHaveAttribute('aria-modal', 'true')
+  await expectDialogPaintedWithinViewport(page, 'approval-action-dialog')
+
+  const reason = dialog.getByRole('textbox', { name: '驳回原因（必填）' })
+  const confirm = page.getByTestId('approval-action-dialog-confirm')
+  await expect(reason).toBeFocused()
+  await expect(confirm).toBeDisabled()
+  await reason.fill('   ')
+  await expect(confirm).toBeDisabled()
+  await reason.fill('请补充移动端凭证')
+  await expect(confirm).toBeEnabled()
+
+  await expectFocusWrapsWithinDialog(page, dialog)
+  await expectNoHorizontalOverflow(page)
+
+  await page.keyboard.press('Escape')
+  await expect(accessibleDialog).toBeHidden()
+  await expect(trigger).toBeFocused()
+})
+
 test('P5-C mobile comment dialog traps focus and restores its trigger', async ({ page }) => {
   await openHarness(page, 390, 844)
 

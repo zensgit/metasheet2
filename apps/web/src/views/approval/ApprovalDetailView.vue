@@ -699,6 +699,7 @@
       :width="MEMBER_ACTION_DIALOG_WIDTH"
       :data-testid="ACTION_DIALOG_TEST_ID"
       @keydown.tab="trapMemberActionDialogFocus"
+      @opened="focusActionComment"
     >
       <!-- B1-04: dialog-scoped failure message — the server's own reason, kept in place of a
            generic toast so the reader learns WHY without losing the dialog/typed comment. -->
@@ -730,6 +731,7 @@
             </el-tag>
           </div>
           <el-input
+            ref="actionCommentInputRef"
             v-model="actionComment"
             type="textarea"
             :rows="3"
@@ -1162,6 +1164,7 @@ const router = useRouter()
 const store = useApprovalStore()
 const templateStore = useApprovalTemplateStore()
 const { canAct } = useApprovalPermissions()
+const actionCommentInputRef = ref<{ focus: () => void } | null>(null)
 const MEMBER_ACTION_DIALOG_WIDTH = 'min(480px, calc(100vw - 32px))'
 const MEMBER_ACTION_FOCUSABLE_SELECTOR = [
   'a[href]',
@@ -1171,6 +1174,10 @@ const MEMBER_ACTION_FOCUSABLE_SELECTOR = [
   'textarea:not([disabled])',
   '[tabindex]:not([tabindex="-1"])',
 ].join(',')
+
+function focusActionComment(): void {
+  actionCommentInputRef.value?.focus()
+}
 
 // Element Plus 2.11.8 can release focus to <body> at the dialog's Tab boundary in Chromium.
 // Keep the member-action dialogs modal for keyboard users without changing their interior order.
