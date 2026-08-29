@@ -707,6 +707,203 @@ function testUnimplementedDuplicatePoliciesRemainHeldAsUnsupported() {
   }
 }
 
+// ── O1-B: identity for the ANONYMOUS hold families ──────────────────────────
+//
+// RED-witnessed guards (mutation table in the landing commit body):
+//   O1B-P1  every identity-capable anonymous family gets a derived identity,
+//           at the granularity its emitter actually supports
+//   O1B-P2  the identity is a pure function of the plan input (repeat-plan
+//           reproducibility, the property supersede/reopen leans on)
+//   O1B-P3  the reserved namespace is enforced at the planner too: an
+//           idempotencyKey may not impersonate a derived identity
+//   O1B-P4  a hold whose emitter attached nothing stable gets NO identity
+//           (honest deferral, never a hash of nothing)
+//   O1B-P5  keyed holds are untouched — no identity field appears on them
+
+const ANONYMOUS_IDENTITY_PREFIX = 'anon-hold:v1:'
+
+function anonymousPlanInput() {
+  // Every identity-capable family shape at once, plus both deferral shapes.
+  return {
+    expandedRows: [
+      row({ componentSourceId: 'PART-OK', pathTokens: ['PART-OK'] }),
+      // keyless expanded row WITH lineage -> `row` granularity
+      { projectNo: 'P-001', componentSourceId: 'PART-NOKEY', path: '["PART-NOKEY"]', depth: 0 },
+    ],
+    existingRows: [
+      // keyless existing row WITH lineage -> `row` granularity
+      { projectNo: 'P-001', componentSourceId: 'PART-OLD', parentSourceId: null, path: '["PART-OLD"]', depth: 0, active: true },
+      // keyless existing row with NO discriminator at all -> deferral
+      { active: true },
+    ],
+    rowErrors: [
+      // two errors on the SAME locus -> one identity, deliberately
+      { type: 'missing_component', field: 'OBJ_ID', depth: 2 },
+      { type: 'missing_component', field: 'OBJ_ID', depth: 2 },
+      // same type, different depth -> different locus
+      { type: 'missing_component', field: 'OBJ_ID', depth: 3 },
+      // depth 0 is a REAL discriminator, not a blank
+      { type: 'missing_order_id', field: 'OrderNo', depth: 0 },
+      { type: 'invalid_quantity', field: 'Qty', depth: 0, relation: 'root' },
+      { type: 'invalid_quantity', field: 'Qty', depth: 0, relation: 'child' },
+      // ext-mapping coercion refusal -> `cell` granularity
+      { type: 'SOURCE_VALUE_NOT_A_NUMBER', target: 'ext_weight', sourceColumn: 'WGT', expectedType: 'number', depth: 0 },
+      { type: 'SOURCE_VALUE_SECRET_SHAPED', target: 'ext_token', sourceColumn: 'TOK', expectedType: 'string', depth: 0 },
+      // the unvalidated umbrella fallback: no type, no context -> deferral
+      { message: 'only a message' },
+    ],
+    runId: 'run-o1b',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  }
+}
+
+function anonymousHolds(plan) {
+  return plan.decisions.filter((entry) => entry.decision === DECISIONS.MANUAL_CONFIRM && !entry.idempotencyKey)
+}
+
+function testO1bAnonymousFamiliesGetGranularityCorrectIdentities() {
+  const plan = planStockPreparationConflicts(anonymousPlanInput())
+  const holds = anonymousHolds(plan)
+  const identified = holds.filter((entry) => entry.derivedRowIdentity)
+  const deferred = holds.filter((entry) => !entry.derivedRowIdentity)
+
+  // O1B-P1: identity present exactly where the emitter carries stable context.
+  assert.equal(holds.length, 12, 'every keyless hold is an anonymous hold')
+  assert.equal(identified.length, 10)
+  assert.deepEqual(
+    deferred.map((entry) => entry.conflictSummary.type).sort(),
+    ['c2_row_error', 'missing_existing_idempotency_key'],
+    'O1B-P4: the contextless umbrella fallback and the discriminator-less row defer',
+  )
+
+  const identityByType = {}
+  for (const hold of identified) {
+    const type = hold.conflictSummary.type
+    identityByType[type] = identityByType[type] || new Set()
+    identityByType[type].add(hold.derivedRowIdentity)
+  }
+
+  // Granularity is encoded in the identity itself, so a reviewer can read it
+  // off a ledger row without re-deriving anything.
+  const granularityOf = (identity) => identity.slice(ANONYMOUS_IDENTITY_PREFIX.length).split(':')[0]
+  for (const hold of identified) {
+    assert.ok(hold.derivedRowIdentity.startsWith(ANONYMOUS_IDENTITY_PREFIX), 'identities are namespaced')
+    assert.match(hold.derivedRowIdentity, /:sha256:[0-9a-f]{32}$/, 'identities are HASHES, never plaintext context')
+  }
+  assert.equal(granularityOf([...identityByType.missing_expanded_idempotency_key][0]), 'row')
+  assert.equal(granularityOf([...identityByType.missing_existing_idempotency_key][0]), 'row')
+  assert.equal(granularityOf([...identityByType.missing_component][0]), 'locus')
+  assert.equal(granularityOf([...identityByType.missing_order_id][0]), 'locus')
+  assert.equal(granularityOf([...identityByType.SOURCE_VALUE_NOT_A_NUMBER][0]), 'cell')
+  assert.equal(granularityOf([...identityByType.SOURCE_VALUE_SECRET_SHAPED][0]), 'cell')
+
+  // Locus semantics, stated as an assertion: same (type, field, depth) folds to
+  // ONE identity; a different depth or relation is a DIFFERENT locus.
+  assert.equal(identityByType.missing_component.size, 2, 'depth separates loci; same depth folds')
+  assert.equal(identityByType.invalid_quantity.size, 2, 'relation separates loci')
+
+  // No collision across families, granularities or loci.
+  const all = identified.map((entry) => entry.derivedRowIdentity)
+  assert.equal(new Set(all).size, 9, 'exactly 9 distinct identities behind 10 identified holds')
+
+  // A source id that went INTO a hash must not come back OUT of the plan.
+  for (const identity of new Set(all)) {
+    for (const secret of ['PART-NOKEY', 'PART-OLD', 'OBJ_ID', 'ext_weight', 'WGT', 'P-001']) {
+      assert.equal(identity.includes(secret), false, `identity must not leak ${secret}`)
+    }
+  }
+}
+
+function testO1bIdentityIsReproducibleFromTheSameInput() {
+  // O1B-P2. Two independent planner runs over equal (not shared) input must
+  // produce identical identities — without this, every reconcile would
+  // supersede its own ledger rows and no confirmation could ever stick.
+  const first = planStockPreparationConflicts(clone(anonymousPlanInput()))
+  const second = planStockPreparationConflicts(clone(anonymousPlanInput()))
+  const identitiesOf = (plan) => anonymousHolds(plan).map((entry) => entry.derivedRowIdentity || null)
+  assert.deepEqual(identitiesOf(first), identitiesOf(second), 'identity must be a pure function of the input')
+
+  // Key order in the source object must not move the identity either.
+  const reordered = planStockPreparationConflicts({
+    expandedRows: [],
+    existingRows: [],
+    rowErrors: [{ depth: 2, type: 'missing_component', field: 'OBJ_ID' }],
+    runId: 'run-o1b',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+  const straight = planStockPreparationConflicts({
+    expandedRows: [],
+    existingRows: [],
+    rowErrors: [{ type: 'missing_component', field: 'OBJ_ID', depth: 2 }],
+    runId: 'run-o1b',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+  assert.equal(
+    anonymousHolds(reordered)[0].derivedRowIdentity,
+    anonymousHolds(straight)[0].derivedRowIdentity,
+    'stable stringification makes key order irrelevant',
+  )
+
+  // A canonical read that hands `depth` back as a string must NOT re-key the row.
+  const numericDepth = planStockPreparationConflicts({
+    expandedRows: [],
+    existingRows: [{ projectNo: 'P-001', componentSourceId: 'PART-OLD', depth: 2, active: true }],
+    runId: 'run-o1b',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+  const stringDepth = planStockPreparationConflicts({
+    expandedRows: [],
+    existingRows: [{ projectNo: 'P-001', componentSourceId: 'PART-OLD', depth: '2', active: true }],
+    runId: 'run-o1b',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+  assert.equal(
+    anonymousHolds(numericDepth)[0].derivedRowIdentity,
+    anonymousHolds(stringDepth)[0].derivedRowIdentity,
+    'scalar normalisation survives the records-API round trip',
+  )
+}
+
+function testO1bKeyedHoldsAndTheReservedNamespaceAreUntouched() {
+  // O1B-P5: a keyed hold carries no identity field at all — the decision object
+  // of every pre-O1-B class is unchanged, so no existing fingerprint moves.
+  const duplicate = row({ componentSourceId: 'PART-DUP', pathTokens: ['PART-DUP'] })
+  const plan = planStockPreparationConflicts({
+    expandedRows: [duplicate, { ...duplicate }],
+    existingRows: [],
+    runId: 'run-o1b',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+  const keyed = plan.decisions.filter((entry) => entry.decision === DECISIONS.MANUAL_CONFIRM && entry.idempotencyKey)
+  assert.equal(keyed.length, 1)
+  assert.equal(Object.prototype.hasOwnProperty.call(keyed[0], 'derivedRowIdentity'), false)
+
+  // O1B-P3: the reserved namespace is fenced at the planner, not only at the
+  // ledger. A HOLD whose idempotencyKey impersonates a derived identity is
+  // refused rather than keyed under somebody else's addressing scheme — this is
+  // the ledger-relevant surface, since only holds ever reach the ledger.
+  const forgedKey = `${ANONYMOUS_IDENTITY_PREFIX}row:sha256:${'0'.repeat(32)}`
+  const forged = row({ idempotencyKey: forgedKey })
+  assert.throws(
+    () => planStockPreparationConflicts({
+      expandedRows: [forged, { ...forged }],
+      existingRows: [],
+      rowErrors: [],
+      runId: 'run-o1b',
+      plannedAt: '2026-06-04T09:00:00.000Z',
+    }),
+    StockPreparationConflictPlannerError,
+    'a forged anonymous-namespace idempotencyKey must be refused',
+  )
+
+  // THE WALL IS UNTOUCHED: a hold never carries a record or a patch, so adding
+  // identity added no write capability anywhere.
+  for (const hold of plan.decisions.filter((entry) => entry.decision === DECISIONS.MANUAL_CONFIRM)) {
+    assert.equal(Object.prototype.hasOwnProperty.call(hold, 'record'), false)
+    assert.equal(Object.prototype.hasOwnProperty.call(hold, 'patch'), false)
+  }
+}
+
 function main() {
   testAddUpdateSkipInactive()
   testRowErrorsDoNotAbortGoodRows()
@@ -724,6 +921,9 @@ function main() {
   testKeepMultipleRowsWithoutStableDiscriminatorHolds()
   testSourceCorrectionRequiredHoldsWithExplicitReason()
   testUnimplementedDuplicatePoliciesRemainHeldAsUnsupported()
+  testO1bAnonymousFamiliesGetGranularityCorrectIdentities()
+  testO1bIdentityIsReproducibleFromTheSameInput()
+  testO1bKeyedHoldsAndTheReservedNamespaceAreUntouched()
 
   console.log('stock-preparation-conflict-planner.test.cjs OK')
 }

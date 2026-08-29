@@ -256,6 +256,25 @@ async function main() {
   })
   assert.deepEqual(adapterProjectionSystem.config.lookupProjection, lookupProjection,
     'private adapter load retains the persisted lookup projection exactly')
+
+  // --- 4b-i. R-wave (external review finding 3): the THIRD accessor. The B2a object-scope guard
+  // needs to see this private projection — a source configured with one reads a SECOND table — but
+  // it must land BEFORE any credential reload, so it may not use the decrypting accessor above.
+  const configOnlyProjection = await projectionRegistry.getExternalSystemAdapterConfig({
+    tenantId: 'tenant_1',
+    id: 'sys_lookup_projection',
+  })
+  assert.deepEqual(configOnlyProjection.config.lookupProjection, lookupProjection,
+    'the non-decrypting accessor sees the private projection the public one strips')
+  assert.equal(configOnlyProjection.kind, 'data-source:sql-readonly', 'and the kind the roster keys on')
+  assert.deepEqual(Object.keys(configOnlyProjection).sort(), ['config', 'id', 'kind'],
+    'and NOTHING else — no credentials, no ciphertext, no fingerprint, no status')
+  assert.equal('credentials' in configOnlyProjection, false, 'it never decrypts')
+  await assert.rejects(
+    () => projectionRegistry.getExternalSystemAdapterConfig({ tenantId: 'tenant_1', id: 'sys_missing' }),
+    /external system not found/,
+    'a missing system throws rather than resolving to an empty config a guard could read as "no lookup"',
+  )
   await projectionRegistry.upsertExternalSystem({
     tenantId: 'tenant_1',
     id: 'sys_lookup_projection',
