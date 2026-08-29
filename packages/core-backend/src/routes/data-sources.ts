@@ -63,6 +63,28 @@ const DataSourceCreateSchema = z.object({
     idleTimeout: z.number().optional(),
     acquireTimeout: z.number().optional()
   }).optional()
+}).superRefine((data, ctx) => {
+  // sqlserver: MSSQLAdapter.resolveServerAndPort() already requires connection.host OR
+  // connection.server and throws a clear error if both are absent — but only at connect() time.
+  // POST /api/data-sources never auto-connects (addDataSource always calls
+  // addDataSourceInternal(config, false), regardless of options.autoConnect), so a config missing
+  // both today persists successfully and only fails the first time something actually connects
+  // (next /select, /query, /test, or a server restart replaying persisted sources). Reject it here
+  // instead — this cannot reject any config that would otherwise have worked: it is EXACTLY the
+  // adapter's own requirement, just checked earlier.
+  if (data.type === 'sqlserver') {
+    const host = data.connection?.host
+    const server = data.connection?.server
+    const hasHost = typeof host === 'string' && host.trim().length > 0
+    const hasServer = typeof server === 'string' && server.trim().length > 0
+    if (!hasHost && !hasServer) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['connection', 'host'],
+        message: 'connection.host (or connection.server) is required for a sqlserver data source'
+      })
+    }
+  }
 })
 
 const DataSourceUpdateSchema = z.object({
