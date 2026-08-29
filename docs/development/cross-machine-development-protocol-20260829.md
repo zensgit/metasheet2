@@ -10,7 +10,7 @@
 |---|---|---|---|
 | 备料接管 / integration | `plugins/plugin-integration-core/`、`docs/development/takeover-beiliao-*/`、`docs/development/platform-overall-design/`、stock-prep 相关 `packages/core-backend` 迁移 | A 机 | 活跃(章程唯一优先级) |
 | timemachine / multitable recovery | `packages/core-backend/src/multitable/` 恢复面、`scripts/ops/multitable-recovery-*`、相关 workflow | B 机 | 活跃 |
-| 云课堂 elearning | `plugins/plugin-elearning/`、elearning 迁移与 FE | B 机 | **owner 已裁搁置(2026-08-27"先不管 elearning"),本文即该指令的跨机送达。DRAFT 可保留,不再新增产出,不合并,直至 owner 明示解除** |
+| 云课堂 elearning | `plugins/plugin-elearning/`、elearning 迁移与 FE | B 机 | **活跃(owner 于 2026-08-29 明示解除搁置):按已 ratify 的 design-lock 分阶段开发;PR 默认 DRAFT/HOLD、能力默认 OFF;未经 owner 明确授权不得 Ready、合并、启用 flag 或部署** |
 | 考勤 / 审批 | 各自既有路径 | 按 PR 实际发起机 | 活跃 |
 
 跨车道改动(动了别机车道的文件)→ PR 描述里显式标注 `cross-lane`,并等对方车道复核。
@@ -24,8 +24,8 @@
 5. **部署身份入库**:任何机向 222(或其他共享目标)部署,快照必须推 tag(`deploy-rN-YYYYMMDD`),ZIP/TGZ SHA-256 记入 PR 或部署评论;未推 tag 的部署身份视为不可复原。
 6. **owner 指令入库**:优先级变更、线的搁置/解除,以本文(或 decision-register)的提交为准;单机通道(聊天/Downloads)收到的指令,由收到方**当日**落成本文的 PR 送达另一机。
 
-## 3. 当前生效的搁置令(owner,随本文送达)
+## 3. 当前生效的 owner 状态指令(随本文送达)
 
-- **elearning 全线搁置**:#5150 与 #5152–#5154、#5211–#5223 等 DRAFT 保留不动,不新增、不合并;解除需 owner 明示(建议同时裁 §设计锁的 unpark 条件)。
+- **elearning 全线搁置已解除(2026-08-29 owner 明示)**:按已 ratify 的 design-lock 分阶段实现 L0–L6;现有 PR 继续遵守 DRAFT/HOLD 与 default-OFF 边界,每个切片独立测试和审阅;未经 owner 明确授权不得 Ready、合并、启用 flag 或部署。
 - **完整 HG-0 平台工程 NO-GO**(双方复核一致);B2a 窄闭环(PR-A/B/C/D 四支)按序合入中。
 - `/stock-prep` MVP 工作台的采纳/退役/parked 三选一仍待 owner。
