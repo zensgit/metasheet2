@@ -338,9 +338,9 @@ describe('e-learning credit adjustment PostgreSQL authority', () => {
     await firstPool.query(`
       CREATE OR REPLACE FUNCTION elearning_credit_reject_immutable_write()
       RETURNS trigger AS $$
-      BEGIN
-        RAISE EXCEPTION 'ELEARNING_CREDIT_IMMUTABLE';
-      END;
+    BEGIN
+      RAISE EXCEPTION 'ELEARNING_CREDIT_IMMUTABLE';
+    END;
       $$ LANGUAGE plpgsql
     `)
     await migrate(creditAdjustmentUp)
