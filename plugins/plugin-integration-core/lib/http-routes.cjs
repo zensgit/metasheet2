@@ -2816,6 +2816,13 @@ function createHandlers(services, options = {}) {
   // Nothing about it is request-influenced: it is read once off server config and threaded, exactly
   // like `stockPreparationExtFieldMapping`.
   const b2aTrialRegistry = createB2aRegistry({ config: context && context.config })
+  // Migration 078: the DB-enforced one-shot operation claim, built in index.cjs off the same `db`
+  // handle the other stores use. Optional at REGISTRATION for the same reason the audit store and
+  // the PR-A reconcile lease are — an environment without the SQL db must still be able to register
+  // routes — but NOT optional at CHECK time: `assertB2aReadAuthorization` refuses an armed read that
+  // reaches it without one (`operation_claim_unavailable`) rather than degrading to the kv-only
+  // read-then-write path. A DORMANT deployment never gets that far, so its behaviour is unchanged.
+  const b2aOperationClaim = (services && services.b2aOperationClaim) || null
 
   function getMultitableRecordsApi() {
     const records = context && context.api && context.api.multitable && context.api.multitable.records
@@ -3076,6 +3083,7 @@ function createHandlers(services, options = {}) {
     return assertB2aReadAuthorization({
       registry: b2aTrialRegistry,
       store: context.storage,
+      operationClaim: b2aOperationClaim,
       // The PIPELINE ROW's own tenant, not a request carrier: `resolveTenantId` honours a
       // body/query tenant for a tenantless platform admin, and the tenant this read is authorized
       // against must be the one that owns the record.
@@ -3172,6 +3180,7 @@ function createHandlers(services, options = {}) {
     return assertB2aReadAuthorization({
       registry: b2aTrialRegistry,
       store: context.storage,
+      operationClaim: b2aOperationClaim,
       tenantScope,
       sourceSystemType: action.source.kind,
       sourceBindingRef: action.source.externalSystemId,
@@ -4299,6 +4308,7 @@ function createHandlers(services, options = {}) {
         // could disagree.
         b2aTrialRegistry,
         b2aClaimStore: context.storage,
+        b2aOperationClaim,
         b2aRunId: dryRunB2aRunId,
         tenantId: dryRunTenantId,
         now: Date.now(),
@@ -4414,6 +4424,7 @@ function createHandlers(services, options = {}) {
         // already scoped the adapter load with — never a query/body carrier.
         b2aTrialRegistry,
         b2aClaimStore: context.storage,
+        b2aOperationClaim,
         b2aRunId: mvpPersistB2aRunId,
         tenantId,
         now: Date.now(),
@@ -4498,6 +4509,7 @@ function createHandlers(services, options = {}) {
         // right — it does not inherit the dry-run's authorization through the token.
         b2aTrialRegistry,
         b2aClaimStore: context.storage,
+        b2aOperationClaim,
         b2aRunId: applyB2aRunId,
         tenantId: applyTenantId,
         now: Date.now(),
@@ -4561,6 +4573,7 @@ function createHandlers(services, options = {}) {
       const largeBomB2aAuthorization = await assertB2aReadAuthorization({
         registry: b2aTrialRegistry,
         store: context.storage,
+        operationClaim: b2aOperationClaim,
         tenantScope: routeScope.tenantId,
         sourceSystemType: action.source.kind,
         sourceBindingRef: action.source.externalSystemId,
@@ -6147,6 +6160,7 @@ function createHandlers(services, options = {}) {
       await assertB2aReadAuthorization({
         registry: b2aTrialRegistry,
         store: context.storage,
+        operationClaim: b2aOperationClaim,
         tenantScope: sealedSnapshotTenantId,
         // Pinned by the sealed-snapshot authority module, which refuses any other kind.
         sourceSystemType: 'data-source:sql-readonly',

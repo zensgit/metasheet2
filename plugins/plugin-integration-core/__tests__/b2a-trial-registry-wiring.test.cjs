@@ -12,7 +12,10 @@
 // everyone remembering to be careful. Every assertion below would have been red then — most of them
 // vacuously, because there was nothing to call.
 //
-// Case ids follow the acceptance matrix: R-01, R-02, R-05, R-06, R-07, E3-01..E3-05. NOT covered and
+// Case ids follow the acceptance matrix: R-01, R-02, R-05, R-06, R-07, E3-01..E3-05, plus M78 (the
+// migration-078 wiring: armed + no database => refuse fail-closed at every entry point, dormant +
+// no database => untouched, and the AUTHORITY for a spent operation is the SQL row rather than the
+// kv record, which is now only a projection of it). NOT covered and
 // NOT claimed here: R-08 (expiry disposition of value-bearing artifacts), and the ROW-LEVEL half of
 // E3-05 (a data generation that moves mid-read), which no source on this path can report — see the
 // note above `E3_05_aMidReadSourceChangeRefuses`.
@@ -49,6 +52,8 @@ const {
   B2A_AUTHORIZED_RUN_ID,
   B2A_AUTHORIZATION_INVALID,
   readPlanSourceObjects,
+  createB2aOperationClaim,
+  B2A_OPERATION_CLAIM_TABLE,
   assertB2aReadAuthorization,
   createB2aRegistry,
 } = require(path.join(LIB, 'b2a-trial-registry.cjs'))
@@ -353,7 +358,43 @@ function actionConfig(overrides = {}) {
   }
 }
 
-function mount({ registrations, raw, records, source, targetKind, pipelineProjectId, includeGetDeadLetter = true, action, storage, extraServices } = {}) {
+// Migration 078's substrate, in-model: a fake of the SCOPED SQL helper whose insertOne enforces the
+// PRIMARY KEY on claim_key the way Postgres does (same shape as the unit suite's, and as the PR-A
+// lease fake in stock-preparation-confirmation-decisions.test.cjs).
+function makeFakeClaimDb() {
+  const rows = new Map()
+  return {
+    rows,
+    async insertOne(table, row) {
+      assert.equal(table, B2A_OPERATION_CLAIM_TABLE, `the claim must only touch ${B2A_OPERATION_CLAIM_TABLE}, saw ${table}`)
+      if (rows.has(row.claim_key)) {
+        const error = new Error('duplicate key value violates unique constraint')
+        error.code = '23505'
+        throw error
+      }
+      rows.set(row.claim_key, { ...row })
+      return [{ ...row }]
+    },
+    async selectOne(table, where) {
+      assert.equal(table, B2A_OPERATION_CLAIM_TABLE, `the claim must only touch ${B2A_OPERATION_CLAIM_TABLE}, saw ${table}`)
+      const row = rows.get(where.claim_key)
+      return row ? { ...row } : null
+    },
+  }
+}
+
+// The claim table's lifetime tracks the kv storage's, so a mount that carries storage forward keeps
+// the claims it already made and a fresh mount starts clean — the substrate split in two, not the
+// test semantics. `operationClaim: null` mounts a deployment whose db is unreachable.
+const CLAIM_BY_STORAGE = new WeakMap()
+function claimForStorage(storage) {
+  if (!CLAIM_BY_STORAGE.has(storage)) {
+    CLAIM_BY_STORAGE.set(storage, createB2aOperationClaim({ db: makeFakeClaimDb() }))
+  }
+  return CLAIM_BY_STORAGE.get(storage)
+}
+
+function mount({ registrations, raw, records, source, targetKind, pipelineProjectId, includeGetDeadLetter = true, action, storage, operationClaim, extraServices } = {}) {
   const routes = new Map()
   const spies = createSpies()
   const config = {
@@ -375,21 +416,29 @@ function mount({ registrations, raw, records, source, targetKind, pipelineProjec
         records: records ? records.api : createRecordsApi().api,
       },
     },
-    // `durable: true` is what the large-BOM job store demands; it is also the claim store the B2a
-    // operation limit is recorded in.
+    // `durable: true` is what the large-BOM job store demands; it is also where the values-free
+    // PROJECTION of the B2a operation claim is recorded. Since migration 078 the AUTHORITY for the
+    // one-operation limit is the SQL row, not this map.
     storage: storage || Object.assign(new Map(), { durable: true }),
     config,
   }
   httpRoutes.registerIntegrationRoutes({
     context,
-    services: baseServices({
-      sourceAdapter: (source || createRecordingSourceAdapter()).adapter,
-      spies,
-      targetKind,
-      pipelineProjectId,
-      includeGetDeadLetter,
-      extraServices,
-    }),
+    services: {
+      ...baseServices({
+        sourceAdapter: (source || createRecordingSourceAdapter()).adapter,
+        spies,
+        targetKind,
+        pipelineProjectId,
+        includeGetDeadLetter,
+        // W-2: opt-in extra services (audit store, reconcile lease) for the routes that need them.
+        extraServices,
+      }),
+      // W-3 / migration 078. `operationClaim: null` is an ARMED deployment whose database is
+      // unreachable. Applied AFTER the baseServices spread so the mount-level parameter stays the
+      // authority on the claim, exactly as the W-3 suite's M78 cases require.
+      b2aOperationClaim: operationClaim === null ? null : (operationClaim || claimForStorage(context.storage)),
+    },
     logger: { info() {}, warn() {}, error() {} },
   })
   return { routes, context, spies }
@@ -564,6 +613,104 @@ async function armedWithAMatchingRegistrationPasses() {
   assertB2aRefusal(applied, 'B2A_AUTHORIZATION_INVALID', 'operation_already_consumed',
     'a second Run on a spent registration')
   assert.equal(source.reads.length, readsAfterDryRun, 'the refused second Run read ZERO additional rows')
+}
+
+// ── Migration 078: the claim is DB-enforced, threaded, and fail-closed ──────
+//
+// Three legs, because the interesting property is what happens at each of the three states a
+// deployment can be in, not just the happy one.
+
+async function M78_armedWithoutTheDbEnforcedClaimRefusesFailClosed() {
+  // ARMED, database unreachable (`operationClaim: null`). Every gated entry point refuses with the
+  // fixed code, and — the part that matters — NOT ONE of them falls back to the kv-only
+  // read-then-write path that migration 078 exists to replace.
+  const source = createRecordingSourceAdapter()
+  const { routes, spies } = mount({ registrations: [registration()], source, operationClaim: null })
+
+  const dry = await routeDryRun(routes)
+  assertB2aRefusal(dry, B2A_AUTHORIZATION_INVALID, 'operation_claim_unavailable',
+    'M78 armed + no claim: the stock-preparation dry-run')
+  assert.equal(source.reads.length, 0, 'M78: the refused read touched ZERO source rows')
+  assert.deepEqual(spies.credentialLoads, [], 'M78: and reloaded ZERO credentials')
+
+  const c6 = await call(routes, 'POST', C6_DRY_RUN_ROUTE, { user: WRITE_USER, params: { id: PIPELINE_ID }, body: {} })
+  assertB2aRefusal(c6, B2A_AUTHORIZATION_INVALID, 'operation_claim_unavailable', 'M78 armed + no claim: the C6 dry-run')
+
+  const ran = await call(routes, 'POST', PIPELINE_RUN_ROUTE, { user: WRITE_USER, params: { id: PIPELINE_ID }, body: {} })
+  assertB2aRefusal(ran, B2A_AUTHORIZATION_INVALID, 'operation_claim_unavailable', 'M78 armed + no claim: the pipeline runner')
+  assert.deepEqual(spies.pipelineRuns, [], 'M78: the refused run started no pipeline')
+
+  const sealed = await call(routes, 'POST', SEALED_SNAPSHOT_ROUTE, { user: ADMIN_USER, body: { operationId: 'op-1' } })
+  assertB2aRefusal(sealed, B2A_AUTHORIZATION_INVALID, 'operation_claim_unavailable', 'M78 armed + no claim: the sealed-snapshot session')
+  assert.deepEqual(spies.sealedSnapshotRuns, [], 'M78: the refused session opened nothing')
+
+  assert.deepEqual(spies.credentialLoads, [], 'M78: across all four entry points, ZERO credential reloads')
+}
+
+async function M78_dormantNeedsNoClaimAtAll() {
+  // DORMANT + no claim service: byte-identical to a deployment that never heard of B2a. The claim is
+  // not merely unused — the guard returns before it is even looked at, which is why an unarmed
+  // deployment cannot be broken by a database that is down.
+  const source = createRecordingSourceAdapter()
+  const records = createRecordsApi()
+  const { routes, spies } = mount({ records, source, operationClaim: null })
+
+  const res = await routeDryRun(routes)
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+  assert.equal(res.body.data.status, 'ready')
+  assert.ok(source.reads.length > 0, 'a dormant deployment reads its source exactly as before')
+  assert.equal('b2aTrialRegistration' in res.body.data.evidence, false, 'a dormant deployment stamps no B2a stanza')
+
+  const ran = await call(routes, 'POST', PIPELINE_RUN_ROUTE, { user: WRITE_USER, params: { id: PIPELINE_ID }, body: {} })
+  assert.equal(ran.statusCode, 202, JSON.stringify(ran.body))
+  assert.deepEqual(spies.pipelineRuns, [PIPELINE_ID], 'a dormant deployment runs the pipeline as before')
+
+  const sealed = await call(routes, 'POST', SEALED_SNAPSHOT_ROUTE, { user: ADMIN_USER, body: { operationId: 'op-1' } })
+  assert.equal(sealed.statusCode, 200, JSON.stringify(sealed.body))
+  assert.deepEqual(spies.sealedSnapshotRuns, ['op-1'])
+}
+
+async function M78_theAuthorityIsTheSqlRowAndTheKvRecordIsAProjection() {
+  // ARMED and wired. One armed dry-run must leave exactly ONE claim row in the DATABASE, and the
+  // kv record under the same key must be a values-free projection of it — same key, no more
+  // authority. Wiping the projection must NOT resurrect a spent operation.
+  const claimDb = makeFakeClaimDb()
+  const source = createRecordingSourceAdapter()
+  const { routes, context } = mount({
+    registrations: [registration()],
+    source,
+    operationClaim: createB2aOperationClaim({ db: claimDb }),
+  })
+
+  const res = await routeDryRun(routes)
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+  assert.equal(claimDb.rows.size, 1, 'the armed read left exactly ONE claim row in the database')
+  const [row] = [...claimDb.rows.values()]
+  assert.equal(row.registration_id, 'b2a-factory-a-plm')
+  assert.equal(row.registration_version, 1)
+  assert.ok(typeof row.run_id === 'string' && row.run_id.length > 0, 'the row names the Run that holds it')
+  assert.ok(!Number.isNaN(Date.parse(row.claimed_at)), 'claimed_at is a real timestamp')
+  const rowText = JSON.stringify(row)
+  for (const forbidden of FORBIDDEN_IN_RESPONSE) {
+    assert.equal(rowText.includes(forbidden), false, `the claim row leaked ${JSON.stringify(forbidden)}`)
+  }
+
+  const kvClaimKeys = [...context.storage.keys()].filter((key) => key.startsWith('integration:b2a:operation-claim:'))
+  assert.deepEqual(kvClaimKeys, [row.claim_key], 'the kv projection is keyed identically to the SQL row')
+
+  // THE PROJECTION IS NOT THE AUTHORITY. Delete it and try a NEW Run: the SQL row still refuses.
+  // Before migration 078 this deletion would have handed the caller a fresh, unlimited read.
+  for (const key of kvClaimKeys) context.storage.delete(key)
+  const readsSoFar = source.reads.length
+  const applied = await call(routes, 'POST', APPLY_ROUTE, {
+    user: ADMIN_USER,
+    params: ACTION_PARAMS,
+    body: { parameters: { projectNo: PROJECT_NO }, confirm: { dryRunToken: res.body.data.dryRunToken } },
+  })
+  assertB2aRefusal(applied, B2A_AUTHORIZATION_INVALID, 'operation_already_consumed',
+    'M78 a wiped kv projection does not resurrect a spent operation')
+  assert.equal(source.reads.length, readsSoFar, 'the refused Run read ZERO additional rows')
+  assert.equal(claimDb.rows.size, 1, 'and wrote no second claim row')
 }
 
 // ── R-01 / R-02: refusals, each with zero external work ─────────────────────
@@ -1492,6 +1639,10 @@ function createRunnerHarness({ registrations, storage, pipelineOverrides } = {})
     },
     b2aTrialRegistry,
     b2aClaimStore: claimStore,
+    // MERGE-TRAIN (W-3 x W-2). The runner's fence needs migration 078's DB-enforced claim exactly as
+    // the routes do — `claimForStorage` keys it off the SAME store, so a route and a runner sharing
+    // one claim store share one claim table, which is what the shared-run cases below assert.
+    b2aOperationClaim: claimForStorage(claimStore),
   })
   return { runner, spies, source, claimStore, targetWrites, b2aTrialRegistry }
 }
@@ -1531,6 +1682,13 @@ function reconcileServices() {
     stockPreparationAuditStore: { async append() { return { ok: true } } },
     stockPreparationConfirmationDecisionLease: {
       async acquire() { return { held: true, leaseId: 'lease-1' } },
+      // MERGE-TRAIN (W-4 x W-2). W-4 made `renew` a REQUIRED method on the reconcile-lease
+      // contract — a lease without it is refused fail-closed with
+      // CONFIRMATION_DECISION_RECONCILE_LEASE_UNAVAILABLE. This double was written against the
+      // pre-W-4 contract, so without this leg the reconcile route stops at the lease check instead
+      // of the field-id resolution the case below pins. Production is unaffected: the real
+      // `createConfirmationDecisionReconcileLease` grew `renew` in the same change.
+      async renew() { return { held: true } },
       async release() { return { released: true } },
     },
   }
@@ -1698,6 +1856,11 @@ async function W2_theRouteAndTheRunnerShareOneOperationClaim() {
   const routeStanza = await assertB2aReadAuthorization({
     registry: harness.b2aTrialRegistry,
     store: harness.claimStore,
+    // MERGE-TRAIN (W-3 x W-2). The route half must present migration 078's claim, and it must be the
+    // SAME one the runner harness holds — `claimForStorage` keys it off the shared claim store. That
+    // is what makes the runner's continue leg run through the SQL claim's same-run continuation
+    // (`holderRunId === routeRunId` -> continue) rather than any kv-only path.
+    operationClaim: claimForStorage(harness.claimStore),
     tenantScope: TENANT_ID,
     sourceSystemType: SYSTEM_KIND,
     sourceBindingRef: SOURCE_SYSTEM_ID,
@@ -1733,6 +1896,8 @@ async function W2_theRouteAndTheRunnerShareOneOperationClaim() {
   await assertB2aReadAuthorization({
     registry: replayHarness.b2aTrialRegistry,
     store: replayHarness.claimStore,
+    // MERGE-TRAIN (W-3 x W-2), replay door: same shared claim, same reason as above.
+    operationClaim: claimForStorage(replayHarness.claimStore),
     tenantScope: TENANT_ID,
     sourceSystemType: SYSTEM_KIND,
     sourceBindingRef: SOURCE_SYSTEM_ID,
@@ -1861,14 +2026,48 @@ function activationContext(registrations) {
     updated_at: '2026-05-07T00:00:00.000Z',
   }
   const namespaces = new Map()
+  // MERGE-TRAIN (W-3 x W-2). Migration 078 moved the AUTHORITY for "who holds this operation" out of
+  // the kv store and into `integration_b2a_operation_claim`. This activation drives the REAL
+  // index.cjs, so its claim goes through the real `createDb` helper and lands here — and the
+  // precondition this case needs ("another run already holds the operation") therefore has to be a
+  // ROW, not a kv record. The fake below models exactly the two statements the claim issues, with
+  // the PRIMARY KEY on claim_key enforced the way Postgres enforces it.
+  const claimRows = new Map()
+  function claimKeyParam(sql, params) {
+    // `insertOne` emits INSERT INTO … ("claim_key", …) VALUES ($1, …); `selectOne` emits
+    // SELECT * FROM … WHERE "claim_key" = $1 …. Either way the column order is the parameter order.
+    const cols = String(sql).match(/"([a-z_]+)"/g) || []
+    const idx = cols.indexOf('"claim_key"')
+    // The first quoted identifier is the table name, so column positions are offset by one.
+    return idx > 0 ? params[idx - 1] : params[0]
+  }
   const context = {
     api: {
       http: { addRoute() {} },
       database: {
-        async query(sql) {
-          if (String(sql).includes('"integration_pipelines"')) return [pipelineRow]
-          if (String(sql).includes('"integration_external_systems"')) return [systemRow]
-          if (String(sql).includes('"integration_dead_letters"')) return [deadLetterRow]
+        async query(sql, params = []) {
+          const text = String(sql)
+          if (text.includes('"integration_b2a_operation_claim"')) {
+            const key = claimKeyParam(text, params)
+            if (text.startsWith('INSERT')) {
+              if (claimRows.has(key)) {
+                const error = new Error('duplicate key value violates unique constraint')
+                error.code = '23505'
+                throw error
+              }
+              const cols = (text.match(/\(([^)]*)\)\s+VALUES/) || [, ''])[1]
+                .split(',').map((c) => c.trim().replace(/"/g, ''))
+              const row = {}
+              cols.forEach((c, i) => { row[c] = params[i] })
+              claimRows.set(key, row)
+              return [{ ...row }]
+            }
+            const row = claimRows.get(key)
+            return row ? [{ ...row }] : []
+          }
+          if (text.includes('"integration_pipelines"')) return [pipelineRow]
+          if (text.includes('"integration_external_systems"')) return [systemRow]
+          if (text.includes('"integration_dead_letters"')) return [deadLetterRow]
           return []
         },
       },
@@ -1885,7 +2084,24 @@ function activationContext(registrations) {
     storage: Object.assign(new Map(), { durable: true }),
     config: { [B2A_REGISTRY_CONFIG_KEY]: registry(registrations) },
   }
-  return { context, namespaces }
+  // The claim seen through the same substrate index.cjs will use, so a claim taken by the "other
+  // request" below is the very row the activated runner reads back.
+  const operationClaim = createB2aOperationClaim({
+    db: {
+      async insertOne(table, row) {
+        const cols = Object.keys(row)
+        const sql = `INSERT INTO "${table}" (${cols.map((c) => `"${c}"`).join(', ')}) VALUES (${cols.map((_, i) => `$${i + 1}`).join(', ')}) RETURNING *`
+        return context.api.database.query(sql, cols.map((c) => row[c]))
+      },
+      async selectOne(table, where) {
+        const keys = Object.keys(where)
+        const sql = `SELECT * FROM "${table}" WHERE ${keys.map((k, i) => `"${k}" = $${i + 1}`).join(' AND ')} LIMIT 1`
+        const rows = await context.api.database.query(sql, keys.map((k) => where[k]))
+        return rows[0] || null
+      },
+    },
+  })
+  return { context, namespaces, operationClaim }
 }
 
 async function W2_activationWiresTheFenceIntoTheCrossPluginApi() {
@@ -1927,6 +2143,11 @@ async function W2_activationWiresTheFenceIntoTheCrossPluginApi() {
     await assertB2aReadAuthorization({
       registry: createB2aRegistry({ config: armed.context.config }),
       store: armed.context.storage,
+      // MERGE-TRAIN (W-3 x W-2). Post-078 the operation is held by a ROW, so the "another request
+      // already holds it" precondition has to be taken against the same database the activated
+      // runner will read — otherwise the runner would find no row, claim freely, and the case would
+      // pass for the wrong reason.
+      operationClaim: armed.operationClaim,
       tenantScope: TENANT_ID,
       sourceSystemType: SYSTEM_KIND,
       sourceBindingRef: SOURCE_SYSTEM_ID,
@@ -1964,6 +2185,9 @@ const TESTS = [
   unsetEnvIsDormantAndByteIdentical,
   unsetEnvLeavesTheOtherEntryPointsUntouched,
   armedWithAMatchingRegistrationPasses,
+  M78_armedWithoutTheDbEnforcedClaimRefusesFailClosed,
+  M78_dormantNeedsNoClaimAtAll,
+  M78_theAuthorityIsTheSqlRowAndTheKvRecordIsAProjection,
   R01_lifecycleRefusalsThroughTheRoute,
   R02_scopeRefusalsThroughTheRoute,
   R07_entry1_largeBomExpansion,

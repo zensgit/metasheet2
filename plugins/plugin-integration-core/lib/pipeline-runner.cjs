@@ -7,6 +7,19 @@ const { validateRecord } = require('./validator.cjs')
 const { computeRecordIdempotencyKey } = require('./idempotency.cjs')
 const { deriveNextWatermark, normalizeWatermarkConfig } = require('./watermark.cjs')
 const { sanitizeIntegrationPayload } = require('./payload-redaction.cjs')
+// W-1(c) LAYER 2 of TWO. Independent of the adapter's own gate: a caller that reaches this runner
+// with a generic-http target is refused at TARGET RESOLUTION — before credentials are reloaded,
+// before either adapter is constructed, before the first source read. The DEEP layer (the adapter
+// itself) is the one that must hold alone; this one exists so a refused run costs no source read
+// and leaves no half-run behind. NOTE the honest bound stated in the gate module: this layer keys
+// on the connector KIND roster, so a future kind wired to the generic HTTP adapter factory outruns
+// THIS layer and is caught by the adapter layer.
+const {
+  OUTBOUND_HTTP_WRITE_OPERATION_UPSERT,
+  assertOutboundHttpWriteAuthorized,
+  evaluateOutboundHttpWrite,
+  isGenericHttpWriteKind,
+} = require('./outbound-http-write-gate.cjs')
 const {
   B2A_AUTHORIZED_RUN_ID,
   B2A_PURPOSE_PIPELINE_RUNNER_READ,
@@ -306,6 +319,18 @@ function createPipelineRunner(deps = {}) {
   // the one-time operation claim is a record in that store, and two stores would mean two claims.
   const b2aTrialRegistry = deps.b2aTrialRegistry || null
   const b2aClaimStore = deps.b2aClaimStore || null
+  // MERGE-TRAIN (W-3 x W-2). Migration 078 made the DB-enforced one-shot claim MANDATORY for every
+  // armed read: `assertB2aReadAuthorization` refuses with `operation_claim_unavailable` rather than
+  // degrading to the kv-only read-then-write path it replaced. W-2 sank the fence into this runner
+  // and W-3 added that requirement on separate branches, so neither wired this dependency here.
+  // Without it every ARMED run — including the legitimate HTTP-initiated one the route already
+  // authorized — would be refused at this layer. index.cjs hands over the SAME claim the routes
+  // use, for the same reason `b2aClaimStore` must be the same store: one operation, one claim.
+  //
+  // DORMANT IS UNCHANGED. `b2aTrialRegistry === null` returns from the fence before this value is
+  // ever read, so a runner constructed without any of the three is byte-identical to the one that
+  // shipped before either fence existed.
+  const b2aOperationClaim = deps.b2aOperationClaim || null
 
   async function loadExternalSystemForAdapter(input) {
     if (typeof externalSystemRegistry.getExternalSystemForAdapter === 'function') {
@@ -352,6 +377,25 @@ function createPipelineRunner(deps = {}) {
         code: 'K3_WISE_PIPELINE_RUN_DISABLED',
         pipelineId: pipeline.id,
       })
+    }
+    // W-1(c), owner ruling 20260829: generic outbound HTTP write is default-deny. Same seam and the
+    // same `dryRun !== true` shape as the K3 guard directly above, for the same reason — a dry run
+    // performs NO write, so refusing it would break a read-only preview (the E4-05 failure mode).
+    // What a dry run gets instead is an honest `canApply: false` stanza, attached in `runPipeline`.
+    //
+    // This is NOT the K3 ban. It is an authorization gate: a deployment that names this target in
+    // INTEGRATION_CORE_OUTBOUND_HTTP_WRITE_TARGETS passes here and writes normally.
+    if (isGenericHttpWriteKind(targetSystem.kind) && input.dryRun !== true) {
+      assertOutboundHttpWriteAuthorized(
+        (status, code, message, details) => new PipelineRunnerError(message, { ...details, code, status }),
+        {
+          systemId: targetSystem.id,
+          systemName: targetSystem.name,
+          kind: targetSystem.kind,
+          object: pipeline.targetObject,
+          operation: OUTBOUND_HTTP_WRITE_OPERATION_UPSERT,
+        },
+      )
     }
     return {
       tenantId,
@@ -429,6 +473,10 @@ function createPipelineRunner(deps = {}) {
     return assertB2aReadAuthorization({
       registry: b2aTrialRegistry,
       store: b2aClaimStore,
+      // Migration 078 (W-3): REQUIRED when armed, never defaulted. The marker's continue leg runs
+      // through this claim's same-run continuation (`holderRunId === runId` -> continue), which is
+      // what keeps the route and the runner on ONE operation instead of two.
+      operationClaim: b2aOperationClaim,
       // The PIPELINE ROW's own tenant, not the caller's carrier — the tenant this read is authorized
       // against must be the one that owns the record.
       tenantScope: trimmedString(pipeline.tenantId) || trimmedString(tenantId),
@@ -633,6 +681,25 @@ function createPipelineRunner(deps = {}) {
     const started = clock()
     const metrics = createMetrics()
     const preview = dryRun ? { records: [], errors: [] } : null
+    // W-1(c): a dry run against a generic-http target must not read like a plan that can be applied.
+    // The read/transform legs keep working exactly as before (that is the whole point — a blanket
+    // deny that killed the preview would be the E4-05 FAIL, not a pass); what changes is that the
+    // preview now CARRIES the apply verdict. `evaluate…` never throws, so a malformed allowlist file
+    // degrades this stanza into an honest refusal instead of taking the read leg down.
+    if (preview && isGenericHttpWriteKind(context.targetSystem.kind)) {
+      const decision = evaluateOutboundHttpWrite({
+        systemId: context.targetSystem.id,
+        systemName: context.targetSystem.name,
+        kind: context.targetSystem.kind,
+        object: context.pipeline.targetObject,
+        operation: OUTBOUND_HTTP_WRITE_OPERATION_UPSERT,
+      })
+      preview.outboundHttpWrite = {
+        canApply: decision.canApply,
+        refusalCode: decision.code,
+        reason: decision.reason,
+      }
+    }
 
     // Best-effort: recover any runs left stuck in 'running' by a previous crash.
     // Wrapped in try-catch so a transient DB failure here never blocks the main run.
