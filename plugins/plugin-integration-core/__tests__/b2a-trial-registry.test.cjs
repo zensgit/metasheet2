@@ -10,11 +10,19 @@
 // the verification record maps 1:1. R-08 (expiry disposition of value-bearing artifacts) is NOT
 // covered here and is NOT claimed — see the gap list in the change description.
 //
-// Hermetic: no DB, no network, no filesystem, no wall clock (every check is handed an explicit
-// `now`, and the claim store is an in-memory Map). Values-free: the only literals are synthetic ids,
-// frozen reason tokens and ISO timestamps this file authors itself.
+// Hermetic: no DB, no network, no wall clock (every check is handed an explicit `now`, the kv
+// projection is an in-memory Map, and the DB-enforced operation claim of migration 078 runs against
+// a fake of the SCOPED SQL helper whose insertOne enforces the PRIMARY KEY the way Postgres does).
+// The one filesystem read is M78, which asserts the migration text itself. Values-free: the only
+// literals are synthetic ids, frozen reason tokens and ISO timestamps this file authors itself.
+//
+// Additional cases landed with migration 078:
+//   R-03b two CONCURRENT claimers of one operation -> exactly one wins, the loser gets the fixed
+//         refusal code and never reaches a source read; same-Run repagination still continues
+//   M78   migration 078 defines the DB-level claim uniqueness the module leans on
 
 const assert = require('node:assert/strict')
+const fs = require('node:fs')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -59,9 +67,17 @@ const {
   mapB2aSourceReadError,
   runB2aGuardedSourceRead,
   createB2aRegistry,
+  createB2aOperationClaim,
+  B2A_OPERATION_CLAIM_TABLE,
   readPlanSourceObjects,
   resolveB2aRegistryConfig,
 } = require(path.join(LIB, 'b2a-trial-registry.cjs'))
+
+const MODULE_PATH = path.join(LIB, 'b2a-trial-registry.cjs')
+const MIGRATION_078_PATH = path.join(
+  __dirname, '..', '..', '..', 'packages', 'core-backend', 'migrations',
+  '078_create_integration_b2a_operation_claim.sql',
+)
 
 // The literal core-backend's read-only facade exports as `DATA_SOURCE_REQUEST_TIMEOUT_DISABLED_CODE`
 // (packages/core-backend/src/data-adapters/data-source-plugin-facade.ts). Restated as a literal
@@ -175,10 +191,52 @@ function store() {
   return new Map()
 }
 
+// A fake of the SCOPED SQL helper with genuine single-statement atomicity, lifted from the A-04
+// harness in stock-preparation-confirmation-decisions.test.cjs: each method is synchronous inside
+// (no awaits — exactly like one SQL statement), and insertOne enforces the PRIMARY KEY on claim_key
+// the way Postgres does. This is the "database" concurrent claimers race at.
+function makeFakeClaimDb() {
+  const rows = new Map()
+  function assertClaimTable(table) {
+    assert.equal(table, B2A_OPERATION_CLAIM_TABLE, `the claim must only touch ${B2A_OPERATION_CLAIM_TABLE}, saw ${table}`)
+  }
+  return {
+    rows,
+    async insertOne(table, row) {
+      assertClaimTable(table)
+      if (rows.has(row.claim_key)) {
+        const error = new Error(`duplicate key value violates unique constraint "${table}_pkey"`)
+        error.code = '23505'
+        throw error
+      }
+      rows.set(row.claim_key, { ...row })
+      return [{ ...row }]
+    },
+    async selectOne(table, where) {
+      assertClaimTable(table)
+      const row = rows.get(where.claim_key)
+      return row ? { ...row } : null
+    },
+  }
+}
+
+// The claim table's lifetime tracks the kv store's, so every existing case that shares one `store()`
+// across calls keeps sharing ONE claim database too — the substrate split in two, not the test
+// semantics. A caller may still pass its own `operationClaim` to drive a race explicitly.
+const CLAIM_BY_STORE = new WeakMap()
+function claimFor(kvStore) {
+  if (!CLAIM_BY_STORE.has(kvStore)) {
+    CLAIM_BY_STORE.set(kvStore, createB2aOperationClaim({ db: makeFakeClaimDb() }))
+  }
+  return CLAIM_BY_STORE.get(kvStore)
+}
+
 function check(registry, overrides = {}) {
+  const kvStore = overrides.store || store()
   return assertB2aReadAuthorization({
     registry,
-    store: overrides.store || store(),
+    store: kvStore,
+    operationClaim: claimFor(kvStore),
     tenantScope: TENANT,
     sourceSystemType: SYSTEM_TYPE,
     sourceBindingRef: PLM_SYSTEM,
@@ -492,6 +550,19 @@ async function R01_registrationLifecycleRefusals() {
     await assertRefusal(build([registration()]), { store: bad },
       B2A_AUTHORIZATION_INVALID, 'claim_store_unavailable', 'R-01 no claim store')
   }
+  // Migration 078. ARMED + no DB-enforced claim -> REFUSE. There is deliberately no fallback to the
+  // kv-only read-then-write path: an unreachable database is not a reason to widen a one-time
+  // authorization, and a silent degrade is exactly what this migration removed.
+  for (const bad of [undefined, null, {}, { claim: 'not-a-function' }]) {
+    await assertRefusal(build([registration()]), { operationClaim: bad },
+      B2A_AUTHORIZATION_INVALID, 'operation_claim_unavailable', 'R-01 no DB-enforced operation claim')
+  }
+  // …and the factory itself refuses a db that cannot do the two statements the protocol needs, at
+  // BUILD time, so a miswired activation fails loudly instead of at the first armed read.
+  for (const bad of [undefined, null, {}, { insertOne() {} }, { selectOne() {} }]) {
+    assert.throws(() => createB2aOperationClaim({ db: bad }), /scoped db helper/,
+      `R-01 createB2aOperationClaim refuses db ${JSON.stringify(bad) || String(bad)}`)
+  }
 }
 
 // ── R-02: source / data-scope / object / purpose out of bounds ───────────────
@@ -616,6 +687,146 @@ async function R03_oneRegistrationIsOneSourceReadOperation() {
   // …and a THIRD run finds both spent.
   await assertRefusal(twoOps, { store: fresh, runId: 'run-z' },
     B2A_AUTHORIZATION_INVALID, 'operation_already_consumed', 'R-03 both operations spent')
+}
+
+// ── R-03b: TWO CONCURRENT CLAIMERS -> exactly ONE wins (migration 078) ───────
+//
+// The case R-03 above could not make: not "a second Run afterwards", but two Runs racing for the
+// SAME operation with no ordering between them. Before migration 078 the claim was get -> set ->
+// read back over a kv `set` that is an unconditional upsert, so two writers interleaving between the
+// read-back and the set could both conclude they won — the module's own header said so. The decision
+// is now a plain INSERT whose claim_key is a PRIMARY KEY, and the database picks the winner.
+
+function loadIsolatedRegistryModule() {
+  const resolved = require.resolve(MODULE_PATH)
+  const cached = require.cache[resolved]
+  delete require.cache[resolved]
+  // eslint-disable-next-line global-require
+  const fresh = require(MODULE_PATH)
+  delete require.cache[resolved]
+  if (cached) require.cache[resolved] = cached
+  return fresh
+}
+
+async function R03b_twoConcurrentClaimersYieldExactlyOneWinner() {
+  // ONE shared substrate: one claim database and one kv projection, exactly as two processes of the
+  // same deployment would see. The INSERT parks on a gate so both claimers are genuinely in flight
+  // at the same moment; everything after the gate is synchronous, which is what makes each INSERT
+  // one statement.
+  const sharedDb = makeFakeClaimDb()
+  const rawInsert = sharedDb.insertOne
+  let releaseGate
+  const gate = new Promise((resolve) => { releaseGate = resolve })
+  let gatedInserts = 0
+  sharedDb.insertOne = async function gatedInsertOne(table, row) {
+    gatedInserts += 1
+    if (gatedInserts <= 2) await gate
+    return rawInsert.call(sharedDb, table, row)
+  }
+  const sharedStore = store()
+
+  // Two INDEPENDENT module instances (fresh require, no shared JS state — the in-model equivalent of
+  // two processes) presenting the SAME registration for two DIFFERENT Runs.
+  const moduleA = loadIsolatedRegistryModule()
+  const moduleB = loadIsolatedRegistryModule()
+  assert.notEqual(moduleA, moduleB, 'the two claimers share no module state')
+
+  const guardInput = (mod, runId) => ({
+    registry: mod.createB2aRegistry({ config: { [B2A_REGISTRY_CONFIG_KEY]: registryConfig([registration()]) } }),
+    store: sharedStore,
+    operationClaim: mod.createB2aOperationClaim({ db: sharedDb }),
+    tenantScope: TENANT,
+    sourceSystemType: SYSTEM_TYPE,
+    sourceBindingRef: PLM_SYSTEM,
+    dataScopeRef: IN_SCOPE_PROJECT,
+    sourceObjects: [OBJECT_A],
+    purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+    runId,
+    now: NOW,
+  })
+
+  const attemptA = moduleA.assertB2aReadAuthorization(guardInput(moduleA, 'run-race-a'))
+  const attemptB = moduleB.assertB2aReadAuthorization(guardInput(moduleB, 'run-race-b'))
+  // Attach the settle handlers FIRST (the loser rejecting while the gate is shut must not surface as
+  // an unhandled rejection), let both attempts reach the INSERT, then open the gate.
+  const settledPromise = Promise.allSettled([attemptA, attemptB])
+  await new Promise((resolve) => setTimeout(resolve, 25))
+  releaseGate()
+  const settled = await settledPromise
+
+  // THE acceptance criterion first: whatever the two attempts reported, the database holds exactly
+  // one claim on this operation.
+  assert.equal(sharedDb.rows.size, 1, 'R-03b: the claim table ends with exactly ONE row')
+
+  const fulfilled = settled.filter((entry) => entry.status === 'fulfilled')
+  const rejected = settled.filter((entry) => entry.status === 'rejected')
+  assert.equal(fulfilled.length, 1, 'R-03b: exactly one claimer wins')
+  assert.equal(rejected.length, 1, 'R-03b: exactly one claimer loses')
+  assert.equal(fulfilled[0].value.operationClaimed, true, 'the winner CLAIMED the operation')
+  assert.equal(fulfilled[0].value.operationContinued, false)
+  assert.equal(fulfilled[0].value.pageReads, 1)
+  assert.equal(rejected[0].reason.code, B2A_AUTHORIZATION_INVALID, 'R-03b: the loser gets the fixed code')
+  assert.equal(rejected[0].reason.status, 403)
+  assert.equal(rejected[0].reason.details.reason, 'operation_already_consumed', 'R-03b: the loser gets the fixed reason')
+  assert.equal(rejected[0].reason.details.sourceReadOperationLimit, 1)
+
+  // The winner's OWN Run may keep paging: same-Run re-entry continues on the claim it holds, which
+  // is the property the one-shot limit must not break.
+  const [winnerRow] = [...sharedDb.rows.values()]
+  const winnerRunId = winnerRow.run_id
+  assert.ok(['run-race-a', 'run-race-b'].includes(winnerRunId), 'the stored holder is one of the two racers')
+  const winnerModule = winnerRunId === 'run-race-a' ? moduleA : moduleB
+  const continued = await winnerModule.assertB2aReadAuthorization(guardInput(winnerModule, winnerRunId))
+  assert.equal(continued.operationClaimed, false)
+  assert.equal(continued.operationContinued, true, 'R-03b: the holder continues on its own claim')
+  assert.equal(continued.pageReads, 2, 're-entries are still counted for evidence')
+  assert.equal(sharedDb.rows.size, 1, 'a continuation writes no second claim row')
+
+  // NEGATIVE CONTROL: the single winner is produced by the DB-enforced claim, not by the harness. A
+  // claim that always says "held" lets BOTH concurrent Runs through — which is precisely the state
+  // this migration removed, restated as a test rather than as prose.
+  const permissive = { async claim() { return { held: true, claimed: true, holderRunId: null } } }
+  const both = await Promise.allSettled([
+    moduleA.assertB2aReadAuthorization({ ...guardInput(moduleA, 'run-permissive-a'), store: store(), operationClaim: permissive }),
+    moduleB.assertB2aReadAuthorization({ ...guardInput(moduleB, 'run-permissive-b'), store: store(), operationClaim: permissive }),
+  ])
+  assert.deepEqual(both.map((entry) => entry.status), ['fulfilled', 'fulfilled'],
+    'R-03b control: without the DB-enforced claim both concurrent Runs are authorized')
+}
+
+// ── M78: the DB-level claim the module leans on is real ─────────────────────
+
+async function M78_migration078DefinesTheDbLevelOperationClaim() {
+  const sql = fs.readFileSync(MIGRATION_078_PATH, 'utf8')
+  assert.ok(
+    sql.includes(`CREATE TABLE IF NOT EXISTS ${B2A_OPERATION_CLAIM_TABLE}`),
+    'migration 078 must create the claim table the module names',
+  )
+  const block = sql.match(new RegExp(`CREATE TABLE IF NOT EXISTS ${B2A_OPERATION_CLAIM_TABLE} \\(([\\s\\S]*?)\\n\\);`, 'm'))
+  assert.ok(block, 'claim table block must parse')
+  // THE one-shot guarantee: claim_key is the PRIMARY KEY (DB-level unique). Everything else is
+  // evidence, and must be NOT NULL so a claim can never be half-written.
+  assert.match(block[1], /claim_key TEXT PRIMARY KEY/, 'claim_key must be the PRIMARY KEY — this IS the DB-level uniqueness')
+  assert.match(block[1], /registration_id TEXT NOT NULL/, 'registration_id must exist')
+  assert.match(block[1], /registration_version INTEGER NOT NULL/, 'registration_version must exist')
+  assert.match(block[1], /operation_digest TEXT NOT NULL/, 'operation_digest (the hashed operation identity) must exist')
+  assert.match(block[1], /run_id TEXT NOT NULL/, 'run_id (the holder identity the same-run check reads) must exist')
+  assert.match(block[1], /claimed_at TIMESTAMPTZ NOT NULL/, 'claimed_at must exist')
+  assert.doesNotMatch(sql, /\bDROP\s+TABLE\b/i, 'forward migration must not drop tables')
+  // A CLAIM IS PERMANENT — the whole difference from the 077 lease. No TTL column, and nothing here
+  // hands the runtime a way to expire or steal one.
+  assert.doesNotMatch(block[1], /expires_at/i, 'an operation claim must not carry an expiry — a renewable one-shot is not a one-shot')
+
+  // …and the module never UPDATEs, DELETEs or UPSERTs a claim either: the two statements the
+  // protocol uses are exactly insertOne + selectOne, which is why the factory demands only those
+  // two. An upsert here would be the original defect wearing a new name.
+  const moduleSource = fs.readFileSync(MODULE_PATH, 'utf8')
+  for (const forbidden of ['updateRow', 'deleteRows', 'upsertOne']) {
+    assert.ok(
+      !moduleSource.includes(`db.${forbidden}(`),
+      `the claim protocol must not ${forbidden} — claims are permanent`,
+    )
+  }
 }
 
 // ── R-04: concurrent duplicates, version downgrade, cross-app reuse ──────────
@@ -1201,6 +1412,8 @@ const TESTS = [
   R02_scopeRefusals,
   unknownEntryPointsDefaultRefuse,
   R03_oneRegistrationIsOneSourceReadOperation,
+  R03b_twoConcurrentClaimersYieldExactlyOneWinner,
+  M78_migration078DefinesTheDbLevelOperationClaim,
   R04_uniquenessVersionAndReuse,
   aMatchingRegistrationPasses,
   theSoonestExpiringLiveRegistrationWins,
