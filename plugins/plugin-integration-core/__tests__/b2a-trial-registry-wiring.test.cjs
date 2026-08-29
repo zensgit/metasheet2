@@ -49,14 +49,23 @@ const {
   C6_FULL_BATCH_INCOMPLETE,
   SCHEMA_CONTRACT_KEY_PREFIX,
   SEALED_SNAPSHOT_BINDING_REF,
+  B2A_AUTHORIZED_RUN_ID,
+  B2A_AUTHORIZATION_INVALID,
   readPlanSourceObjects,
   createB2aOperationClaim,
   B2A_OPERATION_CLAIM_TABLE,
-  B2A_AUTHORIZATION_INVALID,
+  assertB2aReadAuthorization,
+  createB2aRegistry,
 } = require(path.join(LIB, 'b2a-trial-registry.cjs'))
 const {
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
 } = require(path.join(LIB, 'stock-preparation-bom-expansion.cjs'))
+// W-2: the runner is the layer the fence was sunk to, and index.cjs is the door that reaches it
+// without a route. Both are exercised for real below rather than through a stand-in.
+const { createPipelineRunner } = require(path.join(LIB, 'pipeline-runner.cjs'))
+const {
+  FEATURE_FLAG: STOCK_PREPARATION_FEATURE_FLAG,
+} = require(path.join(LIB, 'sealed-export', 'stock-preparation-runtime-config.cjs'))
 
 // The literal the HOST writes onto server config. A self-referential assertion (import the constant,
 // configure with it, compare) passes just as happily when the key is mistyped and the gate is
@@ -251,10 +260,14 @@ function createSpies() {
     pipelineRuns: [],
     sealedSnapshotRuns: [],
     targetUpserts: [],
+    pipelineLoads: [],
+    // W-2: what the ROUTE hands the runner under the shared-run marker. `undefined` for a dormant
+    // deployment (nothing is attached at all) and the route's own server-generated run id when armed.
+    runnerRunMarkers: [],
   }
 }
 
-function baseServices({ sourceAdapter, spies, targetKind, pipelineProjectId, includeGetDeadLetter }) {
+function baseServices({ sourceAdapter, spies, targetKind, pipelineProjectId, includeGetDeadLetter, extraServices }) {
   const system = (id) => ({
     id,
     tenantId: TENANT_ID,
@@ -304,10 +317,12 @@ function baseServices({ sourceAdapter, spies, targetKind, pipelineProjectId, inc
     pipelineRunner: {
       async runPipeline(input = {}) {
         spies.pipelineRuns.push(input.pipelineId)
+        spies.runnerRunMarkers.push(input[B2A_AUTHORIZED_RUN_ID])
         return { id: 'run_1', status: 'succeeded' }
       },
       async replayDeadLetter(input = {}) {
         spies.pipelineRuns.push(input.id)
+        spies.runnerRunMarkers.push(input[B2A_AUTHORIZED_RUN_ID])
         return { id: 'run_2', status: 'succeeded' }
       },
     },
@@ -328,6 +343,9 @@ function baseServices({ sourceAdapter, spies, targetKind, pipelineProjectId, inc
         return { status: 'captured' }
       },
     },
+    // Opt-in only. The audit store and the reconcile lease are OPTIONAL services, and every test that
+    // predates W-2 mounts without them; handing them to everybody would change what those routes do.
+    ...(extraServices || {}),
   }
 }
 
@@ -376,7 +394,7 @@ function claimForStorage(storage) {
   return CLAIM_BY_STORAGE.get(storage)
 }
 
-function mount({ registrations, raw, records, source, targetKind, pipelineProjectId, includeGetDeadLetter = true, action, storage, operationClaim } = {}) {
+function mount({ registrations, raw, records, source, targetKind, pipelineProjectId, includeGetDeadLetter = true, action, storage, operationClaim, extraServices } = {}) {
   const routes = new Map()
   const spies = createSpies()
   const config = {
@@ -413,8 +431,12 @@ function mount({ registrations, raw, records, source, targetKind, pipelineProjec
         targetKind,
         pipelineProjectId,
         includeGetDeadLetter,
+        // W-2: opt-in extra services (audit store, reconcile lease) for the routes that need them.
+        extraServices,
       }),
-      // `operationClaim: null` is an ARMED deployment whose database is unreachable.
+      // W-3 / migration 078. `operationClaim: null` is an ARMED deployment whose database is
+      // unreachable. Applied AFTER the baseServices spread so the mount-level parameter stays the
+      // authority on the claim, exactly as the W-3 suite's M78 cases require.
       b2aOperationClaim: operationClaim === null ? null : (operationClaim || claimForStorage(context.storage)),
     },
     logger: { info() {}, warn() {}, error() {} },
@@ -1482,6 +1504,683 @@ async function E3_02_aTruncatedBackgroundExpansionNeverBecomesAPlan() {
   assert.deepEqual(writes, [], 'target writes = 0')
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// W-2 — THE CHOKE POINT, SUNK BELOW THE HTTP LAYER
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// Two gaps, both verified on main before this suite grew:
+//
+//   (1) `tableActionConfirmationDecisionsReconcile` called `loadTableActionSourceAdapter` — and so
+//       `getExternalSystemForAdapter`, which DECRYPTS — with no B2a assertion in front of it. Every
+//       other stock-prep read entry got the fence in PR-C; this route was missed, and its handoff
+//       (`prepareStockPreparationConfirmationDecisions`) carries no wrapper-level guard either, so
+//       nothing further down caught it.
+//
+//   (2) The cross-plugin communication API's `runPipeline` / `replayDeadLetter` enter the pipeline
+//       runner DIRECTLY. PR-C's own comment said "every caller that exists today ... is a route and
+//       is covered"; these two existed and were not. Any plugin holding
+//       `context.communication.call('integration-core', 'runPipeline', …)` read an armed
+//       deployment's source with no registration.
+//
+// What is asserted here is the same thing the PR-C suite asserts and nothing softer: a refusal is
+// `reads.length === 0` and `credentialLoads.length === 0`, not an argument about statement order.
+
+function capturedRejection(promise) {
+  return promise.then(
+    (value) => { throw new Error(`expected a rejection, got ${JSON.stringify(value)}`) },
+    (error) => error,
+  )
+}
+
+// The registration that authorizes the PIPELINE-RUNNER entry point for this suite's fixture pipeline.
+function runnerRegistration(overrides = {}) {
+  return registration({
+    registrationId: 'b2a-runner',
+    operationRef: 'op-runner',
+    purpose: B2A_PURPOSE_PIPELINE_RUNNER_READ,
+    projectDataScope: { dataScopeRefs: [PIPELINE_PROJECT_ID] },
+    objectScope: { sourceObjects: [PIPELINE_SOURCE_OBJECT] },
+    ...overrides,
+  })
+}
+
+/**
+ * A REAL `createPipelineRunner`, wired the way index.cjs wires it. Not a stand-in: the whole point
+ * of W-2 is that the fence is INSIDE this module, so a fake runner would assert nothing.
+ */
+function createRunnerHarness({ registrations, storage, pipelineOverrides } = {}) {
+  const spies = createSpies()
+  const source = createRecordingSourceAdapter()
+  const config = {}
+  if (registrations !== undefined) config[B2A_REGISTRY_CONFIG_KEY] = registry(registrations)
+  const b2aTrialRegistry = createB2aRegistry({ config })
+  const claimStore = storage || Object.assign(new Map(), { durable: true })
+  const pipeline = {
+    id: PIPELINE_ID,
+    tenantId: TENANT_ID,
+    workspaceId: null,
+    status: 'active',
+    mode: 'manual',
+    createdBy: 'owner@example.invalid',
+    projectId: PIPELINE_PROJECT_ID,
+    sourceSystemId: SOURCE_SYSTEM_ID,
+    targetSystemId: 'target_system',
+    sourceObject: PIPELINE_SOURCE_OBJECT,
+    targetObject: 'imported_items',
+    fieldMappings: [],
+    options: {},
+    ...(pipelineOverrides || {}),
+  }
+  const system = (id) => ({
+    id,
+    tenantId: TENANT_ID,
+    kind: id === 'target_system' ? 'mock-target' : SYSTEM_KIND,
+    role: id === 'target_system' ? 'target' : 'source',
+    status: 'active',
+    config: {},
+  })
+  const deadLetter = {
+    id: 'dl_1',
+    tenantId: TENANT_ID,
+    workspaceId: null,
+    pipelineId: PIPELINE_ID,
+    status: 'open',
+    retryCount: 0,
+    sourcePayload: { code: 'ROW-1' },
+  }
+  const targetWrites = []
+  const runner = createPipelineRunner({
+    pipelineRegistry: {
+      async getPipeline(input = {}) {
+        spies.pipelineLoads.push(input.id)
+        return pipeline
+      },
+    },
+    externalSystemRegistry: {
+      async getExternalSystem(input = {}) {
+        // The credential-STRIPPED accessor. The fence may use this one; it never decrypts.
+        spies.publicSystemLoads.push(input.id)
+        return system(input.id)
+      },
+      async getExternalSystemForAdapter(input = {}) {
+        // THE CREDENTIAL RELOAD. Every armed refusal below requires this to have stayed empty of the
+        // SOURCE binding.
+        spies.credentialLoads.push(input.id)
+        return system(input.id)
+      },
+    },
+    adapterRegistry: {
+      createAdapter(sys, options = {}) {
+        spies.adapterCreations.push(sys && sys.id)
+        if (options.role === 'target') {
+          return {
+            async upsert(input = {}) {
+              targetWrites.push(input.object)
+              return { written: (input.records || []).length, skipped: 0, failed: 0, errors: [] }
+            },
+            async previewUpsert() { return { records: [] } },
+          }
+        }
+        return source.adapter
+      },
+    },
+    deadLetterStore: {
+      async createDeadLetter() { return null },
+      async getDeadLetter() { return { ...deadLetter } },
+      async markReplayed() { return { ...deadLetter, status: 'replayed' } },
+    },
+    watermarkStore: {
+      async getWatermark() { return null },
+      async setWatermark() { return null },
+    },
+    runLogger: {
+      async startRun(input = {}) { return { id: 'run_1', ...input } },
+      async finishRun(run, metrics, status) { return { ...run, status } },
+    },
+    b2aTrialRegistry,
+    b2aClaimStore: claimStore,
+    // MERGE-TRAIN (W-3 x W-2). The runner's fence needs migration 078's DB-enforced claim exactly as
+    // the routes do — `claimForStorage` keys it off the SAME store, so a route and a runner sharing
+    // one claim store share one claim table, which is what the shared-run cases below assert.
+    b2aOperationClaim: claimForStorage(claimStore),
+  })
+  return { runner, spies, source, claimStore, targetWrites, b2aTrialRegistry }
+}
+
+function runnerInput(overrides = {}) {
+  return {
+    tenantId: TENANT_ID,
+    workspaceId: null,
+    pipelineId: PIPELINE_ID,
+    mode: 'full',
+    triggeredBy: 'plugin',
+    ...overrides,
+  }
+}
+
+function claimKeysIn(store) {
+  return [...store.keys()].filter((key) => key.startsWith('integration:b2a:operation-claim:'))
+}
+
+function assertRunnerRefusal(error, code, reason, label) {
+  assert.equal(error.name, 'B2aReadAuthorizationError', `${label}: wrong error class (${error.name}: ${error.message})`)
+  assert.equal(error.status, 403, label)
+  assert.equal(error.code, code, `${label}: ${JSON.stringify(error.details)}`)
+  assert.equal(error.details.reason, reason, `${label}: wrong reason token`)
+  const text = JSON.stringify(error.details)
+  for (const forbidden of FORBIDDEN_IN_RESPONSE) {
+    assert.equal(text.includes(forbidden), false, `${label}: refusal leaked ${JSON.stringify(forbidden)}`)
+  }
+}
+
+// ── (1) the confirmation-decision RECONCILE route ────────────────────────────
+
+// The reconcile route needs the two OPTIONAL services it fails closed without. They are handed to
+// this route's mounts only, so every test that predates W-2 keeps the harness it had.
+function reconcileServices() {
+  return {
+    stockPreparationAuditStore: { async append() { return { ok: true } } },
+    stockPreparationConfirmationDecisionLease: {
+      async acquire() { return { held: true, leaseId: 'lease-1' } },
+      // MERGE-TRAIN (W-4 x W-2). W-4 made `renew` a REQUIRED method on the reconcile-lease
+      // contract — a lease without it is refused fail-closed with
+      // CONFIRMATION_DECISION_RECONCILE_LEASE_UNAVAILABLE. This double was written against the
+      // pre-W-4 contract, so without this leg the reconcile route stops at the lease check instead
+      // of the field-id resolution the case below pins. Production is unaffected: the real
+      // `createConfirmationDecisionReconcileLease` grew `renew` in the same change.
+      async renew() { return { held: true } },
+      async release() { return { released: true } },
+    },
+  }
+}
+
+const RECONCILE_ROUTE = '/api/integration/table-actions/:actionId/confirmation-decisions/reconcile'
+
+async function routeReconcile(routes, { projectNo = PROJECT_NO } = {}) {
+  return call(routes, 'POST', RECONCILE_ROUTE, {
+    user: ADMIN_USER, params: ACTION_PARAMS, body: { parameters: { projectNo } },
+  })
+}
+
+async function W2_reconcileRouteIsFencedBeforeAnyCredentialReload() {
+  // Armed for the PIPELINE-RUNNER purpose: reconcile presents `stock-preparation.table-action` and
+  // a registration written for another consumer does not cover it.
+  for (const [registrations, code, reason, label] of [
+    [[registration({ purpose: B2A_PURPOSE_PIPELINE_RUNNER_READ })], B2A_SCOPE_MISMATCH, 'purpose_not_permitted',
+      'W-2 (1) reconcile, registration for another consumer'],
+    [[], B2A_REGISTRATION_REQUIRED, 'no_registration', 'W-2 (1) reconcile, armed but empty registry'],
+    [[registration({ status: 'revoked' })], B2A_REGISTRATION_REQUIRED, 'revoked', 'W-2 (1) reconcile, revoked'],
+  ]) {
+    const source = createRecordingSourceAdapter()
+    const records = createRecordsApi()
+    const { routes, spies } = mount({
+      registrations, records, source, extraServices: reconcileServices(),
+    })
+    const res = await routeReconcile(routes)
+    assertB2aRefusal(res, code, reason, label)
+    assert.equal(source.reads.length, 0, `${label}: the source adapter was asked for ZERO rows`)
+    assert.deepEqual(spies.credentialLoads, [], `${label}: refused BEFORE the credential reload`)
+    assert.deepEqual(spies.adapterCreations, [], `${label}: no source adapter was ever built`)
+    assert.deepEqual(records.calls, [], `${label}: not even the ledger's own table was queried`)
+  }
+
+  // OUT OF SCOPE PROJECT: the same route, a registration that covers the purpose but not the data
+  // scope. Proves the fence keys on the scope reconcile will actually read, not on the route.
+  const scoped = mount({
+    registrations: [registration()], source: createRecordingSourceAdapter(), extraServices: reconcileServices(),
+  })
+  const outOfScope = await routeReconcile(scoped.routes, { projectNo: OUT_OF_SCOPE_PROJECT_NO })
+  assertB2aRefusal(outOfScope, B2A_SCOPE_MISMATCH, 'data_scope_mismatch', 'W-2 (1) reconcile, project out of scope')
+  assert.deepEqual(scoped.spies.credentialLoads, [], 'W-2 (1) out-of-scope reconcile: no credential reload')
+}
+
+// DORMANCY for the reconcile route, and the strongest form available to it: an ARMED-AND-AUTHORIZED
+// reconcile and a DORMANT one must produce the byte-identical response. The guard contributes
+// nothing to this route's output — it either refuses or is invisible — so any divergence is the
+// fence leaking into a payload it has no business touching.
+async function W2_reconcileRouteIsUnchangedWhenDormantOrAuthorized() {
+  const dormant = mount({
+    source: createRecordingSourceAdapter(),
+    records: createRecordsApi(),
+    extraServices: reconcileServices(),
+  })
+  const dormantRes = await routeReconcile(dormant.routes)
+  assert.deepEqual(dormant.spies.credentialLoads, [SOURCE_SYSTEM_ID],
+    'a dormant reconcile loads the source exactly as it did before the fence existed')
+
+  const armedSource = createRecordingSourceAdapter()
+  const armed = mount({
+    registrations: [registration()],
+    source: armedSource,
+    records: createRecordsApi(),
+    extraServices: reconcileServices(),
+  })
+  const armedRes = await routeReconcile(armed.routes)
+  assert.deepEqual(armed.spies.credentialLoads, [SOURCE_SYSTEM_ID],
+    'an authorized reconcile loads the source too')
+  assert.ok(armedSource.reads.length > 0, 'an authorized reconcile reaches the source')
+
+  assert.equal(armedRes.statusCode, dormantRes.statusCode,
+    `armed/dormant status divergence: ${JSON.stringify(armedRes.body)} vs ${JSON.stringify(dormantRes.body)}`)
+  assert.deepEqual(armedRes.body, dormantRes.body,
+    'the reconcile response is byte-identical whether the gate is dormant or authorizing')
+  // WHERE THIS HARNESS STOPS, said plainly so the equality above is not read as more than it is: the
+  // ledger's own field-id resolution, which needs a provisioning surface this suite deliberately does
+  // not fake. That is AFTER the guard, AFTER the credential reload, AFTER the source expansion and
+  // AFTER the audit append — every step W-2 is about — and it is the SAME stop in both modes. Pinned
+  // by code so a change that made reconcile fail EARLIER (before the source read) would show up here
+  // instead of quietly making the equality vacuous.
+  assert.equal(dormantRes.statusCode, 503, JSON.stringify(dormantRes.body))
+  assert.equal(dormantRes.body.error.code, 'TABLE_ACTION_FIELD_IDS_UNRESOLVED', JSON.stringify(dormantRes.body))
+  // And the ARMED run really did go through the guard: one operation claim was spent.
+  assert.equal(claimKeysIn(armed.context.storage).length, 1, 'the authorized reconcile spent exactly one claim')
+  assert.equal(claimKeysIn(dormant.context.storage).length, 0, 'a dormant reconcile records no claim at all')
+}
+
+// ── (2) the cross-plugin door: the runner's own fence ────────────────────────
+
+async function W2_inProcessRunPipelineIsFencedBeforeAnyCredentialReload() {
+  for (const [registrations, code, reason, label] of [
+    [[registration()], B2A_SCOPE_MISMATCH, 'purpose_not_permitted',
+      'W-2 (2) runPipeline, registration for another consumer'],
+    [[], B2A_REGISTRATION_REQUIRED, 'no_registration', 'W-2 (2) runPipeline, armed but empty registry'],
+    [[runnerRegistration({ projectDataScope: { dataScopeRefs: [OUT_OF_SCOPE_PROJECT_NO] } })],
+      B2A_SCOPE_MISMATCH, 'data_scope_mismatch', 'W-2 (2) runPipeline, pipeline project out of scope'],
+    [[runnerRegistration({ objectScope: { sourceObjects: ['some_other_object'] } })],
+      B2A_SCOPE_MISMATCH, 'object_out_of_scope', 'W-2 (2) runPipeline, source object out of scope'],
+  ]) {
+    const harness = createRunnerHarness({ registrations })
+    const error = await capturedRejection(harness.runner.runPipeline(runnerInput()))
+    assertRunnerRefusal(error, code, reason, label)
+    assert.deepEqual(harness.spies.credentialLoads, [], `${label}: refused BEFORE any credential reload`)
+    assert.deepEqual(harness.spies.adapterCreations, [], `${label}: no adapter was created`)
+    assert.deepEqual(harness.source.reads, [], `${label}: the source was asked for ZERO rows`)
+    assert.deepEqual(harness.targetWrites, [], `${label}: ZERO target writes`)
+  }
+
+  // A NULL project id is refused rather than treated as a wildcard — pipelines.cjs stores
+  // `row.project_id ?? null`, so this is the shape a project-less pipeline actually has.
+  const nullScope = createRunnerHarness({
+    registrations: [runnerRegistration()],
+    pipelineOverrides: { projectId: null },
+  })
+  const nullScopeError = await capturedRejection(nullScope.runner.runPipeline(runnerInput()))
+  assertRunnerRefusal(nullScopeError, B2A_SCOPE_MISMATCH, 'missing_scope', 'W-2 (2) runPipeline, null project id')
+  assert.equal(nullScopeError.details.dataScopeResolved, false)
+  assert.deepEqual(nullScope.spies.credentialLoads, [], 'a project-less pipeline never reaches a credential')
+
+  // Registered for this purpose and scope -> the in-process run proceeds and reads.
+  const allowed = createRunnerHarness({ registrations: [runnerRegistration()] })
+  const ran = await allowed.runner.runPipeline(runnerInput())
+  assert.equal(ran.run.status, 'succeeded', JSON.stringify(ran))
+  assert.deepEqual(allowed.spies.credentialLoads, [SOURCE_SYSTEM_ID, 'target_system'],
+    'the authorized run loads both systems, as it always did')
+  assert.deepEqual(allowed.source.reads, [PIPELINE_SOURCE_OBJECT], 'the authorized run reaches the source')
+  assert.equal(claimKeysIn(allowed.claimStore).length, 1, 'one in-process run spends exactly one operation')
+}
+
+async function W2_inProcessReplayDeadLetterIsFencedBeforeAnySourceCredentialReload() {
+  const denied = createRunnerHarness({ registrations: [registration()] })
+  const error = await capturedRejection(denied.runner.replayDeadLetter({ tenantId: TENANT_ID, workspaceId: null, id: 'dl_1' }))
+  assertRunnerRefusal(error, B2A_SCOPE_MISMATCH, 'purpose_not_permitted', 'W-2 (2) replayDeadLetter')
+  assert.deepEqual(denied.source.reads, [], 'replay refused: ZERO source rows')
+  assert.deepEqual(denied.spies.adapterCreations, [], 'replay refused: no adapter was built')
+  assert.deepEqual(denied.targetWrites, [], 'replay refused: ZERO target writes')
+  // THE RESIDUAL, pinned rather than described: the pre-existing K3 target-kind fence runs FIRST (so
+  // a replay that will be refused for a K3 target never spends the registration), and its own lookup
+  // uses the adapter-capable accessor. So the TARGET system's credentials are reloaded before the
+  // read fence — and the SOURCE system's are not, which is what B2a authorizes.
+  assert.deepEqual(denied.spies.credentialLoads, ['target_system'],
+    'replay refused before the SOURCE credential reload; only the K3 fence\'s target lookup ran')
+
+  const allowed = createRunnerHarness({ registrations: [runnerRegistration()] })
+  const replayed = await allowed.runner.replayDeadLetter({ tenantId: TENANT_ID, workspaceId: null, id: 'dl_1' })
+  // The stored payload is re-fed through the pipeline. Whether it survives transform/idempotency is
+  // this fixture's business and not the fence's — what matters is that the replay RAN.
+  assert.equal(replayed.replay.run.pipelineId, PIPELINE_ID, JSON.stringify(replayed))
+  assert.equal(replayed.replay.metrics.rowsRead, 1, 'the authorized replay re-fed its stored row')
+  assert.ok(allowed.spies.credentialLoads.includes(SOURCE_SYSTEM_ID), 'the authorized replay loads the source')
+  assert.equal(claimKeysIn(allowed.claimStore).length, 1, 'one in-process replay spends exactly one operation')
+}
+
+// ── NO DOUBLE BURN ───────────────────────────────────────────────────────────
+//
+// The fence now stands at the route AND in the runner. One HTTP request must still spend ONE
+// operation: `sourceReadOperationLimit` is 1, so a second claim would not merely be untidy, it would
+// refuse the very request the route just authorized.
+async function W2_theRouteAndTheRunnerShareOneOperationClaim() {
+  const harness = createRunnerHarness({ registrations: [runnerRegistration()] })
+
+  // The ROUTE half, driven exactly as `assertPipelineRunAllowed` drives it: assert, and claim.
+  const routeRunId = 'pipeline-run:route-generated-1'
+  const routeStanza = await assertB2aReadAuthorization({
+    registry: harness.b2aTrialRegistry,
+    store: harness.claimStore,
+    // MERGE-TRAIN (W-3 x W-2). The route half must present migration 078's claim, and it must be the
+    // SAME one the runner harness holds — `claimForStorage` keys it off the shared claim store. That
+    // is what makes the runner's continue leg run through the SQL claim's same-run continuation
+    // (`holderRunId === routeRunId` -> continue) rather than any kv-only path.
+    operationClaim: claimForStorage(harness.claimStore),
+    tenantScope: TENANT_ID,
+    sourceSystemType: SYSTEM_KIND,
+    sourceBindingRef: SOURCE_SYSTEM_ID,
+    dataScopeRef: PIPELINE_PROJECT_ID,
+    sourceObjects: [PIPELINE_SOURCE_OBJECT],
+    purpose: B2A_PURPOSE_PIPELINE_RUNNER_READ,
+    runId: routeRunId,
+    now: Date.now(),
+  })
+  assert.equal(routeStanza.operationClaimed, true, 'the route takes the claim')
+  assert.equal(routeStanza.pageReads, 1)
+
+  // The RUNNER half, handed the same run under the marker: it CONTINUES that claim.
+  const ran = await harness.runner.runPipeline(runnerInput({ [B2A_AUTHORIZED_RUN_ID]: routeRunId }))
+  assert.equal(ran.run.status, 'succeeded', JSON.stringify(ran))
+  const keys = claimKeysIn(harness.claimStore)
+  assert.equal(keys.length, 1, 'one HTTP-initiated run spends exactly ONE claim, not two')
+  assert.equal(harness.claimStore.get(keys[0]).runId, routeRunId, 'and it is the route\'s run that holds it')
+  assert.equal(harness.claimStore.get(keys[0]).pageReads, 2, 'route + runner rode the SAME operation')
+
+  // THE DISCRIMINATING CONTROL. Without the marker the runner would take a claim of its own — and on
+  // a spent registration that is a refusal, which is exactly the failure the marker prevents. So the
+  // marker is load-bearing, not decorative.
+  const unmarked = await capturedRejection(harness.runner.runPipeline(runnerInput()))
+  assertRunnerRefusal(unmarked, B2A_AUTHORIZATION_INVALID, 'operation_already_consumed',
+    'W-2 a second, unmarked run on a spent registration')
+
+  // REPLAY carries the marker the same way — it FORWARDS it into its internal `runPipeline`. Without
+  // that forwarding an armed HTTP replay would be refused by the runner as a second run, so this is
+  // the same load-bearing property on the second door.
+  const replayHarness = createRunnerHarness({ registrations: [runnerRegistration()] })
+  const replayRouteRunId = 'pipeline-dead-letter-replay:route-generated-1'
+  await assertB2aReadAuthorization({
+    registry: replayHarness.b2aTrialRegistry,
+    store: replayHarness.claimStore,
+    // MERGE-TRAIN (W-3 x W-2), replay door: same shared claim, same reason as above.
+    operationClaim: claimForStorage(replayHarness.claimStore),
+    tenantScope: TENANT_ID,
+    sourceSystemType: SYSTEM_KIND,
+    sourceBindingRef: SOURCE_SYSTEM_ID,
+    dataScopeRef: PIPELINE_PROJECT_ID,
+    sourceObjects: [PIPELINE_SOURCE_OBJECT],
+    purpose: B2A_PURPOSE_PIPELINE_RUNNER_READ,
+    runId: replayRouteRunId,
+    now: Date.now(),
+  })
+  const replayed = await replayHarness.runner.replayDeadLetter({
+    tenantId: TENANT_ID, workspaceId: null, id: 'dl_1', [B2A_AUTHORIZED_RUN_ID]: replayRouteRunId,
+  })
+  assert.equal(replayed.replay.metrics.rowsRead, 1, 'the marked replay continued the route\'s claim and ran')
+  const replayKeys = claimKeysIn(replayHarness.claimStore)
+  assert.equal(replayKeys.length, 1, 'one HTTP-initiated replay spends exactly ONE claim')
+  assert.equal(replayHarness.claimStore.get(replayKeys[0]).pageReads, 2, 'route + runner rode one operation')
+
+  const unmarkedReplay = await capturedRejection(replayHarness.runner.replayDeadLetter({
+    tenantId: TENANT_ID, workspaceId: null, id: 'dl_1',
+  }))
+  assertRunnerRefusal(unmarkedReplay, B2A_AUTHORIZATION_INVALID, 'operation_already_consumed',
+    'W-2 a second, unmarked replay on a spent registration')
+}
+
+// The route half of the same property: the HTTP layer really does hand its run id down, and hands
+// down NOTHING when the gate is dormant.
+async function W2_theRoutesHandTheirRunToTheRunner() {
+  for (const [route, params, prefix] of [
+    [PIPELINE_RUN_ROUTE, { id: PIPELINE_ID }, 'pipeline-run:'],
+    [PIPELINE_DRY_RUN_ROUTE, { id: PIPELINE_ID }, 'pipeline-dry-run:'],
+    [DEAD_LETTER_REPLAY_ROUTE, { id: 'dl_1' }, 'pipeline-dead-letter-replay:'],
+  ]) {
+    const armed = mount({ registrations: [runnerRegistration()] })
+    const res = await call(armed.routes, 'POST', route, { user: WRITE_USER, params, body: {} })
+    assert.ok(res.statusCode < 400, `${route} armed+authorized: ${JSON.stringify(res.body)}`)
+    assert.equal(armed.spies.runnerRunMarkers.length, 1, `${route}: the runner was entered once`)
+    const marker = armed.spies.runnerRunMarkers[0]
+    assert.equal(typeof marker, 'string', `${route}: the route hands the runner its run id`)
+    assert.ok(marker.startsWith(prefix), `${route}: unexpected run label ${marker}`)
+
+    // DORMANT: the runner input gains no key at all — not the marker, not an undefined placeholder.
+    const dormant = mount({})
+    const dormantRes = await call(dormant.routes, 'POST', route, { user: WRITE_USER, params, body: {} })
+    assert.ok(dormantRes.statusCode < 400, `${route} dormant: ${JSON.stringify(dormantRes.body)}`)
+    assert.deepEqual(dormant.spies.runnerRunMarkers, [undefined], `${route}: dormant attaches no marker`)
+  }
+}
+
+// ── DORMANCY at the runner layer ─────────────────────────────────────────────
+async function W2_theRunnerIsDormantWhenTheRegistryIsUnset() {
+  const dormant = createRunnerHarness()
+  const dormantRan = await dormant.runner.runPipeline(runnerInput())
+  assert.equal(dormantRan.run.status, 'succeeded')
+  // NOT ONE EXTRA PLATFORM READ. The fence's own two reads (the pipeline row and the
+  // credential-stripped source system) never happen, so a dormant runner makes exactly the calls it
+  // made before this fence existed.
+  assert.deepEqual(dormant.spies.pipelineLoads, [PIPELINE_ID], 'dormant: ONE pipeline read, the runner\'s own')
+  assert.deepEqual(dormant.spies.publicSystemLoads, [], 'dormant: the stripped accessor is never called')
+  assert.equal(claimKeysIn(dormant.claimStore).length, 0, 'dormant: no claim, no durable trace at all')
+  assert.deepEqual([...dormant.claimStore.keys()], [], 'dormant: the claim store is untouched')
+
+  const armed = createRunnerHarness({ registrations: [runnerRegistration()] })
+  const armedRan = await armed.runner.runPipeline(runnerInput())
+  // ... and an ARMED, AUTHORIZED run produces the same RESULT. The fence adds reads, never output.
+  assert.equal(armedRan.run.status, dormantRan.run.status)
+  assert.deepEqual(
+    { ...armedRan.metrics, durationMs: 0 },
+    { ...dormantRan.metrics, durationMs: 0 },
+    'an authorized run computes exactly what a dormant one computes',
+  )
+  assert.deepEqual(armedRan.preview, dormantRan.preview)
+  assert.deepEqual(armed.spies.pipelineLoads, [PIPELINE_ID, PIPELINE_ID], 'armed: the fence costs one extra pipeline read')
+  assert.deepEqual(armed.spies.publicSystemLoads, [SOURCE_SYSTEM_ID], 'armed: and one credential-STRIPPED system read')
+  assert.deepEqual(armed.spies.credentialLoads, dormant.spies.credentialLoads,
+    'the fence adds no credential reload of its own')
+}
+
+// ── THE CROSS-PLUGIN DOOR, THROUGH THE REAL index.cjs ────────────────────────
+//
+// Everything above proves the runner holds the fence. This proves index.cjs actually GIVES it the
+// registry and the claim store — without which the communication API is as open as it was.
+function activationContext(registrations) {
+  const pipelineRow = {
+    id: PIPELINE_ID,
+    tenant_id: TENANT_ID,
+    workspace_id: null,
+    project_id: PIPELINE_PROJECT_ID,
+    name: 'pipeline',
+    source_system_id: SOURCE_SYSTEM_ID,
+    source_object: PIPELINE_SOURCE_OBJECT,
+    target_system_id: 'target_system',
+    target_object: 'imported_items',
+    mode: 'manual',
+    status: 'active',
+    options: {},
+    idempotency_key_fields: [],
+    created_by: 'owner@example.invalid',
+  }
+  const systemRow = {
+    id: SOURCE_SYSTEM_ID,
+    tenant_id: TENANT_ID,
+    workspace_id: null,
+    name: 'source',
+    kind: SYSTEM_KIND,
+    role: 'source',
+    status: 'active',
+    config: {},
+    capabilities: {},
+    credentials_encrypted: null,
+  }
+  const deadLetterRow = {
+    id: 'dl_1',
+    tenant_id: TENANT_ID,
+    workspace_id: null,
+    run_id: 'run_0',
+    pipeline_id: PIPELINE_ID,
+    idempotency_key: 'idem_1',
+    source_payload: { code: 'ROW-1' },
+    transformed_payload: null,
+    error_code: 'VALIDATION_FAILED',
+    error_message: 'synthetic',
+    retry_count: 0,
+    status: 'open',
+    last_replay_run_id: null,
+    created_at: '2026-05-07T00:00:00.000Z',
+    updated_at: '2026-05-07T00:00:00.000Z',
+  }
+  const namespaces = new Map()
+  // MERGE-TRAIN (W-3 x W-2). Migration 078 moved the AUTHORITY for "who holds this operation" out of
+  // the kv store and into `integration_b2a_operation_claim`. This activation drives the REAL
+  // index.cjs, so its claim goes through the real `createDb` helper and lands here — and the
+  // precondition this case needs ("another run already holds the operation") therefore has to be a
+  // ROW, not a kv record. The fake below models exactly the two statements the claim issues, with
+  // the PRIMARY KEY on claim_key enforced the way Postgres enforces it.
+  const claimRows = new Map()
+  function claimKeyParam(sql, params) {
+    // `insertOne` emits INSERT INTO … ("claim_key", …) VALUES ($1, …); `selectOne` emits
+    // SELECT * FROM … WHERE "claim_key" = $1 …. Either way the column order is the parameter order.
+    const cols = String(sql).match(/"([a-z_]+)"/g) || []
+    const idx = cols.indexOf('"claim_key"')
+    // The first quoted identifier is the table name, so column positions are offset by one.
+    return idx > 0 ? params[idx - 1] : params[0]
+  }
+  const context = {
+    api: {
+      http: { addRoute() {} },
+      database: {
+        async query(sql, params = []) {
+          const text = String(sql)
+          if (text.includes('"integration_b2a_operation_claim"')) {
+            const key = claimKeyParam(text, params)
+            if (text.startsWith('INSERT')) {
+              if (claimRows.has(key)) {
+                const error = new Error('duplicate key value violates unique constraint')
+                error.code = '23505'
+                throw error
+              }
+              const cols = (text.match(/\(([^)]*)\)\s+VALUES/) || [, ''])[1]
+                .split(',').map((c) => c.trim().replace(/"/g, ''))
+              const row = {}
+              cols.forEach((c, i) => { row[c] = params[i] })
+              claimRows.set(key, row)
+              return [{ ...row }]
+            }
+            const row = claimRows.get(key)
+            return row ? [{ ...row }] : []
+          }
+          if (text.includes('"integration_pipelines"')) return [pipelineRow]
+          if (text.includes('"integration_external_systems"')) return [systemRow]
+          if (text.includes('"integration_dead_letters"')) return [deadLetterRow]
+          return []
+        },
+      },
+    },
+    communication: { register(namespace, api) { namespaces.set(namespace, api) }, call() {}, on() {}, emit() {} },
+    logger: { info() {}, warn() {}, error() {} },
+    services: {
+      security: {
+        async encrypt(value) { return `enc:${Buffer.from(value, 'utf8').toString('base64')}` },
+        async decrypt(value) { return Buffer.from(value.slice(4), 'base64').toString('utf8') },
+        async hash(value) { return `hash:${value}` },
+      },
+    },
+    storage: Object.assign(new Map(), { durable: true }),
+    config: { [B2A_REGISTRY_CONFIG_KEY]: registry(registrations) },
+  }
+  // The claim seen through the same substrate index.cjs will use, so a claim taken by the "other
+  // request" below is the very row the activated runner reads back.
+  const operationClaim = createB2aOperationClaim({
+    db: {
+      async insertOne(table, row) {
+        const cols = Object.keys(row)
+        const sql = `INSERT INTO "${table}" (${cols.map((c) => `"${c}"`).join(', ')}) VALUES (${cols.map((_, i) => `$${i + 1}`).join(', ')}) RETURNING *`
+        return context.api.database.query(sql, cols.map((c) => row[c]))
+      },
+      async selectOne(table, where) {
+        const keys = Object.keys(where)
+        const sql = `SELECT * FROM "${table}" WHERE ${keys.map((k, i) => `"${k}" = $${i + 1}`).join(' AND ')} LIMIT 1`
+        const rows = await context.api.database.query(sql, keys.map((k) => where[k]))
+        return rows[0] || null
+      },
+    },
+  })
+  return { context, namespaces, operationClaim }
+}
+
+async function W2_activationWiresTheFenceIntoTheCrossPluginApi() {
+  const entry = require(path.join(__dirname, '..', 'index.cjs'))
+  const previousFlag = process.env[STOCK_PREPARATION_FEATURE_FLAG]
+  process.env[STOCK_PREPARATION_FEATURE_FLAG] = 'false'
+
+  try {
+    // ARMED, and EMPTY: a deployment that has switched the gate on with no exception approved yet.
+    // If index.cjs did not hand the runner the registry, this call would sail past into
+    // `loadPipelineContext` and run.
+    const empty = activationContext([])
+    await entry.activate(empty.context)
+    const emptyApi = empty.namespaces.get('integration-core')
+    assert.ok(emptyApi, 'the cross-plugin namespace is registered')
+
+    const runRefusal = await capturedRejection(emptyApi.runPipeline({
+      tenantId: TENANT_ID, workspaceId: null, pipelineId: PIPELINE_ID, mode: 'full', triggeredBy: 'plugin',
+    }))
+    assertRunnerRefusal(runRefusal, B2A_REGISTRATION_REQUIRED, 'no_registration',
+      'W-2 cross-plugin runPipeline on an armed deployment')
+
+    const replayRefusal = await capturedRejection(emptyApi.replayDeadLetter({
+      tenantId: TENANT_ID, workspaceId: null, id: 'dl_1',
+    }))
+    assertRunnerRefusal(replayRefusal, B2A_REGISTRATION_REQUIRED, 'no_registration',
+      'W-2 cross-plugin replayDeadLetter on an armed deployment')
+    await entry.deactivate()
+
+    // A CALLER MAY NOT PRESENT SOMEBODY ELSE'S RUN. The registration below is real and its single
+    // operation has already been claimed by another run — the shape of an HTTP request in flight. A
+    // cross-plugin caller that presents that run id must NOT ride the claim.
+    //
+    // DISCRIMINATING BY CONSTRUCTION: with the marker honoured the runner would CONTINUE the claim
+    // and the read would proceed; stripped, it takes its own and is refused as a second run. The two
+    // outcomes are different codes, so this cannot pass for the wrong reason.
+    const armed = activationContext([runnerRegistration()])
+    const otherRunId = 'pipeline-run:belongs-to-another-request'
+    await assertB2aReadAuthorization({
+      registry: createB2aRegistry({ config: armed.context.config }),
+      store: armed.context.storage,
+      // MERGE-TRAIN (W-3 x W-2). Post-078 the operation is held by a ROW, so the "another request
+      // already holds it" precondition has to be taken against the same database the activated
+      // runner will read — otherwise the runner would find no row, claim freely, and the case would
+      // pass for the wrong reason.
+      operationClaim: armed.operationClaim,
+      tenantScope: TENANT_ID,
+      sourceSystemType: SYSTEM_KIND,
+      sourceBindingRef: SOURCE_SYSTEM_ID,
+      dataScopeRef: PIPELINE_PROJECT_ID,
+      sourceObjects: [PIPELINE_SOURCE_OBJECT],
+      purpose: B2A_PURPOSE_PIPELINE_RUNNER_READ,
+      runId: otherRunId,
+      now: Date.now(),
+    })
+    await entry.activate(armed.context)
+    const armedApi = armed.namespaces.get('integration-core')
+    const forged = await capturedRejection(armedApi.runPipeline({
+      tenantId: TENANT_ID,
+      workspaceId: null,
+      pipelineId: PIPELINE_ID,
+      mode: 'full',
+      triggeredBy: 'plugin',
+      [B2A_AUTHORIZED_RUN_ID]: otherRunId,
+    }))
+    assertRunnerRefusal(forged, B2A_AUTHORIZATION_INVALID, 'operation_already_consumed',
+      'W-2 cross-plugin runPipeline presenting another request\'s run marker')
+    const forgedReplay = await capturedRejection(armedApi.replayDeadLetter({
+      tenantId: TENANT_ID, workspaceId: null, id: 'dl_1', [B2A_AUTHORIZED_RUN_ID]: otherRunId,
+    }))
+    assertRunnerRefusal(forgedReplay, B2A_AUTHORIZATION_INVALID, 'operation_already_consumed',
+      'W-2 cross-plugin replayDeadLetter presenting another request\'s run marker')
+  } finally {
+    await entry.deactivate()
+    if (previousFlag === undefined) delete process.env[STOCK_PREPARATION_FEATURE_FLAG]
+    else process.env[STOCK_PREPARATION_FEATURE_FLAG] = previousFlag
+  }
+}
+
 const TESTS = [
   unsetEnvIsDormantAndByteIdentical,
   unsetEnvLeavesTheOtherEntryPointsUntouched,
@@ -1507,6 +2206,15 @@ const TESTS = [
   E3_03_noWatermarkIsReadOrAdvancedOnTheDedicatedPath,
   E3_04_aMultiPageBatchProducesExactlyOnePlanAndOneToken,
   E3_05_aMidReadSourceChangeRefuses,
+  // W-2: the choke point sunk below HTTP.
+  W2_reconcileRouteIsFencedBeforeAnyCredentialReload,
+  W2_reconcileRouteIsUnchangedWhenDormantOrAuthorized,
+  W2_inProcessRunPipelineIsFencedBeforeAnyCredentialReload,
+  W2_inProcessReplayDeadLetterIsFencedBeforeAnySourceCredentialReload,
+  W2_theRouteAndTheRunnerShareOneOperationClaim,
+  W2_theRoutesHandTheirRunToTheRunner,
+  W2_theRunnerIsDormantWhenTheRegistryIsUnset,
+  W2_activationWiresTheFenceIntoTheCrossPluginApi,
 ]
 
 async function main() {
