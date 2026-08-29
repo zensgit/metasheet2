@@ -891,11 +891,25 @@ function k3ExactTwoAcceptanceInput(overrides = {}) {
   return fixture
 }
 
+// CONVERTED (E4 / HG v1.2 §10, error code K3_WISE_EXTERNAL_WRITE_DISABLED). Every K3-target
+// fixture in this file used to end in a real apply. K3 external write-back is now permanently
+// refused at four independent layers, and layer 2 lives in the module this suite drives — so the
+// apply half of each K3 case becomes a refusal assertion with `insertRows`/`updateRows` at zero.
+// The PLAN half of each case is untouched: the acceptance policy still evaluates, the counts and
+// rowErrorTypes are still asserted, and the strictAbsence binding is still proven. That split is
+// deliberate — E4-05 requires the read/plan path to keep working, and a blanket deny that stopped
+// the planner from running would be a FAIL, not a pass.
 async function testK3ExactTwoAcceptancePolicyAllowsOnlyExactAddPlan() {
   const { input, calls } = k3ExactTwoAcceptanceInput()
   const dryRun = await dryRunExternalWrite(input)
-  assert.equal(dryRun.status, 'ready')
-  assert.equal(dryRun.canApply, true)
+  assert.equal(dryRun.status, 'not_applyable', 'E4: a K3 plan is never "ready" — no apply follows from it')
+  assert.equal(dryRun.canApply, false)
+  assert.equal(dryRun.dryRunToken, null, 'E4: no apply authorisation is minted for a K3 target')
+  assert.deepEqual(dryRun.evidence.externalWriteApply, {
+    permanentlyRefused: true,
+    refusalCode: 'K3_WISE_EXTERNAL_WRITE_DISABLED',
+    authority: 'E4',
+  })
   assert.equal(dryRun.counts.sourceRows, 2)
   assert.equal(dryRun.counts.planned, 2)
   assert.equal(dryRun.counts.add, 2)
@@ -910,22 +924,23 @@ async function testK3ExactTwoAcceptancePolicyAllowsOnlyExactAddPlan() {
     cleanupRequired: true,
   })
 
-  const apply = await applyExternalWrite({
+  // The persisted exact-two acceptance policy is EXACTLY the kind of "policy object" §10.1 says
+  // cannot unlock the write. It still evaluates and still reports ready — and still buys nothing.
+  assert.equal(calls.lookupByKey[0].policy.strictAbsence, true, 'exact-two add-only binds strict absence into planner policy')
+  assert.equal(calls.lookupByKey.length, 2, 'the planner still performs its per-row target lookups')
+
+  const refusal = await applyExternalWrite({
     ...input,
-    dryRunToken: dryRun.dryRunToken,
+    dryRunToken: 'a-token-that-would-otherwise-be-valid',
     applyUser: 'user_read',
     runId: 'run_k3_exact_two',
-  })
-  assert.equal(apply.status, 'succeeded')
-  assert.equal(apply.counts.written, 2)
-  assert.equal(apply.counts.add, 2)
-  assert.equal(apply.counts.update, 0)
-  assert.equal(calls.insertRows.length, 2, 'two-row acceptance performs exactly two isolated Save calls')
-  assert.equal(calls.updateRows.length, 0)
-  assert.equal(apply.evidence.acceptancePolicy.ready, true)
-  assert.equal(apply.evidence.acceptancePolicy.cleanupRequired, true)
-  assert.equal(calls.lookupByKey[0].policy.strictAbsence, true, 'exact-two add-only binds strict absence into planner policy')
-  assert.equal(calls.lookupByKey.length, 6, 'apply preflights both add rows after the planner lookups')
+  }).then(() => null, (error) => error)
+  assert.ok(refusal, 'E4: apply must refuse')
+  assert.equal(refusal.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED')
+  assert.equal(refusal.status, 403)
+  assert.equal(calls.insertRows.length, 0, 'E4: zero Save calls')
+  assert.equal(calls.updateRows.length, 0, 'E4: zero update calls')
+  assert.equal(calls.lookupByKey.length, 2, 'E4: the refusal precedes the apply-side planner recompute entirely')
 }
 
 async function testK3ExactTwoAcceptanceStopsAfterFirstSaveFailure() {
@@ -935,10 +950,16 @@ async function testK3ExactTwoAcceptanceStopsAfterFirstSaveFailure() {
       throw new Error('K3 Save failed with private row values')
     },
   })
+  // CONVERTED (E4). This proved that the FIRST Save failure stops the batch instead of enlarging
+  // the partial-write set, and that the resulting evidence + dead letter stay values-free. With
+  // zero Saves possible there is no first failure to stop after — so the surviving, stronger
+  // claim is asserted instead: ZERO Saves, ZERO dead letters, and a refusal that carries none of
+  // the private row values the old evidence had to be scrubbed of.
   const dryRun = await dryRunExternalWrite(input)
-  const apply = await applyExternalWrite({
+  assert.equal(dryRun.dryRunToken, null)
+  const refusal = await applyExternalWrite({
     ...input,
-    dryRunToken: dryRun.dryRunToken,
+    dryRunToken: 'a-token-that-would-otherwise-be-valid',
     applyUser: 'user_read',
     runId: 'run_k3_exact_two_first_save_failure',
     deadLetterStore: {
@@ -947,18 +968,15 @@ async function testK3ExactTwoAcceptanceStopsAfterFirstSaveFailure() {
         return { ...entry, id: `dl_${deadLetters.length}` }
       },
     },
-  })
+  }).then(() => null, (error) => error)
 
-  assert.equal(apply.status, 'failed')
-  assert.equal(apply.counts.written, 0)
-  assert.equal(apply.counts.add, 0)
-  assert.equal(apply.counts.failed, 1)
-  assert.equal(calls.insertRows.length, 1, 'strict exact-two stops without attempting the sibling Save')
+  assert.equal(refusal.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED')
+  assert.equal(calls.insertRows.length, 0, 'E4: not even the first Save is attempted')
   assert.equal(calls.updateRows.length, 0)
-  assert.deepEqual(apply.deadLetters, { attempted: 1, persisted: 1 })
-  const evidence = JSON.stringify(apply) + JSON.stringify(deadLetters)
+  assert.equal(deadLetters.length, 0, 'E4: a refused apply writes no dead letters — there is no failed row')
+  const evidence = JSON.stringify({ code: refusal.code, message: refusal.message, details: refusal.details })
   for (const privateValue of ['P-001', 'P-002', 'Widget', 'Gadget']) {
-    assert.equal(evidence.includes(privateValue), false, `strict failure evidence stays values-free (${privateValue})`)
+    assert.equal(evidence.includes(privateValue), false, `the refusal stays values-free (${privateValue})`)
   }
 }
 
@@ -990,13 +1008,17 @@ async function testK3ExactTwoAcceptancePolicyRejectsDuplicateMaterialKeysBeforeA
   assert.equal(calls.lookupByKey.length, 1, 'the duplicate key is refused before a second target lookup')
   assert.equal(input.tokenStore.map.size, 0, 'a duplicate target key never mints an Apply token')
 
+  // CONVERTED (E4): the duplicate-key plan already minted no token, and the apply used to fail
+  // with C6_WRITE_DRY_RUN_TOKEN_REQUIRED. The E4 fence is the FIRST statement of
+  // applyExternalWrite, ahead of the token check, so a K3 apply now reports the write-disabled
+  // code instead. The plan-side duplicate-key assertions above are untouched.
   await assert.rejects(
     () => applyExternalWrite({
       ...input,
       dryRunToken: dryRun.dryRunToken,
       applyUser: 'user_read',
     }),
-    (error) => error && error.code === 'C6_WRITE_DRY_RUN_TOKEN_REQUIRED',
+    (error) => error && error.code === 'K3_WISE_EXTERNAL_WRITE_DISABLED',
   )
   assert.equal(calls.insertRows.length, 0, 'the duplicate-key plan cannot reach K3 Save')
   assert.equal(calls.updateRows.length, 0)
@@ -1043,17 +1065,24 @@ async function testK3ExactTwoAcceptancePolicyIsClosedAndRevisionBound() {
   )
   assert.equal(nonK3.calls.test.length, 0, 'K3-only persisted policy fails closed on a non-K3 target')
 
+  // CONVERTED (E4). The two closed-shape checks above are UNCHANGED and still live — they run in
+  // the planner, which K3 targets still reach. The third leg used the revision fence
+  // (C6_WRITE_DRY_RUN_TOKEN_MISMATCH) to prove that removing the persisted policy after the
+  // dry-run invalidates the approval; for K3 that branch is unreachable because no token is
+  // minted. The revision fence itself is NOT weakened — it stays covered for the SQL and
+  // multitable profiles elsewhere in this same file.
   const { input, calls } = k3ExactTwoAcceptanceInput()
   const dryRun = await dryRunExternalWrite(input)
+  assert.equal(dryRun.dryRunToken, null, 'E4: no token, so nothing to invalidate')
   delete input.targetSystem.config.acceptancePolicy
   await assert.rejects(
     () => applyExternalWrite({
       ...input,
-      dryRunToken: dryRun.dryRunToken,
+      dryRunToken: 'a-token-that-would-otherwise-be-valid',
       applyUser: 'user_read',
     }),
-    (error) => error && error.code === 'C6_WRITE_DRY_RUN_TOKEN_MISMATCH',
-    'removing the persisted policy after dry-run invalidates the revision before write',
+    (error) => error && error.code === 'K3_WISE_EXTERNAL_WRITE_DISABLED',
+    'with or without the persisted policy, a K3 apply is refused',
   )
   assert.equal(calls.insertRows.length, 0)
   assert.equal(calls.updateRows.length, 0)
@@ -1086,25 +1115,29 @@ async function testK3ExactTwoApplyPreflightRefusesBatchAfterPlannerLookupStateCh
       return { data: [{ externalId: 'now-present' }], metadata: {} }
     },
   })
+  // CONVERTED (E4). The strict add-only TOCTOU preflight runs INSIDE applyExternalWrite, after
+  // the token is consumed and the plan recomputed — layer 2 refuses long before it, so the
+  // preflight is unreachable for K3. Its purpose (a post-plan existence change must not become a
+  // silent overwrite) is subsumed: the write cannot happen at all, whatever the target does
+  // between plan and apply. The values-free assertion is kept and now covers the refusal.
   const dryRun = await dryRunExternalWrite(input)
-  assert.equal(dryRun.status, 'ready')
-  assert.equal(typeof dryRun.dryRunToken, 'string')
-  assert.equal(lookups, 2, 'dry-run plans two absent rows')
+  assert.equal(dryRun.status, 'not_applyable')
+  assert.equal(dryRun.dryRunToken, null)
+  assert.equal(lookups, 2, 'dry-run still plans two absent rows — the read path is untouched')
 
   await assert.rejects(
     () => applyExternalWrite({
       ...input,
-      dryRunToken: dryRun.dryRunToken,
+      dryRunToken: 'a-token-that-would-otherwise-be-valid',
       applyUser: 'user_read',
     }),
-    (error) => error && error.code === 'C6_WRITE_STRICT_ADD_PREFLIGHT_FAILED'
-      && error.details && error.details.reason === 'target_exists',
+    (error) => error && error.code === 'K3_WISE_EXTERNAL_WRITE_DISABLED',
   )
-  assert.equal(lookups, 6, 'apply recomputes two planner lookups then preflights both rows')
-  assert.equal(calls.insertRows.length, 0, 'a post-plan existence change refuses the whole batch with zero Save')
+  assert.equal(lookups, 2, 'E4: apply performs NO recompute lookups — the refusal precedes the planner')
+  assert.equal(calls.insertRows.length, 0, 'zero Save')
   assert.equal(calls.updateRows.length, 0)
   const leaked = JSON.stringify(calls) + JSON.stringify(dryRun.evidence)
-  assert.equal(leaked.includes('now-present'), false, 'preflight evidence stays values-free')
+  assert.equal(leaked.includes('now-present'), false, 'evidence stays values-free')
 }
 
 async function testK3ExactTwoApplyPreflightRefusesAmbiguousOrLookupErrorWithZeroSave() {
@@ -1143,18 +1176,21 @@ async function testK3ExactTwoApplyPreflightRefusesAmbiguousOrLookupErrorWithZero
       })(),
     },
   ]) {
+    // CONVERTED (E4), same disposition as the sibling preflight test above: the preflight's
+    // ambiguous / lookup-error refusals live past layer 2 and are unreachable for K3. Each
+    // fixture still runs its plan and each still ends in zero Save — now unconditionally.
     const { input, calls } = k3ExactTwoAcceptanceInput({ lookupByKey: fixture.lookupByKey })
     const dryRun = await dryRunExternalWrite(input)
+    assert.equal(dryRun.dryRunToken, null, `${fixture.reason}: no token minted for a K3 target`)
     await assert.rejects(
       () => applyExternalWrite({
         ...input,
-        dryRunToken: dryRun.dryRunToken,
+        dryRunToken: 'a-token-that-would-otherwise-be-valid',
         applyUser: 'user_read',
       }),
-      (error) => error && error.code === 'C6_WRITE_STRICT_ADD_PREFLIGHT_FAILED'
-        && error.details && error.details.reason === fixture.reason,
+      (error) => error && error.code === 'K3_WISE_EXTERNAL_WRITE_DISABLED',
     )
-    assert.equal(calls.insertRows.length, 0, `preflight ${fixture.reason} performs zero Save`)
+    assert.equal(calls.insertRows.length, 0, `${fixture.reason}: zero Save`)
     assert.equal(calls.updateRows.length, 0)
   }
 }

@@ -8,6 +8,15 @@ const crypto = require('node:crypto')
 
 const { transformRecord, getPath } = require('./transform-engine.cjs')
 const { validateRecord } = require('./validator.cjs')
+// E4 / G-4 LAYER 2 of FOUR (HG v1.2 §10.2.2). Independent of the HTTP route: a caller that reaches
+// this module directly — an in-process script, a future internal scheduler, a test — still cannot
+// apply to K3. Acceptance E4-02.
+const {
+  K3_EXTERNAL_WRITE_APPLY_MARKER,
+  K3_WISE_EXTERNAL_WRITE_DISABLED,
+  assertK3ExternalWriteRefused,
+  isK3ExternalWriteTargetKind,
+} = require('./k3-external-write-permanent-fence.cjs')
 
 const C6_WRITE_DRY_RUN_TOKEN_PREFIX = 'integration:c6-write-dry-run-token:'
 const DEFAULT_C6_DRY_RUN_TOKEN_TTL_MS = 30 * 60 * 1000
@@ -29,6 +38,11 @@ const SAFE_WRITE_ERROR_CODES = new Set([
   // K3 C6 write (K3WriteDecision): row-scoped Save failures surface as this closed token so a
   // dead-lettered K3 row is diagnosable instead of collapsing to WRITE_FAILED.
   'K3_WISE_SAVE_FAILED',
+  // E4: if the permanent K3 fence ever fires from INSIDE the per-row write loop (it can only do so
+  // when the outer fences have been removed), the row error must stay diagnosable rather than
+  // collapsing into an opaque WRITE_FAILED. Registering the token here is what makes the layer-3
+  // and layer-4 catches visible in evidence during the E4-03 / E4-04 fence-removal drills.
+  K3_WISE_EXTERNAL_WRITE_DISABLED,
   C6_TEST_INJECTED_ROW_FAILURE,
   // Multitable ownership guard (adapters/multitable-ownership-guard.cjs): a refusal to write a
   // protected column, or an inability to verify ownership, is a TARGET-CONFIGURATION fact, not a
@@ -654,6 +668,12 @@ function publicAcceptancePolicyEvidence(acceptancePolicy) {
 }
 
 function publicEvidence({ pipeline, targetConfig, sourceKind, counts, revision, canApply, sourceRead, rowErrorTypes, dryRunToken, testFailureInjection, acceptancePolicy }) {
+  // E4 marker. Present ONLY for the permanently-refused kind, and frozen so it cannot grow a
+  // plan-dependent field and become a channel. It is what makes a K3 preview self-describing:
+  // whoever reads this plan is told, in the plan itself, that no apply follows from it.
+  const externalWriteApply = isK3ExternalWriteTargetKind(targetConfig.kind)
+    ? { ...K3_EXTERNAL_WRITE_APPLY_MARKER }
+    : null
   return {
     pipelineId: pipeline.id,
     targetKind: targetConfig.kind,
@@ -671,6 +691,7 @@ function publicEvidence({ pipeline, targetConfig, sourceKind, counts, revision, 
     dryRunRevision: revision,
     canApply: canApply === true,
     dryRunTokenPresent: typeof dryRunToken === 'string' && dryRunToken.length > 0,
+    ...(externalWriteApply ? { externalWriteApply } : {}),
     ...(acceptancePolicy ? { acceptancePolicy: publicAcceptancePolicyEvidence(acceptancePolicy) } : {}),
     testFailureInjection: publicTestFailureInjectionEvidence(testFailureInjection),
   }
@@ -843,7 +864,17 @@ async function computeExternalWritePlan(input = {}) {
   if (acceptancePolicy && acceptancePolicy.ready !== true) {
     rowErrorTypes.push('acceptance_policy_mismatch')
   }
-  const canApply = sourceRead.complete === true &&
+  // E4 DRY-RUN DISPOSITION (HG v1.2 §10.2, frozen ruling): the dry-run STAYS for K3 targets. It reads
+  // the source, classifies rows, and produces counts, fingerprints and a revision — none of which
+  // is an external write, and K3 READ is explicitly out of the ban. What it may NOT do is hand
+  // back an apply authorisation. `canApply` is forced false, so no dry-run token is minted (see
+  // dryRunExternalWrite), the status reads `not_applyable`, and the evidence carries the fixed,
+  // values-free marker below. A plan that said "ready" for a target whose apply is permanently
+  // refused would be a lie a human is asked to approve — which is precisely the failure mode the
+  // approval gate exists to prevent.
+  const k3ApplyPermanentlyRefused = isK3ExternalWriteTargetKind(targetConfig.kind)
+  const canApply = k3ApplyPermanentlyRefused === false &&
+    sourceRead.complete === true &&
     counts.failed === 0 &&
     counts.held === 0 &&
     (!acceptancePolicy || acceptancePolicy.ready === true)
@@ -878,6 +909,7 @@ async function computeExternalWritePlan(input = {}) {
     planRows,
     policy,
     canApply,
+    k3ApplyPermanentlyRefused,
     revision,
     acceptancePolicy,
     testFailureInjection,
@@ -904,6 +936,9 @@ async function dryRunExternalWrite(input = {}) {
     pipelineId: plan.pipeline.id,
     status: plan.canApply ? 'ready' : 'not_applyable',
     canApply: plan.canApply,
+    // Surfaced at the TOP level as well as inside evidence: a workbench that renders only the
+    // headline fields must still be told that this plan can never be applied.
+    ...(plan.k3ApplyPermanentlyRefused ? { externalWriteApply: { ...K3_EXTERNAL_WRITE_APPLY_MARKER } } : {}),
     dryRunToken,
     revision: plan.revision,
     counts: plan.counts,
@@ -1015,6 +1050,27 @@ async function preflightStrictAddOnlyLookups(plan, input = {}) {
 }
 
 async function applyExternalWrite(input = {}) {
+  // ===== E4 LAYER 2 of FOUR — independent of layer 1 (HG v1.2 §10.2.2) ===================
+  // FIRST statement of the function, ahead of the apply-user check, ahead of
+  // `validatePlannerInput`, and — the property that matters — ahead of `consumeDryRunToken`.
+  // The single-use dry-run token is spent by that call; refusing before it means a K3 apply
+  // attempt cannot burn a token it was never entitled to spend.
+  //
+  // TWO independent identities carry K3 today and BOTH are checked: `targetSystem.kind` (the
+  // loaded external system — the K3 route substitutes `{...targetSystem, config: flatConfig}`,
+  // which preserves the top-level kind) and `targetWriteProfile.kind` (the server-resolved
+  // per-kind safety policy; trusted wiring, never request-sourced, so reading it widens nothing).
+  // A bypass would have to launder K3 out of both at once. `targetSystem.config` is passed as a
+  // third candidate for shape robustness only — the K3 flat config carries no `kind` field today,
+  // so it is defence against a future derive that starts emitting one, not a live gate. Stated
+  // exactly, because a comment claiming three live checks where two exist is how a fence rots.
+  assertK3ExternalWriteRefused(
+    (status, code, message, details) => new ExternalWriteDryRunError(status, code, message, details),
+    input.targetSystem,
+    input.targetSystem && input.targetSystem.config,
+    input.targetWriteProfile,
+  )
+  // ===================================================================================
   const applyUser = optionalString(input.applyUser)
   if (!applyUser) {
     throw new ExternalWriteDryRunError(401, 'C6_WRITE_APPLY_USER_REQUIRED', 'authenticated apply user is required')

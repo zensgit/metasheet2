@@ -189,6 +189,63 @@ test('reachability context: the K3 adapter still declares itself a write TARGET'
   assert.ok(K3_WISE_WEBAPI_ADAPTER_METADATA.roles.includes('target'))
 })
 
+// ---------------------------------------------------------------------------
+// (5) E4 (HG v1.2 §10) — the POSTURE flip this file exists to record.
+//
+// This file's own history is the argument for putting it here. It was written to pin "no wired
+// C6 write profile accepts the K3 connector kind" as a FORWARD REQUIREMENT, then deliberately
+// flipped when K3WriteDecision wired the profile. E4 flips the posture again, in the opposite
+// direction and permanently: the profile stays wired — it is what makes the K3 dry-run PLANNABLE,
+// which §15.2 E4-05 requires — but no apply follows from it at any of four layers.
+//
+// Kept SCOPED: this pins the CONTRACT (the frozen code, and that the K3 kind is still the profile
+// the planner resolves). The four layers' zero-login/zero-save behaviour is witnessed per layer in
+// k3-external-write-permanent-fence.test.cjs (E4-01..E4-04); duplicating it here would be a
+// second, drifting record of the same fact.
+// ---------------------------------------------------------------------------
+
+test('E4: the K3 write profile stays wired for PLANNING, and the refusal code is the frozen one', () => {
+  const fence = require('../lib/k3-external-write-permanent-fence.cjs')
+  // The literal is spelled out rather than compared to itself through the import — a rename in
+  // production must be a visible, reviewable edit here, not a silently re-pointed expectation.
+  assert.equal(fence.K3_WISE_EXTERNAL_WRITE_DISABLED, 'K3_WISE_EXTERNAL_WRITE_DISABLED')
+  assert.equal(fence.K3_EXTERNAL_WRITE_REFUSAL_STATUS, 403)
+  assert.equal(fence.K3_EXTERNAL_WRITE_TARGET_KIND, K3_CONNECTOR_KIND)
+  // The fence's subject is the SAME kind the C6 profile covers — if those two ever diverged, the
+  // profile would keep planning a target the fence no longer recognised.
+  assert.equal(fence.isK3ExternalWriteTargetKind(K3_WISE_C6_WRITE_PROFILE.kind), true)
+  // Discrimination: the fence must not swallow the other two wired kinds.
+  assert.equal(fence.isK3ExternalWriteTargetKind(SQL_WRITE_GATED_PROFILE.kind), false)
+  assert.equal(fence.isK3ExternalWriteTargetKind(MULTITABLE_WRITE_PROFILE.kind), false)
+})
+
+test('E4 §10.1: the fence module reserves NO runtime switch — it takes no config of any kind', () => {
+  // "不得预留运行时开关" is a property of the SOURCE, not of a call. Assert it structurally: the
+  // module reads no environment variable and consults no options object. A future edit that adds
+  // an unlock knob has to delete this test to land, which is exactly the reviewable act §10.1
+  // demands.
+  const fs = require('node:fs')
+  const path = require('node:path')
+  const source = fs.readFileSync(path.join(__dirname, '..', 'lib', 'k3-external-write-permanent-fence.cjs'), 'utf8')
+  const code = source.split('\n').filter((line) => !line.trim().startsWith('//')).join('\n')
+  assert.equal(/process\.env/.test(code), false, 'the fence must never read an environment variable')
+  assert.equal(/require\(/.test(code), false, 'the fence must stay a leaf — no module it depends on can weaken it')
+
+  // And nothing it exports can be mutated into an unlock at runtime.
+  const fence = require('../lib/k3-external-write-permanent-fence.cjs')
+  assert.ok(Object.isFrozen(fence.K3_EXTERNAL_WRITE_APPLY_MARKER), 'the plan marker is frozen')
+  const mutators = Object.entries(fence).filter(([name, value]) => typeof value === 'function' && /^set|^enable|^configure/i.test(name))
+  assert.deepEqual(mutators.map(([name]) => name), [], 'the fence exports no setter, enabler or configurator')
+
+  // The unconditional refusal really is unconditional: it throws for every caller, with no
+  // argument that could make it return instead.
+  for (const build of [
+    (status, code2, message, details) => Object.assign(new Error(message), { status, code: code2, details }),
+  ]) {
+    assert.throws(() => fence.refuseK3ExternalWritePermanently(build), /permanently disabled/)
+  }
+})
+
 test('reachability context: material upsert stays the DEFAULT template operation (guard restored per review)', () => {
   // Review #4761 P3: the pre-flip file asserted this and the flip dropped it with no
   // successor. It is what makes the whole posture load-bearing — if upsert stopped being the

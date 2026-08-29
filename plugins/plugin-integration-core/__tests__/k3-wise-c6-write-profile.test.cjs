@@ -374,7 +374,17 @@ test('fail-closed: a target without the named customer profile cannot even deriv
   )
 })
 
-test('roundtrip: dry-run plans add+update, mints a token; apply consumes it and Saves — 0 Submit, 0 Audit', async () => {
+test('G-4: dry-run still PLANS add+update, but mints NO token and apply is permanently refused', async () => {
+  // CONVERTED (G-4, go-live gate: K3 Save/Submit/Audit external write-back is permanently
+  // banned; "即使出现通用写开关或普通 owner 审批也保持不可达"). This was the happy-path roundtrip —
+  // dry-run mints a token, apply consumes it and Saves twice.
+  //
+  // DRY-RUN DISPOSITION (decided for this PR, and this test is where it is pinned): the dry-run
+  // STAYS. It reads and classifies exactly as before — a K3 READ is not a write, and the whole
+  // point of a preview is to let a human see what a target holds. Its two apply-facing outputs
+  // change, because those would otherwise be untrue: `canApply` is false, no token is minted, and
+  // the plan carries the fixed values-free marker `externalWriteApply.permanentlyRefused`. The
+  // ROW CLASSIFICATION assertions below are unchanged and still the substance of the test.
   const tokenStore = memoryStore()
   const fetchPair = mockK3({
     existing: {
@@ -387,28 +397,63 @@ test('roundtrip: dry-run plans add+update, mints a token; apply consumes it and 
   ]
 
   const dryRun = await dryRunExternalWrite(c6Inputs({ rows, fetchPair, tokenStore }))
-  assert.equal(dryRun.status, 'ready')
-  assert.ok(dryRun.dryRunToken, 'a ready dry-run must mint a token')
   assert.equal(dryRun.counts.sourceRows, 2)
   assert.equal(dryRun.counts.add, 1, 'business-level GetDetail miss classifies as add')
   assert.equal(dryRun.counts.update, 1, 'differing FName classifies as update')
   const dryRunSaves = fetchPair.calls.filter((c) => c.pathname.endsWith('/Material/Save'))
   assert.equal(dryRunSaves.length, 0, 'dry-run must not write')
 
-  const apply = await applyExternalWrite({
-    ...c6Inputs({ rows, fetchPair, tokenStore }),
-    dryRunToken: dryRun.dryRunToken,
-    applyUser: 'operator-1',
-  })
-  assert.equal(apply.counts.written, 2)
-  assert.equal(apply.counts.failed, 0)
+  assert.equal(dryRun.status, 'not_applyable', 'G-4: a plan for a permanently-refused target is never "ready"')
+  assert.equal(dryRun.canApply, false)
+  assert.equal(dryRun.dryRunToken, null, 'G-4: no apply authorisation is issued for a K3 target')
+  assert.deepEqual(
+    dryRun.externalWriteApply,
+    { permanentlyRefused: true, refusalCode: 'K3_WISE_EXTERNAL_WRITE_DISABLED', authority: 'E4' },
+    'the plan says, in its own output, that no apply follows from it',
+  )
+  assert.deepEqual(dryRun.evidence.externalWriteApply, dryRun.externalWriteApply, 'the same marker rides the evidence')
 
-  const saves = fetchPair.calls.filter((c) => c.pathname.endsWith('/Material/Save'))
-  assert.equal(saves.length, 2, 'one Save per planned row')
-  const savedNumbers = saves.map((c) => c.body && c.body.Data && c.body.Data.FNumber).sort()
-  assert.deepEqual(savedNumbers, ['MAT-C6-EXIST', 'MAT-C6-NEW'])
-  assert.equal(fetchPair.calls.filter((c) => /\/(Submit|Audit)$/.test(c.pathname)).length, 0,
-    'save-only must survive the entire C6 lifecycle')
+  // LAYER 2 (module): apply refuses even when handed a token that WOULD have been valid. The
+  // token is seeded straight into the store, which is exactly the real in-flight case — a token
+  // minted before this fence shipped is still within its 30-minute TTL after it.
+  const plannedInputs = c6Inputs({ rows, fetchPair, tokenStore })
+  const smuggledToken = 'g4-preexisting-token'
+  await tokenStore.set(`integration:c6-write-dry-run-token:${smuggledToken}`, {
+    pipelineId: plannedInputs.pipeline.id,
+    tenantId: plannedInputs.pipeline.tenantId,
+    workspaceId: plannedInputs.pipeline.workspaceId ?? null,
+    dryRunUser: 'operator-1',
+    dataSourceOwnerPrincipal: plannedInputs.dataSourceOwnerPrincipal,
+    revision: dryRun.revision,
+    counts: dryRun.counts,
+    maxRows: 3,
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+  })
+  const callsBeforeApply = fetchPair.calls.length
+  await assert.rejects(
+    applyExternalWrite({
+      ...plannedInputs,
+      dryRunToken: smuggledToken,
+      applyUser: 'operator-1',
+    }),
+    (error) => {
+      assert.equal(error.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED')
+      assert.equal(error.status, 403)
+      return true
+    },
+  )
+  assert.equal(fetchPair.calls.length, callsBeforeApply, 'G-4: apply made ZERO further K3 calls — no login')
+  assert.equal(fetchPair.calls.filter((c) => c.pathname.endsWith('/Material/Save')).length, 0, 'G-4: 0 Save calls')
+  assert.equal(fetchPair.calls.filter((c) => /\/(Submit|Audit)$/.test(c.pathname)).length, 0, 'G-4: 0 Submit/Audit calls')
+
+  // THE TOKEN IS UNCONSUMED. The refusal is the FIRST statement of applyExternalWrite, ahead of
+  // consumeDryRunToken — so a refused apply cannot burn an approval it was never entitled to
+  // spend. Mutating the fence to sit after the consume turns this assertion red.
+  assert.ok(
+    await tokenStore.get(`integration:c6-write-dry-run-token:${smuggledToken}`),
+    'the early refusal must leave the dry-run token unconsumed',
+  )
 })
 
 test('lookup ignores a successful GetDetail record whose normalized key does not exactly match', async () => {
@@ -619,22 +664,29 @@ test('lookup preserves multiple exact key matches so the planner holds the ambig
   assert.equal(dryRun.canApply, false)
 })
 
-test('CONTENT BINDING: source rows changed between dry-run and apply -> 409, nothing written', async () => {
+test('CONTENT BINDING: tampered source rows reach no K3 write — now refused EARLIER, by G-4', async () => {
+  // CONVERTED (G-4). The property under test is "the human approved OTHER content, so nothing may
+  // reach K3", and it still holds — it is simply enforced one step earlier and unconditionally.
+  // The old carrier was the revision fence (C6_WRITE_DRY_RUN_TOKEN_MISMATCH), which needed a
+  // minted token to compare against; K3 dry-runs no longer mint one, so the mismatch branch is
+  // unreachable FOR K3 (it stays live and covered for the SQL and multitable profiles in
+  // external-write-dry-run.test.cjs — this conversion does not weaken it there).
   const tokenStore = memoryStore()
   const fetchPair = mockK3()
   const rows = [{ code: 'MAT-C6-A', name: 'Original', spec: 'S1' }]
 
   const dryRun = await dryRunExternalWrite(c6Inputs({ rows, fetchPair, tokenStore }))
-  assert.equal(dryRun.status, 'ready')
+  assert.equal(dryRun.status, 'not_applyable')
+  assert.equal(dryRun.dryRunToken, null, 'G-4: no token to tamper against in the first place')
 
   const changed = [{ code: 'MAT-C6-A', name: 'TAMPERED AFTER APPROVAL', spec: 'S1' }]
   await assert.rejects(
     applyExternalWrite({
       ...c6Inputs({ rows: changed, fetchPair, tokenStore }),
-      dryRunToken: dryRun.dryRunToken,
+      dryRunToken: 'any-token-at-all',
       applyUser: 'operator-1',
     }),
-    (error) => error && error.code === 'C6_WRITE_DRY_RUN_TOKEN_MISMATCH',
+    (error) => error && error.code === 'K3_WISE_EXTERNAL_WRITE_DISABLED',
   )
   assert.equal(fetchPair.calls.filter((c) => c.pathname.endsWith('/Material/Save')).length, 0,
     'the human approved OTHER content — nothing may reach K3')
@@ -724,10 +776,13 @@ test('without exact-two policy a generic K3 business-read error still classifies
     fetchPair,
     tokenStore,
   }))
-  assert.equal(dryRun.status, 'ready')
+  // The CLASSIFICATION is the subject and is unchanged. The two apply-facing outputs flip under
+  // G-4 (see the dry-run disposition note on the converted roundtrip test above): no token, and
+  // the plan is never "ready" for a permanently-refused target.
   assert.equal(dryRun.counts.add, 1)
   assert.equal(dryRun.counts.update, 0)
-  assert.ok(dryRun.dryRunToken)
+  assert.equal(dryRun.status, 'not_applyable')
+  assert.equal(dryRun.dryRunToken, null, 'G-4: a K3 plan issues no apply authorisation')
   assert.equal(fetchPair.calls.filter((c) => c.pathname.endsWith('/Material/Save')).length, 0)
 })
 
@@ -753,20 +808,27 @@ test('exact-two apply preflight refuses the batch when GetDetail changes after p
   ]
   const targetOverrides = { config: { c6AcceptancePolicy: { profile: 'k3-test-only-exact-two-add-v1' } } }
   const dryRun = await dryRunExternalWrite(c6Inputs({ rows, fetchPair, tokenStore, targetOverrides }))
-  assert.equal(dryRun.status, 'ready')
-  assert.ok(dryRun.dryRunToken)
+  // CONVERTED (G-4). The old carrier was the strict add-only TOCTOU preflight, which fires inside
+  // applyExternalWrite AFTER the token is consumed and the plan recomputed. Under G-4 the apply
+  // never gets that far, so the preflight's own code is unreachable for K3 — and the acceptance
+  // policy that armed it (`k3-test-only-exact-two-add-v1`) existed solely to license a supervised
+  // K3 write window that G-4 has now closed permanently. The refusal is earlier, unconditional,
+  // and independent of whether the target changed under the planner.
+  assert.equal(dryRun.status, 'not_applyable')
+  assert.equal(dryRun.dryRunToken, null, 'G-4: the exact-two acceptance policy cannot mint a token either')
   await assert.rejects(
     applyExternalWrite({
       ...c6Inputs({ rows, fetchPair, tokenStore, targetOverrides }),
-      dryRunToken: dryRun.dryRunToken,
+      dryRunToken: 'any-token-at-all',
       applyUser: 'operator-1',
     }),
-    (error) => error && error.code === 'C6_WRITE_STRICT_ADD_PREFLIGHT_FAILED',
+    (error) => error && error.code === 'K3_WISE_EXTERNAL_WRITE_DISABLED',
+    'a persisted acceptance policy is exactly the kind of "policy object" G-4 says cannot re-enable the write',
   )
   assert.equal(
     fetchPair.calls.filter((c) => c.pathname.endsWith('/Material/Save')).length,
     0,
-    'preflight refuse performs zero Save',
+    'zero Save',
   )
 })
 
@@ -814,19 +876,31 @@ test('a Save business failure lands as the registered closed token, not WRITE_FA
   const fetchPair = { impl, calls }
   const rows = [{ code: 'MAT-C6-BAD', name: 'Will fail', spec: 'S' }]
 
+  // CONVERTED (E4 / HG v1.2 §10). This proved that a business-level Save refusal is CONVERTED by
+  // the write source into a throw carrying the registered closed token `K3_WISE_SAVE_FAILED`,
+  // rather than collapsing to WRITE_FAILED. That conversion happens inside `writeRows`, AFTER the
+  // Save has been sent — and no Save can be sent any more, so the branch is unreachable for K3.
+  //
+  // NOT SILENTLY DROPPED: `K3_WISE_SAVE_FAILED` stays registered in SAFE_WRITE_ERROR_CODES (a
+  // registration that is now inert for K3, alongside the write leg it described), and the
+  // property that REPLACES it is asserted here — planning still works, and the write is refused
+  // with the fixed values-free E4 code and zero wire activity, whatever K3 would have replied.
   const dryRun = await dryRunExternalWrite(c6Inputs({ rows, fetchPair, tokenStore }))
-  assert.equal(dryRun.status, 'ready', 'planning succeeds — the failure is at write time')
+  assert.equal(dryRun.status, 'not_applyable', 'planning still runs; it just cannot authorise an apply')
+  assert.equal(dryRun.dryRunToken, null)
+  assert.ok(calls.some((p) => p.endsWith('/Material/GetDetail')), 'the READ-side lookup still reached K3 — no blanket deny')
 
-  const apply = await applyExternalWrite({
-    ...c6Inputs({ rows, fetchPair, tokenStore }),
-    dryRunToken: dryRun.dryRunToken,
-    applyUser: 'operator-1',
-  })
-  assert.equal(apply.counts.written, 0)
-  assert.equal(apply.counts.failed, 1)
-  // The registered token, not the WRITE_FAILED collapse — this is the positive control for
-  // the SAFE_WRITE_ERROR_CODES registration; values-free by construction (a closed token).
-  assert.deepEqual(apply.rowErrors.map((e) => e.errorCode), ['K3_WISE_SAVE_FAILED'])
+  const savesDuringPlan = calls.filter((p) => p.endsWith('/Material/Save')).length
+  await assert.rejects(
+    applyExternalWrite({
+      ...c6Inputs({ rows, fetchPair, tokenStore }),
+      dryRunToken: 'any-token-at-all',
+      applyUser: 'operator-1',
+    }),
+    (error) => error && error.code === 'K3_WISE_EXTERNAL_WRITE_DISABLED',
+  )
+  assert.equal(calls.filter((p) => p.endsWith('/Material/Save')).length, savesDuringPlan, 'zero Save calls')
+  assert.equal(calls.filter((p) => p.endsWith('/Material/Save')).length, 0, 'zero Save calls, absolutely')
 })
 
 test('REVIEW P2: an unchanged reference-shaped field converges to skip (unwrap parity)', async () => {
@@ -885,15 +959,24 @@ test('REVIEW P2: a Save failure WITH a K3 Code field still lands as the register
     }
     return jsonResponse(404, { success: false })
   }
+  // CONVERTED (E4 / HG v1.2 §10), same disposition as the sibling test above: the "unconditional
+  // closed token" property lived on the Save-failure branch of `writeRows`, which no K3 call can
+  // reach any more. The VALUES-FREE half of the property is preserved and is what is asserted
+  // now: the refusal that replaces it carries a FIXED code and NOTHING derived from the K3
+  // response — this fixture deliberately hands K3 an arbitrary, values-bearing `Code` string
+  // ('E-K3-000123') that must not appear anywhere in what surfaces.
   const rows = [{ code: 'MAT-C6-CODED', name: 'Coded fail', spec: 'S' }]
   const dryRun = await dryRunExternalWrite(c6Inputs({ rows, fetchPair: { impl, calls }, tokenStore }))
-  const apply = await applyExternalWrite({
+  assert.equal(dryRun.dryRunToken, null)
+  const refusal = await applyExternalWrite({
     ...c6Inputs({ rows, fetchPair: { impl, calls }, tokenStore }),
-    dryRunToken: dryRun.dryRunToken,
+    dryRunToken: 'any-token-at-all',
     applyUser: 'operator-1',
-  })
-  assert.deepEqual(apply.rowErrors.map((e) => e.errorCode), ['K3_WISE_SAVE_FAILED'],
-    'the closed token must be unconditional — K3 code strings are neither SAFE-registered nor values-free')
+  }).then(() => null, (error) => error)
+  assert.equal(refusal.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED', 'the code is fixed, never derived from a K3 response')
+  assert.equal(JSON.stringify({ code: refusal.code, message: refusal.message, details: refusal.details }).includes('E-K3-000123'), false,
+    'no K3-supplied string may ride the refusal')
+  assert.equal(calls.filter((p) => p.endsWith('/Material/Save')).length, 0, 'zero Save calls')
 })
 
 
@@ -1074,7 +1157,11 @@ test('B4 IDENTITY IS CONTENT-BOUND: a different approved binding changes the dry
       b4: b4Of([binding], { pipelineSystemIds: ['source_1', 'k3-target-1', 'k3-read-2'] }),
     })
     const out = await dryRunExternalWrite(input)
-    assert.equal(out.status, 'ready')
+    // CONVERTED (E4): the status pin moves from 'ready' to 'not_applyable' — a K3 plan no longer
+    // authorises an apply. The REVISION is what this test is about and it is computed exactly as
+    // before (buildRevision's inputs are untouched by the fence), so the per-field content-binding
+    // assertions below are unchanged.
+    assert.equal(out.status, 'not_applyable')
     return out.evidence ? out.evidence.dryRunRevision : out.revision
   }
   const base = await revisionWith(APPROVED_B4_ROW)
