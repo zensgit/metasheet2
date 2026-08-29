@@ -696,8 +696,10 @@
     <el-dialog
       v-model="actionDialogVisible"
       :title="actionDialogTitle"
-      width="480px"
+      :width="MEMBER_ACTION_DIALOG_WIDTH"
       :data-testid="ACTION_DIALOG_TEST_ID"
+      @keydown.tab="trapMemberActionDialogFocus"
+      @opened="focusActionComment"
     >
       <!-- B1-04: dialog-scoped failure message — the server's own reason, kept in place of a
            generic toast so the reader learns WHY without losing the dialog/typed comment. -->
@@ -729,6 +731,7 @@
             </el-tag>
           </div>
           <el-input
+            ref="actionCommentInputRef"
             v-model="actionComment"
             type="textarea"
             :rows="3"
@@ -755,8 +758,9 @@
     <el-dialog
       v-model="transferDialogVisible"
       :title="MEMBER_ACTION_DIALOG_GRAMMAR.transfer.dialogTitle"
-      width="480px"
+      :width="MEMBER_ACTION_DIALOG_WIDTH"
       :data-testid="MEMBER_ACTION_DIALOG_GRAMMAR.transfer.dialogTestId"
+      @keydown.tab="trapMemberActionDialogFocus"
     >
       <!-- P5-C-1: same dialog-scoped failure grammar as approve/reject/comment above — the
            non-policy branch of `handleMemberActionFailure` now renders here instead of a toast
@@ -807,8 +811,9 @@
     <el-dialog
       v-model="addSignDialogVisible"
       :title="MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.dialogTitle"
-      width="480px"
+      :width="MEMBER_ACTION_DIALOG_WIDTH"
       :data-testid="MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.dialogTestId"
+      @keydown.tab="trapMemberActionDialogFocus"
     >
       <!-- P5-C-1: same dialog-scoped failure grammar as approve/reject/comment above. -->
       <el-alert
@@ -883,8 +888,9 @@
     <el-dialog
       v-model="reduceSignDialogVisible"
       :title="MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.dialogTitle"
-      width="480px"
+      :width="MEMBER_ACTION_DIALOG_WIDTH"
       :data-testid="MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.dialogTestId"
+      @keydown.tab="trapMemberActionDialogFocus"
     >
       <!-- P5-C-1: same dialog-scoped failure grammar as approve/reject/comment above. -->
       <el-alert
@@ -943,8 +949,9 @@
     <el-dialog
       v-model="commentDialogVisible"
       :title="MEMBER_ACTION_DIALOG_GRAMMAR.comment.dialogTitle"
-      width="480px"
+      :width="MEMBER_ACTION_DIALOG_WIDTH"
       :data-testid="MEMBER_ACTION_DIALOG_GRAMMAR.comment.dialogTestId"
+      @keydown.tab="trapMemberActionDialogFocus"
     >
       <!-- B1-04: same dialog-scoped failure message as the 通过/驳回 dialog above. -->
       <el-alert
@@ -1032,8 +1039,9 @@
     <el-dialog
       v-model="returnDialogVisible"
       :title="MEMBER_ACTION_DIALOG_GRAMMAR.return.dialogTitle"
-      width="480px"
+      :width="MEMBER_ACTION_DIALOG_WIDTH"
       :data-testid="MEMBER_ACTION_DIALOG_GRAMMAR.return.dialogTestId"
+      @keydown.tab="trapMemberActionDialogFocus"
     >
       <!-- P5-C-1: same dialog-scoped failure grammar as approve/reject/comment above. -->
       <el-alert
@@ -1156,6 +1164,44 @@ const router = useRouter()
 const store = useApprovalStore()
 const templateStore = useApprovalTemplateStore()
 const { canAct } = useApprovalPermissions()
+const actionCommentInputRef = ref<{ focus: () => void } | null>(null)
+const MEMBER_ACTION_DIALOG_WIDTH = 'min(480px, calc(100vw - 32px))'
+const MEMBER_ACTION_FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled]):not([type="hidden"])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',')
+
+function focusActionComment(): void {
+  actionCommentInputRef.value?.focus()
+}
+
+// Element Plus 2.11.8 can release focus to <body> at the dialog's Tab boundary in Chromium.
+// Keep the member-action dialogs modal for keyboard users without changing their interior order.
+function trapMemberActionDialogFocus(event: KeyboardEvent): void {
+  const root = event.currentTarget
+  if (!(root instanceof HTMLElement)) return
+
+  const focusable = Array.from(root.querySelectorAll<HTMLElement>(MEMBER_ACTION_FOCUSABLE_SELECTOR))
+    .filter((element) => {
+      const style = window.getComputedStyle(element)
+      return style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0
+    })
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (!first || !last) return
+
+  if (event.shiftKey && (document.activeElement === first || document.activeElement === root)) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
 
 // T3-1 v0 — mobile approval surface (ballot Q8/Q11). When the tenant/user has
 // opted into `approvalMobile` AND the viewport is narrow, the action bar is

@@ -15,33 +15,21 @@ name: Approval Browser Verify
 # NOT a required check yet: per delta §7.1 item 8 the branch-protection
 # addition is an explicit OWNER step before the F4 merge; until that owner
 # action is visible, this lane's evidence is exact-head but not "required".
+# Pull requests intentionally have no top-level path filter: the in-job
+# classifier below keeps the context stable for unrelated PRs and merge queues.
 #
 # F4 (delta §5 F4, F2-gate handoff condition 1) added the mounted-production-
 # surface matrix (approval-form-builder-mounted-matrix.spec.ts, its owned
 # harness, and the two production-mount source files it exercises) to this
 # SAME lane/job — same server discipline, same "not required yet" posture.
+#
+# P5-C extends the lane with a real ApprovalDetailView + Element Plus member-action dialog harness
+# at desktop/tablet/mobile viewports. This is browser/mobile/a11y acceptance, not a write-path test.
 
 on:
   workflow_dispatch:
+  merge_group:
   pull_request:
-    paths:
-      - 'apps/web/src/approvals/components/ApprovalFormBuilder.vue'
-      - 'apps/web/src/approvals/components/ApprovalFormPalette.vue'
-      - 'apps/web/src/approvals/components/ApprovalFormFieldInspector.vue'
-      - 'apps/web/src/approvals/approvalFormDragPayload.ts'
-      - 'apps/web/src/approvals/approvalFormAuthoringAdapter.ts'
-      - 'apps/web/src/approvals/approvalFormIdentity.ts'
-      - 'apps/web/src/approvals/approvalFormCommands.ts'
-      - 'apps/web/src/approvals/approvalFormAuthoringHistory.ts'
-      - 'apps/web/src/views/approval/TemplateAuthoringView.vue'
-      - 'apps/web/verification/approval-form-builder-harness.html'
-      - 'apps/web/verification/approval-form-builder-harness.ts'
-      - 'apps/web/verification/approval-form-builder-parity.spec.ts'
-      - 'apps/web/verification/approval-form-builder-mounted-harness.html'
-      - 'apps/web/verification/approval-form-builder-mounted-harness.ts'
-      - 'apps/web/verification/approval-form-builder-mounted-matrix.spec.ts'
-      - 'apps/web/playwright.approval-verification.config.ts'
-      - '.github/workflows/approval-browser-verify.yml'
 
 jobs:
   browser-verify:
@@ -51,29 +39,94 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect relevant approval changes
+        id: changes
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          relevant=false
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            relevant=true
+          else
+            if [[ -z "$BASE_SHA" || "$BASE_SHA" == "0000000000000000000000000000000000000000" ]]; then
+              echo 'Approval Browser Verify: unable to determine the changed-file base.' >&2
+              exit 1
+            fi
+
+            changed_files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+            while IFS= read -r path; do
+              case "$path" in
+                apps/web/src/approvals/*|\
+                apps/web/src/views/approval*|\
+                apps/web/src/types/approval.ts|\
+                apps/web/src/composables/useAuth.ts|\
+                apps/web/src/composables/useMobileViewport.ts|\
+                apps/web/src/stores/featureFlags.ts|\
+                apps/web/src/router/appRoutes.ts|\
+                apps/web/verification/approval-*|\
+                apps/web/playwright.approval-verification.config.ts|\
+                apps/web/playwright.verification.config.ts|\
+                apps/web/tsconfig.verification-approval.json|\
+                apps/web/vite.config.ts|\
+                apps/web/package.json|\
+                package.json|\
+                pnpm-lock.yaml|\
+                scripts/ops/approval-browser-ci-wiring.test.mjs|\
+                .github/workflows/approval-browser-verify.yml)
+                  relevant=true
+                  break
+                  ;;
+              esac
+            done <<< "$changed_files"
+          fi
+
+          echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
+          if [[ "$relevant" == true ]]; then
+            echo "Approval Browser Verify: relevant changes detected for $EVENT_NAME."
+          else
+            echo "Approval Browser Verify: no relevant changes detected for $EVENT_NAME."
+          fi
+
+      - name: Report success for unrelated changes
+        if: steps.changes.outputs.relevant == 'false'
+        run: |
+          echo 'Approval Browser Verify passed: no guarded approval web files changed.'
 
       - name: Setup Node.js 20.x
+        if: steps.changes.outputs.relevant == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 20.x
 
       - name: Setup pnpm
+        if: steps.changes.outputs.relevant == 'true'
         uses: pnpm/action-setup@v4
         with:
           version: 10.16.1
           run_install: false
 
       - name: Use empty npmrc for pnpm
+        if: steps.changes.outputs.relevant == 'true'
         run: |
           echo "" > /tmp/empty-npmrc
           echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
 
       - name: Get pnpm store directory
+        if: steps.changes.outputs.relevant == 'true'
         id: pnpm-cache
         shell: bash
         run: echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
 
       - name: Setup pnpm cache
+        if: steps.changes.outputs.relevant == 'true'
         uses: actions/cache@v4
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
@@ -82,18 +135,31 @@ jobs:
             ${{ runner.os }}-pnpm-store-
 
       - name: Install dependencies
+        if: steps.changes.outputs.relevant == 'true'
         run: pnpm install --frozen-lockfile
 
+      - name: Verify approval browser CI ownership and collection
+        if: steps.changes.outputs.relevant == 'true'
+        run: node --test scripts/ops/approval-browser-ci-wiring.test.mjs
+
       - name: Install Playwright chromium (+ system deps)
+        if: steps.changes.outputs.relevant == 'true'
         run: pnpm exec playwright install --with-deps chromium
 
+      - name: Type-check approval verification harnesses
+        if: steps.changes.outputs.relevant == 'true'
+        run: pnpm --filter @metasheet/web run type-check:verification-approval
+
       - name: Run approval browser verification (boots Vite, renders real components)
+        if: steps.changes.outputs.relevant == 'true'
         run: pnpm --filter @metasheet/web exec playwright test --config playwright.approval-verification.config.ts
 
       - name: Upload verification screenshots
-        if: always()
+        if: always() && steps.changes.outputs.relevant == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: approval-browser-verify-screenshots
-          path: apps/web/verification-output/afb-*.png
+          path: |
+            apps/web/verification-output/afb-*.png
+            apps/web/verification-output/p5c-*.png
           if-no-files-found: warn

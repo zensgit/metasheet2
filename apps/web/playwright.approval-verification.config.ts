@@ -14,6 +14,10 @@ import { defineConfig, devices } from '@playwright/test'
 // real Vue Router, real Element Plus — verification/
 // approval-form-builder-mounted-harness.html/.ts), flag ON.
 //
+// P5-C adds the real ApprovalDetailView member-action dialog acceptance harness. It exercises the
+// production Element Plus dialog/focus trap at 1440/1024/390, including mobile action narrowing,
+// accessible names, disabled confirms, focus containment/restoration, and overflow.
+//
 // Run: `pnpm --filter @metasheet/web exec playwright test
 //       --config playwright.approval-verification.config.ts` (cwd = apps/web).
 // Port 5175 keeps this lane's server disjoint from the multitable lane (5174).
@@ -21,10 +25,7 @@ const PORT = 5175
 
 export default defineConfig({
   testDir: './verification',
-  testMatch: [
-    '**/approval-form-builder-parity.spec.ts',
-    '**/approval-form-builder-mounted-matrix.spec.ts',
-  ],
+  testMatch: ['**/approval-*.spec.ts'],
   timeout: 60_000,
   fullyParallel: false,
   retries: process.env.CI ? 1 : 0,
