@@ -64,23 +64,29 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_UNIT_OF_WORK_UNAVAILABLE', // required host-capability error code, not a flag
 ])
 
-function globalHistoryFlagsInSource() {
+function grepFlagTokens(pattern) {
   const srcDir = path.join(REPO_ROOT, 'packages/core-backend/src')
   let out = ''
   try {
-    out = execSync(`grep -rhoE 'MULTITABLE_[A-Z_0-9]+' ${srcDir} --include='*.ts'`, {
+    out = execSync(`grep -rhoE '${pattern}' ${srcDir} --include='*.ts'`, {
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
     })
   } catch (err) {
-    throw new Error(`could not grep MULTITABLE_ flags under ${srcDir}: ${err.message}`)
+    throw new Error(`could not grep ${pattern} under ${srcDir}: ${err.message}`)
   }
-  const tokens = [...new Set(out.split('\n').map((s) => s.trim()).filter(Boolean))]
-  return tokens
+  return [...new Set(out.split('\n').map((s) => s.trim()).filter(Boolean))]
+}
+
+function globalHistoryFlagsInSource() {
+  const tokens = grepFlagTokens('MULTITABLE_[A-Z_0-9]+')
     .filter((t) => !t.endsWith('_')) // drop concatenation-prefix artifacts (MULTITABLE_ENABLE_, ..._SMTP_)
     .filter((t) => !NON_GH_PREFIXES.some((p) => t.startsWith(p)))
     .filter((t) => !NON_GH_EXACT.has(t))
-    .sort()
+  // E-learning V0.1 flags live in this same operator registry (AGENTS.md: every new env flag).
+  // Restrict to *_ENABLED so constant names such as ELEARNING_FLAG_NAMES are not treated as flags.
+  const elearning = grepFlagTokens('ELEARNING_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
+  return [...new Set([...tokens, ...elearning])].sort()
 }
 
 test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src', () => {
@@ -168,7 +174,15 @@ test('R2 positive control: SIDE_DOOR off never fires regardless of capture', () 
   )
 })
 
-// ── R3: PIT-reset vs retention STOP-SHIP ───────────────────────────────────────────────────────────
+// ── R3: exact-anchor Revert/Reset vs retention STOP-SHIP ───────────────────────────────────────────
+
+test('R3 sheet-revert-intent-with-retention-on: SHEET_REVERT on + retention active (\'1\') fires', () => {
+  const ids = violationIds({
+    MULTITABLE_ENABLE_SHEET_REVERT: 'true',
+    MULTITABLE_META_REVISION_RETENTION_ENABLED: '1',
+  })
+  assert.ok(ids.includes('sheet-revert-intent-with-retention-on'), `expected sheet-revert conflict, got ${ids.join(',')}`)
+})
 
 test('R3 pit-reset-intent-with-retention-on: PIT_RESET on + retention active (\'1\') fires', () => {
   const ids = violationIds({
@@ -195,11 +209,14 @@ test('R3 positive control: PIT_RESET on + retention off/unset does NOT fire', ()
   assert.equal(violationIds({ MULTITABLE_ENABLE_PIT_RESET: 'true' }).includes('pit-reset-intent-with-retention-on'), false)
 })
 
-test('R3 positive control: retention active alone (no PIT_RESET) does NOT fire', () => {
-  assert.equal(
-    violationIds({ MULTITABLE_META_REVISION_RETENTION_ENABLED: '1' }).includes('pit-reset-intent-with-retention-on'),
-    false,
-  )
+test('R3 positive control: SHEET_REVERT on + retention off/unset does NOT fire', () => {
+  assert.equal(violationIds({ MULTITABLE_ENABLE_SHEET_REVERT: 'true' }).includes('sheet-revert-intent-with-retention-on'), false)
+})
+
+test('R3 positive control: retention active alone (no Revert/Reset gate) does NOT fire', () => {
+  const ids = violationIds({ MULTITABLE_META_REVISION_RETENTION_ENABLED: '1' })
+  assert.equal(ids.includes('sheet-revert-intent-with-retention-on'), false)
+  assert.equal(ids.includes('pit-reset-intent-with-retention-on'), false)
 })
 
 test('R3 PIT_RESET activation is case-insensitive + trimmed (matches univer-meta.ts PIT_RESET_ENABLED)', () => {
@@ -218,6 +235,18 @@ test("R4 retention requires exact '1'; '1' activates, 'true'/'yes'/'on' do not",
   assert.equal(isActivated(spec, 'true'), false)
   assert.equal(isActivated(spec, 'yes'), false)
   assert.equal(isActivated(spec, 'on'), false)
+  assert.equal(isActivated(spec, ' 1 '), false)
+  assert.equal(isActivated(spec, '1 '), false)
+})
+
+test('R3 reciprocal manifest metadata keeps Revert/Reset and retention conflictsWith symmetric', () => {
+  const revert = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_ENABLE_SHEET_REVERT
+  const reset = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_ENABLE_PIT_RESET
+  const retention = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_META_REVISION_RETENTION_ENABLED
+  assert.ok(revert.conflictsWith.includes(retention.key), 'Revert must declare retention as a conflict')
+  assert.ok(retention.conflictsWith.includes(revert.key), 'retention must declare Revert as a conflict')
+  assert.ok(reset.conflictsWith.includes(retention.key), 'PIT Reset must declare retention as a conflict')
+  assert.ok(retention.conflictsWith.includes(reset.key), 'retention must declare PIT Reset as a conflict')
 })
 
 test('R4 isMisconfiguredTruthy flags retention=true (should be 1) and PIT_RESET=1 (should be true)', () => {
@@ -236,6 +265,41 @@ test('R4 isMisconfiguredTruthy is false for empty/absent values (nothing to warn
   assert.equal(isMisconfiguredTruthy(retentionSpec, undefined), false)
   assert.equal(isMisconfiguredTruthy(retentionSpec, null), false)
   assert.equal(isMisconfiguredTruthy(retentionSpec, 'false'), false)
+})
+
+// ── D2a: archive contract-only flag ────────────────────────────────────────────────────────────────
+
+test('D2a recovery archive flag is exact-case-sensitive, fence-dependent, and has no retention conflict', () => {
+  const archive = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
+  assert.deepEqual(
+    {
+      key: archive.key,
+      type: archive.type,
+      activationValue: archive.activationValue,
+      caseInsensitive: archive.caseInsensitive,
+      dependsOn: archive.dependsOn,
+      conflictsWith: archive.conflictsWith,
+      danger: archive.danger,
+      source: archive.source,
+    },
+    {
+      key: 'MULTITABLE_RECOVERY_ARCHIVE_ENABLED',
+      type: 'boolean',
+      activationValue: 'true',
+      caseInsensitive: undefined,
+      dependsOn: ['MULTITABLE_ENABLE_WRITER_FENCE'],
+      conflictsWith: [],
+      danger: 'medium',
+      source: 'packages/core-backend/src/multitable/recovery-archive-contract.ts#isMultitableRecoveryArchiveEnabled',
+    },
+  )
+  assert.equal(isActivated(archive, 'true'), true)
+  for (const value of [undefined, 'false', 'TRUE', ' true ', 'true ', ' true']) {
+    assert.equal(isActivated(archive, value), false, `archive flag must remain OFF for ${String(value)}`)
+  }
+  assert.match(archive.purpose, /no production caller/i)
+  assert.match(archive.purpose, /later D2 caller/i)
+  assert.match(archive.purpose, /no retention conflict/i)
 })
 
 // ── Combined ladder rung ───────────────────────────────────────────────────────────────────────────
@@ -287,19 +351,21 @@ test('undelete positive control: PIT_UNDELETE off never fires regardless of SHEE
   )
 })
 
-test('a rung that stacks ALL FOUR illegal combinations fires all four named violations at once', () => {
+test('a rung that stacks every compatible retention conflict fires all four named violations', () => {
   const ids = violationIds({
     MULTITABLE_ENABLE_FIELD_RETYPE_REVERT_LOSSY: 'true',
     MULTITABLE_ENABLE_FIELD_RETYPE_REVERT: 'false',
     MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED: 'true',
     MULTITABLE_TOMBSTONE_CAPTURE_ENABLED: 'false',
     MULTITABLE_ENABLE_PIT_RESET: 'true',
+    MULTITABLE_ENABLE_SHEET_REVERT: 'true',
     MULTITABLE_META_REVISION_RETENTION_ENABLED: '1',
-    MULTITABLE_ENABLE_PIT_UNDELETE: 'true', // SHEET_REVERT unset → undelete-without-revert-gate fires
+    // SHEET_REVERT is on here to exercise its retention conflict. That makes the undelete-without-revert
+    // violation mutually exclusive; it is covered by its own targeted test above.
   })
   assert.deepEqual(
     [...ids].sort(),
-    ['lossy-without-base', 'pit-reset-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
+    ['lossy-without-base', 'pit-reset-intent-with-retention-on', 'sheet-revert-intent-with-retention-on', 'side-door-without-capture'].sort(),
   )
 })
 
@@ -312,7 +378,7 @@ test('mutation guard: every FlagSpec.rules[] entry is reachable by evaluateFlagR
   const allRuleIds = GLOBAL_HISTORY_FLAG_MANIFEST.flatMap((spec) => (spec.rules || []).map((r) => r.id))
   assert.deepEqual(
     [...allRuleIds].sort(),
-    ['lossy-without-base', 'pit-reset-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
+    ['lossy-without-base', 'pit-reset-intent-with-retention-on', 'sheet-revert-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
     'manifest rule set changed — update this test deliberately if a rule was intentionally added/removed',
   )
 })

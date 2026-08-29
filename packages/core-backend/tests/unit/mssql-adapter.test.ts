@@ -58,10 +58,13 @@ function normalizeSql(sql: string): string {
   return sql.replace(/\s+/g, ' ').trim()
 }
 
-function adapterWithFakePool(fp: ReturnType<typeof fakePool>): MSSQLAdapter {
+function adapterWithFakePool(
+  fp: ReturnType<typeof fakePool>,
+  connectionOverrides: Record<string, unknown> = {}
+): MSSQLAdapter {
   const a = new MSSQLAdapter({
     id: 's', name: 's', type: 'sqlserver',
-    connection: { host: 'db', port: 1433, database: 'ERP' },
+    connection: { host: 'db', port: 1433, database: 'ERP', ...connectionOverrides } as DataSourceConfig['connection'],
     credentials: { username: 'u', password: 'p' },
     options: { autoConnect: false },
   })
@@ -234,6 +237,109 @@ describe('MSSQLAdapter — SQL generation (fake driver)', () => {
     expect(sql).toContain('FETCH NEXT 10 ROWS ONLY')
   })
 
+  // #4591 (DATA_SOURCE_OFFSET_ORDERING_REQUIRED, DRAFT) documents that an offset read with no real
+  // ORDER BY key cannot guarantee stable row order across pages. This pins TODAY's default (flag
+  // unset) behavior byte-for-byte: SQL Server's OFFSET/FETCH syntax requires SOME ORDER BY to be
+  // valid at all, so the adapter falls back to a no-op `(SELECT NULL)`. That fallback is NOT a fix —
+  // it exists only to keep the SQL syntactically legal — and this test exists so nobody mistakes
+  // silence here for "MSSQL solved #4591": it did not, this is still the exposure the doc describes.
+  it('select: offset without orderBy falls back to a non-deterministic ORDER BY (SELECT NULL) — pins the KNOWN #4591 exposure, unchanged by default', async () => {
+    const fp = fakePool()
+    await adapterWithFakePool(fp).select('t', { limit: 10, offset: 20 })
+    const { sql } = fp.calls[0]
+    expect(sql).toContain('ORDER BY (SELECT NULL) OFFSET 20 ROWS')
+    expect(sql).toContain('FETCH NEXT 10 ROWS ONLY')
+  })
+
+  describe('select: strictOffsetOrdering opt-in (default OFF, narrow #4591 belt)', () => {
+    it('default (flag unset): offset without orderBy still runs, unchanged (byte-identical to before this change)', async () => {
+      const fp = fakePool()
+      await adapterWithFakePool(fp).select('t', { limit: 10, offset: 20 })
+      expect(fp.calls[0].sql).toContain('ORDER BY (SELECT NULL) OFFSET 20 ROWS')
+    })
+
+    it('strictOffsetOrdering:true + offset>0 + no orderBy -> refused BEFORE the driver query is issued', async () => {
+      const fp = fakePool()
+      await expect(
+        adapterWithFakePool(fp, { strictOffsetOrdering: true }).select('t', { limit: 10, offset: 20 })
+      ).rejects.toThrow(/strictOffsetOrdering/)
+      expect(fp.calls).toHaveLength(0)
+    })
+
+    it('strictOffsetOrdering:true + offset>0 + an explicit orderBy -> still runs normally (unaffected)', async () => {
+      const fp = fakePool()
+      await adapterWithFakePool(fp, { strictOffsetOrdering: true }).select('t', {
+        limit: 10,
+        offset: 20,
+        orderBy: [{ column: 'id', direction: 'asc' }],
+      })
+      const { sql } = fp.calls[0]
+      expect(sql).toContain('ORDER BY [id] ASC OFFSET 20 ROWS')
+    })
+
+    it('strictOffsetOrdering:true + offset omitted/0 -> unaffected (TOP path never requires ORDER BY)', async () => {
+      const fp = fakePool()
+      await adapterWithFakePool(fp, { strictOffsetOrdering: true }).select('t', { limit: 10 })
+      expect(fp.calls[0].sql).toContain('SELECT TOP (10)')
+      const fp2 = fakePool()
+      await adapterWithFakePool(fp2, { strictOffsetOrdering: true }).select('t', { limit: 10, offset: 0 })
+      expect(fp2.calls[0].sql).toContain('SELECT TOP (10)')
+    })
+
+    it('strictOffsetOrdering:"false" (string) behaves as off, like the other boolean-ish connection knobs', async () => {
+      const fp = fakePool()
+      await adapterWithFakePool(fp, { strictOffsetOrdering: 'false' }).select('t', { limit: 10, offset: 20 })
+      expect(fp.calls[0].sql).toContain('ORDER BY (SELECT NULL) OFFSET 20 ROWS')
+    })
+  })
+
+  // W-5 (armed B2a floor 2): `options.strictOffsetOrdering` is a PER-CALL override of the SAME check
+  // above — the seam that resolves an armed B2a read's source config sets it for one read, without
+  // touching this data source's own connection.strictOffsetOrdering setting.
+  describe('select: options.strictOffsetOrdering per-call override (W-5)', () => {
+    it('options.strictOffsetOrdering:true refuses offset>0 without orderBy even when connection.strictOffsetOrdering is unset', async () => {
+      const fp = fakePool()
+      await expect(
+        adapterWithFakePool(fp).select('t', { limit: 10, offset: 20, strictOffsetOrdering: true })
+      ).rejects.toThrow(/strictOffsetOrdering/)
+      expect(fp.calls).toHaveLength(0)
+    })
+
+    it('options.strictOffsetOrdering:true refuses even when connection.strictOffsetOrdering is explicitly false', async () => {
+      const fp = fakePool()
+      await expect(
+        adapterWithFakePool(fp, { strictOffsetOrdering: false }).select('t', { limit: 10, offset: 20, strictOffsetOrdering: true })
+      ).rejects.toThrow(/strictOffsetOrdering/)
+      expect(fp.calls).toHaveLength(0)
+    })
+
+    it('options.strictOffsetOrdering:true + an explicit orderBy still runs normally (unaffected)', async () => {
+      const fp = fakePool()
+      await adapterWithFakePool(fp).select('t', {
+        limit: 10,
+        offset: 20,
+        strictOffsetOrdering: true,
+        orderBy: [{ column: 'id', direction: 'asc' }],
+      })
+      expect(fp.calls[0].sql).toContain('ORDER BY [id] ASC OFFSET 20 ROWS')
+    })
+
+    it('options.strictOffsetOrdering:true + offset omitted/0 is unaffected (TOP path never requires ORDER BY)', async () => {
+      const fp = fakePool()
+      await adapterWithFakePool(fp).select('t', { limit: 10, strictOffsetOrdering: true })
+      expect(fp.calls[0].sql).toContain('SELECT TOP (10)')
+    })
+
+    it('options.strictOffsetOrdering unset/false is byte-identical to before this option existed', async () => {
+      const fp = fakePool()
+      await adapterWithFakePool(fp).select('t', { limit: 10, offset: 20 })
+      expect(fp.calls[0].sql).toContain('ORDER BY (SELECT NULL) OFFSET 20 ROWS')
+      const fp2 = fakePool()
+      await adapterWithFakePool(fp2).select('t', { limit: 10, offset: 20, strictOffsetOrdering: false })
+      expect(fp2.calls[0].sql).toContain('ORDER BY (SELECT NULL) OFFSET 20 ROWS')
+    })
+  })
+
   it('select: structured OR groups support C3 composite keyset predicates', async () => {
     const fp = fakePool()
     await adapterWithFakePool(fp).select('dbo.orders', {
@@ -357,6 +463,43 @@ describe('data-sources route — sqlserver type', () => {
     currentUser = admin('alice')
     pinned.setApp(app)
     const res = await request(pinned.url()).post('/api/data-sources').send(body('sql-prod'))
+    expect(res.status).toBe(201)
+  })
+
+  // POST /api/data-sources never auto-connects (addDataSource always passes autoConnect=false to
+  // addDataSourceInternal), so before this fix a sqlserver source missing BOTH connection.host and
+  // connection.server persisted successfully at 201 and only failed later — the first time
+  // something actually called connect() (next /select, /query, /test, or a server restart replaying
+  // persisted sources) — with MSSQLAdapter.resolveServerAndPort()'s
+  // "SQL Server data source requires connection.host or connection.server". This closes that gap at
+  // the API boundary instead.
+  it('rejects a sqlserver create with neither connection.host nor connection.server (400, never persists)', async () => {
+    currentUser = admin('alice')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).post('/api/data-sources').send({
+      id: 'sql-no-host', name: 'sql-no-host', type: 'sqlserver',
+      connection: { database: 'ERP' },
+      credentials: { username: 'u', password: 'p' },
+      options: { autoConnect: false },
+    })
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe('VALIDATION_ERROR')
+    expect(res.body.error.message).toMatch(/connection\.host.*connection\.server/)
+    // Never persisted: a follow-up create with the SAME id must not 409 (a 409 would mean the
+    // rejected payload landed in the store anyway).
+    const retry = await request(pinned.url()).post('/api/data-sources').send(body('sql-no-host'))
+    expect(retry.status).toBe(201)
+  })
+
+  it('accepts a sqlserver create using connection.server instead of connection.host (documented alias)', async () => {
+    currentUser = admin('alice')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).post('/api/data-sources').send({
+      id: 'sql-server-alias', name: 'sql-server-alias', type: 'sqlserver',
+      connection: { server: 'db2,1444', database: 'ERP' },
+      credentials: { username: 'u', password: 'p' },
+      options: { autoConnect: false },
+    })
     expect(res.status).toBe(201)
   })
 

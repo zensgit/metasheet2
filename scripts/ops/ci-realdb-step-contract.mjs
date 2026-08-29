@@ -141,10 +141,15 @@ const parseCache = new Map()
  * python3 cannot be spawned, PyYAML is absent, or the text is not valid YAML. A guard that cannot
  * parse the workflow must go red, never silently green.
  *
+ * Exported so sibling pre-install `*-ci-wiring.test.mjs` guards (e.g. elearning-media) can reuse
+ * THIS fail-closed parser instead of importing `js-yaml`, which is not available before
+ * `pnpm install`. Semantics are unchanged: keys are still stringified (`on:` → `"True"`), and
+ * missing python3 / missing PyYAML / YAML parse errors still throw.
+ *
  * @param {string} wf
  * @returns {unknown}
  */
-function parseYamlDocument(wf) {
+export function parseYamlDocument(wf) {
   if (parseCache.has(wf)) return parseCache.get(wf)
   const res = spawnSync('python3', ['-c', PY_YAML_TO_JSON], {
     input: wf,

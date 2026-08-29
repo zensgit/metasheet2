@@ -1,0 +1,148 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const apiFetchMock = vi.fn()
+vi.mock('../src/utils/api', () => ({
+  apiFetch: (...args: unknown[]) => apiFetchMock(...args),
+}))
+
+import {
+  getAdminElearningCreditWallet,
+  getMyElearningCreditWallet,
+  listElearningCreditRules,
+  publishElearningCreditRule,
+} from '../src/services/elearningCredit'
+
+const RULE = '11111111-1111-4111-8111-111111111111'
+const REQUEST = '22222222-2222-4222-8222-222222222222'
+const DECISION = '33333333-3333-4333-8333-333333333333'
+const CREATED = '2026-08-29T01:02:03.000Z'
+
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+function rule(over: Record<string, unknown> = {}) {
+  return {
+    behavior: 'complete_course',
+    ruleId: RULE,
+    version: 1,
+    points: 5,
+    dailyCap: 10,
+    timeZone: 'Asia/Taipei',
+    createdAt: CREATED,
+    ...over,
+  }
+}
+
+function wallet(over: Record<string, unknown> = {}) {
+  return {
+    userId: 'user-1',
+    balancePoints: 5,
+    items: [{
+      decisionId: DECISION,
+      behavior: 'complete_course',
+      awardedPoints: 5,
+      status: 'awarded',
+      occurredAt: CREATED,
+      createdAt: CREATED,
+    }],
+    nextCursor: 'cursor-2',
+    ...over,
+  }
+}
+
+function lastCall(): { path: string; options: RequestInit } {
+  const [path, options] = apiFetchMock.mock.calls.at(-1) ?? []
+  return { path: String(path), options: (options ?? {}) as RequestInit }
+}
+
+beforeEach(() => {
+  apiFetchMock.mockReset()
+})
+
+afterEach(() => {
+  vi.clearAllMocks()
+})
+
+describe('e-learning credit client', () => {
+  it('parses active rules and publishes only the five command fields', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, { items: [rule()] }))
+    await expect(listElearningCreditRules()).resolves.toEqual([rule()])
+    expect(lastCall()).toMatchObject({
+      path: '/api/elearning/admin/credit-rules',
+      options: { method: 'GET' },
+    })
+
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, rule({ version: 2 })))
+    await expect(publishElearningCreditRule({
+      requestId: REQUEST,
+      behavior: 'complete_course',
+      points: 5,
+      dailyCap: null,
+      timeZone: 'Asia/Taipei',
+    })).resolves.toEqual(rule({ version: 2 }))
+    expect(lastCall().path).toBe('/api/elearning/admin/credit-rules')
+    expect(JSON.parse(String(lastCall().options.body))).toEqual({
+      requestId: REQUEST,
+      behavior: 'complete_course',
+      points: 5,
+      dailyCap: null,
+      timeZone: 'Asia/Taipei',
+    })
+  })
+
+  it('rejects extra keys and sensitive internal authority fields in successful responses', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, { items: [rule({ status: 'active' })] }))
+    await expect(listElearningCreditRules()).rejects.toMatchObject({
+      code: 'invalid_response',
+      status: 200,
+    })
+
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, wallet({ requestHash: 'secret' })))
+    await expect(getMyElearningCreditWallet()).rejects.toMatchObject({
+      code: 'invalid_response',
+      status: 200,
+    })
+
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, wallet({
+      items: [{ ...wallet().items[0], effectKey: 'internal' }],
+    })))
+    await expect(getMyElearningCreditWallet()).rejects.toMatchObject({
+      code: 'invalid_response',
+      status: 200,
+    })
+  })
+
+  it('uses stable keyset queries for own/admin wallets and parses the closed DTO', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, wallet()))
+    await expect(getMyElearningCreditWallet('cursor-1', 25)).resolves.toEqual(wallet())
+    expect(lastCall().path).toBe('/api/elearning/credits/wallet?limit=25&cursor=cursor-1')
+
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, wallet({ userId: 'user-2' })))
+    await expect(getAdminElearningCreditWallet('user-2')).resolves.toMatchObject({ userId: 'user-2' })
+    expect(lastCall().path).toBe('/api/elearning/admin/credits/wallet?limit=20&userId=user-2')
+  })
+
+  it('fails before IO for invalid commands and preserves values-free server conflicts', async () => {
+    await expect(publishElearningCreditRule({
+      requestId: 'not-a-uuid',
+      behavior: 'complete_course',
+      points: 5,
+      dailyCap: null,
+      timeZone: 'UTC',
+    })).rejects.toMatchObject({ code: 'invalid_input', status: 400 })
+    expect(apiFetchMock).not.toHaveBeenCalled()
+
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(409, { error: 'conflict' }))
+    await expect(publishElearningCreditRule({
+      requestId: REQUEST,
+      behavior: 'pass_exam',
+      points: 5,
+      dailyCap: null,
+      timeZone: 'UTC',
+    })).rejects.toMatchObject({ code: 'conflict', status: 409 })
+  })
+})

@@ -97,6 +97,8 @@ export interface ResolveAnchorSuccess {
   anchorSeq: string
   /** the covering trust checkpoint id. */
   checkpointId: string
+  /** the selected checkpoint's exact causal floor, used by the strict target-window precheck. */
+  trustedSinceSeq: string
   /** the resolved sealed operation endpoint id (for a history-batch request: the batch's terminal operation). */
   anchorOperationId: string
   /** the recovery mode this preview (and its token) authorizes — bound into the identity (P1-1). */
@@ -164,19 +166,31 @@ export async function composeBaselineOverlay(
     [input.checkpointId, input.sheetId],
   )
   const composed = new Map<string, RecordStateAtT>(input.stateMap)
+  const unresolvedMarkerBaselines = new Set(
+    [...composed.values()]
+      .filter((state) => state.inheritsCheckpointBaseline)
+      .map((state) => state.recordId),
+  )
   for (const raw of baselineRes.rows as Array<Record<string, unknown>>) {
     const recordId = requireHistoryRecordId(raw.record_id, 'checkpoint baseline')
-    if (composed.has(recordId)) continue // replay map wins — it is at-anchor-exact
+    const replay = composed.get(recordId)
+    if (replay && !replay.inheritsCheckpointBaseline) continue // replay map wins — it is at-anchor-exact
     if (typeof raw.is_trashed !== 'boolean') throw new ExactAnchorHistoryDataError('checkpoint baseline: invalid trash marker')
     const trashed = raw.is_trashed
     const data = requireHistoryData(raw.data, 'checkpoint baseline')
-    const version = requireHistoryVersion(raw.version, 'checkpoint baseline')
+    const version = replay?.inheritsCheckpointBaseline
+      ? requireHistoryVersion(replay.version, 'checkpoint marker')
+      : requireHistoryVersion(raw.version, 'checkpoint baseline')
     composed.set(recordId, {
       recordId,
       exists: !trashed,
       data: trashed ? null : data,
       version,
     })
+    unresolvedMarkerBaselines.delete(recordId)
+  }
+  if (unresolvedMarkerBaselines.size > 0) {
+    throw new ExactAnchorHistoryDataError('checkpoint marker: baseline state missing')
   }
   return composed
 }
@@ -264,7 +278,14 @@ export async function resolveExactAnchor(
   // Reconstruct the record set at the exact anchor (causal, seq-based), COMPOSE the L5 baseline overlay
   // (F4 — the preview must show exactly the set the apply will plan over), and bind the COMPOSED set into
   // the token.
-  const replayMap = await reconstructRecordsAtSeq(query, sheetId, anchorSeq)
+  const replayMap = await reconstructRecordsAtSeq(
+    query,
+    sheetId,
+    anchorSeq,
+    undefined,
+    checkpoint.trustedSinceSeq,
+    checkpoint.id,
+  )
   let stateMap: Map<string, RecordStateAtT>
   try {
     stateMap = await composeBaselineOverlay(query, { sheetId, checkpointId: checkpoint.id, stateMap: replayMap })
@@ -313,7 +334,17 @@ export async function resolveExactAnchor(
     // adjudication and compares — the mint here records which contract the preview was authorized under.
     authorizedScopeHash: hashRecoveryAuthorizationScope({ sheetId, actorId }),
   })
-  return { ok: true, token, anchorSeq, checkpointId: checkpoint.id, anchorOperationId, mode, scopeHash, stateMap }
+  return {
+    ok: true,
+    token,
+    anchorSeq,
+    checkpointId: checkpoint.id,
+    trustedSinceSeq: checkpoint.trustedSinceSeq,
+    anchorOperationId,
+    mode,
+    scopeHash,
+    stateMap,
+  }
 }
 
 export type ExecuteAnchorRefusal =
@@ -366,9 +397,21 @@ export async function executeExactAnchorRecovery(
     return { ok: false, reason: 'forbidden' }
   }
 
+  // Re-select the covering checkpoint so the causal floor comes from retained DB authority, not a token
+  // claim. A changed/pruned winner is ordinary scope drift and requires a fresh preview.
+  const checkpoint = await selectCheckpointByAnchorSeq(query, input.sheetId, anchorSeq)
+  if (!checkpoint || checkpoint.id !== checkpointId) return { ok: false, reason: 'scope-drift' }
+
   // Reconstruct at the TOKEN-BOUND anchorSeq — the sole authority. NOT MAX(seq), NOT the request — then
   // compose the SAME baseline overlay the preview hashed (F4 symmetry; checkpointId is token-bound).
-  const replayMap = await reconstructRecordsAtSeq(query, input.sheetId, anchorSeq)
+  const replayMap = await reconstructRecordsAtSeq(
+    query,
+    input.sheetId,
+    anchorSeq,
+    undefined,
+    checkpoint.trustedSinceSeq,
+    checkpoint.id,
+  )
   let stateMap: Map<string, RecordStateAtT>
   try {
     stateMap = await composeBaselineOverlay(query, { sheetId: input.sheetId, checkpointId, stateMap: replayMap })

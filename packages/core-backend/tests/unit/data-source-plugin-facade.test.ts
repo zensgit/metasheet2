@@ -9,8 +9,10 @@ import {
   DATA_SOURCE_NOT_WRITABLE_CODE,
   DATA_SOURCE_PRINCIPAL_REQUIRED_CODE,
   DATA_SOURCE_QUERY_INVALID_CODE,
+  DATA_SOURCE_REQUEST_TIMEOUT_DISABLED_CODE,
   DataSourceUnavailableError,
   MISSING_PRINCIPAL_MESSAGE,
+  requestTimeoutDisabledMessage,
   writeTargetNotC6Message,
   writeTargetReadOnlyMessage,
   writableSourceMessage,
@@ -23,6 +25,10 @@ interface AdapterStubOptions {
   readOnly?: boolean
   c6WriteTarget?: boolean
   genericQueryDisabled?: boolean
+  // W-5: lets a test build a sqlserver-typed stub with an arbitrary connection posture (e.g.
+  // requestTimeoutMs) without disturbing every OTHER test's postgres default.
+  type?: string
+  connection?: Record<string, unknown>
 }
 
 function adapterStub(opts: AdapterStubOptions = {}) {
@@ -33,8 +39,8 @@ function adapterStub(opts: AdapterStubOptions = {}) {
     getConfig: () => ({
       id: 'pg',
       name: 'pg',
-      type: 'postgres',
-      connection: {},
+      type: opts.type ?? 'postgres',
+      connection: opts.connection ?? {},
       options: {
         ...(opts.readOnly === undefined ? {} : { readOnly: opts.readOnly }),
         ...(opts.c6WriteTarget === undefined ? {} : { c6WriteTarget: opts.c6WriteTarget }),
@@ -249,6 +255,87 @@ describe('createDataSourcePluginFacade', () => {
     expect(m.adapter.getTableInfo).not.toHaveBeenCalled()
     expect(m.adapter.testConnection).not.toHaveBeenCalled()
     expect(m.stub.connectDataSource).not.toHaveBeenCalled()
+  })
+
+  // W-5: two fail-closed floors for ARMED B2a reads over SQL Server. `select`'s 5th param
+  // (`strict`) is the ONLY way either floor engages — omitted (every caller before this change, and
+  // every dormant/unarmed caller after it) is byte-identical to these floors never having existed.
+  describe('select(..., strict) — W-5 armed-read floors', () => {
+    it('strict omitted/false: a sqlserver source with requestTimeoutMs=0 is untouched (byte-identical)', async () => {
+      const m = managerStub({ adapter: adapterStub({ type: 'sqlserver', connected: false, connection: { requestTimeoutMs: 0 } }) })
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      await expect(facade.select('sql-1', 't', { limit: 10 }, 'owner-1')).resolves.toEqual({ data: [{ id: 1 }], metadata: {} })
+      await expect(facade.select('sql-1', 't', { limit: 10 }, 'owner-1', false)).resolves.toEqual({ data: [{ id: 1 }], metadata: {} })
+      expect(m.stub.connectDataSource).toHaveBeenCalledWith('sql-1')
+      // No new field reaches manager.select when strict is absent/false.
+      expect(m.stub.select).toHaveBeenCalledWith('sql-1', 't', { limit: 10, offset: undefined })
+    })
+
+    it('strict:true + sqlserver + requestTimeoutMs=0 refuses BEFORE any connection', async () => {
+      const m = managerStub({ adapter: adapterStub({ type: 'sqlserver', connection: { requestTimeoutMs: 0 } }) })
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      await expect(facade.select('sql-1', 't', { limit: 10 }, 'owner-1', true)).rejects.toMatchObject({
+        status: 422,
+        code: DATA_SOURCE_REQUEST_TIMEOUT_DISABLED_CODE,
+        message: requestTimeoutDisabledMessage('sql-1'),
+      })
+      expect(m.stub.connectDataSource).not.toHaveBeenCalled()
+      expect(m.stub.select).not.toHaveBeenCalled()
+    })
+
+    it('strict:true + sqlserver + requestTimeoutMs="0" (string) also refuses — same coercion mssql itself accepts', async () => {
+      const m = managerStub({ adapter: adapterStub({ type: 'sqlserver', connection: { requestTimeoutMs: '0' } }) })
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      await expect(facade.select('sql-1', 't', { limit: 10 }, 'owner-1', true)).rejects.toMatchObject({
+        code: DATA_SOURCE_REQUEST_TIMEOUT_DISABLED_CODE,
+      })
+      expect(m.stub.connectDataSource).not.toHaveBeenCalled()
+    })
+
+    it('strict:true + sqlserver + a bounded requestTimeoutMs runs normally (floor only fires on an explicit 0)', async () => {
+      const m = managerStub({ adapter: adapterStub({ type: 'sqlserver', connected: false, connection: { requestTimeoutMs: 30000 } }) })
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      await expect(facade.select('sql-1', 't', { limit: 10 }, 'owner-1', true)).resolves.toEqual({ data: [{ id: 1 }], metadata: {} })
+      expect(m.stub.connectDataSource).toHaveBeenCalledWith('sql-1')
+    })
+
+    it('strict:true + sqlserver + requestTimeoutMs unset (adapter default) runs normally', async () => {
+      const m = managerStub({ adapter: adapterStub({ type: 'sqlserver', connection: {} }) })
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      await expect(facade.select('sql-1', 't', { limit: 10 }, 'owner-1', true)).resolves.toEqual({ data: [{ id: 1 }], metadata: {} })
+    })
+
+    it('strict:true + a NON-sqlserver source with requestTimeoutMs=0 is unaffected (floor is sqlserver-only)', async () => {
+      const m = managerStub({ adapter: adapterStub({ type: 'postgres', connected: false, connection: { requestTimeoutMs: 0 } }) })
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      await expect(facade.select('pg', 't', { limit: 10 }, 'owner-1', true)).resolves.toEqual({ data: [{ id: 1 }], metadata: {} })
+      expect(m.stub.connectDataSource).toHaveBeenCalledWith('pg')
+    })
+
+    it('strict:true forces queryOptions.strictOffsetOrdering=true through to manager.select (floor 2)', async () => {
+      const m = managerStub({ adapter: adapterStub({ type: 'sqlserver', connection: {} }) })
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      await facade.select('sql-1', 't', { limit: 10, offset: 20 }, 'owner-1', true)
+      expect(m.stub.select).toHaveBeenCalledWith('sql-1', 't', { limit: 10, offset: 20, strictOffsetOrdering: true })
+    })
+
+    it('strict omitted/false never adds strictOffsetOrdering to the forwarded query options', async () => {
+      const m = managerStub({ adapter: adapterStub({ type: 'sqlserver', connection: {} }) })
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      await facade.select('sql-1', 't', { limit: 10, offset: 20 }, 'owner-1')
+      expect(m.stub.select).toHaveBeenCalledWith('sql-1', 't', { limit: 10, offset: 20 })
+      await facade.select('sql-1', 't', { limit: 10, offset: 20 }, 'owner-1', false)
+      expect(m.stub.select).toHaveBeenLastCalledWith('sql-1', 't', { limit: 10, offset: 20 })
+    })
+
+    it('the readOnly / writable fail-closed check still runs before the strict floor (writable refuses first)', async () => {
+      const m = managerStub({ adapter: adapterStub({ type: 'sqlserver', readOnly: false, connection: { requestTimeoutMs: 0 } }) })
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      await expect(facade.select('sql-1', 't', { limit: 10 }, 'owner-1', true)).rejects.toMatchObject({
+        code: DATA_SOURCE_NOT_READ_ONLY_CODE,
+      })
+      expect(m.stub.connectDataSource).not.toHaveBeenCalled()
+    })
   })
 })
 

@@ -19,11 +19,10 @@ name: Multitable recovery-schema drift (A-vs-B)
 # runs against a real DB. EXPECT_DB=1 arms the anti-skip-green sentinel: a run here with a missing/
 # broken DATABASE_URL goes RED, never silently reports the suite as skipped.
 #
-# NOTE FOR OWNER: this lane is NOT yet a required status context. To make the A-vs-B floor gate merges
-# (the whole point of the hardening), add the check context "recovery-schema-drift" (the job name,
-# NOT the filename "multitable-recovery-schema-drift") to branch protection's
-# required checks. Until then it runs and reports but does not block — same status as the seven
-# approval-realdb-*.yml lanes.
+# VERIFIED 2026-08-26 BRANCH-PROTECTION STATE: this lane is a required status context under the job
+# name "recovery-schema-drift" (not the workflow filename). The separate O-2 observation-kit real-DB
+# execution lane remains path-filtered and non-required; only its hermetic observation-kit contract
+# is required. Re-verify live protection before relying on this note after a policy change.
 
 on:
   workflow_dispatch:

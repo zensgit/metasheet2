@@ -1,9 +1,12 @@
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import { Logger } from '../core/logger'
-import { query } from '../db/pg'
+import { query, transaction } from '../db/pg'
+import { fenceWriterEntry, type FenceQuery } from './canonical-sheet-fence'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { resolveWithinBase } from '../services/StorageService'
+
+type AttachmentTransaction = <T>(work: (client: { query: FenceQuery }) => Promise<T>) => Promise<T>
 
 export type MultitableAttachmentCleanupOptions = {
   retentionHours?: number
@@ -11,6 +14,7 @@ export type MultitableAttachmentCleanupOptions = {
   batchSize?: number
   logger?: Logger
   queryFn?: typeof query
+  transactionFn?: AttachmentTransaction
   storage?: {
     delete(storageFileId: string, storagePath: string): Promise<void>
   }
@@ -20,6 +24,10 @@ type AttachmentCleanupRow = {
   id: string
   storage_file_id: string
   storage_path: string
+}
+
+type GuardedAttachmentCleanupRow = AttachmentCleanupRow & {
+  sheet_id: string
 }
 
 type AttachmentCleanupResult = {
@@ -79,6 +87,94 @@ function isMissingStorageFile(error: unknown): boolean {
   return message.includes('file not found') || message.includes('enoent')
 }
 
+function isArchiveSourcePinGuardEnabled(): boolean {
+  return process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED === 'true'
+    && process.env.MULTITABLE_ENABLE_WRITER_FENCE === 'true'
+}
+
+async function hasActiveArchiveSourcePin(queryFn: FenceQuery, attachmentId: string): Promise<boolean> {
+  const result = await queryFn(
+    `SELECT 1
+       FROM meta_recovery_archive_attachment_refs attachment_ref
+       JOIN meta_recovery_archives archive
+         ON archive.generation_id = attachment_ref.generation_id
+      WHERE attachment_ref.attachment_id = $1
+        AND attachment_ref.reference_class = 'source'
+        AND attachment_ref.reference_state = 'building'
+        AND archive.state = 'building'
+        AND archive.build_status = 'active'
+        AND archive.coverage_status = 'incomplete'
+      LIMIT 1`,
+    [attachmentId],
+  )
+  return result.rows.length > 0
+}
+
+// This protects pins that already exist. The future archive claimant must take the same sheet fence,
+// lock the live attachment row, and refuse deleted rows before inserting a new source pin.
+
+async function claimOrphanAttachmentForPurge(
+  transactionFn: AttachmentTransaction,
+  row: GuardedAttachmentCleanupRow,
+): Promise<GuardedAttachmentCleanupRow | null> {
+  return transactionFn(async ({ query: transactionQuery }) => {
+    await fenceWriterEntry(transactionQuery, row.sheet_id)
+    const locked = await transactionQuery(
+      `SELECT id, sheet_id, storage_file_id, storage_path
+         FROM multitable_attachments
+        WHERE id = $1
+          AND record_id IS NULL
+          AND deleted_at IS NULL
+        FOR UPDATE`,
+      [row.id],
+    )
+    const attachment = locked.rows[0] as GuardedAttachmentCleanupRow | undefined
+    if (
+      !attachment
+      || attachment.sheet_id !== row.sheet_id
+      || await hasActiveArchiveSourcePin(transactionQuery, attachment.id)
+    ) return null
+
+    const updated = await transactionQuery(
+      `UPDATE multitable_attachments
+          SET deleted_at = now(),
+              updated_at = now()
+        WHERE id = $1
+          AND deleted_at IS NULL
+        RETURNING id, sheet_id, storage_file_id, storage_path`,
+      [attachment.id],
+    )
+    return (updated.rows[0] as GuardedAttachmentCleanupRow | undefined) ?? null
+  })
+}
+
+async function claimAttachmentBlobPurge(
+  transactionFn: AttachmentTransaction,
+  row: GuardedAttachmentBlobPurgeRow,
+  graceHours: number,
+): Promise<GuardedAttachmentBlobPurgeRow | null> {
+  return transactionFn(async ({ query: transactionQuery }) => {
+    await fenceWriterEntry(transactionQuery, row.sheet_id)
+    const locked = await transactionQuery(
+      `SELECT id, sheet_id, storage_path
+         FROM multitable_attachments
+        WHERE id = $1
+          AND deleted_at IS NOT NULL
+          AND blob_purged_at IS NULL
+          AND deleted_at < now() - make_interval(hours => $2)
+        FOR UPDATE`,
+      [row.id, graceHours],
+    )
+    const attachment = locked.rows[0] as GuardedAttachmentBlobPurgeRow | undefined
+    if (
+      !attachment
+      || attachment.sheet_id !== row.sheet_id
+      || await hasActiveArchiveSourcePin(transactionQuery, attachment.id)
+    ) return null
+    return attachment
+  })
+}
+
 export async function cleanupOrphanMultitableAttachments(
   options: MultitableAttachmentCleanupOptions = {},
 ): Promise<AttachmentCleanupResult> {
@@ -87,6 +183,17 @@ export async function cleanupOrphanMultitableAttachments(
   const storage = options.storage ?? { delete: deleteLocalAttachment }
   const retentionHours = options.retentionHours ?? parseRetentionHours(process.env.MULTITABLE_ATTACHMENT_RETENTION_HOURS)
   const batchSize = options.batchSize ?? parseBatchSize(process.env.MULTITABLE_ATTACHMENT_CLEANUP_BATCH_SIZE)
+
+  if (isArchiveSourcePinGuardEnabled()) {
+    return cleanupOrphanMultitableAttachmentsWithSourcePinGuard({
+      logger,
+      queryFn,
+      transactionFn: options.transactionFn ?? transaction,
+      storage,
+      retentionHours,
+      batchSize,
+    })
+  }
 
   try {
     const rows = await queryFn<AttachmentCleanupRow>(
@@ -151,6 +258,65 @@ export async function cleanupOrphanMultitableAttachments(
   }
 }
 
+async function cleanupOrphanMultitableAttachmentsWithSourcePinGuard(input: {
+  logger: Logger
+  queryFn: typeof query
+  transactionFn: AttachmentTransaction
+  storage: { delete(storageFileId: string, storagePath: string): Promise<void> }
+  retentionHours: number
+  batchSize: number
+}): Promise<AttachmentCleanupResult> {
+  const { logger, queryFn, transactionFn, storage, retentionHours, batchSize } = input
+  try {
+    const rows = await queryFn<GuardedAttachmentCleanupRow>(
+      `SELECT id, sheet_id, storage_file_id, storage_path
+         FROM multitable_attachments
+        WHERE record_id IS NULL
+          AND deleted_at IS NULL
+          AND created_at < now() - make_interval(hours => $1)
+        ORDER BY created_at ASC
+        LIMIT $2`,
+      [retentionHours, batchSize],
+    )
+
+    let deleted = 0
+    let skipped = 0
+    for (const row of rows.rows) {
+      const claimed = await claimOrphanAttachmentForPurge(transactionFn, row)
+      if (!claimed) {
+        skipped += 1
+        continue
+      }
+      try {
+        await storage.delete(String(claimed.storage_file_id), String(claimed.storage_path))
+      } catch (error) {
+        if (!isMissingStorageFile(error)) {
+          skipped += 1
+          logger.warn('MULTITABLE_ATTACHMENT_STORAGE_DELETE_FAILED')
+          continue
+        }
+      }
+      await queryFn(
+        'UPDATE multitable_attachments SET blob_purged_at = now() WHERE id = $1 AND blob_purged_at IS NULL',
+        [claimed.id],
+      )
+      deleted += 1
+    }
+
+    if (deleted > 0 || skipped > 0) {
+      logger.info(`Multitable attachment cleanup processed ${rows.rows.length} row(s), deleted=${deleted}, skipped=${skipped}`)
+    }
+    return { inspected: rows.rows.length, deleted, skipped }
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) {
+      logger.warn('Multitable attachment cleanup skipped: multitable_attachments not ready', error as Error)
+      return { inspected: 0, deleted: 0, skipped: 0 }
+    }
+    logger.warn('Multitable attachment cleanup failed', error as Error)
+    return { inspected: 0, deleted: 0, skipped: 0 }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // F9 design-lock GF9-2 (owner CHANGES-REQUESTED P2-1②, Option A — full F5 alignment): the compensating
 // sweep for NORMALLY soft-deleted attachment rows whose blob-delete may have failed. Unlike the
@@ -179,6 +345,7 @@ export type MultitableAttachmentBlobPurgeOptions = {
   batchSize?: number
   logger?: Logger
   queryFn?: typeof query
+  transactionFn?: AttachmentTransaction
   storage?: {
     deleteByKey(storagePath: string): Promise<void>
   }
@@ -187,6 +354,10 @@ export type MultitableAttachmentBlobPurgeOptions = {
 type AttachmentBlobPurgeRow = {
   id: string
   storage_path: string
+}
+
+type GuardedAttachmentBlobPurgeRow = AttachmentBlobPurgeRow & {
+  sheet_id: string
 }
 
 export type MultitableAttachmentBlobPurgeResult = {
@@ -218,6 +389,17 @@ export async function sweepMultitableAttachmentBlobPurge(
   const storage = options.storage ?? { deleteByKey: deleteLocalAttachmentByKey }
   const graceHours = options.graceHours ?? parseRetentionHours(process.env.MULTITABLE_ATTACHMENT_BLOB_RETENTION_GRACE_HOURS)
   const batchSize = options.batchSize ?? parseBatchSize(process.env.MULTITABLE_ATTACHMENT_BLOB_RETENTION_BATCH_SIZE)
+
+  if (isArchiveSourcePinGuardEnabled()) {
+    return sweepMultitableAttachmentBlobPurgeWithSourcePinGuard({
+      logger,
+      queryFn,
+      transactionFn: options.transactionFn ?? transaction,
+      storage,
+      graceHours,
+      batchSize,
+    })
+  }
 
   try {
     // GF9-2 consume marker (`blob_purged_at IS NULL`) + grace (`deleted_at < now() - grace`). Active rows
@@ -263,6 +445,65 @@ export async function sweepMultitableAttachmentBlobPurge(
       logger.info(`Multitable attachment blob purge sweep processed ${rows.rows.length} row(s), purged=${purged}, skipped=${skipped}`)
     }
 
+    return { inspected: rows.rows.length, purged, skipped }
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) {
+      logger.warn('Multitable attachment blob purge sweep skipped: multitable_attachments not ready', error as Error)
+      return { inspected: 0, purged: 0, skipped: 0 }
+    }
+    logger.warn('Multitable attachment blob purge sweep failed', error as Error)
+    return { inspected: 0, purged: 0, skipped: 0 }
+  }
+}
+
+async function sweepMultitableAttachmentBlobPurgeWithSourcePinGuard(input: {
+  logger: Logger
+  queryFn: typeof query
+  transactionFn: AttachmentTransaction
+  storage: { deleteByKey(storagePath: string): Promise<void> }
+  graceHours: number
+  batchSize: number
+}): Promise<MultitableAttachmentBlobPurgeResult> {
+  const { logger, queryFn, transactionFn, storage, graceHours, batchSize } = input
+  try {
+    const rows = await queryFn<GuardedAttachmentBlobPurgeRow>(
+      `SELECT id, sheet_id, storage_path
+         FROM multitable_attachments
+        WHERE deleted_at IS NOT NULL
+          AND blob_purged_at IS NULL
+          AND deleted_at < now() - make_interval(hours => $1)
+        ORDER BY deleted_at ASC
+        LIMIT $2`,
+      [graceHours, batchSize],
+    )
+
+    let purged = 0
+    let skipped = 0
+    for (const row of rows.rows) {
+      const claimed = await claimAttachmentBlobPurge(transactionFn, row, graceHours)
+      if (!claimed) {
+        skipped += 1
+        continue
+      }
+      try {
+        await storage.deleteByKey(String(claimed.storage_path))
+      } catch (error) {
+        if (!isMissingStorageFile(error)) {
+          skipped += 1
+          logger.warn('MULTITABLE_ATTACHMENT_BLOB_PURGE_STORAGE_DELETE_FAILED')
+          continue
+        }
+      }
+      await queryFn(
+        'UPDATE multitable_attachments SET blob_purged_at = now() WHERE id = $1 AND blob_purged_at IS NULL',
+        [claimed.id],
+      )
+      purged += 1
+    }
+
+    if (purged > 0 || skipped > 0) {
+      logger.info(`Multitable attachment blob purge sweep processed ${rows.rows.length} row(s), purged=${purged}, skipped=${skipped}`)
+    }
     return { inspected: rows.rows.length, purged, skipped }
   } catch (error) {
     if (isDatabaseSchemaError(error)) {

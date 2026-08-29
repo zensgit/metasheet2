@@ -14,8 +14,8 @@
  *
  * ## Activation semantics (the operator footgun, R4/R12-C)
  *
- * `activationValue` is the EXACT string the flag must equal (after `.trim()`, and after `.toLowerCase()`
- * only when `caseInsensitive: true`) for the gated code path to treat it as ON. Two families exist:
+ * `activationValue` is the source-accurate string the flag must equal. Normalization happens ONLY when
+ * `caseInsensitive: true`; every other boolean comparison is byte-exact. Two families exist:
  *   - capture/replay/revert flags compare with `=== 'true'` (case-SENSITIVE, no trim in most call sites,
  *     except PIT_RESET/PIT_UNDELETE/SHEET_REVERT which use `.trim().toLowerCase() === 'true'`)
  *   - the retention flag compares with `=== '1'` (NOT `'true'`) — `meta-revision-retention.ts:60`
@@ -173,13 +173,21 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     activationValue: 'true',
     caseInsensitive: true,
     dependsOn: [],
-    conflictsWith: [],
+    conflictsWith: ['MULTITABLE_META_REVISION_RETENTION_ENABLED'],
     danger: 'high',
     purpose:
-      'Revert-execute master gate (default OFF): exact-anchor recovery is WIRED (L6 resolveExactAnchor + L7 plan classification + L8 applyExactAnchorRecovery, all-or-nothing in ONE transaction; authority is exactly one historyBatchId or anchorOperationId — free wall-clock asOf refuses 400 EXACT_ANCHOR_REQUIRED, both ids refuse 400 AMBIGUOUS_ANCHOR). Execute is TOKEN-ONLY authority: the verified previewIdentity carries the mode, and a reset-minted token refuses on this surface before any write. At RUNTIME both preview and execute additionally require the trust pair MULTITABLE_ENABLE_WRITER_FENCE + MULTITABLE_HISTORY_CONTIGUITY_STRICT (409 RECOVERY_TRUST_REQUIRED otherwise; not modeled as a dependsOn rule — the refusal is enforced in-process, values-free). Restores the RESTORABLE projection only (canonical record-restore-diff; derived formula/lookup/rollup values recompute post-commit, never restored history). Exact-anchor undelete/resurrection is fail-closed (409 INBOUND_UNPROVABLE; no executable token is minted for resurrect-bearing plans). Mirrors MULTITABLE_ENABLE_PIT_RESET\'s gate exactly: SAME `String(env).trim().toLowerCase() === \'true\'` resolution (hence caseInsensitive), same canManageSheetAccess (D2) floor + conservative full-table-read gate. danger=high: a whole-sheet-scale destructive bulk write over live record data with no undo. revert-preview stays UNGATED by this flag (read-only; capabilities.sheetRevertEnabled controls FE button visibility) but still refuses without the trust pair before minting any token.',
+      'Revert-execute master gate (default OFF): exact-anchor recovery is WIRED (L6 resolveExactAnchor + L7 plan classification + L8 applyExactAnchorRecovery, all-or-nothing in ONE transaction; authority is exactly one historyBatchId or anchorOperationId — free wall-clock asOf refuses 400 EXACT_ANCHOR_REQUIRED, both ids refuse 400 AMBIGUOUS_ANCHOR). Execute is TOKEN-ONLY authority: the verified previewIdentity carries the mode, and a reset-minted token refuses on this surface before any write. Both preview and execute refuse 409 REVERT_RETENTION_CONFLICT whenever meta revision retention is active, matching PIT Reset until recovery-aware retention exists; the conflict is emitted only after authentication, existence hiding, and conservative full-read, but before trust/anchor/reconstruction work. At RUNTIME both preview and execute additionally require the trust pair MULTITABLE_ENABLE_WRITER_FENCE + MULTITABLE_HISTORY_CONTIGUITY_STRICT (409 RECOVERY_TRUST_REQUIRED otherwise; not modeled as a dependsOn rule — the refusal is enforced in-process, values-free). Restores the RESTORABLE projection only (canonical record-restore-diff; derived formula/lookup/rollup values recompute post-commit, never restored history). Exact-anchor undelete/resurrection is fail-closed (409 INBOUND_UNPROVABLE; no executable token is minted for resurrect-bearing plans). Mirrors MULTITABLE_ENABLE_PIT_RESET\'s gate exactly: SAME `String(env).trim().toLowerCase() === \'true\'` resolution (hence caseInsensitive), same canManageSheetAccess (D2) floor + conservative full-table-read gate. danger=high: a whole-sheet-scale destructive bulk write over live record data with no undo. revert-preview stays UNGATED by this flag (read-only; capabilities.sheetRevertEnabled controls FE button visibility) but still refuses without retention, the trust pair, or an executable plan before minting any token.',
     // Source symbols (line numbers intentionally omitted because this route is edited frequently):
     // SHEET_REVERT_ENABLED, the handleExactAnchorExecute REVERT_DISABLED guard, capabilities.sheetRevertEnabled.
-    source: 'packages/core-backend/src/routes/univer-meta.ts#SHEET_REVERT_ENABLED,handleExactAnchorExecute,capabilities.sheetRevertEnabled; packages/core-backend/src/multitable/exact-anchor-recovery-route.ts#checkExactAnchorRecoveryTrust',
+    source: 'packages/core-backend/src/routes/univer-meta.ts#SHEET_REVERT_ENABLED,isMetaRevisionRetentionEnabled,sendRecoveryRetentionBlocked,handleExactAnchorPreview,handleExactAnchorExecute,capabilities.sheetRevertEnabled; packages/core-backend/src/multitable/exact-anchor-recovery-route.ts#checkExactAnchorRecoveryTrust',
+    rules: [
+      {
+        kind: 'conflicts',
+        id: 'sheet-revert-intent-with-retention-on',
+        description:
+          "MULTITABLE_ENABLE_SHEET_REVERT is active while MULTITABLE_META_REVISION_RETENTION_ENABLED is active ('1') — exact-anchor Revert refuses every revert-preview and revert-execute call with 409 REVERT_RETENTION_CONFLICT. Revert-to-T cannot function in this state.",
+      },
+    ],
   },
   {
     key: 'MULTITABLE_ENABLE_PIT_RESET',
@@ -190,17 +198,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: ['MULTITABLE_META_REVISION_RETENTION_ENABLED'],
     danger: 'high',
     purpose:
-      'R3 — PIT-reset vs retention STOP-SHIP. T8-2 / W0 L8 Reset-to-T (destructive whole-sheet EXACT-ANCHOR restore: historyBatchId/anchorOperationId only — free wall-clock asOf refuses 400 EXACT_ANCHOR_REQUIRED). Execute is TOKEN-ONLY authority with the typed confirm:\'reset\' second step; a revert-minted token refuses on this surface before any write. At RUNTIME both preview and execute also require the trust pair MULTITABLE_ENABLE_WRITER_FENCE + MULTITABLE_HISTORY_CONTIGUITY_STRICT (409 RECOVERY_TRUST_REQUIRED otherwise; enforced in-process, not a dependsOn rule). Gated by PIT_RESET_ENABLED() (`.trim().toLowerCase() === \'true\'`, so \'TRUE\'/\' true \' also activate it — unlike most other flags in this manifest). BOTH reset-preview and reset-execute additionally call PIT_RESET_RETENTION_BLOCKED() and refuse with 409 RESET_RETENTION_CONFLICT whenever meta-revision retention is active. An operator who intends to use PIT reset MUST NOT also have retention active.',
-    // Anchored by SYMBOL NAME (drift-proof): PIT_RESET_ENABLED + PIT_RESET_RETENTION_BLOCKED (compares
+      'R3 — PIT-reset vs retention STOP-SHIP. T8-2 / W0 L8 Reset-to-T (destructive whole-sheet EXACT-ANCHOR restore: historyBatchId/anchorOperationId only — free wall-clock asOf refuses 400 EXACT_ANCHOR_REQUIRED). Execute is TOKEN-ONLY authority with the typed confirm:\'reset\' second step; a revert-minted token refuses on this surface before any write. At RUNTIME both preview and execute also require the trust pair MULTITABLE_ENABLE_WRITER_FENCE + MULTITABLE_HISTORY_CONTIGUITY_STRICT (409 RECOVERY_TRUST_REQUIRED otherwise; enforced in-process, not a dependsOn rule). Gated by PIT_RESET_ENABLED() (`.trim().toLowerCase() === \'true\'`, so \'TRUE\'/\' true \' also activate it — unlike most other flags in this manifest). BOTH reset-preview and reset-execute additionally call isMetaRevisionRetentionEnabled() and refuse with 409 RESET_RETENTION_CONFLICT whenever meta-revision retention is active. An operator who intends to use PIT reset MUST NOT also have retention active.',
+    // Anchored by SYMBOL NAME (drift-proof): PIT_RESET_ENABLED + isMetaRevisionRetentionEnabled (compares
     // MULTITABLE_META_REVISION_RETENTION_ENABLED === '1'); both handleExactAnchorPreview('reset') and
-    // handleExactAnchorExecute('reset') call the blocked-check.
-    source: 'packages/core-backend/src/routes/univer-meta.ts#PIT_RESET_ENABLED,PIT_RESET_RETENTION_BLOCKED,handleExactAnchorPreview,handleExactAnchorExecute',
+    // handleExactAnchorExecute('reset') call the shared blocked-check.
+    source: 'packages/core-backend/src/routes/univer-meta.ts#PIT_RESET_ENABLED,isMetaRevisionRetentionEnabled,sendRecoveryRetentionBlocked,handleExactAnchorPreview,handleExactAnchorExecute',
     rules: [
       {
         kind: 'conflicts',
         id: 'pit-reset-intent-with-retention-on',
         description:
-          "MULTITABLE_ENABLE_PIT_RESET is active while MULTITABLE_META_REVISION_RETENTION_ENABLED is active ('1') — PIT_RESET_RETENTION_BLOCKED() will refuse every reset-preview and reset-execute call with 409 RESET_RETENTION_CONFLICT. Reset-to-T cannot function in this state.",
+          "MULTITABLE_ENABLE_PIT_RESET is active while MULTITABLE_META_REVISION_RETENTION_ENABLED is active ('1') — isMetaRevisionRetentionEnabled() will refuse every reset-preview and reset-execute call with 409 RESET_RETENTION_CONFLICT. Reset-to-T cannot function in this state.",
       },
     ],
   },
@@ -239,6 +247,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     // source: packages/core-backend/src/multitable/canonical-sheet-fence.ts:137 (isWriterFenceEnabled) — read by
     //         record-service/record-write-service/records/auto-number-service/univer-meta writer entry points.
     source: 'packages/core-backend/src/multitable/canonical-sheet-fence.ts:137',
+  },
+  {
+    key: 'MULTITABLE_RECOVERY_ARCHIVE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['MULTITABLE_ENABLE_WRITER_FENCE'],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "Time Machine D2a contract flag only: exact-case-sensitive `=== 'true'`; unset, false, TRUE, and whitespace remain OFF. This slice has no production caller and does not make archive behavior available. A later D2 caller remains unreachable unless this flag and MULTITABLE_ENABLE_WRITER_FENCE are both exact ON. It intentionally has no retention conflict: D2 is the archive-before-prune handoff, not current retention behavior.",
+    source: 'packages/core-backend/src/multitable/recovery-archive-contract.ts#isMultitableRecoveryArchiveEnabled',
   },
   {
     key: 'MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND',
@@ -317,10 +336,10 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     type: 'boolean',
     activationValue: '1',
     dependsOn: [],
-    conflictsWith: ['MULTITABLE_ENABLE_PIT_RESET'],
+    conflictsWith: ['MULTITABLE_ENABLE_SHEET_REVERT', 'MULTITABLE_ENABLE_PIT_RESET'],
     danger: 'high',
     purpose:
-      'R4 — activation value is the EXACT string \'1\', NOT \'true\' (unlike every capture/replay/revert flag above). resolveMetaRevisionRetentionConfig() compares with `=== \'1\'`; setting \'true\' here is a silent no-op (retention stays disabled) — the single biggest operator footgun in this manifest. When active, ages meta_record_revisions AND meta_config_revisions (same knob set governs both, T9 D4) and is read by PIT_RESET_RETENTION_BLOCKED() to refuse PIT reset (see MULTITABLE_ENABLE_PIT_RESET). Also caps how far back 4c-1/4c-3 recovery can reach once tombstones age out — field-value tombstones have NO retention floor (link-tombstones referenced by a surviving trash row do; field-value ones do not), a ratified, accepted boundary (owner decision, not a bug).',
+      'R4 — activation value is the EXACT string \'1\', NOT \'true\' (unlike every capture/replay/revert flag above). resolveMetaRevisionRetentionConfig() compares with `=== \'1\'`; setting \'true\' here is a silent no-op (retention stays disabled) — the single biggest operator footgun in this manifest. When active, ages meta_record_revisions AND meta_config_revisions (same knob set governs both, T9 D4) and makes both exact-anchor Revert and PIT Reset refuse after auth/full-read but before trust/anchor/reconstruction work (see MULTITABLE_ENABLE_SHEET_REVERT and MULTITABLE_ENABLE_PIT_RESET). Also caps how far back 4c-1/4c-3 recovery can reach once tombstones age out — field-value tombstones have NO retention floor (link-tombstones referenced by a surviving trash row do; field-value ones do not), a ratified, accepted boundary (owner decision, not a bug).',
     // source: packages/core-backend/src/multitable/meta-revision-retention.ts:60
     source: 'packages/core-backend/src/multitable/meta-revision-retention.ts:60',
   },
@@ -416,6 +435,83 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
       'packages/core-backend/src/multitable/history-trust-precondition.ts (RECONSTRUCTION_CAUSALITY_LANDED, evaluateStrictEnablementPrecondition, checkStrictEnablementPrecondition)',
     enablementEnforcedVia:
       'packages/core-backend/src/multitable/history-integrity-precheck.ts precheckSheetHistoryIntegrity (strict branch) — refuses strict_enablement_unmet UNCONDITIONALLY when canEnable is false (no no-checkpoint exemption)',
+  },
+  {
+    key: 'ELEARNING_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      'Master gate for the elearning V0.1 named pilot (video upload → viewing verification → objective exam → automatic grading). Default OFF; exact literal \'true\' only. Session feature `elearning` is this flag and is never inferred from admin role, product mode, or plugin state.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:28-30',
+  },
+  {
+    key: 'ELEARNING_CONTENT_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning content capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
+  {
+    key: 'ELEARNING_ASSIGNMENT_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning assignment capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
+  {
+    key: 'ELEARNING_ASSESSMENT_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning assessment capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
+  {
+    key: 'ELEARNING_INCENTIVE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning incentive capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
+  {
+    key: 'ELEARNING_ANALYTICS_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning analytics capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
+  {
+    key: 'ELEARNING_MEDIA_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning media capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
   },
 ])
 

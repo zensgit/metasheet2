@@ -27,6 +27,11 @@ RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0
 ENV PORT=8900
+# E-learning M1: ffprobe/ffmpeg are a deployment dependency (server-side duration/codec probe).
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ffmpeg \
+  && command -v ffprobe \
+  && rm -rf /var/lib/apt/lists/*
 ENV METASHEET_BUILD_COMMIT=${VCS_REF}
 ENV METASHEET_BUILD_IMAGE_TAG=${BUILD_IMAGE_TAG}
 ENV METASHEET_BUILD_SOURCE=${BUILD_IMAGE_SOURCE}
