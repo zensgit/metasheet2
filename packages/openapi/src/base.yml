@@ -4867,6 +4867,272 @@ components:
               minLength: 1
               maxLength: 512
             - type: 'null'
+    ElearningContentArticleRevisionRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, itemType, title, articleHtml, externalUrl]
+      properties:
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+        itemType:
+          type: string
+          enum: [article]
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        articleHtml:
+          type: string
+          minLength: 1
+          maxLength: 1000000
+          description: HTML sanitized and stored by the server before it is returned to learners.
+        externalUrl:
+          type: string
+          nullable: true
+          enum: [null]
+    ElearningContentExternalLinkRevisionRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, itemType, title, articleHtml, externalUrl]
+      properties:
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+        itemType:
+          type: string
+          enum: [external_link]
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        articleHtml:
+          type: string
+          nullable: true
+          enum: [null]
+        externalUrl:
+          type: string
+          format: uri
+          pattern: '^https://'
+          minLength: 1
+          maxLength: 2048
+    ElearningContentRevisionRequest:
+      oneOf:
+        - $ref: '#/components/schemas/ElearningContentArticleRevisionRequest'
+        - $ref: '#/components/schemas/ElearningContentExternalLinkRevisionRequest'
+      discriminator:
+        propertyName: itemType
+        mapping:
+          article: '#/components/schemas/ElearningContentArticleRevisionRequest'
+          external_link: '#/components/schemas/ElearningContentExternalLinkRevisionRequest'
+    ElearningContentArticleRevision:
+      type: object
+      additionalProperties: false
+      required: [contentRevisionId, itemType, title, articleHtml, externalUrl, contentDigest]
+      properties:
+        contentRevisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        itemType:
+          type: string
+          enum: [article]
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        articleHtml:
+          type: string
+          minLength: 1
+          maxLength: 1000000
+          description: Server-sanitized HTML.
+        externalUrl:
+          type: string
+          nullable: true
+          enum: [null]
+        contentDigest:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+    ElearningContentExternalLinkRevision:
+      type: object
+      additionalProperties: false
+      required: [contentRevisionId, itemType, title, articleHtml, externalUrl, contentDigest]
+      properties:
+        contentRevisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        itemType:
+          type: string
+          enum: [external_link]
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        articleHtml:
+          type: string
+          nullable: true
+          enum: [null]
+        externalUrl:
+          type: string
+          format: uri
+          pattern: '^https://'
+          minLength: 1
+          maxLength: 2048
+        contentDigest:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+    ElearningContentRevision:
+      oneOf:
+        - $ref: '#/components/schemas/ElearningContentArticleRevision'
+        - $ref: '#/components/schemas/ElearningContentExternalLinkRevision'
+      discriminator:
+        propertyName: itemType
+        mapping:
+          article: '#/components/schemas/ElearningContentArticleRevision'
+          external_link: '#/components/schemas/ElearningContentExternalLinkRevision'
+    ElearningContentCoursePublishItem:
+      type: object
+      additionalProperties: false
+      required: [itemType, contentRevisionId]
+      properties:
+        itemType:
+          type: string
+          enum: [article, external_link]
+        contentRevisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+    ElearningContentCoursePublishRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, title, items]
+      properties:
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        items:
+          type: array
+          minItems: 1
+          maxItems: 10000
+          uniqueItems: true
+          description: Ordered immutable content-revision references; position is assigned by array order.
+          items:
+            $ref: '#/components/schemas/ElearningContentCoursePublishItem'
+    ElearningContentCoursePublishedItem:
+      type: object
+      additionalProperties: false
+      required: [itemId, itemType, contentRevisionId, position]
+      properties:
+        itemId:
+          $ref: '#/components/schemas/ElearningUuid'
+        itemType:
+          type: string
+          enum: [article, external_link]
+        contentRevisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        position:
+          type: integer
+          minimum: 1
+          maximum: 10000
+    ElearningContentCoursePublishResult:
+      type: object
+      additionalProperties: false
+      required: [courseId, courseVersionId, status, itemCount, items]
+      properties:
+        courseId:
+          $ref: '#/components/schemas/ElearningUuid'
+        courseVersionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        status:
+          type: string
+          enum: [published]
+        itemCount:
+          type: integer
+          minimum: 1
+          maximum: 10000
+        items:
+          type: array
+          minItems: 1
+          maxItems: 10000
+          items:
+            $ref: '#/components/schemas/ElearningContentCoursePublishedItem'
+    ElearningOpenCompletionRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId]
+      properties:
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+    ElearningContentArticleOpenResult:
+      type: object
+      additionalProperties: false
+      required: [itemId, itemType, title, articleHtml, externalUrl, status, completedAt, assurance]
+      properties:
+        itemId:
+          $ref: '#/components/schemas/ElearningUuid'
+        itemType:
+          type: string
+          enum: [article]
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        articleHtml:
+          type: string
+          minLength: 1
+          maxLength: 1000000
+          description: Server-sanitized HTML.
+        externalUrl:
+          type: string
+          nullable: true
+          enum: [null]
+        status:
+          type: string
+          enum: [completed]
+        completedAt:
+          type: string
+          format: date-time
+        assurance:
+          type: string
+          enum: [weak_server_recorded_open]
+    ElearningContentExternalLinkOpenResult:
+      type: object
+      additionalProperties: false
+      required: [itemId, itemType, title, articleHtml, externalUrl, status, completedAt, assurance]
+      properties:
+        itemId:
+          $ref: '#/components/schemas/ElearningUuid'
+        itemType:
+          type: string
+          enum: [external_link]
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        articleHtml:
+          type: string
+          nullable: true
+          enum: [null]
+        externalUrl:
+          type: string
+          format: uri
+          pattern: '^https://'
+          minLength: 1
+          maxLength: 2048
+        status:
+          type: string
+          enum: [completed]
+        completedAt:
+          type: string
+          format: date-time
+        assurance:
+          type: string
+          enum: [weak_server_recorded_launch]
+    ElearningOpenCompletionResult:
+      oneOf:
+        - $ref: '#/components/schemas/ElearningContentArticleOpenResult'
+        - $ref: '#/components/schemas/ElearningContentExternalLinkOpenResult'
+      discriminator:
+        propertyName: itemType
+        mapping:
+          article: '#/components/schemas/ElearningContentArticleOpenResult'
+          external_link: '#/components/schemas/ElearningContentExternalLinkOpenResult'
     ElearningMediaRejectCode:
       type: string
       enum:
@@ -5939,7 +6205,7 @@ components:
           allOf:
             - $ref: '#/components/schemas/ElearningLearnerExamAttempt'
           nullable: true
-    ElearningLearnerCourse:
+    ElearningLearnerAssessmentCourse:
       type: object
       additionalProperties: false
       required: [courseId, courseVersionId, title, access, assignment, video, exam, completed]
@@ -5962,6 +6228,86 @@ components:
         exam:
           $ref: '#/components/schemas/ElearningLearnerExam'
         completed: { type: boolean }
+    ElearningLearnerContentItemNotStarted:
+      type: object
+      additionalProperties: false
+      required: [itemId, itemType, title, status, completedAt]
+      properties:
+        itemId:
+          $ref: '#/components/schemas/ElearningUuid'
+        itemType:
+          type: string
+          enum: [article, external_link]
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        status:
+          type: string
+          enum: [not_started]
+        completedAt:
+          type: string
+          nullable: true
+          enum: [null]
+    ElearningLearnerContentItemCompleted:
+      type: object
+      additionalProperties: false
+      required: [itemId, itemType, title, status, completedAt]
+      properties:
+        itemId:
+          $ref: '#/components/schemas/ElearningUuid'
+        itemType:
+          type: string
+          enum: [article, external_link]
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        status:
+          type: string
+          enum: [completed]
+        completedAt:
+          type: string
+          format: date-time
+    ElearningLearnerContentItem:
+      oneOf:
+        - $ref: '#/components/schemas/ElearningLearnerContentItemNotStarted'
+        - $ref: '#/components/schemas/ElearningLearnerContentItemCompleted'
+      discriminator:
+        propertyName: status
+        mapping:
+          not_started: '#/components/schemas/ElearningLearnerContentItemNotStarted'
+          completed: '#/components/schemas/ElearningLearnerContentItemCompleted'
+    ElearningLearnerContentCourse:
+      type: object
+      additionalProperties: false
+      required: [courseId, courseVersionId, title, access, assignment, items, completed]
+      properties:
+        courseId:
+          $ref: '#/components/schemas/ElearningUuid'
+        courseVersionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        access:
+          $ref: '#/components/schemas/ElearningLearnerAccess'
+        assignment:
+          allOf:
+            - $ref: '#/components/schemas/ElearningLearnerAssignment'
+          nullable: true
+        items:
+          type: array
+          minItems: 1
+          maxItems: 10000
+          items:
+            $ref: '#/components/schemas/ElearningLearnerContentItem'
+        completed: { type: boolean }
+    ElearningLearnerCourse:
+      oneOf:
+        - $ref: '#/components/schemas/ElearningLearnerAssessmentCourse'
+        - $ref: '#/components/schemas/ElearningLearnerContentCourse'
     ElearningLearnerCourseList:
       type: object
       additionalProperties: false

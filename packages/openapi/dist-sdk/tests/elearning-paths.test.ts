@@ -56,6 +56,16 @@ type CreditAutomaticBehavior = components['schemas']['ElearningCreditAutomaticBe
 type CreditAutomaticWalletItem = components['schemas']['ElearningCreditAutomaticWalletItem']
 type CreditManualWalletItem = components['schemas']['ElearningCreditManualWalletItem']
 type CreditWalletItem = components['schemas']['ElearningCreditWalletItem']
+type ContentRevisionRequest = components['schemas']['ElearningContentRevisionRequest']
+type ContentRevisionResult = components['schemas']['ElearningContentRevision']
+type ContentCoursePublishRequest = components['schemas']['ElearningContentCoursePublishRequest']
+type ContentCoursePublishResult = components['schemas']['ElearningContentCoursePublishResult']
+type OpenCompletionRequest = components['schemas']['ElearningOpenCompletionRequest']
+type OpenCompletionResult = components['schemas']['ElearningOpenCompletionResult']
+type LearnerAssessmentCourse = components['schemas']['ElearningLearnerAssessmentCourse']
+type LearnerContentCourse = components['schemas']['ElearningLearnerContentCourse']
+type LearnerContentItem = components['schemas']['ElearningLearnerContentItem']
+type LearnerCourse = components['schemas']['ElearningLearnerCourse']
 
 const FORBIDDEN_LEARNER_KEYS = new Set([
   'answerKey',
@@ -164,6 +174,9 @@ describe('elearning V0.1 OpenAPI paths', () => {
   it('exposes the live named-pilot routes in generated SDK types', () => {
     expectTypeOf<paths['/api/elearning/capabilities']['get']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/admin/credits/adjustments']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/admin/content-revisions']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/admin/courses/content/publish']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/me/course-items/{itemId}/open']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/media']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/courses/publish']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/assessment/question-banks']['post']>().not.toBeNever()
@@ -202,6 +215,15 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<
       paths['/api/elearning/admin/credits/adjustments']['post']['responses']['200']['content']['application/json']
     >().toEqualTypeOf<CreditAdjustmentResult>()
+    expectTypeOf<
+      paths['/api/elearning/admin/content-revisions']['post']['responses']['201']['content']['application/json']
+    >().toEqualTypeOf<ContentRevisionResult>()
+    expectTypeOf<
+      paths['/api/elearning/admin/courses/content/publish']['post']['responses']['201']['content']['application/json']
+    >().toEqualTypeOf<ContentCoursePublishResult>()
+    expectTypeOf<
+      paths['/api/elearning/me/course-items/{itemId}/open']['post']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<OpenCompletionResult>()
     expectTypeOf<
       paths['/api/elearning/media']['post']['responses']['201']['content']['application/json']
     >().toEqualTypeOf<MediaUpload>()
@@ -467,6 +489,194 @@ describe('elearning V0.1 OpenAPI paths', () => {
       minimum: 0,
       maximum: 2147483647,
     })
+  })
+
+  it('keeps content authoring, publishing, opening, and learner course shapes closed', () => {
+    expectTypeOf<ContentRevisionRequest>().toEqualTypeOf<
+      | {
+          requestId: string
+          itemType: 'article'
+          title: string
+          articleHtml: string
+          externalUrl: null
+        }
+      | {
+          requestId: string
+          itemType: 'external_link'
+          title: string
+          articleHtml: null
+          externalUrl: string
+        }
+    >()
+    expectTypeOf<ContentRevisionResult>().toEqualTypeOf<
+      | {
+          contentRevisionId: string
+          itemType: 'article'
+          title: string
+          articleHtml: string
+          externalUrl: null
+          contentDigest: string
+        }
+      | {
+          contentRevisionId: string
+          itemType: 'external_link'
+          title: string
+          articleHtml: null
+          externalUrl: string
+          contentDigest: string
+        }
+    >()
+    expectTypeOf<ContentCoursePublishRequest>().toEqualTypeOf<{
+      requestId: string
+      title: string
+      items: Array<{
+        itemType: 'article' | 'external_link'
+        contentRevisionId: string
+      }>
+    }>()
+    expectTypeOf<ContentCoursePublishResult>().toEqualTypeOf<{
+      courseId: string
+      courseVersionId: string
+      status: 'published'
+      itemCount: number
+      items: Array<{
+        itemId: string
+        itemType: 'article' | 'external_link'
+        contentRevisionId: string
+        position: number
+      }>
+    }>()
+    expectTypeOf<OpenCompletionRequest>().toEqualTypeOf<{ requestId: string }>()
+    expectTypeOf<OpenCompletionResult>().toEqualTypeOf<
+      | {
+          itemId: string
+          itemType: 'article'
+          title: string
+          articleHtml: string
+          externalUrl: null
+          status: 'completed'
+          completedAt: string
+          assurance: 'weak_server_recorded_open'
+        }
+      | {
+          itemId: string
+          itemType: 'external_link'
+          title: string
+          articleHtml: null
+          externalUrl: string
+          status: 'completed'
+          completedAt: string
+          assurance: 'weak_server_recorded_launch'
+        }
+    >()
+    expectTypeOf<LearnerCourse>()
+      .toEqualTypeOf<LearnerAssessmentCourse | LearnerContentCourse>()
+    expectTypeOf<LearnerContentCourse>().toEqualTypeOf<{
+      courseId: string
+      courseVersionId: string
+      title: string
+      access: components['schemas']['ElearningLearnerAccess']
+      assignment: components['schemas']['ElearningLearnerAssignment'] | null
+      items: LearnerContentItem[]
+      completed: boolean
+    }>()
+    expectTypeOf<LearnerContentItem>().toEqualTypeOf<
+      | {
+          itemId: string
+          itemType: 'article' | 'external_link'
+          title: string
+          status: 'not_started'
+          completedAt: null
+        }
+      | {
+          itemId: string
+          itemType: 'article' | 'external_link'
+          title: string
+          status: 'completed'
+          completedAt: string
+        }
+    >()
+
+    expectTypeOf<
+      NonNullable<paths['/api/elearning/admin/content-revisions']['post']['requestBody']>['content']['application/json']
+    >().toEqualTypeOf<ContentRevisionRequest>()
+    expectTypeOf<
+      NonNullable<paths['/api/elearning/admin/courses/content/publish']['post']['requestBody']>['content']['application/json']
+    >().toEqualTypeOf<ContentCoursePublishRequest>()
+    expectTypeOf<
+      NonNullable<paths['/api/elearning/me/course-items/{itemId}/open']['post']['requestBody']>['content']['application/json']
+    >().toEqualTypeOf<OpenCompletionRequest>()
+
+    const doc = JSON.parse(readFileSync(join(here, '..', '..', 'dist', 'openapi.json'), 'utf8')) as {
+      paths?: Record<string, any>
+      components?: { schemas?: Record<string, JsonSchema> }
+    }
+    const schemas = doc.components?.schemas ?? {}
+    const expectedOperations = [
+      ['/api/elearning/admin/content-revisions', '201'],
+      ['/api/elearning/admin/courses/content/publish', '201'],
+      ['/api/elearning/me/course-items/{itemId}/open', '200'],
+    ] as const
+    for (const [path, success] of expectedOperations) {
+      const operation = doc.paths?.[path]?.post
+      expect(operation?.security).toEqual([{ bearerAuth: [] }])
+      expect(operation?.description).toContain('ELEARNING_ENABLED')
+      expect(operation?.description).toContain('ELEARNING_CONTENT_ENABLED')
+      expect(operation?.description).toContain('server')
+      expect(operation?.responses?.[success]?.content?.['application/json']?.schema?.$ref)
+        .toMatch(/^#\/components\/schemas\/Elearning/)
+    }
+
+    expect(schemas.ElearningContentRevisionRequest?.oneOf).toEqual([
+      { $ref: '#/components/schemas/ElearningContentArticleRevisionRequest' },
+      { $ref: '#/components/schemas/ElearningContentExternalLinkRevisionRequest' },
+    ])
+    for (const name of [
+      'ElearningContentArticleRevisionRequest',
+      'ElearningContentExternalLinkRevisionRequest',
+      'ElearningContentArticleRevision',
+      'ElearningContentExternalLinkRevision',
+      'ElearningContentCoursePublishRequest',
+      'ElearningContentCoursePublishResult',
+      'ElearningOpenCompletionRequest',
+      'ElearningContentArticleOpenResult',
+      'ElearningContentExternalLinkOpenResult',
+      'ElearningLearnerAssessmentCourse',
+      'ElearningLearnerContentCourse',
+      'ElearningLearnerContentItemNotStarted',
+      'ElearningLearnerContentItemCompleted',
+    ]) expect(schemas[name]?.additionalProperties).toBe(false)
+
+    expect(schemas.ElearningContentArticleRevisionRequest?.required).toEqual([
+      'requestId', 'itemType', 'title', 'articleHtml', 'externalUrl',
+    ])
+    expect(schemas.ElearningContentArticleRevisionRequest?.properties?.externalUrl)
+      .toMatchObject({ nullable: true, enum: [null] })
+    expect(schemas.ElearningContentExternalLinkRevisionRequest?.properties?.articleHtml)
+      .toMatchObject({ nullable: true, enum: [null] })
+    expect(schemas.ElearningContentExternalLinkRevisionRequest?.properties?.externalUrl)
+      .toMatchObject({ type: 'string', format: 'uri', pattern: '^https://' })
+    expect(schemas.ElearningContentCoursePublishRequest?.properties?.items)
+      .toMatchObject({ minItems: 1, maxItems: 10000 })
+    expect(schemas.ElearningOpenCompletionResult?.oneOf).toEqual([
+      { $ref: '#/components/schemas/ElearningContentArticleOpenResult' },
+      { $ref: '#/components/schemas/ElearningContentExternalLinkOpenResult' },
+    ])
+    expect(schemas.ElearningLearnerCourse?.oneOf).toEqual([
+      { $ref: '#/components/schemas/ElearningLearnerAssessmentCourse' },
+      { $ref: '#/components/schemas/ElearningLearnerContentCourse' },
+    ])
+    expect(schemas.ElearningLearnerContentItem?.oneOf).toEqual([
+      { $ref: '#/components/schemas/ElearningLearnerContentItemNotStarted' },
+      { $ref: '#/components/schemas/ElearningLearnerContentItemCompleted' },
+    ])
+    expect(schemas.ElearningLearnerContentItemNotStarted?.properties?.completedAt)
+      .toMatchObject({ nullable: true, enum: [null] })
+    expect(schemas.ElearningLearnerContentItemCompleted?.properties?.completedAt)
+      .toMatchObject({ type: 'string', format: 'date-time' })
+    expect(schemas.ElearningLearnerAssessmentCourse?.properties?.items).toBeUndefined()
+    expect(schemas.ElearningLearnerContentCourse?.properties?.video).toBeUndefined()
+    expect(schemas.ElearningLearnerContentCourse?.properties?.exam).toBeUndefined()
   })
 
   it('keeps L3 assessment admin requests and responses closed', () => {

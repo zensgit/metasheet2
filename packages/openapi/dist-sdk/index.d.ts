@@ -8428,6 +8428,80 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/admin/content-revisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create an immutable article or external-link revision
+         * @description Global `elearning:admin` only. `ELEARNING_ENABLED` and
+         *     `ELEARNING_CONTENT_ENABLED` must each equal the exact literal `true`.
+         *     Organization and actor are server-derived and are never accepted from
+         *     the closed request body. Reusing `requestId` with the same normalized
+         *     payload replays the immutable revision; a changed payload returns a
+         *     values-free conflict.
+         */
+        post: operations["createElearningContentRevision"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/courses/content/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Publish one ordered content-only course version
+         * @description Global `elearning:admin` only. `ELEARNING_ENABLED` and
+         *     `ELEARNING_CONTENT_ENABLED` must each equal the exact literal `true`.
+         *     Organization and actor are server-derived. The closed request freezes
+         *     a non-empty ordered list of same-organization immutable content
+         *     revisions; array order becomes the one-based course-item position.
+         */
+        post: operations["publishElearningContentCourse"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/me/course-items/{itemId}/open": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Open an accessible article or external-link item and record completion
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+         *     `ELEARNING_ENABLED` and `ELEARNING_CONTENT_ENABLED` must each equal the
+         *     exact literal `true`. Organization, learner, completion time, event,
+         *     and assurance are server-derived. The closed body accepts only the
+         *     idempotency `requestId`; the response exposes sanitized article HTML or
+         *     the validated HTTPS link, never both.
+         */
+        post: operations["openElearningContentCourseItem"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/credits/wallet": {
         parameters: {
             query?: never;
@@ -9056,10 +9130,13 @@ export interface paths {
         };
         /**
          * List the current learner's assigned and visible courses
-         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags (watch gate plus
-         *     ASSESSMENT). No JSON body. At most 100 course versions. Actor/org from JWT.
-         *     Assignment access wins when both bases match; visibility access is optional
-         *     self-study and returns assignment null.
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+         *     Requires `ELEARNING_ENABLED` and `ELEARNING_CONTENT_ENABLED` to each
+         *     equal the exact literal `true`. No JSON body. At most 100 course
+         *     versions. Actor and organization are server-derived. Assignment access
+         *     wins when both bases match; visibility access is optional self-study
+         *     and returns assignment null. Every course is exactly one closed shape:
+         *     legacy video plus exam, or ordered article/external-link items.
          */
         get: operations["listMyElearningCourses"];
         put?: never;
@@ -18140,6 +18217,130 @@ export interface components {
             items: components["schemas"]["ElearningCreditWalletItem"][];
             nextCursor: string | null;
         };
+        ElearningContentArticleRevisionRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            itemType: "article";
+            title: string;
+            /** @description HTML sanitized and stored by the server before it is returned to learners. */
+            articleHtml: string;
+            /** @enum {string|null} */
+            externalUrl: null;
+        };
+        ElearningContentExternalLinkRevisionRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            itemType: "external_link";
+            title: string;
+            /** @enum {string|null} */
+            articleHtml: null;
+            /** Format: uri */
+            externalUrl: string;
+        };
+        ElearningContentRevisionRequest: components["schemas"]["ElearningContentArticleRevisionRequest"] | components["schemas"]["ElearningContentExternalLinkRevisionRequest"];
+        ElearningContentArticleRevision: {
+            contentRevisionId: components["schemas"]["ElearningUuid"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            itemType: "article";
+            title: string;
+            /** @description Server-sanitized HTML. */
+            articleHtml: string;
+            /** @enum {string|null} */
+            externalUrl: null;
+            contentDigest: string;
+        };
+        ElearningContentExternalLinkRevision: {
+            contentRevisionId: components["schemas"]["ElearningUuid"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            itemType: "external_link";
+            title: string;
+            /** @enum {string|null} */
+            articleHtml: null;
+            /** Format: uri */
+            externalUrl: string;
+            contentDigest: string;
+        };
+        ElearningContentRevision: components["schemas"]["ElearningContentArticleRevision"] | components["schemas"]["ElearningContentExternalLinkRevision"];
+        ElearningContentCoursePublishItem: {
+            /** @enum {string} */
+            itemType: "article" | "external_link";
+            contentRevisionId: components["schemas"]["ElearningUuid"];
+        };
+        ElearningContentCoursePublishRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            title: string;
+            /** @description Ordered immutable content-revision references; position is assigned by array order. */
+            items: components["schemas"]["ElearningContentCoursePublishItem"][];
+        };
+        ElearningContentCoursePublishedItem: {
+            itemId: components["schemas"]["ElearningUuid"];
+            /** @enum {string} */
+            itemType: "article" | "external_link";
+            contentRevisionId: components["schemas"]["ElearningUuid"];
+            position: number;
+        };
+        ElearningContentCoursePublishResult: {
+            courseId: components["schemas"]["ElearningUuid"];
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            /** @enum {string} */
+            status: "published";
+            itemCount: number;
+            items: components["schemas"]["ElearningContentCoursePublishedItem"][];
+        };
+        ElearningOpenCompletionRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+        };
+        ElearningContentArticleOpenResult: {
+            itemId: components["schemas"]["ElearningUuid"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            itemType: "article";
+            title: string;
+            /** @description Server-sanitized HTML. */
+            articleHtml: string;
+            /** @enum {string|null} */
+            externalUrl: null;
+            /** @enum {string} */
+            status: "completed";
+            /** Format: date-time */
+            completedAt: string;
+            /** @enum {string} */
+            assurance: "weak_server_recorded_open";
+        };
+        ElearningContentExternalLinkOpenResult: {
+            itemId: components["schemas"]["ElearningUuid"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            itemType: "external_link";
+            title: string;
+            /** @enum {string|null} */
+            articleHtml: null;
+            /** Format: uri */
+            externalUrl: string;
+            /** @enum {string} */
+            status: "completed";
+            /** Format: date-time */
+            completedAt: string;
+            /** @enum {string} */
+            assurance: "weak_server_recorded_launch";
+        };
+        ElearningOpenCompletionResult: components["schemas"]["ElearningContentArticleOpenResult"] | components["schemas"]["ElearningContentExternalLinkOpenResult"];
         /** @enum {string} */
         ElearningMediaRejectCode: "file_too_large" | "too_many_files" | "mime_not_allowed" | "extension_not_allowed" | "extension_mime_mismatch" | "content_mime_mismatch" | "invalid_size" | "org_quota_exceeded" | "upload_rejected";
         ElearningMediaReject: {
@@ -18572,7 +18773,7 @@ export interface components {
             itemId: components["schemas"]["ElearningUuid"];
             latestAttempt: components["schemas"]["ElearningLearnerExamAttempt"] | null;
         };
-        ElearningLearnerCourse: {
+        ElearningLearnerAssessmentCourse: {
             courseId: components["schemas"]["ElearningUuid"];
             courseVersionId: components["schemas"]["ElearningUuid"];
             title: string;
@@ -18582,6 +18783,43 @@ export interface components {
             exam: components["schemas"]["ElearningLearnerExam"];
             completed: boolean;
         };
+        ElearningLearnerContentItemNotStarted: {
+            itemId: components["schemas"]["ElearningUuid"];
+            /** @enum {string} */
+            itemType: "article" | "external_link";
+            title: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            status: "not_started";
+            /** @enum {string|null} */
+            completedAt: null;
+        };
+        ElearningLearnerContentItemCompleted: {
+            itemId: components["schemas"]["ElearningUuid"];
+            /** @enum {string} */
+            itemType: "article" | "external_link";
+            title: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            status: "completed";
+            /** Format: date-time */
+            completedAt: string;
+        };
+        ElearningLearnerContentItem: components["schemas"]["ElearningLearnerContentItemNotStarted"] | components["schemas"]["ElearningLearnerContentItemCompleted"];
+        ElearningLearnerContentCourse: {
+            courseId: components["schemas"]["ElearningUuid"];
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            title: string;
+            access: components["schemas"]["ElearningLearnerAccess"];
+            assignment: components["schemas"]["ElearningLearnerAssignment"] | null;
+            items: components["schemas"]["ElearningLearnerContentItem"][];
+            completed: boolean;
+        };
+        ElearningLearnerCourse: components["schemas"]["ElearningLearnerAssessmentCourse"] | components["schemas"]["ElearningLearnerContentCourse"];
         ElearningLearnerCourseList: {
             courses: components["schemas"]["ElearningLearnerCourse"][];
         };
@@ -20064,6 +20302,125 @@ export interface operations {
             503: components["responses"]["ElearningError"];
         };
     };
+    createElearningContentRevision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningContentRevisionRequest"];
+            };
+        };
+        responses: {
+            /** @description Created immutable revision or exact idempotent replay. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningContentRevision"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Content surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description requestId reused with a different normalized payload */
+            409: components["responses"]["ElearningError"];
+            /** @description payload_too_large */
+            413: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    publishElearningContentCourse: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningContentCoursePublishRequest"];
+            };
+        };
+        responses: {
+            /** @description Published content-only course or exact idempotent replay. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningContentCoursePublishResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Content surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description reference_unavailable or requestId conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description payload_too_large */
+            413: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    openElearningContentCourseItem: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                itemId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningOpenCompletionRequest"];
+            };
+        };
+        responses: {
+            /** @description Server-recorded completion or exact idempotent replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningOpenCompletionResult"];
+                };
+            };
+            /** @description invalid_input or unsupported_item */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or forbidden */
+            403: components["responses"]["ElearningError"];
+            /** @description Item not found or content surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description course_withdrawn or requestId conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description payload_too_large */
+            413: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
     getMyElearningCreditWallet: {
         parameters: {
             query?: {
@@ -21141,7 +21498,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Accessible courses with access basis, video progress, and latest exam attempt. No answer keys. */
+            /** @description Accessible closed assessment/content course union. No answer keys or raw revision authority fields. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -21156,7 +21513,7 @@ export interface operations {
             401: components["responses"]["ElearningAuthError"];
             /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions (any of `elearning:read`, `elearning:write`, `elearning:admin`) */
             403: components["responses"]["ElearningError"];
-            /** @description Exam/learner-list surface flags off */
+            /** @description Content/learner-list surface flags off */
             404: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];
