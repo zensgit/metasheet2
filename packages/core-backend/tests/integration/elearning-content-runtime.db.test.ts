@@ -553,6 +553,115 @@ describe('e-learning content runtime PostgreSQL authority', () => {
       )
     }
     await migrate(contentRuntimeUp)
+
+    const completionPolicyShape = await firstPool.query<{ definition: string }>(
+      `SELECT pg_get_constraintdef(oid, true) AS definition
+         FROM pg_constraint
+        WHERE conrelid = 'elearning_course_version_items'::regclass
+          AND conname = 'elearning_course_version_items_completion_policy_chk'`,
+    )
+    try {
+      await firstPool.query(
+        `ALTER TABLE elearning_course_version_items
+           DROP CONSTRAINT elearning_course_version_items_completion_policy_chk,
+           ADD CONSTRAINT elearning_course_version_items_completion_policy_chk CHECK (
+             (item_type = 'video'
+               AND completion_policy_version = 'video-v1-90pct'
+               AND completion_threshold_bps = 9000)
+             OR
+             (item_type = 'exam'
+               AND completion_policy_version IS NULL
+               AND completion_threshold_bps IS NULL)
+             OR
+             (item_type = 'article'
+               AND completion_policy_version = 'article-open-v1'
+               AND completion_threshold_bps IS NULL)
+             OR
+             (item_type = 'external_link'
+               AND completion_policy_version = 'external-link-launch-v1'
+               AND completion_threshold_bps IS NULL)
+           )`,
+      )
+      await expect(migrate(contentRuntimeUp)).rejects.toThrow(
+        'elearning content runtime migration drift: '
+        + 'elearning_course_version_items_completion_policy_chk',
+      )
+    } finally {
+      await firstPool.query(
+        `ALTER TABLE elearning_course_version_items
+           DROP CONSTRAINT elearning_course_version_items_completion_policy_chk,
+           ADD CONSTRAINT elearning_course_version_items_completion_policy_chk
+           ${completionPolicyShape.rows[0].definition}`,
+      )
+    }
+    await migrate(contentRuntimeUp)
+  })
+
+  it('rejects NULL-shaped completion policies for video, article, and external-link items', async () => {
+    const db = runtimeDb(firstPool)
+    const probeOrg = org('null-policy')
+    const mediaId = await seedReadyMedia(firstPool, probeOrg)
+    const article = await createRevision(db, probeOrg, 'article', 'null-policy-a')
+    const link = await createRevision(db, probeOrg, 'external_link', 'null-policy-b')
+    const versionId = await seedDraftVersion(firstPool, probeOrg, [])
+    const cases = [
+      {
+        itemType: 'video',
+        mediaId,
+        articleRevisionId: null,
+        externalLinkRevisionId: null,
+        policy: null,
+        threshold: 9000,
+      },
+      {
+        itemType: 'video',
+        mediaId,
+        articleRevisionId: null,
+        externalLinkRevisionId: null,
+        policy: 'video-v1-90pct',
+        threshold: null,
+      },
+      {
+        itemType: 'article',
+        mediaId: null,
+        articleRevisionId: article.contentRevisionId,
+        externalLinkRevisionId: null,
+        policy: null,
+        threshold: null,
+      },
+      {
+        itemType: 'external_link',
+        mediaId: null,
+        articleRevisionId: null,
+        externalLinkRevisionId: link.contentRevisionId,
+        policy: null,
+        threshold: null,
+      },
+    ] as const
+    for (const [index, item] of cases.entries()) {
+      await expect(firstPool.query(
+        `INSERT INTO elearning_course_version_items (
+           id, org_id, course_version_id, item_type, position,
+           media_id, exam_id, article_revision_id, external_link_revision_id,
+           completion_policy_version, completion_threshold_bps
+         ) VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, $8, $9, $10)`,
+        [
+          randomUUID(),
+          probeOrg,
+          versionId,
+          item.itemType,
+          index + 1,
+          item.mediaId,
+          item.articleRevisionId,
+          item.externalLinkRevisionId,
+          item.policy,
+          item.threshold,
+        ],
+      )).rejects.toMatchObject({
+        code: '23514',
+        constraint: 'elearning_course_version_items_completion_policy_chk',
+      })
+    }
   })
 
   it('publishes article-only, link-only, mixed ordered, and legacy video-exam courses while empty publish fails', async () => {

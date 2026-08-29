@@ -1634,9 +1634,9 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
     })
 
     const missingVideo = await reject(() => publishVersion(org, missingVideoId))
-    expect(String(missingVideo?.message)).toMatch(/at least one video item is required/)
+    expect(String(missingVideo?.message)).toMatch(/unsupported item family/)
     const missingExam = await reject(() => publishVersion(org, missingExamId))
-    expect(String(missingExam?.message)).toMatch(/at least one exam item is required/)
+    expect(String(missingExam?.message)).toMatch(/unsupported item family/)
   })
 
   it('locks draft audit fields on course_version and exam while allowing business edits', async () => {

@@ -221,15 +221,19 @@ const CONTENT_CHECK_DEFINITIONS = [
     name: 'elearning_course_version_items_completion_policy_chk',
     definition: `CHECK (
       item_type = 'video'::text
+      AND completion_policy_version IS NOT NULL
       AND completion_policy_version = 'video-v1-90pct'::text
+      AND completion_threshold_bps IS NOT NULL
       AND completion_threshold_bps = 9000
       OR item_type = 'exam'::text
       AND completion_policy_version IS NULL
       AND completion_threshold_bps IS NULL
       OR item_type = 'article'::text
+      AND completion_policy_version IS NOT NULL
       AND completion_policy_version = 'article-open-v1'::text
       AND completion_threshold_bps IS NULL
       OR item_type = 'external_link'::text
+      AND completion_policy_version IS NOT NULL
       AND completion_policy_version = 'external-link-launch-v1'::text
       AND completion_threshold_bps IS NULL
     )`,
@@ -1268,7 +1272,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       ADD CONSTRAINT elearning_course_version_items_completion_policy_chk
         CHECK (
           (item_type = 'video'
+            AND completion_policy_version IS NOT NULL
             AND completion_policy_version = 'video-v1-90pct'
+            AND completion_threshold_bps IS NOT NULL
             AND completion_threshold_bps = 9000)
           OR
           (item_type = 'exam'
@@ -1276,10 +1282,12 @@ export async function up(db: Kysely<unknown>): Promise<void> {
             AND completion_threshold_bps IS NULL)
           OR
           (item_type = 'article'
+            AND completion_policy_version IS NOT NULL
             AND completion_policy_version = 'article-open-v1'
             AND completion_threshold_bps IS NULL)
           OR
           (item_type = 'external_link'
+            AND completion_policy_version IS NOT NULL
             AND completion_policy_version = 'external-link-launch-v1'
             AND completion_threshold_bps IS NULL)
         ),
