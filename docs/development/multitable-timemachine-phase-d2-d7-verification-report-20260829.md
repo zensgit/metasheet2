@@ -2,10 +2,9 @@
 
 **Status:** MERGED FOUNDATION / LOCAL CLOSEOUT CANDIDATE HOLD. PR #5305 is
 merged. Local code/test candidate `9c5c082a53a26e4ae55f02b1724b99826e9abb95`
-and report carrier `b8893e6b860d09b2b5518adbdbffbadb74073d8d` are
-replayed by true merge onto then-current main
-`9d29e7a7d339be5ce4fb276c2e96b1a2ae67e17c` at
-`0464d551d829ac020a6504e49c54f64a8d17c03a` and locally verified, but not
+and its report lineage are carried by the current true merge onto main
+`da1057141a8c4ee7f41fe7f55c32700f1e46a5ff` at
+`f95eadaf5d972316279cfd7ae5e151c12fc73e6a` and locally verified, but not
 pushed or remotely verified. No staging, flag, deployment, or production
 acceptance claim.
 
@@ -40,10 +39,14 @@ acceptance claim.
 | final mutation-locked code/test head | `9c5c082a53a26e4ae55f02b1724b99826e9abb95` |
 | post-merge closeout code/test tree | `3831f7c62a13e296715dbfb1f18becfacba82fb2` |
 | prior report-only carriers | `886a24da5d1f4533a40b5310ec0dd2510523b105`, `6f468e3f211713483c02d0ab8a7cb747fc7078a7`, `332b13efd87e3352250c6ffa39be0a95ef01b5c4` |
-| final local report carrier before latest replay | `b8893e6b860d09b2b5518adbdbffbadb74073d8d` |
-| latest then-current main replay parent | `9d29e7a7d339be5ce4fb276c2e96b1a2ae67e17c` |
-| latest local true-merge replay | `0464d551d829ac020a6504e49c54f64a8d17c03a` |
-| latest local replay tree | `c8574f916171d50f0fc8fe9e9426bc3f41aa29b1` |
+| prior local report carrier before prior replay | `b8893e6b860d09b2b5518adbdbffbadb74073d8d` |
+| prior then-current main replay parent | `9d29e7a7d339be5ce4fb276c2e96b1a2ae67e17c` |
+| prior local true-merge replay | `0464d551d829ac020a6504e49c54f64a8d17c03a` |
+| prior local replay tree | `c8574f916171d50f0fc8fe9e9426bc3f41aa29b1` |
+| current closeout source parent | `d49bc9b07f5a192d857e5bb849a2e888a1e74874` |
+| current then-current main parent | `da1057141a8c4ee7f41fe7f55c32700f1e46a5ff` |
+| current local true-merge replay | `f95eadaf5d972316279cfd7ae5e151c12fc73e6a` |
+| current local replay tree | `a64f5c9c1c60448c4193d2d935cd98d080f08136` |
 | post-merge closeout remote CI | not run |
 | flags | unchanged and OFF |
 | production | not accessed |
@@ -104,13 +107,14 @@ RED-to-fixed-GREEN run above. No temporary production-guard neutralization is
 claimed: the local safety reviewer refused the attempted weakening, and it was
 not bypassed.
 
-The latest true-merge replay at `0464d551d8` has ordered parents
-`b8893e6b86` and `9d29e7a7d3`, no manual conflict resolution, and no path
-overlap between the two parent deltas. On that exact tree, the archive client
-and modal passed **2 files / 95 tests**, the D5-D7 set passed **18 files / 210
-tests**, application plus server wiring passed **2 files / 17 tests**, archive
-wiring/fail-not-skip passed **6/6 + 1/1**, both web and core typechecks passed,
-and diff-check was clean. Remote exact-head CI remains unrun.
+The current true-merge replay at `f95eadaf5d` has ordered parents
+`d49bc9b07f` and `da1057141a8c`, no manual conflict resolution, and a nine-file
+Time Machine delta relative to its main parent. On that exact tree, the archive
+client and modal passed **2 files / 95 tests**, application plus server wiring
+passed **2 files / 17 tests**, web typecheck passed, and diff-check was clean.
+The broader D5-D7 evidence remains attached to the carried source lineage; it
+was not silently reclassified as an exact-head remote matrix. Remote exact-head
+CI remains unrun.
 
 ### Draft PR exact-head progression
 
@@ -433,6 +437,14 @@ category mutations above turned the intended cases red. Sol reran the final
 HOLD for current-main replay, exact-head remote CI, and the provider/staging
 boundaries; the local refute-first gate is closed.
 
+A fresh Sol high review of exact range `da1057141a8c..f95eadaf5d` returned
+product **0 P1 / 0 P2 / 0 P3** and report-only **0 P1 / 1 P2 / 0 P3**. It
+independently refuted both unproven shutdown hypotheses: rejecting the memoized
+`stop()` promise is the intended fail-closed result when worker drain cannot be
+proved, and the worker-stop deadline must remain referenced so the promised
+failure is delivered. The report-only P2 was the stale exact-replay binding;
+this amendment closes that evidence defect.
+
 The same review cycle exposed malformed job-list elements and led to
 `4d3a50c627`. Sol then reviewed that exact two-file delta, ran the focused spec at
 **10/10** plus web typecheck, and found one P2: UUID/decimal/timestamp values were
@@ -460,8 +472,9 @@ owner/provider or staging/production proof:
 - current-main local integration and exact-worktree gates: passed;
 - PR #5305 merged at `fac252067a`; its product-code matrix reached `48 SUCCESS /
   1 intentional SKIPPED / 0 failure` at `73d3187c8b` before the report carrier;
-- local closeout code/test checkpoint `9c5c082a53` is carried by current-main
-  replay `0464d551d8`, but has no remote matrix or landing authorization;
+- local closeout code/test checkpoint `9c5c082a53` is carried through the report
+  lineage by current-main replay `f95eadaf5d` over `da1057141a8c`, but has no
+  remote matrix or landing authorization;
 - flags: OFF;
 - production: untouched.
 

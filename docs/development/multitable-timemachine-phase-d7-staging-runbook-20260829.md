@@ -24,9 +24,10 @@ candidate SHA:
    mounts, and the application owns worker start and shutdown.
 2. Land and remotely verify the post-merge closeout that bounds a stuck worker
    drain, exits non-zero when shutdown cannot drain it, and rejects malformed
-   catalog/job-list/operation success data. At this runbook revision the latest
-   local true-merge replay is `0464d551d8` (carrying code/test checkpoint
-   `9c5c082a53`), not a pushed or deployed build.
+   catalog/job-list/operation success data. At this runbook revision the current
+   local true-merge replay is `f95eadaf5d` over main `da1057141a8c` (carrying
+   code/test checkpoint `9c5c082a53` through the report lineage), not a pushed
+   or deployed build.
 3. The object store is independently durable from the hot database and the
    application host. Same-host local files do not satisfy this gate.
 4. Key custody uses a staging KMS/test key and never exposes plaintext key

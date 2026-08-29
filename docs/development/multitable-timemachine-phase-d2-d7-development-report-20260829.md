@@ -4,9 +4,9 @@
 through `fac252067ab1c22d910266ac2ba29016c2b5fe43` on 2026-08-29. The local
 closeout code/test candidate `9c5c082a53a26e4ae55f02b1724b99826e9abb95`
 and its report carrier `b8893e6b860d09b2b5518adbdbffbadb74073d8d`
-are replayed by true merge onto then-current main
-`9d29e7a7d339be5ce4fb276c2e96b1a2ae67e17c` at
-`0464d551d829ac020a6504e49c54f64a8d17c03a`. The code/test candidate closes the
+are carried through the prior replay/report lineage and the current true merge
+onto main `da1057141a8c4ee7f41fe7f55c32700f1e46a5ff` at
+`f95eadaf5d972316279cfd7ae5e151c12fc73e6a`. The code/test candidate closes the
 disclosed malformed catalog/job-list/preview/execute/job success responses,
 bounds a stuck restore-worker drain at ten seconds, makes every concurrent stop
 caller observe the same result, and makes a failed signal shutdown exit
@@ -54,10 +54,14 @@ enabled and production was not accessed.
 | exact response-shape mutation lock | `9c5c082a53a26e4ae55f02b1724b99826e9abb95` |
 | post-merge closeout code/test tree | `3831f7c62a13e296715dbfb1f18becfacba82fb2` |
 | prior report-only carriers | `886a24da5d1f4533a40b5310ec0dd2510523b105`, `6f468e3f211713483c02d0ab8a7cb747fc7078a7`, `332b13efd87e3352250c6ffa39be0a95ef01b5c4` |
-| final local report carrier before latest replay | `b8893e6b860d09b2b5518adbdbffbadb74073d8d` |
-| latest then-current main replay parent | `9d29e7a7d339be5ce4fb276c2e96b1a2ae67e17c` |
-| latest local true-merge replay | `0464d551d829ac020a6504e49c54f64a8d17c03a` |
-| latest local replay tree | `c8574f916171d50f0fc8fe9e9426bc3f41aa29b1` |
+| prior local report carrier before prior replay | `b8893e6b860d09b2b5518adbdbffbadb74073d8d` |
+| prior then-current main replay parent | `9d29e7a7d339be5ce4fb276c2e96b1a2ae67e17c` |
+| prior local true-merge replay | `0464d551d829ac020a6504e49c54f64a8d17c03a` |
+| prior local replay tree | `c8574f916171d50f0fc8fe9e9426bc3f41aa29b1` |
+| current closeout source parent | `d49bc9b07f5a192d857e5bb849a2e888a1e74874` |
+| current then-current main parent | `da1057141a8c4ee7f41fe7f55c32700f1e46a5ff` |
+| current local true-merge replay | `f95eadaf5d972316279cfd7ae5e151c12fc73e6a` |
+| current local replay tree | `a64f5c9c1c60448c4193d2d935cd98d080f08136` |
 | post-merge closeout remote matrix | not run; local checkpoint only |
 
 The integration merge is a true two-parent merge of the final source evidence
@@ -237,12 +241,20 @@ not reveal. They were fixed on the same branch before closeout:
    the restored exact head passed **78/78** client tests and **95/95** with the
    modal neighbor. Sol's follow-up verdict is **0 P1 / 0 P2 / 0 P3**.
 10. Luna high performed a read-only report-truthfulness review after true-merge
-    replay `0464d551d8`. It verified the parent order, zero-overlap merge, HOLD
+    replay `0464d551d8` (now a prior replay). It verified the parent order,
+    zero-overlap merge, HOLD
     boundaries, and local gates, then found stale prose that still said no
     current-main replay. Report-only carrier `f92112aa64` corrected that state.
     Its follow-up found no code issue and identified only review-provenance and
     report-head wording; this report records Luna's scope explicitly and uses
     lineage wording so a report-only child does not invalidate itself.
+11. Sol high independently reviewed the current exact range
+    `da1057141a8c..f95eadaf5d`. Product verdict was **0 P1 / 0 P2 / 0 P3**.
+    It confirmed shared stop-promise failure propagation, the referenced
+    ten-second worker-stop deadline, and pool-close ordering. It found one
+    report-only P2: the reports still called the prior `0464d551d8` replay the
+    latest candidate. This amendment binds the evidence to `f95eadaf5d` without
+    changing the HOLD, staging, flag, deployment, or production boundaries.
 
 ## 3. Architecture boundaries preserved
 
@@ -269,7 +281,7 @@ These are real residuals, not documentation polish:
 | no true OS-process restart exercise | the 5,001-record test proves same-process lease takeover, not host/process recovery |
 | fixed ten-second worker-stop bound | the bound is fail-closed but is not composition-configurable; changing it is a separate runtime policy decision |
 | sheet ID discovery comparison overlaps stronger generation/job guards | defense remains, but removing that comparison alone is not mutation-discriminating |
-| post-merge closeout candidate is local only | code/test checkpoint `9c5c082a53` is carried by true-merge replay `0464d551d8` onto main `9d29e7a7d3`, with local gates plus Opus 5 and Sol code-review evidence and Luna report-truthfulness review, but no push, PR, or remote matrix |
+| post-merge closeout candidate is local only | the lineage containing code/test checkpoint `9c5c082a53` is carried by current true-merge replay `f95eadaf5d` onto main `da1057141a8c`, with local gates plus Opus 5, Sol, and Luna review evidence, but no push, PR, or remote matrix |
 
 The provider rows cannot be closed by choosing an adapter implicitly. D1 leaves
 KMS/key custody and the production object backend as explicit owner decisions.
@@ -289,9 +301,10 @@ failure domain.
 
 - PR #5305 was merged through `fac252067a`; this report now records that result
   rather than preserving the obsolete Draft claim.
-- The post-merge closeout branch remains local. Code replay `0464d551d8` and
-  the report lineage through `f92112aa64` were not pushed, and no closeout PR
-  was opened. This report-only correction is a child of that lineage.
+- The post-merge closeout branch remains local. Current code replay
+  `f95eadaf5d` carries the report lineage through `d49bc9b07f`; it was not
+  pushed, and no closeout PR was opened. This report-only correction is a child
+  of that exact code tree.
 - No deployment, dispatch, staging action, or production access was performed.
 - No flag was enabled or changed.
 - D7 adds only the bounded durable-list and application-runtime slices described
@@ -305,7 +318,7 @@ failure domain.
 1. Obtain the explicit owner choices for KMS/key custody and the staging/production
    object backend; do not infer them from another product surface.
 2. Recheck `origin/main` before any push. The current true-merge replay
-   `0464d551d8` is bound to main `9d29e7a7d3`; if main moves again, replay first.
+   `f95eadaf5d` is bound to main `da1057141a8c`; if main moves again, replay first.
    Then require complete exact-head remote checks and another bounded
    replay-delta review before a separate landing decision. Local green evidence
    is not that decision.
