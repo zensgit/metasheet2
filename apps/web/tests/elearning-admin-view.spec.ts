@@ -1135,4 +1135,27 @@ describe('ElearningAdminView', () => {
     expect(root.textContent).toContain('安全题库 (1)')
     expect(root.querySelector('[data-testid="elearning-assessment-bank-next"]')).toBeNull()
   })
+
+  it('mounts the content-course sibling only when the master content capability is exact true', async () => {
+    const enabled = mountView()
+    await flushUi()
+    expect(enabled.querySelector('[data-testid="elearning-content-admin-section"]')).not.toBeNull()
+
+    app?.unmount()
+    container?.remove()
+    h.capabilities.mockResolvedValue({
+      enabled: true,
+      capabilities: {
+        content: false,
+        assignment: true,
+        assessment: true,
+        incentive: false,
+        analytics: false,
+        media: true,
+      },
+    })
+    const disabled = mountView()
+    await flushUi()
+    expect(disabled.querySelector('[data-testid="elearning-content-admin-section"]')).toBeNull()
+  })
 })
