@@ -110,12 +110,37 @@ import {
   type ExactAnchorBody,
 } from '../multitable/exact-anchor-recovery-route'
 import {
-  pruneExpiredRecoveryTokenBurns,
   resolveForeignSheetIdFromProperty,
   type ExactAnchorAppliedMutation,
   type ExactAnchorLinkInvalidation,
   type ExactAnchorPlanAuthContext,
 } from '../multitable/exact-anchor-recovery-execute'
+import {
+  listRecoveryArchiveCatalog,
+  readRecoveryArchiveCatalogEntry,
+  type RecoveryArchiveCatalogQuery,
+  type RecoveryArchiveCatalogTransaction,
+} from '../multitable/recovery-archive-catalog'
+import {
+  previewRecoveryArchive,
+  RecoveryArchivePreviewError,
+  type RecoveryArchivePreviewRuntime,
+} from '../multitable/recovery-archive-preview'
+import { executeRecoveryArchiveSync } from '../multitable/recovery-archive-sync-execute'
+import { acceptFrozenRecoveryArchiveRestoreJob } from '../multitable/recovery-archive-async-plan'
+import {
+  cancelRecoveryArchiveRestoreJob,
+  listRecoveryArchiveRestoreJobs,
+  pruneEligibleRecoveryTokenBurns,
+  readRecoveryArchiveRestoreJobStatus,
+  resumeRecoveryArchiveRestoreJob,
+  type RecoveryArchiveRestoreJobQuery,
+  type RecoveryArchiveRestoreJobTransaction,
+} from '../multitable/recovery-archive-restore-jobs'
+import {
+  registerRecoveryArchiveRestoreOwnerRoutes,
+  type RecoveryArchiveRestoreOwnerContextResolution,
+} from './recovery-archive-restore-owner'
 import { isRetryableLiveLinkDatabaseConflict } from '../multitable/live-link-projection-integrity'
 import {
   recordConfigRevision,
@@ -279,6 +304,19 @@ import {
   isWriterFenceEnabled,
   SheetWriterBlockedError,
 } from '../multitable/canonical-sheet-fence'
+import {
+  assertLinkWriterFencePlanMatchesFieldGuards,
+  enterFieldLinkDropFencePlan,
+  enterFieldLinkRestoreFencePlan,
+  enterLinkWriterFencePlan,
+  enterSheetLinkDeleteFencePlan,
+  LinkWriterFencePlanChangedError,
+  prepareFieldLinkDropFencePlan,
+  prepareFieldLinkRestoreFencePlan,
+  prepareLinkWriterFencePlan,
+  prepareSheetLinkDeleteFencePlan,
+  type FieldLinkRestoreFencePlan,
+} from '../multitable/link-writer-fence'
 import { activateCheckpoint, CheckpointUnattributableTrashError } from '../multitable/history-trust-checkpoint'
 import type { QueryFn as TrustCheckpointQueryFn } from '../multitable/permission-service'
 import { applyFencedDerivedDataMerge, type DerivedMergeQueryFn } from '../multitable/derived-write-fence'
@@ -599,6 +637,11 @@ type PeopleSheetPreset = {
     description: string | null
   }
   fieldProperty: Record<string, unknown>
+}
+
+type PeopleSheetProvisionPlan = {
+  peopleSheetRow: any | null
+  peopleSheetId: string
 }
 
 type PublicFormAccessMode = 'public' | 'dingtalk' | 'dingtalk_granted'
@@ -5175,7 +5218,7 @@ function serializeBaseRow(row: any): UniverMetaBase {
 
 const ensureLegacyBase = ensureLegacyBaseShared
 
-async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<PeopleSheetPreset> {
+async function planPeopleSheetPreset(query: QueryFn, baseId: string): Promise<PeopleSheetProvisionPlan> {
   const existingSheets = await query(
     `SELECT id, base_id, name, description
      FROM meta_sheets
@@ -5184,8 +5227,22 @@ async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<
     [baseId],
   )
 
-  let peopleSheetRow = (existingSheets.rows as any[]).find((row) => isSystemPeopleSheetDescription(row.description)) ?? null
-  let peopleSheetId = typeof peopleSheetRow?.id === 'string' ? String(peopleSheetRow.id) : buildId('sheet').slice(0, 50)
+  const peopleSheetRow = (existingSheets.rows as any[]).find((row) => isSystemPeopleSheetDescription(row.description)) ?? null
+  const peopleSheetId = typeof peopleSheetRow?.id === 'string' ? String(peopleSheetRow.id) : buildId('sheet').slice(0, 50)
+  return { peopleSheetRow, peopleSheetId }
+}
+
+async function ensurePeopleSheetPreset(
+  query: QueryFn,
+  baseId: string,
+  plan: PeopleSheetProvisionPlan,
+): Promise<PeopleSheetPreset> {
+  let { peopleSheetRow } = plan
+  const { peopleSheetId } = plan
+  // D-H1: people-directory provisioning writes meta_sheets / meta_fields / meta_records.
+  // The route resolves the target before opening this writer transaction, so this canonical fence is
+  // the transaction's first statement and precedes every source read/write. Flag-off ⇒ no-op.
+  await fenceWriterEntry(query, peopleSheetId)
 
   if (!peopleSheetRow) {
     await query(
@@ -5876,6 +5933,9 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
   ]
 
   const run = async (query: QueryFn) => {
+    // D-H1: GET /view?seed=true and POST /sheets?seed=true write meta_sheets / meta_fields / meta_records.
+    // Fence-before-check in THIS transaction (the route's txn, or the helper's own txn). Flag-off ⇒ no-op.
+    await fenceWriterEntry(query, args.sheetId)
     const baseId = await ensureLegacyBase(query)
 
     // ②a §2a.4-c TOCTOU close — CENTRALIZED chokepoint. `createSeededSheet` is the sheet-create sink for
@@ -6008,6 +6068,39 @@ type PatchFailurePayload = {
   code: string
   message: string
   serverVersion?: number
+}
+
+type WriterFenceConflictPayload = {
+  statusCode: 409
+  code: 'RECOVERY_IN_PROGRESS' | 'LINK_WRITER_FENCE_PLAN_CHANGED'
+  message: string
+}
+
+function serializeWriterFenceConflict(err: unknown): WriterFenceConflictPayload | null {
+  if (err instanceof SheetWriterBlockedError) {
+    return {
+      statusCode: 409,
+      code: 'RECOVERY_IN_PROGRESS',
+      message: 'Another recovery operation is in progress on this sheet; retry shortly.',
+    }
+  }
+  if (err instanceof LinkWriterFencePlanChangedError) {
+    return {
+      statusCode: err.statusCode,
+      code: err.code,
+      message: err.message,
+    }
+  }
+  return null
+}
+
+function sendWriterFenceConflict(res: Response, err: unknown): Response | null {
+  const failure = serializeWriterFenceConflict(err)
+  if (!failure) return null
+  return res.status(failure.statusCode).json({
+    ok: false,
+    error: { code: failure.code, message: failure.message },
+  })
 }
 
 function serializePatchFailure(recordId: string, err: unknown): PatchFailurePayload | null {
@@ -6611,6 +6704,7 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
   /** The field-delete revision's own id (`rev.id` at the undelete-execute call site) — scopes which
    * tombstone rows (if any) belong to THIS delete cycle, not a stray earlier/later capture for the same id. */
   deleteRevisionId?: string | null
+  linkFencePlan?: FieldLinkRestoreFencePlan | null
 }): Promise<void> {
   const { sheetId, fieldId, before, actorId } = opts
   const name = String(before.name ?? '')
@@ -6716,6 +6810,13 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
     // random `id` only), so a repeat rehydration would silently duplicate edges. Guard with NOT
     // EXISTS, mirroring the value-side `NOT (m.data ? $3)` guard. Unreachable in current flows
     // (rehydration runs only after the edges are gone) but load-bearing once 4c-3 replays inbound edges.
+    const linkFenceGuard = opts.linkFencePlan
+      ? `AND r1.sheet_id = $3
+         AND r2.sheet_id = ANY($4::text[])`
+      : ''
+    const linkFenceParams = opts.linkFencePlan
+      ? [deleteRevisionId, fieldId, opts.linkFencePlan.sourceSheetId, opts.linkFencePlan.allowedTargetSheetIds]
+      : [deleteRevisionId, fieldId]
     await query(
       `INSERT INTO meta_links (field_id, record_id, foreign_record_id)
        SELECT t.field_id, t.record_id, t.foreign_record_id
@@ -6723,13 +6824,14 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
        JOIN meta_records r1 ON r1.id = t.record_id
        JOIN meta_records r2 ON r2.id = t.foreign_record_id
        WHERE t.source_revision_id = $1 AND t.field_id = $2 AND t.reason = 'field_delete'
+         ${linkFenceGuard}
          AND NOT EXISTS (
            SELECT 1 FROM meta_links ml
            WHERE ml.field_id = t.field_id
              AND ml.record_id = t.record_id
              AND ml.foreign_record_id = t.foreign_record_id
          )`,
-      [deleteRevisionId, fieldId],
+      linkFenceParams,
     )
     // Auto-number sequence: only for an autoNumber field whose delete revision carried a captured lastValue.
     const lastValue = (before as { lastValue?: unknown }).lastValue
@@ -6817,8 +6919,33 @@ async function applyPermissionDeEscalation(query: TxnQuery, opts: { scope: Permi
   if (diff) await recordConfigRevision(query, { sheetId, entityType: 'permission', entityId, action: live && target ? 'update' : live ? 'delete' : 'create', before: diff.before, after: diff.after, changedKeys: diff.changedKeys, batchId: randomUUID(), actorId, source: 'restore', restoredFromId })
 }
 
-export function univerMetaRouter(): Router {
+export interface UniverMetaRouterOptions {
+  readonly recoveryArchiveRuntime?: RecoveryArchivePreviewRuntime
+  readonly recoveryArchiveDatabaseRuntime?: RecoveryArchiveRouterDatabaseRuntime
+  readonly recoveryArchiveAuditedReplayHorizonMs?: number
+  readonly recoveryArchiveAsyncResumeHorizonMs?: number
+}
+
+export interface RecoveryArchiveRouterDatabaseRuntime {
+  readonly transaction: RecoveryArchiveRestoreJobTransaction
+  readonly query: RecoveryArchiveRestoreJobQuery
+  readonly transactionDepthProbe: RecoveryArchivePreviewRuntime['transactionDepth']
+}
+
+export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router {
   const router = Router()
+  const injectedRecoveryArchiveDatabase = options.recoveryArchiveDatabaseRuntime
+  if (
+    (options.recoveryArchiveRuntime || injectedRecoveryArchiveDatabase) &&
+    (
+      !options.recoveryArchiveRuntime ||
+      !injectedRecoveryArchiveDatabase ||
+      options.recoveryArchiveRuntime.transactionDepth !==
+        injectedRecoveryArchiveDatabase.transactionDepthProbe
+    )
+  ) {
+    throw new Error('RECOVERY_ARCHIVE_ROUTER_DATABASE_RUNTIME_MISMATCH')
+  }
 
   router.get('/bases', async (req: Request, res: Response) => {
     try {
@@ -7650,6 +7777,9 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
       await pool.transaction(async ({ query }) => {
+        // D-H1: sheet_config writer (row-level-read-deny). Fence-before-check, then the live column
+        // read + UPDATE. Flag-off ⇒ no-op / byte-identical.
+        await fenceWriterEntry(query, sheetId)
         const beforeResult = await query('SELECT row_level_read_permissions_enabled AS enabled FROM meta_sheets WHERE id = $1', [sheetId])
         const before = {
           rowLevelReadPermissionsEnabled: ((beforeResult as any).rows?.[0] as { enabled?: boolean } | undefined)?.enabled === true,
@@ -7673,6 +7803,9 @@ export function univerMetaRouter(): Router {
       })
       return res.json({ ok: true, data: { enabled: parsed.data.enabled } })
     } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] set row-level-read-deny flag failed:', err)
@@ -7735,6 +7868,9 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
       await pool.transaction(async ({ query }) => {
+        // D-H1: sheet_config writer (conditional-read rules). Fence-before-check, then the live
+        // column read + UPDATE. Flag-off ⇒ no-op / byte-identical.
+        await fenceWriterEntry(query, sheetId)
         const beforeResult = await query('SELECT conditional_read_rules AS rules FROM meta_sheets WHERE id = $1', [sheetId])
         const before = {
           conditionalReadRules: parseConditionalRules(((beforeResult as any).rows?.[0] as { rules?: unknown } | undefined)?.rules).rules,
@@ -7758,6 +7894,9 @@ export function univerMetaRouter(): Router {
       })
       return res.json({ ok: true, data: { rules } })
     } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] set conditional-rules failed:', err)
@@ -9001,14 +9140,27 @@ export function univerMetaRouter(): Router {
         }
         const confirm = typeof req.body?.confirm === 'string' ? req.body.confirm : ''
         if (confirm.trim() !== 'uncreate') return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "uncreate" to confirm dropping the created entity.' } })
+        const fieldLinkDropFencePlan = rev.entity_type === 'field'
+          ? await prepareFieldLinkDropFencePlan(pool.query.bind(pool), {
+              sourceSheetId: sheetId,
+              fieldId: rev.entity_id,
+            })
+          : null
         const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
           // W0-1 L4cov (fence the config-restore-execute record writes — un-create branch). `dropFieldCascade`
           // below strips the dropped field's key from EVERY record of this sheet's `data` (a whole-sheet
           // record-data write via the shared field-drop cascade helper), so this txn is a record writer and
           // must converge onto the canonical fence: acquire it first, then refuse (409 in the outer catch) if
           // a recovery holds a durable block. (dropFieldCascade carries its own revision disposition.)
-          // Flag-off ⇒ no-op / byte-identical.
-          await fenceWriterEntry(query, sheetId)
+          // Flag-off ⇒ no-op / byte-identical. Flag-on FIELD un-create must enter the shared plan even
+          // when preflight saw missing/non-link, so a late retype cannot sneak an unfenced target.
+          if (fieldLinkDropFencePlan) {
+            await enterFieldLinkDropFencePlan(query, fieldLinkDropFencePlan)
+          } else if (rev.entity_type === 'field' && isWriterFenceEnabled()) {
+            throw new LinkWriterFencePlanChangedError()
+          } else {
+            await fenceWriterEntry(query, sheetId)
+          }
           let fieldRow: any = null
           let viewRow: any = null
           if (rev.entity_type === 'field') {
@@ -9064,6 +9216,14 @@ export function univerMetaRouter(): Router {
         if (confirm.trim() !== 'undelete') return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "undelete" to confirm recreating the deleted entity.' } })
         const before = (rev.before ?? {}) as Record<string, unknown>
         const undeleteSheetId = String(rev.sheet_id)
+        const fieldLinkFencePlan = rev.entity_type === 'field'
+          ? await prepareFieldLinkRestoreFencePlan(pool.query.bind(pool), {
+              sourceSheetId: undeleteSheetId,
+              fieldId: rev.entity_id,
+              before,
+              deleteRevisionId: rev.id,
+            })
+          : null
         let failure: { status: number; code: string; message: string } | null = null
         try {
           failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
@@ -9071,7 +9231,8 @@ export function univerMetaRouter(): Router {
             // undelete, `recreateFieldFromConfig` below re-materializes the field's cells across this sheet's
             // `meta_records`, so this txn is a record writer: take the canonical fence first, then refuse (409
             // in the outer catch) under an active recovery block. Flag-off ⇒ no-op / byte-identical.
-            await fenceWriterEntry(query, sheetId)
+            if (fieldLinkFencePlan) await enterFieldLinkRestoreFencePlan(query, fieldLinkFencePlan)
+            else await fenceWriterEntry(query, sheetId)
             // U4-L5 id-occupied check (FOR UPDATE) — also the idempotency guard: undelete when the entity already exists → reject.
             const table = rev.entity_type === 'field' ? 'meta_fields' : 'meta_views'
             const occ = (await query(`SELECT 1 FROM ${table} WHERE id = $1 FOR UPDATE`, [rev.entity_id])) as any
@@ -9088,7 +9249,16 @@ export function univerMetaRouter(): Router {
               return { status: 401, code: 'PREVIEW_IDENTITY_INVALID', message: 'A valid server-minted preview identity is required; preview before undeleting.' }
             }
             if (rev.entity_type === 'field') {
-              await recreateFieldFromConfig(query, { sheetId: undeleteSheetId, fieldId: rev.entity_id, before, actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id, deleteRevisionId: rev.id })
+              await recreateFieldFromConfig(query, {
+                sheetId: undeleteSheetId,
+                fieldId: rev.entity_id,
+                before,
+                actorId: getRequestActorId(req),
+                source: 'restore',
+                restoredFromId: rev.id,
+                deleteRevisionId: rev.id,
+                linkFencePlan: fieldLinkFencePlan,
+              })
             } else {
               await recreateViewFromConfig(query, { sheetId: undeleteSheetId, viewId: rev.entity_id, before, actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id })
             }
@@ -9253,6 +9423,10 @@ export function univerMetaRouter(): Router {
 
       // null = applied; a failure object = a guard tripped (the txn made no write either way).
       const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
+        // D-H1: generic config-restore (name/order/view/sheet_config applyConfigRevert) was the
+        // unfenced sibling of the un-create / undelete / lossy-retype branches above. Fence-before-check
+        // before the snapshot read and UPDATE. Flag-off ⇒ no-op / byte-identical.
+        await fenceWriterEntry(query, sheetId)
         const snapshot = await loadEntityConfigSnapshot(query, rev)
         if (!snapshot) return { status: 409, code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot restore.' }
         const preview = computeRevertPreview(rev, snapshot)
@@ -9291,11 +9465,11 @@ export function univerMetaRouter(): Router {
       if (rev.entity_type === 'field') invalidateFieldCache(sheetId)
       return res.json({ ok: true, data: { restored: { revisionId, entityType: rev.entity_type, entityId: rev.entity_id, changedKeys: rev.changed_keys } } })
     } catch (err: unknown) {
-      // W0-1 L4cov: a fenced config-restore branch (uncreate / undelete / lossy retype-revert) observed a
-      // durable recovery writer-block → refuse with the same 409 RECOVERY_IN_PROGRESS shape as reset/revert.
-      if (err instanceof SheetWriterBlockedError) {
-        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
-      }
+      // W0-1 L4cov / D-H1: a fenced config-restore branch (uncreate / undelete / lossy retype-revert /
+      // generic applyConfigRevert) observed a durable recovery writer-block → refuse with the same
+      // 409 RECOVERY_IN_PROGRESS shape as reset/revert.
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (err instanceof TombstoneCaptureCapExceededError) {
         return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
       }
@@ -9807,6 +9981,8 @@ export function univerMetaRouter(): Router {
         const newVersion = result.updated.find((u) => u.recordId === recordId)?.version ?? currentVersion + 1
         return res.json({ ok: true, data: { recordId, newVersion, noop: false, restoredFieldIds, skippedFieldIds: [] } })
       } catch (err) {
+        const writerFenceResponse = sendWriterFenceConflict(res, err)
+        if (writerFenceResponse) return writerFenceResponse
         if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) {
           return res.status(409).json({ ok: false, error: { code: 'VERSION_CONFLICT', message: (err as Error).message } })
         }
@@ -9949,6 +10125,8 @@ export function univerMetaRouter(): Router {
         const newVersion = result.updated.find((u) => u.recordId === recordId)?.version ?? currentVersion + 1
         return res.json({ ok: true, data: { recordId, newVersion, noop: false, restoredFieldIds: selectedDiff.map((c) => c.fieldId) } })
       } catch (err) {
+        const writerFenceResponse = sendWriterFenceConflict(res, err)
+        if (writerFenceResponse) return writerFenceResponse
         if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) return res.status(409).json({ ok: false, error: { code: 'VERSION_CONFLICT', message: (err as Error).message } })
         if (err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) return res.status(403).json({ ok: false, error: { code: 'RESTORE_FORBIDDEN', message: (err as Error).message } })
         if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: (err as Error).message } })
@@ -10105,6 +10283,8 @@ export function univerMetaRouter(): Router {
           // the WHOLE transaction rolled back → zero writes. The CAS aborts on the FIRST conflicting record, so the
           // conflict blocker list is first-only BY DESIGN (a full version preflight would reintroduce the TOCTOU we
           // deliberately avoid). denied/forbidden are reported in full above (those are preflighted, not thrown).
+          const writerFenceResponse = sendWriterFenceConflict(res, err)
+          if (writerFenceResponse) return writerFenceResponse
           if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) return res.status(409).json({ ok: false, error: { code: 'BATCH_RESTORE_BLOCKED', message: 'All-or-nothing batch restore blocked: a record version conflicted; nothing written', blockers: [{ recordId: (err as ServiceVersionConflictError).recordId, reason: 'conflict' }] } })
           if (err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) return res.status(409).json({ ok: false, error: { code: 'BATCH_RESTORE_BLOCKED', message: 'All-or-nothing batch restore blocked: a record field is forbidden; nothing written', blockers: [{ recordId: '', reason: 'forbidden' }] } })
           if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError) return res.status(409).json({ ok: false, error: { code: 'BATCH_RESTORE_BLOCKED', message: `All-or-nothing batch restore blocked: ${(err as Error).message}; nothing written`, blockers: [{ recordId: '', reason: 'error' }] } })
@@ -10128,6 +10308,7 @@ export function univerMetaRouter(): Router {
           })
           outcomes.push({ recordId: c.recordId, status: 'restored', newVersion: result.updated.find((u) => u.recordId === c.recordId)?.version, restoredFieldIds: c.diff.map((d) => d.fieldId) })
         } catch (err) {
+          if (serializeWriterFenceConflict(err)) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'error' }); continue }
           if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'conflict' }); continue }
           if (err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'forbidden' }); continue }
           if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'error' }); continue }
@@ -10371,6 +10552,127 @@ export function univerMetaRouter(): Router {
       return hasFullTableReadAccess(req, query, sheetId, access, capabilities)
     }
 
+  type RecoveryArchiveRouteDatabase = Pick<
+    RecoveryArchiveRouterDatabaseRuntime,
+    'transaction' | 'query'
+  >
+  const recoveryArchiveRestoreTransaction: RecoveryArchiveRestoreJobTransaction =
+    injectedRecoveryArchiveDatabase?.transaction ?? (async (work) => {
+      const pool = poolManager.get()
+      return pool.transaction(async ({ query }) => (
+        work(query as unknown as RecoveryArchiveRestoreJobQuery)
+      ))
+    })
+  const recoveryArchiveCatalogTransaction: RecoveryArchiveCatalogTransaction =
+    injectedRecoveryArchiveDatabase?.transaction ?? (async (work) => {
+      const pool = poolManager.get()
+      return pool.transaction(async ({ query }) => (
+        work(query as unknown as RecoveryArchiveCatalogQuery)
+      ))
+    })
+  const resolveRecoveryArchiveAutocommitQuery = (): RecoveryArchiveRestoreJobQuery => {
+    if (injectedRecoveryArchiveDatabase) return injectedRecoveryArchiveDatabase.query
+    const pool = poolManager.get()
+    return pool.query.bind(pool) as unknown as RecoveryArchiveRestoreJobQuery
+  }
+  const resolveRecoveryArchiveContextDatabase = (): RecoveryArchiveRouteDatabase => {
+    if (injectedRecoveryArchiveDatabase) return injectedRecoveryArchiveDatabase
+    const pool = poolManager.get()
+    return {
+      query: pool.query.bind(pool) as unknown as RecoveryArchiveRestoreJobQuery,
+      transaction: async (work) => pool.transaction(async ({ query }) => (
+        work(query as unknown as RecoveryArchiveRestoreJobQuery)
+      )),
+    }
+  }
+
+  const resolveRecoveryArchiveRestoreOwnerContext = async (
+    req: Request,
+    sheetId: string,
+  ): Promise<RecoveryArchiveRestoreOwnerContextResolution> => {
+    const database = resolveRecoveryArchiveContextDatabase()
+    const query = database.query as TrustCheckpointQueryFn
+    const { access, capabilities } = await resolveRecoverySheetAuthority(req, query, sheetId)
+    if (!access.userId) return { ok: false, status: 401, code: 'UNAUTHENTICATED' }
+    if (!capabilities.canManageSheetAccess) return { ok: false, status: 403, code: 'FORBIDDEN' }
+
+    const scopeResult = await query(
+      `SELECT sheet_row.base_id, base_row.workspace_id
+         FROM public.meta_sheets sheet_row
+         LEFT JOIN public.meta_bases base_row ON base_row.id = sheet_row.base_id
+        WHERE sheet_row.id = $1 AND sheet_row.deleted_at IS NULL`,
+      [sheetId],
+    )
+    const scope = scopeResult.rows[0] as { base_id?: unknown; workspace_id?: unknown } | undefined
+    if (!scope) {
+      return access.isAdminRole
+        ? { ok: false, status: 404, code: 'NOT_FOUND' }
+        : { ok: false, status: 403, code: 'FORBIDDEN' }
+    }
+    if (!(await hasFullTableReadAccess(req, query, sheetId, access, capabilities))) {
+      return { ok: false, status: 403, code: 'FORBIDDEN' }
+    }
+    const baseId = typeof scope.base_id === 'string' ? scope.base_id.trim() : ''
+    const workspaceId = typeof scope.workspace_id === 'string' ? scope.workspace_id.trim() : ''
+    if (!baseId || !workspaceId) {
+      return { ok: false, status: 503, code: 'RECOVERY_ARCHIVE_SCOPE_UNAVAILABLE' }
+    }
+    const actorId = access.userId
+    const evaluatePlanAuthorization = makePlanAuthorization(req, sheetId)
+    const mutationObserver = createRecoveryMutationObserver(req, database, sheetId, actorId)
+    return {
+      ok: true,
+      context: {
+        workspaceId,
+        baseId,
+        sheetId,
+        actorId,
+        evaluatePlanAuthorization,
+        syncApply: {
+          preliminaryFullRead: makeFullReadEvaluator(req, sheetId),
+          stabilizeAuthorization: makeAuthorizationStabilizer(),
+          finalLockedFullRead: makeFullReadEvaluator(req, sheetId),
+          evaluatePlanAuthorization,
+          onMutationApplied: mutationObserver.onMutationApplied,
+          afterCommit: mutationObserver.afterCommit,
+        },
+        recheckAuthority: async (freshQuery) => {
+          const fresh = await resolveRecoverySheetAuthority(req, freshQuery, sheetId)
+          if (
+            fresh.access.userId !== actorId ||
+            !fresh.capabilities.canManageSheetAccess
+          ) {
+            return false
+          }
+          const freshScope = await freshQuery(
+            `SELECT sheet_row.base_id, base_row.workspace_id
+               FROM public.meta_sheets sheet_row
+               LEFT JOIN public.meta_bases base_row ON base_row.id = sheet_row.base_id
+              WHERE sheet_row.id = $1 AND sheet_row.deleted_at IS NULL`,
+            [sheetId],
+          )
+          const freshRow = freshScope.rows[0] as {
+            base_id?: unknown
+            workspace_id?: unknown
+          } | undefined
+          if (
+            freshRow?.base_id !== baseId ||
+            freshRow?.workspace_id !== workspaceId
+          ) {
+            return false
+          }
+          return hasFullTableReadAccess(
+            req,
+            freshQuery,
+            sheetId,
+            fresh.access,
+            fresh.capabilities,
+          )
+        },
+      },
+    }
+  }
+
   const makeAuthorizationStabilizer = () =>
     async (
       query: TrustCheckpointQueryFn,
@@ -10559,10 +10861,12 @@ export function univerMetaRouter(): Router {
     }
   }
 
-  /** Best-effort burn retention sweep after a successful recovery — never fails the HTTP response. */
-  const bestEffortPruneRecoveryBurns = async (pool: ReturnType<typeof poolManager.get>) => {
+  /** Best-effort provenance-aware retention sweep — ambiguous/legacy burns are never eligible. */
+  const bestEffortPruneRecoveryBurns = async (
+    transaction: RecoveryArchiveRestoreJobTransaction,
+  ) => {
     try {
-      await pruneExpiredRecoveryTokenBurns(pool.query.bind(pool) as unknown as TrustCheckpointQueryFn)
+      await pruneEligibleRecoveryTokenBurns(transaction)
     } catch (err) {
       console.warn('[univer-meta] recovery token burn prune failed (non-fatal):', err)
     }
@@ -10592,7 +10896,7 @@ export function univerMetaRouter(): Router {
    */
   const runRecoveryPostCommitSideEffects = async (
     req: Request,
-    pool: ReturnType<typeof poolManager.get>,
+    query: QueryFn,
     sheetId: string,
     actorId: string,
     appliedReverts: AppliedRevertFact[],
@@ -10601,8 +10905,7 @@ export function univerMetaRouter(): Router {
     const formulaByRecord = new Map<string, Record<string, unknown>>()
     let relatedRecords: RelatedComputedRecord[] = []
     try {
-      const helpers = createRecordWriteHelpers(req, pool)
-      const query = pool.query.bind(pool) as QueryFn
+      const helpers = createRecordWriteHelpers(req, { query })
       const fields = (await loadFieldsForSheet(query, sheetId)) as UniverMetaField[]
       const recordIds = appliedReverts.map((r) => r.recordId)
       const changedFieldIds = [...new Set(appliedReverts.flatMap((r) => r.fieldIds))]
@@ -10664,7 +10967,7 @@ export function univerMetaRouter(): Router {
 
     for (const r of appliedReverts) {
       await notifyRecordSubscribersBestEffort(
-        pool.query.bind(pool) as QueryFn,
+        query,
         { sheetId, recordId: r.recordId, eventType: 'record.updated', actorId, revisionId: r.revisionId },
         'exact-anchor-recovery',
       )
@@ -10720,6 +11023,90 @@ export function univerMetaRouter(): Router {
       ...[...affectedRelatedBySheet.values()].flatMap((g) => g.recordIds),
     ]
     return { yjsRecordIds: [...new Set(yjsRecordIds)] }
+  }
+
+  const createRecoveryMutationObserver = (
+    req: Request,
+    database: RecoveryArchiveRouteDatabase,
+    sheetId: string,
+    actorId: string,
+  ) => {
+    const appliedReverts: AppliedRevertFact[] = []
+    const appliedDeleteIds: string[] = []
+    const appliedLinkInvalidations: ExactAnchorLinkInvalidation[] = []
+    const updatedEventPayloads: Array<Record<string, unknown> & { _eventId: string }> = []
+    const deletedEventPayloads: Array<Record<string, unknown> & { _eventId: string }> = []
+
+    const onMutationApplied = async (
+      query: QueryFn,
+      mutation: ExactAnchorAppliedMutation,
+    ): Promise<void> => {
+      appliedLinkInvalidations.push(...mutation.linkInvalidations)
+      const txnQueryable = asProducerTxnQueryable(async (sql: string, params?: unknown[]) => {
+        const result = await query(sql, params)
+        return { rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rowCount ?? null }
+      })
+      if (mutation.kind === 'revert') {
+        const payload = withAutomationEventId({
+          sheetId,
+          recordId: mutation.recordId,
+          changes: mutation.patch,
+          actorId,
+        })
+        updatedEventPayloads.push(payload)
+        appliedReverts.push({
+          recordId: mutation.recordId,
+          version: mutation.version,
+          fieldIds: mutation.changedFieldIds,
+          patch: mutation.patch,
+          revisionId: mutation.revisionId,
+        })
+        await enqueueRecordEventIfDurable(txnQueryable, 'multitable.record.updated', payload)
+      } else {
+        const payload = withAutomationEventId({
+          sheetId,
+          recordId: mutation.recordId,
+          actorId,
+        })
+        deletedEventPayloads.push(payload)
+        appliedDeleteIds.push(mutation.recordId)
+        await enqueueRecordEventIfDurable(txnQueryable, 'multitable.record.deleted', payload)
+      }
+    }
+
+    const afterCommit = async (): Promise<void> => {
+      try {
+        const side = await runRecoveryPostCommitSideEffects(
+          req,
+          database.query,
+          sheetId,
+          actorId,
+          appliedReverts,
+          appliedLinkInvalidations,
+        )
+        for (const payload of updatedEventPayloads) {
+          emitRecordEventIfLegacy(eventBus, 'multitable.record.updated', payload)
+        }
+        if (appliedDeleteIds.length > 0) {
+          publishMultitableSheetRealtime({
+            spreadsheetId: sheetId,
+            actorId,
+            source: 'multitable',
+            kind: 'record-deleted',
+            recordIds: appliedDeleteIds,
+          })
+          for (const payload of deletedEventPayloads) {
+            emitRecordEventIfLegacy(eventBus, 'multitable.record.deleted', payload)
+          }
+        }
+        await bestEffortYjsInvalidate([...new Set([...side.yjsRecordIds, ...appliedDeleteIds])])
+        void bestEffortPruneRecoveryBurns(database.transaction)
+      } catch (error) {
+        console.warn('[univer-meta] exact-anchor recovery post-commit side effects failed (non-fatal):', error)
+      }
+    }
+
+    return { appliedReverts, appliedDeleteIds, afterCommit, onMutationApplied }
   }
 
   /**
@@ -10913,14 +11300,12 @@ export function univerMetaRouter(): Router {
       }
 
       const actorId = access.userId
-      // Same-transaction mutation facts + stable event payloads (P1#2d): built ONCE inside the txn hook,
-      // durable-enqueued atomically with each mutation's writes, and REUSED verbatim for the post-commit
-      // legacy emit. A refusal rolls everything back — the collected arrays are then simply discarded.
-      const appliedReverts: AppliedRevertFact[] = []
-      const appliedDeleteIds: string[] = []
-      const appliedLinkInvalidations: ExactAnchorLinkInvalidation[] = []
-      const updatedEventPayloads: Array<Record<string, unknown> & { _eventId: string }> = []
-      const deletedEventPayloads: Array<Record<string, unknown> & { _eventId: string }> = []
+      const mutationObserver = createRecoveryMutationObserver(req, {
+        query: pool.query.bind(pool) as unknown as RecoveryArchiveRestoreJobQuery,
+        transaction: async (work) => pool.transaction(async ({ query }) => (
+          work(query as unknown as RecoveryArchiveRestoreJobQuery)
+        )),
+      }, sheetId, actorId)
       const result = await executeExactAnchorRecoveryApply(
         (fn) => pool.transaction(async ({ query }) => fn(query as unknown as TrustCheckpointQueryFn)),
         {
@@ -10936,30 +11321,7 @@ export function univerMetaRouter(): Router {
           stabilizeAuthorization: makeAuthorizationStabilizer(),
           finalLockedFullRead: makeFullReadEvaluator(req, sheetId),
           evaluatePlanAuthorization: makePlanAuthorization(req, sheetId),
-          onMutationApplied: async (query, mutation: ExactAnchorAppliedMutation) => {
-            appliedLinkInvalidations.push(...mutation.linkInvalidations)
-            const txnQueryable = asProducerTxnQueryable(async (sql: string, params?: unknown[]) => {
-              const r = await query(sql, params)
-              return { rows: r.rows as Array<Record<string, unknown>>, rowCount: r.rowCount ?? null }
-            })
-            if (mutation.kind === 'revert') {
-              const payload = withAutomationEventId({ sheetId, recordId: mutation.recordId, changes: mutation.patch, actorId })
-              updatedEventPayloads.push(payload)
-              appliedReverts.push({
-                recordId: mutation.recordId,
-                version: mutation.version,
-                fieldIds: mutation.changedFieldIds,
-                patch: mutation.patch,
-                revisionId: mutation.revisionId,
-              })
-              await enqueueRecordEventIfDurable(txnQueryable, 'multitable.record.updated', payload)
-            } else {
-              const payload = withAutomationEventId({ sheetId, recordId: mutation.recordId, actorId })
-              deletedEventPayloads.push(payload)
-              appliedDeleteIds.push(mutation.recordId)
-              await enqueueRecordEventIfDurable(txnQueryable, 'multitable.record.deleted', payload)
-            }
-          },
+          onMutationApplied: mutationObserver.onMutationApplied,
         },
       )
       if (result.ok === false) {
@@ -10967,28 +11329,7 @@ export function univerMetaRouter(): Router {
         return res.status(m.status).json({ ok: false, error: { code: m.code, message: m.message } })
       }
 
-      // Post-commit: recompute/realtime/subscribers/Yjs/legacy-emit are best-effort — NEVER a 500 after commit.
-      try {
-        const side = await runRecoveryPostCommitSideEffects(
-          req,
-          pool,
-          sheetId,
-          actorId,
-          appliedReverts,
-          appliedLinkInvalidations,
-        )
-        // Flag OFF ⇒ legacy post-commit emits (the SAME prebuilt payload objects the durable enqueue used);
-        // flag ON ⇒ suppressed (the same-txn enqueues above are the delivery path).
-        for (const p of updatedEventPayloads) emitRecordEventIfLegacy(eventBus, 'multitable.record.updated', p)
-        if (appliedDeleteIds.length > 0) {
-          publishMultitableSheetRealtime({ spreadsheetId: sheetId, actorId, source: 'multitable', kind: 'record-deleted', recordIds: appliedDeleteIds })
-          for (const p of deletedEventPayloads) emitRecordEventIfLegacy(eventBus, 'multitable.record.deleted', p)
-        }
-        await bestEffortYjsInvalidate([...new Set([...side.yjsRecordIds, ...appliedDeleteIds])])
-        void bestEffortPruneRecoveryBurns(pool)
-      } catch (sideErr) {
-        console.warn('[univer-meta] exact-anchor recovery post-commit side effects failed (non-fatal):', sideErr)
-      }
+      await mutationObserver.afterCommit()
 
       // Counts/ids only — no recovered values, no patches (values-free result contract).
       return res.json({
@@ -11002,8 +11343,8 @@ export function univerMetaRouter(): Router {
           revertedCount: result.applied.reverts,
           resurrectedCount: result.applied.resurrects,
           keptCreatedAfterAnchor: result.keptCreatedAfterAnchor,
-          records: appliedReverts.map((r) => ({ recordId: r.recordId, status: 'reverted' as const, fieldIds: r.fieldIds, revisionId: r.revisionId })),
-          ...(mode === 'reset' ? { deletedCount: result.applied.deletes, deletedRecordIds: appliedDeleteIds } : {}),
+          records: mutationObserver.appliedReverts.map((r) => ({ recordId: r.recordId, status: 'reverted' as const, fieldIds: r.fieldIds, revisionId: r.revisionId })),
+          ...(mode === 'reset' ? { deletedCount: result.applied.deletes, deletedRecordIds: mutationObserver.appliedDeleteIds } : {}),
         },
       })
     } catch (err) {
@@ -11025,6 +11366,133 @@ export function univerMetaRouter(): Router {
   router.post('/sheets/:sheetId/revert-execute', (req: Request, res: Response) => handleExactAnchorExecute(req, res, 'revert'))
   router.post('/sheets/:sheetId/reset-preview', (req: Request, res: Response) => handleExactAnchorPreview(req, res, 'reset'))
   router.post('/sheets/:sheetId/reset-execute', (req: Request, res: Response) => handleExactAnchorExecute(req, res, 'reset'))
+
+  registerRecoveryArchiveRestoreOwnerRoutes(router, {
+    resolveContext: resolveRecoveryArchiveRestoreOwnerContext,
+    service: {
+      preview: options.recoveryArchiveRuntime
+        ? (context, input) => previewRecoveryArchive(
+            recoveryArchiveCatalogTransaction,
+            resolveRecoveryArchiveAutocommitQuery(),
+            options.recoveryArchiveRuntime,
+            {
+              ...context,
+              ...input,
+            },
+          )
+        : undefined,
+      executeSync:
+        options.recoveryArchiveRuntime &&
+        Number.isSafeInteger(options.recoveryArchiveAuditedReplayHorizonMs) &&
+        (options.recoveryArchiveAuditedReplayHorizonMs ?? -1) >= 0
+          ? async (context, input) => {
+              if (!context.syncApply) {
+                throw new RecoveryArchivePreviewError(
+                  'RECOVERY_ARCHIVE_PREVIEW_RUNTIME_UNAVAILABLE',
+                )
+              }
+              const result = await executeRecoveryArchiveSync(
+                recoveryArchiveRestoreTransaction,
+                resolveRecoveryArchiveAutocommitQuery(),
+                options.recoveryArchiveRuntime,
+                {
+                  workspaceId: context.workspaceId,
+                  baseId: context.baseId,
+                  sheetId: context.sheetId,
+                  actorId: context.actorId,
+                  previewIdentity: input.previewIdentity,
+                  scope: input.scope,
+                  recheckAuthority: context.recheckAuthority,
+                  preliminaryFullRead: context.syncApply.preliminaryFullRead,
+                  stabilizeAuthorization: context.syncApply.stabilizeAuthorization,
+                  finalLockedFullRead: context.syncApply.finalLockedFullRead,
+                  evaluatePlanAuthorization: context.syncApply.evaluatePlanAuthorization,
+                  ...(context.syncApply.onMutationApplied
+                    ? { onMutationApplied: context.syncApply.onMutationApplied }
+                    : {}),
+                  auditedReplayHorizonMs: options.recoveryArchiveAuditedReplayHorizonMs!,
+                },
+              )
+              if (result.ok) await context.syncApply.afterCommit()
+              return result
+            }
+          : undefined,
+      listCatalog: (context, input) => listRecoveryArchiveCatalog(
+        recoveryArchiveCatalogTransaction,
+        {
+          ...context,
+          ...input,
+        },
+      ),
+      readCatalog: (context, generationId) => readRecoveryArchiveCatalogEntry(
+        recoveryArchiveCatalogTransaction,
+        {
+          ...context,
+          generationId,
+        },
+      ),
+      listJobs: (context, input) => listRecoveryArchiveRestoreJobs(
+        recoveryArchiveRestoreTransaction,
+        {
+          ...context,
+          ...input,
+        },
+      ),
+      accept:
+        options.recoveryArchiveRuntime &&
+        Number.isSafeInteger(options.recoveryArchiveAsyncResumeHorizonMs) &&
+        (options.recoveryArchiveAsyncResumeHorizonMs ?? -1) > 0
+          ? (context, input) => acceptFrozenRecoveryArchiveRestoreJob(
+              recoveryArchiveRestoreTransaction,
+              options.recoveryArchiveRuntime!.objectStore,
+              options.recoveryArchiveRuntime!.transactionDepth,
+              {
+                identity: {
+                  workspaceId: context.workspaceId,
+                  baseId: context.baseId,
+                  sheetId: context.sheetId,
+                  actorId: context.actorId,
+                },
+                token: input.token,
+                resumeDeadline: new Date(
+                  Date.now() + options.recoveryArchiveAsyncResumeHorizonMs!,
+                ),
+                recheckAuthority: context.recheckAuthority,
+              },
+            )
+          : undefined,
+      read: (context, jobId) => readRecoveryArchiveRestoreJobStatus(
+        recoveryArchiveRestoreTransaction,
+        {
+          ...context,
+          jobId,
+        },
+      ),
+      resume: (context, jobId) => resumeRecoveryArchiveRestoreJob(
+        recoveryArchiveRestoreTransaction,
+        {
+          ...context,
+          jobId,
+        },
+      ),
+      cancel:
+        Number.isSafeInteger(options.recoveryArchiveAuditedReplayHorizonMs) &&
+        (options.recoveryArchiveAuditedReplayHorizonMs ?? -1) >= 0
+          ? (context, jobId) => cancelRecoveryArchiveRestoreJob(
+              recoveryArchiveRestoreTransaction,
+              {
+                workspaceId: context.workspaceId,
+                baseId: context.baseId,
+                sheetId: context.sheetId,
+                actorId: context.actorId,
+                jobId,
+                replayHorizonMs: options.recoveryArchiveAuditedReplayHorizonMs!,
+                recheckAuthority: context.recheckAuthority,
+              },
+            )
+          : undefined,
+    },
+  })
 
   router.get('/sheets/:sheetId/records/:recordId/subscriptions', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
@@ -11691,13 +12159,17 @@ export function univerMetaRouter(): Router {
       if (!sourceSheet) throw new NotFoundError(`Sheet not found: ${parsed.data.sheetId}`)
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), parsed.data.sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
+      const baseId = sourceSheet.baseId ?? await pool.transaction(async ({ query }) => ensureLegacyBase(query as unknown as QueryFn))
+      const plan = await planPeopleSheetPreset(pool.query.bind(pool) as unknown as QueryFn, baseId)
       const preset = await pool.transaction(async ({ query }) => {
-        const baseId = sourceSheet.baseId ?? await ensureLegacyBase(query as unknown as QueryFn)
-        return ensurePeopleSheetPreset(query as unknown as QueryFn, baseId)
+        return ensurePeopleSheetPreset(query as unknown as QueryFn, baseId, plan)
       })
 
       return res.json({ ok: true, data: { targetSheet: preset.sheet, fieldProperty: preset.fieldProperty } })
     } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
       }
@@ -12110,13 +12582,25 @@ export function univerMetaRouter(): Router {
       const sheetId = String((existing.rows[0] as any).sheet_id ?? '')
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
+      const fieldLinkDropFencePlan = await prepareFieldLinkDropFencePlan(pool.query.bind(pool), {
+        sourceSheetId: sheetId,
+        fieldId,
+      })
       const result = await pool.transaction(async ({ query }) => {
         // W0-1 L4cov: dropFieldCascade below strips the dropped field's key from every record of this sheet's
         // `data` (a whole-sheet record-data write via the shared field-drop cascade helper — the SAME cascade
         // the config-restore un-create branch fences at ~8888), so the FORWARD field-delete txn is a record
         // writer too and must take the canonical fence FIRST, then refuse (409 RECOVERY_IN_PROGRESS in the
-        // catch) if a recovery holds a durable block. Flag-off ⇒ no-op / byte-identical.
-        await fenceWriterEntry(query, sheetId)
+        // catch) if a recovery holds a durable block. Flag-off ⇒ no-op / byte-identical. Flag-on must enter
+        // the shared plan even when preflight saw missing/non-link, so a late retype cannot sneak an
+        // unfenced target via a source-only fence.
+        if (fieldLinkDropFencePlan) {
+          await enterFieldLinkDropFencePlan(query, fieldLinkDropFencePlan)
+        } else if (isWriterFenceEnabled()) {
+          throw new LinkWriterFencePlanChangedError()
+        } else {
+          await fenceWriterEntry(query, sheetId)
+        }
         const existing = await query('SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1', [fieldId])
         if ((existing as any).rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
         const row = (existing as any).rows[0]
@@ -12141,11 +12625,10 @@ export function univerMetaRouter(): Router {
       }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
-      // W0-1 L4cov: fence-then-block-checked forward field-delete → a durable recovery block surfaces here as
-      // 409 RECOVERY_IN_PROGRESS (same shape as reset/revert and the un-create sibling).
-      if (err instanceof SheetWriterBlockedError) {
-        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
-      }
+      // W0-1 L4cov / D-H1: fence-then-block-checked forward field-delete → a durable recovery block or a
+      // concurrent link-plan change surfaces here through the shared writer-fence mapping.
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       console.error('[univer-meta] delete field failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete field' } })
     }
@@ -12183,6 +12666,9 @@ export function univerMetaRouter(): Router {
           config: {},
         })
         await pool.transaction(async ({ query }) => {
+          // D-H1: GET /views lazily inserts the default view. Fence-before-check in this txn
+          // before the source INSERT. Flag-off ⇒ no-op / byte-identical.
+          await fenceWriterEntry(query, sheetId)
           const insert = await query(
             `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
              VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)
@@ -12244,6 +12730,9 @@ export function univerMetaRouter(): Router {
 
       return res.json({ ok: true, data: { views: effectiveViews.map((view: UniverMetaViewConfig) => redactViewConfigFilterLiterals(view, allowedFieldIds)) } })
     } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] list views failed:', err)
@@ -12321,6 +12810,9 @@ export function univerMetaRouter(): Router {
         config: incomingConfig,
       }
       await pool.transaction(async ({ query }) => {
+        // D-H1: view create is a config/view source writer. Fence-before-check, then INSERT.
+        // Flag-off ⇒ no-op / byte-identical.
+        await fenceWriterEntry(query, sheetId)
         await query(
           `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)`,
@@ -12351,6 +12843,9 @@ export function univerMetaRouter(): Router {
       const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, (await resolveRequestAccess(req)).userId, capabilities)
       return res.status(201).json({ ok: true, data: { view: redactViewConfigFilterLiterals(view, allowedFieldIds) } })
     } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] create view failed:', err)
@@ -12462,6 +12957,9 @@ export function univerMetaRouter(): Router {
       }
       const afterView = viewConfigSnapshot(view)
       await pool.transaction(async ({ query }) => {
+        // D-H1: view patch is a config/view source writer. Fence-before-check on the view's sheet,
+        // then UPDATE. Flag-off ⇒ no-op / byte-identical.
+        await fenceWriterEntry(query, String(row.sheet_id))
         await query(
           `UPDATE meta_views
            SET name = $2, type = $3, filter_info = $4::jsonb, sort_info = $5::jsonb, group_info = $6::jsonb, hidden_field_ids = $7::jsonb, config = $8::jsonb
@@ -12496,6 +12994,9 @@ export function univerMetaRouter(): Router {
       metaViewConfigCache.set(viewId, view)
       return res.json({ ok: true, data: { view: redactViewConfigFilterLiterals(view, allowedFieldIds) } })
     } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] update view failed:', err)
@@ -12740,6 +13241,8 @@ export function univerMetaRouter(): Router {
       }
       const afterView = viewConfigSnapshot(view)
       await pool.transaction(async ({ query }) => {
+        // D-H1: form-share writes view.config. Fence-before-check, then UPDATE. Flag-off ⇒ no-op.
+        await fenceWriterEntry(query, sheetId)
         await query(
           `UPDATE meta_views
            SET config = $2::jsonb
@@ -12764,6 +13267,9 @@ export function univerMetaRouter(): Router {
       metaViewConfigCache.set(viewId, view)
       return res.json({ ok: true, data: await serializePublicFormShareConfig(pool.query.bind(pool), view) })
     } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] update form share config failed:', err)
@@ -12830,6 +13336,9 @@ export function univerMetaRouter(): Router {
       }
       const afterView = viewConfigSnapshot(view)
       await pool.transaction(async ({ query }) => {
+        // D-H1: form-share token regenerate writes view.config. Fence-before-check, then UPDATE.
+        // Flag-off ⇒ no-op / byte-identical.
+        await fenceWriterEntry(query, sheetId)
         await query(
           `UPDATE meta_views
            SET config = $2::jsonb
@@ -12859,6 +13368,9 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] regenerate form share token failed:', err)
@@ -12917,12 +13429,18 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
       await pool.transaction(async ({ query }) => {
+        // D-H1: view delete is a config/view source deleter. Fence-before-check, then dropViewCascade.
+        // Flag-off ⇒ no-op / byte-identical.
+        await fenceWriterEntry(query, sheetId)
         // U3-L2: the view-delete cascade is the shared dropViewCascade (also used by the un-create execute).
         await dropViewCascade(query, { sheetId, viewId, viewRow: row, actorId: getRequestActorId(req) })
       })
       invalidateViewConfigCache(viewId)
       return res.json({ ok: true, data: { deleted: viewId } })
     } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] delete view failed:', err)
@@ -13073,11 +13591,18 @@ export function univerMetaRouter(): Router {
       } else if (!capabilities.canManageViews) {
         return sendForbidden(res)
       }
+      const sheetDeleteFencePlan = await prepareSheetLinkDeleteFencePlan(
+        pool.query.bind(pool),
+        sheetId,
+      )
       // Referential integrity: the sheet's records are about to be deleted by the
       // meta_sheets -> meta_records cascade. Source-side links cascade, but `meta_links.foreign_record_id`
       // carries NO FK at all (closeout removed it; the containment guard enforces its absence); remove
       // inbound edges explicitly in the same transaction before their targets vanish.
       await pool.transaction(async ({ query }) => {
+        if (sheetDeleteFencePlan) {
+          await enterSheetLinkDeleteFencePlan(query, sheetDeleteFencePlan)
+        }
         await query('DELETE FROM meta_links WHERE foreign_record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)', [sheetId])
         return query('DELETE FROM meta_sheets WHERE id = $1', [sheetId])
       })
@@ -13086,6 +13611,8 @@ export function univerMetaRouter(): Router {
       invalidateViewConfigCache()
       return res.json({ ok: true, data: { deleted: sheetId } })
     } catch (err) {
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] delete sheet failed:', err)
@@ -13139,6 +13666,11 @@ export function univerMetaRouter(): Router {
             throw new ValidationError('Insufficient permissions')
           }
         }
+
+        // D-H1: sheet provisioning writes meta_sheets + default meta_views (and may seed records).
+        // Fence-before-check on the new sheet id before the link-target lock and source INSERTs.
+        // Flag-off ⇒ no-op / byte-identical.
+        await fenceWriterEntry(query, sheetId)
 
         // ②a §2a.4-c TOCTOU close: reject if creating this sheet (with this resolved baseId) would
         // retroactively make an EXISTING link field cross-base (a link previously pointed at this
@@ -13203,6 +13735,9 @@ export function univerMetaRouter(): Router {
 
       return res.json({ ok: true, data: { sheet: { id: sheetId, baseId, name, description, seeded: seed } } })
     } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       if (err instanceof CrossBaseLinkError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
       }
@@ -13296,8 +13831,11 @@ export function univerMetaRouter(): Router {
             })
             createdRecordIds.push(created.recordId)
           } catch (error) {
+            const writerFenceFailure = serializeWriterFenceConflict(error)
             if (error instanceof RecordCreateValidationFailedError) {
               failures.push({ rowIndex, message: 'Record validation failed', code: 'VALIDATION_FAILED' })
+            } else if (writerFenceFailure) {
+              failures.push({ rowIndex, message: writerFenceFailure.message, code: writerFenceFailure.code })
             } else if (error instanceof RecordServiceFieldForbiddenError || error instanceof RecordServiceValidationError) {
               failures.push({ rowIndex, message: error.message, code: error.code })
             } else if (error instanceof RecordServicePermissionError) {
@@ -14504,6 +15042,9 @@ export function univerMetaRouter(): Router {
     } catch (err) {
       // ②a §2a.4-c: a centralized sheet-create TOCTOU rejection surfaced by the `seed=true` branch
       // (createSeededSheet) maps to 400 VALIDATION_ERROR, mirroring POST /sheets (:6838).
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       if (err instanceof CrossBaseLinkError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
       }
@@ -14954,6 +15495,14 @@ export function univerMetaRouter(): Router {
       const recordId = parsed.data.recordId
       let resultRecordId = recordId ?? buildId('rec')
       let nextVersion = 1
+      const linkWriterFencePlan = await prepareLinkWriterFencePlan(
+        pool.query.bind(pool),
+        view.sheetId,
+        Object.keys(data),
+      )
+      if (linkWriterFencePlan) {
+        assertLinkWriterFencePlanMatchesFieldGuards(linkWriterFencePlan, fieldById)
+      }
 
       // P1#2d REPLACE — build the form.submitted payload ONCE before the txn (stable `_eventId`) so the
       // same-txn durable enqueue (flag ON, at the end of BOTH the EDIT and CREATE branches below) and the
@@ -14968,14 +15517,30 @@ export function univerMetaRouter(): Router {
       })
 
       await pool.transaction(async ({ query }) => {
-        // W0-1 L4cov (close the form-submit create/edit PARTIAL gap — L4 map's univer-meta.ts:14585). The
-        // canonical sheet fence stays UNCONDITIONAL (the pre-existing auto-number serialization lock — the
-        // form-submit CREATE branch allocates auto-numbers below; byte-identical when the L4 flag is off), then
-        // a flag-gated durable recovery-block refusal covers BOTH the EDIT (UPDATE @14655) and CREATE (INSERT
-        // @14743) branches of this handler in one place. A block observed here throws `SheetWriterBlockedError`,
-        // caught in this handler's catch and mapped to 409 RECOVERY_IN_PROGRESS (same shape as reset/revert).
-        await acquireAutoNumberSheetWriteLock(query, view.sheetId)
-        if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, view.sheetId)
+        // Flag OFF preserves the form submitter's pre-existing unconditional source fence for auto-number
+        // allocation. Flag ON enters the complete source+target plan in one sorted batch and rechecks every
+        // submitted target while those fences are held, covering both edit and create branches.
+        if (linkWriterFencePlan) {
+          await enterLinkWriterFencePlan(query, linkWriterFencePlan)
+          for (const [fieldId, { ids, cfg }] of linkUpdates.entries()) {
+            if (ids.length === 0) continue
+            const exists = await query(
+              'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+              [cfg.foreignSheetId, ids],
+            )
+            const found = new Set(
+              (exists.rows as Array<Record<string, unknown>>)
+                .map((row) => (typeof row.id === 'string' ? row.id : ''))
+                .filter((id) => id.length > 0),
+            )
+            if (ids.some((id) => !found.has(id))) {
+              throw new LinkWriterFencePlanChangedError('Linked records changed concurrently; retry the write')
+            }
+          }
+        } else {
+          await acquireAutoNumberSheetWriteLock(query, view.sheetId)
+          if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, view.sheetId)
+        }
         // W0-1 L6-a: mint the sealed operation after the fence — covers BOTH the EDIT and CREATE branches of
         // this handler (one form submit = one operation). Inert ⇒ byte-identical to L4cov.
         const op = await mintOperation(query, view.sheetId)
@@ -15299,10 +15864,8 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
-      // W0-1 L4cov: the fence's durable-block refusal (added at this handler's txn entry) surfaces here.
-      if (err instanceof SheetWriterBlockedError) {
-        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
-      }
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (err instanceof VersionConflictError) {
         return res.status(409).json({
           ok: false,
@@ -15500,6 +16063,8 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (err instanceof RecordServicePatchFieldValidationError) {
         return res.status(err.statusCode).json({
           ok: false,
@@ -16544,6 +17109,8 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (isRecordCreateValidationError(err)) {
         const fieldErrors = normalizeRecordCreateFieldErrors(err.fieldErrors)
         return res.status(422).json({
@@ -16708,6 +17275,8 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (isRecordCreateValidationError(err)) {
         const fieldErrors = normalizeRecordCreateFieldErrors(err.fieldErrors)
         return res.status(422).json({
@@ -16767,6 +17336,8 @@ export function univerMetaRouter(): Router {
 
       return res.json({ ok: true, data: { deleted: recordId } })
     } catch (err) {
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (err instanceof RecordServicePermissionError) {
         return sendForbidden(res, err.message)
       }
@@ -16916,6 +17487,8 @@ export function univerMetaRouter(): Router {
       // 4c-3 §6 honest signal (omitted-when-off/absent — flag-off responses stay byte-identical):
       return res.json({ ok: true, data: { restored: result.recordId, sheetId: result.sheetId, ...(result.inbound ? { inbound: result.inbound } : {}) } })
     } catch (err) {
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (err instanceof RecordServicePermissionError) {
         return sendForbidden(res, err.message)
       }
@@ -17284,6 +17857,8 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (err instanceof MirrorLinkTargetUnavailableError) {
         // The ONE uniform fail-closed body (Lock C). Do not add fields, vary the message, or branch here.
         return res.status(403).json({ ok: false, error: { code: 'MIRROR_LINK_TARGET_UNAVAILABLE', message: 'Link target is not available' } })
@@ -17501,9 +18076,8 @@ export function univerMetaRouter(): Router {
       // durable recovery writer-block → refuse with the same 409 RECOVERY_IN_PROGRESS shape the
       // reset/revert/config-restore routes use, instead of falling through to a 500. (Derived-value
       // materialization refusals never reach here — they are caught + skipped at their sites.)
-      if (err instanceof SheetWriterBlockedError) {
-        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
-      }
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (err instanceof ConflictError) {
         return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: err.message } })
       }

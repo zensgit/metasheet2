@@ -25,12 +25,16 @@ import request from 'supertest'
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
+import {
+  __resetRecoveryWriterStateColumnProbe,
+} from '../../src/multitable/canonical-sheet-fence'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
 const BASE = `base_uc_${TS}`
 const FLAG = 'MULTITABLE_ENABLE_CONFIG_UNCREATE'
+const WRITER_FENCE_FLAG = 'MULTITABLE_ENABLE_WRITER_FENCE'
 
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
 
@@ -55,8 +59,15 @@ async function freshSheet(tag: string): Promise<string> {
   CREATED_SHEETS.push(id)
   return id
 }
-async function insertField(sheetId: string, fieldId: string, name: string, type: string, order: number): Promise<void> {
-  await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [fieldId, sheetId, name, type, '{}', order])
+async function insertField(
+  sheetId: string,
+  fieldId: string,
+  name: string,
+  type: string,
+  order: number,
+  property: Record<string, unknown> = {},
+): Promise<void> {
+  await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [fieldId, sheetId, name, type, JSON.stringify(property), order])
 }
 /** Seed the `create` revision a forward field-create records (fieldCreateDiff shape): after = full config, source='mutation'. */
 async function insertFieldCreateRev(sheetId: string, fieldId: string, name: string, type: string, order: number): Promise<string> {
@@ -123,7 +134,14 @@ describeIfDatabase('multitable config un-create — T9-W Tier 3 / U-3 (real DB)'
     }
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
   })
-  afterEach(() => { delete process.env[FLAG] })
+  afterEach(async () => {
+    delete process.env[FLAG]
+    delete process.env[WRITER_FENCE_FLAG]
+    __resetRecoveryWriterStateColumnProbe()
+    if (CREATED_SHEETS.length > 0) {
+      await q('UPDATE meta_sheets SET recovery_writer_state = NULL WHERE id = ANY($1::text[])', [CREATED_SHEETS])
+    }
+  })
 
   test('sentinel: DATABASE_URL set', () => { expect(process.env.DATABASE_URL).toBeTruthy() })
 
@@ -435,5 +453,40 @@ describeIfDatabase('multitable config un-create — T9-W Tier 3 / U-3 (real DB)'
       await q(`DROP TRIGGER IF EXISTS ${TRG} ON meta_records`, []).catch(() => {})
       await q(`DROP FUNCTION IF EXISTS ${FN}()`, []).catch(() => {})
     }
+  })
+
+  test('D-H1 configured target blocked through un-create is values-free 409 with zero writes', async () => {
+    process.env[FLAG] = 'true'
+    const source = await freshSheet('dh1_block_source')
+    const target = await freshSheet('dh1_block_target')
+    const fieldId = mkFieldId()
+    await insertField(source, fieldId, 'D-H1 Blocked Link', 'link', 1, { foreignSheetId: target })
+    const createRev = await insertFieldCreateRev(source, fieldId, 'D-H1 Blocked Link', 'link', 1)
+    const sourceRecordId = await insertRecord(source, {})
+    const targetRecordId = await insertRecord(target, {})
+    await insertLink(fieldId, sourceRecordId, targetRecordId)
+    const p = await preview(source, createRev)
+    expect(p.status).toBe(200)
+
+    process.env[WRITER_FENCE_FLAG] = 'true'
+    await q("UPDATE meta_sheets SET recovery_writer_state = 'applying' WHERE id = $1", [target])
+    const response = await execute(source, {
+      revisionId: createRev,
+      previewToken: p.body.data.previewToken,
+      confirm: 'uncreate',
+    })
+
+    expect(response.status).toBe(409)
+    expect(response.body).toEqual({
+      ok: false,
+      error: {
+        code: 'RECOVERY_IN_PROGRESS',
+        message: 'Another recovery operation is in progress on this sheet; retry shortly.',
+      },
+    })
+    expect(JSON.stringify(response.body)).not.toContain(target)
+    expect(await rowCount('SELECT 1 FROM meta_fields WHERE id=$1', [fieldId])).toBe(1)
+    expect(await rowCount('SELECT 1 FROM meta_links WHERE field_id=$1', [fieldId])).toBe(1)
+    expect(await countColumnData(source, fieldId)).toBe(0)
   })
 })

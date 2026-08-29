@@ -1094,8 +1094,8 @@ describe('the real app assembly (index.ts) registers this route behind the globa
  */
 describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', () => {
   const SCOPE = new Set(['setupMiddleware', 'constructor'])
-  const FROZEN_SAFE_COUNT = 46
-  const FROZEN_SAFE_HASH = '4d74175f6d2a3d8ff0147be6d441c68274a130f9db82a01c7f0c78cb396e907b'
+  const FROZEN_SAFE_COUNT = 48
+  const FROZEN_SAFE_HASH = '491a38feac62706d5568953e8a424e60411b88f9ff547cc788d381152ef984a6'
   // Frozen census as a LITERAL (owner + gate P2): deriving it live from the
   // same source it partitions makes UNKNOWN-empty vacuous (a novel this-use is
   // auto-added to SAFE). With the literal, a novel this-use lands in UNKNOWN.
@@ -1110,6 +1110,7 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.logger//#0",
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.port//#0",
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.portLocked//#0",
+      "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.recoveryArchiveApplication//#0",
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.snapshotService//#0",
       "constructor//Block>ExpressionStatement>CallExpression>PropertyAccessExpression//.initializeCache//#0",
       "constructor//Block>ExpressionStatement>CallExpression>PropertyAccessExpression//.registerInternalPluginApis//#0",
@@ -1144,6 +1145,7 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>PropertyAccessExpression//.injector//#2",
       "setupMiddleware//Block>FirstStatement>VariableDeclarationList>VariableDeclaration>ArrowFunction>Block>TryStatement>Block>ExpressionStatement>CallExpression>ObjectLiteralExpression>PropertyAssignment>PropertyAccessExpression>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.pluginLoader//#0",
       "setupMiddleware//Block>FirstStatement>VariableDeclarationList>VariableDeclaration>ArrowFunction>Block>TryStatement>Block>TryStatement>Block>ExpressionStatement>BinaryExpression>CallExpression>PropertyAccessExpression>ParenthesizedExpression>AsExpression>AsExpression>PropertyAccessExpression//.pluginLoader//#0",
+      "setupMiddleware//Block>FirstStatement>VariableDeclarationList>VariableDeclaration>PropertyAccessExpression>PropertyAccessExpression//.recoveryArchiveApplication//#0",
       "setupMiddleware//Block>IfStatement>Block>IfStatement>Block>ExpressionStatement>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.logger//#0",
       "setupMiddleware//Block>IfStatement>Block>IfStatement>Block>ExpressionStatement>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.logger//#1",
     ])
@@ -1190,7 +1192,7 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       assertValidPartition(part, independentThisStarts(source, SCOPE))
     })
 
-    it('every SAFE occurrence is a member of the FROZEN literal census (occurrence-level, count 46, sha256 pin) — a novel this-use is NOT auto-admitted', () => {
+    it('every SAFE occurrence is a member of the FROZEN literal census (occurrence-level, count 48, sha256 pin) — a novel this-use is NOT auto-admitted', () => {
       expect(part.safe.length).toBe(FROZEN_SAFE_COUNT)
       for (const o of part.safe) expect(FROZEN_SAFE_KEYS.has(o.key)).toBe(true)
       const hash = createHash('sha256').update(part.safe.map((o) => o.key).sort().join('\n')).digest('hex')
@@ -1243,7 +1245,7 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       expect(indexText).toContain(marker)
       const mutated = indexText.replace(marker, marker + '\n    const __p2bUnrelated = 1; void __p2bUnrelated;')
       const msrc = ts.createSourceFile('mut.ts', mutated, ts.ScriptTarget.ES2022, true)
-      // the safe-eligible census is unchanged (same 46 keys)
+      // the safe-eligible census is unchanged (same 48 keys)
       expect(new Set(deriveSafeCensus(msrc, SCOPE))).toEqual(FROZEN_SAFE_KEYS)
       const mpart = buildThisPartition(msrc, FROZEN_SAFE_KEYS, SCOPE)
       expect(mpart.safe.length).toBe(FROZEN_SAFE_COUNT)
