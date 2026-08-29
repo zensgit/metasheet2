@@ -33,7 +33,7 @@ const ENABLED: NodeJS.ProcessEnv = {
   ELEARNING_INCENTIVE_ENABLED: 'true',
 }
 
-const adminUrl = process.env.DATABASE_URL
+const DATABASE_URL = process.env.DATABASE_URL
 const scratchName = `ms2_elcredit_${randomUUID().replaceAll('-', '').slice(0, 12)}`
 const ORG = 'org-credit-realdb'
 const USER = 'user-credit-realdb'
@@ -110,13 +110,13 @@ function expectValuesFreeCode(error: unknown, code: string): void {
 
 describe('elearning credit ledger PostgreSQL authority', () => {
   beforeAll(async () => {
-    if (!adminUrl) {
-      throw new Error('DATABASE_URL is required; real-DB authority tests never skip-green')
+    if (!DATABASE_URL) {
+      throw new Error('DATABASE_URL is required; refusing skip-shaped green')
     }
     assertSafeScratchDatabaseName(scratchName)
     adminPool = new Pool({
       application_name: 'elearning-credit-authority-admin',
-      connectionString: adminUrl,
+      connectionString: DATABASE_URL,
       max: 1,
     })
     const existing = await adminPool.query(
@@ -126,7 +126,7 @@ describe('elearning credit ledger PostgreSQL authority', () => {
     if (existing.rows.length !== 0) throw new Error('scratch database name collision')
     await adminPool.query(`CREATE DATABASE "${scratchName}"`)
 
-    const connectionString = scratchUrl(adminUrl, scratchName)
+    const connectionString = scratchUrl(DATABASE_URL, scratchName)
     firstPool = new Pool({
       application_name: 'elearning-credit-authority-first',
       connectionString,

@@ -26,7 +26,7 @@ import {
   formatScratchDropOutcome,
 } from '../helpers/scratch-database'
 
-const adminUrl = process.env.DATABASE_URL
+const DATABASE_URL = process.env.DATABASE_URL
 const scratchName = `ms2_elacl_${randomUUID().replaceAll('-', '').slice(0, 12)}`
 const USER_ORGS_MIGRATION = 'zzzz20260114110000_create_user_orgs_table'
 const ACL_MIGRATION = 'zzzz20260826200000_create_elearning_admin_scope_acl'
@@ -203,7 +203,7 @@ function expectMigrationSucceeded(error: unknown): void {
 }
 
 beforeAll(async () => {
-  if (!adminUrl) {
+  if (!DATABASE_URL) {
     throw new Error(
       'e-learning admin ACL migration authority requires DATABASE_URL; refusing skip-shaped green',
     )
@@ -211,7 +211,7 @@ beforeAll(async () => {
   assertSafeScratchDatabaseName(scratchName)
   adminPool = new Pool({
     application_name: 'elearning-acl-migration-admin',
-    connectionString: adminUrl,
+    connectionString: DATABASE_URL,
     max: 1,
   })
   const collision = await adminPool.query(
@@ -220,7 +220,7 @@ beforeAll(async () => {
   )
   if (collision.rows.length !== 0) throw new Error('scratch database name collision')
   await adminPool.query(`CREATE DATABASE "${scratchName}"`)
-  scratchUrl = databaseUrl(adminUrl, scratchName)
+  scratchUrl = databaseUrl(DATABASE_URL, scratchName)
 }, 30_000)
 
 afterAll(async () => {

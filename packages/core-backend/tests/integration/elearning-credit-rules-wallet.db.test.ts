@@ -26,7 +26,7 @@ import {
   formatScratchDropOutcome,
 } from '../helpers/scratch-database'
 
-const adminUrl = process.env.DATABASE_URL
+const DATABASE_URL = process.env.DATABASE_URL
 const scratchName = `ms2_elrules_${randomUUID().replaceAll('-', '').slice(0, 12)}`
 
 let adminPool: Pool
@@ -127,13 +127,13 @@ function expectValuesFreeConflict(error: unknown, values: string[]): void {
 
 describe('e-learning credit rules and wallet PostgreSQL authority', () => {
   beforeAll(async () => {
-    if (!adminUrl) {
-      throw new Error('DATABASE_URL is required; e-learning credit rules/wallet DB gate never skip-greens')
+    if (!DATABASE_URL) {
+      throw new Error('DATABASE_URL is required; refusing skip-shaped green')
     }
     assertSafeScratchDatabaseName(scratchName)
     adminPool = new Pool({
       application_name: 'elearning-credit-rules-admin',
-      connectionString: adminUrl,
+      connectionString: DATABASE_URL,
       max: 1,
     })
     const collision = await adminPool.query(
@@ -143,7 +143,7 @@ describe('e-learning credit rules and wallet PostgreSQL authority', () => {
     if (collision.rows.length !== 0) throw new Error('scratch database name collision')
     await adminPool.query(`CREATE DATABASE "${scratchName}"`)
 
-    const connectionString = scratchUrl(adminUrl, scratchName)
+    const connectionString = scratchUrl(DATABASE_URL, scratchName)
     firstPool = new Pool({
       application_name: 'elearning-credit-rules-first',
       connectionString,
