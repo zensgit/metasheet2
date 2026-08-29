@@ -192,6 +192,72 @@ async function seedReadyMedia(pool: Pool, orgId: string): Promise<string> {
   return mediaId
 }
 
+async function seedDraftExam(pool: Pool, orgId: string): Promise<string> {
+  const examId = randomUUID()
+  await pool.query(
+    `INSERT INTO elearning_exams (
+       id, org_id, title, status, pass_score, max_attempts, created_by
+     ) VALUES ($1, $2, 'Draft exam', 'draft', 0, 1, $3)`,
+    [examId, orgId, actor('exam-author')],
+  )
+  return examId
+}
+
+type DraftItemSeed =
+  | { itemType: 'video'; referenceId: string }
+  | { itemType: 'exam'; referenceId: string }
+  | { itemType: 'article'; referenceId: string }
+  | { itemType: 'external_link'; referenceId: string }
+
+async function seedDraftVersion(
+  pool: Pool,
+  orgId: string,
+  items: DraftItemSeed[],
+): Promise<string> {
+  const courseId = randomUUID()
+  const versionId = randomUUID()
+  await pool.query(
+    `INSERT INTO elearning_courses (id, org_id, title, status, created_by)
+     VALUES ($1, $2, 'Shape probe', 'active', $3)`,
+    [courseId, orgId, actor('publisher')],
+  )
+  await pool.query(
+    `INSERT INTO elearning_course_versions (
+       id, org_id, course_id, version, status, title, created_by
+     ) VALUES ($1, $2, $3, 1, 'draft', 'Shape probe', $4)`,
+    [versionId, orgId, courseId, actor('publisher')],
+  )
+  for (const [index, item] of items.entries()) {
+    await pool.query(
+      `INSERT INTO elearning_course_version_items (
+         id, org_id, course_version_id, item_type, position,
+         media_id, exam_id, article_revision_id, external_link_revision_id,
+         completion_policy_version, completion_threshold_bps
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [
+        randomUUID(),
+        orgId,
+        versionId,
+        item.itemType,
+        index + 1,
+        item.itemType === 'video' ? item.referenceId : null,
+        item.itemType === 'exam' ? item.referenceId : null,
+        item.itemType === 'article' ? item.referenceId : null,
+        item.itemType === 'external_link' ? item.referenceId : null,
+        item.itemType === 'video'
+          ? 'video-v1-90pct'
+          : item.itemType === 'article'
+            ? 'article-open-v1'
+            : item.itemType === 'external_link'
+              ? 'external-link-launch-v1'
+              : null,
+        item.itemType === 'video' ? 9000 : null,
+      ],
+    )
+  }
+  return versionId
+}
+
 function migrationFailed(error: unknown): never {
   const code = error && typeof error === 'object' && 'code' in error
     ? String(error.code)
@@ -332,7 +398,7 @@ describe('e-learning content runtime PostgreSQL authority', () => {
     await migrate(contentRuntimeUp)
   }, 30_000)
 
-  it('fails loud on unique, check-shape, immutable-function, and publish-readiness drift then restores cleanly', async () => {
+  it('fails loud on columns, FKs, checks, functions, and publish-readiness drift then restores cleanly', async () => {
     await firstPool.query(
       `ALTER TABLE elearning_open_completion_events
          DROP CONSTRAINT elearning_open_completion_events_effect_uniq`,
@@ -411,6 +477,82 @@ describe('e-learning content runtime PostgreSQL authority', () => {
       )
     }
     await migrate(contentRuntimeUp)
+
+    await firstPool.query(
+      'ALTER TABLE elearning_completion_evidence ALTER COLUMN item_type DROP NOT NULL',
+    )
+    try {
+      await expect(migrate(contentRuntimeUp)).rejects.toThrow(
+        'elearning content runtime migration drift: '
+        + 'elearning_completion_evidence.item_type',
+      )
+    } finally {
+      await firstPool.query(
+        'ALTER TABLE elearning_completion_evidence ALTER COLUMN item_type SET NOT NULL',
+      )
+    }
+    await migrate(contentRuntimeUp)
+
+    const eventShape = await firstPool.query<{ definition: string }>(
+      `SELECT pg_get_constraintdef(oid, true) AS definition
+         FROM pg_constraint
+        WHERE conrelid = 'elearning_open_completion_events'::regclass
+          AND conname = 'elearning_open_completion_events_shape_chk'`,
+    )
+    try {
+      await firstPool.query(
+        `ALTER TABLE elearning_open_completion_events
+           DROP CONSTRAINT elearning_open_completion_events_shape_chk,
+           ADD CONSTRAINT elearning_open_completion_events_shape_chk CHECK (
+             (item_type = 'article' AND event_kind = 'ARTICLE_OPEN')
+             OR
+             (item_type = 'external_link' AND event_kind = 'external_link_launch')
+           )`,
+      )
+      await expect(migrate(contentRuntimeUp)).rejects.toThrow(
+        'elearning content runtime migration drift: '
+        + 'elearning_open_completion_events_shape_chk',
+      )
+    } finally {
+      await firstPool.query(
+        `ALTER TABLE elearning_open_completion_events
+           DROP CONSTRAINT elearning_open_completion_events_shape_chk,
+           ADD CONSTRAINT elearning_open_completion_events_shape_chk
+           ${eventShape.rows[0].definition}`,
+      )
+    }
+    await migrate(contentRuntimeUp)
+
+    const eventItemFk = await firstPool.query<{ definition: string }>(
+      `SELECT pg_get_constraintdef(oid, true) AS definition
+         FROM pg_constraint
+        WHERE conrelid = 'elearning_open_completion_events'::regclass
+          AND conname = 'elearning_open_completion_events_item_fk'`,
+    )
+    try {
+      await firstPool.query(
+        `ALTER TABLE elearning_open_completion_events
+           DROP CONSTRAINT elearning_open_completion_events_item_fk,
+           ADD CONSTRAINT elearning_open_completion_events_item_fk
+           FOREIGN KEY (
+             org_id, course_version_id, course_version_item_id, item_type
+           ) REFERENCES elearning_course_version_items (
+             org_id, course_version_id, id, item_type
+           ) ON DELETE RESTRICT`,
+      )
+      await expect(migrate(contentRuntimeUp)).rejects.toThrow(
+        'elearning content runtime migration drift: '
+        + 'elearning_open_completion_events_item_fk',
+      )
+    } finally {
+      await firstPool.query(
+        `ALTER TABLE elearning_open_completion_events
+           DROP CONSTRAINT elearning_open_completion_events_item_fk,
+           ADD CONSTRAINT elearning_open_completion_events_item_fk
+           ${eventItemFk.rows[0].definition}`,
+      )
+    }
+    await migrate(contentRuntimeUp)
   })
 
   it('publishes article-only, link-only, mixed ordered, and legacy video-exam courses while empty publish fails', async () => {
@@ -472,6 +614,50 @@ describe('e-learning content runtime PostgreSQL authority', () => {
       [2, 'article'],
     ])
 
+    const expectUnsupported = async (
+      suffix: string,
+      select: (refs: {
+        articleId: string
+        examId: string
+        mediaId: string
+      }) => DraftItemSeed[],
+    ): Promise<void> => {
+      const unsupportedOrg = org(`unsupported-${suffix}`)
+      const mediaId = await seedReadyMedia(firstPool, unsupportedOrg)
+      const examId = await seedDraftExam(firstPool, unsupportedOrg)
+      const unsupportedArticle = await createRevision(
+        db,
+        unsupportedOrg,
+        'article',
+        suffix,
+      )
+      const versionId = await seedDraftVersion(firstPool, unsupportedOrg, select({
+        articleId: unsupportedArticle.contentRevisionId,
+        examId,
+        mediaId,
+      }))
+      await expect(firstPool.query(
+        `UPDATE elearning_course_versions SET status = 'published'
+          WHERE org_id = $1 AND id = $2`,
+        [unsupportedOrg, versionId],
+      )).rejects.toThrow('cannot publish course version: unsupported item family')
+    }
+    await expectUnsupported('video-only', ({ mediaId }) => [
+      { itemType: 'video', referenceId: mediaId },
+    ])
+    await expectUnsupported('exam-only', ({ examId }) => [
+      { itemType: 'exam', referenceId: examId },
+    ])
+    await expectUnsupported('legacy-content', ({ articleId, examId, mediaId }) => [
+      { itemType: 'video', referenceId: mediaId },
+      { itemType: 'exam', referenceId: examId },
+      { itemType: 'article', referenceId: articleId },
+    ])
+    await expectUnsupported('other-mixed', ({ articleId, mediaId }) => [
+      { itemType: 'video', referenceId: mediaId },
+      { itemType: 'article', referenceId: articleId },
+    ])
+
     const emptyCourseId = randomUUID()
     const emptyVersionId = randomUUID()
     await firstPool.query(
@@ -488,7 +674,7 @@ describe('e-learning content runtime PostgreSQL authority', () => {
     await expect(firstPool.query(
       `UPDATE elearning_course_versions SET status = 'published' WHERE id = $1`,
       [emptyVersionId],
-    )).rejects.toThrow('cannot publish course version: at least one valid item is required')
+    )).rejects.toThrow('cannot publish course version: unsupported item family')
 
     const legacyOrg = org('legacy')
     const mediaId = await seedReadyMedia(firstPool, legacyOrg)
@@ -672,6 +858,36 @@ describe('e-learning content runtime PostgreSQL authority', () => {
        ) VALUES ($1, $2, $3, 'article', 1, $4, 'article-open-v1')`,
       [randomUUID(), orgA, versionId, external.contentRevisionId],
     )).rejects.toMatchObject({ code: '23503' })
+
+    const bound = await createRevision(db, orgA, 'article', 'bound')
+    const sameTypeWrong = await createRevision(db, orgA, 'article', 'same-type-wrong')
+    const boundCourse = await publishElearningContentCourse(db, {
+      orgId: orgA,
+      actorId: actor('publisher'),
+      requestId: randomUUID(),
+      title: 'Exact revision binding',
+      items: [{ itemType: 'article', contentRevisionId: bound.contentRevisionId }],
+    })
+    await expect(firstPool.query(
+      `INSERT INTO elearning_open_completion_events (
+         id, org_id, user_id, course_version_id, course_version_item_id,
+         item_type, content_revision_id, event_kind, event_digest,
+         server_received_at
+       ) VALUES ($1, $2, $3, $4, $5, 'article', $6,
+                 'article_open', $7, now())`,
+      [
+        randomUUID(),
+        orgA,
+        actor('wrong-revision-user'),
+        boundCourse.courseVersionId,
+        boundCourse.items[0].itemId,
+        sameTypeWrong.contentRevisionId,
+        'd'.repeat(64),
+      ],
+    )).rejects.toMatchObject({
+      code: '23503',
+      constraint: 'elearning_open_completion_events_item_fk',
+    })
 
     await expect(firstPool.query(
       `UPDATE elearning_content_revisions SET title = title WHERE org_id = $1 AND id = $2`,

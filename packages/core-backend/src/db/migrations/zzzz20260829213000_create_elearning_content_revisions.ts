@@ -35,6 +35,7 @@ export const CONTENT_IMMUTABLE_TRUNCATE_TRIGGERS = [
 const NEW_ITEM_COLUMNS = [
   'article_revision_id',
   'external_link_revision_id',
+  'canonical_content_revision_id',
 ] as const
 
 const NEW_EVIDENCE_COLUMNS = [
@@ -42,6 +43,69 @@ const NEW_EVIDENCE_COLUMNS = [
   'content_revision_id',
   'open_event_id',
   'completion_assurance',
+] as const
+
+const OWNED_COLUMN_DEFINITIONS = [
+  {
+    table: 'elearning_course_version_items',
+    name: 'article_revision_id',
+    type: 'uuid',
+    notNull: false,
+    generated: '',
+    expression: null,
+  },
+  {
+    table: 'elearning_course_version_items',
+    name: 'external_link_revision_id',
+    type: 'uuid',
+    notNull: false,
+    generated: '',
+    expression: null,
+  },
+  {
+    table: 'elearning_course_version_items',
+    name: 'canonical_content_revision_id',
+    type: 'uuid',
+    notNull: false,
+    generated: 's',
+    expression: `CASE
+      WHEN item_type = 'article'::text THEN article_revision_id
+      WHEN item_type = 'external_link'::text THEN external_link_revision_id
+      ELSE NULL::uuid
+    END`,
+  },
+  {
+    table: 'elearning_completion_evidence',
+    name: 'item_type',
+    type: 'text',
+    notNull: true,
+    generated: '',
+    expression: null,
+  },
+  {
+    table: 'elearning_completion_evidence',
+    name: 'content_revision_id',
+    type: 'uuid',
+    notNull: false,
+    generated: '',
+    expression: null,
+  },
+  {
+    table: 'elearning_completion_evidence',
+    name: 'open_event_id',
+    type: 'uuid',
+    notNull: false,
+    generated: '',
+    expression: null,
+  },
+  {
+    table: 'elearning_completion_evidence',
+    name: 'completion_assurance',
+    type: 'text',
+    notNull: false,
+    generated: '',
+    expression: null,
+  },
 ] as const
 
 const CONTENT_CHECK_DEFINITIONS = [
@@ -285,8 +349,18 @@ BEGIN
         FROM elearning_course_version_items
        WHERE org_id = NEW.org_id
          AND course_version_id = NEW.id
+      HAVING (
+        count(*) = 2
+        AND count(*) FILTER (WHERE item_type = 'video') = 1
+        AND count(*) FILTER (WHERE item_type = 'exam') = 1
+      ) OR (
+        count(*) >= 1
+        AND count(*) FILTER (
+          WHERE item_type IN ('article', 'external_link')
+        ) = count(*)
+      )
     ) THEN
-      RAISE EXCEPTION 'cannot publish course version: at least one valid item is required';
+      RAISE EXCEPTION 'cannot publish course version: unsupported item family';
     END IF;
     IF EXISTS (
       SELECT 1
@@ -454,8 +528,26 @@ BEGIN
 END;
 `.trim()
 
-function normalizeDefinition(value: string): string {
-  return value.toLowerCase().replaceAll('"', '').replace(/\s+/g, '')
+function canonicalizeDefinition(value: string): string {
+  let result = ''
+  let inLiteral = false
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index]
+    if (character === "'") {
+      result += character
+      if (inLiteral && value[index + 1] === "'") {
+        result += value[index + 1]
+        index += 1
+      } else {
+        inLiteral = !inLiteral
+      }
+    } else if (inLiteral) {
+      result += character
+    } else if (!/\s/.test(character)) {
+      result += character.toLowerCase()
+    }
+  }
+  return result
 }
 
 function drift(detail: string): never {
@@ -487,6 +579,58 @@ async function columnSet(
   return new Set(result.rows.map((row) => row.name))
 }
 
+async function assertOwnedColumns(db: Kysely<unknown>): Promise<void> {
+  const result = await sql<{
+    table: string
+    name: string
+    type: string
+    not_null: boolean
+    generated: string
+    expression: string | null
+  }>`
+    SELECT table_row.relname AS table,
+           attribute.attname AS name,
+           format_type(attribute.atttypid, attribute.atttypmod) AS type,
+           attribute.attnotnull AS not_null,
+           attribute.attgenerated::text AS generated,
+           pg_get_expr(default_row.adbin, default_row.adrelid, true) AS expression
+      FROM pg_attribute attribute
+      JOIN pg_class table_row ON table_row.oid = attribute.attrelid
+      JOIN pg_namespace namespace ON namespace.oid = table_row.relnamespace
+      LEFT JOIN pg_attrdef default_row
+        ON default_row.adrelid = attribute.attrelid
+       AND default_row.adnum = attribute.attnum
+     WHERE namespace.nspname = current_schema()
+       AND NOT attribute.attisdropped
+       AND (table_row.relname, attribute.attname) IN (
+         SELECT * FROM unnest(
+           ${sql.val(OWNED_COLUMN_DEFINITIONS.map((row) => row.table))}::text[],
+           ${sql.val(OWNED_COLUMN_DEFINITIONS.map((row) => row.name))}::text[]
+         )
+       )
+  `.execute(db)
+  for (const required of OWNED_COLUMN_DEFINITIONS) {
+    const matches = result.rows.filter((row) => (
+      row.table === required.table && row.name === required.name
+    ))
+    const actual = matches[0]
+    if (
+      matches.length !== 1
+      || !actual
+      || actual.type !== required.type
+      || actual.not_null !== required.notNull
+      || actual.generated !== required.generated
+      || (actual.expression === null) !== (required.expression === null)
+      || (
+        actual.expression !== null
+        && required.expression !== null
+        && canonicalizeDefinition(actual.expression)
+          !== canonicalizeDefinition(required.expression)
+      )
+    ) drift(`${required.table}.${required.name}`)
+  }
+}
+
 async function assertConstraintColumns(
   db: Kysely<unknown>,
   input: {
@@ -505,6 +649,10 @@ async function assertConstraintColumns(
     referenced_columns: string[] | null
     validated: boolean
     delete_action: string
+    update_action: string
+    match_type: string
+    deferrable: boolean
+    deferred: boolean
   }>`
     SELECT
       constraint_row.contype::text AS type,
@@ -526,7 +674,11 @@ async function assertConstraintColumns(
          ORDER BY key.position
       )::text[] END AS referenced_columns,
       constraint_row.convalidated AS validated,
-      constraint_row.confdeltype::text AS delete_action
+      constraint_row.confdeltype::text AS delete_action,
+      constraint_row.confupdtype::text AS update_action,
+      constraint_row.confmatchtype::text AS match_type,
+      constraint_row.condeferrable AS deferrable,
+      constraint_row.condeferred AS deferred
       FROM pg_constraint constraint_row
       JOIN pg_class table_row ON table_row.oid = constraint_row.conrelid
       JOIN pg_namespace namespace ON namespace.oid = table_row.relnamespace
@@ -545,7 +697,13 @@ async function assertConstraintColumns(
     || (row.referenced_columns ?? []).join('\0')
       !== (input.referencedColumns ?? []).join('\0')
     || !row.validated
-    || (input.type === 'f' && row.delete_action !== 'r')
+    || (input.type === 'f' && (
+      row.delete_action !== 'r'
+      || row.update_action !== 'a'
+      || row.match_type !== 's'
+      || row.deferrable
+      || row.deferred
+    ))
   ) drift(input.name)
 }
 
@@ -584,7 +742,8 @@ async function assertNamedChecks(
       matches.length !== 1
       || !actual
       || !actual.validated
-      || normalizeDefinition(actual.definition) !== normalizeDefinition(required.definition)
+      || canonicalizeDefinition(actual.definition)
+        !== canonicalizeDefinition(required.definition)
     ) drift(required.name)
   }
 }
@@ -618,7 +777,7 @@ async function assertFunction(
     || row.language !== 'plpgsql'
     || row.result_type !== 'trigger'
     || row.security_definer
-    || normalizeDefinition(row.source) !== normalizeDefinition(body)
+    || canonicalizeDefinition(row.source) !== canonicalizeDefinition(body)
   ) drift(`${name} function`)
 }
 
@@ -732,6 +891,7 @@ async function assertSchema(db: Kysely<unknown>): Promise<void> {
     NEW_ITEM_COLUMNS.some((column) => !itemColumns.has(column))
     || NEW_EVIDENCE_COLUMNS.some((column) => !evidenceColumns.has(column))
   ) drift('amended columns')
+  await assertOwnedColumns(db)
 
   for (const constraint of [
     {
@@ -759,6 +919,15 @@ async function assertSchema(db: Kysely<unknown>): Promise<void> {
       columns: ['org_id', 'course_version_id', 'id', 'item_type'],
     },
     {
+      table: 'elearning_course_version_items',
+      name: 'elearning_course_version_items_content_revision_identity_uniq',
+      type: 'u' as const,
+      columns: [
+        'org_id', 'course_version_id', 'id', 'item_type',
+        'canonical_content_revision_id',
+      ],
+    },
+    {
       table: 'elearning_open_completion_events',
       name: 'elearning_open_completion_events_effect_uniq',
       type: 'u' as const,
@@ -780,6 +949,30 @@ async function assertSchema(db: Kysely<unknown>): Promise<void> {
 
   for (const constraint of [
     {
+      table: 'elearning_content_revision_requests',
+      name: 'elearning_content_revision_requests_revision_fk',
+      type: 'f' as const,
+      columns: ['org_id', 'content_revision_id'],
+      referencedTable: 'elearning_content_revisions',
+      referencedColumns: ['org_id', 'id'],
+    },
+    {
+      table: 'elearning_content_course_publish_requests',
+      name: 'elearning_content_course_publish_requests_course_fk',
+      type: 'f' as const,
+      columns: ['org_id', 'course_id'],
+      referencedTable: 'elearning_courses',
+      referencedColumns: ['org_id', 'id'],
+    },
+    {
+      table: 'elearning_content_course_publish_requests',
+      name: 'elearning_content_course_publish_requests_version_fk',
+      type: 'f' as const,
+      columns: ['org_id', 'course_id', 'course_version_id'],
+      referencedTable: 'elearning_course_versions',
+      referencedColumns: ['org_id', 'course_id', 'id'],
+    },
+    {
       table: 'elearning_course_version_items',
       name: 'elearning_course_version_items_article_revision_fk',
       type: 'f' as const,
@@ -792,6 +985,28 @@ async function assertSchema(db: Kysely<unknown>): Promise<void> {
       name: 'elearning_course_version_items_external_revision_fk',
       type: 'f' as const,
       columns: ['org_id', 'external_link_revision_id', 'item_type'],
+      referencedTable: 'elearning_content_revisions',
+      referencedColumns: ['org_id', 'id', 'item_type'],
+    },
+    {
+      table: 'elearning_open_completion_events',
+      name: 'elearning_open_completion_events_item_fk',
+      type: 'f' as const,
+      columns: [
+        'org_id', 'course_version_id', 'course_version_item_id',
+        'item_type', 'content_revision_id',
+      ],
+      referencedTable: 'elearning_course_version_items',
+      referencedColumns: [
+        'org_id', 'course_version_id', 'id', 'item_type',
+        'canonical_content_revision_id',
+      ],
+    },
+    {
+      table: 'elearning_open_completion_events',
+      name: 'elearning_open_completion_events_revision_fk',
+      type: 'f' as const,
+      columns: ['org_id', 'content_revision_id', 'item_type'],
       referencedTable: 'elearning_content_revisions',
       referencedColumns: ['org_id', 'id', 'item_type'],
     },
@@ -1013,7 +1228,15 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`
     ALTER TABLE elearning_course_version_items
       ADD COLUMN article_revision_id uuid,
-      ADD COLUMN external_link_revision_id uuid
+      ADD COLUMN external_link_revision_id uuid,
+      ADD COLUMN canonical_content_revision_id uuid
+        GENERATED ALWAYS AS (
+          CASE
+            WHEN item_type = 'article' THEN article_revision_id
+            WHEN item_type = 'external_link' THEN external_link_revision_id
+            ELSE NULL::uuid
+          END
+        ) STORED
   `.execute(db)
   await sql`
     ALTER TABLE elearning_course_version_items
@@ -1067,7 +1290,12 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       ADD CONSTRAINT elearning_course_version_items_external_revision_fk
         FOREIGN KEY (org_id, external_link_revision_id, item_type)
         REFERENCES elearning_content_revisions (org_id, id, item_type)
-        ON DELETE RESTRICT
+        ON DELETE RESTRICT,
+      ADD CONSTRAINT elearning_course_version_items_content_revision_identity_uniq
+        UNIQUE (
+          org_id, course_version_id, id, item_type,
+          canonical_content_revision_id
+        )
   `.execute(db)
 
   await sql`
@@ -1103,8 +1331,13 @@ export async function up(db: Kysely<unknown>): Promise<void> {
           (item_type = 'external_link' AND event_kind = 'external_link_launch')
         ),
       CONSTRAINT elearning_open_completion_events_item_fk
-        FOREIGN KEY (org_id, course_version_id, course_version_item_id, item_type)
-        REFERENCES elearning_course_version_items (org_id, course_version_id, id, item_type)
+        FOREIGN KEY (
+          org_id, course_version_id, course_version_item_id,
+          item_type, content_revision_id
+        ) REFERENCES elearning_course_version_items (
+          org_id, course_version_id, id, item_type,
+          canonical_content_revision_id
+        )
         ON DELETE RESTRICT,
       CONSTRAINT elearning_open_completion_events_revision_fk
         FOREIGN KEY (org_id, content_revision_id, item_type)
@@ -1304,12 +1537,14 @@ export async function down(db: Kysely<unknown>): Promise<void> {
 
   await sql`
     ALTER TABLE elearning_course_version_items
+      DROP CONSTRAINT elearning_course_version_items_content_revision_identity_uniq,
       DROP CONSTRAINT elearning_course_version_items_external_revision_fk,
       DROP CONSTRAINT elearning_course_version_items_article_revision_fk,
       DROP CONSTRAINT elearning_course_version_items_completion_policy_chk,
       DROP CONSTRAINT elearning_course_version_items_item_shape_chk,
       DROP CONSTRAINT elearning_course_version_items_position_chk,
       DROP CONSTRAINT elearning_course_version_items_item_type_chk,
+      DROP COLUMN canonical_content_revision_id,
       DROP COLUMN external_link_revision_id,
       DROP COLUMN article_revision_id
   `.execute(db)

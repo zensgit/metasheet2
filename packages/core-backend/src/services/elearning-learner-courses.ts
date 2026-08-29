@@ -291,6 +291,7 @@ SELECT
   item.id AS item_id,
   item.item_type AS item_type,
   item.position AS item_position,
+  revision.id AS item_revision_id,
   revision.title AS item_title,
   evidence.completed_at AS item_completed_at,
   evidence.item_type AS evidence_item_type,
@@ -664,6 +665,7 @@ function assignmentFor(
 
 function mapContentItem(row: Record<string, unknown>): ElearningLearnerContentItem {
   const itemId = requireUuid(row.item_id)
+  const itemRevisionId = requireUuid(row.item_revision_id)
   const itemType = asText(row.item_type)
   if (itemType !== 'article' && itemType !== 'external_link') fail('unavailable')
   const completedAt = optionalIsoTimestamp(row.item_completed_at)
@@ -673,7 +675,7 @@ function mapContentItem(row: Record<string, unknown>): ElearningLearnerContentIt
     }
   } else if (
     row.evidence_item_type !== itemType
-    || row.evidence_revision_id == null
+    || requireUuid(row.evidence_revision_id) !== itemRevisionId
   ) fail('unavailable')
   return {
     itemId,

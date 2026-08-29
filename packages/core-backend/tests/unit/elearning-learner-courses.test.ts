@@ -216,6 +216,7 @@ function contentRow(over: Record<string, unknown> = {}): Record<string, unknown>
     item_id: ARTICLE_ITEM,
     item_type: 'article',
     item_position: 1,
+    item_revision_id: ARTICLE_REVISION,
     item_title: 'Safe article',
     item_completed_at: null,
     evidence_item_type: null,
@@ -492,6 +493,7 @@ describe('elearning learner courses public mapping', () => {
         item_id: LINK_ITEM,
         item_type: 'external_link',
         item_position: 2,
+        item_revision_id: LINK_REVISION,
         item_title: 'External reference',
         item_completed_at: COMPLETED_AT,
         evidence_item_type: 'external_link',
@@ -544,6 +546,16 @@ describe('elearning learner courses public mapping', () => {
       orgId: ORG,
       userId: USER,
     })).resolves.toMatchObject([{ completed: true }])
+
+    const wrongRevision = createMemoryDb([contentRow({
+      item_completed_at: COMPLETED_AT,
+      evidence_item_type: 'article',
+      evidence_revision_id: LINK_REVISION,
+    })])
+    await expect(listElearningLearnerCourses(wrongRevision.db, {
+      orgId: ORG,
+      userId: USER,
+    })).rejects.toMatchObject({ code: 'unavailable' })
   })
 
   it('returns the exact public DTO for an assigned not-started course and keeps expired deadlines', async () => {

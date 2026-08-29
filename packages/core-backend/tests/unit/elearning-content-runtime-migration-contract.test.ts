@@ -34,7 +34,14 @@ describe('elearning content runtime migration contract', () => {
 
   it('replaces video-exam publication cardinality with item and per-type readiness', async () => {
     expect(ELEARNING_CONTENT_COURSE_STATE_BODY).toContain(
-      'at least one valid item is required',
+      'unsupported item family',
+    )
+    expect(ELEARNING_CONTENT_COURSE_STATE_BODY).toContain('count(*) = 2')
+    expect(ELEARNING_CONTENT_COURSE_STATE_BODY).toContain(
+      "count(*) FILTER (WHERE item_type = 'video') = 1",
+    )
+    expect(ELEARNING_CONTENT_COURSE_STATE_BODY).toContain(
+      "item_type IN ('article', 'external_link')",
     )
     expect(ELEARNING_CONTENT_COURSE_STATE_BODY).toContain("i.item_type = 'article'")
     expect(ELEARNING_CONTENT_COURSE_STATE_BODY).toContain("i.item_type = 'external_link'")
@@ -54,12 +61,18 @@ describe('elearning content runtime migration contract', () => {
     expect(source).toContain('effective_ms IS NULL')
     expect(source).toContain('max_position_ms IS NULL')
     expect(source).not.toContain('COALESCE(media_duration_ms, 0)')
+    expect(source).toContain('canonical_content_revision_id')
+    expect(source).toContain('elearning_open_completion_events_item_fk')
   })
 
   it('uses pg_catalog semantics for checks, immutable functions, and triggers', async () => {
     const source = await fs.readFile(MIGRATION_SOURCE, 'utf8')
     for (const token of [
       'pg_get_constraintdef',
+      'pg_get_expr',
+      'pg_attribute',
+      'attnotnull',
+      'attgenerated',
       'pg_proc',
       'pg_trigger',
       'prosecdef',
