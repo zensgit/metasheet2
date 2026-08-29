@@ -1,7 +1,7 @@
 # Time Machine Phase D2-D7 verification report
 
 **Status:** MERGED FOUNDATION / LOCAL CLOSEOUT CANDIDATE HOLD. PR #5305 is
-merged. Local candidate `7fcc57d9ec31e5d8735105a3cccabdec181db06d` is
+merged. Local candidate `9c5c082a53a26e4ae55f02b1724b99826e9abb95` is
 replayed onto then-current main and locally verified, but not pushed or remotely
 verified. No staging, flag, deployment, or production acceptance claim.
 
@@ -33,8 +33,9 @@ verified. No staging, flag, deployment, or production acceptance claim.
 | local true-merge replay | `c1863ea288f4a23a0736b6984c51d8dfa867b714` |
 | first Opus fix-forward | `a9835b0efa1af52408b5a8848af2247f05715e4d` |
 | post-merge closeout code head | `7fcc57d9ec31e5d8735105a3cccabdec181db06d` |
-| post-merge closeout code tree | `0b26a48378bbee3c1b0531c77edb13dcf538ee24` |
-| prior report-only carriers | `886a24da5d1f4533a40b5310ec0dd2510523b105`, `6f468e3f211713483c02d0ab8a7cb747fc7078a7` |
+| final mutation-locked code/test head | `9c5c082a53a26e4ae55f02b1724b99826e9abb95` |
+| post-merge closeout code/test tree | `3831f7c62a13e296715dbfb1f18becfacba82fb2` |
+| prior report-only carriers | `886a24da5d1f4533a40b5310ec0dd2510523b105`, `6f468e3f211713483c02d0ab8a7cb747fc7078a7`, `332b13efd87e3352250c6ffa39be0a95ef01b5c4` |
 | post-merge closeout remote CI | not run |
 | flags | unchanged and OFF |
 | production | not accessed |
@@ -69,19 +70,19 @@ merge still does not authorize runtime enablement.
 
 ### Post-merge local closeout checks
 
-Candidate `7fcc57d9ec` closes the later review residuals without changing a
+Candidate `9c5c082a53` closes the later review residuals without changing a
 migration, workflow, flag, writer, archive format, or provider contract:
 
 - pre-fix catalog test: **17 failures / 48 tests**, each malformed successful
   response resolved instead of rejecting; fixed client: **48/48 PASS**;
 - pre-fix application test: **1 failure / 10 tests**, because a never-resolving
   in-flight worker had no ten-second failure; fixed application: **10/10 PASS**;
-- final archive client: **1 file / 59 tests PASS**;
-- client plus mounted modal neighbor: **2 files / 76 tests PASS**;
+- final archive client: **1 file / 78 tests PASS**;
+- client plus mounted modal neighbor: **2 files / 95 tests PASS**;
 - application and server wiring neighbors: **2 files / 17 tests PASS**;
 - current-main D5-D7 unit set: **18 files / 210 tests PASS**;
 - Required Web: **406 files / 5,150 tests PASS**. This required selector does
-  not include the archive client spec; the direct **59/59** run is its evidence;
+  not include the archive client spec; the direct **78/78** run is its evidence;
 - Time Machine archive CI wiring and fail-not-skip: **6/6 + 1/1 PASS**;
 - web and core-backend typecheck: **PASS**;
 - diff-check: **PASS**;
@@ -273,6 +274,11 @@ outside this change. It was not edited or misreported as fixed.
 | remove the shared job-snapshot validator | accept/read/resume/cancel each RED by resolving malformed success; restored client **59/59 PASS** |
 | remove stop-promise memoization | reentrant stop is no longer the same rejected promise; shutdown wiring RED |
 | route SIGTERM/SIGINT around `stopForSignal` | static runtime-registration contract RED; restored backend neighbors **17/17 PASS** |
+| remove exact preview/execute key equality | extra-key preview and execute cases both RED |
+| accept arbitrary preview/execute mode strings | both invalid-mode cases RED |
+| accept any numeric count | preview negative count plus execute negative/fractional counts RED |
+| skip preview revert-row validation | malformed `fieldIds` case RED |
+| ignore executable/blocked/identity coherence | both incoherent preview cases RED |
 
 The lease-reclaim mutation was restored with `apply_patch`; the same two focused
 real-DB legs then passed **2/2**. Runtime source is byte-restored; only tests and
@@ -397,9 +403,19 @@ independent operation cases, and the runtime-registration source contract. The
 retained P3 boundaries are the fixed ten-second stop policy, the
 non-discriminating canonical-loop rejection branch, the redundant catalog
 key-order clause, the overlapping sheet-ID guard, and the distinction between
-direct client evidence and the Required Web selector. This report names both
-prior report carriers. Final exact-head independent re-review remains required
-before landing.
+direct client evidence and the Required Web selector. This report names the
+prior report carriers.
+
+Sol's exact review then found **0 P1 / 1 P2 / 0 P3**: the validators were exact,
+but the tests only exercised null, missing-data, 204, and empty-body successes.
+`9c5c082a53` adds 11 truthy malformed preview objects and eight truthy malformed
+execute objects. They reach the validators and cover missing/extra keys, every
+preview enum plus execute mode, invalid UUID/decimal/identity/count shapes,
+malformed summary rows, and both executable-state incoherencies. The five
+category mutations above turned the intended cases red. Sol reran the final
+**78/78** client file and returned **0 P1 / 0 P2 / 0 P3**. The landing remains
+HOLD for current-main replay, exact-head remote CI, and the provider/staging
+boundaries; the local refute-first gate is closed.
 
 The same review cycle exposed malformed job-list elements and led to
 `4d3a50c627`. Sol then reviewed that exact two-file delta, ran the focused spec at
@@ -428,7 +444,7 @@ owner/provider or staging/production proof:
 - current-main local integration and exact-worktree gates: passed;
 - PR #5305 merged at `fac252067a`; its product-code matrix reached `48 SUCCESS /
   1 intentional SKIPPED / 0 failure` at `73d3187c8b` before the report carrier;
-- local closeout `7fcc57d9ec` has no remote matrix or landing authorization;
+- local closeout `9c5c082a53` has no current-main replay, remote matrix, or landing authorization;
 - flags: OFF;
 - production: untouched.
 
