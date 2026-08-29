@@ -1,7 +1,7 @@
 # Time Machine Phase D2-D7 verification report
 
 **Status:** MERGED FOUNDATION / LOCAL CLOSEOUT CANDIDATE HOLD. PR #5305 is
-merged. Local candidate `a9835b0efa1af52408b5a8848af2247f05715e4d` is
+merged. Local candidate `7fcc57d9ec31e5d8735105a3cccabdec181db06d` is
 replayed onto then-current main and locally verified, but not pushed or remotely
 verified. No staging, flag, deployment, or production acceptance claim.
 
@@ -31,9 +31,10 @@ verified. No staging, flag, deployment, or production acceptance claim.
 | post-merge closeout original base | `3f30d8eb4f27f9972b640e2d69e2c3dab2837ae5` |
 | then-current main replay parent | `5eb83055937ebecc9be690bcf721a8cc89ca27d0` |
 | local true-merge replay | `c1863ea288f4a23a0736b6984c51d8dfa867b714` |
-| post-merge closeout code head | `a9835b0efa1af52408b5a8848af2247f05715e4d` |
-| post-merge closeout code tree | `bb2571ff6a5a674a8d69df4b830136e105eab92e` |
-| prior report-only carrier | `886a24da5d1f4533a40b5310ec0dd2510523b105` |
+| first Opus fix-forward | `a9835b0efa1af52408b5a8848af2247f05715e4d` |
+| post-merge closeout code head | `7fcc57d9ec31e5d8735105a3cccabdec181db06d` |
+| post-merge closeout code tree | `0b26a48378bbee3c1b0531c77edb13dcf538ee24` |
+| prior report-only carriers | `886a24da5d1f4533a40b5310ec0dd2510523b105`, `6f468e3f211713483c02d0ab8a7cb747fc7078a7` |
 | post-merge closeout remote CI | not run |
 | flags | unchanged and OFF |
 | production | not accessed |
@@ -68,21 +69,23 @@ merge still does not authorize runtime enablement.
 
 ### Post-merge local closeout checks
 
-Candidate `a9835b0efa` closes the later review residuals without changing a
+Candidate `7fcc57d9ec` closes the later review residuals without changing a
 migration, workflow, flag, writer, archive format, or provider contract:
 
 - pre-fix catalog test: **17 failures / 48 tests**, each malformed successful
   response resolved instead of rejecting; fixed client: **48/48 PASS**;
 - pre-fix application test: **1 failure / 10 tests**, because a never-resolving
   in-flight worker had no ten-second failure; fixed application: **10/10 PASS**;
-- final archive client: **1 file / 54 tests PASS**;
-- client plus mounted modal neighbor: **2 files / 71 tests PASS**;
-- application and server wiring neighbors: **2 files / 16 tests PASS**;
-- current-main D5-D7 unit set: **18 files / 209 tests PASS**;
-- Required Web: **406 files / 5,150 tests PASS**;
+- final archive client: **1 file / 59 tests PASS**;
+- client plus mounted modal neighbor: **2 files / 76 tests PASS**;
+- application and server wiring neighbors: **2 files / 17 tests PASS**;
+- current-main D5-D7 unit set: **18 files / 210 tests PASS**;
+- Required Web: **406 files / 5,150 tests PASS**. This required selector does
+  not include the archive client spec; the direct **59/59** run is its evidence;
 - Time Machine archive CI wiring and fail-not-skip: **6/6 + 1/1 PASS**;
 - web and core-backend typecheck: **PASS**;
 - diff-check: **PASS**;
+- `src/index.ts` package-scoped ESLint exits zero with existing warnings;
 - whole-file web client ESLint still reports the pre-existing unused
   `MultitableCommentReaction` import at line 40; origin/main blame predates this
   closeout and the unrelated import was not edited.
@@ -265,10 +268,11 @@ outside this change. It was not edited or misreported as fixed.
 | omit test-only trigger bypass for immutable token burns | lease suite RED at immutable burn cleanup; **6 tests RED** |
 | remove the catalog null-body guard | both 204 and empty-200 cases RED with raw `TypeError`; restored **53/53 PASS** |
 | remove the job-list null-body guard | both 204 and empty-200 cases RED with raw `TypeError`; restored **53/53 PASS** |
-| remove the preview object guard | 204/empty preview case RED by resolving `undefined`; restored client **54/54 PASS** |
-| remove the accept-job snapshot guard | 204/empty accept case RED by resolving `undefined`; restored client **54/54 PASS** |
-| suppress worker-stop failure propagation | shutdown wiring RED because `server.stop()` resolved; restored backend neighbors **16/16 PASS** |
-| map failed signal shutdown to exit 0 | signal wiring RED at expected exit 1; restored backend neighbors **16/16 PASS** |
+| remove the exact preview validator | preview case RED by resolving `data: null`; restored client **59/59 PASS** |
+| remove the exact execute validator | execute case RED by resolving malformed success; restored client **59/59 PASS** |
+| remove the shared job-snapshot validator | accept/read/resume/cancel each RED by resolving malformed success; restored client **59/59 PASS** |
+| remove stop-promise memoization | reentrant stop is no longer the same rejected promise; shutdown wiring RED |
+| route SIGTERM/SIGINT around `stopForSignal` | static runtime-registration contract RED; restored backend neighbors **17/17 PASS** |
 
 The lease-reclaim mutation was restored with `apply_patch`; the same two focused
 real-DB legs then passed **2/2**. Runtime source is byte-restored; only tests and
@@ -381,11 +385,21 @@ An Opus 5 refute-first review of the resulting closeout found **0 P1 / 2 P2 /
 4 P3**. Its two P2 findings were accepted: six adjacent archive operations could
 still resolve `undefined` on 204/empty success, and the SIGTERM/SIGINT path could
 exit 0 after a worker-drain failure. `a9835b0efa` closes both with the four
-RED/restore mutations above. The retained P3 boundaries are the fixed ten-second
-stop policy, the non-discriminating canonical-loop rejection branch, the
-redundant catalog key-order clause, and the need to name the report carrier.
-This report now names the prior carrier; final exact-head re-review remains
-required before landing.
+initial RED/restore mutations.
+
+Opus 5 then re-reviewed the report-bound candidate and found **0 P1 / 3 P2 /
+5 P3**. The three P2 findings were accepted: `data: null` or missing `data`
+could still pass the object-only preview/execute check; a second signal during a
+failed first shutdown could resolve through the old early return; and the tests
+called the private mapper without pinning real signal registration. `7fcc57d9ec`
+closes all three with exact response validators, one memoized stop promise, six
+independent operation cases, and the runtime-registration source contract. The
+retained P3 boundaries are the fixed ten-second stop policy, the
+non-discriminating canonical-loop rejection branch, the redundant catalog
+key-order clause, the overlapping sheet-ID guard, and the distinction between
+direct client evidence and the Required Web selector. This report names both
+prior report carriers. Final exact-head independent re-review remains required
+before landing.
 
 The same review cycle exposed malformed job-list elements and led to
 `4d3a50c627`. Sol then reviewed that exact two-file delta, ran the focused spec at
@@ -414,7 +428,7 @@ owner/provider or staging/production proof:
 - current-main local integration and exact-worktree gates: passed;
 - PR #5305 merged at `fac252067a`; its product-code matrix reached `48 SUCCESS /
   1 intentional SKIPPED / 0 failure` at `73d3187c8b` before the report carrier;
-- local closeout `a9835b0efa` has no remote matrix or landing authorization;
+- local closeout `7fcc57d9ec` has no remote matrix or landing authorization;
 - flags: OFF;
 - production: untouched.
 

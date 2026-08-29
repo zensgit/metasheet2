@@ -25,7 +25,7 @@ candidate SHA:
 2. Land and remotely verify the post-merge closeout that bounds a stuck worker
    drain, exits non-zero when shutdown cannot drain it, and rejects malformed
    catalog/job-list/operation success data. At this runbook revision it is local
-   candidate `a9835b0efa`, not a deployed build.
+   candidate `7fcc57d9ec`, not a deployed build.
 3. The object store is independently durable from the hot database and the
    application host. Same-host local files do not satisfy this gate.
 4. Key custody uses a staging KMS/test key and never exposes plaintext key

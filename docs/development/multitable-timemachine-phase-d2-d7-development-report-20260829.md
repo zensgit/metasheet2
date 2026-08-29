@@ -2,11 +2,12 @@
 
 **Status:** MERGED FOUNDATION / LOCAL CLOSEOUT CANDIDATE HOLD. PR #5305 merged
 through `fac252067ab1c22d910266ac2ba29016c2b5fe43` on 2026-08-29. The local
-closeout candidate `a9835b0efa1af52408b5a8848af2247f05715e4d` is replayed onto
+closeout candidate `7fcc57d9ec31e5d8735105a3cccabdec181db06d` is replayed onto
 then-current main `5eb83055937ebecc9be690bcf721a8cc89ca27d0`. It closes the
 disclosed malformed catalog/job-list/preview/execute/job success responses,
-bounds a stuck restore-worker drain at ten seconds, and makes a failed signal
-shutdown exit non-zero. The candidate is local only: it has not
+bounds a stuck restore-worker drain at ten seconds, makes every concurrent stop
+caller observe the same result, and makes a failed signal shutdown exit
+non-zero. The candidate is local only: it has not
 been pushed, reviewed by remote CI, staged, or deployed. No Time Machine flag is
 enabled and production was not accessed.
 
@@ -45,9 +46,10 @@ enabled and production was not accessed.
 | local true-merge replay | `c1863ea288f4a23a0736b6984c51d8dfa867b714` |
 | empty catalog response hardening | `0d5fd1adf51f0447722d9d23fb675797f108da3f` |
 | empty job-list response hardening | `0767a3781e2452c8693a33c6197a2c7bef6d9490` |
-| empty operation responses and shutdown failure hardening | `a9835b0efa1af52408b5a8848af2247f05715e4d` |
-| post-merge closeout code tree | `bb2571ff6a5a674a8d69df4b830136e105eab92e` |
-| prior report-only carrier | `886a24da5d1f4533a40b5310ec0dd2510523b105` |
+| first operation-response and shutdown fix-forward | `a9835b0efa1af52408b5a8848af2247f05715e4d` |
+| exact response-shape and stop-replay hardening | `7fcc57d9ec31e5d8735105a3cccabdec181db06d` |
+| post-merge closeout code tree | `0b26a48378bbee3c1b0531c77edb13dcf538ee24` |
+| prior report-only carriers | `886a24da5d1f4533a40b5310ec0dd2510523b105`, `6f468e3f211713483c02d0ab8a7cb747fc7078a7` |
 | post-merge closeout remote matrix | not run; local checkpoint only |
 
 The integration merge is a true two-parent merge of the final source evidence
@@ -212,6 +214,13 @@ not reveal. They were fixed on the same branch before closeout:
    through `server.stop()` and maps a failed SIGTERM/SIGINT shutdown to exit 1,
    while preserving the rule that the database pool stays open until the worker
    has definitely drained.
+8. Opus 5's re-review found three remaining discrimination gaps. `7fcc57d9ec`
+   validates the exact preview and execute wire shapes, so successful envelopes
+   with `data: null`, missing `data`, 204, or an empty body all fail closed. The
+   same job-snapshot validator is exercised independently by accept, read,
+   resume, and cancel. Server shutdown now memoizes one stop promise, so a second
+   SIGTERM/SIGINT caller observes the original failure instead of resolving, and
+   the runtime registration source is pinned to the non-zero failure mapper.
 
 ## 3. Architecture boundaries preserved
 
@@ -238,7 +247,7 @@ These are real residuals, not documentation polish:
 | no true OS-process restart exercise | the 5,001-record test proves same-process lease takeover, not host/process recovery |
 | fixed ten-second worker-stop bound | the bound is fail-closed but is not composition-configurable; changing it is a separate runtime policy decision |
 | sheet ID discovery comparison overlaps stronger generation/job guards | defense remains, but removing that comparison alone is not mutation-discriminating |
-| post-merge closeout candidate is local only | `a9835b0efa` has local gates plus Sonnet 5 and Opus 5 fix-forwards, but no push, PR, final exact-head review, or remote matrix |
+| post-merge closeout candidate is local only | `7fcc57d9ec` has local gates and Opus 5 fix-forwards, but no push, PR, final exact-head review, or remote matrix |
 
 The provider rows cannot be closed by choosing an adapter implicitly. D1 leaves
 KMS/key custody and the production object backend as explicit owner decisions.
@@ -259,7 +268,7 @@ failure domain.
 - PR #5305 was merged through `fac252067a`; this report now records that result
   rather than preserving the obsolete Draft claim.
 - The post-merge closeout branch remains local. It was not pushed and no PR was
-  opened for `a9835b0efa`.
+  opened for `7fcc57d9ec`.
 - No deployment, dispatch, staging action, or production access was performed.
 - No flag was enabled or changed.
 - D7 adds only the bounded durable-list and application-runtime slices described
@@ -272,7 +281,7 @@ failure domain.
 
 1. Obtain the explicit owner choices for KMS/key custody and the staging/production
    object backend; do not infer them from another product surface.
-2. Complete final independent review of `a9835b0efa`, replay again if main moves,
+2. Complete final independent review of `7fcc57d9ec`, replay again if main moves,
    and require complete exact-head remote checks before a separate landing
    decision. Local green evidence is not that decision.
 3. Obtain a new owner staging-only authorization and execute the D7 runbook,
