@@ -148,9 +148,11 @@ async function mountFlow(
     width: number
     height: number
     template?: typeof COMPLEX_TEMPLATE | typeof LINEAR_TEMPLATE
+    route?: 'edit' | 'new'
   },
 ): Promise<void> {
   const template = options.template ?? COMPLEX_TEMPLATE
+  const route = options.route ?? 'edit'
   await page.setViewportSize({ width: options.width, height: options.height })
   await page.route(/\/api\/approval-templates\/afb_harness_1(?:\?.*)?$/, (route) => route.fulfill({
     status: 200,
@@ -173,12 +175,14 @@ async function mountFlow(
     body: JSON.stringify({ plugins: [] }),
   }))
   await page.goto(
-    `/verification/approval-form-builder-mounted-harness.html?canvasV2=${options.canvasV2 ? 'on' : 'off'}&route=edit&networkTemplate=on`,
+    `/verification/approval-form-builder-mounted-harness.html?canvasV2=${options.canvasV2 ? 'on' : 'off'}&route=${route}&networkTemplate=on`,
   )
   await page.waitForFunction(() => (
     window as unknown as { __AFB_MOUNT_READY__?: boolean }
   ).__AFB_MOUNT_READY__ === true)
-  await expect(page.locator('[data-testid="approval-template-name"]')).toHaveValue(template.name)
+  await expect(page.locator('[data-testid="approval-template-name"]')).toHaveValue(
+    route === 'edit' ? template.name : '',
+  )
   await page.click('[data-testid="approval-template-section-flow"]')
 }
 
@@ -293,6 +297,34 @@ test('ordinary linear editable templates promote into Canvas without exposing th
   await expect(page.locator('[data-testid="approval-template-add-step"]')).toHaveCount(0)
   await expect(page.locator('[data-testid="approval-template-step-spine"]')).toHaveCount(0)
   await expect(page.locator('[data-testid="approval-template-step-row"]')).toHaveCount(0)
+  await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('已保存')
+
+  await canvasNodeSelector(page, 'approval_1').click()
+  await page.click('[data-testid="approval-canvas-inspector-rename"]')
+  await page.fill('[data-testid="approval-canvas-inspector-rename-input"]', '财务复核')
+  await page.press('[data-testid="approval-canvas-inspector-rename-input"]', 'Enter')
+  await expect(canvasNodeSelector(page, 'approval_1')).toHaveAttribute('aria-label', '编辑审批节点「财务复核」')
+  await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('有未保存更改')
+})
+
+test('/new promotes its starter flow into Canvas without manufacturing a dirty draft', async ({ page }) => {
+  await mountFlow(page, {
+    canvasV2: true,
+    width: 1440,
+    height: 900,
+    route: 'new',
+  })
+
+  await expect(page.locator('[data-testid="approval-canvas-workspace"]')).toBeVisible()
+  await expect(canvasNode(page, 'approval_1')).toHaveAttribute('data-node-type', 'approval')
+  await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('新模板')
+
+  await canvasNodeSelector(page, 'approval_1').click()
+  await page.click('[data-testid="approval-canvas-inspector-rename"]')
+  await page.fill('[data-testid="approval-canvas-inspector-rename-input"]', '新建画布审批')
+  await page.press('[data-testid="approval-canvas-inspector-rename-input"]', 'Enter')
+  await expect(canvasNodeSelector(page, 'approval_1')).toHaveAttribute('aria-label', '编辑审批节点「新建画布审批」')
+  await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('有未保存更改')
 })
 
 test('flag OFF keeps the explicit structured-list rollback and does not mount Canvas', async ({ page }) => {
@@ -303,4 +335,33 @@ test('flag OFF keeps the explicit structured-list rollback and does not mount Ca
   await expect(page.locator('[data-testid="approval-graph-node-row"]')).toHaveCount(
     COMPLEX_TEMPLATE.approvalGraph.nodes.length,
   )
+})
+
+test('flag OFF keeps the linear legacy editor editable and saves its real graph', async ({ page }) => {
+  await mountFlow(page, {
+    canvasV2: false,
+    width: 1440,
+    height: 900,
+    template: LINEAR_TEMPLATE,
+  })
+
+  await expect(page.locator('[data-testid="approval-canvas-workspace"]')).toHaveCount(0)
+  await expect(page.locator('[data-testid="approval-template-step-spine"]')).toBeVisible()
+  const stepRow = page.locator('[data-testid="approval-template-step-row"]').first()
+  await expect(stepRow).toBeVisible()
+  await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('已保存')
+
+  await stepRow.locator('input').first().fill('财务复核')
+  await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('有未保存更改')
+
+  const updateRequest = page.waitForRequest((request) => (
+    request.method() === 'PATCH'
+      && /\/api\/approval-templates\/afb_harness_1(?:\?.*)?$/.test(request.url())
+  ))
+  await page.click('[data-testid="approval-template-save-button"]')
+  const payload = (await updateRequest).postDataJSON() as {
+    approvalGraph?: { nodes?: Array<{ key?: string; name?: string }> }
+  }
+  expect(payload.approvalGraph?.nodes?.find((node) => node.key === 'approval_1')?.name).toBe('财务复核')
+  await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('已保存')
 })
