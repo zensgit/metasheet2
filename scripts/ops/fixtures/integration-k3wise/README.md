@@ -17,7 +17,7 @@ Fixtures and mock server for the K3 WISE Live PoC chain. Used to:
 | `mock-sqlserver-executor.mjs` | Mock SQL executor: implements the real K3 SQL channel `select()` / `insertMany()` contract, keeps legacy `query()` / `exec()` probes, and rejects core-table writes. |
 | `mock-sqlserver-executor.test.mjs` | Contract test for SQL mock safety parsing and real channel compatibility, including CTE-wrapped writes, `MERGE`, and bracket-qualified K3 core tables. |
 | `fixture-contract.test.mjs` | Contract test proving the copy-and-edit JSON templates still match the exported CLI samples and compile into PASS preflight/evidence results. |
-| `run-mock-poc-demo.mjs` | End-to-end smoke: loads gate sample → preflight → spins up mock K3 → adapter Save-only → SQL channel read/upsert probes → evidence compile → asserts PASS. |
+| `run-mock-poc-demo.mjs` | End-to-end smoke — **read chain + permanent write-fence proof** (E4 / G-4). Loads gate sample → preflight → spins up mock K3 → read chain (testConnection, SQL readonly probe, stock-prep intake, C6 read → clean → dry-run with a real GetDetail round trip) → proves K3 material, BOM and C6-apply writes are permanently refused with `K3_WISE_EXTERNAL_WRITE_DISABLED` (0 login, 0 Save, 0 Submit, 0 Audit; a pre-seeded approval token left unconsumed) → evidence compile on a labeled synthetic packet → asserts PASS. It no longer performs any Save: K3 external write-back is permanently banned. |
 
 ## Local verification
 

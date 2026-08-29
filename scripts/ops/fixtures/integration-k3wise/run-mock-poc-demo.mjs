@@ -3,19 +3,36 @@
 // before any customer-facing live test. NOT a substitute for a real customer
 // run — see README.md.
 //
+// CONVERTED FOR E4 / G-4 (HG v1.2 §10 — K3 Save/Submit/Audit external write-back is PERMANENTLY
+// BANNED, fixed values-free code `K3_WISE_EXTERNAL_WRITE_DISABLED`, four independent refusal
+// layers). This demo described the pre-fence world: steps 6, 6b and 7d each drove a real Save
+// against the mock and asserted rows were written. Those Saves are now structurally unreachable —
+// layer 4 refuses inside the adapter's `upsert` BEFORE `login()`.
+//
+// The conversion is deliberate and is the same one applied to the six plugin suites: a leg that
+// asserted "the write happened" becomes a leg that asserts "the write is refused, with the fixed
+// code, and K3 saw nothing". Every READ-ONLY assertion is kept — the demo is now also the
+// end-to-end proof of the §15.2 E4-05 property (the fence is NOT a blanket deny: reads, cleaning,
+// intake, the C6 planner and GetDetail all still work over real HTTP against the mock).
+//
 // Pipeline this exercises:
 //   1. Load gate-sample.json
 //   2. preflight: buildPacket(gate) → packet (in-memory, no disk write)
 //   3. Spin up mock K3 WebAPI server (ephemeral port, in-process)
 //   4. Spin up mock SQL Server executor (in-process)
 //   5. Adapter testConnection on both
-//   6. Adapter Material Save-only upsert against mock K3 (autoSubmit=false, autoAudit=false)
+//   6. E4 FENCE PROOF (material): adapter upsert is REFUSED with the fixed code; the mock records
+//      ZERO new calls — no login, no Save
+//   6b. E4 FENCE PROOF (BOM): the ban is connector-wide, not material-only — same refusal, same
+//      zero-call proof
 //   7. SQL channel read/upsert probes to verify the mock matches channel contract
-//   7d. THE RULED CHAIN end-to-end: read -> clean -> C6 dry-run -> approval token ->
-//       Save-only -> GetDetail read-back (value-verified) + never-saved negative control
+//   7d. THE RULED CHAIN, as far as it now goes: read -> clean -> C6 dry-run (REAL GetDetail round
+//       trip against the mock) -> NO token minted -> apply REFUSED without consuming a pre-seeded
+//       token -> K3's own state confirms the material was never written, and that read failure
+//       carries a READ-ONLY code, never the write-fence code
 //   7a-2. The row just READ is fed to the REAL stock-prep intake (no per-connector mapper):
 //         0 row errors, key stable and source-namespaced, incomplete row rejected
-//   8. Compose evidence JSON (hardcoded for the values we just produced)
+//   8. Compose evidence JSON (synthetic literals — see the note at step 8)
 //   9. evidence compiler: buildEvidenceReport(packet, evidence) → assert PASS
 //
 // Run: node scripts/ops/fixtures/integration-k3wise/run-mock-poc-demo.mjs
@@ -87,7 +104,9 @@ async function main() {
   })
   console.log('✓ step 4: mock SQL executor ready (t_ICItem readonly with 1 canned row)')
 
-  let upsertResult, bomUpsertResult, sqlReadResult, sqlWriteRejected
+  // `upsertResult` / `bomUpsertResult` are gone: E4 makes both writes unreachable, so there is no
+  // result object to carry into the evidence compiler (see the note at step 8).
+  let sqlReadResult, sqlWriteRejected
   try {
     // 5a. K3 adapter testConnection
     const k3System = {
@@ -138,28 +157,64 @@ async function main() {
     assert(sqlConn.ok === true, 'SQL channel testConnection should succeed against mock')
     console.log('✓ step 5b: SQL channel testConnection ok against mock')
 
-    // 6. K3 Material Save-only upsert
-    upsertResult = await k3Adapter.upsert({
+    // 6. E4 FENCE PROOF — K3 Material write is PERMANENTLY REFUSED.
+    //
+    // CONVERTED (E4 / G-4). This asserted `written === 2` against the mock. Layer 4 of the
+    // permanent fence now refuses inside the adapter's `upsert`, ahead of `login()`, so the two
+    // Saves cannot happen — and neither can the login that would have preceded them.
+    //
+    // The zero-call proof is a DELTA, not an absolute: step 5a's testConnection legitimately put
+    // calls on the mock already. Measuring the delta is what makes "0 login, 0 Save" attributable
+    // to THIS attempt rather than to an idle server.
+    const callsBeforeMaterialWrite = mockK3.calls.length
+    const materialRefusal = await k3Adapter.upsert({
       object: 'material',
       records: [
         { FNumber: 'MAT-MOCK-001', FName: 'Mock material A' },
         { FNumber: 'MAT-MOCK-002', FName: 'Mock material B' },
       ],
       keyFields: ['FNumber'],
-      options: { autoSubmit: false, autoAudit: false },
-    })
-    assert(upsertResult.written === 2, `expected 2 written, got ${upsertResult.written}`)
-    assert(upsertResult.failed === 0, `expected 0 failed, got ${upsertResult.failed}`)
-    assert(upsertResult.metadata.autoSubmit === false, 'autoSubmit must remain false (PoC safety)')
-    assert(upsertResult.metadata.autoAudit === false, 'autoAudit must remain false (PoC safety)')
-    const submitCalls = mockK3.calls.filter((call) => call.pathname === '/K3API/Material/Submit')
-    const auditCalls = mockK3.calls.filter((call) => call.pathname === '/K3API/Material/Audit')
-    assert(submitCalls.length === 0, `expected 0 Submit calls (Save-only), got ${submitCalls.length}`)
-    assert(auditCalls.length === 0, `expected 0 Audit calls (Save-only), got ${auditCalls.length}`)
-    console.log(`✓ step 6: K3 Save-only upsert wrote 2 records, 0 Submit, 0 Audit (PoC safety preserved)`)
+      // The request-parameter enablement surface §10.1 names, tried at its most permissive.
+      options: { autoSubmit: true, autoAudit: true },
+    }).then(() => null, (error) => error)
+    assert(materialRefusal, 'E4: the K3 material write must be REFUSED, never performed')
+    assert(
+      materialRefusal.details?.code === 'K3_WISE_EXTERNAL_WRITE_DISABLED',
+      `E4: expected the fixed code K3_WISE_EXTERNAL_WRITE_DISABLED, got ${materialRefusal.details?.code}`,
+    )
+    const materialAttemptCalls = mockK3.calls.slice(callsBeforeMaterialWrite)
+    assert(
+      materialAttemptCalls.length === 0,
+      `E4: a refused write must reach K3 ZERO times (login included), got ${JSON.stringify(materialAttemptCalls.map((c) => c.pathname))}`,
+    )
+    assert(
+      mockK3.calls.filter((call) => call.pathname === '/K3API/Material/Save').length === 0,
+      'E4: zero Material/Save calls across the whole run',
+    )
+    assert(
+      mockK3.calls.filter((call) => call.pathname === '/K3API/Login').length === 0
+        || materialAttemptCalls.every((call) => call.pathname !== '/K3API/Login'),
+      'E4: the refusal precedes login — no login attributable to the write',
+    )
+    assert(
+      mockK3.calls.filter((call) => call.pathname === '/K3API/Material/Submit').length === 0,
+      'E4: zero Material/Submit calls',
+    )
+    assert(
+      mockK3.calls.filter((call) => call.pathname === '/K3API/Material/Audit').length === 0,
+      'E4: zero Material/Audit calls',
+    )
+    console.log('✓ step 6: K3 material write PERMANENTLY REFUSED (K3_WISE_EXTERNAL_WRITE_DISABLED); 0 login, 0 Save, 0 Submit, 0 Audit')
 
-    // 6b. K3 BOM Save-only upsert with v1 template fields.
-    bomUpsertResult = await k3Adapter.upsert({
+    // 6b. E4 FENCE PROOF — the ban is CONNECTOR-WIDE, not material-only.
+    //
+    // CONVERTED (E4 / G-4). This asserted a BOM Save reached the mock and inspected the v1 Data
+    // template payload on the wire. The BOM write leg is refused by the same layer-4 fence, so
+    // there is no wire payload to inspect. Keeping this step matters precisely because it proves
+    // the fence is not scoped to the profiled material object: BOM, which was never behind the
+    // named-profile guard, is refused identically.
+    const callsBeforeBomWrite = mockK3.calls.length
+    const bomRefusal = await k3Adapter.upsert({
       object: 'bom',
       records: [
         {
@@ -171,20 +226,27 @@ async function main() {
         },
       ],
       keyFields: ['FParentItemNumber'],
-      options: { autoSubmit: false, autoAudit: false },
-    })
-    assert(bomUpsertResult.written === 1, `expected 1 BOM written, got ${bomUpsertResult.written}`)
-    assert(bomUpsertResult.failed === 0, `expected 0 BOM failed, got ${bomUpsertResult.failed}`)
-    const bomSaveCalls = mockK3.calls.filter((call) => call.pathname === '/K3API/BOM/Save')
-    assert(bomSaveCalls.length === 1, `expected 1 BOM Save call, got ${bomSaveCalls.length}`)
-    const bomPayload = bomSaveCalls[0].body?.Data
-    assert(bomPayload?.FParentItemNumber === 'MAT-MOCK-001', 'BOM Save payload must include FParentItemNumber')
-    assert(bomPayload?.FChildItemNumber === 'MAT-MOCK-002', 'BOM Save payload must include FChildItemNumber')
-    assert(bomPayload?.FQty === 1, 'BOM Save payload must include FQty')
-    assert(bomPayload?.FUnitID === 'PCS', 'BOM Save payload must include FUnitID')
-    assert(bomPayload?.FEntryID === 1, 'BOM Save payload must include FEntryID')
-    assert(bomPayload?.sourceId === undefined, 'BOM Save payload must not include internal source fields')
-    console.log('✓ step 6b: K3 BOM Save-only upsert wrote 1 BOM with v1 Data template fields')
+      options: { autoSubmit: true, autoAudit: true },
+    }).then(() => null, (error) => error)
+    assert(bomRefusal, 'E4: the K3 BOM write must be REFUSED, never performed')
+    assert(
+      bomRefusal.details?.code === 'K3_WISE_EXTERNAL_WRITE_DISABLED',
+      `E4: expected the fixed code for BOM too, got ${bomRefusal.details?.code}`,
+    )
+    const bomAttemptCalls = mockK3.calls.slice(callsBeforeBomWrite)
+    assert(
+      bomAttemptCalls.length === 0,
+      `E4: the refused BOM write must reach K3 ZERO times, got ${JSON.stringify(bomAttemptCalls.map((c) => c.pathname))}`,
+    )
+    for (const bomPath of ['/K3API/BOM/Save', '/K3API/BOM/Submit', '/K3API/BOM/Audit']) {
+      assert(
+        mockK3.calls.filter((call) => call.pathname === bomPath).length === 0,
+        `E4: zero ${bomPath} calls across the whole run`,
+      )
+    }
+    // The Save BODY the old assertions read off the wire is still covered, off the wire, by
+    // k3-save-body-composer.parity.test.cjs (route preview ≡ the adapter's own buildSaveBody).
+    console.log('✓ step 6b: K3 BOM write PERMANENTLY REFUSED too — the ban is connector-wide; 0 login, 0 BOM Save/Submit/Audit')
 
     // 7. SQL channel contract probes + safety check
     try {
@@ -290,10 +352,24 @@ async function main() {
     assert(sqlWriteRejected, 'SQL safety: write to t_ICItem must be rejected')
     console.log('✓ step 7c: SQL safety guard rejected INSERT into t_ICItem (core table)')
 
-    // 7d. THE RULED CHAIN, end to end: 读 → 清洗 → dry-run → token(人工批准的机械代理)
-    // → K3 Material Save-only → GetDetail 回读验证. Every hop is the REAL module — the C6
-    // planner, the C6 K3 write profile, the K3 adapter over real HTTP to the mock server.
-    // The only fakes are the wire's far end and the token store.
+    // 7d. THE RULED CHAIN, as far as it now goes: 读 → 清洗 → C6 dry-run → (NO token) →
+    // apply PERMANENTLY REFUSED. Every hop is still the REAL module — the C6 planner, the C6 K3
+    // write profile, the K3 adapter over real HTTP to the mock server. The only fakes are the
+    // wire's far end and the token store.
+    //
+    // CONVERTED (E4 / G-4). Three things changed and each is asserted rather than dropped:
+    //   * the dry-run no longer mints an approval token and is never `ready` — for a permanently
+    //     refused target, `canApply: true` would be a lie a human is asked to approve;
+    //   * the Save leg becomes a refusal, driven with a token seeded straight into the store (the
+    //     realistic in-flight case: a token minted before the fence shipped, still inside its
+    //     TTL). The token must survive the refusal UNCONSUMED;
+    //   * the value-verified GetDetail read-back cannot exist, because the mock's GetDetail only
+    //     serves what a Save wrote. It is replaced by the stronger end-to-end fact: K3's OWN
+    //     STATE says the material is absent — the fence is proven from the far side of the wire,
+    //     not just from our call counters.
+    //
+    // Everything read-only in this block STAYS, and that is the point: §15.2 E4-05 requires the
+    // read/plan path to keep working, and a blanket deny would take this whole step out.
     try {
       const chainRows = [{ code: 'MAT-CHAIN-001', name: 'Chain material', spec: 'SPEC-CHAIN' }]
       const chainTarget = {
@@ -408,45 +484,130 @@ async function main() {
         maxRows: K3_WISE_C6_MAX_APPLY_ROWS,
       })
 
+      // --- READ + CLEAN + PLAN: unchanged, and required to stay green (E4-05) -----------------
+      const callsBeforeDryRun = mockK3.calls.length
       const chainDryRun = await dryRunExternalWrite(chainInputs())
-      assert(chainDryRun.status === 'ready', `chain dry-run must be ready, got ${chainDryRun.status}`)
-      assert(chainDryRun.dryRunToken, 'chain dry-run must mint the approval token')
-      assert(chainDryRun.counts.add === 1, 'a new material must plan as add')
+      assert(chainDryRun.counts.sourceRows === 1, 'the source read must still return the row')
+      assert(chainDryRun.counts.add === 1, 'a new material must still plan as add')
+      assert(chainDryRun.counts.failed === 0, 'the plan must have no failed rows')
+      // ANTI-BLANKET-DENY: the planner's per-row lookup is a REAL HTTP GetDetail round trip
+      // against the mock. If the fence had been implemented as a blanket deny, this would be
+      // zero and the whole "the read path still works" claim would be hollow.
+      const dryRunCalls = mockK3.calls.slice(callsBeforeDryRun)
+      assert(
+        dryRunCalls.some((call) => call.pathname === '/K3API/Material/GetDetail'),
+        'E4-05: the C6 dry-run must still reach K3 GetDetail — the fence must not be a blanket deny',
+      )
+      assert(
+        dryRunCalls.some((call) => call.pathname === '/K3API/Login'),
+        'E4-05: the READ path is still allowed to authenticate — the ban is on writes, not on reads',
+      )
+      assert(/^[0-9a-f]{64}$/.test(String(chainDryRun.revision)), 'a real dry-run revision must still be computed')
 
-      const chainApply = await applyExternalWrite({
-        ...chainInputs(),
-        dryRunToken: chainDryRun.dryRunToken,
-        applyUser: 'demo-operator',
+      // --- APPLY AUTHORISATION: E4 removes it -------------------------------------------------
+      assert(chainDryRun.status === 'not_applyable',
+        `E4: a K3 plan is never "ready", got ${chainDryRun.status}`)
+      assert(chainDryRun.canApply === false, 'E4: canApply must be false for a permanently refused target')
+      assert(chainDryRun.dryRunToken === null, 'E4: no approval token may be minted for a K3 target')
+      assert(chainDryRun.externalWriteApply?.permanentlyRefused === true,
+        'E4: the plan must carry the values-free permanent-refusal marker')
+      assert(chainDryRun.externalWriteApply?.refusalCode === 'K3_WISE_EXTERNAL_WRITE_DISABLED',
+        'E4: the marker must carry the fixed code')
+
+      // --- SAVE LEG: refused, and the token is NOT consumed -----------------------------------
+      // Seed a token that WOULD otherwise be presentable — the in-flight case a deployment of
+      // this fence actually meets. The refusal is the first statement of applyExternalWrite,
+      // ahead of consumeDryRunToken, so a refused apply must not burn it.
+      const seededToken = 'demo-preexisting-token'
+      const seededTokenKey = `integration:c6-write-dry-run-token:${seededToken}`
+      await tokenStore.set(seededTokenKey, {
+        pipelineId: chainPipeline.id,
+        tenantId: chainPipeline.tenantId,
+        workspaceId: chainPipeline.workspaceId ?? null,
+        dryRunUser: 'demo-operator',
+        dataSourceOwnerPrincipal: 'demo-owner',
+        revision: chainDryRun.revision,
+        counts: chainDryRun.counts,
+        maxRows: K3_WISE_C6_MAX_APPLY_ROWS,
+        createdAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
       })
-      assert(chainApply.counts.written === 1, `chain apply must write 1, got ${chainApply.counts.written}`)
+      const callsBeforeApply = mockK3.calls.length
+      const chainRefusal = await applyExternalWrite({
+        ...chainInputs(),
+        dryRunToken: seededToken,
+        applyUser: 'demo-operator',
+      }).then(() => null, (error) => error)
+      assert(chainRefusal, 'E4: the chain apply must be REFUSED')
+      assert(chainRefusal.code === 'K3_WISE_EXTERNAL_WRITE_DISABLED',
+        `E4: expected the fixed code, got ${chainRefusal.code}`)
+      assert(chainRefusal.status === 403, `E4: the refusal must be a 403, got ${chainRefusal.status}`)
+      assert(await tokenStore.get(seededTokenKey),
+        'E4: an early refusal must leave the dry-run token UNCONSUMED')
+      const applyCalls = mockK3.calls.slice(callsBeforeApply)
+      assert(applyCalls.length === 0,
+        `E4: the refused apply must reach K3 ZERO times, got ${JSON.stringify(applyCalls.map((c) => c.pathname))}`)
 
-      // THE LAST LINK — post-save GetDetail read-back, value-verified (not presence-only):
-      // the read must return the material JUST WRITTEN with the APPROVED name carried through.
+      // --- THE FAR SIDE OF THE WIRE: K3's own state says nothing was written ------------------
+      // Stronger than a call counter: the mock's GetDetail serves only what a Save actually
+      // stored, so a business-level MISS here is K3 itself confirming the chain wrote nothing.
+      // It is also E4-06 in demo context — a READ failure must surface a READ-ONLY code and must
+      // never be swallowed into the write-fence code.
       const readBackAdapter = createK3WiseWebApiAdapter({ system: chainTarget, fetchImpl: globalThis.fetch })
-      const readBack = await readBackAdapter.read({ object: 'material', filters: { FNumber: 'MAT-CHAIN-001' } })
-      assert(readBack.records.length === 1, 'read-back must return the saved material')
-      assert(readBack.records[0].FNumber === 'MAT-CHAIN-001', 'read-back key must match')
-      assert(readBack.records[0].FName === 'Chain material',
-        'read-back must carry the APPROVED value — presence alone proves nothing')
+      let chainReadBackCode = null
+      try {
+        await readBackAdapter.read({ object: 'material', filters: { FNumber: 'MAT-CHAIN-001' } })
+      } catch (error) {
+        chainReadBackCode = error?.details?.code ?? null
+      }
+      assert(chainReadBackCode === 'K3_WISE_READ_BUSINESS_ERROR',
+        `E4: the never-written material must read as a business-level miss, got ${chainReadBackCode}`)
+      assert(chainReadBackCode !== 'K3_WISE_EXTERNAL_WRITE_DISABLED',
+        'E4-06: a READ failure must never be reported as the write fence')
 
-      // Negative control: a never-saved number must be a business-level miss, proving the
-      // read-back above found the WRITE, not canned data.
-      let readBackMissRefused = false
+      // Discriminating control for the read channel itself: the SAME read against an
+      // unmistakably absent key must fail the SAME way. If GetDetail were broken (rather than
+      // simply empty), both would still miss — so this pairs with the positive GetDetail round
+      // trip asserted during the dry-run above, which is what proves the channel is alive.
+      let neverSavedCode = null
       try {
         await readBackAdapter.read({ object: 'material', filters: { FNumber: 'MAT-NEVER-SAVED' } })
       } catch (error) {
-        readBackMissRefused = error?.details?.code === 'K3_WISE_READ_BUSINESS_ERROR'
+        neverSavedCode = error?.details?.code ?? null
       }
-      assert(readBackMissRefused, 'a never-saved material must be a business-level read miss')
+      assert(neverSavedCode === 'K3_WISE_READ_BUSINESS_ERROR', 'a never-saved material must be a business-level read miss')
 
+      const chainSaves = mockK3.calls.filter((call) => /\/Save$/.test(call.pathname))
       const chainSubmits = mockK3.calls.filter((call) => /\/(Submit|Audit)$/.test(call.pathname))
-      assert(chainSubmits.length === 0, 'the FULL chain must stay Save-only: 0 Submit, 0 Audit')
-      console.log('✓ step 7d: RULED CHAIN end-to-end — read → clean → dry-run → token → Save-only → GetDetail read-back (value-verified; never-saved miss refused; 0 Submit/Audit)')
+      assert(chainSaves.length === 0, 'E4: the FULL chain must reach 0 Save calls')
+      assert(chainSubmits.length === 0, 'E4: the FULL chain must reach 0 Submit, 0 Audit')
+      console.log('✓ step 7d: RULED CHAIN — read → clean → dry-run (real GetDetail round trip) → NO token → apply REFUSED (token unconsumed) → K3 state confirms nothing written; 0 Save/Submit/Audit')
     } catch (error) {
       throw new Error(`ruled-chain end-to-end failed: ${error.message}`)
     }
 
     // 8-9. Compose evidence + run compiler
+    //
+    // CONVERTED (E4 / G-4) — disposition (a) of the two the conversion contract offered: KEEP the
+    // compiler leg, with a clearly-labeled synthetic packet.
+    //
+    // Why keep it. This leg never tested the write; it tested `buildEvidenceReport`'s SECTION
+    // CONTRACT — that a complete evidence packet compiles to PASS with 0 issues. Every value it
+    // consumed was already a mock literal (`mock-save-001`, `PRODUCT-TEST-001`,
+    // `mock://gate-archive`); the only pieces that came from a live object were `written` (2 and
+    // 1) and the mock's own `externalId`/`billNo` echoes (`mock-<FNumber>` / `<FNumber>`), which
+    // are themselves literals the mock hard-codes. Retiring the leg would therefore delete real
+    // coverage of the compiler and buy nothing.
+    //
+    // WHAT THIS PACKET IS NOT. It is NOT evidence that a write happened. The write legs are
+    // permanently refused (steps 6, 6b, 7d) and this packet is a fixture that stands in for what
+    // a pre-fence run would have produced, so the compiler's contract stays exercised. The three
+    // write-derived sections below are marked SYNTHETIC for exactly that reason. Nothing here is
+    // read back from K3 and nothing here is used as a gate input.
+    const SYNTHETIC_MATERIAL_SAVE_ROWS = [
+      { materialCode: 'MAT-MOCK-001', externalId: 'mock-MAT-MOCK-001', billNo: 'MAT-MOCK-001' },
+      { materialCode: 'MAT-MOCK-002', externalId: 'mock-MAT-MOCK-002', billNo: 'MAT-MOCK-002' },
+    ]
     const evidence = {
       gate: { status: 'pass', archivePath: 'mock://gate-archive' },
       connections: {
@@ -455,44 +616,41 @@ async function main() {
         sqlServer: { status: 'pass', requestId: 'mock-sql-conn' },
       },
       materialDryRun: { status: 'pass', runId: 'mock-dry-001', rowsPreviewed: 2 },
+      // SYNTHETIC (E4): stands in for a pre-fence Save run. No write occurred.
       materialSaveOnly: {
         status: 'pass',
         runId: 'mock-save-001',
-        rowsWritten: upsertResult.written,
+        rowsWritten: SYNTHETIC_MATERIAL_SAVE_ROWS.length,
         autoSubmit: false,
         autoAudit: false,
-        k3Records: upsertResult.results.map((r) => ({
-          materialCode: r.key,
-          externalId: r.externalId,
-          billNo: r.billNo,
-        })),
+        k3Records: SYNTHETIC_MATERIAL_SAVE_ROWS.map((r) => ({ ...r })),
       },
+      // SYNTHETIC (E4): derived from the packet above, not from a live write result.
       erpFeedback: {
         status: 'pass',
         runId: 'mock-feedback-001',
-        rowsUpdated: upsertResult.results.length,
+        rowsUpdated: SYNTHETIC_MATERIAL_SAVE_ROWS.length,
         fieldsUpdated: ['erpSyncStatus', 'erpExternalId', 'erpBillNo', 'erpResponseCode', 'erpResponseMessage', 'lastSyncedAt'],
-        updatedRows: upsertResult.results.map((r) => ({
-          materialCode: r.key,
+        updatedRows: SYNTHETIC_MATERIAL_SAVE_ROWS.map((r) => ({
+          materialCode: r.materialCode,
           erpSyncStatus: 'synced',
           erpExternalId: r.externalId,
           erpBillNo: r.billNo,
           erpResponseCode: 'OK',
-          erpResponseMessage: r.responseMessage || 'K3 WISE save succeeded',
+          erpResponseMessage: 'K3 WISE save succeeded',
           lastSyncedAt: '2026-04-26T01:00:00.000Z',
         })),
       },
       deadLetterReplay: { status: 'pass', originalRunId: 'mock-fail-001', replayRunId: 'mock-replay-001' },
+      // SYNTHETIC (E4): the BOM write is refused connector-wide (step 6b).
       bomPoC: {
         status: 'pass',
         runId: 'mock-bom-001',
         productId: 'PRODUCT-TEST-001',
-        rowsWritten: bomUpsertResult.written,
-        k3Records: bomUpsertResult.results.map((r) => ({
-          bomNumber: r.key,
-          externalId: r.externalId,
-          billNo: r.billNo,
-        })),
+        rowsWritten: 1,
+        k3Records: [
+          { bomNumber: 'MAT-MOCK-001', externalId: 'mock-bom-MAT-MOCK-001', billNo: 'MAT-MOCK-001' },
+        ],
         legacyPipelineOptionsSourceProductId: false,
       },
       rollback: { status: 'pass', owner: 'mock-admin', evidence: 'TEST-prefixed mock records' },
@@ -501,7 +659,7 @@ async function main() {
     const report = buildEvidenceReport(packet, evidence, { generatedAt: '2026-04-26T01:00:00.000Z' })
     assert(report.decision === 'PASS', `expected PASS, got ${report.decision}`)
     assert(report.issues.length === 0, `expected 0 issues, got ${report.issues.length}: ${JSON.stringify(report.issues)}`)
-    console.log(`✓ step 8-9: evidence compiler returned PASS with 0 issues`)
+    console.log('✓ step 8-9: evidence compiler returned PASS with 0 issues (SYNTHETIC write sections — this leg tests buildEvidenceReport\'s contract only; the write legs are permanently refused)')
 
   } finally {
     await mockK3.stop()
@@ -509,6 +667,14 @@ async function main() {
 
   console.log('')
   console.log('✓ K3 WISE PoC mock chain verified end-to-end (PASS)')
+  console.log('  PROVES: the READ chain works end to end over real HTTP (testConnection, SQL')
+  console.log('          readonly probe, stock-prep intake, C6 read → clean → dry-run with a real')
+  console.log('          GetDetail round trip), AND that K3 external write-back is PERMANENTLY')
+  console.log('          REFUSED (E4 / G-4, K3_WISE_EXTERNAL_WRITE_DISABLED) at material, BOM and')
+  console.log('          C6-apply entry points — 0 login, 0 Save, 0 Submit, 0 Audit, and a')
+  console.log('          pre-seeded approval token left unconsumed.')
+  console.log('  DOES NOT PROVE: any write. There is no write left to prove; the evidence')
+  console.log('          compiler leg runs on a clearly-labeled SYNTHETIC packet.')
   console.log('  Note: mock pass ≠ customer live pass. See fixtures/README.md.')
 }
 
