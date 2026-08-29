@@ -33,6 +33,17 @@ function item(decisionId: string, points: number) {
   }
 }
 
+function adjustment(decisionId: string, points: number) {
+  return {
+    decisionId,
+    behavior: 'manual_adjust' as const,
+    awardedPoints: points,
+    status: 'adjusted' as const,
+    occurredAt: '2026-08-29T00:00:00.000Z',
+    createdAt: '2026-08-29T00:00:01.000Z',
+  }
+}
+
 describe('ElearningCreditWalletSection', () => {
   let app: VueApp<Element> | null = null
   let root: HTMLDivElement | null = null
@@ -93,5 +104,21 @@ describe('ElearningCreditWalletSection', () => {
     await flushUi()
     expect(view.querySelector('[data-testid="elearning-credit-wallet-error"]')).toBeTruthy()
     expect(view.querySelector('[data-testid="elearning-credit-wallet-empty"]')).toBeNull()
+  })
+
+  it('renders positive and negative manual adjustments without a false plus sign', async () => {
+    h.getWallet.mockResolvedValueOnce({
+      userId: 'user-1',
+      balancePoints: 7,
+      items: [adjustment(FIRST, -3), adjustment(SECOND, 2)],
+      nextCursor: null,
+    })
+    const view = mountView()
+    await flushUi()
+    const text = view.textContent ?? ''
+    expect(text).toContain('-3')
+    expect(text).toContain('+2')
+    expect(text).not.toContain('+-3')
+    expect(text).toContain('Manual adjustment')
   })
 })

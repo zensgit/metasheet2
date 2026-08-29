@@ -3,6 +3,7 @@ import { createApp, nextTick, type App as VueApp } from 'vue'
 import { useLocale } from '../src/composables/useLocale'
 
 const h = vi.hoisted(() => ({
+  adjust: vi.fn(),
   list: vi.fn(),
   publish: vi.fn(),
 }))
@@ -13,6 +14,7 @@ vi.mock('../src/services/elearningCredit', async () => {
   )
   return {
     ...actual,
+    adjustElearningCredit: h.adjust,
     listElearningCreditRules: h.list,
     publishElearningCreditRule: h.publish,
   }
@@ -24,6 +26,7 @@ import ElearningCreditAdminSection from '../src/views/ElearningCreditAdminSectio
 const REQUEST_A = '11111111-1111-4111-8111-111111111111'
 const REQUEST_B = '22222222-2222-4222-8222-222222222222'
 const RULE = '33333333-3333-4333-8333-333333333333'
+const ADJUSTMENT = '44444444-4444-4444-8444-444444444444'
 
 async function flushUi(cycles = 8): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
@@ -74,6 +77,7 @@ describe('ElearningCreditAdminSection', () => {
     useLocale().setLocale('en')
     h.list.mockReset()
     h.publish.mockReset()
+    h.adjust.mockReset()
     h.list.mockResolvedValue([rule()])
     let index = 0
     const ids = [REQUEST_A, REQUEST_B]
@@ -132,5 +136,64 @@ describe('ElearningCreditAdminSection', () => {
     expect(status).toContain('request ID')
     expect(status).not.toContain(REQUEST_A)
     expect(status).not.toContain('complete_course')
+  })
+
+  it('reuses an adjustment requestId after retryable failure and rotates it after payload changes', async () => {
+    mountView()
+    await flushUi()
+    fill(q('elearning-credit-adjust-user') as HTMLInputElement, 'user-adjust-secret')
+    fill(q('elearning-credit-adjust-points') as HTMLInputElement, '-3')
+    fill(q('elearning-credit-adjust-reason') as HTMLInputElement, 'correction-secret')
+
+    h.adjust.mockRejectedValueOnce(new ElearningApiError('network_error', 0))
+    ;(q('elearning-credit-adjust-submit') as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.adjust.mock.calls[0]?.[0]).toEqual({
+      requestId: REQUEST_A,
+      userId: 'user-adjust-secret',
+      points: -3,
+      reason: 'correction-secret',
+    })
+
+    h.adjust.mockRejectedValueOnce(new ElearningApiError('unavailable', 503))
+    ;(q('elearning-credit-adjust-submit') as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.adjust.mock.calls[1]?.[0]).toMatchObject({ requestId: REQUEST_A })
+
+    fill(q('elearning-credit-adjust-points') as HTMLInputElement, '-2')
+    h.adjust.mockResolvedValueOnce({
+      adjustmentId: ADJUSTMENT,
+      userId: 'user-adjust-secret',
+      points: -2,
+      balancePoints: 8,
+      createdAt: '2026-08-29T00:00:00.000Z',
+    })
+    ;(q('elearning-credit-adjust-submit') as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.adjust.mock.calls[2]?.[0]).toMatchObject({ requestId: REQUEST_B, points: -2 })
+    const status = q('elearning-credit-adjust-status').textContent ?? ''
+    expect(status).toContain('8')
+    expect(status).not.toContain('correction-secret')
+    expect(status).not.toContain('user-adjust-secret')
+  })
+
+  it('keeps adjustment conflict and unavailable errors values-free', async () => {
+    mountView()
+    await flushUi()
+    fill(q('elearning-credit-adjust-user') as HTMLInputElement, 'user-adjust-secret')
+    fill(q('elearning-credit-adjust-points') as HTMLInputElement, '3')
+    fill(q('elearning-credit-adjust-reason') as HTMLInputElement, 'correction-secret')
+
+    for (const error of [
+      new ElearningApiError('conflict', 409),
+      new ElearningApiError('unavailable', 503),
+    ]) {
+      h.adjust.mockRejectedValueOnce(error)
+      ;(q('elearning-credit-adjust-submit') as HTMLButtonElement).click()
+      await flushUi()
+      const status = q('elearning-credit-adjust-status').textContent ?? ''
+      expect(status).not.toContain('user-adjust-secret')
+      expect(status).not.toContain('correction-secret')
+    }
   })
 })

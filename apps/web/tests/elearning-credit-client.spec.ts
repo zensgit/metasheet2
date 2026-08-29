@@ -6,6 +6,7 @@ vi.mock('../src/utils/api', () => ({
 }))
 
 import {
+  adjustElearningCredit,
   getAdminElearningCreditWallet,
   getMyElearningCreditWallet,
   listElearningCreditRules,
@@ -15,6 +16,7 @@ import {
 const RULE = '11111111-1111-4111-8111-111111111111'
 const REQUEST = '22222222-2222-4222-8222-222222222222'
 const DECISION = '33333333-3333-4333-8333-333333333333'
+const ADJUSTMENT = '44444444-4444-4444-8444-444444444444'
 const CREATED = '2026-08-29T01:02:03.000Z'
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -50,6 +52,17 @@ function wallet(over: Record<string, unknown> = {}) {
       createdAt: CREATED,
     }],
     nextCursor: 'cursor-2',
+    ...over,
+  }
+}
+
+function adjustment(over: Record<string, unknown> = {}) {
+  return {
+    adjustmentId: ADJUSTMENT,
+    userId: 'user-2',
+    points: -3,
+    balancePoints: 7,
+    createdAt: CREATED,
     ...over,
   }
 }
@@ -126,6 +139,58 @@ describe('e-learning credit client', () => {
     expect(lastCall().path).toBe('/api/elearning/admin/credits/wallet?limit=20&userId=user-2')
   })
 
+  it('posts only the four manual-adjustment command fields and parses a closed result', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, adjustment()))
+    await expect(adjustElearningCredit({
+      requestId: REQUEST,
+      userId: ' user-2 ',
+      points: -3,
+      reason: ' correction ',
+    })).resolves.toEqual(adjustment())
+    expect(lastCall().path).toBe('/api/elearning/admin/credits/adjustments')
+    expect(lastCall().options.method).toBe('POST')
+    expect(JSON.parse(String(lastCall().options.body))).toEqual({
+      requestId: REQUEST,
+      userId: 'user-2',
+      points: -3,
+      reason: 'correction',
+    })
+
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, adjustment({ duplicate: false })))
+    await expect(adjustElearningCredit({
+      requestId: REQUEST,
+      userId: 'user-2',
+      points: 3,
+      reason: 'correction',
+    })).rejects.toMatchObject({ code: 'invalid_response', status: 200 })
+  })
+
+  it('accepts a closed manual-adjust wallet row and rejects impossible behavior/status/points pairs', async () => {
+    const manual = {
+      decisionId: ADJUSTMENT,
+      behavior: 'manual_adjust',
+      awardedPoints: -3,
+      status: 'adjusted',
+      occurredAt: CREATED,
+      createdAt: CREATED,
+    }
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, wallet({ items: [manual] })))
+    await expect(getMyElearningCreditWallet()).resolves.toEqual(wallet({ items: [manual] }))
+
+    for (const impossible of [
+      { ...manual, awardedPoints: 0 },
+      { ...manual, status: 'awarded' },
+      { ...manual, behavior: 'pass_exam', status: 'adjusted' },
+      { ...manual, behavior: 'pass_exam', status: 'awarded', awardedPoints: -1 },
+    ]) {
+      apiFetchMock.mockResolvedValueOnce(jsonResponse(200, wallet({ items: [impossible] })))
+      await expect(getMyElearningCreditWallet()).rejects.toMatchObject({
+        code: 'invalid_response',
+        status: 200,
+      })
+    }
+  })
+
   it('fails before IO for invalid commands and preserves values-free server conflicts', async () => {
     await expect(publishElearningCreditRule({
       requestId: 'not-a-uuid',
@@ -144,5 +209,32 @@ describe('e-learning credit client', () => {
       dailyCap: null,
       timeZone: 'UTC',
     })).rejects.toMatchObject({ code: 'conflict', status: 409 })
+
+    for (const over of [
+      { points: 0 },
+      { points: 1.5 },
+      { userId: ' ' },
+      { reason: '' },
+      { requestId: 'not-a-uuid' },
+      { reason: 'bad\ud800reason' },
+    ]) {
+      await expect(adjustElearningCredit({
+        requestId: REQUEST,
+        userId: 'user-2',
+        points: 3,
+        reason: 'correction',
+        ...over,
+      })).rejects.toMatchObject({ code: 'invalid_input', status: 400 })
+    }
+
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, adjustment({
+      balancePoints: 2_147_483_648,
+    })))
+    await expect(adjustElearningCredit({
+      requestId: REQUEST,
+      userId: 'user-2',
+      points: 3,
+      reason: 'correction',
+    })).rejects.toMatchObject({ code: 'invalid_response', status: 200 })
   })
 })
