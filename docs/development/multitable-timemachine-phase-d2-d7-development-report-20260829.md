@@ -1,11 +1,12 @@
 # Time Machine Phase D2-D7 development report
 
-**Status:** DRAFT / HOLD. Published for review as Draft PR #5305. The product
-code head passed its remote matrix. A later report-only matrix exposed an
-unhandled scratch-database teardown race in one D2 real-DB test; the test harness
-has been moved to the shared drain/drop authority and the refreshed report
-carrier still requires its own exact-head checks. The PR is not merge-ready, not
-deployed, no flag is enabled, and production was not accessed.
+**Status:** MERGED FOUNDATION / LOCAL CLOSEOUT HOLD. PR #5305 merged through
+`fac252067ab1c22d910266ac2ba29016c2b5fe43` on 2026-08-29. The post-merge
+closeout code checkpoint `6cf88c0e848495787d8dfec1af6348ba22325762`
+closes two disclosed local residuals: malformed catalog `2xx` responses now fail
+closed, and a stuck restore-worker drain is bounded at ten seconds. That
+checkpoint is local only: it has not been pushed, reviewed by remote CI, staged,
+or deployed. No Time Machine flag is enabled and production was not accessed.
 
 **Design authority:**
 `multitable-timemachine-phase-d1-durable-archive-design-lock-20260826.md`.
@@ -14,9 +15,10 @@ deployed, no flag is enabled, and production was not accessed.
 
 | Item | Exact value |
 |---|---|
-| Draft PR | `#5305` (`feat(multitable): integrate Time Machine archive recovery D2-D7`) |
-| base / refreshed `origin/main` | `c479e9b321fe772149e367b5d90cb01c21654766` |
-| branch merge-base | `c479e9b321fe772149e367b5d90cb01c21654766` |
+| merged PR | `#5305` (`feat(multitable): integrate Time Machine archive recovery D2-D7`) |
+| #5305 original base / merge-base | `c479e9b321fe772149e367b5d90cb01c21654766` |
+| merged PR head | `beeff6b3765cff463f8887d58f6b3fb11b8a5a61` |
+| merge commit | `fac252067ab1c22d910266ac2ba29016c2b5fe43` |
 | D2-D6 local head before D7 evidence | `d0fc5a5a2be412500604f70cba172536cb40f086` |
 | D7 test + runbook evidence | `70b5e53f2144dc09a2aa46d7af94adffcbac7de8` |
 | final source evidence head | `def68afe85d759f130656882c3bf5de2e98dbb8a` |
@@ -36,13 +38,17 @@ deployed, no flag is enabled, and production was not accessed.
 | product-code remote matrix | `48 SUCCESS / 1 intentional SKIPPED / 0 failure` |
 | key-registry scratch-drain hardening | `e19b65041d9fd79a556bb58b0c40734b2066c874` |
 | final code/test tree before report refresh | `6ac12d5efa2849faecdd4de32f4414574b90bb82` |
+| post-merge closeout base | `3f30d8eb4f27f9972b640e2d69e2c3dab2837ae5` |
+| post-merge closeout code head | `6cf88c0e848495787d8dfec1af6348ba22325762` |
+| post-merge closeout code tree | `a6fe1e4d8a685dea8dd30563826ca4d3ecc76c64` |
+| post-merge closeout remote matrix | not run; local checkpoint only |
 
 The integration merge is a true two-parent merge of the final source evidence
 head and refreshed `origin/main`; both are ancestors. Later commits close durable
 job rediscovery, provider-neutral application wiring, exact-head CI failures, and
-malformed job-list handling on that tree. Draft PR #5305 is the review carrier;
-Draft publication is not merge authorization, flag authorization, or deployment
-evidence.
+malformed job-list handling on that tree. PR #5305 subsequently landed as the
+true merge above. Merge is implementation history only; it is not flag
+authorization, staging evidence, or deployment evidence.
 
 Main commit `c479e9b321` fixes false-green entry guards in the recovery containment
 workflow and reset-acceptance harness. The candidate preserves all three affected
@@ -182,6 +188,12 @@ not reveal. They were fixed on the same branch before closeout:
    helper. The exact file then passed four consecutive real-DB runs at **10/10**,
    every drop reported `scratchDrain=CLEAN residualBackends=0`, and the final
    database-prefix residue was zero.
+5. Post-merge checkpoint `6cf88c0e84` validates the read-only archive catalog as
+   the exact public seven-field shape instead of manufacturing an empty list from
+   malformed success data. It also gives the canonical worker loop a ten-second
+   drain bound; timeout maps to the existing values-free stop error, and the
+   server preserves the existing rule that the database pool stays open when the
+   worker has not definitely drained.
 
 ## 3. Architecture boundaries preserved
 
@@ -206,10 +218,8 @@ These are real residuals, not documentation polish:
 | direct-entry exact-ON has no owner-selected composition factory | startup deliberately refuses instead of silently using an unratified provider |
 | no executed staging fault/storage/KMS window | D7 cannot claim staging acceptance yet |
 | no true OS-process restart exercise | the 5,001-record test proves same-process lease takeover, not host/process recovery |
-| worker-stop rejection branch is not exercised by the canonical loop | the loop contains tick failures; bounding a genuinely stuck in-flight stop remains a disclosed follow-up |
-| catalog-list malformed `2xx` still maps to an empty read-only catalog | unlike durable job discovery, this older display path remains fail-open and must not be cited as absence evidence |
 | sheet ID discovery comparison overlaps stronger generation/job guards | defense remains, but removing that comparison alone is not mutation-discriminating |
-| Draft PR product-code remote matrix | `48 SUCCESS / 1 intentional SKIPPED / 0 failure`; the post-cleanup report carrier still requires its own checks |
+| post-merge closeout checkpoint is local only | `6cf88c0e84` has local gates but no push, PR, independent exact-head review, or remote matrix |
 
 The provider rows cannot be closed by choosing an adapter implicitly. D1 leaves
 KMS/key custody and the production object backend as explicit owner decisions.
@@ -228,9 +238,11 @@ failure domain.
 
 ## 6. Change discipline
 
-- The branch was pushed and Draft PR #5305 was opened for exact-head review.
-- No Ready transition, merge, deployment, dispatch, staging action, or production
-  access was performed.
+- PR #5305 was merged through `fac252067a`; this report now records that result
+  rather than preserving the obsolete Draft claim.
+- The post-merge closeout branch remains local. It was not pushed and no PR was
+  opened for `6cf88c0e84`.
+- No deployment, dispatch, staging action, or production access was performed.
 - No flag was enabled or changed.
 - D7 adds only the bounded durable-list and application-runtime slices described
   above plus their focused tests. It does not select a KMS/object-store provider.
@@ -242,9 +254,9 @@ failure domain.
 
 1. Obtain the explicit owner choices for KMS/key custody and the staging/production
    object backend; do not infer them from another product surface.
-2. Finish independent review and require the complete exact-head remote check
-   set, including the Node 20 full-schema real-DB lane at zero skipped; Draft
-   status remains until the owner separately authorizes landing.
+2. Independently review `6cf88c0e84`, replay it onto then-current main if needed,
+   and require its complete exact-head remote checks before a separate landing
+   decision. Local green evidence is not that decision.
 3. Obtain a new owner staging-only authorization and execute the D7 runbook,
    including a true process restart and provider/KMS fault legs.
 4. Keep production and all Time Machine flags unchanged until a later, separate

@@ -19,13 +19,12 @@ The exact implementation evidence that prepared this runbook is documented in:
 Do not start the staging window until every item below is true on the exact
 candidate SHA:
 
-1. The application startup path injects a production-like
-   `recoveryArchiveRuntime` into both `/api/multitable` and the compatibility
-   `/api/univer-meta` router mount. At the report head, `src/index.ts` still
-   mounts `univerMetaRouter()` with no options.
-2. The application startup path calls `bootRecoveryArchiveRestoreWorker` and
-   owns its shutdown. At the report head, the boot factory has tests but no
-   application caller.
+1. Preserve the runtime wiring merged by #5305: one canonical main-pool runtime
+   is injected into both `/api/multitable` and compatibility `/api/univer-meta`
+   mounts, and the application owns worker start and shutdown.
+2. Land and remotely verify the post-merge closeout that bounds a stuck worker
+   drain and rejects malformed catalog success data. At this runbook revision it
+   is local checkpoint `6cf88c0e84`, not a deployed build.
 3. The object store is independently durable from the hot database and the
    application host. Same-host local files do not satisfy this gate.
 4. Key custody uses a staging KMS/test key and never exposes plaintext key
@@ -34,8 +33,10 @@ candidate SHA:
    zero skipped tests, and a current-main range-diff has been reviewed.
 6. An owner explicitly authorizes the staging-only flag window and its rollback.
 
-**Current verdict:** these prerequisites are not all present. Therefore this
-runbook is presently a prepared procedure, not an executed acceptance record.
+**Current verdict:** application runtime/worker wiring is present in merged code,
+but the provider/KMS choices, local closeout landing, exact deployed SHA, staging
+authorization, and staging execution are not all present. Therefore this runbook
+is a prepared procedure, not an executed acceptance record.
 
 ## 1. Safety invariants
 
@@ -214,7 +215,8 @@ The staging evidence packet must bind:
 Allowed terminal verdicts:
 
 - `PASS (staging only)`: every section above executed and passed;
-- `HOLD-RUNTIME`: runtime/worker/provider/KMS composition missing;
+- `HOLD-RUNTIME`: exact runtime wiring, independently durable provider, or KMS
+  composition missing;
 - `HOLD-EVIDENCE`: observation or required CI coverage incomplete;
 - `FAIL`: an invariant or cleanup check failed.
 

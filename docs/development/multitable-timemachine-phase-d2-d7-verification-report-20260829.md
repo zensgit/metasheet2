@@ -1,15 +1,18 @@
 # Time Machine Phase D2-D7 verification report
 
-**Status:** DRAFT / HOLD. Local exact-worktree and Draft PR verification. No
-merge, staging, flag, deployment, or production acceptance claim.
+**Status:** MERGED FOUNDATION / LOCAL CLOSEOUT HOLD. PR #5305 is merged. The
+post-merge hardening checkpoint is locally verified but not pushed or remotely
+verified. No staging, flag, deployment, or production acceptance claim.
 
 ## 1. Verification subject
 
 | Item | Value |
 |---|---|
 | source worktree | `/private/tmp/codex-tm-d55-runtime-api-20260828` |
-| current-main worktree | `/private/tmp/codex-tm-d2-d7-current-main-20260829` |
-| Draft PR | `#5305` |
+| original current-main worktree | `/private/tmp/codex-tm-d2-d7-current-main-20260829` |
+| merged PR | `#5305` |
+| merged PR head | `beeff6b3765cff463f8887d58f6b3fb11b8a5a61` |
+| merge commit | `fac252067ab1c22d910266ac2ba29016c2b5fe43` |
 | D2-D6 head before D7 evidence | `d0fc5a5a2be412500604f70cba172536cb40f086` |
 | D7 test + runbook evidence | `70b5e53f2144dc09a2aa46d7af94adffcbac7de8` |
 | final source evidence head | `def68afe85d759f130656882c3bf5de2e98dbb8a` |
@@ -23,14 +26,19 @@ merge, staging, flag, deployment, or production acceptance claim.
 | product-code remote matrix | `48 SUCCESS / 1 intentional SKIPPED / 0 failure` |
 | key-registry scratch-drain hardening | `e19b65041d9fd79a556bb58b0c40734b2066c874` |
 | final code/test tree before report refresh | `6ac12d5efa2849faecdd4de32f4414574b90bb82` |
+| post-merge closeout worktree | `/private/tmp/codex-tm-closeout-hardening-20260829` |
+| post-merge closeout base | `3f30d8eb4f27f9972b640e2d69e2c3dab2837ae5` |
+| post-merge closeout code head | `6cf88c0e848495787d8dfec1af6348ba22325762` |
+| post-merge closeout code tree | `a6fe1e4d8a685dea8dd30563826ca4d3ecc76c64` |
+| post-merge closeout remote CI | not run |
 | flags | unchanged and OFF |
 | production | not accessed |
 
 The integration merge is a true two-parent merge of the final source evidence and
 current `origin/main`; both are ancestors. Durable rediscovery, application
 runtime wiring, exact-head CI fix-forwards, and closed job-list validation were
-then added as bounded commits. Draft PR #5305 supplies remote review evidence but
-does not authorize merge or runtime enablement.
+then added as bounded commits. PR #5305 was merged through `fac252067a`; that
+merge still does not authorize runtime enablement.
 
 ### Current-main integration checks
 
@@ -53,6 +61,30 @@ does not authorize merge or runtime enablement.
   0 skipped** inside the full multitable real-DB step.
 - shared full-schema cleanup regression set: **10 files / 182 tests PASS**;
   catalog **41/41**, lease/PIT focused **13/13**, and lease whole-file **10/10**.
+
+### Post-merge local closeout checks
+
+Checkpoint `6cf88c0e84` closes the two later review residuals without changing a
+migration, workflow, flag, writer, archive format, or provider contract:
+
+- pre-fix catalog test: **17 failures / 48 tests**, each malformed successful
+  response resolved instead of rejecting; fixed client: **48/48 PASS**;
+- pre-fix application test: **1 failure / 10 tests**, because a never-resolving
+  in-flight worker had no ten-second failure; fixed application: **10/10 PASS**;
+- client plus mounted modal neighbor: **2 files / 65 tests PASS**;
+- worker, application, and server wiring neighbors: **3 files / 32 tests PASS**;
+- Required Web: **406 files / 5,150 tests PASS**;
+- Time Machine archive CI wiring: **6/6 PASS**;
+- web and core-backend typecheck: **PASS**;
+- core changed-source ESLint and diff-check: **PASS**;
+- whole-file web client ESLint still reports the pre-existing unused
+  `MultitableCommentReaction` import at line 40; origin/main blame predates this
+  closeout and the unrelated import was not edited.
+
+The discriminating evidence for this local closeout is the exact pre-fix
+RED-to-fixed-GREEN run above. No temporary production-guard neutralization is
+claimed: the local safety reviewer refused the attempted weakening, and it was
+not bypassed.
 
 ### Draft PR exact-head progression
 
@@ -258,7 +290,7 @@ owner action has not occurred.
 | Attachments | PASS (implementation) | source pin, immutable version/hash, archive-object reference, and deletion authority suites are wired |
 | Links/config/tombstones | PASS (implementation) | section causality, operation binding, reconstruction, and link authority are present |
 | Permissions | PASS (implementation) | preview/execute fresh authority and zero-write refusal tests pass; staging UAT remains HOLD |
-| Runtime composition | PASS (implementation) | canonical main-pool transaction/query/depth, route identity, worker start/stop, and exact-OFF gates pass; production provider selection remains HOLD |
+| Runtime composition | PASS (implementation) | canonical main-pool transaction/query/depth, route identity, exact-OFF gates, worker start, normal drain, and bounded stop failure pass; production provider selection remains HOLD |
 | Values-free | PASS (local) | route/worker/crypto/provider errors use closed codes; ordinary evidence contains no raw identities |
 
 ## 5. Database cleanup
@@ -319,12 +351,17 @@ runtime and by the RED/restore mutation above. That review returned
 **0 P1 / 0 P2 / 0 P3** for its bounded delta.
 
 A later Kimi read-only review of the published hardening returned **0 P1 / 0 P2**
-and three P3 observations: the sheet-ID comparison overlaps stronger stale
-response guards; the canonical worker loop contains tick failures, so the mocked
-drain-rejection branch is not production-discriminating and a genuinely stuck
-stop remains unbounded; and the older read-only catalog list still maps malformed
-successful data to an empty catalog. These are disclosed residuals, not evidence
-for flag enablement.
+and three P3 observations at that exact review head: the sheet-ID comparison
+overlaps stronger stale response guards; the canonical worker loop contains tick
+failures, so the mocked drain-rejection branch was not production-discriminating
+and a genuinely stuck stop remained unbounded; and the older read-only catalog
+list mapped malformed successful data to an empty catalog. Those findings were
+not evidence for flag enablement.
+
+Post-merge checkpoint `6cf88c0e84` closes the latter two observations with
+pre-fix RED evidence and the local gates listed above. The overlapping sheet-ID
+comparison remains the disclosed P3; no external-model verdict is claimed for
+this new local delta.
 
 The same review cycle exposed malformed job-list elements and led to
 `4d3a50c627`. Sol then reviewed that exact two-file delta, ran the focused spec at
@@ -339,8 +376,7 @@ and web typecheck and returned **0 P1 / 0 P2 / 0 P3**.
 
 ## 7. Final verdict
 
-**CURRENT-MAIN DRAFT D2-D7 IMPLEMENTATION: PASS WITH
-PROVIDER / STAGING HOLD.**
+**MERGED D2-D7 FOUNDATION + LOCAL CLOSEOUT: PASS WITH PROVIDER / STAGING HOLD.**
 
 The D7 fault/scale evidence, durable job rediscovery, and provider-neutral runtime
 composition are implemented and locally verified. They do not close the
@@ -352,10 +388,9 @@ owner/provider or staging/production proof:
 - staging fault/storage/KMS runbook execution: not performed;
 - true OS-process restart: not performed;
 - current-main local integration and exact-worktree gates: passed;
-- Draft PR #5305 product-code matrix: `48 SUCCESS / 1 intentional SKIPPED /
-  0 failure` at `73d3187c8b`;
-- the post-cleanup report carrier must independently pass its exact-head checks
-  before owner review;
+- PR #5305 merged at `fac252067a`; its product-code matrix reached `48 SUCCESS /
+  1 intentional SKIPPED / 0 failure` at `73d3187c8b` before the report carrier;
+- local closeout `6cf88c0e84` has no remote matrix or landing authorization;
 - flags: OFF;
 - production: untouched.
 
@@ -363,5 +398,5 @@ D1 explicitly leaves KMS/key custody and the production object backend to the
 owner. Reusing the approval attachment S3 implementation or inventing a KMS
 choice would therefore be a new product decision, not mechanical runtime wiring.
 
-Therefore no statement in this report authorizes merge, deployment, staging flag
-enablement, or production recovery.
+Therefore no statement in this report authorizes the local closeout landing,
+deployment, staging flag enablement, or production recovery.
