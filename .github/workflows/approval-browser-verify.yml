@@ -12,19 +12,20 @@ name: Approval Browser Verify
 # positive control), the stale-anchor values-free no-op, and the read-only
 # transition. Screenshots upload as supporting artifacts.
 #
-# NOT a required check yet: per delta §7.1 item 8 the branch-protection
-# addition is an explicit OWNER step before the F4 merge; until that owner
-# action is visible, this lane's evidence is exact-head but not "required".
-# Pull requests intentionally have no top-level path filter: the in-job
-# classifier below keeps the context stable for unrelated PRs and merge queues.
+# This lane is a required context. Pull requests intentionally have no top-level path filter: the
+# in-job classifier below keeps the context stable for unrelated PRs and merge queues.
 #
 # F4 (delta §5 F4, F2-gate handoff condition 1) added the mounted-production-
 # surface matrix (approval-form-builder-mounted-matrix.spec.ts, its owned
 # harness, and the two production-mount source files it exercises) to this
-# SAME lane/job — same server discipline, same "not required yet" posture.
+# SAME lane/job and server discipline.
 #
 # P5-C extends the lane with a real ApprovalDetailView + Element Plus member-action dialog harness
 # at desktop/tablet/mobile viewports. This is browser/mobile/a11y acceptance, not a write-path test.
+#
+# P7-B0 extends the lane with Canvas sole-surface acceptance against the mounted production
+# TemplateAuthoringView at desktop/tablet/mobile widths. The collection preflight below prevents a
+# testMatch removal from turning this browser contract into a vacuous green.
 
 on:
   workflow_dispatch:
@@ -162,4 +163,5 @@ jobs:
           path: |
             apps/web/verification-output/afb-*.png
             apps/web/verification-output/p5c-*.png
+            apps/web/verification-output/p7-canvas-*.png
           if-no-files-found: warn

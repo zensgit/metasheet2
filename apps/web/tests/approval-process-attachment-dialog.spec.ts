@@ -337,6 +337,10 @@ describe('ApprovalDetailView — Lock-9 process-attachment comment dialog', () =
     await flushUi()
   }
 
+  function approvalDetailSetupState(): Record<string, unknown> {
+    return (app as any)?._instance?.subTree?.component?.setupState ?? {}
+  }
+
   // -------------------------------------------------------------------------
   // 1. Affordance gating — attachmentPipelineEnabled && isMyTurn, NOT canAct
   // -------------------------------------------------------------------------
@@ -534,6 +538,310 @@ describe('ApprovalDetailView — Lock-9 process-attachment comment dialog', () =
 
       expect(deleteAttachmentSpy).toHaveBeenCalledWith('att_nav_1')
       expect(loadDetailSpy).toHaveBeenCalledWith('apv_2')
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Lock-9 C1 — in-flight pick vs unmount / params-only instance switch
+  //
+  // The P3-2 retract above only sees ids already in `commentStagedAttachments`.
+  // A pick whose `uploadApprovalProcessAttachmentsAtomic` has not yet resolved
+  // leaves that list empty, so retract is a no-op; when the deferred success
+  // later lands it used to `push` onto the dead/switched instance. These cases
+  // keep the upload promise pending across the lifecycle event, then resolve.
+  // Dropping the generation guard makes the unmount + switch cases
+  // fail (no DELETE, and the switch case would show the stale filename on the
+  // reused instance) and makes the positive control fail if every resolve
+  // started deleting.
+  // -------------------------------------------------------------------------
+  describe('in-flight process-attachment pick lifecycle', () => {
+    beforeEach(() => {
+      approvalAttachmentsFlag = true
+      mockCurrentUserId.value = 'user_me'
+      mockActiveApproval.value = baseInstance({ assignments: MY_TURN_ASSIGNMENTS })
+    })
+
+    function deferred<T>() {
+      let resolve!: (value: T | PromiseLike<T>) => void
+      let reject!: (reason?: unknown) => void
+      const promise = new Promise<T>((res, rej) => {
+        resolve = res
+        reject = rej
+      })
+      return { promise, resolve, reject }
+    }
+
+    it('positive control: a deferred upload that resolves on the same mounted instance is staged and not deleted', async () => {
+      const pending = deferred<Array<{ id: string; sizeBytes: number }>>()
+      uploadAtomicSpy.mockReturnValueOnce(pending.promise)
+      await mountView()
+      openCommentDialog()
+      await flushUi()
+      await pickFiles([new File(['x'], 'still-current.pdf', { type: 'application/pdf' })])
+
+      expect(commentDialog().textContent).not.toContain('still-current.pdf')
+      expect(deleteAttachmentSpy).not.toHaveBeenCalled()
+      expect(commentAttachmentInput().disabled).toBe(true)
+
+      pending.resolve([{ id: 'att_live_1', sizeBytes: 1 }])
+      await flushUi()
+
+      expect(commentDialog().textContent).toContain('still-current.pdf')
+      expect(deleteAttachmentSpy).not.toHaveBeenCalled()
+      expect(commentAttachmentInput().disabled).toBe(false)
+    })
+
+    it('a deferred upload that rejects on the same mounted instance surfaces the values-free error and stages nothing', async () => {
+      const pending = deferred<Array<{ id: string; sizeBytes: number }>>()
+      uploadAtomicSpy.mockReturnValueOnce(pending.promise)
+      const { ElMessage } = await import('element-plus')
+      const errorSpy = vi.spyOn(ElMessage, 'error').mockImplementation(() => undefined as never)
+      await mountView()
+      openCommentDialog()
+      await flushUi()
+      await pickFiles([new File(['x'], 'rejected-live.pdf', { type: 'application/pdf' })])
+
+      pending.reject(new Error('attachment rejected: infected'))
+      await flushUi()
+
+      expect(errorSpy).toHaveBeenCalledWith('attachment rejected: infected')
+      expect(commentDialog().textContent).not.toContain('rejected-live.pdf')
+      expect(deleteAttachmentSpy).not.toHaveBeenCalled()
+      expect(commentAttachmentInput().disabled).toBe(false)
+      errorSpy.mockRestore()
+    })
+
+    it('blocks comment submission until the in-flight upload is staged, then binds the returned id', async () => {
+      const pending = deferred<Array<{ id: string; sizeBytes: number }>>()
+      uploadAtomicSpy.mockReturnValueOnce(pending.promise)
+      await mountView()
+      openCommentDialog()
+      await flushUi()
+      await typeComment('等待附件完成')
+      await pickFiles([new File(['x'], 'pending-submit.pdf', { type: 'application/pdf' })])
+
+      const submitButton = commentDialog().querySelector('[data-testid="approval-comment-submit"]') as HTMLButtonElement
+      expect(submitButton.disabled).toBe(true)
+      await (approvalDetailSetupState().submitComment as () => Promise<void>)()
+      expect(executeActionSpy).not.toHaveBeenCalled()
+
+      pending.resolve([{ id: 'att_pending_submit', sizeBytes: 1 }])
+      await flushUi()
+
+      expect(submitButton.disabled).toBe(false)
+      await submitComment()
+      expect(executeActionSpy).toHaveBeenCalledWith('apv_1', {
+        action: 'comment',
+        comment: '等待附件完成',
+        attachmentIds: ['att_pending_submit'],
+      })
+      expect(deleteAttachmentSpy).not.toHaveBeenCalled()
+    })
+
+    it('unmounting while a pick is still in flight DELETEs every later-returned id and never stages them', async () => {
+      const pending = deferred<Array<{ id: string; sizeBytes: number }>>()
+      uploadAtomicSpy.mockReturnValueOnce(pending.promise)
+      await mountView()
+      openCommentDialog()
+      await flushUi()
+      await pickFiles([new File(['x'], 'inflight-unmount.pdf', { type: 'application/pdf' })])
+      expect(deleteAttachmentSpy).not.toHaveBeenCalled()
+
+      app!.unmount()
+      app = null
+      expect(deleteAttachmentSpy).not.toHaveBeenCalled() // still in flight — staged list was empty
+
+      pending.resolve([{ id: 'att_late_unmount_a', sizeBytes: 1 }, { id: 'att_late_unmount_b', sizeBytes: 1 }])
+      await flushUi()
+
+      expect(deleteAttachmentSpy).toHaveBeenCalledWith('att_late_unmount_a')
+      expect(deleteAttachmentSpy).toHaveBeenCalledWith('att_late_unmount_b')
+      expect(deleteAttachmentSpy).toHaveBeenCalledTimes(2)
+    })
+
+    it('a deferred upload that rejects after unmount does not toast into the dead context', async () => {
+      const pending = deferred<Array<{ id: string; sizeBytes: number }>>()
+      uploadAtomicSpy.mockReturnValueOnce(pending.promise)
+      const { ElMessage } = await import('element-plus')
+      const errorSpy = vi.spyOn(ElMessage, 'error').mockImplementation(() => undefined as never)
+      await mountView()
+      openCommentDialog()
+      await flushUi()
+      await pickFiles([new File(['x'], 'inflight-unmount-fail.pdf', { type: 'application/pdf' })])
+
+      app!.unmount()
+      app = null
+      pending.reject(new Error('attachment upload failed: 500'))
+      await flushUi()
+
+      expect(errorSpy).not.toHaveBeenCalled()
+      expect(deleteAttachmentSpy).not.toHaveBeenCalled()
+      errorSpy.mockRestore()
+    })
+
+    it('params-only instance switch while a pick is still in flight DELETEs every later-returned id and does not append them onto the reused instance', async () => {
+      const pending = deferred<Array<{ id: string; sizeBytes: number }>>()
+      uploadAtomicSpy.mockReturnValueOnce(pending.promise)
+      await mountView()
+      openCommentDialog()
+      await flushUi()
+      await pickFiles([new File(['x'], 'inflight-nav.pdf', { type: 'application/pdf' })])
+      expect(deleteAttachmentSpy).not.toHaveBeenCalled()
+      expect(commentDialog().textContent).not.toContain('inflight-nav.pdf')
+
+      mockRouteId.value = 'apv_2'
+      await flushUi()
+      expect(deleteAttachmentSpy).not.toHaveBeenCalled() // still in flight — retract saw an empty list
+      expect(loadDetailSpy).toHaveBeenCalledWith('apv_2')
+
+      pending.resolve([{ id: 'att_late_nav', sizeBytes: 1 }])
+      await flushUi()
+
+      expect(deleteAttachmentSpy).toHaveBeenCalledWith('att_late_nav')
+      expect(commentDialog().textContent).not.toContain('inflight-nav.pdf')
+    })
+
+    it('blocks a new pick while the route has changed but the reused store still exposes the outgoing instance', async () => {
+      uploadAtomicSpy.mockResolvedValue([{ id: 'att_wrong_instance', sizeBytes: 1 }])
+      await mountView()
+      openCommentDialog()
+      await flushUi()
+
+      mockRouteId.value = 'apv_2'
+      await flushUi()
+
+      expect(loadDetailSpy).toHaveBeenCalledWith('apv_2')
+      expect(mockActiveApproval.value.id).toBe('apv_1')
+      expect(commentAttachmentInput().disabled).toBe(true)
+
+      await pickFiles([new File(['x'], 'wrong-instance.pdf', { type: 'application/pdf' })])
+
+      expect(uploadAtomicSpy).not.toHaveBeenCalled()
+      expect(commentDialog().textContent).not.toContain('wrong-instance.pdf')
+
+      mockActiveApproval.value = baseInstance({ id: 'apv_2', assignments: MY_TURN_ASSIGNMENTS })
+      await flushUi()
+      expect(commentAttachmentInput().disabled).toBe(false)
+    })
+
+    it('clears same-generation upload loading when the active detail temporarily reverts to another instance', async () => {
+      const pending = deferred<Array<{ id: string; sizeBytes: number }>>()
+      uploadAtomicSpy.mockReturnValueOnce(pending.promise)
+      await mountView()
+
+      mockRouteId.value = 'apv_2'
+      mockActiveApproval.value = baseInstance({ id: 'apv_2', assignments: MY_TURN_ASSIGNMENTS })
+      await flushUi()
+      openCommentDialog()
+      await flushUi()
+      await typeComment('恢复后可提交')
+
+      const submitButton = commentDialog().querySelector('[data-testid="approval-comment-submit"]') as HTMLButtonElement
+      await pickFiles([new File(['x'], 'same-generation-stale.pdf', { type: 'application/pdf' })])
+      expect(commentAttachmentInput().disabled).toBe(true)
+      expect(submitButton.disabled).toBe(true)
+
+      mockActiveApproval.value = baseInstance({ id: 'apv_1', assignments: MY_TURN_ASSIGNMENTS })
+      await flushUi()
+      pending.resolve([{ id: 'att_same_generation_stale', sizeBytes: 1 }])
+      await flushUi()
+
+      expect(deleteAttachmentSpy).toHaveBeenCalledWith('att_same_generation_stale')
+      expect(commentDialog().textContent).not.toContain('same-generation-stale.pdf')
+
+      mockActiveApproval.value = baseInstance({ id: 'apv_2', assignments: MY_TURN_ASSIGNMENTS })
+      await flushUi()
+      expect(commentAttachmentInput().disabled).toBe(false)
+      expect(submitButton.disabled).toBe(false)
+    })
+
+    it('closing the dialog while a pick is still in flight DELETEs every later-returned id', async () => {
+      const pending = deferred<Array<{ id: string; sizeBytes: number }>>()
+      uploadAtomicSpy.mockReturnValueOnce(pending.promise)
+      await mountView()
+      openCommentDialog()
+      await flushUi()
+      await pickFiles([new File(['x'], 'inflight-close.pdf', { type: 'application/pdf' })])
+
+      const cancelBtn = Array.from(commentDialog().querySelectorAll('button')).find((b) => b.textContent === '取消')!
+      cancelBtn.click()
+      await flushUi()
+      expect(deleteAttachmentSpy).not.toHaveBeenCalled()
+
+      pending.resolve([{ id: 'att_late_close', sizeBytes: 1 }])
+      await flushUi()
+
+      expect(deleteAttachmentSpy).toHaveBeenCalledWith('att_late_close')
+      openCommentDialog()
+      await flushUi()
+      expect(commentDialog().textContent).not.toContain('inflight-close.pdf')
+    })
+
+    it('a stale pick finally/catch does not clobber a newer pick after a params-only instance switch', async () => {
+      const first = deferred<Array<{ id: string; sizeBytes: number }>>()
+      const second = deferred<Array<{ id: string; sizeBytes: number }>>()
+      uploadAtomicSpy.mockReturnValueOnce(first.promise)
+      await mountView()
+      openCommentDialog()
+      await flushUi()
+      await pickFiles([new File(['x'], 'old-instance.pdf', { type: 'application/pdf' })])
+
+      mockRouteId.value = 'apv_2'
+      mockActiveApproval.value = baseInstance({ id: 'apv_2', assignments: MY_TURN_ASSIGNMENTS })
+      await flushUi()
+
+      uploadAtomicSpy.mockReturnValueOnce(second.promise)
+      await pickFiles([new File(['y'], 'new-instance.pdf', { type: 'application/pdf' })])
+      expect(commentAttachmentInput().disabled).toBe(true)
+
+      first.resolve([{ id: 'att_stale_old', sizeBytes: 1 }])
+      await flushUi()
+
+      expect(deleteAttachmentSpy).toHaveBeenCalledWith('att_stale_old')
+      expect(commentAttachmentInput().disabled).toBe(true)
+      expect(commentDialog().textContent).not.toContain('old-instance.pdf')
+      expect(commentDialog().textContent).not.toContain('new-instance.pdf')
+
+      second.resolve([{ id: 'att_live_new', sizeBytes: 1 }])
+      await flushUi()
+
+      expect(commentDialog().textContent).toContain('new-instance.pdf')
+      expect(commentDialog().textContent).not.toContain('old-instance.pdf')
+      expect(deleteAttachmentSpy).not.toHaveBeenCalledWith('att_live_new')
+      expect(commentAttachmentInput().disabled).toBe(false)
+    })
+
+    it('a stale pick that rejects after a params-only instance switch does not toast or re-enable a newer in-flight pick', async () => {
+      const first = deferred<Array<{ id: string; sizeBytes: number }>>()
+      const second = deferred<Array<{ id: string; sizeBytes: number }>>()
+      uploadAtomicSpy.mockReturnValueOnce(first.promise)
+      const { ElMessage } = await import('element-plus')
+      const errorSpy = vi.spyOn(ElMessage, 'error').mockImplementation(() => undefined as never)
+      await mountView()
+      openCommentDialog()
+      await flushUi()
+      await pickFiles([new File(['x'], 'old-fail.pdf', { type: 'application/pdf' })])
+
+      mockRouteId.value = 'apv_2'
+      mockActiveApproval.value = baseInstance({ id: 'apv_2', assignments: MY_TURN_ASSIGNMENTS })
+      await flushUi()
+
+      uploadAtomicSpy.mockReturnValueOnce(second.promise)
+      await pickFiles([new File(['y'], 'new-ok.pdf', { type: 'application/pdf' })])
+      expect(commentAttachmentInput().disabled).toBe(true)
+
+      first.reject(new Error('attachment upload failed: 500'))
+      await flushUi()
+
+      expect(errorSpy).not.toHaveBeenCalled()
+      expect(commentAttachmentInput().disabled).toBe(true)
+      expect(deleteAttachmentSpy).not.toHaveBeenCalled()
+
+      second.resolve([{ id: 'att_new_ok', sizeBytes: 1 }])
+      await flushUi()
+      expect(commentDialog().textContent).toContain('new-ok.pdf')
+      expect(commentAttachmentInput().disabled).toBe(false)
+      errorSpy.mockRestore()
     })
   })
 

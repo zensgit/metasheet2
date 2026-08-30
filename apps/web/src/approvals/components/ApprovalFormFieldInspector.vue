@@ -53,7 +53,10 @@
         />
       </label>
 
-      <label class="approval-form-field-inspector__row approval-form-field-inspector__row--inline">
+      <label
+        v-if="field.type !== 'explanation'"
+        class="approval-form-field-inspector__row approval-form-field-inspector__row--inline"
+      >
         <input
           type="checkbox"
           data-testid="approval-form-field-inspector-required"
@@ -63,7 +66,10 @@
         <span class="approval-form-field-inspector__label">必填</span>
       </label>
 
-      <label class="approval-form-field-inspector__row">
+      <label
+        v-if="field.type !== 'explanation'"
+        class="approval-form-field-inspector__row"
+      >
         <span class="approval-form-field-inspector__label">提示文字</span>
         <input
           class="approval-form-field-inspector__control"
@@ -116,6 +122,131 @@
         >
           添加选项
         </button>
+      </section>
+
+      <section
+        v-if="field.type === 'number'"
+        class="approval-form-field-inspector__section"
+        data-testid="approval-form-field-inspector-number-format"
+      >
+        <p class="approval-form-field-inspector__label">格式化数字</p>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">货币符号</span>
+          <select
+            class="approval-form-field-inspector__control approval-form-field-inspector__control--narrow"
+            data-testid="approval-form-field-inspector-number-currency"
+            :value="field.numberCurrencySymbol"
+            @change="onNumberCurrencyChange($event)"
+          >
+            <option value="">不显示</option>
+            <option value="¥">¥ 人民币</option>
+            <option value="$">$ 美元</option>
+            <option value="€">€ 欧元</option>
+            <option value="£">£ 英镑</option>
+          </select>
+        </label>
+        <label class="approval-form-field-inspector__row--inline">
+          <input
+            type="checkbox"
+            data-testid="approval-form-field-inspector-number-thousands"
+            :checked="field.numberThousandsSeparator"
+            @change="onNumberThousandsChange($event)"
+          />
+          <span class="approval-form-field-inspector__hint">显示千位分隔符</span>
+        </label>
+        <label class="approval-form-field-inspector__row--inline">
+          <input
+            type="checkbox"
+            data-testid="approval-form-field-inspector-number-uppercase"
+            :checked="field.numberUppercaseCny"
+            @change="onNumberUppercaseChange($event)"
+          />
+          <span class="approval-form-field-inspector__hint">显示中文大写</span>
+        </label>
+        <p class="approval-form-field-inspector__hint">
+          格式化数字仅用于展示（货币符号、千位分隔符、中文大写回显），不改变提交的数值。
+        </p>
+      </section>
+
+      <section
+        v-if="field.type === 'date_range'"
+        class="approval-form-field-inspector__section"
+        data-testid="approval-form-field-inspector-date-range"
+      >
+        <p class="approval-form-field-inspector__label">日期区间</p>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">日期类型（必选）</span>
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-date-range-type"
+            :value="field.dateRangeDateType"
+            @change="onDateRangeDateTypeChange($event)"
+          >
+            <option value="" disabled>请选择日期类型</option>
+            <option value="date">年-月-日</option>
+            <option value="date_half_day">年-月-日 上午/下午</option>
+            <option value="date_minute">年-月-日 时:分</option>
+          </select>
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">起始控件名称（必填）</span>
+          <input
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-date-range-start-label"
+            type="text"
+            :value="textValue('dateRangeStartLabel')"
+            @input="onTextInput('dateRangeStartLabel', $event)"
+            @blur="commitTextBuffer('dateRangeStartLabel')"
+            @keydown.enter.prevent="commitTextBuffer('dateRangeStartLabel')"
+          />
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">结束控件名称（必填）</span>
+          <input
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-date-range-end-label"
+            type="text"
+            :value="textValue('dateRangeEndLabel')"
+            @input="onTextInput('dateRangeEndLabel', $event)"
+            @blur="commitTextBuffer('dateRangeEndLabel')"
+            @keydown.enter.prevent="commitTextBuffer('dateRangeEndLabel')"
+          />
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">时长控件名称（可选）</span>
+          <input
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-date-range-duration-label"
+            type="text"
+            :value="textValue('dateRangeDurationLabel')"
+            @input="onTextInput('dateRangeDurationLabel', $event)"
+            @blur="commitTextBuffer('dateRangeDurationLabel')"
+            @keydown.enter.prevent="commitTextBuffer('dateRangeDurationLabel')"
+          />
+        </label>
+        <p class="approval-form-field-inspector__hint">
+          时长由起始、结束自动计算并展示，不可编辑；提交时以系统计算结果为准。
+        </p>
+      </section>
+
+      <section
+        v-if="field.type === 'explanation'"
+        class="approval-form-field-inspector__section"
+        data-testid="approval-form-field-inspector-explanation"
+      >
+        <p class="approval-form-field-inspector__label">说明内容</p>
+        <textarea
+          class="approval-form-field-inspector__control"
+          data-testid="approval-form-field-inspector-explanation-text"
+          aria-label="说明内容"
+          rows="3"
+          :value="textValue('explanationText')"
+          @input="onTextInput('explanationText', $event)"
+          @blur="commitTextBuffer('explanationText')"
+        ></textarea>
+        <p class="approval-form-field-inspector__hint">
+          说明为纯展示控件，不收集任何提交值，不可设置必填、占位文本或选项。
+        </p>
       </section>
 
       <!-- detail columns -->
@@ -524,6 +655,10 @@ type TextBufferKey =
   | 'valueText'
   | 'minRowsText'
   | 'maxRowsText'
+  | 'dateRangeStartLabel'
+  | 'dateRangeEndLabel'
+  | 'dateRangeDurationLabel'
+  | 'explanationText'
 
 interface EditBuffer {
   text: Partial<Record<TextBufferKey, string>>
@@ -702,6 +837,24 @@ function bufferValidationError(): string | null {
   if (label !== undefined && label.trim() === '') {
     return INSPECTOR_INVALID_BUFFER_MESSAGE
   }
+  const dateRangeStartLabel = buffer.text.dateRangeStartLabel
+  if (
+    dateRangeStartLabel !== undefined &&
+    dateRangeStartLabel.trim() === ''
+  ) {
+    return INSPECTOR_INVALID_BUFFER_MESSAGE
+  }
+  const dateRangeEndLabel = buffer.text.dateRangeEndLabel
+  if (
+    dateRangeEndLabel !== undefined &&
+    dateRangeEndLabel.trim() === ''
+  ) {
+    return INSPECTOR_INVALID_BUFFER_MESSAGE
+  }
+  const explanationText = buffer.text.explanationText
+  if (explanationText !== undefined && explanationText.trim() === '') {
+    return INSPECTOR_INVALID_BUFFER_MESSAGE
+  }
   const minRows = buffer.text.minRowsText ?? current.minRowsText
   const maxRows = buffer.text.maxRowsText ?? current.maxRowsText
   if (
@@ -732,7 +885,7 @@ function onTextInput(key: TextBufferKey, event: Event): void {
   // Buffer only — NEVER a command per keystroke (FB-D7).
   buffer.text = {
     ...buffer.text,
-    [key]: (event.target as HTMLInputElement).value,
+    [key]: (event.target as HTMLInputElement | HTMLTextAreaElement).value,
   }
 }
 
@@ -770,7 +923,14 @@ function commitTextBuffer(key: TextBufferKey): void {
 }
 
 function keyBlocksCommit(key: TextBufferKey): boolean {
-  return key === 'label' || key === 'minRowsText' || key === 'maxRowsText'
+  return (
+    key === 'label' ||
+    key === 'minRowsText' ||
+    key === 'maxRowsText' ||
+    key === 'dateRangeStartLabel' ||
+    key === 'dateRangeEndLabel' ||
+    key === 'explanationText'
+  )
 }
 
 // --- select/toggle commits (commit on change) -------------------------------
@@ -781,6 +941,11 @@ function onTypeChange(event: Event): void {
   const select = event.target as HTMLSelectElement
   const nextType = select.value as FormFieldType
   if (nextType === current.type) return
+  if (!settlePendingEdits()) {
+    // A retype must not hide an invalid buffer from the previous field type.
+    select.value = current.type
+    return
+  }
   const committed = runCommand({
     kind: 'retype',
     localId: current.localId,
@@ -798,6 +963,44 @@ function onRequiredChange(event: Event): void {
   const checked = (event.target as HTMLInputElement).checked
   if (!commitPatch({ required: checked })) {
     ;(event.target as HTMLInputElement).checked = current.required
+  }
+}
+
+function onNumberCurrencyChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  if (!commitPatch({ numberCurrencySymbol: select.value })) {
+    select.value = current.numberCurrencySymbol
+  }
+}
+
+function onNumberThousandsChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const input = event.target as HTMLInputElement
+  if (!commitPatch({ numberThousandsSeparator: input.checked })) {
+    input.checked = current.numberThousandsSeparator
+  }
+}
+
+function onNumberUppercaseChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const input = event.target as HTMLInputElement
+  if (!commitPatch({ numberUppercaseCny: input.checked })) {
+    input.checked = current.numberUppercaseCny
+  }
+}
+
+function onDateRangeDateTypeChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const dateRangeDateType =
+    select.value as FieldAuthoringDraft['dateRangeDateType']
+  if (!commitPatch({ dateRangeDateType })) {
+    select.value = current.dateRangeDateType
   }
 }
 
@@ -1003,6 +1206,10 @@ function settlePendingEdits(): boolean {
     optionsText?: string
     minRowsText?: string
     maxRowsText?: string
+    dateRangeStartLabel?: string
+    dateRangeEndLabel?: string
+    dateRangeDurationLabel?: string
+    explanationText?: string
     visibility?: FieldVisibilityDraft
   } = {}
   if (buffer.text.label !== undefined && buffer.text.label !== current.label) {
@@ -1025,6 +1232,30 @@ function settlePendingEdits(): boolean {
     buffer.text.maxRowsText !== current.maxRowsText
   ) {
     patch.maxRowsText = buffer.text.maxRowsText
+  }
+  if (
+    buffer.text.dateRangeStartLabel !== undefined &&
+    buffer.text.dateRangeStartLabel !== current.dateRangeStartLabel
+  ) {
+    patch.dateRangeStartLabel = buffer.text.dateRangeStartLabel
+  }
+  if (
+    buffer.text.dateRangeEndLabel !== undefined &&
+    buffer.text.dateRangeEndLabel !== current.dateRangeEndLabel
+  ) {
+    patch.dateRangeEndLabel = buffer.text.dateRangeEndLabel
+  }
+  if (
+    buffer.text.dateRangeDurationLabel !== undefined &&
+    buffer.text.dateRangeDurationLabel !== current.dateRangeDurationLabel
+  ) {
+    patch.dateRangeDurationLabel = buffer.text.dateRangeDurationLabel
+  }
+  if (
+    buffer.text.explanationText !== undefined &&
+    buffer.text.explanationText !== current.explanationText
+  ) {
+    patch.explanationText = buffer.text.explanationText
   }
   if (
     buffer.text.valueText !== undefined &&

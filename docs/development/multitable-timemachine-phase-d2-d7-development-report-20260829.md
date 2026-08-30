@@ -1,11 +1,18 @@
 # Time Machine Phase D2-D7 development report
 
-**Status:** DRAFT / HOLD. Published for review as Draft PR #5305. The product
-code head passed its remote matrix. A later report-only matrix exposed an
-unhandled scratch-database teardown race in one D2 real-DB test; the test harness
-has been moved to the shared drain/drop authority and the refreshed report
-carrier still requires its own exact-head checks. The PR is not merge-ready, not
-deployed, no flag is enabled, and production was not accessed.
+**Status:** MERGED FOUNDATION / LOCAL CLOSEOUT CANDIDATE HOLD. PR #5305 merged
+through `fac252067ab1c22d910266ac2ba29016c2b5fe43` on 2026-08-29. The local
+closeout code/test candidate `9c5c082a53a26e4ae55f02b1724b99826e9abb95`
+and its report carrier `b8893e6b860d09b2b5518adbdbffbadb74073d8d`
+are carried through the prior replay/report lineage and the current true merge
+onto main `da1057141a8c4ee7f41fe7f55c32700f1e46a5ff` at
+`f95eadaf5d972316279cfd7ae5e151c12fc73e6a`. The code/test candidate closes the
+disclosed malformed catalog/job-list/preview/execute/job success responses,
+bounds a stuck restore-worker drain at ten seconds, makes every concurrent stop
+caller observe the same result, and makes a failed signal shutdown exit
+non-zero. The candidate is local only: it has not
+been pushed, reviewed by remote CI, staged, or deployed. No Time Machine flag is
+enabled and production was not accessed.
 
 **Design authority:**
 `multitable-timemachine-phase-d1-durable-archive-design-lock-20260826.md`.
@@ -14,9 +21,10 @@ deployed, no flag is enabled, and production was not accessed.
 
 | Item | Exact value |
 |---|---|
-| Draft PR | `#5305` (`feat(multitable): integrate Time Machine archive recovery D2-D7`) |
-| base / refreshed `origin/main` | `c479e9b321fe772149e367b5d90cb01c21654766` |
-| branch merge-base | `c479e9b321fe772149e367b5d90cb01c21654766` |
+| merged PR | `#5305` (`feat(multitable): integrate Time Machine archive recovery D2-D7`) |
+| #5305 original base / merge-base | `c479e9b321fe772149e367b5d90cb01c21654766` |
+| merged PR head | `beeff6b3765cff463f8887d58f6b3fb11b8a5a61` |
+| merge commit | `fac252067ab1c22d910266ac2ba29016c2b5fe43` |
 | D2-D6 local head before D7 evidence | `d0fc5a5a2be412500604f70cba172536cb40f086` |
 | D7 test + runbook evidence | `70b5e53f2144dc09a2aa46d7af94adffcbac7de8` |
 | final source evidence head | `def68afe85d759f130656882c3bf5de2e98dbb8a` |
@@ -36,13 +44,32 @@ deployed, no flag is enabled, and production was not accessed.
 | product-code remote matrix | `48 SUCCESS / 1 intentional SKIPPED / 0 failure` |
 | key-registry scratch-drain hardening | `e19b65041d9fd79a556bb58b0c40734b2066c874` |
 | final code/test tree before report refresh | `6ac12d5efa2849faecdd4de32f4414574b90bb82` |
+| post-merge closeout original base | `3f30d8eb4f27f9972b640e2d69e2c3dab2837ae5` |
+| then-current main replay parent | `5eb83055937ebecc9be690bcf721a8cc89ca27d0` |
+| local true-merge replay | `c1863ea288f4a23a0736b6984c51d8dfa867b714` |
+| empty catalog response hardening | `0d5fd1adf51f0447722d9d23fb675797f108da3f` |
+| empty job-list response hardening | `0767a3781e2452c8693a33c6197a2c7bef6d9490` |
+| first operation-response and shutdown fix-forward | `a9835b0efa1af52408b5a8848af2247f05715e4d` |
+| exact response-shape and stop-replay hardening | `7fcc57d9ec31e5d8735105a3cccabdec181db06d` |
+| exact response-shape mutation lock | `9c5c082a53a26e4ae55f02b1724b99826e9abb95` |
+| post-merge closeout code/test tree | `3831f7c62a13e296715dbfb1f18becfacba82fb2` |
+| prior report-only carriers | `886a24da5d1f4533a40b5310ec0dd2510523b105`, `6f468e3f211713483c02d0ab8a7cb747fc7078a7`, `332b13efd87e3352250c6ffa39be0a95ef01b5c4` |
+| prior local report carrier before prior replay | `b8893e6b860d09b2b5518adbdbffbadb74073d8d` |
+| prior then-current main replay parent | `9d29e7a7d339be5ce4fb276c2e96b1a2ae67e17c` |
+| prior local true-merge replay | `0464d551d829ac020a6504e49c54f64a8d17c03a` |
+| prior local replay tree | `c8574f916171d50f0fc8fe9e9426bc3f41aa29b1` |
+| current closeout source parent | `d49bc9b07f5a192d857e5bb849a2e888a1e74874` |
+| current then-current main parent | `da1057141a8c4ee7f41fe7f55c32700f1e46a5ff` |
+| current local true-merge replay | `f95eadaf5d972316279cfd7ae5e151c12fc73e6a` |
+| current local replay tree | `a64f5c9c1c60448c4193d2d935cd98d080f08136` |
+| post-merge closeout remote matrix | not run; local checkpoint only |
 
 The integration merge is a true two-parent merge of the final source evidence
 head and refreshed `origin/main`; both are ancestors. Later commits close durable
 job rediscovery, provider-neutral application wiring, exact-head CI failures, and
-malformed job-list handling on that tree. Draft PR #5305 is the review carrier;
-Draft publication is not merge authorization, flag authorization, or deployment
-evidence.
+malformed job-list handling on that tree. PR #5305 subsequently landed as the
+true merge above. Merge is implementation history only; it is not flag
+authorization, staging evidence, or deployment evidence.
 
 Main commit `c479e9b321` fixes false-green entry guards in the recovery containment
 workflow and reset-acceptance harness. The candidate preserves all three affected
@@ -182,6 +209,52 @@ not reveal. They were fixed on the same branch before closeout:
    helper. The exact file then passed four consecutive real-DB runs at **10/10**,
    every drop reported `scratchDrain=CLEAN residualBackends=0`, and the final
    database-prefix residue was zero.
+5. Post-merge checkpoint `6cf88c0e84` validates the read-only archive catalog as
+   the exact public seven-field shape instead of manufacturing an empty list from
+   malformed success data. It also gives the canonical worker loop a ten-second
+   drain bound; timeout maps to the existing values-free stop error, and the
+   server preserves the existing rule that the database pool stays open when the
+   worker has not definitely drained.
+6. The current-main replay at `c1863ea288` preserves that product delta while
+   incorporating `5eb8305593` as the exact second parent. `0d5fd1adf5` and
+   `0767a3781e` then normalize successful 204/empty-body responses for both the
+   archive catalog and durable job list to their fixed values-free domain errors.
+   A truthy primitive catalog body is also rejected as malformed.
+7. Opus 5 found two remaining closeout defects. `a9835b0efa` makes preview,
+   execute, accept, read, resume, and cancel reject 204/empty successful bodies
+   instead of resolving `undefined`. It also propagates a worker-drain failure
+   through `server.stop()` and maps a failed SIGTERM/SIGINT shutdown to exit 1,
+   while preserving the rule that the database pool stays open until the worker
+   has definitely drained.
+8. Opus 5's re-review found three remaining discrimination gaps. `7fcc57d9ec`
+   validates the exact preview and execute wire shapes, so successful envelopes
+   with `data: null`, missing `data`, 204, or an empty body all fail closed. The
+   same job-snapshot validator is exercised independently by accept, read,
+   resume, and cancel. Server shutdown now memoizes one stop promise, so a second
+   SIGTERM/SIGINT caller observes the original failure instead of resolving, and
+   the runtime registration source is pinned to the non-zero failure mapper.
+9. Sol's final review found the exact preview/execute branches were not yet
+   mutation-locked. `9c5c082a53` adds 11 non-null malformed preview objects and
+   eight non-null malformed execute objects covering missing/extra keys, closed
+   enums, UUID/decimal/identity/count shapes, summary rows, and executable-state
+   coherence. Five guard-category mutations each turned the matching cases red;
+   the restored exact head passed **78/78** client tests and **95/95** with the
+   modal neighbor. Sol's follow-up verdict is **0 P1 / 0 P2 / 0 P3**.
+10. Luna high performed a read-only report-truthfulness review after true-merge
+    replay `0464d551d8` (now a prior replay). It verified the parent order,
+    zero-overlap merge, HOLD
+    boundaries, and local gates, then found stale prose that still said no
+    current-main replay. Report-only carrier `f92112aa64` corrected that state.
+    Its follow-up found no code issue and identified only review-provenance and
+    report-head wording; this report records Luna's scope explicitly and uses
+    lineage wording so a report-only child does not invalidate itself.
+11. Sol high independently reviewed the current exact range
+    `da1057141a8c..f95eadaf5d`. Product verdict was **0 P1 / 0 P2 / 0 P3**.
+    It confirmed shared stop-promise failure propagation, the referenced
+    ten-second worker-stop deadline, and pool-close ordering. It found one
+    report-only P2: the reports still called the prior `0464d551d8` replay the
+    latest candidate. This amendment binds the evidence to `f95eadaf5d` without
+    changing the HOLD, staging, flag, deployment, or production boundaries.
 
 ## 3. Architecture boundaries preserved
 
@@ -206,10 +279,9 @@ These are real residuals, not documentation polish:
 | direct-entry exact-ON has no owner-selected composition factory | startup deliberately refuses instead of silently using an unratified provider |
 | no executed staging fault/storage/KMS window | D7 cannot claim staging acceptance yet |
 | no true OS-process restart exercise | the 5,001-record test proves same-process lease takeover, not host/process recovery |
-| worker-stop rejection branch is not exercised by the canonical loop | the loop contains tick failures; bounding a genuinely stuck in-flight stop remains a disclosed follow-up |
-| catalog-list malformed `2xx` still maps to an empty read-only catalog | unlike durable job discovery, this older display path remains fail-open and must not be cited as absence evidence |
+| fixed ten-second worker-stop bound | the bound is fail-closed but is not composition-configurable; changing it is a separate runtime policy decision |
 | sheet ID discovery comparison overlaps stronger generation/job guards | defense remains, but removing that comparison alone is not mutation-discriminating |
-| Draft PR product-code remote matrix | `48 SUCCESS / 1 intentional SKIPPED / 0 failure`; the post-cleanup report carrier still requires its own checks |
+| post-merge closeout candidate is local only | the lineage containing code/test checkpoint `9c5c082a53` is carried by current true-merge replay `f95eadaf5d` onto main `da1057141a8c`, with local gates plus Opus 5, Sol, and Luna review evidence, but no push, PR, or remote matrix |
 
 The provider rows cannot be closed by choosing an adapter implicitly. D1 leaves
 KMS/key custody and the production object backend as explicit owner decisions.
@@ -218,19 +290,22 @@ failure domain.
 
 ## 5. Coordination status
 
-- Approval/automation remains a separate HOLD queue. Phase D did not edit its
+- Approval/automation remains a separate replay queue. Phase D did not edit its
   implementation branches or merge any approval PR.
 - Approval FWB and automation writes continue to use the shared writer-block
   entry; D5 did not create a second authority table or lock order.
-- Cloud Classroom used explicitly serialized shared/DB windows, returned both
-  with clean residue, and remains in separate worktrees. None of its product or
-  shared-union bytes are mixed into this Time Machine candidate.
+- Cloud Classroom remains in a separate product-only hardening worktree. None of
+  its product or shared-union bytes are mixed into this Time Machine candidate.
 
 ## 6. Change discipline
 
-- The branch was pushed and Draft PR #5305 was opened for exact-head review.
-- No Ready transition, merge, deployment, dispatch, staging action, or production
-  access was performed.
+- PR #5305 was merged through `fac252067a`; this report now records that result
+  rather than preserving the obsolete Draft claim.
+- The post-merge closeout branch remains local. Current code replay
+  `f95eadaf5d` carries the report lineage through `d49bc9b07f`; it was not
+  pushed, and no closeout PR was opened. This report-only correction is a child
+  of that exact code tree.
+- No deployment, dispatch, staging action, or production access was performed.
 - No flag was enabled or changed.
 - D7 adds only the bounded durable-list and application-runtime slices described
   above plus their focused tests. It does not select a KMS/object-store provider.
@@ -242,9 +317,11 @@ failure domain.
 
 1. Obtain the explicit owner choices for KMS/key custody and the staging/production
    object backend; do not infer them from another product surface.
-2. Finish independent review and require the complete exact-head remote check
-   set, including the Node 20 full-schema real-DB lane at zero skipped; Draft
-   status remains until the owner separately authorizes landing.
+2. Recheck `origin/main` before any push. The current true-merge replay
+   `f95eadaf5d` is bound to main `da1057141a8c`; if main moves again, replay first.
+   Then require complete exact-head remote checks and another bounded
+   replay-delta review before a separate landing decision. Local green evidence
+   is not that decision.
 3. Obtain a new owner staging-only authorization and execute the D7 runbook,
    including a true process restart and provider/KMS fault legs.
 4. Keep production and all Time Machine flags unchanged until a later, separate
