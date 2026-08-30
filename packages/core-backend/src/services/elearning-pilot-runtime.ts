@@ -16,6 +16,7 @@ import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
 import { createElearningCreditRouter } from '../routes/elearning-credit'
 import { createElearningContentRouter } from '../routes/elearning-content'
 import { createElearningPilotRouter } from '../routes/elearning-pilot'
+import { createElearningProfileRouter } from '../routes/elearning-profile'
 import { isElearningGlobalAdminRequest } from '../routes/elearning-admin-access'
 import type { ElearningAdminAccessDb } from './elearning-admin-access'
 import type { ElearningAssessmentCatalogDb } from './elearning-assessment-catalog'
@@ -82,6 +83,10 @@ import {
   type ElearningLearnerCoursesDb,
   type ListElearningLearnerCoursesInput,
 } from './elearning-learner-courses'
+import {
+  getElearningLearningProfile,
+  type ElearningLearningProfileDb,
+} from './elearning-learning-profile'
 import {
   ELEARNING_MEDIA_PLAYBACK_SECRET_ENV,
   issueElearningMediaPlaybackTicket,
@@ -175,7 +180,8 @@ export interface ElearningPilotRuntimeOptions {
     ElearningPaperExamDb &
     ElearningManualGradingDb &
     ElearningManualGradingReadDb &
-    ElearningCreditSurfaceDb
+    ElearningCreditSurfaceDb &
+    ElearningLearningProfileDb
   env?: NodeJS.ProcessEnv
   authenticate?: RequestHandler
   adminGuard?: RequestHandler
@@ -279,6 +285,7 @@ export interface ElearningPilotRuntimeOptions {
   publishElearningCertificateTemplate?: typeof publishElearningCertificateTemplate
   issueElearningCertificate?: typeof issueElearningCertificate
   listMyElearningCertificates?: typeof listMyElearningCertificates
+  getElearningLearningProfile?: typeof getElearningLearningProfile
 }
 
 function viewerId(req: Request): string | null {
@@ -401,12 +408,23 @@ export function createElearningPilotRuntime(
     issueElearningCertificate: opts.issueElearningCertificate,
     listMyElearningCertificates: opts.listMyElearningCertificates,
   }) : null
-  if (!inner && !credit) return null
+  const profile = creditEnabled ? createElearningProfileRouter({
+    db: opts.db,
+    env,
+    viewerId: opts.viewerId ?? viewerId,
+    orgId: opts.orgId ?? orgId,
+    readGuard: opts.readGuard
+      ?? rbacGuardAny(['elearning:read', 'elearning:write', 'elearning:admin']),
+    getElearningLearningProfile:
+      opts.getElearningLearningProfile ?? getElearningLearningProfile,
+  }) : null
+  if (!inner && !credit && !profile) return null
 
   const router = Router()
   router.use('/api/elearning', opts.authenticate ?? authenticate)
   if (content) router.use(content)
   if (inner) router.use(inner)
   if (credit) router.use(credit)
+  if (profile) router.use(profile)
   return { router }
 }
