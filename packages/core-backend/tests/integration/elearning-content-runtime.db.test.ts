@@ -895,6 +895,21 @@ describe('e-learning content runtime PostgreSQL authority', () => {
       questionCount: 1,
       totalScore: 5,
     })
+
+    const multiAssessmentVersionId = await seedDraftVersion(
+      firstPool,
+      legacyOrg,
+      [
+        { itemType: 'video', referenceId: mediaId },
+        { itemType: 'exam', referenceId: legacy.examId },
+        { itemType: 'exam', referenceId: legacy.examId },
+      ],
+    )
+    await expect(firstPool.query(
+      `UPDATE elearning_course_versions SET status = 'published'
+        WHERE org_id = $1 AND id = $2`,
+      [legacyOrg, multiAssessmentVersionId],
+    )).resolves.toMatchObject({ rowCount: 1 })
   }, 30_000)
 
   it('serializes one open effect, replays requests, honors assignment/archive/withdrawn access, and keeps evidence single-source', async () => {

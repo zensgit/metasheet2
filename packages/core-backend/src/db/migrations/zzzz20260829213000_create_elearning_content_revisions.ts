@@ -373,12 +373,12 @@ BEGIN
     IF NOT EXISTS (
       SELECT 1
         FROM elearning_course_version_items
-       WHERE org_id = NEW.org_id
+      WHERE org_id = NEW.org_id
          AND course_version_id = NEW.id
       HAVING (
-        count(*) = 2
-        AND count(*) FILTER (WHERE item_type = 'video') = 1
-        AND count(*) FILTER (WHERE item_type = 'exam') = 1
+        count(*) FILTER (WHERE item_type = 'video') >= 1
+        AND count(*) FILTER (WHERE item_type = 'exam') >= 1
+        AND count(*) FILTER (WHERE item_type IN ('video', 'exam')) = count(*)
       ) OR (
         count(*) >= 1
         AND count(*) FILTER (

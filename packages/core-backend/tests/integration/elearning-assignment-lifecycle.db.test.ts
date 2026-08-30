@@ -563,9 +563,9 @@ async function insertEvidence(input: {
   await pool.query(
     `INSERT INTO elearning_completion_evidence (
        org_id, assignment_member_id, course_version_id, course_version_item_id,
-       user_id, completion_policy_version, completion_threshold_bps, media_duration_ms,
+       user_id, item_type, completion_policy_version, completion_threshold_bps, media_duration_ms,
        effective_ms, max_position_ms, event_digest, evaluator_version, completed_at
-     ) VALUES ($1, $2, $3, $4, $5, 'video-v1-90pct', 9000, 10000, 9000, 10000, 'ev', 'eval-v1', now())`,
+     ) VALUES ($1, $2, $3, $4, $5, 'video', 'video-v1-90pct', 9000, 10000, 9000, 10000, 'ev', 'eval-v1', now())`,
     [input.org, input.memberId, input.versionId, input.itemId, input.userId],
   )
 }

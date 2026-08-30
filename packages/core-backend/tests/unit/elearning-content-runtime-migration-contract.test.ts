@@ -32,13 +32,18 @@ describe('elearning content runtime migration contract', () => {
     )
   })
 
-  it('replaces video-exam publication cardinality with item and per-type readiness', async () => {
+  it('allows complete assessment or content item families with per-type readiness', async () => {
     expect(ELEARNING_CONTENT_COURSE_STATE_BODY).toContain(
       'unsupported item family',
     )
-    expect(ELEARNING_CONTENT_COURSE_STATE_BODY).toContain('count(*) = 2')
     expect(ELEARNING_CONTENT_COURSE_STATE_BODY).toContain(
-      "count(*) FILTER (WHERE item_type = 'video') = 1",
+      "count(*) FILTER (WHERE item_type = 'video') >= 1",
+    )
+    expect(ELEARNING_CONTENT_COURSE_STATE_BODY).toContain(
+      "count(*) FILTER (WHERE item_type = 'exam') >= 1",
+    )
+    expect(ELEARNING_CONTENT_COURSE_STATE_BODY).toContain(
+      "count(*) FILTER (WHERE item_type IN ('video', 'exam')) = count(*)",
     )
     expect(ELEARNING_CONTENT_COURSE_STATE_BODY).toContain(
       "item_type IN ('article', 'external_link')",
