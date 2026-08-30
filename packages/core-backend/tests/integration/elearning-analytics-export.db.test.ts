@@ -271,6 +271,40 @@ describe.sequential('e-learning analytics export PostgreSQL authority', () => {
     await expect(migrate(exportUp)).rejects.toThrow('elearning export migration drift: columns')
     await firstPool.query('ALTER TABLE elearning_export_jobs ALTER COLUMN actor_id SET NOT NULL')
     await migrate(exportUp)
+    for (const mutation of [
+      {
+        column: 'status',
+        replacement: "'failed'::text",
+        restore: "'pending'::text",
+      },
+      {
+        column: 'created_at',
+        replacement: 'statement_timestamp()',
+        restore: 'now()',
+      },
+      {
+        column: 'updated_at',
+        replacement: 'clock_timestamp()',
+        restore: 'now()',
+      },
+    ]) {
+      await firstPool.query(
+        `ALTER TABLE elearning_export_jobs ALTER COLUMN ${mutation.column} DROP DEFAULT`,
+      )
+      await expect(migrate(exportUp)).rejects.toThrow('elearning export migration drift: defaults')
+      await firstPool.query(
+        `ALTER TABLE elearning_export_jobs ALTER COLUMN ${mutation.column} SET DEFAULT ${mutation.restore}`,
+      )
+      await migrate(exportUp)
+      await firstPool.query(
+        `ALTER TABLE elearning_export_jobs ALTER COLUMN ${mutation.column} SET DEFAULT ${mutation.replacement}`,
+      )
+      await expect(migrate(exportUp)).rejects.toThrow('elearning export migration drift: defaults')
+      await firstPool.query(
+        `ALTER TABLE elearning_export_jobs ALTER COLUMN ${mutation.column} SET DEFAULT ${mutation.restore}`,
+      )
+      await migrate(exportUp)
+    }
     await firstPool.query(`
       ALTER TABLE elearning_export_jobs
         DROP CONSTRAINT elearning_export_jobs_request_hash_chk;
@@ -584,5 +618,92 @@ describe.sequential('e-learning analytics export PostgreSQL authority', () => {
       'SELECT status, expired_at IS NOT NULL AS expired FROM elearning_export_jobs WHERE id = $1',
       [exportId],
     )).rows).toEqual([{ status: 'expired', expired: true }])
+
+    const raceExportId = randomUUID()
+    const raceSnapshot = {
+      dataset: 'department_overview',
+      departmentId: DEPARTMENT,
+      periodEnd: PERIOD_END,
+      periodStart: PERIOD_START,
+      rows: [],
+      version: 1,
+    }
+    await firstPool.query(
+      `INSERT INTO elearning_export_jobs (
+         id, org_id, actor_id, request_id, request_hash, request_hash_version,
+         directory_integration_id, directory_provider, department_id,
+         period_start, period_end, scope_snapshot, query_snapshot, expires_at
+       ) VALUES (
+         $1, $2, $3, $4, $5, 1, $6, 'local', $7,
+         $8, $9, '{}'::jsonb, $10::jsonb, clock_timestamp() + interval '2 seconds'
+       )`,
+      [
+        raceExportId,
+        ORG,
+        ACTOR,
+        randomUUID(),
+        'c'.repeat(64),
+        INTEGRATION,
+        DEPARTMENT,
+        PERIOD_START,
+        PERIOD_END,
+        JSON.stringify(raceSnapshot),
+      ],
+    )
+    const raceObjects = memoryStorage()
+    let releasePut = (): void => undefined
+    let observePut = (): void => undefined
+    const putReleased = new Promise<void>((resolve) => { releasePut = resolve })
+    const putStarted = new Promise<void>((resolve) => { observePut = resolve })
+    let deleteCalls = 0
+    const raceStorage: ElearningAnalyticsExportStorage = {
+      async put(key, content) {
+        observePut()
+        await putReleased
+        await raceObjects.put(key, content)
+      },
+      get: (key) => raceObjects.get(key),
+      async delete(key) {
+        deleteCalls += 1
+        if (deleteCalls === 2) throw new Error('deterministic compensation failure')
+        await raceObjects.delete(key)
+      },
+    }
+    const materialization = materializeElearningAnalyticsExport(
+      exportDb(firstPool),
+      { orgId: ORG, exportId: raceExportId },
+      raceStorage,
+      FLAGS,
+    )
+    await putStarted
+    expect((await firstPool.query(
+      'SELECT status FROM elearning_export_jobs WHERE id = $1',
+      [raceExportId],
+    )).rows).toEqual([{ status: 'running' }])
+    const dueDeadline = Date.now() + 10_000
+    for (;;) {
+      const due = await secondPool.query(
+        'SELECT expires_at <= now() AS due FROM elearning_export_jobs WHERE id = $1',
+        [raceExportId],
+      )
+      if (due.rows[0]?.due === true) break
+      if (Date.now() >= dueDeadline) throw new Error('export expiry barrier timed out')
+      await new Promise<void>((resolve) => setImmediate(resolve))
+    }
+    await expect(cleanupElearningAnalyticsExport(
+      exportDb(secondPool), { orgId: ORG, exportId: raceExportId }, raceStorage, FLAGS,
+    )).resolves.toEqual({ outcome: 'expired', exportId: raceExportId })
+    releasePut()
+    await expect(materialization).rejects.toMatchObject({ code: 'unavailable' })
+    expect((await firstPool.query(
+      'SELECT status, storage_key IS NOT NULL AS claimed FROM elearning_export_jobs WHERE id = $1',
+      [raceExportId],
+    )).rows).toEqual([{ status: 'expired', claimed: true }])
+    expect(raceObjects.objects.size).toBe(1)
+    await expect(cleanupElearningAnalyticsExport(
+      exportDb(secondPool), { orgId: ORG, exportId: raceExportId }, raceStorage, FLAGS,
+    )).resolves.toEqual({ outcome: 'expired', exportId: raceExportId })
+    expect(deleteCalls).toBe(3)
+    expect(raceObjects.objects.size).toBe(0)
   })
 })

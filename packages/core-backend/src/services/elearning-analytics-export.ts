@@ -146,11 +146,19 @@ interface StoredExport {
 }
 
 interface PreparedMaterialization {
+  kind: 'materialize'
   orgId: string
   exportId: string
   storageKey: string
   digest: string
   content: Buffer
+}
+
+interface PreparedExpiredCleanup {
+  kind: 'cleanup'
+  orgId: string
+  exportId: string
+  storageKey: string | null
 }
 
 interface ProjectionSnapshotRow {
@@ -766,7 +774,7 @@ async function prepareMaterialization(
   db: ElearningAnalyticsExportDb,
   orgId: string,
   exportId: string,
-): Promise<PreparedMaterialization | null> {
+): Promise<PreparedMaterialization | PreparedExpiredCleanup | null> {
   return db.transaction(async (tx) => {
     const result = await tx.query(
       `/* elearning-analytics-export:materialize-lock */
@@ -779,8 +787,21 @@ async function prepareMaterialization(
     if (result.rows.length === 0) fail('not_found')
     if (result.rows.length !== 1 || !result.rows[0]) fail('unavailable')
     const row = parseStoredExport(result.rows[0])
+    if (row.status === 'expired' || row.expiredByClock) {
+      if (row.status !== 'expired') {
+        const expired = await tx.query(
+          `/* elearning-analytics-export:materialize-expire */
+           UPDATE elearning_export_jobs
+           SET status = 'expired', expired_at = now(), updated_at = now()
+           WHERE org_id = $1 AND id = $2::uuid AND status <> 'expired' AND expires_at <= now()
+           RETURNING id`,
+          [orgId, exportId],
+        )
+        if (expired.rows.length !== 1) fail('unavailable')
+      }
+      return { kind: 'cleanup', orgId, exportId, storageKey: row.storageKey }
+    }
     if (row.status === 'succeeded') return null
-    if (row.status === 'expired' || row.expiredByClock) fail('expired')
     const { content, digest } = parseProjectionSnapshot(row.querySnapshot, row)
     const storageKey = deriveElearningAnalyticsExportStorageKey({ orgId, exportId })
     if (row.status !== 'pending') {
@@ -790,7 +811,7 @@ async function prepareMaterialization(
         || row.fileSizeBytes !== content.length
       ) fail('unavailable')
       if (row.status === 'running') {
-        return { orgId, exportId, storageKey, digest, content }
+        return { kind: 'materialize', orgId, exportId, storageKey, digest, content }
       }
     }
     const updated = await tx.query(
@@ -803,7 +824,7 @@ async function prepareMaterialization(
       [orgId, exportId, storageKey, digest, content.length],
     )
     if (updated.rows.length !== 1) fail('unavailable')
-    return { orgId, exportId, storageKey, digest, content }
+    return { kind: 'materialize', orgId, exportId, storageKey, digest, content }
   })
 }
 
@@ -829,10 +850,14 @@ export async function materializeElearningAnalyticsExport(
   if (!isElearningAnalyticsSurfaceEnabled(env)) fail('disabled')
   const orgId = requireText(input.orgId)
   const exportId = requireUuid(input.exportId)
-  let prepared: PreparedMaterialization | null = null
+  let prepared: PreparedMaterialization | PreparedExpiredCleanup | null = null
   try {
     prepared = await prepareMaterialization(db, orgId, exportId)
     if (!prepared) return { outcome: 'noop', exportId }
+    if (prepared.kind === 'cleanup') {
+      if (prepared.storageKey !== null) await storage.delete(prepared.storageKey)
+      return { outcome: 'noop', exportId }
+    }
     try {
       await storage.put(prepared.storageKey, prepared.content)
     } catch {
@@ -854,24 +879,31 @@ export async function materializeElearningAnalyticsExport(
     if (finalized.rows.length !== 1) {
       const replay = await db.query(
         `/* elearning-analytics-export:materialize-replay */
-         SELECT status, file_sha256, file_size_bytes::text
+         SELECT status, storage_key, file_sha256, file_size_bytes::text
          FROM elearning_export_jobs
          WHERE org_id = $1 AND id = $2::uuid`,
         [orgId, exportId],
       )
       const replayRow = replay.rows[0]
-      if (
-        replay.rows.length !== 1
-        || replayRow?.status !== 'succeeded'
-        || replayRow.file_sha256 !== prepared.digest
-        || storedInteger(replayRow.file_size_bytes) !== prepared.content.length
-      ) fail('unavailable')
-      return { outcome: 'noop', exportId }
+      const matchingClaim = replay.rows.length === 1
+        && replayRow?.storage_key === prepared.storageKey
+        && replayRow.file_sha256 === prepared.digest
+        && storedInteger(replayRow.file_size_bytes) === prepared.content.length
+      if (matchingClaim && replayRow?.status === 'succeeded') {
+        return { outcome: 'noop', exportId }
+      }
+      if (matchingClaim && replayRow?.status === 'expired') {
+        await storage.delete(prepared.storageKey)
+        return { outcome: 'noop', exportId }
+      }
+      fail('unavailable')
     }
     return { outcome: 'materialized', exportId }
   } catch (error) {
     if (error instanceof ElearningAnalyticsExportError) throw error
-    if (prepared) await markMaterializationFailed(db, prepared).catch(() => undefined)
+    if (prepared?.kind === 'materialize') {
+      await markMaterializationFailed(db, prepared).catch(() => undefined)
+    }
     fail('unavailable')
   }
 }
@@ -915,31 +947,37 @@ export async function cleanupElearningAnalyticsExport(
   const orgId = requireText(input.orgId)
   const exportId = requireUuid(input.exportId)
   try {
-    const found = await db.query(
-      `/* elearning-analytics-export:cleanup-read */
-       SELECT storage_key, status, (expires_at <= now()) AS expired_by_clock
-       FROM elearning_export_jobs
-       WHERE org_id = $1 AND id = $2::uuid`,
-      [orgId, exportId],
-    )
-    if (found.rows.length === 0) fail('not_found')
-    if (found.rows.length !== 1 || !found.rows[0]) fail('unavailable')
-    if (storedStatus(found.rows[0].status) === 'expired') return { outcome: 'noop', exportId }
-    if (!storedBoolean(found.rows[0].expired_by_clock)) {
-      return { outcome: 'noop', exportId }
-    }
-    if (found.rows[0].storage_key !== null) {
-      await storage.delete(storedText(found.rows[0].storage_key))
-    }
-    const updated = await db.query(
-      `/* elearning-analytics-export:cleanup-expire */
-       UPDATE elearning_export_jobs
-       SET status = 'expired', expired_at = now(), updated_at = now()
-       WHERE org_id = $1 AND id = $2::uuid AND status <> 'expired' AND expires_at <= now()
-       RETURNING id`,
-      [orgId, exportId],
-    )
-    if (updated.rows.length !== 1) fail('unavailable')
+    const prepared = await db.transaction(async (tx) => {
+      const found = await tx.query(
+        `/* elearning-analytics-export:cleanup-lock */
+         SELECT storage_key, status, (expires_at <= now()) AS expired_by_clock
+         FROM elearning_export_jobs
+         WHERE org_id = $1 AND id = $2::uuid
+         FOR UPDATE`,
+        [orgId, exportId],
+      )
+      if (found.rows.length === 0) fail('not_found')
+      if (found.rows.length !== 1 || !found.rows[0]) fail('unavailable')
+      const row = found.rows[0]
+      const status = storedStatus(row.status)
+      if (status !== 'expired' && !storedBoolean(row.expired_by_clock)) return null
+      if (status !== 'expired') {
+        const updated = await tx.query(
+          `/* elearning-analytics-export:cleanup-expire */
+           UPDATE elearning_export_jobs
+           SET status = 'expired', expired_at = now(), updated_at = now()
+           WHERE org_id = $1 AND id = $2::uuid AND status <> 'expired' AND expires_at <= now()
+           RETURNING id`,
+          [orgId, exportId],
+        )
+        if (updated.rows.length !== 1) fail('unavailable')
+      }
+      return {
+        storageKey: row.storage_key === null ? null : storedText(row.storage_key),
+      }
+    })
+    if (!prepared) return { outcome: 'noop', exportId }
+    if (prepared.storageKey !== null) await storage.delete(prepared.storageKey)
     return { outcome: 'expired', exportId }
   } catch (error) {
     if (error instanceof ElearningAnalyticsExportError) throw error

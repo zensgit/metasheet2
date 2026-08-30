@@ -35,6 +35,12 @@ const EXPECTED_COLUMNS = new Map<string, string>([
   ['updated_at', 'timestamp with time zone:NO'],
 ])
 
+const EXPECTED_DEFAULTS = new Map<string, string>([
+  ['status', "'pending'::text"],
+  ['created_at', 'now()'],
+  ['updated_at', 'now()'],
+])
+
 const EXPECTED_CONSTRAINTS = new Map<string, string>([
   ['elearning_export_jobs_actor_fk',
     'FOREIGN KEY (actor_id, org_id) REFERENCES user_orgs(user_id, org_id) ON DELETE RESTRICT'],
@@ -76,8 +82,9 @@ async function assertCanonical(db: Kysely<unknown>): Promise<void> {
     column_name: string
     data_type: string
     is_nullable: string
+    column_default: string | null
   }>`
-    SELECT column_name, data_type, is_nullable
+    SELECT column_name, data_type, is_nullable, column_default
     FROM information_schema.columns
     WHERE table_schema = current_schema() AND table_name = ${TABLE}
     ORDER BY ordinal_position
@@ -88,6 +95,9 @@ async function assertCanonical(db: Kysely<unknown>): Promise<void> {
       EXPECTED_COLUMNS.get(row.column_name) !== `${row.data_type}:${row.is_nullable}`
     ))
   ) throw new Error('elearning export migration drift: columns')
+  if (columns.rows.some((row) => (
+    row.column_default !== (EXPECTED_DEFAULTS.get(row.column_name) ?? null)
+  ))) throw new Error('elearning export migration drift: defaults')
 
   const constraints = await sql<{
     conname: string
