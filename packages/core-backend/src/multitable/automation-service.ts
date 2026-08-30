@@ -82,11 +82,17 @@ import { AutomationLogService } from './automation-log-service'
 import { AutomationJobService } from './automation-job-service'
 import { AutomationSuspensionService, computeActionFingerprint } from './automation-suspension-service'
 import { deriveRuleActionSetFingerprint } from './automation-rule-fingerprint'
-import { realFireTestRunEligibility } from './automation-retry-eligibility'
 import {
   deriveTestRunScopedRoot,
   type ExecutionLedgerKind,
 } from './automation-execution-ledger'
+import {
+  claimFirstAutomationRetryAttempt,
+  hasAutomationRetryLedgerEvidence,
+  isWithinAutomationRetryWindow,
+  realFireTestRunEligibility,
+  retryLedgerFamiliesForActions,
+} from './automation-retry-eligibility'
 import {
   AutomationApprovalBridgeService,
   hasPermissionCode,
@@ -2661,8 +2667,17 @@ export class AutomationService {
       // Fail closed (A4-D7): null/undefined, array, or empty `{}` cannot rebuild context.
       return { status: 409, code: 'MISSING_TRIGGER_EVENT', message: 'Original execution has no usable stored trigger event to retry' }
     }
-    const lineageIds = await this.collectExecutionLineageIds(original)
-    const rootExecutionId = lineageIds.at(-1) ?? original.id
+    const lineage = await this.collectExecutionLineage(original)
+    const lineageIds = lineage.map((execution) => execution.id)
+    const rootExecution = lineage.at(-1) ?? original
+    const rootExecutionId = rootExecution.id
+    if (!isWithinAutomationRetryWindow(rootExecution.triggeredAt)) {
+      return {
+        status: 409,
+        code: 'RETRY_WINDOW_EXPIRED',
+        message: 'The original execution is outside the retry evidence retention window',
+      }
+    }
     if (await this.approvalBridgeService.hasCreatedApprovalForAnyExecution(lineageIds)) {
       return {
         status: 409,
@@ -2691,6 +2706,20 @@ export class AutomationService {
         message: 'Rule actions changed since the original execution; cannot retry safely',
       }
     }
+    const firstRetryAttempt = await claimFirstAutomationRetryAttempt(this.queryFn, rootExecutionId)
+    const isGenuinelyFirstRetry = firstRetryAttempt && original.rerunOfExecutionId == null
+    const retryLedgerFamilies = retryLedgerFamiliesForActions(execRule.actions)
+    if (
+      !isGenuinelyFirstRetry
+      && (retryLedgerFamilies.classA || retryLedgerFamilies.classB)
+      && !(await hasAutomationRetryLedgerEvidence(this.queryFn, rootExecutionId, retryLedgerFamilies))
+    ) {
+      return {
+        status: 409,
+        code: 'RETRY_LEDGER_EVIDENCE_MISSING',
+        message: 'Retry evidence for this execution lineage is missing',
+      }
+    }
     const execution = await this.executeRule(execRule, original.triggerEvent, {
       rerunOfExecutionId: original.id,
       initiatedBy,
@@ -2699,19 +2728,21 @@ export class AutomationService {
     return { execution }
   }
 
-  private async collectExecutionLineageIds(execution: AutomationExecution): Promise<string[]> {
-    const ids: string[] = []
+  private async collectExecutionLineage(
+    execution: AutomationExecution,
+  ): Promise<AutomationExecution[]> {
+    const executions: AutomationExecution[] = []
     const seen = new Set<string>()
     let current: AutomationExecution | null = execution
     for (let depth = 0; current && depth < 16; depth++) {
       if (seen.has(current.id)) break
       seen.add(current.id)
-      ids.push(current.id)
+      executions.push(current)
       const parentId = current.rerunOfExecutionId
       if (!parentId || seen.has(parentId)) break
-      current = await this.logService.getById(parentId)
+      current = (await this.logService.getById(parentId)) ?? null
     }
-    return ids
+    return executions
   }
 
   /**
@@ -2841,7 +2872,7 @@ export class AutomationService {
       actorId: ((triggerEvent as Record<string, unknown>)?.actorId as string) ?? null,
       triggerEvent,
     }
-    const lineageIds = await this.collectExecutionLineageIds(execution)
+    const lineageIds = (await this.collectExecutionLineage(execution)).map((item) => item.id)
     const rootExecutionId = suspension.rootExecutionId ?? lineageIds.at(-1) ?? execution.id
     // #4196: carry the lineage root onto the resumed context so Class-A actions in the resumed tail claim
     // on the SAME root as the original run (a resumed action re-applying itself → duplicate → skip).
