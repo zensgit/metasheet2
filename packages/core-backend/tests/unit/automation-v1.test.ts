@@ -8,6 +8,11 @@ import { EventBus } from '../../src/integration/events/event-bus'
 import { __resetDingTalkAppAccessTokenCacheForTests } from '../../src/integrations/dingtalk/client'
 import { encryptStoredSecretValue } from '../../src/security/encrypted-secrets'
 import { ALL_ACTION_TYPES, type AutomationAction } from '../../src/multitable/automation-actions'
+import {
+  AUTOMATION_ACTION_LEDGER_RETENTION_DAYS,
+  automationActionLedgerRetentionCutoffIso,
+  classifyRetryWindow,
+} from '../../src/multitable/automation-execution-ledger'
 
 // ── DB mock for AutomationLogService ──────────────────────────────────────
 
@@ -4084,12 +4089,20 @@ describe('AutomationService — Rule CRUD', () => {
 
 describe('AutomationService — retryExecution (A5)', () => {
   let service: AutomationService
+  let queryFn: ReturnType<typeof vi.fn>
+  const classAFlag = 'AUTOMATION_CLASSA_CLAIM_ENABLED'
+  const nowMs = Date.parse('2026-08-30T12:00:00.000Z')
 
   beforeEach(() => {
+    delete process.env[classAFlag]
     const eventBus = new EventBus()
-    const queryFn = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+    queryFn = vi.fn(async () => ({ rows: [], rowCount: 0 }))
     // Minimal kysely-ish stub; retryExecution collaborators are spied, so the db is unused.
     service = new AutomationService(eventBus, {} as never, queryFn)
+  })
+
+  afterEach(() => {
+    delete process.env[classAFlag]
   })
 
   function storedExecution(over: Partial<AutomationExecution> = {}): AutomationExecution {
@@ -4113,6 +4126,188 @@ describe('AutomationService — retryExecution (A5)', () => {
       ...over,
     } as never
   }
+
+  function currentClassARule(over: Record<string, unknown> = {}) {
+    return currentRule({
+      action_type: 'create_record',
+      action_config: { sheetId: 'sheet_1', data: { name: 'retry' } },
+      ...over,
+    })
+  }
+
+  it('classifies the retry window against the same strict cutoff used by the applied-ledger sweep', () => {
+    const cutoff = Date.parse(automationActionLedgerRetentionCutoffIso(nowMs))
+    expect(AUTOMATION_ACTION_LEDGER_RETENTION_DAYS).toBe(7)
+    expect(classifyRetryWindow(new Date(cutoff - 1).toISOString(), nowMs)).toBe('expired')
+    expect(classifyRetryWindow(new Date(cutoff).toISOString(), nowMs)).toBe('eligible')
+    expect(classifyRetryWindow(new Date(nowMs + 1).toISOString(), nowMs)).toBe('invalid')
+    expect(classifyRetryWindow('not-a-time', nowMs)).toBe('invalid')
+  })
+
+  it('409 RETRY_WINDOW_EXPIRED before dispatch when the Class-A lineage root is older than retention', async () => {
+    process.env[classAFlag] = 'true'
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(storedExecution({
+      triggeredAt: new Date(nowMs - 8 * 24 * 60 * 60 * 1000).toISOString(),
+    }))
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentClassARule())
+    const execSpy = vi.spyOn(service, 'executeRule')
+
+    await expect(service.retryExecution('axe_orig', 'admin1', nowMs)).resolves.toMatchObject({
+      status: 409,
+      code: 'RETRY_WINDOW_EXPIRED',
+    })
+    expect(execSpy).not.toHaveBeenCalled()
+    expect(queryFn.mock.calls.some(([sqlText]) => String(sqlText).includes('first_retry_attempted_at'))).toBe(false)
+  })
+
+  it('applies the retry evidence gate to a Class-A action nested inside a condition branch', async () => {
+    process.env[classAFlag] = 'true'
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(storedExecution({
+      triggeredAt: new Date(nowMs - 8 * 24 * 60 * 60 * 1000).toISOString(),
+    }))
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentRule({
+      actions: [{
+        type: 'condition_branch',
+        config: {
+          branches: [{
+            key: 'matched',
+            actions: [{ type: 'create_record', config: { sheetId: 'sheet_1', data: { name: 'nested' } } }],
+          }],
+        },
+      }],
+    }))
+    const execSpy = vi.spyOn(service, 'executeRule')
+
+    await expect(service.retryExecution('axe_orig', 'admin1', nowMs)).resolves.toMatchObject({
+      status: 409,
+      code: 'RETRY_WINDOW_EXPIRED',
+    })
+    expect(execSpy).not.toHaveBeenCalled()
+  })
+
+  it('a genuinely first in-window Class-A retry atomically claims the marker and proceeds', async () => {
+    process.env[classAFlag] = 'true'
+    queryFn.mockImplementation(async (sqlText: unknown) =>
+      String(sqlText).includes('first_retry_attempted_at')
+        ? { rows: [{ id: 'axe_orig' }], rowCount: 1 }
+        : { rows: [], rowCount: 0 })
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(storedExecution({
+      triggeredAt: new Date(nowMs - 60_000).toISOString(),
+    }))
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentClassARule())
+    const execSpy = vi.spyOn(service, 'executeRule').mockResolvedValue(storedExecution({ id: 'axe_new', status: 'success' }))
+
+    const result = await service.retryExecution('axe_orig', 'admin1', nowMs)
+    expect('execution' in result).toBe(true)
+    expect(execSpy).toHaveBeenCalledTimes(1)
+    expect(queryFn.mock.calls.some(([sqlText]) => String(sqlText).includes('first_retry_attempted_at'))).toBe(true)
+    expect(queryFn.mock.calls.some(([sqlText]) => String(sqlText).includes('meta_automation_action_applied'))).toBe(false)
+  })
+
+  it('409 RETRY_EVIDENCE_MISSING for a non-first Class-A retry whose applied ledger vanished', async () => {
+    process.env[classAFlag] = 'true'
+    queryFn.mockImplementation(async (sqlText: unknown) => {
+      const sql = String(sqlText)
+      if (sql.includes('first_retry_attempted_at')) return { rows: [], rowCount: 0 }
+      if (sql.includes('meta_automation_action_applied')) return { rows: [{ has_evidence: false }], rowCount: 1 }
+      return { rows: [], rowCount: 0 }
+    })
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(storedExecution({
+      triggeredAt: new Date(nowMs - 60_000).toISOString(),
+    }))
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentClassARule())
+    const execSpy = vi.spyOn(service, 'executeRule')
+
+    await expect(service.retryExecution('axe_orig', 'admin1', nowMs)).resolves.toMatchObject({
+      status: 409,
+      code: 'RETRY_EVIDENCE_MISSING',
+    })
+    expect(execSpy).not.toHaveBeenCalled()
+  })
+
+  it('a non-first in-window Class-A retry proceeds when durable applied evidence remains', async () => {
+    process.env[classAFlag] = 'true'
+    queryFn.mockImplementation(async (sqlText: unknown) => {
+      const sql = String(sqlText)
+      if (sql.includes('first_retry_attempted_at')) return { rows: [], rowCount: 0 }
+      if (sql.includes('meta_automation_action_applied')) return { rows: [{ has_evidence: true }], rowCount: 1 }
+      return { rows: [], rowCount: 0 }
+    })
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(storedExecution({
+      triggeredAt: new Date(nowMs - 60_000).toISOString(),
+    }))
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentClassARule())
+    const execSpy = vi.spyOn(service, 'executeRule').mockResolvedValue(storedExecution({ id: 'axe_new', status: 'success' }))
+
+    const result = await service.retryExecution('axe_orig', 'admin1', nowMs)
+    expect('execution' in result).toBe(true)
+    expect(execSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not impose Class-A evidence semantics on a rule with no Class-A actions', async () => {
+    process.env[classAFlag] = 'true'
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(storedExecution({
+      triggeredAt: new Date(nowMs - 30 * 24 * 60 * 60 * 1000).toISOString(),
+    }))
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentRule())
+    const execSpy = vi.spyOn(service, 'executeRule').mockResolvedValue(storedExecution({ id: 'axe_new', status: 'success' }))
+
+    const result = await service.retryExecution('axe_orig', 'admin1', nowMs)
+    expect('execution' in result).toBe(true)
+    expect(execSpy).toHaveBeenCalledTimes(1)
+    expect(queryFn.mock.calls.some(([sqlText]) => String(sqlText).includes('first_retry_attempted_at'))).toBe(false)
+  })
+
+  it('keeps the legacy Class-A retry path unchanged while the existing claim flag is OFF', async () => {
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(storedExecution({
+      triggeredAt: new Date(nowMs - 30 * 24 * 60 * 60 * 1000).toISOString(),
+    }))
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentClassARule())
+    const execSpy = vi.spyOn(service, 'executeRule').mockResolvedValue(storedExecution({ id: 'axe_new', status: 'success' }))
+
+    const result = await service.retryExecution('axe_orig', 'admin1', nowMs)
+    expect('execution' in result).toBe(true)
+    expect(execSpy).toHaveBeenCalledTimes(1)
+    expect(queryFn.mock.calls.some(([sqlText]) => String(sqlText).includes('first_retry_attempted_at'))).toBe(false)
+  })
+
+  it('fails closed when a retry child points at a missing lineage root', async () => {
+    process.env[classAFlag] = 'true'
+    const child = storedExecution({
+      id: 'axe_retry_child',
+      rerunOfExecutionId: 'axe_missing_root',
+      triggeredAt: new Date(nowMs - 60_000).toISOString(),
+    })
+    vi.spyOn(service.logs, 'getById').mockImplementation(async (id) => id === child.id ? child : undefined)
+    const getRule = vi.spyOn(service, 'getRule').mockResolvedValue(currentClassARule())
+    const execSpy = vi.spyOn(service, 'executeRule')
+
+    await expect(service.retryExecution(child.id, 'admin1', nowMs)).resolves.toMatchObject({
+      status: 409,
+      code: 'RETRY_EVIDENCE_MISSING',
+    })
+    expect(getRule).toHaveBeenCalledTimes(1)
+    expect(execSpy).not.toHaveBeenCalled()
+    expect(queryFn).not.toHaveBeenCalled()
+  })
+
+  it('keeps the legacy missing-parent path unchanged while the Class-A claim flag is OFF', async () => {
+    const child = storedExecution({
+      id: 'axe_retry_child',
+      rerunOfExecutionId: 'axe_missing_root',
+      triggeredAt: new Date(nowMs - 60_000).toISOString(),
+    })
+    vi.spyOn(service.logs, 'getById').mockImplementation(async (id) => id === child.id ? child : undefined)
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentClassARule())
+    const execSpy = vi.spyOn(service, 'executeRule').mockResolvedValue(
+      storedExecution({ id: 'axe_new', status: 'success' }),
+    )
+
+    const result = await service.retryExecution(child.id, 'admin1', nowMs)
+    expect('execution' in result).toBe(true)
+    expect(execSpy).toHaveBeenCalledTimes(1)
+    expect(queryFn).not.toHaveBeenCalled()
+  })
 
   it('404 NOT_FOUND when the original execution is missing', async () => {
     vi.spyOn(service.logs, 'getById').mockResolvedValue(undefined)

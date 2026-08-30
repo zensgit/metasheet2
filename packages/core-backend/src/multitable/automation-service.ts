@@ -83,6 +83,14 @@ import { AutomationJobService } from './automation-job-service'
 import { AutomationSuspensionService, computeActionFingerprint } from './automation-suspension-service'
 import { deriveRuleActionSetFingerprint } from './automation-rule-fingerprint'
 import {
+  AUTOMATION_ACTION_LEDGER_SWEEP_INTERVAL_MS,
+  automationActionLedgerRetentionCutoffIso,
+  claimRetryEvidence,
+  classifyRetryWindow,
+  isClassAExecutionClaimEnabled,
+  ruleHasClassAActions,
+} from './automation-execution-ledger'
+import {
   AutomationApprovalBridgeService,
   hasPermissionCode,
   type AutomationApprovalBridgeRow,
@@ -874,6 +882,7 @@ export class AutomationService {
   private approvalBridgeService: AutomationApprovalBridgeService
   private lastDateReminderLedgerSweepMs = 0
   private lastEventDedupLedgerSweepMs = 0
+  private lastActionAppliedLedgerSweepMs = 0
   /** Kept for backward-compat with raw SQL in executor actions */
   private queryFn: AutomationQueryFn
 
@@ -1643,6 +1652,35 @@ export class AutomationService {
       SELECT count(*)::int AS count FROM deleted
     `.execute(this.db)
     return Number(deleted.rows[0]?.count ?? 0)
+  }
+
+  /** #4196 §5: bound the Class-A proof ledger to the same fixed seven-day window as retry eligibility. */
+  async sweepAutomationActionAppliedLedger(nowMs = Date.now()): Promise<number> {
+    const cutoffIso = automationActionLedgerRetentionCutoffIso(nowMs)
+    const deleted = await sql<{ count: number | string }>`
+      WITH deleted AS (
+        DELETE FROM meta_automation_action_applied
+         WHERE applied_at < ${cutoffIso}
+        RETURNING 1
+      )
+      SELECT count(*)::int AS count FROM deleted
+    `.execute(this.db)
+    return Number(deleted.rows[0]?.count ?? 0)
+  }
+
+  private kickAutomationActionAppliedLedgerSweepIfDue(nowMs: number): void {
+    if (nowMs - this.lastActionAppliedLedgerSweepMs < AUTOMATION_ACTION_LEDGER_SWEEP_INTERVAL_MS) return
+    this.lastActionAppliedLedgerSweepMs = nowMs
+    void this.sweepAutomationActionAppliedLedger(nowMs)
+      .then((deleted) => {
+        if (deleted > 0) logger.info(`Automation action-applied ledger retention swept ${deleted} old row(s)`)
+      })
+      .catch((err) => {
+        logger.warn(
+          'Automation action-applied ledger retention sweep failed; continuing execution',
+          err instanceof Error ? err : undefined,
+        )
+      })
   }
 
   private kickEventDedupLedgerSweepIfDue(nowMs: number): void {
@@ -2456,6 +2494,9 @@ export class AutomationService {
     triggerEvent: unknown,
     retryMeta?: { rerunOfExecutionId: string; initiatedBy: string; rootExecutionId?: string },
   ): Promise<AutomationExecution> {
+    if (isClassAExecutionClaimEnabled() && ruleHasClassAActions(rule.actions)) {
+      this.kickAutomationActionAppliedLedgerSweepIfDue(Date.now())
+    }
     const persistJobs = rule.executionMode === 'workflow_job_v1'
     // A6-1: ONLY opted-in rules ('workflow_job_v1') get a per-action job lifecycle. Legacy rules
     // pass no factory → executor writes zero job rows (opt-out path is byte-identical to today).
@@ -2551,6 +2592,7 @@ export class AutomationService {
   async retryExecution(
     executionId: string,
     initiatedBy: string,
+    nowMs = Date.now(),
   ): Promise<{ execution: AutomationExecution } | { status: number; code: string; message: string }> {
     const original = await this.logService.getById(executionId)
     if (!original) {
@@ -2576,6 +2618,9 @@ export class AutomationService {
     }
     const lineageIds = await this.collectExecutionLineageIds(original)
     const rootExecutionId = lineageIds.at(-1) ?? original.id
+    const rootExecution = rootExecutionId === original.id
+      ? original
+      : await this.logService.getById(rootExecutionId)
     if (await this.approvalBridgeService.hasCreatedApprovalForAnyExecution(lineageIds)) {
       return {
         status: 409,
@@ -2602,6 +2647,39 @@ export class AutomationService {
         status: 409,
         code: 'RULE_CHANGED',
         message: 'Rule actions changed since the original execution; cannot retry safely',
+      }
+    }
+    if (isClassAExecutionClaimEnabled() && ruleHasClassAActions(execRule.actions)) {
+      if (!rootExecution || rootExecution.rerunOfExecutionId != null) {
+        return {
+          status: 409,
+          code: 'RETRY_EVIDENCE_MISSING',
+          message: 'Retry lineage root is unavailable; cannot prove prior action state',
+        }
+      }
+      const windowDecision = classifyRetryWindow(rootExecution.triggeredAt, nowMs)
+      if (windowDecision === 'expired') {
+        return {
+          status: 409,
+          code: 'RETRY_WINDOW_EXPIRED',
+          message: 'Retry window expired; prior Class-A action evidence may no longer be retained',
+        }
+      }
+      if (windowDecision === 'invalid') {
+        return {
+          status: 409,
+          code: 'RETRY_EVIDENCE_INVALID',
+          message: 'Retry lineage has an invalid time anchor; cannot prove prior action state',
+        }
+      }
+
+      const evidenceDecision = await claimRetryEvidence(this.queryFn, rootExecutionId)
+      if (evidenceDecision === 'evidence_missing') {
+        return {
+          status: 409,
+          code: 'RETRY_EVIDENCE_MISSING',
+          message: 'Prior retry exists but its Class-A action evidence is missing',
+        }
       }
     }
     const execution = await this.executeRule(execRule, original.triggerEvent, {
