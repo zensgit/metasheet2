@@ -28,9 +28,11 @@ import {
   commitPlmBulkGrid,
   dryRunPlmBulkGrid,
   getPlmBulkGridSchema,
+  indexBulkGridRowErrors,
   type PlmBulkGridProperty,
   type PlmBulkGridReport,
   type PlmBulkGridRowError,
+  type PlmBulkGridSubmitResult,
 } from '../services/integration/workbench'
 
 export type PlmBulkGridRow = Record<string, unknown>
@@ -59,6 +61,33 @@ function defaultMintKey(): string {
   return `bulk-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`
 }
 
+/**
+ * Statuses on which the relay has told us, definitively, that NOTHING was written: a request
+ * the relay or the provider rejected outright. Everything else after a commit attempt —
+ * 5xx, a transport failure, an unreadable body — leaves the outcome UNKNOWN.
+ *
+ * The 409 is in this set on purpose: `idempotency_conflict` means the provider recognised the
+ * key and refused because the bytes changed, so the key is spent and nothing was written.
+ */
+const COMMIT_DEFINITELY_NOT_WRITTEN = new Set([400, 401, 403, 404, 409, 413, 422])
+
+/**
+ * §11's discriminator. "Did the write land?" — and the honest answer is often "unknown".
+ *
+ * `commitPlmBulkGrid` returns `{ok: false}` for every non-2xx rather than throwing, so the
+ * commonest ambiguous case (the relay was reached, the provider was not) arrives in the normal
+ * result branch and NOT in a `catch`. Classifying on "did we throw" would therefore mint a new
+ * key for exactly the case §11 says to reuse one — and a lost response over a create-only grid
+ * would then create every row a second time.
+ *
+ * A refusal at the freshness stage is provably clean: the relay re-runs dry-run BEFORE the
+ * commit and never reaches the write.
+ */
+export function commitOutcomeIsAmbiguous(result: PlmBulkGridSubmitResult & { ok: false }): boolean {
+  if (result.stage === 'freshness-dry-run') return false
+  return !COMMIT_DEFINITELY_NOT_WRITTEN.has(result.status)
+}
+
 export function usePlmBulkGrid(options: UsePlmBulkGridOptions) {
   const now = options.now ?? (() => Date.now())
   const mintKey = options.mintKey ?? defaultMintKey
@@ -68,7 +97,16 @@ export function usePlmBulkGrid(options: UsePlmBulkGridOptions) {
   const declaredColumns = ref<string[]>([])
   const rows = ref<PlmBulkGridRow[]>([])
   const report = ref<PlmBulkGridReport | null>(null)
+  /**
+   * N3-A: the seam, parked at create-only. The relay refuses any submission carrying a
+   * `match_property` (its uniqueness cannot be established for the ItemType in the tenant), and
+   * `matchPropertyCandidates` comes back empty, so the panel offers nothing to set this to.
+   * Kept as state rather than deleted because it is the single knob the owner's N3 disposition
+   * turns — and because a client that sets it anyway must be seen to be refused.
+   */
   const matchProperty = ref<string>('')
+  const matchPropertyCandidates = ref<string[]>([])
+  const matchPropertyReason = ref<string>('')
   const commitEnabled = ref(false)
   const loading = ref(false)
   const submitting = ref(false)
@@ -82,6 +120,23 @@ export function usePlmBulkGrid(options: UsePlmBulkGridOptions) {
    * ONLY by `load()`. This is the flag that makes stale resubmission impossible.
    */
   const mustReload = ref(false)
+
+  /**
+   * §11: "On a network failure or timeout with no response: retry with the SAME key. That is
+   * the case the key exists for."
+   *
+   * That sentence is unsatisfiable without this ref. N2-b locks the grid after an ambiguous
+   * commit, the only way out of the lock is `load()`, and `load()` used to re-mint the key
+   * unconditionally — so the same-key retry §11 mandates could not physically be expressed.
+   * Under create-only (N3-A's mandated mode) that meant a lost response led to an operator
+   * resubmitting identical rows under a NEW key: the provider's idempotency cache is never
+   * consulted, and EVERY ROW IS CREATED TWICE.
+   *
+   * So: an ambiguous commit parks its key here, `load()` restores it when the rows have not
+   * moved, and any edit clears it — because a changed cell is a different submission and
+   * reusing the key would be a 409 by design.
+   */
+  const pendingRetryKey = ref<string>('')
 
   /**
    * Reactive clock tick for N2-d.
@@ -115,15 +170,15 @@ export function usePlmBulkGrid(options: UsePlmBulkGridOptions) {
   /** N2-d: an expired session must be reloaded before the commit affordance returns. */
   const needsRefreshBeforeCommit = computed(() => mustReload.value || isStale.value)
 
-  const rowErrorIndex = computed(() => {
-    const index = new Map<number, PlmBulkGridRowError[]>()
-    for (const entry of report.value?.row_errors ?? []) {
-      const bucket = index.get(entry.row_number)
-      if (bucket) bucket.push(entry)
-      else index.set(entry.row_number, [entry])
-    }
-    return index
-  })
+  /**
+   * True while a submission of UNKNOWN outcome is parked for a same-key retry (§11). The panel
+   * has to say so: reloading and resubmitting is normally a fresh submission, and this is the
+   * one case where it must be byte-identical instead.
+   */
+  const canRetrySameSubmission = computed(() => pendingRetryKey.value !== '')
+
+  // ONE indexer, shared with the service layer -- not a second local re-derivation.
+  const rowErrorIndex = computed(() => indexBulkGridRowErrors(report.value))
 
   /** `row_number` is 1-based over data rows, matching the serialized file the server built. */
   function errorsForRow(rowIndex: number): PlmBulkGridRowError[] {
@@ -156,6 +211,9 @@ export function usePlmBulkGrid(options: UsePlmBulkGridOptions) {
    */
   function markEdited(): void {
     report.value = null
+    // A changed cell is a DIFFERENT submission, so any parked same-key retry is void: reusing
+    // that key now would be a 409 by design (§11), which is the point of the design.
+    pendingRetryKey.value = ''
     idempotencyKey.value = mintKey()
   }
 
@@ -184,13 +242,26 @@ export function usePlmBulkGrid(options: UsePlmBulkGridOptions) {
       }
       properties.value = schema.properties
       declaredColumns.value = schema.declaredColumns
+      matchPropertyCandidates.value = schema.matchPropertyCandidates
+      matchPropertyReason.value = schema.matchPropertyReason
+      // N3-A: with no candidate the grid is create-only. Clearing here means a stale selection
+      // can never survive a reload into a submission the relay would refuse anyway.
+      if (!schema.matchPropertyCandidates.includes(matchProperty.value)) matchProperty.value = ''
       commitEnabled.value = schema.commitEnabled
       if (seedRows) rows.value = seedRows.map((row) => ({ ...row }))
       // A genuine reload is the ONLY thing that clears the N2-b lock and restarts the clock.
       mustReload.value = false
       loadedAt.value = now()
       report.value = null
-      idempotencyKey.value = mintKey()
+      // §11 same-key retry. Preserved ONLY for a reload that re-reads the schema and leaves the
+      // rows alone -- passing `seedRows` replaces them, which changes the bytes and therefore
+      // demands a new key. Everything else re-mints.
+      if (!seedRows && pendingRetryKey.value) {
+        idempotencyKey.value = pendingRetryKey.value
+      } else {
+        pendingRetryKey.value = ''
+        idempotencyKey.value = mintKey()
+      }
       return true
     } finally {
       loading.value = false
@@ -237,6 +308,9 @@ export function usePlmBulkGrid(options: UsePlmBulkGridOptions) {
       return null
     }
     if (!canSubmit.value) return null
+    // Captured BEFORE the try so the catch can park it. The catch is the no-response case, and
+    // §11 says that is exactly the case the key exists for -- it must not be out of scope there.
+    const submittedKey = idempotencyKey.value
     submitting.value = true
     errorMessage.value = ''
     try {
@@ -270,23 +344,41 @@ export function usePlmBulkGrid(options: UsePlmBulkGridOptions) {
         read(options.itemTypeId),
         rows.value,
         read(options.callerPlmToken),
-        idempotencyKey.value,
+        submittedKey,
         matchProperty.value || undefined,
       )
       if (!result.ok) {
-        // N2-b: ANY non-clean commit locks the grid until a reload. This deliberately covers
-        // the ambiguous case (no response) as well as an outright rejection: after an
-        // uncertain write the local buffer can no longer be trusted to describe PLM.
-        mustReload.value = true
-        errorMessage.value = result.message
         report.value = result.report ?? null
+        errorMessage.value = result.message
+        if (result.stage === 'freshness-dry-run') {
+          // The relay's OWN pre-commit revalidation refused; the write was never attempted, so
+          // this is not a failed commit at all. Locking here would force a reload for a grid
+          // that merely needs fixing, which is the case N2-b is not about.
+          return null
+        }
+        // N2-b: every other non-clean commit locks the grid until a reload.
+        mustReload.value = true
+        if (commitOutcomeIsAmbiguous(result)) {
+          // §11: the write MAY have landed. Park the key so the reload can retry the identical
+          // submission under it -- the provider then replays its cached report instead of
+          // writing a second time.
+          pendingRetryKey.value = submittedKey
+          errorMessage.value = `${result.message}（提交结果未知，可能已写入。请重新加载后用同一幂等键原样重交，切勿改动后重交。）`
+        } else {
+          // A definitive refusal: nothing was written and this key is spent.
+          pendingRetryKey.value = ''
+          idempotencyKey.value = mintKey()
+        }
         return null
       }
       report.value = result.report
+      // A response arrived, so nothing is ambiguous from here on: no key is parked.
+      pendingRetryKey.value = ''
       if (!result.report.ready) {
         // Reject-all: a 200 that wrote NOTHING. Fix and resubmit the whole grid with a fresh
         // load and a new key (§10: no partial retry).
         mustReload.value = true
+        idempotencyKey.value = mintKey()
         errorMessage.value = '整批被拒绝，未写入任何数据。请重新加载并修正后整批重交。'
         return result.report
       }
@@ -294,9 +386,11 @@ export function usePlmBulkGrid(options: UsePlmBulkGridOptions) {
       mustReload.value = true
       return result.report
     } catch (err) {
-      // An exception here is the ambiguous case: the write may or may not have landed.
+      // A throw is the other ambiguous case -- no response at all, so the write may or may not
+      // have landed. Same treatment as an ambiguous status: lock, and park the key for §11.
       mustReload.value = true
-      errorMessage.value = err instanceof Error ? err.message : String(err)
+      pendingRetryKey.value = submittedKey
+      errorMessage.value = `${err instanceof Error ? err.message : String(err)}（提交结果未知，可能已写入。请重新加载后用同一幂等键原样重交。）`
       return null
     } finally {
       submitting.value = false
@@ -309,12 +403,16 @@ export function usePlmBulkGrid(options: UsePlmBulkGridOptions) {
     rows,
     report,
     matchProperty,
+    matchPropertyCandidates,
+    matchPropertyReason,
     commitEnabled,
     loading,
     submitting,
     errorMessage,
     mustReload,
     idempotencyKey,
+    pendingRetryKey,
+    canRetrySameSubmission,
     isStale,
     refreshStaleness,
     needsRefreshBeforeCommit,

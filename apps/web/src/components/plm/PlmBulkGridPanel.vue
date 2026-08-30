@@ -13,32 +13,37 @@
           匹配属性
           <select
             :value="grid.matchProperty.value"
+            :disabled="grid.matchPropertyCandidates.value.length === 0"
             data-testid="plm-bulk-grid-match-property"
             @change="onMatchPropertyChange(($event.target as HTMLSelectElement).value)"
           >
-            <!-- N3-A: create-only is the SAFE default and the mandated fallback whenever a
-                 match property's uniqueness cannot be established. -->
+            <!-- N3-A: create-only is the mandated fallback whenever a match property's
+                 uniqueness cannot be established, and the relay establishes none — so the
+                 candidate list is EMPTY and this select has exactly one option. It is NOT
+                 populated from declaredColumns: offering every declared column would advertise
+                 an update mode whose precondition was never checked. -->
             <option value="">仅新建（不更新已有对象）</option>
-            <option v-for="column in grid.declaredColumns.value" :key="column" :value="column">
+            <option v-for="column in grid.matchPropertyCandidates.value" :key="column" :value="column">
               {{ column }}
             </option>
           </select>
         </label>
         <button type="button" data-testid="plm-bulk-grid-add-row" @click="grid.addRow()">新增行</button>
-        <button type="button" data-testid="plm-bulk-grid-reload" @click="reload">重新加载</button>
+        <button type="button" data-testid="plm-bulk-grid-reload" @click="reload()">重新加载</button>
       </div>
 
-      <!-- N3-A warning: the provider's match lookup is a bare .first() with no is_current and
-           no state filter, so a duplicated value writes to an ARBITRARY row and a superseded
-           generation is an eligible target. Neither raises anything server-side. -->
+      <!-- N3-A, stated rather than silently applied: the provider's match lookup is a bare
+           .first() with no is_current and no state filter, so a value shared by two items
+           writes to an ARBITRARY one and a superseded generation is an eligible target. The
+           consumer cannot establish uniqueness for the ItemType in the tenant, so update mode
+           is off entirely and the operator is told why. -->
       <p
-        v-if="grid.matchProperty.value && duplicateMatchValues.length > 0"
-        class="bulk-panel__warn"
-        data-testid="plm-bulk-grid-match-warning"
+        v-if="grid.matchPropertyCandidates.value.length === 0"
+        class="bulk-panel__hint"
+        data-testid="plm-bulk-grid-create-only"
       >
-        匹配属性「{{ grid.matchProperty.value }}」在本表中不唯一（{{ duplicateMatchValues.length }} 个重复值：
-        {{ duplicateMatchValues.slice(0, 5).join('、') }}）。PLM 会任意选中其中一条写入，且历史版本同样可能被命中。
-        请改为仅新建，或先使该值唯一。
+        本表仅支持「新建」：无法确认任何属性在该对象类型下于本租户内唯一，
+        而 PLM 的匹配是任意选中一条（历史版本同样可能被命中），因此不提供按属性更新已有对象。
       </p>
 
       <p
@@ -46,7 +51,11 @@
         class="bulk-panel__warn"
         data-testid="plm-bulk-grid-stale-warning"
       >
-        <template v-if="grid.mustReload.value">
+        <template v-if="grid.canRetrySameSubmission.value">
+          上一次提交结果未知，可能已写入 PLM。请重新加载后<strong>原样</strong>重交：
+          将沿用同一幂等键，若上次已写入则不会重复写入。此时请勿改动任何单元格。
+        </template>
+        <template v-else-if="grid.mustReload.value">
           上一次提交未确认或未成功，本地表格已不可信。请重新加载后再整批重交。
         </template>
         <template v-else>
@@ -84,11 +93,13 @@
         </button>
       </div>
 
-      <!-- The maker-checker split, stated rather than hidden: an engineer validates, an admin
-           commits. The client affordance is a HINT only -- Yuantus's require_admin_user is the
-           real gate, so a non-admin who reaches the endpoint still gets a 403. -->
+      <!-- Deployment state ONLY. `commit_enabled` mirrors the relay's operator flag and knows
+           nothing about the account: the maker-checker gate is Yuantus's own require_admin_user,
+           which a non-admin meets as a 403 rendered from errorMessage below. Saying "or your
+           account lacks permission" here, as an earlier revision did, attributes a deployment
+           setting to the user and sends them to the wrong fix. -->
       <p v-if="!grid.commitEnabled.value" class="bulk-panel__hint" data-testid="plm-bulk-grid-commit-disabled">
-        本部署未开启批量写入，或当前账号不具备写入权限。校验仍可使用。
+        本部署未开启批量写入（校验仍可使用）。是否具备写入权限由 PLM 在提交时判定。
       </p>
 
       <p v-if="grid.errorMessage.value" class="bulk-panel__warn" data-testid="plm-bulk-grid-error">
@@ -158,25 +169,8 @@ const grid = usePlmBulkGrid({
   callerPlmToken: toRef(props, 'callerPlmToken'),
 })
 
-/**
- * Local N3-A pre-flight so the operator sees the problem BEFORE submitting. The server runs
- * the same check authoritatively and refuses with 409 match-property-not-unique. This is a
- * scan over rows already in hand — never a per-row existence probe, which §7 forbids.
- */
-const duplicateMatchValues = computed<string[]>(() => {
-  const column = grid.matchProperty.value
-  if (!column) return []
-  const counts = new Map<string, number>()
-  for (const row of grid.rows.value) {
-    const raw = row[column]
-    const value = raw === null || raw === undefined ? '' : String(raw).trim()
-    if (!value) continue
-    counts.set(value, (counts.get(value) ?? 0) + 1)
-  }
-  return [...counts.entries()].filter(([, count]) => count > 1).map(([value]) => value)
-})
-
 const commitTitle = computed(() => {
+  if (grid.canRetrySameSubmission.value) return '上一次提交结果未知，请重新加载后原样重交'
   if (grid.mustReload.value) return '上一次提交未确认，请先重新加载'
   if (grid.isStale.value) return '表格已过期，请先重新加载'
   if (!grid.isReady.value) return '请先校验通过'
@@ -184,10 +178,19 @@ const commitTitle = computed(() => {
   return '提交写入 PLM'
 })
 
-async function reload(): Promise<void> {
+/**
+ * The seed rows are applied ONCE, on mount.
+ *
+ * Every later reload deliberately leaves the rows alone, for two reasons. N2-c: re-applying the
+ * host's original seed after a commit would repaint the PRE-commit values as though they came
+ * back from PLM. And §11: `load()` may only carry an ambiguous submission's Idempotency-Key
+ * forward while the rows are untouched, so a reload that re-seeds would re-mint the key and
+ * make the same-key retry impossible — the exact failure this panel's retry notice describes.
+ */
+async function reload({ seed = false }: { seed?: boolean } = {}): Promise<void> {
   loading.value = true
   try {
-    await grid.load(props.seedRows)
+    await grid.load(seed ? props.seedRows : undefined)
   } finally {
     loading.value = false
   }
@@ -216,7 +219,7 @@ async function onCommit(): Promise<void> {
 let stalenessTimer: ReturnType<typeof setInterval> | null = null
 
 onMounted(async () => {
-  await reload()
+  await reload({ seed: true })
   stalenessTimer = setInterval(() => grid.refreshStaleness(), 30_000)
 })
 

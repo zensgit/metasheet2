@@ -1561,12 +1561,40 @@ export interface PlmBulkGridReport {
 }
 
 export type PlmBulkGridSchemaResult =
-  | { ok: true; properties: PlmBulkGridProperty[]; declaredColumns: string[]; commitEnabled: boolean }
+  | {
+    ok: true
+    properties: PlmBulkGridProperty[]
+    declaredColumns: string[]
+    commitEnabled: boolean
+    /**
+     * N3-A: the properties the grid may offer as `match_property`. The relay returns an EMPTY
+     * list today — no declared property's uniqueness can be established for the ItemType in the
+     * tenant from the consumer side — so the grid runs create-only. Never fall back to
+     * `declaredColumns` here: that is the bug this field exists to prevent.
+     */
+    matchPropertyCandidates: string[]
+    /** Machine-readable reason the candidate list is empty, rendered by the panel. */
+    matchPropertyReason: string
+  }
   | { ok: false; status: number; reason: string; message: string }
 
 export type PlmBulkGridSubmitResult =
   | { ok: true; report: PlmBulkGridReport; mustReload?: boolean }
-  | { ok: false; status: number; reason: string; message: string; report?: PlmBulkGridReport }
+  | {
+    ok: false
+    status: number
+    reason: string
+    message: string
+    report?: PlmBulkGridReport
+    /**
+     * WHERE the relay stopped — the only thing that distinguishes "definitely nothing was
+     * written" from "we do not know". `'freshness-dry-run'` means the pre-commit revalidation
+     * refused and the commit was never attempted; `'commit'` means the provider write WAS
+     * attempted. Dropping this (an earlier revision did) collapses the two, and the caller
+     * then has to treat a provably-clean refusal as an ambiguous write.
+     */
+    stage?: string
+  }
 
 function bulkGridHeaders(callerPlmToken: string, extra?: Record<string, string>): Record<string, string> {
   return {
@@ -1584,10 +1612,37 @@ function failure(status: number, body: Record<string, unknown> | null, fallback:
     status,
     reason: typeof body?.reason === 'string' && body.reason.trim() ? body.reason.trim() : 'request-failed',
     message: typeof body?.error === 'string' && body.error.trim() ? body.error.trim() : fallback,
+    // Carried through, never dropped: see the `stage` docs on PlmBulkGridSubmitResult.
+    ...(typeof body?.stage === 'string' && body.stage.trim() ? { stage: body.stage.trim() } : {}),
     ...(body && typeof body.ready === 'boolean'
       ? { report: normalizeBulkGridReport(body) }
       : {}),
   }
+}
+
+/**
+ * Index `row_errors` by `row_number` so the grid can paint a marker on the exact cell.
+ *
+ * The ONE indexer for the web app — the composable consumes this rather than re-deriving it.
+ * `row_number` is 1-based over data rows of the serialized file, so a caller holding a 0-based
+ * row index adds 1.
+ *
+ * `normalizeBulkGridReport` has already dropped any entry whose `row_number` is not finite, so
+ * a `NaN` bucket that no row could ever match cannot form here. Unrecognized `error_code`
+ * values are preserved verbatim — §3.1 declares the code set open, and an unknown code must be
+ * rendered rather than dropped.
+ */
+export function indexBulkGridRowErrors(
+  report: PlmBulkGridReport | null | undefined,
+): Map<number, PlmBulkGridRowError[]> {
+  const index = new Map<number, PlmBulkGridRowError[]>()
+  for (const entry of report?.row_errors ?? []) {
+    if (!entry || !Number.isFinite(entry.row_number)) continue
+    const bucket = index.get(entry.row_number)
+    if (bucket) bucket.push(entry)
+    else index.set(entry.row_number, [entry])
+  }
+  return index
 }
 
 export function normalizeBulkGridReport(payload: unknown): PlmBulkGridReport {
@@ -1660,6 +1715,17 @@ export async function getPlmBulkGridSchema(
     declaredColumns: Array.isArray(body?.declared_columns)
       ? (body!.declared_columns as string[])
       : properties.map((p) => p.name),
+    // NOTE the asymmetry with declaredColumns above, which is deliberate. A missing
+    // declared_columns falls back to the property names, because a short column list is the N1
+    // silent-delete. A missing match_property_candidates falls back to the EMPTY list, because
+    // the failure direction there is the opposite: guessing candidates would re-advertise an
+    // update mode whose uniqueness precondition nobody checked (N3-A).
+    matchPropertyCandidates: Array.isArray(body?.match_property_candidates)
+      ? (body!.match_property_candidates as unknown[]).filter((c): c is string => typeof c === 'string')
+      : [],
+    matchPropertyReason: typeof body?.match_property_reason === 'string'
+      ? body.match_property_reason
+      : 'match-property-uniqueness-unestablished',
     commitEnabled: body?.commit_enabled === true,
   }
 }
