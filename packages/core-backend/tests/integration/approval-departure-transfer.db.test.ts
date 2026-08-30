@@ -662,6 +662,48 @@ describeIfDatabase('F4-E departure fallback (离职自动转上级) — Lock-4 g
     },
   )
 
+  it('keeps a per-instance infrastructure failure warning values-free and leaves the seat in place', async () => {
+    const key = `dep-error-values-free-${TS}`
+    templateKeys.push(key)
+    const instanceId = await createPublishedInstance(service, key, [U3])
+    const hostileErrorValue = `departure-secret-${TS}`
+    const warnSpy = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+
+    __setApprovalDepartureTransferTestBarrierForTests(async (point, info) => {
+      if (point === 'after_instance_lock' && info.instanceId === instanceId) {
+        throw new Error(hostileErrorValue)
+      }
+    })
+
+    try {
+      const result = await service.applyApprovalDepartureTransfer(U3)
+      expect(result.transferred).not.toContain(instanceId)
+      expect(result.skipped).toContainEqual({ id: instanceId, reason: 'error' })
+
+      const failureWarns = warnSpy.mock.calls.filter(
+        (call) => call[0] === 'approval departure transfer failed; manual recovery required',
+      )
+      expect(failureWarns).toEqual([
+        [
+          'approval departure transfer failed; manual recovery required',
+          { reason: 'departure_transfer_instance_failed' },
+        ],
+      ])
+      expect(JSON.stringify(failureWarns)).not.toContain(instanceId)
+      expect(JSON.stringify(failureWarns)).not.toContain(hostileErrorValue)
+
+      const activeSeat = (
+        await pool.query<AssignmentRow>(
+          `SELECT assignee_id, is_active FROM approval_assignments WHERE instance_id = $1 AND is_active = TRUE`,
+          [instanceId],
+        )
+      ).rows[0]
+      expect(activeSeat.assignee_id).toBe(U3)
+    } finally {
+      __setApprovalDepartureTransferTestBarrierForTests(null)
+    }
+  })
+
   it(
     'concurrency (constructed, not argued): a departure racing a concurrent decide on the same seat resolves via the ' +
       "instance FOR UPDATE lock — the blocked decide re-reads post-transfer state and is rejected as not-assigned, and exactly one reassign audit row exists (no double-move)",

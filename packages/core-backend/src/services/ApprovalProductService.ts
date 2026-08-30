@@ -8754,8 +8754,8 @@ export class ApprovalProductService {
       } catch (error) {
         await rollbackQuietly(client)
         approvalProductLogger.warn(
-          `approval departure transfer error for instance ${instanceId}: ${error instanceof Error ? error.message : String(error)}`,
-          error instanceof Error ? error : undefined,
+          'approval departure transfer failed; manual recovery required',
+          { reason: 'departure_transfer_instance_failed' },
         )
         skipDepartureTransfer(instanceId, 'error')
       } finally {
