@@ -485,13 +485,49 @@ describe('AutomationExecutor', () => {
         },
         durationMs: 0,
       },
-      ...rule.actions.slice(1).map((action) => ({
-        actionType: action.type,
-        status: 'success' as const,
+      {
+        actionType: 'send_webhook',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: {
+            target: { host: 'example.com' },
+            payload: {
+              method: 'POST',
+              body: {
+                ruleId: 'sheet_1',
+                recordId: 'r1',
+                data: { status: 'active' },
+                triggeredAt: expect.any(String),
+              },
+            },
+          },
+        },
+        durationMs: 0,
+      },
+      {
+        actionType: 'send_notification',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: {
+            target: { userIds: ['u1'] },
+            payload: { message: 'Hello' },
+          },
+        },
+        durationMs: 0,
+      },
+      {
+        actionType: 'start_approval',
+        status: 'success',
         simulated: true,
         output: { dryRun: true, dispatched: false },
         durationMs: 0,
-      })),
+      },
     ])
     const sqlCalls = vi.mocked(deps.queryFn).mock.calls.map(([sql]) => String(sql))
     expect(sqlCalls).not.toEqual(expect.arrayContaining([
@@ -499,6 +535,149 @@ describe('AutomationExecutor', () => {
     ]))
     expect(deps.fetchFn).not.toHaveBeenCalled()
     expect(emitSpy).not.toHaveBeenCalled()
+  })
+
+  it('simulate resolves generic Class-B targets and redacted payloads without dispatch', async () => {
+    const send = vi.fn(async () => ({ id: 'notif_1', status: 'sent' as const }))
+    deps = createMockDeps({ notificationService: { send } })
+    executor = new AutomationExecutor(deps)
+    const emitSpy = vi.spyOn(deps.eventBus, 'emit')
+    const rule = createMockRule({
+      actions: [
+        {
+          type: 'send_webhook',
+          config: {
+            url: 'https://user:pass@example.com:8443/hook?token=secret',
+            method: 'PUT',
+            headers: { Authorization: 'Bearer secret' },
+            secret: 'signing-secret',
+            body: { status: 'ready', password: 'source-secret' },
+          },
+        },
+        { type: 'send_notification', config: { userIds: ['u1', 'u2'], message: 'Ready' } },
+        {
+          type: 'send_email',
+          config: {
+            recipients: [' first@example.com ', 'second@example.com', 'first@example.com'],
+            subjectTemplate: 'Record {{record.title}} changed',
+            bodyTemplate: 'Status: {{record.status}}',
+          },
+        },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      {
+        recordId: 'record_sample',
+        data: { title: 'Sample', status: 'active' },
+        sheetId: 'sheet_1',
+      },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.steps.map((step) => step.output)).toEqual([
+      {
+        dryRun: true,
+        dispatched: false,
+        plan: {
+          target: { host: 'example.com:8443' },
+          payload: { method: 'PUT', body: { status: 'ready', password: '<redacted>' } },
+        },
+      },
+      {
+        dryRun: true,
+        dispatched: false,
+        plan: { target: { userIds: ['u1', 'u2'] }, payload: { message: 'Ready' } },
+      },
+      {
+        dryRun: true,
+        dispatched: false,
+        plan: {
+          target: { recipients: ['first@example.com', 'second@example.com'] },
+          payload: { subject: 'Record Sample changed', content: 'Status: active' },
+        },
+      },
+    ])
+    const serializedPlans = JSON.stringify(result.steps.map((step) => step.output))
+    expect(serializedPlans).not.toContain('user:pass')
+    expect(serializedPlans).not.toContain('token=secret')
+    expect(serializedPlans).not.toContain('signing-secret')
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+    expect(emitSpy).not.toHaveBeenCalled()
+  })
+
+  it('simulate fail-stops invalid generic Class-B plans before any later action', async () => {
+    const rule = createMockRule({
+      actions: [
+        { type: 'send_webhook', config: { url: 'not a URL' } },
+        { type: 'send_notification', config: { userIds: ['should_skip'], message: 'should skip' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      { recordId: 'record_sample', data: {}, sheetId: 'sheet_1' },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('failed')
+    expect(result.steps).toEqual([
+      { actionType: 'send_webhook', status: 'failed', error: 'Webhook URL is invalid', durationMs: 0 },
+      { actionType: 'send_notification', status: 'skipped', durationMs: 0 },
+    ])
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    {
+      name: 'notification recipients',
+      action: { type: 'send_notification', config: { userIds: [], message: 'Ready' } },
+      error: 'No user IDs specified',
+    },
+    {
+      name: 'notification message',
+      action: { type: 'send_notification', config: { userIds: ['u1'], message: '' } },
+      error: 'Notification message is required',
+    },
+    {
+      name: 'email recipients',
+      action: { type: 'send_email', config: { recipients: [], subjectTemplate: 'Subject', bodyTemplate: 'Body' } },
+      error: 'send_email requires at least one recipient',
+    },
+    {
+      name: 'email subject',
+      action: { type: 'send_email', config: { recipients: ['u@example.com'], subjectTemplate: '', bodyTemplate: 'Body' } },
+      error: 'send_email subjectTemplate is required',
+    },
+    {
+      name: 'email body',
+      action: { type: 'send_email', config: { recipients: ['u@example.com'], subjectTemplate: 'Subject', bodyTemplate: '' } },
+      error: 'send_email bodyTemplate is required',
+    },
+  ])('simulate rejects invalid $name before dispatch', async ({ action, error }) => {
+    const result = await executor.execute(
+      createMockRule({ actions: [action as AutomationAction] }),
+      { recordId: 'record_sample', data: {}, sheetId: 'sheet_1' },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('failed')
+    expect(result.steps).toEqual([{
+      actionType: action.type,
+      status: 'failed',
+      error,
+      durationMs: 0,
+    }])
+    expect(deps.fetchFn).not.toHaveBeenCalled()
   })
 
   it('simulate returns redacted Class-A targets and payloads without touching a business handler', async () => {
