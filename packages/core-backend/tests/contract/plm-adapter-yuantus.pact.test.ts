@@ -148,6 +148,24 @@ const PLM_ADAPTER_PACT_PATHS = [
   { method: 'POST', path: '/api/v1/auth/embed/discussion-session' },
   { method: 'POST', path: '/api/v1/discussions/01H000000000000000000000T2/comments' },
   { method: 'POST', path: '/api/v1/discussions/01H000000000000000000000T2/comments' },
+  // MetaSheet bulk item-property maintenance grid (taskbook
+  // DEVELOPMENT_TASK_METASHEET_BULK_GRID_CONSUMER_20260829.md). Provider side shipped with ZERO
+  // new routes/SKUs/migrations -- these are the two existing bulk-import endpoints, newly called
+  // by PLMAdapter.bulkImportDryRun/bulkImportCommit. The four 200-shaped interactions sit at the
+  // END of the adapter-owned list (the 409 lives in ERROR_CONTRACT_PACT_PATHS below); the
+  // reject-all pair is the one that pins a TOTAL REJECTION as an HTTP 200 carrying ready:false,
+  // so a consumer branching on status alone breaks the contract instead of silently reporting a
+  // write that never happened.
+  //
+  // §9.1 REDUCTION: these interactions pin method/path/headers/response-shape only and carry NO
+  // request body -- both endpoints are multipart/form-data and this repo's pact is hand-authored
+  // JSON with no mock server. See metadata.claudeNote in the pact file for the full statement and
+  // the open provider-replay question. Request-body coverage lives in
+  // tests/unit/plm-bulk-grid-adapter.test.ts instead.
+  { method: 'POST', path: '/api/v1/bulk-import/dry-run' },
+  { method: 'POST', path: '/api/v1/bulk-import/dry-run' },
+  { method: 'POST', path: '/api/v1/bulk-import/commit' },
+  { method: 'POST', path: '/api/v1/bulk-import/commit' },
 ] as const
 
 const PARENT_HOST_PACT_PATHS = [
@@ -171,6 +189,11 @@ const ERROR_CONTRACT_PACT_PATHS = [
   // sibling code eco_intent_rejected shares the same envelope and stays consumer-tested only
   // (its recovery is a generic retry; pinning one code freezes the namespace shape).
   { method: 'POST', path: '/api/v1/bom/multitable/01H000000000000000000000L2/eco-intent' },
+  // Bulk-import grid: the commit path's idempotency-conflict 409. Taskbook §9 calls this "the one
+  // that keeps the consumer's retry logic honest and must not be dropped as an error case" --
+  // reusing a key after ANY cell change is a conflict BY DESIGN, so that an uncertain outcome can
+  // never be resolved by silently writing something different under the same key.
+  { method: 'POST', path: '/api/v1/bulk-import/commit' },
 ] as const
 
 const PACT_PATHS = [
@@ -265,6 +288,10 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
       '/api/v1/discussions/${threadId}/comments/${commentId}',
       '/api/v1/discussions/${threadId}/resolve',
       '/api/v1/discussions/${threadId}/reopen',
+      // Bulk item-property maintenance grid: both endpoints are literal paths in PLMAdapter
+      // (no path templating), called by bulkImportDryRun / bulkImportCommit.
+      '/api/v1/bulk-import/dry-run',
+      '/api/v1/bulk-import/commit',
     ]
     for (const ep of endpointsToFind) {
       expect(
@@ -927,5 +954,118 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
         triangle_count: 102400,
       }),
     })
+  })
+})
+
+/**
+ * MetaSheet bulk item-property maintenance grid — contract pins.
+ *
+ * Taskbook: docs/development/DEVELOPMENT_TASK_METASHEET_BULK_GRID_CONSUMER_20260829.md §9/§9.1.
+ *
+ * These assertions exist so the two things most likely to be "tidied" later cannot drift
+ * silently: the exact-match discriminators, and the §9.1 body reduction being RECORDED rather
+ * than merely present. A header-only interaction that nobody labelled as reduced is exactly the
+ * failure mode §9.1 warns about — someone later reads it as a body contract.
+ */
+describe('Pact: bulk item-property maintenance grid (§9)', () => {
+  const bulkInteractions = () =>
+    loadPact().interactions.filter((interaction) => interaction.request.path.startsWith('/api/v1/bulk-import/'))
+
+  it('publishes exactly the five required interactions', () => {
+    const bulk = bulkInteractions()
+    expect(bulk).toHaveLength(5)
+    expect(bulk.map((i) => `${i.request.method} ${i.request.path}`)).toEqual([
+      'POST /api/v1/bulk-import/dry-run',
+      'POST /api/v1/bulk-import/dry-run',
+      'POST /api/v1/bulk-import/commit',
+      'POST /api/v1/bulk-import/commit',
+      'POST /api/v1/bulk-import/commit',
+    ])
+  })
+
+  it('pins the reject-all commit as an HTTP 200 whose `ready` is EXACT-matched', () => {
+    // The single most consequential interaction in the set: a total rejection is a 200 that
+    // wrote nothing. If `ready` ever acquired a type matcher, a provider returning ready:true
+    // on a rejection would still satisfy the contract.
+    const rejectAll = bulkInteractions().find((i) => i.description.includes('rejected in full'))
+    expect(rejectAll).toBeDefined()
+    expect(rejectAll!.response.status).toBe(200)
+    expect((rejectAll!.response.body as { ready: boolean }).ready).toBe(false)
+    expect((rejectAll!.response.body as { created_ids: string[] }).created_ids).toEqual([])
+    const bodyRules = rejectAll!.response.matchingRules?.body ?? {}
+    expect(Object.keys(bodyRules)).not.toContain('$.ready')
+  })
+
+  it('pins `ready: true` exactly on both success interactions too', () => {
+    for (const description of ['all valid', 'commit a ready bulk']) {
+      const interaction = bulkInteractions().find((i) => i.description.includes(description))
+      expect(interaction, description).toBeDefined()
+      expect(interaction!.response.status).toBe(200)
+      expect((interaction!.response.body as { ready: boolean }).ready).toBe(true)
+      expect(Object.keys(interaction!.response.matchingRules?.body ?? {})).not.toContain('$.ready')
+    }
+  })
+
+  it('pins the 409 by detail.code exactly, leaving only the prose match-by-type', () => {
+    const conflict = bulkInteractions().find((i) => i.response.status === 409)
+    expect(conflict).toBeDefined()
+    const detail = (conflict!.response.body as { detail: Record<string, unknown> }).detail
+    expect(detail.code).toBe('idempotency_conflict')
+    const rules = Object.keys(conflict!.response.matchingRules?.body ?? {})
+    expect(rules).toContain('$.detail.message')
+    expect(rules).not.toContain('$.detail.code')
+  })
+
+  it('leaves error_code match-by-TYPE — §3.1 declares the code set open', () => {
+    // Pinning a literal error_code would freeze a vocabulary the provider is allowed to extend,
+    // and would push consumers toward dropping codes they do not recognize.
+    const invalid = bulkInteractions().find((i) => i.description.includes('one invalid row'))
+    expect(invalid).toBeDefined()
+    expect(Object.keys(invalid!.response.matchingRules?.body ?? {})).toContain('$.row_errors[0].error_code')
+  })
+
+  it('carries Idempotency-Key as a literal with a type matcher on every commit interaction', () => {
+    const commits = bulkInteractions().filter((i) => i.request.path.endsWith('/commit'))
+    expect(commits).toHaveLength(3)
+    for (const commit of commits) {
+      expect(commit.request.headers!['Idempotency-Key']).toBeTruthy()
+    }
+  })
+
+  it('sends NO Idempotency-Key on dry-run (it is a commit-only concern)', () => {
+    for (const dryRun of bulkInteractions().filter((i) => i.request.path.endsWith('/dry-run'))) {
+      expect(dryRun.request.headers!['Idempotency-Key']).toBeUndefined()
+    }
+  })
+
+  it('§9.1 reduction: no bulk interaction declares a request body, and Content-Type is regex-matched', () => {
+    for (const interaction of bulkInteractions()) {
+      // The boundary is generated per request; a literal content type could never replay.
+      expect(interaction.request.body, interaction.description).toBeUndefined()
+      expect(interaction.request.headers!['Content-Type']).toContain('multipart/form-data')
+    }
+  })
+
+  it('§9.1 reduction is RECORDED in the pact note, not left implicit', () => {
+    // Without this, a future reader sees header-only interactions and reasonably concludes the
+    // bodies were checked. The taskbook requires the reduction be stated explicitly.
+    const note = loadPact().metadata as unknown as { claudeNote: string }
+    expect(note.claudeNote).toContain('§9.1 REDUCTION')
+    expect(note.claudeNote).toContain('NOT pinned')
+    expect(note.claudeNote).toContain('UNVERIFIED')
+  })
+
+  it('every bulk interaction declares its own provider state naming the licences it needs', () => {
+    // "Pact does not inherit": each interaction needs its own state and its own fixture.
+    for (const interaction of bulkInteractions()) {
+      const name = interaction.providerStates![0].name
+      expect(name, interaction.description).toContain('plm.bulk_import')
+    }
+    // The three commit interactions additionally need the admin actor -- require_admin_user runs
+    // FIRST on that route, so a fixture that seeds only the licence cannot exercise it.
+    for (const commit of bulkInteractions().filter((i) => i.request.path.endsWith('/commit'))) {
+      expect(commit.providerStates![0].name).toContain('admin')
+      expect(commit.providerStates![0].name).toContain('plm.bulk_import_commit')
+    }
   })
 })
