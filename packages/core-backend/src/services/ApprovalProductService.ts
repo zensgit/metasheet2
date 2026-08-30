@@ -85,6 +85,7 @@ import {
 } from './ApprovalGraphExecutor'
 import { collectActiveNodeKeys, collectHiddenFieldIds, fieldAccessAtNodes, resolveFieldAccessAtNodes } from './approval-form-redaction'
 import { fieldDerivedAssigneeSourceKey, resolveApprovalAssignees, resolveFormUserValue } from './ApprovalAssigneeResolver'
+import { isPriorNodeApproverHistoryDedupExempt } from './approval-prior-node-dedup-exemption'
 import { validateAmountTotalConsistency } from './amount-total-check'
 import { isApprovalAttachmentsEnabled } from '../routes/approval-attachments'
 import {
@@ -4921,6 +4922,11 @@ function evaluateAutoApprovalAssignment(
       event: buildAutoApprovalEvent(assignment, approvalMode, 'auto-merge-requester', effectivePolicy),
     }
   }
+
+  // Lock-4 F4-D / OD-L4-7(a): a K3 seat exists specifically so the prior node's ACTUAL
+  // decider reviews again. It remains subject to mergeWithRequester above, but neither
+  // history-derived flag may consume it merely because that same decider appears in history.
+  if (isPriorNodeApproverHistoryDedupExempt(assignment.metadata)) return null
 
   if (effectivePolicy.policy.mergeAdjacentApprover) {
     const adjacent = findLatestApprovalHistory(
