@@ -2510,7 +2510,11 @@ export class AutomationExecutor {
           )
           break
         case 'send_dingtalk_person_message':
-          result = await this.executeSendDingTalkPersonMessage(action.config as unknown as SendDingTalkPersonMessageConfig, context)
+          result = await this.executeSendDingTalkPersonMessage(
+            action.config as unknown as SendDingTalkPersonMessageConfig,
+            context,
+            identity,
+          )
           break
         case 'send_dingtalk_approval_card':
           // #4196 Class-B follow-up: thread the raw config + execution identity so the approval card can take
@@ -4785,6 +4789,7 @@ export class AutomationExecutor {
   private async executeSendDingTalkPersonMessage(
     config: SendDingTalkPersonMessageConfig,
     context: ExecutionContext,
+    identity?: ClassAActionIdentity,
   ): Promise<AutomationStepResult> {
     const staticUserIds = normalizeUserIds(config.userIds)
     const staticMemberGroupIds = normalizeUserIds(config.memberGroupIds)
@@ -5053,6 +5058,17 @@ export class AutomationExecutor {
         chunkItems(recipients, DINGTALK_PERSON_BATCH_SIZE).map((batch) => ({ integrationId, batch })),
     )
 
+    // #4196 Class-B two-phase intent/outcome. Claim the action before the first token/send network
+    // call. A prior sent or ambiguous attempt short-circuits the whole multi-batch action: retrying
+    // it could duplicate any recipient batch that DingTalk already accepted.
+    const outboundId = this.classBOutboundIdentity(identity, 'send_dingtalk_person_message', config)
+    if (outboundId) {
+      const decision = await claimOutboundIntent(this.deps.queryFn, outboundId)
+      if (decision === 'skip_sent' || decision === 'skip_unknown') {
+        return this.alreadyAppliedResult('send_dingtalk_person_message')
+      }
+    }
+
     // DT-HARDEN-06: recipients whose batch already reached DingTalk. A later batch
     // throwing must not re-mark them failed — that used to write BOTH a success and a
     // failed delivery row for the same recipient in the same send attempt.
@@ -5114,6 +5130,15 @@ export class AutomationExecutor {
         for (const recipient of batch) sentRecipients.add(recipient)
       }
 
+      if (outboundId) {
+        await recordOutboundOutcome(
+          this.deps.queryFn,
+          outboundId,
+          'sent',
+          'dingtalk_person_sent',
+        )
+      }
+
       return {
         actionType: 'send_dingtalk_person_message',
         status: 'success',
@@ -5159,6 +5184,28 @@ export class AutomationExecutor {
       const outcomeUnknownRecipients = outcomeUnknown && inFlightSendBatch
         ? new Set<(typeof resolvedRecipients)[number]>(inFlightSendBatch)
         : new Set<(typeof resolvedRecipients)[number]>()
+
+      if (outboundId) {
+        // The durable action outcome is deliberately more conservative than the legacy per-recipient
+        // delivery label. Per #4196 Q-B, every response/business rejection after a send began is
+        // ambiguous for automatic retry. Any earlier confirmed batch makes the whole action terminal
+        // sent; only a provable pre-dispatch failure with no successful batch remains retryable.
+        const outcome: OutboundOutcome = sentRecipients.size > 0
+          ? 'sent'
+          : inFlightSendBatch
+            ? classifyOutboundResult(classifyFetchError(error))
+            : 'failed'
+        await recordOutboundOutcome(
+          this.deps.queryFn,
+          outboundId,
+          outcome,
+          outcome === 'sent'
+            ? 'dingtalk_person_sent'
+            : outcome === 'outcome_unknown'
+              ? 'dingtalk_person_outcome_unknown'
+              : 'dingtalk_person_definite_non_delivery',
+        )
+      }
 
       await Promise.all(unsentRecipients.map((recipient) => recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
         localUserId: recipient.localUserId,
