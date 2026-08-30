@@ -71,6 +71,9 @@ function hashEvidenceValue(value) {
  *   prod_canonical        — the production canonical target is not a sandbox one
  *   not_sandbox_namespace — anything outside `plm_stock_preparation_sandbox*`
  */
+// The sandbox namespace, named once so the guard, the refusal message and any caller quoting it in
+// a runbook can never drift apart.
+const SANDBOX_OBJECT_ID_NAMESPACE = 'plm_stock_preparation_sandbox'
 function assertSandboxObjectId(value, field = 'objectId') {
   const objectId = requiredString(value, field)
   if (objectId === STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId) {
@@ -85,8 +88,15 @@ function assertSandboxObjectId(value, field = 'objectId') {
     throw new StockPreparationTargetProvisioningError(
       422,
       'TARGET_SANDBOX_OBJECT_ID_INVALID',
-      'sandbox stock-preparation target objectId must use the stock-preparation sandbox namespace',
-      { reason: 'not_sandbox_namespace' },
+      // NAME THE NAMESPACE. The refusal used to say only that the objectId was outside the sandbox
+      // namespace, without saying what that namespace IS -- so the caller learns they are wrong and
+      // still has to read this file to find out what would be right. A namespace prefix is a
+      // deployment-authored constant, not customer data, so quoting it leaks nothing and turns a
+      // dead end into a copy-paste fix. The offending value is NOT echoed: it is caller-supplied
+      // and could carry anything.
+      `sandbox stock-preparation target objectId must use the stock-preparation sandbox namespace `
+        + `(it must be "${SANDBOX_OBJECT_ID_NAMESPACE}" or start with "${SANDBOX_OBJECT_ID_NAMESPACE}_")`,
+      { reason: 'not_sandbox_namespace', requiredNamespace: SANDBOX_OBJECT_ID_NAMESPACE },
     )
   }
   return objectId

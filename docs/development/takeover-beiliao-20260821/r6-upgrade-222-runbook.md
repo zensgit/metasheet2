@@ -47,3 +47,27 @@ r5 部署时故意没跑(42P01 by design)。r6 必须跑:补 076 等全部。单
 ## 已知不影响试用、别顺手修
 
 大 BOM 路径 `ext_` 未接(响应带 `extFieldMappingConfiguredButNotAppliedOnThisPath` 标记,持久态改动另立项);MVP 快照面(222 上有 2 个存量活跃项目——**切换清单里记一笔,别动它**);ledger `packVersion` 返回 string(小缺陷,单开)。
+
+---
+
+## 附:首次真机部署实测值(2026-08-30,直接复制,勿再自拟)
+
+初装引导建 admin 之后,备料需要**两张受管表**,各一条 POST 即可(admin token)。**两个 objectId 是固定值**——
+第一次部署时自拟名字被守卫拒了(见下),写在这里就不必再猜。
+
+```
+POST /api/integration/stock-preparation/confirmation-decisions/ensure   {}
+POST /api/integration/stock-preparation/sandbox-target/ensure           {"objectId":"plm_stock_preparation_sandbox_trial"}
+```
+
+- 确认裁决账本 objectId(固定,不可自拟):`plm_stock_preparation_confirmation_decision` —— 建成为 16 列(12 系统 / 4 人工)。
+- 沙箱目标 objectId:**必须落在 `plm_stock_preparation_sandbox` 命名空间**(等于它,或以 `plm_stock_preparation_sandbox_` 开头)。
+  本次采用 `plm_stock_preparation_sandbox_trial` —— 建成为 25 列(17 系统 / 8 人工保留),`targetBindingAvailable: true`。
+  **实测教训**:`stock_prep_sandbox_trial` 会被 422 `TARGET_SANDBOX_OBJECT_ID_INVALID / not_sandbox_namespace` 拒绝。
+  该守卫是有意的(防止误建到 canonical 名下);其拒绝信息现已带上 `requiredNamespace`,不必再翻源码。
+
+随后 env 里的沙箱清单直接用同一个值:
+
+```
+STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS=plm_stock_preparation_sandbox_trial
+```
