@@ -41,6 +41,8 @@
       </li>
     </ul>
 
+    <ElearningTitleAdminSection />
+
     <section class="credit-admin__adjustment" aria-labelledby="credit-adjustment-title">
       <header>
         <h3 id="credit-adjustment-title">{{ text('Manual adjustment', '人工调整学分') }}</h3>
@@ -74,6 +76,7 @@
 import { onMounted, ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
 import { ElearningApiError } from '../services/elearning'
+import ElearningTitleAdminSection from './ElearningTitleAdminSection.vue'
 import {
   adjustElearningCredit,
   listElearningCreditRules,

@@ -74,12 +74,14 @@ describe('ElearningCreditWalletSection', () => {
       .mockResolvedValueOnce({
         userId: 'user-1',
         balancePoints: 5,
+        currentTitle: { id: 'starter', name: 'Starter', threshold: 0 },
         items: [item(FIRST, 5)],
         nextCursor: 'cursor-2',
       })
       .mockResolvedValueOnce({
         userId: 'user-1',
         balancePoints: 8,
+        currentTitle: { id: 'expert', name: 'Expert', threshold: 8 },
         items: [item(SECOND, 3)],
         nextCursor: null,
       })
@@ -87,12 +89,14 @@ describe('ElearningCreditWalletSection', () => {
     await flushUi()
     expect(h.getWallet).toHaveBeenCalledWith(null)
     expect(view.querySelector('[data-testid="elearning-credit-wallet-balance"]')?.textContent).toBe('5')
+    expect(view.querySelector('[data-testid="elearning-credit-wallet-title"]')?.textContent).toContain('Starter')
     expect(view.textContent).toContain('+5')
 
     ;(view.querySelector('[data-testid="elearning-credit-wallet-more"]') as HTMLButtonElement).click()
     await flushUi()
     expect(h.getWallet).toHaveBeenLastCalledWith('cursor-2')
     expect(view.querySelector('[data-testid="elearning-credit-wallet-balance"]')?.textContent).toBe('8')
+    expect(view.querySelector('[data-testid="elearning-credit-wallet-title"]')?.textContent).toContain('Expert')
     expect(view.textContent).toContain('+5')
     expect(view.textContent).toContain('+3')
     expect(view.querySelector('[data-testid="elearning-credit-wallet-more"]')).toBeNull()
@@ -110,6 +114,7 @@ describe('ElearningCreditWalletSection', () => {
     h.getWallet.mockResolvedValueOnce({
       userId: 'user-1',
       balancePoints: 7,
+      currentTitle: null,
       items: [adjustment(FIRST, -3), adjustment(SECOND, 2)],
       nextCursor: null,
     })

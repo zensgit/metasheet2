@@ -4,8 +4,10 @@ import { useLocale } from '../src/composables/useLocale'
 
 const h = vi.hoisted(() => ({
   adjust: vi.fn(),
+  getTitles: vi.fn(),
   list: vi.fn(),
   publish: vi.fn(),
+  publishTitles: vi.fn(),
 }))
 
 vi.mock('../src/services/elearningCredit', async () => {
@@ -15,8 +17,10 @@ vi.mock('../src/services/elearningCredit', async () => {
   return {
     ...actual,
     adjustElearningCredit: h.adjust,
+    getElearningTitleSnapshot: h.getTitles,
     listElearningCreditRules: h.list,
     publishElearningCreditRule: h.publish,
+    publishElearningTitleSnapshot: h.publishTitles,
   }
 })
 
@@ -78,7 +82,15 @@ describe('ElearningCreditAdminSection', () => {
     h.list.mockReset()
     h.publish.mockReset()
     h.adjust.mockReset()
+    h.getTitles.mockReset()
+    h.publishTitles.mockReset()
     h.list.mockResolvedValue([rule()])
+    h.getTitles.mockResolvedValue({
+      revisionId: null,
+      version: 0,
+      titles: [],
+      createdAt: null,
+    })
     let index = 0
     const ids = [REQUEST_A, REQUEST_B]
     uuidSpy = vi.spyOn(globalThis.crypto, 'randomUUID').mockImplementation(() => (

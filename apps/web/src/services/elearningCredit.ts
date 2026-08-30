@@ -3,6 +3,7 @@ import { ElearningApiError } from './elearning'
 
 export const ELEARNING_CREDIT_WALLET_PAGE_DEFAULT = 20 as const
 export const ELEARNING_CREDIT_WALLET_PAGE_MAX = 100 as const
+export const ELEARNING_TITLE_SNAPSHOT_MAX_ROWS = 100 as const
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -84,8 +85,27 @@ export interface ElearningCreditAdjustmentResult {
 export interface ElearningCreditWallet {
   userId: string
   balancePoints: number
+  currentTitle: ElearningTitleRow | null
   items: ElearningCreditWalletItem[]
   nextCursor: string | null
+}
+
+export interface ElearningTitleRow {
+  id: string
+  name: string
+  threshold: number
+}
+
+export interface ElearningTitleSnapshot {
+  revisionId: string | null
+  version: number
+  titles: ElearningTitleRow[]
+  createdAt: string | null
+}
+
+export interface ElearningTitlePublishInput {
+  requestId: string
+  titles: ElearningTitleRow[]
 }
 
 function fail(code: string, status: number): never {
@@ -169,6 +189,13 @@ function requireAdjustmentPointsInput(value: number): number {
     || value < -PG_INT4_MAX
     || value > PG_INT4_MAX
   ) fail('invalid_input', 400)
+  return value
+}
+
+function requireTitleThresholdInput(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0 || value > PG_INT4_MAX) {
+    fail('invalid_input', 400)
+  }
   return value
 }
 
@@ -293,6 +320,60 @@ function parseWalletItem(value: unknown, status: number): ElearningCreditWalletI
   }
 }
 
+function parseTitleRow(value: unknown, status: number): ElearningTitleRow {
+  if (!isPlainObject(value) || !exactKeys(value, ['id', 'name', 'threshold'])) {
+    failShape(status)
+  }
+  return {
+    id: requireText(value.id, status),
+    name: requireText(value.name, status),
+    threshold: requireSafeInt(value.threshold, status, 0, PG_INT4_MAX),
+  }
+}
+
+function parseTitleSnapshot(value: unknown, status: number): ElearningTitleSnapshot {
+  if (!isPlainObject(value) || !exactKeys(value, [
+    'revisionId', 'version', 'titles', 'createdAt',
+  ]) || !Array.isArray(value.titles) || value.titles.length > ELEARNING_TITLE_SNAPSHOT_MAX_ROWS) {
+    failShape(status)
+  }
+  const revisionId = value.revisionId === null
+    ? null
+    : requireUuid(value.revisionId, status)
+  const createdAt = value.createdAt === null
+    ? null
+    : requireIsoTimestamp(value.createdAt, status)
+  const version = requireSafeInt(value.version, status, 0, PG_INT4_MAX)
+  if ((revisionId === null) !== (createdAt === null) || (revisionId === null) !== (version === 0)) {
+    failShape(status)
+  }
+  const titles = value.titles.map((title) => parseTitleRow(title, status))
+  const ids = new Set(titles.map((title) => title.id))
+  const thresholds = new Set(titles.map((title) => title.threshold))
+  if (
+    ids.size !== titles.length
+    || thresholds.size !== titles.length
+    || titles.some((title, index) => index > 0 && title.threshold <= titles[index - 1]!.threshold)
+  ) failShape(status)
+  return { revisionId, version, titles, createdAt }
+}
+
+function normalizeTitleInput(titles: ElearningTitleRow[]): ElearningTitleRow[] {
+  if (!Array.isArray(titles) || titles.length > ELEARNING_TITLE_SNAPSHOT_MAX_ROWS) {
+    fail('invalid_input', 400)
+  }
+  const normalized = titles.map((title) => ({
+    id: requireInputText(title.id),
+    name: requireInputText(title.name),
+    threshold: requireTitleThresholdInput(title.threshold),
+  })).sort((left, right) => left.threshold - right.threshold)
+  if (
+    new Set(normalized.map((title) => title.id)).size !== normalized.length
+    || new Set(normalized.map((title) => title.threshold)).size !== normalized.length
+  ) fail('invalid_input', 400)
+  return normalized
+}
+
 function parseAdjustment(
   value: unknown,
   status: number,
@@ -313,7 +394,7 @@ function parseAdjustment(
 
 function parseWallet(value: unknown, status: number): ElearningCreditWallet {
   if (!isPlainObject(value) || !exactKeys(value, [
-    'userId', 'balancePoints', 'items', 'nextCursor',
+    'userId', 'balancePoints', 'currentTitle', 'items', 'nextCursor',
   ])) failShape(status)
   if (!Array.isArray(value.items)) failShape(status)
   const nextCursor = value.nextCursor === null
@@ -322,6 +403,9 @@ function parseWallet(value: unknown, status: number): ElearningCreditWallet {
   return {
     userId: requireText(value.userId, status),
     balancePoints: requireSafeInt(value.balancePoints, status, 0, PG_INT4_MAX),
+    currentTitle: value.currentTitle === null
+      ? null
+      : parseTitleRow(value.currentTitle, status),
     items: value.items.map((item) => parseWalletItem(item, status)),
     nextCursor,
   }
@@ -349,6 +433,29 @@ export async function publishElearningCreditRule(
     method: 'POST',
     body: JSON.stringify(body),
   }), 200)
+}
+
+export async function getElearningTitleSnapshot(): Promise<ElearningTitleSnapshot> {
+  return parseTitleSnapshot(await requestJson(
+    '/api/elearning/admin/credit-titles',
+    { method: 'GET' },
+  ), 200)
+}
+
+export async function publishElearningTitleSnapshot(
+  input: ElearningTitlePublishInput,
+): Promise<ElearningTitleSnapshot> {
+  const body = {
+    requestId: requireInputUuid(input.requestId),
+    titles: normalizeTitleInput(input.titles),
+  }
+  return parseTitleSnapshot(await requestJson(
+    '/api/elearning/admin/credit-titles',
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    },
+  ), 200)
 }
 
 export async function adjustElearningCredit(
