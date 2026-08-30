@@ -42,7 +42,7 @@ export interface GetElearningDepartmentStatsInput {
 
 const DEPARTMENT_STATS_SQL = `/* elearning-department-stats:aggregate */
 WITH target_department AS (
-  SELECT department.id
+  SELECT department.id, department.integration_id
     FROM directory_departments department
     JOIN directory_integrations integration
       ON integration.id = department.integration_id
@@ -58,6 +58,7 @@ department_users AS (
       ON membership.directory_department_id = department.id
     JOIN directory_accounts account
       ON account.id = membership.directory_account_id
+     AND account.integration_id = department.integration_id
      AND account.is_active IS TRUE
     JOIN directory_integrations integration
       ON integration.id = account.integration_id

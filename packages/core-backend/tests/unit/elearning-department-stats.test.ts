@@ -110,6 +110,9 @@ describe('e-learning department statistics service', () => {
     const aggregate = db.calls[1]
     expect(aggregate?.params).toEqual([ORG, DEPARTMENT, START, END])
     expect(aggregate?.sql).toContain('integration.org_id = $1')
+    expect(aggregate?.sql).toContain(
+      'account.integration_id = department.integration_id',
+    )
     expect(aggregate?.sql).toContain('org_membership.is_active IS TRUE')
     expect(aggregate?.sql).toContain("link.link_status = 'linked'")
     expect(aggregate?.sql).toContain('elearning_completion_evidence')
