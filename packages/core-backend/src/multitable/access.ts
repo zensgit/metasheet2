@@ -1,5 +1,6 @@
 import type { Request } from 'express'
 
+import { deriveCanManageFields } from './manage-schema-permission'
 import { isAdmin, listUserPermissions } from '../rbac/service'
 
 export type MultitableCapabilities = {
@@ -98,6 +99,12 @@ export function deriveCapabilities(
     hasPermission(permissions, 'multitable:read') ||
     hasPermission(permissions, 'multitable:write')
   const canWrite = isAdminRole || hasPermission(permissions, 'multitable:write')
+  // SCHEMA MANAGEMENT IS NOT RECORD WRITING. `canManageFields` no longer rides on `canWrite`: it needs
+  // its own `multitable:manage-schema` code (zero automatic holders; admin satisfies it via isAdminRole).
+  // See multitable/manage-schema-permission.ts for the live-deployment defect, the transition switch
+  // MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA (owner-gated, default OFF, a REGRESSION while on),
+  // and why the sibling capabilities below are deliberately left alone.
+  const canManageFields = deriveCanManageFields(permissions, isAdminRole, hasPermission)
   const canManageSheetAccess =
     isAdminRole || hasPermission(permissions, 'multitable:share')
   const canComment =
@@ -116,7 +123,7 @@ export function deriveCapabilities(
     canCreateRecord: canWrite,
     canEditRecord: canWrite,
     canDeleteRecord: canWrite,
-    canManageFields: canWrite,
+    canManageFields,
     canManageSheetAccess,
     canManageViews: canWrite,
     canComment,

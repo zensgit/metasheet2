@@ -167,7 +167,7 @@ async function createApp(handler: (sql: string, params?: unknown[]) => QueryResu
   vi.doMock('../../src/rbac/service', () => ({
     isAdmin: vi.fn().mockResolvedValue(false),
     userHasPermission: vi.fn().mockResolvedValue(false),
-    listUserPermissions: vi.fn().mockResolvedValue(['multitable:write']),
+    listUserPermissions: vi.fn().mockResolvedValue(['multitable:write', 'multitable:manage-schema']),
     invalidateUserPerms: vi.fn(),
     getPermCacheStatus: vi.fn(),
   }))
@@ -180,7 +180,8 @@ async function createApp(handler: (sql: string, params?: unknown[]) => QueryResu
   const app = express()
   app.use(express.json())
   app.use((req, _res, next) => {
-    req.user = { id: 'user_hier', roles: [], perms: ['multitable:read', 'multitable:write'] }
+    // PATCH /fields is canManageFields-gated, which now needs `multitable:manage-schema`.
+    req.user = { id: 'user_hier', roles: [], perms: ['multitable:read', 'multitable:write', 'multitable:manage-schema'] }
     next()
   })
   app.use('/api/multitable', univerMetaRouter())

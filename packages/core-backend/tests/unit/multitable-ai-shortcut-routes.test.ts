@@ -193,7 +193,8 @@ describe('A2 shortcut routes (mock pool)', () => {
     process.env.MULTITABLE_AI_CONFIRM_LIVE_REQUESTS = '1'
 
     recordData = { [FLD_SRC]: 'hello world', [FLD_SECRET]: SECRET_VALUE }
-    currentUser = { id: 'u_ai_writer', roles: ['member'], perms: ['multitable:write'] }
+    // canManageFields now needs `multitable:manage-schema` (the field-write leg of this test).
+    currentUser = { id: 'u_ai_writer', roles: ['member'], perms: ['multitable:write', 'multitable:manage-schema'] }
     fieldPermissionRows = [
       { field_id: FLD_SECRET, visible: false, read_only: false },
       { field_id: FLD_TARGET_RO, visible: true, read_only: true },

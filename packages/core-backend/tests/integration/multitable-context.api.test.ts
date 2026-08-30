@@ -1202,7 +1202,8 @@ describe('Multitable context API', () => {
     const fieldIdsByName = new Map<string, string>()
 
     const { app } = await createApp({
-      tokenPerms: ['multitable:write'],
+      // canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
+      tokenPerms: ['multitable:write', 'multitable:manage-schema'],
       queryHandler: async (sql, params) => {
         if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])
@@ -1289,7 +1290,7 @@ describe('Multitable context API', () => {
   // remain for them + direct API callers.)
   test('creates a native person field stored as type=person (no People-sheet rewrite)', async () => {
     const { app } = await createApp({
-      tokenPerms: ['multitable:write'],
+      tokenPerms: ['multitable:write', 'multitable:manage-schema'],
       queryHandler: async (sql, params) => {
         if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])
@@ -1375,7 +1376,7 @@ describe('Multitable context API', () => {
   // be silently flipped native (verified by the route's `requestedType ?? mapFieldType(stored)`).
   test('updates a field into a native person field stored as type=person (no People-sheet rewrite)', async () => {
     const { app } = await createApp({
-      tokenPerms: ['multitable:write'],
+      tokenPerms: ['multitable:write', 'multitable:manage-schema'],
       queryHandler: async (sql, params) => {
         if (sql.includes('SELECT id, sheet_id FROM meta_fields WHERE id = $1')) {
           expect(params).toEqual(['fld_assignee'])
@@ -1448,7 +1449,7 @@ describe('Multitable context API', () => {
 
   test('accepts date fields in create and update multitable field contracts', async () => {
     const { app } = await createApp({
-      tokenPerms: ['multitable:write'],
+      tokenPerms: ['multitable:write', 'multitable:manage-schema'],
       queryHandler: async (sql, params) => {
         if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])
@@ -1576,7 +1577,7 @@ describe('Multitable context API', () => {
 
   test('accepts MF2 field types in create and update multitable field contracts', async () => {
     const { app } = await createApp({
-      tokenPerms: ['multitable:write'],
+      tokenPerms: ['multitable:write', 'multitable:manage-schema'],
       queryHandler: async (sql, params) => {
         if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])

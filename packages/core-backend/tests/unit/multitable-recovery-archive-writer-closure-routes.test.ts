@@ -303,7 +303,7 @@ async function createApp(handler: (sql: string, params?: unknown[]) => QueryResu
   vi.doMock('../../src/rbac/service', () => ({
     isAdmin: vi.fn().mockResolvedValue(false),
     userHasPermission: vi.fn().mockResolvedValue(false),
-    listUserPermissions: vi.fn().mockResolvedValue(['multitable:read', 'multitable:write', 'multitable:share']),
+    listUserPermissions: vi.fn().mockResolvedValue(['multitable:read', 'multitable:write', 'multitable:share', 'multitable:manage-schema']),
     invalidateUserPerms: vi.fn(),
     getPermCacheStatus: vi.fn(),
   }))
@@ -321,7 +321,9 @@ async function createApp(handler: (sql: string, params?: unknown[]) => QueryResu
     req.user = {
       id: ACTOR,
       roles: [],
-      perms: ['multitable:read', 'multitable:write', 'multitable:share'],
+      // config-restore / person-fields prepare are canManageFields-gated, which now needs
+      // `multitable:manage-schema` (src/multitable/manage-schema-permission.ts).
+      perms: ['multitable:read', 'multitable:write', 'multitable:share', 'multitable:manage-schema'],
     }
     next()
   })

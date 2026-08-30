@@ -70,7 +70,8 @@ const burnCountForToken = async (token: string): Promise<number> => Number(
 )
 
 let app: Express
-let curPerms = ['multitable:read', 'multitable:write', 'multitable:share']
+// canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
+let curPerms = ['multitable:read', 'multitable:write', 'multitable:share', 'multitable:manage-schema']
 let curRoles = ['member']
 
 const revertPreview = (body: Record<string, unknown>) =>
@@ -328,7 +329,7 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       `INSERT INTO users (id, password_hash, permissions)
        VALUES ($1, 'x', $2::jsonb)
        ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions, is_active = TRUE`,
-      [ACTOR, JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share'])],
+      [ACTOR, JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share', 'multitable:manage-schema'])],
     )
     await q('INSERT INTO roles (id, name) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING', [ROLE_RACE, 'EARW race role'])
     await q(
@@ -366,7 +367,7 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
   })
 
   beforeEach(async () => {
-    curPerms = ['multitable:read', 'multitable:write', 'multitable:share']
+    curPerms = ['multitable:read', 'multitable:write', 'multitable:share', 'multitable:manage-schema']
     curRoles = ['member']
     delete process.env.MULTITABLE_ENABLE_SHEET_REVERT
     delete process.env.MULTITABLE_ENABLE_PIT_RESET
@@ -378,7 +379,7 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     await wipe()
     await q('UPDATE users SET permissions = $2::jsonb, is_active = TRUE WHERE id = $1', [
       ACTOR,
-      JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share']),
+      JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share', 'multitable:manage-schema']),
     ])
   })
 
@@ -1197,7 +1198,7 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
       await q('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [ACTOR, ROLE_RACE]).catch(() => {})
       await q('UPDATE users SET permissions = $2::jsonb WHERE id = $1', [
         ACTOR,
-        JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share']),
+        JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share', 'multitable:manage-schema']),
       ]).catch(() => {})
     }
   })

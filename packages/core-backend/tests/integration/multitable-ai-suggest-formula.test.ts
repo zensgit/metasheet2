@@ -50,7 +50,8 @@ const AI_ENV_KEYS = [
 ] as const
 
 let app: Express
-let currentUser: { id: string; roles: string[]; perms: string[] } = { id: USER_SUGGEST, roles: ['member'], perms: ['multitable:write'] }
+// canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
+let currentUser: { id: string; roles: string[]; perms: string[] } = { id: USER_SUGGEST, roles: ['member'], perms: ['multitable:write', 'multitable:manage-schema'] }
 let stubUsage = { input_tokens: 18, output_tokens: 7 }
 let lastOutboundBody = ''
 let fetchCallCount = 0
@@ -148,7 +149,7 @@ describeIfDatabase('M4 suggest-formula (real DB)', () => {
   })
 
   test('M4-T3: suggest lands a sheet-scoped ledger row (action=suggest, record/field NULL); prompt has names+types, no record values', async () => {
-    currentUser = { id: USER_SUGGEST, roles: ['member'], perms: ['multitable:write'] }
+    currentUser = { id: USER_SUGGEST, roles: ['member'], perms: ['multitable:write', 'multitable:manage-schema'] }
     stubUsage = { input_tokens: 18, output_tokens: 7 }
 
     const res = await suggestReq('unit price times one plus tax')
@@ -177,7 +178,7 @@ describeIfDatabase('M4 suggest-formula (real DB)', () => {
   })
 
   test('M4-T8: a suggest (NULL-scope) row counts in the SAME quota SUM as preview/run — no escape, no corruption', async () => {
-    currentUser = { id: USER_QUOTA, roles: ['member'], perms: ['multitable:write'] }
+    currentUser = { id: USER_QUOTA, roles: ['member'], perms: ['multitable:write', 'multitable:manage-schema'] }
     const query = poolManager.get().query.bind(poolManager.get()) as AiUsageQueryFn
 
     const before = await sumAiUsageWindows(query, USER_QUOTA)
@@ -208,7 +209,7 @@ describeIfDatabase('M4 suggest-formula (real DB)', () => {
     // ≈ 1.1k); cap 1500 admits the first suggest (window 0) but not the second
     // (window settles to the ~1000 ACTUAL below, +estimate > 1500).
     const capUser = `u_m4_cap_${TS}`
-    currentUser = { id: capUser, roles: ['member'], perms: ['multitable:write'] }
+    currentUser = { id: capUser, roles: ['member'], perms: ['multitable:write', 'multitable:manage-schema'] }
     process.env.MULTITABLE_AI_TENANT_DAILY_TOKEN_CAP = '1500'
     stubUsage = { input_tokens: 600, output_tokens: 400 } // ACTUAL ≤ estimate (no overshoot)
 
