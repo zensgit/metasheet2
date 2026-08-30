@@ -34,6 +34,8 @@ import express, { type Express } from 'express'
 import request from 'supertest'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { usePinnedServer } from '../utils/pinned-server'
+
 const SHEET_ID = 'sheet_ms'
 const PEOPLE_SHEET_ID = 'sheet_ms_people'
 const BASE_ID = 'base_ms'
@@ -253,6 +255,17 @@ async function buildAppWithPool(
   return { app, pool }
 }
 
+// ── transport ─────────────────────────────────────────────────────────────────
+// ONE pinned listener for the whole file, app swapped per cell (#4154: `on(app)` re-listens per
+// request and is banned by tests/unit/supertest-app-mode-tripwire.test.ts).
+const pinned = usePinnedServer()
+
+/** Install `app` on the pinned listener and return a supertest agent bound to its stable URL. */
+function on(app: Express) {
+  pinned.setApp(app)
+  return request(pinned.url())
+}
+
 /**
  * R11 lives on the OTHER router (routes/multitable-ai.ts) and gates on the SAME `canManageFields`
  * primitive. Built here with the provider seam stubbed at construction (`fetchFn`), so an ALLOWED
@@ -319,38 +332,38 @@ const SCHEMA_ROUTES: RouteCell[] = [
     key: 'R1',
     label: 'POST /fields (create a column)',
     allowedStatus: 201,
-    send: (app) => request(app).post('/api/multitable/fields').send({ sheetId: SHEET_ID, name: 'New column', type: 'string' }),
+    send: (app) => on(app).post('/api/multitable/fields').send({ sheetId: SHEET_ID, name: 'New column', type: 'string' }),
   },
   {
     key: 'R2',
     label: 'PATCH /fields/:fieldId (rename / retype a column)',
     allowedStatus: 200,
-    send: (app) => request(app).patch(`/api/multitable/fields/${FLD_QTY}`).send({ name: 'Renamed quantity' }),
+    send: (app) => on(app).patch(`/api/multitable/fields/${FLD_QTY}`).send({ name: 'Renamed quantity' }),
   },
   {
     key: 'R3',
     label: 'DELETE /fields/:fieldId (delete the "total quantity" column)',
     allowedStatus: 200,
-    send: (app) => request(app).delete(`/api/multitable/fields/${FLD_QTY}`),
+    send: (app) => on(app).delete(`/api/multitable/fields/${FLD_QTY}`),
   },
   {
     key: 'R4',
     label: 'POST /person-fields/prepare (provision the people sheet + person field)',
     allowedStatus: 200,
-    send: (app) => request(app).post('/api/multitable/person-fields/prepare').send({ sheetId: SHEET_ID }),
+    send: (app) => on(app).post('/api/multitable/person-fields/prepare').send({ sheetId: SHEET_ID }),
   },
   {
     key: 'R5',
     label: 'GET /sheets/:sheetId/field-permissions (read the field ACL)',
     allowedStatus: 200,
-    send: (app) => request(app).get(`/api/multitable/sheets/${SHEET_ID}/field-permissions`),
+    send: (app) => on(app).get(`/api/multitable/sheets/${SHEET_ID}/field-permissions`),
   },
   {
     key: 'R6',
     label: 'PUT /sheets/:sheetId/field-permissions/:fieldId/:subjectType/:subjectId (write the field ACL)',
     allowedStatus: 200,
     send: (app) =>
-      request(app)
+      on(app)
         .put(`/api/multitable/sheets/${SHEET_ID}/field-permissions/${FLD_QTY}/user/${TARGET_USER}`)
         .send({ readOnly: true }),
   },
@@ -361,7 +374,7 @@ const SCHEMA_ROUTES: RouteCell[] = [
     // this mock. The load-bearing fact is that it is NOT 403 and is identical for T1 and T3.
     allowedStatus: 409,
     deniedStatus: { T5_anonymous: 401 },
-    send: (app) => request(app).post(`/api/multitable/sheets/${SHEET_ID}/config-restore-preview`).send({ revisionId: REVISION_ID }),
+    send: (app) => on(app).post(`/api/multitable/sheets/${SHEET_ID}/config-restore-preview`).send({ revisionId: REVISION_ID }),
   },
   {
     key: 'R9',
@@ -371,7 +384,7 @@ const SCHEMA_ROUTES: RouteCell[] = [
     allowedStatus: 409,
     deniedStatus: { T5_anonymous: 401 },
     send: (app) =>
-      request(app)
+      on(app)
         .post(`/api/multitable/sheets/${SHEET_ID}/config-restore-execute`)
         .send({ revisionId: REVISION_ID, previewToken: 'not-a-real-token' }),
   },
@@ -379,7 +392,7 @@ const SCHEMA_ROUTES: RouteCell[] = [
     key: 'R10',
     label: 'POST /sheets/:sheetId/formula/dry-run (author a formula against the schema)',
     allowedStatus: 200,
-    send: (app) => request(app).post(`/api/multitable/sheets/${SHEET_ID}/formula/dry-run`).send({ expression: '1 + 1' }),
+    send: (app) => on(app).post(`/api/multitable/sheets/${SHEET_ID}/formula/dry-run`).send({ expression: '1 + 1' }),
   },
 ]
 
@@ -425,17 +438,17 @@ describe('multitable:manage-schema — actor x route matrix', () => {
     for (const tier of TIERS.filter((t) => t !== 'T5_anonymous')) {
       it(`${TIER_LABEL[tier]}: capability projection`, async () => {
         const app = await buildApp(tier, freshFields())
-        const res = await request(app).get('/api/multitable/context').query({ sheetId: SHEET_ID })
+        const res = await on(app).get('/api/multitable/context').query({ sheetId: SHEET_ID })
         expect(res.status).toBe(200)
         expect(res.body.data.capabilities).toMatchObject(EXPECTED_CAPABILITIES[tier]!)
       })
     }
 
     it('T2 vs T3 differ in EXACTLY one capability key — the change widens nothing else', async () => {
-      const t2 = await request(await buildApp('T2_write_only', freshFields()))
+      const t2 = await on(await buildApp('T2_write_only', freshFields()))
         .get('/api/multitable/context').query({ sheetId: SHEET_ID })
       vi.resetModules()
-      const t3 = await request(await buildApp('T3_write_and_schema', freshFields()))
+      const t3 = await on(await buildApp('T3_write_and_schema', freshFields()))
         .get('/api/multitable/context').query({ sheetId: SHEET_ID })
       const a = t2.body.data.capabilities as Record<string, unknown>
       const b = t3.body.data.capabilities as Record<string, unknown>
@@ -470,7 +483,7 @@ describe('multitable:manage-schema — actor x route matrix', () => {
       const allowed = SCHEMA_TIERS.includes(tier)
       it(`R7 ${TIER_LABEL[tier]} => 200, field revisions ${allowed ? 'SELECTABLE' : 'EXCLUDED from the WHERE clause'}`, async () => {
         const { app, pool } = await buildAppWithPool(tier, freshFields())
-        const res = await request(app).get(`/api/multitable/sheets/${SHEET_ID}/config-history`)
+        const res = await on(app).get(`/api/multitable/sheets/${SHEET_ID}/config-history`)
         expect(res.status).toBe(200)
 
         const selects = pool.query.mock.calls
@@ -493,7 +506,7 @@ describe('multitable:manage-schema — actor x route matrix', () => {
 
     it('R7 T5 unauthenticated => 401', async () => {
       const app = await buildApp('T5_anonymous', freshFields())
-      const res = await request(app).get(`/api/multitable/sheets/${SHEET_ID}/config-history`)
+      const res = await on(app).get(`/api/multitable/sheets/${SHEET_ID}/config-history`)
       expect(res.status).toBe(401)
     })
   })
@@ -517,7 +530,7 @@ describe('multitable:manage-schema — actor x route matrix', () => {
       const expected = allowed ? 200 : tier === 'T5_anonymous' ? 401 : 403
       it(`${TIER_LABEL[tier]} => ${expected}`, async () => {
         const app = await buildAiApp(tier, freshFields())
-        const res = await request(app)
+        const res = await on(app)
           .post(`/api/multitable/sheets/${SHEET_ID}/ai/suggest-formula`)
           .send({ instruction: 'double the quantity' })
         expect(res.status).toBe(expected)
@@ -528,7 +541,7 @@ describe('multitable:manage-schema — actor x route matrix', () => {
     it('flag=true restores the legacy fused behaviour here too', async () => {
       process.env[LEGACY_FLAG] = 'true'
       const app = await buildAiApp('T2_write_only', freshFields())
-      const res = await request(app)
+      const res = await on(app)
         .post(`/api/multitable/sheets/${SHEET_ID}/ai/suggest-formula`)
         .send({ instruction: 'double the quantity' })
       expect(res.status).toBe(200)
@@ -539,15 +552,15 @@ describe('multitable:manage-schema — actor x route matrix', () => {
     it('T2 may still create, edit and delete records while every schema mutation is refused', async () => {
       const app = await buildApp('T2_write_only', freshFields())
 
-      const created = await request(app).post('/api/multitable/records').send({ sheetId: SHEET_ID, data: { [FLD_QTY]: 7 } })
+      const created = await on(app).post('/api/multitable/records').send({ sheetId: SHEET_ID, data: { [FLD_QTY]: 7 } })
       expect(created.status).not.toBe(403)
       expect(created.body).not.toEqual(FORBIDDEN_BODY)
 
-      const patched = await request(app).patch('/api/multitable/records/rec_ms_1').send({ data: { [FLD_QTY]: 8 } })
+      const patched = await on(app).patch('/api/multitable/records/rec_ms_1').send({ data: { [FLD_QTY]: 8 } })
       expect(patched.status).not.toBe(403)
       expect(patched.body).not.toEqual(FORBIDDEN_BODY)
 
-      const deleted = await request(app).delete('/api/multitable/records/rec_ms_1')
+      const deleted = await on(app).delete('/api/multitable/records/rec_ms_1')
       expect(deleted.status).not.toBe(403)
       expect(deleted.body).not.toEqual(FORBIDDEN_BODY)
     })
@@ -557,7 +570,7 @@ describe('multitable:manage-schema — actor x route matrix', () => {
     it('default (unset) is the TIGHTENED behaviour — T2 is refused the field delete', async () => {
       expect(process.env[LEGACY_FLAG]).toBeUndefined()
       const app = await buildApp('T2_write_only', freshFields())
-      const res = await request(app).delete(`/api/multitable/fields/${FLD_QTY}`)
+      const res = await on(app).delete(`/api/multitable/fields/${FLD_QTY}`)
       expect(res.status).toBe(403)
     })
 
@@ -568,7 +581,7 @@ describe('multitable:manage-schema — actor x route matrix', () => {
       it(`flag=${JSON.stringify(value)} ${reopens ? 'RE-OPENS' : 'does NOT re-open'} the gate`, async () => {
         process.env[LEGACY_FLAG] = value
         const app = await buildApp('T2_write_only', freshFields())
-        const res = await request(app).delete(`/api/multitable/fields/${FLD_QTY}`)
+        const res = await on(app).delete(`/api/multitable/fields/${FLD_QTY}`)
         expect(res.status).toBe(reopens ? 200 : 403)
       })
     }
@@ -584,23 +597,23 @@ describe('multitable:manage-schema — actor x route matrix', () => {
     })
 
     it('flag=true widens NOTHING else — only canManageFields changes for T2, and T4 stays untouched', async () => {
-      const off = await request(await buildApp('T2_write_only', freshFields()))
+      const flagOff = await on(await buildApp('T2_write_only', freshFields()))
         .get('/api/multitable/context').query({ sheetId: SHEET_ID })
       process.env[LEGACY_FLAG] = 'true'
       vi.resetModules()
-      const on = await request(await buildApp('T2_write_only', freshFields()))
+      const flagOn = await on(await buildApp('T2_write_only', freshFields()))
         .get('/api/multitable/context').query({ sheetId: SHEET_ID })
-      const a = off.body.data.capabilities as Record<string, unknown>
-      const b = on.body.data.capabilities as Record<string, unknown>
+      const a = flagOff.body.data.capabilities as Record<string, unknown>
+      const b = flagOn.body.data.capabilities as Record<string, unknown>
       expect(Object.keys(b).filter((k) => a[k] !== b[k])).toEqual(['canManageFields'])
 
       // A read-only actor gains nothing from the flag: it never held multitable:write.
       vi.resetModules()
-      const readerOn = await request(await buildApp('T4_read_only', freshFields()))
+      const readerOn = await on(await buildApp('T4_read_only', freshFields()))
         .get('/api/multitable/context').query({ sheetId: SHEET_ID })
       expect((readerOn.body.data.capabilities as Record<string, unknown>).canManageFields).toBe(false)
       vi.resetModules()
-      const readerRoute = await request(await buildApp('T4_read_only', freshFields()))
+      const readerRoute = await on(await buildApp('T4_read_only', freshFields()))
         .delete(`/api/multitable/fields/${FLD_QTY}`)
       expect(readerRoute.status).toBe(403)
     })

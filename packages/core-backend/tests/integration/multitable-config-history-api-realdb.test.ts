@@ -1,8 +1,10 @@
 /**
  * T9-R3: config/schema-change history READ API — real DB. The load-bearing property is the PER-ENTITY-TYPE gate
- * (read-gate ≡ write-gate), applied IN the WHERE clause: field/field-perm → canManageFields(=write), view/view-perm
- * → canManageViews(=write), sheet_config/sheet-perm → canManageSheetAccess(=share). Caps: field/view = multitable:write,
- * sheet-config/sheet-access = multitable:share (independent), so the meaningful DENY case is write-but-not-share.
+ * (read-gate ≡ write-gate), applied IN the WHERE clause: field/field-perm → canManageFields(=manage-schema),
+ * view/view-perm → canManageViews(=write), sheet_config/sheet-perm → canManageSheetAccess(=share). Caps:
+ * field = multitable:manage-schema (since the schema/record-write split — src/multitable/manage-schema-permission.ts),
+ * view = multitable:write, sheet-config/sheet-access = multitable:share (independent), so the meaningful DENY case
+ * here is write+manage-schema-but-not-share.
  * Tests BOTH allow and deny (not allow-only). Runs only with DATABASE_URL.
  */
 import express, { type Express } from 'express'
