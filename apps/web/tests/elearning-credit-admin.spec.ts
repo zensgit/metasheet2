@@ -8,6 +8,7 @@ const h = vi.hoisted(() => ({
   list: vi.fn(),
   publish: vi.fn(),
   publishTitles: vi.fn(),
+  listCertificates: vi.fn(),
 }))
 
 vi.mock('../src/services/elearningCredit', async () => {
@@ -22,6 +23,13 @@ vi.mock('../src/services/elearningCredit', async () => {
     publishElearningCreditRule: h.publish,
     publishElearningTitleSnapshot: h.publishTitles,
   }
+})
+
+vi.mock('../src/services/elearningCertificate', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/elearningCertificate')>(
+    '../src/services/elearningCertificate',
+  )
+  return { ...actual, listElearningCertificateTemplates: h.listCertificates }
 })
 
 import { ElearningApiError } from '../src/services/elearning'
@@ -84,6 +92,7 @@ describe('ElearningCreditAdminSection', () => {
     h.adjust.mockReset()
     h.getTitles.mockReset()
     h.publishTitles.mockReset()
+    h.listCertificates.mockReset()
     h.list.mockResolvedValue([rule()])
     h.getTitles.mockResolvedValue({
       revisionId: null,
@@ -91,6 +100,7 @@ describe('ElearningCreditAdminSection', () => {
       titles: [],
       createdAt: null,
     })
+    h.listCertificates.mockResolvedValue([])
     let index = 0
     const ids = [REQUEST_A, REQUEST_B]
     uuidSpy = vi.spyOn(globalThis.crypto, 'randomUUID').mockImplementation(() => (

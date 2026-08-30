@@ -12,6 +12,7 @@ const h = vi.hoisted(() => ({
   saveExam: vi.fn(),
   submitExam: vi.fn(),
   openContent: vi.fn(),
+  listCertificates: vi.fn(),
 }))
 
 vi.mock('../src/services/elearning', async () => {
@@ -34,6 +35,13 @@ vi.mock('../src/services/elearningContent', async () => {
     '../src/services/elearningContent',
   )
   return { ...actual, openElearningContentItem: h.openContent }
+})
+
+vi.mock('../src/services/elearningCertificate', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/elearningCertificate')>(
+    '../src/services/elearningCertificate',
+  )
+  return { ...actual, listMyElearningCertificates: h.listCertificates }
 })
 
 import {
@@ -312,9 +320,11 @@ describe('ElearningLearnerView', () => {
     h.saveExam.mockReset()
     h.submitExam.mockReset()
     h.openContent.mockReset()
+    h.listCertificates.mockReset()
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout', 'Date'] })
     h.capabilities.mockResolvedValue(v01Capabilities())
     h.list.mockResolvedValue({ courses: [course()] })
+    h.listCertificates.mockResolvedValue([])
     h.startWatch.mockResolvedValue(watchState())
     h.ticket.mockResolvedValue(playbackTicket())
     h.heartbeat.mockImplementation(async (_session: string, body: { sequence: number; positionMs: number; playing: boolean }) => watchState({
