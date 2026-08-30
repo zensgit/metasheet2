@@ -913,9 +913,109 @@ function simulatedClassAPlan(
   }
 }
 
+function simulatedGenericClassBPlan(
+  action: AutomationAction,
+  context: ExecutionContext,
+): AutomationStepResult | null {
+  const config = action.config
+  let target: Record<string, unknown>
+  let payload: unknown
+
+  switch (action.type) {
+    case 'send_webhook': {
+      const url = typeof config.url === 'string' ? config.url : ''
+      if (!url) {
+        return { actionType: action.type, status: 'failed', error: 'Webhook URL is required', durationMs: 0 }
+      }
+      let host: string
+      try {
+        host = new URL(url).host
+      } catch {
+        return { actionType: action.type, status: 'failed', error: 'Webhook URL is invalid', durationMs: 0 }
+      }
+      if (!host) {
+        return { actionType: action.type, status: 'failed', error: 'Webhook URL is invalid', durationMs: 0 }
+      }
+      target = { host }
+      payload = {
+        method: typeof config.method === 'string' ? config.method : 'POST',
+        body: config.body ?? {
+          ruleId: context.sheetId,
+          recordId: context.recordId,
+          data: context.recordData,
+          triggeredAt: new Date().toISOString(),
+        },
+      }
+      break
+    }
+    case 'send_notification': {
+      const userIds = Array.isArray(config.userIds)
+        ? config.userIds.filter((entry): entry is string => typeof entry === 'string' && Boolean(entry))
+        : []
+      const message = typeof config.message === 'string' ? config.message : ''
+      if (!userIds.length) {
+        return { actionType: action.type, status: 'failed', error: 'No user IDs specified', durationMs: 0 }
+      }
+      if (!message) {
+        return { actionType: action.type, status: 'failed', error: 'Notification message is required', durationMs: 0 }
+      }
+      target = { userIds }
+      payload = { message }
+      break
+    }
+    case 'send_email': {
+      const recipients = Array.from(new Set(
+        (Array.isArray(config.recipients) ? config.recipients : [])
+          .filter((entry): entry is string => typeof entry === 'string')
+          .map((entry) => entry.trim())
+          .filter(Boolean),
+      ))
+      const subjectTemplate = typeof config.subjectTemplate === 'string' ? config.subjectTemplate.trim() : ''
+      const bodyTemplate = typeof config.bodyTemplate === 'string' ? config.bodyTemplate.trim() : ''
+      if (!recipients.length) {
+        return { actionType: action.type, status: 'failed', error: 'send_email requires at least one recipient', durationMs: 0 }
+      }
+      if (!subjectTemplate) {
+        return { actionType: action.type, status: 'failed', error: 'send_email subjectTemplate is required', durationMs: 0 }
+      }
+      if (!bodyTemplate) {
+        return { actionType: action.type, status: 'failed', error: 'send_email bodyTemplate is required', durationMs: 0 }
+      }
+      const templateData: Record<string, unknown> = {
+        sheetId: context.sheetId,
+        recordId: context.recordId,
+        actorId: context.actorId ?? '',
+        record: context.recordData,
+      }
+      target = { recipients }
+      payload = {
+        subject: renderAutomationTemplate(subjectTemplate, templateData).trim(),
+        content: renderAutomationTemplate(bodyTemplate, templateData).trim(),
+      }
+      break
+    }
+    default:
+      return null
+  }
+
+  return {
+    actionType: action.type,
+    status: 'success',
+    simulated: true,
+    output: {
+      dryRun: true,
+      dispatched: false,
+      plan: { target, payload: redactValue(payload) },
+    },
+    durationMs: 0,
+  }
+}
+
 function simulatedStep(action: AutomationAction, context: ExecutionContext): AutomationStepResult {
   const classAPlan = simulatedClassAPlan(action, context)
   if (classAPlan) return classAPlan
+  const genericClassBPlan = simulatedGenericClassBPlan(action, context)
+  if (genericClassBPlan) return genericClassBPlan
   return {
     actionType: action.type,
     status: 'success',
