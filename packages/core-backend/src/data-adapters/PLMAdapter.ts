@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { IConfigService, ILogger } from '../di/identifiers'
 import { HTTPAdapter } from './HTTPAdapter'
 import type { QueryResult, DataSourceConfig } from './BaseAdapter'
+import type { PlmBulkImportReport } from '../plm/bulkImportGridSerializer'
 
 export interface PLMProduct {
   id: string
@@ -56,6 +57,22 @@ export interface PLMItemMetadata {
   label?: string
   is_relationship?: boolean
   properties: PLMItemMetadataProperty[]
+}
+
+/**
+ * One bulk item-property grid submission. `content` is the serialized grid produced by
+ * `src/plm/bulkImportGridSerializer.ts` — which derives its columns from the ItemType's
+ * DECLARED property list, never from the rendered column set (N1).
+ *
+ * `matchProperty` absent ⇒ create-only, which is N3-A's mandated fallback when the match
+ * value's uniqueness cannot be established.
+ */
+export interface PlmBulkImportSubmission {
+  itemTypeId: string
+  matchProperty?: string
+  fileName: string
+  content: string
+  contentType?: string
 }
 
 export interface ApprovalRequest {
@@ -3681,6 +3698,245 @@ export class PLMAdapter extends HTTPAdapter {
     if (options?.offset) params.skip = options.offset
 
     return this.select<ApprovalRequest>(this.approvalRequestsPath(), { params })
+  }
+
+  /* ------------------------------------------------------------------------------------
+   * MetaSheet bulk item-property maintenance grid (taskbook
+   * DEVELOPMENT_TASK_METASHEET_BULK_GRID_CONSUMER_20260829.md, merged on Yuantus main).
+   *
+   * ## §2 — Family I ONLY. The credential is an ARGUMENT, never adapter state.
+   *
+   * `POST /api/v1/bulk-import/commit` runs `require_admin_user`. The three methods below
+   * therefore take the CALLER's own Yuantus credential explicitly on every invocation and
+   * **never read `this.authToken`**, the adapter's shared per-data-source service account.
+   *
+   * That absence of a fallback is the load-bearing property, not an implementation detail.
+   * If these methods fell back to the service token, the admin gate would be satisfied by the
+   * service account rather than by a human admin, and this lane would become exactly what
+   * taskbook §10 forbids in its first clause: "a service account that commits on an
+   * engineer's behalf". That deletes the entire maker-checker property the lane exists for.
+   * A blank/missing caller credential FAILS CLOSED with an error — it never transits.
+   *
+   * Pinned by `tests/unit/plm-bulk-grid-adapter.test.ts`
+   * ("never falls back to the service account").
+   * ---------------------------------------------------------------------------------- */
+
+  /**
+   * Bare-`fetch` transport for the two bulk-import endpoints.
+   *
+   * Deliberately bypasses `this.query`/`this.select`: HTTPAdapter's request interceptor
+   * unconditionally overwrites `Authorization` with the adapter's own service token, which
+   * would silently replace the caller's credential with the wrong one (the same reason
+   * `yuantusDiscussionFetch` exists).
+   *
+   * Unlike `yuantusDiscussionFetch` this sets **no `Content-Type`**: the body is a
+   * `FormData`, and `fetch` must be left to derive the `multipart/form-data` boundary itself.
+   * Setting it by hand produces a boundary-less content type the provider cannot parse.
+   *
+   * Never throws: network failures and non-2xx responses alike come back as
+   * `QueryResult.error`, with the status and parsed payload attached for the route to
+   * discriminate (e.g. the 409 `detail.code`).
+   */
+  private async yuantusBulkImportFetch<T>(
+    path: string,
+    callerToken: string,
+    form: FormData,
+    extraHeaders?: Record<string, string>,
+  ): Promise<QueryResult<T>> {
+    const baseUrl = this.config.connection.baseURL || this.config.connection.url
+    if (!baseUrl) {
+      return { data: [], error: new Error('PLM base URL is not configured') }
+    }
+    // FAIL CLOSED. There is deliberately no `?? this.authToken` here -- see the block above.
+    if (typeof callerToken !== 'string' || callerToken.trim().length === 0) {
+      return { data: [], error: new Error('A caller PLM credential is required for bulk import') }
+    }
+
+    const tenantId = this.getEffectiveTenantId()
+    let response: Awaited<ReturnType<typeof fetch>>
+    try {
+      response = await fetch(`${baseUrl}${path}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${callerToken}`,
+          ...(tenantId ? { 'x-tenant-id': tenantId } : {}),
+          ...(extraHeaders || {}),
+        },
+        body: form,
+      })
+    } catch (err) {
+      return { data: [], error: err instanceof Error ? err : new Error(String(err)) }
+    }
+
+    let payload: unknown
+    try {
+      payload = await response.json()
+    } catch {
+      payload = undefined
+    }
+
+    if (!response.ok) {
+      const detail = payload && typeof payload === 'object' && 'detail' in (payload as Record<string, unknown>)
+        ? (payload as Record<string, unknown>).detail
+        : undefined
+      const message = typeof detail === 'string'
+        ? detail
+        : `PLM bulk import request failed with status ${response.status}`
+      return {
+        data: [],
+        error: Object.assign(new Error(message), { response: { status: response.status, data: payload } }),
+      }
+    }
+
+    // NOTE: a TOTAL REJECTION is HTTP 200 with `ready: false` and writes nothing (§3). It
+    // arrives here as a SUCCESS envelope on purpose -- the caller must branch on `ready`,
+    // never on the status code.
+    return { data: [payload as T], metadata: { totalCount: 1 } }
+  }
+
+  /** Build the `multipart/form-data` body both endpoints accept. */
+  private buildBulkImportForm(submission: PlmBulkImportSubmission): FormData {
+    const form = new FormData()
+    form.append('item_type_id', submission.itemTypeId)
+    if (submission.matchProperty) {
+      // Absent match_property => create-only, which is N3-A's fallback when uniqueness
+      // cannot be established. The route decides; this only transmits.
+      form.append('match_property', submission.matchProperty)
+    }
+    const contentType = submission.contentType
+      || (submission.fileName.toLowerCase().endsWith('.xlsx')
+        ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        : 'text/csv')
+    form.append('file', new Blob([submission.content], { type: contentType }), submission.fileName)
+    return form
+  }
+
+  /**
+   * N1-b: fetch the target ItemType's DECLARED property list fresh for a submission, on the
+   * CALLER's credential (§2 keeps the whole grid in one credential family — the serializer's
+   * schema read must not travel on the service account while the write travels on the user).
+   *
+   * This is the same provider surface as `getItemMetadata`
+   * (`/api/v1/aml/metadata/${encodeURIComponent(itemType)}`), re-issued with the caller's
+   * bearer instead of the adapter's. No new provider route.
+   */
+  async getItemMetadataAsCaller(callerToken: string, itemType: string): Promise<QueryResult<PLMItemMetadata>> {
+    if (this.mockMode) {
+      return this.getItemMetadata(itemType)
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('PLM metadata is not supported for this PLM API mode') }
+    }
+    const baseUrl = this.config.connection.baseURL || this.config.connection.url
+    if (!baseUrl) {
+      return { data: [], error: new Error('PLM base URL is not configured') }
+    }
+    if (typeof callerToken !== 'string' || callerToken.trim().length === 0) {
+      return { data: [], error: new Error('A caller PLM credential is required for bulk import') }
+    }
+
+    const tenantId = this.getEffectiveTenantId()
+    let response: Awaited<ReturnType<typeof fetch>>
+    try {
+      response = await fetch(`${baseUrl}/api/v1/aml/metadata/${encodeURIComponent(itemType)}`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${callerToken}`,
+          ...(tenantId ? { 'x-tenant-id': tenantId } : {}),
+        },
+      })
+    } catch (err) {
+      return { data: [], error: err instanceof Error ? err : new Error(String(err)) }
+    }
+    if (!response.ok) {
+      return {
+        data: [],
+        error: Object.assign(new Error(`PLM metadata request failed with status ${response.status}`), {
+          response: { status: response.status },
+        }),
+      }
+    }
+    let payload: unknown
+    try {
+      payload = await response.json()
+    } catch {
+      return { data: [], error: new Error('PLM metadata response was not JSON') }
+    }
+    const entry = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+    const properties = Array.isArray(entry.properties)
+      ? entry.properties
+          .map((property) => {
+            const record = (property && typeof property === 'object' ? property : {}) as Record<string, unknown>
+            const name = typeof record.name === 'string' ? record.name : ''
+            if (!name) return null
+            return {
+              name,
+              ...(typeof record.label === 'string' ? { label: record.label } : {}),
+              ...(typeof record.type === 'string' ? { type: record.type } : {}),
+              ...(typeof record.required === 'boolean' ? { required: record.required } : {}),
+              ...(typeof record.length === 'number' || record.length === null
+                ? { length: record.length as number | null }
+                : {}),
+            } as PLMItemMetadataProperty
+          })
+          .filter((property): property is PLMItemMetadataProperty => property !== null)
+      : []
+
+    return {
+      data: [{
+        id: String(entry.id || itemType),
+        label: typeof entry.label === 'string' ? entry.label : String(entry.id || itemType),
+        is_relationship: Boolean(entry.is_relationship),
+        properties,
+      }],
+      metadata: { totalCount: 1 },
+    }
+  }
+
+  /**
+   * Maker half: validate the serialized grid. `POST /api/v1/bulk-import/dry-run`.
+   * Authenticated + `is_entitled("bulk_import")`, **no admin dependency**. Never writes.
+   *
+   * Returns the report as data even when `ready` is false — that is a valid 200 response
+   * describing a total rejection, not a transport error.
+   */
+  async bulkImportDryRun(
+    callerToken: string,
+    submission: PlmBulkImportSubmission,
+  ): Promise<QueryResult<PlmBulkImportReport>> {
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('Bulk import is not supported for this PLM API mode') }
+    }
+    return this.yuantusBulkImportFetch<PlmBulkImportReport>(
+      '/api/v1/bulk-import/dry-run',
+      callerToken,
+      this.buildBulkImportForm(submission),
+    )
+  }
+
+  /**
+   * Checker half: write. `POST /api/v1/bulk-import/commit`.
+   * `require_admin_user` FIRST, then `is_entitled("bulk_import_commit")`. The admin gate is
+   * satisfied by the CALLER's own Yuantus identity — see the §2 block above.
+   *
+   * `Idempotency-Key` is replay protection ONLY; it is never a freshness check (§5/N2).
+   * Same key + byte-identical file = a 200 replay of the cached report with no second write;
+   * same key + any change to the file = 409 `idempotency_conflict`.
+   */
+  async bulkImportCommit(
+    callerToken: string,
+    submission: PlmBulkImportSubmission,
+    idempotencyKey: string,
+  ): Promise<QueryResult<PlmBulkImportReport>> {
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('Bulk import is not supported for this PLM API mode') }
+    }
+    return this.yuantusBulkImportFetch<PlmBulkImportReport>(
+      '/api/v1/bulk-import/commit',
+      callerToken,
+      this.buildBulkImportForm(submission),
+      { 'Idempotency-Key': idempotencyKey },
+    )
   }
 
   async uploadDrawing(_params: unknown): Promise<QueryResult<PLMDrawing>> {
