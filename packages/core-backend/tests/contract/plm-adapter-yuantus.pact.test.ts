@@ -1053,6 +1053,12 @@ describe('Pact: bulk item-property maintenance grid (§9)', () => {
     expect(note.claudeNote).toContain('§9.1 REDUCTION')
     expect(note.claudeNote).toContain('NOT pinned')
     expect(note.claudeNote).toContain('UNVERIFIED')
+    // The note must name the PREDICTED provider-replay failure (Form(...)/File(...) -> 422) and
+    // the missing state fixtures, not merely say "unverified". "Unverified" invites someone to
+    // publish and find out; the concrete prediction tells them what to build first.
+    expect(note.claudeNote).toContain('422')
+    expect(note.claudeNote).toContain('STATE FIXTURES')
+    expect(note.claudeNote).toContain('HARD MERGE PRECONDITION')
   })
 
   it('every bulk interaction declares its own provider state naming the licences it needs', () => {
