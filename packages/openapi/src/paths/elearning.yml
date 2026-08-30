@@ -106,6 +106,221 @@ paths:
           description: unavailable
           $ref: '#/components/responses/ElearningError'
 
+  /api/elearning/admin/credit-titles:
+    get:
+      operationId: getElearningTitleSnapshot
+      summary: Read the active organization credit-title threshold snapshot
+      description: |
+        Global `elearning:admin` only. Requires `ELEARNING_ENABLED` and
+        `ELEARNING_INCENTIVE_ENABLED` to each equal the exact literal `true`.
+        Organization is server-derived. The closed response contains only the
+        active immutable revision and its threshold-ordered title rows.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: Active snapshot, or the explicit empty snapshot when no titles are configured.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningTitleSnapshot'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient elearning:admin
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Incentive surface flags off
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+    post:
+      operationId: publishElearningTitleSnapshot
+      summary: Publish one complete credit-title threshold snapshot
+      description: |
+        Global `elearning:admin` only. Actor and organization are server-derived.
+        The complete normalized snapshot becomes one immutable active revision.
+        The same organization-scoped `requestId` and logical payload replay the
+        original closed result; changed values return a values-free 409.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningTitlePublishRequest'
+      responses:
+        '200':
+          description: Published snapshot or exact idempotent replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningTitleSnapshot'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient elearning:admin
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Incentive surface flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: requestId reused with a different normalized snapshot
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/admin/certificate-templates:
+    get:
+      operationId: listElearningCertificateTemplates
+      summary: List active organization certificate templates
+      description: |
+        Global `elearning:admin` only. Requires `ELEARNING_ENABLED` and
+        `ELEARNING_INCENTIVE_ENABLED` to each equal the exact literal `true`.
+        Organization is server-derived. The closed response contains only each
+        active immutable template revision. This surface stores template and
+        issuance metadata; it does not render or expose PDF, image, or download
+        artifacts.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: Active templates ordered by stable certificate identifier.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningCertificateTemplateList'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient elearning:admin
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Incentive surface flags off
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+    post:
+      operationId: publishElearningCertificateTemplate
+      summary: Publish an immutable certificate-template revision
+      description: |
+        Global `elearning:admin` only. Requires `ELEARNING_ENABLED` and
+        `ELEARNING_INCENTIVE_ENABLED` to each equal the exact literal `true`.
+        Organization and actor are server-derived. The same organization-scoped
+        `requestId` and normalized payload replay the original closed result;
+        changed values return a values-free 409. Publishing stores metadata only
+        and does not render or expose PDF, image, or download artifacts.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningCertificateTemplatePublishRequest'
+      responses:
+        '200':
+          description: Published template revision or exact idempotent replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningCertificateTemplate'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient elearning:admin
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Incentive surface flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: requestId reused with a different normalized payload
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/admin/certificate-issues:
+    post:
+      operationId: issueElearningCertificate
+      summary: Issue a certificate ledger record to a same-organization learner
+      description: |
+        Global `elearning:admin` only. Requires `ELEARNING_ENABLED` and
+        `ELEARNING_INCENTIVE_ENABLED` to each equal the exact literal `true`.
+        Organization, actor, serial number, and issuance time are server-derived.
+        The same organization-scoped `requestId` and normalized payload replay
+        the original closed result; changed values return a values-free 409.
+        The result is immutable ledger metadata, not a rendered PDF, image, or
+        downloadable certificate artifact.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningCertificateIssueRequest'
+      responses:
+        '200':
+          description: Issued ledger record or exact idempotent replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningCertificateIssue'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient elearning:admin
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Template or target membership not found, or incentive flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: requestId reused with a different normalized payload
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/certificates:
+    get:
+      operationId: listMyElearningCertificates
+      summary: List the authenticated learner's certificate ledger records
+      description: |
+        Requires `ELEARNING_ENABLED` and `ELEARNING_INCENTIVE_ENABLED` to each
+        equal the exact literal `true` plus an e-learning read-capable role.
+        Organization and learner identity are server-derived; only that learner's
+        same-organization immutable records are returned. The closed DTO contains
+        metadata and parameter snapshots only, with no PDF, render, or download
+        capability.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: Learner-owned certificate records ordered newest first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningCertificateIssueList'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient e-learning read permission
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Incentive surface flags off
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
   /api/elearning/admin/credits/adjustments:
     post:
       operationId: adjustElearningCredit
@@ -397,6 +612,57 @@ paths:
           $ref: '#/components/responses/ElearningError'
         '404':
           description: User not active in the organization or flags off
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/profile:
+    get:
+      operationId: getMyElearningLearningProfile
+      summary: Read the authenticated learner historical archive
+      description: |
+        RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+        The organization and learner are derived only from the authenticated
+        session. The archive is projected from immutable completion evidence
+        and graded attempts; it does not expose answers, grading comments,
+        event digests, request hashes, actor identifiers, or access-basis keys.
+        Historical completed courses remain visible after course withdrawal.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: cursor
+          required: false
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9_-]+$'
+            minLength: 1
+            maxLength: 512
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: Closed learner-owned archive with stable keyset pagination.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningLearningProfile'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED, inactive membership, or insufficient read permission
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Incentive surface flags off
           $ref: '#/components/responses/ElearningError'
         '503':
           description: unavailable
@@ -2217,6 +2483,86 @@ paths:
           $ref: '#/components/responses/ElearningError'
         '409':
           description: course_withdrawn or review_unavailable
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/portal:
+    get:
+      operationId: getElearningPortalSettings
+      summary: Read the active learning portal presentation
+      description: |
+        Requires the master and CONTENT capability flags plus `elearning:read`.
+        Organization and learner identity are derived only from the authenticated
+        request. The response is either the closed empty presentation or the active
+        immutable portal revision. It never returns actor, organization, request-hash,
+        or request-id fields.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: Closed active or empty learning portal presentation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningPortalSettings'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or content flags off
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/admin/portal:
+    put:
+      operationId: publishElearningPortalSettings
+      summary: Publish one immutable learning portal revision
+      description: |
+        Requires the master and CONTENT capability flags plus `elearning:admin`.
+        Organization and actor identity are server-derived. The command is closed to
+        requestId, siteName, tagline, bannerUrl, and ordered internal navigation.
+        Reusing requestId with the same normalized payload replays the original result;
+        a different payload returns a values-free conflict.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningPortalPublishRequest'
+      responses:
+        '200':
+          description: Published portal revision; duplicate is true on an exact replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningPortalPublishResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or content flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: conflict
           $ref: '#/components/responses/ElearningError'
         '500':
           description: internal_error

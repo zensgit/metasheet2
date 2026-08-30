@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ELEARNING_FLAG_NAMES,
   ELEARNING_PRODUCT_FEATURE,
+  isElearningAnalyticsSurfaceEnabled,
   isElearningAssessmentSurfaceEnabled,
   isElearningEnabled,
   isElearningExamSurfaceEnabled,
@@ -83,6 +84,21 @@ describe('elearning V0.1 flags', () => {
         ELEARNING_MEDIA_ENABLED: 'true',
       } as NodeJS.ProcessEnv),
     ).toBe(true)
+  })
+
+  it('gates analytics independently with master plus exact analytics true', () => {
+    expect(isElearningAnalyticsSurfaceEnabled({} as NodeJS.ProcessEnv)).toBe(false)
+    expect(isElearningAnalyticsSurfaceEnabled({
+      ELEARNING_ENABLED: 'true',
+      ELEARNING_ANALYTICS_ENABLED: 'true',
+    } as NodeJS.ProcessEnv)).toBe(true)
+    expect(isElearningAnalyticsSurfaceEnabled({
+      ELEARNING_ENABLED: 'true',
+      ELEARNING_ANALYTICS_ENABLED: 'TRUE',
+    } as NodeJS.ProcessEnv)).toBe(false)
+    expect(isElearningAnalyticsSurfaceEnabled({
+      ELEARNING_ANALYTICS_ENABLED: 'true',
+    } as NodeJS.ProcessEnv)).toBe(false)
   })
 
   it('FEATURE_FLAGS registers the seven names, default OFF, exact true only', async () => {

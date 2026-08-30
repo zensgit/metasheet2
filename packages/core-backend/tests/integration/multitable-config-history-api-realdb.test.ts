@@ -1,8 +1,10 @@
 /**
  * T9-R3: config/schema-change history READ API — real DB. The load-bearing property is the PER-ENTITY-TYPE gate
- * (read-gate ≡ write-gate), applied IN the WHERE clause: field/field-perm → canManageFields(=write), view/view-perm
- * → canManageViews(=write), sheet_config/sheet-perm → canManageSheetAccess(=share). Caps: field/view = multitable:write,
- * sheet-config/sheet-access = multitable:share (independent), so the meaningful DENY case is write-but-not-share.
+ * (read-gate ≡ write-gate), applied IN the WHERE clause: field/field-perm → canManageFields(=manage-schema),
+ * view/view-perm → canManageViews(=write), sheet_config/sheet-perm → canManageSheetAccess(=share). Caps:
+ * field = multitable:manage-schema (since the schema/record-write split — src/multitable/manage-schema-permission.ts),
+ * view = multitable:write, sheet-config/sheet-access = multitable:share (independent), so the meaningful DENY case
+ * here is write+manage-schema-but-not-share.
  * Tests BOTH allow and deny (not allow-only). Runs only with DATABASE_URL.
  */
 import express, { type Express } from 'express'
@@ -21,7 +23,8 @@ const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, param
 let app: Express
 let currentActor: { id: string; roles: string[]; perms: string[] }
 const ADMIN = { id: `u_admin_${TS}`, roles: ['admin'], perms: ['multitable:read', 'multitable:write', 'multitable:share'] }
-const WRITER = { id: `u_writer_${TS}`, roles: ['member'], perms: ['multitable:read', 'multitable:write'] } // NOT share
+// canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
+const WRITER = { id: `u_writer_${TS}`, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:manage-schema'] } // NOT share
 const SHARER = { id: `u_sharer_${TS}`, roles: ['member'], perms: ['multitable:read', 'multitable:share'] } // NOT write
 const READER = { id: `u_reader_${TS}`, roles: ['member'], perms: ['multitable:read'] } // no manage caps
 

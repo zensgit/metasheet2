@@ -12,6 +12,8 @@ const h = vi.hoisted(() => ({
   saveExam: vi.fn(),
   submitExam: vi.fn(),
   openContent: vi.fn(),
+  listCertificates: vi.fn(),
+  getProfile: vi.fn(),
 }))
 
 vi.mock('../src/services/elearning', async () => {
@@ -34,6 +36,20 @@ vi.mock('../src/services/elearningContent', async () => {
     '../src/services/elearningContent',
   )
   return { ...actual, openElearningContentItem: h.openContent }
+})
+
+vi.mock('../src/services/elearningCertificate', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/elearningCertificate')>(
+    '../src/services/elearningCertificate',
+  )
+  return { ...actual, listMyElearningCertificates: h.listCertificates }
+})
+
+vi.mock('../src/services/elearningProfile', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/elearningProfile')>(
+    '../src/services/elearningProfile',
+  )
+  return { ...actual, getMyElearningLearningProfile: h.getProfile }
 })
 
 import {
@@ -312,9 +328,18 @@ describe('ElearningLearnerView', () => {
     h.saveExam.mockReset()
     h.submitExam.mockReset()
     h.openContent.mockReset()
+    h.listCertificates.mockReset()
+    h.getProfile.mockReset()
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout', 'Date'] })
     h.capabilities.mockResolvedValue(v01Capabilities())
     h.list.mockResolvedValue({ courses: [course()] })
+    h.listCertificates.mockResolvedValue([])
+    h.getProfile.mockResolvedValue({
+      userId: 'learner-1',
+      summary: { completedCourses: 0, assessmentCourses: 0, contentCourses: 0 },
+      courses: [],
+      nextCursor: null,
+    })
     h.startWatch.mockResolvedValue(watchState())
     h.ticket.mockResolvedValue(playbackTicket())
     h.heartbeat.mockImplementation(async (_session: string, body: { sequence: number; positionMs: number; playing: boolean }) => watchState({
@@ -362,6 +387,7 @@ describe('ElearningLearnerView', () => {
     await flushUi()
     expect(root.textContent).toContain('学习中心')
     expect(root.textContent).toContain('示范课')
+    expect(h.getProfile).not.toHaveBeenCalled()
     const examBtn = root.querySelector('[data-testid="elearning-start-exam"]') as HTMLButtonElement
     expect(examBtn.disabled).toBe(true)
   })
@@ -1164,6 +1190,8 @@ describe('ElearningLearnerView', () => {
     await flushUi()
 
     expect(root.querySelector('[data-testid="elearning-credit-wallet-balance"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="elearning-profile-summary"]')).not.toBeNull()
+    expect(h.getProfile).toHaveBeenCalledWith(null)
     expect(root.querySelector('[data-testid="elearning-learner-status"]')).toBeNull()
     expect(h.list).not.toHaveBeenCalled()
     expect(h.startWatch).not.toHaveBeenCalled()

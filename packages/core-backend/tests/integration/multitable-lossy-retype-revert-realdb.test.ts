@@ -41,7 +41,7 @@ const SHEET = `sheet_lrr_${TS}`
 const FIELD = `fld_lrr_${TS}`
 const OTHER_FIELD = `fld_lrr_other_${TS}`
 const ERA_FIELD = `fld_lrr_era_${TS}`
-const U_FULL = `u_lrr_full_${TS}` // multitable:write -> canManageFields
+const U_FULL = `u_lrr_full_${TS}` // multitable:manage-schema -> canManageFields
 const BASE_FLAG = 'MULTITABLE_ENABLE_FIELD_RETYPE_REVERT'
 const LOSSY_FLAG = 'MULTITABLE_ENABLE_FIELD_RETYPE_REVERT_LOSSY'
 const CAP_ENV = 'MULTITABLE_SHEET_REVERT_MAX_RECORDS'
@@ -51,7 +51,8 @@ const CONFIRM = 'revert-retype-lossy'
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
 let app: Express
 let actor: { id: string; roles: string[]; perms: string[] }
-const FULL = { id: U_FULL, roles: ['member'], perms: ['multitable:read', 'multitable:write'] }
+// canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
+const FULL = { id: U_FULL, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:manage-schema'] }
 
 const rid = (n: number) => `rec_lrr_${TS}_${n}`
 

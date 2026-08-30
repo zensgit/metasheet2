@@ -59,6 +59,13 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_OBJECT_SCOPE_FORBIDDEN', // scope guards
   'MULTITABLE_PROJECT_NAMESPACE_FORBIDDEN',
   'MULTITABLE_SHARE_PERMISSIONS', // share permission registry
+  // Schema-management permission split: these four are CONSTANT NAMES (permission codes and the
+  // env-var name itself), not flags. The one real flag, MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA,
+  // is registered in the manifest instead.
+  'MULTITABLE_LEGACY_MANAGE_SCHEMA_FLAG_ENV', // the env-var NAME constant, not the flag
+  'MULTITABLE_MANAGE_SCHEMA_PERMISSION', // permission code constant
+  'MULTITABLE_MANAGE_SCHEMA_PERMISSION_CODE', // permission code constant
+  'MULTITABLE_WRITE_PERMISSION', // permission code constant
   'MULTITABLE_SHEET_SCOPE_FORBIDDEN',
   'MULTITABLE_UNIT_OF_WORK_SCOPE_FORBIDDEN', // plugin-scoped records UOW error code, not a flag
   'MULTITABLE_UNIT_OF_WORK_UNAVAILABLE', // required host-capability error code, not a flag

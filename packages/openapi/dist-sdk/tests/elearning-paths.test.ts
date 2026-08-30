@@ -56,6 +56,18 @@ type CreditAutomaticBehavior = components['schemas']['ElearningCreditAutomaticBe
 type CreditAutomaticWalletItem = components['schemas']['ElearningCreditAutomaticWalletItem']
 type CreditManualWalletItem = components['schemas']['ElearningCreditManualWalletItem']
 type CreditWalletItem = components['schemas']['ElearningCreditWalletItem']
+type CreditWallet = components['schemas']['ElearningCreditWallet']
+type LearningProfile = components['schemas']['ElearningLearningProfile']
+type LearningProfileCourse = components['schemas']['ElearningLearningProfileCourse']
+type TitleRow = components['schemas']['ElearningTitleRow']
+type TitlePublishRequest = components['schemas']['ElearningTitlePublishRequest']
+type TitleSnapshot = components['schemas']['ElearningTitleSnapshot']
+type CertificateTemplatePublishRequest = components['schemas']['ElearningCertificateTemplatePublishRequest']
+type CertificateTemplate = components['schemas']['ElearningCertificateTemplate']
+type CertificateTemplateList = components['schemas']['ElearningCertificateTemplateList']
+type CertificateIssueRequest = components['schemas']['ElearningCertificateIssueRequest']
+type CertificateIssue = components['schemas']['ElearningCertificateIssue']
+type CertificateIssueList = components['schemas']['ElearningCertificateIssueList']
 type ContentRevisionRequest = components['schemas']['ElearningContentRevisionRequest']
 type ContentRevisionResult = components['schemas']['ElearningContentRevision']
 type ContentCoursePublishRequest = components['schemas']['ElearningContentCoursePublishRequest']
@@ -66,6 +78,12 @@ type LearnerAssessmentCourse = components['schemas']['ElearningLearnerAssessment
 type LearnerContentCourse = components['schemas']['ElearningLearnerContentCourse']
 type LearnerContentItem = components['schemas']['ElearningLearnerContentItem']
 type LearnerCourse = components['schemas']['ElearningLearnerCourse']
+type PortalNavigationItem = components['schemas']['ElearningPortalNavigationItem']
+type PortalEmptySettings = components['schemas']['ElearningPortalEmptySettings']
+type PortalActiveSettings = components['schemas']['ElearningPortalActiveSettings']
+type PortalSettings = components['schemas']['ElearningPortalSettings']
+type PortalPublishRequest = components['schemas']['ElearningPortalPublishRequest']
+type PortalPublishResult = components['schemas']['ElearningPortalPublishResult']
 
 const FORBIDDEN_LEARNER_KEYS = new Set([
   'answerKey',
@@ -109,6 +127,10 @@ type JsonSchema = {
   enum?: unknown[]
   minimum?: number
   maximum?: number
+  minLength?: number
+  maxLength?: number
+  maxProperties?: number
+  uniqueItems?: boolean
   not?: JsonSchema
   properties?: Record<string, JsonSchema>
   items?: JsonSchema | JsonSchema[]
@@ -173,6 +195,14 @@ function jsonSchemaAt(
 describe('elearning V0.1 OpenAPI paths', () => {
   it('exposes the live named-pilot routes in generated SDK types', () => {
     expectTypeOf<paths['/api/elearning/capabilities']['get']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/admin/credit-titles']['get']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/admin/credit-titles']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/admin/certificate-templates']['get']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/admin/certificate-templates']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/admin/certificate-issues']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/certificates']['get']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/portal']['get']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/admin/portal']['put']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/admin/credits/adjustments']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/admin/content-revisions']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/admin/courses/content/publish']['post']>().not.toBeNever()
@@ -212,6 +242,30 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<
       paths['/api/elearning/capabilities']['get']['responses']['200']['content']['application/json']
     >().toEqualTypeOf<Capabilities>()
+    expectTypeOf<
+      paths['/api/elearning/admin/credit-titles']['get']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<TitleSnapshot>()
+    expectTypeOf<
+      paths['/api/elearning/admin/credit-titles']['post']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<TitleSnapshot>()
+    expectTypeOf<
+      paths['/api/elearning/admin/certificate-templates']['get']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<CertificateTemplateList>()
+    expectTypeOf<
+      paths['/api/elearning/admin/certificate-templates']['post']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<CertificateTemplate>()
+    expectTypeOf<
+      paths['/api/elearning/admin/certificate-issues']['post']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<CertificateIssue>()
+    expectTypeOf<
+      paths['/api/elearning/certificates']['get']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<CertificateIssueList>()
+    expectTypeOf<
+      paths['/api/elearning/portal']['get']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<PortalSettings>()
+    expectTypeOf<
+      paths['/api/elearning/admin/portal']['put']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<PortalPublishResult>()
     expectTypeOf<
       paths['/api/elearning/admin/credits/adjustments']['post']['responses']['200']['content']['application/json']
     >().toEqualTypeOf<CreditAdjustmentResult>()
@@ -373,6 +427,13 @@ describe('elearning V0.1 OpenAPI paths', () => {
       occurredAt: string
       createdAt: string
     }>()
+    expectTypeOf<CreditWallet>().toEqualTypeOf<{
+      userId: string
+      balancePoints: number
+      currentTitle: TitleRow | null
+      items: CreditWalletItem[]
+      nextCursor: string | null
+    }>()
 
     const doc = JSON.parse(readFileSync(join(here, '..', '..', 'dist', 'openapi.json'), 'utf8')) as {
       paths?: Record<string, any>
@@ -489,6 +550,470 @@ describe('elearning V0.1 OpenAPI paths', () => {
       minimum: 0,
       maximum: 2147483647,
     })
+    expect(schemas.ElearningCreditWallet).toMatchObject({
+      additionalProperties: false,
+      required: ['userId', 'balancePoints', 'currentTitle', 'items', 'nextCursor'],
+      properties: {
+        currentTitle: {
+          oneOf: [
+            { $ref: '#/components/schemas/ElearningTitleRow' },
+            { type: 'null' },
+          ],
+        },
+      },
+    })
+  })
+
+  it('keeps title configuration and wallet title DTOs closed and server-authoritative', () => {
+    expectTypeOf<TitleRow>().toEqualTypeOf<{
+      id: string
+      name: string
+      threshold: number
+    }>()
+    expectTypeOf<TitlePublishRequest>().toEqualTypeOf<{
+      requestId: string
+      titles: TitleRow[]
+    }>()
+    expectTypeOf<TitleSnapshot>().toEqualTypeOf<{
+      revisionId: string | null
+      version: number
+      titles: TitleRow[]
+      createdAt: string | null
+    }>()
+    expectTypeOf<
+      NonNullable<paths['/api/elearning/admin/credit-titles']['post']['requestBody']>['content']['application/json']
+    >().toEqualTypeOf<TitlePublishRequest>()
+
+    const doc = JSON.parse(readFileSync(join(here, '..', '..', 'dist', 'openapi.json'), 'utf8')) as {
+      paths?: Record<string, any>
+      components?: { schemas?: Record<string, JsonSchema> }
+    }
+    const schemas = doc.components?.schemas ?? {}
+    const operation = doc.paths?.['/api/elearning/admin/credit-titles']
+    for (const method of ['get', 'post']) {
+      expect(operation?.[method]?.security).toEqual([{ bearerAuth: [] }])
+      expect(operation?.[method]?.description).toContain('elearning:admin')
+      expect(operation?.[method]?.responses?.['200']?.content?.['application/json']?.schema)
+        .toEqual({ $ref: '#/components/schemas/ElearningTitleSnapshot' })
+    }
+    expect(operation?.get?.description).toContain('server-derived')
+    expect(operation?.post?.description).toContain('server-derived')
+    expect(operation?.post?.requestBody?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningTitlePublishRequest' })
+    expect(Object.keys(operation?.post?.responses ?? {}).sort())
+      .toEqual(['200', '400', '401', '403', '404', '409', '503'])
+
+    expect(schemas.ElearningTitleRow).toMatchObject({
+      additionalProperties: false,
+      required: ['id', 'name', 'threshold'],
+      properties: {
+        threshold: {
+          type: 'integer',
+          format: 'int32',
+          minimum: 0,
+          maximum: 2147483647,
+        },
+      },
+    })
+    expect(schemas.ElearningTitlePublishRequest).toMatchObject({
+      additionalProperties: false,
+      required: ['requestId', 'titles'],
+      properties: {
+        titles: {
+          type: 'array',
+          maxItems: 100,
+          items: { $ref: '#/components/schemas/ElearningTitleRow' },
+        },
+      },
+    })
+    expect(schemas.ElearningTitleSnapshot).toMatchObject({
+      additionalProperties: false,
+      required: ['revisionId', 'version', 'titles', 'createdAt'],
+      properties: {
+        revisionId: {
+          oneOf: [
+            { $ref: '#/components/schemas/ElearningUuid' },
+            { type: 'null' },
+          ],
+        },
+        version: { minimum: 0, maximum: 2147483647 },
+        titles: {
+          type: 'array',
+          maxItems: 100,
+          items: { $ref: '#/components/schemas/ElearningTitleRow' },
+        },
+        createdAt: {
+          oneOf: [
+            { type: 'string', format: 'date-time' },
+            { type: 'null' },
+          ],
+        },
+      },
+    })
+  })
+
+  it('keeps the learner learning profile session-owned, paginated, and structurally closed', () => {
+    expectTypeOf<
+      paths['/api/elearning/profile']['get']['responses'][200]['content']['application/json']
+    >().toEqualTypeOf<LearningProfile>()
+    expectTypeOf<LearningProfile['courses'][number]>().toEqualTypeOf<LearningProfileCourse>()
+
+    const doc = JSON.parse(readFileSync(join(here, '..', '..', 'dist', 'openapi.json'), 'utf8')) as {
+      paths?: Record<string, any>
+      components?: { schemas?: Record<string, JsonSchema> }
+    }
+    const schemas = doc.components?.schemas ?? {}
+    const path = doc.paths?.['/api/elearning/profile']?.get
+    expect(path?.operationId).toBe('getMyElearningLearningProfile')
+    expect(path?.security).toEqual([{ bearerAuth: [] }])
+    expect(path?.requestBody).toBeUndefined()
+    expect(path?.parameters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'cursor', in: 'query', required: false }),
+      expect.objectContaining({ name: 'limit', in: 'query', required: false }),
+    ]))
+    expect(path?.responses?.['200']?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningLearningProfile' })
+
+    expect(schemas.ElearningLearningProfile).toMatchObject({
+      additionalProperties: false,
+      required: ['userId', 'summary', 'courses', 'nextCursor'],
+      properties: {
+        summary: { $ref: '#/components/schemas/ElearningLearningProfileSummary' },
+        courses: {
+          type: 'array',
+          items: { $ref: '#/components/schemas/ElearningLearningProfileCourse' },
+        },
+      },
+    })
+    expect(schemas.ElearningLearningProfileSummary).toMatchObject({
+      additionalProperties: false,
+      required: ['completedCourses', 'assessmentCourses', 'contentCourses'],
+    })
+    expect(schemas.ElearningLearningProfileCourse).toEqual({
+      oneOf: [
+        { $ref: '#/components/schemas/ElearningLearningProfileAssessmentCourse' },
+        { $ref: '#/components/schemas/ElearningLearningProfileContentCourse' },
+      ],
+      discriminator: {
+        propertyName: 'kind',
+        mapping: {
+          assessment: '#/components/schemas/ElearningLearningProfileAssessmentCourse',
+          content: '#/components/schemas/ElearningLearningProfileContentCourse',
+        },
+      },
+    })
+    expect(schemas.ElearningLearningProfileAssessmentCourse).toMatchObject({
+      additionalProperties: false,
+      required: ['courseId', 'courseVersionId', 'title', 'kind', 'completedAt', 'exams'],
+      properties: {
+        kind: { enum: ['assessment'] },
+        exams: {
+          type: 'array',
+          minItems: 1,
+          items: { $ref: '#/components/schemas/ElearningLearningProfileExam' },
+        },
+      },
+    })
+    expect(schemas.ElearningLearningProfileContentCourse).toMatchObject({
+      additionalProperties: false,
+      required: ['courseId', 'courseVersionId', 'title', 'kind', 'completedAt'],
+      properties: { kind: { enum: ['content'] } },
+    })
+    expect(schemas.ElearningLearningProfileExam).toMatchObject({
+      additionalProperties: false,
+      required: ['itemId', 'earnedScore', 'totalScore', 'passedAt'],
+      properties: {
+        earnedScore: { type: 'number', minimum: 0 },
+        totalScore: { type: 'number', minimum: 0 },
+      },
+    })
+    expect(JSON.stringify(schemas.ElearningLearningProfile)).not.toMatch(
+      /answers|paperSnapshot|grading|eventDigest|requestHash|actorId/,
+    )
+  })
+
+  it('keeps portal presentation reads and idempotent admin publication closed', () => {
+    expectTypeOf<PortalNavigationItem>().toEqualTypeOf<{
+      label: string
+      href: string
+    }>()
+    expectTypeOf<PortalEmptySettings>().toEqualTypeOf<{
+      revisionId: null
+      version: 0
+      siteName: null
+      tagline: null
+      bannerUrl: null
+      navigation: PortalNavigationItem[]
+      createdAt: null
+    }>()
+    expectTypeOf<PortalActiveSettings>().toEqualTypeOf<{
+      revisionId: string
+      version: number
+      siteName: string
+      tagline: string | null
+      bannerUrl: string | null
+      navigation: PortalNavigationItem[]
+      createdAt: string
+    }>()
+    expectTypeOf<PortalSettings>().toEqualTypeOf<
+      PortalEmptySettings | PortalActiveSettings
+    >()
+    expectTypeOf<PortalPublishRequest>().toEqualTypeOf<{
+      requestId: string
+      siteName: string
+      tagline: string | null
+      bannerUrl: string | null
+      navigation: PortalNavigationItem[]
+    }>()
+    expectTypeOf<PortalPublishResult>().toEqualTypeOf<{
+      revisionId: string
+      version: number
+      siteName: string
+      tagline: string | null
+      bannerUrl: string | null
+      navigation: PortalNavigationItem[]
+      createdAt: string
+      duplicate: boolean
+    }>()
+
+    const doc = JSON.parse(readFileSync(join(here, '..', '..', 'dist', 'openapi.json'), 'utf8')) as {
+      paths?: Record<string, any>
+      components?: { schemas?: Record<string, JsonSchema> }
+    }
+    const schemas = doc.components?.schemas ?? {}
+    const read = doc.paths?.['/api/elearning/portal']?.get
+    const publish = doc.paths?.['/api/elearning/admin/portal']?.put
+    expect(read?.operationId).toBe('getElearningPortalSettings')
+    expect(read?.security).toEqual([{ bearerAuth: [] }])
+    expect(read?.requestBody).toBeUndefined()
+    expect(read?.responses?.['200']?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningPortalSettings' })
+    expect(publish?.operationId).toBe('publishElearningPortalSettings')
+    expect(publish?.security).toEqual([{ bearerAuth: [] }])
+    expect(publish?.requestBody?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningPortalPublishRequest' })
+    expect(publish?.responses?.['200']?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningPortalPublishResult' })
+
+    expect(schemas.ElearningPortalSettings).toEqual({
+      oneOf: [
+        { $ref: '#/components/schemas/ElearningPortalEmptySettings' },
+        { $ref: '#/components/schemas/ElearningPortalActiveSettings' },
+      ],
+    })
+    expect(schemas.ElearningPortalEmptySettings).toMatchObject({
+      additionalProperties: false,
+      required: ['revisionId', 'version', 'siteName', 'tagline', 'bannerUrl', 'navigation', 'createdAt'],
+      properties: {
+        revisionId: { type: 'null' },
+        version: { type: 'integer', format: 'int32', enum: [0] },
+        siteName: { type: 'null' },
+        createdAt: { type: 'null' },
+      },
+    })
+    expect(schemas.ElearningPortalActiveSettings).toMatchObject({
+      additionalProperties: false,
+      required: ['revisionId', 'version', 'siteName', 'tagline', 'bannerUrl', 'navigation', 'createdAt'],
+      properties: {
+        revisionId: { $ref: '#/components/schemas/ElearningUuid' },
+        version: { type: 'integer', format: 'int32', minimum: 1, maximum: 2147483647 },
+        navigation: {
+          type: 'array',
+          maxItems: 8,
+          items: { $ref: '#/components/schemas/ElearningPortalNavigationItem' },
+        },
+      },
+    })
+    expect(schemas.ElearningPortalPublishRequest).toMatchObject({
+      additionalProperties: false,
+      required: ['requestId', 'siteName', 'tagline', 'bannerUrl', 'navigation'],
+    })
+    expect(Object.keys(schemas.ElearningPortalPublishRequest?.properties ?? {}).sort())
+      .toEqual(['bannerUrl', 'navigation', 'requestId', 'siteName', 'tagline'])
+    expect(schemas.ElearningPortalPublishResult).toMatchObject({
+      additionalProperties: false,
+      required: [
+        'revisionId', 'version', 'siteName', 'tagline', 'bannerUrl',
+        'navigation', 'createdAt', 'duplicate',
+      ],
+    })
+    expect(JSON.stringify({ read, publish, schemas: {
+      settings: schemas.ElearningPortalSettings,
+      request: schemas.ElearningPortalPublishRequest,
+      result: schemas.ElearningPortalPublishResult,
+    } })).not.toMatch(/orgId|actorId|requestHash|answerKey|paperSnapshot/)
+  })
+
+  it('keeps certificate template, issue, and learner DTOs closed without artifact claims', () => {
+    expectTypeOf<CertificateTemplatePublishRequest>().toEqualTypeOf<{
+      requestId: string
+      certificateId: string
+      name: string
+      templateText: string
+      backgroundImageUrl: string | null
+    }>()
+    expectTypeOf<CertificateTemplate>().toEqualTypeOf<{
+      certificateId: string
+      revisionId: string
+      version: number
+      name: string
+      templateText: string
+      backgroundImageUrl: string | null
+      placeholders: string[]
+      createdAt: string
+    }>()
+    expectTypeOf<CertificateTemplateList>().toEqualTypeOf<{
+      items: CertificateTemplate[]
+    }>()
+    expectTypeOf<CertificateIssueRequest>().toEqualTypeOf<{
+      requestId: string
+      certificateId: string
+      userId: string
+      parameters: Record<string, string>
+    }>()
+    expectTypeOf<CertificateIssue>().toEqualTypeOf<{
+      issueId: string
+      certificateId: string
+      templateRevisionId: string
+      templateName: string
+      serialNumber: string
+      parameters: Record<string, string>
+      backgroundImageUrl: string | null
+      issuedAt: string
+    }>()
+    expectTypeOf<CertificateIssueList>().toEqualTypeOf<{
+      items: CertificateIssue[]
+    }>()
+    expectTypeOf<
+      NonNullable<paths['/api/elearning/admin/certificate-templates']['post']['requestBody']>['content']['application/json']
+    >().toEqualTypeOf<CertificateTemplatePublishRequest>()
+    expectTypeOf<
+      NonNullable<paths['/api/elearning/admin/certificate-issues']['post']['requestBody']>['content']['application/json']
+    >().toEqualTypeOf<CertificateIssueRequest>()
+
+    const doc = JSON.parse(readFileSync(join(here, '..', '..', 'dist', 'openapi.json'), 'utf8')) as {
+      paths?: Record<string, any>
+      components?: { schemas?: Record<string, JsonSchema> }
+    }
+    const schemas = doc.components?.schemas ?? {}
+    const templatePath = doc.paths?.['/api/elearning/admin/certificate-templates']
+    const issueOperation = doc.paths?.['/api/elearning/admin/certificate-issues']?.post
+    const learnerOperation = doc.paths?.['/api/elearning/certificates']?.get
+
+    for (const operation of [templatePath?.get, templatePath?.post, issueOperation]) {
+      expect(operation?.security).toEqual([{ bearerAuth: [] }])
+      expect(operation?.description).toContain('ELEARNING_ENABLED')
+      expect(operation?.description).toContain('ELEARNING_INCENTIVE_ENABLED')
+      expect(operation?.description).toContain('elearning:admin')
+    }
+    expect(templatePath?.get?.description).toContain('server-derived')
+    expect(templatePath?.post?.description).toContain('server-derived')
+    expect(issueOperation?.description).toContain('server-derived')
+    expect(learnerOperation?.description).toContain('server-derived')
+    expect(learnerOperation?.security).toEqual([{ bearerAuth: [] }])
+    expect(learnerOperation?.description).toContain('learner identity')
+
+    expect(templatePath?.get?.responses?.['200']?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningCertificateTemplateList' })
+    expect(templatePath?.post?.requestBody?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningCertificateTemplatePublishRequest' })
+    expect(templatePath?.post?.responses?.['200']?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningCertificateTemplate' })
+    expect(issueOperation?.requestBody?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningCertificateIssueRequest' })
+    expect(issueOperation?.responses?.['200']?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningCertificateIssue' })
+    expect(learnerOperation?.responses?.['200']?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningCertificateIssueList' })
+    expect(Object.keys(templatePath?.post?.responses ?? {}).sort())
+      .toEqual(['200', '400', '401', '403', '404', '409', '503'])
+    expect(Object.keys(issueOperation?.responses ?? {}).sort())
+      .toEqual(['200', '400', '401', '403', '404', '409', '503'])
+
+    expect(schemas.ElearningCertificateTemplatePublishRequest).toMatchObject({
+      additionalProperties: false,
+      required: ['requestId', 'certificateId', 'name', 'templateText', 'backgroundImageUrl'],
+      properties: {
+        templateText: { type: 'string', maxLength: 16384 },
+        backgroundImageUrl: {
+          oneOf: [
+            { type: 'string', format: 'uri', maxLength: 2048 },
+            { type: 'null' },
+          ],
+        },
+      },
+    })
+    expect(Object.keys(schemas.ElearningCertificateTemplatePublishRequest?.properties ?? {}).sort())
+      .toEqual(['backgroundImageUrl', 'certificateId', 'name', 'requestId', 'templateText'])
+    expect(schemas.ElearningCertificateTemplate).toMatchObject({
+      additionalProperties: false,
+      required: [
+        'certificateId', 'revisionId', 'version', 'name', 'templateText',
+        'backgroundImageUrl', 'placeholders', 'createdAt',
+      ],
+      description: expect.stringContaining('not a rendered or downloadable artifact'),
+      properties: {
+        version: { type: 'integer', format: 'int32', minimum: 1, maximum: 2147483647 },
+        placeholders: { type: 'array', maxItems: 64, uniqueItems: true },
+      },
+    })
+    expect(Object.keys(schemas.ElearningCertificateTemplate?.properties ?? {}).sort())
+      .toEqual([
+        'backgroundImageUrl', 'certificateId', 'createdAt', 'name', 'placeholders',
+        'revisionId', 'templateText', 'version',
+      ])
+    expect(schemas.ElearningCertificateIssueRequest).toMatchObject({
+      additionalProperties: false,
+      required: ['requestId', 'certificateId', 'userId', 'parameters'],
+      properties: {
+        parameters: {
+          type: 'object',
+          maxProperties: 64,
+          additionalProperties: { type: 'string', minLength: 1, maxLength: 2048 },
+        },
+      },
+    })
+    expect(Object.keys(schemas.ElearningCertificateIssueRequest?.properties ?? {}).sort())
+      .toEqual(['certificateId', 'parameters', 'requestId', 'userId'])
+    expect(schemas.ElearningCertificateIssue).toMatchObject({
+      additionalProperties: false,
+      required: [
+        'issueId', 'certificateId', 'templateRevisionId', 'templateName',
+        'serialNumber', 'parameters', 'backgroundImageUrl', 'issuedAt',
+      ],
+      description: expect.stringContaining('no PDF, render, image-generation, or download payload'),
+    })
+    expect(Object.keys(schemas.ElearningCertificateIssue?.properties ?? {}).sort())
+      .toEqual([
+        'backgroundImageUrl', 'certificateId', 'issueId', 'issuedAt', 'parameters',
+        'serialNumber', 'templateName', 'templateRevisionId',
+      ])
+    expect(schemas.ElearningCertificateTemplateList).toMatchObject({
+      additionalProperties: false,
+      required: ['items'],
+      properties: {
+        items: { type: 'array', items: { $ref: '#/components/schemas/ElearningCertificateTemplate' } },
+      },
+    })
+    expect(schemas.ElearningCertificateIssueList).toMatchObject({
+      additionalProperties: false,
+      required: ['items'],
+      properties: {
+        items: { type: 'array', items: { $ref: '#/components/schemas/ElearningCertificateIssue' } },
+      },
+    })
+
+    const certificateDescriptions = [
+      templatePath?.get?.description,
+      templatePath?.post?.description,
+      issueOperation?.description,
+      learnerOperation?.description,
+    ].join('\n').toLowerCase()
+    expect(certificateDescriptions).toContain('pdf')
+    expect(certificateDescriptions).toContain('download')
+    expect(Object.keys(doc.paths ?? {}).filter((path) => (
+      path.includes('certificate') && /(pdf|render|download)/i.test(path)
+    ))).toEqual([])
   })
 
   it('keeps content authoring, publishing, opening, and learner course shapes closed', () => {
