@@ -159,7 +159,7 @@ describe('e-learning title surface', () => {
         'insert-revision',
         'insert-row',
         'insert-row',
-        'lock-balances',
+        'balance-org-lock',
         'activate-revision',
         'record-request',
         'backfill-awards',
@@ -232,6 +232,7 @@ describe('e-learning title surface', () => {
     { threshold: 2_147_483_648 },
     { revision_id: 'not-a-uuid' },
     { created_at: 'invalid-date' },
+    { name: ' Starter ' },
   ])('fails closed on malformed stored revision rows %#', async (over) => {
     const db = dbWith(async (sql) => {
       if (sql.includes(':load-head')) {

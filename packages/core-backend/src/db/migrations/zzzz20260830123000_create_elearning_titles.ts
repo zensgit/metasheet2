@@ -309,6 +309,10 @@ function normalizeFunctionBody(value: string): string {
 
 const AWARD_FUNCTION_BODY = `
 BEGIN
+  PERFORM pg_advisory_xact_lock(
+    hashtext('elearning-title-balance-org'),
+    hashtext(NEW.org_id)
+  );
   INSERT INTO elearning_title_awards (
     id, org_id, user_id, title_key, title_revision_id,
     title_row_id, threshold, balance_points

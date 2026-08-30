@@ -406,25 +406,18 @@ describe.sequential('e-learning title PostgreSQL authority', () => {
     ])
   })
 
-  it('serializes an uncommitted balance award before activating and backfilling a snapshot', async () => {
+  it('serializes a first balance insert before activating and backfilling a snapshot', async () => {
     const orgId = `org-title-balance-race-${randomUUID()}`
     const actorId = `actor-title-balance-race-${randomUUID()}`
     const userId = `user-title-balance-race-${randomUUID()}`
     await seedMember(actorId, orgId)
     await seedMember(userId, orgId)
-    await firstPool.query(
-      `INSERT INTO elearning_credit_balances (org_id, user_id, balance_points)
-       VALUES ($1, $2, 0)`,
-      [orgId, userId],
-    )
-
-    const updater = await secondPool.connect()
+    const inserter = await secondPool.connect()
     try {
-      await updater.query('BEGIN')
-      await updater.query(
-        `UPDATE elearning_credit_balances
-            SET balance_points = 120, updated_at = now()
-          WHERE org_id = $1 AND user_id = $2`,
+      await inserter.query('BEGIN')
+      await inserter.query(
+        `INSERT INTO elearning_credit_balances (org_id, user_id, balance_points)
+         VALUES ($1, $2, 120)`,
         [orgId, userId],
       )
       let publishSettled = false
@@ -436,15 +429,15 @@ describe.sequential('e-learning title PostgreSQL authority', () => {
       })
       await new Promise((resolve) => setTimeout(resolve, 100))
       expect(publishSettled).toBe(false)
-      await updater.query('COMMIT')
+      await inserter.query('COMMIT')
       await publish
     } finally {
       try {
-        await updater.query('ROLLBACK')
+        await inserter.query('ROLLBACK')
       } catch {
         // COMMIT already ended the transaction.
       }
-      updater.release()
+      inserter.release()
     }
     expect(await firstPool.query(
       `SELECT title_key

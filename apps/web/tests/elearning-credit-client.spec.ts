@@ -221,6 +221,14 @@ describe('e-learning credit client', () => {
       code: 'invalid_response',
       status: 200,
     })
+
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, wallet({
+      currentTitle: { id: 'expert', name: 'Expert', threshold: 6 },
+    })))
+    await expect(getMyElearningCreditWallet()).rejects.toMatchObject({
+      code: 'invalid_response',
+      status: 200,
+    })
   })
 
   it('posts only the four manual-adjustment command fields and parses a closed result', async () => {

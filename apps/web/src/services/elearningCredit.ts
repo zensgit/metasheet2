@@ -400,12 +400,15 @@ function parseWallet(value: unknown, status: number): ElearningCreditWallet {
   const nextCursor = value.nextCursor === null
     ? null
     : requireText(value.nextCursor, status)
+  const balancePoints = requireSafeInt(value.balancePoints, status, 0, PG_INT4_MAX)
+  const currentTitle = value.currentTitle === null
+    ? null
+    : parseTitleRow(value.currentTitle, status)
+  if (currentTitle !== null && currentTitle.threshold > balancePoints) failShape(status)
   return {
     userId: requireText(value.userId, status),
-    balancePoints: requireSafeInt(value.balancePoints, status, 0, PG_INT4_MAX),
-    currentTitle: value.currentTitle === null
-      ? null
-      : parseTitleRow(value.currentTitle, status),
+    balancePoints,
+    currentTitle,
     items: value.items.map((item) => parseWalletItem(item, status)),
     nextCursor,
   }

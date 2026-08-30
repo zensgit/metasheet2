@@ -192,6 +192,11 @@ async function loadRevision(
   try {
     const normalized = normalizeElearningTitleThresholdSnapshot(titles)
     if (normalized.length !== titles.length) fail('unavailable')
+    if (normalized.some((row, index) => (
+      row.id !== titles[index]?.id
+      || row.name !== titles[index]?.name
+      || row.threshold !== titles[index]?.threshold
+    ))) fail('unavailable')
     return {
       revisionId,
       version,
@@ -335,13 +340,9 @@ export async function publishElearningTitleSnapshot(
         )
       }
       await tx.query(
-        `/* elearning-title:lock-balances */
-         SELECT user_id
-         FROM elearning_credit_balances
-         WHERE org_id = $1
-         ORDER BY user_id
-         FOR UPDATE`,
-        [orgId],
+        `/* elearning-title:balance-org-lock */
+         SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`,
+        ['elearning-title-balance-org', orgId],
       )
       const moved = await tx.query(
         `/* elearning-title:activate-revision */
