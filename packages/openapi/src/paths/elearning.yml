@@ -617,6 +617,57 @@ paths:
           description: unavailable
           $ref: '#/components/responses/ElearningError'
 
+  /api/elearning/profile:
+    get:
+      operationId: getMyElearningLearningProfile
+      summary: Read the authenticated learner historical archive
+      description: |
+        RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+        The organization and learner are derived only from the authenticated
+        session. The archive is projected from immutable completion evidence
+        and graded attempts; it does not expose answers, grading comments,
+        event digests, request hashes, actor identifiers, or access-basis keys.
+        Historical completed courses remain visible after course withdrawal.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: cursor
+          required: false
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9_-]+$'
+            minLength: 1
+            maxLength: 512
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: Closed learner-owned archive with stable keyset pagination.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningLearningProfile'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED, inactive membership, or insufficient read permission
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Incentive surface flags off
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
   /api/elearning/media:
     post:
       operationId: uploadElearningMedia

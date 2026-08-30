@@ -28,6 +28,7 @@ describe('e-learning credit runtime', () => {
   it('mounts the incentive router independently without exposing content routes', async () => {
     const walletCalls: string[] = []
     const adjustmentCalls: string[] = []
+    const profileCalls: string[] = []
     const runtime = createElearningPilotRuntime({
       db: dummyDb(),
       env: { ...FLAG_ON },
@@ -55,6 +56,15 @@ describe('e-learning credit runtime', () => {
           balancePoints: 5,
           createdAt: '2026-08-29T00:00:00.000Z',
           duplicate: false,
+        }
+      },
+      getElearningLearningProfile: async (_db, input) => {
+        profileCalls.push(input.userId)
+        return {
+          userId: input.userId,
+          summary: { completedCourses: 0, assessmentCourses: 0, contentCourses: 0 },
+          courses: [],
+          nextCursor: null,
         }
       },
     })
@@ -91,6 +101,15 @@ describe('e-learning credit runtime', () => {
       createdAt: '2026-08-29T00:00:00.000Z',
     })
     expect(adjustmentCalls).toEqual([ACTOR])
+    const profile = await api.get('/api/elearning/profile')
+    expect(profile.status).toBe(200)
+    expect(profile.body).toEqual({
+      userId: ACTOR,
+      summary: { completedCourses: 0, assessmentCourses: 0, contentCourses: 0 },
+      courses: [],
+      nextCursor: null,
+    })
+    expect(profileCalls).toEqual([ACTOR])
     expect((await api.get('/api/elearning/courses')).status).toBe(404)
   })
 

@@ -936,6 +936,7 @@ jobs:
             tests/unit/elearning-exam.test.ts \
             tests/unit/elearning-flags.test.ts \
             tests/unit/elearning-learner-courses.test.ts \
+            tests/unit/elearning-learning-profile.test.ts \
             tests/unit/elearning-manual-grading-migration-contract.test.ts \
             tests/unit/elearning-manual-grading-read-routes.test.ts \
             tests/unit/elearning-manual-grading-read.test.ts \
@@ -956,6 +957,7 @@ jobs:
             tests/unit/elearning-pilot-routes.test.ts \
             tests/unit/elearning-pilot-runtime.test.ts \
             tests/unit/elearning-plugin-runtime.test.ts \
+            tests/unit/elearning-profile-routes.test.ts \
             tests/unit/elearning-title-policy.test.ts \
             tests/unit/elearning-title-surface.test.ts \
             tests/unit/elearning-training-plan-routes.test.ts \
@@ -1049,6 +1051,7 @@ jobs:
             tests/integration/elearning-credit-adjustment.db.test.ts \
             tests/integration/elearning-title-runtime.db.test.ts \
             tests/integration/elearning-certificate-runtime.db.test.ts \
+            tests/integration/elearning-learning-profile.db.test.ts \
             tests/integration/elearning-admin-scope-acl-migration-authority.db.test.ts \
             tests/integration/elearning-exam-service.db.test.ts \
             tests/integration/elearning-learner-courses.db.test.ts \
