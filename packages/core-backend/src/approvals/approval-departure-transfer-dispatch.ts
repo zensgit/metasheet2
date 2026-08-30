@@ -89,8 +89,18 @@ export async function dispatchApprovalDepartureTransfersForRun(
     }
 
     try {
-      await approvals.applyApprovalDepartureTransfer(signal.local_user_id, { resolvedManagerId })
-      result.dispatchedCount += 1
+      const transferResult = await approvals.applyApprovalDepartureTransfer(signal.local_user_id, {
+        resolvedManagerId,
+      })
+      if (transferResult.skipped.some((entry) => entry.reason === 'error')) {
+        result.failedCount += 1
+        logger.warn(
+          'Approval departure transfer completed with an instance error; manual recovery required',
+          { reason: 'departure_transfer_instance_failed' },
+        )
+      } else {
+        result.dispatchedCount += 1
+      }
     } catch (_error) {
       result.failedCount += 1
       logger.warn(

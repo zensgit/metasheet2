@@ -164,4 +164,60 @@ describe('dispatchApprovalDepartureTransfersForRun', () => {
       unresolvedContextCount: 0,
     })
   })
+
+  it('reports a writer-captured per-instance error as unresolved durable work', async () => {
+    const query = vi.fn(async () => ({
+      rows: [{ directory_account_id: 'account-a', local_user_id: 'local-departed' }],
+    }))
+    const applyApprovalDepartureTransfer = vi.fn(async () => ({
+      transferred: [],
+      noManagerResolved: [],
+      skipped: [{ id: 'instance-a', reason: 'error' as const }],
+    }))
+
+    const result = await dispatchApprovalDepartureTransfersForRun({
+      runId: 'run-a',
+      integrationId: 'integration-a',
+      managerContexts: new Map([['account-a', CONTEXT]]),
+    }, {
+      query,
+      resolveManager: vi.fn(async () => 'local-manager'),
+      approvals: { applyApprovalDepartureTransfer },
+    })
+
+    expect(result).toEqual({
+      signalCount: 1,
+      dispatchedCount: 0,
+      failedCount: 1,
+      unresolvedContextCount: 0,
+    })
+  })
+
+  it('counts a handled business skip as a completed durable signal', async () => {
+    const query = vi.fn(async () => ({
+      rows: [{ directory_account_id: 'account-a', local_user_id: 'local-departed' }],
+    }))
+    const applyApprovalDepartureTransfer = vi.fn(async () => ({
+      transferred: [],
+      noManagerResolved: [],
+      skipped: [{ id: 'instance-a', reason: 'target-is-requester' as const }],
+    }))
+
+    const result = await dispatchApprovalDepartureTransfersForRun({
+      runId: 'run-a',
+      integrationId: 'integration-a',
+      managerContexts: new Map([['account-a', CONTEXT]]),
+    }, {
+      query,
+      resolveManager: vi.fn(async () => 'local-manager'),
+      approvals: { applyApprovalDepartureTransfer },
+    })
+
+    expect(result).toEqual({
+      signalCount: 1,
+      dispatchedCount: 1,
+      failedCount: 0,
+      unresolvedContextCount: 0,
+    })
+  })
 })
