@@ -316,6 +316,10 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     expect(runtimeSrc).toMatch(/publishElearningContentCourse/)
     expect(runtimeSrc).toMatch(/recordElearningOpenCompletion/)
     expect(runtimeSrc).toMatch(/if\s*\(content\)\s*router\.use\(content\)/)
+    expect(runtimeSrc).toMatch(/createElearningPortalRouter/)
+    expect(runtimeSrc).toMatch(/getActiveElearningPortalSettings/)
+    expect(runtimeSrc).toMatch(/publishElearningPortalSettings/)
+    expect(runtimeSrc).toMatch(/if\s*\(portal\)\s*router\.use\(portal\)/)
     expect(runtimeSrc).toMatch(/listElearningLearnerCourses/)
     expect(runtimeSrc).toMatch(
       /opts\.publishElearningCourse\s*\?\?\s*publishElearningCourse/,

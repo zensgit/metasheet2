@@ -20,6 +20,7 @@ import { createElearningAnalyticsRouter } from '../routes/elearning-analytics'
 import { createElearningCreditRouter } from '../routes/elearning-credit'
 import { createElearningContentRouter } from '../routes/elearning-content'
 import { createElearningPilotRouter } from '../routes/elearning-pilot'
+import { createElearningPortalRouter } from '../routes/elearning-portal'
 import { createElearningProfileRouter } from '../routes/elearning-profile'
 import { isElearningGlobalAdminRequest } from '../routes/elearning-admin-access'
 import type { ElearningAdminAccessDb } from './elearning-admin-access'
@@ -124,6 +125,11 @@ import {
   type ElearningOpenCompletionResult,
   type RecordElearningOpenCompletionInput,
 } from './elearning-open-completion-postgres'
+import {
+  getActiveElearningPortalSettings,
+  publishElearningPortalSettings,
+  type ElearningPortalDb,
+} from './elearning-portal-settings'
 import type {
   ElearningWatchDb,
   ElearningWatchState,
@@ -190,7 +196,8 @@ export interface ElearningPilotRuntimeOptions {
     ElearningManualGradingReadDb &
     ElearningCreditSurfaceDb &
     ElearningLearningProfileDb &
-    ElearningDepartmentStatsDb
+    ElearningDepartmentStatsDb &
+    ElearningPortalDb
   env?: NodeJS.ProcessEnv
   authenticate?: RequestHandler
   adminGuard?: RequestHandler
@@ -297,6 +304,8 @@ export interface ElearningPilotRuntimeOptions {
   listMyElearningCertificates?: typeof listMyElearningCertificates
   getElearningLearningProfile?: typeof getElearningLearningProfile
   getElearningDepartmentStats?: typeof getElearningDepartmentStats
+  getActiveElearningPortalSettings?: typeof getActiveElearningPortalSettings
+  publishElearningPortalSettings?: typeof publishElearningPortalSettings
 }
 
 function viewerId(req: Request): string | null {
@@ -357,6 +366,20 @@ export function createElearningPilotRuntime(
       opts.publishElearningContentCourse ?? publishElearningContentCourse,
     recordElearningOpenCompletion:
       opts.recordElearningOpenCompletion ?? recordElearningOpenCompletion,
+  }) : null
+
+  const portal = contentEnabled ? createElearningPortalRouter({
+    db: opts.db,
+    env,
+    viewerId: opts.viewerId ?? viewerId,
+    orgId: opts.orgId ?? orgId,
+    adminGuard: opts.adminGuard ?? rbacGuard('elearning', 'admin'),
+    readGuard: opts.readGuard
+      ?? rbacGuardAny(['elearning:read', 'elearning:write', 'elearning:admin']),
+    getActiveElearningPortalSettings:
+      opts.getActiveElearningPortalSettings ?? getActiveElearningPortalSettings,
+    publishElearningPortalSettings:
+      opts.publishElearningPortalSettings ?? publishElearningPortalSettings,
   }) : null
 
   const inner = contentEnabled ? createElearningPilotRouter({
@@ -441,11 +464,12 @@ export function createElearningPilotRuntime(
     getElearningDepartmentStats:
       opts.getElearningDepartmentStats ?? getElearningDepartmentStats,
   }) : null
-  if (!inner && !credit && !profile && !analytics) return null
+  if (!portal && !inner && !credit && !profile && !analytics) return null
 
   const router = Router()
   router.use('/api/elearning', opts.authenticate ?? authenticate)
   if (content) router.use(content)
+  if (portal) router.use(portal)
   if (inner) router.use(inner)
   if (credit) router.use(credit)
   if (profile) router.use(profile)

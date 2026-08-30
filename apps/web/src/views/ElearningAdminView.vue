@@ -241,6 +241,8 @@
       :assignment-enabled="assignmentEnabled"
     />
 
+    <ElearningPortalAdminSection v-if="contentEnabled" />
+
     <ElearningCreditAdminSection v-if="incentiveEnabled" />
 
     <ElearningAnalyticsAdminSection v-if="analyticsEnabled" />
@@ -281,6 +283,7 @@ import ElearningAssessmentAdminSection from './ElearningAssessmentAdminSection.v
 import ElearningAnalyticsAdminSection from './ElearningAnalyticsAdminSection.vue'
 import ElearningAnalyticsPeriodSection from './ElearningAnalyticsPeriodSection.vue'
 import ElearningContentAdminSection from './ElearningContentAdminSection.vue'
+import ElearningPortalAdminSection from './ElearningPortalAdminSection.vue'
 import ElearningCreditAdminSection from './ElearningCreditAdminSection.vue'
 import {
   elearningAssignIncomplete,
