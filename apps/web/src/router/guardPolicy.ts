@@ -68,6 +68,11 @@ export function isAttendanceFocusAllowedPath(path: string): boolean {
  * audience (#4468, owner-confirmed gap). Routes keep their own permission gates — this list only
  * governs reachability inside the focus mode. Every entry must be a non-empty absolute path: an
  * empty string would prefix-match EVERY route (behavior-tested).
+ *
+ * O2 / R-11: '/stock-prep' stays here unchanged. Focus-mode reachability confers NO permission — step
+ * 2 of resolveRouteGuardDecision has already run by the time this list is consulted, so the route's
+ * own `stock-prep:read` gate decides access and this entry only keeps the page from being bounced to
+ * /plm for someone who already passed it.
  */
 export const PLM_WORKBENCH_ALLOWED_PREFIXES: readonly string[] = Object.freeze([
   '/plm',
@@ -77,7 +82,17 @@ export const PLM_WORKBENCH_ALLOWED_PREFIXES: readonly string[] = Object.freeze([
   '/stock-prep',
 ])
 
-const KNOWN_REQUIRED_FEATURES = ['attendance', 'workflow', 'attendanceAdmin', 'attendanceImport', 'plm', 'elearning'] as const
+/**
+ * Exported since O2 / R-11 so a suite can pin what is NOT here as well as what is.
+ *
+ * `/stock-prep` deliberately declares no `requiredFeature`, and the O2 permission work deliberately
+ * did not add one. A product-feature flag is a SECOND, independent gate: with the flag off, step 1
+ * redirects everyone — platform admins included — before the permission gate is ever consulted. That
+ * would be a privilege regression on every deployment that has not turned the flag on, in a change
+ * whose whole point is that admins lose nothing. The workbench's access story is therefore carried
+ * entirely by the permission gate (step 2) and the shared vocabulary behind it.
+ */
+export const KNOWN_REQUIRED_FEATURES = ['attendance', 'workflow', 'attendanceAdmin', 'attendanceImport', 'plm', 'elearning'] as const
 type KnownRequiredFeature = (typeof KNOWN_REQUIRED_FEATURES)[number]
 
 export type RouteGuardDecision = { action: 'allow' } | { action: 'redirect'; target: string }

@@ -35,7 +35,11 @@
             <router-link v-if="canManageUsers" to="/admin/automation-executions" class="nav-link">{{ navLabels.automationRuns }}</router-link>
             <router-link v-if="canManageUsers" to="/approvals/metrics" class="nav-link">{{ navLabels.approvalMetrics }}</router-link>
             <router-link v-if="canUseIntegration" to="/integrations/workbench" class="nav-link">{{ navLabels.systemIntegration }}</router-link>
-            <router-link v-if="canUseIntegration" to="/stock-prep" class="nav-link">{{ navLabels.stockPreparation }}</router-link>
+            <!-- O2 / R-11: the nav link is a control like any other — it follows the route's own gate
+                 (stock-prep:read), not the Data Factory's integration:write. Left on canUseIntegration
+                 it would be a link that renders for a principal the guard immediately redirects: the
+                 "visible but not actionable" failure moved from the page into the navigation. -->
+            <router-link v-if="canUseStockPreparation" to="/stock-prep" class="nav-link">{{ navLabels.stockPreparation }}</router-link>
             <router-link v-if="canUseIntegration" to="/data-sources" class="nav-link">{{ navLabels.dataSources }}</router-link>
             <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
             <router-link v-if="canUsePlm" to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
@@ -79,6 +83,7 @@ import { useLocale } from './composables/useLocale'
 import { usePlugins } from './composables/usePlugins'
 import { setMultitableApiErrorLocaleResolver } from './multitable/api/client'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
+import { STOCK_PREP_ROUTE_PERMISSION } from './services/integration/stockPreparation/workbenchAccess'
 import { useFeatureFlags } from './stores/featureFlags'
 import { clearStoredAuthState, getApiBase } from './utils/api'
 import { truncateAccountIdentity } from './utils/accountIdentityDisplay'
@@ -110,6 +115,13 @@ const canManageUsers = computed(() => {
 const canUseIntegration = computed(() => {
   void route.fullPath
   return hasPermission('integration:write')
+})
+// O2 / R-11: `/stock-prep` reachability is exactly STOCK_PREP_ROUTE_PERMISSION, the same code the
+// route meta declares and the same one the plugin gates the queue read with. Imported from the
+// shared vocabulary rather than typed inline so the nav link cannot drift from the guard.
+const canUseStockPreparation = computed(() => {
+  void route.fullPath
+  return hasPermission(STOCK_PREP_ROUTE_PERMISSION)
 })
 const canUseApprovals = computed(() => {
   void route.fullPath
