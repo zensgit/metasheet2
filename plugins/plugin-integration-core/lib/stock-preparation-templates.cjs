@@ -13,6 +13,58 @@ const STOCK_PREPARATION_FIELD_OWNERSHIPS = Object.freeze(['plm_system', 'human_p
 const STOCK_PREPARATION_OWNERSHIP_SET = new Set(STOCK_PREPARATION_FIELD_OWNERSHIPS)
 const STOCK_PREPARATION_TYPE_SET = new Set(STOCK_PREPARATION_FIELD_TYPES)
 
+// ---------------------------------------------------------------------------
+// DISPLAY LANGUAGE of the tables provisioned from these templates.
+//
+// The first customer-facing deployment created every managed sheet with the
+// English template names below. The operator could not read them, so 66 field
+// headers and 4 sheet names were renamed BY HAND, directly against that
+// deployment's database. That cost repeats at every customer until the
+// templates carry the names themselves -- which is what the additive `labelZh`
+// on each field and on each template's own sheet name is for.
+//
+// This product has no server-side deployment language: locale lives entirely in
+// the web app (`apps/web/src/composables/useLocale.ts`, the `metasheet_locale`
+// localStorage key), and the backend has never known which one a deployment
+// speaks. So ONE narrow setting is introduced here, in the plugin's existing
+// `MULTITABLE_STOCK_PREP_*` env style, and it is read in exactly one place.
+//
+// UNSET -- the state every deployment that exists today is in -- resolves to
+// `en`, and every structure built from these templates is byte-for-byte what it
+// is today.
+const TEMPLATE_LABEL_LOCALE_ENV = 'MULTITABLE_STOCK_PREP_TABLE_LABEL_LOCALE'
+const DEFAULT_TEMPLATE_LABEL_LOCALE = 'en'
+const TEMPLATE_LABEL_LOCALES = Object.freeze(['en', 'zh-CN'])
+
+// Accepts the spellings a human actually types into an env file, mirroring the
+// web app's own normalization. Anything else -- including a typo -- resolves to
+// English rather than throwing: a mis-spelled DISPLAY LANGUAGE must never be
+// able to block provisioning of the tables themselves.
+function normalizeTemplateLabelLocale(value) {
+  const raw = typeof value === 'string' ? value.trim().toLowerCase().replace(/_/g, '-') : ''
+  if (raw === 'zh' || raw === 'zh-cn' || raw === 'zh-hans' || raw === 'zh-hans-cn') return 'zh-CN'
+  return DEFAULT_TEMPLATE_LABEL_LOCALE
+}
+
+// THE one place the deployment's table-display language is read. Every builder
+// below takes an explicit `locale` option that DEFAULTS to this, so a caller (or
+// a test) can drive either leg without touching process.env while production
+// keeps a single authority.
+function resolveTemplateLabelLocale(env = process.env) {
+  return normalizeTemplateLabelLocale(env ? env[TEMPLATE_LABEL_LOCALE_ENV] : undefined)
+}
+
+// Pick the display name of one labelled thing -- a field, or a template's own
+// sheet name. `label` is always present and is the fallback; `labelZh` is purely
+// additive and is used only when the deployment asked for Chinese.
+function pickTemplateLabel(labelled, locale) {
+  if (!labelled) return undefined
+  if (normalizeTemplateLabelLocale(locale) === 'zh-CN' && typeof labelled.labelZh === 'string' && labelled.labelZh) {
+    return labelled.labelZh
+  }
+  return labelled.label
+}
+
 const REQUIRED_SYSTEM_FIELDS = Object.freeze([
   'projectNo',
   'idempotencyKey',
@@ -109,6 +161,18 @@ function assertSafeSchemaString(value, field) {
   return str
 }
 
+// Additive Chinese display name, for a field or for a template's own sheet name.
+// It NEVER replaces `label`: every reader that uses `label` today keeps seeing
+// exactly the same string, and `labelZh` is consulted only by pickTemplateLabel.
+function optionalLabelZh(input, field) {
+  const labelZh = optionalString(input ? input.labelZh : undefined, field)
+  if (!labelZh) return undefined
+  if (isSecretShaped(labelZh)) {
+    throw new StockPreparationTemplateError(`${field} must not be secret-shaped`, { field })
+  }
+  return labelZh
+}
+
 function assertNoContentKeys(input, field) {
   if (!isPlainObject(input)) return
   for (const key of FORBIDDEN_CONTENT_KEYS) {
@@ -163,7 +227,9 @@ function normalizeField(field, index) {
       { field: `${at}.ownership`, value: ownership },
     )
   }
+  const labelZh = optionalLabelZh(field, `${at}.labelZh`)
   const out = { id, label, type, ownership }
+  if (labelZh) out.labelZh = labelZh
   if (field.required !== undefined) out.required = requiredBoolean(field.required, `${at}.required`)
   if (field.key !== undefined) out.key = requiredBoolean(field.key, `${at}.key`)
   const optionSource = normalizeOptionSource(field.optionSource, `${at}.optionSource`)
@@ -345,10 +411,12 @@ function normalizeStockPreparationTemplate(input) {
   if (!keyFields.includes('idempotencyKey')) {
     throw new StockPreparationTemplateError('keyFields must include idempotencyKey', { field: 'keyFields' })
   }
+  const labelZh = optionalLabelZh(input, 'labelZh')
   return {
     id: assertSafeSchemaString(input.id, 'id'),
     objectId: assertSafeSchemaString(input.objectId || input.id, 'objectId'),
     label: assertSafeSchemaString(input.label || input.name || input.id, 'label'),
+    ...(labelZh ? { labelZh } : {}),
     version: optionalString(input.version, 'version') || 'v1',
     keyFields,
     feasibilityGate: normalizeBomReadFeasibilityGate(input.feasibilityGate),
@@ -357,16 +425,22 @@ function normalizeStockPreparationTemplate(input) {
   }
 }
 
-function buildSheetStructureFromTemplate(template) {
+// `options.locale` is the CREATION-TIME display language. Omitted, it resolves to
+// the deployment setting, which is `en` unless a deployment opted in -- so the
+// structure this returns is unchanged for every deployment that exists today.
+// Field IDS, order, types and required-ness never depend on it; only the human
+// display names do.
+function buildSheetStructureFromTemplate(template, options = {}) {
   const normalized = normalizeStockPreparationTemplate(template)
+  const locale = options.locale === undefined ? resolveTemplateLabelLocale() : options.locale
   return {
     objectId: normalized.objectId,
-    label: normalized.label,
+    label: pickTemplateLabel(normalized, locale),
     keyFields: normalized.keyFields.slice(),
     fields: normalized.fields.map((field, order) => {
       const out = {
         id: field.id,
-        name: field.label,
+        name: pickTemplateLabel(field, locale),
         type: field.type,
         order,
       }
@@ -452,10 +526,12 @@ function normalizeStockPreparationMvpTableTemplate(input) {
       })
     }
   }
+  const labelZh = optionalLabelZh(input, 'labelZh')
   return {
     id: assertSafeSchemaString(input.id, 'id'),
     objectId: assertSafeSchemaString(input.objectId || input.id, 'objectId'),
     label: assertSafeSchemaString(input.label || input.name || input.id, 'label'),
+    ...(labelZh ? { labelZh } : {}),
     version: optionalString(input.version, 'version') || 'v1',
     role: optionalString(input.role, 'role') || 'supporting',
     keyFields,
@@ -464,16 +540,20 @@ function normalizeStockPreparationMvpTableTemplate(input) {
   }
 }
 
-function buildSheetStructureFromMvpTableTemplate(template) {
+// Same locale contract as buildSheetStructureFromTemplate. The nine frozen MVP
+// templates carry no `labelZh`, so they are unaffected in either leg; the
+// confirmation-decision LEDGER, which does carry one, is created readable.
+function buildSheetStructureFromMvpTableTemplate(template, options = {}) {
   const normalized = normalizeStockPreparationMvpTableTemplate(template)
+  const locale = options.locale === undefined ? resolveTemplateLabelLocale() : options.locale
   return {
     objectId: normalized.objectId,
-    label: normalized.label,
+    label: pickTemplateLabel(normalized, locale),
     keyFields: normalized.keyFields.slice(),
     fields: normalized.fields.map((field, order) => {
       const out = {
         id: field.id,
-        name: field.label,
+        name: pickTemplateLabel(field, locale),
         type: field.type,
         order,
       }
@@ -515,6 +595,10 @@ function summarizeMvpTableTemplatesForEvidence(templates) {
   }
 }
 
+// `extra` carries the optional per-field flags -- `required`, `key`, `optionSource`
+// -- and `labelZh`, the field's Chinese display name. `labelZh` is ADDITIVE: `label`
+// stays the English/fallback name every existing reader already uses, and only a
+// deployment that asked for Chinese ever creates the column with `labelZh`.
 function field(id, label, type, ownership, extra = {}) {
   return { id, label, type, ownership, ...extra }
 }
@@ -523,6 +607,7 @@ const STOCK_PREPARATION_MAIN_TABLE_TEMPLATE = Object.freeze(normalizeStockPrepar
   id: 'plm.stock-preparation.main.v1',
   objectId: 'plm_stock_preparation_main',
   label: 'PLM Stock Preparation Main',
+  labelZh: '备料主表',
   version: 'v1',
   keyFields: ['idempotencyKey'],
   feasibilityGate: {
@@ -557,39 +642,46 @@ const STOCK_PREPARATION_MAIN_TABLE_TEMPLATE = Object.freeze(normalizeStockPrepar
     deleteByDefault: false,
   },
   fields: [
-    field('projectNo', 'Project No', 'string', 'plm_system', { required: true }),
-    field('idempotencyKey', 'Idempotency Key', 'string', 'plm_system', { required: true, key: true }),
-    field('componentSourceId', 'Component Source ID', 'string', 'plm_system', { required: true }),
-    field('parentSourceId', 'Parent Source ID', 'string', 'plm_system'),
-    field('path', 'BOM Path', 'string', 'plm_system', { required: true }),
-    field('depth', 'BOM Depth', 'number', 'plm_system'),
-    field('componentCode', 'Component Code', 'string', 'plm_system'),
-    field('componentName', 'Component Name', 'string', 'plm_system'),
-    field('material', 'Material', 'string', 'plm_system'),
-    field('sourceVersion', 'PLM Source Version', 'string', 'plm_system'),
-    field('rawQuantity', 'Raw Quantity', 'number', 'plm_system'),
-    field('totalQuantity', 'Total Quantity', 'number', 'plm_system', { required: true }),
-    field('active', 'Active', 'boolean', 'plm_system', { required: true }),
-    field('lastPlmRefreshRunId', 'Last PLM Refresh Run ID', 'string', 'plm_system'),
-    field('lastPlmRefreshAt', 'Last PLM Refresh At', 'date', 'plm_system'),
+    field('projectNo', 'Project No', 'string', 'plm_system', { required: true, labelZh: '项目号' }),
+    field('idempotencyKey', 'Idempotency Key', 'string', 'plm_system', { required: true, key: true, labelZh: '唯一键' }),
+    field('componentSourceId', 'Component Source ID', 'string', 'plm_system', { required: true, labelZh: '部件源ID' }),
+    field('parentSourceId', 'Parent Source ID', 'string', 'plm_system', { labelZh: '父件源ID' }),
+    field('path', 'BOM Path', 'string', 'plm_system', { required: true, labelZh: 'BOM路径' }),
+    field('depth', 'BOM Depth', 'number', 'plm_system', { labelZh: 'BOM层级' }),
+    // 图号, deliberately NOT a translation of "Component Code". The customer's own
+    // PLM calls this column `IdentityNo` 图号 and the legacy 备料 system used the
+    // same word -- the table speaks the customer's vocabulary, not ours.
+    field('componentCode', 'Component Code', 'string', 'plm_system', { labelZh: '图号' }),
+    field('componentName', 'Component Name', 'string', 'plm_system', { labelZh: '名称' }),
+    field('material', 'Material', 'string', 'plm_system', { labelZh: '材料' }),
+    field('sourceVersion', 'PLM Source Version', 'string', 'plm_system', { labelZh: '源版本' }),
+    field('rawQuantity', 'Raw Quantity', 'number', 'plm_system', { labelZh: '单层用量' }),
+    field('totalQuantity', 'Total Quantity', 'number', 'plm_system', { required: true, labelZh: '总用量' }),
+    field('active', 'Active', 'boolean', 'plm_system', { required: true, labelZh: '有效' }),
+    field('lastPlmRefreshRunId', 'Last PLM Refresh Run ID', 'string', 'plm_system', { labelZh: '最近刷新RunID' }),
+    field('lastPlmRefreshAt', 'Last PLM Refresh At', 'date', 'plm_system', { labelZh: '最近刷新时间' }),
     field('lastPlmRefreshDecision', 'Last PLM Refresh Decision', 'select', 'plm_system', {
+      labelZh: '最近刷新决定',
       optionSource: { type: 'contract', key: 'plm_stock_preparation_decision_v1' },
     }),
-    field('lastPlmConflictSummary', 'Last PLM Conflict Summary', 'string', 'plm_system'),
+    field('lastPlmConflictSummary', 'Last PLM Conflict Summary', 'string', 'plm_system', { labelZh: '冲突摘要' }),
     field('materialType', 'Material Type', 'select', 'human_preserved', {
+      labelZh: '材料类型',
       optionSource: { type: 'config_info', key: 'material_type' },
     }),
     field('blankType', 'Blank Type', 'select', 'human_preserved', {
+      labelZh: '毛胚类型',
       optionSource: { type: 'config_info', key: 'blank_type' },
     }),
     field('stockPreparationStatus', 'Stock Preparation Status', 'select', 'human_preserved', {
+      labelZh: '备料状态',
       optionSource: { type: 'config_info', key: 'stock_preparation_status' },
     }),
-    field('demandDate', 'Demand Date', 'date', 'human_preserved'),
-    field('leadTimeDays', 'Lead Time Days', 'number', 'human_preserved'),
-    field('notes', 'Notes', 'string', 'human_preserved'),
-    field('procurementReply', 'Procurement Reply', 'string', 'human_preserved'),
-    field('warehouseConfirmation', 'Warehouse Confirmation', 'string', 'human_preserved'),
+    field('demandDate', 'Demand Date', 'date', 'human_preserved', { labelZh: '需求日期' }),
+    field('leadTimeDays', 'Lead Time Days', 'number', 'human_preserved', { labelZh: '提前周期(天)' }),
+    field('notes', 'Notes', 'string', 'human_preserved', { labelZh: '备注' }),
+    field('procurementReply', 'Procurement Reply', 'string', 'human_preserved', { labelZh: '采购回复' }),
+    field('warehouseConfirmation', 'Warehouse Confirmation', 'string', 'human_preserved', { labelZh: '仓库确认' }),
   ],
 }))
 
@@ -604,6 +696,7 @@ const STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE = Object.freeze(nor
   id: 'plm.stock-preparation.confirmation-decision.v1',
   objectId: 'plm_stock_preparation_confirmation_decision',
   label: 'Stock Preparation Confirmation Decision',
+  labelZh: '备料确认账本',
   version: 'v1',
   role: 'confirmation_decision',
   keyFields: ['decisionId'],
@@ -618,22 +711,22 @@ const STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE = Object.freeze(nor
     'openedAt',
   ],
   fields: [
-    field('decisionId', 'Decision ID', 'string', 'plm_system', { required: true, key: true }),
-    field('stableDecisionKey', 'Stable Decision Key', 'string', 'plm_system', { required: true }),
-    field('projectNo', 'Project No', 'string', 'plm_system', { required: true }),
-    field('rowIdentity', 'Row Identity', 'string', 'plm_system', { required: true }),
-    field('conflictType', 'Conflict Type', 'string', 'plm_system', { required: true }),
-    field('inputFingerprint', 'Input Fingerprint', 'string', 'plm_system', { required: true }),
-    field('sourceRevision', 'Source Revision', 'string', 'plm_system'),
-    field('status', 'Status', 'string', 'plm_system', { required: true }),
-    field('openedAt', 'Opened At', 'date', 'plm_system', { required: true }),
-    field('resolutionAction', 'Resolution Action', 'string', 'human_preserved'),
-    field('resolvedValue', 'Resolved Value', 'string', 'human_preserved'),
-    field('resolvedAuxValue', 'Resolved Auxiliary Value', 'string', 'human_preserved'),
-    field('notes', 'Notes', 'string', 'human_preserved'),
-    field('confirmedBy', 'Confirmed By', 'string', 'plm_system'),
-    field('confirmedAt', 'Confirmed At', 'date', 'plm_system'),
-    field('supersededAt', 'Superseded At', 'date', 'plm_system'),
+    field('decisionId', 'Decision ID', 'string', 'plm_system', { required: true, key: true, labelZh: '裁决ID' }),
+    field('stableDecisionKey', 'Stable Decision Key', 'string', 'plm_system', { required: true, labelZh: '稳定裁决键' }),
+    field('projectNo', 'Project No', 'string', 'plm_system', { required: true, labelZh: '项目号' }),
+    field('rowIdentity', 'Row Identity', 'string', 'plm_system', { required: true, labelZh: '行身份' }),
+    field('conflictType', 'Conflict Type', 'string', 'plm_system', { required: true, labelZh: '冲突类型' }),
+    field('inputFingerprint', 'Input Fingerprint', 'string', 'plm_system', { required: true, labelZh: '输入指纹' }),
+    field('sourceRevision', 'Source Revision', 'string', 'plm_system', { labelZh: '源修订' }),
+    field('status', 'Status', 'string', 'plm_system', { required: true, labelZh: '状态' }),
+    field('openedAt', 'Opened At', 'date', 'plm_system', { required: true, labelZh: '开启时间' }),
+    field('resolutionAction', 'Resolution Action', 'string', 'human_preserved', { labelZh: '处理动作' }),
+    field('resolvedValue', 'Resolved Value', 'string', 'human_preserved', { labelZh: '录入值' }),
+    field('resolvedAuxValue', 'Resolved Auxiliary Value', 'string', 'human_preserved', { labelZh: '录入辅助值' }),
+    field('notes', 'Notes', 'string', 'human_preserved', { labelZh: '备注' }),
+    field('confirmedBy', 'Confirmed By', 'string', 'plm_system', { labelZh: '确认人' }),
+    field('confirmedAt', 'Confirmed At', 'date', 'plm_system', { labelZh: '确认时间' }),
+    field('supersededAt', 'Superseded At', 'date', 'plm_system', { labelZh: '作废时间' }),
   ],
 }))
 
@@ -909,6 +1002,12 @@ module.exports = {
   REQUIRED_SYSTEM_FIELDS,
   HUMAN_PRESERVED_FIELD_IDS,
   FEASIBILITY_FORBIDDEN_MECHANISMS,
+  TEMPLATE_LABEL_LOCALE_ENV,
+  TEMPLATE_LABEL_LOCALES,
+  DEFAULT_TEMPLATE_LABEL_LOCALE,
+  normalizeTemplateLabelLocale,
+  resolveTemplateLabelLocale,
+  pickTemplateLabel,
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
@@ -925,6 +1024,7 @@ module.exports = {
     isPlainObject,
     assertNoContentKeys,
     normalizeField,
+    optionalLabelZh,
     normalizeOptionSource,
     normalizeConflictStrategy,
     normalizeFeasibilityRelation,

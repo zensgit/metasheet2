@@ -387,8 +387,12 @@ function readCell(record, key) {
   return value
 }
 
-function buildTargetDescriptor() {
-  const structure = buildSheetStructureFromMvpTableTemplate(TEMPLATE)
+// `options.locale` is the creation-time display language; omitted, the builder resolves
+// the deployment setting (`en` unless a deployment opted in). The ledger template carries
+// a Chinese sheet name and a Chinese name for all 16 of its columns, so a zh-CN deployment
+// creates this table readable instead of needing its headers renamed by hand afterwards.
+function buildTargetDescriptor(options = {}) {
+  const structure = buildSheetStructureFromMvpTableTemplate(TEMPLATE, options)
   const templateById = new Map(TEMPLATE.fields.map((field) => [field.id, field]))
   return {
     id: structure.objectId,
@@ -433,7 +437,7 @@ async function inspectConfirmationDecisionTarget({ context, projectId, permissio
   }
 }
 
-async function ensureConfirmationDecisionTarget({ context, projectId, permission, baseId } = {}) {
+async function ensureConfirmationDecisionTarget({ context, projectId, permission, baseId, locale } = {}) {
   assertAdminPermission(permission)
   const provisioning = getProvisioningApi(context || {})
   const scopedProjectId = requiredString(projectId, 'projectId')
@@ -457,7 +461,7 @@ async function ensureConfirmationDecisionTarget({ context, projectId, permission
   await provisioning.ensureObject({
     projectId: scopedProjectId,
     baseId: optionalString(baseId),
-    descriptor: buildTargetDescriptor(),
+    descriptor: buildTargetDescriptor({ locale }),
   })
   const verified = await inspectConfirmationDecisionTarget({ context, projectId: scopedProjectId, permission })
   if (!verified.ready) {
