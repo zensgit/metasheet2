@@ -210,6 +210,27 @@ describe.sequential('e-learning title PostgreSQL authority', () => {
     await migrate(titleUp)
 
     await firstPool.query(`
+      CREATE OR REPLACE FUNCTION elearning_credit_reject_immutable_write()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      SECURITY INVOKER
+      AS 'BEGIN RETURN OLD; END;'
+    `)
+    await expect(migrate(titleUp)).rejects.toThrow(
+      'elearning title migration drift: immutable function',
+    )
+    await firstPool.query(`
+      CREATE OR REPLACE FUNCTION elearning_credit_reject_immutable_write()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      SECURITY INVOKER
+      AS \$immutable\$BEGIN
+      RAISE EXCEPTION 'ELEARNING_CREDIT_IMMUTABLE';
+    END;\$immutable\$
+    `)
+    await migrate(titleUp)
+
+    await firstPool.query(`
       ALTER TABLE elearning_title_publish_requests
       DROP CONSTRAINT elearning_title_publish_requests_hash_check
     `)

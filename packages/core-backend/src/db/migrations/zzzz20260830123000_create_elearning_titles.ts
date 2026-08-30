@@ -12,6 +12,9 @@ const TABLES = [
 ] as const
 
 const IMMUTABLE_FUNCTION = 'elearning_credit_reject_immutable_write'
+const IMMUTABLE_FUNCTION_SOURCE = `BEGIN
+      RAISE EXCEPTION 'ELEARNING_CREDIT_IMMUTABLE';
+    END;`
 const AWARD_FUNCTION = 'elearning_title_award_balance_milestones'
 const BALANCE_TRIGGER = 'elearning_credit_balances_title_awards'
 const IMMUTABLE_TABLES = TABLES.slice(1)
@@ -576,6 +579,36 @@ async function assertFunction(db: Kysely<unknown>): Promise<void> {
   ) drift(AWARD_FUNCTION)
 }
 
+async function assertImmutableFunction(db: Kysely<unknown>): Promise<void> {
+  const result = await sql<{
+    source: string
+    language: string
+    return_type: string
+    security_definer: boolean
+  }>`
+    SELECT
+      function_row.prosrc AS source,
+      language_row.lanname AS language,
+      function_row.prorettype::regtype::text AS return_type,
+      function_row.prosecdef AS security_definer
+      FROM pg_proc function_row
+      JOIN pg_namespace namespace ON namespace.oid = function_row.pronamespace
+      JOIN pg_language language_row ON language_row.oid = function_row.prolang
+     WHERE namespace.nspname = current_schema()
+       AND function_row.proname = ${IMMUTABLE_FUNCTION}
+       AND function_row.pronargs = 0
+  `.execute(db)
+  const actual = result.rows[0]
+  if (
+    result.rows.length !== 1
+    || !actual
+    || actual.source.trim() !== IMMUTABLE_FUNCTION_SOURCE
+    || actual.language !== 'plpgsql'
+    || actual.return_type !== 'trigger'
+    || actual.security_definer
+  ) drift('immutable function')
+}
+
 async function assertAuthority(db: Kysely<unknown>): Promise<void> {
   const tables = await presentTables(db)
   if (tables.size !== TABLES.length) drift('table set')
@@ -586,6 +619,7 @@ async function assertAuthority(db: Kysely<unknown>): Promise<void> {
     await assertTrigger(db, table, `${table}_immutable_row`, 27, IMMUTABLE_FUNCTION)
     await assertTrigger(db, table, `${table}_immutable_truncate`, 34, IMMUTABLE_FUNCTION)
   }
+  await assertImmutableFunction(db)
   await assertFunction(db)
   await assertTrigger(
     db,
@@ -766,6 +800,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   if (!immutable.rows[0]?.present || !balances.rows[0]?.present) {
     drift('credit authority prerequisite')
   }
+  await assertImmutableFunction(db)
   const tables = await presentTables(db)
   if (tables.size === 0) await createAuthority(db)
   else if (tables.size !== TABLES.length) drift('partial table set')

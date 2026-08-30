@@ -213,6 +213,27 @@ describe.sequential('e-learning certificate PostgreSQL authority', () => {
 
   it('applies, replays, detects drift, rolls down twice, and reapplies empty', async () => {
     await migrate(certificateUp)
+
+    await firstPool.query(`
+      CREATE OR REPLACE FUNCTION elearning_credit_reject_immutable_write()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      SECURITY INVOKER
+      AS 'BEGIN RETURN OLD; END;'
+    `)
+    await expect(migrate(certificateUp)).rejects.toThrow(
+      'elearning certificate migration drift: immutable function',
+    )
+    await firstPool.query(`
+      CREATE OR REPLACE FUNCTION elearning_credit_reject_immutable_write()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      SECURITY INVOKER
+      AS \$immutable\$BEGIN
+      RAISE EXCEPTION 'ELEARNING_CREDIT_IMMUTABLE';
+    END;\$immutable\$
+    `)
+    await migrate(certificateUp)
     await firstPool.query(`
       ALTER TABLE elearning_certificate_issues
       DROP CONSTRAINT elearning_certificate_issues_hash_check
