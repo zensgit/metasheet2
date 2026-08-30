@@ -1180,6 +1180,7 @@ describe('ElearningAdminView', () => {
     await flushUi()
 
     expect(root.querySelector('[data-testid="elearning-analytics-admin-section"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="elearning-analytics-period-section"]')).not.toBeNull()
     expect(root.querySelector('[data-testid="elearning-credit-rule-form"]')).toBeNull()
     expect(root.querySelector('[data-testid="elearning-content-admin-section"]')).toBeNull()
     expect(root.querySelector('[data-testid="elearning-admin-status"]')).toBeNull()

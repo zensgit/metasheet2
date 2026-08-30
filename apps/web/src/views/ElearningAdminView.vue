@@ -245,6 +245,8 @@
 
     <ElearningAnalyticsAdminSection v-if="analyticsEnabled" />
 
+    <ElearningAnalyticsPeriodSection v-if="analyticsEnabled" />
+
     <div class="elearning-admin__assessment-toggle">
       <button
         type="button"
@@ -277,6 +279,7 @@ import {
 } from '../services/elearning'
 import ElearningAssessmentAdminSection from './ElearningAssessmentAdminSection.vue'
 import ElearningAnalyticsAdminSection from './ElearningAnalyticsAdminSection.vue'
+import ElearningAnalyticsPeriodSection from './ElearningAnalyticsPeriodSection.vue'
 import ElearningContentAdminSection from './ElearningContentAdminSection.vue'
 import ElearningCreditAdminSection from './ElearningCreditAdminSection.vue'
 import {

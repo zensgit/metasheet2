@@ -73,6 +73,28 @@ export type ElearningDepartmentStatsDaily =
   | ElearningDepartmentStatsDailySuppressed
   | ElearningDepartmentStatsDailyVisible
 
+interface ElearningDepartmentStatsPeriodBase {
+  departmentId: string
+  periodStart: string
+  periodEnd: string
+  sourceVersion: string
+}
+
+export interface ElearningDepartmentStatsPeriodSuppressed
+  extends ElearningDepartmentStatsPeriodBase {
+  suppressed: true
+}
+
+export interface ElearningDepartmentStatsPeriodVisible
+  extends ElearningDepartmentStatsPeriodBase {
+  suppressed: false
+  metrics: ElearningDepartmentStatsDailyMetrics
+}
+
+export type ElearningDepartmentStatsPeriod =
+  | ElearningDepartmentStatsPeriodSuppressed
+  | ElearningDepartmentStatsPeriodVisible
+
 function fail(code: string, status: number): never {
   throw new ElearningApiError(code, status)
 }
@@ -116,6 +138,15 @@ function requireInputDate(value: string): string {
   } catch {
     fail('invalid_input', 400)
   }
+}
+
+function requireInputTimestamp(value: string): string {
+  if (!CANONICAL_ISO_INSTANT_RE.test(value)) fail('invalid_input', 400)
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString() !== value) {
+    fail('invalid_input', 400)
+  }
+  return value
 }
 
 function requireTimestamp(value: unknown, status: number): string {
@@ -203,6 +234,30 @@ function parseDailyStats(value: unknown, status: number): ElearningDepartmentSta
   return { ...common, suppressed: false, metrics: parseMetrics(value.metrics, status) }
 }
 
+function parsePeriodStats(value: unknown, status: number): ElearningDepartmentStatsPeriod {
+  if (!isPlainObject(value) || typeof value.suppressed !== 'boolean') failShape(status)
+  const baseKeys = [
+    'departmentId',
+    'periodStart',
+    'periodEnd',
+    'sourceVersion',
+    'suppressed',
+  ] as const
+  const expectedKeys = value.suppressed ? baseKeys : [...baseKeys, 'metrics']
+  if (!exactKeys(value, expectedKeys)) failShape(status)
+  const periodStart = requireTimestamp(value.periodStart, status)
+  const periodEnd = requireTimestamp(value.periodEnd, status)
+  if (periodStart >= periodEnd) failShape(status)
+  const common = {
+    departmentId: requireUuid(value.departmentId, status),
+    periodStart,
+    periodEnd,
+    sourceVersion: requireText(value.sourceVersion, status),
+  }
+  if (value.suppressed) return { ...common, suppressed: true }
+  return { ...common, suppressed: false, metrics: parseMetrics(value.metrics, status) }
+}
+
 function readErrorCode(payload: unknown): string {
   if (!isPlainObject(payload) || typeof payload.error !== 'string') return 'request_failed'
   const code = payload.error.trim()
@@ -233,4 +288,33 @@ export async function getElearningDepartmentStatsDaily(
   }
   if (response.status !== 200) fail(readErrorCode(payload), response.status)
   return parseDailyStats(payload, response.status)
+}
+
+export async function getElearningDepartmentStatsPeriod(
+  departmentId: string,
+  periodStart: string,
+  periodEnd: string,
+): Promise<ElearningDepartmentStatsPeriod> {
+  const department = requireInputUuid(departmentId)
+  const start = requireInputTimestamp(periodStart)
+  const end = requireInputTimestamp(periodEnd)
+  if (start >= end) fail('invalid_input', 400)
+  const query = new URLSearchParams({ periodStart: start, periodEnd: end })
+  let response: Response
+  try {
+    response = await apiFetch(
+      `/api/elearning/admin/analytics/departments/${department}?${query.toString()}`,
+      { method: 'GET' },
+    )
+  } catch {
+    fail('network_error', 0)
+  }
+  let payload: unknown
+  try {
+    payload = await response.json()
+  } catch {
+    payload = undefined
+  }
+  if (response.status !== 200) fail(readErrorCode(payload), response.status)
+  return parsePeriodStats(payload, response.status)
 }
