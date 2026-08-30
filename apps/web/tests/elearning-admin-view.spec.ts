@@ -13,6 +13,8 @@ const h = vi.hoisted(() => ({
   importQuestions: vi.fn(),
   publishPaper: vi.fn(),
   publishExam: vi.fn(),
+  createPractice: vi.fn(),
+  listPractice: vi.fn(),
 }))
 
 vi.mock('../src/services/elearning', async () => {
@@ -38,6 +40,17 @@ vi.mock('../src/services/elearningAssessmentAdmin', async () => {
     importElearningQuestionBankXlsx: h.importQuestions,
     publishElearningFixedPaper: h.publishPaper,
     publishElearningPaperExam: h.publishExam,
+  }
+})
+
+vi.mock('../src/services/elearningPractice', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/elearningPractice')>(
+    '../src/services/elearningPractice',
+  )
+  return {
+    ...actual,
+    createElearningPracticeSet: h.createPractice,
+    listElearningPracticeSets: h.listPractice,
   }
 })
 
@@ -123,6 +136,9 @@ describe('ElearningAdminView', () => {
     h.importQuestions.mockReset()
     h.publishPaper.mockReset()
     h.publishExam.mockReset()
+    h.createPractice.mockReset()
+    h.listPractice.mockReset()
+    h.listPractice.mockResolvedValue({ practiceSets: [] })
     h.capabilities.mockResolvedValue({
       enabled: true,
       capabilities: {
@@ -1184,6 +1200,28 @@ describe('ElearningAdminView', () => {
     expect(root.querySelector('[data-testid="elearning-credit-rule-form"]')).toBeNull()
     expect(root.querySelector('[data-testid="elearning-content-admin-section"]')).toBeNull()
     expect(root.querySelector('[data-testid="elearning-admin-status"]')).toBeNull()
+  })
+
+  it('mounts objective practice with assessment only and does not surface legacy readiness failure', async () => {
+    h.capabilities.mockResolvedValue({
+      enabled: true,
+      capabilities: {
+        content: false,
+        assignment: false,
+        assessment: true,
+        incentive: false,
+        analytics: false,
+        media: false,
+      },
+    })
+    const root = mountView()
+    await flushUi()
+
+    expect(root.querySelector('[data-testid="elearning-practice-admin-section"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="elearning-content-admin-section"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-admin-status"]')).toBeNull()
+    expect((root.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).disabled)
+      .toBe(true)
   })
 
   it('keeps content-only and mixed content capabilities independent from legacy V0.1 readiness', async () => {

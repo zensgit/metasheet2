@@ -249,6 +249,8 @@
 
     <ElearningAnalyticsPeriodSection v-if="analyticsEnabled" />
 
+    <ElearningPracticeAdminSection v-if="practiceEnabled" />
+
     <div class="elearning-admin__assessment-toggle">
       <button
         type="button"
@@ -285,6 +287,8 @@ import ElearningAnalyticsPeriodSection from './ElearningAnalyticsPeriodSection.v
 import ElearningContentAdminSection from './ElearningContentAdminSection.vue'
 import ElearningPortalAdminSection from './ElearningPortalAdminSection.vue'
 import ElearningCreditAdminSection from './ElearningCreditAdminSection.vue'
+import ElearningPracticeAdminSection from './ElearningPracticeAdminSection.vue'
+import { isElearningPracticeReady } from '../services/elearningPractice'
 import {
   elearningAssignIncomplete,
   elearningCorrectOptionAria,
@@ -331,6 +335,7 @@ const incentiveEnabled = ref(false)
 const analyticsEnabled = ref(false)
 const contentEnabled = ref(false)
 const assignmentEnabled = ref(false)
+const practiceEnabled = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error' | 'partial'>('info')
 const operationStage = ref<OperationStage | null>(null)
@@ -530,12 +535,14 @@ async function ensureV01Ready(): Promise<void> {
     && capabilities.capabilities.incentive === true
   analyticsEnabled.value = capabilities.enabled === true
     && capabilities.capabilities.analytics === true
+  practiceEnabled.value = isElearningPracticeReady(capabilities)
   ready.value = isElearningV01Ready(capabilities)
   if (
     !ready.value
     && !contentEnabled.value
     && !incentiveEnabled.value
     && !analyticsEnabled.value
+    && !practiceEnabled.value
   ) {
     throw new ElearningApiError('feature_disabled', 404)
   }
