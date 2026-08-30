@@ -1164,6 +1164,28 @@ describe('ElearningAdminView', () => {
     expect(disabled.querySelector('[data-testid="elearning-content-admin-section"]')).toBeNull()
   })
 
+  it('mounts analytics independently when analytics is the only enabled capability', async () => {
+    h.capabilities.mockResolvedValueOnce({
+      enabled: true,
+      capabilities: {
+        content: false,
+        assignment: false,
+        assessment: false,
+        incentive: false,
+        analytics: true,
+        media: false,
+      },
+    })
+    const root = mountView()
+    await flushUi()
+
+    expect(root.querySelector('[data-testid="elearning-analytics-admin-section"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="elearning-analytics-period-section"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="elearning-credit-rule-form"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-content-admin-section"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-admin-status"]')).toBeNull()
+  })
+
   it('keeps content-only and mixed content capabilities independent from legacy V0.1 readiness', async () => {
     h.capabilities.mockResolvedValue({
       enabled: true,

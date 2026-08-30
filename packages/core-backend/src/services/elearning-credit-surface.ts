@@ -5,6 +5,8 @@ import {
   normalizeElearningCreditTimeZone,
   type ElearningCreditBehavior,
 } from './elearning-credit-policy'
+import type { ElearningTitleThresholdRow } from './elearning-title-policy'
+import { resolveActiveElearningTitle } from './elearning-title-surface'
 
 export const ELEARNING_CREDIT_RULE_REQUEST_DOMAIN =
   'elearning.credit.rule.request.v1' as const
@@ -87,6 +89,7 @@ export interface ElearningCreditWalletItem {
 export interface ElearningCreditWalletResult {
   userId: string
   balancePoints: number
+  currentTitle: ElearningTitleThresholdRow | null
   items: ElearningCreditWalletItem[]
   nextCursor: string | null
 }
@@ -506,6 +509,7 @@ export async function getElearningCreditWallet(
         || balancePoints < 0
         || balancePoints > POSTGRES_INT4_MAX
       ) fail('unavailable')
+      const currentTitle = await resolveActiveElearningTitle(tx, orgId, balancePoints)
 
       const params: unknown[] = [orgId, userId]
       let after = ''
@@ -550,6 +554,7 @@ export async function getElearningCreditWallet(
       return {
         userId,
         balancePoints,
+        currentTitle,
         items: entries.map(({ item }) => item),
         nextCursor: hasMore && last
           ? encodeCursor({

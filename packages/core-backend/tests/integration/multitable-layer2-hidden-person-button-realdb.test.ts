@@ -77,7 +77,8 @@ describeIfDatabase('layer-2 property.hidden masks person + button values (real D
   beforeAll(async () => {
     app = express()
     app.use(express.json())
-    app.use((req, _res, next) => { ;(req as any).user = { id: VIEWER, roles: ['member'], perms: ['multitable:read', 'multitable:write'] }; next() })
+    // canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
+    app.use((req, _res, next) => { ;(req as any).user = { id: VIEWER, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:manage-schema'] }; next() })
     app.use('/api/multitable', univerMetaRouter())
 
     for (const u of [VIEWER, P_SECRET, P_OPEN]) {

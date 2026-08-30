@@ -10,12 +10,18 @@
 import type { Request, RequestHandler } from 'express'
 import { Router, type Router as ExpressRouter } from 'express'
 
-import { isElearningContentSurfaceEnabled } from '../elearning/feature-flags'
+import {
+  isElearningAnalyticsSurfaceEnabled,
+  isElearningContentSurfaceEnabled,
+} from '../elearning/feature-flags'
 import { authenticate } from '../middleware/auth'
 import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
+import { createElearningAnalyticsRouter } from '../routes/elearning-analytics'
 import { createElearningCreditRouter } from '../routes/elearning-credit'
 import { createElearningContentRouter } from '../routes/elearning-content'
 import { createElearningPilotRouter } from '../routes/elearning-pilot'
+import { createElearningPortalRouter } from '../routes/elearning-portal'
+import { createElearningProfileRouter } from '../routes/elearning-profile'
 import { isElearningGlobalAdminRequest } from '../routes/elearning-admin-access'
 import type { ElearningAdminAccessDb } from './elearning-admin-access'
 import type { ElearningAssessmentCatalogDb } from './elearning-assessment-catalog'
@@ -43,11 +49,25 @@ import {
 import { isElearningCreditSurfaceEnabled } from './elearning-credit-ledger'
 import type { adjustElearningCreditPostgres } from './elearning-credit-adjustment-postgres'
 import type {
+  issueElearningCertificate,
+  listActiveElearningCertificateTemplates,
+  listMyElearningCertificates,
+  publishElearningCertificateTemplate,
+} from './elearning-certificate-surface'
+import type {
   getElearningCreditWallet,
   listElearningCreditRules,
   publishElearningCreditRule,
   ElearningCreditSurfaceDb,
 } from './elearning-credit-surface'
+import type {
+  getActiveElearningTitleSnapshot,
+  publishElearningTitleSnapshot,
+} from './elearning-title-surface'
+import {
+  getElearningDepartmentStats,
+  type ElearningDepartmentStatsDb,
+} from './elearning-department-stats'
 import type {
   ElearningDirectAssignmentDb,
   ElearningDirectAssignmentResult,
@@ -72,6 +92,10 @@ import {
   type ElearningLearnerCoursesDb,
   type ListElearningLearnerCoursesInput,
 } from './elearning-learner-courses'
+import {
+  getElearningLearningProfile,
+  type ElearningLearningProfileDb,
+} from './elearning-learning-profile'
 import {
   ELEARNING_MEDIA_PLAYBACK_SECRET_ENV,
   issueElearningMediaPlaybackTicket,
@@ -101,6 +125,11 @@ import {
   type ElearningOpenCompletionResult,
   type RecordElearningOpenCompletionInput,
 } from './elearning-open-completion-postgres'
+import {
+  getActiveElearningPortalSettings,
+  publishElearningPortalSettings,
+  type ElearningPortalDb,
+} from './elearning-portal-settings'
 import type {
   ElearningWatchDb,
   ElearningWatchState,
@@ -165,13 +194,17 @@ export interface ElearningPilotRuntimeOptions {
     ElearningPaperExamDb &
     ElearningManualGradingDb &
     ElearningManualGradingReadDb &
-    ElearningCreditSurfaceDb
+    ElearningCreditSurfaceDb &
+    ElearningLearningProfileDb &
+    ElearningDepartmentStatsDb &
+    ElearningPortalDb
   env?: NodeJS.ProcessEnv
   authenticate?: RequestHandler
   adminGuard?: RequestHandler
   readGuard?: RequestHandler
   writeGuard?: RequestHandler
   gradeGuard?: RequestHandler
+  statsGuard?: RequestHandler
   viewerId?: (req: Request) => string | null
   orgId?: (req: Request) => string | null
   isGlobalAdmin?: (req: Request) => boolean
@@ -263,6 +296,16 @@ export interface ElearningPilotRuntimeOptions {
   listElearningCreditRules?: typeof listElearningCreditRules
   getElearningCreditWallet?: typeof getElearningCreditWallet
   adjustElearningCredit?: typeof adjustElearningCreditPostgres
+  getActiveElearningTitleSnapshot?: typeof getActiveElearningTitleSnapshot
+  publishElearningTitleSnapshot?: typeof publishElearningTitleSnapshot
+  listActiveElearningCertificateTemplates?: typeof listActiveElearningCertificateTemplates
+  publishElearningCertificateTemplate?: typeof publishElearningCertificateTemplate
+  issueElearningCertificate?: typeof issueElearningCertificate
+  listMyElearningCertificates?: typeof listMyElearningCertificates
+  getElearningLearningProfile?: typeof getElearningLearningProfile
+  getElearningDepartmentStats?: typeof getElearningDepartmentStats
+  getActiveElearningPortalSettings?: typeof getActiveElearningPortalSettings
+  publishElearningPortalSettings?: typeof publishElearningPortalSettings
 }
 
 function viewerId(req: Request): string | null {
@@ -286,7 +329,8 @@ export function createElearningPilotRuntime(
   const env = opts.env ?? process.env
   const contentEnabled = isElearningContentSurfaceEnabled(env)
   const creditEnabled = isElearningCreditSurfaceEnabled(env)
-  if (!contentEnabled && !creditEnabled) return null
+  const analyticsEnabled = isElearningAnalyticsSurfaceEnabled(env)
+  if (!contentEnabled && !creditEnabled && !analyticsEnabled) return null
 
   const issuePlayback =
     opts.issueElearningMediaPlaybackTicket ??
@@ -322,6 +366,20 @@ export function createElearningPilotRuntime(
       opts.publishElearningContentCourse ?? publishElearningContentCourse,
     recordElearningOpenCompletion:
       opts.recordElearningOpenCompletion ?? recordElearningOpenCompletion,
+  }) : null
+
+  const portal = contentEnabled ? createElearningPortalRouter({
+    db: opts.db,
+    env,
+    viewerId: opts.viewerId ?? viewerId,
+    orgId: opts.orgId ?? orgId,
+    adminGuard: opts.adminGuard ?? rbacGuard('elearning', 'admin'),
+    readGuard: opts.readGuard
+      ?? rbacGuardAny(['elearning:read', 'elearning:write', 'elearning:admin']),
+    getActiveElearningPortalSettings:
+      opts.getActiveElearningPortalSettings ?? getActiveElearningPortalSettings,
+    publishElearningPortalSettings:
+      opts.publishElearningPortalSettings ?? publishElearningPortalSettings,
   }) : null
 
   const inner = contentEnabled ? createElearningPilotRouter({
@@ -376,13 +434,45 @@ export function createElearningPilotRuntime(
     listElearningCreditRules: opts.listElearningCreditRules,
     getElearningCreditWallet: opts.getElearningCreditWallet,
     adjustElearningCredit: opts.adjustElearningCredit,
+    getActiveElearningTitleSnapshot: opts.getActiveElearningTitleSnapshot,
+    publishElearningTitleSnapshot: opts.publishElearningTitleSnapshot,
+    listActiveElearningCertificateTemplates:
+      opts.listActiveElearningCertificateTemplates,
+    publishElearningCertificateTemplate:
+      opts.publishElearningCertificateTemplate,
+    issueElearningCertificate: opts.issueElearningCertificate,
+    listMyElearningCertificates: opts.listMyElearningCertificates,
   }) : null
-  if (!inner && !credit) return null
+  const profile = creditEnabled ? createElearningProfileRouter({
+    db: opts.db,
+    env,
+    viewerId: opts.viewerId ?? viewerId,
+    orgId: opts.orgId ?? orgId,
+    readGuard: opts.readGuard
+      ?? rbacGuardAny(['elearning:read', 'elearning:write', 'elearning:admin']),
+    getElearningLearningProfile:
+      opts.getElearningLearningProfile ?? getElearningLearningProfile,
+  }) : null
+  const analytics = analyticsEnabled ? createElearningAnalyticsRouter({
+    db: opts.db,
+    env,
+    viewerId: opts.viewerId ?? viewerId,
+    orgId: opts.orgId ?? orgId,
+    isGlobalAdmin: opts.isGlobalAdmin ?? isElearningGlobalAdminRequest,
+    statsGuard: opts.statsGuard
+      ?? rbacGuardAny(['elearning:stats', 'elearning:admin']),
+    getElearningDepartmentStats:
+      opts.getElearningDepartmentStats ?? getElearningDepartmentStats,
+  }) : null
+  if (!portal && !inner && !credit && !profile && !analytics) return null
 
   const router = Router()
   router.use('/api/elearning', opts.authenticate ?? authenticate)
   if (content) router.use(content)
+  if (portal) router.use(portal)
   if (inner) router.use(inner)
   if (credit) router.use(credit)
+  if (profile) router.use(profile)
+  if (analytics) router.use(analytics)
   return { router }
 }

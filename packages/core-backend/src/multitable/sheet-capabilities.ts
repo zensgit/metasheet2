@@ -6,6 +6,7 @@
 
 import { listUserPermissions, isAdmin } from '../rbac/service'
 import { APPROVAL_PROJECTION_BASE_ID, restrictApprovalProjectionCapabilitiesPerRow } from './approval-projection-constants'
+import { deriveCanManageFields } from './manage-schema-permission'
 
 // ── Permission code sets ────────────────────────────────────────────
 
@@ -75,6 +76,10 @@ export function hasPermission(permissions: string[], code: string): boolean {
 export function deriveCapabilities(permissions: string[], isAdminRole: boolean): MultitableCapabilities {
   const canRead = isAdminRole || hasPermission(permissions, 'multitable:read') || hasPermission(permissions, 'multitable:write')
   const canWrite = isAdminRole || hasPermission(permissions, 'multitable:write')
+  // Kept byte-for-byte in policy with multitable/access.ts's derivation (this file is that file's
+  // Yjs-bridge / OAPI-token clone): schema management needs `multitable:manage-schema`, not
+  // `multitable:write`. Both call the SAME helper so the two clones cannot drift apart.
+  const canManageFields = deriveCanManageFields(permissions, isAdminRole, hasPermission)
   const canManageSheetAccess = isAdminRole || hasPermission(permissions, 'multitable:share')
   const canComment = isAdminRole || hasPermission(permissions, 'comments:write') || hasPermission(permissions, 'comments:read')
   const canManageAutomation =
@@ -89,7 +94,7 @@ export function deriveCapabilities(permissions: string[], isAdminRole: boolean):
     canCreateRecord: canWrite,
     canEditRecord: canWrite,
     canDeleteRecord: canWrite,
-    canManageFields: canWrite,
+    canManageFields,
     canManageSheetAccess,
     canManageViews: canWrite,
     canComment,

@@ -95,3 +95,13 @@ export function isElearningExamSurfaceEnabled(env: NodeJS.ProcessEnv = process.e
     && isElearningAssessmentSurfaceEnabled(env)
   )
 }
+
+/** Analytics is independent from content and incentive, but always needs master. */
+export function isElearningAnalyticsSurfaceEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return (
+    isElearningEnabled(env)
+    && isElearningFlagEnabled(ELEARNING_ANALYTICS_ENABLED, env)
+  )
+}
