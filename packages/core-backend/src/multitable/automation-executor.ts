@@ -994,6 +994,65 @@ function simulatedGenericClassBPlan(
       }
       break
     }
+    case 'send_dingtalk_group_message': {
+      const groupConfig = config as unknown as SendDingTalkGroupMessageConfig
+      const staticDestinationIds = Array.from(new Set([
+        ...(Array.isArray(groupConfig.destinationIds)
+          ? groupConfig.destinationIds
+            .filter((value): value is string => typeof value === 'string')
+            .map((value) => value.trim())
+            .filter(Boolean)
+          : []),
+        ...(typeof groupConfig.destinationId === 'string' && groupConfig.destinationId.trim()
+          ? [groupConfig.destinationId.trim()]
+          : []),
+      ]))
+      const destinationFieldPaths = normalizeRecipientFieldPaths(
+        groupConfig.destinationIdFieldPath,
+        groupConfig.destinationIdFieldPaths,
+      )
+      const recordDestinationIds = resolveGroupDestinationIdsFromRecord(context.recordData, destinationFieldPaths)
+      const destinationIds = Array.from(new Set([...staticDestinationIds, ...recordDestinationIds]))
+      const titleTemplate = typeof groupConfig.titleTemplate === 'string' ? groupConfig.titleTemplate.trim() : ''
+      const bodyTemplate = typeof groupConfig.bodyTemplate === 'string' ? groupConfig.bodyTemplate.trim() : ''
+      if (!destinationIds.length) {
+        if (destinationFieldPaths.length > 0) {
+          return {
+            actionType: action.type,
+            status: 'failed',
+            error: `No DingTalk destinationIds resolved from record field paths: ${destinationFieldPaths.join(', ')}`,
+            durationMs: 0,
+          }
+        }
+        return {
+          actionType: action.type,
+          status: 'failed',
+          error: 'At least one DingTalk destination or record destination field path is required',
+          durationMs: 0,
+        }
+      }
+      if (!titleTemplate) {
+        return { actionType: action.type, status: 'failed', error: 'DingTalk title template is required', durationMs: 0 }
+      }
+      if (!bodyTemplate) {
+        return { actionType: action.type, status: 'failed', error: 'DingTalk body template is required', durationMs: 0 }
+      }
+      const templateData: Record<string, unknown> = {
+        sheetId: context.sheetId,
+        recordId: context.recordId,
+        actorId: context.actorId ?? '',
+        record: context.recordData,
+      }
+      target = { destinationIds }
+      payload = {
+        title: truncateDingTalkMessageText(
+          renderAutomationTemplate(titleTemplate, templateData).trim(),
+          DINGTALK_MESSAGE_TITLE_MAX_LENGTH,
+        ),
+        body: renderAutomationTemplate(bodyTemplate, templateData).trim(),
+      }
+      break
+    }
     default:
       return null
   }
