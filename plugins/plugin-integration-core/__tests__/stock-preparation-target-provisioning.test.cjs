@@ -20,6 +20,7 @@ const {
   ensureStockPreparationCanonicalTarget,
   ensureStockPreparationSandboxTarget,
   repairStockPreparationCanonicalTarget,
+  assertSandboxObjectId,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-target-provisioning.cjs'))
 
 const LOGICAL_FIELD_IDS = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id)
@@ -179,7 +180,26 @@ async function rejectsWith(fn, code) {
   return err
 }
 
+
+// A refusal that does not say what WOULD be accepted sends the operator to the source. Observed on
+// the first real deployment: a hand-picked sandbox objectId was rejected with 'must use the
+// stock-preparation sandbox namespace' and no way to learn the namespace from the response.
+async function testSandboxNamespaceRefusalNamesTheNamespace() {
+  let caught = null
+  try { assertSandboxObjectId('stock_prep_sandbox_trial') } catch (error) { caught = error }
+  assert.ok(caught, 'a non-namespaced sandbox objectId must be refused')
+  assert.equal(caught.details.reason, 'not_sandbox_namespace')
+  assert.equal(caught.details.requiredNamespace, 'plm_stock_preparation_sandbox')
+  assert.match(caught.message, /plm_stock_preparation_sandbox/)
+  // and the accepted form actually passes, so the message is not merely plausible
+  assert.equal(assertSandboxObjectId('plm_stock_preparation_sandbox_trial'), 'plm_stock_preparation_sandbox_trial')
+  assert.equal(assertSandboxObjectId('plm_stock_preparation_sandbox'), 'plm_stock_preparation_sandbox')
+  // the caller-supplied value is never echoed back
+  assert.equal(caught.message.includes('stock_prep_sandbox_trial'), false)
+  console.log('  testSandboxNamespaceRefusalNamesTheNamespace OK')
+}
 async function main() {
+  await testSandboxNamespaceRefusalNamesTheNamespace()
   // Descriptor is manifest-derived, schema-only, and carries no rows/customer content.
   const descriptor = buildStockPreparationTargetDescriptor()
   assert.equal(descriptor.id, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId)
@@ -379,7 +399,13 @@ async function main() {
     }),
     'TARGET_SANDBOX_OBJECT_ID_INVALID',
   )
-  assert.deepEqual(nonSandboxError.details, { reason: 'not_sandbox_namespace' })
+  // details is a CONTRACT surface, so this stays a deepEqual: a field added here is an intended
+  // change to what callers receive, not an incidental one. requiredNamespace is what makes the
+  // refusal actionable -- an operator gets the accepted namespace from the response itself.
+  assert.deepEqual(nonSandboxError.details, {
+    reason: 'not_sandbox_namespace',
+    requiredNamespace: 'plm_stock_preparation_sandbox',
+  })
   assert.equal(nonSandboxRejectCalls.findObjectSheet.length, 0, 'non-sandbox objectId is rejected before provisioning reads')
   assert.equal(nonSandboxRejectCalls.ensureObject.length, 0, 'non-sandbox objectId is never provisioned as sandbox')
 

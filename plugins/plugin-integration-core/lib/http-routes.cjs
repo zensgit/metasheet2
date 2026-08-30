@@ -72,6 +72,15 @@ const ROUTES = [
   // decision metadata into the one managed supporting ledger table — no plan row is applied and no
   // request-supplied plan/revision is accepted. Admin-gated.
   ['POST', '/api/integration/table-actions/:actionId/confirmation-decisions/reconcile', 'tableActionConfirmationDecisionsReconcile'],
+  // DEPLOYMENT PREFLIGHT — ONE call answering "is this deployment ready to run stock-prep, and if
+  // not, exactly what do I run to fix it". It aggregates the readiness checks below plus the two
+  // things none of them ever mentioned: the customer pack's OWN declared target, and the sandbox
+  // WRITE authorization env allowlist. Read-only: it inspects and it provisions nothing.
+  //
+  // Gated on stock-prep:read (platform admin satisfies it as everywhere else), not on 'admin': the
+  // whole point is that the operator who has to fix the deployment can see what is wrong, and the
+  // response is values-free evidence — ids, counts, env KEY names — with no provisioning power.
+  ['GET', '/api/integration/stock-preparation/preflight', 'stockPreparationPreflight'],
   ['GET', '/api/integration/stock-preparation/target/readiness', 'stockPreparationTargetReadiness'],
   ['POST', '/api/integration/stock-preparation/target/ensure', 'stockPreparationTargetEnsure'],
   ['GET', '/api/integration/stock-preparation/sandbox-target/readiness', 'stockPreparationSandboxTargetReadiness'],
@@ -326,6 +335,12 @@ const {
   isStockPrepPermissionCode,
   satisfiesStockPrepAccess,
 } = require('./stock-preparation-workbench-access.cjs')
+// DEPLOYMENT PREFLIGHT: the one read that aggregates every "this deployment cannot run stock-prep
+// yet" condition and names the literal fix for each. It reuses the inspection functions the four
+// readiness routes already call — it re-derives no notion of "ready" — and it writes nothing.
+const {
+  computeStockPreparationPreflight,
+} = require('./stock-preparation-preflight.cjs')
 const {
   assertAuthoritativeLargeBomExpansion,
   cancelLargeBomBackgroundExpansionJob,
@@ -965,6 +980,11 @@ const VALID_STOCK_PREPARATION_TARGET_REQUEST_KEYS = new Set(['tenantId', 'worksp
 // The confirm body carries the full converged key vocabulary; resolvedValue/resolvedAuxValue are
 // validated and stored by the module since the O1' ledger-semantics slice (Q2-A value unlock).
 const VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_READINESS_QUERY_KEYS = new Set(['tenantId', 'workspaceId'])
+// The preflight answers "is THIS deployment ready", so its only request surface is the scope the
+// neighbouring readiness route already accepts. Deliberately no `projectId` and no `objectId`: the
+// declared target comes from the PACK, and letting a request name one would recreate incident 2 at
+// the API instead of in a chat window.
+const VALID_STOCK_PREPARATION_PREFLIGHT_QUERY_KEYS = new Set(['tenantId', 'workspaceId'])
 const VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_ENSURE_BODY_KEYS = new Set()
 const VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_LIST_QUERY_KEYS = new Set(['tenantId', 'workspaceId', 'projectNo', 'status'])
 const VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_VALUE_ENTRY_QUERY_KEYS = new Set(['tenantId', 'workspaceId', 'decisionId'])
@@ -4911,6 +4931,42 @@ function createHandlers(services, options = {}) {
         action,
         policyStore: context.storage,
         request: requestBody(req),
+      }))
+    },
+
+    // DEPLOYMENT PREFLIGHT — the one call that replaces four readiness polls plus the tribal
+    // knowledge none of them carried.
+    //
+    // Two real incidents on the first customer deployment are the reason it exists: an operator
+    // inventing a sandbox objectId and being refused without being told the namespace, and two
+    // people configuring the same instance in parallel onto DIFFERENT sandbox objectIds so the
+    // installed pack declared one target while the table that existed carried another. The second
+    // is why the declared-target check reads `targetObjectId` off the pack and quotes it in the fix.
+    //
+    // READ TIER, on purpose. The response is values-free evidence and fix INSTRUCTIONS; running any
+    // of them still needs the admin gate the ensure/install routes already carry. Handing the
+    // diagnosis to the operator who has to act on it is the whole deliverable.
+    //
+    // ZERO WRITES: every check delegates to an inspection function (findObjectSheet /
+    // resolveFieldIds) or reads server config. Nothing here ensures, installs or provisions.
+    async stockPreparationPreflight(req, res) {
+      requireAccess(req, STOCK_PREP_READ)
+      const input = normalizeStockPreparationConfirmBody(
+        requestQuery(req),
+        VALID_STOCK_PREPARATION_PREFLIGHT_QUERY_KEYS,
+        'STOCK_PREPARATION_PREFLIGHT_REQUEST_INVALID',
+      )
+      const tenantId = resolveTenantId(req, input)
+      return sendOk(res, await computeStockPreparationPreflight({
+        context,
+        projectId: resolveIntegrationStagingProjectId(tenantId, undefined),
+        // The SAME server-held objects the pack/refresh routes were handed at registration, so what
+        // the preflight reports and what those routes actually do cannot drift.
+        packCatalog: customerPackCatalog,
+        extFieldMapping: stockPreparationExtFieldMapping,
+        config: context && context.config,
+        b2aTrialRegistry,
+        env: process.env,
       }))
     },
 
