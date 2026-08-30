@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp, type Component } from 'vue'
 
@@ -242,6 +244,19 @@ describe('MultitableWorkbench record-restore handler wiring (preview→execute, 
     workbenchMock.activeSheetId.value = 'sheet_archive'
     await flushUi()
     expect(capturedDrawerAttrs!['sheet-id']).toBe('sheet_archive')
+  })
+
+  it('reruns the real-browser restore chain when either load-bearing history component changes', () => {
+    const workflow = readFileSync(
+      join(__dirname, '../../..', '.github/workflows/multitable-browser-verify.yml'),
+      'utf8',
+    )
+    for (const path of [
+      'apps/web/src/multitable/components/MetaRecordHistoryPanel.vue',
+      'apps/web/src/multitable/components/RestorePreviewDialog.vue',
+    ]) {
+      expect(workflow).toContain(`- '${path}'`)
+    }
   })
 
   it('full-record: onRestore opens a PREVIEW (restorePreviewRecord with fieldIds undefined), not a direct restore', async () => {
