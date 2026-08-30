@@ -390,10 +390,18 @@ test('index.ts mounts media routes, defers startWorkers until listen, and stops 
   const stopMethodSrc = src.slice(stopMethodAt, stopOnceMethodAt)
   assert.match(stopMethodSrc, /this\.stopPromise\s*\?\?=\s*this\.stopOnce\s*\(\s*signal\s*\)/)
   assert.match(stopMethodSrc, /return\s+this\.stopPromise/)
+  const stopPromiseAssignments = [...stopMethodSrc.matchAll(/this\.stopPromise\s*(\?\?=|\|\|=|&&=|=(?!=))/g)]
+    .map((match) => match[1])
+  assert.deepEqual(
+    stopPromiseAssignments,
+    ['??='],
+    'stop() must assign stopPromise exactly once with ??= and never overwrite the shared promise',
+  )
   const stopSlice = src.slice(stopOnceMethodAt)
   const startAfterStopRel = stopSlice.search(/\n  async\s+start\s*\(/)
   const stopSrc = startAfterStopRel >= 0 ? stopSlice.slice(0, startAfterStopRel) : stopSlice
   const stopAwaitAt = stopSrc.search(/await\s+this\.stopElearningMediaWorkers\s*\?\.\s*\(\s*\)/)
+  const recoveryStopAt = stopSrc.search(/await\s+this\.recoveryArchiveApplication\.stopWorker\s*\(\s*\)/)
   const poolEndAt = stopSrc.search(/await\s+pool\.end\s*\(\s*\)/)
 
   assert.ok(assignAt >= 0, 'boot must capture startWorkers without invoking it')
@@ -401,10 +409,11 @@ test('index.ts mounts media routes, defers startWorkers until listen, and stops 
   assert.ok(listenAt >= 0, 'server listen must exist')
   assert.ok(startAt >= 0, 'startWorkers must be invoked after listen')
   assert.ok(stopAwaitAt >= 0, 'stopOnce() must await stopElearningMediaWorkers')
+  assert.ok(recoveryStopAt >= 0, 'stopOnce() must await recoveryArchiveApplication.stopWorker')
   assert.ok(poolEndAt >= 0, 'stopOnce() must await pool.end')
   assert.ok(
-    stopAwaitAt < poolEndAt,
-    'stopOnce() must await stopElearningMediaWorkers before await pool.end',
+    stopAwaitAt < recoveryStopAt && recoveryStopAt < poolEndAt,
+    'stopOnce() must stop e-learning media before recovery drain and pool close',
   )
 
   assert.ok(mountAt < listenAt, 'route mount must happen during boot, before listen')
