@@ -470,19 +470,127 @@ describe('AutomationExecutor', () => {
 
     expect(result.status).toBe('success')
     expect(result.dryRun).toBe(true)
-    expect(result.steps).toEqual(rule.actions.map((action) => ({
-      actionType: action.type,
-      status: 'success',
-      simulated: true,
-      output: { dryRun: true, dispatched: false },
-      durationMs: 0,
-    })))
+    expect(result.steps).toEqual([
+      {
+        actionType: 'update_record',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: {
+            target: { sheetId: 'sheet_1', recordId: 'r1' },
+            payload: { status: 'done' },
+          },
+        },
+        durationMs: 0,
+      },
+      ...rule.actions.slice(1).map((action) => ({
+        actionType: action.type,
+        status: 'success' as const,
+        simulated: true,
+        output: { dryRun: true, dispatched: false },
+        durationMs: 0,
+      })),
+    ])
     const sqlCalls = vi.mocked(deps.queryFn).mock.calls.map(([sql]) => String(sql))
     expect(sqlCalls).not.toEqual(expect.arrayContaining([
       expect.stringMatching(/\b(?:INSERT\s+INTO|UPDATE\s+\S+\s+SET|DELETE\s+FROM)\b/i),
     ]))
     expect(deps.fetchFn).not.toHaveBeenCalled()
     expect(emitSpy).not.toHaveBeenCalled()
+  })
+
+  it('simulate returns redacted Class-A targets and payloads without touching a business handler', async () => {
+    const emitSpy = vi.spyOn(deps.eventBus, 'emit')
+    const rule = createMockRule({
+      actions: [
+        {
+          type: 'update_record',
+          config: {
+            fields: { status: 'done', password: 'source-secret' },
+            targetBaseId: 'base_target',
+            targetSheetId: 'sheet_target',
+            targetRecordId: 'record_target',
+          },
+        },
+        { type: 'create_record', config: { sheetId: 'sheet_created', data: { title: 'New' } } },
+        { type: 'delete_record', config: {} },
+        { type: 'lock_record', config: { locked: false } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      { recordId: 'record_sample', data: {}, sheetId: 'sheet_1' },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.steps.map((step) => step.output)).toEqual([
+      {
+        dryRun: true,
+        dispatched: false,
+        plan: {
+          target: { baseId: 'base_target', sheetId: 'sheet_target', recordId: 'record_target' },
+          payload: { status: 'done', password: '<redacted>' },
+        },
+      },
+      {
+        dryRun: true,
+        dispatched: false,
+        plan: { target: { sheetId: 'sheet_created' }, payload: { title: 'New' } },
+      },
+      {
+        dryRun: true,
+        dispatched: false,
+        plan: { target: { sheetId: 'sheet_1', recordId: 'record_sample' } },
+      },
+      {
+        dryRun: true,
+        dispatched: false,
+        plan: {
+          target: { sheetId: 'sheet_1', recordId: 'record_sample' },
+          payload: { locked: false },
+        },
+      },
+    ])
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+    expect(emitSpy).not.toHaveBeenCalled()
+  })
+
+  it('simulate rejects malformed cross-base Class-A targets before reporting a plan', async () => {
+    const rule = createMockRule({
+      actions: [
+        {
+          type: 'delete_record',
+          config: { targetBaseId: 'base_target', targetSheetId: 'sheet_target' },
+        },
+        { type: 'send_notification', config: { userIds: ['should_skip'], message: 'should skip' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      { recordId: 'record_sample', data: {}, sheetId: 'sheet_1' },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('failed')
+    expect(result.steps).toEqual([
+      {
+        actionType: 'delete_record',
+        status: 'failed',
+        error: 'Cross-base delete_record requires targetBaseId + targetSheetId + targetRecordId',
+        durationMs: 0,
+      },
+      { actionType: 'send_notification', status: 'skipped', durationMs: 0 },
+    ])
+    expect(deps.queryFn).not.toHaveBeenCalled()
   })
 
   it('executes send_email action successfully through NotificationService email channel', async () => {
@@ -4497,6 +4605,54 @@ describe('AutomationExecutor — A6-1 job lifecycle hooks', () => {
     ])
     expect(emitSpy).not.toHaveBeenCalled()
     expect(deps.fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('simulate fail-stops a selected branch when its Class-A target is malformed', async () => {
+    const lc = recordingLifecycle()
+    const rule = createMockRule({
+      actions: [{
+        type: 'condition_branch',
+        config: {
+          branches: [{
+            key: 'vip',
+            conditions: { logic: 'and', conditions: [{ fieldId: 'tier', operator: 'equals', value: 'vip' }] },
+            actions: [
+              {
+                type: 'lock_record',
+                config: { targetBaseId: 'base_target', targetSheetId: 'sheet_target' },
+              },
+              { type: 'send_notification', config: { userIds: ['should_skip'], message: 'should skip' } },
+            ],
+          }],
+        },
+      }],
+    })
+
+    const execution = await executor.execute(
+      rule,
+      { recordId: 'r1', data: { tier: 'vip' }, sheetId: 'sheet_1' },
+      lc.factory,
+      undefined,
+      'simulate',
+    )
+
+    expect(execution).toMatchObject({
+      status: 'failed',
+      dryRun: true,
+      steps: [{
+        actionType: 'condition_branch',
+        status: 'failed',
+        error: 'Cross-base lock_record requires targetBaseId + targetSheetId + targetRecordId',
+      }],
+    })
+    expect(lc.calls).toEqual([
+      'start:0',
+      'start:0',
+      'settled:0:failed',
+      'skipped:0',
+      'settled:0:failed',
+    ])
+    expect(deps.queryFn).not.toHaveBeenCalled()
   })
 
   it('A6-3-1: condition_branch fails closed in legacy mode and skips later actions', async () => {
