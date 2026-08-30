@@ -850,6 +850,227 @@ describe('AutomationExecutor', () => {
     expect(deps.fetchFn).not.toHaveBeenCalled()
   })
 
+  it('simulate resolves DingTalk person targets and redacted content without directory or view queries', async () => {
+    const emitSpy = vi.spyOn(deps.eventBus, 'emit')
+    const rule = createMockRule({
+      actions: [
+        {
+          type: 'send_dingtalk_person_message',
+          config: {
+            userIds: ['user_static', ' user_static '],
+            memberGroupIds: ['group_static'],
+            userIdFieldPaths: ['record.assigneeUserIds'],
+            memberGroupIdFieldPath: 'record.watcherGroupIds',
+            titleTemplate: 'Record {{record.title}}',
+            bodyTemplate: 'API_TOKEN={{record.apiToken}} status={{record.status}}',
+            publicFormViewId: 'view_requires_live_form_validation',
+            internalViewId: 'view_requires_live_access_validation',
+          },
+        },
+        { type: 'send_notification', config: { userIds: ['u1'], message: 'After person plan' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      {
+        recordId: 'record_sample',
+        data: {
+          title: 'Sample',
+          status: 'active',
+          apiToken: 'source-secret',
+          assigneeUserIds: ['user_dynamic', { id: 'user_second' }, 'user_static'],
+          watcherGroupIds: [{ memberGroupId: 'group_dynamic' }, 'group_static'],
+        },
+        sheetId: 'sheet_1',
+      },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('success')
+    expect(result.steps).toEqual([
+      {
+        actionType: 'send_dingtalk_person_message',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: {
+            target: {
+              userIds: ['user_static', 'user_dynamic', 'user_second'],
+              memberGroupIds: ['group_static', 'group_dynamic'],
+            },
+            payload: {
+              title: 'Record Sample',
+              body: 'API_TOKEN=<redacted> status=active',
+              linkConfiguration: {
+                publicFormViewConfigured: true,
+                internalViewConfigured: true,
+              },
+            },
+          },
+        },
+        durationMs: 0,
+      },
+      {
+        actionType: 'send_notification',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: { target: { userIds: ['u1'] }, payload: { message: 'After person plan' } },
+        },
+        durationMs: 0,
+      },
+    ])
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+    expect(emitSpy).not.toHaveBeenCalled()
+    const serialized = JSON.stringify(result.steps)
+    expect(serialized).not.toContain('source-secret')
+    expect(serialized).not.toContain('view_requires_live_form_validation')
+    expect(serialized).not.toContain('view_requires_live_access_validation')
+  })
+
+  it('simulate fail-stops an unresolved DingTalk person target before later actions', async () => {
+    const rule = createMockRule({
+      actions: [
+        {
+          type: 'send_dingtalk_person_message',
+          config: {
+            userIdFieldPath: 'record.missingUsers',
+            titleTemplate: 'Record {{record.title}}',
+            bodyTemplate: 'Open form',
+          },
+        },
+        { type: 'send_notification', config: { userIds: ['should_skip'], message: 'should skip' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      { recordId: 'record_sample', data: { title: 'Sample' }, sheetId: 'sheet_1' },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('failed')
+    expect(result.steps).toEqual([
+      {
+        actionType: 'send_dingtalk_person_message',
+        status: 'failed',
+        error: 'No local userIds resolved from record field paths: missingUsers',
+        durationMs: 0,
+      },
+      { actionType: 'send_notification', status: 'skipped', durationMs: 0 },
+    ])
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('simulate resolves the event-fixed DingTalk approval-card target without directory or transport calls', async () => {
+    const emitSpy = vi.spyOn(deps.eventBus, 'emit')
+    const rule = createMockRule({
+      trigger: { type: 'approval.task_created', config: {} },
+      actions: [
+        { type: 'send_dingtalk_approval_card', config: {} },
+        { type: 'send_notification', config: { userIds: ['u1'], message: 'After card plan' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      {
+        eventType: 'approval.task_created',
+        recordId: 'record_sample',
+        data: {},
+        approval: { instanceId: 'approval_1', requestNo: 'AP-1', templateId: 'tpl_1' },
+        task: { nodeKey: 'finance', assigneeUserId: 'user_finance', entryEpoch: 2, sourceStep: 1 },
+      },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('success')
+    expect(result.steps).toEqual([
+      {
+        actionType: 'send_dingtalk_approval_card',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: {
+            target: {
+              approvalInstanceId: 'approval_1',
+              nodeKey: 'finance',
+              assigneeUserId: 'user_finance',
+            },
+            payload: { cardKind: 'approval_task' },
+          },
+        },
+        durationMs: 0,
+      },
+      {
+        actionType: 'send_notification',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: { target: { userIds: ['u1'] }, payload: { message: 'After card plan' } },
+        },
+        durationMs: 0,
+      },
+    ])
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+    expect(emitSpy).not.toHaveBeenCalled()
+  })
+
+  it('simulate fail-stops a DingTalk approval card without the fixed pending-task target', async () => {
+    const rule = createMockRule({
+      trigger: { type: 'approval.task_created', config: {} },
+      actions: [
+        { type: 'send_dingtalk_approval_card', config: {} },
+        { type: 'send_notification', config: { userIds: ['should_skip'], message: 'should skip' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      {
+        eventType: 'approval.task_created',
+        recordId: 'record_sample',
+        data: {},
+        approval: { instanceId: 'approval_1' },
+        task: { nodeKey: 'finance' },
+      },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('failed')
+    expect(result.steps).toEqual([
+      {
+        actionType: 'send_dingtalk_approval_card',
+        status: 'failed',
+        error: 'send_dingtalk_approval_card requires an approval.task_created trigger event',
+        durationMs: 0,
+      },
+      { actionType: 'send_notification', status: 'skipped', durationMs: 0 },
+    ])
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+  })
+
   it('simulate records wait_for_callback as a token-free suspension plan and continues the action chain', async () => {
     const emitSpy = vi.spyOn(deps.eventBus, 'emit')
     const rule = createMockRule({

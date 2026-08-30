@@ -1053,6 +1053,101 @@ function simulatedGenericClassBPlan(
       }
       break
     }
+    case 'send_dingtalk_person_message': {
+      const personConfig = config as unknown as SendDingTalkPersonMessageConfig
+      const recipientFieldPaths = normalizeRecipientFieldPaths(
+        personConfig.userIdFieldPath,
+        personConfig.userIdFieldPaths,
+      )
+      const memberGroupRecipientFieldPaths = normalizeRecipientFieldPaths(
+        personConfig.memberGroupIdFieldPath,
+        personConfig.memberGroupIdFieldPaths,
+      )
+      const userIds = Array.from(new Set([
+        ...normalizeUserIds(personConfig.userIds),
+        ...resolveRecipientUserIdsFromRecord(context.recordData, recipientFieldPaths),
+      ]))
+      const memberGroupIds = Array.from(new Set([
+        ...normalizeUserIds(personConfig.memberGroupIds),
+        ...resolveRecipientMemberGroupIdsFromRecord(context.recordData, memberGroupRecipientFieldPaths),
+      ]))
+      const titleTemplate = typeof personConfig.titleTemplate === 'string'
+        ? personConfig.titleTemplate.trim()
+        : ''
+      const bodyTemplate = typeof personConfig.bodyTemplate === 'string'
+        ? personConfig.bodyTemplate.trim()
+        : ''
+      if (!titleTemplate) {
+        return { actionType: action.type, status: 'failed', error: 'DingTalk title template is required', durationMs: 0 }
+      }
+      if (!bodyTemplate) {
+        return { actionType: action.type, status: 'failed', error: 'DingTalk body template is required', durationMs: 0 }
+      }
+      if (userIds.length === 0 && memberGroupIds.length === 0) {
+        if (recipientFieldPaths.length > 0) {
+          return {
+            actionType: action.type,
+            status: 'failed',
+            error: `No local userIds resolved from record field paths: ${recipientFieldPaths.join(', ')}`,
+            durationMs: 0,
+          }
+        }
+        if (memberGroupRecipientFieldPaths.length > 0) {
+          return {
+            actionType: action.type,
+            status: 'failed',
+            error: `No local userIds resolved from member group record field paths: ${memberGroupRecipientFieldPaths.join(', ')}`,
+            durationMs: 0,
+          }
+        }
+        return {
+          actionType: action.type,
+          status: 'failed',
+          error: 'At least one local userId, memberGroupId, record recipient field path, or member group record field path is required',
+          durationMs: 0,
+        }
+      }
+      const templateData: Record<string, unknown> = {
+        sheetId: context.sheetId,
+        recordId: context.recordId,
+        actorId: context.actorId ?? '',
+        record: context.recordData,
+      }
+      target = { userIds, memberGroupIds }
+      payload = {
+        title: truncateDingTalkMessageText(
+          renderAutomationTemplate(titleTemplate, templateData).trim(),
+          DINGTALK_MESSAGE_TITLE_MAX_LENGTH,
+        ),
+        body: renderAutomationTemplate(bodyTemplate, templateData).trim(),
+        linkConfiguration: {
+          publicFormViewConfigured: Boolean(nonBlankConfigString(personConfig.publicFormViewId)),
+          internalViewConfigured: Boolean(nonBlankConfigString(personConfig.internalViewId)),
+        },
+      }
+      break
+    }
+    case 'send_dingtalk_approval_card': {
+      const event = context.triggerEvent as {
+        eventType?: unknown
+        approval?: { instanceId?: unknown }
+        task?: { nodeKey?: unknown; assigneeUserId?: unknown }
+      } | null
+      const approvalInstanceId = nonBlankConfigString(event?.approval?.instanceId)
+      const nodeKey = nonBlankConfigString(event?.task?.nodeKey)
+      const assigneeUserId = nonBlankConfigString(event?.task?.assigneeUserId)
+      if (event?.eventType !== 'approval.task_created' || !approvalInstanceId || !nodeKey || !assigneeUserId) {
+        return {
+          actionType: action.type,
+          status: 'failed',
+          error: 'send_dingtalk_approval_card requires an approval.task_created trigger event',
+          durationMs: 0,
+        }
+      }
+      target = { approvalInstanceId, nodeKey, assigneeUserId }
+      payload = { cardKind: 'approval_task' }
+      break
+    }
     default:
       return null
   }
