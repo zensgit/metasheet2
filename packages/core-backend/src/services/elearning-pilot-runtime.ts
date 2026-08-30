@@ -10,9 +10,13 @@
 import type { Request, RequestHandler } from 'express'
 import { Router, type Router as ExpressRouter } from 'express'
 
-import { isElearningContentSurfaceEnabled } from '../elearning/feature-flags'
+import {
+  isElearningAnalyticsSurfaceEnabled,
+  isElearningContentSurfaceEnabled,
+} from '../elearning/feature-flags'
 import { authenticate } from '../middleware/auth'
 import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
+import { createElearningAnalyticsRouter } from '../routes/elearning-analytics'
 import { createElearningCreditRouter } from '../routes/elearning-credit'
 import { createElearningContentRouter } from '../routes/elearning-content'
 import { createElearningPilotRouter } from '../routes/elearning-pilot'
@@ -59,6 +63,10 @@ import type {
   getActiveElearningTitleSnapshot,
   publishElearningTitleSnapshot,
 } from './elearning-title-surface'
+import {
+  getElearningDepartmentStats,
+  type ElearningDepartmentStatsDb,
+} from './elearning-department-stats'
 import type {
   ElearningDirectAssignmentDb,
   ElearningDirectAssignmentResult,
@@ -181,13 +189,15 @@ export interface ElearningPilotRuntimeOptions {
     ElearningManualGradingDb &
     ElearningManualGradingReadDb &
     ElearningCreditSurfaceDb &
-    ElearningLearningProfileDb
+    ElearningLearningProfileDb &
+    ElearningDepartmentStatsDb
   env?: NodeJS.ProcessEnv
   authenticate?: RequestHandler
   adminGuard?: RequestHandler
   readGuard?: RequestHandler
   writeGuard?: RequestHandler
   gradeGuard?: RequestHandler
+  statsGuard?: RequestHandler
   viewerId?: (req: Request) => string | null
   orgId?: (req: Request) => string | null
   isGlobalAdmin?: (req: Request) => boolean
@@ -286,6 +296,7 @@ export interface ElearningPilotRuntimeOptions {
   issueElearningCertificate?: typeof issueElearningCertificate
   listMyElearningCertificates?: typeof listMyElearningCertificates
   getElearningLearningProfile?: typeof getElearningLearningProfile
+  getElearningDepartmentStats?: typeof getElearningDepartmentStats
 }
 
 function viewerId(req: Request): string | null {
@@ -309,7 +320,8 @@ export function createElearningPilotRuntime(
   const env = opts.env ?? process.env
   const contentEnabled = isElearningContentSurfaceEnabled(env)
   const creditEnabled = isElearningCreditSurfaceEnabled(env)
-  if (!contentEnabled && !creditEnabled) return null
+  const analyticsEnabled = isElearningAnalyticsSurfaceEnabled(env)
+  if (!contentEnabled && !creditEnabled && !analyticsEnabled) return null
 
   const issuePlayback =
     opts.issueElearningMediaPlaybackTicket ??
@@ -418,7 +430,18 @@ export function createElearningPilotRuntime(
     getElearningLearningProfile:
       opts.getElearningLearningProfile ?? getElearningLearningProfile,
   }) : null
-  if (!inner && !credit && !profile) return null
+  const analytics = analyticsEnabled ? createElearningAnalyticsRouter({
+    db: opts.db,
+    env,
+    viewerId: opts.viewerId ?? viewerId,
+    orgId: opts.orgId ?? orgId,
+    isGlobalAdmin: opts.isGlobalAdmin ?? isElearningGlobalAdminRequest,
+    statsGuard: opts.statsGuard
+      ?? rbacGuardAny(['elearning:stats', 'elearning:admin']),
+    getElearningDepartmentStats:
+      opts.getElearningDepartmentStats ?? getElearningDepartmentStats,
+  }) : null
+  if (!inner && !credit && !profile && !analytics) return null
 
   const router = Router()
   router.use('/api/elearning', opts.authenticate ?? authenticate)
@@ -426,5 +449,6 @@ export function createElearningPilotRuntime(
   if (inner) router.use(inner)
   if (credit) router.use(credit)
   if (profile) router.use(profile)
+  if (analytics) router.use(analytics)
   return { router }
 }
