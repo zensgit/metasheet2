@@ -243,6 +243,8 @@
 
     <ElearningCreditAdminSection v-if="incentiveEnabled" />
 
+    <ElearningAnalyticsAdminSection v-if="analyticsEnabled" />
+
     <div class="elearning-admin__assessment-toggle">
       <button
         type="button"
@@ -274,6 +276,7 @@ import {
   type ElearningQuestionType,
 } from '../services/elearning'
 import ElearningAssessmentAdminSection from './ElearningAssessmentAdminSection.vue'
+import ElearningAnalyticsAdminSection from './ElearningAnalyticsAdminSection.vue'
 import ElearningContentAdminSection from './ElearningContentAdminSection.vue'
 import ElearningCreditAdminSection from './ElearningCreditAdminSection.vue'
 import {
@@ -319,6 +322,7 @@ const assigned = ref(false)
 const busy = ref(false)
 const ready = ref(false)
 const incentiveEnabled = ref(false)
+const analyticsEnabled = ref(false)
 const contentEnabled = ref(false)
 const assignmentEnabled = ref(false)
 const status = ref('')
@@ -518,8 +522,15 @@ async function ensureV01Ready(): Promise<void> {
     && capabilities.capabilities.assignment === true
   incentiveEnabled.value = capabilities.enabled === true
     && capabilities.capabilities.incentive === true
+  analyticsEnabled.value = capabilities.enabled === true
+    && capabilities.capabilities.analytics === true
   ready.value = isElearningV01Ready(capabilities)
-  if (!ready.value && !contentEnabled.value && !incentiveEnabled.value) {
+  if (
+    !ready.value
+    && !contentEnabled.value
+    && !incentiveEnabled.value
+    && !analyticsEnabled.value
+  ) {
     throw new ElearningApiError('feature_disabled', 404)
   }
 }
