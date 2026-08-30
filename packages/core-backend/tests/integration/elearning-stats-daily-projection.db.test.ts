@@ -342,6 +342,13 @@ describe('e-learning stats daily PostgreSQL authority', () => {
     await migrate(statsDailyUp)
     await assertElearningStatsDailySchema(database)
 
+    expect(await firstPool.query(
+      `SELECT format_type(atttypid, atttypmod) AS type
+         FROM pg_attribute
+        WHERE attrelid = 'elearning_stats_daily'::regclass
+          AND attname = 'credit_average'`,
+    ).then((result) => result.rows)).toEqual([{ type: 'numeric(30,9)' }])
+
     await mutateConstraint(
       firstPool,
       'elearning_stats_daily_threshold_chk',

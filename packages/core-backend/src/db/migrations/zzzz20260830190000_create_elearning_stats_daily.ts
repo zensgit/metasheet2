@@ -28,7 +28,7 @@ const EXPECTED_COLUMNS = [
   { name: 'assigned_count', type: 'bigint', nullable: true, default: null },
   { name: 'completed_count', type: 'bigint', nullable: true, default: null },
   { name: 'completion_rate', type: 'numeric(12,9)', nullable: true, default: null },
-  { name: 'credit_average', type: 'numeric(24,9)', nullable: true, default: null },
+  { name: 'credit_average', type: 'numeric(30,9)', nullable: true, default: null },
   { name: 'credit_total', type: 'bigint', nullable: true, default: null },
   { name: 'exam_participant_count', type: 'bigint', nullable: true, default: null },
   { name: 'learner_count', type: 'bigint', nullable: true, default: null },
@@ -87,6 +87,7 @@ type CatalogConstraint = {
   delete_action: string
   update_action: string
   match_type: string
+  referenced_in_current_schema: boolean | null
 }
 
 function canonicalSql(value: string): string {
@@ -157,11 +158,17 @@ async function readConstraint(
       constraint_row.convalidated AS validated,
       constraint_row.confdeltype::text AS delete_action,
       constraint_row.confupdtype::text AS update_action,
-      constraint_row.confmatchtype::text AS match_type
+      constraint_row.confmatchtype::text AS match_type,
+      CASE
+        WHEN constraint_row.confrelid = 0 THEN NULL
+        ELSE referenced_namespace.nspname = current_schema()
+      END AS referenced_in_current_schema
       FROM pg_constraint constraint_row
       JOIN pg_class table_row ON table_row.oid = constraint_row.conrelid
       JOIN pg_namespace namespace ON namespace.oid = table_row.relnamespace
       LEFT JOIN pg_class referenced_table ON referenced_table.oid = constraint_row.confrelid
+      LEFT JOIN pg_namespace referenced_namespace
+        ON referenced_namespace.oid = referenced_table.relnamespace
      WHERE namespace.nspname = current_schema()
        AND table_row.relname = ${ELEARNING_STATS_DAILY_TABLE}
        AND constraint_row.conname = ${name}
@@ -188,6 +195,7 @@ async function assertConstraint(
     || actual.type !== expected.type
     || actual.columns.join('\0') !== expected.columns.join('\0')
     || actual.referenced_table !== (expected.referencedTable ?? null)
+    || (expected.referencedTable !== undefined && !actual.referenced_in_current_schema)
     || (actual.referenced_columns ?? []).join('\0')
       !== (expected.referencedColumns ?? []).join('\0')
     || actual.deferrable
@@ -355,7 +363,7 @@ async function createSchema(db: Kysely<unknown>): Promise<void> {
       assigned_count bigint,
       completed_count bigint,
       completion_rate numeric(12, 9),
-      credit_average numeric(24, 9),
+      credit_average numeric(30, 9),
       credit_total bigint,
       exam_participant_count bigint,
       learner_count bigint,

@@ -204,6 +204,16 @@ describe('e-learning stats daily projection', () => {
     expect(write?.params.slice(11)).toEqual(Array.from({ length: 10 }, () => null))
   })
 
+  it('preserves the largest policy-valid credit average in projection parameters', async () => {
+    const db = new ScriptDb({
+      aggregate: aggregate({ credit_total: String(Number.MAX_SAFE_INTEGER) }),
+    })
+    await projectElearningDepartmentStatsDaily(db, input(), ENABLED)
+    const write = db.transactionCalls.at(-1)
+    expect(write?.params[14]).toBe('1801439850948198.250000000')
+    expect(write?.params[15]).toBe(String(Number.MAX_SAFE_INTEGER))
+  })
+
   it('treats identical materialized content as a no-op despite source clock drift', async () => {
     const first = new ScriptDb()
     await projectElearningDepartmentStatsDaily(first, input(), ENABLED)
