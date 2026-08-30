@@ -1580,6 +1580,10 @@ export default defineConfig({
       // Excluded from no-DB collection and wired whole-file post-migrate.
       'tests/integration/elearning-portal-settings.db.test.ts',
       'tests/integration/elearning-stats-daily-projection.db.test.ts',
+      // E-learning L3.5 objective practice authority requires real PostgreSQL
+      // for immutable sessions/answers, request replay, and wrong-book projection.
+      // Excluded from no-DB collection and wired whole-file post-migrate.
+      'tests/integration/elearning-question-practice.db.test.ts',
       // E-learning V0.1 exam service gate. Requires real PostgreSQL (start/
       // submit + advisory lock). Excluded from the no-DB job so a missing
       // DATABASE_URL cannot skip-green it; wired as a WHOLE FILE sibling of
