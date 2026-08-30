@@ -1522,3 +1522,226 @@ export function canReadFromSystem(system: WorkbenchExternalSystem): boolean {
 export function canWriteToSystem(system: WorkbenchExternalSystem): boolean {
   return system.role === 'target' || system.role === 'bidirectional'
 }
+
+/* ==========================================================================================
+ * MetaSheet bulk item-property maintenance grid
+ * Taskbook: docs/development/DEVELOPMENT_TASK_METASHEET_BULK_GRID_CONSUMER_20260829.md
+ *
+ * §2 (Family I): every call carries the CALLER's own PLM credential, passed in explicitly by
+ * the component on each invocation and never cached in this module. §8 forbids caching or
+ * sharing any of these responses across viewers — MetaSheet is collaborative, and one user's
+ * row_errors report rendered for another is a privilege leak by construction.
+ * ========================================================================================== */
+
+/** A declared property of the target ItemType. The grid's column set, in PLM's declared order. */
+export interface PlmBulkGridProperty {
+  name: string
+  label?: string
+  type?: string
+  required?: boolean
+  length?: number | null
+}
+
+export interface PlmBulkGridRowError {
+  row_number: number
+  property_name?: string
+  error_code: string
+  message: string
+}
+
+/** The dry-run / commit report. `ready` is the ONLY success discriminator (§3). */
+export interface PlmBulkGridReport {
+  ready: boolean
+  row_errors: PlmBulkGridRowError[]
+  would_create?: number
+  would_update?: number
+  unknown_columns?: string[]
+  created_ids?: string[]
+  updated_ids?: string[]
+}
+
+export type PlmBulkGridSchemaResult =
+  | { ok: true; properties: PlmBulkGridProperty[]; declaredColumns: string[]; commitEnabled: boolean }
+  | { ok: false; status: number; reason: string; message: string }
+
+export type PlmBulkGridSubmitResult =
+  | { ok: true; report: PlmBulkGridReport; mustReload?: boolean }
+  | { ok: false; status: number; reason: string; message: string; report?: PlmBulkGridReport }
+
+function bulkGridHeaders(callerPlmToken: string, extra?: Record<string, string>): Record<string, string> {
+  return {
+    'Content-Type': 'application/json',
+    // The caller's OWN PLM credential (§2). Distinct from MetaSheet's Authorization header,
+    // which is a different identity in a different system.
+    'X-PLM-Authorization': `Bearer ${callerPlmToken}`,
+    ...(extra || {}),
+  }
+}
+
+function failure(status: number, body: Record<string, unknown> | null, fallback: string): PlmBulkGridSubmitResult {
+  return {
+    ok: false,
+    status,
+    reason: typeof body?.reason === 'string' && body.reason.trim() ? body.reason.trim() : 'request-failed',
+    message: typeof body?.error === 'string' && body.error.trim() ? body.error.trim() : fallback,
+    ...(body && typeof body.ready === 'boolean'
+      ? { report: normalizeBulkGridReport(body) }
+      : {}),
+  }
+}
+
+export function normalizeBulkGridReport(payload: unknown): PlmBulkGridReport {
+  const source = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+  const rawErrors = Array.isArray(source.row_errors) ? source.row_errors : []
+  return {
+    // Fail closed: anything but a literal `true` is NOT ready.
+    ready: source.ready === true,
+    row_errors: rawErrors
+      .map((entry) => {
+        const record = (entry && typeof entry === 'object' ? entry : {}) as Record<string, unknown>
+        const rowNumber = Number(record.row_number)
+        if (!Number.isFinite(rowNumber)) return null
+        return {
+          row_number: rowNumber,
+          ...(typeof record.property_name === 'string' ? { property_name: record.property_name } : {}),
+          // Unrecognized codes are PRESERVED and rendered -- §3.1 declares the set open.
+          error_code: typeof record.error_code === 'string' ? record.error_code : 'UNKNOWN',
+          message: typeof record.message === 'string' ? record.message : '',
+        }
+      })
+      .filter((entry): entry is PlmBulkGridRowError => entry !== null),
+    ...(typeof source.would_create === 'number' ? { would_create: source.would_create } : {}),
+    ...(typeof source.would_update === 'number' ? { would_update: source.would_update } : {}),
+    ...(Array.isArray(source.unknown_columns)
+      ? { unknown_columns: source.unknown_columns.filter((c): c is string => typeof c === 'string') }
+      : {}),
+    ...(Array.isArray(source.created_ids)
+      ? { created_ids: source.created_ids.filter((c): c is string => typeof c === 'string') }
+      : {}),
+    ...(Array.isArray(source.updated_ids)
+      ? { updated_ids: source.updated_ids.filter((c): c is string => typeof c === 'string') }
+      : {}),
+  }
+}
+
+/**
+ * Fetch the target ItemType's FULL declared property list. The UI renders these as columns and
+ * may let the operator hide some visually — but hiding is presentation only: the server
+ * re-fetches this list and serializes from it at submission time (N1-b), so a hidden column can
+ * never go missing from the write.
+ */
+export async function getPlmBulkGridSchema(
+  dataSourceId: string,
+  itemTypeId: string,
+  callerPlmToken: string,
+): Promise<PlmBulkGridSchemaResult> {
+  const dsId = dataSourceId.trim()
+  const typeId = itemTypeId.trim()
+  if (!dsId || !typeId || !callerPlmToken.trim()) {
+    return { ok: false, status: 400, reason: 'invalid-request', message: '缺少数据源、对象类型或 PLM 凭据' }
+  }
+  const response = await apiFetch(
+    `/api/plm-workbench/data-sources/${encodeURIComponent(dsId)}/bulk-import/schema/${encodeURIComponent(typeId)}`,
+    { headers: bulkGridHeaders(callerPlmToken.trim()), suppressUnauthorizedRedirect: true },
+  )
+  const body = await response.json().catch(() => null) as Record<string, unknown> | null
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      reason: typeof body?.reason === 'string' ? body.reason : 'schema-unavailable',
+      message: typeof body?.error === 'string' ? body.error : `无法读取对象类型定义 (${response.status})`,
+    }
+  }
+  const properties = Array.isArray(body?.properties) ? (body!.properties as PlmBulkGridProperty[]) : []
+  return {
+    ok: true,
+    properties,
+    declaredColumns: Array.isArray(body?.declared_columns)
+      ? (body!.declared_columns as string[])
+      : properties.map((p) => p.name),
+    commitEnabled: body?.commit_enabled === true,
+  }
+}
+
+/**
+ * MAKER half — validate. Never writes. Posts ROWS, not a file: the server serializes from the
+ * freshly-fetched declared list so a virtualized/hidden column cannot be dropped (N1).
+ */
+export async function dryRunPlmBulkGrid(
+  dataSourceId: string,
+  itemTypeId: string,
+  rows: Array<Record<string, unknown>>,
+  callerPlmToken: string,
+  matchProperty?: string,
+): Promise<PlmBulkGridSubmitResult> {
+  const dsId = dataSourceId.trim()
+  if (!dsId || !itemTypeId.trim() || !callerPlmToken.trim()) {
+    return { ok: false, status: 400, reason: 'invalid-request', message: '缺少数据源、对象类型或 PLM 凭据' }
+  }
+  const response = await apiFetch(
+    `/api/plm-workbench/data-sources/${encodeURIComponent(dsId)}/bulk-import/dry-run`,
+    {
+      method: 'POST',
+      headers: bulkGridHeaders(callerPlmToken.trim()),
+      body: JSON.stringify({
+        item_type_id: itemTypeId.trim(),
+        rows,
+        ...(matchProperty ? { match_property: matchProperty } : {}),
+      }),
+      suppressUnauthorizedRedirect: true,
+    },
+  )
+  const body = await response.json().catch(() => null) as Record<string, unknown> | null
+  if (!response.ok) {
+    return failure(response.status, body, `校验失败 (${response.status})`)
+  }
+  // A 200 here may still be a TOTAL REJECTION (ready:false). The caller branches on `ready`.
+  return { ok: true, report: normalizeBulkGridReport(body) }
+}
+
+/**
+ * CHECKER half — write. Requires a Yuantus ADMIN caller; the server (and ultimately Yuantus's
+ * own `require_admin_user`) is authoritative, and this client affordance is only a hint.
+ *
+ * `idempotencyKey` must be a FRESH key whenever any cell changed since the last attempt (§11):
+ * reusing one after an edit is a 409 by design, precisely so an uncertain outcome can never be
+ * resolved by silently writing something different under the same key.
+ */
+export async function commitPlmBulkGrid(
+  dataSourceId: string,
+  itemTypeId: string,
+  rows: Array<Record<string, unknown>>,
+  callerPlmToken: string,
+  idempotencyKey: string,
+  matchProperty?: string,
+): Promise<PlmBulkGridSubmitResult> {
+  const dsId = dataSourceId.trim()
+  const idem = idempotencyKey.trim()
+  if (!dsId || !itemTypeId.trim() || !callerPlmToken.trim() || !idem) {
+    return { ok: false, status: 400, reason: 'invalid-request', message: '缺少数据源、对象类型、PLM 凭据或幂等键' }
+  }
+  const response = await apiFetch(
+    `/api/plm-workbench/data-sources/${encodeURIComponent(dsId)}/bulk-import/commit`,
+    {
+      method: 'POST',
+      headers: bulkGridHeaders(callerPlmToken.trim(), { 'Idempotency-Key': idem }),
+      body: JSON.stringify({
+        item_type_id: itemTypeId.trim(),
+        rows,
+        ...(matchProperty ? { match_property: matchProperty } : {}),
+      }),
+      suppressUnauthorizedRedirect: true,
+    },
+  )
+  const body = await response.json().catch(() => null) as Record<string, unknown> | null
+  if (!response.ok) {
+    return failure(response.status, body, `提交失败 (${response.status})`)
+  }
+  return {
+    ok: true,
+    report: normalizeBulkGridReport(body),
+    // N2-b/N2-c: the server tells us never to trust the local buffer after a write.
+    mustReload: body?.must_reload === true,
+  }
+}
