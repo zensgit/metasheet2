@@ -21,6 +21,8 @@ import {
   runProbe,
   parseArgs,
   main,
+  coerceRowCount,
+  isBareIpAddress,
 } from './source-discovery-probe.mjs'
 
 // ---------------------------------------------------------------------------
@@ -457,5 +459,49 @@ describe('main()', () => {
       PROBE_MSSQL_PASSWORD: 'p',
     })
     assert.equal(code, 2)
+  })
+})
+
+describe('live-instance regressions (all four found by the first real SQL Server run)', () => {
+  test('a bigint row count arriving as a STRING is still a row count', () => {
+    // SUM() over sys.partitions.rows returns bigint, which the driver hands back as a string. A
+    // typeof check therefore yielded null for EVERY table; because unknown counts are treated as
+    // over-cap (fail-closed), the run screened out every table and reported ZERO dictionaries --
+    // a false negative shaped exactly like a valid answer. This is the guard against that.
+    assert.equal(coerceRowCount('30'), 30)
+    assert.equal(coerceRowCount(' 500 '), 500)
+    assert.equal(coerceRowCount(30), 30)
+    assert.equal(coerceRowCount(30n), 30)
+    assert.equal(coerceRowCount('abc'), null)
+    assert.equal(coerceRowCount(null), null)
+    assert.equal(coerceRowCount(undefined), null)
+  })
+
+  test('a string row count under the cap makes the table samplable', () => {
+    const table = { schema: 'dbo', name: 'Dict', rowCount: coerceRowCount('30'), columns: [] }
+    assert.equal(isSmallTable(table, SMALL_TABLE_ROW_CAP), true)
+  })
+
+  test('a bare IP target is recognised so TLS is not asked to verify an address', () => {
+    // encrypt:true against an IP fails before a single catalog row is read: the driver refuses to
+    // set the TLS servername to an address. On-prem PLM/ERP hosts are reached by IP.
+    assert.equal(isBareIpAddress('10.0.0.1'), true)
+    assert.equal(isBareIpAddress(' 192.168.1.10 '), true)
+    assert.equal(isBareIpAddress('[2001:db8::1]'), true)
+    assert.equal(isBareIpAddress('plm.internal.example'), false)
+    assert.equal(isBareIpAddress(''), false)
+    assert.equal(isBareIpAddress(undefined), false)
+  })
+
+  test('the values-free check compares whole leaves, not substrings', () => {
+    // A guarded value that is an ordinary word ('workshop') is a substring of an identifier the
+    // report is entitled to emit ('base_workshop'). Substring matching failed the run closed on
+    // the tool's own output; equality still catches a value leaked as its own leaf.
+    const report = { schemaInventory: [{ schema: 'dbo', name: 'T', columns: [{ name: 'base_workshop' }] }], dictionaries: [] }
+    assert.doesNotThrow(() => assertValuesFree(report, { leakGuardValues: new Set(['workshop']) }))
+    assert.throws(
+      () => assertValuesFree({ schemaInventory: [], dictionaries: [], note: 'workshop' }, { leakGuardValues: new Set(['workshop']) }),
+      /VALUES_FREE_SELF_CHECK_FAILED/,
+    )
   })
 })
