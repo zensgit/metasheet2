@@ -1458,6 +1458,8 @@ export interface MultitableAutomationExecutionsTable {
   // A5 retry provenance columns (nullable; set only on a retry-created execution).
   rerun_of_execution_id: string | null
   initiated_by: string | null
+  // #4196 §5/V5: lineage-root CAS marker distinguishing a genuine first retry from missing ledger evidence.
+  first_retry_attempted_at: Date | string | null
   created_at: CreatedAt
 }
 

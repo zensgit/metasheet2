@@ -25,6 +25,7 @@
 import { createHash } from 'node:crypto'
 
 import { assertInTransaction, type TransactionalQueryable } from './pg-transaction-guard'
+import { enumerateRuleActions } from './automation-rule-fingerprint'
 
 export type ExecutionLedgerKind = 'execution' | 'test_run'
 
@@ -36,6 +37,84 @@ export type ExecutionLedgerKind = 'execution' | 'test_run'
  */
 export function isClassAExecutionClaimEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.AUTOMATION_CLASSA_CLAIM_ENABLED === 'true'
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000
+export const AUTOMATION_ACTION_LEDGER_RETENTION_DAYS = 7
+export const AUTOMATION_ACTION_LEDGER_SWEEP_INTERVAL_MS = DAY_MS
+
+const CLASS_A_ACTION_TYPES: ReadonlySet<string> = new Set([
+  'create_record',
+  'update_record',
+  'delete_record',
+  'lock_record',
+])
+
+export type RetryWindowDecision = 'eligible' | 'expired' | 'invalid'
+
+export function automationActionLedgerRetentionCutoffIso(nowMs = Date.now()): string {
+  return new Date(nowMs - AUTOMATION_ACTION_LEDGER_RETENTION_DAYS * DAY_MS).toISOString()
+}
+
+/** Exact cutoff is eligible because the sweep deletes only rows strictly older than the same cutoff. */
+export function classifyRetryWindow(triggeredAt: string, nowMs = Date.now()): RetryWindowDecision {
+  const triggeredAtMs = Date.parse(triggeredAt)
+  if (!Number.isFinite(triggeredAtMs) || triggeredAtMs > nowMs) return 'invalid'
+  return triggeredAtMs < nowMs - AUTOMATION_ACTION_LEDGER_RETENTION_DAYS * DAY_MS ? 'expired' : 'eligible'
+}
+
+export function ruleHasClassAActions(actions: ReadonlyArray<{ type: string; config?: unknown }> | undefined): boolean {
+  for (const { action } of enumerateRuleActions(actions)) {
+    if (CLASS_A_ACTION_TYPES.has(action.type)) return true
+  }
+  return false
+}
+
+export type RetryEvidenceDecision = 'first_retry' | 'evidence_present' | 'evidence_missing'
+
+export type RetryEvidenceQuery = (
+  sql: string,
+  params?: unknown[],
+) => Promise<{ rows: unknown[]; rowCount?: number | null }>
+
+/**
+ * Atomically claim the lineage's first retry. A legacy retry child also proves this is not the first retry,
+ * even when the marker was introduced later. Every non-first retry must retain at least one Class-A claim.
+ */
+export async function claimRetryEvidence(
+  query: RetryEvidenceQuery,
+  rootExecutionId: string,
+): Promise<RetryEvidenceDecision> {
+  if (typeof rootExecutionId !== 'string' || !NON_BLANK.test(rootExecutionId)) {
+    throw new RangeError('claimRetryEvidence: rootExecutionId must be non-blank')
+  }
+
+  const claimed = await query(
+    `UPDATE multitable_automation_executions AS root
+        SET first_retry_attempted_at = now()
+      WHERE root.id = $1
+        AND root.first_retry_attempted_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1
+            FROM multitable_automation_executions AS child
+           WHERE child.rerun_of_execution_id = root.id
+        )
+      RETURNING root.id`,
+    [rootExecutionId],
+  )
+  if (Number(claimed.rowCount ?? claimed.rows.length) === 1) return 'first_retry'
+
+  const evidence = await query(
+    `SELECT EXISTS (
+       SELECT 1
+         FROM meta_automation_action_applied
+        WHERE kind = 'execution' AND root_execution_id = $1
+     ) AS has_evidence`,
+    [rootExecutionId],
+  )
+  return (evidence.rows[0] as { has_evidence?: unknown } | undefined)?.has_evidence === true
+    ? 'evidence_present'
+    : 'evidence_missing'
 }
 
 const LEDGER_KINDS: ReadonlySet<string> = new Set<ExecutionLedgerKind>(['execution', 'test_run'])

@@ -45,6 +45,7 @@ const BASE = `base_ca_${TS}`
 const SHEET = `sheet_ca_${TS}`
 const SHEET_CRASH = `sheet_ca_crash_${TS}`
 const SHEET_OFF = `sheet_ca_off_${TS}`
+const SHEET_RETRY = `sheet_ca_retry_${TS}`
 // G5 cross-base: a SECOND base OWNER owns (so the write-gate grants base-write) — the not-found target lives here.
 const BASE_XB = `base_ca_xb_${TS}`
 const SHEET_XB = `sheet_ca_xb_${TS}`
@@ -74,6 +75,33 @@ function ruleFor(
     createdBy: OWNER,
     createdAt: new Date().toISOString(),
   } as unknown as AutomationRule
+}
+
+async function persistRetryRule(ruleId: string, value: string): Promise<void> {
+  await q(
+    `INSERT INTO automation_rules
+      (id, sheet_id, name, trigger_type, trigger_config, action_type, action_config, enabled, created_by)
+     VALUES ($1,$2,$3,'record.created','{}'::jsonb,'create_record',$4::jsonb,true,$5)`,
+    [
+      ruleId,
+      SHEET_RETRY,
+      'Retry evidence rule',
+      JSON.stringify({ sheetId: SHEET_RETRY, data: { [`${FLD_TITLE}_${SHEET_RETRY}`]: value } }),
+      OWNER,
+    ],
+  )
+}
+
+async function persistFailedRoot(rootId: string, ruleId: string, triggeredAt: string): Promise<void> {
+  await realService().logs.record({
+    id: rootId,
+    ruleId,
+    triggeredBy: 'event',
+    triggeredAt,
+    status: 'failed',
+    steps: [],
+    triggerEvent: { actorId: OWNER, data: {} },
+  })
 }
 
 const recordsIn = async (sheetId: string): Promise<string[]> =>
@@ -144,6 +172,7 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
       [SHEET, 'Class-A Sheet'],
       [SHEET_CRASH, 'Class-A Crash Sheet'],
       [SHEET_OFF, 'Class-A Flag-Off Sheet'],
+      [SHEET_RETRY, 'Class-A Retry Evidence Sheet'],
     ]) {
       await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [sheet, BASE, name])
       await q(`INSERT INTO meta_fields (id, sheet_id, name, type, "order") VALUES ($1,$2,'Title','string',0)`, [
@@ -157,7 +186,7 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
   })
 
   afterAll(async () => {
-    for (const sheet of [SHEET, SHEET_CRASH, SHEET_OFF]) {
+    for (const sheet of [SHEET, SHEET_CRASH, SHEET_OFF, SHEET_RETRY]) {
       await q(
         'DELETE FROM meta_record_revisions WHERE record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)',
         [sheet],
@@ -175,6 +204,33 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
   test('sentinel: DATABASE_URL is set and the flag is ON', () => {
     expect(process.env.DATABASE_URL).toBeTruthy()
     expect(process.env[FLAG]).toBe('true')
+  })
+
+  test('V5 migration installs the retry marker and both bounded-query indexes', async () => {
+    const column = await q(
+      `SELECT data_type
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'multitable_automation_executions'
+          AND column_name = 'first_retry_attempted_at'`,
+    )
+    expect(column.rows).toEqual([{ data_type: 'timestamp with time zone' }])
+
+    const indexes = await q(
+      `SELECT indexname
+         FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND indexname = ANY($1::text[])
+        ORDER BY indexname`,
+      [[
+        'idx_automation_action_applied_applied_at',
+        'idx_automation_executions_rerun_parent',
+      ]],
+    )
+    expect(indexes.rows).toEqual([
+      { indexname: 'idx_automation_action_applied_applied_at' },
+      { indexname: 'idx_automation_executions_rerun_parent' },
+    ])
   })
 
   test('a persisted manual test execution cannot enter whole-execution retry', async () => {
@@ -210,6 +266,188 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
       })
     } finally {
       await q('DELETE FROM multitable_automation_executions WHERE id = ANY($1::text[])', [[manualId, eventId]])
+    }
+  })
+
+  test('V5 first retry proceeds, then a deliberately deleted Class-A ledger fails closed', async () => {
+    const ruleId = `atr_retry_evidence_${TS}`
+    const rootId = `axe_retry_evidence_${TS}`
+    await persistRetryRule(ruleId, 'evidence-once')
+    await persistFailedRoot(rootId, ruleId, new Date(Date.now() - 60_000).toISOString())
+    try {
+      const first = await svc.retryExecution(rootId, OWNER)
+      expect('execution' in first).toBe(true)
+      if (!('execution' in first)) throw new Error('first retry unexpectedly rejected')
+      expect(first.execution.status).toBe('success')
+      expect(await claimRowsFor(rootId)).toHaveLength(1)
+      const marker = await q(
+        'SELECT first_retry_attempted_at FROM multitable_automation_executions WHERE id = $1',
+        [rootId],
+      )
+      expect(marker.rows[0]).toMatchObject({ first_retry_attempted_at: expect.any(Date) })
+
+      const childCountBefore = Number((await q(
+        'SELECT count(*)::int AS count FROM multitable_automation_executions WHERE rerun_of_execution_id = $1',
+        [rootId],
+      )).rows[0].count)
+      await q(
+        `DELETE FROM meta_automation_action_applied
+          WHERE kind = 'execution' AND root_execution_id = $1`,
+        [rootId],
+      )
+
+      await expect(svc.retryExecution(rootId, OWNER)).resolves.toMatchObject({
+        status: 409,
+        code: 'RETRY_EVIDENCE_MISSING',
+      })
+      const childCountAfter = Number((await q(
+        'SELECT count(*)::int AS count FROM multitable_automation_executions WHERE rerun_of_execution_id = $1',
+        [rootId],
+      )).rows[0].count)
+      expect(childCountAfter).toBe(childCountBefore)
+    } finally {
+      await q('DELETE FROM meta_automation_action_applied WHERE root_execution_id = $1', [rootId]).catch(() => {})
+      await q(
+        'DELETE FROM multitable_automation_executions WHERE id = $1 OR rerun_of_execution_id = $1',
+        [rootId],
+      ).catch(() => {})
+      await q('DELETE FROM automation_rules WHERE id = $1', [ruleId]).catch(() => {})
+    }
+  })
+
+  test('V5 legacy retry-child signal prevents a missing marker from masquerading as a first retry', async () => {
+    const ruleId = `atr_retry_legacy_child_${TS}`
+    const rootId = `axe_retry_legacy_root_${TS}`
+    const childId = `axe_retry_legacy_child_${TS}`
+    await persistRetryRule(ruleId, 'legacy-child')
+    await persistFailedRoot(rootId, ruleId, new Date(Date.now() - 60_000).toISOString())
+    await svc.logs.record({
+      id: childId,
+      ruleId,
+      triggeredBy: 'event',
+      triggeredAt: new Date().toISOString(),
+      status: 'failed',
+      steps: [],
+      triggerEvent: { actorId: OWNER, data: {} },
+      rerunOfExecutionId: rootId,
+      initiatedBy: OWNER,
+    })
+    try {
+      await expect(svc.retryExecution(rootId, OWNER)).resolves.toMatchObject({
+        status: 409,
+        code: 'RETRY_EVIDENCE_MISSING',
+      })
+      const root = await q(
+        'SELECT first_retry_attempted_at FROM multitable_automation_executions WHERE id = $1',
+        [rootId],
+      )
+      expect(root.rows[0]).toMatchObject({ first_retry_attempted_at: null })
+    } finally {
+      await q('DELETE FROM multitable_automation_executions WHERE id = ANY($1::text[])', [[childId, rootId]])
+        .catch(() => {})
+      await q('DELETE FROM automation_rules WHERE id = $1', [ruleId]).catch(() => {})
+    }
+  })
+
+  test('V5 missing lineage root cannot be re-minted from its surviving retry child', async () => {
+    const ruleId = `atr_retry_missing_root_${TS}`
+    const missingRootId = `axe_retry_missing_root_${TS}`
+    const childId = `axe_retry_orphan_child_${TS}`
+    await persistRetryRule(ruleId, 'missing-root')
+    await svc.logs.record({
+      id: childId,
+      ruleId,
+      triggeredBy: 'event',
+      triggeredAt: new Date(Date.now() - 60_000).toISOString(),
+      status: 'failed',
+      steps: [],
+      triggerEvent: { actorId: OWNER, data: {} },
+      rerunOfExecutionId: missingRootId,
+      initiatedBy: OWNER,
+    })
+    const recordsBefore = await recordsIn(SHEET_RETRY)
+    try {
+      await expect(svc.retryExecution(childId, OWNER)).resolves.toMatchObject({
+        status: 409,
+        code: 'RETRY_EVIDENCE_MISSING',
+      })
+      expect(await recordsIn(SHEET_RETRY)).toEqual(recordsBefore)
+      const child = await q(
+        'SELECT first_retry_attempted_at FROM multitable_automation_executions WHERE id = $1',
+        [childId],
+      )
+      expect(child.rows[0]).toMatchObject({ first_retry_attempted_at: null })
+      expect(await claimRowsFor(childId)).toEqual([])
+    } finally {
+      await q('DELETE FROM multitable_automation_executions WHERE id = $1', [childId])
+      await q('DELETE FROM automation_rules WHERE id = $1', [ruleId])
+    }
+  })
+
+  test('V5 retry older than retention is rejected before marker claim or dispatch', async () => {
+    const ruleId = `atr_retry_expired_${TS}`
+    const rootId = `axe_retry_expired_${TS}`
+    await persistRetryRule(ruleId, 'expired')
+    await persistFailedRoot(rootId, ruleId, new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString())
+    try {
+      const before = await recordsIn(SHEET_RETRY)
+      await expect(svc.retryExecution(rootId, OWNER)).resolves.toMatchObject({
+        status: 409,
+        code: 'RETRY_WINDOW_EXPIRED',
+      })
+      expect(await recordsIn(SHEET_RETRY)).toEqual(before)
+      const root = await q(
+        'SELECT first_retry_attempted_at FROM multitable_automation_executions WHERE id = $1',
+        [rootId],
+      )
+      expect(root.rows[0]).toMatchObject({ first_retry_attempted_at: null })
+    } finally {
+      await q('DELETE FROM multitable_automation_executions WHERE id = $1', [rootId]).catch(() => {})
+      await q('DELETE FROM automation_rules WHERE id = $1', [ruleId]).catch(() => {})
+    }
+  })
+
+  test('V5 concurrent first retries produce one Class-A mutation and one durable claim', async () => {
+    const ruleId = `atr_retry_concurrent_${TS}`
+    const rootId = `axe_retry_concurrent_${TS}`
+    await persistRetryRule(ruleId, 'concurrent')
+    await persistFailedRoot(rootId, ruleId, new Date(Date.now() - 60_000).toISOString())
+    try {
+      const before = (await recordsIn(SHEET_RETRY)).length
+      const outcomes = await Promise.all([
+        svc.retryExecution(rootId, OWNER),
+        svc.retryExecution(rootId, OWNER),
+      ])
+      expect(outcomes.some((outcome) => 'execution' in outcome)).toBe(true)
+      expect((await recordsIn(SHEET_RETRY)).length).toBe(before + 1)
+      expect(await claimRowsFor(rootId)).toHaveLength(1)
+    } finally {
+      await q('DELETE FROM meta_automation_action_applied WHERE root_execution_id = $1', [rootId]).catch(() => {})
+      await q(
+        'DELETE FROM multitable_automation_executions WHERE id = $1 OR rerun_of_execution_id = $1',
+        [rootId],
+      ).catch(() => {})
+      await q('DELETE FROM automation_rules WHERE id = $1', [ruleId]).catch(() => {})
+    }
+  })
+
+  test('§5 sweep deletes rows strictly older than the retry cutoff and preserves the boundary', async () => {
+    const oldRoot = `axe_retry_sweep_old_${TS}`
+    const edgeRoot = `axe_retry_sweep_edge_${TS}`
+    const nowMs = Date.now()
+    const cutoff = new Date(nowMs - 7 * 24 * 60 * 60 * 1000)
+    await q(
+      `INSERT INTO meta_automation_action_applied (kind, root_execution_id, action_key, applied_at)
+       VALUES ('execution',$1,'old',$3), ('execution',$2,'edge',$4)`,
+      [oldRoot, edgeRoot, new Date(cutoff.getTime() - 1), cutoff],
+    )
+    try {
+      await expect(svc.sweepAutomationActionAppliedLedger(nowMs)).resolves.toBe(1)
+      expect(await claimRowsFor(oldRoot)).toHaveLength(0)
+      expect(await claimRowsFor(edgeRoot)).toHaveLength(1)
+    } finally {
+      await q('DELETE FROM meta_automation_action_applied WHERE root_execution_id = ANY($1::text[])', [[oldRoot, edgeRoot]])
+        .catch(() => {})
     }
   })
 
