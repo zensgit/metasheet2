@@ -497,6 +497,16 @@ export interface ApprovalDepartureTransferResult {
 }
 
 /**
+ * F4-E signal-consumer override. The directory consumer resolves the manager from the departed
+ * account's captured org position after the deprovision transaction commits. The writer still
+ * rechecks that supplied local user is active before moving any seat. Omit the whole options object
+ * to retain the direct/test entry point's legacy live requester resolution.
+ */
+export interface ApprovalDepartureTransferOptions {
+  resolvedManagerId: string | null
+}
+
+/**
  * P1#2e producer family 1 — wrap an in-transaction pg client (the connection that has BEGUN and not yet
  * COMMITted) as the durable seam's `TransactionalQueryable`. The `isTransaction: true` marker documents intent
  * but proves nothing on its own; `produceAutomationEvent`'s `pg_current_xact_id()` probe (pg-transaction-guard)
@@ -8472,7 +8482,10 @@ export class ApprovalProductService {
    *   is the test-only seam that pauses here, held-locked, so a test can construct that race for real
    *   rather than argue it.
    */
-  async applyApprovalDepartureTransfer(departedUserId: string): Promise<ApprovalDepartureTransferResult> {
+  async applyApprovalDepartureTransfer(
+    departedUserId: string,
+    options?: ApprovalDepartureTransferOptions,
+  ): Promise<ApprovalDepartureTransferResult> {
     if (!pool) throw new Error('Database not available')
     const userId = departedUserId.trim()
     if (!userId) throw new ServiceError('departedUserId is required', 400, 'VALIDATION_ERROR')
@@ -8482,14 +8495,16 @@ export class ApprovalProductService {
       result.skipped.push({ id, reason: reasonCode })
     }
 
-    // ONE live directory read for this departure signal (not per-instance, not inside the pure
-    // resolver — Lock-1 §2.1). A multi-org routing ambiguity / policy misconfig / transient read
-    // failure all collapse to the SAME "manager unresolved" fail-closed outcome below — OD-L4-9(a)
-    // treats every unresolved case identically, never distinguishing by cause.
+    // ONE manager resolution for this departure signal (not per-instance, not inside the pure
+    // resolver — Lock-1 §2.1). The production directory consumer supplies its post-commit live
+    // resolution because the departed source account is already inactive; the direct/test entry
+    // point keeps the legacy requester lookup. Both paths converge on the same active-user recheck.
+    // A routing ambiguity / transient read failure collapses to the SAME fail-closed outcome below.
     let resolvedManagerId: string | null = null
     try {
-      const orgRelations = await resolveApprovalRequesterOrgRelations(userId, pool.query.bind(pool), {})
-      const candidate = orgRelations.managerId ? orgRelations.managerId.trim() : ''
+      const candidate = options === undefined
+        ? (await resolveApprovalRequesterOrgRelations(userId, pool.query.bind(pool), {})).managerId?.trim() ?? ''
+        : options.resolvedManagerId?.trim() ?? ''
       if (candidate && candidate !== userId) {
         const activeManager = await pool.query<{ id: string }>(
           `SELECT id FROM users WHERE id = $1 AND COALESCE(is_active, TRUE) = TRUE LIMIT 1`,
@@ -8497,10 +8512,10 @@ export class ApprovalProductService {
         )
         if (activeManager.rows.length > 0) resolvedManagerId = candidate
       }
-    } catch (error) {
+    } catch {
       approvalProductLogger.warn(
-        `approval departure transfer: manager resolution failed for ${userId}: ${error instanceof Error ? error.message : String(error)}`,
-        error instanceof Error ? error : undefined,
+        'approval departure transfer: manager resolution failed; using fail-closed no-manager outcome',
+        { reason: 'manager_resolution_failed' },
       )
     }
 
