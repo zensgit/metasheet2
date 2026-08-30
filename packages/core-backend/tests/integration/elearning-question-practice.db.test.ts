@@ -284,6 +284,22 @@ describe.sequential('e-learning question practice PostgreSQL authority', () => {
     )
     await migrate(practiceUp)
     await firstPool.query(
+      'ALTER TABLE elearning_practice_sessions DROP CONSTRAINT elearning_practice_sessions_request_uniq',
+    )
+    await firstPool.query(
+      'ALTER TABLE elearning_practice_sessions ADD CONSTRAINT elearning_practice_sessions_request_uniq UNIQUE (org_id, id, source_key)',
+    )
+    await expect(migrate(practiceUp)).rejects.toThrow(
+      'elearning practice migration drift: constraint definition',
+    )
+    await firstPool.query(
+      'ALTER TABLE elearning_practice_sessions DROP CONSTRAINT elearning_practice_sessions_request_uniq',
+    )
+    await firstPool.query(
+      'ALTER TABLE elearning_practice_sessions ADD CONSTRAINT elearning_practice_sessions_request_uniq UNIQUE (org_id, user_id, source_key)',
+    )
+    await migrate(practiceUp)
+    await firstPool.query(
       'ALTER TABLE elearning_practice_sessions ALTER COLUMN request_hash DROP NOT NULL',
     )
     await expect(migrate(practiceUp)).rejects.toThrow(
@@ -292,6 +308,18 @@ describe.sequential('e-learning question practice PostgreSQL authority', () => {
     await firstPool.query(
       'ALTER TABLE elearning_practice_sessions ALTER COLUMN request_hash SET NOT NULL',
     )
+    await migrate(practiceUp)
+    await firstPool.query(`
+      CREATE OR REPLACE FUNCTION elearning_practice_sessions_immutable()
+      RETURNS trigger LANGUAGE plpgsql AS $fn$
+      BEGIN
+        RETURN OLD;
+      END $fn$
+    `)
+    await expect(migrate(practiceUp)).rejects.toThrow(
+      'elearning practice migration drift: function definition',
+    )
+    await migrate(practiceDown)
     await migrate(practiceUp)
     await migrate(practiceDown)
     await migrate(practiceDown)

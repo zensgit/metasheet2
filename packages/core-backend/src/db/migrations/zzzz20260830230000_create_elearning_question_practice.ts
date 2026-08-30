@@ -76,6 +76,36 @@ const CONSTRAINTS = [
   'elearning_wrong_question_events_kind_chk',
 ] as const
 
+const CRITICAL_CONSTRAINT_DEFINITIONS = new Map<string, string>([
+  ['elearning_practice_sets_request_uniq', 'UNIQUE (org_id, source_key)'],
+  ['elearning_practice_sets_paper_fk', 'FOREIGN KEY (org_id, paper_id) REFERENCES elearning_papers(org_id, id) ON DELETE RESTRICT'],
+  ['elearning_practice_sets_actor_fk', 'FOREIGN KEY (created_by, org_id) REFERENCES user_orgs(user_id, org_id) ON DELETE RESTRICT'],
+  ['elearning_practice_sessions_request_uniq', 'UNIQUE (org_id, user_id, source_key)'],
+  ['elearning_practice_sessions_set_fk', 'FOREIGN KEY (org_id, practice_set_id) REFERENCES elearning_practice_sets(org_id, id) ON DELETE RESTRICT'],
+  ['elearning_practice_sessions_member_fk', 'FOREIGN KEY (user_id, org_id) REFERENCES user_orgs(user_id, org_id) ON DELETE RESTRICT'],
+  ['elearning_practice_session_questions_org_session_position_uniq', 'UNIQUE (org_id, session_id, "position")'],
+  ['elearning_practice_session_questions_org_session_revision_uniq', 'UNIQUE (org_id, session_id, question_revision_id)'],
+  ['elearning_practice_session_questions_session_fk', 'FOREIGN KEY (org_id, session_id) REFERENCES elearning_practice_sessions(org_id, id) ON DELETE RESTRICT'],
+  ['elearning_practice_session_questions_paper_question_fk', 'FOREIGN KEY (org_id, paper_question_id) REFERENCES elearning_paper_questions(org_id, id) ON DELETE RESTRICT'],
+  ['elearning_practice_session_questions_revision_fk', 'FOREIGN KEY (org_id, question_id, question_revision_id) REFERENCES elearning_question_revisions(org_id, question_id, id) ON DELETE RESTRICT'],
+  ['elearning_practice_answers_request_uniq', 'UNIQUE (org_id, user_id, source_key)'],
+  ['elearning_practice_answers_question_uniq', 'UNIQUE (org_id, session_id, session_question_id)'],
+  ['elearning_practice_answers_session_question_fk', 'FOREIGN KEY (org_id, session_id, session_question_id) REFERENCES elearning_practice_session_questions(org_id, session_id, id) ON DELETE RESTRICT'],
+  ['elearning_practice_answers_member_fk', 'FOREIGN KEY (user_id, org_id) REFERENCES user_orgs(user_id, org_id) ON DELETE RESTRICT'],
+  ['elearning_wrong_question_events_answer_uniq', 'UNIQUE (org_id, answer_id)'],
+  ['elearning_wrong_question_events_answer_fk', 'FOREIGN KEY (org_id, answer_id) REFERENCES elearning_practice_answers(org_id, id) ON DELETE RESTRICT'],
+  ['elearning_wrong_question_events_revision_fk', 'FOREIGN KEY (org_id, question_id, question_revision_id) REFERENCES elearning_question_revisions(org_id, question_id, id) ON DELETE RESTRICT'],
+  ['elearning_wrong_question_events_member_fk', 'FOREIGN KEY (user_id, org_id) REFERENCES user_orgs(user_id, org_id) ON DELETE RESTRICT'],
+])
+
+const FUNCTION_DIGESTS = new Map<string, string>([
+  ['elearning_practice_sets_authority', '0d0b02a878ebad09c6a52e1aeb9952db'],
+  ['elearning_practice_sessions_immutable', '09d82caf8fc6eaeccf1fd332a60cb100'],
+  ['elearning_practice_session_questions_authority', '6117cdbf75ba84de265df42e5afaf8ae'],
+  ['elearning_practice_answers_authority', '1aa331ec7f603756967fbb59605804e5'],
+  ['elearning_wrong_question_events_authority', 'ccf6808964247da00f6954dd70945bd4'],
+])
+
 async function assertCanonical(db: Kysely<unknown>): Promise<void> {
   const columns = await sql<{
     table_name: string
@@ -102,8 +132,8 @@ async function assertCanonical(db: Kysely<unknown>): Promise<void> {
     throw new Error('elearning practice migration drift: column nullability')
   }
 
-  const constraints = await sql<{ conname: string }>`
-    SELECT con.conname
+  const constraints = await sql<{ conname: string; definition: string }>`
+    SELECT con.conname, pg_get_constraintdef(con.oid, true) AS definition
     FROM pg_constraint con
     JOIN pg_class rel ON rel.oid = con.conrelid
     JOIN pg_namespace ns ON ns.oid = rel.relnamespace
@@ -113,6 +143,28 @@ async function assertCanonical(db: Kysely<unknown>): Promise<void> {
   const names = new Set(constraints.rows.map((row) => row.conname))
   if (CONSTRAINTS.some((name) => !names.has(name))) {
     throw new Error('elearning practice migration drift: constraint set')
+  }
+  if (constraints.rows.some((row) => {
+    const expected = CRITICAL_CONSTRAINT_DEFINITIONS.get(row.conname)
+    return expected !== undefined && row.definition !== expected
+  })) {
+    throw new Error('elearning practice migration drift: constraint definition')
+  }
+
+  const functions = await sql<{ function_name: string; source_digest: string }>`
+    SELECT proc.proname AS function_name, md5(proc.prosrc) AS source_digest
+    FROM pg_proc proc
+    JOIN pg_namespace ns ON ns.oid = proc.pronamespace
+    WHERE ns.nspname = current_schema()
+      AND proc.proname = ANY(${sql.val([...FUNCTION_DIGESTS.keys()])}::text[])
+      AND proc.prorettype = 'trigger'::regtype
+      AND proc.prosecdef = false
+      AND proc.pronargs = 0
+  `.execute(db)
+  if (functions.rows.length !== FUNCTION_DIGESTS.size || functions.rows.some((row) => (
+    FUNCTION_DIGESTS.get(row.function_name) !== row.source_digest
+  ))) {
+    throw new Error('elearning practice migration drift: function definition')
   }
 
   const triggers = await sql<{
