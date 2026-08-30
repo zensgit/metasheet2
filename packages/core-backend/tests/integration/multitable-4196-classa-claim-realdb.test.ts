@@ -33,6 +33,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { EventBus } from '../../src/integration/events/event-bus'
 import { AutomationService } from '../../src/multitable/automation-service'
+import { deriveActionKey } from '../../src/multitable/automation-action-idempotency'
+import { deriveTestRunScopedRoot } from '../../src/multitable/automation-execution-ledger'
 import { db } from '../../src/db/db'
 import type { AutomationExecution, AutomationRule } from '../../src/multitable/automation-executor'
 
@@ -45,12 +47,24 @@ const BASE = `base_ca_${TS}`
 const SHEET = `sheet_ca_${TS}`
 const SHEET_CRASH = `sheet_ca_crash_${TS}`
 const SHEET_OFF = `sheet_ca_off_${TS}`
+const SHEET_TEST_RUN = `sheet_ca_test_run_${TS}`
+const RULE_TEST_RUN = `atr_ca_test_run_${TS}`
+const RULE_TEST_RUN_2 = `atr_ca_test_run_2_${TS}`
+const RULE_TEST_RUN_WAIT = `atr_ca_test_run_wait_${TS}`
 // G5 cross-base: a SECOND base OWNER owns (so the write-gate grants base-write) — the not-found target lives here.
 const BASE_XB = `base_ca_xb_${TS}`
 const SHEET_XB = `sheet_ca_xb_${TS}`
 const FLD_TITLE = `fld_ca_title_${TS}`
+const TEST_RUN_ACTION_CONFIG = { sheetId: SHEET_TEST_RUN, data: { [FLD_TITLE]: 'real-fire' } }
+const testRunRoots = new Set<string>()
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
+
+function testRunRoot(ruleId: string, operationId: string): string {
+  const root = deriveTestRunScopedRoot({ actorId: OWNER, ruleId, testRunOperationId: operationId })
+  testRunRoots.add(root)
+  return root
+}
 
 /** The REAL production AutomationService wiring — mirrors index.ts (real queryFn; constructor hard-wires
  * deps.transaction to a real poolManager.get().transaction(...)). This is what makes the same-transaction
@@ -144,6 +158,7 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
       [SHEET, 'Class-A Sheet'],
       [SHEET_CRASH, 'Class-A Crash Sheet'],
       [SHEET_OFF, 'Class-A Flag-Off Sheet'],
+      [SHEET_TEST_RUN, 'Class-A Test-Run Sheet'],
     ]) {
       await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [sheet, BASE, name])
       await q(`INSERT INTO meta_fields (id, sheet_id, name, type, "order") VALUES ($1,$2,'Title','string',0)`, [
@@ -154,10 +169,51 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
     // G5: a second base OWNER owns + a sheet in it (the cross-base write target).
     await q('INSERT INTO meta_bases (id, name, owner_id) VALUES ($1,$2,$3)', [BASE_XB, 'Class-A XBase', OWNER])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_XB, BASE_XB, 'Class-A XSheet'])
+    for (const ruleId of [RULE_TEST_RUN, RULE_TEST_RUN_2]) {
+      await q(
+        `INSERT INTO automation_rules
+          (id, sheet_id, name, trigger_type, action_type, action_config, enabled, created_by)
+         VALUES ($1,$2,'real-fire class-a','record.created','create_record',$3::jsonb,TRUE,$4)`,
+        [ruleId, SHEET_TEST_RUN, JSON.stringify(TEST_RUN_ACTION_CONFIG), OWNER],
+      )
+    }
+    await q(
+      `INSERT INTO automation_rules
+        (id, sheet_id, name, trigger_type, action_type, action_config, actions, enabled, created_by, execution_mode)
+       VALUES ($1,$2,'real-fire wait class-a','record.created','wait_for_callback','{}'::jsonb,$3::jsonb,TRUE,$4,'workflow_job_v1')`,
+      [
+        RULE_TEST_RUN_WAIT,
+        SHEET_TEST_RUN,
+        JSON.stringify([
+          { type: 'wait_for_callback', config: {} },
+          { type: 'create_record', config: TEST_RUN_ACTION_CONFIG },
+        ]),
+        OWNER,
+      ],
+    )
   })
 
   afterAll(async () => {
-    for (const sheet of [SHEET, SHEET_CRASH, SHEET_OFF]) {
+    const ruleIds = [RULE_TEST_RUN, RULE_TEST_RUN_2, RULE_TEST_RUN_WAIT]
+    const executions = await q(
+      `SELECT id FROM multitable_automation_executions
+        WHERE rule_id = ANY($1::text[]) OR rule_id LIKE $2`,
+      [ruleIds, `atr_ca_${TS}_%`],
+    )
+    const executionIds = executions.rows.map((row) => row.id as string)
+    const ledgerRoots = [...new Set([...executionIds, ...testRunRoots])]
+    if (ledgerRoots.length > 0) {
+      await q('DELETE FROM meta_automation_action_applied WHERE root_execution_id = ANY($1::text[])', [ledgerRoots]).catch(() => {})
+      await q('DELETE FROM meta_automation_outbound_intent WHERE root_execution_id = ANY($1::text[])', [ledgerRoots]).catch(() => {})
+    }
+    if (executionIds.length > 0) {
+      await q('DELETE FROM multitable_automation_suspensions WHERE execution_id = ANY($1::text[])', [executionIds]).catch(() => {})
+      await q('DELETE FROM multitable_automation_approval_bridges WHERE execution_id = ANY($1::text[])', [executionIds]).catch(() => {})
+      await q('DELETE FROM multitable_automation_jobs WHERE execution_id = ANY($1::text[])', [executionIds]).catch(() => {})
+      await q('DELETE FROM multitable_automation_executions WHERE id = ANY($1::text[])', [executionIds]).catch(() => {})
+    }
+    await q('DELETE FROM automation_rules WHERE id = ANY($1::text[])', [ruleIds]).catch(() => {})
+    for (const sheet of [SHEET, SHEET_CRASH, SHEET_OFF, SHEET_TEST_RUN]) {
       await q(
         'DELETE FROM meta_record_revisions WHERE record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)',
         [sheet],
@@ -175,6 +231,45 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
   test('sentinel: DATABASE_URL is set and the flag is ON', () => {
     expect(process.env.DATABASE_URL).toBeTruthy()
     expect(process.env[FLAG]).toBe('true')
+  })
+
+  test('migration compatibility: legacy continuation rows default to execution identity', async () => {
+    const suspensionId = `asp_ca_legacy_${TS}`
+    const bridgeId = `aab_ca_legacy_${TS}`
+    try {
+      await q(
+        `INSERT INTO multitable_automation_suspensions
+          (id, execution_id, rule_id, step_index, resume_token, reason, action_fingerprint, status)
+         VALUES ($1,$2,$3,0,$4,'external_event',$5::jsonb,'pending')`,
+        [suspensionId, `axe_ca_legacy_${TS}`, `atr_ca_legacy_${TS}`, `token_ca_legacy_${TS}`, JSON.stringify({ count: 0, hash: 'legacy' })],
+      )
+      await q(
+        `INSERT INTO multitable_automation_approval_bridges
+          (id, execution_id, root_execution_id, rule_id, step_index, approval_template_id,
+           idempotency_key, status, action_fingerprint)
+         VALUES ($1,$2,$3,$4,0,$5,$6,'creating',$7::jsonb)`,
+        [
+          bridgeId,
+          `axe_ca_legacy_${TS}`,
+          `axe_ca_legacy_root_${TS}`,
+          `atr_ca_legacy_${TS}`,
+          `tpl_ca_legacy_${TS}`,
+          `idem_ca_legacy_${TS}`,
+          JSON.stringify({ count: 0, hash: 'legacy' }),
+        ],
+      )
+      expect((await q(
+        'SELECT root_execution_id, ledger_kind FROM multitable_automation_suspensions WHERE id = $1',
+        [suspensionId],
+      )).rows).toEqual([{ root_execution_id: null, ledger_kind: 'execution' }])
+      expect((await q(
+        'SELECT ledger_kind FROM multitable_automation_approval_bridges WHERE id = $1',
+        [bridgeId],
+      )).rows).toEqual([{ ledger_kind: 'execution' }])
+    } finally {
+      await q('DELETE FROM multitable_automation_suspensions WHERE id = $1', [suspensionId]).catch(() => {})
+      await q('DELETE FROM multitable_automation_approval_bridges WHERE id = $1', [bridgeId]).catch(() => {})
+    }
   })
 
   // G1 — create_record replay no-op ────────────────────────────────────────────────────────────────────
@@ -288,6 +383,184 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
     } finally {
       process.env[FLAG] = 'true'
     }
+  })
+
+  test('V2b real_fire: same operation key dedups sequentially and concurrently; a new key reapplies', async () => {
+    const run = (testRunOperationId: string) => {
+      testRunRoot(RULE_TEST_RUN, testRunOperationId)
+      return svc.testRun(RULE_TEST_RUN, SHEET_TEST_RUN, {
+        mode: 'real_fire',
+        actorId: OWNER,
+        testRunOperationId,
+        confirmSideEffects: true,
+      })
+    }
+
+    const sequentialKey = `seq_${TS}`
+    const first = await run(sequentialKey)
+    const duplicate = await run(sequentialKey)
+    expect(first.steps[0]?.alreadyApplied).toBeUndefined()
+    expect(duplicate.steps[0]?.alreadyApplied).toBe(true)
+    expect(await recordsIn(SHEET_TEST_RUN)).toHaveLength(1)
+
+    const concurrentKey = `concurrent_${TS}`
+    const concurrent = await Promise.all([run(concurrentKey), run(concurrentKey)])
+    expect(concurrent.filter((execution) => execution.steps[0]?.alreadyApplied === true)).toHaveLength(1)
+    expect(concurrent.filter((execution) => execution.steps[0]?.alreadyApplied !== true)).toHaveLength(1)
+    expect(await recordsIn(SHEET_TEST_RUN)).toHaveLength(2)
+
+    await run(`fresh_${TS}`)
+    expect(await recordsIn(SHEET_TEST_RUN)).toHaveLength(3)
+
+    for (const operationId of [sequentialKey, concurrentKey, `fresh_${TS}`]) {
+      const root = testRunRoot(RULE_TEST_RUN, operationId)
+      const rows = await q(
+        `SELECT kind, count(*)::int AS count
+           FROM meta_automation_action_applied
+          WHERE root_execution_id = $1
+          GROUP BY kind`,
+        [root],
+      )
+      expect(rows.rows).toEqual([{ kind: 'test_run', count: 1 }])
+    }
+  })
+
+  test('V2c real_fire: rule scope and kind keep caller keys outside the execution namespace', async () => {
+    const countBefore = (await recordsIn(SHEET_TEST_RUN)).length
+    const sharedOperationId = `same_key_${TS}`
+    testRunRoot(RULE_TEST_RUN, sharedOperationId)
+    await svc.testRun(RULE_TEST_RUN, SHEET_TEST_RUN, {
+      mode: 'real_fire',
+      actorId: OWNER,
+      testRunOperationId: sharedOperationId,
+      confirmSideEffects: true,
+    })
+    testRunRoot(RULE_TEST_RUN_2, sharedOperationId)
+    await svc.testRun(RULE_TEST_RUN_2, SHEET_TEST_RUN, {
+      mode: 'real_fire',
+      actorId: OWNER,
+      testRunOperationId: sharedOperationId,
+      confirmSideEffects: true,
+    })
+    expect(await recordsIn(SHEET_TEST_RUN)).toHaveLength(countBefore + 2)
+
+    const firstRoot = testRunRoot(RULE_TEST_RUN, sharedOperationId)
+    const secondRoot = testRunRoot(RULE_TEST_RUN_2, sharedOperationId)
+    expect(firstRoot).not.toBe(secondRoot)
+
+    const craftedExecutionRoot = `axe_collision_${TS}`
+    const actionKey = deriveActionKey({
+      structuralPath: '0',
+      actionType: 'create_record',
+      canonicalConfig: TEST_RUN_ACTION_CONFIG,
+    })
+    await q(
+      `INSERT INTO meta_automation_action_applied (kind, root_execution_id, action_key, action_type)
+       VALUES ('execution',$1,$2,'create_record')`,
+      [craftedExecutionRoot, actionKey],
+    )
+    testRunRoots.add(craftedExecutionRoot)
+    const executionClaimBefore = (await q(
+      `SELECT kind, root_execution_id, action_key, action_type, applied_at
+         FROM meta_automation_action_applied
+        WHERE kind = 'execution' AND root_execution_id = $1 AND action_key = $2`,
+      [craftedExecutionRoot, actionKey],
+    )).rows[0]
+    testRunRoot(RULE_TEST_RUN, craftedExecutionRoot)
+    await svc.testRun(RULE_TEST_RUN, SHEET_TEST_RUN, {
+      mode: 'real_fire',
+      actorId: OWNER,
+      testRunOperationId: craftedExecutionRoot,
+      confirmSideEffects: true,
+    })
+    expect(await recordsIn(SHEET_TEST_RUN)).toHaveLength(countBefore + 3)
+
+    const derivedRoot = testRunRoot(RULE_TEST_RUN, craftedExecutionRoot)
+    const claims = await q(
+      `SELECT kind, root_execution_id, action_key, action_type
+         FROM meta_automation_action_applied
+        WHERE (kind = 'execution' AND root_execution_id = $1)
+           OR (kind = 'test_run' AND root_execution_id = $2)
+        ORDER BY kind`,
+      [craftedExecutionRoot, derivedRoot],
+    )
+    expect(claims.rows).toEqual([
+      { kind: 'execution', root_execution_id: craftedExecutionRoot, action_key: actionKey, action_type: 'create_record' },
+      { kind: 'test_run', root_execution_id: derivedRoot, action_key: actionKey, action_type: 'create_record' },
+    ])
+    expect((await q(
+      `SELECT kind, root_execution_id, action_key, action_type, applied_at
+         FROM meta_automation_action_applied
+        WHERE kind = 'execution' AND root_execution_id = $1 AND action_key = $2`,
+      [craftedExecutionRoot, actionKey],
+    )).rows[0]).toEqual(executionClaimBefore)
+    const duplicate = await q(
+      `INSERT INTO meta_automation_action_applied (kind, root_execution_id, action_key, action_type)
+       VALUES ('execution',$1,$2,'create_record')
+       ON CONFLICT (kind, root_execution_id, action_key) DO NOTHING`,
+      [craftedExecutionRoot, actionKey],
+    )
+    expect(duplicate.rowCount).toBe(0)
+  })
+
+  test('V2d real_fire preserves the test-run root and ledger kind across wait/resume', async () => {
+    const operationId = `wait_${TS}`
+    const root = testRunRoot(RULE_TEST_RUN_WAIT, operationId)
+    const run = () => svc.testRun(RULE_TEST_RUN_WAIT, SHEET_TEST_RUN, {
+      mode: 'real_fire',
+      actorId: OWNER,
+      testRunOperationId: operationId,
+      confirmSideEffects: true,
+      sampleRecord: { recordId: '', data: {} },
+    })
+
+    const first = await run()
+    expect(first.status).toBe('running')
+    const firstSuspension = await q(
+      `SELECT resume_token, root_execution_id, ledger_kind
+         FROM multitable_automation_suspensions
+        WHERE execution_id = $1`,
+      [first.id],
+    )
+    expect(firstSuspension.rows).toEqual([expect.objectContaining({
+      root_execution_id: root,
+      ledger_kind: 'test_run',
+    })])
+    const firstResume = await svc.resumeExecution(firstSuspension.rows[0].resume_token, OWNER)
+    expect('execution' in firstResume).toBe(true)
+    if (!('execution' in firstResume)) throw new Error(firstResume.code)
+    expect(firstResume.execution.status).toBe('success')
+    expect(firstResume.execution.steps.map((step) => [step.actionType, step.alreadyApplied])).toEqual([
+      ['wait_for_callback', undefined],
+      ['create_record', undefined],
+    ])
+    const countAfterFirst = (await recordsIn(SHEET_TEST_RUN)).length
+
+    const duplicate = await run()
+    const duplicateSuspension = await q(
+      'SELECT resume_token FROM multitable_automation_suspensions WHERE execution_id = $1',
+      [duplicate.id],
+    )
+    const duplicateResume = await svc.resumeExecution(duplicateSuspension.rows[0].resume_token, OWNER)
+    expect('execution' in duplicateResume).toBe(true)
+    if (!('execution' in duplicateResume)) throw new Error(duplicateResume.code)
+    expect(duplicateResume.execution.steps.at(-1)).toMatchObject({
+      actionType: 'create_record',
+      alreadyApplied: true,
+    })
+    expect(await recordsIn(SHEET_TEST_RUN)).toHaveLength(countAfterFirst)
+    expect((await q(
+      `SELECT kind, root_execution_id, action_type, count(*)::int AS count
+         FROM meta_automation_action_applied
+        WHERE root_execution_id = $1
+        GROUP BY kind, root_execution_id, action_type`,
+      [root],
+    )).rows).toEqual([{
+      kind: 'test_run',
+      root_execution_id: root,
+      action_type: 'create_record',
+      count: 1,
+    }])
   })
 
   // G5 — LOGICAL failure (non-throwing return) after the claim also ROLLS BACK ─────────────────────────

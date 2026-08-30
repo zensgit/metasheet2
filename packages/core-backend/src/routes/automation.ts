@@ -20,7 +20,11 @@
  */
 
 import express, { Router, type Request, type Response } from 'express'
-import type { AutomationService, AutomationTestRunSampleRecord } from '../multitable/automation-service'
+import {
+  AutomationTestRunRejectedError,
+  type AutomationService,
+  type AutomationTestRunSampleRecord,
+} from '../multitable/automation-service'
 import { redactAutomationExecutionForResponse } from '../multitable/automation-log-service'
 import type { AutomationExecution, AutomationStepResult } from '../multitable/automation-executor'
 import { legacyAutomationStatusToJobStatus } from '../multitable/workflow-job-contract'
@@ -541,7 +545,7 @@ export function createAutomationRoutes(
 
     // G8 (retry/test-run governance lock §6): test-run requires the same per-sheet
     // canManageAutomation capability as rule authoring. The default run is simulate and dispatches
-    // no business side effect; any future real_fire path remains capability-gated too.
+    // no business side effect; real_fire remains capability-gated too.
     // Mirrors the automation rule-CRUD gate at routes/univer-meta.ts (resolveSheetCapabilities →
     // canManageAutomation). The FE test button already only renders for canManageAutomation holders;
     // the route additionally makes the safe simulation default authoritative server-side.
@@ -570,25 +574,24 @@ export function createAutomationRoutes(
     const svc = getService(res)
     if (!svc) return undefined
 
-    const rawMode = req.body && typeof req.body === 'object'
-      ? (req.body as Record<string, unknown>).mode
-      : undefined
+    const body = req.body && typeof req.body === 'object'
+      ? req.body as Record<string, unknown>
+      : {}
+    const rawMode = body.mode
     if (rawMode !== undefined && rawMode !== 'simulate' && rawMode !== 'real_fire') {
       return res.status(400).json({
         ok: false,
         error: { code: 'INVALID_TEST_RUN_MODE', message: 'mode must be simulate or real_fire' },
       })
     }
-    if (rawMode === 'real_fire') {
-      return res.status(409).json({
+    if (rawMode === 'real_fire' && body.confirmSideEffects !== true) {
+      return res.status(400).json({
         ok: false,
-        error: { code: 'TEST_RUN_REAL_FIRE_DISABLED', message: 'Real-fire test runs are not enabled' },
+        error: { code: 'CONFIRM_SIDE_EFFECTS_REQUIRED', message: 'confirmSideEffects must be true for a real-fire test run' },
       })
     }
 
-    const rawRecordId = req.body && typeof req.body === 'object'
-      ? (req.body as Record<string, unknown>).recordId
-      : undefined
+    const rawRecordId = body.recordId
     if (
       rawRecordId !== undefined
       && (typeof rawRecordId !== 'string' || rawRecordId.trim().length === 0 || rawRecordId.trim().length > 256)
@@ -625,16 +628,35 @@ export function createAutomationRoutes(
     }
 
     try {
+      const actorId = req.user?.id?.toString() ?? req.user?.sub?.toString() ?? req.user?.userId?.toString() ?? ''
       const execution = await svc.testRun(ruleId, sheetId, {
-        mode: 'simulate',
+        mode: rawMode === 'real_fire' ? 'real_fire' : 'simulate',
         ...(sampleRecord ? { sampleRecord } : {}),
+        ...(rawMode === 'real_fire'
+          ? {
+            actorId,
+            testRunOperationId: typeof body.testRunOperationId === 'string'
+              ? body.testRunOperationId
+              : undefined,
+            confirmSideEffects: true,
+          }
+          : {}),
       })
       // Simulation persistence is values-free and intentionally omits rule/record values. The
       // authorized caller still receives the response-level secret-redacted execution so future
       // sample-record previews can describe the planned action without widening the audit row.
       const response = redactAutomationExecutionForResponse(execution)
-      return res.json({ ...response, dryRun: true })
+      return res.json({ ...response, dryRun: rawMode !== 'real_fire' })
     } catch (err) {
+      if (err instanceof AutomationTestRunRejectedError) {
+        return res.status(err.status).json({ ok: false, error: { code: err.code, message: err.message } })
+      }
+      if (rawMode === 'real_fire') {
+        return res.status(500).json({
+          ok: false,
+          error: { code: 'TEST_RUN_FAILED', message: 'Test run failed' },
+        })
+      }
       const message = err instanceof Error ? err.message : 'Test run failed'
       const code = message.includes('not found') ? 404 : 500
       return res.status(code).json({ error: message })

@@ -1,13 +1,14 @@
 /**
  * G8 (retry/test-run governance lock §6, §11-G8): the test-run route
  * `POST /api/multitable/sheets/:sheetId/automations/:ruleId/test` defaults to a side-effect-free
- * simulation. The capability gate remains mandatory, and real_fire stays fail-closed until its
- * separately-gated contract is implemented.
+ * simulation. The capability gate remains mandatory, and real_fire is admitted only through its
+ * explicit confirmation, operation-key, and durable action-family gates.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { createAutomationRoutes } from '../../src/routes/automation'
+import { AutomationTestRunRejectedError } from '../../src/multitable/automation-service'
 import { usePinnedServer } from '../utils/pinned-server'
 
 // The gate resolves per-sheet capabilities; drive that resolution from the test.
@@ -191,7 +192,7 @@ describe('G8 — test-run route capability gate', () => {
     expect(svc.testRun).not.toHaveBeenCalled()
   })
 
-  it('fails closed on explicit real_fire while no production enablement gate exists', async () => {
+  it('requires explicit side-effect confirmation before invoking real_fire', async () => {
     resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
     const svc = makeService()
 
@@ -200,9 +201,70 @@ describe('G8 — test-run route capability gate', () => {
       .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
       .send({ mode: 'real_fire' })
 
-    expect(res.status).toBe(409)
-    expect(res.body?.error?.code).toBe('TEST_RUN_REAL_FIRE_DISABLED')
+    expect(res.status).toBe(400)
+    expect(res.body?.error?.code).toBe('CONFIRM_SIDE_EFFECTS_REQUIRED')
     expect(svc.testRun).not.toHaveBeenCalled()
+  })
+
+  it('passes the authenticated actor and opaque operation key to the real-fire service gate', async () => {
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    const svc = makeService()
+
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
+      .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
+      .send({ mode: 'real_fire', confirmSideEffects: true, testRunOperationId: 'click_1' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.dryRun).toBe(false)
+    expect(svc.testRun).toHaveBeenCalledWith('rule-1', 'sheet-a', {
+      mode: 'real_fire',
+      actorId: 'u1',
+      testRunOperationId: 'click_1',
+      confirmSideEffects: true,
+    })
+  })
+
+  it('keeps unexpected real-fire failures values-free', async () => {
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    const svc = makeService()
+    svc.testRun.mockRejectedValue(new Error('connect db.internal.host:5432 as pg_app for secret-rule'))
+
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
+      .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
+      .send({ mode: 'real_fire', confirmSideEffects: true, testRunOperationId: 'click_1' })
+
+    expect(res.status).toBe(500)
+    expect(res.body).toEqual({
+      ok: false,
+      error: { code: 'TEST_RUN_FAILED', message: 'Test run failed' },
+    })
+    expect(JSON.stringify(res.body)).not.toMatch(/db\.internal\.host|5432|pg_app|secret-rule/)
+  })
+
+  it('preserves a stable typed real-fire rejection from the service gate', async () => {
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    const svc = makeService()
+    svc.testRun.mockRejectedValue(new AutomationTestRunRejectedError(
+      409,
+      'TEST_RUN_CLASS_A_PROTECTION_DISABLED',
+      'The rule cannot run in real-fire test mode under the current safety gates',
+    ))
+
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
+      .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
+      .send({ mode: 'real_fire', confirmSideEffects: true, testRunOperationId: 'click_1' })
+
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'TEST_RUN_CLASS_A_PROTECTION_DISABLED',
+        message: 'The rule cannot run in real-fire test mode under the current safety gates',
+      },
+    })
   })
 
   it('fails CLOSED (503, values-free) when capability resolution throws a transient error — never an ungated testRun', async () => {

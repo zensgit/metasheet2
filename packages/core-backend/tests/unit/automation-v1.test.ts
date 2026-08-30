@@ -58,6 +58,7 @@ vi.mock('../../src/db/db', () => {
 import { AutomationLogService } from '../../src/multitable/automation-log-service'
 import { AutomationRuleValidationError, AutomationService, toExecutorRule } from '../../src/multitable/automation-service'
 import { deriveRuleActionSetFingerprint } from '../../src/multitable/automation-rule-fingerprint'
+import { realFireTestRunEligibility } from '../../src/multitable/automation-retry-eligibility'
 import { AutomationJobService } from '../../src/multitable/automation-job-service'
 import { normalizeWorkflowJob } from '../../src/multitable/workflow-job-contract'
 
@@ -5152,6 +5153,54 @@ describe('AutomationService — retryExecution (A5)', () => {
     } as never
   }
 
+  it('#4196 §6 real-fire admission classifies nested actions and fails closed on unsupported families', () => {
+    const actions = [{
+      type: 'condition_branch',
+      config: { branches: [{ key: 'yes', actions: [{ type: 'update_record', config: {} }, { type: 'send_email', config: {} }] }] },
+    }]
+    expect(realFireTestRunEligibility(actions, {} as NodeJS.ProcessEnv)).toEqual({
+      ok: false,
+      code: 'TEST_RUN_CLASS_A_PROTECTION_DISABLED',
+    })
+    expect(realFireTestRunEligibility(actions, {
+      AUTOMATION_CLASSA_CLAIM_ENABLED: 'true',
+    } as NodeJS.ProcessEnv)).toEqual({
+      ok: false,
+      code: 'TEST_RUN_CLASS_B_PROTECTION_DISABLED',
+    })
+    expect(realFireTestRunEligibility(actions, {
+      AUTOMATION_CLASSA_CLAIM_ENABLED: 'true',
+      AUTOMATION_CLASSB_OUTBOUND_ENABLED: 'true',
+    } as NodeJS.ProcessEnv)).toEqual({ ok: true })
+    expect(realFireTestRunEligibility([{ type: 'send_notification', config: {} }], process.env)).toEqual({
+      ok: false,
+      code: 'TEST_RUN_ACTION_UNSUPPORTED',
+    })
+    expect(realFireTestRunEligibility([{ type: 'write_approval_form_values', config: {} }], process.env)).toEqual({
+      ok: false,
+      code: 'TEST_RUN_ACTION_UNSUPPORTED',
+    })
+
+    const defaultBranch = (action: { type: string; config: Record<string, unknown> }) => [{
+      type: 'condition_branch',
+      config: { branches: [], defaultBranch: { key: 'default', actions: [action] } },
+    }]
+    expect(realFireTestRunEligibility(
+      defaultBranch({ type: 'create_record', config: {} }),
+      {} as NodeJS.ProcessEnv,
+    )).toEqual({ ok: false, code: 'TEST_RUN_CLASS_A_PROTECTION_DISABLED' })
+    expect(realFireTestRunEligibility(
+      defaultBranch({ type: 'send_email', config: {} }),
+      { AUTOMATION_CLASSA_CLAIM_ENABLED: 'true' } as NodeJS.ProcessEnv,
+    )).toEqual({ ok: false, code: 'TEST_RUN_CLASS_B_PROTECTION_DISABLED' })
+    expect(realFireTestRunEligibility(
+      defaultBranch({ type: 'send_notification', config: {} }),
+      {
+        AUTOMATION_CLASSA_CLAIM_ENABLED: 'true',
+        AUTOMATION_CLASSB_OUTBOUND_ENABLED: 'true',
+      } as NodeJS.ProcessEnv,
+    )).toEqual({ ok: false, code: 'TEST_RUN_ACTION_UNSUPPORTED' })
+  })
   it('404 NOT_FOUND when the original execution is missing', async () => {
     vi.spyOn(service.logs, 'getById').mockResolvedValue(undefined)
     const r = await service.retryExecution('axe_missing', 'admin1')

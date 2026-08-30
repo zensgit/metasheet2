@@ -8,7 +8,11 @@ import { recordRecordRevision, recordVersionMarker } from './record-history-serv
 import { mintOperation, sealOperation } from './operation-ledger'
 import { branchChildStepKey, topLevelStepKey } from './automation-step-key'
 import { deriveRuleActionSetFingerprint } from './automation-rule-fingerprint'
-import { claimExecutionAction, isClassAExecutionClaimEnabled } from './automation-execution-ledger'
+import {
+  claimExecutionAction,
+  isClassAExecutionClaimEnabled,
+  type ExecutionLedgerKind,
+} from './automation-execution-ledger'
 import { deriveActionKey } from './automation-action-idempotency'
 import {
   classifyFetchError,
@@ -1400,6 +1404,7 @@ function simulatedStep(action: AutomationAction, context: ExecutionContext): Aut
 export interface ClassAActionIdentity {
   structuralPath: string
   rootExecutionId: string
+  kind?: ExecutionLedgerKind
 }
 
 export interface ExecutionContext {
@@ -1418,6 +1423,8 @@ export interface ExecutionContext {
    * for back-compat: builders that omit it fall back to `executionId` at the claim call site.
    */
   rootExecutionId?: string
+  /** #4196 §6.1: real-fire test runs use a structurally disjoint applied/outbound ledger namespace. */
+  ledgerKind?: ExecutionLedgerKind
   /** #4196 Q2/Q6: simulate derives control flow but dispatches no business action. */
   dispatchMode?: AutomationDispatchMode
 }
@@ -1579,6 +1586,7 @@ export class AutomationExecutor {
     jobLifecycleFactory?: ActionJobLifecycleFactory,
     rootExecutionId?: string,
     dispatchMode: AutomationDispatchMode = 'live',
+    ledgerKind: ExecutionLedgerKind = 'execution',
   ): Promise<AutomationExecution> {
     const executionId = `axe_${randomUUID()}`
     // A6-1: opt-in rules get a per-action job lifecycle bound to this executionId. The factory
@@ -1621,6 +1629,7 @@ export class AutomationExecutor {
       // #4196: the lineage root. A retry threads the original execution's root in; a first run has no
       // parent, so it defaults to its own id. Class-A claims key on this (retry of the same action → dup).
       rootExecutionId: rootExecutionId ?? executionId,
+      ledgerKind,
       dispatchMode,
     }
 
@@ -1830,6 +1839,7 @@ export class AutomationExecutor {
         const branchActionResult = await this.executeSingleAction(branchAction, context, {
           structuralPath: stepKey,
           rootExecutionId: context.rootExecutionId ?? context.executionId,
+          kind: context.ledgerKind,
         })
         await jobLifecycle.onSettled(cursor.parentStepIndex, branchAction, branchActionResult, meta)
         upstreamJobId = jobId
@@ -2088,6 +2098,7 @@ export class AutomationExecutor {
       const result = await this.executeSingleAction(action, context, {
         structuralPath: topLevelStepKey(index),
         rootExecutionId: context.rootExecutionId ?? context.executionId,
+        kind: context.ledgerKind,
       })
 
       results.push(result)
@@ -2165,6 +2176,7 @@ export class AutomationExecutor {
         const branchActionResult = await this.executeSingleAction(branchAction, context, {
           structuralPath: stepKey,
           rootExecutionId: context.rootExecutionId ?? context.executionId,
+          kind: context.ledgerKind,
         })
         await jobLifecycle.onSettled(stepIndex, branchAction, branchActionResult, meta)
 
@@ -2398,6 +2410,7 @@ export class AutomationExecutor {
       const branchActionResult = await this.executeSingleAction(branchAction, context, {
         structuralPath: stepKey,
         rootExecutionId: context.rootExecutionId ?? context.executionId,
+        kind: context.ledgerKind,
       })
       await jobLifecycle.onSettled(stepIndex, branchAction, branchActionResult, meta)
       lastJobId = jobId
@@ -3413,7 +3426,7 @@ export class AutomationExecutor {
     const outcome = await claimExecutionAction(
       { query, isTransaction: true } as unknown as TransactionalQueryable,
       {
-        kind: 'execution',
+        kind: identity.kind ?? 'execution',
         rootExecutionId: identity.rootExecutionId,
         actionKey: deriveActionKey({ structuralPath: identity.structuralPath, actionType, canonicalConfig: config }),
         actionType,
@@ -4202,7 +4215,7 @@ export class AutomationExecutor {
   ): OutboundIntentIdentity | null {
     if (!isClassBOutboundEnabled() || !identity) return null
     return {
-      kind: 'execution',
+      kind: identity.kind ?? 'execution',
       rootExecutionId: identity.rootExecutionId,
       actionKey: deriveActionKey({ structuralPath: identity.structuralPath, actionType, canonicalConfig: config }),
     }

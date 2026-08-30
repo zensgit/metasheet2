@@ -1394,6 +1394,9 @@ export interface MultitableAutomationJobsTable {
 export interface MultitableAutomationSuspensionsTable {
   id: string
   execution_id: string
+  // #4196 §6.1 continuation identity. NULL only for rows created before the migration.
+  root_execution_id: ColumnType<string | null, string | null | undefined, string | null>
+  ledger_kind: ColumnType<'execution' | 'test_run', 'execution' | 'test_run' | undefined, 'execution' | 'test_run'>
   rule_id: string
   sheet_id: string | null
   record_id: string | null
@@ -1414,6 +1417,7 @@ export interface MultitableAutomationApprovalBridgesTable {
   id: string
   execution_id: string
   root_execution_id: string
+  ledger_kind: ColumnType<'execution' | 'test_run', 'execution' | 'test_run' | undefined, 'execution' | 'test_run'>
   rule_id: string
   sheet_id: string | null
   record_id: string | null
