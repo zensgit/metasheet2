@@ -41,6 +41,7 @@ describe('e-learning credit runtime', () => {
         return {
           userId: input.userId,
           balancePoints: 0,
+          currentTitle: null,
           items: [],
           nextCursor: null,
         }
@@ -68,6 +69,7 @@ describe('e-learning credit runtime', () => {
     expect(wallet.body).toEqual({
       userId: ACTOR,
       balancePoints: 0,
+      currentTitle: null,
       items: [],
       nextCursor: null,
     })

@@ -15,6 +15,9 @@ import {
   up as creditAdjustmentUp,
 } from '../../src/db/migrations/zzzz20260829160000_create_elearning_credit_adjustments'
 import {
+  up as titleUp,
+} from '../../src/db/migrations/zzzz20260830123000_create_elearning_titles'
+import {
   ElearningCreditSurfaceError,
   getElearningCreditWallet,
   publishElearningCreditRule,
@@ -163,6 +166,7 @@ describe('e-learning credit rules and wallet PostgreSQL authority', () => {
     await migrate(creditLedgerUp)
     await migrate(creditSurfaceUp)
     await migrate(creditAdjustmentUp)
+    await migrate(titleUp)
   }, 30_000)
 
   afterAll(async () => {
@@ -343,6 +347,7 @@ describe('e-learning credit rules and wallet PostgreSQL authority', () => {
     expect(firstPage).toEqual({
       userId,
       balancePoints: 15,
+      currentTitle: null,
       items: expect.arrayContaining([
         expect.objectContaining({ decisionId: decisions[0]?.id, awardedPoints: 5 }),
         expect.objectContaining({ decisionId: decisions[1]?.id, awardedPoints: 5 }),

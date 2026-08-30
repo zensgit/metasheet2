@@ -43,11 +43,21 @@ import {
 import { isElearningCreditSurfaceEnabled } from './elearning-credit-ledger'
 import type { adjustElearningCreditPostgres } from './elearning-credit-adjustment-postgres'
 import type {
+  issueElearningCertificate,
+  listActiveElearningCertificateTemplates,
+  listMyElearningCertificates,
+  publishElearningCertificateTemplate,
+} from './elearning-certificate-surface'
+import type {
   getElearningCreditWallet,
   listElearningCreditRules,
   publishElearningCreditRule,
   ElearningCreditSurfaceDb,
 } from './elearning-credit-surface'
+import type {
+  getActiveElearningTitleSnapshot,
+  publishElearningTitleSnapshot,
+} from './elearning-title-surface'
 import type {
   ElearningDirectAssignmentDb,
   ElearningDirectAssignmentResult,
@@ -263,6 +273,12 @@ export interface ElearningPilotRuntimeOptions {
   listElearningCreditRules?: typeof listElearningCreditRules
   getElearningCreditWallet?: typeof getElearningCreditWallet
   adjustElearningCredit?: typeof adjustElearningCreditPostgres
+  getActiveElearningTitleSnapshot?: typeof getActiveElearningTitleSnapshot
+  publishElearningTitleSnapshot?: typeof publishElearningTitleSnapshot
+  listActiveElearningCertificateTemplates?: typeof listActiveElearningCertificateTemplates
+  publishElearningCertificateTemplate?: typeof publishElearningCertificateTemplate
+  issueElearningCertificate?: typeof issueElearningCertificate
+  listMyElearningCertificates?: typeof listMyElearningCertificates
 }
 
 function viewerId(req: Request): string | null {
@@ -376,6 +392,14 @@ export function createElearningPilotRuntime(
     listElearningCreditRules: opts.listElearningCreditRules,
     getElearningCreditWallet: opts.getElearningCreditWallet,
     adjustElearningCredit: opts.adjustElearningCredit,
+    getActiveElearningTitleSnapshot: opts.getActiveElearningTitleSnapshot,
+    publishElearningTitleSnapshot: opts.publishElearningTitleSnapshot,
+    listActiveElearningCertificateTemplates:
+      opts.listActiveElearningCertificateTemplates,
+    publishElearningCertificateTemplate:
+      opts.publishElearningCertificateTemplate,
+    issueElearningCertificate: opts.issueElearningCertificate,
+    listMyElearningCertificates: opts.listMyElearningCertificates,
   }) : null
   if (!inner && !credit) return null
 

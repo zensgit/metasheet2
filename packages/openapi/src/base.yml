@@ -4729,6 +4729,223 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ElearningCreditRule'
+    ElearningTitleRow:
+      type: object
+      additionalProperties: false
+      required: [id, name, threshold]
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 512
+        name:
+          type: string
+          minLength: 1
+          maxLength: 512
+        threshold:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 2147483647
+    ElearningTitlePublishRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, titles]
+      properties:
+        requestId:
+          type: string
+          minLength: 1
+          maxLength: 512
+        titles:
+          type: array
+          maxItems: 100
+          description: Complete snapshot in strictly increasing threshold order after normalization.
+          items:
+            $ref: '#/components/schemas/ElearningTitleRow'
+    ElearningTitleSnapshot:
+      type: object
+      additionalProperties: false
+      required: [revisionId, version, titles, createdAt]
+      properties:
+        revisionId:
+          oneOf:
+            - $ref: '#/components/schemas/ElearningUuid'
+            - type: 'null'
+        version:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 2147483647
+        titles:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ElearningTitleRow'
+        createdAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
+    ElearningCertificateTemplatePublishRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, certificateId, name, templateText, backgroundImageUrl]
+      properties:
+        requestId:
+          type: string
+          minLength: 1
+          maxLength: 512
+        certificateId:
+          type: string
+          minLength: 1
+          maxLength: 512
+        name:
+          type: string
+          minLength: 1
+          maxLength: 512
+        templateText:
+          type: string
+          maxLength: 16384
+          description: Text template whose server-parsed placeholders use exact #parameter# names.
+        backgroundImageUrl:
+          oneOf:
+            - type: string
+              format: uri
+              maxLength: 2048
+              description: Canonical credential-free HTTPS URL without a fragment.
+            - type: 'null'
+    ElearningCertificateTemplate:
+      type: object
+      additionalProperties: false
+      required:
+        - certificateId
+        - revisionId
+        - version
+        - name
+        - templateText
+        - backgroundImageUrl
+        - placeholders
+        - createdAt
+      description: Immutable certificate-template metadata; not a rendered or downloadable artifact.
+      properties:
+        certificateId:
+          type: string
+          minLength: 1
+        revisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        version:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 2147483647
+        name:
+          type: string
+          minLength: 1
+        templateText:
+          type: string
+          maxLength: 16384
+        backgroundImageUrl:
+          oneOf:
+            - type: string
+              format: uri
+              maxLength: 2048
+            - type: 'null'
+        placeholders:
+          type: array
+          maxItems: 64
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 128
+        createdAt:
+          type: string
+          format: date-time
+    ElearningCertificateTemplateList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ElearningCertificateTemplate'
+    ElearningCertificateIssueRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, certificateId, userId, parameters]
+      properties:
+        requestId:
+          type: string
+          minLength: 1
+          maxLength: 512
+        certificateId:
+          type: string
+          minLength: 1
+          maxLength: 512
+        userId:
+          type: string
+          minLength: 1
+          maxLength: 512
+        parameters:
+          type: object
+          maxProperties: 64
+          additionalProperties:
+            type: string
+            minLength: 1
+            maxLength: 2048
+          description: Exact placeholder-name to normalized value snapshot required by the active template.
+    ElearningCertificateIssue:
+      type: object
+      additionalProperties: false
+      required:
+        - issueId
+        - certificateId
+        - templateRevisionId
+        - templateName
+        - serialNumber
+        - parameters
+        - backgroundImageUrl
+        - issuedAt
+      description: Immutable issuance ledger metadata; no PDF, render, image-generation, or download payload.
+      properties:
+        issueId:
+          $ref: '#/components/schemas/ElearningUuid'
+        certificateId:
+          type: string
+          minLength: 1
+        templateRevisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        templateName:
+          type: string
+          minLength: 1
+        serialNumber:
+          $ref: '#/components/schemas/ElearningUuid'
+        parameters:
+          type: object
+          maxProperties: 64
+          additionalProperties:
+            type: string
+            minLength: 1
+            maxLength: 2048
+        backgroundImageUrl:
+          oneOf:
+            - type: string
+              format: uri
+              maxLength: 2048
+            - type: 'null'
+        issuedAt:
+          type: string
+          format: date-time
+    ElearningCertificateIssueList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ElearningCertificateIssue'
     ElearningCreditAdjustmentRequest:
       type: object
       additionalProperties: false
@@ -4847,7 +5064,7 @@ components:
     ElearningCreditWallet:
       type: object
       additionalProperties: false
-      required: [userId, balancePoints, items, nextCursor]
+      required: [userId, balancePoints, currentTitle, items, nextCursor]
       properties:
         userId:
           type: string
@@ -4857,6 +5074,11 @@ components:
           format: int32
           minimum: 0
           maximum: 2147483647
+        currentTitle:
+          oneOf:
+            - $ref: '#/components/schemas/ElearningTitleRow'
+            - type: 'null'
+          description: Dynamically resolved from the active title snapshot and current balance.
         items:
           type: array
           items:

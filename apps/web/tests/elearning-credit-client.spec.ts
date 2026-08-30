@@ -8,15 +8,18 @@ vi.mock('../src/utils/api', () => ({
 import {
   adjustElearningCredit,
   getAdminElearningCreditWallet,
+  getElearningTitleSnapshot,
   getMyElearningCreditWallet,
   listElearningCreditRules,
   publishElearningCreditRule,
+  publishElearningTitleSnapshot,
 } from '../src/services/elearningCredit'
 
 const RULE = '11111111-1111-4111-8111-111111111111'
 const REQUEST = '22222222-2222-4222-8222-222222222222'
 const DECISION = '33333333-3333-4333-8333-333333333333'
 const ADJUSTMENT = '44444444-4444-4444-8444-444444444444'
+const TITLE_REVISION = '55555555-5555-4555-8555-555555555555'
 const CREATED = '2026-08-29T01:02:03.000Z'
 const NONCANONICAL = '2026-08-29T01:02:03Z'
 const IMPOSSIBLE = '2026-02-31T01:02:03.000Z'
@@ -45,6 +48,7 @@ function wallet(over: Record<string, unknown> = {}) {
   return {
     userId: 'user-1',
     balancePoints: 5,
+    currentTitle: null,
     items: [{
       decisionId: DECISION,
       behavior: 'complete_course',
@@ -54,6 +58,19 @@ function wallet(over: Record<string, unknown> = {}) {
       createdAt: CREATED,
     }],
     nextCursor: 'cursor-2',
+    ...over,
+  }
+}
+
+function titleSnapshot(over: Record<string, unknown> = {}) {
+  return {
+    revisionId: TITLE_REVISION,
+    version: 2,
+    titles: [
+      { id: 'starter', name: 'Starter', threshold: 0 },
+      { id: 'expert', name: 'Expert', threshold: 100 },
+    ],
+    createdAt: CREATED,
     ...over,
   }
 }
@@ -139,6 +156,79 @@ describe('e-learning credit client', () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse(200, wallet({ userId: 'user-2' })))
     await expect(getAdminElearningCreditWallet('user-2')).resolves.toMatchObject({ userId: 'user-2' })
     expect(lastCall().path).toBe('/api/elearning/admin/credits/wallet?limit=20&userId=user-2')
+  })
+
+  it('gets and publishes a canonical closed title snapshot', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, titleSnapshot()))
+    await expect(getElearningTitleSnapshot()).resolves.toEqual(titleSnapshot())
+    expect(lastCall()).toMatchObject({
+      path: '/api/elearning/admin/credit-titles',
+      options: { method: 'GET' },
+    })
+
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, titleSnapshot({ version: 3 })))
+    await expect(publishElearningTitleSnapshot({
+      requestId: REQUEST,
+      titles: [
+        { id: 'expert', name: 'Expert', threshold: 100 },
+        { id: 'starter', name: 'Starter', threshold: 0 },
+      ],
+    })).resolves.toEqual(titleSnapshot({ version: 3 }))
+    expect(lastCall().path).toBe('/api/elearning/admin/credit-titles')
+    expect(JSON.parse(String(lastCall().options.body))).toEqual({
+      requestId: REQUEST,
+      titles: [
+        { id: 'starter', name: 'Starter', threshold: 0 },
+        { id: 'expert', name: 'Expert', threshold: 100 },
+      ],
+    })
+  })
+
+  it.each([
+    titleSnapshot({ secret: true }),
+    titleSnapshot({ titles: [{ id: 'starter', name: 'Starter', threshold: 0, extra: true }] }),
+    titleSnapshot({ titles: [
+      { id: 'expert', name: 'Expert', threshold: 100 },
+      { id: 'starter', name: 'Starter', threshold: 0 },
+    ] }),
+    titleSnapshot({ titles: [
+      { id: 'starter', name: 'Starter', threshold: 0 },
+      { id: 'starter', name: 'Duplicate', threshold: 100 },
+    ] }),
+    titleSnapshot({ revisionId: null }),
+    titleSnapshot({ createdAt: IMPOSSIBLE }),
+    titleSnapshot({ titles: [{ id: 'overflow', name: 'Overflow', threshold: 2_147_483_648 }] }),
+  ])('rejects malformed title snapshot %#', async (payload) => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, payload))
+    await expect(getElearningTitleSnapshot()).rejects.toMatchObject({
+      code: 'invalid_response',
+      status: 200,
+    })
+  })
+
+  it('parses a nullable closed current title and rejects title leakage in wallet DTOs', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, wallet({
+      currentTitle: { id: 'starter', name: 'Starter', threshold: 0 },
+    })))
+    await expect(getMyElearningCreditWallet()).resolves.toMatchObject({
+      currentTitle: { id: 'starter', name: 'Starter', threshold: 0 },
+    })
+
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, wallet({
+      currentTitle: { id: 'starter', name: 'Starter', threshold: 0, rowId: TITLE_REVISION },
+    })))
+    await expect(getMyElearningCreditWallet()).rejects.toMatchObject({
+      code: 'invalid_response',
+      status: 200,
+    })
+
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, wallet({
+      currentTitle: { id: 'expert', name: 'Expert', threshold: 6 },
+    })))
+    await expect(getMyElearningCreditWallet()).rejects.toMatchObject({
+      code: 'invalid_response',
+      status: 200,
+    })
   })
 
   it('posts only the four manual-adjustment command fields and parses a closed result', async () => {
