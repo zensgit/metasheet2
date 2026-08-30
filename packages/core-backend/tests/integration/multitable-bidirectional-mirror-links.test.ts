@@ -85,10 +85,11 @@ const USER_NOA = `u_bdl_noa_${TS}` // sheet-scoped: B only; sheet A unreadable (
 
 let app: Express
 let publishSpy: MockInstance
+// canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
 let currentUser: { id: string; roles: string[]; perms: string[] } = {
   id: USER_FULL,
   roles: ['member'],
-  perms: ['multitable:read', 'multitable:write'],
+  perms: ['multitable:read', 'multitable:write', 'multitable:manage-schema'],
 }
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
@@ -215,7 +216,7 @@ describeIfDatabase('multitable bidirectional / mirror links — derived reverse 
 
   beforeEach(() => {
     publishSpy.mockClear()
-    currentUser = { id: USER_FULL, roles: ['member'], perms: ['multitable:read', 'multitable:write'] }
+    currentUser = { id: USER_FULL, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:manage-schema'] }
   })
 
   afterAll(async () => {
@@ -289,7 +290,7 @@ describeIfDatabase('multitable bidirectional / mirror links — derived reverse 
     currentUser = { id: USER_NOA, roles: ['member'], perms: [] }
     expect(((await viewRawRecordData(SB, REC_B1))[FLD_B_MIRROR] as string[]) ?? []).toEqual([])
     // PERMITTED (global read) — the raw mirror ids are intact (no over-masking).
-    currentUser = { id: USER_FULL, roles: ['member'], perms: ['multitable:read', 'multitable:write'] }
+    currentUser = { id: USER_FULL, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:manage-schema'] }
     expect((((await viewRawRecordData(SB, REC_B1))[FLD_B_MIRROR] as string[]) ?? []).slice().sort()).toEqual(expectedAll)
   })
 
@@ -299,7 +300,7 @@ describeIfDatabase('multitable bidirectional / mirror links — derived reverse 
     currentUser = { id: USER_NOA, roles: ['member'], perms: [] }
     expect(((await getRecordRawData(SB, REC_B1))[FLD_B_MIRROR] as string[]) ?? []).toEqual([])
     // PERMITTED (global read) — the raw mirror ids are intact (no over-masking).
-    currentUser = { id: USER_FULL, roles: ['member'], perms: ['multitable:read', 'multitable:write'] }
+    currentUser = { id: USER_FULL, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:manage-schema'] }
     expect((((await getRecordRawData(SB, REC_B1))[FLD_B_MIRROR] as string[]) ?? []).slice().sort()).toEqual(expectedAll)
   })
 

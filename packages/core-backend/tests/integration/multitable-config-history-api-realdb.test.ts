@@ -21,7 +21,8 @@ const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, param
 let app: Express
 let currentActor: { id: string; roles: string[]; perms: string[] }
 const ADMIN = { id: `u_admin_${TS}`, roles: ['admin'], perms: ['multitable:read', 'multitable:write', 'multitable:share'] }
-const WRITER = { id: `u_writer_${TS}`, roles: ['member'], perms: ['multitable:read', 'multitable:write'] } // NOT share
+// canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
+const WRITER = { id: `u_writer_${TS}`, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:manage-schema'] } // NOT share
 const SHARER = { id: `u_sharer_${TS}`, roles: ['member'], perms: ['multitable:read', 'multitable:share'] } // NOT write
 const READER = { id: `u_reader_${TS}`, roles: ['member'], perms: ['multitable:read'] } // no manage caps
 

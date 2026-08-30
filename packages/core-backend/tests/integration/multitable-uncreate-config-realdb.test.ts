@@ -39,10 +39,10 @@ const WRITER_FENCE_FLAG = 'MULTITABLE_ENABLE_WRITER_FENCE'
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
 
 type Actor = { id: string; roles: string[]; perms: string[] }
-// canManageFields === canManageViews === canWrite (deriveCapabilities: both derive from multitable:write, and the
-// sheet-scope grant sets both together) — so MANAGER (read+write) holds BOTH field+view manage caps, and a read-only
-// actor holds NEITHER. There is no perm that yields "canManageViews but not canManageFields".
-const MANAGER: Actor = { id: `u_uc_mgr_${TS}`, roles: ['member'], perms: ['multitable:read', 'multitable:write'] }
+// canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts); canManageViews
+// still derives from multitable:write. MANAGER holds BOTH codes so it keeps field+view manage caps, and a read-only
+// actor holds NEITHER.
+const MANAGER: Actor = { id: `u_uc_mgr_${TS}`, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:manage-schema'] }
 const READER: Actor = { id: `u_uc_reader_${TS}`, roles: ['member'], perms: ['multitable:read'] }
 
 let app: Express
@@ -161,8 +161,8 @@ describeIfDatabase('multitable config un-create — T9-W Tier 3 / U-3 (real DB)'
   })
 
   test('(b) permission: actor lacking field-manage capability → 403 on field un-create (preview + execute)', async () => {
-    // "canManageViews but NOT canManageFields" is unconstructable (both === canWrite); the field gate is exercised with
-    // a read-only actor that holds NEITHER cap (mirrors the config-restore READER→403). Flag is ON to prove the 403 is
+    // The field gate is exercised with a read-only actor that holds NEITHER cap (mirrors the config-restore
+    // READER→403). Flag is ON to prove the 403 is
     // the CAPABILITY gate (which precedes the flag check), not the flag.
     process.env[FLAG] = 'true'
     const s = await freshSheet('b')

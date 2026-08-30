@@ -138,7 +138,8 @@ describe('M4 suggest-formula routes (mock pool)', () => {
     process.env.MULTITABLE_AI_MODEL = 'claude-sonnet-4-6'
     process.env.MULTITABLE_AI_CONFIRM_LIVE_REQUESTS = '1'
 
-    currentUser = { id: 'u_ai_author', roles: ['member'], perms: ['multitable:write'] }
+    // suggest-formula is canManageFields-gated, which now needs `multitable:manage-schema`.
+    currentUser = { id: 'u_ai_author', roles: ['member'], perms: ['multitable:write', 'multitable:manage-schema'] }
     ledgerInserts = []
     ledgerSettles = []
     metaRecordsQueried = false
