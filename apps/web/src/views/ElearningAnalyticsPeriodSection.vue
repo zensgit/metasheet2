@@ -38,6 +38,31 @@
         </template>
       </dl>
     </article>
+
+    <section class="analytics-period__export" aria-labelledby="elearning-analytics-export-title">
+      <h3 id="elearning-analytics-export-title">{{ text('CSV export', 'CSV 导出') }}</h3>
+      <p>{{ text('Create a suppressed department aggregate export for this date range.', '为当前日期区间创建已执行隐私抑制的部门汇总导出。') }}</p>
+      <div class="analytics-period__actions">
+        <button data-testid="elearning-analytics-export-create" type="button" :disabled="exportBusy" @click="void createExport()">
+          {{ exportBusy ? text('Working...', '处理中…') : text('Create export', '创建导出') }}
+        </button>
+        <button data-testid="elearning-analytics-export-refresh" type="button" :disabled="exportBusy || !exportResult" @click="void refreshExport()">
+          {{ text('Refresh status', '刷新状态') }}
+        </button>
+        <button data-testid="elearning-analytics-export-download" type="button" :disabled="exportBusy || exportResult?.status !== 'succeeded'" @click="void downloadExport()">
+          {{ text('Download CSV', '下载 CSV') }}
+        </button>
+      </div>
+      <p v-if="exportError" class="analytics-period__status analytics-period__status--error" data-testid="elearning-analytics-export-error" role="status">
+        {{ exportError }}
+      </p>
+      <dl v-if="exportResult" class="analytics-period__export-status" data-testid="elearning-analytics-export-result">
+        <dt>{{ text('Status', '状态') }}</dt>
+        <dd data-testid="elearning-analytics-export-status">{{ exportResult.status }}</dd>
+        <dt>{{ text('Expires', '过期时间') }}</dt>
+        <dd>{{ exportResult.expiresAt }}</dd>
+      </dl>
+    </section>
   </section>
 </template>
 
@@ -46,7 +71,11 @@ import { ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
 import { ElearningApiError } from '../services/elearning'
 import {
+  createElearningAnalyticsExport,
+  downloadElearningAnalyticsExport,
+  getElearningAnalyticsExport,
   getElearningDepartmentStatsPeriod,
+  type ElearningAnalyticsExport,
   type ElearningDepartmentStatsDailyMetrics,
   type ElearningDepartmentStatsPeriod,
 } from '../services/elearningAnalytics'
@@ -58,6 +87,10 @@ const startDate = ref(daysBefore(endDate.value, 6))
 const loading = ref(false)
 const error = ref('')
 const result = ref<ElearningDepartmentStatsPeriod | null>(null)
+const exportBusy = ref(false)
+const exportError = ref('')
+const exportResult = ref<ElearningAnalyticsExport | null>(null)
+let pendingExportIdentity: { fingerprint: string; requestId: string } | null = null
 
 function text(en: string, zh: string): string {
   return isZh.value ? zh : en
@@ -89,6 +122,32 @@ function errorText(value: unknown): string {
     if (value.status === 404) return text('No department data exists for this range.', '该区间暂无部门数据。')
   }
   return text('Unable to load the period summary.', '无法加载区间汇总。')
+}
+
+function exportErrorText(value: unknown): string {
+  if (value instanceof ElearningApiError) {
+    if (value.status === 400) return text('Enter a valid department and date range.', '请输入有效的部门和日期区间。')
+    if (value.status === 403) return text('This department is outside your management scope.', '该部门不在您的管理范围内。')
+    if (value.status === 409) return text('The export is not ready yet.', '导出尚未就绪。')
+    if (value.status === 410) return text('The export has expired.', '导出已过期。')
+  }
+  return text('Unable to process the export.', '无法处理导出。')
+}
+
+function exportInput(): { departmentId: string; periodStart: string; periodEnd: string } {
+  return {
+    departmentId: departmentId.value.trim().toLowerCase(),
+    periodStart: `${startDate.value}T00:00:00.000Z`,
+    periodEnd: `${nextUtcDay(endDate.value)}T00:00:00.000Z`,
+  }
+}
+
+function requestIdFor(input: ReturnType<typeof exportInput>): string {
+  const fingerprint = JSON.stringify(input)
+  if (pendingExportIdentity?.fingerprint === fingerprint) return pendingExportIdentity.requestId
+  const requestId = crypto.randomUUID()
+  pendingExportIdentity = { fingerprint, requestId }
+  return requestId
 }
 
 function metrics(value: ElearningDepartmentStatsDailyMetrics): Array<{ label: string; value: string }> {
@@ -123,12 +182,63 @@ async function load(): Promise<void> {
     loading.value = false
   }
 }
+
+async function createExport(): Promise<void> {
+  if (exportBusy.value) return
+  exportBusy.value = true
+  exportError.value = ''
+  const input = exportInput()
+  try {
+    exportResult.value = await createElearningAnalyticsExport({
+      requestId: requestIdFor(input),
+      ...input,
+    })
+    pendingExportIdentity = null
+  } catch (value) {
+    exportError.value = exportErrorText(value)
+  } finally {
+    exportBusy.value = false
+  }
+}
+
+async function refreshExport(): Promise<void> {
+  if (exportBusy.value || !exportResult.value) return
+  exportBusy.value = true
+  exportError.value = ''
+  try {
+    exportResult.value = await getElearningAnalyticsExport(exportResult.value.exportId)
+  } catch (value) {
+    exportError.value = exportErrorText(value)
+  } finally {
+    exportBusy.value = false
+  }
+}
+
+async function downloadExport(): Promise<void> {
+  if (exportBusy.value || exportResult.value?.status !== 'succeeded') return
+  exportBusy.value = true
+  exportError.value = ''
+  try {
+    const download = await downloadElearningAnalyticsExport(exportResult.value.exportId)
+    const url = URL.createObjectURL(download.blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = download.filename
+    anchor.click()
+    URL.revokeObjectURL(url)
+  } catch (value) {
+    exportError.value = exportErrorText(value)
+  } finally {
+    exportBusy.value = false
+  }
+}
 </script>
 
 <style scoped>
 .analytics-period,
 .analytics-period__form,
-.analytics-period__result {
+.analytics-period__result,
+.analytics-period__export {
   display: grid;
   gap: 12px;
 }
@@ -161,6 +271,46 @@ async function load(): Promise<void> {
   border-radius: 8px;
   padding: 8px 10px;
   font: inherit;
+}
+
+.analytics-period__export {
+  border-top: 1px solid #dfe7f4;
+  padding-top: 12px;
+}
+
+.analytics-period__export h3 {
+  margin: 0;
+}
+
+.analytics-period__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.analytics-period__actions button {
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #2563eb;
+  color: #fff;
+  cursor: pointer;
+}
+
+.analytics-period__actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.analytics-period__export-status {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 12px;
+  margin: 0;
+}
+
+.analytics-period__export-status dd {
+  margin: 0;
 }
 
 .analytics-period__form button {

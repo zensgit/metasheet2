@@ -6,6 +6,17 @@ const UUID_RE =
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 const CANONICAL_ISO_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const ERROR_CODE_RE = /^[A-Z][A-Z0-9_]{1,63}$/
+const EXPORT_KEYS = [
+  'exportId',
+  'departmentId',
+  'periodStart',
+  'periodEnd',
+  'status',
+  'expiresAt',
+  'completedAt',
+  'errorCode',
+  'duplicate',
+] as const
 
 const BASE_KEYS = [
   'departmentId',
@@ -94,6 +105,30 @@ export interface ElearningDepartmentStatsPeriodVisible
 export type ElearningDepartmentStatsPeriod =
   | ElearningDepartmentStatsPeriodSuppressed
   | ElearningDepartmentStatsPeriodVisible
+
+export type ElearningAnalyticsExportStatus =
+  | 'pending'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'expired'
+
+export interface ElearningAnalyticsExport {
+  exportId: string
+  departmentId: string
+  periodStart: string
+  periodEnd: string
+  status: ElearningAnalyticsExportStatus
+  expiresAt: string
+  completedAt: string | null
+  errorCode: string | null
+  duplicate: boolean
+}
+
+export interface ElearningAnalyticsExportDownload {
+  blob: Blob
+  filename: string
+}
 
 function fail(code: string, status: number): never {
   throw new ElearningApiError(code, status)
@@ -258,6 +293,44 @@ function parsePeriodStats(value: unknown, status: number): ElearningDepartmentSt
   return { ...common, suppressed: false, metrics: parseMetrics(value.metrics, status) }
 }
 
+function parseExport(value: unknown, status: number): ElearningAnalyticsExport {
+  if (!isPlainObject(value) || !exactKeys(value, EXPORT_KEYS)) failShape(status)
+  if (!['pending', 'running', 'succeeded', 'failed', 'expired'].includes(String(value.status))) {
+    failShape(status)
+  }
+  const completedAt = value.completedAt === null
+    ? null
+    : requireTimestamp(value.completedAt, status)
+  const errorCode = value.errorCode === null
+    ? null
+    : typeof value.errorCode === 'string' && ERROR_CODE_RE.test(value.errorCode)
+      ? value.errorCode
+      : failShape(status)
+  if (typeof value.duplicate !== 'boolean') failShape(status)
+  const periodStart = requireTimestamp(value.periodStart, status)
+  const periodEnd = requireTimestamp(value.periodEnd, status)
+  if (periodStart >= periodEnd) failShape(status)
+  return {
+    exportId: requireUuid(value.exportId, status),
+    departmentId: requireUuid(value.departmentId, status),
+    periodStart,
+    periodEnd,
+    status: value.status as ElearningAnalyticsExportStatus,
+    expiresAt: requireTimestamp(value.expiresAt, status),
+    completedAt,
+    errorCode,
+    duplicate: value.duplicate,
+  }
+}
+
+async function readJson(response: Response): Promise<unknown> {
+  try {
+    return await response.json()
+  } catch {
+    return undefined
+  }
+}
+
 function readErrorCode(payload: unknown): string {
   if (!isPlainObject(payload) || typeof payload.error !== 'string') return 'request_failed'
   const code = payload.error.trim()
@@ -317,4 +390,74 @@ export async function getElearningDepartmentStatsPeriod(
   }
   if (response.status !== 200) fail(readErrorCode(payload), response.status)
   return parsePeriodStats(payload, response.status)
+}
+
+export async function createElearningAnalyticsExport(input: {
+  requestId: string
+  departmentId: string
+  periodStart: string
+  periodEnd: string
+}): Promise<ElearningAnalyticsExport> {
+  const body = {
+    requestId: requireInputUuid(input.requestId),
+    departmentId: requireInputUuid(input.departmentId),
+    periodStart: requireInputTimestamp(input.periodStart),
+    periodEnd: requireInputTimestamp(input.periodEnd),
+  }
+  if (body.periodStart >= body.periodEnd) fail('invalid_input', 400)
+  let response: Response
+  try {
+    response = await apiFetch('/api/elearning/admin/analytics/exports', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  } catch {
+    fail('network_error', 0)
+  }
+  const payload = await readJson(response)
+  if (response.status !== 200 && response.status !== 202) {
+    fail(readErrorCode(payload), response.status)
+  }
+  return parseExport(payload, response.status)
+}
+
+export async function getElearningAnalyticsExport(
+  exportId: string,
+): Promise<ElearningAnalyticsExport> {
+  const id = requireInputUuid(exportId)
+  let response: Response
+  try {
+    response = await apiFetch(`/api/elearning/admin/analytics/exports/${id}`, { method: 'GET' })
+  } catch {
+    fail('network_error', 0)
+  }
+  const payload = await readJson(response)
+  if (response.status !== 200) fail(readErrorCode(payload), response.status)
+  return parseExport(payload, response.status)
+}
+
+export async function downloadElearningAnalyticsExport(
+  exportId: string,
+): Promise<ElearningAnalyticsExportDownload> {
+  const id = requireInputUuid(exportId)
+  let response: Response
+  try {
+    response = await apiFetch(
+      `/api/elearning/admin/analytics/exports/${id}/download`,
+      { method: 'GET' },
+    )
+  } catch {
+    fail('network_error', 0)
+  }
+  if (response.status !== 200) {
+    fail(readErrorCode(await readJson(response)), response.status)
+  }
+  if (response.headers.get('Content-Type')?.toLowerCase() !== 'text/csv; charset=utf-8') {
+    failShape(response.status)
+  }
+  return {
+    blob: await response.blob(),
+    filename: `elearning-department-stats-${id}.csv`,
+  }
 }
