@@ -66,7 +66,7 @@ import {
   type AutomationConditionField,
   type ConditionGroup,
 } from './automation-conditions'
-import { AutomationExecutor, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps, type ExecutionContext, type ActionJobLifecycle, type AutomationStepResult } from './automation-executor'
+import { AutomationExecutor, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps, type ExecutionContext, type ActionJobLifecycle, type AutomationStepResult, type AutomationDispatchMode } from './automation-executor'
 import { ALL_ACTION_TYPES, type AutomationAction } from './automation-actions'
 import type { AutomationTrigger } from './automation-triggers'
 import {
@@ -117,6 +117,12 @@ export class AutomationRuleValidationError extends Error {
     super(message)
     this.name = 'AutomationRuleValidationError'
   }
+}
+
+export type AutomationTestRunMode = 'simulate' | 'real_fire'
+
+export interface AutomationTestRunOptions {
+  mode?: AutomationTestRunMode
 }
 
 const VALID_TRIGGER_TYPES = new Set([
@@ -2455,6 +2461,7 @@ export class AutomationService {
     rule: ExecutorRule,
     triggerEvent: unknown,
     retryMeta?: { rerunOfExecutionId: string; initiatedBy: string; rootExecutionId?: string },
+    dispatchMode: AutomationDispatchMode = 'live',
   ): Promise<AutomationExecution> {
     const persistJobs = rule.executionMode === 'workflow_job_v1'
     // A6-1: ONLY opted-in rules ('workflow_job_v1') get a per-action job lifecycle. Legacy rules
@@ -2466,7 +2473,13 @@ export class AutomationService {
     // #4196: thread the retry lineage root into the executor so its ExecutionContext.rootExecutionId keys
     // Class-A claims on the ORIGINAL execution's root (a retry re-running the same action → duplicate →
     // skip). A first run has no retryMeta, so the executor defaults the root to its own execution id.
-    const execution = await this.executor.execute(rule, triggerEvent, jobLifecycleFactory, retryMeta?.rootExecutionId)
+    const execution = await this.executor.execute(
+      rule,
+      triggerEvent,
+      jobLifecycleFactory,
+      retryMeta?.rootExecutionId,
+      dispatchMode,
+    )
     if (retryMeta) {
       // A5: stamp retry provenance onto the NEW execution before persistence.
       execution.rerunOfExecutionId = retryMeta.rerunOfExecutionId
@@ -3498,9 +3511,18 @@ export class AutomationService {
   }
 
   /**
-   * Manual test run: execute a rule immediately with synthetic event.
+   * Manual test run: simulate the saved rule immediately with a synthetic event.
    */
-  async testRun(ruleId: string, sheetId: string): Promise<AutomationExecution> {
+  async testRun(
+    ruleId: string,
+    sheetId: string,
+    options: AutomationTestRunOptions = {},
+  ): Promise<AutomationExecution> {
+    const mode = options.mode ?? 'simulate'
+    if (mode !== 'simulate') {
+      throw new Error('Real-fire automation test runs are disabled')
+    }
+
     const rule = await this.getRule(ruleId)
     // G8 hardening (review P3): the route gates `canManageAutomation` on the PATH `sheetId`, but
     // getRule(ruleId) is not sheet-bound — so a caller authorized on sheet A could otherwise run a
@@ -3517,7 +3539,7 @@ export class AutomationService {
       actorId: 'system',
       _triggeredBy: 'manual_test',
     }
-    return this.executeRule(execRule, syntheticEvent)
+    return this.executeRule(execRule, syntheticEvent, undefined, 'simulate')
   }
 
   /**

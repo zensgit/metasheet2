@@ -538,13 +538,12 @@ export function createAutomationRoutes(
       return res.status(400).json({ error: 'sheetId and ruleId are required' })
     }
 
-    // G8 (retry/test-run governance lock §6): the test route REALLY executes the rule (fires
-    // writes/notifications/webhooks). Until now it had no backend capability gate at all — only the
-    // FE hides the button behind `canManageAutomation`. Enforce that same per-sheet capability on
-    // the backend so a caller who cannot manage automation on this sheet cannot trigger a real run.
+    // G8 (retry/test-run governance lock §6): test-run requires the same per-sheet
+    // canManageAutomation capability as rule authoring. The default run is simulate and dispatches
+    // no business side effect; any future real_fire path remains capability-gated too.
     // Mirrors the automation rule-CRUD gate at routes/univer-meta.ts (resolveSheetCapabilities →
-    // canManageAutomation). Standalone security fix; no flag, no behaviour change for a privileged
-    // caller (the FE test button already only renders for canManageAutomation holders).
+    // canManageAutomation). The FE test button already only renders for canManageAutomation holders;
+    // the route additionally makes the safe simulation default authoritative server-side.
     try {
       const pool = poolManager.get()
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
@@ -570,8 +569,24 @@ export function createAutomationRoutes(
     const svc = getService(res)
     if (!svc) return undefined
 
+    const rawMode = req.body && typeof req.body === 'object'
+      ? (req.body as Record<string, unknown>).mode
+      : undefined
+    if (rawMode !== undefined && rawMode !== 'simulate' && rawMode !== 'real_fire') {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'INVALID_TEST_RUN_MODE', message: 'mode must be simulate or real_fire' },
+      })
+    }
+    if (rawMode === 'real_fire') {
+      return res.status(409).json({
+        ok: false,
+        error: { code: 'TEST_RUN_REAL_FIRE_DISABLED', message: 'Real-fire test runs are not enabled' },
+      })
+    }
+
     try {
-      const execution = await svc.testRun(ruleId, sheetId)
+      const execution = await svc.testRun(ruleId, sheetId, { mode: 'simulate' })
       // The in-memory execution carries the live rule (credentials) in ruleSnapshot + raw
       // action output in steps; record()'s at-persist redaction returns new objects and does
       // NOT mutate it. Serialize the PERSISTED (redacted) row; if it didn't land, fall back to
@@ -579,7 +594,8 @@ export function createAutomationRoutes(
       // preserved either way (client does parseJson<AutomationExecution>(res)).
       // safeGet: a log-read failure must not 500 a completed test run → redacted fallback.
       const persisted = await safeGetPersistedExecution(svc, execution.id)
-      return res.json(persisted ?? redactAutomationExecutionForResponse(execution))
+      const response = persisted ?? redactAutomationExecutionForResponse(execution)
+      return res.json({ ...response, dryRun: true })
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Test run failed'
       const code = message.includes('not found') ? 404 : 500

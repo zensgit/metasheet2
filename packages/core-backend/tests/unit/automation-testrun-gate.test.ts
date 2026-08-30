@@ -1,10 +1,8 @@
 /**
  * G8 (retry/test-run governance lock §6, §11-G8): the test-run route
- * `POST /api/multitable/sheets/:sheetId/automations/:ruleId/test` REALLY executes the rule
- * (fires writes/notifications/webhooks). It previously had NO backend capability gate — only the
- * FE hid the button behind `canManageAutomation`. These tests pin the backend gate: a caller
- * lacking `canManageAutomation` on the sheet gets 403 and `testRun` is NEVER invoked (no real
- * action fires); a privileged caller reaches `testRun` exactly as before.
+ * `POST /api/multitable/sheets/:sheetId/automations/:ruleId/test` defaults to a side-effect-free
+ * simulation. The capability gate remains mandatory, and real_fire stays fail-closed until its
+ * separately-gated contract is implemented.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import express from 'express'
@@ -64,13 +62,13 @@ describe('G8 — test-run route capability gate', () => {
 
     expect(res.status).toBe(403)
     expect(res.body?.error?.code).toBe('FORBIDDEN')
-    // THE point of the gate: the real execution never ran.
+    // THE point of the gate: even the simulation never ran.
     expect(svc.testRun).not.toHaveBeenCalled()
     // …and the gate was actually scoped to THIS sheet.
     expect(resolveSheetCapabilities).toHaveBeenCalledWith(expect.anything(), expect.any(Function), 'sheet-a')
   })
 
-  it('reaches testRun for a caller WITH canManageAutomation (privileged path unchanged)', async () => {
+  it('defaults an authorized caller to simulate and marks the response dryRun', async () => {
     resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
     const svc = makeService()
 
@@ -80,7 +78,36 @@ describe('G8 — test-run route capability gate', () => {
       .send({})
 
     expect(res.status).toBe(200)
-    expect(svc.testRun).toHaveBeenCalledWith('rule-1', 'sheet-a')
+    expect(res.body.dryRun).toBe(true)
+    expect(svc.testRun).toHaveBeenCalledWith('rule-1', 'sheet-a', { mode: 'simulate' })
+  })
+
+  it('rejects an unknown mode before testRun is invoked', async () => {
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    const svc = makeService()
+
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
+      .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
+      .send({ mode: 'preview' })
+
+    expect(res.status).toBe(400)
+    expect(res.body?.error?.code).toBe('INVALID_TEST_RUN_MODE')
+    expect(svc.testRun).not.toHaveBeenCalled()
+  })
+
+  it('fails closed on explicit real_fire while no production enablement gate exists', async () => {
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    const svc = makeService()
+
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
+      .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
+      .send({ mode: 'real_fire' })
+
+    expect(res.status).toBe(409)
+    expect(res.body?.error?.code).toBe('TEST_RUN_REAL_FIRE_DISABLED')
+    expect(svc.testRun).not.toHaveBeenCalled()
   })
 
   it('fails CLOSED (503, values-free) when capability resolution throws a transient error — never an ungated testRun', async () => {
