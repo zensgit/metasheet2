@@ -121,8 +121,16 @@ export class AutomationRuleValidationError extends Error {
 
 export type AutomationTestRunMode = 'simulate' | 'real_fire'
 
+export interface AutomationTestRunSampleRecord {
+  recordId: string
+  data: Record<string, unknown>
+  actorId: string
+}
+
 export interface AutomationTestRunOptions {
   mode?: AutomationTestRunMode
+  /** Server-read-gated sample snapshot. Request payloads must never construct this directly. */
+  sampleRecord?: AutomationTestRunSampleRecord
 }
 
 function valuesFreeSimulationStep(step: AutomationStepResult): AutomationStepResult {
@@ -3576,9 +3584,9 @@ export class AutomationService {
     const execRule = toExecutorRule(rule)
     const syntheticEvent: AutomationEventPayload = {
       sheetId,
-      recordId: 'test_record',
-      data: {},
-      actorId: 'system',
+      recordId: options.sampleRecord?.recordId ?? 'test_record',
+      data: options.sampleRecord?.data ?? {},
+      actorId: options.sampleRecord?.actorId ?? 'system',
       _triggeredBy: 'manual_test',
     }
     return this.executeRule(execRule, syntheticEvent, undefined, 'simulate')
