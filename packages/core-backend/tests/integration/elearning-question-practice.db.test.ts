@@ -321,6 +321,30 @@ describe.sequential('e-learning question practice PostgreSQL authority', () => {
     )
     await migrate(practiceDown)
     await migrate(practiceUp)
+    await firstPool.query(`
+      CREATE SCHEMA elearning_practice_shadow;
+      CREATE FUNCTION elearning_practice_shadow.elearning_practice_sessions_immutable()
+      RETURNS trigger LANGUAGE plpgsql AS $fn$
+      BEGIN
+        IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+        RETURN NEW;
+      END $fn$;
+      DROP TRIGGER trg_elearning_practice_sessions_immutable ON elearning_practice_sessions;
+      CREATE TRIGGER trg_elearning_practice_sessions_immutable
+        BEFORE UPDATE OR DELETE ON elearning_practice_sessions
+        FOR EACH ROW EXECUTE FUNCTION elearning_practice_shadow.elearning_practice_sessions_immutable();
+    `)
+    await expect(migrate(practiceUp)).rejects.toThrow(
+      'elearning practice migration drift: trigger set',
+    )
+    await firstPool.query(`
+      DROP TRIGGER trg_elearning_practice_sessions_immutable ON elearning_practice_sessions;
+      CREATE TRIGGER trg_elearning_practice_sessions_immutable
+        BEFORE UPDATE OR DELETE ON elearning_practice_sessions
+        FOR EACH ROW EXECUTE FUNCTION elearning_practice_sessions_immutable();
+      DROP SCHEMA elearning_practice_shadow CASCADE;
+    `)
+    await migrate(practiceUp)
     await migrate(practiceDown)
     await migrate(practiceDown)
     await migrate(practiceUp)

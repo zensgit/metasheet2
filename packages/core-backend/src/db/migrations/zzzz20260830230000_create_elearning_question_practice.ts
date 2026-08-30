@@ -175,10 +175,15 @@ async function assertCanonical(db: Kysely<unknown>): Promise<void> {
     tgqual: unknown
     tgattr: string
     function_name: string
+    function_oid: string
+    canonical_function_oid: string | null
   }>`
     SELECT tg.tgname, rel.relname AS table_name, tg.tgtype, tg.tgenabled,
            tg.tgqual, tg.tgattr::text,
-           function_rel.proname AS function_name
+           function_rel.proname AS function_name,
+           function_rel.oid::text AS function_oid,
+           to_regprocedure(format('%I.%I()', current_schema(), function_rel.proname))::oid::text
+             AS canonical_function_oid
     FROM pg_trigger tg
     JOIN pg_class rel ON rel.oid = tg.tgrelid
     JOIN pg_namespace ns ON ns.oid = rel.relnamespace
@@ -218,6 +223,7 @@ async function assertCanonical(db: Kysely<unknown>): Promise<void> {
       || row.table_name !== expected.table
       || row.tgtype !== expected.type
       || row.function_name !== expected.fn
+      || row.function_oid !== row.canonical_function_oid
       || row.tgenabled !== 'O'
       || row.tgqual !== null
       || row.tgattr !== ''
