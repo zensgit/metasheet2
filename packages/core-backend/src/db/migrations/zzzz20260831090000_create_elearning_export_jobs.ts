@@ -207,6 +207,12 @@ async function assertCanonical(db: Kysely<unknown>): Promise<void> {
          OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
         RAISE EXCEPTION 'elearning export identity is immutable';
       END IF;
+      IF OLD.storage_key IS NOT NULL
+         AND (NEW.storage_key IS DISTINCT FROM OLD.storage_key
+           OR NEW.file_sha256 IS DISTINCT FROM OLD.file_sha256
+           OR NEW.file_size_bytes IS DISTINCT FROM OLD.file_size_bytes) THEN
+        RAISE EXCEPTION 'elearning export effect claim is immutable';
+      END IF;
       IF (OLD.status = 'pending' AND NEW.status NOT IN ('running', 'expired'))
          OR (OLD.status = 'running' AND NEW.status NOT IN ('running', 'succeeded', 'failed', 'expired'))
          OR (OLD.status = 'failed' AND NEW.status NOT IN ('running', 'expired'))
@@ -382,6 +388,12 @@ export async function up(db: Kysely<unknown>): Promise<void> {
          OR NEW.expires_at IS DISTINCT FROM OLD.expires_at
          OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
         RAISE EXCEPTION 'elearning export identity is immutable';
+      END IF;
+      IF OLD.storage_key IS NOT NULL
+         AND (NEW.storage_key IS DISTINCT FROM OLD.storage_key
+           OR NEW.file_sha256 IS DISTINCT FROM OLD.file_sha256
+           OR NEW.file_size_bytes IS DISTINCT FROM OLD.file_size_bytes) THEN
+        RAISE EXCEPTION 'elearning export effect claim is immutable';
       END IF;
       IF (OLD.status = 'pending' AND NEW.status NOT IN ('running', 'expired'))
          OR (OLD.status = 'running' AND NEW.status NOT IN ('running', 'succeeded', 'failed', 'expired'))

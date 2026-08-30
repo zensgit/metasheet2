@@ -41,6 +41,14 @@ function storedRow(overrides: Record<string, unknown> = {}): Record<string, unkn
     department_id: DEPARTMENT,
     period_start: PERIOD_START,
     period_end: PERIOD_END,
+    query_snapshot: {
+      dataset: 'department_overview',
+      departmentId: DEPARTMENT,
+      periodEnd: PERIOD_END,
+      periodStart: PERIOD_START,
+      rows: [],
+      version: 1,
+    },
     status: 'pending',
     storage_key: null,
     file_sha256: null,
@@ -55,6 +63,28 @@ function storedRow(overrides: Record<string, unknown> = {}): Record<string, unkn
 
 function result(rows: Array<Record<string, unknown>>) {
   return { rows, rowCount: rows.length }
+}
+
+function projectionRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    statsDate: '2026-08-01',
+    periodStart: '2026-08-01T00:00:00.000Z',
+    periodEnd: '2026-08-02T00:00:00.000Z',
+    sourceVersion: '=unsafe',
+    suppressed: true,
+    minGroupSize: 5,
+    assignedCount: null,
+    completedCount: null,
+    completionRate: null,
+    creditAverage: null,
+    creditTotal: null,
+    examParticipantCount: null,
+    learnerCount: null,
+    learningSeconds: null,
+    memberCount: null,
+    overdueCount: null,
+    ...overrides,
+  }
 }
 
 function dbFromQuery(
@@ -156,8 +186,17 @@ describe('e-learning analytics export authority', () => {
   it('materializes suppression-safe formula-safe CSV with an idempotent storage effect', async () => {
     const writes: Array<{ key: string; content: Buffer }> = []
     const db = dbFromQuery(async (sql) => {
-      if (sql.includes('materialize-lock')) return result([storedRow()])
-      if (sql.includes('elearning-analytics-export:stats')) {
+      if (sql.includes('materialize-lock')) return result([storedRow({
+        query_snapshot: {
+          dataset: 'department_overview',
+          departmentId: DEPARTMENT,
+          periodEnd: PERIOD_END,
+          periodStart: PERIOD_START,
+          rows: [projectionRow()],
+          version: 1,
+        },
+      })])
+      if (sql.includes('elearning-analytics-export:snapshot')) {
         return result([{
           stats_date: '2026-08-01',
           period_start: '2026-08-01T00:00:00.000Z',
@@ -210,7 +249,6 @@ describe('e-learning analytics export authority', () => {
     let content = Buffer.alloc(0)
     const db = dbFromQuery(async (sql, params) => {
       if (sql.includes('materialize-lock')) return result([storedRow()])
-      if (sql.includes('elearning-analytics-export:stats')) return result([])
       if (sql.includes('materialize-claim')) {
         content = Buffer.from('\uFEFF' + '"departmentId","statsDate","periodStart","periodEnd","sourceVersion","suppressed","minGroupSize","assignedCount","completedCount","completionRate","creditAverage","creditTotal","examParticipantCount","learnerCount","learningSeconds","memberCount","overdueCount"\r\n')
         expect(params?.[3]).toBe(createHash('sha256').update(content).digest('hex'))
@@ -236,11 +274,11 @@ describe('e-learning analytics export authority', () => {
     )).resolves.toMatchObject({ outcome: 'materialized' })
   })
 
-  it('rejects a suppressed projection if any protected metric is present', async () => {
-    const storagePut = vi.fn()
+  it('rejects a suppressed projection before freezing or enqueueing the request', async () => {
     const db = dbFromQuery(async (sql) => {
-      if (sql.includes('materialize-lock')) return result([storedRow()])
-      if (sql.includes('elearning-analytics-export:stats')) {
+      if (sql.includes('elearning-analytics-export:actor')) return result([{ ok: 1 }])
+      if (sql.includes('elearning-analytics-export:request')) return result([])
+      if (sql.includes('elearning-analytics-export:snapshot')) {
         return result([{
           stats_date: '2026-08-01',
           period_start: '2026-08-01T00:00:00.000Z',
@@ -260,7 +298,56 @@ describe('e-learning analytics export authority', () => {
           overdue_count: null,
         }])
       }
-      if (sql.includes('materialize-claim')) return result([{ id: EXPORT }])
+      return result([])
+    })
+    await expect(createElearningAnalyticsExport(
+      db,
+      createInput(),
+      FLAGS,
+    )).rejects.toMatchObject({ code: 'unavailable' })
+  })
+
+  it('reuses the immutable projection snapshot without rewriting an active effect claim', async () => {
+    const content = Buffer.from('\uFEFF' + '"departmentId","statsDate","periodStart","periodEnd","sourceVersion","suppressed","minGroupSize","assignedCount","completedCount","completionRate","creditAverage","creditTotal","examParticipantCount","learnerCount","learningSeconds","memberCount","overdueCount"\r\n')
+    const digest = createHash('sha256').update(content).digest('hex')
+    const storageKey = deriveElearningAnalyticsExportStorageKey({ orgId: ORG, exportId: EXPORT })
+    const claim = vi.fn()
+    const db = dbFromQuery(async (sql) => {
+      if (sql.includes('materialize-lock')) return result([storedRow({
+        status: 'running',
+        storage_key: storageKey,
+        file_sha256: digest,
+        file_size_bytes: content.length,
+      })])
+      if (sql.includes('materialize-claim')) {
+        claim()
+        return result([{ id: EXPORT }])
+      }
+      if (sql.includes('materialize-complete')) return result([{ id: EXPORT }])
+      return result([])
+    })
+    await expect(materializeElearningAnalyticsExport(
+      db,
+      { orgId: ORG, exportId: EXPORT },
+      { put: vi.fn(), get: vi.fn(), delete: vi.fn() },
+      FLAGS,
+    )).resolves.toEqual({ outcome: 'materialized', exportId: EXPORT })
+    expect(claim).not.toHaveBeenCalled()
+  })
+
+  it('rejects person-shaped or extra fields in the closed aggregate snapshot', async () => {
+    const storagePut = vi.fn()
+    const db = dbFromQuery(async (sql) => {
+      if (sql.includes('materialize-lock')) return result([storedRow({
+        query_snapshot: {
+          dataset: 'department_overview',
+          departmentId: DEPARTMENT,
+          periodEnd: PERIOD_END,
+          periodStart: PERIOD_START,
+          rows: [projectionRow({ answerCount: '1' })],
+          version: 1,
+        },
+      })])
       return result([])
     })
     await expect(materializeElearningAnalyticsExport(

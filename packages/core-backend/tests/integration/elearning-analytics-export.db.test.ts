@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
@@ -444,19 +444,64 @@ describe.sequential('e-learning analytics export PostgreSQL authority', () => {
       FLAGS,
     )
     const storage = memoryStorage()
-    const outcomes = await Promise.all([
-      materializeElearningAnalyticsExport(
-        exportDb(firstPool), { orgId: ORG, exportId: created.exportId }, storage, FLAGS,
-      ),
-      materializeElearningAnalyticsExport(
-        exportDb(secondPool), { orgId: ORG, exportId: created.exportId }, storage, FLAGS,
-      ),
-    ])
+    let releaseFirstPut = (): void => undefined
+    let observeFirstClaim = (_value: { key: string; content: Buffer }): void => undefined
+    const firstPutReleased = new Promise<void>((resolve) => { releaseFirstPut = resolve })
+    const firstClaimed = new Promise<{ key: string; content: Buffer }>((resolve) => {
+      observeFirstClaim = resolve
+    })
+    const pausedStorage: ElearningAnalyticsExportStorage = {
+      async put(key, content) {
+        observeFirstClaim({ key, content: Buffer.from(content) })
+        await firstPutReleased
+        await storage.put(key, content)
+      },
+      get: (key) => storage.get(key),
+      delete: (key) => storage.delete(key),
+    }
+    const firstEffect = materializeElearningAnalyticsExport(
+      exportDb(firstPool), { orgId: ORG, exportId: created.exportId }, pausedStorage, FLAGS,
+    )
+    const frozen = await firstClaimed
+    const claimed = await firstPool.query(
+      `SELECT status, storage_key, file_sha256, file_size_bytes::text
+       FROM elearning_export_jobs WHERE org_id = $1 AND id = $2`,
+      [ORG, created.exportId],
+    )
+    expect(claimed.rows).toEqual([{
+      status: 'running',
+      storage_key: frozen.key,
+      file_sha256: createHash('sha256').update(frozen.content).digest('hex'),
+      file_size_bytes: String(frozen.content.length),
+    }])
+    await secondPool.query(
+      `UPDATE elearning_stats_daily
+       SET source_version = 'projection-mutated-after-claim', assigned_count = 99
+       WHERE org_id = $1 AND department_id = $2 AND stats_date = '2026-08-02'`,
+      [ORG, DEPARTMENT],
+    )
+    const retried = await materializeElearningAnalyticsExport(
+      exportDb(secondPool), { orgId: ORG, exportId: created.exportId }, storage, FLAGS,
+    )
+    releaseFirstPut()
+    const outcomes = [await firstEffect, retried]
     expect(outcomes.map((item) => item.outcome).sort()).toEqual(['materialized', 'noop'])
     expect(storage.objects.size).toBe(1)
     const bytes = [...storage.objects.values()][0]!
+    expect(bytes).toEqual(frozen.content)
     expect(bytes.toString('utf8')).toContain('"\'=projection"')
+    expect(bytes.toString('utf8')).toContain('"projection-2"')
+    expect(bytes.toString('utf8')).not.toContain('projection-mutated-after-claim')
     expect(bytes.toString('utf8')).not.toMatch(/answer|trace|grade/i)
+    expect((await firstPool.query(
+      `SELECT storage_key, file_sha256, file_size_bytes::text
+       FROM elearning_export_jobs WHERE org_id = $1 AND id = $2`,
+      [ORG, created.exportId],
+    )).rows).toEqual([{
+      storage_key: frozen.key,
+      file_sha256: createHash('sha256').update(bytes).digest('hex'),
+      file_size_bytes: String(bytes.length),
+    }])
     const download = await downloadElearningAnalyticsExport(
       exportDb(firstPool),
       { orgId: ORG, actorId: ACTOR, isGlobalAdmin: false, exportId: created.exportId },
@@ -500,6 +545,10 @@ describe.sequential('e-learning analytics export PostgreSQL authority', () => {
       `UPDATE elearning_export_jobs SET actor_id = 'other' WHERE id = $1`,
       [created.exportId],
     )).rejects.toThrow()
+    await expect(firstPool.query(
+      `UPDATE elearning_export_jobs SET file_sha256 = $2 WHERE id = $1`,
+      [created.exportId, 'b'.repeat(64)],
+    )).rejects.toThrow('elearning export effect claim is immutable')
     await expect(firstPool.query(
       'DELETE FROM elearning_export_jobs WHERE id = $1',
       [created.exportId],

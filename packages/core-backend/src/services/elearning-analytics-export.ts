@@ -26,6 +26,8 @@ const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const SHA256_RE = /^[0-9a-f]{64}$/
 const ERROR_CODE_RE = /^[A-Z][A-Z0-9_]{1,63}$/
 const CSV_FORMULA_RE = /^[=+\-@\t\r]/
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+const NUMERIC_RE = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/
 
 export type ElearningAnalyticsExportErrorCode =
   | 'disabled'
@@ -132,6 +134,7 @@ interface StoredExport {
   departmentId: string
   periodStart: string
   periodEnd: string
+  querySnapshot: Record<string, unknown>
   status: ElearningAnalyticsExportStatus
   storageKey: string | null
   fileSha256: string | null
@@ -148,6 +151,25 @@ interface PreparedMaterialization {
   storageKey: string
   digest: string
   content: Buffer
+}
+
+interface ProjectionSnapshotRow {
+  statsDate: string
+  periodStart: string
+  periodEnd: string
+  sourceVersion: string
+  suppressed: boolean
+  minGroupSize: number
+  assignedCount: string | null
+  completedCount: string | null
+  completionRate: string | null
+  creditAverage: string | null
+  creditTotal: string | null
+  examParticipantCount: string | null
+  learnerCount: string | null
+  learningSeconds: string | null
+  memberCount: string | null
+  overdueCount: string | null
 }
 
 function fail(code: ElearningAnalyticsExportErrorCode): never {
@@ -217,6 +239,28 @@ function storedNullableInteger(value: unknown): number | null {
 
 function storedBoolean(value: unknown): boolean {
   if (typeof value !== 'boolean') fail('unavailable')
+  return value
+}
+
+function storedObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail('unavailable')
+  return value as Record<string, unknown>
+}
+
+function storedDate(value: unknown): string {
+  if (typeof value !== 'string' || !DATE_RE.test(value)) fail('unavailable')
+  const parsed = new Date(`${value}T00:00:00.000Z`)
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) {
+    fail('unavailable')
+  }
+  return value
+}
+
+function storedMetric(value: unknown): string | null {
+  if (value === null) return null
+  if (typeof value !== 'string' || value.length > 128 || !NUMERIC_RE.test(value)) {
+    fail('unavailable')
+  }
   return value
 }
 
@@ -373,6 +417,7 @@ function parseStoredExport(row: Record<string, unknown>): StoredExport {
     departmentId: storedUuid(row.department_id),
     periodStart: storedTimestamp(row.period_start),
     periodEnd: storedTimestamp(row.period_end),
+    querySnapshot: storedObject(row.query_snapshot),
     status: storedStatus(row.status),
     storageKey,
     fileSha256,
@@ -400,7 +445,7 @@ function dto(row: StoredExport, duplicate: boolean): ElearningAnalyticsExportDto
 
 const EXPORT_COLUMNS = `
   id::text AS export_id, actor_id, request_hash, request_hash_version,
-  department_id::text AS department_id, period_start, period_end, status,
+  department_id::text AS department_id, period_start, period_end, query_snapshot, status,
   storage_key, file_sha256, file_size_bytes::text, expires_at, completed_at, error_code,
   (expires_at <= now()) AS expired_by_clock`
 
@@ -443,6 +488,7 @@ export async function createElearningAnalyticsExport(
       }
 
       const snapshot = await scopeSnapshot(tx, prepared)
+      const projectionSnapshot = await buildProjectionSnapshot(tx, prepared)
       const exportId = randomUUID()
       const inserted = await tx.query(
         `/* elearning-analytics-export:create */
@@ -473,12 +519,7 @@ export async function createElearningAnalyticsExport(
           prepared.periodStart,
           prepared.periodEnd,
           JSON.stringify(snapshot),
-          JSON.stringify({
-            dataset: 'department_overview',
-            departmentId: prepared.departmentId,
-            periodEnd: prepared.periodEnd,
-            periodStart: prepared.periodStart,
-          }),
+          JSON.stringify(projectionSnapshot),
           ELEARNING_ANALYTICS_EXPORT_RETENTION_DAYS,
         ],
       )
@@ -564,30 +605,161 @@ const CSV_HEADERS = [
   'learningSeconds', 'memberCount', 'overdueCount',
 ] as const
 
-function exportCsv(rows: Array<Record<string, unknown>>, departmentId: string): Buffer {
+function exportCsv(rows: ProjectionSnapshotRow[], departmentId: string): Buffer {
   const output = [CSV_HEADERS.map(csvCell).join(',')]
   for (const row of rows) {
-    if (typeof row.suppressed !== 'boolean') fail('unavailable')
     const metrics = [
-      row.assigned_count, row.completed_count, row.completion_rate, row.credit_average,
-      row.credit_total, row.exam_participant_count, row.learner_count,
-      row.learning_seconds, row.member_count, row.overdue_count,
+      row.assignedCount, row.completedCount, row.completionRate, row.creditAverage,
+      row.creditTotal, row.examParticipantCount, row.learnerCount,
+      row.learningSeconds, row.memberCount, row.overdueCount,
     ]
     if (row.suppressed ? metrics.some((value) => value !== null) : metrics.some((value) => value === null)) {
       fail('unavailable')
     }
     output.push([
       departmentId,
-      storedText(row.stats_date),
-      storedTimestamp(row.period_start),
-      storedTimestamp(row.period_end),
-      storedText(row.source_version),
+      row.statsDate,
+      row.periodStart,
+      row.periodEnd,
+      row.sourceVersion,
       row.suppressed,
-      storedInteger(row.min_group_size),
+      row.minGroupSize,
       ...metrics,
     ].map(csvCell).join(','))
   }
   return Buffer.from(`\uFEFF${output.join('\r\n')}\r\n`, 'utf8')
+}
+
+const PROJECTION_SNAPSHOT_KEYS = [
+  'dataset',
+  'departmentId',
+  'periodEnd',
+  'periodStart',
+  'rows',
+  'version',
+] as const
+
+const PROJECTION_ROW_KEYS = [
+  'assignedCount',
+  'completedCount',
+  'completionRate',
+  'creditAverage',
+  'creditTotal',
+  'examParticipantCount',
+  'learnerCount',
+  'learningSeconds',
+  'memberCount',
+  'minGroupSize',
+  'overdueCount',
+  'periodEnd',
+  'periodStart',
+  'sourceVersion',
+  'statsDate',
+  'suppressed',
+] as const
+
+function projectionSnapshotRow(value: Record<string, unknown>): ProjectionSnapshotRow {
+  if (Object.keys(value).sort().join('\0') !== [...PROJECTION_ROW_KEYS].sort().join('\0')) {
+    fail('unavailable')
+  }
+  const row: ProjectionSnapshotRow = {
+    statsDate: storedDate(value.statsDate),
+    periodStart: storedTimestamp(value.periodStart),
+    periodEnd: storedTimestamp(value.periodEnd),
+    sourceVersion: storedText(value.sourceVersion),
+    suppressed: storedBoolean(value.suppressed),
+    minGroupSize: storedInteger(value.minGroupSize),
+    assignedCount: storedMetric(value.assignedCount),
+    completedCount: storedMetric(value.completedCount),
+    completionRate: storedMetric(value.completionRate),
+    creditAverage: storedMetric(value.creditAverage),
+    creditTotal: storedMetric(value.creditTotal),
+    examParticipantCount: storedMetric(value.examParticipantCount),
+    learnerCount: storedMetric(value.learnerCount),
+    learningSeconds: storedMetric(value.learningSeconds),
+    memberCount: storedMetric(value.memberCount),
+    overdueCount: storedMetric(value.overdueCount),
+  }
+  if (row.minGroupSize < 5 || row.periodStart >= row.periodEnd) fail('unavailable')
+  const metrics = [
+    row.assignedCount, row.completedCount, row.completionRate, row.creditAverage,
+    row.creditTotal, row.examParticipantCount, row.learnerCount,
+    row.learningSeconds, row.memberCount, row.overdueCount,
+  ]
+  if (row.suppressed ? metrics.some((metric) => metric !== null) : metrics.some((metric) => metric === null)) {
+    fail('unavailable')
+  }
+  return row
+}
+
+function projectionSnapshotRowFromDb(value: Record<string, unknown>): ProjectionSnapshotRow {
+  return projectionSnapshotRow({
+    statsDate: value.stats_date,
+    periodStart: value.period_start,
+    periodEnd: value.period_end,
+    sourceVersion: value.source_version,
+    suppressed: value.suppressed,
+    minGroupSize: value.min_group_size,
+    assignedCount: value.assigned_count,
+    completedCount: value.completed_count,
+    completionRate: value.completion_rate,
+    creditAverage: value.credit_average,
+    creditTotal: value.credit_total,
+    examParticipantCount: value.exam_participant_count,
+    learnerCount: value.learner_count,
+    learningSeconds: value.learning_seconds,
+    memberCount: value.member_count,
+    overdueCount: value.overdue_count,
+  })
+}
+
+async function buildProjectionSnapshot(
+  db: ElearningAnalyticsExportQueryable,
+  input: Pick<PreparedCreate, 'orgId' | 'departmentId' | 'periodStart' | 'periodEnd'>,
+): Promise<Record<string, unknown>> {
+  const stats = await db.query(
+    `/* elearning-analytics-export:snapshot */
+     SELECT to_char(stats_date, 'YYYY-MM-DD') AS stats_date,
+            period_start, period_end, source_version, suppressed,
+            min_group_size, assigned_count::text, completed_count::text,
+            completion_rate::text, credit_average::text, credit_total::text,
+            exam_participant_count::text, learner_count::text,
+            learning_seconds::text, member_count::text, overdue_count::text
+     FROM elearning_stats_daily
+     WHERE org_id = $1
+       AND dataset = 'department_overview'
+       AND department_id = $2::uuid
+       AND period_start >= $3::timestamptz
+       AND period_end <= $4::timestamptz
+     ORDER BY stats_date ASC`,
+    [input.orgId, input.departmentId, input.periodStart, input.periodEnd],
+  )
+  return {
+    dataset: 'department_overview',
+    departmentId: input.departmentId,
+    periodEnd: input.periodEnd,
+    periodStart: input.periodStart,
+    rows: stats.rows.map(projectionSnapshotRowFromDb),
+    version: 1,
+  }
+}
+
+function parseProjectionSnapshot(
+  value: Record<string, unknown>,
+  row: Pick<StoredExport, 'departmentId' | 'periodStart' | 'periodEnd'>,
+): { content: Buffer; digest: string } {
+  if (
+    Object.keys(value).sort().join('\0') !== [...PROJECTION_SNAPSHOT_KEYS].sort().join('\0')
+    || value.version !== 1
+    || value.dataset !== 'department_overview'
+    || value.departmentId !== row.departmentId
+    || value.periodStart !== row.periodStart
+    || value.periodEnd !== row.periodEnd
+    || !Array.isArray(value.rows)
+  ) fail('unavailable')
+  const rows = value.rows.map((item) => projectionSnapshotRow(storedObject(item)))
+  const content = exportCsv(rows, row.departmentId)
+  return { content, digest: createHash('sha256').update(content).digest('hex') }
 }
 
 async function prepareMaterialization(
@@ -609,33 +781,24 @@ async function prepareMaterialization(
     const row = parseStoredExport(result.rows[0])
     if (row.status === 'succeeded') return null
     if (row.status === 'expired' || row.expiredByClock) fail('expired')
-
-    const stats = await tx.query(
-      `/* elearning-analytics-export:stats */
-       SELECT to_char(stats_date, 'YYYY-MM-DD') AS stats_date,
-              period_start, period_end, source_version, suppressed,
-              min_group_size, assigned_count::text, completed_count::text,
-              completion_rate::text, credit_average::text, credit_total::text,
-              exam_participant_count::text, learner_count::text,
-              learning_seconds::text, member_count::text, overdue_count::text
-       FROM elearning_stats_daily
-       WHERE org_id = $1
-         AND dataset = 'department_overview'
-         AND department_id = $2::uuid
-         AND period_start >= $3::timestamptz
-         AND period_end <= $4::timestamptz
-       ORDER BY stats_date ASC`,
-      [orgId, row.departmentId, row.periodStart, row.periodEnd],
-    )
-    const content = exportCsv(stats.rows, row.departmentId)
-    const digest = createHash('sha256').update(content).digest('hex')
+    const { content, digest } = parseProjectionSnapshot(row.querySnapshot, row)
     const storageKey = deriveElearningAnalyticsExportStorageKey({ orgId, exportId })
+    if (row.status !== 'pending') {
+      if (
+        row.storageKey !== storageKey
+        || row.fileSha256 !== digest
+        || row.fileSizeBytes !== content.length
+      ) fail('unavailable')
+      if (row.status === 'running') {
+        return { orgId, exportId, storageKey, digest, content }
+      }
+    }
     const updated = await tx.query(
       `/* elearning-analytics-export:materialize-claim */
        UPDATE elearning_export_jobs
        SET status = 'running', storage_key = $3, file_sha256 = $4,
            file_size_bytes = $5, error_code = NULL, updated_at = now()
-       WHERE org_id = $1 AND id = $2::uuid AND status IN ('pending', 'running', 'failed')
+       WHERE org_id = $1 AND id = $2::uuid AND status IN ('pending', 'failed')
        RETURNING id`,
       [orgId, exportId, storageKey, digest, content.length],
     )

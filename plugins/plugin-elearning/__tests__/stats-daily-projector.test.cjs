@@ -126,10 +126,22 @@ async function main() {
             return { outcome: 'noop', projectedVersion: 1, suppressed: true }
           },
         },
+        elearningAnalyticsExport: {
+          async materialize(input) {
+            return { outcome: 'noop', exportId: input.exportId }
+          },
+          async cleanup(input) {
+            return { outcome: 'noop', exportId: input.exportId }
+          },
+        },
       },
     })
     assert.equal(routes.length, 1)
-    assert.deepEqual(registeredKinds(), [STATS_DAILY_PROJECT_JOB_KIND])
+    assert.deepEqual(registeredKinds(), [
+      STATS_DAILY_PROJECT_JOB_KIND,
+      'analytics_export',
+      'analytics_export_cleanup',
+    ])
     assert.equal(getJobsWorkerState().running, true)
     await deactivate()
     assert.equal(getJobsWorkerState().running, false)
