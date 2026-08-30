@@ -280,6 +280,7 @@ import {
 import { createElearningMediaPlaybackRouter } from './routes/elearning-media-playback'
 import { isElearningCreditSurfaceEnabled } from './services/elearning-credit-ledger'
 import { getBootedElearningMediaRangeStore } from './services/elearning-media-runtime'
+import { isElearningPracticeSurfaceEnabled } from './services/elearning-question-practice-postgres'
 import { createElearningPilotRuntime } from './services/elearning-pilot-runtime'
 import {
   checkElearningAssignmentReminderEligibility,
@@ -1436,6 +1437,7 @@ export class MetaSheetServer {
       isElearningContentSurfaceEnabled(process.env)
       || isElearningCreditSurfaceEnabled(process.env)
       || isElearningAnalyticsSurfaceEnabled(process.env)
+      || isElearningPracticeSurfaceEnabled(process.env)
     )
       ? createElearningPilotRuntime({ db: poolManager.get() })
       : null
