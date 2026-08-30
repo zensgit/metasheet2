@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+
 import { Router } from 'express'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -7,6 +9,8 @@ import { pool as pgPool } from '../../src/db/pg'
 const routeMocks = vi.hoisted(() => ({
   univerMetaRouter: vi.fn(),
 }))
+
+const indexSource = readFileSync(new URL('../../src/index.ts', import.meta.url), 'utf8')
 
 vi.mock('../../src/routes/univer-meta', () => ({
   univerMetaRouter: routeMocks.univerMetaRouter,
@@ -152,7 +156,12 @@ describe('MetaSheetServer recovery archive wiring', () => {
       recoveryArchiveApplication: { stopWorker(): Promise<void> }
     }).recoveryArchiveApplication = { stopWorker }
 
-    await server.stop()
+    const firstStop = server.stop('SIGTERM')
+    const reentrantStop = server.stop('SIGINT')
+
+    expect(reentrantStop).toBe(firstStop)
+    await expect(firstStop).rejects.toThrow('RECOVERY_ARCHIVE_RESTORE_WORKER_STOP_FAILED')
+    await expect(reentrantStop).rejects.toThrow('RECOVERY_ARCHIVE_RESTORE_WORKER_STOP_FAILED')
 
     expect(stopWorker).toHaveBeenCalledTimes(1)
     expect(poolEnd).not.toHaveBeenCalled()
@@ -160,16 +169,79 @@ describe('MetaSheetServer recovery archive wiring', () => {
 
   it('closes the database pool after the restore worker drains', async () => {
     expect(pgPool).not.toBeNull()
-    const poolEnd = vi.spyOn(pgPool!, 'end').mockResolvedValue(undefined)
-    const stopWorker = vi.fn().mockResolvedValue(undefined)
+    const order: string[] = []
+    let releaseMediaWorkers: (() => void) | undefined
+    let releaseRecoveryWorker: (() => void) | undefined
+    const poolEnd = vi.spyOn(pgPool!, 'end').mockImplementation(async () => {
+      order.push('pool')
+    })
+    const stopMediaWorkers = vi.fn(async () => {
+      order.push('media:start')
+      await new Promise<void>((resolve) => {
+        releaseMediaWorkers = resolve
+      })
+      order.push('media:done')
+    })
+    const stopWorker = vi.fn(async () => {
+      order.push('recovery:start')
+      await new Promise<void>((resolve) => {
+        releaseRecoveryWorker = resolve
+      })
+      order.push('recovery:done')
+    })
     const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
     ;(server as unknown as {
       recoveryArchiveApplication: { stopWorker(): Promise<void> }
+      stopElearningMediaWorkers?: () => Promise<void>
     }).recoveryArchiveApplication = { stopWorker }
+    ;(server as unknown as {
+      stopElearningMediaWorkers?: () => Promise<void>
+    }).stopElearningMediaWorkers = stopMediaWorkers
 
-    await server.stop()
+    const firstStop = server.stop()
+    await vi.waitFor(() => {
+      expect(stopMediaWorkers).toHaveBeenCalledTimes(1)
+    })
+    expect(order).toEqual(['media:start'])
+    expect(stopWorker).not.toHaveBeenCalled()
+    expect(poolEnd).not.toHaveBeenCalled()
 
+    releaseMediaWorkers?.()
+    await vi.waitFor(() => {
+      expect(stopWorker).toHaveBeenCalledTimes(1)
+    })
+    expect(order).toEqual(['media:start', 'media:done', 'recovery:start'])
+    expect(poolEnd).not.toHaveBeenCalled()
+
+    releaseRecoveryWorker?.()
+    await firstStop
+    const completedReplay = server.stop('SIGINT')
+    expect(completedReplay).toBe(firstStop)
+    await completedReplay
+
+    expect(order).toEqual(['media:start', 'media:done', 'recovery:start', 'recovery:done', 'pool'])
+    expect(stopMediaWorkers).toHaveBeenCalledTimes(1)
     expect(stopWorker).toHaveBeenCalledTimes(1)
     expect(poolEnd).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports a failed signal shutdown with a non-zero exit code', async () => {
+    const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+    const stop = vi.spyOn(server, 'stop').mockRejectedValue(
+      new Error('RECOVERY_ARCHIVE_RESTORE_WORKER_STOP_FAILED'),
+    )
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as typeof process.exit)
+
+    ;(server as unknown as {
+      stopForSignal(signal: 'SIGTERM' | 'SIGINT'): void
+    }).stopForSignal('SIGTERM')
+
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(1))
+    expect(stop).toHaveBeenCalledWith('SIGTERM')
+  })
+
+  it('registers both runtime signals through the non-zero failure mapper', () => {
+    expect(indexSource).toContain("process.on('SIGTERM', () => this.stopForSignal('SIGTERM'))")
+    expect(indexSource).toContain("process.on('SIGINT', () => this.stopForSignal('SIGINT'))")
   })
 })

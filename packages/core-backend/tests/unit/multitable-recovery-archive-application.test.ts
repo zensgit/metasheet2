@@ -286,6 +286,34 @@ describe('recovery archive application composition', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
+  it('fails closed after a bounded wait when an in-flight worker never drains', async () => {
+    vi.useFakeTimers()
+    const chunk = deferred<RecoveryArchiveRestoreWorkerRunResult>()
+    workerMocks.createRecoveryArchiveRestoreWorker.mockReturnValue({ runOnce: () => chunk.promise })
+    const application = createRecoveryArchiveApplication(
+      () => fakeComposition(fakeProviders()),
+      () => fakeDatabaseRuntime().runtime,
+      ENABLED_ENV,
+    )
+    application.startWorker()
+
+    let stopError: unknown
+    const stopped = application.stopWorker().catch((error: unknown) => {
+      stopError = error
+    })
+
+    await vi.advanceTimersByTimeAsync(9_999)
+    expect(stopError).toBeUndefined()
+    await vi.advanceTimersByTimeAsync(1)
+    try {
+      expect(stopError).toEqual(new Error('RECOVERY_ARCHIVE_APPLICATION_WORKER_STOP_FAILED'))
+    } finally {
+      chunk.resolve({ kind: 'stopped', swept: 0, chunks: 0 })
+      await stopped
+    }
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('fails closed when both flags are on without a composition factory', () => {
     expect(() => createRecoveryArchiveApplication(
       undefined,

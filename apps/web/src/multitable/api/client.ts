@@ -1031,6 +1031,16 @@ export interface RecoveryArchiveJobPage {
   nextCursor: string | null
 }
 
+const RECOVERY_ARCHIVE_CATALOG_ENTRY_KEYS = [
+  'anchorSeq',
+  'archivedAt',
+  'coverageRowCount',
+  'expiresAt',
+  'generationId',
+  'recoveryPointAt',
+  'superseded',
+] as const
+
 const RECOVERY_ARCHIVE_JOB_STATES: ReadonlySet<unknown> = new Set([
   'planned',
   'applying',
@@ -1050,21 +1060,77 @@ const RECOVERY_ARCHIVE_JOB_SNAPSHOT_KEYS = [
   'totalCount',
 ] as const
 
-function isRecoveryArchiveJobUuid(value: unknown): value is string {
+const RECOVERY_ARCHIVE_PREVIEW_KEYS = [
+  'blockedReason',
+  'executable',
+  'executionKind',
+  'generationId',
+  'mode',
+  'previewIdentity',
+  'scopeKind',
+  'summary',
+] as const
+
+const RECOVERY_ARCHIVE_PREVIEW_SUMMARY_KEYS = [
+  'deleteIds',
+  'driftCount',
+  'effectiveWriteCount',
+  'keptCreatedAfterAnchorCount',
+  'resurrectIds',
+  'reverts',
+] as const
+
+const RECOVERY_ARCHIVE_EXECUTE_RESULT_KEYS = [
+  'anchorSeq',
+  'checkpointId',
+  'deletedCount',
+  'keptCreatedAfterAnchor',
+  'mode',
+  'resurrectedCount',
+  'revertedCount',
+] as const
+
+const RECOVERY_ARCHIVE_PREVIEW_BLOCKED_REASONS: ReadonlySet<unknown> = new Set([
+  'no_changes',
+  'schema_drift',
+  'inbound_unprovable',
+  'async_plan_required',
+])
+
+function isRecoveryArchiveUuid(value: unknown): value is string {
   return typeof value === 'string'
     && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
 }
 
-function isRecoveryArchiveJobDecimal(value: unknown): value is string {
+function isRecoveryArchiveDecimal(value: unknown): value is string {
   return typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value)
 }
 
 function isRecoveryArchiveJobPositiveDecimal(value: unknown): value is string {
-  return isRecoveryArchiveJobDecimal(value) && value !== '0'
+  return isRecoveryArchiveDecimal(value) && value !== '0'
 }
 
-function isRecoveryArchiveJobTimestamp(value: unknown): value is string {
+function isRecoveryArchiveTimestamp(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && !Number.isNaN(Date.parse(value))
+}
+
+function isRecoveryArchiveCatalogEntry(value: unknown): value is RecoveryArchiveCatalogEntry {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const keys = Object.keys(value).sort()
+  if (
+    keys.length !== RECOVERY_ARCHIVE_CATALOG_ENTRY_KEYS.length
+    || keys.some((key, index) => key !== RECOVERY_ARCHIVE_CATALOG_ENTRY_KEYS[index])
+  ) {
+    return false
+  }
+  const entry = value as Record<string, unknown>
+  return isRecoveryArchiveUuid(entry.generationId)
+    && isRecoveryArchiveTimestamp(entry.recoveryPointAt)
+    && isRecoveryArchiveTimestamp(entry.archivedAt)
+    && isRecoveryArchiveTimestamp(entry.expiresAt)
+    && isRecoveryArchiveDecimal(entry.anchorSeq)
+    && isRecoveryArchiveDecimal(entry.coverageRowCount)
+    && typeof entry.superseded === 'boolean'
 }
 
 function isRecoveryArchiveJobSnapshot(value: unknown): value is RecoveryArchiveJobSnapshot {
@@ -1078,12 +1144,12 @@ function isRecoveryArchiveJobSnapshot(value: unknown): value is RecoveryArchiveJ
   }
   const snapshot = value as Record<string, unknown>
   if (
-    !isRecoveryArchiveJobUuid(snapshot.jobId)
+    !isRecoveryArchiveUuid(snapshot.jobId)
     || !RECOVERY_ARCHIVE_JOB_STATES.has(snapshot.state)
     || !isRecoveryArchiveJobPositiveDecimal(snapshot.totalCount)
-    || !isRecoveryArchiveJobDecimal(snapshot.completedCount)
-    || !isRecoveryArchiveJobTimestamp(snapshot.resumeDeadline)
-    || (snapshot.terminalAt !== null && !isRecoveryArchiveJobTimestamp(snapshot.terminalAt))
+    || !isRecoveryArchiveDecimal(snapshot.completedCount)
+    || !isRecoveryArchiveTimestamp(snapshot.resumeDeadline)
+    || (snapshot.terminalAt !== null && !isRecoveryArchiveTimestamp(snapshot.terminalAt))
     || !isRecoveryArchiveJobPositiveDecimal(snapshot.rowVersion)
   ) {
     return false
@@ -1095,6 +1161,97 @@ function isRecoveryArchiveJobSnapshot(value: unknown): value is RecoveryArchiveJ
     && BigInt(snapshot.completedCount) <= BigInt(snapshot.totalCount)
     && (state !== 'done' || snapshot.completedCount === snapshot.totalCount)
     && (state !== 'cancelled_zero_write' || snapshot.completedCount === '0')
+}
+
+function hasRecoveryArchiveExactKeys(
+  value: unknown,
+  expectedKeys: readonly string[],
+): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const keys = Object.keys(value).sort()
+  return keys.length === expectedKeys.length
+    && keys.every((key, index) => key === expectedKeys[index])
+}
+
+function isRecoveryArchiveOpaque(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.trim() === value
+}
+
+function isRecoveryArchiveNonNegativeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 0
+}
+
+function isRecoveryArchiveStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(isRecoveryArchiveOpaque)
+}
+
+function isRecoveryArchivePreview(value: unknown): value is RecoveryArchivePreview {
+  if (!hasRecoveryArchiveExactKeys(value, RECOVERY_ARCHIVE_PREVIEW_KEYS)) return false
+  if (!hasRecoveryArchiveExactKeys(value.summary, RECOVERY_ARCHIVE_PREVIEW_SUMMARY_KEYS)) return false
+  const summary = value.summary
+  if (
+    !Array.isArray(summary.reverts)
+    || summary.reverts.some((revert) => (
+      !hasRecoveryArchiveExactKeys(revert, ['fieldIds', 'recordId'])
+      || !isRecoveryArchiveOpaque(revert.recordId)
+      || !isRecoveryArchiveStringArray(revert.fieldIds)
+    ))
+    || !isRecoveryArchiveStringArray(summary.resurrectIds)
+    || !isRecoveryArchiveStringArray(summary.deleteIds)
+    || !isRecoveryArchiveNonNegativeInteger(summary.effectiveWriteCount)
+    || !isRecoveryArchiveNonNegativeInteger(summary.keptCreatedAfterAnchorCount)
+    || !isRecoveryArchiveNonNegativeInteger(summary.driftCount)
+  ) {
+    return false
+  }
+  const blockedReasonValid = value.blockedReason === null
+    || RECOVERY_ARCHIVE_PREVIEW_BLOCKED_REASONS.has(value.blockedReason)
+  const previewIdentityValid = value.previewIdentity === null
+    || isRecoveryArchiveOpaque(value.previewIdentity)
+  const executionStateValid = value.executable === true
+    ? value.blockedReason === null && isRecoveryArchiveOpaque(value.previewIdentity)
+    : value.executable === false
+      && RECOVERY_ARCHIVE_PREVIEW_BLOCKED_REASONS.has(value.blockedReason)
+      && value.previewIdentity === null
+  return isRecoveryArchiveUuid(value.generationId)
+    && (value.mode === 'revert' || value.mode === 'reset')
+    && (value.scopeKind === 'whole_sheet' || value.scopeKind === 'selected_records' || value.scopeKind === 'selected_fields')
+    && (value.executionKind === 'sync' || value.executionKind === 'async')
+    && blockedReasonValid
+    && previewIdentityValid
+    && executionStateValid
+}
+
+function isRecoveryArchiveExecuteResult(value: unknown): value is RecoveryArchiveExecuteResult {
+  if (!hasRecoveryArchiveExactKeys(value, RECOVERY_ARCHIVE_EXECUTE_RESULT_KEYS)) return false
+  return (value.mode === 'revert' || value.mode === 'reset')
+    && isRecoveryArchiveDecimal(value.anchorSeq)
+    && isRecoveryArchiveOpaque(value.checkpointId)
+    && isRecoveryArchiveNonNegativeInteger(value.revertedCount)
+    && isRecoveryArchiveNonNegativeInteger(value.resurrectedCount)
+    && isRecoveryArchiveNonNegativeInteger(value.deletedCount)
+    && isRecoveryArchiveNonNegativeInteger(value.keptCreatedAfterAnchor)
+}
+
+function requireRecoveryArchivePreview(value: unknown): RecoveryArchivePreview {
+  if (!isRecoveryArchivePreview(value)) {
+    throw new Error('Invalid recovery archive preview response')
+  }
+  return value
+}
+
+function requireRecoveryArchiveExecuteResult(value: unknown): RecoveryArchiveExecuteResult {
+  if (!isRecoveryArchiveExecuteResult(value)) {
+    throw new Error('Invalid recovery archive execute response')
+  }
+  return value
+}
+
+function requireRecoveryArchiveJobSnapshot(value: unknown): RecoveryArchiveJobSnapshot {
+  if (!isRecoveryArchiveJobSnapshot(value)) {
+    throw new Error('Invalid recovery archive job response')
+  }
+  return value
 }
 
 // BS-4: scoped (multi-record) restore preview/execute results — a faithful client of the BS-2/BS-3 wire.
@@ -2357,9 +2514,17 @@ export class MultitableApiClient implements CommentsApiClient {
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/catalog${qs(params ?? {})}`,
     )
     const data = await this.parseJson<Partial<RecoveryArchiveCatalogPage>>(res)
+    if (
+      !data
+      || !Array.isArray(data.entries)
+      || data.entries.some((entry) => !isRecoveryArchiveCatalogEntry(entry))
+      || (data.nextCursor !== null && typeof data.nextCursor !== 'string')
+    ) {
+      throw new Error('Invalid recovery archive catalog response')
+    }
     return {
-      entries: Array.isArray(data.entries) ? data.entries : [],
-      nextCursor: typeof data.nextCursor === 'string' ? data.nextCursor : null,
+      entries: data.entries,
+      nextCursor: data.nextCursor,
     }
   }
 
@@ -2372,7 +2537,7 @@ export class MultitableApiClient implements CommentsApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return this.parseJson<RecoveryArchivePreview>(res)
+    return requireRecoveryArchivePreview(await this.parseJson<RecoveryArchivePreview>(res))
   }
 
   async executeRecoveryArchive(
@@ -2384,7 +2549,7 @@ export class MultitableApiClient implements CommentsApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return this.parseJson<RecoveryArchiveExecuteResult>(res)
+    return requireRecoveryArchiveExecuteResult(await this.parseJson<RecoveryArchiveExecuteResult>(res))
   }
 
   async acceptRecoveryArchiveJob(
@@ -2396,7 +2561,7 @@ export class MultitableApiClient implements CommentsApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ previewIdentity }),
     })
-    return this.parseJson<RecoveryArchiveJobSnapshot>(res)
+    return requireRecoveryArchiveJobSnapshot(await this.parseJson<RecoveryArchiveJobSnapshot>(res))
   }
 
   async listRecoveryArchiveJobs(
@@ -2408,7 +2573,8 @@ export class MultitableApiClient implements CommentsApiClient {
     )
     const data = await this.parseJson<Partial<RecoveryArchiveJobPage>>(res)
     if (
-      !Array.isArray(data.entries)
+      !data
+      || !Array.isArray(data.entries)
       || data.entries.some((entry) => !isRecoveryArchiveJobSnapshot(entry))
       || (data.nextCursor !== null && typeof data.nextCursor !== 'string')
     ) {
@@ -2427,7 +2593,7 @@ export class MultitableApiClient implements CommentsApiClient {
     const res = await this.fetch(
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/jobs/${encodeURIComponent(jobId)}`,
     )
-    return this.parseJson<RecoveryArchiveJobSnapshot>(res)
+    return requireRecoveryArchiveJobSnapshot(await this.parseJson<RecoveryArchiveJobSnapshot>(res))
   }
 
   async resumeRecoveryArchiveJob(
@@ -2442,7 +2608,7 @@ export class MultitableApiClient implements CommentsApiClient {
         body: JSON.stringify({}),
       },
     )
-    return this.parseJson<RecoveryArchiveJobSnapshot>(res)
+    return requireRecoveryArchiveJobSnapshot(await this.parseJson<RecoveryArchiveJobSnapshot>(res))
   }
 
   async cancelRecoveryArchiveJob(
@@ -2457,7 +2623,7 @@ export class MultitableApiClient implements CommentsApiClient {
         body: JSON.stringify({}),
       },
     )
-    return this.parseJson<RecoveryArchiveJobSnapshot>(res)
+    return requireRecoveryArchiveJobSnapshot(await this.parseJson<RecoveryArchiveJobSnapshot>(res))
   }
 
   // --- Global History & Point-in-Time Restore (read-only) ---
