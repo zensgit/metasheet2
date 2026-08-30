@@ -619,3 +619,27 @@ describe('multitable:manage-schema — actor x route matrix', () => {
     })
   })
 })
+
+// THE CAPABILITY HAS TWO DERIVATIONS. `multitable/access.ts` serves the HTTP routes; a byte-identical
+// clone in `multitable/sheet-capabilities.ts` serves the Yjs bridge and OAPI tokens through
+// permission-service. Fixing only the first leaves schema authority flowing through the second, and
+// the route matrix above cannot see it: regressing the clone alone to `canWrite` leaves all of it
+// green. This asserts the clone directly, so the two can never drift apart again.
+describe('the second derivation (Yjs bridge / OAPI) obeys the same rule', () => {
+  it('grants canManageFields only for admin or the manage-schema code', async () => {
+    const mod = await import('../../src/multitable/sheet-capabilities')
+    const derive = mod.deriveCapabilities
+
+    const writeOnly = derive(['multitable:read', 'multitable:write'], false)
+    expect(writeOnly.canManageFields).toBe(false)
+    // record authority is untouched — this change is about schema, not data
+    expect(writeOnly.canEditRecord).toBe(true)
+    expect(writeOnly.canCreateRecord).toBe(true)
+
+    const withSchema = derive(['multitable:read', 'multitable:write', 'multitable:manage-schema'], false)
+    expect(withSchema.canManageFields).toBe(true)
+
+    expect(derive([], true).canManageFields).toBe(true)
+    expect(derive(['multitable:read'], false).canManageFields).toBe(false)
+  })
+})
