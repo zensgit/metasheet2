@@ -177,6 +177,42 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
     expect(process.env[FLAG]).toBe('true')
   })
 
+  test('a persisted manual test execution cannot enter whole-execution retry', async () => {
+    const manualId = `axe_manual_retry_guard_${TS}`
+    const eventId = `axe_event_retry_control_${TS}`
+    try {
+      await svc.logs.record({
+        id: manualId,
+        ruleId: `atr_missing_${TS}`,
+        triggeredBy: 'manual_test',
+        triggeredAt: new Date().toISOString(),
+        status: 'failed',
+        steps: [],
+        triggerEvent: { recordId: 'test_record', data: {} },
+      })
+      await svc.logs.record({
+        id: eventId,
+        ruleId: `atr_missing_${TS}`,
+        triggeredBy: 'event',
+        triggeredAt: new Date().toISOString(),
+        status: 'failed',
+        steps: [],
+        triggerEvent: { recordId: 'test_record', data: {} },
+      })
+
+      await expect(svc.retryExecution(manualId, OWNER)).resolves.toMatchObject({
+        status: 409,
+        code: 'TEST_RUN_NOT_RETRYABLE',
+      })
+      await expect(svc.retryExecution(eventId, OWNER)).resolves.toMatchObject({
+        status: 409,
+        code: 'RULE_MISSING_OR_DISABLED',
+      })
+    } finally {
+      await q('DELETE FROM multitable_automation_executions WHERE id = ANY($1::text[])', [[manualId, eventId]])
+    }
+  })
+
   // G1 — create_record replay no-op ────────────────────────────────────────────────────────────────────
   test('G1 create_record: replay on the same root is a NO-OP — exactly ONE record + ONE revision + ONE claim', async () => {
     const rule = ruleFor(SHEET, { type: 'create_record', config: { sheetId: SHEET, data: { [FLD_TITLE]: 'once' } } })
