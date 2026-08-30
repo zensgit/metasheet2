@@ -1071,6 +1071,23 @@ function simulatedGenericClassBPlan(
 }
 
 function simulatedStep(action: AutomationAction, context: ExecutionContext): AutomationStepResult {
+  if (action.type === 'wait_for_callback') {
+    return {
+      actionType: action.type,
+      status: 'success',
+      simulated: true,
+      output: {
+        dryRun: true,
+        dispatched: false,
+        plan: {
+          wouldSuspend: true,
+          reason: 'external_event',
+          resumeTokenIssued: false,
+        },
+      },
+      durationMs: 0,
+    }
+  }
   const classAPlan = simulatedClassAPlan(action, context)
   if (classAPlan) return classAPlan
   const genericClassBPlan = simulatedGenericClassBPlan(action, context)

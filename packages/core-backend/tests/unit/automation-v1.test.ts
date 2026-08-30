@@ -706,6 +706,59 @@ describe('AutomationExecutor', () => {
     expect(deps.fetchFn).not.toHaveBeenCalled()
   })
 
+  it('simulate records wait_for_callback as a token-free suspension plan and continues the action chain', async () => {
+    const emitSpy = vi.spyOn(deps.eventBus, 'emit')
+    const rule = createMockRule({
+      actions: [
+        { type: 'wait_for_callback', config: { reason: 'external_event' } },
+        { type: 'send_notification', config: { userIds: ['u1'], message: 'After wait' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      { recordId: 'record_sample', data: {}, sheetId: 'sheet_1' },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('success')
+    expect(result.finishedAt).toEqual(expect.any(String))
+    expect(result.steps).toEqual([
+      {
+        actionType: 'wait_for_callback',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: {
+            wouldSuspend: true,
+            reason: 'external_event',
+            resumeTokenIssued: false,
+          },
+        },
+        durationMs: 0,
+      },
+      {
+        actionType: 'send_notification',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: { target: { userIds: ['u1'] }, payload: { message: 'After wait' } },
+        },
+        durationMs: 0,
+      },
+    ])
+    expect(JSON.stringify(result)).not.toMatch(/"(?:resumeToken|resume_token)"\s*:/)
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+    expect(emitSpy).not.toHaveBeenCalled()
+  })
+
   it('simulate fail-stops invalid generic Class-B plans before any later action', async () => {
     const rule = createMockRule({
       actions: [
@@ -4681,15 +4734,18 @@ describe('AutomationExecutor — A6-1 job lifecycle hooks', () => {
   // A recording lifecycle; throwOn lets a test simulate a job-write failure at a phase.
   function recordingLifecycle(throwOn?: { phase: 'start' | 'settled'; index: number }) {
     const calls: string[] = []
+    const settledResults: Array<{ actionType?: string; status: string; output?: unknown }> = []
     return {
       calls,
+      settledResults,
       factory: (_executionId: string) => ({
         onStart: async (i: number) => {
           calls.push(`start:${i}`)
           if (throwOn?.phase === 'start' && throwOn.index === i) throw new Error('job create failed')
         },
-        onSettled: async (i: number, _a: unknown, r: { status: string }) => {
+        onSettled: async (i: number, _a: unknown, r: { actionType?: string; status: string; output?: unknown }) => {
           calls.push(`settled:${i}:${r.status}`)
+          settledResults.push(r)
           if (throwOn?.phase === 'settled' && throwOn.index === i) throw new Error('job update failed')
         },
         onSkipped: async (i: number) => { calls.push(`skipped:${i}`) },
@@ -4892,6 +4948,19 @@ describe('AutomationExecutor — A6-1 job lifecycle hooks', () => {
       'settled:0:success',
       'settled:0:success',
     ])
+    expect(lc.settledResults[0]).toMatchObject({
+      actionType: 'wait_for_callback',
+      status: 'success',
+      output: {
+        dryRun: true,
+        dispatched: false,
+        plan: {
+          wouldSuspend: true,
+          reason: 'external_event',
+          resumeTokenIssued: false,
+        },
+      },
+    })
     expect(emitSpy).not.toHaveBeenCalled()
     expect(deps.fetchFn).not.toHaveBeenCalled()
   })
