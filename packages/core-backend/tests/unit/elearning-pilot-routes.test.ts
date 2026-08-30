@@ -623,7 +623,7 @@ describe('elearning routes (independent content/assignment/watch/exam gates)', (
     }
   })
 
-  test('publish and learner-list lookalikes 404 before identity/RBAC/service', async () => {
+  test('assessment publish lookalikes 404 while content learner-list stays identity-gated', async () => {
     const noopGuard: express.RequestHandler = (_req, _res, next) => next()
     const deps = {
       db: dummyDb(),
@@ -651,10 +651,11 @@ describe('elearning routes (independent content/assignment/watch/exam gates)', (
     const learnerOff = await serve(assessmentLookalikes.app).get(
       '/api/elearning/me/courses',
     )
-    expect(learnerOff.status).toBe(404)
-    expect(learnerOff.body).toEqual({ error: 'not_found' })
+    expect(learnerOff.status).toBe(401)
+    expect(learnerOff.body).toEqual({ error: 'unauthenticated' })
     expect(assessmentLookalikes.readCalls).toBe(0)
     expect(assessmentLookalikes.learnerCalls).toHaveLength(0)
+    expect(assessmentLookalikes.order).toEqual(['identity'])
 
     for (const value of LOOKALIKES) {
       const env = {
@@ -678,10 +679,11 @@ describe('elearning routes (independent content/assignment/watch/exam gates)', (
       expect(app.publishCalls).toHaveLength(0)
       expect(app.adminCalls).toBe(0)
       const learner = await serve(app.app).get('/api/elearning/me/courses')
-      expect(learner.status).toBe(404)
-      expect(learner.body).toEqual({ error: 'not_found' })
+      expect(learner.status).toBe(401)
+      expect(learner.body).toEqual({ error: 'unauthenticated' })
       expect(app.learnerCalls).toHaveLength(0)
       expect(app.readCalls).toBe(0)
+      expect(app.order).toEqual(['identity'])
     }
 
     for (const flag of FLAG_NAMES) {
@@ -756,10 +758,12 @@ describe('elearning routes (independent content/assignment/watch/exam gates)', (
     expect(publish.body).toEqual({ error: 'not_found' })
     expect(examApp.publishCalls).toHaveLength(0)
     expect(examApp.adminCalls).toBe(0)
+    const readsBeforeLearner = examApp.readCalls
     const learner = await serve(examApp.app).get('/api/elearning/me/courses')
-    expect(learner.status).toBe(404)
-    expect(learner.body).toEqual({ error: 'not_found' })
-    expect(examApp.learnerCalls).toHaveLength(0)
+    expect(learner.status).toBe(200)
+    assertLearnerEnvelope(learner.body)
+    expect(examApp.readCalls).toBe(readsBeforeLearner + 1)
+    expect(examApp.learnerCalls).toEqual([{ orgId: ORG, userId: ACTOR }])
   })
 
   test('scope revision is content-only, strict, delegated-write gated, and rechecks flags', async () => {
@@ -1866,9 +1870,12 @@ describe('elearning routes (independent content/assignment/watch/exam gates)', (
     const publish = await serve(ready.app).post('/api/elearning/courses/publish').send(PUBLISH_BODY)
     expect(publish.status).toBe(404)
     expect(ready.publishCalls).toHaveLength(0)
+    const readsBeforeLearner = ready.readCalls
     const learner = await serve(ready.app).get('/api/elearning/me/courses')
-    expect(learner.status).toBe(404)
-    expect(ready.learnerCalls).toHaveLength(0)
+    expect(learner.status).toBe(200)
+    assertLearnerEnvelope(learner.body)
+    expect(ready.readCalls).toBe(readsBeforeLearner + 1)
+    expect(ready.learnerCalls).toEqual([{ orgId: ORG, userId: ACTOR }])
   })
 
   test('publish 1 MiB parser reaches service under the cap; oversized/unknown do not; GET has no parser', async () => {
