@@ -25,6 +25,32 @@
 
 r5 部署时故意没跑(42P01 by design)。r6 必须跑:补 076 等全部。单事务 all-or-nothing;全新失败即整体回滚,库不残留半迁移。
 
+## 2.5 部署后第一件事:跑一次 preflight(按它列的逐条修,先别做别的)
+
+`GET /api/integration/stock-preparation/preflight` —— read 档(`stock-prep:read`,平台 admin 同样满足),**只读**:不建表、不装列、不 ensure 任何东西。
+
+一次返回 `ready` + `blockers`(最挡路的在前)。每条 blocker 带稳定的机器 `code`、人话 `what`,和一条**照抄就能跑**的 `fix.run`——要么是 `METHOD /path {json}`,要么是一行 `KEY=value`。**按它给的顺序修完、修到 `ready: true` 再往下走**;别自己另起 objectId,别凭印象猜 env 名。
+
+它替掉了今天要分四个 readiness 端点轮询(`target/` `sandbox-target/` `mvp/` `confirmation-decisions/`)、轮完仍问不出来的那两件事:pack 自己声明的目标、以及 sandbox 写行授权。
+
+| code | 它在说什么 |
+|---|---|
+| `STOCK_PREP_CONFIRMATION_LEDGER_NOT_READY` | 确认裁决账本表不在。**它是按需建的,不在迁移链里**——部署完 ≠ 它存在。`fix` 是那条 ensure 调用 |
+| `STOCK_PREP_CUSTOMER_PACK_NOT_CONFIGURED` | 没配 pack。`fix` 直接点名 `INTEGRATION_CORE_STOCK_PREPARATION_CUSTOMER_PACKS_PATH` |
+| `STOCK_PREP_PACK_TARGET_MISSING` | **pack 自己声明的 `targetObjectId` 那张表不存在**。`fix` 里引的就是 **pack 声明的那个 id**,照抄,不要换成「现有的那张表」 |
+| `STOCK_PREP_PACK_TARGET_INCOMPLETE` | 表在,但 pack 的 `ext_` 列没装。`fix` 是那个 pack 的 install 调用 |
+| `STOCK_PREP_EXT_FIELD_MAPPING_NOT_CONFIGURED` | 没配源列→`ext_` 映射(列会装上、值一个都不写)。`fix` 点名 `INTEGRATION_CORE_STOCK_PREPARATION_EXT_FIELD_MAPPING_PATH` |
+| `STOCK_PREP_SANDBOX_MODE_NOT_ENABLED` | 写行授权没开。**装列(pack)和写行(apply)是两道独立授权** |
+| `STOCK_PREP_SANDBOX_ALLOWLIST_MISSING_TARGET` | 允许清单里没有 pack 声明的目标——**装列会成功、写行会被拒**,这种晚失败最费时间。`fix` 给的是「现有清单 + 缺的那个」整行,贴一次就对 |
+
+**它为什么存在——两起真事**(首次真机部署,同一次会话):
+1. 有人手挑 sandbox objectId 被拒,而拒绝语没说命名空间是 `plm_stock_preparation_sandbox`;
+2. 两个人并行配同一台机、各挑了不同的 sandbox objectId:pack 声明 A,实际建出来的表叫 B。dry-run 报缺目标,却从不提 pack 声明的那个名字。上表第 3 条就是为这条写的回归。
+
+响应里只有部署方自己定义的东西(objectId、`ext_` 列 id、packId、env KEY 名),**不含任何客户业务值、口令或主机地址**;env 类 `fix` 只给 KEY 名和占位路径,不回显你机器上的真实路径。
+
+**围栏是 `posture`,不是 blocker**:production Apply 关闭、K3 外部写永久拒、B2a 登记休眠、通用出站写门不设——这四条只报状态,**一律不给 fix**。不设就是正确姿态,preflight 不会推你去开它们。
+
 ## 3. 配置(全部服务端文件/env,永不入库、永不经请求)
 
 | key | 内容 |
@@ -33,6 +59,8 @@ r5 部署时故意没跑(42P01 by design)。r6 必须跑:补 076 等全部。单
 | `INTEGRATION_CORE_STOCK_PREPARATION_EXT_FIELD_MAPPING_PATH` | 源列→`ext_` 映射 JSON(`packId` 必须在上面目录里) |
 | `STOCK_PREP_SANDBOX_MODE=true` + `STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS=<sandbox objectId>` | apply 的允许清单——**装列(pack)和写行(apply)是两道独立授权,都要开** |
 | production Apply | **保持关闭**(R-09 未签发) |
+
+配完回头再跑一次 §2.5 的 preflight,直到 `ready: true` 且 `blockers` 为空——它对这张表里每一项都有对应的 blocker。
 
 ## 4. 目标绑定
 
