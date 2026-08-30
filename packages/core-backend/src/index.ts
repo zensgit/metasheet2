@@ -1435,6 +1435,7 @@ export class MetaSheetServer {
     const elearningPilotRuntime = (
       isElearningContentSurfaceEnabled(process.env)
       || isElearningCreditSurfaceEnabled(process.env)
+      || isElearningAnalyticsSurfaceEnabled(process.env)
     )
       ? createElearningPilotRuntime({ db: poolManager.get() })
       : null
