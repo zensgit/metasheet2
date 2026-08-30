@@ -636,6 +636,193 @@ describe('AutomationExecutor', () => {
     expect(JSON.stringify(result.steps)).not.toContain('actor_private')
   })
 
+  it('simulate resolves values-free FWB create/update plans without reading or writing business data', async () => {
+    const emitSpy = vi.spyOn(deps.eventBus, 'emit')
+    const rule = createMockRule({
+      trigger: { type: 'approval.completed', config: { templateId: 'tpl_expense' } },
+      actions: [
+        {
+          type: 'write_approval_form_values',
+          config: {
+            sourceTemplateVersionId: 'version_1',
+            confirmationHash: 'private-confirmation-hash',
+            mappings: [
+              { formFieldId: 'amount', targetFieldId: 'total', targetType: 'text' },
+            ],
+          },
+        },
+        {
+          type: 'write_approval_form_values',
+          config: {
+            mode: 'update',
+            sourceTemplateVersionId: 'version_1',
+            recordLinkFieldId: 'linked_record',
+            confirmationHash: 'private-update-confirmation',
+            mappings: [
+              {
+                formFieldId: 'category',
+                targetFieldId: 'classification',
+                targetType: 'select',
+                selectOptions: ['private-select-option'],
+              },
+            ],
+          },
+        },
+        { type: 'send_notification', config: { userIds: ['u1'], message: 'After FWB plans' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      {
+        sheetId: 'sheet_1',
+        recordId: 'test_record',
+        data: { password: 'snapshot-secret-must-not-be-used' },
+        actorId: 'actor_private',
+        _triggeredBy: 'manual_test',
+      },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('success')
+    expect(result.steps).toEqual([
+      {
+        actionType: 'write_approval_form_values',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: {
+            wouldWriteApprovalFormValues: true,
+            target: {
+              mode: 'create',
+              sheetId: 'sheet_1',
+              sourceTemplateVersionId: 'version_1',
+            },
+            payload: {
+              valueSource: 'immutable_approved_form_snapshot',
+              mappings: [
+                { formFieldId: 'amount', targetFieldId: 'total', targetType: 'text' },
+              ],
+            },
+          },
+        },
+        durationMs: 0,
+      },
+      {
+        actionType: 'write_approval_form_values',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: {
+            wouldWriteApprovalFormValues: true,
+            target: {
+              mode: 'update',
+              sourceTemplateVersionId: 'version_1',
+              recordLinkFieldId: 'linked_record',
+              derivedFrom: 'published_template_record_link',
+            },
+            payload: {
+              valueSource: 'immutable_approved_form_snapshot',
+              mappings: [
+                { formFieldId: 'category', targetFieldId: 'classification', targetType: 'select' },
+              ],
+            },
+          },
+        },
+        durationMs: 0,
+      },
+      {
+        actionType: 'send_notification',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: { target: { userIds: ['u1'] }, payload: { message: 'After FWB plans' } },
+        },
+        durationMs: 0,
+      },
+    ])
+    const serialized = JSON.stringify(result.steps)
+    expect(serialized).not.toContain('private-confirmation-hash')
+    expect(serialized).not.toContain('private-update-confirmation')
+    expect(serialized).not.toContain('private-select-option')
+    expect(serialized).not.toContain('snapshot-secret-must-not-be-used')
+    expect(serialized).not.toContain('actor_private')
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+    expect(emitSpy).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    {
+      name: 'unknown mode',
+      config: {
+        mode: 'replace',
+        sourceTemplateVersionId: 'version_1',
+        mappings: [{ formFieldId: 'source', targetFieldId: 'target', targetType: 'text' }],
+      },
+      error: 'fwb_rejected:mapping_config:unknown_mode',
+    },
+    {
+      name: 'empty mappings',
+      config: { sourceTemplateVersionId: 'version_1', mappings: [] },
+      error: 'fwb_rejected:mapping_config:empty_config',
+    },
+    {
+      name: 'unavailable exact-number mapping',
+      config: {
+        sourceTemplateVersionId: 'version_1',
+        mappings: [{ formFieldId: 'source', targetFieldId: 'target', targetType: 'number' }],
+      },
+      error: 'fwb_rejected:exact_number_mapping_unavailable',
+    },
+    {
+      name: 'missing source template version',
+      config: { mappings: [{ formFieldId: 'source', targetFieldId: 'target', targetType: 'text' }] },
+      error: 'fwb_rejected:source_template_version',
+    },
+    {
+      name: 'missing update record-link field',
+      config: {
+        mode: 'update',
+        sourceTemplateVersionId: 'version_1',
+        mappings: [{ formFieldId: 'source', targetFieldId: 'target', targetType: 'text' }],
+      },
+      error: 'fwb_rejected:mapping_config:record_link_field_missing',
+    },
+  ])('simulate fail-stops malformed FWB config: $name', async ({ config, error }) => {
+    const rule = createMockRule({
+      trigger: { type: 'approval.completed', config: { templateId: 'tpl_expense' } },
+      actions: [
+        { type: 'write_approval_form_values', config },
+        { type: 'send_notification', config: { userIds: ['should_skip'], message: 'should skip' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      { sheetId: 'sheet_1', recordId: 'test_record', data: {}, _triggeredBy: 'manual_test' },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('failed')
+    expect(result.steps).toEqual([
+      { actionType: 'write_approval_form_values', status: 'failed', error, durationMs: 0 },
+      { actionType: 'send_notification', status: 'skipped', durationMs: 0 },
+    ])
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+  })
+
   it.each([
     ['missing template', { templateId: ' ', formDataMapping: { status: 'status' } }, 'start_approval.templateId is required'],
     ['missing mapping', { templateId: 'tpl_1' }, 'start_approval.formDataMapping is required'],

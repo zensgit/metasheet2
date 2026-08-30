@@ -1263,6 +1263,98 @@ function simulatedStartApprovalPlan(
   }
 }
 
+function simulatedWriteApprovalFormValuesPlan(
+  action: AutomationAction,
+  context: ExecutionContext,
+): AutomationStepResult | null {
+  if (action.type !== 'write_approval_form_values') return null
+
+  const mode = parseFwbWriteMode(action.config.mode)
+  if (!mode.ok) {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: 'fwb_rejected:mapping_config:unknown_mode',
+      durationMs: 0,
+    }
+  }
+  const mappings = normalizeFwbMappings(action.config.mappings)
+  if (mappings.ok === false) {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: `fwb_rejected:mapping_config:${mappings.issue}`,
+      durationMs: 0,
+    }
+  }
+  if (hasUnavailableFwbNumberMapping(mappings.mappings)) {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: 'fwb_rejected:exact_number_mapping_unavailable',
+      durationMs: 0,
+    }
+  }
+  const sourceTemplateVersionId = nonBlankConfigString(action.config.sourceTemplateVersionId)
+  if (!sourceTemplateVersionId) {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: 'fwb_rejected:source_template_version',
+      durationMs: 0,
+    }
+  }
+
+  let target: Record<string, unknown>
+  if (mode.mode === 'update') {
+    const linkField = normalizeFwbUpdateRecordLinkFieldId(action.config.recordLinkFieldId)
+    if (linkField.ok === false) {
+      return {
+        actionType: action.type,
+        status: 'failed',
+        error: `fwb_rejected:mapping_config:${linkField.issue}`,
+        durationMs: 0,
+      }
+    }
+    target = {
+      mode: 'update',
+      sourceTemplateVersionId,
+      recordLinkFieldId: linkField.recordLinkFieldId,
+      derivedFrom: 'published_template_record_link',
+    }
+  } else {
+    target = {
+      mode: 'create',
+      sheetId: context.sheetId,
+      sourceTemplateVersionId,
+    }
+  }
+
+  const mappingPlan = mappings.mappings.map(({ formFieldId, targetFieldId, targetType }) => ({
+    formFieldId,
+    targetFieldId,
+    targetType,
+  }))
+  return {
+    actionType: action.type,
+    status: 'success',
+    simulated: true,
+    output: {
+      dryRun: true,
+      dispatched: false,
+      plan: {
+        wouldWriteApprovalFormValues: true,
+        target,
+        payload: {
+          valueSource: 'immutable_approved_form_snapshot',
+          mappings: mappingPlan,
+        },
+      },
+    },
+    durationMs: 0,
+  }
+}
+
 function simulatedStep(action: AutomationAction, context: ExecutionContext): AutomationStepResult {
   if (action.type === 'wait_for_callback') {
     return {
@@ -1287,6 +1379,8 @@ function simulatedStep(action: AutomationAction, context: ExecutionContext): Aut
   if (genericClassBPlan) return genericClassBPlan
   const startApprovalPlan = simulatedStartApprovalPlan(action, context)
   if (startApprovalPlan) return startApprovalPlan
+  const writeApprovalFormValuesPlan = simulatedWriteApprovalFormValuesPlan(action, context)
+  if (writeApprovalFormValuesPlan) return writeApprovalFormValuesPlan
   return {
     actionType: action.type,
     status: 'success',
