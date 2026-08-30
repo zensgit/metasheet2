@@ -12,11 +12,14 @@ import { usePinnedServer } from '../utils/pinned-server'
 
 // The gate resolves per-sheet capabilities; drive that resolution from the test.
 const resolveSheetCapabilities = vi.hoisted(() => vi.fn())
+const requireRecordReadable = vi.hoisted(() => vi.fn())
+const poolQuery = vi.hoisted(() => vi.fn())
 vi.mock('../../src/multitable/permission-service', () => ({ resolveSheetCapabilities }))
+vi.mock('../../src/routes/univer-meta', () => ({ requireRecordReadable }))
 // The gate touches the pool only to hand a query fn to resolveSheetCapabilities (which is mocked),
 // so a stub pool with a no-op query is enough.
 vi.mock('../../src/integration/db/connection-pool', () => {
-  const client = { query: vi.fn().mockResolvedValue({ rows: [] }), getInternalPool: () => null }
+  const client = { query: poolQuery, getInternalPool: () => null }
   return { poolManager: { get: () => client } }
 })
 // Keep the runs routes' admin guard a pass-through so mounting the router is cheap.
@@ -38,7 +41,6 @@ function makeService() {
   return {
     testRun: vi.fn().mockResolvedValue({ id: 'axe_test', ruleId: 'rule-1', sheetId: 'sheet-a', status: 'success', steps: [] }),
     logs: {
-      // safeGetPersistedExecution re-fetch after a run — return the redacted persisted row.
       getById: vi.fn().mockResolvedValue({ id: 'axe_test', ruleId: 'rule-1', sheetId: 'sheet-a', status: 'success', steps: [] }),
     },
   }
@@ -49,6 +51,9 @@ const pinned = usePinnedServer()
 describe('G8 — test-run route capability gate', () => {
   beforeEach(() => {
     resolveSheetCapabilities.mockReset()
+    requireRecordReadable.mockReset()
+    poolQuery.mockReset()
+    poolQuery.mockResolvedValue({ rows: [], rowCount: 0 })
   })
 
   it('403s a caller WITHOUT canManageAutomation and NEVER invokes testRun (no real action fires)', async () => {
@@ -80,6 +85,96 @@ describe('G8 — test-run route capability gate', () => {
     expect(res.status).toBe(200)
     expect(res.body.dryRun).toBe(true)
     expect(svc.testRun).toHaveBeenCalledWith('rule-1', 'sheet-a', { mode: 'simulate' })
+  })
+
+  it('loads a readable sample record and derives the simulation actor server-side', async () => {
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    requireRecordReadable.mockResolvedValue({
+      access: { userId: 'server_actor' },
+      capabilities: { canRead: true },
+      capabilityOrigin: 'role',
+    })
+    poolQuery.mockResolvedValue({ rows: [{ data: { tier: 'gold', amount: 12 } }], rowCount: 1 })
+    const svc = makeService()
+
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
+      .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
+      .send({ recordId: ' rec-sample ', actorId: 'spoofed_actor' })
+
+    expect(res.status).toBe(200)
+    expect(requireRecordReadable).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(Function),
+      'sheet-a',
+      'rec-sample',
+    )
+    expect(poolQuery).toHaveBeenCalledWith(
+      'SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+      ['rec-sample', 'sheet-a'],
+    )
+    expect(svc.testRun).toHaveBeenCalledWith('rule-1', 'sheet-a', {
+      mode: 'simulate',
+      sampleRecord: {
+        recordId: 'rec-sample',
+        data: { tier: 'gold', amount: 12 },
+        actorId: 'server_actor',
+      },
+    })
+  })
+
+  it('returns the record-read denial unchanged and never invokes testRun', async () => {
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    requireRecordReadable.mockResolvedValue({
+      status: 403,
+      body: { ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } },
+    })
+    const svc = makeService()
+
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
+      .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
+      .send({ recordId: 'rec-denied' })
+
+    expect(res.status).toBe(403)
+    expect(res.body?.error?.code).toBe('FORBIDDEN')
+    expect(poolQuery).not.toHaveBeenCalled()
+    expect(svc.testRun).not.toHaveBeenCalled()
+  })
+
+  it('rejects malformed sample record ids before any record lookup or simulation', async () => {
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    const svc = makeService()
+
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
+      .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
+      .send({ recordId: ['rec-1'] })
+
+    expect(res.status).toBe(400)
+    expect(res.body?.error?.code).toBe('INVALID_TEST_RUN_RECORD_ID')
+    expect(requireRecordReadable).not.toHaveBeenCalled()
+    expect(svc.testRun).not.toHaveBeenCalled()
+  })
+
+  it('fails closed when the sample row disappears after its read gate', async () => {
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    requireRecordReadable.mockResolvedValue({
+      access: { userId: 'server_actor' },
+      capabilities: { canRead: true },
+      capabilityOrigin: 'role',
+    })
+    poolQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+    const svc = makeService()
+
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
+      .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
+      .send({ recordId: 'rec-gone' })
+
+    expect(res.status).toBe(404)
+    expect(res.body?.error?.code).toBe('NOT_FOUND')
+    expect(svc.testRun).not.toHaveBeenCalled()
   })
 
   it('rejects an unknown mode before testRun is invoked', async () => {

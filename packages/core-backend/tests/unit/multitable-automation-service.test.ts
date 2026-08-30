@@ -422,6 +422,47 @@ describe('AutomationService', () => {
       }))
     })
 
+    it('evaluates rule conditions against the server-read-gated sample snapshot', async () => {
+      const rule = createMockRule({
+        id: 'atr_x',
+        sheet_id: 'sheet1',
+        enabled: true,
+        conditions: {
+          logic: 'and',
+          conditions: [{ fieldId: 'tier', operator: 'equals', value: 'gold' }],
+        },
+      })
+      const query = createMockQuery([rule])
+      service = new AutomationService(bus, createMockDb([rule]) as never, query)
+
+      const execution = await service.testRun('atr_x', 'sheet1', {
+        sampleRecord: {
+          recordId: 'rec-sample',
+          data: { tier: 'gold', amount: 12 },
+          actorId: 'server_actor',
+        },
+      })
+      const emptyExecution = await service.testRun('atr_x', 'sheet1')
+
+      expect(execution).toMatchObject({
+        status: 'success',
+        dryRun: true,
+        triggerEvent: {
+          sheetId: 'sheet1',
+          recordId: 'rec-sample',
+          data: { tier: 'gold', amount: 12 },
+          actorId: 'server_actor',
+          _triggeredBy: 'manual_test',
+        },
+      })
+      expect(emptyExecution.status).toBe('skipped')
+      expect(automationLogMocks.record).toHaveBeenCalledWith(expect.objectContaining({
+        id: execution.id,
+        triggerEvent: undefined,
+        ruleSnapshot: undefined,
+      }))
+    })
+
     it('fails closed when a direct caller requests real_fire', async () => {
       const rule = createMockRule({ id: 'atr_x', sheet_id: 'sheet1', enabled: true })
       const query = createMockQuery([rule])
