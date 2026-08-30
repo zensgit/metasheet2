@@ -61,6 +61,7 @@ export interface ElearningPracticeAnswerResult {
 export interface ElearningPracticeRequestIds {
   forSet(paperId: string, title: string): string
   forSession(practiceSetId: string, mode: ElearningPracticeMode): string
+  settleSession(practiceSetId: string, mode: ElearningPracticeMode): void
   forAnswer(sessionId: string, questionRevisionId: string, selectedOptionIds: readonly string[]): string
 }
 
@@ -162,19 +163,27 @@ function parseQuestion(value: unknown, status: number): ElearningPracticeQuestio
   }
 }
 
-function parseQuestions(value: unknown, status: number): ElearningPracticeQuestion[] {
+function parseQuestions(
+  value: unknown,
+  status: number,
+  positionRule: 'dense' | 'strictly_increasing' = 'dense',
+): ElearningPracticeQuestion[] {
   if (!Array.isArray(value) || value.length > 2_000) failShape(status)
   const questions = value.map((question) => parseQuestion(question, status))
   const ids = new Set<string>()
   const revisions = new Set<string>()
+  let previousPosition = 0
   for (const [index, question] of questions.entries()) {
     if (
-      question.position !== index + 1
+      (positionRule === 'dense'
+        ? question.position !== index + 1
+        : question.position <= previousPosition)
       || ids.has(question.questionId)
       || revisions.has(question.questionRevisionId)
     ) failShape(status)
     ids.add(question.questionId)
     revisions.add(question.questionRevisionId)
+    previousPosition = question.position
   }
   return questions
 }
@@ -247,6 +256,9 @@ export function isElearningPracticeReady(payload: ElearningCapabilities): boolea
 
 export function createElearningPracticeRequestIds(): ElearningPracticeRequestIds {
   const ids = new Map<string, string>()
+  const sessionIdentity = (practiceSetId: string, practiceMode: ElearningPracticeMode): string => (
+    requestIdentity(['session', practiceSetId.toLowerCase(), practiceMode])
+  )
   const forIdentity = (identity: string): string => {
     const existing = ids.get(identity)
     if (existing) return existing
@@ -257,8 +269,11 @@ export function createElearningPracticeRequestIds(): ElearningPracticeRequestIds
   return {
     forSet: (paperId, title) => forIdentity(requestIdentity(['set', paperId.toLowerCase(), title.trim()])),
     forSession: (practiceSetId, practiceMode) => (
-      forIdentity(requestIdentity(['session', practiceSetId.toLowerCase(), practiceMode]))
+      forIdentity(sessionIdentity(practiceSetId, practiceMode))
     ),
+    settleSession: (practiceSetId, practiceMode) => {
+      ids.delete(sessionIdentity(practiceSetId, practiceMode))
+    },
     forAnswer: (sessionId, questionRevisionId, selectedOptionIds) => forIdentity(requestIdentity([
       'answer',
       sessionId.toLowerCase(),
@@ -378,6 +393,6 @@ export async function listElearningWrongQuestions(
   if (!isObject(payload) || !exactKeys(payload, ['practiceSetId', 'questions'])) failShape(status)
   return {
     practiceSetId: uuid(payload.practiceSetId, status),
-    questions: parseQuestions(payload.questions, status),
+    questions: parseQuestions(payload.questions, status, 'strictly_increasing'),
   }
 }

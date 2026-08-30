@@ -143,11 +143,14 @@ async function startSession(): Promise<void> {
   }
   busy.value = true
   try {
+    const practiceSetId = selectedSetId.value
+    const practiceMode = mode.value
     session.value = await startElearningPracticeSession({
-      requestId: requestIds.forSession(selectedSetId.value, mode.value),
-      practiceSetId: selectedSetId.value,
-      mode: mode.value,
+      requestId: requestIds.forSession(practiceSetId, practiceMode),
+      practiceSetId,
+      mode: practiceMode,
     })
+    requestIds.settleSession(practiceSetId, practiceMode)
     questionIndex.value = 0
     selectedOptionIds.value = []
     statusTone.value = 'info'

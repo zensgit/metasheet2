@@ -97,7 +97,8 @@ describe('ElearningPracticeLearnerSection', () => {
     })
     uuid = vi.spyOn(globalThis.crypto, 'randomUUID')
       .mockReturnValueOnce(REQUEST_A)
-      .mockReturnValue(REQUEST_B)
+      .mockReturnValueOnce(REQUEST_B)
+      .mockReturnValue(ANSWER)
   })
 
   afterEach(() => {
@@ -138,7 +139,7 @@ describe('ElearningPracticeLearnerSection', () => {
     expect(view.querySelector('[data-testid="elearning-practice-wrong-list"]')).toBeNull()
   })
 
-  it('reuses start identity after a retry and rotates it when mode changes', async () => {
+  it('reuses start identity after a retry and rotates it after success or payload change', async () => {
     const view = await mount()
     h.start.mockRejectedValueOnce(new ElearningApiError('network_error', 0))
     select(view, 'elearning-practice-set-select', SET)
@@ -151,10 +152,14 @@ describe('ElearningPracticeLearnerSection', () => {
     expect(h.start.mock.calls[0]?.[0].requestId).toBe(REQUEST_A)
     expect(h.start.mock.calls[1]?.[0].requestId).toBe(REQUEST_A)
 
-    select(view, 'elearning-practice-mode', 'random')
     button.click()
     await flush()
     expect(h.start.mock.calls[2]?.[0].requestId).toBe(REQUEST_B)
+
+    select(view, 'elearning-practice-mode', 'random')
+    button.click()
+    await flush()
+    expect(h.start.mock.calls[3]?.[0].requestId).toBe(ANSWER)
   })
 
   it('requires an answer before submitting', async () => {

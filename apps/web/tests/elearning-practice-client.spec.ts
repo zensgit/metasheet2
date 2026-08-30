@@ -19,6 +19,8 @@ const PAPER = '22222222-2222-4222-8222-222222222222'
 const SESSION = '33333333-3333-4333-8333-333333333333'
 const QUESTION = '44444444-4444-4444-8444-444444444444'
 const REVISION = '55555555-5555-4555-8555-555555555555'
+const QUESTION_B = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+const REVISION_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const ANSWER = '66666666-6666-4666-8666-666666666666'
 const REQUEST_A = '77777777-7777-4777-8777-777777777777'
 const REQUEST_B = '88888888-8888-4888-8888-888888888888'
@@ -129,6 +131,39 @@ describe('e-learning practice client', () => {
     }
   })
 
+  it('accepts sparse original positions for wrong questions but rejects duplicate or decreasing order', async () => {
+    const sparse = [
+      question({ position: 2 }),
+      question({ questionId: QUESTION_B, questionRevisionId: REVISION_B, position: 4 }),
+    ]
+    apiFetchMock.mockResolvedValueOnce(response(200, {
+      practiceSetId: SET,
+      questions: sparse,
+    }))
+    await expect(listElearningWrongQuestions(SET)).resolves.toEqual({
+      practiceSetId: SET,
+      questions: sparse,
+    })
+
+    for (const positions of [[2, 2], [4, 2]]) {
+      apiFetchMock.mockResolvedValueOnce(response(200, {
+        practiceSetId: SET,
+        questions: [
+          question({ position: positions[0] }),
+          question({
+            questionId: QUESTION_B,
+            questionRevisionId: REVISION_B,
+            position: positions[1],
+          }),
+        ],
+      }))
+      await expect(listElearningWrongQuestions(SET)).rejects.toMatchObject({
+        code: 'invalid_response',
+        status: 200,
+      })
+    }
+  })
+
   it.each([
     question({ position: 2 }),
     question({ extra: true }),
@@ -174,6 +209,18 @@ describe('e-learning practice client', () => {
     expect(ids.forAnswer(SESSION, REVISION, ['b', 'a'])).toBe(ANSWER)
     expect(ids.forAnswer(SESSION, REVISION, ['a', 'b'])).toBe(ANSWER)
     expect(ids.forAnswer(SESSION, REVISION, ['a'])).toBe(REQUEST_C)
+    randomUuid.mockRestore()
+  })
+
+  it('settles a successful session identity without rotating transport retries', () => {
+    const randomUuid = vi.spyOn(globalThis.crypto, 'randomUUID')
+      .mockReturnValueOnce(REQUEST_A)
+      .mockReturnValue(REQUEST_B)
+    const ids = createElearningPracticeRequestIds()
+    expect(ids.forSession(SET, 'sequential')).toBe(REQUEST_A)
+    expect(ids.forSession(SET, 'sequential')).toBe(REQUEST_A)
+    ids.settleSession(SET, 'sequential')
+    expect(ids.forSession(SET, 'sequential')).toBe(REQUEST_B)
     randomUuid.mockRestore()
   })
 
