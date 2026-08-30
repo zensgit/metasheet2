@@ -961,6 +961,153 @@ export async function getPlmTaskInbox(
   return normalizePlmTaskInboxResult(dsId, payload)
 }
 
+// ---------------------------------------------------------------------------
+// PLM-COLLAB lane ③ — ECO impact working set (read-only). Family-I only.
+// ---------------------------------------------------------------------------
+export interface PlmEcoImpactFlags {
+  includeFiles?: boolean
+  includeBomDiff?: boolean
+  includeVersionDiff?: boolean
+  includeChildFields?: boolean
+  maxLevels?: number
+  compareMode?: string
+}
+
+export type PlmEcoImpactExportFormat = 'csv' | 'xlsx' | 'pdf' | 'json'
+
+export type PlmEcoImpactResult =
+  | {
+    data_source_id: string
+    available: true
+    entitled?: boolean
+    impact: Record<string, unknown> | null
+    // 'no-plm-credential' (viewer has no linked PLM identity), 'not-found-or-forbidden' (§3.1 —
+    // a MISSING ECO and one NOT VISIBLE to the caller are deliberately indistinguishable),
+    // 'invalid-request' (e.g. bad max_levels), or 'unavailable'. Never upstream text.
+    reason?: string
+  }
+  | {
+    data_source_id: string
+    available: false
+    reason?: string
+  }
+
+/**
+ * The ONE shared flag serializer for the grid fetch AND the export URL. ALWAYS emits all four
+ * include flags explicitly (default false) — `/impact` defaults them False and `/impact/export`
+ * defaults them True (§6.1), so the grid and download can only stay in lockstep if both carry the
+ * same explicit flags. Building the export URL from the SAME serializer as the grid fetch is the
+ * fix for that trap; NEVER hardcode the export URL.
+ */
+export function serializeEcoImpactFlags(flags?: PlmEcoImpactFlags): URLSearchParams {
+  const q = new URLSearchParams()
+  q.set('include_files', String(flags?.includeFiles === true))
+  q.set('include_bom_diff', String(flags?.includeBomDiff === true))
+  q.set('include_version_diff', String(flags?.includeVersionDiff === true))
+  q.set('include_child_fields', String(flags?.includeChildFields === true))
+  if (typeof flags?.maxLevels === 'number') q.set('max_levels', String(Math.trunc(flags.maxLevels)))
+  if (flags?.compareMode) q.set('compare_mode', flags.compareMode)
+  return q
+}
+
+function normalizePlmEcoImpactResult(dataSourceId: string, value: unknown): PlmEcoImpactResult {
+  if (!value || typeof value !== 'object') {
+    return { data_source_id: dataSourceId, available: false, reason: 'unavailable' }
+  }
+  const record = value as Record<string, unknown>
+  const dsId = typeof record.data_source_id === 'string' && record.data_source_id.trim()
+    ? record.data_source_id.trim()
+    : dataSourceId
+  if (record.available !== true) {
+    return { data_source_id: dsId, available: false, reason: typeof record.reason === 'string' ? record.reason : 'unavailable' }
+  }
+  return {
+    data_source_id: dsId,
+    available: true,
+    entitled: typeof record.entitled === 'boolean' ? record.entitled : undefined,
+    impact: record.impact && typeof record.impact === 'object' ? record.impact as Record<string, unknown> : null,
+    reason: typeof record.reason === 'string' ? record.reason : undefined,
+  }
+}
+
+/**
+ * lane ③ — fetch the ECO impact working set through the workbench relay, with the viewing user's
+ * own PLM bearer (`plmUserToken`) sent HEADER-ONLY. Empty token -> relay degrades to
+ * `no-plm-credential` (never a service account). Never throws.
+ */
+export async function getPlmEcoImpact(
+  dataSourceId: string,
+  plmUserToken: string,
+  ecoId: string,
+  flags?: PlmEcoImpactFlags,
+): Promise<PlmEcoImpactResult> {
+  const dsId = dataSourceId.trim()
+  const eco = ecoId.trim()
+  if (!dsId || !eco) {
+    return { data_source_id: dsId, available: false, reason: 'unavailable' }
+  }
+  const qs = serializeEcoImpactFlags(flags).toString()
+  const headers: Record<string, string> = {}
+  if (plmUserToken && plmUserToken.trim()) headers['X-PLM-User-Token'] = plmUserToken.trim()
+  const response = await apiFetch(
+    `/api/plm-workbench/data-sources/${encodeURIComponent(dsId)}/eco/${encodeURIComponent(eco)}/impact?${qs}`,
+    { headers },
+  )
+  const payload = await response.json().catch(() => null) as unknown
+  if (!response.ok) {
+    return { data_source_id: dsId, available: false, reason: 'unavailable' }
+  }
+  return normalizePlmEcoImpactResult(dsId, payload)
+}
+
+/**
+ * Build the export relay URL from the SAME flag serializer as the grid fetch, so the download can
+ * never show less (or more) than the screen (export parity, §6.1). The download itself must go
+ * through `downloadPlmEcoImpactExport` (a per-caller fetch that carries X-PLM-User-Token) — a plain
+ * <a href> cannot attach the credential, and the export is a per-caller artifact (§7).
+ */
+export function buildPlmEcoImpactExportUrl(
+  dataSourceId: string,
+  ecoId: string,
+  format: PlmEcoImpactExportFormat,
+  flags?: PlmEcoImpactFlags,
+): string {
+  const qs = serializeEcoImpactFlags(flags)
+  qs.set('format', format)
+  return `/api/plm-workbench/data-sources/${encodeURIComponent(dataSourceId.trim())}/eco/${encodeURIComponent(ecoId.trim())}/impact/export?${qs.toString()}`
+}
+
+/**
+ * Download the export with the viewing user's own PLM bearer (per-caller, §7). Returns a discriminated
+ * result; on success the caller triggers the browser save. Never throws.
+ */
+export async function downloadPlmEcoImpactExport(
+  dataSourceId: string,
+  ecoId: string,
+  format: PlmEcoImpactExportFormat,
+  plmUserToken: string,
+  flags?: PlmEcoImpactFlags,
+): Promise<{ ok: true; blob: Blob; filename: string } | { ok: false; reason: string }> {
+  const url = buildPlmEcoImpactExportUrl(dataSourceId, ecoId, format, flags)
+  const headers: Record<string, string> = {}
+  if (plmUserToken && plmUserToken.trim()) headers['X-PLM-User-Token'] = plmUserToken.trim()
+  try {
+    const response = await apiFetch(url, { headers })
+    if (!response.ok) return { ok: false, reason: 'unavailable' }
+    // The relay degrades with a JSON `{available, reason}` envelope at HTTP 200 and NO
+    // Content-Disposition; the real file path always sets `attachment`. Keying on the disposition
+    // (not content-type) distinguishes them even for format=json, whose file body is also JSON.
+    const disposition = response.headers.get('content-disposition') || ''
+    if (!disposition.includes('attachment')) {
+      return { ok: false, reason: 'unavailable' }
+    }
+    const blob = await response.blob()
+    return { ok: true, blob, filename: `eco-${ecoId.trim()}-impact.${format}` }
+  } catch {
+    return { ok: false, reason: 'unavailable' }
+  }
+}
+
 export async function updatePlmBomMultitableLine(
   dataSourceId: string,
   partId: string,

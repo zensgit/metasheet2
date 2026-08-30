@@ -5199,6 +5199,404 @@
       }
     },
     {
+      "description": "lane impact: ECO impact base projection (all include flags explicit-false)",
+      "providerStates": [
+        {
+          "name": "tenant-1 can read the product BOM of ECO 01H000000000000000000000E4 and its impact analysis is computable"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/eco/01H000000000000000000000E4/impact",
+        "query": {
+          "include_files": [
+            "false"
+          ],
+          "include_bom_diff": [
+            "false"
+          ],
+          "include_version_diff": [
+            "false"
+          ],
+          "include_child_fields": [
+            "false"
+          ]
+        },
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example",
+          "x-tenant-id": "tenant-1"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "eco_id": "01H000000000000000000000E4",
+          "changed_product_id": "01H000000000000000000000P1",
+          "impact_count": 1,
+          "impact_level": "medium",
+          "impact_score": 42,
+          "impact_scope": "assembly",
+          "impact_summary": {
+            "added": 0,
+            "removed": 0,
+            "changed": 1,
+            "changed_major": 0,
+            "changed_minor": 1,
+            "changed_info": 0
+          },
+          "impacted_assemblies": [
+            {
+              "parent": {
+                "id": "01H000000000000000000000P9",
+                "item_number": "A-900",
+                "name": "Top Assembly"
+              },
+              "level": 1,
+              "relationship": {
+                "id": "01H000000000000000000000R9",
+                "item_type_id": "Part BOM"
+              }
+            }
+          ]
+        },
+        "matchingRules": {
+          "body": {
+            "$.eco_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.changed_product_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.impact_count": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.impact_level": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.impact_score": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.impact_scope": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.impact_summary": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.impacted_assemblies": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.impacted_assemblies[*].parent.id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.impacted_assemblies[*].relationship.id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.impacted_assemblies[*].level": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "lane impact: ECO impact with BOM diff (include_bom_diff=true adds the bom_diff section)",
+      "providerStates": [
+        {
+          "name": "tenant-1 can read the product BOM of ECO 01H000000000000000000000E5 and its impact analysis includes a BOM diff"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/eco/01H000000000000000000000E5/impact",
+        "query": {
+          "include_files": [
+            "false"
+          ],
+          "include_bom_diff": [
+            "true"
+          ],
+          "include_version_diff": [
+            "false"
+          ],
+          "include_child_fields": [
+            "false"
+          ]
+        },
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example",
+          "x-tenant-id": "tenant-1"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "eco_id": "01H000000000000000000000E5",
+          "changed_product_id": "01H000000000000000000000P1",
+          "impact_count": 1,
+          "impact_level": "medium",
+          "impact_score": 42,
+          "impact_scope": "assembly",
+          "impact_summary": {
+            "added": 0,
+            "removed": 0,
+            "changed": 1,
+            "changed_major": 0,
+            "changed_minor": 1,
+            "changed_info": 0
+          },
+          "impacted_assemblies": [
+            {
+              "parent": {
+                "id": "01H000000000000000000000P9",
+                "item_number": "A-900",
+                "name": "Top Assembly"
+              },
+              "level": 1,
+              "relationship": {
+                "id": "01H000000000000000000000R9",
+                "item_type_id": "Part BOM"
+              }
+            }
+          ],
+          "bom_diff": {
+            "added": [],
+            "removed": []
+          }
+        },
+        "matchingRules": {
+          "body": {
+            "$.eco_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.changed_product_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.impact_count": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.impact_level": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.impact_score": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.impact_scope": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.impact_summary": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.impacted_assemblies": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.impacted_assemblies[*].parent.id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.impacted_assemblies[*].relationship.id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.impacted_assemblies[*].level": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.bom_diff": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "lane impact: ECO impact export csv with the SAME flags as the grid (export parity)",
+      "providerStates": [
+        {
+          "name": "tenant-1 can read the product BOM of ECO 01H000000000000000000000E5 and its impact analysis exports as CSV"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/eco/01H000000000000000000000E5/impact/export",
+        "query": {
+          "format": [
+            "csv"
+          ],
+          "include_files": [
+            "false"
+          ],
+          "include_bom_diff": [
+            "true"
+          ],
+          "include_version_diff": [
+            "false"
+          ],
+          "include_child_fields": [
+            "false"
+          ]
+        },
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example",
+          "x-tenant-id": "tenant-1"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/csv"
+        },
+        "body": "# Overview\r\neco_id,impact_count\r\n01H000000000000000000000E5,1\r\n",
+        "matchingRules": {
+          "body": {
+            "$": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
       "description": "mint a MetaSheet BOM review embed token for the Yuantus parent host",
       "providerStates": [
         {
@@ -5543,6 +5941,122 @@
         },
         "body": {
           "detail": "limit must be between 1 and 200"
+        },
+        "matchingRules": {
+          "body": {
+            "$.detail": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "lane impact: ECO impact denied by the type-level Part-BOM gate (uniform 403)",
+      "providerStates": [
+        {
+          "name": "ECO 01H000000000000000000000E6 exists under tenant-1 but the caller lacks Part BOM read (uniform permission denial)"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/eco/01H000000000000000000000E6/impact",
+        "query": {
+          "include_files": [
+            "false"
+          ],
+          "include_bom_diff": [
+            "false"
+          ],
+          "include_version_diff": [
+            "false"
+          ],
+          "include_child_fields": [
+            "false"
+          ]
+        },
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example",
+          "x-tenant-id": "tenant-1"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 403,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "detail": "Permission denied"
+        }
+      }
+    },
+    {
+      "description": "lane impact: ECO impact with max_levels below -1 is rejected (400)",
+      "providerStates": [
+        {
+          "name": "ECO 01H000000000000000000000E7 exists under tenant-1 and a max_levels below -1 is rejected"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/eco/01H000000000000000000000E7/impact",
+        "query": {
+          "max_levels": [
+            "-2"
+          ],
+          "include_files": [
+            "false"
+          ],
+          "include_bom_diff": [
+            "false"
+          ],
+          "include_version_diff": [
+            "false"
+          ],
+          "include_child_fields": [
+            "false"
+          ]
+        },
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example",
+          "x-tenant-id": "tenant-1"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "detail": "max_levels must be >= -1"
         },
         "matchingRules": {
           "body": {

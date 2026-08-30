@@ -218,6 +218,14 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'PLM Task Inbox', titleZh: 'PLM 任务收件箱', requiresAuth: true, requiredFeature: 'plm' }
   },
   {
+    // PLM-COLLAB lane ③: ECO impact working set. Main-application, full-login placement (NOT an
+    // embed tab, §2) — reads with the viewing user's own PLM credential; read-only, no apply.
+    path: '/plm/eco-impact/:ecoId?',
+    name: 'plm-eco-impact',
+    component: () => import('../views/PlmEcoImpactView.vue'),
+    meta: { title: 'ECO Impact', titleZh: 'ECO 影响分析', requiresAuth: true, requiredFeature: 'plm' }
+  },
+  {
     // PLM-COLLAB P3-D2: token-bound BOM-review embed. Bare page (no shell, no metasheet session) --
     // it is authed by a PLM-minted embed token delivered via postMessage from an allowlisted parent,
     // NOT by a metasheet session. Mirrors the public-form route's no-session meta.

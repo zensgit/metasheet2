@@ -156,6 +156,13 @@ const PLM_ADAPTER_PACT_PATHS = [
   { method: 'GET', path: '/api/v1/tasks/inbox' },
   { method: 'GET', path: '/api/v1/tasks/inbox' },
   { method: 'GET', path: '/api/v1/tasks/inbox' },
+  // PLM-COLLAB lane ③ (ECO impact working set, READ-ONLY, Family I): the base projection, the
+  // flag-gated BOM-diff variant, and the csv export (the export-parity pair for §6). getEcoImpact
+  // and getEcoImpactExport own the callsites. Sit at the END of the adapter-owned list, after lane
+  // ②, immediately before the parent-host embed-token. The 403/400 negatives are ERROR_CONTRACT below.
+  { method: 'GET', path: '/api/v1/eco/01H000000000000000000000E4/impact' },
+  { method: 'GET', path: '/api/v1/eco/01H000000000000000000000E5/impact' },
+  { method: 'GET', path: '/api/v1/eco/01H000000000000000000000E5/impact/export' },
 ] as const
 
 const PARENT_HOST_PACT_PATHS = [
@@ -182,6 +189,11 @@ const ERROR_CONTRACT_PACT_PATHS = [
   // PLM-COLLAB lane ② (task-inbox board): the page-cap error. GET /api/v1/tasks/inbox?limit=201
   // -> 422. Pins that the consumer cannot quietly ask beyond the provider's 200 cap (taskbook §4.4).
   { method: 'GET', path: '/api/v1/tasks/inbox' },
+  // PLM-COLLAB lane ③ (ECO impact): the two negatives. The 403 pins the type-level Part-BOM gate
+  // (the ONLY interaction that pins the gate); the 400 pins the max_levels floor. NO uniform
+  // missing-vs-unauthorized interaction is published -- per §3.1 the route is 404-vs-403 today.
+  { method: 'GET', path: '/api/v1/eco/01H000000000000000000000E6/impact' },
+  { method: 'GET', path: '/api/v1/eco/01H000000000000000000000E7/impact' },
 ] as const
 
 const PACT_PATHS = [
@@ -278,6 +290,10 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
       '/api/v1/discussions/${threadId}/reopen',
       // PLM-COLLAB lane ② (task-inbox board): getTaskInbox's per-caller callsite.
       '/api/v1/tasks/inbox',
+      // PLM-COLLAB lane ③ (ECO impact working set): getEcoImpact + getEcoImpactExport callsites
+      // (ecoId is encodeURIComponent'd — arbitrary caller input must not reshape the provider URL).
+      '/api/v1/eco/${encodeURIComponent(ecoId)}/impact',
+      '/api/v1/eco/${encodeURIComponent(ecoId)}/impact/export',
     ]
     for (const ep of endpointsToFind) {
       expect(
@@ -396,6 +412,52 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
       const q = i.request.query ?? {}
       for (const key of forbidden) expect(q).not.toHaveProperty(key)
     }
+  })
+
+  // PLM-COLLAB lane ③ (ECO impact working set): the gate, the flag-gated section, export parity,
+  // and the negatives.
+  it('lane ③: the denial interaction pins the uniform 403 body EXACTLY (the only gate pin), with no oracle', () => {
+    const pact = loadPact()
+    const denied = pact.interactions.find(i => i.description.startsWith('lane impact:') && i.description.includes('denied'))
+    expect(denied).toBeDefined()
+    expect(denied!.response.status).toBe(403)
+    // uniform denial (§3): body is EXACTLY {"detail":"Permission denied"} and must NOT be loosened
+    expect(denied!.response.body).toEqual({ detail: 'Permission denied' })
+    expect(denied!.response.matchingRules?.body).toBeUndefined()
+    // §3.1: 404-vs-403 is real today; no interaction may encode a UNIFORM missing-vs-unauthorized
+    // answer on the /impact path (that would be a contract the provider does not honour).
+    const impactPaths = pact.interactions.filter(i => /\/impact$/.test(i.request.path))
+    expect(impactPaths.some(i => i.response.status === 404)).toBe(false)
+  })
+
+  it('lane ③: the BOM-diff interaction is flag-gated (include_bom_diff=true adds a bom_diff section)', () => {
+    const pact = loadPact()
+    const bomdiff = pact.interactions.find(i => i.description.startsWith('lane impact:') && i.description.includes('BOM diff'))
+    expect(bomdiff).toBeDefined()
+    expect(bomdiff!.response.status).toBe(200)
+    expect(bomdiff!.request.query?.include_bom_diff).toEqual(['true'])
+    expect(bomdiff!.response.body).toHaveProperty('bom_diff')
+  })
+
+  it('lane ③: the csv export carries the SAME include flags as the grid it pairs with (export parity §6.1)', () => {
+    const pact = loadPact()
+    const bomdiff = pact.interactions.find(i => i.description.startsWith('lane impact:') && i.description.includes('BOM diff'))
+    const exp = pact.interactions.find(i => i.description.startsWith('lane impact:') && i.description.includes('export'))
+    expect(exp).toBeDefined()
+    expect(exp!.response.status).toBe(200)
+    expect(exp!.response.headers?.['Content-Type']).toContain('text/csv')
+    const flagsOf = (q: Record<string, string[]> | undefined) =>
+      ['include_files', 'include_bom_diff', 'include_version_diff', 'include_child_fields']
+        .map(k => `${k}=${q?.[k]?.[0] ?? ''}`).join('&')
+    // Same explicit include flags on both routes -> the download can never diverge from the screen.
+    expect(flagsOf(exp!.request.query)).toBe(flagsOf(bomdiff!.request.query))
+  })
+
+  it('lane ③: an out-of-range max_levels is a 400', () => {
+    const pact = loadPact()
+    const badMax = pact.interactions.find(i => i.description.startsWith('lane impact:') && i.description.includes('max_levels'))
+    expect(badMax).toBeDefined()
+    expect(badMax!.response.status).toBe(400)
   })
 
   // PLM-COLLAB P3 (方案1) governed BOM multitable write-back contract: RE-ADDED in its AMENDED form

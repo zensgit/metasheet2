@@ -36,6 +36,10 @@ import type {
   TaskInboxResult,
   TaskInboxSourceStatus,
   TaskInboxQueryOptions,
+  EcoImpactResult,
+  EcoImpactQueryOptions,
+  EcoImpactExportResult,
+  EcoImpactExportFormat,
 } from '../data-adapters/PLMAdapter'
 import type { QueryResult } from '../data-adapters/BaseAdapter'
 // #4020: value import (not type-only) -- isFeatureAvailable is the shared affordance-
@@ -1344,6 +1348,194 @@ router.get(
       limit: typeof body.limit === 'number' ? body.limit : undefined,
       offset: typeof body.offset === 'number' ? body.offset : undefined,
     })
+  },
+)
+
+// ---------------------------------------------------------------------------
+// PLM-COLLAB lane ③ — ECO impact working-set relay (READ-ONLY, per-caller Family I).
+// Taskbook: DEVELOPMENT_TASK_METASHEET_ECO_IMPACT_WORKSET_CONSUMER_20260830.md.
+//
+// Same per-caller credential model as lane ②: the DATA read (and the export) run with the VIEWING
+// USER's own PLM bearer (X-PLM-User-Token, HEADER-ONLY, never logged/cached), and the relay NEVER
+// falls back to the shared service token (the provider's gate is two RBAC-id `check_permission`
+// calls, §3). The advisory manifest pre-check uses the ordinary service-token call (advisory only).
+//
+// 404-before-403 (§3.1): the provider answers 404 for a missing ECO and 403 for a present-but-
+// unreadable one — a real existence oracle. The relay collapses BOTH to a single
+// `not-found-or-forbidden` reason so the UI shows "not found or not visible to you" and never
+// amplifies the oracle. Reasons are a curated set; upstream error text is never echoed.
+// ---------------------------------------------------------------------------
+interface PlmEcoImpactAdapter {
+  getIntegrationCapabilities(): Promise<IntegrationCapabilitiesResult>
+  getEcoImpact(authToken: string, ecoId: string, options?: EcoImpactQueryOptions): Promise<QueryResult<EcoImpactResult>>
+  getEcoImpactExport(authToken: string, ecoId: string, format: EcoImpactExportFormat, options?: EcoImpactQueryOptions): Promise<EcoImpactExportResult>
+}
+
+function isPlmEcoImpactAdapter(adapter: unknown): adapter is PlmEcoImpactAdapter {
+  const candidate = adapter as PlmEcoImpactAdapter | null
+  return (
+    typeof candidate?.getIntegrationCapabilities === 'function'
+    && typeof candidate?.getEcoImpact === 'function'
+    && typeof candidate?.getEcoImpactExport === 'function'
+  )
+}
+
+function parseEcoImpactOptions(req: Request): EcoImpactQueryOptions {
+  const options: EcoImpactQueryOptions = {}
+  if (typeof req.query.include_files === 'string') options.includeFiles = req.query.include_files === 'true'
+  if (typeof req.query.include_bom_diff === 'string') options.includeBomDiff = req.query.include_bom_diff === 'true'
+  if (typeof req.query.include_version_diff === 'string') options.includeVersionDiff = req.query.include_version_diff === 'true'
+  if (typeof req.query.include_child_fields === 'string') options.includeChildFields = req.query.include_child_fields === 'true'
+  if (typeof req.query.max_levels === 'string') options.maxLevels = Number(req.query.max_levels)
+  if (typeof req.query.compare_mode === 'string') options.compareMode = req.query.compare_mode
+  return options
+}
+
+// ecoId is arbitrary caller input reaching a provider URL path AND a Content-Disposition header.
+// Constrain it to a safe id charset so it can neither reshape the outbound URL (?, #, ../) nor
+// inject a CR/LF/quote into the download header (which would throw ERR_INVALID_CHAR -> a 500,
+// breaking the never-500 degrade contract). ULIDs/UUIDs satisfy this.
+const ECO_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
+
+const ECO_IMPACT_EXPORT_FORMATS = new Set<EcoImpactExportFormat>(['csv', 'xlsx', 'pdf', 'json'])
+const ECO_IMPACT_EXPORT_CONTENT_TYPES: Record<EcoImpactExportFormat, string> = {
+  csv: 'text/csv',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  pdf: 'application/pdf',
+  json: 'application/json',
+}
+
+/**
+ * Resolve the eco_impact_review advisory gate. Returns the per-caller PLM token when the surface is
+ * available AND a header credential was supplied; otherwise it has already written a degrade
+ * response and returns null (caller must return immediately). NEVER reads the service token.
+ */
+async function resolveEcoImpactAccess(
+  req: Request,
+  res: Response,
+  adapter: PlmEcoImpactAdapter,
+  dataSourceId: string,
+): Promise<string | null> {
+  let capabilities: IntegrationCapabilitiesResult
+  try {
+    capabilities = await adapter.getIntegrationCapabilities()
+  } catch {
+    res.json({ data_source_id: dataSourceId, available: false, reason: 'unavailable' })
+    return null
+  }
+  const feature = capabilities.available ? capabilities.manifest.features.eco_impact_review : undefined
+  if (!feature || feature.supported !== true || !isFeatureAvailable(feature)) {
+    res.json({ data_source_id: dataSourceId, available: false, reason: 'unsupported' })
+    return null
+  }
+  const userToken = readPlmUserToken(req)
+  if (!userToken) {
+    res.json({ data_source_id: dataSourceId, available: true, reason: 'no-plm-credential', impact: null })
+    return null
+  }
+  return userToken
+}
+
+router.get(
+  '/api/plm-workbench/data-sources/:id/eco/:ecoId/impact',
+  authenticate,
+  param('id').isString(),
+  param('ecoId').isString(),
+  query('include_files').optional().isBoolean(),
+  query('include_bom_diff').optional().isBoolean(),
+  query('include_version_diff').optional().isBoolean(),
+  query('include_child_fields').optional().isBoolean(),
+  query('max_levels').optional().isInt(),
+  query('compare_mode').optional().isString(),
+  validate,
+  async (req: Request, res: Response) => {
+    const dataSourceId = req.params.id
+    const ecoId = req.params.ecoId
+    if (!ECO_ID_RE.test(ecoId)) {
+      return res.json({ data_source_id: dataSourceId, available: true, reason: 'invalid-request', impact: null })
+    }
+    let adapter: unknown
+    try {
+      adapter = getDataSourceManager().getDataSource(dataSourceId)
+    } catch {
+      return res.status(404).json({ error: 'Data source not found', data_source_id: dataSourceId })
+    }
+    if (!isPlmEcoImpactAdapter(adapter)) {
+      return res.json({ data_source_id: dataSourceId, available: false, reason: 'unsupported-mode' })
+    }
+    const userToken = await resolveEcoImpactAccess(req, res, adapter, dataSourceId)
+    if (!userToken) return
+
+    let result: QueryResult<EcoImpactResult>
+    try {
+      result = await adapter.getEcoImpact(userToken, ecoId, parseEcoImpactOptions(req))
+    } catch {
+      return res.json({ data_source_id: dataSourceId, available: true, reason: 'unavailable', impact: null })
+    }
+    if (result.error) {
+      const status = providerErrorStatus(result.error)
+      // 404-before-403: collapse missing vs unreadable to ONE reason (no existence oracle, §3.1).
+      const reason = status === 403 || status === 404 ? 'not-found-or-forbidden'
+        : status === 400 ? 'invalid-request'
+          : 'unavailable'
+      return res.json({ data_source_id: dataSourceId, available: true, reason, impact: null })
+    }
+    const impact = result.data && result.data.length > 0 ? result.data[0] : null
+    return res.json({ data_source_id: dataSourceId, available: true, entitled: true, impact })
+  },
+)
+
+router.get(
+  '/api/plm-workbench/data-sources/:id/eco/:ecoId/impact/export',
+  authenticate,
+  param('id').isString(),
+  param('ecoId').isString(),
+  query('format').optional().isString(),
+  query('include_files').optional().isBoolean(),
+  query('include_bom_diff').optional().isBoolean(),
+  query('include_version_diff').optional().isBoolean(),
+  query('include_child_fields').optional().isBoolean(),
+  query('max_levels').optional().isInt(),
+  query('compare_mode').optional().isString(),
+  validate,
+  async (req: Request, res: Response) => {
+    const dataSourceId = req.params.id
+    const ecoId = req.params.ecoId
+    if (!ECO_ID_RE.test(ecoId)) {
+      return res.status(400).json({ data_source_id: dataSourceId, available: true, reason: 'invalid-request' })
+    }
+    const formatRaw = typeof req.query.format === 'string' ? req.query.format : 'csv'
+    if (!ECO_IMPACT_EXPORT_FORMATS.has(formatRaw as EcoImpactExportFormat)) {
+      return res.status(400).json({ data_source_id: dataSourceId, available: true, reason: 'invalid-format' })
+    }
+    const format = formatRaw as EcoImpactExportFormat
+    let adapter: unknown
+    try {
+      adapter = getDataSourceManager().getDataSource(dataSourceId)
+    } catch {
+      return res.status(404).json({ error: 'Data source not found', data_source_id: dataSourceId })
+    }
+    if (!isPlmEcoImpactAdapter(adapter)) {
+      return res.json({ data_source_id: dataSourceId, available: false, reason: 'unsupported-mode' })
+    }
+    const userToken = await resolveEcoImpactAccess(req, res, adapter, dataSourceId)
+    if (!userToken) return
+
+    let result: EcoImpactExportResult
+    try {
+      // The export inherits export parity: parseEcoImpactOptions feeds the SAME flags the grid used
+      // (the client builds this URL from the grid's current flag state via the shared serializer).
+      result = await adapter.getEcoImpactExport(userToken, ecoId, format, parseEcoImpactOptions(req))
+    } catch {
+      return res.json({ data_source_id: dataSourceId, available: true, reason: 'unavailable' })
+    }
+    if (!result.ok || !result.body) {
+      const reason = result.reason === 'not-found-or-forbidden' ? 'not-found-or-forbidden' : 'unavailable'
+      return res.json({ data_source_id: dataSourceId, available: true, reason })
+    }
+    res.setHeader('Content-Type', result.contentType || ECO_IMPACT_EXPORT_CONTENT_TYPES[format])
+    res.setHeader('Content-Disposition', `attachment; filename="eco-${ecoId}-impact.${format}"`)
+    return res.send(result.body)
   },
 )
 

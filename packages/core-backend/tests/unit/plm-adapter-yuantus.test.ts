@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest'
-import { PLMAdapter } from '../../src/data-adapters/PLMAdapter'
+import { PLMAdapter, buildEcoImpactFlagParams } from '../../src/data-adapters/PLMAdapter'
 
 const createAdapter = () => {
   const configService = { get: vi.fn().mockResolvedValue(undefined) }
@@ -1873,5 +1873,111 @@ describe('PLMAdapter lane ② task inbox', () => {
     expect(result.data).toHaveLength(0)
     expect(result.error).toBeDefined()
     expect((result.error as any)?.response?.status).toBe(403)
+  })
+})
+
+// PLM-COLLAB lane ③ (ECO impact working set, READ-ONLY, Family I): getEcoImpact + getEcoImpactExport.
+// Same per-caller transport / no-service-token discipline as lane ②, plus the export-parity trap
+// (§6.1): both the grid fetch and the export MUST carry identical include flags, routed through the
+// ONE shared serializer, so the download never diverges from the screen.
+describe('PLMAdapter lane ③ ECO impact', () => {
+  const jsonResponse = (status: number, body: unknown) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: () => 'application/json' },
+    json: async () => body,
+    arrayBuffer: async () => new TextEncoder().encode(JSON.stringify(body)).buffer,
+  })
+  const csvResponse = (status: number, text: string) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: (h: string) => (h.toLowerCase() === 'content-type' ? 'text/csv' : null) },
+    json: async () => ({}),
+    arrayBuffer: async () => new TextEncoder().encode(text).buffer,
+  })
+
+  beforeEach(() => {
+    ;(fetch as Mock).mockClear()
+  })
+
+  it('fetches /impact with the CALLER token and explicit include flags (never the service token)', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { eco_id: 'E1', impacted_assemblies: [] }))
+    const querySpy = vi.spyOn(adapter as any, 'query')
+
+    const result = await adapter.getEcoImpact('caller-token-1', 'E1', { includeBomDiff: true })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toContain('/api/v1/eco/E1/impact?')
+    expect(url).toContain('include_bom_diff=true')
+    // §6.1: ALL four include flags emitted explicitly, so /impact's all-False defaults can't leak in
+    expect(url).toContain('include_files=false')
+    expect(url).toContain('include_version_diff=false')
+    expect(url).toContain('include_child_fields=false')
+    expect(init.headers.Authorization).toBe('Bearer caller-token-1')
+    expect(querySpy).not.toHaveBeenCalled()
+    expect(result.error).toBeUndefined()
+  })
+
+  it('fails closed with NO service-account fallback when the caller token is empty', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    const result = await adapter.getEcoImpact('', 'E1')
+    expect(result.error).toBeDefined()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a provider 403 as QueryResult.error with the status intact (never thrown)', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(403, { detail: 'Permission denied' }))
+    const result = await adapter.getEcoImpact('caller-token-1', 'E6')
+    expect(result.data).toHaveLength(0)
+    expect((result.error as any)?.response?.status).toBe(403)
+  })
+
+  it('export uses the caller token and the SAME include flags as the grid (export parity §6.1)', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    const options = { includeBomDiff: true, includeFiles: false, includeVersionDiff: false, includeChildFields: false }
+    // grid fetch, then export fetch, for the same options
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { eco_id: 'E5' }))
+    await adapter.getEcoImpact('caller-token-1', 'E5', options)
+    fetchMock.mockResolvedValueOnce(csvResponse(200, '# Overview\nE5,1\n'))
+    const exp = await adapter.getEcoImpactExport('caller-token-1', 'E5', 'csv', options)
+
+    const gridUrl = new URL(fetchMock.mock.calls[0][0])
+    const expUrl = new URL(fetchMock.mock.calls[1][0])
+    const flags = (u: URL) => ['include_files', 'include_bom_diff', 'include_version_diff', 'include_child_fields']
+      .map(k => `${k}=${u.searchParams.get(k)}`).join('&')
+    expect(flags(expUrl)).toBe(flags(gridUrl))
+    expect(expUrl.pathname).toContain('/api/v1/eco/E5/impact/export')
+    expect(expUrl.searchParams.get('format')).toBe('csv')
+    expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer caller-token-1')
+    expect(exp.ok).toBe(true)
+    expect(exp.contentType).toBe('text/csv')
+    expect(exp.body).toBeInstanceOf(Buffer)
+  })
+
+  it('export collapses 403/404 to a single non-oracle reason', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 404, headers: { get: () => null }, arrayBuffer: async () => new ArrayBuffer(0) })
+    const res = await adapter.getEcoImpactExport('caller-token-1', 'missing', 'csv')
+    expect(res.ok).toBe(false)
+    expect(res.reason).toBe('not-found-or-forbidden')
+  })
+
+  it('buildEcoImpactFlagParams always emits all four include flags explicitly (defeats the opposite-defaults trap)', () => {
+    const empty = buildEcoImpactFlagParams()
+    expect(empty.get('include_files')).toBe('false')
+    expect(empty.get('include_bom_diff')).toBe('false')
+    expect(empty.get('include_version_diff')).toBe('false')
+    expect(empty.get('include_child_fields')).toBe('false')
+    const withMax = buildEcoImpactFlagParams({ maxLevels: 5, includeFiles: true })
+    expect(withMax.get('include_files')).toBe('true')
+    expect(withMax.get('max_levels')).toBe('5')
   })
 })

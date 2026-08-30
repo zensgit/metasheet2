@@ -856,6 +856,86 @@ export interface TaskInboxQueryOptions {
   offset?: number;
 }
 
+// ---------------------------------------------------------------------------
+// PLM-COLLAB lane ③ — ECO impact-analysis working set (consumer READ, Family I ONLY).
+// Provider taskbook: DEVELOPMENT_TASK_METASHEET_ECO_IMPACT_WORKSET_CONSUMER_20260830.md.
+// A rich read-only computation Yuantus already performs (`GET /api/v1/eco/{eco_id}/impact`) plus a
+// dedicated export (`.../impact/export`). This lane RENDERS that computation as a working-set grid.
+// Read-only end to end: no apply, no per-row disposition write-back (CUT on the merits, §5.2).
+// The response is typed Dict[str, Any] provider-side — there is NO OpenAPI model — so the field set
+// below IS the contract (it lives in the provider contract test, not the schema).
+// ---------------------------------------------------------------------------
+
+/** One impacted assembly (where-used) row, passed through by identity from the provider. The stable
+ * row key is `relationship.id` scoped by `parent.id` — NEVER the array index (§4.1). */
+export interface EcoImpactImpactedAssembly {
+  parent: { id: string; item_number?: string | null; name?: string | null; [key: string]: unknown };
+  level?: number | null;
+  relationship: { id: string; item_type_id?: string | null; [key: string]: unknown };
+  [key: string]: unknown;
+}
+
+/** The impact projection. Known top-level keys are typed; unknown extras are tolerated (the
+ * provider commits to additive-only evolution) via the index signature. Section keys
+ * (`bom_diff` / `version_diff` / `version_files_diff` / `files`) exist ONLY when their include flag
+ * was passed (§4.3), so they are optional. */
+export interface EcoImpactResult {
+  eco_id: string;
+  changed_product_id?: string | null;
+  impact_count?: number | null;
+  impact_level?: string | null;
+  impact_score?: number | null;
+  impact_scope?: string | null;
+  impact_summary?: Record<string, unknown> | null;
+  impacted_assemblies?: EcoImpactImpactedAssembly[];
+  bom_diff?: unknown;
+  version_diff?: unknown;
+  version_files_diff?: unknown;
+  files?: unknown;
+  [key: string]: unknown;
+}
+
+export type EcoImpactExportFormat = 'csv' | 'xlsx' | 'pdf' | 'json';
+
+/** Result of the per-caller export fetch — raw bytes relayed straight through, never re-derived. */
+export interface EcoImpactExportResult {
+  ok: boolean;
+  status: number;
+  contentType: string | null;
+  body: Buffer | null;
+  reason?: string;
+}
+
+/** Section switches. The `/impact` route defaults EVERY include flag to False; `/impact/export`
+ * defaults them all to True (§6.1). The shared serializer below ALWAYS emits explicit values for
+ * all four so grid and download can never diverge by inheriting opposite defaults. */
+export interface EcoImpactQueryOptions {
+  includeFiles?: boolean;
+  includeBomDiff?: boolean;
+  includeVersionDiff?: boolean;
+  includeChildFields?: boolean;
+  maxLevels?: number;
+  compareMode?: string;
+}
+
+/**
+ * The ONE shared flag serializer for both `getEcoImpact` and `getEcoImpactExport`. It ALWAYS sets
+ * all four `include_*` flags explicitly (default false) — because the two routes default them to
+ * OPPOSITE values (§6.1), so omitting any lets the grid and the download silently diverge. Routing
+ * both callers through this single builder means a single mutation to it fires in both the grid and
+ * the export flag assertions (shared key-builder discipline).
+ */
+export function buildEcoImpactFlagParams(options: EcoImpactQueryOptions = {}): URLSearchParams {
+  const q = new URLSearchParams();
+  q.set('include_files', String(options.includeFiles === true));
+  q.set('include_bom_diff', String(options.includeBomDiff === true));
+  q.set('include_version_diff', String(options.includeVersionDiff === true));
+  q.set('include_child_fields', String(options.includeChildFields === true));
+  if (typeof options.maxLevels === 'number') q.set('max_levels', String(Math.trunc(options.maxLevels)));
+  if (options.compareMode) q.set('compare_mode', options.compareMode);
+  return q;
+}
+
 // Field guard for the governed BOM multi-table context. Validates EVERY field declared on
 // BomMultitableLine / BomMultitablePart / BomMultitableContext — both the structural keys
 // (bom_line_id, part_id, level, path, ...) AND the displayed cells (item_number, name, state,
@@ -1467,6 +1547,16 @@ export class PLMAdapter extends HTTPAdapter {
               available: true,
               cache_scope: { supported: 'global', entitled: 'tenant' },
               scenarios: ['task_inbox'],
+            },
+            // lane ③ (ECO impact working set): read-only SHAPE — NO actions, NO action_status
+            // (per-row disposition + apply were CUT on the merits, taskbook §5.2). Family-I only.
+            eco_impact_review: {
+              supported: true,
+              api_version: 'v1',
+              entitled: true,
+              available: true,
+              cache_scope: { supported: 'global', entitled: 'tenant' },
+              scenarios: ['eco_impact'],
             },
           },
         },
@@ -2877,6 +2967,106 @@ export class PLMAdapter extends HTTPAdapter {
       `/api/v1/tasks/inbox${qs ? `?${qs}` : ''}`,
       { method: 'GET', headers: { Authorization: `Bearer ${authToken}` } },
     )
+  }
+
+  /**
+   * PLM-COLLAB lane ③ (READ, Family I): fetch the ECO impact working set
+   * (`GET /api/v1/eco/{eco_id}/impact`). Authenticated with the VIEWING USER's own PLM bearer
+   * (`authToken`), passed explicitly and NEVER cached — the route's real gate is two type-level
+   * `check_permission` calls resolved against the RBAC id, so the read must run as the caller, never
+   * the service account (taskbook §3/§7). Same per-caller transport as the discussion read relay
+   * (raw fetch off `this.query`); a DIFFERENT token source (Family I, not the embed exchange the
+   * taskbook §2 closes to this lane). Every include flag is emitted explicitly via the shared
+   * serializer so the grid can never inherit the `/impact` route's all-False defaults by accident.
+   * Never throws: a provider 403/404/400 comes back as `QueryResult.error` with the status intact.
+   */
+  async getEcoImpact(
+    authToken: string,
+    ecoId: string,
+    options: EcoImpactQueryOptions = {},
+  ): Promise<QueryResult<EcoImpactResult>> {
+    if (this.mockMode) {
+      const now = new Date().toISOString()
+      return {
+        data: [{
+          eco_id: ecoId,
+          changed_product_id: '01H000000000000000000000P1',
+          impact_count: 1,
+          impact_level: 'medium',
+          impact_score: 42,
+          impact_scope: 'assembly',
+          impact_summary: { added: 0, removed: 0, changed: 1, changed_major: 0, changed_minor: 1, changed_info: 0 },
+          impacted_assemblies: [
+            { parent: { id: '01H000000000000000000000P9', item_number: 'A-900', name: 'Top Assembly' }, level: 1, relationship: { id: '01H000000000000000000000R9', item_type_id: 'Part BOM' } },
+          ],
+          ...(options.includeBomDiff ? { bom_diff: { added: [], removed: [] } } : {}),
+          ...(options.includeVersionDiff ? { version_diff: [] } : {}),
+          ...(options.includeFiles ? { files: {} } : {}),
+          source_updated_at: now,
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('ECO impact is not supported for this PLM API mode') }
+    }
+    if (!authToken) {
+      // Fail closed: no per-caller credential means NO fallback to the service token (§7).
+      return { data: [], error: new Error('ECO impact requires a per-caller PLM credential') }
+    }
+
+    const flags = buildEcoImpactFlagParams(options).toString()
+    return this.yuantusDiscussionFetch<EcoImpactResult>(
+      `/api/v1/eco/${encodeURIComponent(ecoId)}/impact?${flags}`,
+      { method: 'GET', headers: { Authorization: `Bearer ${authToken}` } },
+    )
+  }
+
+  /**
+   * PLM-COLLAB lane ③ export (READ, Family I): fetch the ECO impact export bytes
+   * (`GET /api/v1/eco/{eco_id}/impact/export`) with the VIEWING USER's own PLM bearer, using the
+   * SAME shared flag serializer as `getEcoImpact` so the download always matches the grid on screen
+   * (export parity — §6.1). Its own raw fetch (never `this.query`, so the service-token interceptor
+   * cannot overwrite the caller's Authorization) reads the response as bytes rather than JSON, so
+   * csv/xlsx/pdf/json all relay through unchanged. Never throws; a non-2xx returns `ok:false` with
+   * the status. A 403/404 collapses to a single non-oracle reason (§3.1).
+   */
+  async getEcoImpactExport(
+    authToken: string,
+    ecoId: string,
+    format: EcoImpactExportFormat,
+    options: EcoImpactQueryOptions = {},
+  ): Promise<EcoImpactExportResult> {
+    if (this.mockMode) {
+      return { ok: true, status: 200, contentType: 'text/csv', body: Buffer.from('# Overview\neco_id,impact_count\nMOCK,1\n', 'utf8') }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { ok: false, status: 0, contentType: null, body: null, reason: 'unsupported-mode' }
+    }
+    if (!authToken) {
+      return { ok: false, status: 0, contentType: null, body: null, reason: 'no-credential' }
+    }
+    const baseUrl = this.config.connection.baseURL || this.config.connection.url
+    if (!baseUrl) {
+      return { ok: false, status: 0, contentType: null, body: null, reason: 'unconfigured' }
+    }
+    const flags = buildEcoImpactFlagParams(options).toString()
+    let response: Awaited<ReturnType<typeof fetch>>
+    try {
+      response = await fetch(`${baseUrl}/api/v1/eco/${encodeURIComponent(ecoId)}/impact/export?format=${encodeURIComponent(format)}&${flags}`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${authToken}` },
+      })
+    } catch {
+      return { ok: false, status: 0, contentType: null, body: null, reason: 'unavailable' }
+    }
+    const contentType = response.headers.get('content-type')
+    if (!response.ok) {
+      const reason = response.status === 403 || response.status === 404 ? 'not-found-or-forbidden' : 'provider-rejected'
+      return { ok: false, status: response.status, contentType, body: null, reason }
+    }
+    const buf = Buffer.from(await response.arrayBuffer())
+    return { ok: true, status: response.status, contentType, body: buf }
   }
 
   /**
