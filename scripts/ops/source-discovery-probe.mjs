@@ -125,6 +125,21 @@ function tableKey(table) {
   return `${table.schema}.${table.name}`
 }
 
+// SUM() over a bigint column (sys.partitions.rows) comes back from the SQL Server driver as a
+// STRING, not a number. A naive typeof check therefore yields null for EVERY table, and because an
+// unknown row count is treated as 'over the cap' (fail-closed, by design), the whole run screens
+// out every table and reports zero dictionaries -- a false negative that looks exactly like a valid
+// answer. Coerce numeric-looking strings; keep null for anything genuinely unknown.
+function coerceRowCount(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value === 'bigint') return Number(value)
+  if (typeof value === 'string' && /^\s*-?\d+\s*$/.test(value)) {
+    const n = Number(value.trim())
+    return Number.isFinite(n) ? n : null
+  }
+  return null
+}
+
 function isSmallTable(table, cap = SMALL_TABLE_ROW_CAP) {
   return typeof table.rowCount === 'number' && Number.isFinite(table.rowCount) && table.rowCount <= cap
 }
@@ -139,7 +154,7 @@ function buildCatalogFromRows(dialectName, rows) {
       byTable.set(key, {
         schema: r.schemaName,
         name: r.tableName,
-        rowCount: typeof r.rowCount === 'number' ? r.rowCount : null,
+        rowCount: coerceRowCount(r.rowCount),
         columns: [],
       })
     }
@@ -174,7 +189,11 @@ SELECT
   c.max_length AS maxLength,
   c.is_nullable AS nullable,
   CASE WHEN pk.column_id IS NOT NULL THEN 1 ELSE 0 END AS isPrimaryKey,
-  p.rows AS rowCount
+  -- [rowCount] and rowTotal are BRACKETED / renamed on purpose: ROWCOUNT and ROWS are reserved
+  -- words in SQL Server (SET ROWCOUNT / @@ROWCOUNT; ROWS in OFFSET-FETCH and window frames).
+  -- An unbracketed reserved alias breaks the parse, and the engine reports the failure at the
+  -- NEXT token -- the derived-table alias -- which reads as a nonsense complaint about a join.
+  p.rowTotal AS [rowCount]
 FROM sys.tables t
 JOIN sys.schemas s ON s.schema_id = t.schema_id
 JOIN sys.columns c ON c.object_id = t.object_id
@@ -186,7 +205,10 @@ LEFT JOIN (
   WHERE i.is_primary_key = 1
 ) pk ON pk.object_id = c.object_id AND pk.column_id = c.column_id
 LEFT JOIN (
-  SELECT object_id, SUM(rows) AS rows
+  -- ROWS is a reserved word in SQL Server (OFFSET/FETCH, window frames): aliasing to it
+  -- breaks the parse and the error surfaces at the NEXT token, which reads as a nonsense
+  -- complaint about the derived-table alias. Alias to a non-reserved name instead.
+  SELECT object_id, SUM(rows) AS rowTotal
   FROM sys.partitions
   WHERE index_id IN (0, 1)
   GROUP BY object_id
@@ -194,6 +216,13 @@ LEFT JOIN (
 WHERE t.is_ms_shipped = 0
 ORDER BY s.name, t.name, c.column_id
 `
+
+function isBareIpAddress(host) {
+  if (typeof host !== 'string') return false
+  const trimmed = host.trim()
+  if (/^[0-9]{1,3}(?:\.[0-9]{1,3}){3}$/.test(trimmed)) return true
+  return trimmed.startsWith('[') || trimmed.includes(':')
+}
 
 const mssqlDialect = {
   name: 'mssql',
@@ -228,7 +257,14 @@ const mssqlDialect = {
       database,
       user,
       password,
-      options: { trustServerCertificate: true, encrypt: true },
+      // TLS negotiates against a SERVER NAME. When `server` is a bare IP -- the common case for an
+      // on-prem PLM/ERP on a LAN -- the driver refuses to set the TLS servername to an address
+      // ('Setting the TLS ServerName to an IP address is not permitted'), so encrypt:true fails
+      // before a single catalog row is read. Discovery reads schema metadata only, over a link the
+      // deployment already trusts for its data-source connections, so an IP target negotiates
+      // without encryption rather than failing on a name it structurally cannot verify. A HOSTNAME
+      // target keeps encryption ON.
+      options: { trustServerCertificate: true, encrypt: !isBareIpAddress(server) },
       pool: { max: 2 },
     })
     return pool
@@ -711,6 +747,21 @@ function collectStringLeaves(value, out) {
 // (refusing to write output) if either is found — see the module header.
 // Scoped to string leaves only (see collectStringLeaves) — numbers/booleans
 // are never scanned, and neither are object keys.
+// A word-character-adjacency test, written out rather than done with a RegExp so the guarded value
+// never has to be escaped into a pattern (an escaping slip here would silently weaken the guard).
+function containsAsWholeWord(haystack, needle) {
+  if (!needle) return false
+  const isWordChar = (ch) => ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'z' || ch === '_'
+  let from = 0
+  for (;;) {
+    const at = haystack.indexOf(needle, from)
+    if (at === -1) return false
+    const before = at === 0 ? '' : haystack[at - 1]
+    const after = haystack[at + needle.length] || ''
+    if (!isWordChar(before) && !isWordChar(after)) return true
+    from = at + 1
+  }
+}
 function assertValuesFree(report, { env = {}, leakGuardValues = new Set() } = {}) {
   const leaves = []
   collectStringLeaves(report, leaves)
@@ -723,12 +774,65 @@ function assertValuesFree(report, { env = {}, leakGuardValues = new Set() } = {}
     }
   }
 
+  // MATCHING PRECISION. A raw `includes` on every guarded value fires on any SHORT value -- a
+  // dictionary's unmatched '1' / '0' / 'no' is a substring of some structural string in every
+  // report -- which fails the run closed on a leak that never happened. A real leak surfaces as a
+  // whole leaf value, so compare by EQUALITY, and keep the substring sweep only for values long
+  // enough that an accidental collision is not credible. Fail-closed remains the default on any
+  // genuine match.
+  // WHAT THE GUARDED-VALUE SWEEP SCANS. Sampled rows enter the report through one door -- the
+  // decoded dictionary entries -- while these named sections are built from CATALOG METADATA and
+  // the tool's own literals, and never see a sampled value. Scanning them cannot find a real leak,
+  // but it collides endlessly with structural strings (a sampled '2026' is a whole word inside this
+  // run's own generatedAt; a localized column name in the inventory equals some other table's
+  // unmatched label), failing the run closed over output that leaked nothing. They are excluded BY
+  // NAME, so any section a future change adds is scanned by default -- the fail-safe direction.
+  // The connection-env sweep above deliberately still covers the ENTIRE report: a credential must
+  // never appear anywhere, including in a section this list excuses.
+  const CATALOG_DERIVED_SECTIONS = new Set(['generatedAt', 'dialect', 'thresholds', 'limits', 'schemaInventory'])
+  const scannable = {}
+  for (const [key, value] of Object.entries(report || {})) {
+    if (!CATALOG_DERIVED_SECTIONS.has(key)) scannable[key] = value
+  }
+  const dictionaryLeaves = []
+  collectStringLeaves(scannable, dictionaryLeaves)
   for (const value of leakGuardValues) {
     const s = String(value)
     if (s.length === 0) continue
-    if (leaves.some((leaf) => leaf.includes(s))) {
-      violations.push('unmatched-sample-value')
-      break // one is enough to fail closed; do not enumerate business data into an error message
+    const norm = s.trim().toLowerCase()
+    // WHOLE-LEAF OR WHOLE-WORD -- never a naive substring. A leak can arrive two ways: as its own
+    // leaf, or composed into a message ('...report accidentally contains X'). A plain `includes`
+    // catches both but ALSO fires on an ordinary word living inside an identifier the report is
+    // entitled to emit -- a sampled value 'workshop' inside the key 'base_workshop' -- which fails
+    // the run closed on the tool's own output. A word-boundary match separates the two exactly:
+    // '_' is a word character, so 'workshop' does not match inside 'base_workshop', while a
+    // space-delimited occurrence in a sentence does. Word boundaries are meaningless around CJK
+    // (non-word characters on both sides make every position a boundary), so a value carrying
+    // non-ASCII falls back to whole-leaf equality; the legitimate-emission subtraction in runProbe
+    // is what keeps those precise.
+    // WHOLE LEAF, OR A WHOLE-WORD OCCURRENCE INSIDE ONE -- never a naive substring. A leak arrives
+    // two ways: as its own leaf, or composed into a message ('...accidentally contains X'). A plain
+    // `includes` catches both but ALSO fires on an ordinary word living inside an identifier the
+    // report is entitled to emit -- a sampled value 'workshop' inside the key 'base_workshop' --
+    // failing the run closed on the tool's own output. containsAsWholeWord() separates them: '_'
+    // counts as a word character, so 'workshop' does not match inside 'base_workshop', while a
+    // space-delimited occurrence does. Multi-word values and CJK labels work unchanged, because the
+    // test is on the characters ADJACENT to the match, not on the value's own shape.
+    const hit = dictionaryLeaves.some((leaf) => {
+      const lower = leaf.toLowerCase()
+      if (lower.trim() === norm) return true
+      // A PURELY NUMERIC guarded value is excluded from the whole-word sweep: it carries no
+      // business meaning on its own and collides constantly with the structural numbers the report
+      // legitimately prints -- a sampled '2026' is a whole word inside this run's own generatedAt
+      // timestamp. Such a value stays armed for whole-leaf equality, which a timestamp never trips.
+      if (/^[0-9]+$/.test(norm)) return false
+      return containsAsWholeWord(lower, norm)
+    })
+    if (hit) {
+      // Masked so an operator can act on it without the value itself entering a log.
+      const masked = s.length <= 2 ? '*'.repeat(s.length) : s[0] + '*'.repeat(s.length - 2) + s[s.length - 1]
+      violations.push('unmatched-sample-value(len=' + s.length + ', masked=' + masked + ')')
+      break // one is enough to fail closed; never enumerate business data into an error message
     }
   }
 
@@ -815,7 +919,43 @@ async function runProbe({ catalog, sampleFn }) {
   const treeCandidates = detectTreeCandidates(catalog)
   const quantityCandidates = detectQuantityCandidates(catalog, bomPairCandidates)
   const report = buildReport({ catalog, dictionaryResult, bomPairCandidates, treeCandidates, quantityCandidates })
-  return { report, leakGuardValues: dictionaryResult.leakGuardValues }
+  // CROSS-TABLE FALSE POSITIVE. `leakGuardValues` is global, but a value one table left UNMATCHED
+  // can be identical to a label another table legitimately CONTRIBUTES to the report -- a generic
+  // word like a field's display name is the common case. Guarding it globally fails the whole run
+  // closed over a leak that did not happen. Subtract the strings the report is entitled to emit
+  // (matched dictionary rows' attribute names and their labels): a value that is already legitimate
+  // output somewhere is not evidence of a leak anywhere. Every other guarded value stays armed.
+  const emitted = collectEmittedDictionaryStrings(report)
+  const guarded = new Set()
+  for (const value of dictionaryResult.leakGuardValues) {
+    if (!emitted.has(String(value).trim().toLowerCase())) guarded.add(value)
+  }
+  return { report, leakGuardValues: guarded }
+}
+
+function collectEmittedDictionaryStrings(report) {
+  const out = new Set()
+  const add = (v) => { if (typeof v === 'string' && v.trim()) out.add(v.trim().toLowerCase()) }
+  for (const dict of report.dictionaries || []) {
+    for (const row of dict.entries || dict.rows || []) {
+      for (const v of Object.values(row || {})) add(v)
+    }
+    // Companion COLUMN NAMES are schema identifiers, i.e. intended output. A localized column name
+    // (2 CJK characters is ordinary here) can equal some other dictionary's unmatched sample value;
+    // guarding it would fail the run closed on a name the report is meant to print.
+    for (const v of Object.values(dict.companions || {})) add(v)
+    add(dict.keyColumn)
+    add(dict.table)
+  }
+  // SCHEMA IDENTIFIERS ARE LEGITIMATE OUTPUT BY CONSTRUCTION -- the report IS a structure report,
+  // so every table and column name in it is intended. A localized column name (a Chinese label
+  // used AS a column name is ordinary in these systems) can equal some other table's unmatched
+  // sample value; guarding it would fail the run closed on the tool's own intended output.
+  for (const t of report.schemaInventory || []) {
+    add(t.name); add(t.schema)
+    for (const c of t.columns || []) add(typeof c === 'string' ? c : c && c.name)
+  }
+  return out
 }
 
 // ---------------------------------------------------------------------------
@@ -946,6 +1086,8 @@ export {
   isNumericType,
   tableKey,
   isSmallTable,
+  coerceRowCount,
+  isBareIpAddress,
   buildCatalogFromRows,
   buildColumnNameIndex,
   existsElsewhere,
