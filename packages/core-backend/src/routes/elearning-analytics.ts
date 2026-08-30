@@ -7,19 +7,25 @@ import {
   type ElearningDepartmentStatsDb,
 } from '../services/elearning-department-stats'
 import type { ElearningDepartmentStatsProjection } from '../services/elearning-department-stats-policy'
+import {
+  ElearningStatsDailyReadError,
+  getElearningDepartmentStatsDaily,
+  type ElearningStatsDailyReadDb,
+} from '../services/elearning-stats-daily-read'
 
 const QUERY_KEYS = new Set(['periodStart', 'periodEnd'])
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export interface ElearningAnalyticsRouteDeps {
-  db: ElearningDepartmentStatsDb
+  db: ElearningDepartmentStatsDb & ElearningStatsDailyReadDb
   env?: NodeJS.ProcessEnv
   statsGuard: RequestHandler
   viewerId(req: Request): string | null
   orgId(req: Request): string | null
   isGlobalAdmin(req: Request): boolean
   getElearningDepartmentStats?: typeof getElearningDepartmentStats
+  getElearningDepartmentStatsDaily?: typeof getElearningDepartmentStatsDaily
 }
 
 function queryText(value: unknown): string | null {
@@ -61,7 +67,10 @@ function dto(result: ElearningDepartmentStatsProjection) {
 }
 
 function sendError(res: Response, error: unknown): void {
-  if (!(error instanceof ElearningDepartmentStatsError)) {
+  if (
+    !(error instanceof ElearningDepartmentStatsError)
+    && !(error instanceof ElearningStatsDailyReadError)
+  ) {
     res.status(500).json({ error: 'internal_error' })
     return
   }
@@ -81,6 +90,59 @@ export function createElearningAnalyticsRouter(
   if (!isElearningAnalyticsSurfaceEnabled(deps.env ?? process.env)) return null
   const router = Router()
   const readStats = deps.getElearningDepartmentStats ?? getElearningDepartmentStats
+  const readStatsDaily = deps.getElearningDepartmentStatsDaily
+    ?? getElearningDepartmentStatsDaily
+
+  router.get(
+    '/api/elearning/admin/analytics/departments/:departmentId/daily/:statsDate',
+    (req, res, next) => {
+      if (!deps.viewerId(req)) {
+        res.status(401).json({ error: 'unauthenticated' })
+        return
+      }
+      if (!deps.orgId(req)) {
+        res.status(403).json({ error: 'ORG_CONTEXT_REQUIRED' })
+        return
+      }
+      next()
+    },
+    deps.statsGuard,
+    (req, res): void => {
+      void (async () => {
+        if (Object.keys(req.query as Record<string, unknown>).length !== 0) {
+          res.status(400).json({ error: 'invalid_input' })
+          return
+        }
+        const departmentId = departmentParam(req)
+        const statsDate = (req.params as Record<string, unknown>).statsDate
+        const actorId = deps.viewerId(req)
+        const orgId = deps.orgId(req)
+        if (
+          !departmentId
+          || typeof statsDate !== 'string'
+          || !actorId
+          || !orgId
+        ) {
+          res.status(400).json({ error: 'invalid_input' })
+          return
+        }
+        try {
+          const result = await readStatsDaily(deps.db, {
+            orgId,
+            actorId,
+            isGlobalAdmin: deps.isGlobalAdmin(req),
+            departmentId,
+            statsDate,
+          })
+          res.status(200).json(result)
+        } catch (error) {
+          sendError(res, error)
+        }
+      })().catch(() => {
+        if (!res.headersSent) res.status(500).json({ error: 'internal_error' })
+      })
+    },
+  )
 
   router.get(
     '/api/elearning/admin/analytics/departments/:departmentId',

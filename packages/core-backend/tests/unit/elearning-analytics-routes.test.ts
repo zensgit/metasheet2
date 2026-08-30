@@ -8,6 +8,10 @@ import {
   type GetElearningDepartmentStatsInput,
 } from '../../src/services/elearning-department-stats'
 import { buildElearningDepartmentStatsProjection } from '../../src/services/elearning-department-stats-policy'
+import {
+  ElearningStatsDailyReadError,
+  type GetElearningDepartmentStatsDailyInput,
+} from '../../src/services/elearning-stats-daily-read'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const ORG = 'org-analytics-route'
@@ -50,8 +54,11 @@ function makeApp(over: {
   global?: boolean
   memberCount?: number
   error?: ElearningDepartmentStatsError
+  dailyError?: ElearningStatsDailyReadError
+  dailySuppressed?: boolean
 } = {}) {
   const calls: GetElearningDepartmentStatsInput[] = []
+  const dailyCalls: GetElearningDepartmentStatsDailyInput[] = []
   let guardCalls = 0
   const router = createElearningAnalyticsRouter({
     db: { query: async () => ({ rows: [], rowCount: 0 }) },
@@ -72,6 +79,39 @@ function makeApp(over: {
       if (over.error) throw over.error
       return projection(over.memberCount ?? 5)
     },
+    getElearningDepartmentStatsDaily: async (_db, input) => {
+      dailyCalls.push(input)
+      if (over.dailyError) throw over.dailyError
+      const common = {
+        departmentId: DEPARTMENT,
+        lastErrorCode: null,
+        lastProjectedAt: '2026-08-30T03:04:05.678Z',
+        minGroupSize: 5,
+        periodEnd: '2026-08-31T00:00:00.000Z',
+        periodStart: '2026-08-30T00:00:00.000Z',
+        projectedVersion: 2,
+        sourceVersion: 'source-daily-v2',
+        statsDate: '2026-08-30',
+      }
+      return over.dailySuppressed
+        ? { ...common, suppressed: true }
+        : {
+            ...common,
+            suppressed: false,
+            metrics: {
+              assignedCount: 2,
+              completedCount: 1,
+              completionRate: 0.5,
+              creditAverage: 2,
+              creditTotal: 10,
+              examParticipantCount: 1,
+              learnerCount: 2,
+              learningSeconds: 120,
+              memberCount: 5,
+              overdueCount: 1,
+            },
+          }
+    },
   })
   const app = express()
   if (router) app.use(router)
@@ -80,8 +120,14 @@ function makeApp(over: {
     mounted: router !== null,
     api: request(pinned.url()),
     calls,
+    dailyCalls,
     guardCalls: () => guardCalls,
   }
+}
+
+function dailyPath(suffix = '') {
+  return `/api/elearning/admin/analytics/departments/${DEPARTMENT}`
+    + `/daily/2026-08-30${suffix}`
 }
 
 function path(query = `periodStart=${encodeURIComponent(START)}&periodEnd=${encodeURIComponent(END)}`) {
@@ -145,6 +191,70 @@ describe('e-learning analytics route', () => {
       suppressed: true,
     })
     expect(response.body).not.toHaveProperty('metrics')
+  })
+
+  it('returns the closed persisted daily projection with server-derived authority', async () => {
+    const harness = makeApp({ global: true })
+    const response = await harness.api.get(dailyPath())
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({
+      departmentId: DEPARTMENT,
+      lastErrorCode: null,
+      lastProjectedAt: '2026-08-30T03:04:05.678Z',
+      metrics: {
+        assignedCount: 2,
+        completedCount: 1,
+        completionRate: 0.5,
+        creditAverage: 2,
+        creditTotal: 10,
+        examParticipantCount: 1,
+        learnerCount: 2,
+        learningSeconds: 120,
+        memberCount: 5,
+        overdueCount: 1,
+      },
+      minGroupSize: 5,
+      periodEnd: '2026-08-31T00:00:00.000Z',
+      periodStart: '2026-08-30T00:00:00.000Z',
+      projectedVersion: 2,
+      sourceVersion: 'source-daily-v2',
+      statsDate: '2026-08-30',
+      suppressed: false,
+    })
+    expect(harness.dailyCalls).toEqual([{
+      actorId: ACTOR,
+      departmentId: DEPARTMENT,
+      isGlobalAdmin: true,
+      orgId: ORG,
+      statsDate: '2026-08-30',
+    }])
+    expect(response.body).not.toHaveProperty('orgId')
+    expect(response.body).not.toHaveProperty('payloadDigest')
+  })
+
+  it('preserves daily suppression and rejects query injection before service', async () => {
+    const suppressed = makeApp({ dailySuppressed: true })
+    const response = await suppressed.api.get(dailyPath())
+    expect(response.status).toBe(200)
+    expect(response.body.suppressed).toBe(true)
+    expect(response.body).not.toHaveProperty('metrics')
+
+    const injected = makeApp()
+    expect((await injected.api.get(dailyPath('?orgId=attacker'))).status).toBe(400)
+    expect(injected.dailyCalls).toEqual([])
+  })
+
+  it.each([
+    ['invalid_input', 400],
+    ['forbidden', 403],
+    ['not_found', 404],
+    ['unavailable', 503],
+  ] as const)('maps daily %s to a values-free response', async (code, status) => {
+    const response = await makeApp({
+      dailyError: new ElearningStatsDailyReadError(code),
+    }).api.get(dailyPath())
+    expect(response.status).toBe(status)
+    expect(response.body).toEqual({ error: code })
   })
 
   it('fails before service for absent identity, org, permission or closed query', async () => {
