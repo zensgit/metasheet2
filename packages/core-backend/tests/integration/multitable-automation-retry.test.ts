@@ -16,6 +16,7 @@ import { db } from '../../src/db/db'
 import { AutomationLogService } from '../../src/multitable/automation-log-service'
 import { AutomationService } from '../../src/multitable/automation-service'
 import type { AutomationExecution } from '../../src/multitable/automation-executor'
+import { AUTOMATION_RETRY_LEDGER_RETENTION_MS } from '../../src/multitable/automation-retry-eligibility'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -25,6 +26,10 @@ const NEW_ID = `axe_retry_new_${TS}`
 const ROOT_ID = `axe_retry_root_${TS}`
 const CHILD_ID = `axe_retry_child_${TS}`
 const TEST_RUN_ID = `axe_retry_test_run_${TS}`
+const RETENTION_OLD_ID = `axe_retry_retention_old_${TS}`
+const RETENTION_BOUNDARY_ID = `axe_retry_retention_boundary_${TS}`
+const RETENTION_FRESH_ID = `axe_retry_retention_fresh_${TS}`
+const RETENTION_IDS = [RETENTION_OLD_ID, RETENTION_BOUNDARY_ID, RETENTION_FRESH_ID]
 const RULE_ID = `atr_retry_${TS}`
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 
@@ -50,6 +55,7 @@ describeIfDatabase('multitable automation retry provenance (real DB)', () => {
   beforeAll(async () => {
     await q('DELETE FROM multitable_automation_executions WHERE id = ANY($1)', [[ORIG_ID, NEW_ID, ROOT_ID, CHILD_ID, TEST_RUN_ID]])
     await q("DELETE FROM meta_automation_action_applied WHERE kind = 'execution' AND root_execution_id = $1", [ROOT_ID])
+    await q('DELETE FROM meta_automation_action_applied WHERE root_execution_id = ANY($1)', [RETENTION_IDS])
     await q("DELETE FROM meta_automation_outbound_intent WHERE kind = 'execution' AND root_execution_id = $1", [ROOT_ID])
   })
   afterEach(async () => {
@@ -57,12 +63,14 @@ describeIfDatabase('multitable automation retry provenance (real DB)', () => {
     delete process.env.AUTOMATION_CLASSA_CLAIM_ENABLED
     delete process.env.AUTOMATION_CLASSB_OUTBOUND_ENABLED
     await q("DELETE FROM meta_automation_action_applied WHERE kind = 'execution' AND root_execution_id = $1", [ROOT_ID])
+    await q('DELETE FROM meta_automation_action_applied WHERE root_execution_id = ANY($1)', [RETENTION_IDS])
     await q("DELETE FROM meta_automation_outbound_intent WHERE kind = 'execution' AND root_execution_id = $1", [ROOT_ID])
     await q('DELETE FROM multitable_automation_executions WHERE id = ANY($1)', [[ROOT_ID, CHILD_ID, TEST_RUN_ID]])
   })
   afterAll(async () => {
     await q('DELETE FROM multitable_automation_executions WHERE id = ANY($1)', [[ORIG_ID, NEW_ID, ROOT_ID, CHILD_ID, TEST_RUN_ID]])
     await q("DELETE FROM meta_automation_action_applied WHERE kind = 'execution' AND root_execution_id = $1", [ROOT_ID])
+    await q('DELETE FROM meta_automation_action_applied WHERE root_execution_id = ANY($1)', [RETENTION_IDS])
     await q("DELETE FROM meta_automation_outbound_intent WHERE kind = 'execution' AND root_execution_id = $1", [ROOT_ID])
   })
 
@@ -119,6 +127,46 @@ describeIfDatabase('multitable automation retry provenance (real DB)', () => {
       [TEST_RUN_ID],
     )
     expect(raw.rows[0].first_retry_attempted_at).toBeNull()
+  })
+
+  test('#4196 §5: retention sweep deletes only rows strictly older than the retry window', async () => {
+    const nowMs = Date.parse('2026-08-30T12:00:00.000Z')
+    await q(
+      `INSERT INTO meta_automation_action_applied
+         (kind, root_execution_id, action_key, applied_at)
+       VALUES
+         ('test_run', $1, 'old', $4),
+         ('execution', $2, 'boundary', $5),
+         ('execution', $3, 'fresh', $6)`,
+      [
+        RETENTION_OLD_ID,
+        RETENTION_BOUNDARY_ID,
+        RETENTION_FRESH_ID,
+        new Date(nowMs - AUTOMATION_RETRY_LEDGER_RETENTION_MS - 1),
+        new Date(nowMs - AUTOMATION_RETRY_LEDGER_RETENTION_MS),
+        new Date(nowMs - 1_000),
+      ],
+    )
+
+    await expect(realService().sweepAutomationRetryLedger(nowMs)).resolves.toBe(1)
+    const remaining = await q(
+      `SELECT root_execution_id
+         FROM meta_automation_action_applied
+        WHERE root_execution_id = ANY($1)
+        ORDER BY root_execution_id`,
+      [RETENTION_IDS],
+    )
+    expect(remaining.rows.map((row) => row.root_execution_id)).toEqual(
+      [RETENTION_BOUNDARY_ID, RETENTION_FRESH_ID].sort(),
+    )
+    const retentionIndex = await q(
+      `SELECT indexdef
+         FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND indexname = 'idx_automation_action_applied_applied_at'`,
+    )
+    expect(retentionIndex.rows).toHaveLength(1)
+    expect(retentionIndex.rows[0].indexdef).toContain('(applied_at)')
   })
 
   test('#4196 V5: a non-first Class-A retry fails closed on zero root evidence and proceeds with an applied row', async () => {

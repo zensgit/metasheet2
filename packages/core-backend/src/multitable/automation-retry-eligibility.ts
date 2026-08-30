@@ -1,10 +1,18 @@
 import { isClassAExecutionClaimEnabled } from './automation-execution-ledger'
-import { EVENT_DEDUP_RETENTION_DAYS } from './automation-event-dedup'
+import {
+  EVENT_DEDUP_LEDGER_SWEEP_INTERVAL_MS,
+  EVENT_DEDUP_RETENTION_DAYS,
+} from './automation-event-dedup'
 import { isClassBOutboundEnabled } from './automation-outbound-intent'
 import { enumerateRuleActions } from './automation-rule-fingerprint'
 
 export const AUTOMATION_RETRY_LEDGER_RETENTION_DAYS = EVENT_DEDUP_RETENTION_DAYS
 export const AUTOMATION_RETRY_LEDGER_RETENTION_MS = AUTOMATION_RETRY_LEDGER_RETENTION_DAYS * 24 * 60 * 60 * 1000
+export const AUTOMATION_RETRY_LEDGER_SWEEP_INTERVAL_MS = EVENT_DEDUP_LEDGER_SWEEP_INTERVAL_MS
+
+export function automationRetryLedgerRetentionCutoffIso(nowMs = Date.now()): string {
+  return new Date(nowMs - AUTOMATION_RETRY_LEDGER_RETENTION_MS).toISOString()
+}
 
 const CLASS_A_ACTION_TYPES: ReadonlySet<string> = new Set([
   'create_record',

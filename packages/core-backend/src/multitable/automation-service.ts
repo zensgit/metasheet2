@@ -87,6 +87,8 @@ import {
   type ExecutionLedgerKind,
 } from './automation-execution-ledger'
 import {
+  AUTOMATION_RETRY_LEDGER_SWEEP_INTERVAL_MS,
+  automationRetryLedgerRetentionCutoffIso,
   claimFirstAutomationRetryAttempt,
   hasAutomationRetryLedgerEvidence,
   isWithinAutomationRetryWindow,
@@ -938,6 +940,7 @@ export class AutomationService {
   private approvalBridgeService: AutomationApprovalBridgeService
   private lastDateReminderLedgerSweepMs = 0
   private lastEventDedupLedgerSweepMs = 0
+  private lastAutomationRetryLedgerSweepMs = 0
   /** Kept for backward-compat with raw SQL in executor actions */
   private queryFn: AutomationQueryFn
 
@@ -1720,6 +1723,39 @@ export class AutomationService {
       })
       .catch((err) => {
         logger.warn('Automation event dedup ledger retention sweep failed; continuing event handling', err instanceof Error ? err : undefined)
+      })
+  }
+
+  /**
+   * #4196 §5: terminal class-A claim rows have the same fixed seven-day horizon as retry eligibility.
+   * The strict `<` cutoff matches the inclusive retry-window boundary.
+   */
+  async sweepAutomationRetryLedger(nowMs = Date.now()): Promise<number> {
+    const cutoffIso = automationRetryLedgerRetentionCutoffIso(nowMs)
+    const deleted = await this.queryFn(
+      `WITH deleted AS (
+         DELETE FROM meta_automation_action_applied
+          WHERE applied_at < $1::timestamptz
+         RETURNING 1
+       )
+       SELECT count(*)::int AS count FROM deleted`,
+      [cutoffIso],
+    )
+    return Number((deleted.rows[0] as { count?: number | string } | undefined)?.count ?? 0)
+  }
+
+  /** Opportunistic and best-effort: retry correctness and latency must not depend on retention availability. */
+  private kickAutomationRetryLedgerSweepIfDue(nowMs: number): void {
+    if (nowMs - this.lastAutomationRetryLedgerSweepMs < AUTOMATION_RETRY_LEDGER_SWEEP_INTERVAL_MS) return
+    this.lastAutomationRetryLedgerSweepMs = nowMs
+    void this.sweepAutomationRetryLedger(nowMs)
+      .then((deleted) => {
+        if (deleted > 0) {
+          logger.info(`Automation retry ledger retention swept ${deleted} old row(s)`)
+        }
+      })
+      .catch((err) => {
+        logger.warn('Automation retry ledger retention sweep failed; continuing retry', err instanceof Error ? err : undefined)
       })
   }
 
@@ -2677,6 +2713,7 @@ export class AutomationService {
       // Fail closed (A4-D7): null/undefined, array, or empty `{}` cannot rebuild context.
       return { status: 409, code: 'MISSING_TRIGGER_EVENT', message: 'Original execution has no usable stored trigger event to retry' }
     }
+    this.kickAutomationRetryLedgerSweepIfDue(Date.now())
     const lineage = await this.collectExecutionLineage(original)
     const lineageIds = lineage.map((execution) => execution.id)
     const rootExecution = lineage.at(-1) ?? original

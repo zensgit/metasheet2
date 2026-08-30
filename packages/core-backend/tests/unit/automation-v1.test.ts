@@ -60,6 +60,8 @@ import { AutomationRuleValidationError, AutomationService, toExecutorRule } from
 import { deriveRuleActionSetFingerprint } from '../../src/multitable/automation-rule-fingerprint'
 import {
   AUTOMATION_RETRY_LEDGER_RETENTION_MS,
+  AUTOMATION_RETRY_LEDGER_SWEEP_INTERVAL_MS,
+  automationRetryLedgerRetentionCutoffIso,
   claimFirstAutomationRetryAttempt,
   hasAutomationRetryLedgerEvidence,
   isWithinAutomationRetryWindow,
@@ -5217,6 +5219,7 @@ describe('AutomationService — retryExecution (A5)', () => {
 
   it('#4196 V5 helper: retry window is inclusive and malformed/future timestamps fail closed', () => {
     const now = Date.parse('2026-08-30T12:00:00.000Z')
+    expect(automationRetryLedgerRetentionCutoffIso(now)).toBe('2026-08-23T12:00:00.000Z')
     expect(isWithinAutomationRetryWindow(new Date(now - AUTOMATION_RETRY_LEDGER_RETENTION_MS).toISOString(), now)).toBe(true)
     expect(isWithinAutomationRetryWindow(new Date(now - AUTOMATION_RETRY_LEDGER_RETENTION_MS - 1).toISOString(), now)).toBe(false)
     expect(isWithinAutomationRetryWindow(new Date(now + 1).toISOString(), now)).toBe(false)
@@ -5309,6 +5312,56 @@ describe('AutomationService — retryExecution (A5)', () => {
     expect(getRule).not.toHaveBeenCalled()
     expect(execSpy).not.toHaveBeenCalled()
     expect(queryFn).not.toHaveBeenCalled()
+  })
+
+  it('#4196 §5: a retention-sweep failure is best-effort and does not block an eligible retry', async () => {
+    const original = storedExecution()
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(original)
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentRule())
+    const retried = storedExecution({ id: 'axe_next', status: 'success' })
+    vi.spyOn(service, 'executeRule').mockResolvedValue(retried)
+    queryFn.mockResolvedValue({ rows: [{ first_retry_attempt: true }], rowCount: 1 })
+    const sweep = vi.fn().mockRejectedValue(new Error('retention unavailable'))
+    ;(service as unknown as {
+      sweepAutomationRetryLedger: (nowMs?: number) => Promise<number>
+    }).sweepAutomationRetryLedger = sweep
+
+    await expect(service.retryExecution(original.id, 'admin1')).resolves.toEqual({ execution: retried })
+    expect(sweep).toHaveBeenCalledTimes(1)
+  })
+
+  it('#4196 §5: opportunistic retention is limited to one sweep per interval', async () => {
+    const sweep = vi.fn().mockResolvedValue(0)
+    const hooks = service as unknown as {
+      sweepAutomationRetryLedger: (nowMs?: number) => Promise<number>
+      kickAutomationRetryLedgerSweepIfDue: (nowMs: number) => void
+    }
+    hooks.sweepAutomationRetryLedger = sweep
+    const firstDue = AUTOMATION_RETRY_LEDGER_SWEEP_INTERVAL_MS
+
+    hooks.kickAutomationRetryLedgerSweepIfDue(firstDue)
+    hooks.kickAutomationRetryLedgerSweepIfDue(firstDue + AUTOMATION_RETRY_LEDGER_SWEEP_INTERVAL_MS - 1)
+    expect(sweep).toHaveBeenCalledTimes(1)
+
+    hooks.kickAutomationRetryLedgerSweepIfDue(firstDue + AUTOMATION_RETRY_LEDGER_SWEEP_INTERVAL_MS)
+    expect(sweep).toHaveBeenCalledTimes(2)
+  })
+
+  it('#4196 §5: a pending retention sweep does not delay an eligible retry', async () => {
+    const original = storedExecution()
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(original)
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentRule())
+    vi.spyOn(service, 'executeRule').mockResolvedValue(storedExecution({ id: 'axe_next', status: 'success' }))
+    queryFn.mockResolvedValue({ rows: [{ first_retry_attempt: true }], rowCount: 1 })
+    ;(service as unknown as {
+      sweepAutomationRetryLedger: (nowMs?: number) => Promise<number>
+    }).sweepAutomationRetryLedger = vi.fn(() => new Promise<number>(() => {}))
+
+    const outcome = await Promise.race([
+      service.retryExecution(original.id, 'admin1').then(() => 'done'),
+      new Promise((resolve) => setTimeout(() => resolve('timeout'), 25)),
+    ])
+    expect(outcome).toBe('done')
   })
 
   it('409 MISSING_TRIGGER_EVENT fail-closed: absent / empty {} / array — never silent empty-context retry', async () => {
