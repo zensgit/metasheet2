@@ -12,6 +12,7 @@
         <span
           class="template-authoring__save-state"
           :class="{ 'template-authoring__save-state--dirty': isDraftDirty }"
+          data-testid="approval-template-save-state"
         >
           {{ draftStateLabel }}
         </span>
@@ -1792,6 +1793,12 @@ const isDraftDirty = computed(() => JSON.stringify(draft.value) !== draftBaselin
 function snapshotDraft() {
   draftBaseline.value = JSON.stringify(draft.value)
 }
+
+function promoteLinearDraftAndBaselineToGraphAuthoring(): void {
+  const baseline = JSON.parse(draftBaseline.value) as TemplateAuthoringDraft
+  draftBaseline.value = JSON.stringify(promoteLinearDraftToGraphAuthoring(baseline))
+  draft.value = promoteLinearDraftToGraphAuthoring(draft.value)
+}
 const conditionFormulaDryRunResults = ref<Record<string, string>>({})
 const conditionFormulaDryRunBusy = ref<Record<string, boolean>>({})
 
@@ -1867,9 +1874,11 @@ function scrollAuthoringTarget(target: HTMLElement | null, focus = false) {
 async function selectAuthoringSection(section: AuthoringSectionId) {
   activeAuthoringSection.value = section
   // Canvas V2: ordinary-user flow authoring uses one preservedGraph rail. Promote linear steps
-  // when entering the flow step so linear + branch share the canvas surface.
+  // when entering the flow step so linear + branch share the canvas surface. Apply the same
+  // representation-only promotion to the last-saved baseline; snapshotting the current draft here
+  // would erase genuine edits made before entering flow authoring.
   if (section === 'flow' && canvasV2Enabled.value && !readOnly.value && !draft.value.preservedGraph) {
-    draft.value = promoteLinearDraftToGraphAuthoring(draft.value)
+    promoteLinearDraftAndBaselineToGraphAuthoring()
     reseedCanvasHistoryFromDraft()
   }
   await nextTick()
@@ -4696,8 +4705,12 @@ pre {
   }
 
   .template-authoring__steps {
-    top: 0;
+    position: static;
     justify-content: flex-start;
+  }
+
+  .template-authoring__section-actions {
+    position: static;
   }
 
   .template-authoring__grid {

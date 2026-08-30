@@ -23,7 +23,13 @@ import { join } from 'node:path'
 // flip locale / permission BEFORE each mount (useLocale/useAuth are invoked fresh per mount).
 const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
-  hasPerm: true,
+  /**
+   * O2 / R-11. Codes the acting principal holds. The default is the PLATFORM-ADMIN pair, because
+   * every shell assertion below is about the legacy MVP tab strip, which is platform-admin-only
+   * after this change — an operator-tier default would have quietly turned those tests into
+   * assertions about an empty page. Tests that care about the operator tier set it explicitly.
+   */
+  permissions: ['integration:admin', 'stock-prep:read'] as string[],
   route: {
     path: '/multitable',
     fullPath: '/multitable',
@@ -67,12 +73,17 @@ vi.mock('../src/stores/featureFlags', () => ({
   }),
 }))
 
+// O2 / R-11: the auth double became a permission SET rather than one boolean. The shell now renders
+// a different tab strip per tier (the six legacy MVP tabs are platform-admin only, the confirmation
+// queue is the operator's), so a single `hasPerm` flag can no longer express the actors this spec
+// needs. Exact-code matching only — the ladder lives in workbenchAccess.ts and is exercised by
+// stockPrepPermissionMatrix.spec.ts, so reproducing it here would only let the two drift.
 vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     getToken: () => 'session-token',
     clearToken: vi.fn(),
     getAccessSnapshot: () => ({ isAdmin: false, email: '' }),
-    hasPermission: (permission: string) => permission === 'integration:write' && h.hasPerm,
+    hasPermission: (permission: string) => h.permissions.includes(permission),
   }),
 }))
 
@@ -127,7 +138,11 @@ async function waitForSelector(container: HTMLElement, selector: string, cycles 
   throw new Error(`Timed out waiting for selector: ${selector}`)
 }
 
-const VIEW_KEYS = [
+// O1' §附 narrowed this page to the CONFIRMATION-QUEUE workbench, so 'confirmation-queue' leads the
+// strip and is the landing tab. The seven below it are the legacy MVP tabs, which the same ruling
+// did not revive and which stay PLATFORM-ADMIN gated end to end — they render only for this spec's
+// default (admin) actor, never for a stock-prep operator.
+const LEGACY_MVP_VIEW_KEYS = [
   'dashboard',
   'project-workspace',
   'bom-snapshot-diff',
@@ -136,6 +151,7 @@ const VIEW_KEYS = [
   'prep-line',
   'exception-queue',
 ] as const
+const VIEW_KEYS = ['confirmation-queue', ...LEGACY_MVP_VIEW_KEYS] as const
 
 // Source-level drift pin (matching the repo idiom in approvalTemplateRouteGuard.spec.ts): importing
 // appRoutes eagerly pulls every view + element-plus CSS into jsdom, so assert on the source text.
@@ -149,13 +165,18 @@ describe('Stock Preparation route registration (source drift pin)', () => {
     return end === -1 ? SRC.slice(i) : SRC.slice(i, end)
   }
 
-  it('registers /stock-prep bound to a lazy shell component and the integration:write gate', () => {
+  it('registers /stock-prep bound to a lazy shell component and the stock-prep:read gate (O2/R-11)', () => {
     const block = routeBlockByPath('/stock-prep')
     expect(block, 'route /stock-prep must exist in appRoutes.ts').toBeTruthy()
     expect(block).toContain('AppRouteNames.INTEGRATION_STOCK_PREPARATION')
     expect(block).toContain("import('../components/integration/stockPreparation/StockPreparationWorkspace.vue')")
     expect(block).toMatch(/requiresAuth:\s*true/)
-    expect(block).toMatch(/permissions:\s*\[\s*'integration:write'\s*\]/)
+    // O2 / R-11: the gate moved off the Data Factory's integration:write onto the workbench's own
+    // code. BOTH halves are pinned — the new code present AND the old one gone — because a route
+    // that kept both would still admit an integration:write holder the server refuses everywhere,
+    // which is the misalignment this change exists to close.
+    expect(block).toMatch(/permissions:\s*\[\s*'stock-prep:read'\s*\]/)
+    expect(block).not.toMatch(/permissions:\s*\[[^\]]*'integration:write'/)
     expect(block).toContain("titleZh: '备料工作台'")
   })
 
@@ -458,6 +479,9 @@ describe('StockPreparationWorkspace shell', () => {
 
   beforeEach(() => {
     h.locale = 'zh-CN'
+    // Restored per test: the operator-tier case below narrows it, and a leaked narrow actor would
+    // silently turn every later legacy-tab assertion into an assertion about an empty page.
+    h.permissions = ['integration:admin', 'stock-prep:read']
     h.route = { path: '/stock-prep', fullPath: '/stock-prep', meta: {}, query: {} }
     localStorage.removeItem('tenantId')
     localStorage.removeItem('workspaceId')
@@ -484,7 +508,7 @@ describe('StockPreparationWorkspace shell', () => {
     return container!
   }
 
-  it('renders the tablist with the dashboard tab (H1/H2) plus all six MVP view tabs', async () => {
+  it('renders the tablist with the confirmation queue plus every legacy MVP tab (platform admin)', async () => {
     const root = await mountShell()
     const tablist = root.querySelector('[data-testid="stock-prep-tabs"]')
     expect(tablist).not.toBeNull()
@@ -492,7 +516,24 @@ describe('StockPreparationWorkspace shell', () => {
     for (const key of VIEW_KEYS) {
       expect(root.querySelector(`[data-testid="stock-prep-tab-${key}"]`)).not.toBeNull()
     }
-    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(7)
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(8)
+  })
+
+  // O2 / R-11: the operator tier. The tab strip is itself a control surface, so a tab whose panel
+  // would 403 on every action must not be there — otherwise the page hands a customer operator seven
+  // tabs of dead controls, which is the "visible but not actionable" failure in its purest form.
+  it('shows a stock-prep operator ONLY the confirmation queue — every legacy MVP tab is hidden', async () => {
+    h.permissions = ['stock-prep:read']
+    const root = await mountShell()
+    expect(root.querySelector('[data-testid="stock-prep-tab-confirmation-queue"]')).not.toBeNull()
+    for (const key of LEGACY_MVP_VIEW_KEYS) {
+      expect(root.querySelector(`[data-testid="stock-prep-tab-${key}"]`), `${key} must be hidden`).toBeNull()
+    }
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(1)
+    // ...and the panel really is the confirmation queue, not a legacy panel wearing its title.
+    const panel = root.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
+    expect(panel.getAttribute('data-active')).toBe('confirmation-queue')
+    expect(root.querySelector('[data-testid="stock-prep-confirmation-queue"]')).not.toBeNull()
   })
 
   it('renders Chinese labels + the readonly-boundary copy when locale is zh-CN', async () => {
@@ -519,8 +560,20 @@ describe('StockPreparationWorkspace shell', () => {
     expect(boundary.textContent).toMatch(/readonly/i)
   })
 
-  it('defaults to the dashboard tab (H1: "operator enters the system and sees this first"), with no single-endpoint badge', async () => {
+  // O1' §附 moved the landing tab: this page is now the confirmation-queue workbench, so the queue —
+  // not the MVP dashboard — is what an operator sees on arrival. The dashboard remains reachable for
+  // a platform admin via its tab, asserted immediately below.
+  it('lands on the confirmation queue (O1\': the page this workbench was adopted to be)', async () => {
     const root = await mountShell()
+    const panel = root.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
+    expect(panel.getAttribute('data-active')).toBe('confirmation-queue')
+    expect(root.querySelector('[data-testid="stock-prep-confirmation-queue"]')).not.toBeNull()
+  })
+
+  it('still opens the dashboard tab for a platform admin, with no single-endpoint badge', async () => {
+    const root = await mountShell()
+    ;(root.querySelector('[data-testid="stock-prep-tab-dashboard"]') as HTMLButtonElement).click()
+    await flushUi()
     const panel = root.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
     expect(panel.getAttribute('data-active')).toBe('dashboard')
     // The dashboard aggregates MULTIPLE existing endpoints client-side — it has no single endpoint
@@ -537,7 +590,8 @@ describe('StockPreparationWorkspace shell', () => {
       data: { projectCount: 0, statusCounts: {}, projects: [] },
     }), { status: 200 }))
 
-    await mountShell()
+    const shell = await mountShell()
+    ;(shell.querySelector('[data-testid="stock-prep-tab-dashboard"]') as HTMLButtonElement).click()
     await waitForSelector(container!, '[data-testid="stock-prep-dashboard-empty"]')
 
     const call = h.apiFetch.mock.calls.find(([value]) => String(value).includes('/stock-preparation/projects'))
@@ -906,11 +960,12 @@ describe('StockPreparationWorkspace shell', () => {
     const batchListCalls = h.apiFetch.mock.calls
       .map((call) => String(call[0]))
       .filter((url) => url.includes('/snapshot-batches'))
-    // TWO calls, not one: the dashboard (H1/H2, now the default landing tab) ALSO eagerly aggregates
-    // the sync stage for an already-seeded projectId on its own mount (before the test ever switches
-    // to view 2) — this is the dashboard's own reused GET, not a duplicate/bug. Both carry the SAME
-    // deep-linked handle either way.
-    expect(batchListCalls.length).toBe(2)
+    // ONE call now, where it used to be two. The second was the dashboard's own eager stage
+    // aggregation on mount, back when the dashboard was the landing tab; O1' §附 made the
+    // confirmation queue the landing tab, and that tab reads nothing until the operator asks. So
+    // arriving on a deep link no longer fires an admin-tier MVP read the arriving principal may not
+    // even be permitted to make — the count dropping is the point, not an omission.
+    expect(batchListCalls.length).toBe(1)
     for (const call of batchListCalls) {
       expect(call).toContain('projectId=proj-alpha')
     }
@@ -953,7 +1008,9 @@ describe('App nav entry for Stock Preparation', () => {
 
   beforeEach(() => {
     h.locale = 'zh-CN'
-    h.hasPerm = true
+    // O2 / R-11: the nav link follows the ROUTE's gate. A stock-prep:read holder is the minimal
+    // principal the link must appear for; integration:write (the old gate) is deliberately absent.
+    h.permissions = ['stock-prep:read']
     h.route = { path: '/multitable', fullPath: '/multitable', meta: {}, query: {} }
     window.localStorage.clear()
     window.localStorage.setItem('auth_token', 'session-token')
@@ -971,7 +1028,7 @@ describe('App nav entry for Stock Preparation', () => {
     return Array.from(root.querySelectorAll('a')).find((a) => a.getAttribute('href') === '/stock-prep')
   }
 
-  it('renders a /stock-prep nav link with the zh label when the user has integration:write', async () => {
+  it('renders a /stock-prep nav link with the zh label when the user has stock-prep:read', async () => {
     mountApp()
     await flushUi()
     const link = findStockPrepLink(container as HTMLElement)
@@ -988,8 +1045,8 @@ describe('App nav entry for Stock Preparation', () => {
     expect(link!.textContent).toContain('Stock Preparation')
   })
 
-  it('hides the /stock-prep nav link when the user lacks integration:write', async () => {
-    h.hasPerm = false
+  it('hides the /stock-prep nav link when the user lacks stock-prep:read', async () => {
+    h.permissions = []
     mountApp()
     await flushUi()
     expect(findStockPrepLink(container as HTMLElement)).toBeUndefined()

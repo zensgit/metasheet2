@@ -130,10 +130,21 @@ const ROUTES = [
   ['GET', '/api/integration/stock-preparation/prep-lines', 'stockPreparationPrepLineList'],
   // #3751 MVP W5b (#3890): values-free audit trail over the stock-prep write surface.
   ['GET', '/api/integration/stock-preparation/audit', 'stockPreparationAuditList'],
-  // B-stage confirmation-decision LEDGER surfaces (first cut). All admin-gated. Static literal
-  // segments precede the bare collection GET so they can never be mis-read as ids. The GET list is
-  // the AUTHORITATIVE values-free exception queue of the takeover line (converged ruling);
-  // canonical-sheet filter views are auxiliary only.
+  // B-stage confirmation-decision LEDGER surfaces. Static literal segments precede the bare
+  // collection GET so they can never be mis-read as ids. The GET list is the AUTHORITATIVE
+  // values-free exception queue of the takeover line (converged ruling); canonical-sheet filter
+  // views are auxiliary only.
+  //
+  // O2 / R-11 permission split (stock-preparation-workbench-access.cjs holds the vocabulary):
+  //   readiness, list        -> stock-prep:read     (values-free queue; the operator's entry surface)
+  //   value-entry, confirm   -> stock-prep:operate  (the write tier + the author's own value readback)
+  //   ensure                 -> platform admin      (PROVISIONS the ledger table — schema authoring,
+  //                                                  which R-11 names as what the operator tier must
+  //                                                  not open; unchanged by this PR)
+  // Reconcile lives on the table-actions block above and also stays platform-admin: it re-runs the
+  // readonly plan as a SOURCE READ and, when B2a is armed, consumes an operation claim. Handing a
+  // customer operator the ability to trigger source reads is an owner-level decision, so the default
+  // stands and this PR does not move it.
   ['GET', '/api/integration/stock-preparation/confirmation-decisions/readiness', 'stockPreparationConfirmationDecisionsReadiness'],
   ['POST', '/api/integration/stock-preparation/confirmation-decisions/ensure', 'stockPreparationConfirmationDecisionsEnsure'],
   ['POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', 'stockPreparationConfirmationDecisionsConfirm'],
@@ -306,6 +317,15 @@ const {
   readConfirmationDecisionValueEntry,
   loadConfirmedDuplicatePolicyReview,
 } = require('./stock-preparation-confirmation-decisions.cjs')
+// O2 / R-11: the confirmation-queue workbench permission vocabulary + capability manifest. Shared
+// verbatim with the front end (the web alignment suite imports this same module), so the FE control
+// set and the BE gate set cannot drift.
+const {
+  STOCK_PREP_OPERATE,
+  STOCK_PREP_READ,
+  isStockPrepPermissionCode,
+  satisfiesStockPrepAccess,
+} = require('./stock-preparation-workbench-access.cjs')
 const {
   assertAuthoritativeLargeBomExpansion,
   cancelLargeBomBackgroundExpansionJob,
@@ -600,6 +620,14 @@ function listUserPermissions(user) {
 
 function hasPermission(user, action) {
   const permissions = listUserPermissions(user)
+  // O2 / R-11: the `/stock-prep` confirmation-queue workbench has its OWN vocabulary
+  // (stock-prep:read | :operate | :admin), decided in stock-preparation-workbench-access.cjs and
+  // shared verbatim with the front end. It is checked FIRST and it OWNS its whole namespace, so a
+  // token in it can never fall through to the legacy integration:write default — a mistyped gate
+  // refuses everyone rather than silently widening. Platform admin still passes, inside that
+  // decision, so no admin capability is lost. Nothing here grants a stock-prep code to a holder of
+  // integration:read/write: R-11's mapping is zero-automatic.
+  if (isStockPrepPermissionCode(action)) return satisfiesStockPrepAccess(permissions, action)
   if (permissions.includes('role:admin') || permissions.includes('integration:admin')) return true
   if (action === 'admin') return false
   if (action === 'read') {
@@ -5859,7 +5887,10 @@ function createHandlers(services, options = {}) {
     // project is auth-derived and never request-steered on the write routes.
 
     async stockPreparationConfirmationDecisionsReadiness(req, res) {
-      requireAccess(req, 'admin')
+      // O2 / R-11: queue READ tier. Values-free — provisioning state of the ledger target, no row
+      // content. `permission: 'admin'` below is UNRELATED: it is the SERVER's own capability toward
+      // the managed internal table (assertAdminPermission), not the caller's tier, and it stays.
+      requireAccess(req, STOCK_PREP_READ)
       const input = normalizeStockPreparationConfirmBody(
         requestQuery(req),
         VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_READINESS_QUERY_KEYS,
@@ -5893,7 +5924,9 @@ function createHandlers(services, options = {}) {
     // THE authoritative exception queue (converged ruling): pending decisions with counts, ids,
     // hashes and status enums — NEVER a source cell value. Canonical filter views stay auxiliary.
     async stockPreparationConfirmationDecisionsList(req, res) {
-      requireAccess(req, 'admin')
+      // O2 / R-11: queue READ tier — THE operator surface. Counts, ids, hashes and status enums
+      // only (G8 leak canary), so it carries no value content and rides the broad read code.
+      requireAccess(req, STOCK_PREP_READ)
       const input = normalizeStockPreparationConfirmBody(
         requestQuery(req),
         VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_LIST_QUERY_KEYS,
@@ -5920,7 +5953,16 @@ function createHandlers(services, options = {}) {
     // values-free). Admin-gated read; the module refuses a decisionId that does not resolve to
     // exactly one ledger row.
     async stockPreparationConfirmationDecisionsValueEntry(req, res) {
-      requireAccess(req, 'admin')
+      // O2 / R-11 — the ONE content-bearing surface, deliberately placed on OPERATE, not READ.
+      //
+      // It rides the write code because it is the author's own readback: Q1-A/Q2-A give the human
+      // direct authorship of these values, and withholding the readback from the principal who
+      // entered them is incoherent. It must NOT ride READ, because READ is the broad queue-watcher
+      // tier (supervisor, auditor, dashboard) and the O1' ruling re-drew the values-free boundary
+      // around exactly this content: everyone who is not an author keeps seeing counts, fingerprints
+      // and status enums, never a value. One notch tighter than the queue, one notch looser than
+      // platform admin — which is what makes the workbench usable without widening the value face.
+      requireAccess(req, STOCK_PREP_OPERATE)
       const input = normalizeStockPreparationConfirmBody(
         requestQuery(req),
         VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_VALUE_ENTRY_QUERY_KEYS,
@@ -5942,7 +5984,11 @@ function createHandlers(services, options = {}) {
     },
 
     async stockPreparationConfirmationDecisionsConfirm(req, res) {
-      const user = requireAccess(req, 'admin')
+      // O2 / R-11: the OPERATE tier — the whole point of the operator role. Covers the frozen action
+      // vocabulary (keep_multiple_rows / accept_current / manual_hold) and the O1'-A value-entry
+      // fields. The audit append below still stamps the real principal, so a customer operator's
+      // confirmations are attributable exactly as an admin's were.
+      const user = requireAccess(req, STOCK_PREP_OPERATE)
       const audit = requireStockPreparationAudit()
       const input = normalizeStockPreparationConfirmBody(
         requestBody(req),

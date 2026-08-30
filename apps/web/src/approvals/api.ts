@@ -30,7 +30,12 @@ import type {
 // ---------------------------------------------------------------------------
 // Mock-mode flag
 // ---------------------------------------------------------------------------
-const USE_MOCK = import.meta.env.DEV || (globalThis as any).__APPROVAL_MOCK__ === true
+const APPROVAL_MOCK_OVERRIDE = (globalThis as { __APPROVAL_MOCK__?: boolean }).__APPROVAL_MOCK__
+// DEV keeps its existing mock-by-default behavior. A mounted browser harness may explicitly set
+// the override to false before dynamically importing the approval surface so Playwright can drive
+// the real fetch path; production has no override and remains network-backed as before.
+const USE_MOCK = APPROVAL_MOCK_OVERRIDE === true
+  || (import.meta.env.DEV && APPROVAL_MOCK_OVERRIDE !== false)
 
 // ---------------------------------------------------------------------------
 // Mock data factories
@@ -1093,10 +1098,10 @@ export async function previewApprovalRoute(req: CreateApprovalRequest): Promise<
  * allows an org-structure probe on — guarded server-side by `canManageTemplates`). Same output
  * shape as `previewApprovalRoute` (shared substrate, no parallel impl).
  *
- * `templateRoutePreviewPath` is split out purely so the templateId URL-encoding is independently
- * unit-testable: `USE_MOCK` is `import.meta.env.DEV || ...` and DEV is always `true` under this
- * project's Vitest run (see `approvalApiErrorSurfacing.spec.ts`), so calling
- * `previewTemplateRoute` itself in a test can only ever exercise the mock branch below.
+ * `templateRoutePreviewPath` is split out so the templateId URL-encoding remains independently
+ * unit-testable. Normal Vitest DEV runs retain the mock-by-default path; the mounted browser
+ * harness may explicitly disable that mock before module initialization to exercise the real
+ * network branch.
  */
 export function templateRoutePreviewPath(templateId: string): string {
   return `/api/approval-templates/${encodeURIComponent(templateId)}/route-preview`

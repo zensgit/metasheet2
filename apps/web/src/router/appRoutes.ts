@@ -297,14 +297,25 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'K3 WISE Preset', titleZh: 'K3 WISE 预设', requiresAuth: true, permissions: ['integration:write'] }
   },
   {
-    // Stock Preparation MVP (#3751, docs/development/stock-preparation-mvp-design-20260707.md):
-    // readonly-first, tabbed operator workspace. Deliberately a SEPARATE routed shell (not crammed
-    // into the admin IntegrationWorkbenchView) so the six MVP views land later in disjoint files.
-    // Reuses the integration:write gate (same as the Data Factory workbench) — no broader access.
+    // Stock Preparation (#3751; narrowed by the O1' ruling of 2026-08-29 to THE CONFIRMATION-QUEUE
+    // WORKBENCH). Deliberately a SEPARATE routed shell (not crammed into the admin
+    // IntegrationWorkbenchView).
+    //
+    // O2 / R-11 — the gate is the workbench's own code, not integration:write.
+    //
+    // It used to reuse the Data Factory's integration:write gate, and that was the live
+    // front/back misalignment this route change closes: every endpoint the page reads is gated
+    // server-side ABOVE integration:write, so an integration:write holder could reach the page and
+    // then 403 on everything in it — "visible but not actionable", exactly what R-11 forbids.
+    //
+    // stock-prep:read is STRICTLY NARROWER than what stood here: R-11's mapping is zero-automatic, so
+    // integration:write does not become a stock-prep code and no one gains reachability from this
+    // edit. Platform admin keeps it (useAuth's admin short-circuit), and a customer operator gets it
+    // by being granted the code explicitly. See services/integration/stockPreparation/workbenchAccess.ts.
     path: '/stock-prep',
     name: AppRouteNames.INTEGRATION_STOCK_PREPARATION,
     component: () => import('../components/integration/stockPreparation/StockPreparationWorkspace.vue'),
-    meta: { title: 'Stock Preparation', titleZh: '备料工作台', requiresAuth: true, permissions: ['integration:write'] }
+    meta: { title: 'Stock Preparation', titleZh: '备料工作台', requiresAuth: true, permissions: ['stock-prep:read'] }
   },
   {
     path: '/workflows',
