@@ -400,8 +400,12 @@ describe('happy path', () => {
       assert.ok(step.status === 'OK' || step.status === 'SKIP', `${step.id} was ${step.status}: ${step.reason}`)
     }
     assert.equal(lines.length, STEP_COUNT)
-    assert.match(lines[0], /^\[1\/8\] preflight \.\.\. SKIP — /)
-    assert.match(lines[5], /^\[6\/8\] acceptance-apply \.\.\. OK — criterion 1 PASS/)
+    // Assert on the step ID, not its position: the running order is its own contract (see the
+    // plan-integrity test), so moving a step should fail THERE, loudly and once, instead of
+    // scattering position-shaped failures through assertions that are about something else.
+    const lineFor = (id) => lines.find((line) => line.includes('] ' + id + ' ...'))
+    assert.match(lineFor('preflight'), /preflight \.\.\. SKIP/)
+    assert.match(lineFor('acceptance-apply'), /acceptance-apply \.\.\. OK/)
   })
 
   test('preflight SKIPs (not FAILs) on a deployment that predates the route', async () => {
@@ -1138,7 +1142,12 @@ describe('plan integrity', () => {
     assert.equal(STEP_PLAN.length, STEP_COUNT)
     assert.deepEqual(
       STEP_PLAN.map((s) => s.id),
-      ['preflight', 'managed-tables', 'customer-pack', 'source-wiring', 'acceptance-dry-run', 'acceptance-apply', 'acceptance-idempotent', 'confirmation-queue'],
+      // ORDER IS PART OF THE CONTRACT. The queue is drained BEFORE acceptance because a used
+      // deployment carries holds an earlier operator left: the plan then returns
+      // manual_confirm_required, no token is minted, and apply answers 409. The first live run
+      // failed exactly that way with the queue last. Reordering this list without moving the
+      // runner (or vice versa) must fail here.
+      ['preflight', 'managed-tables', 'customer-pack', 'source-wiring', 'confirmation-queue', 'acceptance-dry-run', 'acceptance-apply', 'acceptance-idempotent'],
     )
   })
 

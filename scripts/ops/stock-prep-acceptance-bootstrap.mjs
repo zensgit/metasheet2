@@ -244,6 +244,21 @@ const STEP_PLAN = Object.freeze([
     note: 'status must end ACTIVE — reconcile requires it, dry-run does not',
   },
   {
+    id: 'confirmation-queue',
+    routes: [
+      'POST /integration/table-actions/:actionId/confirmation-decisions/reconcile',
+      'GET  /integration/stock-preparation/confirmation-decisions',
+      'POST /integration/stock-preparation/confirmation-decisions/confirm',
+    ],
+    // ORDER IS LOAD-BEARING, and the first live run is why. A deployment that has been used
+    // carries holds an earlier operator left behind; the plan then comes back
+    // manual_confirm_required, no token is minted, and apply answers 409 -- so acceptance can
+    // only run AFTER the queue is worked. Draining first is also the real operator sequence:
+    // resolve what is held, then refresh. Still optional (MS_SKIP_QUEUE_SMOKE=1), and still
+    // tolerant of E1 re-holds, which are expected behaviour rather than failures.
+    note: 'optional (MS_SKIP_QUEUE_SMOKE=1); drains holds BEFORE acceptance; E1 re-holds are EXPECTED, not failures',
+  },
+  {
     id: 'acceptance-dry-run',
     routes: ['POST /integration/table-actions/:actionId/dry-run'],
     note: 'expects canApply:true and a dryRunToken',
@@ -260,15 +275,6 @@ const STEP_PLAN = Object.freeze([
     id: 'acceptance-idempotent',
     routes: ['POST /integration/table-actions/:actionId/dry-run'],
     note: 'CRITERION 2 — the second dry-run is all-skip',
-  },
-  {
-    id: 'confirmation-queue',
-    routes: [
-      'POST /integration/table-actions/:actionId/confirmation-decisions/reconcile',
-      'GET  /integration/stock-preparation/confirmation-decisions',
-      'POST /integration/stock-preparation/confirmation-decisions/confirm',
-    ],
-    note: 'optional (MS_SKIP_QUEUE_SMOKE=1); E1 re-holds are EXPECTED, not failures',
   },
 ])
 
@@ -288,6 +294,10 @@ const CODE_PATTERN = /^[A-Z][A-Z0-9_]{2,63}$/
 const FIELD_ID_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
 const HANDLE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$/
 const NUMERIC_PATTERN = /^-?\d+(?:\.\d+)?$/
+
+// Deliberate operator override: apply even though the plan still holds. Off by default, because
+// silently applying a held plan is exactly the behaviour the confirmation queue exists to prevent.
+const ACCEPT_HELD_PLAN = String(process.env.MS_ACCEPT_HELD_PLAN || '').trim() === '1'
 
 function safeToken(value) {
   return typeof value === 'string' && TOKEN_PATTERN.test(value) ? value : UNREGISTERED
@@ -1132,7 +1142,24 @@ export async function runAcceptanceDryRunStep(ctx) {
   if (data.canApply !== true || typeof data.dryRunToken !== 'string' || data.dryRunToken === '') {
     return fail(
       `dry-run canApply=${data.canApply === true} status=${status} token=${typeof data.dryRunToken === 'string' && data.dryRunToken !== ''}`,
-      'status manual_confirm_required means the plan is held — work the confirmation queue (step 8) first; no token is minted unless canApply is true',
+      'status manual_confirm_required means the plan is held — work the confirmation queue (it runs before this step) first; no token is minted unless canApply is true',
+    )
+  }
+  // A HELD PLAN AFTER A DRAINED QUEUE IS A REAL TERMINAL STATE, NOT A BROKEN INSTALL. Some
+  // duplicate groups CANNOT be released by confirming them: once a canonical row exists for the
+  // group, the planner re-holds it under clean_to_collision_requires_review (the E1 behaviour
+  // recorded in the O1' conflict matrix, and reproduced on the first live deployment). The
+  // server mints a token here regardless, but apply recomputes and refuses with
+  // TABLE_ACTION_MANUAL_CONFIRM_REQUIRED. Reporting that as FAIL would tell an operator the
+  // install is broken when what is really true is that human work is outstanding upstream, in
+  // the source data. So the acceptance criteria are SKIPPED with the reason named, and the
+  // operator can override deliberately once they accept partial application.
+  const heldCount = safeCount((data.counts && data.counts.manual_confirm) || 0)
+  if (heldCount > 0 && !ACCEPT_HELD_PLAN) {
+    ctx.heldPlanCount = heldCount
+    return skip(
+      `plan still holds ${heldCount} group(s) after the queue was drained — E1 re-holds cannot be`
+      + ' released by confirmation while a canonical row exists for the group; criteria 1 and 2 not evaluated',
     )
   }
   ctx.dryRunToken = data.dryRunToken
@@ -1182,10 +1209,16 @@ async function readTargetRows(ctx, sheetId) {
 export async function runAcceptanceApplyStep(ctx) {
   const { config, fetchImpl, report } = ctx
   let body
+  // CASCADE, don't re-report. When the dry-run SKIPPED because the plan is held, the missing
+  // token is a CONSEQUENCE of that decision, not a second independent fault -- failing here
+  // would tell the operator to go fix a token when the real state is 'human work outstanding'.
+  if (ctx.heldPlanCount > 0) {
+    return skip(`plan holds ${ctx.heldPlanCount} group(s) — criterion 1 not evaluated (set MS_ACCEPT_HELD_PLAN=1 to apply anyway)`)
+  }
   try {
     body = buildApplyBody({ projectNo: config.projectNo, dryRunToken: ctx.dryRunToken })
   } catch {
-    return fail('no dry-run token available', 'step 5 must mint a token before apply can run')
+    return fail('no dry-run token available', 'the dry-run step must mint a token before apply can run')
   }
   const res = await apiRequest(
     config,
@@ -1194,9 +1227,23 @@ export async function runAcceptanceApplyStep(ctx) {
     { body, accept: [200], fetchImpl },
   )
   if (!res.httpOk || !res.envelopeOk) {
+    // NAME THE ACTUAL CAUSE. The first live run failed here with 409
+    // TABLE_ACTION_MANUAL_CONFIRM_REQUIRED -- the plan was held -- while the hint talked about
+    // body shape and sandbox env, sending the operator to look in two places that were both fine.
+    // A refusal must point at its own reason, so the held case gets its own line.
+    // res.errorCode is ALREADY normalised by safeCode() when the envelope is read; re-normalising
+    // it through safeToken() (a different, narrower pattern) turned every real code into
+    // UNREGISTERED and the branch below never fired on the live run that motivated it.
+    const code = res.errorCode
+    const heldFix =
+      'the plan is HELD: work the confirmation queue first (that step now runs before acceptance), '
+      + 'then re-run -- holds left by an earlier operator block apply until they are resolved'
+    const shapeFix =
+      'the apply body accepts ONLY parameters and confirm, with the token at confirm.dryRunToken; '
+      + 'a sandbox refusal means STOCK_PREP_SANDBOX_MODE / STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS do not cover this objectId'
     return fail(
       `apply ${httpReason(res)}`,
-      'the apply body accepts ONLY parameters and confirm, with the token at confirm.dryRunToken; a sandbox refusal means STOCK_PREP_SANDBOX_MODE / STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS do not cover this objectId',
+      code === 'TABLE_ACTION_MANUAL_CONFIRM_REQUIRED' ? heldFix : shapeFix,
     )
   }
   const data = res.data && typeof res.data === 'object' ? res.data : {}
@@ -1282,6 +1329,9 @@ export async function runAcceptanceApplyStep(ctx) {
 // --- 7 -----------------------------------------------------------------------
 
 export async function runAcceptanceIdempotentStep(ctx) {
+  if (ctx.heldPlanCount > 0) {
+    return skip(`plan holds ${ctx.heldPlanCount} group(s) — criterion 2 not evaluated`)
+  }
   const { report } = ctx
   const res = await postDryRun(ctx)
   if (!res.httpOk || !res.envelopeOk) {
