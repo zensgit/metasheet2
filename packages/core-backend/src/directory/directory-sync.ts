@@ -44,6 +44,10 @@ import {
 } from '../auth/user-activation'
 import { claimNonEmptyLoginAliasesOrThrow } from '../auth/login-alias-service'
 import { SimpleCronExpression } from '../services/SchedulerService'
+import {
+  captureApprovalDepartureManagerContexts,
+  type ApprovalDepartureManagerContext,
+} from '../services/ApprovalDirectoryOrg'
 import { deliverDirectorySyncFailureAlert, getDirectoryManagerBindingCoverage } from './directory-sync-alert-delivery'
 import { resolveDirectoryScheduleTimezone } from './directory-sync-timezone'
 import { acquireSourceSyncFreezeLock } from './source-sync-freeze-lock'
@@ -3799,12 +3803,14 @@ export async function syncDirectoryIntegration(
   const integrationId = integration.id
 
   const config = parseIntegrationConfig(integration)
+  const directoryDeprovisionEnabled = isDirectoryDeprovisionEnabled()
   // T2 (§12.2): cheap freeze gate BEFORE the lease claim — a freeze already active at entry
   // must not create a run row, consume provider quota, or reach local apply. The apply
   // transaction re-checks under the shared source freeze lock (see below) so a freeze that
   // commits after this entry check cannot still land directory mutations.
   await assertDirectorySyncNotFrozenByTransfer(integrationId)
   let deprovisionOutcome: DirectoryDeprovisionOutcome | null = null
+  let approvalDepartureManagerContexts = new Map<string, ApprovalDepartureManagerContext>()
   // DT-HARDEN-05: claim the run lease BEFORE the first DingTalk call. The API pull that
   // follows is the expensive, quota-consuming part; a transaction-scoped lock around the
   // later apply would not protect it. Expired leases are reclaimed first so a crashed
@@ -4061,6 +4067,15 @@ export async function syncDirectoryIntegration(
         [integrationId, syncTimestamp],
       )
       const deactivatedAccountIds = (deactivatedAccountsResult.rows as Array<{ id: string }>).map((row) => row.id)
+      // F4-E: preserve only the departed account's source position before the membership rebuild
+      // below removes it. The manager itself is deliberately NOT resolved yet — the post-commit
+      // consumer performs that live read after the exact `user_changed` signal is durable.
+      if (directoryDeprovisionEnabled && deactivatedAccountIds.length > 0) {
+        approvalDepartureManagerContexts = await captureApprovalDepartureManagerContexts(
+          deactivatedAccountIds,
+          (sql, params) => client.query(sql, params),
+        )
+      }
       for (const accountId of deactivatedAccountIds) {
         const priorAccess = priorAccessByAccountId.get(accountId)
         if (priorAccess?.link_status === 'linked' && priorAccess.local_user_id) {
@@ -4499,7 +4514,7 @@ export async function syncDirectoryIntegration(
         // means the fetch is broken, not that the company evacuated.
         syncedAccountCount: users.size,
         integrationDefaultPolicy: integration.default_deprovision_policy,
-        enabled: isDirectoryDeprovisionEnabled(),
+        enabled: directoryDeprovisionEnabled,
       })
 
       // R5: per-run manager-binding snapshot. The live GET /manager-coverage endpoint
@@ -4686,6 +4701,40 @@ export async function syncDirectoryIntegration(
         })
         // A deactivated or grant-revoked user must not keep cached permissions.
         invalidateUserPerms(affected.localUserId)
+      }
+    }
+
+    // F4-E — consume the exact durable `user_changed` effects only AFTER the directory
+    // transaction commits. The dispatcher isolates per-user failures and this outer guard also
+    // covers module/bootstrap failures: a post-commit side-effect must never rewrite a completed
+    // directory run as failed. Counts are values-free and give operators a bounded retry signal.
+    if (deprovisionOutcome?.applied && deprovisionOutcome.affected.length > 0) {
+      try {
+        const { dispatchApprovalDepartureTransfersForRun } = await import(
+          '../approvals/approval-departure-transfer-dispatch'
+        )
+        const dispatchResult = await dispatchApprovalDepartureTransfersForRun({
+          runId,
+          integrationId,
+          managerContexts: approvalDepartureManagerContexts,
+        })
+        if (
+          dispatchResult.failedCount > 0
+          || dispatchResult.unresolvedContextCount > 0
+          || dispatchResult.signalCount !== deprovisionOutcome.usersDeactivatedCount
+        ) {
+          logger.warn('Approval departure dispatch completed with unresolved work', {
+            signalCount: dispatchResult.signalCount,
+            expectedSignalCount: deprovisionOutcome.usersDeactivatedCount,
+            failedCount: dispatchResult.failedCount,
+            unresolvedContextCount: dispatchResult.unresolvedContextCount,
+          })
+        }
+      } catch (_error) {
+        logger.warn(
+          'Approval departure dispatch failed after directory commit; manual recovery required',
+          { reason: 'departure_dispatch_failed' },
+        )
       }
     }
 
