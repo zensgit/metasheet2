@@ -219,8 +219,68 @@ describe.sequential('e-learning title PostgreSQL authority', () => {
     await firstPool.query(`
       ALTER TABLE elearning_title_publish_requests
       ADD CONSTRAINT elearning_title_publish_requests_hash_check
+      CHECK (request_hash ~ '^[0-9A-F]{64}$' AND request_hash_version > 0)
+    `)
+    await expect(migrate(titleUp)).rejects.toThrow(
+      'elearning title migration drift: check constraint set',
+    )
+    await firstPool.query(`
+      ALTER TABLE elearning_title_publish_requests
+      DROP CONSTRAINT elearning_title_publish_requests_hash_check
+    `)
+    await firstPool.query(`
+      ALTER TABLE elearning_title_publish_requests
+      ADD CONSTRAINT elearning_title_publish_requests_hash_check
       CHECK (request_hash ~ '^[0-9a-f]{64}$' AND request_hash_version > 0)
     `)
+    await migrate(titleUp)
+
+    await firstPool.query(`
+      ALTER FUNCTION elearning_title_award_balance_milestones()
+      RESET search_path
+    `)
+    await expect(migrate(titleUp)).rejects.toThrow(
+      'elearning title migration drift: elearning_title_award_balance_milestones',
+    )
+    await firstPool.query(`
+      ALTER FUNCTION elearning_title_award_balance_milestones()
+      SET search_path TO pg_catalog, public
+    `)
+    await migrate(titleUp)
+
+    await firstPool.query(`
+      CREATE SCHEMA elearning_title_shadow
+    `)
+    await firstPool.query(`
+      CREATE FUNCTION elearning_title_shadow.elearning_title_award_balance_milestones()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      SECURITY INVOKER
+      AS 'BEGIN RETURN NEW; END;'
+    `)
+    await firstPool.query(`
+      DROP TRIGGER elearning_credit_balances_title_awards
+      ON elearning_credit_balances
+    `)
+    await firstPool.query(`
+      CREATE TRIGGER elearning_credit_balances_title_awards
+      AFTER INSERT OR UPDATE OF balance_points ON elearning_credit_balances
+      FOR EACH ROW EXECUTE FUNCTION
+        elearning_title_shadow.elearning_title_award_balance_milestones()
+    `)
+    await expect(migrate(titleUp)).rejects.toThrow(
+      'elearning title migration drift: elearning_credit_balances_title_awards',
+    )
+    await firstPool.query(`
+      DROP TRIGGER elearning_credit_balances_title_awards
+      ON elearning_credit_balances
+    `)
+    await firstPool.query(`
+      CREATE TRIGGER elearning_credit_balances_title_awards
+      AFTER INSERT OR UPDATE OF balance_points ON elearning_credit_balances
+      FOR EACH ROW EXECUTE FUNCTION elearning_title_award_balance_milestones()
+    `)
+    await firstPool.query(`DROP SCHEMA elearning_title_shadow CASCADE`)
     await migrate(titleUp)
 
     await firstPool.query(`

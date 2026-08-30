@@ -299,8 +299,26 @@ function drift(detail: string): never {
   throw new Error(`elearning title migration drift: ${detail}`)
 }
 
-function normalizeDefinition(value: string): string {
-  return value.toLowerCase().replaceAll('"', '').replace(/\s+/g, '')
+function canonicalizeDefinition(value: string): string {
+  let result = ''
+  let inLiteral = false
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index]
+    if (character === "'") {
+      result += character
+      if (inLiteral && value[index + 1] === "'") {
+        result += value[index + 1]
+        index += 1
+      } else {
+        inLiteral = !inLiteral
+      }
+    } else if (inLiteral) {
+      result += character
+    } else if (character !== '"' && !/\s/.test(character)) {
+      result += character.toLowerCase()
+    }
+  }
+  return result
 }
 
 function normalizeFunctionBody(value: string): string {
@@ -456,13 +474,13 @@ async function assertChecks(db: Kysely<unknown>): Promise<void> {
   const actual = result.rows.map((row) => ({
     table: row.table,
     name: row.name,
-    definition: normalizeDefinition(row.definition),
+    definition: canonicalizeDefinition(row.definition),
     validated: row.validated,
   }))
   const expected = EXPECTED_CHECKS.map((row) => ({
     table: row.table,
     name: row.name,
-    definition: normalizeDefinition(row.definition),
+    definition: canonicalizeDefinition(row.definition),
     validated: true,
   })).sort((left, right) => (
     `${left.table}:\0${left.name}`.localeCompare(`${right.table}:\0${right.name}`)
@@ -483,6 +501,7 @@ async function assertTrigger(
     enabled: string
     qualifier: string | null
     function_name: string
+    function_in_schema: boolean
     attributes: string[]
   }>`
     SELECT
@@ -490,6 +509,7 @@ async function assertTrigger(
       trigger_row.tgenabled::text AS enabled,
       pg_get_expr(trigger_row.tgqual, trigger_row.tgrelid) AS qualifier,
       function_row.proname AS function_name,
+      function_row.pronamespace = namespace.oid AS function_in_schema,
       ARRAY(
         SELECT attribute.attname
           FROM unnest(trigger_row.tgattr::int2[]) WITH ORDINALITY AS key(attnum, position)
@@ -515,6 +535,7 @@ async function assertTrigger(
     || actual.enabled !== 'O'
     || actual.qualifier !== null
     || actual.function_name !== functionName
+    || !actual.function_in_schema
     || actual.attributes.join('\0') !== expectedAttributeNames.join('\0')
   ) drift(trigger)
 }
@@ -526,13 +547,15 @@ async function assertFunction(db: Kysely<unknown>): Promise<void> {
     return_type: string
     security_definer: boolean
     kind: string
+    config: string[] | null
   }>`
     SELECT
       function_row.prosrc AS source,
       language_row.lanname AS language,
       function_row.prorettype::regtype::text AS return_type,
       function_row.prosecdef AS security_definer,
-      function_row.prokind::text AS kind
+      function_row.prokind::text AS kind,
+      function_row.proconfig AS config
       FROM pg_proc function_row
       JOIN pg_namespace namespace ON namespace.oid = function_row.pronamespace
       JOIN pg_language language_row ON language_row.oid = function_row.prolang
@@ -549,6 +572,7 @@ async function assertFunction(db: Kysely<unknown>): Promise<void> {
     || actual.return_type !== 'trigger'
     || actual.security_definer
     || actual.kind !== 'f'
+    || JSON.stringify(actual.config) !== JSON.stringify(['search_path=pg_catalog, public'])
   ) drift(AWARD_FUNCTION)
 }
 
@@ -719,6 +743,7 @@ async function createAuthority(db: Kysely<unknown>): Promise<void> {
     RETURNS trigger
     LANGUAGE plpgsql
     SECURITY INVOKER
+    SET search_path = pg_catalog, public
     AS $elearning_title_award$
     ${AWARD_FUNCTION_BODY}
     $elearning_title_award$
