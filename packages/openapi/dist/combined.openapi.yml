@@ -6074,6 +6074,134 @@ components:
               minLength: 1
               maxLength: 512
             - type: 'null'
+    ElearningLearningProfileExam:
+      type: object
+      additionalProperties: false
+      required:
+        - itemId
+        - earnedScore
+        - totalScore
+        - passedAt
+      properties:
+        itemId:
+          $ref: '#/components/schemas/ElearningUuid'
+        earnedScore:
+          type: number
+          minimum: 0
+        totalScore:
+          type: number
+          minimum: 0
+        passedAt:
+          type: string
+          format: date-time
+          pattern: ^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$
+    ElearningLearningProfileAssessmentCourse:
+      type: object
+      additionalProperties: false
+      required:
+        - courseId
+        - courseVersionId
+        - title
+        - kind
+        - completedAt
+        - exams
+      properties:
+        courseId:
+          $ref: '#/components/schemas/ElearningUuid'
+        courseVersionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        title:
+          type: string
+          minLength: 1
+        kind:
+          type: string
+          enum:
+            - assessment
+        completedAt:
+          type: string
+          format: date-time
+          pattern: ^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$
+        exams:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/ElearningLearningProfileExam'
+    ElearningLearningProfileContentCourse:
+      type: object
+      additionalProperties: false
+      required:
+        - courseId
+        - courseVersionId
+        - title
+        - kind
+        - completedAt
+      properties:
+        courseId:
+          $ref: '#/components/schemas/ElearningUuid'
+        courseVersionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        title:
+          type: string
+          minLength: 1
+        kind:
+          type: string
+          enum:
+            - content
+        completedAt:
+          type: string
+          format: date-time
+          pattern: ^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$
+    ElearningLearningProfileCourse:
+      oneOf:
+        - $ref: '#/components/schemas/ElearningLearningProfileAssessmentCourse'
+        - $ref: '#/components/schemas/ElearningLearningProfileContentCourse'
+      discriminator:
+        propertyName: kind
+        mapping:
+          assessment: '#/components/schemas/ElearningLearningProfileAssessmentCourse'
+          content: '#/components/schemas/ElearningLearningProfileContentCourse'
+    ElearningLearningProfileSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - completedCourses
+        - assessmentCourses
+        - contentCourses
+      properties:
+        completedCourses:
+          type: integer
+          minimum: 0
+        assessmentCourses:
+          type: integer
+          minimum: 0
+        contentCourses:
+          type: integer
+          minimum: 0
+    ElearningLearningProfile:
+      type: object
+      additionalProperties: false
+      required:
+        - userId
+        - summary
+        - courses
+        - nextCursor
+      properties:
+        userId:
+          type: string
+          minLength: 1
+        summary:
+          $ref: '#/components/schemas/ElearningLearningProfileSummary'
+        courses:
+          type: array
+          items:
+            $ref: '#/components/schemas/ElearningLearningProfileCourse'
+        nextCursor:
+          oneOf:
+            - type: string
+              pattern: ^[A-Za-z0-9_-]+$
+              minLength: 1
+              maxLength: 512
+            - type: 'null'
     ElearningContentArticleRevisionRequest:
       type: object
       additionalProperties: false
@@ -18496,6 +18624,59 @@ paths:
           $ref: '#/components/responses/ElearningError'
         '404':
           description: User not active in the organization or flags off
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+  /api/elearning/profile:
+    get:
+      operationId: getMyElearningLearningProfile
+      summary: Read the authenticated learner historical archive
+      description: |
+        RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+        The organization and learner are derived only from the authenticated
+        session. The archive is projected from immutable completion evidence
+        and graded attempts; it does not expose answers, grading comments,
+        event digests, request hashes, actor identifiers, or access-basis keys.
+        Historical completed courses remain visible after course withdrawal.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: cursor
+          required: false
+          schema:
+            type: string
+            pattern: ^[A-Za-z0-9_-]+$
+            minLength: 1
+            maxLength: 512
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: Closed learner-owned archive with stable keyset pagination.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningLearningProfile'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: >-
+            ORG_CONTEXT_REQUIRED, inactive membership, or insufficient read
+            permission
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Incentive surface flags off
           $ref: '#/components/responses/ElearningError'
         '503':
           description: unavailable

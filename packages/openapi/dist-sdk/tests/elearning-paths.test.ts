@@ -57,6 +57,8 @@ type CreditAutomaticWalletItem = components['schemas']['ElearningCreditAutomatic
 type CreditManualWalletItem = components['schemas']['ElearningCreditManualWalletItem']
 type CreditWalletItem = components['schemas']['ElearningCreditWalletItem']
 type CreditWallet = components['schemas']['ElearningCreditWallet']
+type LearningProfile = components['schemas']['ElearningLearningProfile']
+type LearningProfileCourse = components['schemas']['ElearningLearningProfileCourse']
 type TitleRow = components['schemas']['ElearningTitleRow']
 type TitlePublishRequest = components['schemas']['ElearningTitlePublishRequest']
 type TitleSnapshot = components['schemas']['ElearningTitleSnapshot']
@@ -634,6 +636,86 @@ describe('elearning V0.1 OpenAPI paths', () => {
         },
       },
     })
+  })
+
+  it('keeps the learner learning profile session-owned, paginated, and structurally closed', () => {
+    expectTypeOf<
+      paths['/api/elearning/profile']['get']['responses'][200]['content']['application/json']
+    >().toEqualTypeOf<LearningProfile>()
+    expectTypeOf<LearningProfile['courses'][number]>().toEqualTypeOf<LearningProfileCourse>()
+
+    const doc = JSON.parse(readFileSync(join(here, '..', '..', 'dist', 'openapi.json'), 'utf8')) as {
+      paths?: Record<string, any>
+      components?: { schemas?: Record<string, JsonSchema> }
+    }
+    const schemas = doc.components?.schemas ?? {}
+    const path = doc.paths?.['/api/elearning/profile']?.get
+    expect(path?.operationId).toBe('getMyElearningLearningProfile')
+    expect(path?.security).toEqual([{ bearerAuth: [] }])
+    expect(path?.requestBody).toBeUndefined()
+    expect(path?.parameters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'cursor', in: 'query', required: false }),
+      expect.objectContaining({ name: 'limit', in: 'query', required: false }),
+    ]))
+    expect(path?.responses?.['200']?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningLearningProfile' })
+
+    expect(schemas.ElearningLearningProfile).toMatchObject({
+      additionalProperties: false,
+      required: ['userId', 'summary', 'courses', 'nextCursor'],
+      properties: {
+        summary: { $ref: '#/components/schemas/ElearningLearningProfileSummary' },
+        courses: {
+          type: 'array',
+          items: { $ref: '#/components/schemas/ElearningLearningProfileCourse' },
+        },
+      },
+    })
+    expect(schemas.ElearningLearningProfileSummary).toMatchObject({
+      additionalProperties: false,
+      required: ['completedCourses', 'assessmentCourses', 'contentCourses'],
+    })
+    expect(schemas.ElearningLearningProfileCourse).toEqual({
+      oneOf: [
+        { $ref: '#/components/schemas/ElearningLearningProfileAssessmentCourse' },
+        { $ref: '#/components/schemas/ElearningLearningProfileContentCourse' },
+      ],
+      discriminator: {
+        propertyName: 'kind',
+        mapping: {
+          assessment: '#/components/schemas/ElearningLearningProfileAssessmentCourse',
+          content: '#/components/schemas/ElearningLearningProfileContentCourse',
+        },
+      },
+    })
+    expect(schemas.ElearningLearningProfileAssessmentCourse).toMatchObject({
+      additionalProperties: false,
+      required: ['courseId', 'courseVersionId', 'title', 'kind', 'completedAt', 'exams'],
+      properties: {
+        kind: { enum: ['assessment'] },
+        exams: {
+          type: 'array',
+          minItems: 1,
+          items: { $ref: '#/components/schemas/ElearningLearningProfileExam' },
+        },
+      },
+    })
+    expect(schemas.ElearningLearningProfileContentCourse).toMatchObject({
+      additionalProperties: false,
+      required: ['courseId', 'courseVersionId', 'title', 'kind', 'completedAt'],
+      properties: { kind: { enum: ['content'] } },
+    })
+    expect(schemas.ElearningLearningProfileExam).toMatchObject({
+      additionalProperties: false,
+      required: ['itemId', 'earnedScore', 'totalScore', 'passedAt'],
+      properties: {
+        earnedScore: { type: 'number', minimum: 0 },
+        totalScore: { type: 'number', minimum: 0 },
+      },
+    })
+    expect(JSON.stringify(schemas.ElearningLearningProfile)).not.toMatch(
+      /answers|paperSnapshot|grading|eventDigest|requestHash|actorId/,
+    )
   })
 
   it('keeps certificate template, issue, and learner DTOs closed without artifact claims', () => {

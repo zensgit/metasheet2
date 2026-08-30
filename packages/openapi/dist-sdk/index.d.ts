@@ -8661,6 +8661,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/profile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the authenticated learner historical archive
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+         *     The organization and learner are derived only from the authenticated
+         *     session. The archive is projected from immutable completion evidence
+         *     and graded attempts; it does not expose answers, grading comments,
+         *     event digests, request hashes, actor identifiers, or access-basis keys.
+         *     Historical completed courses remain visible after course withdrawal.
+         */
+        get: operations["getMyElearningLearningProfile"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/media": {
         parameters: {
             query?: never;
@@ -18402,6 +18427,50 @@ export interface components {
             items: components["schemas"]["ElearningCreditWalletItem"][];
             nextCursor: string | null;
         };
+        ElearningLearningProfileExam: {
+            itemId: components["schemas"]["ElearningUuid"];
+            earnedScore: number;
+            totalScore: number;
+            /** Format: date-time */
+            passedAt: string;
+        };
+        ElearningLearningProfileAssessmentCourse: {
+            courseId: components["schemas"]["ElearningUuid"];
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            title: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "assessment";
+            /** Format: date-time */
+            completedAt: string;
+            exams: components["schemas"]["ElearningLearningProfileExam"][];
+        };
+        ElearningLearningProfileContentCourse: {
+            courseId: components["schemas"]["ElearningUuid"];
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            title: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "content";
+            /** Format: date-time */
+            completedAt: string;
+        };
+        ElearningLearningProfileCourse: components["schemas"]["ElearningLearningProfileAssessmentCourse"] | components["schemas"]["ElearningLearningProfileContentCourse"];
+        ElearningLearningProfileSummary: {
+            completedCourses: number;
+            assessmentCourses: number;
+            contentCourses: number;
+        };
+        ElearningLearningProfile: {
+            userId: string;
+            summary: components["schemas"]["ElearningLearningProfileSummary"];
+            courses: components["schemas"]["ElearningLearningProfileCourse"][];
+            nextCursor: string | null;
+        };
         ElearningContentArticleRevisionRequest: {
             requestId: components["schemas"]["ElearningUuid"];
             /**
@@ -20852,6 +20921,38 @@ export interface operations {
             /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
             403: components["responses"]["ElearningError"];
             /** @description User not active in the organization or flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getMyElearningLearningProfile: {
+        parameters: {
+            query?: {
+                cursor?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Closed learner-owned archive with stable keyset pagination. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningLearningProfile"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, inactive membership, or insufficient read permission */
+            403: components["responses"]["ElearningError"];
+            /** @description Incentive surface flags off */
             404: components["responses"]["ElearningError"];
             /** @description unavailable */
             503: components["responses"]["ElearningError"];
