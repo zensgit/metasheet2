@@ -86,7 +86,13 @@ function globalHistoryFlagsInSource() {
   // E-learning V0.1 flags live in this same operator registry (AGENTS.md: every new env flag).
   // Restrict to *_ENABLED so constant names such as ELEARNING_FLAG_NAMES are not treated as flags.
   const elearning = grepFlagTokens('ELEARNING_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning])].sort()
+  // PLM external-write flags, same rule and same reason as the E-learning family above: AGENTS.md
+  // requires EVERY new env flag to be registered here, and the PLM bulk-import commit relay is an
+  // external write (the owner-approval tier), so its gate must be inspectable by the operator
+  // tooling rather than living only at its call site. Restricted to *_ENABLED for the same reason
+  // (constant names such as PLM_BULK_IMPORT_COMMIT_FLAG are not themselves flags).
+  const plm = grepFlagTokens('PLM_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
+  return [...new Set([...tokens, ...elearning, ...plm])].sort()
 }
 
 test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src', () => {

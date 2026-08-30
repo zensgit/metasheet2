@@ -305,6 +305,7 @@ import { PluginRuntimeSecurityService } from './security/plugin-runtime-security
 import workflowRouter, { shutdownWorkflowEngine } from './routes/workflow'
 import workflowDesignerRouter, { shutdownWorkflowDesignerEngine } from './routes/workflow-designer'
 import plmWorkbenchRouter from './routes/plm-workbench'
+import plmBulkImportRouter from './routes/plm-bulk-import'
 import plmEmbedRouter from './routes/plm-embed'
 import plmEmbedDiscussionWriteRouter from './routes/plm-embed-discussion'
 import plmEmbedDiscussionReadRouter from './routes/plm-embed-discussion-read'
@@ -1563,6 +1564,9 @@ export class MetaSheetServer {
     const plmEnabled = isPlmEnabled(process.env.PRODUCT_MODE, process.env.ENABLE_PLM)
     if (plmEnabled) {
       this.app.use(plmWorkbenchRouter)
+      // Bulk item-property maintenance grid. Mounted under the same /api/plm-workbench
+      // prefix, so the `plmEnabled` false branch below already disables it.
+      this.app.use(plmBulkImportRouter)
       this.app.use(plmEmbedRouter())
       this.app.use(plmEmbedDiscussionWriteRouter())
       this.app.use(plmEmbedDiscussionReadRouter())

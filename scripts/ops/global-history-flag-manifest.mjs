@@ -513,6 +513,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
       'E-learning media capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
     source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
   },
+  {
+    key: 'PLM_BULK_IMPORT_COMMIT_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'Gates the WRITE half of the PLM bulk item-property maintenance grid (POST .../bulk-import/commit relay). Default OFF; exact literal \'true\' only — AGENTS.md red line "一切外部写默认 OFF". HIGH danger: the Yuantus commit path REPLACES item.properties wholesale on every matched row and has no freshness check, so an enabled deployment can lose concurrent PLM-side edits. The read/validate half (dry-run) is deliberately NOT gated: it never writes, and gating it would hide the validation loop that makes the write half safe. Note this flag is NOT an authorization gate — the provider\'s require_admin_user + is_entitled("bulk_import_commit") remain authoritative; this only decides whether the deployment exposes the relay at all.',
+    source: 'packages/core-backend/src/routes/plm-bulk-import.ts (PLM_BULK_IMPORT_COMMIT_FLAG, isCommitEnabled)',
+  },
 ])
 
 /** Flat lookup by key, built once. */
