@@ -292,54 +292,37 @@ describe('PLM bulk-import consumer relay routes', () => {
     })
   })
 
-  describe('N3-A — match_property uniqueness precondition', () => {
-    it('refuses update mode when the match value is duplicated in the grid', async () => {
+  describe('N3-A — update mode is refused; the grid is create-only', () => {
+    // §6 requires a match_property "whose uniqueness is established for that ItemType in that
+    // tenant". This consumer can establish that by none of the three open routes -- PLM declares
+    // no uniqueness on the metadata wire, §7 forbids synthesizing it by probing existence, and
+    // N3-B is the owner's call -- so N3-A's own fallback clause applies: create-only, update
+    // mode disabled with a visible reason. These tests pin the REFUSAL, not a duplicate scan.
+    const UPDATE_MODE_BODY = {
+      item_type_id: 'Part',
+      match_property: 'item_number',
+      // Deliberately UNIQUE within the grid. The old guard passed this, which was the defect:
+      // one P-001 row here says nothing about a tenant holding two items numbered P-001.
+      rows: [{ item_number: 'P-001', name: 'A' }, { item_number: 'P-002', name: 'B' }],
+    }
+
+    it('refuses a match_property that is unique WITHIN the grid — the grid is not the population', async () => {
       const adapter = makeAdapter()
       dsMocks.getDataSource.mockReturnValue(adapter)
       const res = await request(pinned.url())
         .post(DRY_RUN_URL)
         .set('X-PLM-Authorization', CALLER)
-        .send({
-          item_type_id: 'Part',
-          match_property: 'item_number',
-          rows: [
-            { item_number: 'P-001', name: 'A' },
-            { item_number: 'P-001', name: 'B' },
-          ],
-        })
+        .send(UPDATE_MODE_BODY)
 
       expect(res.status).toBe(409)
-      expect(res.body.reason).toBe('match-property-not-unique')
-      expect(res.body.duplicate_values).toEqual(['P-001'])
-      // Nothing reached the provider: an arbitrary one of the two would have been written.
+      expect(res.body.reason).toBe('match-property-uniqueness-unestablished')
+      expect(res.body.create_only).toBe(true)
+      expect(res.body.match_property).toBe('item_number')
+      // Nothing reached the provider: PLM would have written to an arbitrary matching item.
       expect(adapter.bulkImportDryRun).not.toHaveBeenCalled()
     })
 
-    it('allows update mode when every match value is unique', async () => {
-      const adapter = makeAdapter()
-      dsMocks.getDataSource.mockReturnValue(adapter)
-      const res = await request(pinned.url())
-        .post(DRY_RUN_URL)
-        .set('X-PLM-Authorization', CALLER)
-        .send({
-          item_type_id: 'Part',
-          match_property: 'item_number',
-          rows: [{ item_number: 'P-001', name: 'A' }, { item_number: 'P-002', name: 'B' }],
-        })
-
-      expect(res.status).toBe(200)
-      expect(adapter.bulkImportDryRun.mock.calls[0][1].matchProperty).toBe('item_number')
-    })
-
-    it('create-only mode omits match_property entirely', async () => {
-      const adapter = makeAdapter()
-      dsMocks.getDataSource.mockReturnValue(adapter)
-      await request(pinned.url()).post(DRY_RUN_URL).set('X-PLM-Authorization', CALLER).send(ROWS_BODY)
-
-      expect(adapter.bulkImportDryRun.mock.calls[0][1].matchProperty).toBeUndefined()
-    })
-
-    it('the N3 guard also runs on commit, not only on dry-run', async () => {
+    it('refuses on commit too, before the provider is touched', async () => {
       process.env.PLM_BULK_IMPORT_COMMIT_ENABLED = 'true'
       const adapter = makeAdapter()
       dsMocks.getDataSource.mockReturnValue(adapter)
@@ -347,15 +330,58 @@ describe('PLM bulk-import consumer relay routes', () => {
         .post(COMMIT_URL)
         .set('X-PLM-Authorization', CALLER)
         .set('Idempotency-Key', 'k-1')
-        .send({
-          item_type_id: 'Part',
-          match_property: 'item_number',
-          rows: [{ item_number: 'D' }, { item_number: 'D' }],
-        })
+        .send(UPDATE_MODE_BODY)
 
       expect(res.status).toBe(409)
-      expect(res.body.reason).toBe('match-property-not-unique')
+      expect(res.body.reason).toBe('match-property-uniqueness-unestablished')
       expect(adapter.bulkImportCommit).not.toHaveBeenCalled()
+      expect(adapter.bulkImportDryRun).not.toHaveBeenCalled()
+    })
+
+    it('NEVER silently strips match_property — refusing is the whole point', async () => {
+      // Stripping would turn every intended update into a CREATE: duplicate items instead of a
+      // wrong-row write. Same class of silent damage, opposite direction. So the request must
+      // fail rather than succeed in a different mode than the caller asked for.
+      const adapter = makeAdapter()
+      dsMocks.getDataSource.mockReturnValue(adapter)
+      const res = await request(pinned.url())
+        .post(DRY_RUN_URL)
+        .set('X-PLM-Authorization', CALLER)
+        .send(UPDATE_MODE_BODY)
+
+      expect(res.status).not.toBe(200)
+      expect(adapter.bulkImportDryRun).not.toHaveBeenCalled()
+    })
+
+    it('refuses BEFORE the advisory capability call, so the verdict cannot depend on it', async () => {
+      const adapter = makeAdapter()
+      dsMocks.getDataSource.mockReturnValue(adapter)
+      await request(pinned.url()).post(DRY_RUN_URL).set('X-PLM-Authorization', CALLER).send(UPDATE_MODE_BODY)
+
+      expect(adapter.getIntegrationCapabilities).not.toHaveBeenCalled()
+    })
+
+    it('create-only mode is accepted and omits match_property entirely', async () => {
+      const adapter = makeAdapter()
+      dsMocks.getDataSource.mockReturnValue(adapter)
+      const res = await request(pinned.url()).post(DRY_RUN_URL).set('X-PLM-Authorization', CALLER).send(ROWS_BODY)
+
+      expect(res.status).toBe(200)
+      expect(adapter.bulkImportDryRun.mock.calls[0][1].matchProperty).toBeUndefined()
+    })
+
+    it('the schema route advertises NO match candidates, with a machine-readable reason', async () => {
+      // The panel builds its match-property picker from this list. An earlier revision returned
+      // every declared column, which advertised an update mode whose precondition was unchecked.
+      dsMocks.getDataSource.mockReturnValue(makeAdapter())
+      const res = await request(pinned.url()).get(SCHEMA_URL).set('X-PLM-Authorization', CALLER)
+
+      expect(res.status).toBe(200)
+      expect(res.body.match_property_candidates).toEqual([])
+      expect(res.body.match_property_reason).toBe('match-property-uniqueness-unestablished')
+      // ...while the DECLARED column set stays complete: N1 and N3-A pull in opposite directions
+      // and must not be conflated.
+      expect(res.body.declared_columns).toEqual(['item_number', 'name', 'material', 'cost_center'])
     })
   })
 

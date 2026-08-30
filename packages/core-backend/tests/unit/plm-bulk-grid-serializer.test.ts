@@ -13,7 +13,6 @@ import {
   buildBulkGridRecords,
   declaredColumnNames,
   findDuplicateMatchValues,
-  indexRowErrors,
   isValidIdempotencyKey,
   normalizeBulkImportReport,
   parseCsvForVerification,
@@ -235,34 +234,17 @@ describe('normalizeBulkImportReport (§3: branch on `ready`, never on the status
   })
 })
 
-describe('indexRowErrors (the red gutter)', () => {
-  it('buckets multiple errors on the same row', () => {
-    const index = indexRowErrors({
-      ready: false,
-      row_errors: [
-        { row_number: 2, property_name: 'name', error_code: 'MISSING_REQUIRED_VALUE', message: 'required' },
-        { row_number: 2, property_name: 'material', error_code: 'LENGTH_EXCEEDED', message: 'too long' },
-        { row_number: 5, property_name: 'name', error_code: 'TYPE_COERCION_FAILED', message: 'bad type' },
-      ],
-    })
-    expect(index.get(2)).toHaveLength(2)
-    expect(index.get(5)).toHaveLength(1)
-    expect(index.has(3)).toBe(false)
-  })
-
-  it('is empty for a ready report and tolerates a malformed entry', () => {
-    expect(indexRowErrors({ ready: true, row_errors: [] }).size).toBe(0)
-    expect(indexRowErrors(undefined).size).toBe(0)
-    const index = indexRowErrors({
-      ready: false,
-      row_errors: [{ row_number: Number.NaN as number, error_code: 'X', message: '' }],
-    })
-    expect(index.size).toBe(0)
-  })
-})
-
-describe('findDuplicateMatchValues (N3-A pre-flight)', () => {
-  it('reports a duplicated match value — update mode must then be refused', () => {
+/**
+ * PARKED for the owner's N3 disposition (§12.2) — this helper has NO live caller.
+ *
+ * It is tested here so the behaviour is pinned for whoever picks up N3, and so the reason it is
+ * unwired is recorded next to it: an intra-grid scan checks a population of one grid, while §6
+ * asks about the ItemType in the TENANT. Update mode is refused outright in
+ * `src/routes/plm-bulk-import.ts` instead; the assertion below is deliberately about the
+ * helper's semantics, and asserts nothing about N3-A being satisfied.
+ */
+describe('findDuplicateMatchValues (parked — the intra-grid half of an eventual N3 check)', () => {
+  it('reports a duplicated match value within the submitted rows', () => {
     const rows: PlmBulkGridRow[] = [
       { item_number: 'P-001' },
       { item_number: 'P-002' },
@@ -272,6 +254,9 @@ describe('findDuplicateMatchValues (N3-A pre-flight)', () => {
   })
 
   it('is empty when every match value is unique, and ignores blank values', () => {
+    // The load-bearing caveat: "empty" here means "no duplicate IN THIS GRID". It does NOT mean
+    // the value is unique in the tenant, which is what N3-A actually requires -- which is why
+    // this result is not, and must not become, a licence to enable update mode.
     expect(findDuplicateMatchValues([{ item_number: 'A' }, { item_number: 'B' }], 'item_number')).toEqual([])
     expect(findDuplicateMatchValues([{ item_number: '' }, { item_number: null }], 'item_number')).toEqual([])
   })

@@ -19,8 +19,13 @@
  *
  * ## Gate order (mirrors plm-workbench.ts)
  *
- *   adapter-type guard → capabilities pre-check (advisory) → operator flag (commit only)
- *   → caller credential → Idempotency-Key (commit only) → N3-A pre-flight → provider
+ *   adapter-type guard → operator flag (commit only) → caller credential
+ *   → Idempotency-Key (commit only) → request shape → N3-A update-mode refusal
+ *   → capabilities pre-check (advisory) → provider
+ *
+ * The N3-A refusal sits ahead of the capabilities call on purpose: it is a decision about the
+ * REQUEST, not about the deployment, so it must not depend on a provider round trip. Its 409
+ * reason is distinct from every capability reason, so neither gate can mask the other's tests.
  *
  * ## What the capability manifest is NOT
  *
@@ -53,7 +58,6 @@ import { isFeatureAvailable } from '../data-adapters/PLMAdapter'
 import type { QueryResult } from '../data-adapters/BaseAdapter'
 import {
   declaredColumnNames,
-  findDuplicateMatchValues,
   normalizeBulkImportReport,
   serializeBulkGridToCsv,
   isValidIdempotencyKey,
@@ -282,32 +286,64 @@ async function buildSubmission(
 }
 
 /**
- * N3-A pre-flight (§6). The provider's match lookup is a bare `.first()` with no `is_current`
- * and no state filter, so a duplicated match value writes to an ARBITRARY row and a
- * superseded generation is a fully eligible target — neither raises anything.
+ * N3-A (§6) — UPDATE MODE IS REFUSED. This consumer ships **create-only**.
  *
- * This consumer implements arm A: if uniqueness cannot be established across the submitted
- * rows, update mode is REFUSED and the caller must fall back to create-only. It is a local
- * scan over the rows already in hand — never a per-row dry-run probe loop, which would be
- * §7's forbidden batch existence probing.
+ * ## Why, precisely
+ *
+ * The provider's update-target lookup is a bare `.first()` with no `is_current` and no state
+ * filter, so a `match_property` value shared by two items writes to an ARBITRARY one, and a
+ * superseded/Released generation is a fully eligible target. Neither hazard raises anything:
+ * `would_update` reads 1 and the commit reports success.
+ *
+ * N3-A therefore requires a `match_property` "whose uniqueness is established **for that
+ * ItemType in that tenant**". This consumer **cannot establish that**, by any of the three
+ * routes the taskbook leaves open:
+ *
+ *  - **No provider declaration to read.** `GET /api/v1/aml/metadata/{itemType}` returns
+ *    `name/label/type/required/length/default` and nothing else — there is no uniqueness flag
+ *    on the wire, and none on the provider's Property model to expose
+ *    (yuantus `src/yuantus/meta_engine/web/router.py`, `get_metadata`).
+ *  - **No tenant-population scan available.** Checking whether the tenant already holds two
+ *    items sharing a value means probing existence for every match value in the grid. §7
+ *    accepts the single-probe dry-run oracle but explicitly refuses to let a consumer amplify
+ *    it: "a bulk existence check ... turns a per-probe oracle into an enumeration tool. Out of
+ *    scope; do not build it." Doing it through a different read route is the same feature.
+ *  - **N3-B is not authorized.** §6/§12.2 reserve the `is_current` prefix filter to the owner,
+ *    and §6 says in terms: "Do not build the update mode on the assumption that N3-B will
+ *    land."
+ *
+ * So the answer is N3-A's own fallback clause, applied verbatim: "the grid runs **create-only**
+ * (no `match_property`), and update mode is disabled with a visible reason."
+ *
+ * ## Why REFUSE rather than silently strip
+ *
+ * Dropping `match_property` from a submission that asked for update mode turns every intended
+ * update into a **create** — duplicate items instead of a wrong-row write. That is the same
+ * class of silent damage, merely pointed the other way. A caller that asks to update is told
+ * no, with a machine-readable reason, and nothing reaches the provider.
+ *
+ * This is a disposition, not a finished feature: when the owner rules on N3 (§12.2) this is the
+ * single function that changes. `findDuplicateMatchValues` in the serializer is the parked
+ * intra-grid half of the eventual check and has no live caller until then.
  */
-function n3Preflight(
-  rows: PlmBulkGridRow[],
+export const MATCH_PROPERTY_REFUSAL_REASON = 'match-property-uniqueness-unestablished'
+
+function n3RefuseUpdateMode(
   matchProperty: string | undefined,
 ): { status: number; body: Record<string, unknown> } | null {
   if (!matchProperty) return null
-  const duplicates = findDuplicateMatchValues(rows, matchProperty)
-  if (duplicates.length === 0) return null
   return {
     status: 409,
     body: {
       error:
-        `match_property "${matchProperty}" is not unique across the grid (${duplicates.length} duplicated value(s)). `
-        + 'The provider would write to an arbitrary one of the matching items. '
-        + 'Resubmit in create-only mode, or make the match value unique.',
-      reason: 'match-property-not-unique',
-      duplicate_values: duplicates.slice(0, 20),
-      duplicate_count: duplicates.length,
+        `Update mode is disabled: the uniqueness of match_property "${matchProperty}" cannot be `
+        + 'established for this ItemType in this tenant, and PLM would write to an arbitrary one '
+        + 'of the matching items (a superseded generation included). Resubmit in create-only '
+        + 'mode by omitting match_property.',
+      reason: MATCH_PROPERTY_REFUSAL_REASON,
+      match_property: matchProperty,
+      // Deliberately explicit: the caller must not read this as a transient failure to retry.
+      create_only: true,
     },
   }
 }
@@ -362,7 +398,13 @@ router.get(
       // a submission -- and structurally cannot, since it does not serialize.
       properties,
       declared_columns: declaredColumnNames(properties),
-      // Advisory: a match_property candidate must be unique. The UI surfaces this.
+      // N3-A: EMPTY, deliberately -- not "we forgot to fill it in". No declared property's
+      // uniqueness can be established for this ItemType in this tenant from the consumer side
+      // (see n3RefuseUpdateMode), so the grid offers create-only and nothing else. Offering
+      // every declared column here, as an earlier revision did, advertised an update mode whose
+      // precondition was never checked against the tenant's items at all.
+      match_property_candidates: [],
+      match_property_reason: MATCH_PROPERTY_REFUSAL_REASON,
       commit_enabled: isCommitEnabled(),
     })
   },
@@ -409,11 +451,14 @@ router.post(
       ? body.match_property.trim()
       : undefined
 
+    // N3-A: update mode is refused outright, on the READ half too. Refusing here as well as on
+    // commit is what keeps the maker loop honest -- an engineer must not be able to iterate a
+    // grid to `ready: true` in a mode the checker half will then reject.
+    const n3 = n3RefuseUpdateMode(matchProperty)
+    if (n3) return res.status(n3.status).json({ ...n3.body, data_source_id: dataSourceId })
+
     const precheck = await precheckCapability(adapter, dataSourceId, 'bulk_import')
     if (precheck) return res.status(precheck.status).json(precheck.body)
-
-    const n3 = n3Preflight(rows, matchProperty)
-    if (n3) return res.status(n3.status).json({ ...n3.body, data_source_id: dataSourceId })
 
     const built = await buildSubmission(adapter, callerToken, itemTypeId, rows, matchProperty)
     if (built.failure) {
@@ -505,11 +550,11 @@ router.post(
       ? body.match_property.trim()
       : undefined
 
+    const n3 = n3RefuseUpdateMode(matchProperty)
+    if (n3) return res.status(n3.status).json({ ...n3.body, data_source_id: dataSourceId })
+
     const precheck = await precheckCapability(adapter, dataSourceId, 'bulk_import_commit')
     if (precheck) return res.status(precheck.status).json(precheck.body)
-
-    const n3 = n3Preflight(rows, matchProperty)
-    if (n3) return res.status(n3.status).json({ ...n3.body, data_source_id: dataSourceId })
 
     const built = await buildSubmission(adapter, callerToken, itemTypeId, rows, matchProperty)
     if (built.failure) {

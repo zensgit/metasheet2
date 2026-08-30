@@ -265,26 +265,6 @@ export function assertSerializedGridRoundTripsAllDeclaredColumns(
 }
 
 /**
- * Index `row_errors` by `row_number` so the grid can paint a marker on the exact cell.
- * Unrecognized `error_code` values are preserved verbatim — the set is open (§3.1) and an
- * unknown code must be rendered, never dropped.
- */
-export function indexRowErrors(report: PlmBulkImportReport | null | undefined): Map<number, PlmBulkImportRowError[]> {
-  const index = new Map<number, PlmBulkImportRowError[]>()
-  const entries = Array.isArray(report?.row_errors) ? report!.row_errors : []
-  for (const entry of entries) {
-    // `Number.isFinite`, NOT `typeof === 'number'`: NaN is a number and would otherwise
-    // become a gutter bucket keyed by NaN, which no row can ever match — the error would
-    // silently vanish from the UI instead of being rendered.
-    if (!entry || !Number.isFinite(entry.row_number)) continue
-    const bucket = index.get(entry.row_number)
-    if (bucket) bucket.push(entry)
-    else index.set(entry.row_number, [entry])
-  }
-  return index
-}
-
-/**
  * Normalize a provider report. `ready` is the ONLY success discriminator (§3): a total
  * rejection is HTTP **200** with `ready: false` and writes nothing, so any caller that
  * branches on the status code mistakes a total rejection for a success. Absent/non-boolean
@@ -330,18 +310,19 @@ export function normalizeBulkImportReport(payload: unknown): PlmBulkImportReport
 }
 
 /**
- * N3-A pre-flight (taskbook §6, and the arm this consumer implements).
+ * PARKED — no live caller. Kept for the owner's N3 disposition (§12.2), not used today.
  *
- * The provider's update-target lookup is a bare `.first()` with NO `is_current` and NO state
- * filter, so a duplicated match value writes to an ARBITRARY row, and a superseded/Released
- * generation is a fully eligible target. Neither hazard raises anything.
+ * This scans the grid's OWN loaded rows for duplicate match values. That is a real check, but
+ * it is **not** the check N3-A asks for: §6 requires uniqueness "for that `ItemType` in that
+ * tenant", and a grid holding a single `P-100` row says nothing about a tenant that holds two
+ * items numbered `P-100`. Wiring this in as though it discharged N3-A is precisely the mistake
+ * to avoid — it would look like a uniqueness guarantee while checking a population of one.
  *
- * This scans the grid's OWN loaded rows for duplicate match values. It is deliberately a
- * local scan over rows already fetched for the grid — NOT a per-row `/dry-run` probe loop,
- * which would be §7's forbidden batch existence probing.
- *
- * Returns the duplicated values. Non-empty ⇒ the caller MUST disable update mode and fall
- * back to create-only with a visible reason.
+ * The consumer therefore ships **create-only** and refuses `match_property` outright; see
+ * `n3RefuseUpdateMode` in `src/routes/plm-bulk-import.ts` for why none of the three routes to
+ * establishing uniqueness is open from here. When the owner rules on N3 this becomes one half
+ * of the eventual precondition (the intra-grid half); the tenant-population half has to come
+ * from the provider, since §7 forbids the consumer synthesizing it by probing.
  */
 export function findDuplicateMatchValues(
   rows: readonly PlmBulkGridRow[],
