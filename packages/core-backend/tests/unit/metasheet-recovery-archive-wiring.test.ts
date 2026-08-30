@@ -169,15 +169,33 @@ describe('MetaSheetServer recovery archive wiring', () => {
 
   it('closes the database pool after the restore worker drains', async () => {
     expect(pgPool).not.toBeNull()
-    const poolEnd = vi.spyOn(pgPool!, 'end').mockResolvedValue(undefined)
-    const stopWorker = vi.fn().mockResolvedValue(undefined)
+    const order: string[] = []
+    const poolEnd = vi.spyOn(pgPool!, 'end').mockImplementation(async () => {
+      order.push('pool')
+    })
+    const stopMediaWorkers = vi.fn(async () => {
+      order.push('media')
+    })
+    const stopWorker = vi.fn(async () => {
+      order.push('recovery')
+    })
     const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
     ;(server as unknown as {
       recoveryArchiveApplication: { stopWorker(): Promise<void> }
+      stopElearningMediaWorkers?: () => Promise<void>
     }).recoveryArchiveApplication = { stopWorker }
+    ;(server as unknown as {
+      stopElearningMediaWorkers?: () => Promise<void>
+    }).stopElearningMediaWorkers = stopMediaWorkers
 
-    await server.stop()
+    const firstStop = server.stop()
+    await firstStop
+    const completedReplay = server.stop('SIGINT')
+    expect(completedReplay).toBe(firstStop)
+    await completedReplay
 
+    expect(order).toEqual(['media', 'recovery', 'pool'])
+    expect(stopMediaWorkers).toHaveBeenCalledTimes(1)
     expect(stopWorker).toHaveBeenCalledTimes(1)
     expect(poolEnd).toHaveBeenCalledTimes(1)
   })
