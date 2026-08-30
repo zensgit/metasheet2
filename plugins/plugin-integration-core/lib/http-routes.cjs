@@ -70,7 +70,14 @@ const ROUTES = [
   // B-stage confirmation-decision LEDGER, first cut (duplicate_expanded_key x keep_multiple_rows
   // only). Reconcile repeats the readonly table-action plan SERVER-SIDE and persists values-free
   // decision metadata into the one managed supporting ledger table — no plan row is applied and no
-  // request-supplied plan/revision is accepted. Admin-gated.
+  // request-supplied plan/revision is accepted.
+  //
+  // O2 / R-11 kept this ADMIN-ONLY while the queue and confirm surfaces moved to the `stockprep:*`
+  // operator vocabulary. It is the one confirmation-decision route that reaches OUT: it re-expands
+  // the customer's BOM off the external source and can burn a one-shot armed B2a claim (see the W-2
+  // fence in the handler below). That is an owner-level act — deciding to spend a claim and touch a
+  // customer system — not queue work, so it is not in the operator vocabulary and the workbench
+  // renders no control for it at any tier.
   ['POST', '/api/integration/table-actions/:actionId/confirmation-decisions/reconcile', 'tableActionConfirmationDecisionsReconcile'],
   ['GET', '/api/integration/stock-preparation/target/readiness', 'stockPreparationTargetReadiness'],
   ['POST', '/api/integration/stock-preparation/target/ensure', 'stockPreparationTargetEnsure'],
@@ -130,16 +137,20 @@ const ROUTES = [
   ['GET', '/api/integration/stock-preparation/prep-lines', 'stockPreparationPrepLineList'],
   // #3751 MVP W5b (#3890): values-free audit trail over the stock-prep write surface.
   ['GET', '/api/integration/stock-preparation/audit', 'stockPreparationAuditList'],
-  // B-stage confirmation-decision LEDGER surfaces (first cut). All admin-gated. Static literal
-  // segments precede the bare collection GET so they can never be mis-read as ids. The GET list is
-  // the AUTHORITATIVE values-free exception queue of the takeover line (converged ruling);
-  // canonical-sheet filter views are auxiliary only.
+  // B-stage confirmation-decision LEDGER surfaces. Static literal segments precede the bare
+  // collection GET so they can never be mis-read as ids. The GET list is the AUTHORITATIVE
+  // values-free exception queue of the takeover line (converged ruling); canonical-sheet filter
+  // views are auxiliary only.
+  //
+  // O2 / R-11 gating (see hasStockPrepPermission): readiness + list are `stockprep:read`;
+  // value-entry + confirm are `stockprep:confirm`; ensure stays admin (it provisions the table).
   ['GET', '/api/integration/stock-preparation/confirmation-decisions/readiness', 'stockPreparationConfirmationDecisionsReadiness'],
   ['POST', '/api/integration/stock-preparation/confirmation-decisions/ensure', 'stockPreparationConfirmationDecisionsEnsure'],
   ['POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', 'stockPreparationConfirmationDecisionsConfirm'],
-  // O1' value unlock: the ONE surface where entered value CONTENTS may cross — a per-decision,
-  // admin-gated operator read for the /stock-prep workbench detail pane. The queue (GET list) and
-  // every evidence/log payload stay values-free (presence booleans only).
+  // O1' value unlock: the ONE surface where entered value CONTENTS may cross — a per-decision
+  // operator read for the /stock-prep workbench detail pane, gated on CONFIRM (the tier that
+  // authored the contents), never on READ. The queue (GET list) and every evidence/log payload stay
+  // values-free (presence booleans only).
   ['GET', '/api/integration/stock-preparation/confirmation-decisions/value-entry', 'stockPreparationConfirmationDecisionsValueEntry'],
   ['GET', '/api/integration/stock-preparation/confirmation-decisions', 'stockPreparationConfirmationDecisionsList'],
   // CUSTOMER PACK entry point — the executable surface for the config pack line. Admin-gated; the
@@ -611,6 +622,64 @@ function hasPermission(user, action) {
 function isAdmin(user) {
   const permissions = listUserPermissions(user)
   return permissions.includes('role:admin') || permissions.includes('integration:admin')
+}
+
+// ── O2 / R-11: the /stock-prep confirmation-queue workbench vocabulary ────────────────────────────
+//
+// The O1' ruling (docs/development/takeover-beiliao-20260821/o1-ruling-20260829.md, 附:同日第二项裁决)
+// adopted `/stock-prep` as the confirmation-queue workbench and made O2's object exactly that page.
+// Until now every confirmation-decision route was `requireAccess(req, 'admin')`, while the page's
+// route guard admitted an `integration:write` holder — the textbook R-11 violation: the surface looks
+// clickable and 403s on click. These two codes are the dedicated operator vocabulary that closes it,
+// so a CUSTOMER operator can work the queue without holding integration admin over the whole plugin.
+//
+// The two codes, and NOTHING else, are minted here (the closure is asserted by the permission-matrix
+// suite). They follow the repo's `resource:action` convention exactly — the same shape as
+// `attendance:approve` / `elearning:grade`, and the shape `buildPluginPermissionCode` produces.
+const STOCK_PREP_READ_PERMISSION = 'stockprep:read'
+const STOCK_PREP_CONFIRM_PERMISSION = 'stockprep:confirm'
+const STOCK_PREP_PERMISSIONS = Object.freeze([STOCK_PREP_READ_PERMISSION, STOCK_PREP_CONFIRM_PERMISSION])
+
+// READ is the ADMISSION TICKET for the whole workbench, and CONFIRM is strictly additive on top of
+// it — a confirm grant WITHOUT a read grant authorizes nothing.
+//
+// That is a deliberate alignment choice, not a convenience. The web route guard
+// (`isRoutePermitted`, apps/web/src/router/routeAccess.ts) is an all-of over `meta.permissions`, and
+// `/stock-prep` declares exactly `['stockprep:read']`. So a confirm-only principal can never reach
+// the page. If the server nonetheless honored its confirm grant, that authority would be
+// PERMITTED-BUT-HIDDEN — the second half of R-11, and the half that is easy to miss because nothing
+// 403s. Requiring read here makes the server's answer and the router's answer the same answer for
+// every principal, in both directions.
+//
+// Admin keeps everything, exactly as `hasPermission` above grants it: `role:admin` and
+// `integration:admin` short-circuit before any stock-prep code is consulted, so this vocabulary can
+// only ADD reach — it can never subtract an admin's.
+// The code is matched EXHAUSTIVELY against the vocabulary and anything else is refused, rather than
+// treating "not the read code" as "therefore the confirm code". The two are equivalent today, since
+// the only call sites pass these two constants — but the fall-through version would answer TRUE for
+// an unrecognised code held up to a read+confirm principal, and a gate whose behavior on an input
+// nobody meant to pass is "allow" is one refactor away from being a hole.
+function hasStockPrepPermission(user, code) {
+  const permissions = listUserPermissions(user)
+  if (permissions.includes('role:admin') || permissions.includes('integration:admin')) return true
+  // READ is the admission ticket: without it nothing in this vocabulary authorizes anything.
+  if (!permissions.includes(STOCK_PREP_READ_PERMISSION)) return false
+  if (code === STOCK_PREP_READ_PERMISSION) return true
+  if (code === STOCK_PREP_CONFIRM_PERMISSION) return permissions.includes(STOCK_PREP_CONFIRM_PERMISSION)
+  return false
+}
+
+// Fail-closed twin of `requireAccess`: no user at all is 401, and anyone without an explicit grant
+// is 403.
+function requireStockPrepAccess(req, code) {
+  const user = getUser(req)
+  if (!user) {
+    throw new HttpRouteError(401, 'UNAUTHENTICATED', 'Authentication required')
+  }
+  if (!hasStockPrepPermission(user, code)) {
+    throw new HttpRouteError(403, 'FORBIDDEN', 'Insufficient stock-preparation workbench permissions')
+  }
+  return user
 }
 
 function isTenantlessPlatformAdmin(user) {
@@ -5855,11 +5924,21 @@ function createHandlers(services, options = {}) {
       return sendOk(res, result)
     },
 
-    // B-stage confirmation-decision LEDGER surfaces (first cut) — all admin-gated; the staging
-    // project is auth-derived and never request-steered on the write routes.
+    // B-stage confirmation-decision LEDGER surfaces. O2 / R-11 re-gated these onto the dedicated
+    // `stockprep:*` workbench vocabulary (see hasStockPrepPermission above); the staging project
+    // stays auth-derived and is never request-steered on the write routes.
+    //
+    // The `permission: 'admin'` argument threaded into the ledger module below is a DIFFERENT axis
+    // and is deliberately unchanged: `assertAdminPermission` in
+    // stock-preparation-confirmation-decisions.cjs is the internal multitable capability the SERVER
+    // acts under when it touches the managed ledger table. RBAC decides who may ask; that literal
+    // decides what the server is allowed to do once it has decided to answer. Lowering it would hand
+    // the operator the kernel capability, which is not what any of this is for.
 
+    // Readiness is a metadata-only inspection of the ledger target — the queue pane's "is the
+    // workbench provisioned" read. Operator READ.
     async stockPreparationConfirmationDecisionsReadiness(req, res) {
-      requireAccess(req, 'admin')
+      requireStockPrepAccess(req, STOCK_PREP_READ_PERMISSION)
       const input = normalizeStockPreparationConfirmBody(
         requestQuery(req),
         VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_READINESS_QUERY_KEYS,
@@ -5874,6 +5953,8 @@ function createHandlers(services, options = {}) {
       return sendOk(res, result)
     },
 
+    // PROVISIONING, not queue work: it CREATES the managed ledger table. Stays admin — an operator
+    // works the queue, it does not stand up the workbench. No FE control renders it for anyone.
     async stockPreparationConfirmationDecisionsEnsure(req, res) {
       requireAccess(req, 'admin')
       normalizeStockPreparationConfirmBody(
@@ -5892,8 +5973,12 @@ function createHandlers(services, options = {}) {
 
     // THE authoritative exception queue (converged ruling): pending decisions with counts, ids,
     // hashes and status enums — NEVER a source cell value. Canonical filter views stay auxiliary.
+    // This IS the operator's workbench, so it is the operator READ surface. Safe to widen precisely
+    // because the projection is values-free: what a READ-tier customer operator can see here is
+    // exactly what the O1' ruling already allows into evidence (counts, fingerprints, status, column
+    // ids). The value CONTENTS live behind the confirm-tier value-entry read below.
     async stockPreparationConfirmationDecisionsList(req, res) {
-      requireAccess(req, 'admin')
+      requireStockPrepAccess(req, STOCK_PREP_READ_PERMISSION)
       const input = normalizeStockPreparationConfirmBody(
         requestQuery(req),
         VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_LIST_QUERY_KEYS,
@@ -5917,10 +6002,30 @@ function createHandlers(services, options = {}) {
 
     // O1' value unlock: the dedicated per-decision operator read — the ONLY surface where entered
     // resolvedValue/resolvedAuxValue/notes CONTENTS cross (the queue and all evidence stay
-    // values-free). Admin-gated read; the module refuses a decisionId that does not resolve to
-    // exactly one ledger row.
+    // values-free). The module refuses a decisionId that does not resolve to exactly one ledger row.
+    //
+    // O2 DELIBERATION — this is the one surface where the choice was genuinely open, so the reasoning
+    // is recorded rather than the outcome alone. It is gated on CONFIRM, not READ.
+    //
+    // The case AGAINST widening it at all: the O1' ruling re-scoped the values-free evidence surface
+    // the moment the ledger became a value ledger — "值列内容不得进入任何证据/日志/报告,证据只允许计数、
+    // 指纹、状态与列 id". A values-free boundary that a whole permission tier can step around is not a
+    // boundary. That argument is why READ does NOT reach here: a read-tier queue watcher — a
+    // supervisor, a dashboard, anyone provisioned to see the backlog — stays values-free, and the
+    // ruling's evidence scope survives intact for every principal who is not deciding.
+    //
+    // The case FOR: the ruling re-scoped EVIDENCE, not the operator's own work surface. The confirm
+    // route below accepts resolvedValue/resolvedAuxValue/notes from this same tier, so a CONFIRM
+    // holder is by construction the principal who authors these contents. Refusing to show an
+    // operator the value they just entered would not protect anything — it would only mean they
+    // cannot verify their own entry before or after committing it, which is how wrong values get
+    // committed twice. Confirm-tier read of confirm-tier writes discloses nothing new to the tier.
+    //
+    // Net: the values-free line is drawn between READ and CONFIRM rather than between operator and
+    // admin. That is a STRICTLY tighter line than the one this route shipped with, where the same
+    // contents were reachable by anyone holding plugin-wide `integration:admin`.
     async stockPreparationConfirmationDecisionsValueEntry(req, res) {
-      requireAccess(req, 'admin')
+      requireStockPrepAccess(req, STOCK_PREP_CONFIRM_PERMISSION)
       const input = normalizeStockPreparationConfirmBody(
         requestQuery(req),
         VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_VALUE_ENTRY_QUERY_KEYS,
@@ -5941,8 +6046,12 @@ function createHandlers(services, options = {}) {
       return sendOk(res, result)
     },
 
+    // The confirmation itself: keep_multiple_rows / accept_current / manual_hold plus the O1-A value
+    // entry fields. Operator CONFIRM. It writes ONLY the ledger row (no canonical sheet, no external
+    // system, no source read), and it still records intent in the audit store BEFORE any patch — the
+    // actor stamped there is now an operator id rather than always an admin id, which is the point.
     async stockPreparationConfirmationDecisionsConfirm(req, res) {
-      const user = requireAccess(req, 'admin')
+      const user = requireStockPrepAccess(req, STOCK_PREP_CONFIRM_PERMISSION)
       const audit = requireStockPreparationAudit()
       const input = normalizeStockPreparationConfirmBody(
         requestBody(req),
@@ -6438,6 +6547,13 @@ module.exports = {
     buildTargetPayloadPreview,
     hasPermission,
     requireAccess,
+    // O2 / R-11 stock-prep workbench vocabulary. Exported so the permission-matrix suite asserts the
+    // SAME predicate the routes run — not a re-implementation of it that could agree with a bug.
+    hasStockPrepPermission,
+    requireStockPrepAccess,
+    STOCK_PREP_PERMISSIONS,
+    STOCK_PREP_READ_PERMISSION,
+    STOCK_PREP_CONFIRM_PERMISSION,
     resolveTenantId,
     resolveAuthUserTenantId,
     resolveAuthenticatedWriteTenantId,

@@ -297,14 +297,24 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'K3 WISE Preset', titleZh: 'K3 WISE 预设', requiresAuth: true, permissions: ['integration:write'] }
   },
   {
-    // Stock Preparation MVP (#3751, docs/development/stock-preparation-mvp-design-20260707.md):
-    // readonly-first, tabbed operator workspace. Deliberately a SEPARATE routed shell (not crammed
-    // into the admin IntegrationWorkbenchView) so the six MVP views land later in disjoint files.
-    // Reuses the integration:write gate (same as the Data Factory workbench) — no broader access.
+    // Stock Preparation (#3751; re-scoped by o1-ruling-20260829.md 附:同日第二项裁决 to THE
+    // confirmation-queue workbench): readonly-first, tabbed operator workspace. Deliberately a
+    // SEPARATE routed shell (not crammed into the admin IntegrationWorkbenchView).
+    //
+    // O2 / R-11: the gate is `stockprep:read`, the workbench admission code, NOT `integration:write`.
+    // The old gate was the misalignment this route existed to demonstrate — it admitted every
+    // `integration:write` holder to a page whose every backend route answered 403, i.e. a surface
+    // that looks clickable and fails on click. `stockprep:read` is the same code the server admits
+    // the queue read on (hasStockPrepPermission, plugins/plugin-integration-core/lib/http-routes.cjs),
+    // so reachability and authority are now one decision. Admin is unaffected: useAuth().hasPermission
+    // short-circuits true for admins before any code is compared.
+    //
+    // Per-CONTROL gating (the confirm surface, and the admin-only legacy MVP tabs) lives in the
+    // component, driven by the same predicates — see services/integration/stockPreparation/permissions.ts.
     path: '/stock-prep',
     name: AppRouteNames.INTEGRATION_STOCK_PREPARATION,
     component: () => import('../components/integration/stockPreparation/StockPreparationWorkspace.vue'),
-    meta: { title: 'Stock Preparation', titleZh: '备料工作台', requiresAuth: true, permissions: ['integration:write'] }
+    meta: { title: 'Stock Preparation', titleZh: '备料工作台', requiresAuth: true, permissions: ['stockprep:read'] }
   },
   {
     path: '/workflows',

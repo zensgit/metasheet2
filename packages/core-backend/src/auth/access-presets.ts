@@ -118,6 +118,33 @@ const ACCESS_PRESETS: AccessPresetDefinition[] = [
     welcomeTitle: 'MetaSheet PLM 协作入口',
     checklist: ['进入 PLM 工作台确认可见产品范围', '如需审批写入能力再由管理员追加权限'],
   },
+  {
+    // O2 / R-11 (o1-ruling-20260829.md 附:同日第二项裁决): the CUSTOMER operator who works the
+    // `/stock-prep` confirmation queue. This preset is what makes the role provisionable — before it,
+    // the only principal who could work the queue was a plugin-wide admin.
+    //
+    // Like `platform-editor` and `plm-collaborator` it carries NO `roleId`: the capability is the two
+    // permission codes, and adding a role id would drag this preset into the attendance/e-learning
+    // role-template assignment machinery it has nothing to do with. `role` stays 'user' — the
+    // platform-wide column never carries a scoped grant (role-assignment-boundary.test.ts leg A).
+    //
+    // Both codes together, never confirm alone: the server refuses a confirm grant without the read
+    // grant (hasStockPrepPermission), because the web route guard admits `/stock-prep` on
+    // `stockprep:read` alone and a confirm-only principal would hold authority it could never reach.
+    id: 'stock-prep-operator',
+    name: '备料确认操作员',
+    description: '适用于处理备料确认队列:查看待确认项、录入值并确认。不含对账与管理能力。',
+    productMode: 'plm-workbench',
+    role: 'user',
+    permissions: ['stockprep:read', 'stockprep:confirm'],
+    homePath: '/stock-prep',
+    welcomeTitle: 'MetaSheet 备料确认工作台',
+    checklist: [
+      '登录后进入备料工作台的确认队列',
+      '按项目号筛选待确认项,逐条选择处理动作并录入值',
+      '如需对账(重新读取来源)或管理能力,由管理员单独执行',
+    ],
+  },
 ]
 
 export function listAccessPresets(): AccessPresetDefinition[] {

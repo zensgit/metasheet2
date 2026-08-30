@@ -142,6 +142,11 @@ describe('access presets — the namespaces each grant derives', () => {
       'attendance-admin': ['attendance'],
       'attendance-importer': ['attendance'],
       'plm-collaborator': [],
+      // O2 / R-11: the stock-prep confirmation-queue operator. Both its codes sit in the
+      // `stockprep` resource, which is NOT in NON_NAMESPACED_PERMISSION_RESOURCES, so the grant
+      // derives exactly that one admission namespace — and nothing else, which is the leg that
+      // proves the new vocabulary cannot over-grant into an existing namespace.
+      'stock-prep-operator': ['stockprep'],
     })
 
     // Floor: at least one preset must derive something, or "no over-granting" is trivially true.

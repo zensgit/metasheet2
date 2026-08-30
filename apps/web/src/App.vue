@@ -35,7 +35,7 @@
             <router-link v-if="canManageUsers" to="/admin/automation-executions" class="nav-link">{{ navLabels.automationRuns }}</router-link>
             <router-link v-if="canManageUsers" to="/approvals/metrics" class="nav-link">{{ navLabels.approvalMetrics }}</router-link>
             <router-link v-if="canUseIntegration" to="/integrations/workbench" class="nav-link">{{ navLabels.systemIntegration }}</router-link>
-            <router-link v-if="canUseIntegration" to="/stock-prep" class="nav-link">{{ navLabels.stockPreparation }}</router-link>
+            <router-link v-if="canUseStockPreparation" to="/stock-prep" class="nav-link">{{ navLabels.stockPreparation }}</router-link>
             <router-link v-if="canUseIntegration" to="/data-sources" class="nav-link">{{ navLabels.dataSources }}</router-link>
             <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
             <router-link v-if="canUsePlm" to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
@@ -79,6 +79,7 @@ import { useLocale } from './composables/useLocale'
 import { usePlugins } from './composables/usePlugins'
 import { setMultitableApiErrorLocaleResolver } from './multitable/api/client'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
+import { canReadStockPrepQueue } from './services/integration/stockPreparation/permissions'
 import { useFeatureFlags } from './stores/featureFlags'
 import { clearStoredAuthState, getApiBase } from './utils/api'
 import { truncateAccountIdentity } from './utils/accountIdentityDisplay'
@@ -110,6 +111,15 @@ const canManageUsers = computed(() => {
 const canUseIntegration = computed(() => {
   void route.fullPath
   return hasPermission('integration:write')
+})
+// O2 / R-11: the /stock-prep nav entry gets its OWN predicate, because the page's admission code is
+// no longer `integration:write`. Sharing `canUseIntegration` would break the alignment in both
+// directions at once: an `integration:write` holder would see a link the route guard now bounces
+// (visible, not actionable), and a `stockprep:read` operator would have no way to find the one page
+// they are provisioned for (permitted, hidden). Same code as the route meta, deliberately.
+const canUseStockPreparation = computed(() => {
+  void route.fullPath
+  return canReadStockPrepQueue(hasPermission)
 })
 const canUseApprovals = computed(() => {
   void route.fullPath

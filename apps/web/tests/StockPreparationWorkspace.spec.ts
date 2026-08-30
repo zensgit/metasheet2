@@ -24,6 +24,11 @@ import { join } from 'node:path'
 const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
   hasPerm: true,
+  // O2 / R-11 actor tier, flipped per test. `grants` is the principal's permission code set and
+  // `admin` is the platform-admin short-circuit — together they reproduce the two inputs
+  // `useAuth().hasPermission` actually decides on.
+  grants: [] as string[],
+  admin: false,
   route: {
     path: '/multitable',
     fullPath: '/multitable',
@@ -71,8 +76,16 @@ vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     getToken: () => 'session-token',
     clearToken: vi.fn(),
-    getAccessSnapshot: () => ({ isAdmin: false, email: '' }),
-    hasPermission: (permission: string) => permission === 'integration:write' && h.hasPerm,
+    getAccessSnapshot: () => ({ isAdmin: h.admin, email: '', roles: [], permissions: h.grants }),
+    hasAdminAccess: () => h.admin,
+    // Mirrors the real composable's shape: admin short-circuits, otherwise an exact grant.
+    // `h.hasPerm` stays wired to `integration:write` so the pre-existing legacy legs keep meaning
+    // what they meant; the O2 tiers drive `h.grants` / `h.admin`.
+    hasPermission: (permission: string) => (
+      h.admin
+      || h.grants.includes(permission)
+      || (permission === 'integration:write' && h.hasPerm)
+    ),
   }),
 }))
 
@@ -127,7 +140,10 @@ async function waitForSelector(container: HTMLElement, selector: string, cycles 
   throw new Error(`Timed out waiting for selector: ${selector}`)
 }
 
-const VIEW_KEYS = [
+// O2 / R-11: the six legacy MVP tabs plus the dashboard are ADMIN-ONLY — every endpoint behind them
+// is still `requireAccess(req, 'admin')`, so showing them to an operator would be the exact
+// "visible but 403" the re-gating removes. The confirmation queue is the operator tab.
+const ADMIN_ONLY_VIEW_KEYS = [
   'dashboard',
   'project-workspace',
   'bom-snapshot-diff',
@@ -136,6 +152,8 @@ const VIEW_KEYS = [
   'prep-line',
   'exception-queue',
 ] as const
+const OPERATOR_VIEW_KEYS = ['confirmation-queue'] as const
+const VIEW_KEYS = [...OPERATOR_VIEW_KEYS, ...ADMIN_ONLY_VIEW_KEYS] as const
 
 // Source-level drift pin (matching the repo idiom in approvalTemplateRouteGuard.spec.ts): importing
 // appRoutes eagerly pulls every view + element-plus CSS into jsdom, so assert on the source text.
@@ -149,13 +167,21 @@ describe('Stock Preparation route registration (source drift pin)', () => {
     return end === -1 ? SRC.slice(i) : SRC.slice(i, end)
   }
 
-  it('registers /stock-prep bound to a lazy shell component and the integration:write gate', () => {
+  // O2 / R-11: the admission code is `stockprep:read`, NOT `integration:write`.
+  //
+  // The old gate is what this re-gating exists to end: it admitted every `integration:write` holder
+  // to a page whose every backend route answered 403 — visible but not actionable. `stockprep:read`
+  // is the same code the server admits the confirmation-queue read on, so reachability and authority
+  // are one decision. The negative below is load-bearing: leaving the old code in place alongside
+  // the new one would restore the misalignment for exactly the tier it was found in.
+  it('registers /stock-prep bound to a lazy shell component and the stockprep:read admission gate', () => {
     const block = routeBlockByPath('/stock-prep')
     expect(block, 'route /stock-prep must exist in appRoutes.ts').toBeTruthy()
     expect(block).toContain('AppRouteNames.INTEGRATION_STOCK_PREPARATION')
     expect(block).toContain("import('../components/integration/stockPreparation/StockPreparationWorkspace.vue')")
     expect(block).toMatch(/requiresAuth:\s*true/)
-    expect(block).toMatch(/permissions:\s*\[\s*'integration:write'\s*\]/)
+    expect(block).toMatch(/permissions:\s*\[\s*'stockprep:read'\s*\]/)
+    expect(block).not.toContain('integration:write')
     expect(block).toContain("titleZh: '备料工作台'")
   })
 
@@ -462,6 +488,12 @@ describe('StockPreparationWorkspace shell', () => {
     localStorage.removeItem('tenantId')
     localStorage.removeItem('workspaceId')
     h.apiFetch.mockReset()
+    // O2 default for this block: ADMIN. Every pre-existing leg below drives one of the legacy MVP
+    // tabs, which are admin-only after the re-gating — so admin is the tier that keeps them meaning
+    // what they meant. The operator tiers are set explicitly by the legs that test them.
+    h.admin = true
+    h.grants = []
+    h.hasPerm = true
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -484,7 +516,10 @@ describe('StockPreparationWorkspace shell', () => {
     return container!
   }
 
-  it('renders the tablist with the dashboard tab (H1/H2) plus all six MVP view tabs', async () => {
+  // NEGATIVE CONTROL for the re-gating: an admin keeps every tab it had, plus the new one. If the
+  // O2 tab gating had narrowed the admin tier, this is the leg that fails.
+  it('renders the full tablist for an admin: confirmation queue + dashboard + all six MVP tabs', async () => {
+    h.admin = true
     const root = await mountShell()
     const tablist = root.querySelector('[data-testid="stock-prep-tabs"]')
     expect(tablist).not.toBeNull()
@@ -492,7 +527,36 @@ describe('StockPreparationWorkspace shell', () => {
     for (const key of VIEW_KEYS) {
       expect(root.querySelector(`[data-testid="stock-prep-tab-${key}"]`)).not.toBeNull()
     }
-    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(7)
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(8)
+  })
+
+  // R-11 "not permitted must not be visible": a `stockprep:read` operator sees the confirmation
+  // queue and NOTHING whose endpoints would 403 them.
+  it('renders only the confirmation-queue tab for a stockprep:read operator', async () => {
+    h.admin = false
+    h.hasPerm = false
+    h.grants = ['stockprep:read']
+    const root = await mountShell()
+    for (const key of OPERATOR_VIEW_KEYS) {
+      expect(root.querySelector(`[data-testid="stock-prep-tab-${key}"]`)).not.toBeNull()
+    }
+    for (const key of ADMIN_ONLY_VIEW_KEYS) {
+      expect(
+        root.querySelector(`[data-testid="stock-prep-tab-${key}"]`),
+        `${key} is admin-only and must not render for an operator`,
+      ).toBeNull()
+    }
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(1)
+  })
+
+  // Fail-closed floor: a principal with no stock-prep grant at all gets no tab. The route guard
+  // already bounces them, so this is defence in depth for a shell mounted by some other caller.
+  it('renders no tabs at all for a principal holding neither admin nor a stockprep code', async () => {
+    h.admin = false
+    h.hasPerm = false
+    h.grants = []
+    const root = await mountShell()
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(0)
   })
 
   it('renders Chinese labels + the readonly-boundary copy when locale is zh-CN', async () => {
@@ -954,6 +1018,11 @@ describe('App nav entry for Stock Preparation', () => {
   beforeEach(() => {
     h.locale = 'zh-CN'
     h.hasPerm = true
+    // O2 / R-11: the nav link now follows the PAGE's admission code, so the default principal for
+    // this block holds it. `hasPerm` (integration:write) stays true so the sibling integration nav
+    // links this block also renders keep their pre-existing meaning.
+    h.admin = false
+    h.grants = ['stockprep:read']
     h.route = { path: '/multitable', fullPath: '/multitable', meta: {}, query: {} }
     window.localStorage.clear()
     window.localStorage.setItem('auth_token', 'session-token')
@@ -971,7 +1040,7 @@ describe('App nav entry for Stock Preparation', () => {
     return Array.from(root.querySelectorAll('a')).find((a) => a.getAttribute('href') === '/stock-prep')
   }
 
-  it('renders a /stock-prep nav link with the zh label when the user has integration:write', async () => {
+  it('renders a /stock-prep nav link with the zh label when the user has stockprep:read', async () => {
     mountApp()
     await flushUi()
     const link = findStockPrepLink(container as HTMLElement)
@@ -988,11 +1057,33 @@ describe('App nav entry for Stock Preparation', () => {
     expect(link!.textContent).toContain('Stock Preparation')
   })
 
-  it('hides the /stock-prep nav link when the user lacks integration:write', async () => {
-    h.hasPerm = false
+  it('hides the /stock-prep nav link when the user lacks stockprep:read', async () => {
+    h.grants = []
     mountApp()
     await flushUi()
     expect(findStockPrepLink(container as HTMLElement)).toBeUndefined()
+  })
+
+  // R-11, BOTH directions, on the nav surface — the two legs that would have passed before O2 while
+  // the page was misaligned, and that pin the fix rather than the old coupling.
+  it('hides the /stock-prep nav link from an integration:write holder who can no longer enter the page', async () => {
+    // `hasPerm` stays true, so this principal DOES hold integration:write — it simply no longer
+    // admits them to /stock-prep. Advertising the link would be "visible, not actionable".
+    h.grants = []
+    h.hasPerm = true
+    mountApp()
+    await flushUi()
+    expect(findStockPrepLink(container as HTMLElement)).toBeUndefined()
+  })
+
+  it('renders the /stock-prep nav link for a stockprep:read operator with no integration grant at all', async () => {
+    // The mirror: this principal IS permitted the page, so the link must exist or the one surface
+    // they are provisioned for would be permitted-but-hidden.
+    h.grants = ['stockprep:read']
+    h.hasPerm = false
+    mountApp()
+    await flushUi()
+    expect(findStockPrepLink(container as HTMLElement)).toBeTruthy()
   })
 })
 

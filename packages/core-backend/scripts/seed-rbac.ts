@@ -32,6 +32,11 @@ async function main() {
       ['attendance:approve', 'Attendance Approve', 'Approve attendance adjustment requests'],
       ['attendance:import', 'Attendance Import', 'Import attendance records and batches'],
       ['attendance:admin', 'Attendance Admin', 'Manage attendance rules'],
+      // O2 / R-11: the /stock-prep confirmation-queue workbench operator vocabulary. Mirrors
+      // zzzz20260830120000_add_stock_prep_operator_permissions so a CI tree seeded by this script
+      // and a migrated tree carry the same catalog.
+      ['stockprep:read', 'Stock Prep Read', 'Read the stock-preparation confirmation queue (values-free)'],
+      ['stockprep:confirm', 'Stock Prep Confirm', 'Confirm stock-preparation decisions and read own value entry'],
     ]
     for (const [code, name, desc] of perms) {
       await client.query(

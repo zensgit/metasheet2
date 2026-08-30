@@ -19,7 +19,7 @@
          they land later in their own DISJOINT files and get mounted here in place of the placeholder. -->
     <nav class="stock-prep__tabs" role="tablist" data-testid="stock-prep-tabs" :aria-label="bi('备料视图', 'Stock preparation views')">
       <button
-        v-for="view in views"
+        v-for="view in visibleViews"
         :key="view.key"
         type="button"
         role="tab"
@@ -98,6 +98,12 @@
         :project-id="selectedProjectId"
         :scope="scope"
       />
+      <!-- O2 / R-11: the operator surface. Reachable by `stockprep:read`; its confirm-tier controls
+           gate themselves. This is the tab the O1' ruling narrowed the page to. -->
+      <StockPreparationConfirmationQueueView
+        v-else-if="activeKey === 'confirmation-queue'"
+        :scope="scope"
+      />
       <p v-else class="stock-prep__panel-pending" data-testid="stock-prep-panel-pending">
         {{ bi('该视图将在后续 wave 落地,当前为容器占位。', 'This view lands in a later wave; this is a container placeholder for now.') }}
       </p>
@@ -117,8 +123,10 @@
 // to avoid colliding with PLM view-state "snapshot" and k3WiseSetup "mapping" vocabularies.
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useAuth } from '../../../composables/useAuth'
 import { useLocale } from '../../../composables/useLocale'
 import { getDefaultIntegrationScope } from '../../../services/integration/workbench'
+import { canReadStockPrepQueue } from '../../../services/integration/stockPreparation/permissions'
 import PageShell from '../../layout/PageShell.vue'
 import PageHeader from '../../layout/PageHeader.vue'
 import StockPreparationDashboardView from './StockPreparationDashboardView.vue'
@@ -128,8 +136,10 @@ import StockPreparationMappingConfirmView from './StockPreparationMappingConfirm
 import StockPreparationUnitConfirmView from './StockPreparationUnitConfirmView.vue'
 import StockPreparationPrepLineView from './StockPreparationPrepLineView.vue'
 import StockPreparationExceptionQueueView from './StockPreparationExceptionQueueView.vue'
+import StockPreparationConfirmationQueueView from './StockPreparationConfirmationQueueView.vue'
 
 const { locale } = useLocale()
+const auth = useAuth()
 const scope = getDefaultIntegrationScope()
 
 // Same synchronous locale pattern as the rest of the integration surface (IntegrationHelpView /
@@ -139,6 +149,7 @@ function bi(zh: string, en: string): string {
 }
 
 type StockPreparationViewKey =
+  | 'confirmation-queue'
   | 'dashboard'
   | 'project-workspace'
   | 'bom-snapshot-diff'
@@ -164,6 +175,21 @@ interface StockPreparationViewTab {
   /** True only for the dashboard tab — it aggregates multiple existing GETs client-side (H1/H2), so
    *  it has no single endpoint to badge (see the panel-endpoint paragraph's v-if). */
   noEndpointBadge?: boolean
+  /**
+   * O2 / R-11. True for the six legacy MVP tabs, whose endpoints are ALL still
+   * `requireAccess(req, 'admin')` (snapshot-batches, material-mappings, unit-conversions,
+   * generation/run, exceptions, prep-lines, projects).
+   *
+   * They are hidden from a non-admin because R-11 forbids exactly what they would otherwise be: a
+   * tab a `stockprep:read` operator can click, whose every read answers 403. Widening those routes
+   * to the operator vocabulary was NOT the alternative — the O1' ruling narrowed this page to the
+   * confirmation queue and explicitly did not revive the other MVP surfaces
+   * (「其余 MVP 面(快照页等)不随采纳复活」), so hiding is the aligned answer and widening would have
+   * contradicted the ruling.
+   *
+   * An admin still sees every tab — nothing is removed from the tier that could already use them.
+   */
+  requiresAdmin?: boolean
 }
 
 // Tab order follows the MVP business loop (design §"MVP Goal"). Descriptions are values-free — they
@@ -175,6 +201,7 @@ const views: StockPreparationViewTab[] = [
   // sees current project / current stage / blocking count / recommended next step".
   {
     key: 'dashboard',
+    requiresAdmin: true,
     zh: '仪表盘',
     en: 'Dashboard',
     zhDesc: '当前项目、当前阶段、阻断数与推荐下一步;六阶段进度均复用下方各视图的既有只读端点聚合,不新增后端。',
@@ -184,6 +211,7 @@ const views: StockPreparationViewTab[] = [
   },
   {
     key: 'project-workspace',
+    requiresAdmin: true,
     zh: '项目工作台',
     en: 'Project Workspace',
     zhDesc: '按项目查看备料概览:快照批次数、待处理异常数、就绪与暂挂的备料行数。',
@@ -192,6 +220,7 @@ const views: StockPreparationViewTab[] = [
   },
   {
     key: 'bom-snapshot-diff',
+    requiresAdmin: true,
     zh: 'BOM 快照批次与差异',
     en: 'BOM Snapshot Batch & Diff',
     zhDesc: '每次同步生成不可变的快照批次;旧批次保留,与前一批次按新增/删除/数量/单位/版本等差异对比。',
@@ -200,6 +229,7 @@ const views: StockPreparationViewTab[] = [
   },
   {
     key: 'material-mapping',
+    requiresAdmin: true,
     zh: '物料映射确认',
     en: 'Material Mapping Confirm',
     zhDesc: '将 PLM 图号/版本映射到 ERP 物料编码/内部 id;歧义或未匹配的行进入人工确认,不自动创建 ERP 物料。',
@@ -209,6 +239,7 @@ const views: StockPreparationViewTab[] = [
   },
   {
     key: 'unit-conversion',
+    requiresAdmin: true,
     zh: '单位换算确认',
     en: 'Unit Conversion Confirm',
     zhDesc: '将设计单位换算为 ERP 领用单位;无唯一有效规则时进入异常队列,不做静默猜测。',
@@ -218,6 +249,7 @@ const views: StockPreparationViewTab[] = [
   },
   {
     key: 'prep-line',
+    requiresAdmin: true,
     zh: '备料行',
     en: 'Prep Lines',
     zhDesc: '仅由已确认的快照、映射与单位规则生成备料行;未解决的映射/单位冲突不会产出就绪行。',
@@ -228,6 +260,7 @@ const views: StockPreparationViewTab[] = [
   },
   {
     key: 'exception-queue',
+    requiresAdmin: true,
     zh: '异常队列',
     en: 'Exception Queue',
     zhDesc: '所有不确定的行都可见、可处理;阻断级异常保持可见并阻止最终确认。',
@@ -235,10 +268,44 @@ const views: StockPreparationViewTab[] = [
     endpoint: '/api/integration/stock-preparation/exceptions',
     confirmWrites: true,
   },
+  // O2 / R-11: the CONFIRMATION QUEUE — the surface the O1' ruling narrowed this page to, and the
+  // only tab an operator can see. It is listed LAST on purpose: `activeKey` defaults to the first
+  // VISIBLE tab, so an admin still lands on the dashboard exactly as before (the re-gating changes
+  // no admin behavior at all), while an operator, for whom this is the only visible tab, lands here.
+  {
+    key: 'confirmation-queue',
+    zh: '确认队列',
+    en: 'Confirmation Queue',
+    zhDesc: '待确认决定的唯一权威清单:按项目号与状态筛选,逐条选择处理动作(keep_multiple_rows / accept_current / manual_hold)并录入值。仅展示计数、状态与指纹。',
+    enDesc: 'The authoritative pending-decision list: filter by project number and status, then per row pick a resolution action (keep_multiple_rows / accept_current / manual_hold) and enter the value. Counts, statuses and fingerprints only.',
+    endpoint: '/api/integration/stock-preparation/confirmation-decisions',
+    confirmWrites: true,
+  },
 ]
 
-const activeKey = ref<StockPreparationViewKey>(views[0].key)
-const activeView = computed(() => views.find((view) => view.key === activeKey.value) ?? null)
+// O2 / R-11 — the visibility half of the alignment, and the reason this is a computed over the
+// tab table rather than a `v-if` sprinkled through the template: one predicate decides which tabs
+// exist, so a tab cannot be added later without stating the tier it belongs to.
+//
+// `hasAdminAccess()` (not a permission code) is the right test for the legacy six: their endpoints
+// gate on `requireAccess(req, 'admin')`, which the plugin satisfies from `role:admin` /
+// `integration:admin` — the same two things `getAccessSnapshot().isAdmin` and the admin role check
+// cover. The confirmation queue gates on the code instead, because that is what its endpoints gate on.
+const isAdmin = computed(() => auth.hasAdminAccess())
+const canReadQueue = computed(() => canReadStockPrepQueue(auth.hasPermission))
+
+const visibleViews = computed(() => views.filter((view) => (
+  view.requiresAdmin ? isAdmin.value : canReadQueue.value
+)))
+
+// Default to the first VISIBLE tab — the ONE line that generalises the shell's pre-existing
+// "default is views[0]" rule without changing what it does for the tier that already had it. An
+// admin sees every tab, so the first visible one is still the dashboard; an operator sees only the
+// confirmation queue, so that is where they land. The literal fallback is unreachable in practice
+// (a principal with no visible tab is bounced by the route guard) and exists so the ref is never
+// undefined — `activeView` then finds nothing and the panel renders nothing, which is fail-closed.
+const activeKey = ref<StockPreparationViewKey>(visibleViews.value[0]?.key ?? 'confirmation-queue')
+const activeView = computed(() => visibleViews.value.find((view) => view.key === activeKey.value) ?? null)
 
 // Shared project context (view 1 → view 2). The shell is the single owner of the selected
 // projectId: view 1 emits it (row action), view 2 receives it as a prop, and the `?projectId=`
@@ -276,6 +343,11 @@ function handleDashboardProjectSelect(projectId: string): void {
 // boundary (STOCK_PREPARATION_STAGE_VIEW_KEY) to avoid a circular type import; every value it can
 // hold is one of this file's own StockPreparationViewKey literals.
 function handleNavigateStage(viewKey: string): void {
+  // O2 / R-11: navigate only to a tab this principal can actually see. The stepper lives inside the
+  // admin-only dashboard today, so this can only be admin traffic — but a satellite navigator that
+  // trusts its caller is exactly how a hidden tab becomes reachable later, and `activeKey` is the
+  // one thing that decides which panel mounts.
+  if (!visibleViews.value.some((view) => view.key === viewKey)) return
   activeKey.value = viewKey as StockPreparationViewKey
 }
 </script>
