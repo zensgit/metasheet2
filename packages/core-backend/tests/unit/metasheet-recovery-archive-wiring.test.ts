@@ -170,14 +170,24 @@ describe('MetaSheetServer recovery archive wiring', () => {
   it('closes the database pool after the restore worker drains', async () => {
     expect(pgPool).not.toBeNull()
     const order: string[] = []
+    let releaseMediaWorkers: (() => void) | undefined
+    let releaseRecoveryWorker: (() => void) | undefined
     const poolEnd = vi.spyOn(pgPool!, 'end').mockImplementation(async () => {
       order.push('pool')
     })
     const stopMediaWorkers = vi.fn(async () => {
-      order.push('media')
+      order.push('media:start')
+      await new Promise<void>((resolve) => {
+        releaseMediaWorkers = resolve
+      })
+      order.push('media:done')
     })
     const stopWorker = vi.fn(async () => {
-      order.push('recovery')
+      order.push('recovery:start')
+      await new Promise<void>((resolve) => {
+        releaseRecoveryWorker = resolve
+      })
+      order.push('recovery:done')
     })
     const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
     ;(server as unknown as {
@@ -189,12 +199,27 @@ describe('MetaSheetServer recovery archive wiring', () => {
     }).stopElearningMediaWorkers = stopMediaWorkers
 
     const firstStop = server.stop()
+    await vi.waitFor(() => {
+      expect(stopMediaWorkers).toHaveBeenCalledTimes(1)
+    })
+    expect(order).toEqual(['media:start'])
+    expect(stopWorker).not.toHaveBeenCalled()
+    expect(poolEnd).not.toHaveBeenCalled()
+
+    releaseMediaWorkers?.()
+    await vi.waitFor(() => {
+      expect(stopWorker).toHaveBeenCalledTimes(1)
+    })
+    expect(order).toEqual(['media:start', 'media:done', 'recovery:start'])
+    expect(poolEnd).not.toHaveBeenCalled()
+
+    releaseRecoveryWorker?.()
     await firstStop
     const completedReplay = server.stop('SIGINT')
     expect(completedReplay).toBe(firstStop)
     await completedReplay
 
-    expect(order).toEqual(['media', 'recovery', 'pool'])
+    expect(order).toEqual(['media:start', 'media:done', 'recovery:start', 'recovery:done', 'pool'])
     expect(stopMediaWorkers).toHaveBeenCalledTimes(1)
     expect(stopWorker).toHaveBeenCalledTimes(1)
     expect(poolEnd).toHaveBeenCalledTimes(1)
