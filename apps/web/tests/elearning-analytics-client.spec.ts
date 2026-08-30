@@ -232,7 +232,8 @@ describe('e-learning analytics client', () => {
 
     const download = await downloadElearningAnalyticsExport(EXPORT)
     expect(download.filename).toBe(`elearning-department-stats-${EXPORT}.csv`)
-    expect(download.blob).toBeInstanceOf(Blob)
+    expect(Object.prototype.toString.call(download.blob)).toBe('[object Blob]')
+    expect(download.blob.type).toBe('text/csv;charset=utf-8')
     expect(download.blob.size).toBe(new TextEncoder().encode('department_id\nvalue\n').length)
     expect(apiFetchMock).toHaveBeenNthCalledWith(
       3,
