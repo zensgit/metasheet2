@@ -4736,6 +4736,469 @@
       }
     },
     {
+      "description": "lane inbox: fetch the caller's unified task inbox (self-scoped, multi-source)",
+      "providerStates": [
+        {
+          "name": "the authenticated tenant-1 user has task-inbox rows across the approval_request and workflow_task sources"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/tasks/inbox",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example",
+          "x-tenant-id": "tenant-1"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "items": [
+            {
+              "source": "approval_request",
+              "title": "Approve ECR-1024",
+              "state": "pending",
+              "is_overdue": true,
+              "due_at": "2026-08-30T00:00:00.000Z",
+              "priority": "high",
+              "entity_type": "approval_request",
+              "entity_id": "01H000000000000000000000A1",
+              "action_url": "/api/v1/approvals/requests/01H000000000000000000000A1",
+              "created_at": "2026-08-30T00:00:00.000Z",
+              "updated_at": "2026-08-30T00:00:00.000Z"
+            }
+          ],
+          "sources": [
+            {
+              "source": "approval_request",
+              "status": "ok",
+              "count": 1,
+              "reason": null
+            }
+          ],
+          "total": 1,
+          "limit": 50,
+          "offset": 0
+        },
+        "matchingRules": {
+          "body": {
+            "$.items": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.items[*].source": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*].title": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*].state": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*].is_overdue": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*].due_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*].action_url": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.sources": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.sources[*].source": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.sources[*].status": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.sources[*].count": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.total": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.limit": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 1
+                }
+              ]
+            },
+            "$.offset": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "lane inbox: a partial inbox keeps 200 while one source is unsupported",
+      "providerStates": [
+        {
+          "name": "one task-inbox source is unsupported under tenant-1's tenancy mode and the inbox still returns 200"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/tasks/inbox",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example",
+          "x-tenant-id": "tenant-1"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "items": [
+            {
+              "source": "approval_request",
+              "title": "Approve ECR-1030",
+              "state": "pending",
+              "is_overdue": false,
+              "due_at": null,
+              "priority": null,
+              "entity_type": "approval_request",
+              "entity_id": "01H000000000000000000000A2",
+              "action_url": "/api/v1/approvals/requests/01H000000000000000000000A2",
+              "created_at": "2026-08-30T00:00:00.000Z",
+              "updated_at": "2026-08-30T00:00:00.000Z"
+            }
+          ],
+          "sources": [
+            {
+              "source": "approval_request",
+              "status": "ok",
+              "count": 1,
+              "reason": null
+            },
+            {
+              "source": "workflow_task",
+              "status": "unsupported",
+              "count": 0,
+              "reason": "role-assigned workflow tasks are deferred until tenant-safe identity resolution"
+            }
+          ],
+          "total": 1,
+          "limit": 50,
+          "offset": 0
+        },
+        "matchingRules": {
+          "body": {
+            "$.items": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.items[*].source": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*].title": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*].state": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*].is_overdue": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*].due_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*].action_url": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.sources[0].source": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.sources[0].status": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.sources[0].count": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.sources[1].source": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.sources[1].count": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.sources[1].reason": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.total": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.limit": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 1
+                }
+              ]
+            },
+            "$.offset": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "lane inbox: an unknown source filter returns 200 with no items and an unsupported source",
+      "providerStates": [
+        {
+          "name": "the task-inbox source filter \"not_a_source\" is unknown and yields 200 with an unsupported source entry and no items"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/tasks/inbox",
+        "query": {
+          "source": [
+            "not_a_source"
+          ]
+        },
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example",
+          "x-tenant-id": "tenant-1"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "items": [],
+          "sources": [
+            {
+              "source": "not_a_source",
+              "status": "unsupported",
+              "count": 0,
+              "reason": "unknown source filter: not_a_source"
+            }
+          ],
+          "total": 0,
+          "limit": 50,
+          "offset": 0
+        },
+        "matchingRules": {
+          "body": {
+            "$.sources[0].source": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.sources[0].count": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.sources[0].reason": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.total": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.limit": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 1
+                }
+              ]
+            },
+            "$.offset": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
       "description": "mint a MetaSheet BOM review embed token for the Yuantus parent host",
       "providerStates": [
         {
@@ -5031,6 +5494,59 @@
         "matchingRules": {
           "body": {
             "$.detail.message": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "lane inbox: a limit above the 200 cap is rejected (422)",
+      "providerStates": [
+        {
+          "name": "a task-inbox request with limit above the 200 cap is rejected"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/tasks/inbox",
+        "query": {
+          "limit": [
+            "201"
+          ]
+        },
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example",
+          "x-tenant-id": "tenant-1"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 422,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "detail": "limit must be between 1 and 200"
+        },
+        "matchingRules": {
+          "body": {
+            "$.detail": {
               "matchers": [
                 {
                   "match": "type"

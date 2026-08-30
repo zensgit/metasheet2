@@ -1794,3 +1794,84 @@ describe('PLMAdapter Yuantus discussion read-relay methods', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 })
+
+// PLM-COLLAB lane ② (task-inbox board, READ-ONLY, Family I): getTaskInbox. SAME per-caller
+// transport as the discussion read-relay (raw fetch; the CALLER sets Authorization; the shared
+// service token's this.query interceptor is deliberately bypassed) but a DIFFERENT token source
+// (full login, not the embed exchange the taskbook §3 closes to this lane). These pins are the
+// consumer's half of the §6 leak obligation: the viewer's own bearer, never the service account.
+describe('PLMAdapter lane ② task inbox', () => {
+  const jsonResponse = (status: number, body: unknown) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+  })
+
+  beforeEach(() => {
+    ;(fetch as Mock).mockClear()
+  })
+
+  it('fetches /api/v1/tasks/inbox with the CALLER token as bearer (never the service token)', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      items: [{ source: 'approval_request', title: 'A', state: 'pending', is_overdue: false, due_at: null, action_url: '/api/v1/approvals/requests/A1' }],
+      sources: [{ source: 'approval_request', status: 'ok', count: 1, reason: null }],
+      total: 1, limit: 50, offset: 0,
+    }))
+    // Spy on this.query to PROVE the data read never routes through the service-token interceptor.
+    const querySpy = vi.spyOn(adapter as any, 'query')
+
+    const result = await adapter.getTaskInbox('caller-token-1')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('http://localhost:8001/api/v1/tasks/inbox')
+    expect(init.method).toBe('GET')
+    expect(init.headers.Authorization).toBe('Bearer caller-token-1')
+    expect(querySpy).not.toHaveBeenCalled()
+    expect(result.error).toBeUndefined()
+    expect(result.data[0].items).toHaveLength(1)
+    expect(result.data[0].sources[0].status).toBe('ok')
+  })
+
+  it('serializes caller-owned filters and clamps limit to the 200 cap; sends NO identity selector', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { items: [], sources: [], total: 0, limit: 200, offset: 0 }))
+
+    await adapter.getTaskInbox('caller-token-1', { source: 'workflow_task', state: 'open', overdue: true, limit: 5000, offset: 20 })
+
+    const [url] = fetchMock.mock.calls[0]
+    expect(url).toContain('source=workflow_task')
+    expect(url).toContain('state=open')
+    expect(url).toContain('overdue=true')
+    expect(url).toContain('limit=200')
+    expect(url).toContain('offset=20')
+    expect(url).not.toMatch(/user_id|assignee_id|subject|on_behalf_of/)
+  })
+
+  it('fails closed with NO service-account fallback when the caller token is empty', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    const querySpy = vi.spyOn(adapter as any, 'query')
+
+    const result = await adapter.getTaskInbox('')
+
+    expect(result.error).toBeDefined()
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(querySpy).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a provider 403 as QueryResult.error (never thrown), with the status intact', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(403, { detail: 'forbidden' }))
+
+    const result = await adapter.getTaskInbox('caller-token-1')
+
+    expect(result.data).toHaveLength(0)
+    expect(result.error).toBeDefined()
+    expect((result.error as any)?.response?.status).toBe(403)
+  })
+})

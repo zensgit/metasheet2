@@ -130,6 +130,59 @@ export type PlmBomMultitableResult =
     reason?: string
   }
 
+// ---------------------------------------------------------------------------
+// PLM-COLLAB lane ② — task-inbox board (read-only). Field names mirror the provider's
+// TaskInboxItem EXACTLY: `state` (not status), `due_at` (not due_date). `source_payload` is
+// intentionally NOT modelled — the consumer never reads it (open dict, per-caller; taskbook §4.2).
+// ---------------------------------------------------------------------------
+export interface PlmTaskInboxItem {
+  source: string
+  title: string
+  state: string
+  is_overdue: boolean
+  due_at?: string | null
+  priority?: string | null
+  entity_type?: string | null
+  entity_id?: string | null
+  action_url: string
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+export interface PlmTaskInboxSourceStatus {
+  source: string
+  status: string
+  count?: number | null
+  reason?: string | null
+}
+
+export type PlmTaskInboxResult =
+  | {
+    data_source_id: string
+    available: true
+    items: PlmTaskInboxItem[]
+    sources: PlmTaskInboxSourceStatus[]
+    total: number
+    limit?: number
+    offset?: number
+    // present only when the relay could not complete a per-caller read: 'no-plm-credential'
+    // (the viewer has no linked PLM identity) or 'unavailable' (transient). Never upstream text.
+    reason?: string
+  }
+  | {
+    data_source_id: string
+    available: false
+    reason?: string
+  }
+
+export interface PlmTaskInboxQueryOptions {
+  source?: string
+  state?: string
+  overdue?: boolean
+  limit?: number
+  offset?: number
+}
+
 export interface PlmBomMultitableLinePatch {
   quantity?: number | string | null
   uom?: string | null
@@ -840,6 +893,72 @@ export async function getPlmBomMultitableContext(
     return { data_source_id: dsId, available: false, reason: 'unavailable' }
   }
   return normalizePlmBomMultitableResult(dsId, payload)
+}
+
+function buildTaskInboxQuery(options?: PlmTaskInboxQueryOptions): string {
+  const q = new URLSearchParams()
+  if (options?.source) q.set('source', options.source)
+  if (options?.state) q.set('state', options.state)
+  if (typeof options?.overdue === 'boolean') q.set('overdue', String(options.overdue))
+  // Clamp client-side too so the URL can never request beyond the provider cap (taskbook §4.4).
+  if (typeof options?.limit === 'number') q.set('limit', String(Math.min(Math.max(Math.trunc(options.limit), 1), 200)))
+  if (typeof options?.offset === 'number' && options.offset > 0) q.set('offset', String(Math.trunc(options.offset)))
+  return q.toString()
+}
+
+function normalizePlmTaskInboxResult(dataSourceId: string, value: unknown): PlmTaskInboxResult {
+  if (!value || typeof value !== 'object') {
+    return { data_source_id: dataSourceId, available: false, reason: 'unavailable' }
+  }
+  const record = value as Record<string, unknown>
+  const dsId = typeof record.data_source_id === 'string' && record.data_source_id.trim()
+    ? record.data_source_id.trim()
+    : dataSourceId
+  if (record.available !== true) {
+    return { data_source_id: dsId, available: false, reason: typeof record.reason === 'string' ? record.reason : 'unavailable' }
+  }
+  const items = Array.isArray(record.items) ? record.items as PlmTaskInboxItem[] : []
+  const sources = Array.isArray(record.sources) ? record.sources as PlmTaskInboxSourceStatus[] : []
+  return {
+    data_source_id: dsId,
+    available: true,
+    items,
+    sources,
+    total: typeof record.total === 'number' ? record.total : items.length,
+    limit: typeof record.limit === 'number' ? record.limit : undefined,
+    offset: typeof record.offset === 'number' ? record.offset : undefined,
+    reason: typeof record.reason === 'string' ? record.reason : undefined,
+  }
+}
+
+/**
+ * lane ② — fetch the caller's unified task inbox through the workbench relay. The viewing user's
+ * own PLM bearer (`plmUserToken`) is sent HEADER-ONLY on `X-PLM-User-Token`; if the caller has no
+ * linked PLM identity, pass an empty token and the relay degrades to `reason: 'no-plm-credential'`
+ * (the board then shows the link-your-identity affordance) — it NEVER falls back to a service
+ * account. Never throws: a non-2xx or malformed body normalizes to an unavailable result.
+ */
+export async function getPlmTaskInbox(
+  dataSourceId: string,
+  plmUserToken: string,
+  options?: PlmTaskInboxQueryOptions,
+): Promise<PlmTaskInboxResult> {
+  const dsId = dataSourceId.trim()
+  if (!dsId) {
+    return { data_source_id: '', available: false, reason: 'unavailable' }
+  }
+  const qs = buildTaskInboxQuery(options)
+  const headers: Record<string, string> = {}
+  if (plmUserToken && plmUserToken.trim()) headers['X-PLM-User-Token'] = plmUserToken.trim()
+  const response = await apiFetch(
+    `/api/plm-workbench/data-sources/${encodeURIComponent(dsId)}/task-inbox${qs ? `?${qs}` : ''}`,
+    { headers },
+  )
+  const payload = await response.json().catch(() => null) as unknown
+  if (!response.ok) {
+    return { data_source_id: dsId, available: false, reason: 'unavailable' }
+  }
+  return normalizePlmTaskInboxResult(dsId, payload)
 }
 
 export async function updatePlmBomMultitableLine(

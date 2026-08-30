@@ -148,6 +148,14 @@ const PLM_ADAPTER_PACT_PATHS = [
   { method: 'POST', path: '/api/v1/auth/embed/discussion-session' },
   { method: 'POST', path: '/api/v1/discussions/01H000000000000000000000T2/comments' },
   { method: 'POST', path: '/api/v1/discussions/01H000000000000000000000T2/comments' },
+  // PLM-COLLAB lane ② (task-inbox board, READ-ONLY, Family I): the self-scoped inbox read plus
+  // its two partial-result shapes. All three are GET /api/v1/tasks/inbox (query differs, path is
+  // identical), authenticated with the VIEWING USER's own bearer -- PLMAdapter.getTaskInbox owns
+  // the callsite. Sit at the END of the adapter-owned list, immediately before the parent-host
+  // embed-token. The over-cap 422 is an ERROR_CONTRACT entry below (no distinct consumer callsite).
+  { method: 'GET', path: '/api/v1/tasks/inbox' },
+  { method: 'GET', path: '/api/v1/tasks/inbox' },
+  { method: 'GET', path: '/api/v1/tasks/inbox' },
 ] as const
 
 const PARENT_HOST_PACT_PATHS = [
@@ -171,6 +179,9 @@ const ERROR_CONTRACT_PACT_PATHS = [
   // sibling code eco_intent_rejected shares the same envelope and stays consumer-tested only
   // (its recovery is a generic retry; pinning one code freezes the namespace shape).
   { method: 'POST', path: '/api/v1/bom/multitable/01H000000000000000000000L2/eco-intent' },
+  // PLM-COLLAB lane ② (task-inbox board): the page-cap error. GET /api/v1/tasks/inbox?limit=201
+  // -> 422. Pins that the consumer cannot quietly ask beyond the provider's 200 cap (taskbook §4.4).
+  { method: 'GET', path: '/api/v1/tasks/inbox' },
 ] as const
 
 const PACT_PATHS = [
@@ -265,6 +276,8 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
       '/api/v1/discussions/${threadId}/comments/${commentId}',
       '/api/v1/discussions/${threadId}/resolve',
       '/api/v1/discussions/${threadId}/reopen',
+      // PLM-COLLAB lane ② (task-inbox board): getTaskInbox's per-caller callsite.
+      '/api/v1/tasks/inbox',
     ]
     for (const ep of endpointsToFind) {
       expect(
@@ -333,6 +346,56 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
     expect(rules).toHaveProperty('$.embed_token')
     expect(rules).toHaveProperty('$.jti')
     expect(rules).toHaveProperty('$.expires_in')
+  })
+
+  // PLM-COLLAB lane ② (task-inbox board): a non-ok source still returns 200, and the ONLY source
+  // reason safe to display is on an `ok`/`unsupported` entry -- the `error` reason carries
+  // str(exc). These interactions pin the `unsupported` status EXACT (never loosened to a type
+  // matcher, which would erase the ok/unsupported/error split) plus a non-null displayable reason.
+  it('lane ②: the partial-inbox interaction pins an unsupported source (exact) with a displayable reason', () => {
+    const pact = loadPact()
+    const degraded = pact.interactions.find(i => i.description.startsWith('lane inbox:') && i.description.includes('partial inbox'))
+    expect(degraded).toBeDefined()
+    expect(degraded!.response.status).toBe(200)
+    const body = degraded!.response.body as { sources: Array<{ source: string; status: string; reason: string | null }> }
+    const unsupported = body.sources.find(s => s.status === 'unsupported')
+    expect(unsupported).toBeDefined()
+    expect(typeof unsupported!.reason).toBe('string')
+    expect(unsupported!.reason).not.toBe('')
+    // the `unsupported` status is the discriminator -- it must be EXACT-matched (no matcher on its path)
+    const rules = degraded!.response.matchingRules?.body ?? {}
+    const unsupportedIndex = body.sources.findIndex(s => s.status === 'unsupported')
+    expect(rules).not.toHaveProperty(`$.sources[${unsupportedIndex}].status`)
+  })
+
+  it('lane ②: an unknown source filter is a 200 with empty items and an unsupported source, never a 4xx', () => {
+    const pact = loadPact()
+    const unknown = pact.interactions.find(i => i.description.startsWith('lane inbox:') && i.description.includes('unknown source'))
+    expect(unknown).toBeDefined()
+    expect(unknown!.response.status).toBe(200)
+    const body = unknown!.response.body as { items: unknown[]; sources: Array<{ status: string }> }
+    expect(body.items).toEqual([])
+    expect(body.sources[0].status).toBe('unsupported')
+    // items:[] is exact (no collection matcher) so the empty result is pinned, not loosened
+    const rules = unknown!.response.matchingRules?.body ?? {}
+    expect(rules).not.toHaveProperty('$.items')
+    expect(rules).not.toHaveProperty('$.sources[0].status')
+  })
+
+  it('lane ②: the page cap is a 422 and NO inbox interaction carries an identity selector', () => {
+    const pact = loadPact()
+    const inbox = pact.interactions.filter(i => i.request.path === '/api/v1/tasks/inbox')
+    // 3 successes (200) + 1 over-cap (422)
+    expect(inbox.length).toBe(4)
+    expect(inbox.some(i => i.response.status === 422)).toBe(true)
+    // The route is self-scoped by construction: there is NO identity parameter, and encoding one
+    // in the pact -- even as a negative case -- would create a shape someone later "fixes" by
+    // adding it (taskbook §2/§8). Assert none of the inbox interactions sends one.
+    const forbidden = ['user_id', 'assignee_id', 'subject', 'on_behalf_of', 'as_user']
+    for (const i of inbox) {
+      const q = i.request.query ?? {}
+      for (const key of forbidden) expect(q).not.toHaveProperty(key)
+    }
   })
 
   // PLM-COLLAB P3 (方案1) governed BOM multitable write-back contract: RE-ADDED in its AMENDED form

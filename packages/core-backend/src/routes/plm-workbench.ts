@@ -33,7 +33,11 @@ import type {
   BomMultitableLinePatch,
   BomMultitableLineUpdateResult,
   BomEcoRevisionIntentResult,
+  TaskInboxResult,
+  TaskInboxSourceStatus,
+  TaskInboxQueryOptions,
 } from '../data-adapters/PLMAdapter'
+import type { QueryResult } from '../data-adapters/BaseAdapter'
 // #4020: value import (not type-only) -- isFeatureAvailable is the shared affordance-
 // visibility judgment (entry.available when the provider sends it, else the pre-#4020
 // supported+entitled derivation), so these routes never re-derive it locally.
@@ -1201,6 +1205,145 @@ router.post(
       })
     }
     return res.json(payload)
+  },
+)
+
+// ---------------------------------------------------------------------------
+// PLM-COLLAB lane ② — unified task-inbox board relay (READ-ONLY, per-caller Family I).
+// Taskbook: DEVELOPMENT_TASK_METASHEET_TASK_INBOX_BOARD_CONSUMER_20260830.md.
+//
+// Credential model (the load-bearing decision). The DATA read is authenticated with the VIEWING
+// USER's own PLM bearer, supplied HEADER-ONLY on `X-PLM-User-Token` (never a query param — URL
+// logging) and passed straight through to the adapter as a local value: never assigned to `req`,
+// the adapter instance, or a log line. If the header is absent the relay DEGRADES — it NEVER falls
+// back to the shared service token (`this.query`), which would render the service account's inbox
+// to every viewer (grounding headline finding; taskbook §6). The advisory capability pre-check
+// uses the ordinary service-token manifest call (advisory only — never an authorization decision).
+//
+// `reason` on the response is a CURATED set — 'unsupported-mode' | 'unsupported' |
+// 'no-plm-credential' | 'unavailable' — never upstream error text. Per-source `reason` from the
+// provider is allowlisted here by status: `ok`/`unsupported` pass through; an `error` source's
+// reason (which the provider copies from `str(exc)`) is STRIPPED server-side (taskbook §4.3), so it
+// can never reach the board. The route never 500s: every failure degrades to a JSON envelope.
+// ---------------------------------------------------------------------------
+interface PlmTaskInboxAdapter {
+  getIntegrationCapabilities(): Promise<IntegrationCapabilitiesResult>
+  getTaskInbox(authToken: string, options?: TaskInboxQueryOptions): Promise<QueryResult<TaskInboxResult>>
+}
+
+function isPlmTaskInboxAdapter(adapter: unknown): adapter is PlmTaskInboxAdapter {
+  const candidate = adapter as PlmTaskInboxAdapter | null
+  return (
+    typeof candidate?.getIntegrationCapabilities === 'function'
+    && typeof candidate?.getTaskInbox === 'function'
+  )
+}
+
+/** Read the per-caller PLM bearer from the header ONLY. Empty / missing -> null (relay degrades). */
+function readPlmUserToken(req: Request): string | null {
+  const raw = req.headers['x-plm-user-token']
+  const value = Array.isArray(raw) ? raw[0] : raw
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
+}
+
+const TASK_INBOX_DISPLAYABLE_STATUSES = new Set(['ok', 'unsupported'])
+
+/**
+ * Allowlist per-source `reason` by status: the provider copies `str(exc)` into an `error` source's
+ * reason (DB/driver internals), so anything that is not `ok`/`unsupported` has its reason nulled
+ * before it leaves the relay (taskbook §4.3). Count is preserved; only the free-text reason is cut.
+ */
+function sanitizeTaskInboxSources(sources: unknown): TaskInboxSourceStatus[] {
+  if (!Array.isArray(sources)) return []
+  return sources
+    .filter((s): s is Record<string, unknown> => !!s && typeof s === 'object')
+    .map((s) => {
+      const status = typeof s.status === 'string' ? s.status : 'error'
+      const reason = TASK_INBOX_DISPLAYABLE_STATUSES.has(status) && typeof s.reason === 'string' ? s.reason : null
+      return {
+        source: typeof s.source === 'string' ? s.source : '',
+        status,
+        count: typeof s.count === 'number' ? s.count : null,
+        reason,
+      }
+    })
+}
+
+router.get(
+  '/api/plm-workbench/data-sources/:id/task-inbox',
+  authenticate,
+  param('id').isString(),
+  query('source').optional().isString(),
+  query('state').optional().isString(),
+  query('overdue').optional().isBoolean(),
+  query('limit').optional().isInt({ min: 1, max: 200 }),
+  query('offset').optional().isInt({ min: 0 }),
+  validate,
+  async (req: Request, res: Response) => {
+    const dataSourceId = req.params.id
+    let adapter: unknown
+    try {
+      adapter = getDataSourceManager().getDataSource(dataSourceId)
+    } catch {
+      return res.status(404).json({ error: 'Data source not found', data_source_id: dataSourceId })
+    }
+    if (!isPlmTaskInboxAdapter(adapter)) {
+      return res.json({ data_source_id: dataSourceId, available: false, reason: 'unsupported-mode' })
+    }
+    // 1) advisory capability pre-check (never 500). NOTE: the provider route itself is NOT
+    // entitlement-gated (taskbook §7) — `available` here gates only the board's VISIBILITY.
+    let capabilities: IntegrationCapabilitiesResult
+    try {
+      capabilities = await adapter.getIntegrationCapabilities()
+    } catch {
+      return res.json({ data_source_id: dataSourceId, available: false, reason: 'unavailable' })
+    }
+    const feature = capabilities.available ? capabilities.manifest.features.task_inbox_board : undefined
+    if (!feature || feature.supported !== true) {
+      return res.json({ data_source_id: dataSourceId, available: false, reason: 'unsupported' })
+    }
+    if (!isFeatureAvailable(feature)) {
+      // supported but not available (unentitled, non-base) -> hide the board, no data fetched
+      return res.json({ data_source_id: dataSourceId, available: false, reason: 'unsupported' })
+    }
+    // 2) per-caller credential is REQUIRED for the data read — no service-account fallback (§6).
+    const userToken = readPlmUserToken(req)
+    if (!userToken) {
+      return res.json({
+        data_source_id: dataSourceId,
+        available: true,
+        reason: 'no-plm-credential',
+        items: [],
+        sources: [],
+        total: 0,
+      })
+    }
+    const options: TaskInboxQueryOptions = {}
+    if (typeof req.query.source === 'string') options.source = req.query.source
+    if (typeof req.query.state === 'string') options.state = req.query.state
+    if (typeof req.query.overdue === 'string') options.overdue = req.query.overdue === 'true'
+    if (typeof req.query.limit === 'string') options.limit = Number(req.query.limit)
+    if (typeof req.query.offset === 'string') options.offset = Number(req.query.offset)
+
+    let result: QueryResult<TaskInboxResult>
+    try {
+      result = await adapter.getTaskInbox(userToken, options)
+    } catch {
+      return res.json({ data_source_id: dataSourceId, available: true, reason: 'unavailable', items: [], sources: [], total: 0 })
+    }
+    if (result.error || !result.data || result.data.length === 0) {
+      return res.json({ data_source_id: dataSourceId, available: true, reason: 'unavailable', items: [], sources: [], total: 0 })
+    }
+    const body = result.data[0]
+    return res.json({
+      data_source_id: dataSourceId,
+      available: true,
+      items: Array.isArray(body.items) ? body.items : [],
+      sources: sanitizeTaskInboxSources(body.sources),
+      total: typeof body.total === 'number' ? body.total : 0,
+      limit: typeof body.limit === 'number' ? body.limit : undefined,
+      offset: typeof body.offset === 'number' ? body.offset : undefined,
+    })
   },
 )
 

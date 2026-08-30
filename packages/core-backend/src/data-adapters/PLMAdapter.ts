@@ -794,6 +794,68 @@ export interface BomEcoRevisionIntentResult {
   target_version_id?: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// PLM-COLLAB lane ② — unified task-inbox board (consumer READ, Family I).
+// Provider taskbook: DEVELOPMENT_TASK_METASHEET_TASK_INBOX_BOARD_CONSUMER_20260830.md.
+// The provider already aggregates every task-like row the caller owns into ONE self-scoped
+// call (`GET /api/v1/tasks/inbox`). This lane RENDERS it; it does not aggregate. There is NO
+// identity parameter on the route (the subject is the token's principal — taskbook §2), so the
+// board cannot be pointed at another user by construction. The consumer's half of the leak
+// obligation (taskbook §6) is: fetch with the VIEWING USER's credential every load, never the
+// shared service account, never cache one caller's rows for another viewer.
+// ---------------------------------------------------------------------------
+
+/**
+ * One aggregated task row. Field names mirror the provider's `TaskInboxItem` EXACTLY:
+ * `state` (NOT status), `due_at` (NOT due_date) — binding the wrong name renders an empty
+ * column silently (taskbook §4.1). `action_url` is a typed OBJECT REFERENCE, non-optional but
+ * navigable for only 1 of 4 sources today — render it NON-navigable by default (taskbook §5).
+ * `source_payload` is DELIBERATELY absent from this type: an open dict with no schema, per-caller,
+ * that must never be persisted or keyed off (taskbook §4.2) — so the consumer never reads it.
+ */
+export interface TaskInboxItem {
+  source: string;
+  title: string;
+  state: string;
+  is_overdue: boolean;
+  due_at?: string | null;
+  priority?: string | null;
+  entity_type?: string | null;
+  entity_id?: string | null;
+  action_url: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+/**
+ * Per-source health. `status` ∈ `ok` | `unsupported` | `error`; a non-`ok` source still returns
+ * 200, so a board that ignores this shows a truncated inbox as if complete (taskbook §4.3).
+ * `reason` is safe to display for `ok`/`unsupported` only — the provider copies `str(exc)` into an
+ * `error` reason, so its text is suppressed at the relay before it ever reaches this shape.
+ */
+export interface TaskInboxSourceStatus {
+  source: string;
+  status: string;
+  count?: number | null;
+  reason?: string | null;
+}
+
+export interface TaskInboxResult {
+  items: TaskInboxItem[];
+  sources: TaskInboxSourceStatus[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface TaskInboxQueryOptions {
+  source?: string;
+  state?: string;
+  overdue?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
 // Field guard for the governed BOM multi-table context. Validates EVERY field declared on
 // BomMultitableLine / BomMultitablePart / BomMultitableContext — both the structural keys
 // (bom_line_id, part_id, level, path, ...) AND the displayed cells (item_number, name, state,
@@ -1394,6 +1456,17 @@ export class PLMAdapter extends HTTPAdapter {
               scenarios: ['bom_review'],
               actions: ['eco_revision_intent'],
               action_status: 'governed',
+            },
+            // lane ② (task-inbox board): read-only SHAPE — NO actions, NO action_status (the
+            // §5.3 no-bulk-decisioning refusal is encoded as the absence of an advertised action).
+            // Mocked so mock-mode dev can render the board end to end.
+            task_inbox_board: {
+              supported: true,
+              api_version: 'v1',
+              entitled: true,
+              available: true,
+              cache_scope: { supported: 'global', entitled: 'tenant' },
+              scenarios: ['task_inbox'],
             },
           },
         },
@@ -2739,6 +2812,71 @@ export class PLMAdapter extends HTTPAdapter {
       method: 'GET',
       headers: { Authorization: `Bearer ${readToken}` },
     })
+  }
+
+  /**
+   * PLM-COLLAB lane ② (READ, Family I): fetch the caller's unified task inbox
+   * (`GET /api/v1/tasks/inbox`). Authenticated with the VIEWING USER's own PLM bearer
+   * (`authToken`), passed EXPLICITLY on every call and NEVER cached on the adapter — so the board
+   * renders the caller's own rows, never the service account's (grounding headline finding;
+   * taskbook §2/§6).
+   *
+   * Deliberately routes through `yuantusDiscussionFetch` (raw fetch; the CALLER sets Authorization)
+   * and NOT `this.query`/`this.select`: HTTPAdapter's request interceptor unconditionally
+   * overwrites Authorization with the shared service token, which would render every viewer the
+   * service account's inbox. The per-caller TRANSPORT is shared with the discussion read relay;
+   * only the token SOURCE differs — Family I (full login) here, not the `bom_multitable` embed
+   * exchange, which the taskbook §3 closes to this lane.
+   *
+   * The route is self-scoped provider-side: there is NO identity parameter, only caller-owned
+   * filters (source/state/overdue) and paging. `limit` is clamped to the provider cap (1..200)
+   * here so the consumer can never quietly ask for more (taskbook §4.4). Never throws.
+   */
+  async getTaskInbox(
+    authToken: string,
+    options: TaskInboxQueryOptions = {},
+  ): Promise<QueryResult<TaskInboxResult>> {
+    if (this.mockMode) {
+      const now = new Date().toISOString()
+      const limit = typeof options.limit === 'number' && options.limit > 0 ? Math.min(options.limit, 200) : 50
+      return {
+        data: [{
+          items: [
+            { source: 'approval_request', title: 'Approve ECR-1024', state: 'pending', is_overdue: true, due_at: now, priority: 'high', entity_type: 'approval_request', entity_id: '01H000000000000000000000A1', action_url: '/api/v1/approvals/requests/01H000000000000000000000A1', created_at: now, updated_at: now },
+            { source: 'workflow_task', title: 'Review drawing pack', state: 'open', is_overdue: false, due_at: null, priority: null, entity_type: 'workflow_task', entity_id: '01H000000000000000000000K1', action_url: '/api/v1/workflow/tasks/01H000000000000000000000K1/actions', created_at: now, updated_at: now },
+          ],
+          sources: [
+            { source: 'approval_request', status: 'ok', count: 1, reason: null },
+            { source: 'workflow_task', status: 'ok', count: 1, reason: null },
+            { source: 'eco_activity', status: 'unsupported', count: 0, reason: 'role-assigned workflow tasks are deferred until tenant-safe identity resolution' },
+          ],
+          total: 2,
+          limit,
+          offset: typeof options.offset === 'number' && options.offset > 0 ? options.offset : 0,
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('Task inbox is not supported for this PLM API mode') }
+    }
+    if (!authToken) {
+      // Fail closed: no per-caller credential means NO fallback to the service token (§6).
+      return { data: [], error: new Error('Task inbox requires a per-caller PLM credential') }
+    }
+
+    const query = new URLSearchParams()
+    if (options.source) query.set('source', options.source)
+    if (options.state) query.set('state', options.state)
+    if (typeof options.overdue === 'boolean') query.set('overdue', String(options.overdue))
+    if (typeof options.limit === 'number') query.set('limit', String(Math.min(Math.max(Math.trunc(options.limit), 1), 200)))
+    if (typeof options.offset === 'number' && options.offset > 0) query.set('offset', String(Math.trunc(options.offset)))
+    const qs = query.toString()
+
+    return this.yuantusDiscussionFetch<TaskInboxResult>(
+      `/api/v1/tasks/inbox${qs ? `?${qs}` : ''}`,
+      { method: 'GET', headers: { Authorization: `Bearer ${authToken}` } },
+    )
   }
 
   /**
