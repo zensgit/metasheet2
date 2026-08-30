@@ -48,6 +48,17 @@
 /** @type {FlagSpec[]} */
 export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
   {
+    key: 'MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'TRANSITION ONLY, and a REGRESSION while on. Schema management (rename/retype/delete a field, 11 gated routes) was split out of multitable:write into multitable:manage-schema, because an operator who may fill a cell must not be able to delete the column. With this flag true, multitable:write is ALSO accepted for canManageFields -- the old fused behaviour returns. Default OFF is the intended end state; the flag exists only so a deployment can stage granting the new code before tightening.',
+    source: 'packages/core-backend/src/multitable/manage-schema-permission.ts',
+  },
+  {
     key: 'MULTITABLE_ENABLE_SHEET_CONFIG_REVERT',
     type: 'boolean',
     activationValue: 'true',
