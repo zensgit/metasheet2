@@ -11,6 +11,9 @@ export const ELEARNING_CONTENT_RUNTIME_TABLES = [
 
 const CONTENT_IMMUTABLE_FUNCTION = 'elearning_content_reject_immutable_write'
 const COMPLETION_IMMUTABLE_FUNCTION = 'elearning_completion_evidence_deny_mutation'
+const COMPLETION_IMMUTABLE_BODY = `BEGIN
+  RAISE EXCEPTION 'elearning_completion_evidence is append-only: % is not permitted', TG_OP;
+END;`
 const COURSE_STATE_FUNCTION = 'elearning_course_versions_state_guard'
 const COURSE_STATE_TRIGGER = 'trg_elearning_course_versions_state_guard'
 
@@ -868,6 +871,44 @@ async function assertTriggers(db: Kysely<unknown>): Promise<void> {
   if (JSON.stringify(actual) !== JSON.stringify(required)) drift('immutable triggers')
 }
 
+async function assertCompletionEvidenceMutationAuthority(db: Kysely<unknown>): Promise<void> {
+  await assertFunction(db, COMPLETION_IMMUTABLE_FUNCTION, COMPLETION_IMMUTABLE_BODY)
+  const result = await sql<{
+    type: number
+    enabled: string
+    attr: string
+    has_qualifier: boolean
+    function_name: string
+    function_in_schema: boolean
+  }>`
+    SELECT trigger_row.tgtype::int AS type,
+           trigger_row.tgenabled AS enabled,
+           trigger_row.tgattr::text AS attr,
+           trigger_row.tgqual IS NOT NULL AS has_qualifier,
+           function_row.proname AS function_name,
+           function_row.pronamespace = namespace.oid AS function_in_schema
+      FROM pg_trigger trigger_row
+      JOIN pg_class table_row ON table_row.oid = trigger_row.tgrelid
+      JOIN pg_namespace namespace ON namespace.oid = table_row.relnamespace
+      JOIN pg_proc function_row ON function_row.oid = trigger_row.tgfoid
+     WHERE namespace.nspname = current_schema()
+       AND table_row.relname = 'elearning_completion_evidence'
+       AND trigger_row.tgname = 'trg_elearning_completion_evidence_deny_mutation'
+       AND NOT trigger_row.tgisinternal
+  `.execute(db)
+  const row = result.rows[0]
+  if (
+    result.rows.length !== 1
+    || !row
+    || row.type !== 27
+    || row.enabled !== 'O'
+    || row.attr !== ''
+    || row.has_qualifier
+    || row.function_name !== COMPLETION_IMMUTABLE_FUNCTION
+    || !row.function_in_schema
+  ) drift('completion evidence immutable trigger')
+}
+
 async function assertCourseStateAuthority(db: Kysely<unknown>): Promise<void> {
   await assertFunction(db, COURSE_STATE_FUNCTION, ELEARNING_CONTENT_COURSE_STATE_BODY)
   const result = await sql<{
@@ -1160,9 +1201,7 @@ async function assertSchema(db: Kysely<unknown>): Promise<void> {
   await assertFunction(
     db,
     COMPLETION_IMMUTABLE_FUNCTION,
-    `BEGIN
-      RAISE EXCEPTION 'elearning_completion_evidence is append-only: % is not permitted', TG_OP;
-    END;`,
+    COMPLETION_IMMUTABLE_BODY,
   )
   await assertTriggers(db)
   await assertCourseStateAuthority(db)
@@ -1452,14 +1491,28 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       ADD COLUMN open_event_id uuid,
       ADD COLUMN completion_assurance text
   `.execute(db)
+  await assertCompletionEvidenceMutationAuthority(db)
   await sql`
-    UPDATE elearning_completion_evidence evidence
-       SET item_type = item.item_type
-      FROM elearning_course_version_items item
-     WHERE item.org_id = evidence.org_id
-       AND item.course_version_id = evidence.course_version_id
-       AND item.id = evidence.course_version_item_id
+    DO $migration$
+    BEGIN
+      ALTER TABLE elearning_completion_evidence
+        DISABLE TRIGGER trg_elearning_completion_evidence_deny_mutation;
+      UPDATE elearning_completion_evidence evidence
+         SET item_type = item.item_type
+        FROM elearning_course_version_items item
+       WHERE item.org_id = evidence.org_id
+         AND item.course_version_id = evidence.course_version_id
+         AND item.id = evidence.course_version_item_id;
+      ALTER TABLE elearning_completion_evidence
+        ENABLE TRIGGER trg_elearning_completion_evidence_deny_mutation;
+    EXCEPTION WHEN OTHERS THEN
+      ALTER TABLE elearning_completion_evidence
+        ENABLE TRIGGER trg_elearning_completion_evidence_deny_mutation;
+      RAISE;
+    END
+    $migration$
   `.execute(db)
+  await assertCompletionEvidenceMutationAuthority(db)
   await sql`ALTER TABLE elearning_completion_evidence ALTER COLUMN item_type SET NOT NULL`.execute(db)
   await sql`
     ALTER TABLE elearning_completion_evidence

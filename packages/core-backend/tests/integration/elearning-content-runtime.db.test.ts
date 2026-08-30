@@ -387,6 +387,56 @@ describe('e-learning content runtime PostgreSQL authority', () => {
     )
     expect(triggers.rows.map((row) => row.tgname)).toEqual(triggerNames)
 
+    const upgradeOrg = org('upgrade-existing-evidence')
+    const upgradeUser = actor('upgrade-learner')
+    const upgradeMediaId = await seedReadyMedia(firstPool, upgradeOrg)
+    const upgradeCourse = await publishElearningCourse(runtimeDb(firstPool), {
+      orgId: upgradeOrg,
+      actorId: actor('upgrade-publisher'),
+      requestId: randomUUID(),
+      title: 'Existing evidence upgrade',
+      mediaId: upgradeMediaId,
+      passScore: 1,
+      maxAttempts: 1,
+      questions: [{
+        questionType: 'single_choice',
+        prompt: 'Upgrade?',
+        options: [{ id: 'yes', text: 'yes' }, { id: 'no', text: 'no' }],
+        correctOptionIds: ['yes'],
+        points: 1,
+      }],
+    })
+    await ensureMembership(firstPool, upgradeUser, upgradeOrg)
+    const upgradeMemberId = await assignVersion(
+      firstPool,
+      upgradeOrg,
+      upgradeUser,
+      upgradeCourse.courseVersionId,
+    )
+    const upgradeEvidenceId = randomUUID()
+    await firstPool.query(
+      `INSERT INTO elearning_completion_evidence (
+         id, org_id, assignment_member_id, course_version_id,
+         course_version_item_id, user_id, completion_policy_version,
+         completion_threshold_bps, media_duration_ms, effective_ms,
+         max_position_ms, event_digest, evaluator_version, completed_at,
+         item_type, content_revision_id, open_event_id, completion_assurance
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, 'video-v1-90pct',
+         9000, 60000, 54000, 54000, $7, 'video-v1', now(),
+         'video', NULL, NULL, NULL
+       )`,
+      [
+        upgradeEvidenceId,
+        upgradeOrg,
+        upgradeMemberId,
+        upgradeCourse.courseVersionId,
+        upgradeCourse.videoItemId,
+        upgradeUser,
+        'c'.repeat(64),
+      ],
+    )
+
     await migrate(contentRuntimeDown)
     const absent = await firstPool.query(
       `SELECT to_regclass('elearning_content_revisions') AS revisions,
@@ -396,6 +446,13 @@ describe('e-learning content runtime PostgreSQL authority', () => {
     await migrate(contentRuntimeDown)
     await migrate(contentRuntimeUp)
     await migrate(contentRuntimeUp)
+    const upgradedEvidence = await firstPool.query(
+      `SELECT item_type
+         FROM elearning_completion_evidence
+        WHERE org_id = $1 AND id = $2`,
+      [upgradeOrg, upgradeEvidenceId],
+    )
+    expect(upgradedEvidence.rows).toEqual([{ item_type: 'video' }])
   }, 30_000)
 
   it('fails loud on columns, FKs, checks, functions, and publish-readiness drift then restores cleanly', async () => {
