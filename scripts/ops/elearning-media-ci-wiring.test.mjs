@@ -56,6 +56,8 @@ const WEB_SPECS = [
   'tests/elearning-routes.spec.ts',
   'tests/elearning-manual-grading-client.spec.ts',
   'tests/elearning-manual-grading-view.spec.ts',
+  'tests/elearning-learning-profile-client.spec.ts',
+  'tests/elearning-learning-profile-section.spec.ts',
   'tests/elearning-title-admin.spec.ts',
 ]
 
@@ -65,6 +67,7 @@ const WEB_GUARD_PATHS = [
   'apps/web/src/services/elearningCredit.ts',
   'apps/web/src/services/elearningCertificate.ts',
   'apps/web/src/services/elearningManualGrading.ts',
+  'apps/web/src/services/elearningProfile.ts',
   'apps/web/src/views/ElearningAdminView.vue',
   'apps/web/src/views/ElearningContentAdminSection.vue',
   'apps/web/src/views/ElearningContentLearnerCourse.vue',
@@ -76,6 +79,7 @@ const WEB_GUARD_PATHS = [
   'apps/web/src/views/ElearningLearnerView.vue',
   'apps/web/src/views/ElearningManualGradingView.vue',
   'apps/web/src/views/ElearningManualGradingAttempt.vue',
+  'apps/web/src/views/ElearningLearningProfileSection.vue',
   'apps/web/src/views/elearningLabels.ts',
   'apps/web/src/router/appRoutes.ts',
   'apps/web/src/router/types.ts',
@@ -97,6 +101,8 @@ const WEB_GUARD_PATHS = [
   'apps/web/tests/elearning-routes.spec.ts',
   'apps/web/tests/elearning-manual-grading-client.spec.ts',
   'apps/web/tests/elearning-manual-grading-view.spec.ts',
+  'apps/web/tests/elearning-learning-profile-client.spec.ts',
+  'apps/web/tests/elearning-learning-profile-section.spec.ts',
   'apps/web/tests/elearning-title-admin.spec.ts',
   '.github/workflows/elearning-web-guard.yml',
 ]
@@ -109,6 +115,7 @@ const SCHEMA_DB_FILES = [
   'tests/integration/elearning-course-publish.db.test.ts',
   'tests/integration/elearning-title-runtime.db.test.ts',
   'tests/integration/elearning-certificate-runtime.db.test.ts',
+  'tests/integration/elearning-learning-profile.db.test.ts',
   'tests/integration/elearning-exam-service.db.test.ts',
   'tests/integration/elearning-learner-courses.db.test.ts',
   'tests/integration/elearning-media-playback.db.test.ts',
@@ -696,7 +703,7 @@ test('media upload OpenAPI and generated SDK keep the ready/rejected discriminat
   assert.match(sdk, /ElearningMediaUploadRejectedResult:[\s\S]*?status: "rejected";[\s\S]*?durationMs: null;/)
 })
 
-test('elearning-web-guard.yml parses, installs frozen deps, and runs the sixteen whole spec files', () => {
+test('elearning-web-guard.yml parses, installs frozen deps, and runs the eighteen whole spec files', () => {
   assert.ok(existsSync(WEB_GUARD), 'elearning-web-guard.yml must exist')
   const yaml = readFileSync(WEB_GUARD, 'utf8')
   const doc = parseYaml(yaml)
@@ -724,7 +731,7 @@ test('elearning-web-guard.yml parses, installs frozen deps, and runs the sixteen
   assert.deepEqual(invocationFileArgs(invocations[0]).sort(), [...WEB_SPECS].sort())
 })
 
-test('run-required-web-tests.sh keeps existing tokens and adds a distinct sixteen-file elearning invocation', () => {
+test('run-required-web-tests.sh keeps existing tokens and adds a distinct eighteen-file elearning invocation', () => {
   assert.ok(existsSync(REQUIRED_WEB), 'run-required-web-tests.sh must exist')
   const src = readFileSync(REQUIRED_WEB, 'utf8')
   for (const token of EXISTING_REQUIRED_WEB_TOKENS) {
@@ -736,7 +743,7 @@ test('run-required-web-tests.sh keeps existing tokens and adds a distinct sixtee
   assert.equal(
     targeted.length,
     1,
-    'run-required-web-tests.sh must have exactly one distinct invocation that names all sixteen elearning specs',
+    'run-required-web-tests.sh must have exactly one distinct invocation that names all eighteen elearning specs',
   )
   assert.deepEqual(
     invocationFileArgs(targeted[0]).sort(),

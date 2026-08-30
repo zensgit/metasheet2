@@ -444,7 +444,7 @@ npx vitest run approval-fwb-mapping-config approval-fwb-mapping-editor --reporte
 npx vitest run fwb-rule-authoring-helpers fwb-rule-authoring --reporter=dot
 npx vitest run tests/App.spec.ts attendance-date-only-format accountIdentityDisplay middleEllipsis attendance-records-route-redirect --reporter=dot
 # E-learning V0.1 (2026-08-25) + L3 manual-grading UI (2026-08-27) + L4
-# credit rules/wallet UI + content courses + titles/certificates (2026-08-30): sixteen
+# credit rules/wallet UI + content courses + titles/certificates/profile (2026-08-30): eighteen
 # whole-file tokens as a distinct targeted invocation so a name filter matching
 # zero tests cannot skip-green. Full paths avoid substring collisions with
 # future sibling specs. The L3 pair (elearning-manual-grading-client.spec.ts,
@@ -466,6 +466,8 @@ npx vitest run \
   tests/elearning-routes.spec.ts \
   tests/elearning-manual-grading-client.spec.ts \
   tests/elearning-manual-grading-view.spec.ts \
+  tests/elearning-learning-profile-client.spec.ts \
+  tests/elearning-learning-profile-section.spec.ts \
   tests/elearning-title-admin.spec.ts \
   --reporter=dot
 # Attendance group list-detail closeout (#4354): these existing specs carry the

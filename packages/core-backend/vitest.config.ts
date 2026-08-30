@@ -1571,6 +1571,10 @@ export default defineConfig({
       // Excluded from no-DB collection and wired whole-file post-migrate.
       'tests/integration/elearning-title-runtime.db.test.ts',
       'tests/integration/elearning-certificate-runtime.db.test.ts',
+      // E-learning learner profile is derived from immutable completion and
+      // graded-attempt authorities and requires exact real PostgreSQL joins.
+      // Excluded from no-DB collection and wired whole-file post-migrate.
+      'tests/integration/elearning-learning-profile.db.test.ts',
       // E-learning V0.1 exam service gate. Requires real PostgreSQL (start/
       // submit + advisory lock). Excluded from the no-DB job so a missing
       // DATABASE_URL cannot skip-green it; wired as a WHOLE FILE sibling of
