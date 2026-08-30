@@ -16,11 +16,10 @@ import { grantApprovalWriteForIntegrationActor } from '../helpers/approval-schem
  * its stated positive/negative control, plus a REAL two-connection concurrency race (a departure
  * racing a concurrent decide on the same seat) — TOCTOU claims are constructed here, not argued.
  *
- * This suite invokes the service method DIRECTLY (no HTTP layer, no directory-sync wiring): P3-A
- * slice scope is "an explicit test-visible entry point (no directory wiring)" per the Lock-4 P3-A
- * briefs — the `user_changed` deprovision consumer wiring (OD-L4-8a) is a separate slice. The
- * suite's fixtures independently reconstruct the ONE precondition that consumer will eventually
- * supply: a departed user id.
+ * This suite invokes the service method DIRECTLY (no HTTP layer or directory-sync orchestration),
+ * so it isolates the writer contract. The `user_changed` post-commit consumer is exercised by
+ * `directory-sync-orchestration.db.test.ts`; this suite independently reconstructs the one input
+ * that consumer supplies: a departed user id.
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()

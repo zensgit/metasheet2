@@ -8421,9 +8421,10 @@ export class ApprovalProductService {
    * `mark_inactive` + `globallyClear` emit, consumed via `directory-sync.ts`'s
    * `usersDeactivatedCount`), which is gated behind `DIRECTORY_DEPROVISION_ENABLED` —
    * **default OFF per org** (`isDirectoryDeprovisionEnabled()`). 离职自动转上级 therefore does NOT
-   * fire for every org; this method is deliberately NOT wired to that consumer in this slice (P3-A
-   * scope — the wiring + operator-warning surface is a separate slice per the Lock-4 P3-A briefs).
-   * Any authoring/disclosure copy describing this feature MUST carry that limit and MUST NOT claim
+   * fire for every org. `syncDirectoryIntegration` now consumes the committed `user_changed`
+   * evidence through the post-commit departure dispatcher; infrastructure failures remain
+   * values-free manual-recovery signals because automatic retry is outside this slice. Any
+   * authoring/disclosure copy describing this feature MUST carry those limits and MUST NOT claim
    * universal coverage.
    *
    * Contract:

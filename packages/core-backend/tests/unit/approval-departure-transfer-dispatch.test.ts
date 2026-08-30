@@ -33,6 +33,9 @@ describe('dispatchApprovalDepartureTransfersForRun', () => {
     const [sql, params] = query.mock.calls[0]
     expect(sql).toContain("event.event_origin = 'sync'")
     expect(sql).toContain("event.status = 'applied'")
+    expect(sql).toContain('event.run_id = $1::uuid')
+    expect(sql).toContain('event.integration_id = $2::uuid')
+    expect(sql).toContain('effect.local_user_id = event.local_user_id')
     expect(sql).toContain("effect.effect_type = 'user_changed'")
     expect(sql).toContain("effect.status = 'applied'")
     expect(params).toEqual(['run-a', 'integration-a'])

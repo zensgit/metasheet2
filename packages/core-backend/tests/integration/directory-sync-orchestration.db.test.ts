@@ -657,9 +657,11 @@ describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', (
     async function seedApprovalDepartureSyncFixture(
       tag: string,
       policy: 'mark_inactive' | 'disable_grant_only',
+      options: { withAutoAdmission?: boolean } = {},
     ): Promise<{
       accountId: string
       approvalId: string
+      autoAdmissionEmail?: string
       deptId: string
       directory: MockDirectory
       integrationId: string
@@ -668,15 +670,21 @@ describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', (
       managerUserId: string
       requesterUserId: string
       templateId: string
+      extraUserEmails: string[]
       extraUserIds: string[]
     }> {
       const corpId = `dso-f4e-corp-${tag}-${TS}`
+      const deptId = `dso-f4e-dept-${tag}-${TS}`
+      const autoAdmissionEmail = options.withAutoAdmission
+        ? `dso-f4e-admit-${tag}-${TS}@example.test`
+        : undefined
       const integration = await createDirectoryIntegration({
         name: `dso-f4e-${tag}-${TS}`,
         corpId,
         appKey: `dso-f4e-appkey-${tag}-${TS}`,
         appSecret: 'dso-secret',
-        admissionMode: 'manual_only',
+        admissionMode: options.withAutoAdmission ? 'auto_for_scoped_departments' : 'manual_only',
+        admissionDepartmentIds: options.withAutoAdmission ? [deptId] : [],
         defaultDeprovisionPolicy: policy,
       })
       const localUserId = `dso-f4e-departed-${tag}-${TS}`
@@ -708,7 +716,6 @@ describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', (
         [localUserId],
       )
 
-      const deptId = `dso-f4e-dept-${tag}-${TS}`
       const department = await query<{ id: string }>(
         `INSERT INTO directory_departments (
            integration_id, external_department_id, name, is_active, raw
@@ -764,16 +771,29 @@ describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', (
       return {
         accountId: departedAccount.rows[0].id,
         approvalId: approval.id,
+        autoAdmissionEmail,
         deptId,
         directory: {
           departments: [{ id: deptId, parentId: '1', name: 'F4E', order: 0 }],
           usersByDept: {
-            [deptId]: [{
-              userId: managerExternalId,
-              name: 'Manager',
-              departmentIds: [deptId],
-              source: managerSource,
-            }],
+            [deptId]: [
+              {
+                userId: managerExternalId,
+                name: 'Manager',
+                departmentIds: [deptId],
+                source: managerSource,
+              },
+              ...(autoAdmissionEmail
+                ? [{
+                    userId: `dso-f4e-ext-admit-${tag}-${TS}`,
+                    name: 'Auto Admission',
+                    departmentIds: [deptId],
+                    unionId: `dso-f4e-union-admit-${tag}-${TS}`,
+                    openId: `dso-f4e-open-admit-${tag}-${TS}`,
+                    email: autoAdmissionEmail,
+                  }]
+                : []),
+            ],
           },
         },
         integrationId: integration.id,
@@ -782,6 +802,7 @@ describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', (
         managerUserId,
         requesterUserId,
         templateId: template.id,
+        extraUserEmails: autoAdmissionEmail ? [autoAdmissionEmail] : [],
         extraUserIds: [managerUserId, requesterUserId],
       }
     }
@@ -871,6 +892,7 @@ describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', (
 
     const cleanupTargets: Array<{
       approvalId?: string
+      extraUserEmails?: string[]
       extraUserIds?: string[]
       integrationId: string
       localUserId: string
@@ -898,6 +920,7 @@ describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', (
         await query(`DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`, [userIds])
         await query(`DELETE FROM user_external_auth_grants WHERE local_user_id = ANY($1::text[])`, [userIds])
         await query(`DELETE FROM users WHERE id = ANY($1::text[])`, [userIds])
+        await deleteUsersByEmail(target.extraUserEmails ?? [])
       }
     })
 
@@ -1018,6 +1041,123 @@ describeIfDatabase('syncDirectoryIntegration orchestration harness (real DB)', (
           is_active: true,
         },
       ])
+    })
+
+    it('keeps a committed mixed run completed and dispatches F4-E once when the invitation ledger throws hostile values', async () => {
+      const fixture = await seedApprovalDepartureSyncFixture(
+        'approval-invite-failure',
+        'mark_inactive',
+        { withAutoAdmission: true },
+      )
+      cleanupTargets.push(fixture)
+      activeDirectory = fixture.directory
+      if (!fixture.autoAdmissionEmail) throw new Error('auto-admission fixture email is required')
+
+      const triggerName = `dso_f4e_invite_fail_${TS}`
+      const functionName = `dso_f4e_invite_fail_fn_${TS}`
+      const hostileMessage = [
+        'hostile-invite-error',
+        fixture.autoAdmissionEmail,
+        fixture.localUserId,
+        fixture.approvalId,
+      ].join(':')
+      const warnSpy = vi.spyOn(Logger.prototype, 'warn')
+      const dispatchSpy = vi.spyOn(ApprovalProductService.prototype, 'applyApprovalDepartureTransfer')
+      let dispatchCallCount = 0
+      let dispatchFirstArgs: unknown[] | undefined
+      let inviteWarningCount = 0
+      let inviteWarningMeta: unknown
+      let warningEvidence = ''
+      let result: Awaited<ReturnType<typeof syncDirectoryIntegration>> | undefined
+      process.env.DIRECTORY_DEPROVISION_ENABLED = 'true'
+      try {
+        await query(
+          `CREATE FUNCTION ${functionName}() RETURNS trigger AS $trigger$
+           BEGIN
+             RAISE EXCEPTION USING MESSAGE = '${hostileMessage}';
+           END;
+           $trigger$ LANGUAGE plpgsql`,
+        )
+        await query(
+          `CREATE TRIGGER ${triggerName}
+           BEFORE INSERT ON user_invites
+           FOR EACH ROW
+           WHEN (NEW.email = '${fixture.autoAdmissionEmail}')
+           EXECUTE FUNCTION ${functionName}()`,
+        )
+        result = await syncDirectoryIntegration(fixture.integrationId, 'system:dso-f4e-invite-failure')
+      } finally {
+        delete process.env.DIRECTORY_DEPROVISION_ENABLED
+        await query(`DROP TRIGGER IF EXISTS ${triggerName} ON user_invites`)
+        await query(`DROP FUNCTION IF EXISTS ${functionName}()`)
+        dispatchCallCount = dispatchSpy.mock.calls.length
+        dispatchFirstArgs = dispatchSpy.mock.calls[0]
+        const inviteWarnings = warnSpy.mock.calls.filter(
+          ([message]) => message === 'Directory auto-admission invite ledger failed after directory commit',
+        )
+        inviteWarningCount = inviteWarnings.length
+        inviteWarningMeta = inviteWarnings[0]?.[1]
+        warningEvidence = JSON.stringify(warnSpy.mock.calls)
+        dispatchSpy.mockRestore()
+        warnSpy.mockRestore()
+      }
+
+      expect(result).toBeDefined()
+      if (!result) throw new Error('directory sync result is required')
+      expect(result.run.status).toBe('completed')
+      expect(dispatchCallCount).toBe(1)
+      expect(dispatchFirstArgs).toEqual([fixture.localUserId, {
+        resolvedManagerId: fixture.managerUserId,
+      }])
+
+      const run = await readRun(result.run.id)
+      expect(run.status).toBe('completed')
+      expect(run.error_message).toBeNull()
+      expect(run.finished_at).not.toBeNull()
+
+      const durableSignal = await query<{ count: string }>(
+        `SELECT count(*)::text AS count
+           FROM directory_deprovision_events event
+           JOIN directory_deprovision_effects effect
+             ON effect.event_id = event.id
+            AND effect.local_user_id = event.local_user_id
+          WHERE event.run_id = $1::uuid
+            AND event.integration_id = $2::uuid
+            AND event.status = 'applied'
+            AND effect.status = 'applied'
+            AND effect.effect_type = 'user_changed'`,
+        [result.run.id, fixture.integrationId],
+      )
+      expect(durableSignal.rows).toEqual([{ count: '1' }])
+
+      const admittedUser = await query<{ id: string; is_active: boolean }>(
+        `SELECT id, is_active FROM users WHERE email = $1`,
+        [fixture.autoAdmissionEmail],
+      )
+      expect(admittedUser.rows).toHaveLength(1)
+      fixture.extraUserIds.push(admittedUser.rows[0].id)
+      expect(admittedUser.rows[0].is_active).toBe(true)
+
+      const inviteCount = await query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM user_invites WHERE email = $1`,
+        [fixture.autoAdmissionEmail],
+      )
+      expect(inviteCount.rows).toEqual([{ count: '0' }])
+
+      const reassignCount = await query<{ count: string }>(
+        `SELECT count(*)::text AS count
+           FROM approval_records
+          WHERE instance_id = $1 AND action = 'reassign'`,
+        [fixture.approvalId],
+      )
+      expect(reassignCount.rows).toEqual([{ count: '1' }])
+
+      expect(inviteWarningCount).toBe(1)
+      expect(inviteWarningMeta).toEqual({ reason: 'invite_ledger_failed' })
+      expect(warningEvidence).not.toContain(hostileMessage)
+      expect(warningEvidence).not.toContain(fixture.autoAdmissionEmail)
+      expect(warningEvidence).not.toContain(fixture.localUserId)
+      expect(warningEvidence).not.toContain(fixture.approvalId)
     })
 
     it('F4-E leaves the active seat in place and audits when the committed departure has no live manager', async () => {
