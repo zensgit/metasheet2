@@ -155,6 +155,12 @@ describe('e-learning learning profile', () => {
       orgId: ORG,
       userId: USER,
     })).rejects.toMatchObject({ code: 'unavailable' })
+    const timestampCorrupt = rows()
+    timestampCorrupt[0]!.cursor_completed_at = '2026-08-30T02:00:01.000900Z'
+    await expect(getElearningLearningProfile(dbWith(timestampCorrupt), {
+      orgId: ORG,
+      userId: USER,
+    })).rejects.toMatchObject({ code: 'unavailable' })
   })
 
   it('rejects invalid context, limits and query failures with values-free errors', async () => {

@@ -39,6 +39,8 @@ const ORG = `${NS}-org`
 const OTHER_ORG = `${NS}-other-org`
 const USER = `${NS}-user`
 const OTHER_USER = `${NS}-other-user`
+const INACTIVE_USER = `${NS}-inactive-user`
+const MICRO_USER = `${NS}-micro-user`
 
 type RuntimeDb = ElearningContentRevisionDb
   & ElearningContentCoursePublishDb
@@ -127,7 +129,11 @@ async function assign(
   return memberId
 }
 
-async function publishAssessment(orgId: string, userId: string) {
+async function publishAssessment(
+  orgId: string,
+  userId: string,
+  gradedAt = '2026-08-30T01:30:00.000Z',
+) {
   const mediaId = randomUUID()
   await pool.query(
     `INSERT INTO elearning_media (
@@ -201,7 +207,7 @@ async function publishAssessment(orgId: string, userId: string) {
         SET status = 'graded', auto_score = 9, total_score = 10,
             passed = TRUE, graded_at = $3
       WHERE org_id = $1 AND id = $2`,
-    [orgId, attemptId, '2026-08-30T01:30:00.000Z'],
+    [orgId, attemptId, gradedAt],
   )
   await pool.query(
     `UPDATE elearning_courses SET status = 'withdrawn'
@@ -336,15 +342,60 @@ describe('e-learning learning profile authority (real PostgreSQL)', () => {
     expect(second.nextCursor).toBeNull()
   })
 
+  it('does not skip courses completed within the same public millisecond', async () => {
+    await ensureMembership(MICRO_USER, ORG)
+    const newer = await publishAssessment(
+      ORG,
+      MICRO_USER,
+      '2026-08-30T03:00:00.000900Z',
+    )
+    const older = await publishAssessment(
+      ORG,
+      MICRO_USER,
+      '2026-08-30T03:00:00.000100Z',
+    )
+    const first = await getElearningLearningProfile(db, {
+      orgId: ORG,
+      userId: MICRO_USER,
+      limit: 1,
+    })
+    expect(first.courses).toEqual([
+      expect.objectContaining({
+        courseVersionId: newer.courseVersionId,
+        completedAt: '2026-08-30T03:00:00.000Z',
+      }),
+    ])
+    expect(first.nextCursor).toEqual(expect.any(String))
+
+    const second = await getElearningLearningProfile(db, {
+      orgId: ORG,
+      userId: MICRO_USER,
+      limit: 1,
+      cursor: first.nextCursor!,
+    })
+    expect(second.courses).toEqual([
+      expect.objectContaining({
+        courseVersionId: older.courseVersionId,
+        completedAt: '2026-08-30T03:00:00.000Z',
+      }),
+    ])
+    expect(second.nextCursor).toBeNull()
+  })
+
   it('rejects a deactivated account even while its organization membership remains active', async () => {
-    await pool.query('UPDATE users SET is_active = FALSE WHERE id = $1', [USER])
+    await ensureMembership(INACTIVE_USER, ORG)
+    const update = await pool.query(
+      'UPDATE users SET is_active = FALSE WHERE id = $1',
+      [INACTIVE_USER],
+    )
+    expect(update.rowCount).toBe(1)
     try {
       await expect(getElearningLearningProfile(db, {
         orgId: ORG,
-        userId: USER,
+        userId: INACTIVE_USER,
       })).rejects.toMatchObject({ code: 'forbidden' })
     } finally {
-      await pool.query('UPDATE users SET is_active = TRUE WHERE id = $1', [USER])
+      await pool.query('UPDATE users SET is_active = TRUE WHERE id = $1', [INACTIVE_USER])
     }
   })
 })

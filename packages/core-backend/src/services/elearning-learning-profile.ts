@@ -264,7 +264,10 @@ function timestamp(value: unknown): string {
   return candidate
 }
 
-function cursorTimestamp(value: unknown): string {
+function cursorTimestamp(value: unknown): {
+  value: string
+  completedAt: string
+} {
   if (typeof value !== 'string') fail('unavailable')
   const match = CURSOR_TIMESTAMP_RE.exec(value)
   if (!match) fail('unavailable')
@@ -273,7 +276,7 @@ function cursorTimestamp(value: unknown): string {
     Number.isNaN(Date.parse(millisecondValue))
     || new Date(millisecondValue).toISOString() !== millisecondValue
   ) fail('unavailable')
-  return value
+  return { value, completedAt: millisecondValue }
 }
 
 function count(value: unknown): number {
@@ -402,13 +405,14 @@ export async function getElearningLearningProfile(
   }> = []
   for (const row of result.rows) {
     if (row.course_id == null) continue
-    const cursorCompletedAt = cursorTimestamp(row.cursor_completed_at)
+    const cursor = cursorTimestamp(row.cursor_completed_at)
     const common = {
       courseId: uuid(row.course_id),
       courseVersionId: uuid(row.course_version_id),
       title: text(row.title),
       completedAt: timestamp(row.completed_at),
     }
+    if (cursor.completedAt !== common.completedAt) fail('unavailable')
     if (row.kind === 'assessment') {
       entries.push({
         course: {
@@ -416,12 +420,12 @@ export async function getElearningLearningProfile(
           kind: 'assessment',
           exams: parseExams(row.exams),
         },
-        cursorCompletedAt,
+        cursorCompletedAt: cursor.value,
       })
     } else if (row.kind === 'content' && row.exams == null) {
       entries.push({
         course: { ...common, kind: 'content' },
-        cursorCompletedAt,
+        cursorCompletedAt: cursor.value,
       })
     } else {
       fail('unavailable')
