@@ -234,6 +234,16 @@ describe('MultitableWorkbench record-restore handler wiring (preview→execute, 
   const confirmDialog = async () => { await (capturedDialogAttrs!.onConfirm as () => void)(); await flushUi() }
   const cancelDialog = async () => { await (capturedDialogAttrs!.onCancel as () => void)(); await flushUi() }
 
+  it('passes the active sheet and canonical client to the record inspector history surface', async () => {
+    await mountAndGetRestore()
+    expect(capturedDrawerAttrs!['sheet-id']).toBe('sheet_orders')
+    expect(capturedDrawerAttrs!['api-client']).toBe(workbenchMock.client)
+
+    workbenchMock.activeSheetId.value = 'sheet_archive'
+    await flushUi()
+    expect(capturedDrawerAttrs!['sheet-id']).toBe('sheet_archive')
+  })
+
   it('full-record: onRestore opens a PREVIEW (restorePreviewRecord with fieldIds undefined), not a direct restore', async () => {
     const onRestore = await mountAndGetRestore()
     await onRestore({ recordId: 'rec_42', targetVersion: 2, expectedVersion: 5 })
