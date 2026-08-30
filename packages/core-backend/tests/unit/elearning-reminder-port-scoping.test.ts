@@ -12,6 +12,7 @@ const FLAG_NAMES = [
   'ELEARNING_ASSIGNMENT_ENABLED',
   'ELEARNING_MEDIA_ENABLED',
   'ELEARNING_ASSESSMENT_ENABLED',
+  'ELEARNING_ANALYTICS_ENABLED',
 ] as const
 const originalFlags = Object.fromEntries(
   FLAG_NAMES.map((name) => [name, process.env[name]]),
@@ -47,18 +48,54 @@ describe('e-learning L2 reminder producer port scoping', () => {
     expect(elearning.elearningReminderProducer).toBeDefined()
     expect(typeof elearning.elearningReminderProducer?.produce).toBe('function')
     expect(typeof elearning.elearningExamExpirySettlement?.settle).toBe('function')
+    expect(typeof elearning.elearningStatsDailyProjection?.project).toBe('function')
+    expect(typeof elearning.elearningStatsDailyProjection?.enqueueDue).toBe('function')
     expect(typeof elearning.elearningNotificationEligibility?.check).toBe('function')
     expect(elearning.elearningNotificationDispatch).toBeUndefined()
 
     expect(contextFor('plugin-attendance').services.elearningReminderProducer).toBeUndefined()
     expect(contextFor('plugin-attendance').services.elearningExamExpirySettlement).toBeUndefined()
+    expect(contextFor('plugin-attendance').services.elearningStatsDailyProjection).toBeUndefined()
     expect(contextFor('plugin-attendance').services.elearningNotificationEligibility).toBeUndefined()
     expect(contextFor('plugin-integration-core').services.elearningReminderProducer).toBeUndefined()
     expect(contextFor('plugin-integration-core').services.elearningExamExpirySettlement).toBeUndefined()
+    expect(contextFor('plugin-integration-core').services.elearningStatsDailyProjection).toBeUndefined()
     expect(contextFor('plugin-integration-core').services.elearningNotificationEligibility).toBeUndefined()
     expect(contextFor('plugin-some-other').services.elearningReminderProducer).toBeUndefined()
     expect(contextFor('plugin-some-other').services.elearningExamExpirySettlement).toBeUndefined()
+    expect(contextFor('plugin-some-other').services.elearningStatsDailyProjection).toBeUndefined()
     expect(contextFor('plugin-some-other').services.elearningNotificationEligibility).toBeUndefined()
+  })
+
+  it('rechecks master and analytics flags before touching the database', async () => {
+    const port = contextFor('plugin-elearning').services.elearningStatsDailyProjection
+    if (!port) throw new Error('expected e-learning stats daily projection port')
+    const poolGet = vi.spyOn(poolManager, 'get').mockImplementation(() => {
+      throw new Error('database touched')
+    })
+    const input = {
+      orgId: 'org-stats-daily-port',
+      departmentId: '11111111-1111-4111-8111-111111111111',
+      statsDate: '2026-08-30',
+    }
+    for (const flags of [
+      {},
+      { ELEARNING_ENABLED: 'true' },
+      { ELEARNING_ENABLED: 'true', ELEARNING_ANALYTICS_ENABLED: 'TRUE' },
+    ]) {
+      setFlags(flags)
+      await expect(port.project(input)).rejects.toMatchObject({ code: 'unavailable' })
+      await expect(port.enqueueDue()).rejects.toMatchObject({ code: 'unavailable' })
+    }
+    expect(poolGet).not.toHaveBeenCalled()
+
+    setFlags({
+      ELEARNING_ENABLED: 'true',
+      ELEARNING_ANALYTICS_ENABLED: 'true',
+    })
+    await expect(port.project(input)).rejects.toThrow('database touched')
+    await expect(port.enqueueDue()).rejects.toThrow('database touched')
+    expect(poolGet).toHaveBeenCalledTimes(2)
   })
 
   it('rechecks master, content, media, and assessment flags before expiry settlement', async () => {

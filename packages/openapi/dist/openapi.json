@@ -7612,6 +7612,338 @@
           }
         }
       },
+      "ElearningTitleRow": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "threshold"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "threshold": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "maximum": 2147483647
+          }
+        }
+      },
+      "ElearningTitlePublishRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "requestId",
+          "titles"
+        ],
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "titles": {
+            "type": "array",
+            "maxItems": 100,
+            "description": "Complete snapshot in strictly increasing threshold order after normalization.",
+            "items": {
+              "$ref": "#/components/schemas/ElearningTitleRow"
+            }
+          }
+        }
+      },
+      "ElearningTitleSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "revisionId",
+          "version",
+          "titles",
+          "createdAt"
+        ],
+        "properties": {
+          "revisionId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ElearningUuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "maximum": 2147483647
+          },
+          "titles": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/ElearningTitleRow"
+            }
+          },
+          "createdAt": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ElearningCertificateTemplatePublishRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "requestId",
+          "certificateId",
+          "name",
+          "templateText",
+          "backgroundImageUrl"
+        ],
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "certificateId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "templateText": {
+            "type": "string",
+            "maxLength": 16384,
+            "description": "Text template whose server-parsed placeholders use exact"
+          },
+          "backgroundImageUrl": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "uri",
+                "maxLength": 2048,
+                "description": "Canonical credential-free HTTPS URL without a fragment."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ElearningCertificateTemplate": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "certificateId",
+          "revisionId",
+          "version",
+          "name",
+          "templateText",
+          "backgroundImageUrl",
+          "placeholders",
+          "createdAt"
+        ],
+        "description": "Immutable certificate-template metadata; not a rendered or downloadable artifact.",
+        "properties": {
+          "certificateId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "revisionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "templateText": {
+            "type": "string",
+            "maxLength": 16384
+          },
+          "backgroundImageUrl": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "uri",
+                "maxLength": 2048
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "placeholders": {
+            "type": "array",
+            "maxItems": 64,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ElearningCertificateTemplateList": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ElearningCertificateTemplate"
+            }
+          }
+        }
+      },
+      "ElearningCertificateIssueRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "requestId",
+          "certificateId",
+          "userId",
+          "parameters"
+        ],
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "certificateId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "userId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "parameters": {
+            "type": "object",
+            "maxProperties": 64,
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            "description": "Exact placeholder-name to normalized value snapshot required by the active template."
+          }
+        }
+      },
+      "ElearningCertificateIssue": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "issueId",
+          "certificateId",
+          "templateRevisionId",
+          "templateName",
+          "serialNumber",
+          "parameters",
+          "backgroundImageUrl",
+          "issuedAt"
+        ],
+        "description": "Immutable issuance ledger metadata; no PDF, render, image-generation, or download payload.",
+        "properties": {
+          "issueId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "certificateId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "templateRevisionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "templateName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "serialNumber": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "parameters": {
+            "type": "object",
+            "maxProperties": 64,
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            }
+          },
+          "backgroundImageUrl": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "uri",
+                "maxLength": 2048
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "issuedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ElearningCertificateIssueList": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ElearningCertificateIssue"
+            }
+          }
+        }
+      },
       "ElearningCreditAdjustmentRequest": {
         "type": "object",
         "additionalProperties": false,
@@ -7812,6 +8144,7 @@
         "required": [
           "userId",
           "balancePoints",
+          "currentTitle",
           "items",
           "nextCursor"
         ],
@@ -7825,6 +8158,17 @@
             "format": "int32",
             "minimum": 0,
             "maximum": 2147483647
+          },
+          "currentTitle": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ElearningTitleRow"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Dynamically resolved from the active title snapshot and current balance."
           },
           "items": {
             "type": "array",
@@ -7843,6 +8187,453 @@
                 "type": "null"
               }
             ]
+          }
+        }
+      },
+      "ElearningLearningProfileExam": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "itemId",
+          "earnedScore",
+          "totalScore",
+          "passedAt"
+        ],
+        "properties": {
+          "itemId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "earnedScore": {
+            "type": "number",
+            "minimum": 0
+          },
+          "totalScore": {
+            "type": "number",
+            "minimum": 0
+          },
+          "passedAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+          }
+        }
+      },
+      "ElearningLearningProfileAssessmentCourse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "courseId",
+          "courseVersionId",
+          "title",
+          "kind",
+          "completedAt",
+          "exams"
+        ],
+        "properties": {
+          "courseId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "courseVersionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "assessment"
+            ]
+          },
+          "completedAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+          },
+          "exams": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/ElearningLearningProfileExam"
+            }
+          }
+        }
+      },
+      "ElearningLearningProfileContentCourse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "courseId",
+          "courseVersionId",
+          "title",
+          "kind",
+          "completedAt"
+        ],
+        "properties": {
+          "courseId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "courseVersionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "content"
+            ]
+          },
+          "completedAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+          }
+        }
+      },
+      "ElearningLearningProfileCourse": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ElearningLearningProfileAssessmentCourse"
+          },
+          {
+            "$ref": "#/components/schemas/ElearningLearningProfileContentCourse"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "kind",
+          "mapping": {
+            "assessment": "#/components/schemas/ElearningLearningProfileAssessmentCourse",
+            "content": "#/components/schemas/ElearningLearningProfileContentCourse"
+          }
+        }
+      },
+      "ElearningLearningProfileSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "completedCourses",
+          "assessmentCourses",
+          "contentCourses"
+        ],
+        "properties": {
+          "completedCourses": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "assessmentCourses": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "contentCourses": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "ElearningLearningProfile": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "userId",
+          "summary",
+          "courses",
+          "nextCursor"
+        ],
+        "properties": {
+          "userId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "summary": {
+            "$ref": "#/components/schemas/ElearningLearningProfileSummary"
+          },
+          "courses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ElearningLearningProfileCourse"
+            }
+          },
+          "nextCursor": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]+$",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ElearningPortalNavigationItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "label",
+          "href"
+        ],
+        "properties": {
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "href": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "^/(?!/)[^\\s\\\\]*$",
+            "description": "Internal absolute path only; external navigation is rejected."
+          }
+        }
+      },
+      "ElearningPortalEmptySettings": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "revisionId",
+          "version",
+          "siteName",
+          "tagline",
+          "bannerUrl",
+          "navigation",
+          "createdAt"
+        ],
+        "properties": {
+          "revisionId": {
+            "type": "null"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "enum": [
+              0
+            ]
+          },
+          "siteName": {
+            "type": "null"
+          },
+          "tagline": {
+            "type": "null"
+          },
+          "bannerUrl": {
+            "type": "null"
+          },
+          "navigation": {
+            "type": "array",
+            "maxItems": 0,
+            "items": {
+              "$ref": "#/components/schemas/ElearningPortalNavigationItem"
+            }
+          },
+          "createdAt": {
+            "type": "null"
+          }
+        }
+      },
+      "ElearningPortalActiveSettings": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "revisionId",
+          "version",
+          "siteName",
+          "tagline",
+          "bannerUrl",
+          "navigation",
+          "createdAt"
+        ],
+        "properties": {
+          "revisionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "siteName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "tagline": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "bannerUrl": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "description": "Canonical HTTPS URL without credentials or an internal absolute path."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "navigation": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "$ref": "#/components/schemas/ElearningPortalNavigationItem"
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+          }
+        }
+      },
+      "ElearningPortalSettings": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ElearningPortalEmptySettings"
+          },
+          {
+            "$ref": "#/components/schemas/ElearningPortalActiveSettings"
+          }
+        ]
+      },
+      "ElearningPortalPublishRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "requestId",
+          "siteName",
+          "tagline",
+          "bannerUrl",
+          "navigation"
+        ],
+        "properties": {
+          "requestId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "siteName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "tagline": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "bannerUrl": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "description": "Canonical HTTPS URL without credentials or an internal absolute path."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "navigation": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "$ref": "#/components/schemas/ElearningPortalNavigationItem"
+            }
+          }
+        }
+      },
+      "ElearningPortalPublishResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "revisionId",
+          "version",
+          "siteName",
+          "tagline",
+          "bannerUrl",
+          "navigation",
+          "createdAt",
+          "duplicate"
+        ],
+        "properties": {
+          "revisionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "siteName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "tagline": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "bannerUrl": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "description": "Canonical HTTPS URL without credentials or an internal absolute path."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "navigation": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "$ref": "#/components/schemas/ElearningPortalNavigationItem"
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+          },
+          "duplicate": {
+            "type": "boolean"
           }
         }
       },
@@ -25735,6 +26526,290 @@
         }
       }
     },
+    "/api/elearning/admin/credit-titles": {
+      "get": {
+        "operationId": "getElearningTitleSnapshot",
+        "summary": "Read the active organization credit-title threshold snapshot",
+        "description": "Global `elearning:admin` only. Requires `ELEARNING_ENABLED` and\n`ELEARNING_INCENTIVE_ENABLED` to each equal the exact literal `true`.\nOrganization is server-derived. The closed response contains only the\nactive immutable revision and its threshold-ordered title rows.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active snapshot, or the explicit empty snapshot when no titles are configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningTitleSnapshot"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or insufficient elearning:admin",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Incentive surface flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      },
+      "post": {
+        "operationId": "publishElearningTitleSnapshot",
+        "summary": "Publish one complete credit-title threshold snapshot",
+        "description": "Global `elearning:admin` only. Actor and organization are server-derived.\nThe complete normalized snapshot becomes one immutable active revision.\nThe same organization-scoped `requestId` and logical payload replay the\noriginal closed result; changed values return a values-free 409.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningTitlePublishRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Published snapshot or exact idempotent replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningTitleSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or insufficient elearning:admin",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Incentive surface flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "requestId reused with a different normalized snapshot",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/admin/certificate-templates": {
+      "get": {
+        "operationId": "listElearningCertificateTemplates",
+        "summary": "List active organization certificate templates",
+        "description": "Global `elearning:admin` only. Requires `ELEARNING_ENABLED` and\n`ELEARNING_INCENTIVE_ENABLED` to each equal the exact literal `true`.\nOrganization is server-derived. The closed response contains only each\nactive immutable template revision. This surface stores template and\nissuance metadata; it does not render or expose PDF, image, or download\nartifacts.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active templates ordered by stable certificate identifier.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningCertificateTemplateList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or insufficient elearning:admin",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Incentive surface flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      },
+      "post": {
+        "operationId": "publishElearningCertificateTemplate",
+        "summary": "Publish an immutable certificate-template revision",
+        "description": "Global `elearning:admin` only. Requires `ELEARNING_ENABLED` and\n`ELEARNING_INCENTIVE_ENABLED` to each equal the exact literal `true`.\nOrganization and actor are server-derived. The same organization-scoped\n`requestId` and normalized payload replay the original closed result;\nchanged values return a values-free 409. Publishing stores metadata only\nand does not render or expose PDF, image, or download artifacts.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningCertificateTemplatePublishRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Published template revision or exact idempotent replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningCertificateTemplate"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or insufficient elearning:admin",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Incentive surface flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "requestId reused with a different normalized payload",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/admin/certificate-issues": {
+      "post": {
+        "operationId": "issueElearningCertificate",
+        "summary": "Issue a certificate ledger record to a same-organization learner",
+        "description": "Global `elearning:admin` only. Requires `ELEARNING_ENABLED` and\n`ELEARNING_INCENTIVE_ENABLED` to each equal the exact literal `true`.\nOrganization, actor, serial number, and issuance time are server-derived.\nThe same organization-scoped `requestId` and normalized payload replay\nthe original closed result; changed values return a values-free 409.\nThe result is immutable ledger metadata, not a rendered PDF, image, or\ndownloadable certificate artifact.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningCertificateIssueRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Issued ledger record or exact idempotent replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningCertificateIssue"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or insufficient elearning:admin",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Template or target membership not found, or incentive flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "requestId reused with a different normalized payload",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/certificates": {
+      "get": {
+        "operationId": "listMyElearningCertificates",
+        "summary": "List the authenticated learner's certificate ledger records",
+        "description": "Requires `ELEARNING_ENABLED` and `ELEARNING_INCENTIVE_ENABLED` to each\nequal the exact literal `true` plus an e-learning read-capable role.\nOrganization and learner identity are server-derived; only that learner's\nsame-organization immutable records are returned. The closed DTO contains\nmetadata and parameter snapshots only, with no PDF, render, or download\ncapability.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Learner-owned certificate records ordered newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningCertificateIssueList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or insufficient e-learning read permission",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Incentive surface flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
     "/api/elearning/admin/credits/adjustments": {
       "post": {
         "operationId": "adjustElearningCredit",
@@ -26130,6 +27205,73 @@
           },
           "404": {
             "description": "User not active in the organization or flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/profile": {
+      "get": {
+        "operationId": "getMyElearningLearningProfile",
+        "summary": "Read the authenticated learner historical archive",
+        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.\nThe organization and learner are derived only from the authenticated\nsession. The archive is projected from immutable completion evidence\nand graded attempts; it does not expose answers, grading comments,\nevent digests, request hashes, actor identifiers, or access-basis keys.\nHistorical completed courses remain visible after course withdrawal.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Closed learner-owned archive with stable keyset pagination.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningLearningProfile"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED, inactive membership, or insufficient read permission",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Incentive surface flags off",
             "$ref": "#/components/responses/ElearningError"
           },
           "503": {
@@ -28685,6 +29827,112 @@
           },
           "409": {
             "description": "course_withdrawn or review_unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/portal": {
+      "get": {
+        "operationId": "getElearningPortalSettings",
+        "summary": "Read the active learning portal presentation",
+        "description": "Requires the master and CONTENT capability flags plus `elearning:read`.\nOrganization and learner identity are derived only from the authenticated\nrequest. The response is either the closed empty presentation or the active\nimmutable portal revision. It never returns actor, organization, request-hash,\nor request-id fields.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Closed active or empty learning portal presentation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningPortalSettings"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or Insufficient permissions",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "not_found or content flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/admin/portal": {
+      "put": {
+        "operationId": "publishElearningPortalSettings",
+        "summary": "Publish one immutable learning portal revision",
+        "description": "Requires the master and CONTENT capability flags plus `elearning:admin`.\nOrganization and actor identity are server-derived. The command is closed to\nrequestId, siteName, tagline, bannerUrl, and ordered internal navigation.\nReusing requestId with the same normalized payload replays the original result;\na different payload returns a values-free conflict.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningPortalPublishRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Published portal revision; duplicate is true on an exact replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningPortalPublishResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or Insufficient permissions",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "not_found or content flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "conflict",
             "$ref": "#/components/responses/ElearningError"
           },
           "500": {

@@ -8403,6 +8403,121 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/admin/credit-titles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the active organization credit-title threshold snapshot
+         * @description Global `elearning:admin` only. Requires `ELEARNING_ENABLED` and
+         *     `ELEARNING_INCENTIVE_ENABLED` to each equal the exact literal `true`.
+         *     Organization is server-derived. The closed response contains only the
+         *     active immutable revision and its threshold-ordered title rows.
+         */
+        get: operations["getElearningTitleSnapshot"];
+        put?: never;
+        /**
+         * Publish one complete credit-title threshold snapshot
+         * @description Global `elearning:admin` only. Actor and organization are server-derived.
+         *     The complete normalized snapshot becomes one immutable active revision.
+         *     The same organization-scoped `requestId` and logical payload replay the
+         *     original closed result; changed values return a values-free 409.
+         */
+        post: operations["publishElearningTitleSnapshot"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/certificate-templates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List active organization certificate templates
+         * @description Global `elearning:admin` only. Requires `ELEARNING_ENABLED` and
+         *     `ELEARNING_INCENTIVE_ENABLED` to each equal the exact literal `true`.
+         *     Organization is server-derived. The closed response contains only each
+         *     active immutable template revision. This surface stores template and
+         *     issuance metadata; it does not render or expose PDF, image, or download
+         *     artifacts.
+         */
+        get: operations["listElearningCertificateTemplates"];
+        put?: never;
+        /**
+         * Publish an immutable certificate-template revision
+         * @description Global `elearning:admin` only. Requires `ELEARNING_ENABLED` and
+         *     `ELEARNING_INCENTIVE_ENABLED` to each equal the exact literal `true`.
+         *     Organization and actor are server-derived. The same organization-scoped
+         *     `requestId` and normalized payload replay the original closed result;
+         *     changed values return a values-free 409. Publishing stores metadata only
+         *     and does not render or expose PDF, image, or download artifacts.
+         */
+        post: operations["publishElearningCertificateTemplate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/certificate-issues": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Issue a certificate ledger record to a same-organization learner
+         * @description Global `elearning:admin` only. Requires `ELEARNING_ENABLED` and
+         *     `ELEARNING_INCENTIVE_ENABLED` to each equal the exact literal `true`.
+         *     Organization, actor, serial number, and issuance time are server-derived.
+         *     The same organization-scoped `requestId` and normalized payload replay
+         *     the original closed result; changed values return a values-free 409.
+         *     The result is immutable ledger metadata, not a rendered PDF, image, or
+         *     downloadable certificate artifact.
+         */
+        post: operations["issueElearningCertificate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/certificates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the authenticated learner's certificate ledger records
+         * @description Requires `ELEARNING_ENABLED` and `ELEARNING_INCENTIVE_ENABLED` to each
+         *     equal the exact literal `true` plus an e-learning read-capable role.
+         *     Organization and learner identity are server-derived; only that learner's
+         *     same-organization immutable records are returned. The closed DTO contains
+         *     metadata and parameter snapshots only, with no PDF, render, or download
+         *     capability.
+         */
+        get: operations["listMyElearningCertificates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/admin/credits/adjustments": {
         parameters: {
             query?: never;
@@ -8538,6 +8653,31 @@ export interface paths {
          *     not part of this L4 endpoint.
          */
         get: operations["getAdminElearningCreditWallet"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/profile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the authenticated learner historical archive
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+         *     The organization and learner are derived only from the authenticated
+         *     session. The archive is projected from immutable completion evidence
+         *     and graded attempts; it does not expose answers, grading comments,
+         *     event digests, request hashes, actor identifiers, or access-basis keys.
+         *     Historical completed courses remain visible after course withdrawal.
+         */
+        get: operations["getMyElearningLearningProfile"];
         put?: never;
         post?: never;
         delete?: never;
@@ -9342,6 +9482,54 @@ export interface paths {
          */
         get: operations["getElearningExamReview"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/portal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the active learning portal presentation
+         * @description Requires the master and CONTENT capability flags plus `elearning:read`.
+         *     Organization and learner identity are derived only from the authenticated
+         *     request. The response is either the closed empty presentation or the active
+         *     immutable portal revision. It never returns actor, organization, request-hash,
+         *     or request-id fields.
+         */
+        get: operations["getElearningPortalSettings"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/portal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Publish one immutable learning portal revision
+         * @description Requires the master and CONTENT capability flags plus `elearning:admin`.
+         *     Organization and actor identity are server-derived. The command is closed to
+         *     requestId, siteName, tagline, bannerUrl, and ordered internal navigation.
+         *     Reusing requestId with the same normalized payload replays the original result;
+         *     a different payload returns a values-free conflict.
+         */
+        put: operations["publishElearningPortalSettings"];
         post?: never;
         delete?: never;
         options?: never;
@@ -18158,6 +18346,74 @@ export interface components {
         ElearningCreditRuleList: {
             items: components["schemas"]["ElearningCreditRule"][];
         };
+        ElearningTitleRow: {
+            id: string;
+            name: string;
+            /** Format: int32 */
+            threshold: number;
+        };
+        ElearningTitlePublishRequest: {
+            requestId: string;
+            /** @description Complete snapshot in strictly increasing threshold order after normalization. */
+            titles: components["schemas"]["ElearningTitleRow"][];
+        };
+        ElearningTitleSnapshot: {
+            revisionId: components["schemas"]["ElearningUuid"] | null;
+            /** Format: int32 */
+            version: number;
+            titles: components["schemas"]["ElearningTitleRow"][];
+            createdAt: string | null;
+        };
+        ElearningCertificateTemplatePublishRequest: {
+            requestId: string;
+            certificateId: string;
+            name: string;
+            /** @description Text template whose server-parsed placeholders use exact */
+            templateText: string;
+            backgroundImageUrl: string | null;
+        };
+        /** @description Immutable certificate-template metadata; not a rendered or downloadable artifact. */
+        ElearningCertificateTemplate: {
+            certificateId: string;
+            revisionId: components["schemas"]["ElearningUuid"];
+            /** Format: int32 */
+            version: number;
+            name: string;
+            templateText: string;
+            backgroundImageUrl: string | null;
+            placeholders: string[];
+            /** Format: date-time */
+            createdAt: string;
+        };
+        ElearningCertificateTemplateList: {
+            items: components["schemas"]["ElearningCertificateTemplate"][];
+        };
+        ElearningCertificateIssueRequest: {
+            requestId: string;
+            certificateId: string;
+            userId: string;
+            /** @description Exact placeholder-name to normalized value snapshot required by the active template. */
+            parameters: {
+                [key: string]: string;
+            };
+        };
+        /** @description Immutable issuance ledger metadata; no PDF, render, image-generation, or download payload. */
+        ElearningCertificateIssue: {
+            issueId: components["schemas"]["ElearningUuid"];
+            certificateId: string;
+            templateRevisionId: components["schemas"]["ElearningUuid"];
+            templateName: string;
+            serialNumber: components["schemas"]["ElearningUuid"];
+            parameters: {
+                [key: string]: string;
+            };
+            backgroundImageUrl: string | null;
+            /** Format: date-time */
+            issuedAt: string;
+        };
+        ElearningCertificateIssueList: {
+            items: components["schemas"]["ElearningCertificateIssue"][];
+        };
         ElearningCreditAdjustmentRequest: {
             requestId: string;
             userId: string;
@@ -18214,8 +18470,103 @@ export interface components {
             userId: string;
             /** Format: int32 */
             balancePoints: number;
+            /** @description Dynamically resolved from the active title snapshot and current balance. */
+            currentTitle: components["schemas"]["ElearningTitleRow"] | null;
             items: components["schemas"]["ElearningCreditWalletItem"][];
             nextCursor: string | null;
+        };
+        ElearningLearningProfileExam: {
+            itemId: components["schemas"]["ElearningUuid"];
+            earnedScore: number;
+            totalScore: number;
+            /** Format: date-time */
+            passedAt: string;
+        };
+        ElearningLearningProfileAssessmentCourse: {
+            courseId: components["schemas"]["ElearningUuid"];
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            title: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "assessment";
+            /** Format: date-time */
+            completedAt: string;
+            exams: components["schemas"]["ElearningLearningProfileExam"][];
+        };
+        ElearningLearningProfileContentCourse: {
+            courseId: components["schemas"]["ElearningUuid"];
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            title: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "content";
+            /** Format: date-time */
+            completedAt: string;
+        };
+        ElearningLearningProfileCourse: components["schemas"]["ElearningLearningProfileAssessmentCourse"] | components["schemas"]["ElearningLearningProfileContentCourse"];
+        ElearningLearningProfileSummary: {
+            completedCourses: number;
+            assessmentCourses: number;
+            contentCourses: number;
+        };
+        ElearningLearningProfile: {
+            userId: string;
+            summary: components["schemas"]["ElearningLearningProfileSummary"];
+            courses: components["schemas"]["ElearningLearningProfileCourse"][];
+            nextCursor: string | null;
+        };
+        ElearningPortalNavigationItem: {
+            label: string;
+            /** @description Internal absolute path only; external navigation is rejected. */
+            href: string;
+        };
+        ElearningPortalEmptySettings: {
+            revisionId: null;
+            /**
+             * Format: int32
+             * @enum {integer}
+             */
+            version: 0;
+            siteName: null;
+            tagline: null;
+            bannerUrl: null;
+            navigation: components["schemas"]["ElearningPortalNavigationItem"][];
+            createdAt: null;
+        };
+        ElearningPortalActiveSettings: {
+            revisionId: components["schemas"]["ElearningUuid"];
+            /** Format: int32 */
+            version: number;
+            siteName: string;
+            tagline: string | null;
+            bannerUrl: string | null;
+            navigation: components["schemas"]["ElearningPortalNavigationItem"][];
+            /** Format: date-time */
+            createdAt: string;
+        };
+        ElearningPortalSettings: components["schemas"]["ElearningPortalEmptySettings"] | components["schemas"]["ElearningPortalActiveSettings"];
+        ElearningPortalPublishRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            siteName: string;
+            tagline: string | null;
+            bannerUrl: string | null;
+            navigation: components["schemas"]["ElearningPortalNavigationItem"][];
+        };
+        ElearningPortalPublishResult: {
+            revisionId: components["schemas"]["ElearningUuid"];
+            /** Format: int32 */
+            version: number;
+            siteName: string;
+            tagline: string | null;
+            bannerUrl: string | null;
+            navigation: components["schemas"]["ElearningPortalNavigationItem"][];
+            /** Format: date-time */
+            createdAt: string;
+            duplicate: boolean;
         };
         ElearningContentArticleRevisionRequest: {
             requestId: components["schemas"]["ElearningUuid"];
@@ -20267,6 +20618,192 @@ export interface operations {
             503: components["responses"]["ElearningError"];
         };
     };
+    getElearningTitleSnapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Active snapshot, or the explicit empty snapshot when no titles are configured. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningTitleSnapshot"];
+                };
+            };
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Incentive surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    publishElearningTitleSnapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningTitlePublishRequest"];
+            };
+        };
+        responses: {
+            /** @description Published snapshot or exact idempotent replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningTitleSnapshot"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Incentive surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description requestId reused with a different normalized snapshot */
+            409: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    listElearningCertificateTemplates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Active templates ordered by stable certificate identifier. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCertificateTemplateList"];
+                };
+            };
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Incentive surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    publishElearningCertificateTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningCertificateTemplatePublishRequest"];
+            };
+        };
+        responses: {
+            /** @description Published template revision or exact idempotent replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCertificateTemplate"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Incentive surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description requestId reused with a different normalized payload */
+            409: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    issueElearningCertificate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningCertificateIssueRequest"];
+            };
+        };
+        responses: {
+            /** @description Issued ledger record or exact idempotent replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCertificateIssue"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Template or target membership not found, or incentive flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description requestId reused with a different normalized payload */
+            409: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    listMyElearningCertificates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Learner-owned certificate records ordered newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCertificateIssueList"];
+                };
+            };
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient e-learning read permission */
+            403: components["responses"]["ElearningError"];
+            /** @description Incentive surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
     adjustElearningCredit: {
         parameters: {
             query?: never;
@@ -20481,6 +21018,38 @@ export interface operations {
             /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
             403: components["responses"]["ElearningError"];
             /** @description User not active in the organization or flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getMyElearningLearningProfile: {
+        parameters: {
+            query?: {
+                cursor?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Closed learner-owned archive with stable keyset pagination. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningLearningProfile"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, inactive membership, or insufficient read permission */
+            403: components["responses"]["ElearningError"];
+            /** @description Incentive surface flags off */
             404: components["responses"]["ElearningError"];
             /** @description unavailable */
             503: components["responses"]["ElearningError"];
@@ -21868,6 +22437,74 @@ export interface operations {
             /** @description not_found or exam flags off */
             404: components["responses"]["ElearningError"];
             /** @description course_withdrawn or review_unavailable */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getElearningPortalSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Closed active or empty learning portal presentation. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPortalSettings"];
+                };
+            };
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or content flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    publishElearningPortalSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningPortalPublishRequest"];
+            };
+        };
+        responses: {
+            /** @description Published portal revision; duplicate is true on an exact replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPortalPublishResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or content flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description conflict */
             409: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];
