@@ -456,7 +456,7 @@ describe('AutomationExecutor', () => {
         { type: 'update_record', config: { fields: { status: 'done' } } },
         { type: 'send_webhook', config: { url: 'https://example.com/hook' } },
         { type: 'send_notification', config: { userIds: ['u1'], message: 'Hello' } },
-        { type: 'start_approval', config: { templateId: 'tpl_1', formDataMapping: {} } },
+        { type: 'start_approval', config: { templateId: 'tpl_1', formDataMapping: { status: 'status' } } },
       ],
     })
 
@@ -525,7 +525,15 @@ describe('AutomationExecutor', () => {
         actionType: 'start_approval',
         status: 'success',
         simulated: true,
-        output: { dryRun: true, dispatched: false },
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: {
+            wouldCreateApproval: true,
+            target: { templateId: 'tpl_1', requesterMode: 'trigger_actor' },
+            payload: { formData: { status: 'active' } },
+          },
+        },
         durationMs: 0,
       },
     ])
@@ -535,6 +543,142 @@ describe('AutomationExecutor', () => {
     ]))
     expect(deps.fetchFn).not.toHaveBeenCalled()
     expect(emitSpy).not.toHaveBeenCalled()
+  })
+
+  it('simulate resolves a redacted start_approval creation plan without calling the approval bridge', async () => {
+    const emitSpy = vi.spyOn(deps.eventBus, 'emit')
+    const onStart = vi.fn(async () => undefined)
+    const onSettled = vi.fn(async () => undefined)
+    const onSkipped = vi.fn(async () => undefined)
+    const onStartApproval = vi.fn(async () => ({ suspended: true }))
+    const rule = createMockRule({
+      actions: [
+        {
+          type: 'start_approval',
+          config: {
+            templateId: ' tpl_expense ',
+            formDataMapping: {
+              amount: 'amount',
+              description: '{{record.title}} / {{record.status}}',
+              password: 'apiToken',
+              missing: 'record.missing',
+            },
+            requester: { mode: 'rule_creator' },
+          },
+        },
+        { type: 'send_notification', config: { userIds: ['u1'], message: 'After approval plan' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      {
+        recordId: 'record_sample',
+        sheetId: 'sheet_1',
+        actorId: 'actor_private',
+        data: {
+          amount: 125,
+          title: 'Expense',
+          status: 'pending',
+          apiToken: 'source-secret',
+        },
+      },
+      () => ({ onStart, onSettled, onSkipped, onStartApproval }),
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('success')
+    expect(result.finishedAt).toEqual(expect.any(String))
+    expect(result.steps).toEqual([
+      {
+        actionType: 'start_approval',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: {
+            wouldCreateApproval: true,
+            target: { templateId: 'tpl_expense', requesterMode: 'rule_creator' },
+            payload: {
+              formData: {
+                amount: 125,
+                description: 'Expense / pending',
+                password: '<redacted>',
+                missing: '',
+              },
+            },
+          },
+        },
+        durationMs: 0,
+      },
+      {
+        actionType: 'send_notification',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: { target: { userIds: ['u1'] }, payload: { message: 'After approval plan' } },
+        },
+        durationMs: 0,
+      },
+    ])
+    expect(onStartApproval).not.toHaveBeenCalled()
+    expect(onStart).toHaveBeenCalledTimes(2)
+    expect(onSettled).toHaveBeenCalledTimes(2)
+    expect(onSkipped).not.toHaveBeenCalled()
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+    expect(emitSpy).not.toHaveBeenCalled()
+    expect(JSON.stringify(result.steps)).not.toContain('source-secret')
+    expect(JSON.stringify(result.steps)).not.toContain('actor_private')
+  })
+
+  it.each([
+    ['missing template', { templateId: ' ', formDataMapping: { status: 'status' } }, 'start_approval.templateId is required'],
+    ['missing mapping', { templateId: 'tpl_1' }, 'start_approval.formDataMapping is required'],
+    ['empty mapping', { templateId: 'tpl_1', formDataMapping: {} }, 'start_approval.formDataMapping is required'],
+    [
+      'blank mapping entry',
+      { templateId: 'tpl_1', formDataMapping: { ' ': 'status' } },
+      'start_approval.formDataMapping entries must be non-empty strings',
+    ],
+    [
+      'non-object requester',
+      { templateId: 'tpl_1', formDataMapping: { status: 'status' }, requester: 'rule_creator' },
+      'start_approval.requester must be an object',
+    ],
+    [
+      'unknown requester mode',
+      { templateId: 'tpl_1', formDataMapping: { status: 'status' }, requester: { mode: 'owner_secret' } },
+      'start_approval.requester.mode must be trigger_actor or rule_creator',
+    ],
+  ])('simulate fail-stops malformed start_approval config: %s', async (_label, config, error) => {
+    const rule = createMockRule({
+      actions: [
+        { type: 'start_approval', config },
+        { type: 'send_notification', config: { userIds: ['should_skip'], message: 'should skip' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      { recordId: 'record_sample', data: { status: 'pending' }, sheetId: 'sheet_1' },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('failed')
+    expect(result.steps).toEqual([
+      { actionType: 'start_approval', status: 'failed', error, durationMs: 0 },
+      { actionType: 'send_notification', status: 'skipped', durationMs: 0 },
+    ])
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+    expect(JSON.stringify(result.steps)).not.toContain('owner_secret')
   })
 
   it('simulate resolves generic Class-B targets and redacted payloads without dispatch', async () => {
