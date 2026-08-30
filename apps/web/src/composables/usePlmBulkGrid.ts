@@ -240,6 +240,15 @@ export function usePlmBulkGrid(options: UsePlmBulkGridOptions) {
     submitting.value = true
     errorMessage.value = ''
     try {
+      // DELIBERATE, not redundant with the server's own N2-a revalidation.
+      //
+      // The server relay re-runs dry-run authoritatively and refuses with a 409
+      // (`freshness-check-failed`) if it is not ready. But reaching THAT 409 is a commit
+      // ATTEMPT, and this composable locks the grid (`mustReload`) on any non-clean commit —
+      // so an operator whose grid merely went stale would be forced through a full reload.
+      // Checking here first keeps that case RECOVERABLE: a stale grid caught client-side
+      // paints its row errors and stays editable. The server check remains the authority; this
+      // one exists to avoid punishing the common case. Cost is one extra round trip per click.
       const fresh = await dryRunPlmBulkGrid(
         read(options.dataSourceId),
         read(options.itemTypeId),

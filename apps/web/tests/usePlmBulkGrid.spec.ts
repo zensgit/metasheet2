@@ -165,6 +165,44 @@ describe('N2-a — the freshness ritual', () => {
     expect(mocks.commitPlmBulkGrid).toHaveBeenCalledTimes(1)
   })
 
+  it("a server-side freshness 409 reports 'nothing was committed', not a phantom write", async () => {
+    // The relay's freshness refusal is an HTTP 409 whose body ALSO carries ready:false, so it
+    // looks superficially like a reject-all (a 200 + ready:false). Both mean nothing was
+    // written, so the operator-visible claim must not diverge: the server's own message is
+    // surfaced verbatim rather than the reject-all copy.
+    mocks.commitPlmBulkGrid.mockResolvedValue({
+      ok: false,
+      status: 409,
+      reason: 'freshness-check-failed',
+      message: '提交前重新校验未通过，未写入任何数据。',
+      report: REJECTED,
+    })
+    const grid = makeGrid()
+    await grid.load([{ item_number: 'P-001' }])
+    await grid.dryRun()
+    // client pre-check passes, so the server's own freshness check is what refuses
+    const result = await grid.commit()
+
+    expect(result).toBeNull()
+    expect(grid.errorMessage.value).toContain('未写入任何数据')
+    expect(grid.report.value!.ready).toBe(false)
+    // Conservative: an unclean commit locks the grid even though nothing was written.
+    expect(grid.mustReload.value).toBe(true)
+  })
+
+  it('a stale grid caught CLIENT-side stays recoverable (no lock), unlike a server 409', async () => {
+    // This asymmetry is the reason the client pre-check exists at all -- see the comment in
+    // commit(). Catching it here keeps the grid editable; reaching the server's 409 would not.
+    const grid = makeGrid()
+    await grid.load([{ item_number: 'P-001' }])
+    await grid.dryRun()
+    mocks.dryRunPlmBulkGrid.mockResolvedValue({ ok: true, report: REJECTED })
+
+    expect(await grid.commit()).toBeNull()
+    expect(mocks.commitPlmBulkGrid).not.toHaveBeenCalled()
+    expect(grid.mustReload.value).toBe(false)
+  })
+
   it('refuses to commit when the pre-commit run is not ready, and writes nothing', async () => {
     const grid = makeGrid()
     await grid.load([{ item_number: 'P-001' }])

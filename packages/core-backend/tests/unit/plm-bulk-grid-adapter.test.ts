@@ -104,6 +104,35 @@ describe('§2/§10 — the caller credential is an argument, never adapter state
     expect(init.headers.Authorization).not.toContain(SERVICE_TOKEN)
   })
 
+  it('two callers on the SAME adapter instance get their OWN PLM identity', async () => {
+    // The live shape of the §2/§10 hazard. DataSourceManager keys adapters by data-source id,
+    // so ONE PLMAdapter instance serves every MetaSheet user of that source, and these are
+    // instance methods. If the caller token were ever cached onto `this` as an "optimization",
+    // the second caller would silently inherit the first caller's PLM identity -- including
+    // their admin-ness -- and every individual HTTP call would still look valid, so Pact could
+    // never catch it. This is the assertion that survives that refactor.
+    const adapter = createAdapter()
+    await adapter.bulkImportDryRun('token-A', SUBMISSION)
+    await adapter.bulkImportCommit('token-B', SUBMISSION, 'key-1')
+    await adapter.getItemMetadataAsCaller('token-C', 'Part')
+
+    expect(fetchSpy).toHaveBeenCalledTimes(3)
+    expect(fetchSpy.mock.calls[0][1].headers.Authorization).toBe('Bearer token-A')
+    expect(fetchSpy.mock.calls[1][1].headers.Authorization).toBe('Bearer token-B')
+    expect(fetchSpy.mock.calls[2][1].headers.Authorization).toBe('Bearer token-C')
+  })
+
+  it('a caller token does not leak onto the adapter for the NEXT caller to inherit', async () => {
+    const adapter = createAdapter()
+    await adapter.bulkImportCommit('admin-token', SUBMISSION, 'key-1')
+    // The instance's own cached credential must be untouched by the call above...
+    expect((adapter as unknown as { authToken: string }).authToken).toBe(SERVICE_TOKEN)
+    // ...and a subsequent blank-credential call must still fail closed rather than reuse it.
+    const result = await adapter.bulkImportCommit('', SUBMISSION, 'key-2')
+    expect(result.error!.message).toContain('caller PLM credential is required')
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
   it.each([
     ['dry-run', (a: PLMAdapter, t: string) => a.bulkImportDryRun(t, SUBMISSION)],
     ['commit', (a: PLMAdapter, t: string) => a.bulkImportCommit(t, SUBMISSION, 'key-0001')],

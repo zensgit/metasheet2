@@ -115,6 +115,23 @@ describe('PLM bulk-import consumer relay routes', () => {
       expect(adapter.bulkImportCommit).not.toHaveBeenCalled()
     })
 
+    it('two requests from DIFFERENT callers forward two DIFFERENT PLM identities', async () => {
+      // §8: MetaSheet is collaborative and the adapter is shared per data source, so the
+      // per-caller property has to hold across requests on the SAME adapter instance. Each
+      // call in isolation is valid, which is exactly why Pact cannot catch a regression here.
+      const adapter = makeAdapter()
+      dsMocks.getDataSource.mockReturnValue(adapter)
+
+      await request(pinned.url()).post(DRY_RUN_URL).set('X-PLM-Authorization', 'Bearer engineer-token').send(ROWS_BODY)
+      await request(pinned.url()).post(DRY_RUN_URL).set('X-PLM-Authorization', 'Bearer admin-token').send(ROWS_BODY)
+
+      expect(adapter.bulkImportDryRun.mock.calls[0][0]).toBe('engineer-token')
+      expect(adapter.bulkImportDryRun.mock.calls[1][0]).toBe('admin-token')
+      // The schema read is per-caller too -- it must not be memoized across callers.
+      expect(adapter.getItemMetadataAsCaller.mock.calls[0][0]).toBe('engineer-token')
+      expect(adapter.getItemMetadataAsCaller.mock.calls[1][0]).toBe('admin-token')
+    })
+
     it('strips the Bearer prefix and forwards the caller token to the adapter', async () => {
       const adapter = makeAdapter()
       dsMocks.getDataSource.mockReturnValue(adapter)
