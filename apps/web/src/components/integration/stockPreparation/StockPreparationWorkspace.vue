@@ -19,7 +19,7 @@
          they land later in their own DISJOINT files and get mounted here in place of the placeholder. -->
     <nav class="stock-prep__tabs" role="tablist" data-testid="stock-prep-tabs" :aria-label="bi('备料视图', 'Stock preparation views')">
       <button
-        v-for="view in views"
+        v-for="view in visibleViews"
         :key="view.key"
         type="button"
         role="tab"
@@ -38,10 +38,10 @@
       class="stock-prep__panel"
       role="tabpanel"
       data-testid="stock-prep-panel"
-      :data-active="activeKey"
+      :data-active="effectiveKey"
     >
       <h2 class="stock-prep__panel-title">{{ bi(activeView.zh, activeView.en) }}</h2>
-      <p class="stock-prep__panel-desc" :data-testid="`stock-prep-desc-${activeKey}`">
+      <p class="stock-prep__panel-desc" :data-testid="`stock-prep-desc-${effectiveKey}`">
         {{ bi(activeView.zhDesc, activeView.enDesc) }}
       </p>
       <!-- The dashboard tab aggregates MULTIPLE existing readonly endpoints client-side (H1/H2) — it
@@ -58,8 +58,15 @@
            selectedProjectId WITHOUT switching tabs (handleDashboardProjectSelect), and its stepper /
            recommend-action navigates by reusing this SAME activeKey (handleNavigateStage) — a
            satellite of the one tab-nav surface, never a second one. -->
+      <!-- O1' §附: the confirmation queue is what this page WAS ADOPTED FOR — the human confirmation
+           loop's operator entry. It is the only tab a customer operator (stock-prep:read) sees; the
+           six MVP tabs below were explicitly not revived by that ruling and stay platform-admin. -->
+      <StockPreparationConfirmationQueueView
+        v-if="effectiveKey === 'confirmation-queue'"
+        :scope="scope"
+      />
       <StockPreparationDashboardView
-        v-if="activeKey === 'dashboard'"
+        v-else-if="effectiveKey === 'dashboard'"
         :project-id="selectedProjectId"
         :scope="scope"
         @select-project="handleDashboardProjectSelect"
@@ -69,32 +76,32 @@
            future tab). Views 2-6 share the shell-owned projectId context selected in view 1
            (#4017 pattern). -->
       <StockPreparationProjectWorkspaceView
-        v-else-if="activeKey === 'project-workspace'"
+        v-else-if="effectiveKey === 'project-workspace'"
         :scope="scope"
         @select-project="handleProjectSelect"
       />
       <StockPreparationSnapshotDiffView
-        v-else-if="activeKey === 'bom-snapshot-diff'"
+        v-else-if="effectiveKey === 'bom-snapshot-diff'"
         :project-id="selectedProjectId"
         :scope="scope"
       />
       <StockPreparationMappingConfirmView
-        v-else-if="activeKey === 'material-mapping'"
+        v-else-if="effectiveKey === 'material-mapping'"
         :project-id="selectedProjectId"
         :scope="scope"
       />
       <StockPreparationUnitConfirmView
-        v-else-if="activeKey === 'unit-conversion'"
+        v-else-if="effectiveKey === 'unit-conversion'"
         :project-id="selectedProjectId"
         :scope="scope"
       />
       <StockPreparationPrepLineView
-        v-else-if="activeKey === 'prep-line'"
+        v-else-if="effectiveKey === 'prep-line'"
         :project-id="selectedProjectId"
         :scope="scope"
       />
       <StockPreparationExceptionQueueView
-        v-else-if="activeKey === 'exception-queue'"
+        v-else-if="effectiveKey === 'exception-queue'"
         :project-id="selectedProjectId"
         :scope="scope"
       />
@@ -128,8 +135,12 @@ import StockPreparationMappingConfirmView from './StockPreparationMappingConfirm
 import StockPreparationUnitConfirmView from './StockPreparationUnitConfirmView.vue'
 import StockPreparationPrepLineView from './StockPreparationPrepLineView.vue'
 import StockPreparationExceptionQueueView from './StockPreparationExceptionQueueView.vue'
+import StockPreparationConfirmationQueueView from './StockPreparationConfirmationQueueView.vue'
+import { useAuth } from '../../../composables/useAuth'
+import { canUseLegacyMvpTabs } from '../../../services/integration/stockPreparation/workbenchAccess'
 
 const { locale } = useLocale()
+const auth = useAuth()
 const scope = getDefaultIntegrationScope()
 
 // Same synchronous locale pattern as the rest of the integration surface (IntegrationHelpView /
@@ -139,6 +150,7 @@ function bi(zh: string, en: string): string {
 }
 
 type StockPreparationViewKey =
+  | 'confirmation-queue'
   | 'dashboard'
   | 'project-workspace'
   | 'bom-snapshot-diff'
@@ -164,17 +176,36 @@ interface StockPreparationViewTab {
   /** True only for the dashboard tab — it aggregates multiple existing GETs client-side (H1/H2), so
    *  it has no single endpoint to badge (see the panel-endpoint paragraph's v-if). */
   noEndpointBadge?: boolean
+  /**
+   * O2 / R-11. True for the six MVP tabs, whose every route is still PLATFORM-ADMIN gated and which
+   * the O1' ruling explicitly did not revive when it narrowed this page to the confirmation queue.
+   * They render only for a platform admin: showing them to a stock-prep operator would put six tabs
+   * of controls on screen that 403 on click — the "visible but not actionable" half of R-11.
+   */
+  legacyMvp?: boolean
 }
 
 // Tab order follows the MVP business loop (design §"MVP Goal"). Descriptions are values-free — they
 // name fields/statuses, never customer drawing numbers, material codes, or quantities.
 const views: StockPreparationViewTab[] = [
+  // O1' §附 (owner, 2026-08-29): `/stock-prep` is adopted as THE CONFIRMATION-QUEUE WORKBENCH — the
+  // operator entry into the human confirmation loop. It is listed FIRST so it is the landing view
+  // (the shell's "default tab is the first VISIBLE tab" pattern), and it is the ONLY tab a customer
+  // operator sees: everything below it is a legacy MVP surface the same ruling declined to revive.
+  {
+    key: 'confirmation-queue',
+    zh: '确认队列',
+    en: 'Confirmation Queue',
+    zhDesc: '待确认决定队列:keep_multiple_rows / accept_current / manual_hold 与 O1′-A 值录入;队列投影 values-free,值内容仅在单条值录入回读中出现。',
+    enDesc: 'Pending decision queue: keep_multiple_rows / accept_current / manual_hold plus the O1\'-A value entry. The queue projection is values-free; entered content appears only in the per-decision readback.',
+    endpoint: '/api/integration/stock-preparation/confirmation-decisions',
+    confirmWrites: true,
+  },
   // H1/H2 (UI humanization, H0 plane-boundary design-lock PR #4202 — PLANE A, values-free): the
-  // task-oriented entry. It is listed FIRST so `views[0].key` (the shell's existing "default tab is
-  // the first tab" pattern) makes it the landing view — "operator enters the system and immediately
-  // sees current project / current stage / blocking count / recommended next step".
+  // task-oriented entry for the legacy MVP surface.
   {
     key: 'dashboard',
+    legacyMvp: true,
     zh: '仪表盘',
     en: 'Dashboard',
     zhDesc: '当前项目、当前阶段、阻断数与推荐下一步;六阶段进度均复用下方各视图的既有只读端点聚合,不新增后端。',
@@ -184,6 +215,7 @@ const views: StockPreparationViewTab[] = [
   },
   {
     key: 'project-workspace',
+    legacyMvp: true,
     zh: '项目工作台',
     en: 'Project Workspace',
     zhDesc: '按项目查看备料概览:快照批次数、待处理异常数、就绪与暂挂的备料行数。',
@@ -192,6 +224,7 @@ const views: StockPreparationViewTab[] = [
   },
   {
     key: 'bom-snapshot-diff',
+    legacyMvp: true,
     zh: 'BOM 快照批次与差异',
     en: 'BOM Snapshot Batch & Diff',
     zhDesc: '每次同步生成不可变的快照批次;旧批次保留,与前一批次按新增/删除/数量/单位/版本等差异对比。',
@@ -200,6 +233,7 @@ const views: StockPreparationViewTab[] = [
   },
   {
     key: 'material-mapping',
+    legacyMvp: true,
     zh: '物料映射确认',
     en: 'Material Mapping Confirm',
     zhDesc: '将 PLM 图号/版本映射到 ERP 物料编码/内部 id;歧义或未匹配的行进入人工确认,不自动创建 ERP 物料。',
@@ -209,6 +243,7 @@ const views: StockPreparationViewTab[] = [
   },
   {
     key: 'unit-conversion',
+    legacyMvp: true,
     zh: '单位换算确认',
     en: 'Unit Conversion Confirm',
     zhDesc: '将设计单位换算为 ERP 领用单位;无唯一有效规则时进入异常队列,不做静默猜测。',
@@ -218,6 +253,7 @@ const views: StockPreparationViewTab[] = [
   },
   {
     key: 'prep-line',
+    legacyMvp: true,
     zh: '备料行',
     en: 'Prep Lines',
     zhDesc: '仅由已确认的快照、映射与单位规则生成备料行;未解决的映射/单位冲突不会产出就绪行。',
@@ -228,6 +264,7 @@ const views: StockPreparationViewTab[] = [
   },
   {
     key: 'exception-queue',
+    legacyMvp: true,
     zh: '异常队列',
     en: 'Exception Queue',
     zhDesc: '所有不确定的行都可见、可处理;阻断级异常保持可见并阻止最终确认。',
@@ -237,8 +274,26 @@ const views: StockPreparationViewTab[] = [
   },
 ]
 
+// O2 / R-11 — the tab strip IS a control surface, so it obeys the same rule as every other control:
+// a tab whose panel would 403 on every action is not rendered. The six legacy MVP tabs are still
+// platform-admin gated end to end, so only a platform admin sees them; a customer operator holding
+// stock-prep:read sees exactly the confirmation queue this page was adopted for.
+const visibleViews = computed(() => views.filter(
+  (view) => !view.legacyMvp || canUseLegacyMvpTabs((permission) => auth.hasPermission(permission)),
+))
+// The landing tab is the first VISIBLE one, and activeKey can never name a hidden tab: without this
+// fold an operator arriving on a stale/deep-linked legacy key would render a panel of controls that
+// all 403 — the exact "visible but not actionable" failure, reintroduced through the back door.
 const activeKey = ref<StockPreparationViewKey>(views[0].key)
-const activeView = computed(() => views.find((view) => view.key === activeKey.value) ?? null)
+const activeView = computed(() => {
+  const visible = visibleViews.value
+  if (visible.length === 0) return null
+  return visible.find((view) => view.key === activeKey.value) ?? visible[0]
+})
+// The key the PANEL actually renders. Every panel branch below keys off this, never off the raw
+// activeKey ref — otherwise a hidden legacy key would title the panel "Confirmation Queue" while
+// mounting the admin-only dashboard beneath it.
+const effectiveKey = computed<StockPreparationViewKey | null>(() => activeView.value?.key ?? null)
 
 // Shared project context (view 1 → view 2). The shell is the single owner of the selected
 // projectId: view 1 emits it (row action), view 2 receives it as a prop, and the `?projectId=`
