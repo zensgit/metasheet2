@@ -5,6 +5,7 @@ const { sendFeatureDisabled } = require('./lib/http-errors.cjs')
 const { startJobsWorker, stopJobsWorker, resolveDatabasePort, clearJobHandlers } = require('./lib/jobs.cjs')
 const { registerAssignmentReminderProducer } = require('./lib/reminder-producer.cjs')
 const { registerExamExpirySettlement } = require('./lib/exam-expiry.cjs')
+const { registerStatsDailyProjector } = require('./lib/stats-daily-projector.cjs')
 const { startNotificationRuntime, stopNotificationRuntime } = require('./lib/notification-runtime.cjs')
 
 const CANONICAL_METHOD = 'GET'
@@ -44,6 +45,7 @@ async function activate(context) {
   try {
     registerAssignmentReminderProducer(context)
     registerExamExpirySettlement(context)
+    registerStatsDailyProjector(context)
     context.api.http.addRoute(CANONICAL_METHOD, CANONICAL_PATH, async (req, res) => {
       if (!isMasterEnabled()) {
         sendFeatureDisabled(res)

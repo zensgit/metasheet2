@@ -1157,6 +1157,18 @@ export interface PluginServices {
     >
   }
   /**
+   * E-learning L5 daily analytics materialization. Only plugin-elearning
+   * receives this port. The plugin supplies the persisted job identity; core
+   * owns current directory membership, suppression, locking, and projection.
+   */
+  elearningStatsDailyProjection?: {
+    project(
+      input: import('../services/elearning-stats-daily-projection').ProjectElearningDepartmentStatsDailyInput,
+    ): Promise<
+      import('../services/elearning-stats-daily-projection').ProjectElearningDepartmentStatsDailyResult
+    >
+  }
+  /**
    * E-learning L2 pre-dispatch eligibility recheck. Core supplies this only to
    * plugin-elearning; the notification worker must call it immediately before
    * every effect-side dispatch.
