@@ -6,6 +6,7 @@
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const CANONICAL_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+const CURSOR_TIMESTAMP_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3})\d{3}Z$/
 
 export const ELEARNING_LEARNING_PROFILE_PAGE_DEFAULT = 50 as const
 export const ELEARNING_LEARNING_PROFILE_PAGE_MAX = 100 as const
@@ -87,9 +88,12 @@ WITH membership AS (
   SELECT EXISTS (
     SELECT 1
       FROM user_orgs membership_row
+      JOIN users account
+        ON account.id = membership_row.user_id
      WHERE membership_row.org_id = $1
        AND membership_row.user_id = $2
        AND membership_row.is_active IS TRUE
+       AND account.is_active IS TRUE
   ) AS active
 ),
 item_state AS (
@@ -224,6 +228,10 @@ SELECT
   page.title,
   page.kind,
   page.completed_at,
+  to_char(
+    page.completed_at AT TIME ZONE 'UTC',
+    'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+  ) AS cursor_completed_at,
   page.exams
 FROM membership
 CROSS JOIN overall
@@ -254,6 +262,18 @@ function timestamp(value: unknown): string {
     || new Date(candidate).toISOString() !== candidate
   ) fail('unavailable')
   return candidate
+}
+
+function cursorTimestamp(value: unknown): string {
+  if (typeof value !== 'string') fail('unavailable')
+  const match = CURSOR_TIMESTAMP_RE.exec(value)
+  if (!match) fail('unavailable')
+  const millisecondValue = `${match[1]}Z`
+  if (
+    Number.isNaN(Date.parse(millisecondValue))
+    || new Date(millisecondValue).toISOString() !== millisecondValue
+  ) fail('unavailable')
+  return value
 }
 
 function count(value: unknown): number {
@@ -287,10 +307,12 @@ function decodeCursor(value: string): Cursor {
     }
     const completedAt = decoded.slice(0, separator)
     const courseVersionId = decoded.slice(separator + 1)
+    const match = CURSOR_TIMESTAMP_RE.exec(completedAt)
+    const millisecondValue = match ? `${match[1]}Z` : ''
     if (
-      !CANONICAL_TIMESTAMP_RE.test(completedAt)
-      || Number.isNaN(Date.parse(completedAt))
-      || new Date(completedAt).toISOString() !== completedAt
+      !match
+      || Number.isNaN(Date.parse(millisecondValue))
+      || new Date(millisecondValue).toISOString() !== millisecondValue
       || !UUID_RE.test(courseVersionId)
     ) fail('invalid_input')
     if (Buffer.from(decoded, 'utf8').toString('base64url') !== value) {
@@ -303,9 +325,9 @@ function decodeCursor(value: string): Cursor {
   }
 }
 
-function encodeCursor(course: ElearningLearningProfileCourse): string {
+function encodeCursor(courseVersionId: string, completedAt: string): string {
   return Buffer.from(
-    `${course.completedAt}|${course.courseVersionId}`,
+    `${completedAt}|${courseVersionId}`,
     'utf8',
   ).toString('base64url')
 }
@@ -374,9 +396,13 @@ export async function getElearningLearningProfile(
     !== summary.completedCourses
   ) fail('unavailable')
 
-  const courses: ElearningLearningProfileCourse[] = []
+  const entries: Array<{
+    course: ElearningLearningProfileCourse
+    cursorCompletedAt: string
+  }> = []
   for (const row of result.rows) {
     if (row.course_id == null) continue
+    const cursorCompletedAt = cursorTimestamp(row.cursor_completed_at)
     const common = {
       courseId: uuid(row.course_id),
       courseVersionId: uuid(row.course_version_id),
@@ -384,25 +410,33 @@ export async function getElearningLearningProfile(
       completedAt: timestamp(row.completed_at),
     }
     if (row.kind === 'assessment') {
-      courses.push({
-        ...common,
-        kind: 'assessment',
-        exams: parseExams(row.exams),
+      entries.push({
+        course: {
+          ...common,
+          kind: 'assessment',
+          exams: parseExams(row.exams),
+        },
+        cursorCompletedAt,
       })
     } else if (row.kind === 'content' && row.exams == null) {
-      courses.push({ ...common, kind: 'content' })
+      entries.push({
+        course: { ...common, kind: 'content' },
+        cursorCompletedAt,
+      })
     } else {
       fail('unavailable')
     }
   }
-  const hasMore = courses.length > limit
-  if (hasMore) courses.pop()
+  const hasMore = entries.length > limit
+  if (hasMore) entries.pop()
+  const courses = entries.map(({ course }) => course)
+  const last = entries.at(-1)
   return {
     userId,
     summary,
     courses,
-    nextCursor: hasMore && courses.length > 0
-      ? encodeCursor(courses[courses.length - 1]!)
+    nextCursor: hasMore && last
+      ? encodeCursor(last.course.courseVersionId, last.cursorCompletedAt)
       : null,
   }
 }

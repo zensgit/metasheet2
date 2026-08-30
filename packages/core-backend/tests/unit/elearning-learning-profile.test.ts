@@ -22,6 +22,9 @@ function dbWith(rows: Array<Record<string, unknown>>, capture?: unknown[][]): El
       expect(sql).toContain('attempt.course_version_id = v.id')
       expect(sql).toContain('attempt.course_version_item_id = i.id')
       expect(sql).toContain("evidence.item_type = i.item_type")
+      expect(sql).toContain('JOIN users account')
+      expect(sql).toContain('account.is_active IS TRUE')
+      expect(sql).toContain("'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'")
       expect(sql).toContain("count(*) FILTER (WHERE item_type = 'video') >= 1")
       expect(sql).toContain("count(*) FILTER (WHERE item_type IN ('article', 'external_link')) = count(*)")
       expect(sql).not.toMatch(/paper_snapshot|answers|grading_records|event_digest/)
@@ -43,6 +46,7 @@ function rows() {
       title: 'Assessment course',
       kind: 'assessment',
       completed_at: new Date('2026-08-30T02:00:00.000Z'),
+      cursor_completed_at: '2026-08-30T02:00:00.000900Z',
       exams: [{
         itemId: EXAM_ITEM,
         earnedScore: 9,
@@ -61,6 +65,7 @@ function rows() {
       title: 'Content course',
       kind: 'content',
       completed_at: '2026-08-29T02:00:00.000Z',
+      cursor_completed_at: '2026-08-29T02:00:00.000100Z',
       exams: null,
     },
   ]
@@ -107,7 +112,7 @@ describe('e-learning learning profile', () => {
       limit: 1,
     })
     expect(secondCapture[0]?.slice(0, 2)).toEqual([ORG, USER])
-    expect(secondCapture[0]?.[2]).toBe('2026-08-30T02:00:00.000Z')
+    expect(secondCapture[0]?.[2]).toBe('2026-08-30T02:00:00.000900Z')
     expect(secondCapture[0]?.[3]).toBe(VERSION_1)
   })
 

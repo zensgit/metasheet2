@@ -335,4 +335,16 @@ describe('e-learning learning profile authority (real PostgreSQL)', () => {
       .not.toBe(first.courses[0]!.courseVersionId)
     expect(second.nextCursor).toBeNull()
   })
+
+  it('rejects a deactivated account even while its organization membership remains active', async () => {
+    await pool.query('UPDATE users SET is_active = FALSE WHERE id = $1', [USER])
+    try {
+      await expect(getElearningLearningProfile(db, {
+        orgId: ORG,
+        userId: USER,
+      })).rejects.toMatchObject({ code: 'forbidden' })
+    } finally {
+      await pool.query('UPDATE users SET is_active = TRUE WHERE id = $1', [USER])
+    }
+  })
 })
