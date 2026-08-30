@@ -904,6 +904,10 @@ jobs:
             tests/unit/elearning-batch-assignment-runtime.test.ts \
             tests/unit/elearning-batch-assignment.test.ts \
             tests/unit/elearning-category-tree-policy.test.ts \
+            tests/unit/elearning-certificate-policy.test.ts \
+            tests/unit/elearning-certificate-routes.test.ts \
+            tests/unit/elearning-certificate-runtime.test.ts \
+            tests/unit/elearning-certificate-surface.test.ts \
             tests/unit/elearning-content-course-publish.test.ts \
             tests/unit/elearning-content-revision-policy.test.ts \
             tests/unit/elearning-content-revision-postgres.test.ts \
@@ -952,6 +956,8 @@ jobs:
             tests/unit/elearning-pilot-routes.test.ts \
             tests/unit/elearning-pilot-runtime.test.ts \
             tests/unit/elearning-plugin-runtime.test.ts \
+            tests/unit/elearning-title-policy.test.ts \
+            tests/unit/elearning-title-surface.test.ts \
             tests/unit/elearning-training-plan-routes.test.ts \
             tests/unit/elearning-training-plan.test.ts \
             tests/unit/elearning-training-plan-assignment-routes.test.ts \
@@ -1041,6 +1047,8 @@ jobs:
             tests/integration/elearning-credit-ledger-authority.db.test.ts \
             tests/integration/elearning-credit-rules-wallet.db.test.ts \
             tests/integration/elearning-credit-adjustment.db.test.ts \
+            tests/integration/elearning-title-runtime.db.test.ts \
+            tests/integration/elearning-certificate-runtime.db.test.ts \
             tests/integration/elearning-admin-scope-acl-migration-authority.db.test.ts \
             tests/integration/elearning-exam-service.db.test.ts \
             tests/integration/elearning-learner-courses.db.test.ts \

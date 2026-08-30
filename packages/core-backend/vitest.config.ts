@@ -1566,6 +1566,11 @@ export default defineConfig({
       // PostgreSQL for replay/conflict, balance locking, and migration drift.
       // Excluded from no-DB collection and wired whole-file post-migrate.
       'tests/integration/elearning-credit-adjustment.db.test.ts',
+      // E-learning L4 title and certificate authorities require real PostgreSQL
+      // for immutable/versioned ledgers, exact replay, drift, and concurrency.
+      // Excluded from no-DB collection and wired whole-file post-migrate.
+      'tests/integration/elearning-title-runtime.db.test.ts',
+      'tests/integration/elearning-certificate-runtime.db.test.ts',
       // E-learning V0.1 exam service gate. Requires real PostgreSQL (start/
       // submit + advisory lock). Excluded from the no-DB job so a missing
       // DATABASE_URL cannot skip-green it; wired as a WHOLE FILE sibling of
