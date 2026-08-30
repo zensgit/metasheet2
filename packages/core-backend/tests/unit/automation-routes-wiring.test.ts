@@ -96,16 +96,15 @@ describe('createAutomationRoutes HTTP mounting', () => {
     expect(serialized).not.toContain('SECRETPW')
   })
 
-  it('POST /test returns the PERSISTED (redacted) row when it exists, not the raw in-memory execution', async () => {
+  it('POST /test returns the authorized redacted plan without re-reading the values-free audit row', async () => {
     const svc = makeMockService()
     svc.testRun.mockResolvedValue({
       id: 'exec-3', ruleId: 'rule-1', triggeredBy: 'manual_test', triggeredAt: '2026-05-29T00:00:00Z', status: 'success',
-      ruleSnapshot: { actions: [{ config: { token: 'LIVE-SECRET-TOKEN' } }] }, // raw in-memory
+      ruleSnapshot: { actions: [{ config: { token: 'LIVE-SECRET-TOKEN', message: 'planned_summary' } }] },
       steps: [],
     })
     svc.logs.getById.mockResolvedValue({
       id: 'exec-3', ruleId: 'rule-1', triggeredBy: 'manual_test', triggeredAt: '2026-05-29T00:00:00Z', status: 'success',
-      ruleSnapshot: { actions: [{ config: { token: '<redacted>' } }] }, // persisted redacted row
       steps: [],
     })
 
@@ -114,12 +113,13 @@ describe('createAutomationRoutes HTTP mounting', () => {
       .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
       .expect(200)
 
-    expect(svc.logs.getById).toHaveBeenCalledWith('exec-3')
+    expect(svc.logs.getById).not.toHaveBeenCalled()
     expect(res.body.id).toBe('exec-3')
-    expect(JSON.stringify(res.body)).not.toContain('LIVE-SECRET-TOKEN') // came from the persisted redacted row
+    expect(JSON.stringify(res.body)).toContain('planned_summary')
+    expect(JSON.stringify(res.body)).not.toContain('LIVE-SECRET-TOKEN')
   })
 
-  it('POST /test stays 200 (redacted fallback) when the persisted-row re-fetch THROWS — a log read must not 500 a completed test', async () => {
+  it('POST /test stays 200 when audit-log reads are unavailable because the response does not depend on them', async () => {
     const svc = makeMockService()
     svc.testRun.mockResolvedValue({
       id: 'exec-4', ruleId: 'rule-1', triggeredBy: 'manual_test', triggeredAt: '2026-05-29T00:00:00Z', status: 'success',
@@ -127,13 +127,14 @@ describe('createAutomationRoutes HTTP mounting', () => {
       // secret-SHAPED error (conn-string) — the redactor scrubs by shape, not bare strings.
       steps: [{ actionType: 'send_webhook', status: 'failed', error: 'connect postgres://u:SECRETPW@h/db failed' }],
     })
-    svc.logs.getById.mockRejectedValue(new Error('db down')) // log read fails
+    svc.logs.getById.mockRejectedValue(new Error('db down'))
 
     pinned.setApp(buildApp(svc))
     const res = await request(pinned.url())
       .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
-      .expect(200) // NOT 500 — the test run completed; only the log read failed
-    expect(res.body.id).toBe('exec-4') // flat shape via redacted fallback
+      .expect(200)
+    expect(svc.logs.getById).not.toHaveBeenCalled()
+    expect(res.body.id).toBe('exec-4')
     const serialized = JSON.stringify(res.body)
     expect(serialized).not.toContain('LIVE-SECRET-TOKEN')
     expect(serialized).not.toContain('SECRETPW')

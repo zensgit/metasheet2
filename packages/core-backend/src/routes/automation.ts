@@ -587,14 +587,10 @@ export function createAutomationRoutes(
 
     try {
       const execution = await svc.testRun(ruleId, sheetId, { mode: 'simulate' })
-      // The in-memory execution carries the live rule (credentials) in ruleSnapshot + raw
-      // action output in steps; record()'s at-persist redaction returns new objects and does
-      // NOT mutate it. Serialize the PERSISTED (redacted) row; if it didn't land, fall back to
-      // a response-level redaction (NEVER the raw execution). Flat AutomationExecution shape is
-      // preserved either way (client does parseJson<AutomationExecution>(res)).
-      // safeGet: a log-read failure must not 500 a completed test run → redacted fallback.
-      const persisted = await safeGetPersistedExecution(svc, execution.id)
-      const response = persisted ?? redactAutomationExecutionForResponse(execution)
+      // Simulation persistence is values-free and intentionally omits rule/record values. The
+      // authorized caller still receives the response-level secret-redacted execution so future
+      // sample-record previews can describe the planned action without widening the audit row.
+      const response = redactAutomationExecutionForResponse(execution)
       return res.json({ ...response, dryRun: true })
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Test run failed'
