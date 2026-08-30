@@ -49,6 +49,10 @@ import type {
   ElearningCreditSurfaceDb,
 } from './elearning-credit-surface'
 import type {
+  getActiveElearningTitleSnapshot,
+  publishElearningTitleSnapshot,
+} from './elearning-title-surface'
+import type {
   ElearningDirectAssignmentDb,
   ElearningDirectAssignmentResult,
 } from './elearning-direct-assignment'
@@ -263,6 +267,8 @@ export interface ElearningPilotRuntimeOptions {
   listElearningCreditRules?: typeof listElearningCreditRules
   getElearningCreditWallet?: typeof getElearningCreditWallet
   adjustElearningCredit?: typeof adjustElearningCreditPostgres
+  getActiveElearningTitleSnapshot?: typeof getActiveElearningTitleSnapshot
+  publishElearningTitleSnapshot?: typeof publishElearningTitleSnapshot
 }
 
 function viewerId(req: Request): string | null {
@@ -376,6 +382,8 @@ export function createElearningPilotRuntime(
     listElearningCreditRules: opts.listElearningCreditRules,
     getElearningCreditWallet: opts.getElearningCreditWallet,
     adjustElearningCredit: opts.adjustElearningCredit,
+    getActiveElearningTitleSnapshot: opts.getActiveElearningTitleSnapshot,
+    publishElearningTitleSnapshot: opts.publishElearningTitleSnapshot,
   }) : null
   if (!inner && !credit) return null
 

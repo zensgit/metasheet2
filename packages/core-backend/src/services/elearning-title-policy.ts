@@ -6,6 +6,7 @@
  */
 
 const ELEARNING_TITLE_TEXT_MAX = 512
+const POSTGRES_INT4_MAX = 2_147_483_647
 const ELEARNING_TITLE_ROW_KEYS = ['id', 'name', 'threshold'] as const
 
 export type ElearningTitlePolicyErrorCode =
@@ -63,7 +64,12 @@ function requireTitleText(value: unknown): string {
 }
 
 function requireThreshold(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+  if (
+    typeof value !== 'number'
+    || !Number.isSafeInteger(value)
+    || value < 0
+    || value > POSTGRES_INT4_MAX
+  ) {
     fail('invalid_row')
   }
   return value

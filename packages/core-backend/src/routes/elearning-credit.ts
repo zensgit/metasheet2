@@ -23,8 +23,15 @@ import {
   type ElearningCreditSurfaceDb,
   type ElearningCreditWalletItem,
 } from '../services/elearning-credit-surface'
+import {
+  ElearningTitleSurfaceError,
+  getActiveElearningTitleSnapshot,
+  publishElearningTitleSnapshot,
+  type ElearningTitleSnapshot,
+} from '../services/elearning-title-surface'
 
 const RULE_KEYS = new Set(['behavior', 'dailyCap', 'points', 'requestId', 'timeZone'])
+const TITLE_KEYS = new Set(['requestId', 'titles'])
 const ADJUSTMENT_KEYS = new Set(['points', 'reason', 'requestId', 'userId'])
 const WALLET_KEYS = new Set(['cursor', 'limit'])
 const ADMIN_WALLET_KEYS = new Set(['cursor', 'limit', 'userId'])
@@ -56,6 +63,8 @@ export interface ElearningCreditRouteDeps {
   listElearningCreditRules?: typeof listElearningCreditRules
   getElearningCreditWallet?: typeof getElearningCreditWallet
   adjustElearningCredit?: typeof adjustElearningCreditPostgres
+  getActiveElearningTitleSnapshot?: typeof getActiveElearningTitleSnapshot
+  publishElearningTitleSnapshot?: typeof publishElearningTitleSnapshot
 }
 
 function readObject(value: unknown): Record<string, unknown> | null {
@@ -126,6 +135,15 @@ function sendError(res: Response, error: unknown): void {
     res.status(ERROR_STATUS[error.code]).json({ error: error.code })
     return
   }
+  if (error instanceof ElearningTitleSurfaceError) {
+    const status = error.code === 'invalid_input'
+      ? 400
+      : error.code === 'conflict'
+        ? 409
+        : 503
+    res.status(status).json({ error: error.code })
+    return
+  }
   res.status(500).json({ error: 'internal_error' })
 }
 
@@ -159,6 +177,19 @@ function walletItemDto(item: ElearningCreditWalletItem) {
     status: item.status,
     occurredAt: item.occurredAt,
     createdAt: item.createdAt,
+  }
+}
+
+function titleSnapshotDto(snapshot: ElearningTitleSnapshot) {
+  return {
+    revisionId: snapshot.revisionId,
+    version: snapshot.version,
+    titles: snapshot.titles.map((title) => ({
+      id: title.id,
+      name: title.name,
+      threshold: title.threshold,
+    })),
+    createdAt: snapshot.createdAt,
   }
 }
 
@@ -212,6 +243,10 @@ export function createElearningCreditRouter(
   const list = deps.listElearningCreditRules ?? listElearningCreditRules
   const getWallet = deps.getElearningCreditWallet ?? getElearningCreditWallet
   const adjustCredit = deps.adjustElearningCredit ?? adjustElearningCreditPostgres
+  const getTitles = deps.getActiveElearningTitleSnapshot
+    ?? getActiveElearningTitleSnapshot
+  const publishTitles = deps.publishElearningTitleSnapshot
+    ?? publishElearningTitleSnapshot
 
   router.get(
     '/api/elearning/admin/credit-rules',
@@ -294,6 +329,53 @@ export function createElearningCreditRouter(
     }),
   )
 
+  router.get(
+    '/api/elearning/admin/credit-titles',
+    gate,
+    context,
+    deps.adminGuard,
+    run(async (req, res) => {
+      const orgId = deps.orgId(req)
+      if (!orgId) {
+        res.status(403).json({ error: 'ORG_CONTEXT_REQUIRED' })
+        return
+      }
+      try {
+        res.status(200).json(titleSnapshotDto(await getTitles(deps.db, orgId)))
+      } catch (error) {
+        sendError(res, error)
+      }
+    }),
+  )
+
+  router.post(
+    '/api/elearning/admin/credit-titles',
+    gate,
+    context,
+    deps.adminGuard,
+    parseJson,
+    run(async (req, res) => {
+      const actorId = deps.viewerId(req)
+      const orgId = deps.orgId(req)
+      const body = readObject(req.body)
+      if (!actorId || !orgId || !body || !exactKeys(body, TITLE_KEYS)) {
+        res.status(400).json({ error: 'invalid_input' })
+        return
+      }
+      try {
+        const result = await publishTitles(deps.db, {
+          orgId,
+          actorId,
+          requestId: body.requestId as string,
+          titles: body.titles,
+        })
+        res.status(200).json(titleSnapshotDto(result))
+      } catch (error) {
+        sendError(res, error)
+      }
+    }),
+  )
+
   const wallet = (admin: boolean): RequestHandler => run(async (req, res) => {
     const orgId = deps.orgId(req)
     const viewerId = deps.viewerId(req)
@@ -312,6 +394,13 @@ export function createElearningCreditRouter(
       res.status(200).json({
         userId: result.userId,
         balancePoints: result.balancePoints,
+        currentTitle: result.currentTitle
+          ? {
+            id: result.currentTitle.id,
+            name: result.currentTitle.name,
+            threshold: result.currentTitle.threshold,
+          }
+          : null,
         items: result.items.map(walletItemDto),
         nextCursor: result.nextCursor,
       })

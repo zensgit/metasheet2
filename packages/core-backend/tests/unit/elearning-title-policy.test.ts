@@ -108,12 +108,15 @@ describe('elearning title policy', () => {
     ]), 'duplicate_threshold')
   })
 
-  it('rejects unsafe, non-integer, and negative thresholds', () => {
-    for (const threshold of [Number.MAX_SAFE_INTEGER + 1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, -1, '100']) {
+  it('rejects values outside the nonnegative PostgreSQL int4 threshold domain', () => {
+    for (const threshold of [2_147_483_648, Number.MAX_SAFE_INTEGER + 1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, -1, '100']) {
       expectCode(() => normalizeElearningTitleThresholdSnapshot([
         { id: 'title-a', name: 'A', threshold },
       ]), 'invalid_row')
     }
+    expect(normalizeElearningTitleThresholdSnapshot([
+      { id: 'title-max', name: 'Maximum', threshold: 2_147_483_647 },
+    ])[0]?.threshold).toBe(2_147_483_647)
   })
 
   it('rejects blank, overlong, NUL, and malformed-surrogate text', () => {
