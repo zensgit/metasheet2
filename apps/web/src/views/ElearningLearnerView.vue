@@ -5,7 +5,11 @@
       <p>{{ elearningLabel('learner.subtitle', isZh) }}</p>
     </header>
 
+    <ElearningPortalHero v-if="contentEnabled" />
+
     <ElearningCreditWalletSection v-if="incentiveEnabled" />
+    <ElearningCertificateWalletSection v-if="incentiveEnabled" />
+    <ElearningLearningProfileSection v-if="incentiveEnabled" />
 
     <p
       v-if="status"
@@ -227,6 +231,9 @@ import {
 } from '../services/elearning'
 import ElearningContentLearnerCourse from './ElearningContentLearnerCourse.vue'
 import ElearningCreditWalletSection from './ElearningCreditWalletSection.vue'
+import ElearningCertificateWalletSection from './ElearningCertificateWalletSection.vue'
+import ElearningLearningProfileSection from './ElearningLearningProfileSection.vue'
+import ElearningPortalHero from './ElearningPortalHero.vue'
 import {
   elearningExamAnswerProgress,
   elearningExamCountdown,
@@ -245,6 +252,7 @@ const loading = ref(false)
 const busy = ref(false)
 const ready = ref(false)
 const assessmentReady = ref(false)
+const contentEnabled = ref(false)
 const incentiveEnabled = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
@@ -597,13 +605,13 @@ function isNaturalVideoEnd(video: HTMLVideoElement | null): boolean {
 async function ensureV01Ready(): Promise<void> {
   const capabilities = await getElearningCapabilities()
   assessmentReady.value = isElearningLearnerReady(capabilities)
-  const contentReady = isElearningContentReady(capabilities)
+  contentEnabled.value = isElearningContentReady(capabilities)
   incentiveEnabled.value = capabilities.enabled === true
     && capabilities.capabilities.incentive === true
-  if (!assessmentReady.value && !contentReady && !incentiveEnabled.value) {
+  if (!assessmentReady.value && !contentEnabled.value && !incentiveEnabled.value) {
     throw new ElearningApiError('feature_disabled', 404)
   }
-  ready.value = assessmentReady.value || contentReady
+  ready.value = assessmentReady.value || contentEnabled.value
 }
 
 async function refreshCourses(): Promise<void> {

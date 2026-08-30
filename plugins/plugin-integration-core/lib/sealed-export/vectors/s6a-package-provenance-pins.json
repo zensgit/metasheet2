@@ -67,7 +67,7 @@
     "pg": "^8.11.3"
   },
   "runtimeFiles": {
-    "pluginPackageJson": "6b4fc2ff31d990fc9700bc2389ab9c62b3b6775e2a6774710147e84709b28f92",
+    "pluginPackageJson": "b022152c31e5c65bc35cc4247c8650d81fd3ed1c650276db4c9c01b4eb54fae9",
     "pnpmLock": "95f095233951bbe488cb70da25cc3c9a0a25c1354bfd861b4ee999ccc857019b",
     "pluginIndex": "c9d9ac7a879462adf0055004c55d6ab87a3819c00aa8ced903b70f5aea3cd112",
     "pluginHttpRoutes": "3b15fa798fc40dc279024b9b4017f69a82092edf892fe7d01a6a06e8c2c9c39c",
@@ -86,6 +86,6 @@
     "s6aAcceptancePs51Test": "835c7c6ce943d82e0378a40a27c7fd1e8b79b526faa8ca4c8066e4231a4bfb0f",
     "s6aProductRuntimeTest": "de978adafa8b89772cefa921c2051f434bf346bf5c2978bef3424ee70f51ba3f",
     "multitableOnpremPackageBuild": "1b76a342e5b947faf271132a5ae246b225439fbace13a4ff90e1209f7fb6b6d6",
-    "pluginTestsWorkflow": "108fbcbe93a77725c61d1a9a476e79bbc7028f37383bae8a4835eec0a0a4d599"
+    "pluginTestsWorkflow": "59540432984846ef000b3ccff114a5d26bdede1738864de50e65b61081a687e3"
   }
 }

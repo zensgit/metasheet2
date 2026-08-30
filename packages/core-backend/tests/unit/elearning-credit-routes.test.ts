@@ -13,6 +13,10 @@ import {
   type GetElearningCreditWalletInput,
   type PublishElearningCreditRuleInput,
 } from '../../src/services/elearning-credit-surface'
+import {
+  ElearningTitleSurfaceError,
+  type PublishElearningTitleSnapshotInput,
+} from '../../src/services/elearning-title-surface'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const ORG = 'org-credit-routes'
@@ -21,6 +25,7 @@ const TARGET = 'target-credit-routes'
 const RULE_ID = '11111111-1111-4111-8111-111111111111'
 const DECISION_ID = '22222222-2222-4222-8222-222222222222'
 const ADJUSTMENT_ID = '33333333-3333-4333-8333-333333333333'
+const TITLE_REVISION_ID = '44444444-4444-4444-8444-444444444444'
 const FLAG_ON = {
   ELEARNING_ENABLED: 'true',
   ELEARNING_INCENTIVE_ENABLED: 'true',
@@ -46,10 +51,12 @@ function makeApp(over: {
   publishError?: ElearningCreditSurfaceError
   walletError?: ElearningCreditSurfaceError
   adjustmentError?: ElearningCreditAdjustmentError
+  titleError?: ElearningTitleSurfaceError
 } = {}) {
   const publishCalls: PublishElearningCreditRuleInput[] = []
   const walletCalls: GetElearningCreditWalletInput[] = []
   const adjustmentCalls: AdjustElearningCreditInput[] = []
+  const titlePublishCalls: PublishElearningTitleSnapshotInput[] = []
   let adminGuardCalls = 0
   let readGuardCalls = 0
   const env = over.env ?? { ...FLAG_ON }
@@ -106,6 +113,12 @@ function makeApp(over: {
       return {
         userId: input.userId,
         balancePoints: 10,
+        currentTitle: {
+          id: 'expert',
+          name: 'Expert',
+          threshold: 10,
+          secret: 'must-not-leak',
+        },
         items: [{
           decisionId: DECISION_ID,
           behavior: 'pass_exam',
@@ -118,6 +131,28 @@ function makeApp(over: {
           rawReference: { secret: true },
         }],
         nextCursor: null,
+      } as never
+    },
+    getActiveElearningTitleSnapshot: async () => {
+      if (over.titleError) throw over.titleError
+      return {
+        revisionId: TITLE_REVISION_ID,
+        version: 2,
+        titles: [{ id: 'expert', name: 'Expert', threshold: 10 }],
+        createdAt: '2026-08-29T00:00:03.000Z',
+        secret: 'must-not-leak',
+      } as never
+    },
+    publishElearningTitleSnapshot: async (_db, input) => {
+      titlePublishCalls.push(input)
+      if (over.titleError) throw over.titleError
+      return {
+        revisionId: TITLE_REVISION_ID,
+        version: 2,
+        titles: [{ id: 'expert', name: 'Expert', threshold: 10 }],
+        createdAt: '2026-08-29T00:00:03.000Z',
+        duplicate: false,
+        requestHash: 'must-not-leak',
       } as never
     },
     adjustElearningCredit: async (_db, input) => {
@@ -145,6 +180,7 @@ function makeApp(over: {
     publishCalls,
     walletCalls,
     adjustmentCalls,
+    titlePublishCalls,
     guardCounts: () => ({ adminGuardCalls, readGuardCalls }),
     mounted: router !== null,
   }
@@ -312,6 +348,11 @@ describe('e-learning credit routes', () => {
     expect(response.body).toEqual({
       userId: ACTOR,
       balancePoints: 10,
+      currentTitle: {
+        id: 'expert',
+        name: 'Expert',
+        threshold: 10,
+      },
       items: [{
         decisionId: DECISION_ID,
         behavior: 'pass_exam',
@@ -330,6 +371,56 @@ describe('e-learning credit routes', () => {
     )
     expect(override.status).toBe(400)
     expect(harness.walletCalls).toHaveLength(1)
+  })
+
+  it('gets and publishes a closed title snapshot behind admin authority', async () => {
+    const harness = makeApp()
+    const listed = await harness.api.get('/api/elearning/admin/credit-titles')
+    expect(listed.status).toBe(200)
+    expect(listed.body).toEqual({
+      revisionId: TITLE_REVISION_ID,
+      version: 2,
+      titles: [{ id: 'expert', name: 'Expert', threshold: 10 }],
+      createdAt: '2026-08-29T00:00:03.000Z',
+    })
+    expect(JSON.stringify(listed.body)).not.toMatch(/secret|requestHash/)
+
+    const published = await harness.api
+      .post('/api/elearning/admin/credit-titles')
+      .send({
+        requestId: 'titles-v2',
+        titles: [{ id: 'expert', name: 'Expert', threshold: 10 }],
+      })
+    expect(published.status).toBe(200)
+    expect(published.body).toEqual(listed.body)
+    expect(harness.titlePublishCalls).toEqual([{
+      orgId: ORG,
+      actorId: ACTOR,
+      requestId: 'titles-v2',
+      titles: [{ id: 'expert', name: 'Expert', threshold: 10 }],
+    }])
+  })
+
+  it('rejects title authority injection and maps title conflicts values-free', async () => {
+    const injected = makeApp()
+    const invalid = await injected.api
+      .post('/api/elearning/admin/credit-titles')
+      .send({
+        requestId: 'titles-v2',
+        titles: [],
+        orgId: 'injected',
+      })
+    expect(invalid.status).toBe(400)
+    expect(injected.titlePublishCalls).toEqual([])
+
+    const conflict = makeApp({
+      titleError: new ElearningTitleSurfaceError('conflict'),
+    })
+    const response = await conflict.api
+      .post('/api/elearning/admin/credit-titles')
+      .send({ requestId: 'titles-v2', titles: [] })
+    expect(response.status).toBe(409)
+    expect(response.body).toEqual({ error: 'conflict' })
   })
 
   it('allows only admin RBAC to query one same-org target wallet', async () => {

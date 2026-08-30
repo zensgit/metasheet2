@@ -4,6 +4,11 @@
       <h2 id="credit-wallet-title">{{ text('My credits', '我的学分') }}</h2>
       <strong data-testid="elearning-credit-wallet-balance">{{ balancePoints }}</strong>
     </header>
+    <p v-if="currentTitle" data-testid="elearning-credit-wallet-title">
+      {{ text('Current title', '当前称号') }}:
+      <strong>{{ currentTitle.name }}</strong>
+      <span>({{ currentTitle.threshold }})</span>
+    </p>
     <p v-if="error" class="credit-wallet__error" data-testid="elearning-credit-wallet-error" role="status">{{ error }}</p>
     <p v-if="loading && items.length === 0" data-testid="elearning-credit-wallet-loading">{{ text('Loading credits...', '正在加载学分…') }}</p>
     <p v-else-if="items.length === 0 && !error" data-testid="elearning-credit-wallet-empty">{{ text('No credit history yet.', '暂无学分记录。') }}</p>
@@ -28,10 +33,12 @@ import {
   getMyElearningCreditWallet,
   type ElearningCreditBehavior,
   type ElearningCreditWalletItem,
+  type ElearningTitleRow,
 } from '../services/elearningCredit'
 
 const { isZh } = useLocale()
 const balancePoints = ref(0)
+const currentTitle = ref<ElearningTitleRow | null>(null)
 const items = ref<ElearningCreditWalletItem[]>([])
 const nextCursor = ref<string | null>(null)
 const loading = ref(false)
@@ -82,6 +89,7 @@ async function load(cursor: string | null): Promise<void> {
   try {
     const result = await getMyElearningCreditWallet(cursor)
     balancePoints.value = result.balancePoints
+    currentTitle.value = result.currentTitle
     items.value = cursor === null ? result.items : [...items.value, ...result.items]
     nextCursor.value = result.nextCursor
   } catch (value) {

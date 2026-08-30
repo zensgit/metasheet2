@@ -67,7 +67,8 @@ function buildApp(userId: string, permissions: string[]): Express {
 }
 
 // Common permission sets.
-const WRITE = ['multitable:read', 'multitable:write']
+// canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
+const WRITE = ['multitable:read', 'multitable:write', 'multitable:manage-schema']
 const READ_ONLY = ['multitable:read']
 const READ_PLUS_BASE = ['multitable:read', 'multitable:base:read']
 

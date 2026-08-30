@@ -271,6 +271,7 @@ import { kanbanRouter } from './routes/kanban'
 import { createPlatformAppsRouter } from './routes/platform-apps'
 import {
   isElearningAssignmentSurfaceEnabled,
+  isElearningAnalyticsSurfaceEnabled,
   isElearningContentSurfaceEnabled,
   isElearningExamSurfaceEnabled,
   isElearningWatchSurfaceEnabled,
@@ -289,6 +290,14 @@ import {
   ElearningExamError,
   settleExpiredElearningExamAttempt,
 } from './services/elearning-exam'
+import {
+  ElearningStatsDailyProjectionError,
+  projectElearningDepartmentStatsDaily,
+} from './services/elearning-stats-daily-projection'
+import {
+  ElearningStatsDailyJobProducerError,
+  enqueueElearningStatsDailyJobs,
+} from './services/elearning-stats-daily-job-producer'
 import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
 import { adminUsersRouter } from './routes/admin-users'
@@ -1426,6 +1435,7 @@ export class MetaSheetServer {
     const elearningPilotRuntime = (
       isElearningContentSurfaceEnabled(process.env)
       || isElearningCreditSurfaceEnabled(process.env)
+      || isElearningAnalyticsSurfaceEnabled(process.env)
     )
       ? createElearningPilotRuntime({ db: poolManager.get() })
       : null
@@ -2264,6 +2274,27 @@ export class MetaSheetServer {
                     throw new ElearningExamError('unavailable')
                   }
                   return settleExpiredElearningExamAttempt(poolManager.get(), input)
+                },
+              }
+            : undefined,
+        // L5 analytics jobs are materialization requests only. Core repeats
+        // the exact flag gate and owns the current-directory projection.
+        elearningStatsDailyProjection:
+          manifest.name === 'plugin-elearning'
+            ? {
+                enqueueDue: async () => {
+                  if (!isElearningAnalyticsSurfaceEnabled()) {
+                    throw new ElearningStatsDailyJobProducerError('unavailable')
+                  }
+                  return enqueueElearningStatsDailyJobs(poolManager.get())
+                },
+                project: async (
+                  input: import('./services/elearning-stats-daily-projection').ProjectElearningDepartmentStatsDailyInput,
+                ) => {
+                  if (!isElearningAnalyticsSurfaceEnabled()) {
+                    throw new ElearningStatsDailyProjectionError('unavailable')
+                  }
+                  return projectElearningDepartmentStatsDaily(poolManager.get(), input)
                 },
               }
             : undefined,

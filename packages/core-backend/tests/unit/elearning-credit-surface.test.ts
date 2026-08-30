@@ -17,6 +17,7 @@ const RULE_ID = '11111111-1111-4111-8111-111111111111'
 const DECISION_1 = '22222222-2222-4222-8222-222222222222'
 const DECISION_2 = '33333333-3333-4333-8333-333333333333'
 const DECISION_3 = '44444444-4444-4444-8444-444444444444'
+const TITLE_REVISION = '55555555-5555-4555-8555-555555555555'
 
 type QueryResult = { rows: Array<Record<string, unknown>>; rowCount: number | null }
 
@@ -247,6 +248,7 @@ describe('e-learning credit rules and wallet surface', () => {
     expect(first).toEqual({
       userId: USER,
       balancePoints: 16,
+      currentTitle: null,
       items: [
         {
           decisionId: DECISION_1,
@@ -329,6 +331,7 @@ describe('e-learning credit rules and wallet surface', () => {
     expect(wallet).toEqual({
       userId: USER,
       balancePoints: 7,
+      currentTitle: null,
       items: [{
         decisionId: DECISION_1,
         behavior: 'manual_adjust',
@@ -340,6 +343,49 @@ describe('e-learning credit rules and wallet surface', () => {
       nextCursor: null,
     })
     expect(JSON.stringify(wallet)).not.toMatch(/reason|actor_id|must-not-leak/)
+  })
+
+  it('resolves the wallet current title from the same read-only snapshot', async () => {
+    const db = dbWith(async (sql) => {
+      if (sql.includes(':membership')) return { rows: [{ ok: 1 }], rowCount: 1 }
+      if (sql.includes(':balance')) return { rows: [{ balance_points: 120 }], rowCount: 1 }
+      if (sql.includes('elearning-title:load-head')) {
+        return { rows: [{ active_revision_id: TITLE_REVISION }], rowCount: 1 }
+      }
+      if (sql.includes('elearning-title:load-revision')) {
+        return {
+          rows: [
+            {
+              revision_id: TITLE_REVISION,
+              version: 1,
+              created_at: '2026-08-29T00:00:00.000Z',
+              title_key: 'starter',
+              name: 'Starter',
+              threshold: 0,
+              position: 1,
+            },
+            {
+              revision_id: TITLE_REVISION,
+              version: 1,
+              created_at: '2026-08-29T00:00:00.000Z',
+              title_key: 'expert',
+              name: 'Expert',
+              threshold: 100,
+              position: 2,
+            },
+          ],
+          rowCount: 2,
+        }
+      }
+      if (sql.includes(':history')) return { rows: [], rowCount: 0 }
+      return { rows: [], rowCount: 0 }
+    })
+
+    await expect(getElearningCreditWallet(db, { orgId: ORG, userId: USER }))
+      .resolves.toMatchObject({
+        balancePoints: 120,
+        currentTitle: { id: 'expert', name: 'Expert', threshold: 100 },
+      })
   })
 
   it.each([

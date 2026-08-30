@@ -132,7 +132,8 @@ describeIfDatabase('4c-2 tombstone capture — field delete (real DB)', () => {
   beforeAll(async () => {
     app = express()
     app.use(express.json())
-    app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: ['owner'], perms: ['multitable:read', 'multitable:write'] }; next() })
+    // canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
+    app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: ['owner'], perms: ['multitable:read', 'multitable:write', 'multitable:manage-schema'] }; next() })
     app.use('/api/multitable', univerMetaRouter())
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'TSC Base'])
   })

@@ -4,8 +4,11 @@ import { useLocale } from '../src/composables/useLocale'
 
 const h = vi.hoisted(() => ({
   adjust: vi.fn(),
+  getTitles: vi.fn(),
   list: vi.fn(),
   publish: vi.fn(),
+  publishTitles: vi.fn(),
+  listCertificates: vi.fn(),
 }))
 
 vi.mock('../src/services/elearningCredit', async () => {
@@ -15,9 +18,18 @@ vi.mock('../src/services/elearningCredit', async () => {
   return {
     ...actual,
     adjustElearningCredit: h.adjust,
+    getElearningTitleSnapshot: h.getTitles,
     listElearningCreditRules: h.list,
     publishElearningCreditRule: h.publish,
+    publishElearningTitleSnapshot: h.publishTitles,
   }
+})
+
+vi.mock('../src/services/elearningCertificate', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/elearningCertificate')>(
+    '../src/services/elearningCertificate',
+  )
+  return { ...actual, listElearningCertificateTemplates: h.listCertificates }
 })
 
 import { ElearningApiError } from '../src/services/elearning'
@@ -78,7 +90,17 @@ describe('ElearningCreditAdminSection', () => {
     h.list.mockReset()
     h.publish.mockReset()
     h.adjust.mockReset()
+    h.getTitles.mockReset()
+    h.publishTitles.mockReset()
+    h.listCertificates.mockReset()
     h.list.mockResolvedValue([rule()])
+    h.getTitles.mockResolvedValue({
+      revisionId: null,
+      version: 0,
+      titles: [],
+      createdAt: null,
+    })
+    h.listCertificates.mockResolvedValue([])
     let index = 0
     const ids = [REQUEST_A, REQUEST_B]
     uuidSpy = vi.spyOn(globalThis.crypto, 'randomUUID').mockImplementation(() => (

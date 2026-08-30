@@ -36,7 +36,8 @@ const CAPTURE_FLAG = 'MULTITABLE_TOMBSTONE_CAPTURE_ENABLED'
 const WRITER_FENCE_FLAG = 'MULTITABLE_ENABLE_WRITER_FENCE'
 
 type Actor = { id: string; roles: string[]; perms: string[] }
-const MANAGER: Actor = { id: `u_tsr_mgr_${TS}`, roles: ['member'], perms: ['multitable:read', 'multitable:write'] }
+// canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
+const MANAGER: Actor = { id: `u_tsr_mgr_${TS}`, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:manage-schema'] }
 const VIEWER: Actor = { id: `u_tsr_viewer_${TS}`, roles: ['member'], perms: ['multitable:read'] } // masked subject
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
