@@ -5648,6 +5648,74 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ElearningCreditRule'
+    ElearningTitleRow:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - threshold
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 512
+        name:
+          type: string
+          minLength: 1
+          maxLength: 512
+        threshold:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 2147483647
+    ElearningTitlePublishRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - requestId
+        - titles
+      properties:
+        requestId:
+          type: string
+          minLength: 1
+          maxLength: 512
+        titles:
+          type: array
+          maxItems: 100
+          description: >-
+            Complete snapshot in strictly increasing threshold order after
+            normalization.
+          items:
+            $ref: '#/components/schemas/ElearningTitleRow'
+    ElearningTitleSnapshot:
+      type: object
+      additionalProperties: false
+      required:
+        - revisionId
+        - version
+        - titles
+        - createdAt
+      properties:
+        revisionId:
+          oneOf:
+            - $ref: '#/components/schemas/ElearningUuid'
+            - type: 'null'
+        version:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 2147483647
+        titles:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ElearningTitleRow'
+        createdAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
     ElearningCreditAdjustmentRequest:
       type: object
       additionalProperties: false
@@ -5800,6 +5868,7 @@ components:
       required:
         - userId
         - balancePoints
+        - currentTitle
         - items
         - nextCursor
       properties:
@@ -5811,6 +5880,13 @@ components:
           format: int32
           minimum: 0
           maximum: 2147483647
+        currentTitle:
+          oneOf:
+            - $ref: '#/components/schemas/ElearningTitleRow'
+            - type: 'null'
+          description: >-
+            Dynamically resolved from the active title snapshot and current
+            balance.
         items:
           type: array
           items:
@@ -17708,6 +17784,81 @@ paths:
           $ref: '#/components/responses/ElearningError'
         '409':
           description: requestId reused with a different normalized payload
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+  /api/elearning/admin/credit-titles:
+    get:
+      operationId: getElearningTitleSnapshot
+      summary: Read the active organization credit-title threshold snapshot
+      description: |
+        Global `elearning:admin` only. Requires `ELEARNING_ENABLED` and
+        `ELEARNING_INCENTIVE_ENABLED` to each equal the exact literal `true`.
+        Organization is server-derived. The closed response contains only the
+        active immutable revision and its threshold-ordered title rows.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: >-
+            Active snapshot, or the explicit empty snapshot when no titles are
+            configured.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningTitleSnapshot'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient elearning:admin
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Incentive surface flags off
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+    post:
+      operationId: publishElearningTitleSnapshot
+      summary: Publish one complete credit-title threshold snapshot
+      description: >
+        Global `elearning:admin` only. Actor and organization are
+        server-derived.
+
+        The complete normalized snapshot becomes one immutable active revision.
+
+        The same organization-scoped `requestId` and logical payload replay the
+
+        original closed result; changed values return a values-free 409.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningTitlePublishRequest'
+      responses:
+        '200':
+          description: Published snapshot or exact idempotent replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningTitleSnapshot'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient elearning:admin
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Incentive surface flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: requestId reused with a different normalized snapshot
           $ref: '#/components/responses/ElearningError'
         '503':
           description: unavailable

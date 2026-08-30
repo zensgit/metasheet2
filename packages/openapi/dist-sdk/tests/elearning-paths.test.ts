@@ -56,6 +56,10 @@ type CreditAutomaticBehavior = components['schemas']['ElearningCreditAutomaticBe
 type CreditAutomaticWalletItem = components['schemas']['ElearningCreditAutomaticWalletItem']
 type CreditManualWalletItem = components['schemas']['ElearningCreditManualWalletItem']
 type CreditWalletItem = components['schemas']['ElearningCreditWalletItem']
+type CreditWallet = components['schemas']['ElearningCreditWallet']
+type TitleRow = components['schemas']['ElearningTitleRow']
+type TitlePublishRequest = components['schemas']['ElearningTitlePublishRequest']
+type TitleSnapshot = components['schemas']['ElearningTitleSnapshot']
 type ContentRevisionRequest = components['schemas']['ElearningContentRevisionRequest']
 type ContentRevisionResult = components['schemas']['ElearningContentRevision']
 type ContentCoursePublishRequest = components['schemas']['ElearningContentCoursePublishRequest']
@@ -173,6 +177,8 @@ function jsonSchemaAt(
 describe('elearning V0.1 OpenAPI paths', () => {
   it('exposes the live named-pilot routes in generated SDK types', () => {
     expectTypeOf<paths['/api/elearning/capabilities']['get']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/admin/credit-titles']['get']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/admin/credit-titles']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/admin/credits/adjustments']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/admin/content-revisions']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/admin/courses/content/publish']['post']>().not.toBeNever()
@@ -212,6 +218,12 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<
       paths['/api/elearning/capabilities']['get']['responses']['200']['content']['application/json']
     >().toEqualTypeOf<Capabilities>()
+    expectTypeOf<
+      paths['/api/elearning/admin/credit-titles']['get']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<TitleSnapshot>()
+    expectTypeOf<
+      paths['/api/elearning/admin/credit-titles']['post']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<TitleSnapshot>()
     expectTypeOf<
       paths['/api/elearning/admin/credits/adjustments']['post']['responses']['200']['content']['application/json']
     >().toEqualTypeOf<CreditAdjustmentResult>()
@@ -373,6 +385,13 @@ describe('elearning V0.1 OpenAPI paths', () => {
       occurredAt: string
       createdAt: string
     }>()
+    expectTypeOf<CreditWallet>().toEqualTypeOf<{
+      userId: string
+      balancePoints: number
+      currentTitle: TitleRow | null
+      items: CreditWalletItem[]
+      nextCursor: string | null
+    }>()
 
     const doc = JSON.parse(readFileSync(join(here, '..', '..', 'dist', 'openapi.json'), 'utf8')) as {
       paths?: Record<string, any>
@@ -488,6 +507,106 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expect(schemas.ElearningCreditWallet?.properties?.balancePoints).toMatchObject({
       minimum: 0,
       maximum: 2147483647,
+    })
+    expect(schemas.ElearningCreditWallet).toMatchObject({
+      additionalProperties: false,
+      required: ['userId', 'balancePoints', 'currentTitle', 'items', 'nextCursor'],
+      properties: {
+        currentTitle: {
+          oneOf: [
+            { $ref: '#/components/schemas/ElearningTitleRow' },
+            { type: 'null' },
+          ],
+        },
+      },
+    })
+  })
+
+  it('keeps title configuration and wallet title DTOs closed and server-authoritative', () => {
+    expectTypeOf<TitleRow>().toEqualTypeOf<{
+      id: string
+      name: string
+      threshold: number
+    }>()
+    expectTypeOf<TitlePublishRequest>().toEqualTypeOf<{
+      requestId: string
+      titles: TitleRow[]
+    }>()
+    expectTypeOf<TitleSnapshot>().toEqualTypeOf<{
+      revisionId: string | null
+      version: number
+      titles: TitleRow[]
+      createdAt: string | null
+    }>()
+    expectTypeOf<
+      NonNullable<paths['/api/elearning/admin/credit-titles']['post']['requestBody']>['content']['application/json']
+    >().toEqualTypeOf<TitlePublishRequest>()
+
+    const doc = JSON.parse(readFileSync(join(here, '..', '..', 'dist', 'openapi.json'), 'utf8')) as {
+      paths?: Record<string, any>
+      components?: { schemas?: Record<string, JsonSchema> }
+    }
+    const schemas = doc.components?.schemas ?? {}
+    const operation = doc.paths?.['/api/elearning/admin/credit-titles']
+    for (const method of ['get', 'post']) {
+      expect(operation?.[method]?.security).toEqual([{ bearerAuth: [] }])
+      expect(operation?.[method]?.description).toContain('elearning:admin')
+      expect(operation?.[method]?.responses?.['200']?.content?.['application/json']?.schema)
+        .toEqual({ $ref: '#/components/schemas/ElearningTitleSnapshot' })
+    }
+    expect(operation?.get?.description).toContain('server-derived')
+    expect(operation?.post?.description).toContain('server-derived')
+    expect(operation?.post?.requestBody?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningTitlePublishRequest' })
+    expect(Object.keys(operation?.post?.responses ?? {}).sort())
+      .toEqual(['200', '400', '401', '403', '404', '409', '503'])
+
+    expect(schemas.ElearningTitleRow).toMatchObject({
+      additionalProperties: false,
+      required: ['id', 'name', 'threshold'],
+      properties: {
+        threshold: {
+          type: 'integer',
+          format: 'int32',
+          minimum: 0,
+          maximum: 2147483647,
+        },
+      },
+    })
+    expect(schemas.ElearningTitlePublishRequest).toMatchObject({
+      additionalProperties: false,
+      required: ['requestId', 'titles'],
+      properties: {
+        titles: {
+          type: 'array',
+          maxItems: 100,
+          items: { $ref: '#/components/schemas/ElearningTitleRow' },
+        },
+      },
+    })
+    expect(schemas.ElearningTitleSnapshot).toMatchObject({
+      additionalProperties: false,
+      required: ['revisionId', 'version', 'titles', 'createdAt'],
+      properties: {
+        revisionId: {
+          oneOf: [
+            { $ref: '#/components/schemas/ElearningUuid' },
+            { type: 'null' },
+          ],
+        },
+        version: { minimum: 0, maximum: 2147483647 },
+        titles: {
+          type: 'array',
+          maxItems: 100,
+          items: { $ref: '#/components/schemas/ElearningTitleRow' },
+        },
+        createdAt: {
+          oneOf: [
+            { type: 'string', format: 'date-time' },
+            { type: 'null' },
+          ],
+        },
+      },
     })
   })
 

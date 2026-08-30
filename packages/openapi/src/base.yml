@@ -4729,6 +4729,63 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ElearningCreditRule'
+    ElearningTitleRow:
+      type: object
+      additionalProperties: false
+      required: [id, name, threshold]
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 512
+        name:
+          type: string
+          minLength: 1
+          maxLength: 512
+        threshold:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 2147483647
+    ElearningTitlePublishRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, titles]
+      properties:
+        requestId:
+          type: string
+          minLength: 1
+          maxLength: 512
+        titles:
+          type: array
+          maxItems: 100
+          description: Complete snapshot in strictly increasing threshold order after normalization.
+          items:
+            $ref: '#/components/schemas/ElearningTitleRow'
+    ElearningTitleSnapshot:
+      type: object
+      additionalProperties: false
+      required: [revisionId, version, titles, createdAt]
+      properties:
+        revisionId:
+          oneOf:
+            - $ref: '#/components/schemas/ElearningUuid'
+            - type: 'null'
+        version:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 2147483647
+        titles:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ElearningTitleRow'
+        createdAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
     ElearningCreditAdjustmentRequest:
       type: object
       additionalProperties: false
@@ -4847,7 +4904,7 @@ components:
     ElearningCreditWallet:
       type: object
       additionalProperties: false
-      required: [userId, balancePoints, items, nextCursor]
+      required: [userId, balancePoints, currentTitle, items, nextCursor]
       properties:
         userId:
           type: string
@@ -4857,6 +4914,11 @@ components:
           format: int32
           minimum: 0
           maximum: 2147483647
+        currentTitle:
+          oneOf:
+            - $ref: '#/components/schemas/ElearningTitleRow'
+            - type: 'null'
+          description: Dynamically resolved from the active title snapshot and current balance.
         items:
           type: array
           items:
