@@ -90,7 +90,7 @@ describe('record-link — FormFieldType / authoring parity', () => {
     expect(catchBlock).not.toMatch(/recordLinkCatalogLoaded\.value\s*=\s*true/)
   })
 
-  it('buildFormSchema pins only baseId/sheetId and drops them when type changes away', () => {
+  it('buildFormSchema pins only baseId/sheetId and drops all original props when type changes away', () => {
     const schema = buildFormSchema(draftWith([recordLinkDraft()]))
     expect(schema.fields[0]).toMatchObject({
       type: 'record-link',
@@ -108,7 +108,7 @@ describe('record-link — FormFieldType / authoring parity', () => {
       },
     })]))
     expect(asText.fields[0].type).toBe('text')
-    expect(asText.fields[0].props).toEqual({ minLength: 1 })
+    expect(asText.fields[0].props).toBeUndefined()
   })
 
   it('buildFormSchema does not preserve stale unrelated props when retyped to record-link', () => {
