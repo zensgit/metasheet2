@@ -1070,6 +1070,104 @@ function simulatedGenericClassBPlan(
   }
 }
 
+function simulatedStartApprovalPlan(
+  action: AutomationAction,
+  context: ExecutionContext,
+): AutomationStepResult | null {
+  if (action.type !== 'start_approval') return null
+
+  const templateId = nonBlankConfigString(action.config.templateId)
+  if (!templateId) {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: 'start_approval.templateId is required',
+      durationMs: 0,
+    }
+  }
+
+  const rawMapping = isPlainRecord(action.config.formDataMapping)
+    ? action.config.formDataMapping
+    : null
+  if (!rawMapping || Object.keys(rawMapping).length === 0) {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: 'start_approval.formDataMapping is required',
+      durationMs: 0,
+    }
+  }
+
+  const formDataMapping: Record<string, string> = {}
+  for (const [rawFieldId, rawExpression] of Object.entries(rawMapping)) {
+    const fieldId = rawFieldId.trim()
+    const expression = nonBlankConfigString(rawExpression)
+    if (!fieldId || !expression) {
+      return {
+        actionType: action.type,
+        status: 'failed',
+        error: 'start_approval.formDataMapping entries must be non-empty strings',
+        durationMs: 0,
+      }
+    }
+    formDataMapping[fieldId] = expression
+  }
+
+  if (action.config.requester !== undefined && !isPlainRecord(action.config.requester)) {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: 'start_approval.requester must be an object',
+      durationMs: 0,
+    }
+  }
+  const requester = isPlainRecord(action.config.requester) ? action.config.requester : undefined
+  const requesterMode = requester?.mode ?? 'trigger_actor'
+  if (requesterMode !== 'trigger_actor' && requesterMode !== 'rule_creator') {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: 'start_approval.requester.mode must be trigger_actor or rule_creator',
+      durationMs: 0,
+    }
+  }
+
+  const templateData: Record<string, unknown> = {
+    ...context.recordData,
+    record: context.recordData,
+    trigger: context.triggerEvent,
+    sheetId: context.sheetId,
+    recordId: context.recordId,
+    actorId: context.actorId,
+    ruleId: context.ruleId,
+    executionId: context.executionId,
+  }
+  const formData = Object.fromEntries(
+    Object.entries(formDataMapping).map(([fieldId, expression]) => {
+      const value = expression.includes('{{')
+        ? renderAutomationTemplate(expression, templateData)
+        : lookupTemplateValue(expression, templateData)
+      return [fieldId, value === undefined ? '' : value]
+    }),
+  )
+
+  return {
+    actionType: action.type,
+    status: 'success',
+    simulated: true,
+    output: {
+      dryRun: true,
+      dispatched: false,
+      plan: {
+        wouldCreateApproval: true,
+        target: { templateId, requesterMode },
+        payload: redactValue({ formData }),
+      },
+    },
+    durationMs: 0,
+  }
+}
+
 function simulatedStep(action: AutomationAction, context: ExecutionContext): AutomationStepResult {
   if (action.type === 'wait_for_callback') {
     return {
@@ -1092,6 +1190,8 @@ function simulatedStep(action: AutomationAction, context: ExecutionContext): Aut
   if (classAPlan) return classAPlan
   const genericClassBPlan = simulatedGenericClassBPlan(action, context)
   if (genericClassBPlan) return genericClassBPlan
+  const startApprovalPlan = simulatedStartApprovalPlan(action, context)
+  if (startApprovalPlan) return startApprovalPlan
   return {
     actionType: action.type,
     status: 'success',
