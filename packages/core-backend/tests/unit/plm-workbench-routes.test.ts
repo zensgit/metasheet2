@@ -104,6 +104,8 @@ vi.mock('../../src/types/validator', () => ({
       chain.notEmpty = () => chain
       chain.exists = () => chain
       chain.isObject = () => chain
+      chain.isBoolean = () => chain
+      chain.isInt = () => chain
       return chain
     }
 

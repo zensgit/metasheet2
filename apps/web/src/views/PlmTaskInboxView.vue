@@ -40,7 +40,6 @@ const dataSourceId = ref<string>(typeof route.query.dataSource === 'string' ? ro
  * service account. When real Family-I linking lands, resolve the viewer's linked PLM bearer here.
  */
 function resolvePlmUserToken(): string {
-  if (typeof route.query.plmUserToken === 'string' && route.query.plmUserToken) return route.query.plmUserToken
   return ''
 }
 

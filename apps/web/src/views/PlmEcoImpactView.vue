@@ -43,7 +43,6 @@ const ecoId = ref<string>(
  * account (§7). When per-user PLM identity linking lands, resolve the viewer's linked bearer here.
  */
 function resolvePlmUserToken(): string {
-  if (typeof route.query.plmUserToken === 'string' && route.query.plmUserToken) return route.query.plmUserToken
   return ''
 }
 const plmUserToken = ref<string>(resolvePlmUserToken())

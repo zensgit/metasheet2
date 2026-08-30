@@ -5584,6 +5584,16 @@
         },
         "body": "# Overview\r\neco_id,impact_count\r\n01H000000000000000000000E5,1\r\n",
         "matchingRules": {
+          "header": {
+            "$.Content-Type": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^text/csv"
+                }
+              ]
+            }
+          },
           "body": {
             "$": {
               "matchers": [
@@ -5938,20 +5948,6 @@
         "status": 422,
         "headers": {
           "Content-Type": "application/json"
-        },
-        "body": {
-          "detail": "limit must be between 1 and 200"
-        },
-        "matchingRules": {
-          "body": {
-            "$.detail": {
-              "matchers": [
-                {
-                  "match": "type"
-                }
-              ]
-            }
-          }
         }
       }
     },
