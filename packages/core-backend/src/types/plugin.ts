@@ -1162,6 +1162,9 @@ export interface PluginServices {
    * owns current directory membership, suppression, locking, and projection.
    */
   elearningStatsDailyProjection?: {
+    enqueueDue(): Promise<
+      import('../services/elearning-stats-daily-job-producer').EnqueueElearningStatsDailyJobsResult
+    >
     project(
       input: import('../services/elearning-stats-daily-projection').ProjectElearningDepartmentStatsDailyInput,
     ): Promise<

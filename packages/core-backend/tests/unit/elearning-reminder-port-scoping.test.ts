@@ -49,6 +49,7 @@ describe('e-learning L2 reminder producer port scoping', () => {
     expect(typeof elearning.elearningReminderProducer?.produce).toBe('function')
     expect(typeof elearning.elearningExamExpirySettlement?.settle).toBe('function')
     expect(typeof elearning.elearningStatsDailyProjection?.project).toBe('function')
+    expect(typeof elearning.elearningStatsDailyProjection?.enqueueDue).toBe('function')
     expect(typeof elearning.elearningNotificationEligibility?.check).toBe('function')
     expect(elearning.elearningNotificationDispatch).toBeUndefined()
 
@@ -84,6 +85,7 @@ describe('e-learning L2 reminder producer port scoping', () => {
     ]) {
       setFlags(flags)
       await expect(port.project(input)).rejects.toMatchObject({ code: 'unavailable' })
+      await expect(port.enqueueDue()).rejects.toMatchObject({ code: 'unavailable' })
     }
     expect(poolGet).not.toHaveBeenCalled()
 
@@ -92,7 +94,8 @@ describe('e-learning L2 reminder producer port scoping', () => {
       ELEARNING_ANALYTICS_ENABLED: 'true',
     })
     await expect(port.project(input)).rejects.toThrow('database touched')
-    expect(poolGet).toHaveBeenCalledTimes(1)
+    await expect(port.enqueueDue()).rejects.toThrow('database touched')
+    expect(poolGet).toHaveBeenCalledTimes(2)
   })
 
   it('rechecks master, content, media, and assessment flags before expiry settlement', async () => {

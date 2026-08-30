@@ -5,6 +5,9 @@ import { Pool, type PoolClient } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import {
+  up as jobsUp,
+} from '../../src/db/migrations/zzzz20260826160000_create_elearning_jobs'
+import {
   assertElearningStatsDailySchema,
   down as statsDailyDown,
   up as statsDailyUp,
@@ -14,6 +17,10 @@ import {
   type ElearningStatsDailyDb,
   type ElearningStatsDailyQueryable,
 } from '../../src/services/elearning-stats-daily-projection'
+import {
+  enqueueElearningStatsDailyJobs,
+  type ElearningStatsDailyJobProducerDb,
+} from '../../src/services/elearning-stats-daily-job-producer'
 import {
   assertSafeScratchDatabaseName,
   attachOwnedPoolTerminationHandler,
@@ -75,6 +82,18 @@ function projectorDb(
         throw error
       } finally {
         client.release()
+      }
+    },
+  }
+}
+
+function producerDb(pool: Pool): ElearningStatsDailyJobProducerDb {
+  return {
+    async query(text, params) {
+      const result = await pool.query(text, params)
+      return {
+        rowCount: result.rowCount,
+        rows: result.rows as Array<Record<string, unknown>>,
       }
     },
   }
@@ -290,6 +309,7 @@ beforeAll(async () => {
   })
   await createPrerequisites(firstPool)
   database = new Kysely({ dialect: new PostgresDialect({ pool: firstPool }) })
+  await migrate(jobsUp)
   await migrate(statsDailyUp)
 }, 30_000)
 
@@ -337,6 +357,56 @@ afterAll(async () => {
 }, 30_000)
 
 describe('e-learning stats daily PostgreSQL authority', () => {
+  it('enqueues the previous UTC day once for active departments across two connections', async () => {
+    if (!firstPool || !secondPool) throw new Error('database unavailable')
+    const activeOrg = `org-stats-producer-${randomUUID()}`
+    const active = await seedDepartment(firstPool, { memberCount: 0, orgId: activeOrg })
+    const inactiveOrg = `org-stats-inactive-${randomUUID()}`
+    const inactive = await seedDepartment(firstPool, { memberCount: 0, orgId: inactiveOrg })
+    await firstPool.query(
+      'UPDATE directory_departments SET is_active = false WHERE id = $1',
+      [inactive.departmentId],
+    )
+    const pausedOrg = `org-stats-paused-${randomUUID()}`
+    const paused = await seedDepartment(firstPool, { memberCount: 0, orgId: pausedOrg })
+    await firstPool.query(
+      "UPDATE directory_integrations SET status = 'disabled' WHERE id = $1",
+      [paused.integrationId],
+    )
+
+    const results = await Promise.all([
+      enqueueElearningStatsDailyJobs(producerDb(firstPool), ENABLED),
+      enqueueElearningStatsDailyJobs(producerDb(secondPool), ENABLED),
+    ])
+    expect(results[0]?.statsDate).toBe(results[1]?.statsDate)
+    expect(results.reduce((sum, result) => sum + result.enqueuedCount, 0)).toBe(1)
+    const expectedDate = await firstPool.query(
+      "SELECT to_char(((clock_timestamp() AT TIME ZONE 'UTC')::date - 1), 'YYYY-MM-DD') AS value",
+    ).then((result) => result.rows[0]?.value)
+    expect(results[0]?.statsDate).toBe(expectedDate)
+
+    expect(await firstPool.query(
+      `SELECT org_id, kind, occurrence_key, ref, payload,
+              status, attempts, last_error
+         FROM elearning_jobs
+        WHERE kind = 'stats_daily_project'
+        ORDER BY org_id, occurrence_key`,
+    ).then((result) => result.rows)).toEqual([{
+      attempts: 0,
+      kind: 'stats_daily_project',
+      last_error: null,
+      occurrence_key: `department:${active.departmentId}:date:${expectedDate}`,
+      org_id: activeOrg,
+      payload: { statsDate: expectedDate },
+      ref: active.departmentId,
+      status: 'pending',
+    }])
+
+    await expect(
+      enqueueElearningStatsDailyJobs(producerDb(firstPool), ENABLED),
+    ).resolves.toEqual({ statsDate: expectedDate, enqueuedCount: 0 })
+  })
+
   it('applies, replays, rejects semantic drift, rolls down and reapplies', async () => {
     if (!firstPool || !database) throw new Error('database unavailable')
     await migrate(statsDailyUp)

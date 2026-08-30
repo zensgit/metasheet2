@@ -18,7 +18,11 @@ function isStatsDailyProjectorEnabled() {
 
 function resolveStatsDailyProjectionPort(context) {
   const port = context && context.services && context.services.elearningStatsDailyProjection
-  return port && typeof port.project === 'function' ? port : null
+  return port
+    && typeof port.project === 'function'
+    && typeof port.enqueueDue === 'function'
+    ? port
+    : null
 }
 
 function readRequiredText(value) {

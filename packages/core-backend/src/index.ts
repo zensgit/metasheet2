@@ -294,6 +294,10 @@ import {
   ElearningStatsDailyProjectionError,
   projectElearningDepartmentStatsDaily,
 } from './services/elearning-stats-daily-projection'
+import {
+  ElearningStatsDailyJobProducerError,
+  enqueueElearningStatsDailyJobs,
+} from './services/elearning-stats-daily-job-producer'
 import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
 import { adminUsersRouter } from './routes/admin-users'
@@ -2277,6 +2281,12 @@ export class MetaSheetServer {
         elearningStatsDailyProjection:
           manifest.name === 'plugin-elearning'
             ? {
+                enqueueDue: async () => {
+                  if (!isElearningAnalyticsSurfaceEnabled()) {
+                    throw new ElearningStatsDailyJobProducerError('unavailable')
+                  }
+                  return enqueueElearningStatsDailyJobs(poolManager.get())
+                },
                 project: async (
                   input: import('./services/elearning-stats-daily-projection').ProjectElearningDepartmentStatsDailyInput,
                 ) => {

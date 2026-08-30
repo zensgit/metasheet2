@@ -62,6 +62,9 @@ async function runRegistered(claimed, project, mutateFlags) {
   registerStatsDailyProjector({
     services: {
       elearningStatsDailyProjection: {
+        async enqueueDue() {
+          return { statsDate: STATS_DATE, enqueuedCount: 0 }
+        },
         async project(input) {
           calls += 1
           return project(input)
@@ -116,6 +119,9 @@ async function main() {
       },
       services: {
         elearningStatsDailyProjection: {
+          async enqueueDue() {
+            return { statsDate: STATS_DATE, enqueuedCount: 0 }
+          },
           async project() {
             return { outcome: 'noop', projectedVersion: 1, suppressed: true }
           },
