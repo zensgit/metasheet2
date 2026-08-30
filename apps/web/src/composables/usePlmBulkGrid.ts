@@ -80,11 +80,18 @@ const COMMIT_DEFINITELY_NOT_WRITTEN = new Set([400, 401, 403, 404, 409, 413, 422
  * key for exactly the case §11 says to reuse one — and a lost response over a create-only grid
  * would then create every row a second time.
  *
- * A refusal at the freshness stage is provably clean: the relay re-runs dry-run BEFORE the
- * commit and never reaches the write.
+ * `stage` decides it whenever the relay supplies one, and `'commit'` is the ONLY value that means
+ * a write was attempted: `'pre-commit'` (gates and the schema read) and `'freshness-dry-run'` (the
+ * relay's own revalidation) both stop short of the provider write. Testing for `'commit'` rather
+ * than listing the clean stages means a stage this client has not heard of is treated as clean
+ * only if the relay says it is not the write — a relay that adds a new pre-write stage does not
+ * silently start telling operators their data may have been written.
+ *
+ * A MISSING stage stays ambiguous on anything but a definitive 4xx. That is the conservative
+ * reading: an older relay, or a response that never reached us, tells us nothing.
  */
 export function commitOutcomeIsAmbiguous(result: PlmBulkGridSubmitResult & { ok: false }): boolean {
-  if (result.stage === 'freshness-dry-run') return false
+  if (result.stage !== undefined && result.stage !== 'commit') return false
   return !COMMIT_DEFINITELY_NOT_WRITTEN.has(result.status)
 }
 

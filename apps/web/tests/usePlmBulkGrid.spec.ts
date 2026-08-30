@@ -8,8 +8,8 @@
  * and are tested in packages/core-backend/tests/unit/plm-bulk-import-routes.test.ts — a bug in
  * the composable cannot cause a silent wholesale property delete.
  */
-import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { ref } from 'vue'
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
+import { createApp, nextTick, ref, type App as VueApp } from 'vue'
 
 const mocks = vi.hoisted(() => ({
   getPlmBulkGridSchema: vi.fn(),
@@ -32,6 +32,7 @@ vi.mock('../src/services/integration/workbench', async (importOriginal) => {
 })
 
 import { usePlmBulkGrid } from '../src/composables/usePlmBulkGrid'
+import PlmBulkGridPanel from '../src/components/plm/PlmBulkGridPanel.vue'
 
 const PROPERTIES = [
   { name: 'item_number', required: true },
@@ -612,9 +613,21 @@ describe('§11 — the service layer must carry `stage` off the relay response',
     const freshUnreachable = await commitPlmBulkGrid('ds-1', 'Part', [{}], 'caller-token', 'key-x')
     expect(commitOutcomeIsAmbiguous(freshUnreachable as never)).toBe(false)
 
+    // Same shape again for the relay's PRE-provider refusals: a capabilities 503 or a schema 502
+    // never reached the provider, so telling the operator "may have been written" would be a lie.
+    relayResponds(503, { reason: 'unavailable', stage: 'pre-commit' })
+    const preCommit = await commitPlmBulkGrid('ds-1', 'Part', [{}], 'caller-token', 'key-x')
+    expect(commitOutcomeIsAmbiguous(preCommit as never)).toBe(false)
+
     relayResponds(502, { reason: 'provider-unavailable', stage: 'commit' })
     const unknown = await commitPlmBulkGrid('ds-1', 'Part', [{}], 'caller-token', 'key-x')
     expect(commitOutcomeIsAmbiguous(unknown as never)).toBe(true)
+
+    // A MISSING stage stays ambiguous -- an older relay, or a response that never reached us,
+    // tells us nothing, and the safe direction is to preserve the key.
+    relayResponds(502, { reason: 'provider-unavailable' })
+    const untagged = await commitPlmBulkGrid('ds-1', 'Part', [{}], 'caller-token', 'key-x')
+    expect(commitOutcomeIsAmbiguous(untagged as never)).toBe(true)
   })
 
   it('reads the relay schema route’s EMPTY match-candidate list rather than inventing one', async () => {
@@ -645,5 +658,123 @@ describe('§11 — the service layer must carry `stage` off the relay response',
     const okSchema = schema as Extract<typeof schema, { ok: true }>
     expect(okSchema.declaredColumns).toEqual(['item_number', 'name', 'cost_center'])
     expect(okSchema.matchPropertyCandidates).toEqual([])
+  })
+})
+
+/**
+ * The panel is the untested link in §11's chain.
+ *
+ * `load()` may only carry an ambiguous submission's Idempotency-Key forward while the rows are
+ * untouched — so if the panel's reload passed `props.seedRows` (as it did), `load()` re-minted
+ * and the same-key retry was dead again, with every composable test still green. Nothing in the
+ * composable can catch that; the defect lives in the caller.
+ *
+ * These mount the real panel and drive the real recovery gesture.
+ */
+describe('PlmBulkGridPanel — the §11 chain end to end, and the create-only surface', () => {
+  let app: VueApp | null = null
+  let container: HTMLDivElement
+
+  // The mount chain is onMounted -> reload -> await load -> await the schema call, then a render
+  // pass. A fixed two-tick flush lands mid-chain, so drain until the microtask queue settles.
+  async function flushUi(): Promise<void> {
+    for (let i = 0; i < 10; i += 1) {
+      await nextTick()
+      await Promise.resolve()
+    }
+  }
+
+  async function mountPanel(props: Record<string, unknown> = {}): Promise<void> {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(PlmBulkGridPanel, {
+      dataSourceId: 'ds-1',
+      itemTypeId: 'Part',
+      callerPlmToken: 'caller-token',
+      ...props,
+    })
+    app.mount(container)
+    await flushUi()
+  }
+
+  const click = (testid: string) =>
+    (container.querySelector(`[data-testid="${testid}"]`) as HTMLButtonElement | null)?.click()
+  const text = (testid: string) =>
+    container.querySelector(`[data-testid="${testid}"]`)?.textContent?.replace(/\s+/g, '') ?? ''
+
+  afterEach(() => {
+    app?.unmount()
+    app = null
+    container?.remove()
+  })
+
+  it('seeds rows ONCE — a later reload must not re-seed, or §11 breaks and N2-c is violated', async () => {
+    await mountPanel({ seedRows: [{ item_number: 'P-001' }] })
+    expect(mocks.getPlmBulkGridSchema).toHaveBeenCalledTimes(1)
+
+    click('plm-bulk-grid-reload')
+    await flushUi()
+
+    expect(mocks.getPlmBulkGridSchema).toHaveBeenCalledTimes(2)
+    // Row state after the reload is still the operator's, not the host prop re-applied: the panel
+    // added a row, and re-seeding would have thrown it away along with the retry key.
+    click('plm-bulk-grid-add-row')
+    await flushUi()
+    click('plm-bulk-grid-reload')
+    await flushUi()
+    expect(container.querySelectorAll('[data-testid="plm-bulk-grid-row"]').length).toBe(2)
+  })
+
+  it('an ambiguous commit tells the operator to resubmit UNCHANGED under the same key', async () => {
+    mocks.commitPlmBulkGrid.mockResolvedValue({
+      ok: false, status: 502, reason: 'provider-unavailable', stage: 'commit', message: 'PLM 无响应',
+    })
+    await mountPanel({ seedRows: [{ item_number: 'P-001' }] })
+    click('plm-bulk-grid-dry-run')
+    await flushUi()
+    click('plm-bulk-grid-commit')
+    await flushUi()
+
+    // Distinct from the plain N2-b lock copy: "reload and resubmit" and "reload and resubmit
+    // BYTE-IDENTICALLY" are different instructions, and only one of them is safe here.
+    expect(text('plm-bulk-grid-stale-warning')).toContain('原样')
+    expect(text('plm-bulk-grid-stale-warning')).toContain('同一幂等键')
+
+    // ...and the gesture the copy asks for must actually preserve the key. This is the assertion
+    // the composable spec cannot make: the key survives the PANEL's reload button, which is the
+    // only exit from the N2-b lock a real operator has.
+    const submittedKey = mocks.commitPlmBulkGrid.mock.calls[0][4]
+    mocks.commitPlmBulkGrid.mockResolvedValue({ ok: true, report: READY, mustReload: true })
+
+    click('plm-bulk-grid-reload')
+    await flushUi()
+    click('plm-bulk-grid-dry-run')
+    await flushUi()
+    click('plm-bulk-grid-commit')
+    await flushUi()
+
+    expect(mocks.commitPlmBulkGrid).toHaveBeenCalledTimes(2)
+    expect(mocks.commitPlmBulkGrid.mock.calls[1][4]).toBe(submittedKey)
+  })
+
+  it('offers create-only with a visible reason, and no declared column as a match candidate', async () => {
+    await mountPanel({ seedRows: [{ item_number: 'P-001' }] })
+
+    const select = container.querySelector('[data-testid="plm-bulk-grid-match-property"]') as HTMLSelectElement
+    expect(select.options).toHaveLength(1)
+    expect(select.options[0].value).toBe('')
+    expect(select.disabled).toBe(true)
+    expect(text('plm-bulk-grid-create-only')).toContain('仅支持')
+  })
+
+  it('attributes a disabled commit to the DEPLOYMENT, never to the account', async () => {
+    // commit_enabled mirrors the operator flag and knows nothing about the caller; the account
+    // question is answered by Yuantus's require_admin_user at submit time.
+    mocks.getPlmBulkGridSchema.mockResolvedValue({ ...SCHEMA_OK, commitEnabled: false })
+    await mountPanel({ seedRows: [{ item_number: 'P-001' }] })
+
+    const hint = text('plm-bulk-grid-commit-disabled')
+    expect(hint).toContain('本部署未开启批量写入')
+    expect(hint).not.toContain('当前账号不具备写入权限')
   })
 })

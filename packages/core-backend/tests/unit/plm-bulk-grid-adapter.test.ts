@@ -272,4 +272,52 @@ describe('response handling (§3: branch on `ready`, never on the status code)',
     expect(result.error?.message).toContain('not supported for this PLM API mode')
     expect(fetchSpy).not.toHaveBeenCalled()
   })
+
+  /**
+   * The other side of §11's double-create hole.
+   *
+   * A 2xx whose body cannot be read used to come back as `{data: [undefined]}` with no error.
+   * The route normalized `undefined` into `{ready: false}` and answered 200, the client read
+   * that as a REJECT-ALL — "nothing was written" — and minted a fresh Idempotency-Key. But the
+   * provider answered 2xx: on the commit path the write may have LANDED, so the next submission
+   * under a new key would create every row a second time. Exactly what the same-key retry
+   * exists to prevent, reached from the opposite direction.
+   */
+  it('treats a 2xx with an UNREADABLE body as unknown, never as an empty report', async () => {
+    fetchSpy.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => { throw new SyntaxError('Unexpected end of JSON input') },
+    } as unknown as Response)
+    const adapter = createAdapter()
+    const result = await adapter.bulkImportCommit(CALLER_TOKEN, SUBMISSION, 'key-0001')
+
+    expect(result.data).toEqual([])
+    expect(result.error).toBeDefined()
+    expect(result.error!.message).toContain('UNKNOWN')
+  })
+
+  it('treats a 2xx carrying a NON-OBJECT body the same way', async () => {
+    // `null` is the sharp one: it parses fine, so a truthiness-free check would let it through
+    // and reproduce the phantom reject-all.
+    for (const body of [null, 'ok', 42]) {
+      fetchSpy.mockResolvedValue(jsonResponse(body))
+      const adapter = createAdapter()
+      const result = await adapter.bulkImportCommit(CALLER_TOKEN, SUBMISSION, 'key-0001')
+
+      expect(result.error, JSON.stringify(body)).toBeDefined()
+      expect(result.data, JSON.stringify(body)).toEqual([])
+    }
+  })
+
+  it('still lets a REAL reject-all report through — the guard must not swallow ready:false', async () => {
+    // The failure mode of the fix itself: rejecting too much would turn every total rejection
+    // into a retryable "unknown", and §3's whole point is that a reject-all is a valid 200.
+    fetchSpy.mockResolvedValue(jsonResponse({ ready: false, row_errors: [], created_ids: [] }))
+    const adapter = createAdapter()
+    const result = await adapter.bulkImportCommit(CALLER_TOKEN, SUBMISSION, 'key-0001')
+
+    expect(result.error).toBeUndefined()
+    expect(result.data[0].ready).toBe(false)
+  })
 })

@@ -277,6 +277,56 @@ describe('PLM bulk-import consumer relay routes', () => {
       expect(adapter.bulkImportCommit).not.toHaveBeenCalled()
     })
 
+    it('tags every pre-provider commit refusal with stage:"pre-commit"', async () => {
+      // The client decides "may this write have landed?" from `stage`, and a capabilities 503 or
+      // a schema 502 shares its status class with a genuinely ambiguous commit. Untagged, the
+      // operator would be told the outcome is unknown and their data may have been written --
+      // when the provider was never called at all. Only stage:'commit' means a write was tried.
+      process.env.PLM_BULK_IMPORT_COMMIT_ENABLED = 'true'
+      const cases: Array<[string, Record<string, unknown>]> = [
+        ['capabilities unreachable', { getIntegrationCapabilities: vi.fn().mockRejectedValue(new Error('down')) }],
+        ['schema unreadable', { getItemMetadataAsCaller: vi.fn().mockResolvedValue({ error: new Error('boom') }) }],
+      ]
+      for (const [label, overrides] of cases) {
+        const adapter = makeAdapter(overrides)
+        dsMocks.getDataSource.mockReturnValue(adapter)
+        const res = await request(pinned.url())
+          .post(COMMIT_URL)
+          .set('X-PLM-Authorization', CALLER)
+          .set('Idempotency-Key', 'k-1')
+          .send(ROWS_BODY)
+
+        expect(res.status, label).toBeGreaterThanOrEqual(500)
+        expect(res.body.stage, label).toBe('pre-commit')
+        expect(adapter.bulkImportCommit, label).not.toHaveBeenCalled()
+      }
+    })
+
+    it('tags the freshness refusal and the commit attempt with their own distinct stages', async () => {
+      process.env.PLM_BULK_IMPORT_COMMIT_ENABLED = 'true'
+      const adapter = makeAdapter({
+        bulkImportDryRun: vi.fn().mockResolvedValue({ data: [{ ready: false, row_errors: [] }] }),
+      })
+      dsMocks.getDataSource.mockReturnValue(adapter)
+      const res = await request(pinned.url())
+        .post(COMMIT_URL)
+        .set('X-PLM-Authorization', CALLER)
+        .set('Idempotency-Key', 'k-1')
+        .send(ROWS_BODY)
+
+      expect(res.body.stage).toBe('freshness-dry-run')
+
+      const committed = makeAdapter()
+      dsMocks.getDataSource.mockReturnValue(committed)
+      const ok = await request(pinned.url())
+        .post(COMMIT_URL)
+        .set('X-PLM-Authorization', CALLER)
+        .set('Idempotency-Key', 'k-2')
+        .send(ROWS_BODY)
+
+      expect(ok.body.stage).toBe('commit')
+    })
+
     it('tells the client to reload rather than trust its local buffer (N2-b/N2-c)', async () => {
       process.env.PLM_BULK_IMPORT_COMMIT_ENABLED = 'true'
       dsMocks.getDataSource.mockReturnValue(makeAdapter())

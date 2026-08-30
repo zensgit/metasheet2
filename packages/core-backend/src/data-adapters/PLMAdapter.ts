@@ -3788,9 +3788,31 @@ export class PLMAdapter extends HTTPAdapter {
       }
     }
 
-    // NOTE: a TOTAL REJECTION is HTTP 200 with `ready: false` and writes nothing (§3). It
-    // arrives here as a SUCCESS envelope on purpose -- the caller must branch on `ready`,
-    // never on the status code.
+    // A 2xx whose body we cannot read is an UNKNOWN outcome, never an empty report.
+    //
+    // The trap this closes: returning `{data: [undefined]}` here looks like a success, and the
+    // route then normalizes `undefined` into `{ready: false, row_errors: []}` and answers 200.
+    // The client reads that as a REJECT-ALL -- "nothing was written" -- and mints a fresh
+    // Idempotency-Key. But the provider answered 2xx: on the commit path the write may well have
+    // LANDED, and the next submission under a new key would create every row a second time. That
+    // is the same double-create §11's same-key retry exists to prevent, reached from the other
+    // side. So it fails as an error, which the route relays as a 502 the client classifies as
+    // ambiguous and retries under the SAME key.
+    //
+    // A genuine total rejection is a 2xx carrying a real report with `ready: false` -- that still
+    // arrives as a success envelope on purpose, and the caller must branch on `ready`, never on
+    // the status code (§3).
+    if (!payload || typeof payload !== 'object') {
+      return {
+        data: [],
+        error: Object.assign(
+          new Error(
+            `PLM returned ${response.status} with no readable bulk-import report; the outcome is UNKNOWN`,
+          ),
+          { response: { status: response.status } },
+        ),
+      }
+    }
     return { data: [payload as T], metadata: { totalCount: 1 } }
   }
 

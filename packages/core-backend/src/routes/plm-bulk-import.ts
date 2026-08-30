@@ -550,15 +550,24 @@ router.post(
       ? body.match_property.trim()
       : undefined
 
+    // Every refusal from here until the provider write carries `stage: 'pre-commit'`.
+    //
+    // The client's §11 ambiguity test keys on `stage`, and a capabilities 503 or a schema 502
+    // shares its status class with a genuinely ambiguous commit. Untagged, those would be
+    // reported to the operator as "the outcome is unknown, it may have been written" when the
+    // provider was never called at all. Tagging them keeps the message honest; only
+    // `stage: 'commit'` means a write was actually attempted.
+    const preCommit = { data_source_id: dataSourceId, stage: 'pre-commit' }
+
     const n3 = n3RefuseUpdateMode(matchProperty)
-    if (n3) return res.status(n3.status).json({ ...n3.body, data_source_id: dataSourceId })
+    if (n3) return res.status(n3.status).json({ ...n3.body, ...preCommit })
 
     const precheck = await precheckCapability(adapter, dataSourceId, 'bulk_import_commit')
-    if (precheck) return res.status(precheck.status).json(precheck.body)
+    if (precheck) return res.status(precheck.status).json({ ...precheck.body, ...preCommit })
 
     const built = await buildSubmission(adapter, callerToken, itemTypeId, rows, matchProperty)
     if (built.failure) {
-      return res.status(built.failure.status).json({ ...built.failure.body, data_source_id: dataSourceId })
+      return res.status(built.failure.status).json({ ...built.failure.body, ...preCommit })
     }
 
     // N2-a: freshness ritual, from the SAME bytes about to be committed.
