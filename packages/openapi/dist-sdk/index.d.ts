@@ -9489,6 +9489,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/portal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the active learning portal presentation
+         * @description Requires the master and CONTENT capability flags plus `elearning:read`.
+         *     Organization and learner identity are derived only from the authenticated
+         *     request. The response is either the closed empty presentation or the active
+         *     immutable portal revision. It never returns actor, organization, request-hash,
+         *     or request-id fields.
+         */
+        get: operations["getElearningPortalSettings"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/portal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Publish one immutable learning portal revision
+         * @description Requires the master and CONTENT capability flags plus `elearning:admin`.
+         *     Organization and actor identity are server-derived. The command is closed to
+         *     requestId, siteName, tagline, bannerUrl, and ordered internal navigation.
+         *     Reusing requestId with the same normalized payload replays the original result;
+         *     a different payload returns a values-free conflict.
+         */
+        put: operations["publishElearningPortalSettings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/multitable/bases": {
         parameters: {
             query?: never;
@@ -18471,6 +18519,55 @@ export interface components {
             courses: components["schemas"]["ElearningLearningProfileCourse"][];
             nextCursor: string | null;
         };
+        ElearningPortalNavigationItem: {
+            label: string;
+            /** @description Internal absolute path only; external navigation is rejected. */
+            href: string;
+        };
+        ElearningPortalEmptySettings: {
+            revisionId: null;
+            /**
+             * Format: int32
+             * @enum {integer}
+             */
+            version: 0;
+            siteName: null;
+            tagline: null;
+            bannerUrl: null;
+            navigation: components["schemas"]["ElearningPortalNavigationItem"][];
+            createdAt: null;
+        };
+        ElearningPortalActiveSettings: {
+            revisionId: components["schemas"]["ElearningUuid"];
+            /** Format: int32 */
+            version: number;
+            siteName: string;
+            tagline: string | null;
+            bannerUrl: string | null;
+            navigation: components["schemas"]["ElearningPortalNavigationItem"][];
+            /** Format: date-time */
+            createdAt: string;
+        };
+        ElearningPortalSettings: components["schemas"]["ElearningPortalEmptySettings"] | components["schemas"]["ElearningPortalActiveSettings"];
+        ElearningPortalPublishRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            siteName: string;
+            tagline: string | null;
+            bannerUrl: string | null;
+            navigation: components["schemas"]["ElearningPortalNavigationItem"][];
+        };
+        ElearningPortalPublishResult: {
+            revisionId: components["schemas"]["ElearningUuid"];
+            /** Format: int32 */
+            version: number;
+            siteName: string;
+            tagline: string | null;
+            bannerUrl: string | null;
+            navigation: components["schemas"]["ElearningPortalNavigationItem"][];
+            /** Format: date-time */
+            createdAt: string;
+            duplicate: boolean;
+        };
         ElearningContentArticleRevisionRequest: {
             requestId: components["schemas"]["ElearningUuid"];
             /**
@@ -22340,6 +22437,74 @@ export interface operations {
             /** @description not_found or exam flags off */
             404: components["responses"]["ElearningError"];
             /** @description course_withdrawn or review_unavailable */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getElearningPortalSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Closed active or empty learning portal presentation. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPortalSettings"];
+                };
+            };
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or content flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    publishElearningPortalSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningPortalPublishRequest"];
+            };
+        };
+        responses: {
+            /** @description Published portal revision; duplicate is true on an exact replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPortalPublishResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or content flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description conflict */
             409: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];

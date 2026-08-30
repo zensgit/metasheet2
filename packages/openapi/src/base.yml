@@ -5193,6 +5193,156 @@ components:
               minLength: 1
               maxLength: 512
             - type: 'null'
+    ElearningPortalNavigationItem:
+      type: object
+      additionalProperties: false
+      required: [label, href]
+      properties:
+        label:
+          type: string
+          minLength: 1
+          maxLength: 40
+        href:
+          type: string
+          minLength: 1
+          maxLength: 512
+          pattern: '^/(?!/)[^\s\\]*$'
+          description: Internal absolute path only; external navigation is rejected.
+    ElearningPortalEmptySettings:
+      type: object
+      additionalProperties: false
+      required: [revisionId, version, siteName, tagline, bannerUrl, navigation, createdAt]
+      properties:
+        revisionId:
+          type: 'null'
+        version:
+          type: integer
+          format: int32
+          enum: [0]
+        siteName:
+          type: 'null'
+        tagline:
+          type: 'null'
+        bannerUrl:
+          type: 'null'
+        navigation:
+          type: array
+          maxItems: 0
+          items:
+            $ref: '#/components/schemas/ElearningPortalNavigationItem'
+        createdAt:
+          type: 'null'
+    ElearningPortalActiveSettings:
+      type: object
+      additionalProperties: false
+      required: [revisionId, version, siteName, tagline, bannerUrl, navigation, createdAt]
+      properties:
+        revisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        version:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 2147483647
+        siteName:
+          type: string
+          minLength: 1
+          maxLength: 80
+        tagline:
+          oneOf:
+            - type: string
+              minLength: 1
+              maxLength: 160
+            - type: 'null'
+        bannerUrl:
+          oneOf:
+            - type: string
+              minLength: 1
+              maxLength: 512
+              description: Canonical HTTPS URL without credentials or an internal absolute path.
+            - type: 'null'
+        navigation:
+          type: array
+          maxItems: 8
+          items:
+            $ref: '#/components/schemas/ElearningPortalNavigationItem'
+        createdAt:
+          type: string
+          format: date-time
+          pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$'
+    ElearningPortalSettings:
+      oneOf:
+        - $ref: '#/components/schemas/ElearningPortalEmptySettings'
+        - $ref: '#/components/schemas/ElearningPortalActiveSettings'
+    ElearningPortalPublishRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, siteName, tagline, bannerUrl, navigation]
+      properties:
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+        siteName:
+          type: string
+          minLength: 1
+          maxLength: 80
+        tagline:
+          oneOf:
+            - type: string
+              minLength: 1
+              maxLength: 160
+            - type: 'null'
+        bannerUrl:
+          oneOf:
+            - type: string
+              minLength: 1
+              maxLength: 512
+              description: Canonical HTTPS URL without credentials or an internal absolute path.
+            - type: 'null'
+        navigation:
+          type: array
+          maxItems: 8
+          items:
+            $ref: '#/components/schemas/ElearningPortalNavigationItem'
+    ElearningPortalPublishResult:
+      type: object
+      additionalProperties: false
+      required: [revisionId, version, siteName, tagline, bannerUrl, navigation, createdAt, duplicate]
+      properties:
+        revisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        version:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 2147483647
+        siteName:
+          type: string
+          minLength: 1
+          maxLength: 80
+        tagline:
+          oneOf:
+            - type: string
+              minLength: 1
+              maxLength: 160
+            - type: 'null'
+        bannerUrl:
+          oneOf:
+            - type: string
+              minLength: 1
+              maxLength: 512
+              description: Canonical HTTPS URL without credentials or an internal absolute path.
+            - type: 'null'
+        navigation:
+          type: array
+          maxItems: 8
+          items:
+            $ref: '#/components/schemas/ElearningPortalNavigationItem'
+        createdAt:
+          type: string
+          format: date-time
+          pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$'
+        duplicate:
+          type: boolean
     ElearningContentArticleRevisionRequest:
       type: object
       additionalProperties: false

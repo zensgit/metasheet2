@@ -8372,6 +8372,271 @@
           }
         }
       },
+      "ElearningPortalNavigationItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "label",
+          "href"
+        ],
+        "properties": {
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "href": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "^/(?!/)[^\\s\\\\]*$",
+            "description": "Internal absolute path only; external navigation is rejected."
+          }
+        }
+      },
+      "ElearningPortalEmptySettings": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "revisionId",
+          "version",
+          "siteName",
+          "tagline",
+          "bannerUrl",
+          "navigation",
+          "createdAt"
+        ],
+        "properties": {
+          "revisionId": {
+            "type": "null"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "enum": [
+              0
+            ]
+          },
+          "siteName": {
+            "type": "null"
+          },
+          "tagline": {
+            "type": "null"
+          },
+          "bannerUrl": {
+            "type": "null"
+          },
+          "navigation": {
+            "type": "array",
+            "maxItems": 0,
+            "items": {
+              "$ref": "#/components/schemas/ElearningPortalNavigationItem"
+            }
+          },
+          "createdAt": {
+            "type": "null"
+          }
+        }
+      },
+      "ElearningPortalActiveSettings": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "revisionId",
+          "version",
+          "siteName",
+          "tagline",
+          "bannerUrl",
+          "navigation",
+          "createdAt"
+        ],
+        "properties": {
+          "revisionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "siteName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "tagline": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "bannerUrl": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "description": "Canonical HTTPS URL without credentials or an internal absolute path."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "navigation": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "$ref": "#/components/schemas/ElearningPortalNavigationItem"
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+          }
+        }
+      },
+      "ElearningPortalSettings": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ElearningPortalEmptySettings"
+          },
+          {
+            "$ref": "#/components/schemas/ElearningPortalActiveSettings"
+          }
+        ]
+      },
+      "ElearningPortalPublishRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "requestId",
+          "siteName",
+          "tagline",
+          "bannerUrl",
+          "navigation"
+        ],
+        "properties": {
+          "requestId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "siteName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "tagline": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "bannerUrl": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "description": "Canonical HTTPS URL without credentials or an internal absolute path."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "navigation": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "$ref": "#/components/schemas/ElearningPortalNavigationItem"
+            }
+          }
+        }
+      },
+      "ElearningPortalPublishResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "revisionId",
+          "version",
+          "siteName",
+          "tagline",
+          "bannerUrl",
+          "navigation",
+          "createdAt",
+          "duplicate"
+        ],
+        "properties": {
+          "revisionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "siteName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "tagline": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "bannerUrl": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "description": "Canonical HTTPS URL without credentials or an internal absolute path."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "navigation": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "$ref": "#/components/schemas/ElearningPortalNavigationItem"
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+          },
+          "duplicate": {
+            "type": "boolean"
+          }
+        }
+      },
       "ElearningContentArticleRevisionRequest": {
         "type": "object",
         "additionalProperties": false,
@@ -29562,6 +29827,112 @@
           },
           "409": {
             "description": "course_withdrawn or review_unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/portal": {
+      "get": {
+        "operationId": "getElearningPortalSettings",
+        "summary": "Read the active learning portal presentation",
+        "description": "Requires the master and CONTENT capability flags plus `elearning:read`.\nOrganization and learner identity are derived only from the authenticated\nrequest. The response is either the closed empty presentation or the active\nimmutable portal revision. It never returns actor, organization, request-hash,\nor request-id fields.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Closed active or empty learning portal presentation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningPortalSettings"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or Insufficient permissions",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "not_found or content flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/admin/portal": {
+      "put": {
+        "operationId": "publishElearningPortalSettings",
+        "summary": "Publish one immutable learning portal revision",
+        "description": "Requires the master and CONTENT capability flags plus `elearning:admin`.\nOrganization and actor identity are server-derived. The command is closed to\nrequestId, siteName, tagline, bannerUrl, and ordered internal navigation.\nReusing requestId with the same normalized payload replays the original result;\na different payload returns a values-free conflict.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningPortalPublishRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Published portal revision; duplicate is true on an exact replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningPortalPublishResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or Insufficient permissions",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "not_found or content flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "conflict",
             "$ref": "#/components/responses/ElearningError"
           },
           "500": {
