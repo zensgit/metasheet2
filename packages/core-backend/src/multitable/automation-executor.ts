@@ -2503,7 +2503,11 @@ export class AutomationExecutor {
           result = await this.executeSendEmail(action.config as unknown as SendEmailConfig, context, identity)
           break
         case 'send_dingtalk_group_message':
-          result = await this.executeSendDingTalkGroupMessage(action.config as unknown as SendDingTalkGroupMessageConfig, context)
+          result = await this.executeSendDingTalkGroupMessage(
+            action.config as unknown as SendDingTalkGroupMessageConfig,
+            context,
+            identity,
+          )
           break
         case 'send_dingtalk_person_message':
           result = await this.executeSendDingTalkPersonMessage(action.config as unknown as SendDingTalkPersonMessageConfig, context)
@@ -5316,6 +5320,7 @@ export class AutomationExecutor {
   private async executeSendDingTalkGroupMessage(
     config: SendDingTalkGroupMessageConfig,
     context: ExecutionContext,
+    identity?: ClassAActionIdentity,
   ): Promise<AutomationStepResult> {
     const staticDestinationIds = Array.from(new Set([
       ...(Array.isArray(config.destinationIds)
@@ -5563,10 +5568,28 @@ export class AutomationExecutor {
       }
     }
 
+    // #4196 Class-B two-phase intent/outcome. All local validation and authorization above remains
+    // outside the intent: an invalid rule has dispatched nothing and needs no retry evidence. Once
+    // this claim commits, every destination send belongs to one action identity. A prior sent or
+    // ambiguous attempt must short-circuit the WHOLE action because retrying it would duplicate any
+    // destination that already received the message.
+    const outboundId = this.classBOutboundIdentity(identity, 'send_dingtalk_group_message', config)
+    if (outboundId) {
+      const decision = await claimOutboundIntent(this.deps.queryFn, outboundId)
+      if (decision === 'skip_sent' || decision === 'skip_unknown') {
+        return this.alreadyAppliedResult('send_dingtalk_group_message')
+      }
+    }
+
+    let sendSucceeded = false
+    let outcomeUnknownObserved = false
+
     for (const destination of orderedDestinations) {
       let deliveryRecorded = false
       let responseStatus: number | null = null
       let responseBody: string | null = null
+      let sendAttemptStarted = false
+      let destinationSendSucceeded = false
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS)
       try {
@@ -5574,8 +5597,10 @@ export class AutomationExecutor {
         if (!runtimeWebhook) {
           throw new Error(`DingTalk destination ${destination.name || destination.id} was not validated before send`)
         }
+        const signedWebhookUrl = buildSignedDingTalkWebhookUrl(runtimeWebhook.webhookUrl, runtimeWebhook.secret)
+        sendAttemptStarted = true
         const response = await (this.deps.fetchFn ?? globalThis.fetch)(
-          buildSignedDingTalkWebhookUrl(runtimeWebhook.webhookUrl, runtimeWebhook.secret),
+          signedWebhookUrl,
           {
             method: 'POST',
             headers: {
@@ -5590,6 +5615,9 @@ export class AutomationExecutor {
         responseStatus = response.status
         responseBody = parsed ? JSON.stringify(parsed) : response.statusText || null
         if (!response.ok) {
+          // The request body left this process and a response came back. Per #4196 Q-B this is
+          // ambiguous even for 4xx: never turn it into retryable `failed`.
+          outcomeUnknownObserved = true
           const errorMessage = `DingTalk request failed with HTTP ${response.status}`
           deliveryRecorded = true
           await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
@@ -5611,6 +5639,9 @@ export class AutomationExecutor {
         try {
           validateDingTalkRobotResponse(parsed)
         } catch (err) {
+          // HTTP 2xx with a DingTalk business error still proves only that the request was received,
+          // not that no downstream effect occurred. It is therefore outcome_unknown, not retryable.
+          outcomeUnknownObserved = true
           const errorMessage = err instanceof Error ? err.message : String(err)
           deliveryRecorded = true
           await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
@@ -5629,6 +5660,8 @@ export class AutomationExecutor {
           failedDestinations.push({ id: destination.id, name: destination.name, error: errorMessage })
           continue
         }
+        destinationSendSucceeded = true
+        sendSucceeded = true
         deliveryRecorded = true
         await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
           destinationId: destination.id,
@@ -5644,6 +5677,10 @@ export class AutomationExecutor {
         })
         successfulDestinations.push({ id: destination.id, name: destination.name })
       } catch (err) {
+        if (!destinationSendSucceeded && sendAttemptStarted) {
+          const outcome = classifyOutboundResult(classifyFetchError(err))
+          if (outcome !== 'failed') outcomeUnknownObserved = true
+        }
         if (!deliveryRecorded) {
           await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
             destinationId: destination.id,
@@ -5667,6 +5704,28 @@ export class AutomationExecutor {
       } finally {
         clearTimeout(timeout)
       }
+    }
+
+    if (outboundId) {
+      // Multi-destination aggregate: any confirmed success makes the action terminal `sent`, even
+      // when a later destination fails. Replaying the action would duplicate that confirmed send.
+      // With no success, any post-dispatch ambiguity is terminal outcome_unknown. Only when every
+      // attempted send is provably pre-dispatch non-delivery is the action retryable `failed`.
+      const outcome: OutboundOutcome = sendSucceeded
+        ? 'sent'
+        : outcomeUnknownObserved
+          ? 'outcome_unknown'
+          : 'failed'
+      await recordOutboundOutcome(
+        this.deps.queryFn,
+        outboundId,
+        outcome,
+        outcome === 'sent'
+          ? 'dingtalk_group_sent'
+          : outcome === 'outcome_unknown'
+            ? 'dingtalk_group_outcome_unknown'
+            : 'dingtalk_group_definite_non_delivery',
+      )
     }
 
     if (failedDestinations.length) {
