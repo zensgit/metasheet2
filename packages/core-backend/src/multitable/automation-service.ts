@@ -2663,6 +2663,16 @@ export class AutomationService {
         message: `Only failed/skipped executions can be retried (got ${original.status})`,
       }
     }
+    // #4196 §2.2: a manual test run is re-issued through testRun(), never promoted into the
+    // kind='execution' retry namespace. `testRun()` stamps this server-owned durable origin and the log
+    // mapper restores it from `triggered_by`, so the decision does not trust request payload identity.
+    if (original.triggeredBy === 'manual_test') {
+      return {
+        status: 409,
+        code: 'TEST_RUN_NOT_RETRYABLE',
+        message: 'Manual test-run executions cannot be retried as live executions',
+      }
+    }
     if (!isRetryableStoredTriggerEvent(original.triggerEvent)) {
       // Fail closed (A4-D7): null/undefined, array, or empty `{}` cannot rebuild context.
       return { status: 409, code: 'MISSING_TRIGGER_EVENT', message: 'Original execution has no usable stored trigger event to retry' }

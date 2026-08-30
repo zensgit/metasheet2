@@ -24,6 +24,7 @@ const ORIG_ID = `axe_retry_orig_${TS}`
 const NEW_ID = `axe_retry_new_${TS}`
 const ROOT_ID = `axe_retry_root_${TS}`
 const CHILD_ID = `axe_retry_child_${TS}`
+const TEST_RUN_ID = `axe_retry_test_run_${TS}`
 const RULE_ID = `atr_retry_${TS}`
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 
@@ -47,7 +48,7 @@ function exec(over: Partial<AutomationExecution> = {}): AutomationExecution {
 
 describeIfDatabase('multitable automation retry provenance (real DB)', () => {
   beforeAll(async () => {
-    await q('DELETE FROM multitable_automation_executions WHERE id = ANY($1)', [[ORIG_ID, NEW_ID, ROOT_ID, CHILD_ID]])
+    await q('DELETE FROM multitable_automation_executions WHERE id = ANY($1)', [[ORIG_ID, NEW_ID, ROOT_ID, CHILD_ID, TEST_RUN_ID]])
     await q("DELETE FROM meta_automation_action_applied WHERE kind = 'execution' AND root_execution_id = $1", [ROOT_ID])
     await q("DELETE FROM meta_automation_outbound_intent WHERE kind = 'execution' AND root_execution_id = $1", [ROOT_ID])
   })
@@ -57,10 +58,10 @@ describeIfDatabase('multitable automation retry provenance (real DB)', () => {
     delete process.env.AUTOMATION_CLASSB_OUTBOUND_ENABLED
     await q("DELETE FROM meta_automation_action_applied WHERE kind = 'execution' AND root_execution_id = $1", [ROOT_ID])
     await q("DELETE FROM meta_automation_outbound_intent WHERE kind = 'execution' AND root_execution_id = $1", [ROOT_ID])
-    await q('DELETE FROM multitable_automation_executions WHERE id = ANY($1)', [[ROOT_ID, CHILD_ID]])
+    await q('DELETE FROM multitable_automation_executions WHERE id = ANY($1)', [[ROOT_ID, CHILD_ID, TEST_RUN_ID]])
   })
   afterAll(async () => {
-    await q('DELETE FROM multitable_automation_executions WHERE id = ANY($1)', [[ORIG_ID, NEW_ID, ROOT_ID, CHILD_ID]])
+    await q('DELETE FROM multitable_automation_executions WHERE id = ANY($1)', [[ORIG_ID, NEW_ID, ROOT_ID, CHILD_ID, TEST_RUN_ID]])
     await q("DELETE FROM meta_automation_action_applied WHERE kind = 'execution' AND root_execution_id = $1", [ROOT_ID])
     await q("DELETE FROM meta_automation_outbound_intent WHERE kind = 'execution' AND root_execution_id = $1", [ROOT_ID])
   })
@@ -94,6 +95,30 @@ describeIfDatabase('multitable automation retry provenance (real DB)', () => {
     const raw = await q('SELECT rerun_of_execution_id, initiated_by FROM multitable_automation_executions WHERE id = $1', [ORIG_ID])
     expect(raw.rows[0].rerun_of_execution_id).toBeNull()
     expect(raw.rows[0].initiated_by).toBeNull()
+  })
+
+  test('#4196 §2.2: a persisted manual test run cannot enter the live retry namespace', async () => {
+    await logs.record(exec({
+      id: TEST_RUN_ID,
+      triggeredBy: 'manual_test',
+      status: 'failed',
+      triggerEvent: { recordId: `rec_test_run_${TS}`, data: {} },
+    }))
+    const service = realService()
+    const getRule = vi.spyOn(service, 'getRule')
+    const execute = vi.spyOn(service, 'executeRule')
+
+    await expect(service.retryExecution(TEST_RUN_ID, `admin_${TS}`)).resolves.toMatchObject({
+      status: 409,
+      code: 'TEST_RUN_NOT_RETRYABLE',
+    })
+    expect(getRule).not.toHaveBeenCalled()
+    expect(execute).not.toHaveBeenCalled()
+    const raw = await q(
+      'SELECT first_retry_attempted_at FROM multitable_automation_executions WHERE id = $1',
+      [TEST_RUN_ID],
+    )
+    expect(raw.rows[0].first_retry_attempted_at).toBeNull()
   })
 
   test('#4196 V5: a non-first Class-A retry fails closed on zero root evidence and proceeds with an applied row', async () => {

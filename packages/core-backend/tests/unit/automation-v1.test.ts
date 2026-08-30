@@ -5294,6 +5294,23 @@ describe('AutomationService — retryExecution (A5)', () => {
     }
   })
 
+  it('#4196 §2.2: a failed test-run execution cannot enter the live retry namespace', async () => {
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(storedExecution({
+      triggeredBy: 'manual_test',
+      status: 'failed',
+    }))
+    const getRule = vi.spyOn(service, 'getRule')
+    const execSpy = vi.spyOn(service, 'executeRule')
+
+    await expect(service.retryExecution('axe_orig', 'admin1')).resolves.toMatchObject({
+      status: 409,
+      code: 'TEST_RUN_NOT_RETRYABLE',
+    })
+    expect(getRule).not.toHaveBeenCalled()
+    expect(execSpy).not.toHaveBeenCalled()
+    expect(queryFn).not.toHaveBeenCalled()
+  })
+
   it('409 MISSING_TRIGGER_EVENT fail-closed: absent / empty {} / array — never silent empty-context retry', async () => {
     const getRule = vi.spyOn(service, 'getRule')
     const execSpy = vi.spyOn(service, 'executeRule')
