@@ -12,6 +12,7 @@ const {
   normalizeStockPreparationTemplate,
   HUMAN_PRESERVED_FIELD_IDS,
   buildSheetStructureFromTemplate,
+  resolveTemplateLabelLocale,
 } = require('./stock-preparation-templates.cjs')
 
 // W2 canonical repair: namespace positive control for a repaired-in field.
@@ -161,11 +162,19 @@ function buildFieldProperty(templateField, structureField) {
 function stockPreparationTemplateForObject(input = {}) {
   const objectId = requiredString(input.objectId, 'objectId')
   const label = optionalString(input.label) || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.label
+  // A caller that renames the sheet supplies BOTH names or neither. The spread below
+  // would otherwise carry the canonical Chinese name onto a differently-named object --
+  // which is exactly how a SANDBOX table would end up displaying 备料主表 to an operator
+  // who then cannot tell it from the production canonical one. So the inherited Chinese
+  // name survives only while the English name is also the inherited one.
+  const labelZh = optionalString(input.labelZh)
+    || (label === STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.label ? STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.labelZh : null)
   return normalizeStockPreparationTemplate({
     ...STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
     id: input.id || `${STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.id}.${hashEvidenceValue(objectId)}`,
     objectId,
     label,
+    labelZh: labelZh || undefined,
   })
 }
 
@@ -174,12 +183,23 @@ function sandboxStockPreparationTemplate(input = {}) {
   return stockPreparationTemplateForObject({
     objectId,
     label: optionalString(input.label) || 'PLM Stock Preparation Sandbox',
+    // The sandbox marker is part of the NAME in BOTH languages. A Chinese-labelled
+    // deployment must be no more able to mistake this table for the production
+    // canonical one than an English-labelled one is.
+    labelZh: optionalString(input.labelZh) || '备料主表(沙箱)',
   })
 }
 
+// CREATION-TIME display language. `input.locale` defaults to the deployment setting,
+// which is `en` unless a deployment opted in -- so with it unset this descriptor is
+// byte-identical to what it has always been. It decides only the human `name` of the
+// sheet and of each column; ids, types, order and property are untouched by it, and
+// nothing here can rename a column that already exists (see ensureStockPreparationTarget:
+// an existing object is either already ready or refused, never re-described).
 function buildStockPreparationTargetDescriptor(input = {}) {
   const template = normalizeStockPreparationTemplate(input.template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE)
-  const structure = buildSheetStructureFromTemplate(template)
+  const locale = input.locale === undefined ? resolveTemplateLabelLocale() : input.locale
+  const structure = buildSheetStructureFromTemplate(template, { locale })
   const templateById = new Map(template.fields.map((field) => [field.id, field]))
   return {
     id: structure.objectId,
@@ -459,7 +479,7 @@ async function ensureStockPreparationTarget(input = {}) {
   const ensured = await provisioning.ensureObject({
     projectId,
     baseId: input.baseId || null,
-    descriptor: buildStockPreparationTargetDescriptor({ template, description: input.description }),
+    descriptor: buildStockPreparationTargetDescriptor({ template, description: input.description, locale: input.locale }),
   })
   const resolvedAfterCreate = await provisioning.resolveFieldIds({
     projectId,
@@ -578,7 +598,11 @@ async function repairStockPreparationCanonicalTarget(input = {}) {
     const existingIds = fieldIds.filter((id) => !missingIds.includes(id))
     const beforeContent = await tx.readObjectFieldsContent({ projectId, objectId: template.objectId, fieldIds: existingIds })
     const humanSet = new Set(HUMAN_PRESERVED_FIELD_IDS)
-    const descriptor = buildStockPreparationTargetDescriptor({ template, description: input.description })
+    // Repair only ever ADDS a missing column, and a column it adds is created -- not
+    // renamed -- so it is created readable too. Every pre-existing column, including one
+    // an operator renamed by hand against the deployment's database, is left exactly as
+    // it is; assertNoExistingFieldMutated below rolls the whole transaction back if not.
+    const descriptor = buildStockPreparationTargetDescriptor({ template, description: input.description, locale: input.locale })
     const ownershipById = new Map(template.fields.map((field) => [field.id, field.ownership]))
     const missingDescriptors = []
     for (const id of missingIds) {
