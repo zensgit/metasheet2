@@ -778,6 +778,8 @@ export interface AutomationExecution {
   finishedAt?: string
   /** Forward-compat tag for the snapshot shape. */
   schemaVersion?: number
+  /** #4196 Q2/Q6 response marker: business dispatch was suppressed for this manual test run. */
+  dryRun?: boolean
   // ── A5 retry provenance (set by AutomationService.retryExecution; plain ids, not redacted) ──
   /** The original execution id this run re-ran (only on a retry-created execution). */
   rerunOfExecutionId?: string
@@ -788,6 +790,8 @@ export interface AutomationExecution {
 export interface AutomationStepResult {
   actionType: AutomationActionType
   status: 'success' | 'failed' | 'skipped'
+  /** Test-run simulation marker: this step was planned but no business dispatch occurred. */
+  simulated?: boolean
   output?: unknown
   error?: string
   durationMs?: number
@@ -798,6 +802,44 @@ export interface AutomationStepResult {
    * NO revision, and NO downstream effect ran. Distinguishable so callers/tests can assert the skip.
    */
   alreadyApplied?: boolean
+}
+
+export type AutomationDispatchMode = 'live' | 'simulate'
+
+function simulationDisposition(actionType: AutomationActionType): 'execute' | 'simulate' {
+  switch (actionType) {
+    case 'condition_branch':
+    case 'parallel_branch':
+    case 'record_click':
+      return 'execute'
+    case 'update_record':
+    case 'create_record':
+    case 'delete_record':
+    case 'send_webhook':
+    case 'send_notification':
+    case 'send_email':
+    case 'send_dingtalk_group_message':
+    case 'send_dingtalk_person_message':
+    case 'send_dingtalk_approval_card':
+    case 'lock_record':
+    case 'wait_for_callback':
+    case 'start_approval':
+    case 'write_approval_form_values':
+      return 'simulate'
+  }
+
+  const unreachable: never = actionType
+  return unreachable
+}
+
+function simulatedStep(actionType: AutomationActionType): AutomationStepResult {
+  return {
+    actionType,
+    status: 'success',
+    simulated: true,
+    output: { dryRun: true, dispatched: false },
+    durationMs: 0,
+  }
 }
 
 /**
@@ -828,6 +870,8 @@ export interface ExecutionContext {
    * for back-compat: builders that omit it fall back to `executionId` at the claim call site.
    */
   rootExecutionId?: string
+  /** #4196 Q2/Q6: simulate derives control flow but dispatches no business action. */
+  dispatchMode?: AutomationDispatchMode
 }
 
 // ── Dependencies interface for action executors ───────────────────────────
@@ -986,6 +1030,7 @@ export class AutomationExecutor {
     triggerEvent: unknown,
     jobLifecycleFactory?: ActionJobLifecycleFactory,
     rootExecutionId?: string,
+    dispatchMode: AutomationDispatchMode = 'live',
   ): Promise<AutomationExecution> {
     const executionId = `axe_${randomUUID()}`
     // A6-1: opt-in rules get a per-action job lifecycle bound to this executionId. The factory
@@ -1007,6 +1052,7 @@ export class AutomationExecutor {
       // #4196 §4: the RAW-config §2.1 fingerprint (the Class-A claim identity) captured before any redaction.
       ruleActionFingerprint: deriveRuleActionSetFingerprint(rule.actions).hash,
       schemaVersion: AUTOMATION_EXECUTION_SCHEMA_VERSION,
+      ...(dispatchMode === 'simulate' ? { dryRun: true } : {}),
     }
 
     // A6-1: opt-in job persistence needs a visible parent execution before any
@@ -1027,6 +1073,7 @@ export class AutomationExecutor {
       // #4196: the lineage root. A retry threads the original execution's root in; a first run has no
       // parent, so it defaults to its own id. Class-A claims key on this (retry of the same action → dup).
       rootExecutionId: rootExecutionId ?? executionId,
+      dispatchMode,
     }
 
     // Evaluate conditions
@@ -1339,6 +1386,14 @@ export class AutomationExecutor {
         ? { upstreamJobId: nextTopLevelUpstreamJobId }
         : undefined
       nextTopLevelUpstreamJobId = undefined
+
+      if (context.dispatchMode === 'simulate' && simulationDisposition(action.type) === 'simulate') {
+        if (jobLifecycle) await jobLifecycle.onStart(index, action, topLevelMeta)
+        const result = simulatedStep(action.type)
+        results.push(result)
+        if (jobLifecycle) await jobLifecycle.onSettled(index, action, result)
+        continue
+      }
 
       // A6-2 suspend point: a `wait_for_callback` in an opted-in rule suspends here.
       if (action.type === 'wait_for_callback') {
@@ -1708,6 +1763,15 @@ export class AutomationExecutor {
       const jobId = `${context.executionId}:job:${stepIndex}:branch:${selectedBranchKey}:${actionIndex}`
       const meta = { stepKey, jobId, upstreamJobId }
 
+      if (context.dispatchMode === 'simulate' && simulationDisposition(branchAction.type) === 'simulate') {
+        await jobLifecycle.onStart(stepIndex, branchAction, meta)
+        const branchActionResult = simulatedStep(branchAction.type)
+        await jobLifecycle.onSettled(stepIndex, branchAction, branchActionResult, meta)
+        lastJobId = jobId
+        upstreamJobId = jobId
+        continue
+      }
+
       if (branchAction.type === 'wait_for_callback') {
         // A6-3-3 branch-local suspend. Fail closed if no resume capability (shouldn't happen:
         // condition_branch already requires workflow_job_v1, which supplies onSuspendBranch).
@@ -1825,6 +1889,10 @@ export class AutomationExecutor {
     // claim-then-skip-on-duplicate; every other action ignores it.
     identity?: ClassAActionIdentity,
   ): Promise<AutomationStepResult> {
+    if (context.dispatchMode === 'simulate' && simulationDisposition(action.type) === 'simulate') {
+      return simulatedStep(action.type)
+    }
+
     const startMs = Date.now()
     let result: AutomationStepResult
 

@@ -449,6 +449,42 @@ describe('AutomationExecutor', () => {
     expect(emitSpy).toHaveBeenCalledWith('automation.notification', expect.objectContaining({ userIds: ['u1', 'u2'] }))
   })
 
+  it('simulate derives steps but dispatches no Class-A, outbound, notification, or approval side effect', async () => {
+    const emitSpy = vi.spyOn(deps.eventBus, 'emit')
+    const rule = createMockRule({
+      actions: [
+        { type: 'update_record', config: { fields: { status: 'done' } } },
+        { type: 'send_webhook', config: { url: 'https://example.com/hook' } },
+        { type: 'send_notification', config: { userIds: ['u1'], message: 'Hello' } },
+        { type: 'start_approval', config: { templateId: 'tpl_1', formDataMapping: {} } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      { recordId: 'r1', data: { status: 'active' }, sheetId: 'sheet_1' },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('success')
+    expect(result.dryRun).toBe(true)
+    expect(result.steps).toEqual(rule.actions.map((action) => ({
+      actionType: action.type,
+      status: 'success',
+      simulated: true,
+      output: { dryRun: true, dispatched: false },
+      durationMs: 0,
+    })))
+    const sqlCalls = vi.mocked(deps.queryFn).mock.calls.map(([sql]) => String(sql))
+    expect(sqlCalls).not.toEqual(expect.arrayContaining([
+      expect.stringMatching(/\b(?:INSERT\s+INTO|UPDATE\s+\S+\s+SET|DELETE\s+FROM)\b/i),
+    ]))
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+    expect(emitSpy).not.toHaveBeenCalled()
+  })
+
   it('executes send_email action successfully through NotificationService email channel', async () => {
     const send = vi.fn(async () => ({ id: 'notif_1', status: 'sent' as const }))
     deps = createMockDeps({ notificationService: { send } })
@@ -4413,6 +4449,54 @@ describe('AutomationExecutor — A6-1 job lifecycle hooks', () => {
       { phase: 'settled', index: 1, type: 'send_webhook', status: 'success' },
     ])
     expect(deps.fetchFn).toHaveBeenCalledTimes(1) // non-selected branch webhook did not run; only the after action did.
+  })
+
+  it('simulate derives a selected branch containing wait + notification without suspending or emitting', async () => {
+    const emitSpy = vi.spyOn(deps.eventBus, 'emit')
+    const lc = recordingLifecycle()
+    const rule = createMockRule({
+      actions: [{
+        type: 'condition_branch',
+        config: {
+          branches: [{
+            key: 'vip',
+            conditions: { logic: 'and', conditions: [{ fieldId: 'tier', operator: 'equals', value: 'vip' }] },
+            actions: [
+              { type: 'wait_for_callback', config: {} },
+              { type: 'send_notification', config: { userIds: ['u1'], message: 'Hello' } },
+            ],
+          }],
+        },
+      }],
+    })
+
+    const execution = await executor.execute(
+      rule,
+      { recordId: 'r1', data: { tier: 'vip' }, sheetId: 'sheet_1' },
+      lc.factory,
+      undefined,
+      'simulate',
+    )
+
+    expect(execution).toMatchObject({
+      status: 'success',
+      dryRun: true,
+      steps: [{
+        actionType: 'condition_branch',
+        status: 'success',
+        output: { selectedBranchKey: 'vip', matched: true },
+      }],
+    })
+    expect(lc.calls).toEqual([
+      'start:0',
+      'start:0',
+      'settled:0:success',
+      'start:0',
+      'settled:0:success',
+      'settled:0:success',
+    ])
+    expect(emitSpy).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
   })
 
   it('A6-3-1: condition_branch fails closed in legacy mode and skips later actions', async () => {

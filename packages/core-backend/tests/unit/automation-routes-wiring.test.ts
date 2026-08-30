@@ -68,6 +68,8 @@ describe('createAutomationRoutes HTTP mounting', () => {
     // Client does parseJson<AutomationExecution> — expects flat object
     expect(res.body.id).toBe('exec-1')
     expect(res.body.ruleId).toBe('rule-1')
+    expect(res.body.dryRun).toBe(true)
+    expect(svc.testRun).toHaveBeenCalledWith('rule-1', 'sheet-a', { mode: 'simulate' })
     // Old envelope shape must NOT appear
     expect(res.body.data).toBeUndefined()
     expect(res.body.ok).toBeUndefined()
