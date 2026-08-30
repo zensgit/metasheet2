@@ -611,6 +611,101 @@ describe('AutomationExecutor', () => {
     expect(emitSpy).not.toHaveBeenCalled()
   })
 
+  it('simulate resolves intended DingTalk group targets and redacted rendered content without DB-backed validation', async () => {
+    const emitSpy = vi.spyOn(deps.eventBus, 'emit')
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'group_static',
+          destinationIds: [' group_static ', 'group_second'],
+          destinationIdFieldPaths: ['record.groupTargets'],
+          titleTemplate: 'Record {{record.title}}',
+          bodyTemplate: 'API_TOKEN={{record.apiToken}} status={{record.status}}',
+          publicFormViewId: 'view_requires_live_db_validation',
+        },
+      }],
+    })
+
+    const result = await executor.execute(
+      rule,
+      {
+        recordId: 'record_sample',
+        data: {
+          title: 'Sample',
+          status: 'active',
+          apiToken: 'source-secret',
+          groupTargets: ['group_second', { destinationId: 'group_dynamic' }],
+        },
+        sheetId: 'sheet_1',
+      },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('success')
+    expect(result.steps).toEqual([{
+      actionType: 'send_dingtalk_group_message',
+      status: 'success',
+      simulated: true,
+      output: {
+        dryRun: true,
+        dispatched: false,
+        plan: {
+          target: { destinationIds: ['group_static', 'group_second', 'group_dynamic'] },
+          payload: {
+            title: 'Record Sample',
+            body: 'API_TOKEN=<redacted> status=active',
+          },
+        },
+      },
+      durationMs: 0,
+    }])
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+    expect(emitSpy).not.toHaveBeenCalled()
+    expect(JSON.stringify(result.steps)).not.toContain('source-secret')
+    expect(JSON.stringify(result.steps)).not.toContain('view_requires_live_db_validation')
+  })
+
+  it('simulate fail-stops an unresolved DingTalk group target before later actions', async () => {
+    const rule = createMockRule({
+      actions: [
+        {
+          type: 'send_dingtalk_group_message',
+          config: {
+            destinationIdFieldPath: 'record.missingTargets',
+            titleTemplate: 'Record {{record.title}}',
+            bodyTemplate: 'Open form',
+          },
+        },
+        { type: 'send_notification', config: { userIds: ['should_skip'], message: 'should skip' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      { recordId: 'record_sample', data: { title: 'Sample' }, sheetId: 'sheet_1' },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('failed')
+    expect(result.steps).toEqual([
+      {
+        actionType: 'send_dingtalk_group_message',
+        status: 'failed',
+        error: 'No DingTalk destinationIds resolved from record field paths: missingTargets',
+        durationMs: 0,
+      },
+      { actionType: 'send_notification', status: 'skipped', durationMs: 0 },
+    ])
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+  })
+
   it('simulate fail-stops invalid generic Class-B plans before any later action', async () => {
     const rule = createMockRule({
       actions: [
@@ -660,6 +755,21 @@ describe('AutomationExecutor', () => {
       name: 'email body',
       action: { type: 'send_email', config: { recipients: ['u@example.com'], subjectTemplate: 'Subject', bodyTemplate: '' } },
       error: 'send_email bodyTemplate is required',
+    },
+    {
+      name: 'DingTalk group target',
+      action: { type: 'send_dingtalk_group_message', config: { titleTemplate: 'Title', bodyTemplate: 'Body' } },
+      error: 'At least one DingTalk destination or record destination field path is required',
+    },
+    {
+      name: 'DingTalk group title',
+      action: { type: 'send_dingtalk_group_message', config: { destinationId: 'group_1', titleTemplate: '', bodyTemplate: 'Body' } },
+      error: 'DingTalk title template is required',
+    },
+    {
+      name: 'DingTalk group body',
+      action: { type: 'send_dingtalk_group_message', config: { destinationId: 'group_1', titleTemplate: 'Title', bodyTemplate: '' } },
+      error: 'DingTalk body template is required',
     },
   ])('simulate rejects invalid $name before dispatch', async ({ action, error }) => {
     const result = await executor.execute(
