@@ -7,6 +7,7 @@
 
     <ElearningCreditWalletSection v-if="incentiveEnabled" />
     <ElearningCertificateWalletSection v-if="incentiveEnabled" />
+    <ElearningLearningProfileSection v-if="incentiveEnabled" />
 
     <p
       v-if="status"
@@ -229,6 +230,7 @@ import {
 import ElearningContentLearnerCourse from './ElearningContentLearnerCourse.vue'
 import ElearningCreditWalletSection from './ElearningCreditWalletSection.vue'
 import ElearningCertificateWalletSection from './ElearningCertificateWalletSection.vue'
+import ElearningLearningProfileSection from './ElearningLearningProfileSection.vue'
 import {
   elearningExamAnswerProgress,
   elearningExamCountdown,
