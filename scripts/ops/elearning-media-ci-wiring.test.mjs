@@ -42,6 +42,9 @@ const DB_SUITES = readdirSync(INTEGRATION_DIR)
 
 const WEB_SPECS = [
   'tests/elearning-client.spec.ts',
+  'tests/elearning-analytics-admin.spec.ts',
+  'tests/elearning-analytics-client.spec.ts',
+  'tests/elearning-analytics-period.spec.ts',
   'tests/elearning-content-admin.spec.ts',
   'tests/elearning-content-client.spec.ts',
   'tests/elearning-content-learner.spec.ts',
@@ -58,17 +61,24 @@ const WEB_SPECS = [
   'tests/elearning-manual-grading-view.spec.ts',
   'tests/elearning-learning-profile-client.spec.ts',
   'tests/elearning-learning-profile-section.spec.ts',
+  'tests/elearning-portal-admin.spec.ts',
+  'tests/elearning-portal-client.spec.ts',
+  'tests/elearning-portal-learner.spec.ts',
   'tests/elearning-title-admin.spec.ts',
 ]
 
 const WEB_GUARD_PATHS = [
   'apps/web/src/services/elearning.ts',
+  'apps/web/src/services/elearningAnalytics.ts',
   'apps/web/src/services/elearningContent.ts',
   'apps/web/src/services/elearningCredit.ts',
   'apps/web/src/services/elearningCertificate.ts',
   'apps/web/src/services/elearningManualGrading.ts',
   'apps/web/src/services/elearningProfile.ts',
+  'apps/web/src/services/elearningPortal.ts',
   'apps/web/src/views/ElearningAdminView.vue',
+  'apps/web/src/views/ElearningAnalyticsAdminSection.vue',
+  'apps/web/src/views/ElearningAnalyticsPeriodSection.vue',
   'apps/web/src/views/ElearningContentAdminSection.vue',
   'apps/web/src/views/ElearningContentLearnerCourse.vue',
   'apps/web/src/views/ElearningCreditAdminSection.vue',
@@ -80,6 +90,8 @@ const WEB_GUARD_PATHS = [
   'apps/web/src/views/ElearningManualGradingView.vue',
   'apps/web/src/views/ElearningManualGradingAttempt.vue',
   'apps/web/src/views/ElearningLearningProfileSection.vue',
+  'apps/web/src/views/ElearningPortalAdminSection.vue',
+  'apps/web/src/views/ElearningPortalHero.vue',
   'apps/web/src/views/elearningLabels.ts',
   'apps/web/src/router/appRoutes.ts',
   'apps/web/src/router/types.ts',
@@ -87,6 +99,9 @@ const WEB_GUARD_PATHS = [
   'apps/web/src/stores/featureFlags.ts',
   'plugins/plugin-elearning/app.manifest.json',
   'apps/web/tests/elearning-client.spec.ts',
+  'apps/web/tests/elearning-analytics-admin.spec.ts',
+  'apps/web/tests/elearning-analytics-client.spec.ts',
+  'apps/web/tests/elearning-analytics-period.spec.ts',
   'apps/web/tests/elearning-content-admin.spec.ts',
   'apps/web/tests/elearning-content-client.spec.ts',
   'apps/web/tests/elearning-content-learner.spec.ts',
@@ -103,6 +118,9 @@ const WEB_GUARD_PATHS = [
   'apps/web/tests/elearning-manual-grading-view.spec.ts',
   'apps/web/tests/elearning-learning-profile-client.spec.ts',
   'apps/web/tests/elearning-learning-profile-section.spec.ts',
+  'apps/web/tests/elearning-portal-admin.spec.ts',
+  'apps/web/tests/elearning-portal-client.spec.ts',
+  'apps/web/tests/elearning-portal-learner.spec.ts',
   'apps/web/tests/elearning-title-admin.spec.ts',
   '.github/workflows/elearning-web-guard.yml',
 ]
@@ -116,6 +134,8 @@ const SCHEMA_DB_FILES = [
   'tests/integration/elearning-title-runtime.db.test.ts',
   'tests/integration/elearning-certificate-runtime.db.test.ts',
   'tests/integration/elearning-learning-profile.db.test.ts',
+  'tests/integration/elearning-portal-settings.db.test.ts',
+  'tests/integration/elearning-stats-daily-projection.db.test.ts',
   'tests/integration/elearning-exam-service.db.test.ts',
   'tests/integration/elearning-learner-courses.db.test.ts',
   'tests/integration/elearning-media-playback.db.test.ts',
@@ -703,7 +723,7 @@ test('media upload OpenAPI and generated SDK keep the ready/rejected discriminat
   assert.match(sdk, /ElearningMediaUploadRejectedResult:[\s\S]*?status: "rejected";[\s\S]*?durationMs: null;/)
 })
 
-test('elearning-web-guard.yml parses, installs frozen deps, and runs the eighteen whole spec files', () => {
+test('elearning-web-guard.yml parses, installs frozen deps, and runs the twenty-four whole spec files', () => {
   assert.ok(existsSync(WEB_GUARD), 'elearning-web-guard.yml must exist')
   const yaml = readFileSync(WEB_GUARD, 'utf8')
   const doc = parseYaml(yaml)
@@ -731,7 +751,7 @@ test('elearning-web-guard.yml parses, installs frozen deps, and runs the eightee
   assert.deepEqual(invocationFileArgs(invocations[0]).sort(), [...WEB_SPECS].sort())
 })
 
-test('run-required-web-tests.sh keeps existing tokens and adds a distinct eighteen-file elearning invocation', () => {
+test('run-required-web-tests.sh keeps existing tokens and adds a distinct twenty-four-file elearning invocation', () => {
   assert.ok(existsSync(REQUIRED_WEB), 'run-required-web-tests.sh must exist')
   const src = readFileSync(REQUIRED_WEB, 'utf8')
   for (const token of EXISTING_REQUIRED_WEB_TOKENS) {
@@ -743,7 +763,7 @@ test('run-required-web-tests.sh keeps existing tokens and adds a distinct eighte
   assert.equal(
     targeted.length,
     1,
-    'run-required-web-tests.sh must have exactly one distinct invocation that names all eighteen elearning specs',
+    'run-required-web-tests.sh must have exactly one distinct invocation that names all twenty-four elearning specs',
   )
   assert.deepEqual(
     invocationFileArgs(targeted[0]).sort(),
