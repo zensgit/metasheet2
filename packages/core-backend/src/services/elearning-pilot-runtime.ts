@@ -14,6 +14,7 @@ import { isElearningContentSurfaceEnabled } from '../elearning/feature-flags'
 import { authenticate } from '../middleware/auth'
 import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
 import { createElearningCreditRouter } from '../routes/elearning-credit'
+import { createElearningContentRouter } from '../routes/elearning-content'
 import { createElearningPilotRouter } from '../routes/elearning-pilot'
 import { isElearningGlobalAdminRequest } from '../routes/elearning-admin-access'
 import type { ElearningAdminAccessDb } from './elearning-admin-access'
@@ -28,7 +29,19 @@ import {
   type ElearningCoursePublishResult,
   type PublishElearningCourseInput,
 } from './elearning-course-publish'
+import {
+  publishElearningContentCourse,
+  type ElearningContentCoursePublishDb,
+  type ElearningContentCoursePublishResult,
+  type PublishElearningContentCourseInput,
+} from './elearning-content-course-publish'
+import {
+  storeElearningContentRevision,
+  type CreateElearningContentRevisionInput,
+  type ElearningContentRevisionDb,
+} from './elearning-content-revision-postgres'
 import { isElearningCreditSurfaceEnabled } from './elearning-credit-ledger'
+import type { adjustElearningCreditPostgres } from './elearning-credit-adjustment-postgres'
 import type {
   getElearningCreditWallet,
   listElearningCreditRules,
@@ -82,6 +95,12 @@ import {
   type GetElearningManualGradingDetailInput,
   type ListElearningManualGradingQueueInput,
 } from './elearning-manual-grading-read'
+import {
+  recordElearningOpenCompletion,
+  type ElearningOpenCompletionDb,
+  type ElearningOpenCompletionResult,
+  type RecordElearningOpenCompletionInput,
+} from './elearning-open-completion-postgres'
 import type {
   ElearningWatchDb,
   ElearningWatchState,
@@ -132,6 +151,9 @@ export interface ElearningPilotRuntimeOptions {
     ElearningPlaybackDb &
     ElearningExamDb &
     ElearningCoursePublishDb &
+    ElearningContentRevisionDb &
+    ElearningContentCoursePublishDb &
+    ElearningOpenCompletionDb &
     ElearningLearnerCoursesDb &
     ElearningScopeDb &
     ElearningTrainingPlanDb &
@@ -201,6 +223,18 @@ export interface ElearningPilotRuntimeOptions {
     db: ElearningCoursePublishDb,
     input: PublishElearningCourseInput,
   ) => Promise<ElearningCoursePublishResult>
+  storeElearningContentRevision?: (
+    db: ElearningContentRevisionDb,
+    input: CreateElearningContentRevisionInput,
+  ) => ReturnType<typeof storeElearningContentRevision>
+  publishElearningContentCourse?: (
+    db: ElearningContentCoursePublishDb,
+    input: PublishElearningContentCourseInput,
+  ) => Promise<ElearningContentCoursePublishResult>
+  recordElearningOpenCompletion?: (
+    db: ElearningOpenCompletionDb,
+    input: RecordElearningOpenCompletionInput,
+  ) => Promise<ElearningOpenCompletionResult>
   listElearningLearnerCourses?: (
     db: ElearningLearnerCoursesDb,
     input: ListElearningLearnerCoursesInput,
@@ -228,6 +262,7 @@ export interface ElearningPilotRuntimeOptions {
   publishElearningCreditRule?: typeof publishElearningCreditRule
   listElearningCreditRules?: typeof listElearningCreditRules
   getElearningCreditWallet?: typeof getElearningCreditWallet
+  adjustElearningCredit?: typeof adjustElearningCreditPostgres
 }
 
 function viewerId(req: Request): string | null {
@@ -272,6 +307,22 @@ export function createElearningPilotRuntime(
     opts.submitElearningManualGrade
     ?? ((db: ElearningManualGradingDb, input: ElearningManualGradeInput) =>
       submitElearningManualGrade(db, input, { env }))
+
+  const content = contentEnabled ? createElearningContentRouter({
+    db: opts.db,
+    env,
+    viewerId: opts.viewerId ?? viewerId,
+    orgId: opts.orgId ?? orgId,
+    adminGuard: opts.adminGuard ?? rbacGuard('elearning', 'admin'),
+    readGuard: opts.readGuard
+      ?? rbacGuardAny(['elearning:read', 'elearning:write', 'elearning:admin']),
+    storeElearningContentRevision:
+      opts.storeElearningContentRevision ?? storeElearningContentRevision,
+    publishElearningContentCourse:
+      opts.publishElearningContentCourse ?? publishElearningContentCourse,
+    recordElearningOpenCompletion:
+      opts.recordElearningOpenCompletion ?? recordElearningOpenCompletion,
+  }) : null
 
   const inner = contentEnabled ? createElearningPilotRouter({
     db: opts.db,
@@ -324,11 +375,13 @@ export function createElearningPilotRuntime(
     publishElearningCreditRule: opts.publishElearningCreditRule,
     listElearningCreditRules: opts.listElearningCreditRules,
     getElearningCreditWallet: opts.getElearningCreditWallet,
+    adjustElearningCredit: opts.adjustElearningCredit,
   }) : null
   if (!inner && !credit) return null
 
   const router = Router()
   router.use('/api/elearning', opts.authenticate ?? authenticate)
+  if (content) router.use(content)
   if (inner) router.use(inner)
   if (credit) router.use(credit)
   return { router }

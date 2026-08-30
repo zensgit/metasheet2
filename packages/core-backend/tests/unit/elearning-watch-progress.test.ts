@@ -408,6 +408,8 @@ function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningWatchDb; mem: M
       return { rows: [], rowCount: 1 }
     }
     if (tag === 'elearning-watch:insert-evidence') {
+      expect(sql).toMatch(/course_version_item_id,\s+user_id,\s+item_type,/)
+      expect(sql).toMatch(/\$5,\s+\$6,\s+'video',\s+\$7/)
       mem.evidence.push({
         memberId: params[1] == null ? null : String(params[1]),
         scopeRuleId: params[2] == null ? null : String(params[2]),

@@ -9,6 +9,11 @@ import {
 
 import { isElearningCreditSurfaceEnabled } from '../services/elearning-credit-ledger'
 import {
+  ElearningCreditAdjustmentError,
+  type ElearningCreditAdjustmentResult,
+} from '../services/elearning-credit-adjustment'
+import { adjustElearningCreditPostgres } from '../services/elearning-credit-adjustment-postgres'
+import {
   ELEARNING_CREDIT_WALLET_PAGE_MAX,
   ElearningCreditSurfaceError,
   getElearningCreditWallet,
@@ -20,11 +25,20 @@ import {
 } from '../services/elearning-credit-surface'
 
 const RULE_KEYS = new Set(['behavior', 'dailyCap', 'points', 'requestId', 'timeZone'])
+const ADJUSTMENT_KEYS = new Set(['points', 'reason', 'requestId', 'userId'])
 const WALLET_KEYS = new Set(['cursor', 'limit'])
 const ADMIN_WALLET_KEYS = new Set(['cursor', 'limit', 'userId'])
 const jsonParser = json({ limit: 16 * 1024 })
 
 const ERROR_STATUS: Record<ElearningCreditSurfaceError['code'], number> = {
+  invalid_input: 400,
+  conflict: 409,
+  not_found: 404,
+  unavailable: 503,
+}
+
+const ADJUSTMENT_ERROR_STATUS: Record<ElearningCreditAdjustmentError['code'], number> = {
+  disabled: 404,
   invalid_input: 400,
   conflict: 409,
   not_found: 404,
@@ -41,6 +55,7 @@ export interface ElearningCreditRouteDeps {
   publishElearningCreditRule?: typeof publishElearningCreditRule
   listElearningCreditRules?: typeof listElearningCreditRules
   getElearningCreditWallet?: typeof getElearningCreditWallet
+  adjustElearningCredit?: typeof adjustElearningCreditPostgres
 }
 
 function readObject(value: unknown): Record<string, unknown> | null {
@@ -103,11 +118,25 @@ function run(
 }
 
 function sendError(res: Response, error: unknown): void {
+  if (error instanceof ElearningCreditAdjustmentError) {
+    res.status(ADJUSTMENT_ERROR_STATUS[error.code]).json({ error: error.code })
+    return
+  }
   if (error instanceof ElearningCreditSurfaceError) {
     res.status(ERROR_STATUS[error.code]).json({ error: error.code })
     return
   }
   res.status(500).json({ error: 'internal_error' })
+}
+
+function adjustmentDto(result: ElearningCreditAdjustmentResult) {
+  return {
+    adjustmentId: result.adjustmentId,
+    userId: result.userId,
+    points: result.points,
+    balancePoints: result.balancePoints,
+    createdAt: result.createdAt,
+  }
 }
 
 function ruleDto(rule: ElearningCreditRule) {
@@ -182,6 +211,7 @@ export function createElearningCreditRouter(
   const publish = deps.publishElearningCreditRule ?? publishElearningCreditRule
   const list = deps.listElearningCreditRules ?? listElearningCreditRules
   const getWallet = deps.getElearningCreditWallet ?? getElearningCreditWallet
+  const adjustCredit = deps.adjustElearningCredit ?? adjustElearningCreditPostgres
 
   router.get(
     '/api/elearning/admin/credit-rules',
@@ -228,6 +258,36 @@ export function createElearningCreditRouter(
           timeZone: body.timeZone,
         })
         res.status(200).json(ruleDto(result))
+      } catch (error) {
+        sendError(res, error)
+      }
+    }),
+  )
+
+  router.post(
+    '/api/elearning/admin/credits/adjustments',
+    gate,
+    context,
+    deps.adminGuard,
+    parseJson,
+    run(async (req, res) => {
+      const actorId = deps.viewerId(req)
+      const orgId = deps.orgId(req)
+      const body = readObject(req.body)
+      if (!actorId || !orgId || !body || !exactKeys(body, ADJUSTMENT_KEYS)) {
+        res.status(400).json({ error: 'invalid_input' })
+        return
+      }
+      try {
+        const result = await adjustCredit(deps.db, {
+          orgId,
+          actorId,
+          requestId: body.requestId,
+          userId: body.userId,
+          points: body.points,
+          reason: body.reason,
+        }, deps.env ?? process.env)
+        res.status(200).json(adjustmentDto(result))
       } catch (error) {
         sendError(res, error)
       }

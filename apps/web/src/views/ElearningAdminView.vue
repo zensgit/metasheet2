@@ -236,6 +236,11 @@
       {{ status }}
     </p>
 
+    <ElearningContentAdminSection
+      v-if="contentEnabled"
+      :assignment-enabled="assignmentEnabled"
+    />
+
     <ElearningCreditAdminSection v-if="incentiveEnabled" />
 
     <div class="elearning-admin__assessment-toggle">
@@ -260,6 +265,7 @@ import {
   assignElearningDirect,
   ElearningApiError,
   getElearningCapabilities,
+  isElearningContentReady,
   isElearningV01Ready,
   publishElearningCourse,
   uploadElearningMedia,
@@ -268,6 +274,7 @@ import {
   type ElearningQuestionType,
 } from '../services/elearning'
 import ElearningAssessmentAdminSection from './ElearningAssessmentAdminSection.vue'
+import ElearningContentAdminSection from './ElearningContentAdminSection.vue'
 import ElearningCreditAdminSection from './ElearningCreditAdminSection.vue'
 import {
   elearningAssignIncomplete,
@@ -312,6 +319,8 @@ const assigned = ref(false)
 const busy = ref(false)
 const ready = ref(false)
 const incentiveEnabled = ref(false)
+const contentEnabled = ref(false)
+const assignmentEnabled = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error' | 'partial'>('info')
 const operationStage = ref<OperationStage | null>(null)
@@ -504,12 +513,15 @@ function buildAssignmentPayload(courseVersionId: string): ElearningDirectAssignm
 
 async function ensureV01Ready(): Promise<void> {
   const capabilities = await getElearningCapabilities()
+  contentEnabled.value = isElearningContentReady(capabilities)
+  assignmentEnabled.value = capabilities.enabled === true
+    && capabilities.capabilities.assignment === true
   incentiveEnabled.value = capabilities.enabled === true
     && capabilities.capabilities.incentive === true
-  if (!isElearningV01Ready(capabilities)) {
+  ready.value = isElearningV01Ready(capabilities)
+  if (!ready.value && !contentEnabled.value && !incentiveEnabled.value) {
     throw new ElearningApiError('feature_disabled', 404)
   }
-  ready.value = true
 }
 
 async function runAssign(): Promise<boolean> {

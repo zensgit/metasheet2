@@ -380,9 +380,9 @@ async function insertEvidence(input: {
   await pool.query(
     `INSERT INTO elearning_completion_evidence (
        id, org_id, assignment_member_id, course_version_id, course_version_item_id,
-       user_id, completion_policy_version, completion_threshold_bps, media_duration_ms,
+       user_id, item_type, completion_policy_version, completion_threshold_bps, media_duration_ms,
        effective_ms, max_position_ms, event_digest, evaluator_version, completed_at
-     ) VALUES ($1, $2, $3, $4, $5, $6, 'video-v1-90pct', 9000, 60000, 54000, 60000, 'ev', 'eval-v1', now())`,
+     ) VALUES ($1, $2, $3, $4, $5, $6, 'video', 'video-v1-90pct', 9000, 60000, 54000, 60000, 'ev', 'eval-v1', now())`,
     [id, input.org, input.memberId, input.versionId, input.itemId, input.userId],
   )
   return id
@@ -1205,7 +1205,7 @@ describe('elearning V0.1 watch-progress schema gate (real DB)', () => {
         ),
       )
       expect(deleteItem?.code).toBe('23503')
-      expect(deleteItem?.constraint).toBe('elearning_completion_evidence_item_version_fk')
+      expect(deleteItem?.constraint).toBe('elearning_completion_evidence_item_version_type_fk')
     } finally {
       await pool.query(
         `ALTER TABLE elearning_course_version_items ENABLE TRIGGER ${COURSE_VERSION_ITEMS_DRAFT_TRIGGER}`,

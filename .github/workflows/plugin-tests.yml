@@ -898,18 +898,25 @@ jobs:
             tests/unit/elearning-assessment-import.test.ts \
             tests/unit/elearning-notification-delivery.test.ts \
             tests/unit/elearning-open-completion-policy.test.ts \
+            tests/unit/elearning-open-completion-postgres.test.ts \
             tests/unit/elearning-reminder-port-scoping.test.ts \
             tests/unit/elearning-batch-assignment-routes.test.ts \
             tests/unit/elearning-batch-assignment-runtime.test.ts \
             tests/unit/elearning-batch-assignment.test.ts \
             tests/unit/elearning-category-tree-policy.test.ts \
+            tests/unit/elearning-content-course-publish.test.ts \
             tests/unit/elearning-content-revision-policy.test.ts \
+            tests/unit/elearning-content-revision-postgres.test.ts \
+            tests/unit/elearning-content-routes.test.ts \
+            tests/unit/elearning-content-runtime-migration-contract.test.ts \
             tests/unit/elearning-course-lifecycle-policy.test.ts \
             tests/unit/elearning-course-progress-policy.test.ts \
             tests/unit/elearning-course-publish-readiness-policy.test.ts \
             tests/unit/elearning-course-publish.test.ts \
             tests/unit/elearning-course-stats-policy.test.ts \
             tests/unit/elearning-course-version-items-policy.test.ts \
+            tests/unit/elearning-credit-adjustment-postgres.test.ts \
+            tests/unit/elearning-credit-adjustment.test.ts \
             tests/unit/elearning-credit-ledger.test.ts \
             tests/unit/elearning-credit-policy.test.ts \
             tests/unit/elearning-credit-postgres.test.ts \
@@ -1030,8 +1037,10 @@ jobs:
             tests/integration/elearning-watch-progress-service.db.test.ts \
             tests/integration/elearning-direct-assignment.db.test.ts \
             tests/integration/elearning-course-publish.db.test.ts \
+            tests/integration/elearning-content-runtime.db.test.ts \
             tests/integration/elearning-credit-ledger-authority.db.test.ts \
             tests/integration/elearning-credit-rules-wallet.db.test.ts \
+            tests/integration/elearning-credit-adjustment.db.test.ts \
             tests/integration/elearning-admin-scope-acl-migration-authority.db.test.ts \
             tests/integration/elearning-exam-service.db.test.ts \
             tests/integration/elearning-learner-courses.db.test.ts \

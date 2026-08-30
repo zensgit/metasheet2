@@ -11,6 +11,7 @@ const h = vi.hoisted(() => ({
   startExam: vi.fn(),
   saveExam: vi.fn(),
   submitExam: vi.fn(),
+  openContent: vi.fn(),
 }))
 
 vi.mock('../src/services/elearning', async () => {
@@ -26,6 +27,13 @@ vi.mock('../src/services/elearning', async () => {
     saveElearningExamAnswers: h.saveExam,
     submitElearningExam: h.submitExam,
   }
+})
+
+vi.mock('../src/services/elearningContent', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/elearningContent')>(
+    '../src/services/elearningContent',
+  )
+  return { ...actual, openElearningContentItem: h.openContent }
 })
 
 import {
@@ -61,6 +69,7 @@ const ATTEMPT_B = '86868686-8686-4868-8868-868686868686'
 const Q1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const Q2 = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const MEDIA = '66666666-6666-4666-8666-666666666666'
+const ARTICLE_ITEM = '67676767-6767-4767-8767-676767676767'
 
 async function flushUi(cycles = 10): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
@@ -204,6 +213,24 @@ function course(over: Record<string, unknown> = {}) {
   }
 }
 
+function contentCourse(completed = false) {
+  return {
+    courseId: COURSE_DONE,
+    courseVersionId: VERSION_B,
+    title: '阅读课程',
+    access: { kind: 'visibility', required: false },
+    assignment: null,
+    items: [{
+      itemId: ARTICLE_ITEM,
+      itemType: 'article',
+      title: '安全文章',
+      status: completed ? 'completed' : 'not_started',
+      completedAt: completed ? '2026-08-29T01:02:03.000Z' : null,
+    }],
+    completed,
+  }
+}
+
 function watchState(over: Record<string, unknown> = {}) {
   return {
     sessionId: SESSION,
@@ -284,6 +311,7 @@ describe('ElearningLearnerView', () => {
     h.startExam.mockReset()
     h.saveExam.mockReset()
     h.submitExam.mockReset()
+    h.openContent.mockReset()
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout', 'Date'] })
     h.capabilities.mockResolvedValue(v01Capabilities())
     h.list.mockResolvedValue({ courses: [course()] })
@@ -306,6 +334,16 @@ describe('ElearningLearnerView', () => {
       totalScore: 10,
       passed: true,
       duplicate: false,
+    })
+    h.openContent.mockResolvedValue({
+      itemId: ARTICLE_ITEM,
+      itemType: 'article',
+      title: '安全文章',
+      articleHtml: '<p>服务端净化正文</p>',
+      externalUrl: null,
+      status: 'completed',
+      completedAt: '2026-08-29T01:02:03.000Z',
+      assurance: 'weak_server_recorded_open',
     })
   })
 
@@ -1051,25 +1089,86 @@ describe('ElearningLearnerView', () => {
     expect(h.startExam).not.toHaveBeenCalled()
   })
 
-  it('fails closed without list/watch/exam when enabled or a V0.1 capability is false', async () => {
+  it('dispatches a content-only course without media/assessment and refreshes after authoritative open', async () => {
+    h.capabilities.mockResolvedValue(v01Capabilities({}, { assessment: false, media: false }))
+    h.list
+      .mockResolvedValueOnce({ courses: [contentCourse()] })
+      .mockResolvedValueOnce({ courses: [contentCourse(true)] })
+    const root = mountView()
+    await flushUi()
+    expect(root.textContent).toContain('阅读课程')
+    expect(root.querySelector('[data-testid="elearning-start-watch"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-start-exam"]')).toBeNull()
+    ;(root.querySelector('[data-testid="elearning-content-open-0"]') as HTMLButtonElement).click()
+    await flushUi(16)
+    expect(h.openContent).toHaveBeenCalledTimes(1)
+    expect(h.list).toHaveBeenCalledTimes(2)
+    expect(root.textContent).toContain('已完成')
+  })
+
+  it('filters assessment variants only when assessment capability is unavailable', async () => {
+    h.capabilities.mockResolvedValue(v01Capabilities({}, { assessment: false, media: false }))
+    h.list.mockResolvedValue({ courses: [course(), contentCourse()] })
+    const contentMode = mountView()
+    await flushUi()
+    expect(contentMode.querySelector(`[data-testid="elearning-course-${COURSE}"]`)).toBeNull()
+    expect(contentMode.querySelector(`[data-testid="elearning-course-${COURSE_DONE}"]`)).not.toBeNull()
+    expect(contentMode.querySelector('[data-testid="elearning-learner-status"]')).toBeNull()
+
+    app?.unmount()
+    container?.remove()
+    h.capabilities.mockResolvedValue(v01Capabilities())
+    h.list.mockResolvedValue({ courses: [course(), contentCourse()] })
+    const assessmentMode = mountView()
+    await flushUi()
+    expect([...assessmentMode.querySelectorAll('[data-testid^="elearning-course-"]')].map(
+      (element) => element.getAttribute('data-testid'),
+    )).toEqual([
+      `elearning-course-${COURSE}`,
+      `elearning-course-${COURSE_DONE}`,
+    ])
+    expect(assessmentMode.querySelector('[data-testid="elearning-learner-status"]')).toBeNull()
+  })
+
+  it('filters assessment-only responses in content mode and fails closed on a disabled master flag', async () => {
     h.capabilities.mockResolvedValue(v01Capabilities({}, { media: false, incentive: true, analytics: true }))
     const root = mountView()
     await flushUi()
-    expect(h.list).not.toHaveBeenCalled()
+    expect(h.list).toHaveBeenCalledTimes(1)
     expect(h.startWatch).not.toHaveBeenCalled()
     expect(h.startExam).not.toHaveBeenCalled()
-    expect(root.querySelector('[data-testid="elearning-learner-status"]')?.textContent).toContain('feature_disabled')
-    expect(root.textContent).not.toContain('暂无已指派课程')
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')).toBeNull()
+    expect(root.querySelector(`[data-testid="elearning-course-${COURSE}"]`)).toBeNull()
+    expect(root.textContent).toContain('暂无可学习课程')
 
     app?.unmount()
     container?.remove()
     h.capabilities.mockResolvedValue(v01Capabilities({ enabled: false }))
     const disabled = mountView()
     await flushUi()
-    expect(h.list).not.toHaveBeenCalled()
+    expect(h.list).toHaveBeenCalledTimes(1)
     expect(h.startWatch).not.toHaveBeenCalled()
     expect(h.startExam).not.toHaveBeenCalled()
     expect(disabled.querySelector('[data-testid="elearning-learner-status"]')?.textContent).toContain('feature_disabled')
+  })
+
+  it('keeps an incentive-only wallet available without requesting course content', async () => {
+    h.capabilities.mockResolvedValue(v01Capabilities({}, {
+      content: false,
+      assignment: false,
+      assessment: false,
+      incentive: true,
+      media: false,
+    }))
+    const root = mountView()
+    await flushUi()
+
+    expect(root.querySelector('[data-testid="elearning-credit-wallet-balance"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')).toBeNull()
+    expect(h.list).not.toHaveBeenCalled()
+    expect(h.startWatch).not.toHaveBeenCalled()
+    expect(h.startExam).not.toHaveBeenCalled()
+    expect(root.querySelector('[data-testid^="elearning-course-"]')).toBeNull()
   })
 
   it('does not leak stale queued beats from a stopped session into a new session', async () => {

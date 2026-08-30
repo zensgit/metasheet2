@@ -880,13 +880,14 @@ describe('elearning V0.1 watch-progress service gate (real DB)', () => {
     assertValuesFree(done, org, seed.userId)
 
     const evidence = await pool.query(
-      `SELECT completion_policy_version, completion_threshold_bps, media_duration_ms,
+      `SELECT item_type, completion_policy_version, completion_threshold_bps, media_duration_ms,
               effective_ms, max_position_ms, event_digest, evaluator_version
          FROM elearning_completion_evidence WHERE org_id = $1`,
       [org],
     )
     expect(evidence.rows).toHaveLength(1)
     expect(evidence.rows[0]).toEqual(expect.objectContaining({
+      item_type: 'video',
       completion_policy_version: ELEARNING_WATCH_POLICY_VERSION,
       completion_threshold_bps: ELEARNING_WATCH_THRESHOLD_BPS,
       evaluator_version: ELEARNING_WATCH_EVALUATOR_VERSION,

@@ -9,7 +9,7 @@
     <p v-else-if="items.length === 0 && !error" data-testid="elearning-credit-wallet-empty">{{ text('No credit history yet.', '暂无学分记录。') }}</p>
     <ul v-else data-testid="elearning-credit-wallet-items">
       <li v-for="item in items" :key="item.decisionId">
-        <strong>+{{ item.awardedPoints }}</strong>
+        <strong>{{ pointsLabel(item.awardedPoints) }}</strong>
         <span>{{ behaviorLabel(item.behavior) }}</span>
         <time :datetime="item.occurredAt">{{ formatDate(item.occurredAt) }}</time>
       </li>
@@ -26,7 +26,7 @@ import { useLocale } from '../composables/useLocale'
 import { ElearningApiError } from '../services/elearning'
 import {
   getMyElearningCreditWallet,
-  type ElearningCreditAutomaticBehavior,
+  type ElearningCreditBehavior,
   type ElearningCreditWalletItem,
 } from '../services/elearningCredit'
 
@@ -41,8 +41,8 @@ function text(en: string, zh: string): string {
   return isZh.value ? zh : en
 }
 
-function behaviorLabel(value: ElearningCreditAutomaticBehavior): string {
-  const labels: Record<ElearningCreditAutomaticBehavior, [string, string]> = {
+function behaviorLabel(value: ElearningCreditBehavior): string {
+  const labels: Record<ElearningCreditBehavior, [string, string]> = {
     login: ['Login', '登录'],
     complete_course: ['Course completed', '完成课程'],
     complete_plan: ['Plan completed', '完成计划'],
@@ -50,9 +50,14 @@ function behaviorLabel(value: ElearningCreditAutomaticBehavior): string {
     submit_survey: ['Survey submitted', '提交问卷'],
     complete_map: ['Learning map completed', '完成学习地图'],
     complete_offline: ['Offline activity completed', '完成线下活动'],
+    manual_adjust: ['Manual adjustment', '人工调整'],
   }
   const [en, zh] = labels[value]
   return text(en, zh)
+}
+
+function pointsLabel(value: number): string {
+  return value > 0 ? `+${value}` : String(value)
 }
 
 function formatDate(value: string): string {

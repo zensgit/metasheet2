@@ -7,6 +7,7 @@ export const ELEARNING_CREDIT_WALLET_PAGE_MAX = 100 as const
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const STABLE_ERROR_CODE_RE = /^[a-z][a-z0-9_]{0,62}$/
+const CANONICAL_ISO_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const AUTOMATIC_BEHAVIORS = [
   'login',
   'complete_course',
@@ -16,7 +17,9 @@ const AUTOMATIC_BEHAVIORS = [
   'complete_map',
   'complete_offline',
 ] as const
-const WALLET_STATUSES = ['awarded', 'capped', 'exhausted'] as const
+const WALLET_BEHAVIORS = [...AUTOMATIC_BEHAVIORS, 'manual_adjust'] as const
+const WALLET_STATUSES = ['awarded', 'capped', 'exhausted', 'adjusted'] as const
+const PG_INT4_MAX = 2_147_483_647
 const FORBIDDEN_KEYS = new Set([
   'actorId',
   'actor_id',
@@ -24,6 +27,7 @@ const FORBIDDEN_KEYS = new Set([
   'effect_key',
   'rawReference',
   'raw_reference',
+  'reason',
   'reference',
   'requestHash',
   'request_hash',
@@ -32,6 +36,7 @@ const FORBIDDEN_KEYS = new Set([
 ])
 
 export type ElearningCreditAutomaticBehavior = (typeof AUTOMATIC_BEHAVIORS)[number]
+export type ElearningCreditBehavior = (typeof WALLET_BEHAVIORS)[number]
 export type ElearningCreditWalletStatus = (typeof WALLET_STATUSES)[number]
 
 export interface ElearningCreditRule {
@@ -54,10 +59,25 @@ export interface ElearningCreditRulePublishInput {
 
 export interface ElearningCreditWalletItem {
   decisionId: string
-  behavior: ElearningCreditAutomaticBehavior
+  behavior: ElearningCreditBehavior
   awardedPoints: number
   status: ElearningCreditWalletStatus
   occurredAt: string
+  createdAt: string
+}
+
+export interface ElearningCreditAdjustmentInput {
+  requestId: string
+  userId: string
+  points: number
+  reason: string
+}
+
+export interface ElearningCreditAdjustmentResult {
+  adjustmentId: string
+  userId: string
+  points: number
+  balancePoints: number
   createdAt: string
 }
 
@@ -111,12 +131,27 @@ function requireText(value: unknown, status: number): string {
 
 function requireIsoTimestamp(value: unknown, status: number): string {
   const text = requireText(value, status)
-  if (!Number.isFinite(Date.parse(text))) failShape(status)
+  const date = new Date(text)
+  if (
+    !CANONICAL_ISO_INSTANT_RE.test(text)
+    || Number.isNaN(date.getTime())
+    || date.toISOString() !== text
+  ) failShape(status)
   return text
 }
 
-function requireSafeInt(value: unknown, status: number, min = 0): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min) {
+function requireSafeInt(
+  value: unknown,
+  status: number,
+  min = 0,
+  max = Number.MAX_SAFE_INTEGER,
+): number {
+  if (
+    typeof value !== 'number'
+    || !Number.isSafeInteger(value)
+    || value < min
+    || value > max
+  ) {
     failShape(status)
   }
   return value
@@ -125,6 +160,27 @@ function requireSafeInt(value: unknown, status: number, min = 0): number {
 function requirePositiveInput(value: number): number {
   if (!Number.isSafeInteger(value) || value <= 0) fail('invalid_input', 400)
   return value
+}
+
+function requireAdjustmentPointsInput(value: number): number {
+  if (
+    !Number.isSafeInteger(value)
+    || value === 0
+    || value < -PG_INT4_MAX
+    || value > PG_INT4_MAX
+  ) fail('invalid_input', 400)
+  return value
+}
+
+function requireInputText(value: string): string {
+  const text = value.trim()
+  if (
+    text === ''
+    || text.length > 512
+    || text.includes('\0')
+    || /[\ud800-\udfff]/u.test(text)
+  ) fail('invalid_input', 400)
+  return text
 }
 
 function requireNullablePositiveInput(value: number | null): number | null {
@@ -143,6 +199,11 @@ function requireInputBehavior(value: string): ElearningCreditAutomaticBehavior {
     fail('invalid_input', 400)
   }
   return value as ElearningCreditAutomaticBehavior
+}
+
+function requireWalletBehavior(value: unknown, status: number): ElearningCreditBehavior {
+  if (!WALLET_BEHAVIORS.includes(value as ElearningCreditBehavior)) failShape(status)
+  return value as ElearningCreditBehavior
 }
 
 function requireStatus(value: unknown, status: number): ElearningCreditWalletStatus {
@@ -209,12 +270,43 @@ function parseWalletItem(value: unknown, status: number): ElearningCreditWalletI
     'decisionId', 'behavior', 'awardedPoints', 'status', 'occurredAt', 'createdAt',
   ] as const
   if (!isPlainObject(value) || !exactKeys(value, keys)) failShape(status)
+  const behavior = requireWalletBehavior(value.behavior, status)
+  const walletStatus = requireStatus(value.status, status)
+  const awardedPoints = requireSafeInt(
+    value.awardedPoints,
+    status,
+    -PG_INT4_MAX,
+    PG_INT4_MAX,
+  )
+  if (
+    behavior === 'manual_adjust'
+      ? walletStatus !== 'adjusted' || awardedPoints === 0
+      : walletStatus === 'adjusted' || awardedPoints < 0
+  ) failShape(status)
   return {
     decisionId: requireUuid(value.decisionId, status),
-    behavior: requireBehavior(value.behavior, status),
-    awardedPoints: requireSafeInt(value.awardedPoints, status),
-    status: requireStatus(value.status, status),
+    behavior,
+    awardedPoints,
+    status: walletStatus,
     occurredAt: requireIsoTimestamp(value.occurredAt, status),
+    createdAt: requireIsoTimestamp(value.createdAt, status),
+  }
+}
+
+function parseAdjustment(
+  value: unknown,
+  status: number,
+): ElearningCreditAdjustmentResult {
+  if (!isPlainObject(value) || !exactKeys(value, [
+    'adjustmentId', 'userId', 'points', 'balancePoints', 'createdAt',
+  ])) failShape(status)
+  const points = requireSafeInt(value.points, status, -PG_INT4_MAX, PG_INT4_MAX)
+  if (points === 0) failShape(status)
+  return {
+    adjustmentId: requireUuid(value.adjustmentId, status),
+    userId: requireText(value.userId, status),
+    points,
+    balancePoints: requireSafeInt(value.balancePoints, status, 0, PG_INT4_MAX),
     createdAt: requireIsoTimestamp(value.createdAt, status),
   }
 }
@@ -229,7 +321,7 @@ function parseWallet(value: unknown, status: number): ElearningCreditWallet {
     : requireText(value.nextCursor, status)
   return {
     userId: requireText(value.userId, status),
-    balancePoints: requireSafeInt(value.balancePoints, status),
+    balancePoints: requireSafeInt(value.balancePoints, status, 0, PG_INT4_MAX),
     items: value.items.map((item) => parseWalletItem(item, status)),
     nextCursor,
   }
@@ -254,6 +346,21 @@ export async function publishElearningCreditRule(
     timeZone: requireTimeZone(input.timeZone),
   }
   return parseRule(await requestJson('/api/elearning/admin/credit-rules', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  }), 200)
+}
+
+export async function adjustElearningCredit(
+  input: ElearningCreditAdjustmentInput,
+): Promise<ElearningCreditAdjustmentResult> {
+  const body = {
+    requestId: requireInputUuid(input.requestId),
+    userId: requireInputText(input.userId),
+    points: requireAdjustmentPointsInput(input.points),
+    reason: requireInputText(input.reason),
+  }
+  return parseAdjustment(await requestJson('/api/elearning/admin/credits/adjustments', {
     method: 'POST',
     body: JSON.stringify(body),
   }), 200)

@@ -12,6 +12,9 @@ import {
   up as creditSurfaceUp,
 } from '../../src/db/migrations/zzzz20260829120000_create_elearning_credit_rule_requests'
 import {
+  up as creditAdjustmentUp,
+} from '../../src/db/migrations/zzzz20260829160000_create_elearning_credit_adjustments'
+import {
   ElearningCreditSurfaceError,
   getElearningCreditWallet,
   publishElearningCreditRule,
@@ -87,6 +90,7 @@ async function createMembershipSchema(): Promise<void> {
       user_id text NOT NULL,
       org_id text NOT NULL,
       is_active boolean NOT NULL DEFAULT true,
+      created_at timestamptz NOT NULL DEFAULT now(),
       PRIMARY KEY (user_id, org_id)
     )
   `)
@@ -158,6 +162,7 @@ describe('e-learning credit rules and wallet PostgreSQL authority', () => {
     await createMembershipSchema()
     await migrate(creditLedgerUp)
     await migrate(creditSurfaceUp)
+    await migrate(creditAdjustmentUp)
   }, 30_000)
 
   afterAll(async () => {

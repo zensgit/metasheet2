@@ -40,7 +40,7 @@
           <dt>{{ elearningLabel('learner.deadline', isZh) }}</dt>
           <dd>{{ course.assignment?.deadline || elearningLabel('learner.deadlineNone', isZh) }}</dd>
         </div>
-        <div>
+        <div v-if="isElearningAssessmentCourse(course)">
           <dt>{{ elearningLabel('learner.videoProgress', isZh) }}</dt>
           <dd data-testid="elearning-video-progress">{{ elearningLearnerVideoProgressLabel(course.video.status, course.video.effectiveMs, course.video.durationMs, isZh) }}</dd>
         </div>
@@ -50,7 +50,13 @@
         </div>
       </dl>
 
-      <div class="elearning-course__actions">
+      <ElearningContentLearnerCourse
+        v-if="!isElearningAssessmentCourse(course)"
+        :course="course"
+        @completed="void onContentCompleted()"
+      />
+
+      <div v-if="isElearningAssessmentCourse(course)" class="elearning-course__actions">
         <button
           type="button"
           class="elearning-btn elearning-btn--primary"
@@ -80,7 +86,7 @@
       </div>
 
       <video
-        v-if="activeCourseVersionId === course.courseVersionId && playbackSrc"
+        v-if="isElearningAssessmentCourse(course) && activeCourseVersionId === course.courseVersionId && playbackSrc"
         class="elearning-video"
         data-testid="elearning-learner-video"
         controls
@@ -98,7 +104,7 @@
       </video>
 
       <p
-        v-if="course.exam.latestAttempt
+        v-if="isElearningAssessmentCourse(course) && course.exam.latestAttempt
           && (course.exam.latestAttempt.status === 'graded'
             || course.exam.latestAttempt.status === 'awaiting_manual')"
         class="elearning-result"
@@ -110,7 +116,7 @@
       </p>
 
       <form
-        v-if="examCourseVersionId === course.courseVersionId && paper"
+        v-if="isElearningAssessmentCourse(course) && examCourseVersionId === course.courseVersionId && paper"
         class="elearning-exam"
         data-testid="elearning-exam-form"
         @submit.prevent="void submitExam()"
@@ -179,7 +185,7 @@
       </form>
 
       <p
-        v-if="examCourseVersionId === course.courseVersionId && examResult"
+        v-if="isElearningAssessmentCourse(course) && examCourseVersionId === course.courseVersionId && examResult"
         class="elearning-result"
         data-testid="elearning-exam-result"
       >
@@ -200,6 +206,8 @@ import {
   ElearningApiError,
   elearningPlaybackSourceUrl,
   getElearningCapabilities,
+  isElearningAssessmentCourse,
+  isElearningContentReady,
   isElearningLearnerReady,
   issueElearningPlaybackTicket,
   listMyElearningCourses,
@@ -210,12 +218,14 @@ import {
   submitElearningExam,
   type ElearningExamSubmitResult,
   type ElearningExamAnswers,
+  type ElearningLearnerAssessmentCourse,
   type ElearningLearnerCourse,
   type ElearningPlaybackTicket,
   type ElearningPublicPaper,
   type ElearningExamQuestionType,
   type ElearningWatchState,
 } from '../services/elearning'
+import ElearningContentLearnerCourse from './ElearningContentLearnerCourse.vue'
 import ElearningCreditWalletSection from './ElearningCreditWalletSection.vue'
 import {
   elearningExamAnswerProgress,
@@ -234,6 +244,7 @@ const courses = ref<ElearningLearnerCourse[]>([])
 const loading = ref(false)
 const busy = ref(false)
 const ready = ref(false)
+const assessmentReady = ref(false)
 const incentiveEnabled = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
@@ -539,7 +550,7 @@ function applyServerWatchProgress(
   watch: Pick<ElearningWatchState, 'status' | 'effectiveMs' | 'maxPositionMs'>,
 ): void {
   courses.value = courses.value.map((course) => {
-    if (course.courseVersionId !== courseVersionId) return course
+    if (course.courseVersionId !== courseVersionId || !isElearningAssessmentCourse(course)) return course
     return {
       ...course,
       video: {
@@ -585,18 +596,30 @@ function isNaturalVideoEnd(video: HTMLVideoElement | null): boolean {
 
 async function ensureV01Ready(): Promise<void> {
   const capabilities = await getElearningCapabilities()
+  assessmentReady.value = isElearningLearnerReady(capabilities)
+  const contentReady = isElearningContentReady(capabilities)
   incentiveEnabled.value = capabilities.enabled === true
     && capabilities.capabilities.incentive === true
-  if (!isElearningLearnerReady(capabilities)) {
+  if (!assessmentReady.value && !contentReady && !incentiveEnabled.value) {
     throw new ElearningApiError('feature_disabled', 404)
   }
-  ready.value = true
+  ready.value = assessmentReady.value || contentReady
 }
 
 async function refreshCourses(): Promise<void> {
   if (!ready.value) return
   const result = await listMyElearningCourses()
-  courses.value = result.courses
+  courses.value = assessmentReady.value
+    ? result.courses
+    : result.courses.filter((course) => !isElearningAssessmentCourse(course))
+}
+
+async function onContentCompleted(): Promise<void> {
+  try {
+    await refreshCourses()
+  } catch (error) {
+    writeStatus(formatError(error), 'error')
+  }
 }
 
 function enqueueBeat(playing: boolean): void {
@@ -878,7 +901,7 @@ function onShortAnswerInput(event: Event, questionRevisionId: string): void {
   queueDraftSave()
 }
 
-async function startWatch(course: ElearningLearnerCourse): Promise<void> {
+async function startWatch(course: ElearningLearnerAssessmentCourse): Promise<void> {
   if (!ready.value || !viewMounted) return
   if (busy.value && !watchStartPending) return
   busy.value = true
@@ -923,7 +946,7 @@ async function startWatch(course: ElearningLearnerCourse): Promise<void> {
   }
 }
 
-async function startExam(course: ElearningLearnerCourse): Promise<void> {
+async function startExam(course: ElearningLearnerAssessmentCourse): Promise<void> {
   if (
     busy.value
     || !ready.value

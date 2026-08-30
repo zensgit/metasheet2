@@ -50,6 +50,8 @@ const BANK = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
 const PAPER_ID = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
 const SHA256 = 'ab'.repeat(32)
 const CREATED_AT = '2026-08-26T00:00:00.000Z'
+const NONCANONICAL_AT = '2026-08-26T00:00:00Z'
+const IMPOSSIBLE_AT = '2026-02-31T00:00:00.000Z'
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -105,6 +107,45 @@ function learnerCourse(over: Record<string, unknown> = {}) {
     },
     exam: { itemId: EXAM_ITEM, latestAttempt: null },
     completed: false,
+    ...over,
+  }
+}
+
+function latestAttempt(over: Record<string, unknown> = {}) {
+  return {
+    attemptId: ATTEMPT,
+    attemptNo: 1,
+    status: 'graded',
+    autoScore: 10,
+    totalScore: 10,
+    passed: true,
+    startedAt: CREATED_AT,
+    submittedAt: CREATED_AT,
+    gradedAt: CREATED_AT,
+    ...over,
+  }
+}
+
+function examStartResult(over: Record<string, unknown> = {}) {
+  return {
+    attemptId: ATTEMPT,
+    attemptNo: 1,
+    status: 'started',
+    paper: paper(),
+    answers: { [Q1]: [] },
+    deadlineAt: CREATED_AT,
+    duplicate: false,
+    ...over,
+  }
+}
+
+function playbackTicket(over: Record<string, unknown> = {}) {
+  return {
+    token: 'tok.en',
+    expiresAt: CREATED_AT,
+    ttlSeconds: 600,
+    itemId: VIDEO,
+    mediaId: MEDIA,
     ...over,
   }
 }
@@ -322,6 +363,108 @@ describe('elearning client transport', () => {
     await issueElearningPlaybackTicket(VIDEO)
     expect(lastCall().path).toBe(`/api/elearning/watch/items/${VIDEO}/playback-ticket`)
     expect(lastJson()).toEqual({})
+  })
+
+  it('accepts canonical timestamps across exam, attempt, video, assignment, and playback DTOs', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(jsonResponse(200, {
+        courses: [learnerCourse({
+          assignment: { deadline: CREATED_AT, assignedAt: CREATED_AT },
+          video: {
+            ...learnerCourse().video,
+            status: 'completed',
+            completedAt: CREATED_AT,
+          },
+          exam: {
+            itemId: EXAM_ITEM,
+            latestAttempt: latestAttempt(),
+          },
+        })],
+      }))
+      .mockResolvedValueOnce(jsonResponse(200, examStartResult()))
+      .mockResolvedValueOnce(jsonResponse(200, playbackTicket()))
+
+    await expect(listMyElearningCourses()).resolves.toMatchObject({
+      courses: [{
+        assignment: { deadline: CREATED_AT, assignedAt: CREATED_AT },
+        video: { completedAt: CREATED_AT },
+        exam: {
+          latestAttempt: {
+            startedAt: CREATED_AT,
+            submittedAt: CREATED_AT,
+            gradedAt: CREATED_AT,
+          },
+        },
+      }],
+    })
+    await expect(startElearningExam(EXAM_ITEM)).resolves.toMatchObject({ deadlineAt: CREATED_AT })
+    await expect(issueElearningPlaybackTicket(VIDEO)).resolves.toMatchObject({ expiresAt: CREATED_AT })
+  })
+
+  it.each([
+    ['exam deadline', (bad: string) => ({
+      body: examStartResult({ deadlineAt: bad }),
+      request: () => startElearningExam(EXAM_ITEM),
+    })],
+    ['latest attempt start', (bad: string) => ({
+      body: { courses: [learnerCourse({
+        exam: {
+          itemId: EXAM_ITEM,
+          latestAttempt: latestAttempt({ startedAt: bad }),
+        },
+      })] },
+      request: () => listMyElearningCourses(),
+    })],
+    ['latest attempt submit', (bad: string) => ({
+      body: { courses: [learnerCourse({
+        exam: {
+          itemId: EXAM_ITEM,
+          latestAttempt: latestAttempt({ submittedAt: bad }),
+        },
+      })] },
+      request: () => listMyElearningCourses(),
+    })],
+    ['latest attempt grade', (bad: string) => ({
+      body: { courses: [learnerCourse({
+        exam: {
+          itemId: EXAM_ITEM,
+          latestAttempt: latestAttempt({ gradedAt: bad }),
+        },
+      })] },
+      request: () => listMyElearningCourses(),
+    })],
+    ['video completion', (bad: string) => ({
+      body: { courses: [learnerCourse({
+        video: {
+          ...learnerCourse().video,
+          status: 'completed',
+          completedAt: bad,
+        },
+      })] },
+      request: () => listMyElearningCourses(),
+    })],
+    ['assignment deadline', (bad: string) => ({
+      body: { courses: [learnerCourse({
+        assignment: { deadline: bad, assignedAt: CREATED_AT },
+      })] },
+      request: () => listMyElearningCourses(),
+    })],
+    ['assignment creation', (bad: string) => ({
+      body: { courses: [learnerCourse({
+        assignment: { deadline: null, assignedAt: bad },
+      })] },
+      request: () => listMyElearningCourses(),
+    })],
+    ['playback expiry', (bad: string) => ({
+      body: playbackTicket({ expiresAt: bad }),
+      request: () => issueElearningPlaybackTicket(VIDEO),
+    })],
+  ])('rejects a noncanonical or impossible %s timestamp', async (_label, makeCase) => {
+    for (const bad of [NONCANONICAL_AT, IMPOSSIBLE_AT]) {
+      const { body, request } = makeCase(bad)
+      apiFetchMock.mockResolvedValueOnce(jsonResponse(200, body))
+      await expect(request()).rejects.toMatchObject({ code: 'invalid_response', status: 200 })
+    }
   })
 
   it('sends heartbeat monotonic fields only', async () => {

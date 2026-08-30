@@ -27,6 +27,7 @@ function dummyDb(): ElearningCreditSurfaceDb {
 describe('e-learning credit runtime', () => {
   it('mounts the incentive router independently without exposing content routes', async () => {
     const walletCalls: string[] = []
+    const adjustmentCalls: string[] = []
     const runtime = createElearningPilotRuntime({
       db: dummyDb(),
       env: { ...FLAG_ON },
@@ -42,6 +43,17 @@ describe('e-learning credit runtime', () => {
           balancePoints: 0,
           items: [],
           nextCursor: null,
+        }
+      },
+      adjustElearningCredit: async (_db, input) => {
+        adjustmentCalls.push(input.userId as string)
+        return {
+          adjustmentId: '11111111-1111-4111-8111-111111111111',
+          userId: input.userId as string,
+          points: input.points as number,
+          balancePoints: 5,
+          createdAt: '2026-08-29T00:00:00.000Z',
+          duplicate: false,
         }
       },
     })
@@ -60,6 +72,23 @@ describe('e-learning credit runtime', () => {
       nextCursor: null,
     })
     expect(walletCalls).toEqual([ACTOR])
+    const adjustment = await api
+      .post('/api/elearning/admin/credits/adjustments')
+      .send({
+        requestId: 'request-runtime-adjust',
+        userId: ACTOR,
+        points: 5,
+        reason: 'runtime adjustment',
+      })
+    expect(adjustment.status).toBe(200)
+    expect(adjustment.body).toEqual({
+      adjustmentId: '11111111-1111-4111-8111-111111111111',
+      userId: ACTOR,
+      points: 5,
+      balancePoints: 5,
+      createdAt: '2026-08-29T00:00:00.000Z',
+    })
+    expect(adjustmentCalls).toEqual([ACTOR])
     expect((await api.get('/api/elearning/courses')).status).toBe(404)
   })
 

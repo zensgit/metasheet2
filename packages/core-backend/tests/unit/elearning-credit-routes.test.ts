@@ -4,6 +4,10 @@ import { describe, expect, it } from 'vitest'
 
 import { createElearningCreditRouter } from '../../src/routes/elearning-credit'
 import {
+  ElearningCreditAdjustmentError,
+  type AdjustElearningCreditInput,
+} from '../../src/services/elearning-credit-adjustment'
+import {
   ElearningCreditSurfaceError,
   type ElearningCreditSurfaceDb,
   type GetElearningCreditWalletInput,
@@ -16,6 +20,7 @@ const ACTOR = 'actor-credit-routes'
 const TARGET = 'target-credit-routes'
 const RULE_ID = '11111111-1111-4111-8111-111111111111'
 const DECISION_ID = '22222222-2222-4222-8222-222222222222'
+const ADJUSTMENT_ID = '33333333-3333-4333-8333-333333333333'
 const FLAG_ON = {
   ELEARNING_ENABLED: 'true',
   ELEARNING_INCENTIVE_ENABLED: 'true',
@@ -40,9 +45,11 @@ function makeApp(over: {
   readAllowed?: boolean
   publishError?: ElearningCreditSurfaceError
   walletError?: ElearningCreditSurfaceError
+  adjustmentError?: ElearningCreditAdjustmentError
 } = {}) {
   const publishCalls: PublishElearningCreditRuleInput[] = []
   const walletCalls: GetElearningCreditWalletInput[] = []
+  const adjustmentCalls: AdjustElearningCreditInput[] = []
   let adminGuardCalls = 0
   let readGuardCalls = 0
   const env = over.env ?? { ...FLAG_ON }
@@ -113,6 +120,21 @@ function makeApp(over: {
         nextCursor: null,
       } as never
     },
+    adjustElearningCredit: async (_db, input) => {
+      adjustmentCalls.push(input)
+      if (over.adjustmentError) throw over.adjustmentError
+      return {
+        adjustmentId: ADJUSTMENT_ID,
+        userId: input.userId as string,
+        points: input.points as number,
+        balancePoints: 15,
+        createdAt: '2026-08-29T00:00:02.000Z',
+        duplicate: false,
+        actorId: 'must-not-leak',
+        requestHash: 'must-not-leak',
+        reason: 'must-not-leak',
+      } as never
+    },
   })
   const app = express()
   if (router) app.use(router)
@@ -122,6 +144,7 @@ function makeApp(over: {
     env,
     publishCalls,
     walletCalls,
+    adjustmentCalls,
     guardCounts: () => ({ adminGuardCalls, readGuardCalls }),
     mounted: router !== null,
   }
@@ -218,6 +241,68 @@ describe('e-learning credit routes', () => {
     expect(response.status).toBe(409)
     expect(response.body).toEqual({ error: 'conflict' })
     expect(JSON.stringify(response.body)).not.toContain('request-route-conflict')
+  })
+
+  it('applies an admin adjustment with server-derived actor/org and a closed DTO', async () => {
+    const harness = makeApp()
+    const response = await harness.api
+      .post('/api/elearning/admin/credits/adjustments')
+      .send({
+        requestId: 'request-adjust-route',
+        userId: TARGET,
+        points: -3,
+        reason: 'manual correction',
+      })
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({
+      adjustmentId: ADJUSTMENT_ID,
+      userId: TARGET,
+      points: -3,
+      balancePoints: 15,
+      createdAt: '2026-08-29T00:00:02.000Z',
+    })
+    expect(harness.adjustmentCalls).toEqual([{
+      orgId: ORG,
+      actorId: ACTOR,
+      requestId: 'request-adjust-route',
+      userId: TARGET,
+      points: -3,
+      reason: 'manual correction',
+    }])
+    expect(JSON.stringify(response.body)).not.toMatch(/requestHash|reason|actorId|must-not-leak/)
+    expect(harness.guardCounts()).toEqual({ adminGuardCalls: 1, readGuardCalls: 0 })
+  })
+
+  it('rejects adjustment authority injection and maps conflict/unavailable values-free', async () => {
+    const injected = makeApp()
+    const injectionResponse = await injected.api
+      .post('/api/elearning/admin/credits/adjustments')
+      .send({
+        requestId: 'request-adjust-injected',
+        userId: TARGET,
+        points: 3,
+        reason: 'manual correction',
+        actorId: 'attacker',
+      })
+    expect(injectionResponse.status).toBe(400)
+    expect(injected.adjustmentCalls).toHaveLength(0)
+
+    for (const [code, status] of [['conflict', 409], ['unavailable', 503]] as const) {
+      const harness = makeApp({
+        adjustmentError: new ElearningCreditAdjustmentError(code),
+      })
+      const response = await harness.api
+        .post('/api/elearning/admin/credits/adjustments')
+        .send({
+          requestId: `request-adjust-${code}`,
+          userId: TARGET,
+          points: 3,
+          reason: 'manual correction',
+        })
+      expect(response.status).toBe(status)
+      expect(response.body).toEqual({ error: code })
+      expect(JSON.stringify(response.body)).not.toMatch(/request-adjust|manual correction/)
+    }
   })
 
   it('reads only the authenticated learner wallet and strips persistence-only fields', async () => {

@@ -1548,6 +1548,11 @@ export default defineConfig({
       // the content/assessment + watch gates in plugin-tests.yml after
       // db:migrate on the 20.x leg.
       'tests/integration/elearning-course-publish.db.test.ts',
+      // E-learning content revision/publish/open authority. Requires real
+      // PostgreSQL for exact item-revision FKs, append-only completion,
+      // publish-shape triggers, replay conflicts, and migration drift.
+      // Excluded from no-DB collection and wired whole-file post-migrate.
+      'tests/integration/elearning-content-runtime.db.test.ts',
       // E-learning L4 credit-ledger authority. Requires real PostgreSQL for
       // effect identity, replay/hash conflicts, bucket locking, and balances.
       // Excluded from the no-DB job and wired as a whole-file post-migrate gate.
@@ -1557,6 +1562,10 @@ export default defineConfig({
       // immutable commands, membership isolation, and stable keyset reads.
       // Excluded from no-DB collection and wired whole-file post-migrate.
       'tests/integration/elearning-credit-rules-wallet.db.test.ts',
+      // E-learning L4 manual credit adjustment authority. Requires real
+      // PostgreSQL for replay/conflict, balance locking, and migration drift.
+      // Excluded from no-DB collection and wired whole-file post-migrate.
+      'tests/integration/elearning-credit-adjustment.db.test.ts',
       // E-learning V0.1 exam service gate. Requires real PostgreSQL (start/
       // submit + advisory lock). Excluded from the no-DB job so a missing
       // DATABASE_URL cannot skip-green it; wired as a WHOLE FILE sibling of

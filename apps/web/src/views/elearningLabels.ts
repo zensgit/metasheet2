@@ -37,6 +37,13 @@ export type ElearningLabelKey =
   | 'learner.examExpired'
   | 'learner.submitExam'
   | 'learner.awaitingManual'
+  | 'learner.contentItems'
+  | 'learner.contentArticle'
+  | 'learner.contentExternalLink'
+  | 'learner.contentOpen'
+  | 'learner.contentOpening'
+  | 'learner.contentOpenLink'
+  | 'learner.contentOpened'
   // --- Admin chrome ---
   | 'admin.title'
   | 'admin.subtitle'
@@ -70,6 +77,21 @@ export type ElearningLabelKey =
   | 'admin.assignSuccess'
   | 'admin.assessmentOpen'
   | 'admin.assessmentClose'
+  | 'contentAdmin.title'
+  | 'contentAdmin.subtitle'
+  | 'contentAdmin.courseTitle'
+  | 'contentAdmin.itemTitle'
+  | 'contentAdmin.articleBody'
+  | 'contentAdmin.externalUrl'
+  | 'contentAdmin.addArticle'
+  | 'contentAdmin.addLink'
+  | 'contentAdmin.remove'
+  | 'contentAdmin.moveUp'
+  | 'contentAdmin.moveDown'
+  | 'contentAdmin.optionalAssignee'
+  | 'contentAdmin.publish'
+  | 'contentAdmin.publishing'
+  | 'contentAdmin.publishSuccess'
   // --- Assessment resource admin chrome ---
   | 'assessment.title'
   | 'assessment.subtitle'
@@ -162,6 +184,10 @@ export type ElearningLabelKey =
   | 'validation.paperTitleRequired'
   | 'validation.examTitleRequired'
   | 'validation.durationInteger'
+  | 'validation.contentItemRequired'
+  | 'validation.contentItemTitleRequired'
+  | 'validation.articleBodyRequired'
+  | 'validation.externalUrlRequired'
 
 const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = {
   'learner.title': { en: 'Learning Center', zh: '学习中心' },
@@ -195,6 +221,13 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
     en: 'Submitted. Waiting for manual grading.',
     zh: '已提交，等待人工阅卷。',
   },
+  'learner.contentItems': { en: 'Course content', zh: '课程内容' },
+  'learner.contentArticle': { en: 'Article', zh: '文章' },
+  'learner.contentExternalLink': { en: 'External link', zh: '外部链接' },
+  'learner.contentOpen': { en: 'Open and mark complete', zh: '打开并记录完成' },
+  'learner.contentOpening': { en: 'Opening...', zh: '正在打开…' },
+  'learner.contentOpenLink': { en: 'Open external content', zh: '打开外部内容' },
+  'learner.contentOpened': { en: 'Completion recorded.', zh: '已记录完成。' },
 
   'admin.title': { en: 'Cloud Classroom Admin', zh: '云课堂管理' },
   'admin.subtitle': {
@@ -234,6 +267,28 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   },
   'admin.assessmentOpen': { en: 'Manage assessment resources', zh: '管理题库与考试' },
   'admin.assessmentClose': { en: 'Close assessment resources', zh: '收起题库与考试' },
+
+  'contentAdmin.title': { en: 'Article and link course', zh: '文章与链接课程' },
+  'contentAdmin.subtitle': {
+    en: 'Build an ordered course from server-sanitized articles and HTTPS links.',
+    zh: '使用服务端净化的文章和 HTTPS 链接按顺序创建课程。',
+  },
+  'contentAdmin.courseTitle': { en: 'Content course title', zh: '内容课程标题' },
+  'contentAdmin.itemTitle': { en: 'Item title', zh: '内容标题' },
+  'contentAdmin.articleBody': { en: 'Article HTML', zh: '文章 HTML' },
+  'contentAdmin.externalUrl': { en: 'HTTPS URL', zh: 'HTTPS 链接' },
+  'contentAdmin.addArticle': { en: 'Add article', zh: '添加文章' },
+  'contentAdmin.addLink': { en: 'Add external link', zh: '添加外部链接' },
+  'contentAdmin.remove': { en: 'Remove', zh: '删除' },
+  'contentAdmin.moveUp': { en: 'Move up', zh: '上移' },
+  'contentAdmin.moveDown': { en: 'Move down', zh: '下移' },
+  'contentAdmin.optionalAssignee': {
+    en: 'Assignee (optional user ID)',
+    zh: '指派对象（可选用户 ID）',
+  },
+  'contentAdmin.publish': { en: 'Publish content course', zh: '发布内容课程' },
+  'contentAdmin.publishing': { en: 'Publishing content course...', zh: '正在发布内容课程…' },
+  'contentAdmin.publishSuccess': { en: 'Content course published.', zh: '内容课程已发布。' },
 
   'assessment.title': { en: 'Assessment resources', zh: '题库与考试资源' },
   'assessment.subtitle': {
@@ -424,6 +479,22 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   'validation.durationInteger': {
     en: 'Duration must be empty or a positive integer.',
     zh: '限时须留空或填写正整数。',
+  },
+  'validation.contentItemRequired': {
+    en: 'Add at least one article or external link.',
+    zh: '请至少添加一篇文章或一个外部链接。',
+  },
+  'validation.contentItemTitleRequired': {
+    en: 'Enter a title for every content item.',
+    zh: '请填写每项内容的标题。',
+  },
+  'validation.articleBodyRequired': {
+    en: 'Enter article HTML.',
+    zh: '请填写文章 HTML。',
+  },
+  'validation.externalUrlRequired': {
+    en: 'Enter an HTTPS URL.',
+    zh: '请填写 HTTPS 链接。',
   },
 }
 

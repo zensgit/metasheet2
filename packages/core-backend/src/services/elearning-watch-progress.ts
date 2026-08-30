@@ -887,11 +887,11 @@ export async function recordElearningHeartbeat(
         `/* elearning-watch:insert-evidence */
          INSERT INTO elearning_completion_evidence (
            org_id, assignment_member_id, scope_revision_rule_id, course_version_id,
-           course_version_item_id, user_id, completion_policy_version,
+           course_version_item_id, user_id, item_type, completion_policy_version,
            completion_threshold_bps, media_duration_ms, effective_ms, max_position_ms,
            event_digest, evaluator_version, completed_at
          ) VALUES (
-           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+           $1, $2, $3, $4, $5, $6, 'video', $7, $8, $9, $10, $11, $12, $13,
            clock_timestamp()
          )`,
         [
