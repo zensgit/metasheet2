@@ -20,7 +20,7 @@
  */
 
 import express, { Router, type Request, type Response } from 'express'
-import type { AutomationService } from '../multitable/automation-service'
+import type { AutomationService, AutomationTestRunSampleRecord } from '../multitable/automation-service'
 import { redactAutomationExecutionForResponse } from '../multitable/automation-log-service'
 import type { AutomationExecution, AutomationStepResult } from '../multitable/automation-executor'
 import { legacyAutomationStatusToJobStatus } from '../multitable/workflow-job-contract'
@@ -49,6 +49,7 @@ import {
   resolveRecordLinkTargetFromSchema,
 } from '../multitable/approval-fwb-activation'
 import { canReadApprovalTemplateForAutomation } from '../multitable/automation-approval-template-access'
+import { loadReadableAutomationSampleRecord } from './automation-test-run-sample'
 
 // ── A2 run-governance read mappers (boundary only — no storage change) ───────
 
@@ -585,8 +586,49 @@ export function createAutomationRoutes(
       })
     }
 
+    const rawRecordId = req.body && typeof req.body === 'object'
+      ? (req.body as Record<string, unknown>).recordId
+      : undefined
+    if (
+      rawRecordId !== undefined
+      && (typeof rawRecordId !== 'string' || rawRecordId.trim().length === 0 || rawRecordId.trim().length > 256)
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'INVALID_TEST_RUN_RECORD_ID', message: 'recordId must be a non-empty string of at most 256 characters' },
+      })
+    }
+
+    let sampleRecord: AutomationTestRunSampleRecord | undefined
+    if (typeof rawRecordId === 'string') {
+      try {
+        const pool = poolManager.get()
+        const loaded = await loadReadableAutomationSampleRecord(
+          req,
+          pool.query.bind(pool),
+          sheetId,
+          rawRecordId.trim(),
+        )
+        if ('status' in loaded) return res.status(loaded.status).json(loaded.body)
+        sampleRecord = loaded.sampleRecord
+      } catch (err) {
+        const raw = err instanceof Error ? err.message : ''
+        const transient = /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
+        return res.status(transient ? 503 : 500).json({
+          ok: false,
+          error: {
+            code: transient ? 'DB_NOT_READY' : 'SAMPLE_RECORD_READ_FAILED',
+            message: transient ? 'Service temporarily unavailable' : 'Failed to read sample record',
+          },
+        })
+      }
+    }
+
     try {
-      const execution = await svc.testRun(ruleId, sheetId, { mode: 'simulate' })
+      const execution = await svc.testRun(ruleId, sheetId, {
+        mode: 'simulate',
+        ...(sampleRecord ? { sampleRecord } : {}),
+      })
       // Simulation persistence is values-free and intentionally omits rule/record values. The
       // authorized caller still receives the response-level secret-redacted execution so future
       // sample-record previews can describe the planned action without widening the audit row.
