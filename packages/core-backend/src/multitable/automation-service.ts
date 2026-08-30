@@ -125,6 +125,28 @@ export interface AutomationTestRunOptions {
   mode?: AutomationTestRunMode
 }
 
+function valuesFreeSimulationStep(step: AutomationStepResult): AutomationStepResult {
+  return {
+    actionType: step.actionType,
+    status: step.status,
+    ...(step.simulated === true
+      ? { simulated: true, output: { dryRun: true, dispatched: false } }
+      : {}),
+    ...(typeof step.durationMs === 'number' ? { durationMs: step.durationMs } : {}),
+    ...(step.error ? { error: 'SIMULATION_STEP_FAILED' } : {}),
+  }
+}
+
+function valuesFreeSimulationExecution(execution: AutomationExecution): AutomationExecution {
+  return {
+    ...execution,
+    steps: execution.steps.map(valuesFreeSimulationStep),
+    triggerEvent: undefined,
+    ruleSnapshot: undefined,
+    ...(execution.error ? { error: 'SIMULATION_FAILED' } : { error: undefined }),
+  }
+}
+
 const VALID_TRIGGER_TYPES = new Set([
   'record.created',
   'record.updated',
@@ -2468,7 +2490,13 @@ export class AutomationService {
     // pass no factory → executor writes zero job rows (opt-out path is byte-identical to today).
     // This is the single place the path is chosen, so a retry of an opt-in rule also writes jobs.
     const jobLifecycleFactory = persistJobs
-      ? (executionId: string) => this.buildJobLifecycle(executionId, rule, triggerEvent, retryMeta?.rootExecutionId)
+      ? (executionId: string) => this.buildJobLifecycle(
+          executionId,
+          rule,
+          triggerEvent,
+          retryMeta?.rootExecutionId,
+          dispatchMode,
+        )
       : undefined
     // #4196: thread the retry lineage root into the executor so its ExecutionContext.rootExecutionId keys
     // Class-A claims on the ORIGINAL execution's root (a retry re-running the same action → duplicate →
@@ -2486,10 +2514,13 @@ export class AutomationService {
       execution.initiatedBy = retryMeta.initiatedBy
     }
     try {
+      const persistedExecution = dispatchMode === 'simulate'
+        ? valuesFreeSimulationExecution(execution)
+        : execution
       if (persistJobs) {
-        await this.logService.updateRecordedExecution(execution)
+        await this.logService.updateRecordedExecution(persistedExecution)
       } else {
-        await this.logService.record(execution)
+        await this.logService.record(persistedExecution)
       }
     } catch (err) {
       logger.error('Automation execution log persistence failed', err instanceof Error ? err : undefined)
@@ -2502,10 +2533,21 @@ export class AutomationService {
     rule: ExecutorRule,
     triggerEvent: unknown,
     rootExecutionId?: string,
+    dispatchMode: AutomationDispatchMode = 'live',
   ): ActionJobLifecycle {
+    const jobLifecycle = this.jobService.lifecycleFor(executionId, { id: rule.id, sheetId: rule.sheetId })
     return {
-      onExecutionStarted: (execution: AutomationExecution) => this.logService.record(execution),
-      ...this.jobService.lifecycleFor(executionId, { id: rule.id, sheetId: rule.sheetId }),
+      onExecutionStarted: (execution: AutomationExecution) => this.logService.record(
+        dispatchMode === 'simulate' ? valuesFreeSimulationExecution(execution) : execution,
+      ),
+      onStart: jobLifecycle.onStart,
+      onSettled: (stepIndex, action, result, meta) => jobLifecycle.onSettled(
+        stepIndex,
+        action,
+        dispatchMode === 'simulate' ? valuesFreeSimulationStep(result) : result,
+        meta,
+      ),
+      onSkipped: jobLifecycle.onSkipped,
       // A6-2: a wait_for_callback step persists the suspension + suspended job, then the executor stops.
       onSuspend: (stepIndex: number, action: AutomationAction): Promise<void> =>
         this.suspensionService
