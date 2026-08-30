@@ -701,6 +701,60 @@ describe('ApprovalDetailView — Lock-9 process-attachment comment dialog', () =
       expect(commentDialog().textContent).not.toContain('inflight-nav.pdf')
     })
 
+    it('blocks a new pick while the route has changed but the reused store still exposes the outgoing instance', async () => {
+      uploadAtomicSpy.mockResolvedValue([{ id: 'att_wrong_instance', sizeBytes: 1 }])
+      await mountView()
+      openCommentDialog()
+      await flushUi()
+
+      mockRouteId.value = 'apv_2'
+      await flushUi()
+
+      expect(loadDetailSpy).toHaveBeenCalledWith('apv_2')
+      expect(mockActiveApproval.value.id).toBe('apv_1')
+      expect(commentAttachmentInput().disabled).toBe(true)
+
+      await pickFiles([new File(['x'], 'wrong-instance.pdf', { type: 'application/pdf' })])
+
+      expect(uploadAtomicSpy).not.toHaveBeenCalled()
+      expect(commentDialog().textContent).not.toContain('wrong-instance.pdf')
+
+      mockActiveApproval.value = baseInstance({ id: 'apv_2', assignments: MY_TURN_ASSIGNMENTS })
+      await flushUi()
+      expect(commentAttachmentInput().disabled).toBe(false)
+    })
+
+    it('clears same-generation upload loading when the active detail temporarily reverts to another instance', async () => {
+      const pending = deferred<Array<{ id: string; sizeBytes: number }>>()
+      uploadAtomicSpy.mockReturnValueOnce(pending.promise)
+      await mountView()
+
+      mockRouteId.value = 'apv_2'
+      mockActiveApproval.value = baseInstance({ id: 'apv_2', assignments: MY_TURN_ASSIGNMENTS })
+      await flushUi()
+      openCommentDialog()
+      await flushUi()
+      await typeComment('恢复后可提交')
+
+      const submitButton = commentDialog().querySelector('[data-testid="approval-comment-submit"]') as HTMLButtonElement
+      await pickFiles([new File(['x'], 'same-generation-stale.pdf', { type: 'application/pdf' })])
+      expect(commentAttachmentInput().disabled).toBe(true)
+      expect(submitButton.disabled).toBe(true)
+
+      mockActiveApproval.value = baseInstance({ id: 'apv_1', assignments: MY_TURN_ASSIGNMENTS })
+      await flushUi()
+      pending.resolve([{ id: 'att_same_generation_stale', sizeBytes: 1 }])
+      await flushUi()
+
+      expect(deleteAttachmentSpy).toHaveBeenCalledWith('att_same_generation_stale')
+      expect(commentDialog().textContent).not.toContain('same-generation-stale.pdf')
+
+      mockActiveApproval.value = baseInstance({ id: 'apv_2', assignments: MY_TURN_ASSIGNMENTS })
+      await flushUi()
+      expect(commentAttachmentInput().disabled).toBe(false)
+      expect(submitButton.disabled).toBe(false)
+    })
+
     it('closing the dialog while a pick is still in flight DELETEs every later-returned id', async () => {
       const pending = deferred<Array<{ id: string; sizeBytes: number }>>()
       uploadAtomicSpy.mockReturnValueOnce(pending.promise)

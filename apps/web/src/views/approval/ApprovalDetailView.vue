@@ -1009,7 +1009,7 @@
             multiple
             accept=".pdf,.jpg,.jpeg,.png,.txt,.csv"
             data-testid="approval-comment-attachment-input"
-            :disabled="commentAttachmentUploading"
+            :disabled="commentAttachmentUploading || !commentAttachmentContextCurrent"
             @change="onCommentAttachmentPick"
           />
           <ul v-if="commentStagedAttachments.length > 0" class="approval-detail__comment-attachment-list">
@@ -1734,6 +1734,10 @@ const commentDialogVisible = ref(false)
 // close-watcher below only ever DELETEs uploads that were never submitted.
 const commentStagedAttachments = ref<Array<{ id: string; name: string }>>([])
 const commentAttachmentUploading = ref(false)
+const commentAttachmentContextCurrent = computed(() => {
+  const routeInstanceId = route.params.id
+  return typeof routeInstanceId === 'string' && routeInstanceId !== '' && approval.value?.id === routeInstanceId
+})
 // Captured at each pick; incremented (invalidated) by retract BEFORE staged cleanup so a later-
 // resolving upload cannot append into a closed/unmounted/switched context. Empty staged lists
 // still invalidate — that is the in-flight-pick case (nothing to retract yet).
@@ -1773,8 +1777,10 @@ function retractStagedCommentAttachments(): void {
   }
 }
 
-function isLiveCommentAttachmentPick(generation: number): boolean {
+function isLiveCommentAttachmentPick(generation: number, instanceId: string): boolean {
   return generation === commentAttachmentLifecycleGeneration
+    && commentAttachmentContextCurrent.value
+    && approval.value?.id === instanceId
 }
 
 watch(commentDialogVisible, (visible, wasVisible) => {
@@ -2267,14 +2273,14 @@ async function onCommentAttachmentPick(event: Event): Promise<void> {
   input.value = '' // allow re-picking the same file after a reject/remove
   if (picked.length === 0) return
   const instanceId = approval.value?.id
-  if (!instanceId) return
+  if (!instanceId || !commentAttachmentContextCurrent.value) return
   const pickGeneration = commentAttachmentLifecycleGeneration
   commentAttachmentUploading.value = true
   try {
     // Atomic selection: a later authoritative server reject compensates (DELETE) every file
     // uploaded from THIS pick, so a refused selection leaves zero live/bindable refs behind.
     const uploaded = await uploadApprovalProcessAttachmentsAtomic(picked, instanceId)
-    if (!isLiveCommentAttachmentPick(pickGeneration)) {
+    if (!isLiveCommentAttachmentPick(pickGeneration, instanceId)) {
       for (const item of uploaded) {
         void deleteApprovalAttachment(item.id).catch(() => {
           // Best-effort: same as retract — the originating dialog/instance is already gone.
@@ -2286,11 +2292,13 @@ async function onCommentAttachmentPick(event: Event): Promise<void> {
       commentStagedAttachments.value.push({ id: uploaded[i].id, name: picked[i].name })
     }
   } catch (error) {
-    if (!isLiveCommentAttachmentPick(pickGeneration)) return
+    if (!isLiveCommentAttachmentPick(pickGeneration, instanceId)) return
     // values-free code from the client mirror / server reject — never file contents or paths.
     ElMessage.error(error instanceof Error ? error.message : '附件上传失败')
   } finally {
-    if (isLiveCommentAttachmentPick(pickGeneration)) {
+    // A same-generation store refresh can briefly expose a different instance. That invalidates
+    // staging/toasts, but this pick still owns the generation's loading bit and must release it.
+    if (pickGeneration === commentAttachmentLifecycleGeneration) {
       commentAttachmentUploading.value = false
     }
   }

@@ -5,11 +5,12 @@
 // approval-form-builder-parity.spec.ts covers the standalone-component DataTransfer-drag subset and
 // is NOT superseded by this file — both run in the same approval-browser-verify.yml lane.
 //
-// No backend is reachable. `/approval-templates/new` needs none (synchronous empty-draft branch).
-// The edit-mode rows (B11) pass `networkTemplate=on` and use Playwright's `page.route()` to
-// intercept `getTemplate` at the network layer — a real request/response cycle, not a framework
-// mock. The explicit query is load-bearing: without it, an attachment-bearing default mock could
-// make the two read-only tests pass without consuming their declared fixtures.
+// No backend is reachable. Every row intercepts the mounted app's plugin/directory dependencies and
+// fails loudly on any other failed/non-2xx API request. The edit-mode rows (B11) additionally pass
+// `networkTemplate=on` and intercept `getTemplate` at the network layer — a real request/response
+// cycle, not a framework mock. The explicit query is load-bearing: without it, an
+// attachment-bearing default mock could make the two read-only tests pass without consuming their
+// declared fixtures.
 // The optional ApprovalNewView payload harness is intentionally not included here: Vite's DEV
 // build sets `approvals/api.ts`'s `USE_MOCK` before either template or create calls, so a route
 // interception cannot observe the request body. Proving that body would require a production-build
@@ -57,20 +58,16 @@ async function mountFields(
       nonOkApiResponses.push(`${pathname}:${response.status()}`)
     }
   }
-  if (useNetworkTemplate) {
-    await routeNetworkTemplateDependencies(page)
-    page.on('requestfailed', recordFailedApiRequest)
-    page.on('response', recordNonOkApiResponse)
-  }
+  await routeNetworkTemplateDependencies(page)
+  page.on('requestfailed', recordFailedApiRequest)
+  page.on('response', recordNonOkApiResponse)
   await page.goto(`/verification/approval-form-builder-mounted-harness.html?canvasV2=${canvasV2 ? 'on' : 'off'}&route=${route}${networkTemplate}`)
   await page.waitForFunction(() => (window as unknown as { __AFB_MOUNT_READY__?: boolean }).__AFB_MOUNT_READY__ === true)
-  if (useNetworkTemplate) {
-    await page.waitForLoadState('networkidle')
-    page.off('requestfailed', recordFailedApiRequest)
-    page.off('response', recordNonOkApiResponse)
-    expect(failedApiRequests, 'network-backed template mount must not tolerate failed API dependencies').toEqual([])
-    expect(nonOkApiResponses, 'network-backed template mount must not tolerate non-2xx API dependencies').toEqual([])
-  }
+  await page.waitForLoadState('networkidle')
+  page.off('requestfailed', recordFailedApiRequest)
+  page.off('response', recordNonOkApiResponse)
+  expect(failedApiRequests, 'mounted form-builder must not tolerate failed API dependencies').toEqual([])
+  expect(nonOkApiResponses, 'mounted form-builder must not tolerate non-2xx API dependencies').toEqual([])
   await page.click('[data-testid="approval-template-section-fields"]')
 }
 

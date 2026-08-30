@@ -3,7 +3,7 @@
 // template read. It proves the ordinary authoring path is Canvas-first in Chromium while the
 // explicit flag-off rollback still exposes the structured list.
 import { mkdirSync } from 'node:fs'
-import { expect, test, type Locator, type Page } from '@playwright/test'
+import { expect, test, type Locator, type Page, type Request, type Response } from '@playwright/test'
 
 const OUT = 'verification-output'
 
@@ -154,6 +154,20 @@ async function mountFlow(
 ): Promise<void> {
   const template = options.template ?? COMPLEX_TEMPLATE
   const route = options.route ?? 'edit'
+  const failedApiRequests: string[] = []
+  const nonOkApiResponses: string[] = []
+  const recordFailedApiRequest = (request: Request) => {
+    const pathname = new URL(request.url()).pathname
+    if (pathname.startsWith('/api/')) failedApiRequests.push(pathname)
+  }
+  const recordNonOkApiResponse = (response: Response) => {
+    const pathname = new URL(response.url()).pathname
+    if (pathname.startsWith('/api/') && !response.ok()) {
+      nonOkApiResponses.push(`${pathname}:${response.status()}`)
+    }
+  }
+  page.on('requestfailed', recordFailedApiRequest)
+  page.on('response', recordNonOkApiResponse)
   await page.setViewportSize({ width: options.width, height: options.height })
   await page.route(/\/api\/approval-templates\/afb_harness_1(?:\?.*)?$/, (route) => {
     const request = route.request()
@@ -191,6 +205,11 @@ async function mountFlow(
   await page.waitForFunction(() => (
     window as unknown as { __AFB_MOUNT_READY__?: boolean }
   ).__AFB_MOUNT_READY__ === true)
+  await page.waitForLoadState('networkidle')
+  page.off('requestfailed', recordFailedApiRequest)
+  page.off('response', recordNonOkApiResponse)
+  expect(failedApiRequests, 'mounted Canvas must not tolerate failed API dependencies').toEqual([])
+  expect(nonOkApiResponses, 'mounted Canvas must not tolerate non-2xx API dependencies').toEqual([])
   await expect(page.locator('[data-testid="approval-template-name"]')).toHaveValue(
     route === 'edit' ? template.name : '',
   )
