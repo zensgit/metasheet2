@@ -57,7 +57,7 @@ import {
   resolveSheetCapabilitiesForUserOnQuery,
 } from '../services/approval-record-link-txn-auth'
 import { acquireRecordLinkRowAuthLockOnQuery } from '../services/approval-record-link-row-auth-lock'
-import { redactString } from './automation-log-redact'
+import { redactString, redactValue } from './automation-log-redact'
 import { computeActionFingerprint } from './automation-suspension-service'
 import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
 import { isRichLongTextProperty, normalizeJson, sanitizeRichLongText } from './field-codecs'
@@ -832,9 +832,92 @@ function simulationDisposition(actionType: AutomationActionType): 'execute' | 's
   return unreachable
 }
 
-function simulatedStep(actionType: AutomationActionType): AutomationStepResult {
+function nonBlankConfigString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function simulatedClassAPlan(
+  action: AutomationAction,
+  context: ExecutionContext,
+): AutomationStepResult | null {
+  const config = action.config
+  const targetBaseId = nonBlankConfigString(config.targetBaseId)
+  const configuredSheetId = nonBlankConfigString(config.targetSheetId)
+  const configuredRecordId = nonBlankConfigString(config.targetRecordId)
+  const crossBaseTarget = (): { baseId: string; sheetId: string; recordId: string } | AutomationStepResult => {
+    if (!configuredSheetId || !configuredRecordId) {
+      return {
+        actionType: action.type,
+        status: 'failed',
+        error: `Cross-base ${action.type} requires targetBaseId + targetSheetId + targetRecordId`,
+        durationMs: 0,
+      }
+    }
+    return { baseId: targetBaseId as string, sheetId: configuredSheetId, recordId: configuredRecordId }
+  }
+
+  let target: { baseId?: string; sheetId: string; recordId?: string }
+  let payload: unknown
+  switch (action.type) {
+    case 'update_record': {
+      const fields = isPlainRecord(config.fields) ? config.fields : null
+      if (!fields || Object.keys(fields).length === 0) {
+        return { actionType: action.type, status: 'failed', error: 'No fields specified', durationMs: 0 }
+      }
+      if (targetBaseId) {
+        const resolved = crossBaseTarget()
+        if ('actionType' in resolved) return resolved
+        target = resolved
+      } else {
+        target = { sheetId: context.sheetId, recordId: context.recordId }
+      }
+      payload = fields
+      break
+    }
+    case 'create_record':
+      target = {
+        ...(targetBaseId ? { baseId: targetBaseId } : {}),
+        sheetId: nonBlankConfigString(config.sheetId) ?? context.sheetId,
+      }
+      payload = isPlainRecord(config.data) ? config.data : {}
+      break
+    case 'delete_record':
+    case 'lock_record': {
+      if (targetBaseId) {
+        const resolved = crossBaseTarget()
+        if ('actionType' in resolved) return resolved
+        target = resolved
+      } else {
+        target = { sheetId: context.sheetId, recordId: context.recordId }
+      }
+      if (action.type === 'lock_record') payload = { locked: config.locked !== false }
+      break
+    }
+    default:
+      return null
+  }
+
   return {
-    actionType,
+    actionType: action.type,
+    status: 'success',
+    simulated: true,
+    output: {
+      dryRun: true,
+      dispatched: false,
+      plan: {
+        target,
+        ...(payload === undefined ? {} : { payload: redactValue(payload) }),
+      },
+    },
+    durationMs: 0,
+  }
+}
+
+function simulatedStep(action: AutomationAction, context: ExecutionContext): AutomationStepResult {
+  const classAPlan = simulatedClassAPlan(action, context)
+  if (classAPlan) return classAPlan
+  return {
+    actionType: action.type,
     status: 'success',
     simulated: true,
     output: { dryRun: true, dispatched: false },
@@ -1389,9 +1472,16 @@ export class AutomationExecutor {
 
       if (context.dispatchMode === 'simulate' && simulationDisposition(action.type) === 'simulate') {
         if (jobLifecycle) await jobLifecycle.onStart(index, action, topLevelMeta)
-        const result = simulatedStep(action.type)
+        const result = simulatedStep(action, context)
         results.push(result)
         if (jobLifecycle) await jobLifecycle.onSettled(index, action, result)
+        if (result.status === 'failed') {
+          for (let i = index + 1; i < actions.length; i++) {
+            if (jobLifecycle) await jobLifecycle.onSkipped(i, actions[i])
+            results.push({ actionType: actions[i].type, status: 'skipped', durationMs: 0 })
+          }
+          break
+        }
         continue
       }
 
@@ -1765,10 +1855,34 @@ export class AutomationExecutor {
 
       if (context.dispatchMode === 'simulate' && simulationDisposition(branchAction.type) === 'simulate') {
         await jobLifecycle.onStart(stepIndex, branchAction, meta)
-        const branchActionResult = simulatedStep(branchAction.type)
+        const branchActionResult = simulatedStep(branchAction, context)
         await jobLifecycle.onSettled(stepIndex, branchAction, branchActionResult, meta)
         lastJobId = jobId
         upstreamJobId = jobId
+        if (branchActionResult.status === 'failed') {
+          for (let skippedIndex = actionIndex + 1; skippedIndex < branchActions.length; skippedIndex++) {
+            const skippedAction = branchActions[skippedIndex]
+            const skippedStepKey = `${stepIndex}.branch.${selectedBranchKey}.${skippedIndex}`
+            const skippedJobId = `${context.executionId}:job:${stepIndex}:branch:${selectedBranchKey}:${skippedIndex}`
+            await jobLifecycle.onSkipped(stepIndex, skippedAction, {
+              stepKey: skippedStepKey,
+              jobId: skippedJobId,
+              upstreamJobId,
+            })
+            upstreamJobId = skippedJobId
+            lastJobId = skippedJobId
+          }
+          return {
+            lastJobId,
+            result: {
+              actionType: 'condition_branch',
+              status: 'failed',
+              error: branchActionResult.error ?? `Branch action ${actionIndex} failed`,
+              output,
+              durationMs: Date.now() - startMs,
+            },
+          }
+        }
         continue
       }
 
@@ -1890,7 +2004,7 @@ export class AutomationExecutor {
     identity?: ClassAActionIdentity,
   ): Promise<AutomationStepResult> {
     if (context.dispatchMode === 'simulate' && simulationDisposition(action.type) === 'simulate') {
-      return simulatedStep(action.type)
+      return simulatedStep(action, context)
     }
 
     const startMs = Date.now()
