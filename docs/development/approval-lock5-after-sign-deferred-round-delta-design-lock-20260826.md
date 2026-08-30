@@ -6,7 +6,7 @@ feature flag、UAT、部署或生产开启。
 **Baseline:** `origin/main@efbf0a931cd6529703a91c9c0053d4cae8217abe`。
 
 **Contract-amendment replay:** `#5183@7a9ace34dd494b5f141e58d9899d4087392cad04` 的 docs-only
-delta 已回放到 `origin/main@da1057141a8c4ee7f41fe7f55c32700f1e46a5ff`；本次只修订合同，
+delta 及后续四轮合同修订已回放到 `origin/main@1775686cb087bcb4ded8b8b1f3ca0f85ab4d6db4`；本次只修订合同，
 不把旧 baseline 的源码证据冒充为 current-main runtime requalification。
 
 **Parents:**
@@ -1344,7 +1344,7 @@ Decision: PENDING
 Owner:
 Date:
 Source evidence baseline: origin/main@efbf0a931cd6529703a91c9c0053d4cae8217abe
-Contract-amendment replay base: origin/main@da1057141a8c4ee7f41fe7f55c32700f1e46a5ff
+Contract-amendment replay base: origin/main@1775686cb087bcb4ded8b8b1f3ca0f85ab4d6db4
 
 OD-AS-1 runtime shape:
   (a) [RECOMMENDED] deferred-round ledger (§2-§3), complete multi-seat parity
