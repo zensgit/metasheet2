@@ -894,6 +894,8 @@ jobs:
             tests/unit/elearning-admin-access-routes.test.ts \
             tests/unit/elearning-admin-access.test.ts \
             tests/unit/elearning-admin-operations.test.ts \
+            tests/unit/elearning-analytics-export-routes.test.ts \
+            tests/unit/elearning-analytics-export.test.ts \
             tests/unit/elearning-analytics-routes.test.ts \
             tests/unit/elearning-analytics-runtime.test.ts \
             tests/unit/elearning-analytics-suppression.test.ts \
@@ -1068,6 +1070,7 @@ jobs:
             tests/integration/elearning-learning-profile.db.test.ts \
             tests/integration/elearning-portal-settings.db.test.ts \
             tests/integration/elearning-stats-daily-projection.db.test.ts \
+            tests/integration/elearning-analytics-export.db.test.ts \
             tests/integration/elearning-admin-scope-acl-migration-authority.db.test.ts \
             tests/integration/elearning-exam-service.db.test.ts \
             tests/integration/elearning-learner-courses.db.test.ts \

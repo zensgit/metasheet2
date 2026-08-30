@@ -1580,6 +1580,11 @@ export default defineConfig({
       // Excluded from no-DB collection and wired whole-file post-migrate.
       'tests/integration/elearning-portal-settings.db.test.ts',
       'tests/integration/elearning-stats-daily-projection.db.test.ts',
+      // E-learning L5 aggregate analytics export authority requires real PostgreSQL
+      // for immutable snapshots, request replay, claim fencing, expiry cleanup, and
+      // management-scope rechecks. Excluded from no-DB collection and wired whole-file
+      // post-migrate in plugin-tests.yml.
+      'tests/integration/elearning-analytics-export.db.test.ts',
       // E-learning L3.5 objective practice authority requires real PostgreSQL
       // for immutable sessions/answers, request replay, and wrong-book projection.
       // Excluded from no-DB collection and wired whole-file post-migrate.
