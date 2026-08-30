@@ -43,6 +43,12 @@ import {
 import { isElearningCreditSurfaceEnabled } from './elearning-credit-ledger'
 import type { adjustElearningCreditPostgres } from './elearning-credit-adjustment-postgres'
 import type {
+  issueElearningCertificate,
+  listActiveElearningCertificateTemplates,
+  listMyElearningCertificates,
+  publishElearningCertificateTemplate,
+} from './elearning-certificate-surface'
+import type {
   getElearningCreditWallet,
   listElearningCreditRules,
   publishElearningCreditRule,
@@ -269,6 +275,10 @@ export interface ElearningPilotRuntimeOptions {
   adjustElearningCredit?: typeof adjustElearningCreditPostgres
   getActiveElearningTitleSnapshot?: typeof getActiveElearningTitleSnapshot
   publishElearningTitleSnapshot?: typeof publishElearningTitleSnapshot
+  listActiveElearningCertificateTemplates?: typeof listActiveElearningCertificateTemplates
+  publishElearningCertificateTemplate?: typeof publishElearningCertificateTemplate
+  issueElearningCertificate?: typeof issueElearningCertificate
+  listMyElearningCertificates?: typeof listMyElearningCertificates
 }
 
 function viewerId(req: Request): string | null {
@@ -384,6 +394,12 @@ export function createElearningPilotRuntime(
     adjustElearningCredit: opts.adjustElearningCredit,
     getActiveElearningTitleSnapshot: opts.getActiveElearningTitleSnapshot,
     publishElearningTitleSnapshot: opts.publishElearningTitleSnapshot,
+    listActiveElearningCertificateTemplates:
+      opts.listActiveElearningCertificateTemplates,
+    publishElearningCertificateTemplate:
+      opts.publishElearningCertificateTemplate,
+    issueElearningCertificate: opts.issueElearningCertificate,
+    listMyElearningCertificates: opts.listMyElearningCertificates,
   }) : null
   if (!inner && !credit) return null
 

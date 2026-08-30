@@ -9,6 +9,15 @@ import {
 
 import { isElearningCreditSurfaceEnabled } from '../services/elearning-credit-ledger'
 import {
+  ElearningCertificateSurfaceError,
+  issueElearningCertificate,
+  listActiveElearningCertificateTemplates,
+  listMyElearningCertificates,
+  publishElearningCertificateTemplate,
+  type ElearningCertificateIssue,
+  type ElearningCertificateTemplate,
+} from '../services/elearning-certificate-surface'
+import {
   ElearningCreditAdjustmentError,
   type ElearningCreditAdjustmentResult,
 } from '../services/elearning-credit-adjustment'
@@ -32,6 +41,19 @@ import {
 
 const RULE_KEYS = new Set(['behavior', 'dailyCap', 'points', 'requestId', 'timeZone'])
 const TITLE_KEYS = new Set(['requestId', 'titles'])
+const CERTIFICATE_TEMPLATE_KEYS = new Set([
+  'requestId',
+  'certificateId',
+  'name',
+  'templateText',
+  'backgroundImageUrl',
+])
+const CERTIFICATE_ISSUE_KEYS = new Set([
+  'requestId',
+  'certificateId',
+  'userId',
+  'parameters',
+])
 const ADJUSTMENT_KEYS = new Set(['points', 'reason', 'requestId', 'userId'])
 const WALLET_KEYS = new Set(['cursor', 'limit'])
 const ADMIN_WALLET_KEYS = new Set(['cursor', 'limit', 'userId'])
@@ -65,6 +87,10 @@ export interface ElearningCreditRouteDeps {
   adjustElearningCredit?: typeof adjustElearningCreditPostgres
   getActiveElearningTitleSnapshot?: typeof getActiveElearningTitleSnapshot
   publishElearningTitleSnapshot?: typeof publishElearningTitleSnapshot
+  listActiveElearningCertificateTemplates?: typeof listActiveElearningCertificateTemplates
+  publishElearningCertificateTemplate?: typeof publishElearningCertificateTemplate
+  issueElearningCertificate?: typeof issueElearningCertificate
+  listMyElearningCertificates?: typeof listMyElearningCertificates
 }
 
 function readObject(value: unknown): Record<string, unknown> | null {
@@ -144,6 +170,17 @@ function sendError(res: Response, error: unknown): void {
     res.status(status).json({ error: error.code })
     return
   }
+  if (error instanceof ElearningCertificateSurfaceError) {
+    const status = error.code === 'invalid_input'
+      ? 400
+      : error.code === 'conflict'
+        ? 409
+        : error.code === 'not_found'
+          ? 404
+          : 503
+    res.status(status).json({ error: error.code })
+    return
+  }
   res.status(500).json({ error: 'internal_error' })
 }
 
@@ -190,6 +227,32 @@ function titleSnapshotDto(snapshot: ElearningTitleSnapshot) {
       threshold: title.threshold,
     })),
     createdAt: snapshot.createdAt,
+  }
+}
+
+function certificateTemplateDto(template: ElearningCertificateTemplate) {
+  return {
+    certificateId: template.certificateId,
+    revisionId: template.revisionId,
+    version: template.version,
+    name: template.name,
+    templateText: template.templateText,
+    backgroundImageUrl: template.backgroundImageUrl,
+    placeholders: [...template.placeholders],
+    createdAt: template.createdAt,
+  }
+}
+
+function certificateIssueDto(issue: ElearningCertificateIssue) {
+  return {
+    issueId: issue.issueId,
+    certificateId: issue.certificateId,
+    templateRevisionId: issue.templateRevisionId,
+    templateName: issue.templateName,
+    serialNumber: issue.serialNumber,
+    parameters: { ...issue.parameters },
+    backgroundImageUrl: issue.backgroundImageUrl,
+    issuedAt: issue.issuedAt,
   }
 }
 
@@ -247,6 +310,14 @@ export function createElearningCreditRouter(
     ?? getActiveElearningTitleSnapshot
   const publishTitles = deps.publishElearningTitleSnapshot
     ?? publishElearningTitleSnapshot
+  const listCertificateTemplates = deps.listActiveElearningCertificateTemplates
+    ?? listActiveElearningCertificateTemplates
+  const publishCertificateTemplate = deps.publishElearningCertificateTemplate
+    ?? publishElearningCertificateTemplate
+  const issueCertificate = deps.issueElearningCertificate
+    ?? issueElearningCertificate
+  const listCertificates = deps.listMyElearningCertificates
+    ?? listMyElearningCertificates
 
   router.get(
     '/api/elearning/admin/credit-rules',
@@ -370,6 +441,108 @@ export function createElearningCreditRouter(
           titles: body.titles,
         })
         res.status(200).json(titleSnapshotDto(result))
+      } catch (error) {
+        sendError(res, error)
+      }
+    }),
+  )
+
+  router.get(
+    '/api/elearning/admin/certificate-templates',
+    gate,
+    context,
+    deps.adminGuard,
+    run(async (req, res) => {
+      const orgId = deps.orgId(req)
+      if (!orgId) {
+        res.status(403).json({ error: 'ORG_CONTEXT_REQUIRED' })
+        return
+      }
+      try {
+        const items = await listCertificateTemplates(deps.db, orgId)
+        res.status(200).json({ items: items.map(certificateTemplateDto) })
+      } catch (error) {
+        sendError(res, error)
+      }
+    }),
+  )
+
+  router.post(
+    '/api/elearning/admin/certificate-templates',
+    gate,
+    context,
+    deps.adminGuard,
+    parseJson,
+    run(async (req, res) => {
+      const actorId = deps.viewerId(req)
+      const orgId = deps.orgId(req)
+      const body = readObject(req.body)
+      if (!actorId || !orgId || !body || !exactKeys(body, CERTIFICATE_TEMPLATE_KEYS)) {
+        res.status(400).json({ error: 'invalid_input' })
+        return
+      }
+      try {
+        const result = await publishCertificateTemplate(deps.db, {
+          orgId,
+          actorId,
+          requestId: body.requestId,
+          certificateId: body.certificateId,
+          name: body.name,
+          templateText: body.templateText,
+          backgroundImageUrl: body.backgroundImageUrl,
+        })
+        res.status(200).json(certificateTemplateDto(result))
+      } catch (error) {
+        sendError(res, error)
+      }
+    }),
+  )
+
+  router.post(
+    '/api/elearning/admin/certificate-issues',
+    gate,
+    context,
+    deps.adminGuard,
+    parseJson,
+    run(async (req, res) => {
+      const actorId = deps.viewerId(req)
+      const orgId = deps.orgId(req)
+      const body = readObject(req.body)
+      if (!actorId || !orgId || !body || !exactKeys(body, CERTIFICATE_ISSUE_KEYS)) {
+        res.status(400).json({ error: 'invalid_input' })
+        return
+      }
+      try {
+        const result = await issueCertificate(deps.db, {
+          orgId,
+          actorId,
+          requestId: body.requestId,
+          certificateId: body.certificateId,
+          userId: body.userId,
+          parameters: body.parameters,
+        })
+        res.status(200).json(certificateIssueDto(result))
+      } catch (error) {
+        sendError(res, error)
+      }
+    }),
+  )
+
+  router.get(
+    '/api/elearning/certificates',
+    gate,
+    context,
+    deps.readGuard,
+    run(async (req, res) => {
+      const orgId = deps.orgId(req)
+      const userId = deps.viewerId(req)
+      if (!orgId || !userId) {
+        res.status(403).json({ error: 'ORG_CONTEXT_REQUIRED' })
+        return
+      }
+      try {
+        const items = await listCertificates(deps.db, orgId, userId)
+        res.status(200).json({ items: items.map(certificateIssueDto) })
       } catch (error) {
         sendError(res, error)
       }
