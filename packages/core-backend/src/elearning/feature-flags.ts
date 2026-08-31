@@ -5,6 +5,7 @@ export const ELEARNING_ASSESSMENT_ENABLED = 'ELEARNING_ASSESSMENT_ENABLED' as co
 export const ELEARNING_INCENTIVE_ENABLED = 'ELEARNING_INCENTIVE_ENABLED' as const
 export const ELEARNING_ANALYTICS_ENABLED = 'ELEARNING_ANALYTICS_ENABLED' as const
 export const ELEARNING_MEDIA_ENABLED = 'ELEARNING_MEDIA_ENABLED' as const
+export const ELEARNING_OFFLINE_TRAINING_ENABLED = 'ELEARNING_OFFLINE_TRAINING_ENABLED' as const
 
 export const ELEARNING_FLAG_NAMES = [
   ELEARNING_ENABLED,
@@ -14,6 +15,7 @@ export const ELEARNING_FLAG_NAMES = [
   ELEARNING_INCENTIVE_ENABLED,
   ELEARNING_ANALYTICS_ENABLED,
   ELEARNING_MEDIA_ENABLED,
+  ELEARNING_OFFLINE_TRAINING_ENABLED,
 ] as const
 
 export type ElearningFlagName = (typeof ELEARNING_FLAG_NAMES)[number]
@@ -103,5 +105,15 @@ export function isElearningAnalyticsSurfaceEnabled(
   return (
     isElearningEnabled(env)
     && isElearningFlagEnabled(ELEARNING_ANALYTICS_ENABLED, env)
+  )
+}
+
+/** L6 offline training is independent and requires its own exact capability gate. */
+export function isElearningOfflineTrainingSurfaceEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return (
+    isElearningEnabled(env)
+    && isElearningFlagEnabled(ELEARNING_OFFLINE_TRAINING_ENABLED, env)
   )
 }

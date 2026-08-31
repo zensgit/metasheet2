@@ -13,6 +13,7 @@ import { Router, type Router as ExpressRouter } from 'express'
 import {
   isElearningAnalyticsSurfaceEnabled,
   isElearningContentSurfaceEnabled,
+  isElearningOfflineTrainingSurfaceEnabled,
 } from '../elearning/feature-flags'
 import { authenticate } from '../middleware/auth'
 import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
@@ -23,6 +24,7 @@ import { createElearningPilotRouter } from '../routes/elearning-pilot'
 import { createElearningPortalRouter } from '../routes/elearning-portal'
 import { createElearningProfileRouter } from '../routes/elearning-profile'
 import { createElearningQuestionPracticeRouter } from '../routes/elearning-question-practice'
+import { createElearningOfflineTrainingRouter } from '../routes/elearning-offline-training'
 import { isElearningGlobalAdminRequest } from '../routes/elearning-admin-access'
 import type { ElearningAdminAccessDb } from './elearning-admin-access'
 import type { ElearningAssessmentCatalogDb } from './elearning-assessment-catalog'
@@ -170,6 +172,13 @@ import type {
   startElearningPracticeSession,
   submitElearningPracticeAnswer,
 } from './elearning-question-practice-postgres'
+import type {
+  ElearningOfflineDb,
+  issueElearningOfflineQr,
+  listMyElearningOfflineTrainings,
+  publishElearningOfflineTraining,
+  recordElearningOfflineAttendance,
+} from './elearning-offline-training-postgres'
 import {
   assignElearningTrainingPlanAuthorized,
   revokeElearningTrainingPlanAssignmentAuthorized,
@@ -212,7 +221,8 @@ export interface ElearningPilotRuntimeOptions {
     ElearningDepartmentStatsDb &
     ElearningAnalyticsExportDb &
     ElearningPortalDb &
-    ElearningPracticeDb
+    ElearningPracticeDb &
+    ElearningOfflineDb
   env?: NodeJS.ProcessEnv
   authenticate?: RequestHandler
   adminGuard?: RequestHandler
@@ -326,6 +336,10 @@ export interface ElearningPilotRuntimeOptions {
   startElearningPracticeSession?: typeof startElearningPracticeSession
   submitElearningPracticeAnswer?: typeof submitElearningPracticeAnswer
   listElearningWrongQuestions?: typeof listElearningWrongQuestions
+  publishElearningOfflineTraining?: typeof publishElearningOfflineTraining
+  issueElearningOfflineQr?: typeof issueElearningOfflineQr
+  recordElearningOfflineAttendance?: typeof recordElearningOfflineAttendance
+  listMyElearningOfflineTrainings?: typeof listMyElearningOfflineTrainings
 }
 
 function viewerId(req: Request): string | null {
@@ -351,7 +365,10 @@ export function createElearningPilotRuntime(
   const creditEnabled = isElearningCreditSurfaceEnabled(env)
   const analyticsEnabled = isElearningAnalyticsSurfaceEnabled(env)
   const practiceEnabled = isElearningPracticeSurfaceEnabled(env)
-  if (!contentEnabled && !creditEnabled && !analyticsEnabled && !practiceEnabled) return null
+  const offlineEnabled = isElearningOfflineTrainingSurfaceEnabled(env)
+  if (!contentEnabled && !creditEnabled && !analyticsEnabled && !practiceEnabled && !offlineEnabled) {
+    return null
+  }
 
   const issuePlayback =
     opts.issueElearningMediaPlaybackTicket ??
@@ -416,6 +433,21 @@ export function createElearningPilotRuntime(
     startElearningPracticeSession: opts.startElearningPracticeSession,
     submitElearningPracticeAnswer: opts.submitElearningPracticeAnswer,
     listElearningWrongQuestions: opts.listElearningWrongQuestions,
+  }) : null
+
+  const offline = offlineEnabled ? createElearningOfflineTrainingRouter({
+    db: opts.db,
+    env,
+    viewerId: opts.viewerId ?? viewerId,
+    orgId: opts.orgId ?? orgId,
+    isGlobalAdmin: opts.isGlobalAdmin ?? isElearningGlobalAdminRequest,
+    adminGuard: opts.adminGuard ?? rbacGuard('elearning', 'admin'),
+    readGuard: opts.readGuard
+      ?? rbacGuardAny(['elearning:read', 'elearning:write', 'elearning:admin']),
+    publishElearningOfflineTraining: opts.publishElearningOfflineTraining,
+    issueElearningOfflineQr: opts.issueElearningOfflineQr,
+    recordElearningOfflineAttendance: opts.recordElearningOfflineAttendance,
+    listMyElearningOfflineTrainings: opts.listMyElearningOfflineTrainings,
   }) : null
 
   const inner = contentEnabled ? createElearningPilotRouter({
@@ -500,13 +532,14 @@ export function createElearningPilotRuntime(
     getElearningDepartmentStats:
       opts.getElearningDepartmentStats ?? getElearningDepartmentStats,
   }) : null
-  if (!portal && !practice && !inner && !credit && !profile && !analytics) return null
+  if (!portal && !practice && !offline && !inner && !credit && !profile && !analytics) return null
 
   const router = Router()
   router.use('/api/elearning', opts.authenticate ?? authenticate)
   if (content) router.use(content)
   if (portal) router.use(portal)
   if (practice) router.use(practice)
+  if (offline) router.use(offline)
   if (inner) router.use(inner)
   if (credit) router.use(credit)
   if (profile) router.use(profile)
