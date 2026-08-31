@@ -72,6 +72,8 @@ interface Store {
   configRevisions: unknown[][]
   /** Every write actually issued against meta_sheets / meta_bases, for "nothing was written" legs. */
   writes: string[]
+  /** Sheet-scoped `spreadsheet_permissions` codes held by the actor on SHEET_ID. Empty = global path. */
+  scopedPermissionCodes: string[]
 }
 
 function freshStore(): Store {
@@ -80,6 +82,7 @@ function freshStore(): Store {
     base: { id: BASE_ID, name: ORIGINAL_BASE_NAME, icon: null, color: null, owner_id: 'owner_rn', workspace_id: null },
     configRevisions: [],
     writes: [],
+    scopedPermissionCodes: [],
   }
 }
 
@@ -89,7 +92,18 @@ function createMockPool(store: Store) {
 
     // No sheet-scoped assignments: isolates the GLOBAL capability derivation, exactly as the
     // manage-schema matrix does.
-    if (sql.includes('FROM spreadsheet_permissions')) return { rows: [] }
+    // Sheet-scoped grants. Empty by default (so the GLOBAL derivation is what the other sections
+    // measure); `store.scopedPermissionCodes` opts a test into the scoped path, which is where the
+    // delete/restore authority differs from `canManageFields`.
+    if (sql.includes('FROM spreadsheet_permissions')) {
+      return {
+        rows: store.scopedPermissionCodes.map((code) => ({
+          sheet_id: SHEET_ID,
+          perm_code: code,
+          subject_type: 'user',
+        })),
+      }
+    }
     if (sql.includes('FROM field_permissions')) return { rows: [] }
     if (sql.includes('FROM record_permissions')) return { rows: [] }
     if (sql.includes('FROM meta_view_permissions')) return { rows: [] }
@@ -544,6 +558,78 @@ describe('F21 — sheet and base display rename', () => {
       expect(shapes[1]).toEqual(shapes[0])
       expect(shapes[2]).toEqual(shapes[0])
       expect(shapes[0]!.status).toBe(403)
+    })
+  })
+
+  // ── §7 sheet-SCOPED grants ───────────────────────────────────────────────────
+  //
+  // THE CELL AN ADVERSARIAL REVIEW CAUGHT. `applyContextSheetSchemaWriteGrant` sets `canManageFields`
+  // for ANY sheet-scoped grant with `canRead && canWrite`, so gating sheet delete on the post-grant
+  // `canManageFields` silently handed delete + restore to a scoped `spreadsheet:write` holder — who is
+  // NOT in SHEET_ADMIN_PERMISSION_CODES and who the OLD `canManageSheetAccess` branch refused. On the
+  // takeover deployment roles are assigned PER SHEET, so that population is real shop-floor writers.
+  //
+  // The routes now gate on `hasSheetLifecycleAuthority` (global schema authority OR sheet admin), and
+  // the resulting TWO-TIER story is asserted here in full:
+  //   RENAME  — `canManageFields`: a scoped writer may rename the sheet, exactly as it may rename
+  //             every FIELD in that sheet. Display-only and reversible.
+  //   DELETE / RESTORE — strictly more: the sheet's existence is not the writer's to decide.
+  describe('§7 a sheet-scoped grant separates renaming from deleting', () => {
+    const SCOPED_USER = { id: 'u_rn_scoped', roles: ['member'], perms: ['multitable:read'] }
+    /** Global share authority, no schema authority — the disclosed LOSS on a scoped sheet. */
+    const SHARER_USER = { id: 'u_rn_sharer', roles: ['member'], perms: ['multitable:read', 'multitable:share'] }
+
+    async function scopedApp(user: typeof SCOPED_USER, codes: string[]) {
+      const store = freshStore()
+      store.scopedPermissionCodes = codes
+      return { store, app: await buildApp(user, store) }
+    }
+
+    it('spreadsheet:write MAY rename the sheet — the same tier that renames its fields', async () => {
+      const { store, app } = await scopedApp(SCOPED_USER, ['spreadsheet:write'])
+      const res = await on(app).patch(`/api/multitable/sheets/${SHEET_ID}`).send({ name: '车间改名' })
+      expect(res.status).toBe(200)
+      expect(store.sheet.name).toBe('车间改名')
+    })
+
+    it('spreadsheet:write MAY NOT delete the sheet, and never reaches the write', async () => {
+      const { store, app } = await scopedApp(SCOPED_USER, ['spreadsheet:write'])
+      const res = await on(app).delete(`/api/multitable/sheets/${SHEET_ID}`)
+      expect(res.status).toBe(403)
+      expect(res.body.error.code).toBe('FORBIDDEN')
+      expect(res.body.error.message).toContain('sheet-scoped admin grant')
+      expect(store.writes).toEqual([])
+      expect(store.sheet.deleted_at).toBeNull()
+    })
+
+    it('spreadsheet:write MAY NOT restore a deleted sheet either', async () => {
+      const { store, app } = await scopedApp(SCOPED_USER, ['spreadsheet:write'])
+      store.sheet.deleted_at = '2026-08-30T00:00:00.000Z'
+      const res = await on(app).post(`/api/multitable/sheets/${SHEET_ID}/restore`)
+      expect(res.status).toBe(403)
+      expect(store.writes).toEqual([])
+      expect(store.sheet.deleted_at).not.toBeNull()
+    })
+
+    // Positive control for the two above: the scoped grant IS being seen by the resolver. Without
+    // this, a mock that silently dropped the scope rows would make both refusals pass for the wrong
+    // reason (no scope at all rather than an insufficient one).
+    it('spreadsheet:admin — the scope IS live, and an admin grant still deletes and restores', async () => {
+      const { store, app } = await scopedApp(SCOPED_USER, ['spreadsheet:admin'])
+      const deleted = await on(app).delete(`/api/multitable/sheets/${SHEET_ID}`)
+      expect(deleted.status).toBe(200)
+      expect(store.sheet.deleted_at).not.toBeNull()
+
+      const restored = await on(app).post(`/api/multitable/sheets/${SHEET_ID}/restore`)
+      expect(restored.status).toBe(200)
+      expect(store.sheet.deleted_at).toBeNull()
+    })
+
+    it('global multitable:share is NOT whole-sheet authority on a scoped sheet — a disclosed loss', async () => {
+      const { store, app } = await scopedApp(SHARER_USER, ['spreadsheet:read'])
+      const res = await on(app).delete(`/api/multitable/sheets/${SHEET_ID}`)
+      expect(res.status).toBe(403)
+      expect(store.writes).toEqual([])
     })
   })
 })

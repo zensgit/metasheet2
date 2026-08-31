@@ -356,12 +356,16 @@ const RENAME_FORBIDDEN_BODY = {
   },
 }
 
+// Sheet delete/restore asks for MORE than canManageFields — see hasSheetLifecycleAuthority. These
+// cells all run with NO sheet-scoped grant, so they measure the global half; the sheet-SCOPED half
+// (spreadsheet:write refused, spreadsheet:admin allowed) is §7 of
+// tests/unit/multitable-display-rename-authority.test.ts.
 const SHEET_DELETE_FORBIDDEN_BODY = {
   ok: false,
   error: {
     code: 'FORBIDDEN',
     message:
-      'Deleting or restoring a sheet requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.',
+      'Deleting or restoring a sheet requires whole-sheet authority: an admin role, the multitable:manage-schema permission, or a sheet-scoped admin grant on this sheet. multitable:write — global or sheet-scoped — is not sufficient.',
   },
 }
 

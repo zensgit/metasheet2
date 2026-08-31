@@ -4391,13 +4391,35 @@ const INVALID_DISPLAY_NAME_MESSAGE =
 const DISPLAY_RENAME_FORBIDDEN_MESSAGE =
   'Renaming requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.'
 
-/**
- * Deleting or restoring a whole sheet is the SAME authority as renaming one field header — it was
- * `canManageViews`, which a write-only operator holds, so an operator could destroy a table they
- * could not rename a column in.
- */
 const SHEET_DELETE_FORBIDDEN_MESSAGE =
-  'Deleting or restoring a sheet requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.'
+  'Deleting or restoring a sheet requires whole-sheet authority: an admin role, the multitable:manage-schema permission, or a sheet-scoped admin grant on this sheet. multitable:write — global or sheet-scoped — is not sufficient.'
+
+/**
+ * Authority to DESTROY or RESURRECT a whole sheet.
+ *
+ * Deliberately NOT plain `capabilities.canManageFields`. That capability is post-scope-grant, and
+ * `applyContextSheetSchemaWriteGrant` sets it for any sheet-scoped grant with `canRead && canWrite`
+ * — so gating on it would hand sheet DELETE to a scoped `spreadsheet:write` holder, who is NOT a
+ * sheet admin (`SHEET_ADMIN_PERMISSION_CODES` excludes `spreadsheet:write`) and who was refused by
+ * the old `canManageSheetAccess` branch. On the takeover deployment roles are assigned PER SHEET, so
+ * that population is real: shop-floor writers on their own sheet. Editing a sheet's fields is not
+ * the authority to delete the sheet.
+ *
+ * So the rule is GLOBAL schema authority, or sheet ADMIN on this specific sheet:
+ *   - `deriveCapabilities(...)` on the GLOBAL permissions (pre-scope-grant) = admin role or
+ *     `multitable:manage-schema`, honouring the #5357 transition switch;
+ *   - OR `sheetScope.canAdmin` — exactly the holders the old scoped branch admitted.
+ *
+ * This keeps #5357's residual where #5357 left it (field-level), instead of silently widening it to
+ * whole-sheet delete + restore.
+ */
+function hasSheetLifecycleAuthority(
+  access: { permissions: string[]; isAdminRole: boolean },
+  sheetScope: { canAdmin?: boolean } | null | undefined,
+): boolean {
+  if (deriveCapabilities(access.permissions, access.isAdminRole).canManageFields) return true
+  return sheetScope?.canAdmin === true
+}
 
 /**
  * Strict `{ name }` parse. `.strict()` is deliberate: silently ignoring an extra property would tell
@@ -13730,16 +13752,21 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
    * is now `canManageFields`: the same schema-authority tier as renaming a field, renaming this sheet,
    * or deleting a field.
    *
-   * Precisely what that moves, in both directions — this is NOT a uniform tightening:
+   * The gate is `hasSheetLifecycleAuthority` (see its docblock) — NOT plain `canManageFields`, which
+   * is post-scope-grant and would hand sheet delete to a scoped `spreadsheet:write` holder. Precisely
+   * what moves, in every direction; this is NOT a uniform tightening:
    *   - a GLOBAL `multitable:write` operator LOSES sheet delete (the reported fault);
    *   - a `multitable:manage-schema` holder without `multitable:write` GAINS it, which is the
-   *     doctrine, not an accident: an actor trusted to delete a FIELD is the actor trusted to delete
-   *     the SHEET;
-   *   - a SHEET-SCOPED full-write grant is UNCHANGED — `applyContextSheetSchemaWriteGrant` already
-   *     confers `canManageFields` on that sheet, so a sheet admin deletes exactly as before;
-   *   - the sheet-scoped branch on `canManageSheetAccess` is gone, because that grant's holders reach
-   *     `canManageFields` through the same scope path when they hold full write, and a share-only
-   *     grant is not schema authority.
+   *     doctrine, not an accident: an actor trusted to delete a FIELD is trusted to delete the SHEET;
+   *   - a SHEET-SCOPED ADMIN (`spreadsheet:admin`) is UNCHANGED — admitted before via
+   *     `canManageSheetAccess`, admitted now via `sheetScope.canAdmin`;
+   *   - a SHEET-SCOPED `spreadsheet:write` holder stays REFUSED. It is not in
+   *     `SHEET_ADMIN_PERMISSION_CODES`, so the old scoped branch refused it, and gating on the
+   *     post-grant `canManageFields` would have silently flipped it to allowed — widening #5357's
+   *     documented field-level residual into whole-sheet delete + restore. It does not;
+   *   - a GLOBAL `multitable:share` holder without schema authority LOSES it on a scoped sheet.
+   *     Share authority decides WHO MAY SEE a sheet; it was never authority over whether the sheet
+   *     exists.
    *
    * FAULT 2 (recoverability). This route used to `DELETE FROM meta_sheets`, cascading the sheet's
    * records away with no recovery at all. It now sets `deleted_at` and leaves `meta_records` and
@@ -13769,8 +13796,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (sheetRes.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageFields) return sendForbidden(res, SHEET_DELETE_FORBIDDEN_MESSAGE)
+      const { access, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!hasSheetLifecycleAuthority(access, sheetScope)) return sendForbidden(res, SHEET_DELETE_FORBIDDEN_MESSAGE)
       const sheetDeleteFencePlan = await prepareSheetLinkDeleteFencePlan(
         pool.query.bind(pool),
         sheetId,
@@ -13822,8 +13849,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const row = (sheetRes.rows as any[])[0] as
         | { id: unknown; base_id?: unknown; name?: unknown; description?: unknown; deleted_at?: unknown }
         | undefined
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageFields) return sendForbidden(res, SHEET_DELETE_FORBIDDEN_MESSAGE)
+      const { access, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!hasSheetLifecycleAuthority(access, sheetScope)) return sendForbidden(res, SHEET_DELETE_FORBIDDEN_MESSAGE)
       if (!row || row.deleted_at === null || typeof row.deleted_at === 'undefined') {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `No deleted sheet to restore: ${sheetId}` } })
       }
