@@ -1,7 +1,9 @@
 # Time Machine D8 operational observability verification report
 
-**Status:** LOCAL VERIFIED / REMOTE PENDING. Exact-head CI, merge, merged-main,
-staging, flags, deployment, production, and tenant UAT are not claimed.
+**Status:** CODE-BEARING EXACT HEAD REMOTE VERIFIED / DRAFT-HOLD. Merge,
+merged-main, staging, flags, deployment, production, and tenant UAT are not
+claimed. The commit that updates this report is report-only and does not alter
+the verified implementation tree.
 
 ## 1. Exact evidence binding
 
@@ -11,10 +13,12 @@ staging, flags, deployment, production, and tenant UAT are not claimed.
 - Outcome-exhaustiveness fix-forward: `af90e770a21ee28bc97b2cead42560092fc6c484`
 - Current implementation tree: `509e493238f66e38ed1599a679be0e0525cfee27`
 - Cache-CI config fix-forward: `e85616da1007eca3664f686d8e19563814970d82`
-- Cache-CI config tree: `61f6f6b95153bf1ee450167e980131475c81967a`
+- Code-bearing remote head: `c0762ee4d79950ec3625311a1cabb39b1b2012ce`
+- Code-bearing tree: `7b10d0d5a35093babb72d6cf5a0c31480725a4d6`
 - Worktree: `/private/tmp/codex-tm-d8-operational-observability-20260831`
 - Remote PR: `#5393`
-- Remote exact head: replacement head pending at this report revision
+- Remote exact-head result: `25 SUCCESS / 1 intentional SKIPPED / 0 failure /
+  0 pending` at `c0762ee4d799...`
 - Merged-main SHA: `NOT AVAILABLE`
 
 ## 2. Local gates
@@ -71,7 +75,7 @@ because the production observer export was absent.
 | Source and local focused tests | PASS at product checkpoint |
 | Local typecheck/lint/diff | PASS with recorded baseline warnings |
 | Independent exact-range model review | Terra high `P1=0 / P2=0 / P3=0` after the bounded exhaustiveness fix-forward |
-| Draft PR exact-head CI | First head `a16569ce...` failed only `core-backend-cache`; replacement config fix is locally green and new exact-head CI is pending |
+| Draft PR exact-head CI | First head `a16569ce...` failed only `core-backend-cache`; replacement code-bearing head `c0762ee4...` is terminal `25 SUCCESS / 1 intentional SKIPPED / 0 failure / 0 pending`, including cache, Node 18, Node 20, and Web Tests |
 | Ready / merge | NOT AUTHORIZED by this report |
 | Merged-main rerun | NOT RUN |
 | D7 staging | NOT RUN / OWNER GATE |

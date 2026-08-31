@@ -1,7 +1,9 @@
 # Time Machine D8 operational observability development report
 
-**Status:** LOCAL CANDIDATE / DRAFT-HOLD. This report is not Ready, merge,
-staging, flag, deployment, production, or tenant-UAT evidence.
+**Status:** DRAFT-HOLD / CODE-BEARING EXACT HEAD REMOTE-GREEN. This report is
+not Ready, merge, staging, flag, deployment, production, or tenant-UAT
+evidence. The commit that updates this report is a report-only child of the
+verified code-bearing head and changes no implementation or CI configuration.
 
 ## 1. Exact binding
 
@@ -11,12 +13,14 @@ staging, flag, deployment, production, or tenant-UAT evidence.
 - Outcome-exhaustiveness fix-forward: `af90e770a21ee28bc97b2cead42560092fc6c484`
 - Current implementation tree: `509e493238f66e38ed1599a679be0e0525cfee27`
 - Cache-CI config fix-forward: `e85616da1007eca3664f686d8e19563814970d82`
-- Cache-CI config tree: `61f6f6b95153bf1ee450167e980131475c81967a`
+- Code-bearing remote head: `c0762ee4d79950ec3625311a1cabb39b1b2012ce`
+- Code-bearing tree: `7b10d0d5a35093babb72d6cf5a0c31480725a4d6`
 - Branch: `codex/tm-d8-operational-observability-20260831`
 - Scope including this development report and its verification report: 12 files,
-  684 insertions, 2 deletions at the cache-CI config checkpoint
+  705 insertions, 2 deletions at the code-bearing remote head
 - Remote PR: `#5393`
-- Remote exact-head CI: replacement head pending at this report revision
+- Remote exact-head CI: `25 SUCCESS / 1 intentional SKIPPED / 0 failure /
+  0 pending` at `c0762ee4d799...`
 
 The contract is
 `multitable-timemachine-d8-operational-observability-design-lock-20260831.md`.
@@ -109,7 +113,10 @@ augmentations, so transitively compiled multitable sources failed TypeScript.
 The one-file fix-forward adds those two existing declaration roots. Luna's
 read-only diagnosis confirmed the minimal file boundary and returned no
 additional P2/P3 finding. This is a CI compilation fix only; it changes no
-runtime request behavior.
+runtime request behavior. The replacement code-bearing head passed
+`core-backend-cache`, Node 18, Node 20, Web Tests, migration/recovery guards,
+and every other reported context; the only skipped context was the intentional
+Strict E2E gate.
 
 ## 7. Honest completion boundary
 
