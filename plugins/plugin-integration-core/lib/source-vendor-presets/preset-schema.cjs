@@ -475,6 +475,30 @@ function validateStructuredFamily(collector, family, atPath, { coreTables, requi
   return stems
 }
 
+/**
+ * Interprets a dictionary enabledFlag's raw column value under a declared polarity. THE single
+ * source of truth for polarity semantics — the probe must use (or byte-mirror) this rather than
+ * re-deriving it, because polarity is exactly the fact that was once generalized across two
+ * different table families and shipped inverted: the PART table's row-availability flag is
+ * zero-means-available, while the DN_PM dictionary tables' enabled flag was MEASURED on a live
+ * vendor catalog as nonzero-means-enabled (corroborated structurally: companion columns such as
+ * is_show / is_unique / sort_id are populated exactly on the enabled rows). Null/undefined and
+ * non-numeric values are disabled under either polarity (fail-closed); an unknown polarity
+ * throws rather than silently disabling everything.
+ */
+function isEnabledFlagValue(polarity, value) {
+  if (!ENABLED_FLAG_POLARITIES.includes(polarity)) {
+    throw new VendorPresetError(
+      `unknown enabledFlag polarity '${String(polarity)}' — must be one of [${ENABLED_FLAG_POLARITIES.join(', ')}]`,
+      [],
+    )
+  }
+  if (value === null || value === undefined) return false
+  const n = Number(value)
+  if (!Number.isFinite(n)) return false
+  return polarity === 'zero-means-enabled' ? n === 0 : n !== 0
+}
+
 /** Generated matcher for one structured family: anchored, case-insensitive, stems alternated. */
 function familyColumnMatcher(family) {
   const stems = Array.isArray(family && family.stems) ? family.stems : []
@@ -1232,6 +1256,7 @@ module.exports = {
   DICTIONARY_TYPE_HINT_WORDS,
   VendorPresetError,
   findValueShapeViolation,
+  isEnabledFlagValue,
   familyColumnMatcher,
   isFamilyColumn,
   buildConcreteMemberScanners,

@@ -45,7 +45,10 @@
         "material": "Material",
         "version": "SysVer"
       },
-      "note": "Row identity in the family's legacy read model is the native code role (drawing number), not any generic slot; see docs/development/takeover-beiliao-20260821."
+      "optionalRoles": {
+        "available": "isable"
+      },
+      "note": "Row identity in the legacy read model is the native code role (drawing number). The row-availability flag here is INVERTED vs the dictionaries' enabled flag (zero marks an available part) — never generalize one family's polarity to the other; see docs/development/takeover-beiliao-20260821."
     },
     "bomHead": {
       "table": "DN_PDM_BomHeadInfo",
@@ -123,8 +126,8 @@
       "mechanism": "rows-name-columns",
       "enabledFlag": {
         "columnCandidates": ["isable", "is_able"],
-        "polarity": "zero-means-enabled",
-        "note": "Polarity is inverted relative to intuition on this family. Confirm against the live dictionary before trusting a draft."
+        "polarity": "nonzero-means-enabled",
+        "note": "Polarity MEASURED on a live vendor test catalog by a cold probe read; corroborated structurally: companion columns (is_show / is_unique / sort_id) are populated exactly on the enabled rows. Distinct from the part table's row-availability flag, which is inverted — see coreTables.part.note."
       },
       "note": "One row per BOM-detail generic slot. Only enabled rows carry an assignment; the assignments are per-customer run-time reads (first-deployment record: docs/development/takeover-beiliao-20260821)."
     },
@@ -135,7 +138,8 @@
       "mechanism": "rows-name-columns",
       "enabledFlag": {
         "columnCandidates": ["isable", "is_able"],
-        "polarity": "zero-means-enabled"
+        "polarity": "nonzero-means-enabled",
+        "note": "Same measured polarity as bom-detail-exattr-labels — see that entry's enabledFlag note."
       },
       "note": "Labels the BOM HEAD table's generic slots. No columnFamily is declared because head-side slot naming is not recorded in-repo — rows-name-columns identifies the labeled columns at run time."
     },
@@ -147,7 +151,8 @@
       "mechanism": "rows-name-columns",
       "enabledFlag": {
         "columnCandidates": ["isable", "is_able"],
-        "polarity": "zero-means-enabled"
+        "polarity": "nonzero-means-enabled",
+        "note": "Same measured polarity as bom-detail-exattr-labels — see that entry's enabledFlag note."
       },
       "note": "One row per part-side generic slot; enabled rows carry the customer's part-side field vocabulary, surfaced by the probe as decoded entries (see docs/development/takeover-beiliao-20260821)."
     }

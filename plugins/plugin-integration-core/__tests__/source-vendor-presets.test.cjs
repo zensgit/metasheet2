@@ -40,6 +40,7 @@ const {
   DICTIONARY_TYPE_HINTS,
   VendorPresetError,
   findValueShapeViolation,
+  isEnabledFlagValue,
   familyColumnMatcher,
   isFamilyColumn,
   buildConcreteMemberScanners,
@@ -476,7 +477,78 @@ function signatureMatching() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. Directory loading is fail-closed: an invalid preset file throws naming the
+// 8. DICTIONARY ENABLED-FLAG POLARITY — pinned against the live measurement.
+//
+// The first shipped polarity was INVERTED for the DN_PM dictionary tables: a fact true of the
+// PART table's row-availability flag (zero-means-available, from the legacy-source archaeology)
+// was generalized across two different table families. The probe's first cold run against a real
+// vendor test catalog refuted it — with the wrong polarity 11 semantics were unresolved; with
+// the measured polarity all resolved. The corroborating STRUCTURAL signal (reproduced here as a
+// synthetic fixture, no real values): companion columns in the dictionary rows — is_show /
+// is_unique / sort_id style — are populated on exactly the ENABLED rows.
+// ---------------------------------------------------------------------------
+
+function dictionaryPolarityIsPinned() {
+  // Synthetic structural fixture mirroring the live signal: enabled rows carry populated
+  // companions, disabled rows carry nulls. Labels are placeholders — the pinned thing is the
+  // CORRELATION between the enabled flag and companion population, not any content.
+  const rows = [
+    { isable: 1, is_show: 1, is_unique: 0, sort_id: 1, label: 'label-a' },
+    { isable: 1, is_show: 1, is_unique: 1, sort_id: 2, label: 'label-b' },
+    { isable: 0, is_show: null, is_unique: null, sort_id: null, label: null },
+    { isable: 0, is_show: null, is_unique: null, sort_id: null, label: null },
+    { isable: null, is_show: null, is_unique: null, sort_id: null, label: null },
+  ]
+  const companionPopulated = rows.filter((r) => r.is_show !== null && r.sort_id !== null)
+  assert.equal(companionPopulated.length, 2, 'fixture control: exactly the two enabled-shaped rows carry companions')
+
+  for (const dictionary of SHIPPED.dictionaries) {
+    assert.equal(
+      dictionary.enabledFlag.polarity,
+      'nonzero-means-enabled',
+      `${dictionary.id}: the dictionary enabled-flag polarity was MEASURED on a live vendor catalog ` +
+        `(cold probe read) as nonzero-means-enabled — flipping it back re-inverts the family and ` +
+        `un-resolves every dictionary-assigned semantic`,
+    )
+    const enabled = rows.filter((r) => isEnabledFlagValue(dictionary.enabledFlag.polarity, r.isable))
+    assert.deepEqual(
+      enabled,
+      companionPopulated,
+      `${dictionary.id}: under the declared polarity, the enabled rows must be exactly the rows ` +
+        `whose companion columns are populated — the structural signal the live measurement ` +
+        `corroborated. A polarity flip selects the companion-empty rows instead.`,
+    )
+  }
+
+  // The PART table's availability flag is the OTHER polarity, and must stay recorded as distinct
+  // so the two families can never be conflated again.
+  assert.equal(SHIPPED.coreTables.part.optionalRoles.available, 'isable', 'part availability flag column stays declared')
+  assert.ok(
+    /INVERTED/.test(SHIPPED.coreTables.part.note) && /never generalize/i.test(SHIPPED.coreTables.part.note),
+    'the part note must state the inverted polarity and forbid generalizing it',
+  )
+  assert.ok(
+    /part table/i.test(SHIPPED.dictionaries[0].enabledFlag.note) && /measured/i.test(SHIPPED.dictionaries[0].enabledFlag.note),
+    'the dictionary enabledFlag note must record where the polarity was measured and point at the part-table distinction',
+  )
+
+  // Interpreter controls, both polarities, fail-closed on null/non-numeric, loud on garbage.
+  assert.equal(isEnabledFlagValue('nonzero-means-enabled', 1), true)
+  assert.equal(isEnabledFlagValue('nonzero-means-enabled', '1'), true)
+  assert.equal(isEnabledFlagValue('nonzero-means-enabled', 0), false)
+  assert.equal(isEnabledFlagValue('nonzero-means-enabled', null), false)
+  assert.equal(isEnabledFlagValue('nonzero-means-enabled', 'x'), false)
+  assert.equal(isEnabledFlagValue('zero-means-enabled', 0), true)
+  assert.equal(isEnabledFlagValue('zero-means-enabled', '0'), true)
+  assert.equal(isEnabledFlagValue('zero-means-enabled', 1), false)
+  assert.equal(isEnabledFlagValue('zero-means-enabled', null), false)
+  assert.throws(() => isEnabledFlagValue('sideways-means-enabled', 1), VendorPresetError)
+
+  console.log('  ✓ dictionary polarity: nonzero-means-enabled pinned to the live structural signal; part-table inversion recorded as distinct')
+}
+
+// ---------------------------------------------------------------------------
+// 9. Directory loading is fail-closed: an invalid preset file throws naming the
 //    file — it is never silently skipped.
 // ---------------------------------------------------------------------------
 
@@ -518,6 +590,7 @@ function main() {
   nestedAllowlistsArePinned()
   detectorControls()
   signatureMatching()
+  dictionaryPolarityIsPinned()
   loadingIsFailClosed()
   console.log('✓ source-vendor-presets: schema, poison rejection, adversarial regressions and signature selection all hold')
 }
