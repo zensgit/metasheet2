@@ -10,10 +10,13 @@ staging, flag, deployment, production, or tenant-UAT evidence.
 - Product/design tree: `ec45c33c4ff5d35b6e04c1c4e713aa5c99396e5d`
 - Outcome-exhaustiveness fix-forward: `af90e770a21ee28bc97b2cead42560092fc6c484`
 - Current implementation tree: `509e493238f66e38ed1599a679be0e0525cfee27`
+- Cache-CI config fix-forward: `e85616da1007eca3664f686d8e19563814970d82`
+- Cache-CI config tree: `61f6f6b95153bf1ee450167e980131475c81967a`
 - Branch: `codex/tm-d8-operational-observability-20260831`
-- Scope including this development report and its verification report: 11 files,
-  662 insertions, 2 deletions at the implementation checkpoint
-- Remote PR and exact-head CI: `NOT RUN` at this report revision
+- Scope including this development report and its verification report: 12 files,
+  684 insertions, 2 deletions at the cache-CI config checkpoint
+- Remote PR: `#5393`
+- Remote exact-head CI: replacement head pending at this report revision
 
 The contract is
 `multitable-timemachine-d8-operational-observability-design-lock-20260831.md`.
@@ -81,6 +84,10 @@ Tests:
 - `packages/core-backend/tests/unit/multitable-recovery-archive-application.test.ts`
 - `packages/core-backend/tests/unit/metasheet-recovery-archive-wiring.test.ts`
 
+CI configuration:
+
+- `packages/core-backend/tsconfig.cache.tests.json`
+
 Contract:
 
 - `docs/development/multitable-timemachine-d8-operational-observability-design-lock-20260831.md`
@@ -95,6 +102,14 @@ P3=1`; the P3 was the missing compile-time exhaustiveness lock for worker run
 outcomes. The fix-forward at `af90e770a21e...` added that lock and an exact
 runtime-list oracle. A fresh narrow Terra review of the two-file fix returned
 `P1=0 / P2=0 / P3=0`.
+
+The first Draft head exposed a pre-existing cache-build configuration gap:
+`tsconfig.cache.tests.json` did not load the existing Express request
+augmentations, so transitively compiled multitable sources failed TypeScript.
+The one-file fix-forward adds those two existing declaration roots. Luna's
+read-only diagnosis confirmed the minimal file boundary and returned no
+additional P2/P3 finding. This is a CI compilation fix only; it changes no
+runtime request behavior.
 
 ## 7. Honest completion boundary
 

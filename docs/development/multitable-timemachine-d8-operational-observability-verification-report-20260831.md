@@ -10,8 +10,11 @@ staging, flags, deployment, production, and tenant UAT are not claimed.
 - Product/design tree: `ec45c33c4ff5d35b6e04c1c4e713aa5c99396e5d`
 - Outcome-exhaustiveness fix-forward: `af90e770a21ee28bc97b2cead42560092fc6c484`
 - Current implementation tree: `509e493238f66e38ed1599a679be0e0525cfee27`
+- Cache-CI config fix-forward: `e85616da1007eca3664f686d8e19563814970d82`
+- Cache-CI config tree: `61f6f6b95153bf1ee450167e980131475c81967a`
 - Worktree: `/private/tmp/codex-tm-d8-operational-observability-20260831`
-- Remote exact head: `NOT AVAILABLE`
+- Remote PR: `#5393`
+- Remote exact head: replacement head pending at this report revision
 - Merged-main SHA: `NOT AVAILABLE`
 
 ## 2. Local gates
@@ -21,6 +24,7 @@ staging, flags, deployment, production, and tenant UAT are not claimed.
 | Observability, metrics, application, restore-worker, server-wiring, and metrics-endpoint tests | 6 files / 46 tests PASS |
 | `pnpm --filter @metasheet/core-backend type-check` | PASS |
 | Scoped source ESLint | 0 errors; 22 pre-existing `src/index.ts` warnings |
+| Cache build and tests | 3 files / 16 tests PASS |
 | `git diff --check` | PASS |
 | Database/migration | NOT RUN; no DB or migration change |
 | Object store / KMS / external I/O | NOT RUN and not constructed by this slice |
@@ -42,6 +46,8 @@ The focused suite included:
 | Remove `drain_failed` lifecycle event | bounded-drain failure test failed because the second lifecycle event was absent | Restored; focused suite green |
 | Ignore extra run-result keys | values-free closed-shape test accepted a `sheetId` property and failed its throw assertion | Restored; focused suite green |
 | Remove `tick_failed` from the exhaustive outcome record | `tsc` failed with TS1360 because the `RecoveryArchiveRestoreWorkerRunKind` member was missing | Restored; typecheck and focused suite green |
+| Remove `src/types/express.d.ts` from the cache include set | cache TypeScript failed on the existing `Request.user` fields | Restored; cache build green |
+| Remove `src/middleware/api-token-auth.ts` from the cache include set | cache TypeScript failed on the existing API-token audit request fields | Restored; cache build green |
 
 The initial observability test also failed before implementation because the
 production module did not exist. The metrics test failed before registry wiring
@@ -65,7 +71,7 @@ because the production observer export was absent.
 | Source and local focused tests | PASS at product checkpoint |
 | Local typecheck/lint/diff | PASS with recorded baseline warnings |
 | Independent exact-range model review | Terra high `P1=0 / P2=0 / P3=0` after the bounded exhaustiveness fix-forward |
-| Draft PR exact-head CI | NOT RUN |
+| Draft PR exact-head CI | First head `a16569ce...` failed only `core-backend-cache`; replacement config fix is locally green and new exact-head CI is pending |
 | Ready / merge | NOT AUTHORIZED by this report |
 | Merged-main rerun | NOT RUN |
 | D7 staging | NOT RUN / OWNER GATE |
