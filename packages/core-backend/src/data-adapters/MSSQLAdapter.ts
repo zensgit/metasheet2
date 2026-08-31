@@ -27,6 +27,7 @@ import type {
   ConnectionConfig
 } from './BaseAdapter';
 import { BaseDataAdapter, getStringConfig, getNumberConfig } from './BaseAdapter'
+import { assertNotK3SqlWrite, assertNotK3MarkedDestination } from './k3-destination-write-fence'
 
 // Minimal structural typing for the optional `mssql` driver (avoid `any` and a
 // hard build-time dependency on @types/mssql).
@@ -272,6 +273,15 @@ export class MSSQLAdapter extends BaseDataAdapter {
   }
 
   async query<T = Record<string, DbValue>>(sql: string, params?: DbValue[]): Promise<QueryResult<T>> {
+    // G-4 DESTINATION FENCE — THE ADAPTER-BOUNDARY CHOKEPOINT (P0 + P1a).
+    // Every write this adapter performs funnels here: insert/update/delete/select/stream/batchInsert
+    // all build SQL and call query(), and a caller who bypasses DataSourceManager entirely
+    // (getDataSource(id).query('INSERT …') or .insert(…)) still lands here. Classifying the raw SQL
+    // at THIS boundary closes both the switch-the-verb bypass (query() ran any statement, incl.
+    // INSERT INTO t_ICItem) and the raw-adapter path (the manager wrappers were only one of several
+    // parallel routes). A SELECT is not a write and is never fenced, so reads — including reads of K3
+    // tables and every internal select() — pass untouched. Placed FIRST, before the pool is touched.
+    assertNotK3SqlWrite(this.config, sql)
     if (!this.pool) {
       throw new Error('Not connected to database')
     }
@@ -540,6 +550,14 @@ export class MSSQLAdapter extends BaseDataAdapter {
   }
 
   async beginTransaction(): Promise<Transaction> {
+    // G-4 DESTINATION FENCE (transaction). A transaction hands the caller a raw driver object whose
+    // Requests execute SQL OUTSIDE this adapter's query() funnel — the one write path the SQL
+    // classifier cannot see. A destination DECLARED to be K3 must therefore not vend a transaction at
+    // all. (The table-signature backstop cannot apply here: the tables a transaction will write are
+    // unknown until the caller issues statements against the raw object.) An unmarked source's
+    // transaction path is the same residual class as direct driver access and is documented on the
+    // fence module; the manager/facade never expose transactions.
+    assertNotK3MarkedDestination(this.config)
     if (!this.pool || !mssql) {
       throw new Error('Not connected to database')
     }
