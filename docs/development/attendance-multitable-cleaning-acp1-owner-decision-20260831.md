@@ -1,6 +1,6 @@
 # Attendance x Multitable Cleaning ACP-1 Owner Decision Packet
 
-Status: **RATIFIED — DESIGN LOCK; RUNTIME AUTHORITY REQUIRES THE EXACT MERGED DESIGN-LOCK SHA**
+Status: **OWNER CHOICE RATIFIED — BLOCKING OD-ATC-10 FACTUAL CONFLICT; DESIGN LOCK NOT MERGEABLE; NO RUNTIME AUTHORITY**
 Prepared: 2026-08-31 (Asia/Taipei)
 Repository: MetaSheet2
 Authority rule: runtime work may start only after the owner ratifies the exact decisions below and the ratified lock is bound to an exact merged commit.
@@ -49,6 +49,23 @@ The multitable is a collaboration and cleaning workspace, **never the attendance
 
 The decision applies prospectively from that owner turn. It does not retroactively authorize earlier work, authorize Ready/merge, or satisfy the exact merged-SHA runtime gate.
 
+### Blocking ratification consistency finding
+
+A post-ratification current-main audit found that OD-ATC-10 contains a false factual premise that was not visible in the proposal packet:
+
+- At `origin/main` `919dc42366d3464c0b941448fad880c88f3f7cf5`, `plugins/plugin-attendance/index.cjs:503-514` defines `attendanceResultEditPolicy.enabled: true` and `notifyAffectedEmployee: true`, explicitly documenting default ON.
+- The route at `plugins/plugin-attendance/index.cjs:31360-31373` falls back to that default and denies only when `enabled === false`.
+- The web client at `apps/web/src/views/AttendanceView.vue:17250-17252` also treats an absent policy as enabled.
+
+Therefore the ratified requirements “the existing result-edit policy/flag remains default OFF” and “ACP-1 adds no new flag” cannot both be implemented without either changing an established global default or exposing ACP under a default-ON gate. Neither interpretation is authorized. The 11 ratified decision rows below remain byte-identical evidence, but the design lock must not merge and runtime work must not start until the owner ratifies one explicit correction:
+
+1. **OD-ATC-10R option (a), fail-closed:** add a dedicated attendance-owned ACP enable policy that defaults OFF; leave the existing result-edit policy/default unchanged. This revises the “no new flag” clause and requires a re-censused attendance-owned settings/test boundary.
+2. **OD-ATC-10R option (b), no new gate:** correct the premise to default ON and govern ACP only with the existing result-edit policy plus permissions. This can expose ACP wherever the plugin, managed sheet, sheet access, and `attendance:admin` already coexist, so release cannot truthfully be called default OFF.
+
+Changing the existing global result-edit default from ON to OFF is excluded because it would alter an already shipped manual-edit product outside ACP-1. No option is inferred from the earlier blanket ratification.
+
+To choose the fail-closed correction explicitly, the owner may respond: `RATIFY ACP-1A OD-ATC-10R，采用 (a)`.
+
 | ID | Ratified option (a) |
 | --- | --- |
 | OD-ATC-0 Authority | Only an exact merged design-lock SHA authorizes runtime work. Before that SHA, no runtime implementation, migration, API, UI, or CI wiring. |
@@ -88,7 +105,7 @@ Option A intentionally combines review and apply. It does not expose a standalon
 
 ## 5. Locked implementation boundary
 
-Implementation must wait until #5372 is merged to then-current `main` and post-merge checks are terminal green. ACP-1 must start from a fresh worktree at that then-current `origin/main`; it must not stack on #5372 or copy its CAS code.
+Implementation must first wait for an exact owner decision on OD-ATC-10R. It must then wait until #5372 is merged to then-current `main` and post-merge checks are terminal green. ACP-1 must start from a fresh worktree at that then-current `origin/main`; it must not stack on #5372 or copy its CAS code.
 
 Attendance-owned product and dedicated tests:
 
@@ -236,6 +253,7 @@ Outputs from unavailable external models are optional independent reviews, not r
 Stop immediately and report the exact blocker if:
 
 - the ratification source cannot be verified, the decision table differs from PR #5381 head `c50f65f55273842ba8b96245e3004ca58832af9d` / document blob `50e9ff52abd45b2616031c43b5e30222c23c6539`, or a later owner decision conflicts with this packet;
+- OD-ATC-10R has not been explicitly ratified and folded into the lock;
 - #5372 changes or is not merged on the starting main;
 - `origin/main` drifts after preflight or relevant OPEN PR overlap changes;
 - Option A requires permission or actor semantics beyond the ratified Draft/HOLD boundary;
