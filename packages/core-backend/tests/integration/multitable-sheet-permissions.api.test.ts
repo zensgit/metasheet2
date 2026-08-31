@@ -16,6 +16,24 @@ function createMockPool(
   userPermissionMap: Record<string, string[]> = {},
 ) {
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    // SHEET LIVENESS (soft delete). `resolveSheetCapabilities` now reads `meta_sheets.deleted_at`
+    // before any sheet-addressed work, and these fixtures predate that query — they answer only the
+    // EXISTENCE form. Rather than enumerate sheet ids here (which would let a fixture drift out of
+    // sync with what its own handler declares), translate the liveness read into the existence read
+    // each test already answers, so every test keeps EXACTLY its original notion of which sheets are
+    // there — including the cases that deliberately declare a sheet ABSENT and expect a 404.
+    //
+    // A handler that answers neither is treated as live: that is precisely the pre-change behaviour
+    // (the routes did not ask), so those tests keep their original intent too.
+    if (sql.includes('SELECT deleted_at FROM meta_sheets WHERE id = $1')) {
+      try {
+        const existing = await queryHandler('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', params)
+        const found = (existing?.rows ?? []).length > 0
+        return { rows: found ? [{ deleted_at: null }] : [], rowCount: found ? 1 : 0 }
+      } catch {
+        return { rows: [{ deleted_at: null }], rowCount: 1 }
+      }
+    }
     if (
       sql.includes('FROM meta_view_permissions')
       && !(sql.includes('FROM meta_view_permissions vp') && sql.includes('LEFT JOIN platform_member_groups g'))
