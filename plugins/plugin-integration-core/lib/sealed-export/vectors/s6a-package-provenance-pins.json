@@ -58,7 +58,7 @@
     "gipCanonicalJson": "99c2f954e35ab1c943c59872def8722b00dccb11401783d77839ae0ed98298b1",
     "pluginDb": "d200fe6397719e9a3f90e53eb6cf959832edfd87a24f50f916fa8748144d3f8d",
     "stockPreparationDecoder": "8868b8c51c7f96d81eb224c81d8d270b1dc79b1f7bca702b4e8b7849259b0c6a",
-    "stockPreparationReadonlyIntake": "b91c57376947657a84fcec16b09e3a8ef6149b68f97498bdb2433f9aa1109bb6",
+    "stockPreparationReadonlyIntake": "57c2df48c090f6ff8fa0333f74443a58eca79c5627ca6e2065de755af337f569",
     "stockPreparationPlmSourcePersistBridge": "f67503e9d69418d0a50c525138fa958e5bde4b43f1ca60444ae847e02a70ab03",
     "stockPreparationSyncRunPersist": "d8e1f295d08ef4bdbbd0ab920f603230700f7c150ede7fbd54c4ac37eaf90058"
   },
