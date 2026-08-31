@@ -1,14 +1,14 @@
 {
   "id": "stock-preparation",
   "version": "0.1.0",
-  "displayName": "BOM 备料",
+  "displayName": "BOM备料",
   "valueStatement": "从 PLM 拉取项目 BOM,逐层展开为备料明细;冲突交人工确认,人工列永不被系统覆盖。",
   "pluginId": "plugin-integration-core",
   "runtimeModel": "direct",
   "boundedContext": {
     "code": "stock-preparation",
     "owner": "integration",
-    "description": "BOM 备料 — the first multitable-backed application: managed multitable objects, a confirmation-queue workbench, three permission codes, two deployment-data config surfaces, and two acceptance criteria. Installing it means tables and configuration, never code."
+    "description": "BOM备料 — the first multitable-backed application: managed multitable objects, a confirmation-queue workbench, three permission codes, two deployment-data config surfaces, and two acceptance criteria. Installing it means tables and configuration, never code."
   },
   "platformDependencies": [
     "auth",
