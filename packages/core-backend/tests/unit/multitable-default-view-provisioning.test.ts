@@ -19,7 +19,7 @@ import { createPluginScopedMultitableApi } from '../../src/multitable/plugin-sco
  */
 type ViewRow = { id: string; sheet_id: string; name: string; type: string }
 
-function createFakeDb(options: { sheetIds: string[]; views?: ViewRow[] }) {
+function createFakeDb(options: { sheetIds: string[]; views?: ViewRow[]; forceZeroCount?: boolean }) {
   const views: ViewRow[] = (options.views ?? []).map((view) => ({ ...view }))
   const statements: string[] = []
   const query = vi.fn(async (sql: string, params: unknown[] = []) => {
@@ -27,6 +27,7 @@ function createFakeDb(options: { sheetIds: string[]; views?: ViewRow[] }) {
     statements.push(normalized)
     if (normalized.startsWith('SELECT count(*)::int AS view_count')) {
       const [sheetId] = params as [string]
+      if (options.forceZeroCount) return { rows: [{ view_count: 0 }] }
       return { rows: [{ view_count: views.filter((view) => view.sheet_id === sheetId).length }] }
     }
     if (normalized.startsWith('SELECT id, base_id, name, description')) {
@@ -36,7 +37,20 @@ function createFakeDb(options: { sheetIds: string[]; views?: ViewRow[] }) {
     }
     if (normalized.startsWith('INSERT INTO meta_views')) {
       const [id, sheetId, name, type] = params as [string, string, string, string]
-      if (views.some((view) => view.id === id)) return { rows: [], rowCount: 0 }
+      const existing = views.find((view) => view.id === id)
+      if (existing) {
+        // HONOR THE SQL, do not hard-code the safe semantics into the fake: the first
+        // version of this handler always refused the write on an id collision, which made
+        // the DO-NOTHING guarantee a tautology -- mutating the real SQL to ON CONFLICT DO
+        // UPDATE left every test green (caught by adversarial mutation M2). A fake that
+        // vouches for the code must behave like the database would.
+        if (/ON CONFLICT \(id\) DO UPDATE/i.test(normalized)) {
+          existing.name = name
+          existing.type = type
+          return { rows: [], rowCount: 1 }
+        }
+        return { rows: [], rowCount: 0 }
+      }
       views.push({ id, sheet_id: sheetId, name, type })
       return { rows: [], rowCount: 1 }
     }
@@ -122,6 +136,31 @@ describe('ensureObjectDefaultView', () => {
     })
     expect(second).toEqual({ created: false, viewId: null, existingViewCount: 1 })
     expect(db.views).toHaveLength(1)
+  })
+
+  it('an id collision mutates nothing: ON CONFLICT DO NOTHING is load-bearing (TOCTOU race)', async () => {
+    // Simulates the check-then-act window: the count SELECT sees zero views, but by the
+    // time the INSERT lands, a row with the SAME deterministic id already exists (two
+    // concurrent ensures). DO NOTHING must leave that row byte-identical; the DO-UPDATE
+    // mutation of this statement must fail HERE, not survive on a vouching fake.
+    const viewId = getObjectViewId(PROJECT_ID, OBJECT_ID, 'default')
+    const db = createFakeDb({
+      sheetIds: [SHEET_ID],
+      views: [{ id: viewId, sheet_id: SHEET_ID, name: 'winner of the race', type: 'grid' }],
+      forceZeroCount: true,
+    })
+    const result = await ensureObjectDefaultView({
+      query: db.query,
+      projectId: PROJECT_ID,
+      objectId: OBJECT_ID,
+      name: 'loser default',
+    })
+    expect(result.created).toBe(false)
+    expect(db.views).toHaveLength(1)
+    expect(db.views[0]).toMatchObject({ id: viewId, name: 'winner of the race', type: 'grid' })
+    const insert = db.statements.find((sql) => sql.startsWith('INSERT INTO meta_views'))
+    expect(insert).toContain('ON CONFLICT (id) DO NOTHING')
+    expect(insert).not.toMatch(/DO UPDATE/i)
   })
 
   it('refuses an empty name and a missing sheet, and writes nothing either way', async () => {
