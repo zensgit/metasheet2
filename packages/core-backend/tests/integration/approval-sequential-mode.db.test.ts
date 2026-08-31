@@ -7,10 +7,10 @@ import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
-// TOP-LEVEL: the dedicated real-DB lane sets EXPECT_DB=1, so a missing DATABASE_URL must fail
-// instead of skipping the describeIfDatabase suite and reporting a false green.
-const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
-itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+// TOP-LEVEL: this file is excluded from no-DB collection. Any direct integration invocation must
+// therefore prove it is the dedicated DB lane instead of silently skipping the gated suite.
+it('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+  expect(process.env.EXPECT_DB).toBe('1')
   expect(process.env.DATABASE_URL).toBeTruthy()
 })
 
@@ -61,16 +61,30 @@ function formSchema() {
 }
 
 function linearGraph(assignees: string[], approvalMode: 'sequential' | 'all', finalAssignee?: string) {
+  const assigneeSources = assignees.length > 1
+    ? [
+        { kind: 'static_user', userIds: assignees.slice(0, 2) },
+        { kind: 'static_user', userIds: [assignees[1], ...assignees.slice(2)] },
+      ]
+    : [{ kind: 'static_user', userIds: assignees }]
   return {
     nodes: [
       { key: 'start', type: 'start', config: {} },
       {
         key: 'approval_seq',
         type: 'approval',
-        config: { assigneeType: 'user', assigneeIds: assignees, approvalMode },
+        config: { assigneeSources, approvalMode, emptyAssigneePolicy: 'error' },
       },
       ...(finalAssignee
-        ? [{ key: 'approval_final', type: 'approval', config: { assigneeType: 'user', assigneeIds: [finalAssignee], approvalMode: 'single' } }]
+        ? [{
+            key: 'approval_final',
+            type: 'approval',
+            config: {
+              assigneeSources: [{ kind: 'static_user', userIds: [finalAssignee] }],
+              approvalMode: 'single',
+              emptyAssigneePolicy: 'error',
+            },
+          }]
         : []),
       { key: 'end', type: 'end', config: {} },
     ],

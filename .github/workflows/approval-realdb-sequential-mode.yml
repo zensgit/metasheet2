@@ -8,28 +8,42 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'packages/core-backend/package.json'
       - 'packages/core-backend/src/routes/approvals.ts'
+      - 'packages/core-backend/src/services/ApprovalAssigneeResolver.ts'
       - 'packages/core-backend/src/services/ApprovalGraphExecutor.ts'
       - 'packages/core-backend/src/services/ApprovalProductService.ts'
       - 'packages/core-backend/src/services/approval-effective-node-operations.ts'
       - 'packages/core-backend/src/services/approval-sequential-mode.ts'
       - 'packages/core-backend/src/types/approval-product.ts'
+      - 'packages/core-backend/tests/globalTeardown.ts'
       - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
       - 'packages/core-backend/tests/integration/approval-sequential-mode.db.test.ts'
+      - 'packages/core-backend/tests/setup.integration.ts'
       - 'packages/core-backend/vitest.config.ts'
+      - 'packages/core-backend/vitest.integration.config.ts'
       - '.github/workflows/approval-realdb-sequential-mode.yml'
   push:
     branches: [main]
     paths:
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'packages/core-backend/package.json'
       - 'packages/core-backend/src/routes/approvals.ts'
+      - 'packages/core-backend/src/services/ApprovalAssigneeResolver.ts'
       - 'packages/core-backend/src/services/ApprovalGraphExecutor.ts'
       - 'packages/core-backend/src/services/ApprovalProductService.ts'
       - 'packages/core-backend/src/services/approval-effective-node-operations.ts'
       - 'packages/core-backend/src/services/approval-sequential-mode.ts'
       - 'packages/core-backend/src/types/approval-product.ts'
+      - 'packages/core-backend/tests/globalTeardown.ts'
       - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
       - 'packages/core-backend/tests/integration/approval-sequential-mode.db.test.ts'
+      - 'packages/core-backend/tests/setup.integration.ts'
       - 'packages/core-backend/vitest.config.ts'
+      - 'packages/core-backend/vitest.integration.config.ts'
       - '.github/workflows/approval-realdb-sequential-mode.yml'
 
 permissions:
@@ -50,16 +64,17 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: metasheet_approval_sequential
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d metasheet_approval_sequential"
+          --health-cmd "pg_isready -U postgres -d postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
     env:
-      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_approval_sequential
+      # The repository-wide coverage census requires job-level DB ownership. The real DSN replaces
+      # this values-free marker through GITHUB_ENV only after GitHub's log masker is armed.
+      DATABASE_URL: 'configured-after-masking'
       EXPECT_DB: '1'
     steps:
       - name: Checkout repository
@@ -78,6 +93,15 @@ jobs:
           version: 10.16.1
           run_install: false
 
+      - name: Configure values-free database connection
+        shell: bash
+        run: |
+          db_host="$(getent ahostsv4 localhost | awk 'NR == 1 { print $1 }')"
+          test -n "$db_host"
+          database_url="postgresql://postgres:postgres@${db_host}:5432/postgres"
+          echo "::add-mask::${database_url}"
+          printf 'DATABASE_URL=%s\n' "$database_url" >> "$GITHUB_ENV"
+
       - name: Use empty npmrc for pnpm
         run: |
           echo "" > /tmp/empty-npmrc
@@ -90,13 +114,28 @@ jobs:
         run: |
           grep -Fq "'tests/integration/approval-sequential-mode.db.test.ts'," packages/core-backend/vitest.config.ts
           grep -Fq "sentinel: EXPECT_DB lane must have DATABASE_URL" packages/core-backend/tests/integration/approval-sequential-mode.db.test.ts
+          grep -Fq "it('sentinel: EXPECT_DB lane must have DATABASE_URL" packages/core-backend/tests/integration/approval-sequential-mode.db.test.ts
+          ! grep -Fq "it.skip('sentinel: EXPECT_DB lane must have DATABASE_URL" packages/core-backend/tests/integration/approval-sequential-mode.db.test.ts
           expect_key=EXPECT_DB
           grep -Eq "^      ${expect_key}: '1'$" .github/workflows/approval-realdb-sequential-mode.yml
+          grep -Fq "      DATABASE_URL: 'configured-after-masking'" .github/workflows/approval-realdb-sequential-mode.yml
+          test "$(grep -Ec '^          echo "::add-mask::\$\{database_url\}"$' .github/workflows/approval-realdb-sequential-mode.yml)" -eq 1
+          ! grep -Eq '^      DATABASE_URL: .*postgresql://' .github/workflows/approval-realdb-sequential-mode.yml
+          for path in \
+            packages/core-backend/src/services/ApprovalAssigneeResolver.ts \
+            packages/core-backend/tests/globalTeardown.ts \
+            packages/core-backend/tests/setup.integration.ts \
+            packages/core-backend/vitest.integration.config.ts
+          do
+            test "$(grep -Fc "      - '$path'" .github/workflows/approval-realdb-sequential-mode.yml)" -eq 2
+          done
 
       - name: Assert fail-loud DB contract
         run: |
           test "${EXPECT_DB:-}" = '1'
           test -n "${DATABASE_URL:-}"
+          test "${DATABASE_URL}" != 'configured-after-masking'
+          case "${DATABASE_URL}" in postgresql://*) ;; *) exit 1 ;; esac
 
       - name: Run DB migrations
         env:
