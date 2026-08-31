@@ -4128,6 +4128,24 @@ describe('AutomationService — retryExecution (A5)', () => {
     }
   })
 
+  it('409 TEST_RUN_NOT_RETRYABLE for persisted failed/skipped manual test executions', async () => {
+    const getById = vi.spyOn(service.logs, 'getById')
+    const getRule = vi.spyOn(service, 'getRule').mockResolvedValue(currentRule())
+    const execSpy = vi.spyOn(service, 'executeRule').mockResolvedValue(
+      storedExecution({ id: 'axe_new', status: 'success' }),
+    )
+
+    for (const status of ['failed', 'skipped'] as const) {
+      getById.mockResolvedValue(storedExecution({ triggeredBy: 'manual_test', status }))
+      await expect(service.retryExecution('axe_orig', 'admin1')).resolves.toMatchObject({
+        status: 409,
+        code: 'TEST_RUN_NOT_RETRYABLE',
+      })
+    }
+    expect(getRule).not.toHaveBeenCalled()
+    expect(execSpy).not.toHaveBeenCalled()
+  })
+
   it('409 MISSING_TRIGGER_EVENT fail-closed: absent / empty {} / array — never silent empty-context retry', async () => {
     const getRule = vi.spyOn(service, 'getRule')
     const execSpy = vi.spyOn(service, 'executeRule')

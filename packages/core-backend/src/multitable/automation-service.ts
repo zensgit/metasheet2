@@ -2563,6 +2563,13 @@ export class AutomationService {
         message: `Only failed/skipped executions can be retried (got ${original.status})`,
       }
     }
+    if (original.triggeredBy === 'manual_test') {
+      return {
+        status: 409,
+        code: 'TEST_RUN_NOT_RETRYABLE',
+        message: 'Test-run executions cannot be retried; start a new test run instead',
+      }
+    }
     if (!isRetryableStoredTriggerEvent(original.triggerEvent)) {
       // Fail closed (A4-D7): null/undefined, array, or empty `{}` cannot rebuild context.
       return { status: 409, code: 'MISSING_TRIGGER_EVENT', message: 'Original execution has no usable stored trigger event to retry' }
