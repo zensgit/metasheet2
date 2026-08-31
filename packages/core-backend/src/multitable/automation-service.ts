@@ -66,7 +66,7 @@ import {
   type AutomationConditionField,
   type ConditionGroup,
 } from './automation-conditions'
-import { AutomationExecutor, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps, type ExecutionContext, type ActionJobLifecycle, type AutomationStepResult } from './automation-executor'
+import { AutomationExecutor, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps, type ExecutionContext, type ActionJobLifecycle, type AutomationStepResult, type AutomationDispatchMode } from './automation-executor'
 import { ALL_ACTION_TYPES, type AutomationAction } from './automation-actions'
 import type { AutomationTrigger } from './automation-triggers'
 import {
@@ -82,6 +82,11 @@ import { AutomationLogService } from './automation-log-service'
 import { AutomationJobService } from './automation-job-service'
 import { AutomationSuspensionService, computeActionFingerprint } from './automation-suspension-service'
 import { deriveRuleActionSetFingerprint } from './automation-rule-fingerprint'
+import { realFireTestRunEligibility } from './automation-retry-eligibility'
+import {
+  deriveTestRunScopedRoot,
+  type ExecutionLedgerKind,
+} from './automation-execution-ledger'
 import {
   AutomationApprovalBridgeService,
   hasPermissionCode,
@@ -116,6 +121,59 @@ export class AutomationRuleValidationError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'AutomationRuleValidationError'
+  }
+}
+
+export type AutomationTestRunMode = 'simulate' | 'real_fire'
+
+export interface AutomationTestRunSampleRecord {
+  recordId: string
+  data: Record<string, unknown>
+  actorId: string
+}
+
+export interface AutomationTestRunOptions {
+  mode?: AutomationTestRunMode
+  /** Server-read-gated sample snapshot. Request payloads must never construct this directly. */
+  sampleRecord?: AutomationTestRunSampleRecord
+  /** Server-authenticated caller identity; required for a real-fire scoped ledger root. */
+  actorId?: string
+  /** #4196 §6.1 caller idempotency key; input to server-side root derivation only. */
+  testRunOperationId?: string
+  /** Explicit side-effect acknowledgement; required for real_fire. */
+  confirmSideEffects?: boolean
+}
+
+export class AutomationTestRunRejectedError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message)
+    this.name = 'AutomationTestRunRejectedError'
+  }
+}
+
+function valuesFreeSimulationStep(step: AutomationStepResult): AutomationStepResult {
+  return {
+    actionType: step.actionType,
+    status: step.status,
+    ...(step.simulated === true
+      ? { simulated: true, output: { dryRun: true, dispatched: false } }
+      : {}),
+    ...(typeof step.durationMs === 'number' ? { durationMs: step.durationMs } : {}),
+    ...(step.error ? { error: 'SIMULATION_STEP_FAILED' } : {}),
+  }
+}
+
+function valuesFreeSimulationExecution(execution: AutomationExecution): AutomationExecution {
+  return {
+    ...execution,
+    steps: execution.steps.map(valuesFreeSimulationStep),
+    triggerEvent: undefined,
+    ruleSnapshot: undefined,
+    ...(execution.error ? { error: 'SIMULATION_FAILED' } : { error: undefined }),
   }
 }
 
@@ -2455,28 +2513,48 @@ export class AutomationService {
     rule: ExecutorRule,
     triggerEvent: unknown,
     retryMeta?: { rerunOfExecutionId: string; initiatedBy: string; rootExecutionId?: string },
+    dispatchMode: AutomationDispatchMode = 'live',
+    executionIdentity?: { rootExecutionId?: string; ledgerKind?: ExecutionLedgerKind },
   ): Promise<AutomationExecution> {
     const persistJobs = rule.executionMode === 'workflow_job_v1'
+    const rootExecutionId = executionIdentity?.rootExecutionId ?? retryMeta?.rootExecutionId
     // A6-1: ONLY opted-in rules ('workflow_job_v1') get a per-action job lifecycle. Legacy rules
     // pass no factory → executor writes zero job rows (opt-out path is byte-identical to today).
     // This is the single place the path is chosen, so a retry of an opt-in rule also writes jobs.
     const jobLifecycleFactory = persistJobs
-      ? (executionId: string) => this.buildJobLifecycle(executionId, rule, triggerEvent, retryMeta?.rootExecutionId)
+      ? (executionId: string) => this.buildJobLifecycle(
+          executionId,
+          rule,
+          triggerEvent,
+          rootExecutionId,
+          dispatchMode,
+          executionIdentity?.ledgerKind ?? 'execution',
+        )
       : undefined
     // #4196: thread the retry lineage root into the executor so its ExecutionContext.rootExecutionId keys
     // Class-A claims on the ORIGINAL execution's root (a retry re-running the same action → duplicate →
     // skip). A first run has no retryMeta, so the executor defaults the root to its own execution id.
-    const execution = await this.executor.execute(rule, triggerEvent, jobLifecycleFactory, retryMeta?.rootExecutionId)
+    const execution = await this.executor.execute(
+      rule,
+      triggerEvent,
+      jobLifecycleFactory,
+      rootExecutionId,
+      dispatchMode,
+      executionIdentity?.ledgerKind ?? 'execution',
+    )
     if (retryMeta) {
       // A5: stamp retry provenance onto the NEW execution before persistence.
       execution.rerunOfExecutionId = retryMeta.rerunOfExecutionId
       execution.initiatedBy = retryMeta.initiatedBy
     }
     try {
+      const persistedExecution = dispatchMode === 'simulate'
+        ? valuesFreeSimulationExecution(execution)
+        : execution
       if (persistJobs) {
-        await this.logService.updateRecordedExecution(execution)
+        await this.logService.updateRecordedExecution(persistedExecution)
       } else {
-        await this.logService.record(execution)
+        await this.logService.record(persistedExecution)
       }
     } catch (err) {
       logger.error('Automation execution log persistence failed', err instanceof Error ? err : undefined)
@@ -2489,15 +2567,29 @@ export class AutomationService {
     rule: ExecutorRule,
     triggerEvent: unknown,
     rootExecutionId?: string,
+    dispatchMode: AutomationDispatchMode = 'live',
+    ledgerKind: ExecutionLedgerKind = 'execution',
   ): ActionJobLifecycle {
+    const jobLifecycle = this.jobService.lifecycleFor(executionId, { id: rule.id, sheetId: rule.sheetId })
     return {
-      onExecutionStarted: (execution: AutomationExecution) => this.logService.record(execution),
-      ...this.jobService.lifecycleFor(executionId, { id: rule.id, sheetId: rule.sheetId }),
+      onExecutionStarted: (execution: AutomationExecution) => this.logService.record(
+        dispatchMode === 'simulate' ? valuesFreeSimulationExecution(execution) : execution,
+      ),
+      onStart: jobLifecycle.onStart,
+      onSettled: (stepIndex, action, result, meta) => jobLifecycle.onSettled(
+        stepIndex,
+        action,
+        dispatchMode === 'simulate' ? valuesFreeSimulationStep(result) : result,
+        meta,
+      ),
+      onSkipped: jobLifecycle.onSkipped,
       // A6-2: a wait_for_callback step persists the suspension + suspended job, then the executor stops.
       onSuspend: (stepIndex: number, action: AutomationAction): Promise<void> =>
         this.suspensionService
           .create({
             executionId,
+            rootExecutionId: rootExecutionId ?? executionId,
+            ledgerKind,
             rule: { id: rule.id, sheetId: rule.sheetId, actions: rule.actions },
             recordId: ((triggerEvent as Record<string, unknown>)?.recordId as string) ?? '',
             triggerEvent,
@@ -2511,6 +2603,8 @@ export class AutomationService {
         this.suspensionService
           .createBranchLocal({
             executionId,
+            rootExecutionId: rootExecutionId ?? executionId,
+            ledgerKind,
             rule: { id: rule.id, sheetId: rule.sheetId, actions: rule.actions },
             recordId: ((triggerEvent as Record<string, unknown>)?.recordId as string) ?? '',
             triggerEvent,
@@ -2522,7 +2616,7 @@ export class AutomationService {
       // if the approval auto-completed during createApproval().
       onStartApproval: async (stepIndex: number, action: AutomationAction, context: ExecutionContext) => {
         const result = await this.approvalBridgeService.startApproval({
-          execution: { id: executionId, rootExecutionId },
+          execution: { id: executionId, rootExecutionId, ledgerKind },
           rule: { id: rule.id, sheetId: rule.sheetId, actions: rule.actions, createdBy: rule.createdBy },
           context,
           stepIndex,
@@ -2748,11 +2842,19 @@ export class AutomationService {
       triggerEvent,
     }
     const lineageIds = await this.collectExecutionLineageIds(execution)
-    const rootExecutionId = lineageIds.at(-1) ?? execution.id
+    const rootExecutionId = suspension.rootExecutionId ?? lineageIds.at(-1) ?? execution.id
     // #4196: carry the lineage root onto the resumed context so Class-A actions in the resumed tail claim
     // on the SAME root as the original run (a resumed action re-applying itself → duplicate → skip).
     context.rootExecutionId = rootExecutionId
-    const jobLifecycle = this.buildJobLifecycle(execution.id, execRule, triggerEvent, rootExecutionId)
+    context.ledgerKind = suspension.ledgerKind
+    const jobLifecycle = this.buildJobLifecycle(
+      execution.id,
+      execRule,
+      triggerEvent,
+      rootExecutionId,
+      'live',
+      suspension.ledgerKind,
+    )
     const continued = resumeCursor.kind === 'condition_branch'
       ? await this.executor.continueBranchExecution(execution, execRule, context, resumeCursor.cursor, jobLifecycle)
       : await this.executor.continueExecution(execution, execRule, context, suspension.stepIndex, jobLifecycle)
@@ -2876,13 +2978,14 @@ export class AutomationService {
       // #4196: the bridge carries the lineage root; carry it onto the resumed context so Class-A actions
       // in the approval-resumed tail claim on the same root.
       rootExecutionId: bridge.rootExecutionId,
+      ledgerKind: bridge.ledgerKind,
     }
     const continued = await this.executor.continueExecution(
       execution,
       execRule,
       context,
       bridge.stepIndex,
-      this.buildJobLifecycle(execution.id, execRule, triggerEvent, bridge.rootExecutionId),
+      this.buildJobLifecycle(execution.id, execRule, triggerEvent, bridge.rootExecutionId, 'live', bridge.ledgerKind),
       result,
     )
     try {
@@ -3498,9 +3601,14 @@ export class AutomationService {
   }
 
   /**
-   * Manual test run: execute a rule immediately with synthetic event.
+   * Manual test run: simulate the saved rule immediately with a synthetic event.
    */
-  async testRun(ruleId: string, sheetId: string): Promise<AutomationExecution> {
+  async testRun(
+    ruleId: string,
+    sheetId: string,
+    options: AutomationTestRunOptions = {},
+  ): Promise<AutomationExecution> {
+    const mode = options.mode ?? 'simulate'
     const rule = await this.getRule(ruleId)
     // G8 hardening (review P3): the route gates `canManageAutomation` on the PATH `sheetId`, but
     // getRule(ruleId) is not sheet-bound — so a caller authorized on sheet A could otherwise run a
@@ -3510,14 +3618,57 @@ export class AutomationService {
       throw new Error(`Rule ${ruleId} not found or not enabled`)
     }
     const execRule = toExecutorRule(rule)
+    let testRunRoot: string | undefined
+    if (mode === 'real_fire') {
+      if (options.confirmSideEffects !== true) {
+        throw new AutomationTestRunRejectedError(
+          400,
+          'CONFIRM_SIDE_EFFECTS_REQUIRED',
+          'confirmSideEffects must be true for a real-fire test run',
+        )
+      }
+      try {
+        testRunRoot = deriveTestRunScopedRoot({
+          actorId: options.actorId ?? '',
+          ruleId,
+          testRunOperationId: options.testRunOperationId ?? '',
+        })
+      } catch {
+        throw new AutomationTestRunRejectedError(
+          400,
+          'INVALID_TEST_RUN_OPERATION_ID',
+          'testRunOperationId must be a valid opaque idempotency key and the caller must be authenticated',
+        )
+      }
+      const eligibility = realFireTestRunEligibility(execRule.actions)
+      if (eligibility.ok === false) {
+        throw new AutomationTestRunRejectedError(
+          409,
+          eligibility.code,
+          'The rule cannot run in real-fire test mode under the current safety gates',
+        )
+      }
+    } else if (mode !== 'simulate') {
+      throw new AutomationTestRunRejectedError(400, 'INVALID_TEST_RUN_MODE', 'mode must be simulate or real_fire')
+    }
     const syntheticEvent: AutomationEventPayload = {
       sheetId,
-      recordId: 'test_record',
-      data: {},
-      actorId: 'system',
+      recordId: options.sampleRecord?.recordId ?? 'test_record',
+      data: options.sampleRecord?.data ?? {},
+      actorId: mode === 'real_fire'
+        ? options.actorId ?? ''
+        : options.sampleRecord?.actorId ?? 'system',
       _triggeredBy: 'manual_test',
     }
-    return this.executeRule(execRule, syntheticEvent)
+    return this.executeRule(
+      execRule,
+      syntheticEvent,
+      undefined,
+      mode === 'real_fire' ? 'live' : 'simulate',
+      mode === 'real_fire'
+        ? { rootExecutionId: testRunRoot, ledgerKind: 'test_run' }
+        : undefined,
+    )
   }
 
   /**
