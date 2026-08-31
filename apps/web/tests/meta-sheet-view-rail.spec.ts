@@ -457,3 +457,112 @@ describe('MetaSheetViewRail — T6: UF token gate (design MD §6: zero hardcoded
     expect(hexMatches).toEqual([])
   })
 })
+
+// T7 — sheet rename affordance (feat/multitable-rename). Hiding is UX only: the server is the
+// real enforcement (PATCH /api/multitable/sheets/:id gates on canManageFields). These tests cover
+// (a) the affordance is entirely absent without the capability, (b) it fires rename-sheet with the
+// TRIMMED name and only on an actual change, (c) Escape/✗ cancels without emitting, and (d) it
+// never interferes with select-sheet/onTreeKeydown (sibling button, not nested).
+describe('MetaSheetViewRail — T7: sheet rename affordance', () => {
+  function renameButtons(root: HTMLElement): HTMLButtonElement[] {
+    return Array.from(root.querySelectorAll('[data-testid="rail-sheet-rename"]'))
+  }
+
+  it('canManageFields=false (or absent) renders NO rename affordance at all', () => {
+    const rootAbsent = mountComponent(baseProps({ canManageFields: undefined }))
+    expect(renameButtons(rootAbsent).length).toBe(0)
+
+    const rootFalse = mountComponent(baseProps({ canManageFields: false }))
+    expect(renameButtons(rootFalse).length).toBe(0)
+  })
+
+  it('canManageFields=true renders exactly one rename button per sheet', () => {
+    const root = mountComponent(baseProps({ canManageFields: true }))
+    expect(renameButtons(root).length).toBe(SHEETS.length)
+  })
+
+  it('clicking rename swaps the row into an input and does NOT emit select-sheet', async () => {
+    const onSelectSheet = vi.fn()
+    const root = mountComponent(baseProps({ canManageFields: true, onSelectSheet }))
+    renameButtons(root)[1].click() // SHEETS[1] === { id: 's2', name: 'Inventory' }
+    await flushPromises()
+    expect(onSelectSheet).not.toHaveBeenCalled()
+    const input = root.querySelector('[data-testid="rail-sheet-rename-input"]') as HTMLInputElement
+    expect(input).toBeTruthy()
+    expect(input.value).toBe('Inventory')
+    expect(renameButtons(root).length).toBe(SHEETS.length - 1) // this row's pencil is now the confirm/cancel pair
+  })
+
+  it('confirming with Enter emits rename-sheet with the TRIMMED name, and ONLY rename-sheet', async () => {
+    const onSelectSheet = vi.fn()
+    const onSelectView = vi.fn()
+    const onCreateSheet = vi.fn()
+    const onTogglePersonal = vi.fn()
+    const onRenameSheet = vi.fn()
+    const root = mountComponent(baseProps({ canManageFields: true, onSelectSheet, onSelectView, onCreateSheet, onTogglePersonal, onRenameSheet }))
+    renameButtons(root)[0].click() // SHEETS[0] === { id: 's1', name: 'Sales' }
+    await flushPromises()
+    const input = root.querySelector('[data-testid="rail-sheet-rename-input"]') as HTMLInputElement
+    input.value = '  Sales Renamed  '
+    input.dispatchEvent(new Event('input'))
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushPromises()
+
+    expect(onRenameSheet).toHaveBeenCalledTimes(1)
+    expect(onRenameSheet).toHaveBeenCalledWith('s1', 'Sales Renamed')
+    expect(onSelectSheet).not.toHaveBeenCalled()
+    expect(onSelectView).not.toHaveBeenCalled()
+    expect(onCreateSheet).not.toHaveBeenCalled()
+    expect(onTogglePersonal).not.toHaveBeenCalled()
+    // The row reverts to the pencil affordance after confirming.
+    expect(root.querySelector('[data-testid="rail-sheet-rename-input"]')).toBeNull()
+  })
+
+  it('confirming with an unchanged (or whitespace-only) name does NOT emit rename-sheet', async () => {
+    const onRenameSheet = vi.fn()
+    const root = mountComponent(baseProps({ canManageFields: true, onRenameSheet }))
+    renameButtons(root)[0].click()
+    await flushPromises()
+    const okBtn = root.querySelector('[data-testid="rail-sheet-rename-confirm"]') as HTMLButtonElement
+    okBtn.click() // unchanged 'Sales'
+    await flushPromises()
+    expect(onRenameSheet).not.toHaveBeenCalled()
+
+    renameButtons(root)[0].click()
+    await flushPromises()
+    const input = root.querySelector('[data-testid="rail-sheet-rename-input"]') as HTMLInputElement
+    input.value = '   '
+    input.dispatchEvent(new Event('input'))
+    await flushPromises()
+    const okBtn2 = root.querySelector('[data-testid="rail-sheet-rename-confirm"]') as HTMLButtonElement
+    expect(okBtn2.disabled).toBe(true) // whitespace-only name disables confirm
+  })
+
+  it('Escape cancels the rename without emitting, and restores the pencil affordance', async () => {
+    const onRenameSheet = vi.fn()
+    const root = mountComponent(baseProps({ canManageFields: true, onRenameSheet }))
+    renameButtons(root)[0].click()
+    await flushPromises()
+    const input = root.querySelector('[data-testid="rail-sheet-rename-input"]') as HTMLInputElement
+    input.value = 'Should not be saved'
+    input.dispatchEvent(new Event('input'))
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushPromises()
+
+    expect(onRenameSheet).not.toHaveBeenCalled()
+    expect(root.querySelector('[data-testid="rail-sheet-rename-input"]')).toBeNull()
+    expect(renameButtons(root).length).toBe(SHEETS.length)
+  })
+
+  it('the ✗ cancel button cancels without emitting', async () => {
+    const onRenameSheet = vi.fn()
+    const root = mountComponent(baseProps({ canManageFields: true, onRenameSheet }))
+    renameButtons(root)[0].click()
+    await flushPromises()
+    const cancelBtn = root.querySelector('[data-testid="rail-sheet-rename-cancel"]') as HTMLButtonElement
+    cancelBtn.click()
+    await flushPromises()
+    expect(onRenameSheet).not.toHaveBeenCalled()
+    expect(root.querySelector('[data-testid="rail-sheet-rename-input"]')).toBeNull()
+  })
+})

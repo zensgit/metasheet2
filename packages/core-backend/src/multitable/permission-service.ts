@@ -44,6 +44,7 @@ import {
   type ViewPermissionScope,
 } from './permission-derivation'
 import { filterPermissionCodesByNamespaceAdmission } from '../rbac/namespace-admission'
+import { loadSheetLiveness, type SheetLiveness } from './sheet-liveness'
 import {
   APPROVAL_PROJECTION_BASE_ID,
   restrictApprovalProjectionCapabilitiesPerRow,
@@ -1722,6 +1723,14 @@ export async function resolveSheetCapabilities(
   capabilities: MultitableCapabilities
   capabilityOrigin: MultitableCapabilityOrigin
   sheetScope?: SheetPermissionScope
+  /**
+   * Whether the sheet still EXISTS as a live object. Resolved here — the one place effectively every
+   * sheet-addressed route already passes through — so a soft-deleted sheet cannot stay invisible to a
+   * path that only ever asked "may this actor?" and never "is there a sheet?". Capabilities are NOT
+   * zeroed for a dead sheet: callers must answer 404 (a coded refusal), not 403, and the restore flow
+   * legitimately needs to see a deleted sheet. See multitable/sheet-liveness.ts.
+   */
+  sheetLiveness: SheetLiveness
 }> {
   const access = await resolveRequestAccess(req)
   return resolveSheetCapabilitiesForAccess(query, sheetId, access)
@@ -1744,8 +1753,17 @@ export async function resolveSheetCapabilitiesForAccess(
   capabilities: MultitableCapabilities
   capabilityOrigin: MultitableCapabilityOrigin
   sheetScope?: SheetPermissionScope
+  /**
+   * Whether the sheet still EXISTS as a live object. Resolved here — the one place effectively every
+   * sheet-addressed route already passes through — so a soft-deleted sheet cannot stay invisible to a
+   * path that only ever asked "may this actor?" and never "is there a sheet?". Capabilities are NOT
+   * zeroed for a dead sheet: callers must answer 404 (a coded refusal), not 403, and the restore flow
+   * legitimately needs to see a deleted sheet. See multitable/sheet-liveness.ts.
+   */
+  sheetLiveness: SheetLiveness
 }> {
   const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+  const sheetLiveness = await loadSheetLiveness(query, sheetId)
   const scopeMap = await loadSheetPermissionScopeMap(query, [sheetId], access.userId)
   const sheetScope = scopeMap.get(sheetId)
   let capabilities = applyContextSheetSchemaWriteGrant(baseCapabilities, sheetScope, access.isAdminRole)
@@ -1760,6 +1778,7 @@ export async function resolveSheetCapabilitiesForAccess(
     access,
     capabilities,
     capabilityOrigin: deriveCapabilityOrigin(baseCapabilities, capabilities, sheetScope, access.isAdminRole),
+    sheetLiveness,
     ...(sheetScope ? { sheetScope } : {}),
   }
 }
@@ -1773,6 +1792,14 @@ export async function resolveSheetReadableCapabilities(
   capabilities: MultitableCapabilities
   capabilityOrigin: MultitableCapabilityOrigin
   sheetScope?: SheetPermissionScope
+  /**
+   * Whether the sheet still EXISTS as a live object. Resolved here — the one place effectively every
+   * sheet-addressed route already passes through — so a soft-deleted sheet cannot stay invisible to a
+   * path that only ever asked "may this actor?" and never "is there a sheet?". Capabilities are NOT
+   * zeroed for a dead sheet: callers must answer 404 (a coded refusal), not 403, and the restore flow
+   * legitimately needs to see a deleted sheet. See multitable/sheet-liveness.ts.
+   */
+  sheetLiveness: SheetLiveness
 }> {
   return resolveSheetCapabilities(req, query, sheetId)
 }
