@@ -1,11 +1,11 @@
 # MetaSheet 云课堂 L5 新员工培训开发报告（2026-08-31）
 
-> 状态：DRAFT / HOLD — LOCAL PRODUCT CHECKPOINT，NOT A RELEASE CLAIM
+> 状态：DRAFT / HOLD — LOCAL LANDING CANDIDATE，NOT A RELEASE CLAIM
 >
 > 设计合同：`docs/development/elearning-plugin-design-lock-20260810.md`（§11 L5「新员工自动指派+周报」）
 >
-> 已验证代码 checkpoint：`21f3d489c8d376aa656c411bb04b1a9bc285617e`
->（tree `6f75b039afbf57efa74f232c9f362f345e5c1e15`）
+> 已验证代码 checkpoint：`f8f29007379d58b70728d7935aec91d353591c95`
+>（tree `1a91fbcf4febaa64200f0eb69bd36dafb70917c1`）
 >
 > 本报告不授权 Ready、merge、feature flag、dispatch、deploy、UAT 或 production。
 
@@ -49,6 +49,8 @@
 | 7 | `81d0d0fcb5` | lifecycle flag/事务/空日期修复 |
 | 8 | `75c4513118` | OpenAPI closed contract |
 | 9 | `21f3d489c8` | true-merge `main@25635e67db`，零冲突、产品路径零交集 |
+| 10 | `9c910e2404` | development / verification 报告初稿 |
+| 11 | `f8f2900737` | shared selector 严格并集、wiring contract 与 provenance 重算 |
 
 最终 merge 的父顺序为：
 
@@ -57,7 +59,7 @@
 
 相对 second parent 的 onboarding 产品投影为 44 个文件。主线新增的 25 个备料/来源探测文件由 Git 自动并入，没有人工解冲或产品改写。
 
-## 4. 文件面（44 个产品/测试/OpenAPI 文件）
+## 4. 文件面
 
 | 面 | 数量 | 路径 |
 |---|---:|---|
@@ -73,25 +75,31 @@
 git diff --name-status 25635e67db5145a5998499c4adc8f030e156daf7..21f3d489c8d376aa656c411bb04b1a9bc285617e
 ```
 
+在 44 个产品/测试/OpenAPI 文件之外，最终本地候选还包含：
+
+- 6 个 shared CI/provenance 文件：backend unit 与 real-DB 双点接线、Web 双点接线、机械 wiring contract 和官方 provenance pin；
+- 2 份本开发/验证报告。
+
+因此 `main@25635e67db..f8f2900737` 的代码与报告文件面共 52 个；其中 shared 提交严格限定为已授权的 6 个路径。
+
 ## 5. 明确未完成
 
-1. onboarding 新增后端 unit、real-DB 与 Web spec 尚未机械接入 shared CI selector；该尾提交必须与 then-current main 做严格 UNION，并最后重算 provenance pin。
-2. 当前只有本地 exact-tree 证据；尚无该 onboarding head 的远端 exact-head CI。
-3. 尚未 push、创建 Draft PR、转 Ready 或 merge。
-4. 所有能力仍默认 OFF；未做真实目录租户、浏览器 UAT、第三方通知、staging 或 production 验收。
-5. 本切片只完成 L5 onboarding；不表示 L0–L6 整体完成，也不包含 Time Machine 整表恢复。
+1. 当前只有本地 exact-tree 证据；尚无该 onboarding head 的远端 exact-head CI。
+2. 尚未 push、创建 Draft PR、转 Ready 或 merge。
+3. 所有能力仍默认 OFF；未做真实目录租户、浏览器 UAT、第三方通知、staging 或 production 验收。
+4. 本切片只完成 L5 onboarding；不表示 L0–L6 整体完成，也不包含 Time Machine 整表恢复。
 
 ## 6. 模型与验证来源
 
 - Codex：唯一 writer；合同收敛、实现、真库验证、main replay 与本报告。
-- Sol high：pre-merge 审阅发现 flag OFF 持久化、pending activation、空 hire date 和测试证明力问题；前三项已在 `81d0d0fcb5` 关闭。本轮 merge-head 复审超过 bounded cutoff 后被关闭，状态为“无 terminal verdict”，不作为通过依据；final shared head 形成后须重新审阅。
+- Sol high：pre-merge 审阅发现 flag OFF 持久化、pending activation、空 hire date 和测试证明力问题；前三项已在 `81d0d0fcb5` 关闭。merge-head 复审超过 bounded cutoff 后被关闭，状态为“无 terminal verdict”，不作为通过依据。
+- Luna：shared selector 机械复核超过 bounded cutoff 后关闭，状态同样为“无 terminal verdict”，不作为通过依据。
 - Grok 4.6：早期 bounded 只读审阅未在 cutoff 前形成 terminal verdict，不作为通过依据。
 - 未调用无真实入口的 Opus 5、Fable 5 或 Sonnet 5，也未虚构其贡献。
 
 ## 7. 下一步
 
-1. 取得 shared-CI 串行窗口，完成 selector/provenance 严格并集和删除 mutation。
-2. 在最终 exact head 重跑 required Web、plugin chain、OpenAPI、S5 与 fresh PostgreSQL 门。
-3. 完成 Sol high exact-head refute-first 复审，要求 P1/P2=0。
-4. 只在主线稳定且获得发布窗口后 ordinary push 一个 Draft/HOLD PR。
-5. Ready、merge、flag、UAT 与部署继续分别等待 owner 授权。
+1. 对 `f8f2900737` 启动 bounded Sol/Terra/Luna 只读 exact-head 复审，要求已知 P1/P2=0；超时必须据实记录，不阻塞主路径。
+2. push 前复核 `origin/main` 仍精确为 `25635e67db...`；若漂移则停止，不自行 replay。
+3. 主线稳定时 ordinary push 并创建一个 Draft/HOLD PR，等待远端 exact-head CI。
+4. Ready、merge、flag、UAT 与部署继续分别等待 owner 授权。

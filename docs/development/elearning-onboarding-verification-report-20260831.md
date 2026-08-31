@@ -1,13 +1,13 @@
 # MetaSheet 云课堂 L5 新员工培训验证报告（2026-08-31）
 
-> 当前结论：PASS FOR LOCAL PRE-SHARED CHECKPOINT
+> 当前结论：PASS FOR LOCAL LANDING CANDIDATE
 >
 > 非结论：不是 exact-head CI、Ready、merge、flag、UAT、deploy、production 或 L0–L6 完成证明。
 >
-> 被测代码：`21f3d489c8d376aa656c411bb04b1a9bc285617e`
->（tree `6f75b039afbf57efa74f232c9f362f345e5c1e15`）。
+> 被测代码：`f8f29007379d58b70728d7935aec91d353591c95`
+>（tree `1a91fbcf4febaa64200f0eb69bd36dafb70917c1`）。
 >
-> 报告提交只增加开发/验证文档；后续 shared-CI 尾提交形成后必须更新本报告绑定的 exact head。
+> 后续报告提交只更新开发/验证文档，不改变上述被测代码树。
 
 ## 1. Exact topology
 
@@ -16,7 +16,8 @@
 | branch | `codex/elearning-l5-onboarding-20260831` |
 | first parent | `75c451311809870a8ec177011ace625a9a3012d2` |
 | second parent / main | `25635e67db5145a5998499c4adc8f030e156daf7` |
-| merge head/tree | `21f3d489c8...` / `6f75b039af...` |
+| product merge head/tree | `21f3d489c8...` / `6f75b039af...` |
+| shared landing candidate head/tree | `f8f2900737...` / `1a91fbcf4f...` |
 | merge conflict | 0 |
 | pre-merge path overlap | 0 |
 | manual resolution files | 0 |
@@ -35,9 +36,15 @@
 | Web typecheck | Web build + verification approval config | PASS |
 | Source ESLint | Core package config + Web package config | PASS |
 | OpenAPI build/guard | official build + SDK generation + codegen guard | PASS，生成物零 tracked drift |
+| Shared wiring | `elearning-media-ci-wiring.test.mjs` | 15/15 PASS |
+| Backend onboarding canaries | 7 个 whole-file canary | 7/7 files，52/52 tests PASS |
+| Required Web | canonical required-Web script | 410/410 files，5244/5244 tests PASS |
+| E-learning Web lane | 29 个 whole-file spec | 29/29 files，374/374 tests PASS |
+| Plugin package chain | plugin-elearning package tests | 14 suites PASS，0 intentional exclusion |
+| Provenance / S5 | official pin + full sealed-export S5 | old pin RED，new pin GREEN，frozen/live differenceCount=0，full S5 PASS |
 | diff/status | diff-check + clean worktree | PASS |
 
-说明：第一次从仓库根执行 source ESLint 时根 `tsconfig.json` 不包含 package 文件，解析前失败；改用各 package 的 canonical ESLint 工作目录后有效门通过。第一次 OpenAPI 定向测试误指定了不存在的包内 Vitest config；随后使用 workflow 的 canonical `packages/openapi/dist-sdk` 命令通过。两者均是命令姿态纠正，不是代码绿转红。
+说明：产品源文件已使用各 package 的 canonical ESLint 配置通过。shared 尾窗对 `vitest.config.ts` 的直接 ESLint 因该 package 的 ESLint project 不包含配置文件而在解析前拒绝；该文件由 core typecheck、wiring、真实 Vitest 运行和 diff-check 覆盖。根目录脚本无 ESLint 配置，使用 `node --check`；shell 使用 `bash -n`。这些是工具适用边界，不被记为源码通过证据。
 
 ## 3. PostgreSQL authority
 
@@ -67,7 +74,7 @@
 
 ### 4.1 本轮 exact/pre-merge 产品修复门
 
-以下 mutation 在 `81d0d0fcb5` 所属产品树执行；main replay 与该 44 文件投影零交集，因此 `21f3d489c8` 保留相同产品字节。最终 shared head 仍须重跑承重 selector/provenance mutation。
+以下 mutation 在 `81d0d0fcb5` 所属产品树执行；main replay 与该 44 文件投影零交集，因此 `f8f2900737` 保留相同产品字节。
 
 1. 绕过 disabled hire-date isolation：目录/生命周期测试精确 RED；恢复 GREEN。
 2. 移除 pending activation onboarding enqueue：activation 事务测试 RED；恢复 GREEN。
@@ -80,15 +87,23 @@
 1. 将周报 response 指向错误 schema：focused test RED；恢复后 17/17 GREEN。
 2. 删除 suppressed 判别分支：focused test RED；恢复后 17/17 GREEN。
 
+### 4.3 Shared selector / provenance
+
+1. 7 个 onboarding backend unit canary 逐一从 `plugin-tests.yml` 删除：每项 wiring 精确 RED；逐一恢复 GREEN。
+2. 删除 real-DB no-DB exclude 或 post-migrate whole-file 参数：两项分别 RED；恢复 GREEN。
+3. 两个 onboarding Web spec 分别从 domain guard 和 required-Web 删除：四项分别 RED；恢复 GREEN。
+4. 删除 onboarding service、view 或两个 spec trigger path：四项分别 RED；恢复 GREEN。
+5. 恢复旧 `pluginTestsWorkflow` digest：package provenance RED；官方新 pin 恢复后 GREEN，完整 S5 GREEN。
+
 ## 5. 尚缺的 landing 证据
 
 | 证据 | 当前状态 |
 |---|---|
-| backend unit whole-file canary union | PENDING shared window |
-| onboarding real-DB no-DB exclude + post-migrate arg | PENDING shared window |
-| Web guard + required-Web 双点 selector | PENDING shared window |
-| wiring contract deletion mutations | PENDING shared window |
-| official provenance old RED / new GREEN / full S5 | PENDING shared window |
+| backend unit whole-file canary union | PASS，7/7 files / 52 tests |
+| onboarding real-DB no-DB exclude + post-migrate arg | PASS，双点 selector + 删除 mutation |
+| Web guard + required-Web 双点 selector | PASS，29-file domain lane + required-Web 410/5244 |
+| wiring contract deletion mutations | PASS，15/15 restored |
+| official provenance old RED / new GREEN / full S5 | PASS |
 | merge-head Sol review | bounded cutoff；无 terminal verdict，不作为通过依据 |
 | final shared-head Sol review | NOT RUN |
 | remote exact-head CI | NOT RUN |
@@ -98,8 +113,8 @@
 
 ## 6. 当前 P1/P2/P3
 
-- P1：本地已知产品 P1 为 0；shared selector 缺口是尚未完成的 landing gate，不被记成已关闭。
-- P2：本地已知产品 P2 为 0；等待 fresh exact-head 独立审阅确认。
+- P1：本地已知产品与 landing selector P1 为 0；等待 fresh exact-head 独立审阅。
+- P2：本地已知产品与 landing selector P2 为 0；等待 fresh exact-head 独立审阅。
 - P3：未做真实目录 tenant、通知通道、浏览器 UAT 或生产容量/运维验收；这些不由本地 unit/DB 证明。
 
 ## 7. 发布状态
@@ -108,10 +123,10 @@
 |---|---|
 | local product + OpenAPI checkpoint | 完成 |
 | local focused/unit/Web/plugin/DB gates | 完成 |
-| shared CI/provenance tail | 未完成 |
+| shared CI/provenance tail | 完成，`f8f2900737` |
 | push / Draft PR | 未执行 |
 | Ready / merge | 未授权、未执行 |
 | feature flags | 全部默认 OFF |
 | UAT / dispatch / deploy / production | 未授权、未执行 |
 
-因此当前候选只可进入 shared-CI 尾窗与 final exact-head 审阅；不能据此宣称 onboarding 已发布或 L0–L6 整体完成。
+因此当前候选可进入 final exact-head 审阅与 Draft/HOLD publication；不能据此宣称 onboarding 已发布或 L0–L6 整体完成。
