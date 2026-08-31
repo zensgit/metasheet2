@@ -44,6 +44,10 @@ import {
 } from '../auth/user-activation'
 import { claimNonEmptyLoginAliasesOrThrow } from '../auth/login-alias-service'
 import { SimpleCronExpression } from '../services/SchedulerService'
+import {
+  captureApprovalDepartureManagerContexts,
+  type ApprovalDepartureManagerContext,
+} from '../services/ApprovalDirectoryOrg'
 import { deliverDirectorySyncFailureAlert, getDirectoryManagerBindingCoverage } from './directory-sync-alert-delivery'
 import { resolveDirectoryScheduleTimezone } from './directory-sync-timezone'
 import { acquireSourceSyncFreezeLock } from './source-sync-freeze-lock'
@@ -3799,12 +3803,15 @@ export async function syncDirectoryIntegration(
   const integrationId = integration.id
 
   const config = parseIntegrationConfig(integration)
+  const directoryDeprovisionEnabled = isDirectoryDeprovisionEnabled()
+  let directoryApplyCommitted = false
   // T2 (§12.2): cheap freeze gate BEFORE the lease claim — a freeze already active at entry
   // must not create a run row, consume provider quota, or reach local apply. The apply
   // transaction re-checks under the shared source freeze lock (see below) so a freeze that
   // commits after this entry check cannot still land directory mutations.
   await assertDirectorySyncNotFrozenByTransfer(integrationId)
   let deprovisionOutcome: DirectoryDeprovisionOutcome | null = null
+  let approvalDepartureManagerContexts = new Map<string, ApprovalDepartureManagerContext>()
   // DT-HARDEN-05: claim the run lease BEFORE the first DingTalk call. The API pull that
   // follows is the expensive, quota-consuming part; a transaction-scoped lock around the
   // later apply would not protect it. Expired leases are reclaimed first so a crashed
@@ -4061,6 +4068,15 @@ export async function syncDirectoryIntegration(
         [integrationId, syncTimestamp],
       )
       const deactivatedAccountIds = (deactivatedAccountsResult.rows as Array<{ id: string }>).map((row) => row.id)
+      // F4-E: preserve only the departed account's source position before the membership rebuild
+      // below removes it. The manager itself is deliberately NOT resolved yet — the post-commit
+      // consumer performs that live read after the exact `user_changed` signal is durable.
+      if (directoryDeprovisionEnabled && deactivatedAccountIds.length > 0) {
+        approvalDepartureManagerContexts = await captureApprovalDepartureManagerContexts(
+          deactivatedAccountIds,
+          (sql, params) => client.query(sql, params),
+        )
+      }
       for (const accountId of deactivatedAccountIds) {
         const priorAccess = priorAccessByAccountId.get(accountId)
         if (priorAccess?.link_status === 'linked' && priorAccess.local_user_id) {
@@ -4499,7 +4515,7 @@ export async function syncDirectoryIntegration(
         // means the fetch is broken, not that the company evacuated.
         syncedAccountCount: users.size,
         integrationDefaultPolicy: integration.default_deprovision_policy,
-        enabled: isDirectoryDeprovisionEnabled(),
+        enabled: directoryDeprovisionEnabled,
       })
 
       // R5: per-run manager-binding snapshot. The live GET /manager-coverage endpoint
@@ -4624,21 +4640,63 @@ export async function syncDirectoryIntegration(
         throw new DirectorySyncLeaseLostError(runId)
       }
     }))
+    directoryApplyCommitted = true
 
-    for (const invite of autoAdmissionInvites) {
-      await recordInvite({
-        userId: invite.userId,
-        email: invite.email,
-        presetId: null,
-        productMode: 'platform',
-        roleId: null,
-        invitedBy: triggeredBy,
-        inviteToken: invite.inviteToken,
-      })
+    // F4-E — consume the exact durable `user_changed` effects immediately after the directory
+    // transaction commits. No later post-commit sibling may strand these signals. The dispatcher
+    // isolates per-user failures; this guard also covers module/bootstrap failures. Counts are
+    // values-free and give operators a bounded manual-recovery signal.
+    if (deprovisionOutcome?.applied && deprovisionOutcome.affected.length > 0) {
+      try {
+        const { dispatchApprovalDepartureTransfersForRun } = await import(
+          '../approvals/approval-departure-transfer-dispatch'
+        )
+        const dispatchResult = await dispatchApprovalDepartureTransfersForRun({
+          runId,
+          integrationId,
+          managerContexts: approvalDepartureManagerContexts,
+        })
+        if (
+          dispatchResult.failedCount > 0
+          || dispatchResult.unresolvedContextCount > 0
+          || dispatchResult.signalCount !== deprovisionOutcome.usersDeactivatedCount
+        ) {
+          logger.warn('Approval departure dispatch completed with unresolved work', {
+            signalCount: dispatchResult.signalCount,
+            expectedSignalCount: deprovisionOutcome.usersDeactivatedCount,
+            failedCount: dispatchResult.failedCount,
+            unresolvedContextCount: dispatchResult.unresolvedContextCount,
+          })
+        }
+      } catch (_error) {
+        logger.warn(
+          'Approval departure dispatch failed after directory commit; manual recovery required',
+          { reason: 'departure_dispatch_failed' },
+        )
+      }
     }
 
-    // DT-OPS-01: audit offboarding AFTER the transaction commits (mirrors the invite
-    // ledger below) and only for effects that actually happened. A revoked grant or a
+    for (const invite of autoAdmissionInvites) {
+      try {
+        await recordInvite({
+          userId: invite.userId,
+          email: invite.email,
+          presetId: null,
+          productMode: 'platform',
+          roleId: null,
+          invitedBy: triggeredBy,
+          inviteToken: invite.inviteToken,
+        })
+      } catch (_error) {
+        logger.warn(
+          'Directory auto-admission invite ledger failed after directory commit',
+          { reason: 'invite_ledger_failed' },
+        )
+      }
+    }
+
+    // DT-OPS-01: audit offboarding AFTER the transaction commits, alongside the isolated invite
+    // ledger, and only for effects that actually happened. A revoked grant or a
     // deactivated user must leave a trail — this is the access-closure record.
     if (deprovisionOutcome?.applied && deprovisionOutcome.affected.length > 0) {
       // Imported lazily on purpose. The audit stack binds a repository to the shared pg
@@ -4743,6 +4801,13 @@ export async function syncDirectoryIntegration(
     // route's deliberate 409 mapping and the scheduler's quiet info-skip are untouched.
     if (error instanceof DirectorySyncFrozenByTransferError) {
       await markSyncAbortedByFreeze(runId, error.transferId)
+      throw error
+    }
+    if (directoryApplyCommitted) {
+      logger.warn(
+        'Directory sync post-commit processing failed; committed run remains completed',
+        { reason: 'post_commit_processing_failed' },
+      )
       throw error
     }
     const message = readErrorMessage(error, 'Directory sync failed')
