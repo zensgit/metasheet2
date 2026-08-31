@@ -300,6 +300,11 @@ import {
   ElearningStatsDailyJobProducerError,
   enqueueElearningStatsDailyJobs,
 } from './services/elearning-stats-daily-job-producer'
+import {
+  cleanupElearningAnalyticsExport,
+  ElearningAnalyticsExportError,
+  materializeElearningAnalyticsExport,
+} from './services/elearning-analytics-export'
 import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
 import { adminUsersRouter } from './routes/admin-users'
@@ -2315,6 +2320,29 @@ export class MetaSheetServer {
                     throw new ElearningStatsDailyProjectionError('unavailable')
                   }
                   return projectElearningDepartmentStatsDaily(poolManager.get(), input)
+                },
+              }
+            : undefined,
+        // L5 aggregate exports are at-least-once job effects. Core owns the
+        // request ledger, suppression-safe CSV bytes and idempotent storage.
+        elearningAnalyticsExport:
+          manifest.name === 'plugin-elearning'
+            ? {
+                materialize: async (
+                  input: import('./services/elearning-analytics-export').MaterializeElearningAnalyticsExportInput,
+                ) => {
+                  if (!isElearningAnalyticsSurfaceEnabled()) {
+                    throw new ElearningAnalyticsExportError('disabled')
+                  }
+                  return materializeElearningAnalyticsExport(poolManager.get(), input)
+                },
+                cleanup: async (
+                  input: import('./services/elearning-analytics-export').MaterializeElearningAnalyticsExportInput,
+                ) => {
+                  if (!isElearningAnalyticsSurfaceEnabled()) {
+                    throw new ElearningAnalyticsExportError('disabled')
+                  }
+                  return cleanupElearningAnalyticsExport(poolManager.get(), input)
                 },
               }
             : undefined,

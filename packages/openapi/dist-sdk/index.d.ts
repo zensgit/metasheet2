@@ -9657,6 +9657,78 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/admin/analytics/exports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create one suppressed department aggregate CSV export
+         * @description Requires `elearning:admin`, global administrator authority, and the exact-literal
+         *     `ELEARNING_ENABLED=true` plus `ELEARNING_ANALYTICS_ENABLED=true` gates.
+         *     Organization and actor are server-derived only from the authenticated request. The closed
+         *     command contains requestId, departmentId, periodStart, and periodEnd. An exact replay
+         *     returns the original closed nine-field result; a different payload for the same
+         *     requestId returns a values-free conflict. The export never contains individual answers,
+         *     traces, grades, or unsuppressed small-group values.
+         */
+        post: operations["createElearningAnalyticsExport"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/analytics/exports/{exportId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the current state of one department aggregate export
+         * @description Requires the same global-admin, organization, management-scope, RBAC, and exact feature
+         *     gates as creation. Actor and organization remain server-derived. The response is the
+         *     closed nine-field result and never exposes storage keys, digests, file sizes, snapshots,
+         *     organization identifiers, or person-level fields.
+         */
+        get: operations["getElearningAnalyticsExport"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/analytics/exports/{exportId}/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download one ready suppressed department aggregate CSV export
+         * @description Rechecks current organization, actor, global-admin authority, management scope, expiry,
+         *     RBAC, and exact feature gates at download time. Only a succeeded, unexpired export is
+         *     returned. Production storage remains fail-closed when no authorized storage adapter is
+         *     configured.
+         */
+        get: operations["downloadElearningAnalyticsExport"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/multitable/bases": {
         parameters: {
             query?: never;
@@ -19577,6 +19649,30 @@ export interface components {
             passed: boolean;
             questions: components["schemas"]["ElearningExamReviewQuestion"][];
         };
+        ElearningAnalyticsExportCreateRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            departmentId: components["schemas"]["ElearningUuid"];
+            /** Format: date-time */
+            periodStart: string;
+            /** Format: date-time */
+            periodEnd: string;
+        };
+        /** @enum {string} */
+        ElearningAnalyticsExportStatus: "pending" | "running" | "succeeded" | "failed" | "expired";
+        ElearningAnalyticsExportResult: {
+            exportId: components["schemas"]["ElearningUuid"];
+            departmentId: components["schemas"]["ElearningUuid"];
+            /** Format: date-time */
+            periodStart: string;
+            /** Format: date-time */
+            periodEnd: string;
+            status: components["schemas"]["ElearningAnalyticsExportStatus"];
+            /** Format: date-time */
+            expiresAt: string;
+            completedAt: string | null;
+            errorCode: string | null;
+            duplicate: boolean;
+        };
     };
     responses: {
         /** @description Values-free e-learning error `{ error: "<code>" }` */
@@ -22886,6 +22982,103 @@ export interface operations {
             /** @description internal_error */
             500: components["responses"]["ElearningError"];
             /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    createElearningAnalyticsExport: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningAnalyticsExportCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Exact replay of an existing export request. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAnalyticsExportResult"];
+                };
+            };
+            /** @description Export accepted for asynchronous materialization. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAnalyticsExportResult"];
+                };
+            };
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            403: components["responses"]["ElearningError"];
+            404: components["responses"]["ElearningError"];
+            409: components["responses"]["ElearningError"];
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getElearningAnalyticsExport: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                exportId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current closed export state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAnalyticsExportResult"];
+                };
+            };
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            403: components["responses"]["ElearningError"];
+            404: components["responses"]["ElearningError"];
+            410: components["responses"]["ElearningError"];
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    downloadElearningAnalyticsExport: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                exportId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Formula-safe UTF-8 CSV aggregate export. */
+            200: {
+                headers: {
+                    "Content-Disposition"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/csv": string;
+                };
+            };
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            403: components["responses"]["ElearningError"];
+            404: components["responses"]["ElearningError"];
+            409: components["responses"]["ElearningError"];
+            410: components["responses"]["ElearningError"];
             503: components["responses"]["ElearningError"];
         };
     };

@@ -2783,3 +2783,127 @@ paths:
         '503':
           description: unavailable
           $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/admin/analytics/exports:
+    post:
+      operationId: createElearningAnalyticsExport
+      summary: Create one suppressed department aggregate CSV export
+      description: |
+        Requires `elearning:admin`, global administrator authority, and the exact-literal
+        `ELEARNING_ENABLED=true` plus `ELEARNING_ANALYTICS_ENABLED=true` gates.
+        Organization and actor are server-derived only from the authenticated request. The closed
+        command contains requestId, departmentId, periodStart, and periodEnd. An exact replay
+        returns the original closed nine-field result; a different payload for the same
+        requestId returns a values-free conflict. The export never contains individual answers,
+        traces, grades, or unsuppressed small-group values.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningAnalyticsExportCreateRequest'
+      responses:
+        '200':
+          description: Exact replay of an existing export request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningAnalyticsExportResult'
+        '202':
+          description: Export accepted for asynchronous materialization.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningAnalyticsExportResult'
+        '400':
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/admin/analytics/exports/{exportId}:
+    get:
+      operationId: getElearningAnalyticsExport
+      summary: Read the current state of one department aggregate export
+      description: |
+        Requires the same global-admin, organization, management-scope, RBAC, and exact feature
+        gates as creation. Actor and organization remain server-derived. The response is the
+        closed nine-field result and never exposes storage keys, digests, file sizes, snapshots,
+        organization identifiers, or person-level fields.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: exportId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      responses:
+        '200':
+          description: Current closed export state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningAnalyticsExportResult'
+        '400':
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          $ref: '#/components/responses/ElearningError'
+        '410':
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/admin/analytics/exports/{exportId}/download:
+    get:
+      operationId: downloadElearningAnalyticsExport
+      summary: Download one ready suppressed department aggregate CSV export
+      description: |
+        Rechecks current organization, actor, global-admin authority, management scope, expiry,
+        RBAC, and exact feature gates at download time. Only a succeeded, unexpired export is
+        returned. Production storage remains fail-closed when no authorized storage adapter is
+        configured.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: exportId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      responses:
+        '200':
+          description: Formula-safe UTF-8 CSV aggregate export.
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          $ref: '#/components/responses/ElearningError'
+        '410':
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          $ref: '#/components/responses/ElearningError'

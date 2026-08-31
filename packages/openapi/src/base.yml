@@ -7498,6 +7498,65 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ElearningExamReviewQuestion'
+    ElearningAnalyticsExportCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, departmentId, periodStart, periodEnd]
+      properties:
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+        departmentId:
+          $ref: '#/components/schemas/ElearningUuid'
+        periodStart:
+          type: string
+          format: date-time
+        periodEnd:
+          type: string
+          format: date-time
+    ElearningAnalyticsExportStatus:
+      type: string
+      enum: [pending, running, succeeded, failed, expired]
+    ElearningAnalyticsExportResult:
+      type: object
+      additionalProperties: false
+      required:
+        - exportId
+        - departmentId
+        - periodStart
+        - periodEnd
+        - status
+        - expiresAt
+        - completedAt
+        - errorCode
+        - duplicate
+      properties:
+        exportId:
+          $ref: '#/components/schemas/ElearningUuid'
+        departmentId:
+          $ref: '#/components/schemas/ElearningUuid'
+        periodStart:
+          type: string
+          format: date-time
+        periodEnd:
+          type: string
+          format: date-time
+        status:
+          $ref: '#/components/schemas/ElearningAnalyticsExportStatus'
+        expiresAt:
+          type: string
+          format: date-time
+        completedAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
+        errorCode:
+          oneOf:
+            - type: string
+              pattern: '^[A-Z][A-Z0-9_]{1,63}$'
+            - type: 'null'
+        duplicate:
+          type: boolean
   responses:
     ElearningError:
       description: 'Values-free e-learning error `{ error: "<code>" }`'

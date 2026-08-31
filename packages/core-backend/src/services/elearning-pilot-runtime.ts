@@ -69,6 +69,7 @@ import {
   getElearningDepartmentStats,
   type ElearningDepartmentStatsDb,
 } from './elearning-department-stats'
+import type { ElearningAnalyticsExportDb } from './elearning-analytics-export'
 import type {
   ElearningDirectAssignmentDb,
   ElearningDirectAssignmentResult,
@@ -209,6 +210,7 @@ export interface ElearningPilotRuntimeOptions {
     ElearningCreditSurfaceDb &
     ElearningLearningProfileDb &
     ElearningDepartmentStatsDb &
+    ElearningAnalyticsExportDb &
     ElearningPortalDb &
     ElearningPracticeDb
   env?: NodeJS.ProcessEnv
