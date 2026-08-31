@@ -299,6 +299,20 @@ export interface StockPreparationPreflight {
   blockerCount: number
   blockers: StockPreparationPreflightBlocker[]
   posture: Record<string, StockPreparationPreflightPostureEntry>
+  /**
+   * Only the one field the page reads. `droppedNonNamespaceEntries` is how many configured sandbox
+   * write-allowlist entries sat OUTSIDE the sandbox objectId namespace and were therefore withheld
+   * from the response server-side — a COUNT, never the entries. Non-zero means the deployment env
+   * holds something that is not a sandbox objectId, which the page must be able to say WITHOUT the
+   * thing itself ever crossing.
+   */
+  checks?: {
+    sandboxWriteAuthorization?: {
+      droppedNonNamespaceEntries?: number
+      [key: string]: unknown
+    }
+    [key: string]: unknown
+  }
 }
 
 /** Raised when a read fails. Carries the HTTP status only — never a server message. */

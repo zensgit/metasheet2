@@ -20,10 +20,23 @@ import { resolve } from 'node:path'
 //   I-06 the run stops at the first FAIL and returns everything that completed
 //   I-07 a run of nothing but SKIPs passes — held is not broken
 //   I-08 VALUES-FREE: business values planted on every response never reach a step result
+//   I-09 a 2xx that is not this API's envelope FAILs with its own reason — never laundered into OK
+//   I-10 the ensure-mode chips are a closed set at the boundary; anything else becomes `other`
+
+const h = vi.hoisted(() => ({ apiFetch: vi.fn() }))
+
+vi.mock('../src/utils/api', async () => {
+  const actual = await vi.importActual<typeof import('../src/utils/api')>('../src/utils/api')
+  return { ...actual, apiFetch: h.apiFetch }
+})
 
 import {
+  STOCK_PREPARATION_ENSURE_MODES,
   STOCK_PREPARATION_INSTALL_STEPS,
+  STOCK_PREPARATION_UNKNOWN_MODE,
+  clampEnsureMode,
   classifyPreflightStep,
+  createStockPreparationInstallApi,
   heldStepResult,
   runStockPreparationInstall,
   summarizeInstallRun,
@@ -87,7 +100,7 @@ const ENV_BLOCKER = {
 function greenApi(overrides: Partial<StockPreparationInstallApi> = {}): StockPreparationInstallApi {
   return {
     readPreflight: vi.fn(async () => ({ preflight: preflight(), routeAbsent: false, status: 200 })),
-    ensureConfirmationLedger: vi.fn(async () => ({ mode: 'exists', projectName: PLANTED_PROJECT_NAME } as never)),
+    ensureConfirmationLedger: vi.fn(async () => ({ mode: 'confirmation_decision_existing', projectName: PLANTED_PROJECT_NAME } as never)),
     listCustomerPacks: vi.fn(async () => ({
       packCount: 1,
       packs: [{
@@ -98,7 +111,7 @@ function greenApi(overrides: Partial<StockPreparationInstallApi> = {}): StockPre
         drawingNo: PLANTED_DRAWING_NO,
       }],
     } as never)),
-    ensureSandboxTarget: vi.fn(async () => ({ mode: 'exists', ready: true, dsn: PLANTED_SECRET } as never)),
+    ensureSandboxTarget: vi.fn(async () => ({ mode: 'sandbox_existing', ready: true, dsn: PLANTED_SECRET } as never)),
     dryRunCustomerPack: vi.fn(async () => ({ canInstall: true, materialCode: PLANTED_MATERIAL_CODE } as never)),
     installCustomerPack: vi.fn(async () => ({ createdFields: [], stampedFields: ['ext_material_type'] })),
     ...overrides,
@@ -274,7 +287,7 @@ describe('BOM备料 install run — the walk', () => {
     expect(managed.reason).toBe('PACK_CATALOG_EMPTY')
     // The ledger WAS provisioned — reporting a half-done step as a blank failure is how an operator
     // re-runs work that is already done.
-    expect(managed.detail.ledgerMode).toBe('exists')
+    expect(managed.detail.ledgerMode).toBe('confirmation_decision_existing')
 
     const pack = report.steps.find((step) => step.id === 'customer-pack')!
     expect(pack.status).toBe('skip')
@@ -373,6 +386,98 @@ describe('BOM备料 install run — the walk', () => {
     expect(report.failCount).toBe(0)
     expect(report.skipCount).toBe(STOCK_PREPARATION_INSTALL_STEPS.length)
     expect(report.failedStepId).toBeNull()
+  })
+
+  // -------------------------------------------------------------------------
+  // I-09 a 2xx that is not this API's envelope is a FAILURE, not an OK
+  // -------------------------------------------------------------------------
+  it('I-09: a malformed 2xx FAILs with its own reason instead of laundering into OK', async () => {
+    // The realistic case: an auth proxy or an ingress answers 200 with an HTML sign-in page. The
+    // first cut let any 2xx through as `{}`, so `sandbox-target/ensure` and the pack install both
+    // recorded OK and the page told an admin the tables were in place.
+    const htmlSignInPage = new Response('<!doctype html><title>Sign in</title>', {
+      status: 200,
+      headers: { 'Content-Type': 'text/html' },
+    })
+    const api = createStockPreparationInstallApi({ tenantId: 't', workspaceId: 'w' })
+
+    h.apiFetch.mockImplementation(async () => htmlSignInPage.clone())
+    await expect(api.ensureConfirmationLedger()).rejects.toMatchObject({ malformed: true, status: 200 })
+    await expect(api.installCustomerPack('factory-a')).rejects.toMatchObject({ malformed: true, status: 200 })
+    await expect(api.ensureSandboxTarget('plm_stock_preparation_sandbox_a')).rejects.toMatchObject({ malformed: true })
+
+    // A 2xx with an EMPTY body, and a 2xx carrying an array, read the same way.
+    h.apiFetch.mockImplementation(async () => new Response('', { status: 200 }))
+    await expect(api.ensureConfirmationLedger()).rejects.toMatchObject({ malformed: true })
+    h.apiFetch.mockImplementation(async () => new Response(JSON.stringify([]), { status: 200 }))
+    await expect(api.ensureConfirmationLedger()).rejects.toMatchObject({ malformed: true })
+
+    // ...and an ordinary refusal is still an ordinary refusal, not "malformed".
+    h.apiFetch.mockImplementation(async () => new Response(
+      JSON.stringify({ ok: false, error: { code: 'FORBIDDEN' } }),
+      { status: 403 },
+    ))
+    await expect(api.ensureConfirmationLedger()).rejects.toMatchObject({ malformed: false, status: 403 })
+
+    // A legitimate envelope with no `data` is NOT malformed — some routes answer `{ ok: true }`.
+    h.apiFetch.mockImplementation(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }))
+    await expect(api.ensureConfirmationLedger()).resolves.toEqual({})
+  })
+
+  it('I-09: the run reports MALFORMED_RESPONSE at whichever step met it', async () => {
+    const malformed = new StockPreparationInstallCallError(200, '/ensure', { malformed: true })
+
+    const atLedger = await runStockPreparationInstall(greenApi({
+      ensureConfirmationLedger: vi.fn(async () => { throw malformed }),
+    }))
+    const managed = atLedger.steps.find((step) => step.id === 'managed-tables')!
+    expect(managed.status).toBe('fail')
+    expect(managed.reason).toBe('MALFORMED_RESPONSE')
+
+    const atPreflight = await runStockPreparationInstall(greenApi({
+      readPreflight: vi.fn(async () => { throw malformed }),
+    }))
+    expect(atPreflight.steps[0].status).toBe('fail')
+    expect(atPreflight.steps[0].reason).toBe('MALFORMED_RESPONSE')
+    // NOT softened into "this deployment predates the route": that degrade is for a 404, and a
+    // malformed 2xx is a live deployment answering wrongly.
+    expect(atPreflight.steps[0].reason).not.toBe('PREFLIGHT_ROUTE_ABSENT')
+  })
+
+  // -------------------------------------------------------------------------
+  // I-10 the mode chips are a closed set at the boundary
+  // -------------------------------------------------------------------------
+  it('I-10: an unrecognised ensure mode is clamped to `other` and the raw value is dropped', async () => {
+    expect(clampEnsureMode('sandbox_create')).toBe('sandbox_create')
+    expect(clampEnsureMode('confirmation_decision_existing')).toBe('confirmation_decision_existing')
+    for (const rogue of [
+      'Server=10.4.4.9;Database=PLM;User Id=sa;Password=hunter2',
+      PLANTED_PROJECT_NAME,
+      '',
+      null,
+      undefined,
+      42,
+      { mode: 'nested' },
+    ]) {
+      expect(clampEnsureMode(rogue)).toBe(STOCK_PREPARATION_UNKNOWN_MODE)
+    }
+    // Every token in the vocabulary really is accepted — otherwise the clamp would quietly turn a
+    // correct deployment's modes into `other` and this test would still pass.
+    for (const mode of STOCK_PREPARATION_ENSURE_MODES) {
+      expect(clampEnsureMode(mode)).toBe(mode)
+    }
+
+    // ...and the runner clamps what it puts in a step's detail.
+    const report = await runStockPreparationInstall(greenApi({
+      ensureConfirmationLedger: vi.fn(async () => ({ mode: `secret://${PLANTED_SECRET}` })),
+      ensureSandboxTarget: vi.fn(async () => ({ mode: PLANTED_PROJECT_NAME, ready: true })),
+    }))
+    const managed = report.steps.find((step) => step.id === 'managed-tables')!
+    expect(managed.status).toBe('ok')
+    expect(managed.detail.ledgerMode).toBe(STOCK_PREPARATION_UNKNOWN_MODE)
+    expect(managed.detail.sandboxMode).toBe(STOCK_PREPARATION_UNKNOWN_MODE)
+    expect(JSON.stringify(report)).not.toContain(PLANTED_SECRET)
+    expect(JSON.stringify(report)).not.toContain(PLANTED_PROJECT_NAME)
   })
 
   it('I-08: no planted business value survives into any step result', async () => {

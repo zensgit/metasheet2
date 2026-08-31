@@ -159,6 +159,20 @@
             : bi('未就绪,阻断项 ', 'Not ready, blockers: ') + preflight.blockers.length }}
         </p>
 
+        <!-- The env is POLLUTED and the server withheld what is in it. A count, never the content:
+             the whole point of the server-side filter is that a non-namespace allowlist entry has no
+             path to this page, so the page can only ever say how many there were. -->
+        <p
+          v-if="pollutedAllowlistCount > 0"
+          class="stock-prep-install__hint"
+          data-testid="stock-prep-install-allowlist-polluted"
+        >
+          {{ bi(
+            '沙箱写允许清单里有 ' + pollutedAllowlistCount + ' 项不在沙箱命名空间内,已由服务端扣下,不在本页显示 —— 请到部署机上检查该 env。',
+            pollutedAllowlistCount + ' entr(y/ies) in the sandbox write allowlist sit outside the sandbox namespace. The server withheld them and this page never receives them — check that env on the deployment machine.',
+          ) }}
+        </p>
+
         <ul class="stock-prep-install__list">
           <li
             v-for="blocker in preflight.blockers"
@@ -369,6 +383,16 @@ async function startInstall(): Promise<void> {
 
 onMounted(() => { void loadDefaults() })
 
+/**
+ * How many configured sandbox write-allowlist entries the SERVER withheld for sitting outside the
+ * sandbox objectId namespace. A count is all that exists on this side — the entries themselves never
+ * leave the plugin, which is the point of the filter in stock-preparation-preflight.cjs.
+ */
+const pollutedAllowlistCount = computed(() => {
+  const dropped = preflight.value?.checks?.sandboxWriteAuthorization?.droppedNonNamespaceEntries
+  return typeof dropped === 'number' && Number.isFinite(dropped) && dropped > 0 ? dropped : 0
+})
+
 /** The observed fence states from the preflight, as rows. */
 const postureRows = computed(() => {
   const posture = preflight.value?.posture
@@ -449,6 +473,10 @@ const REASON_TEXT: Record<StockPreparationInstallReason, [string, string]> = {
     'The second install created fields again — install is supposed to be idempotent, so this is a defect, not a configuration problem.',
   ],
   PACK_INSTALLED: ['客户包已装列,第二次运行是空操作(幂等已验证)。', 'Pack columns installed; the second run was a no-op (idempotence verified).'],
+  MALFORMED_RESPONSE: [
+    '收到 2xx,但内容不是本接口的应答体 —— 多半是网关/登录页替服务器答了。这一步按失败处理:报「表已建好」而表并不存在,比报失败更糟。',
+    'A 2xx arrived carrying something that is not this API\'s envelope — usually a gateway or a sign-in page answering in the server\'s place. Treated as a failure: reporting a table that does not exist is worse than reporting a failure.',
+  ],
   HELD_FOR_OPERATOR: ['', ''],
   RECHECK_READY: ['复检就绪:零阻断。', 'Recheck ready: zero blockers.'],
   RECHECK_STILL_BLOCKED: [

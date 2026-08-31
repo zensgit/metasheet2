@@ -20,6 +20,11 @@ import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vu
 //        defaults, the preflight and a line saying who runs it
 //   V-06 stop-on-FAIL still renders every step that completed
 //   V-07 VALUES-FREE: business values planted throughout the payloads never reach the DOM
+//   V-08 a 2xx that is not this API's envelope renders FAIL — a gateway answering 200 with HTML must
+//        never read as a provisioned table
+//
+// V-03 also covers the polluted-allowlist COUNT: the server withholds any sandbox write-allowlist
+// entry outside the namespace, so the page can only ever report how many there were.
 
 const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
@@ -139,7 +144,7 @@ function manifestPayload(): Record<string, unknown> {
 
 const LEDGER_FIX = 'POST /api/integration/stock-preparation/confirmation-decisions/ensure {}'
 
-function preflightPayload(options: { ready?: boolean } = {}): Record<string, unknown> {
+function preflightPayload(options: { ready?: boolean; polluted?: number } = {}): Record<string, unknown> {
   const ready = options.ready !== false
   return {
     ready,
@@ -161,11 +166,18 @@ function preflightPayload(options: { ready?: boolean } = {}): Record<string, unk
       b2aTrialRegistry: { state: 'dormant', envVar: B2A_ENV },
       outboundHttpWrite: { state: 'unset', envVar: 'INTEGRATION_CORE_OUTBOUND_HTTP_WRITE_TARGETS' },
     },
+    checks: {
+      // The count the server reports when the sandbox write-allowlist env holds something that is
+      // not a sandbox objectId. The entries themselves never cross — the plugin filters them out
+      // before the response exists (stock-preparation-preflight.cjs; plugin suite P-15).
+      sandboxWriteAuthorization: { droppedNonNamespaceEntries: options.polluted ?? 0 },
+    },
   }
 }
 
 interface RouteBehaviour {
   preflightReady?: boolean
+  pollutedAllowlistCount?: number
   packs?: Array<Record<string, unknown>>
   ledgerStatus?: number
 }
@@ -180,20 +192,20 @@ function installRoutes(behaviour: RouteBehaviour = {}): void {
       return new Response(JSON.stringify(manifestPayload()), { status: 200 })
     }
     if (url.includes('/stock-preparation/preflight')) {
-      return envelope(preflightPayload({ ready: behaviour.preflightReady }))
+      return envelope(preflightPayload({ ready: behaviour.preflightReady, polluted: behaviour.pollutedAllowlistCount }))
     }
     if (url.includes('/confirmation-decisions/ensure')) {
       const status = behaviour.ledgerStatus ?? 200
       return status >= 400
         ? new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN' } }), { status })
-        : envelope({ mode: 'exists', projectName: PLANTED_PROJECT_NAME })
+        : envelope({ mode: 'confirmation_decision_existing', projectName: PLANTED_PROJECT_NAME })
     }
     if (url.includes('/stock-preparation/customer-packs')) {
       const packs = behaviour.packs ?? []
       return envelope({ packCount: packs.length, packs })
     }
     if (url.includes('/sandbox-target/ensure')) {
-      return envelope({ mode: 'exists', ready: true, dsn: PLANTED_DSN })
+      return envelope({ mode: 'sandbox_existing', ready: true, dsn: PLANTED_DSN })
     }
     return envelope({})
   })
@@ -334,6 +346,31 @@ describe('BOM备料 install page (§14 defaults for confirmation)', () => {
     expect(preflightPanel.querySelectorAll('button').length).toBe(1)
   })
 
+  it('V-03: a polluted sandbox allowlist is reported as a COUNT — the page never receives the entries', async () => {
+    // The server withholds any allowlist entry outside the sandbox namespace before the response
+    // exists (stock-preparation-preflight.cjs; plugin suite P-15 proves it, including with a
+    // connection string seeded into that env). All this side can ever have is the count, and it must
+    // say so rather than leave a polluted deployment looking clean.
+    installRoutes({ preflightReady: false, pollutedAllowlistCount: 3 })
+    const root = await mountView()
+    ;(root.querySelector('[data-testid="stock-prep-install-preflight-run"]') as HTMLButtonElement).click()
+    await flush()
+
+    const notice = text(root, '[data-testid="stock-prep-install-allowlist-polluted"]')
+    expect(notice).toContain('3')
+    expect(notice).toContain('命名空间')
+
+    // ...and a clean deployment gets no notice at all: the line has to distinguish states.
+    if (app) app.unmount()
+    app = null
+    container!.innerHTML = ''
+    installRoutes({ preflightReady: false })
+    const clean = await mountView()
+    ;(clean.querySelector('[data-testid="stock-prep-install-preflight-run"]') as HTMLButtonElement).click()
+    await flush()
+    expect(clean.querySelector('[data-testid="stock-prep-install-allowlist-polluted"]')).toBeNull()
+  })
+
   // ---------------------------------------------------------------------------
   // V-04 SKIP IS RENDERED
   // ---------------------------------------------------------------------------
@@ -358,7 +395,7 @@ describe('BOM备料 install page (§14 defaults for confirmation)', () => {
     expect(managed.dataset.status).toBe('skip')
     expect(managed.textContent).toContain('SKIP')
     expect(managed.textContent).toContain('客户包未配置')
-    expect(managed.textContent).toContain('ledgerMode=exists')
+    expect(managed.textContent).toContain('ledgerMode=confirmation_decision_existing')
 
     // The five HELD steps: each SKIP, each carrying the reason it is held.
     for (const key of ['source-wiring', 'confirmation-queue', 'acceptance-dry-run', 'acceptance-apply', 'acceptance-idempotent']) {
@@ -420,6 +457,35 @@ describe('BOM备料 install page (§14 defaults for confirmation)', () => {
     const pack = root.querySelector('[data-testid="stock-prep-install-step"][data-step="customer-pack"]') as HTMLElement
     expect(pack.dataset.status).toBe('pending')
     expect(text(root, '[data-testid="stock-prep-install-summary"]')).toContain('managed-tables')
+  })
+
+  // ---------------------------------------------------------------------------
+  // V-08 a proxy answering 200 with HTML must not read as a finished install
+  // ---------------------------------------------------------------------------
+
+  it('V-08: a 2xx that is not the API envelope renders FAIL, not OK', async () => {
+    h.permissions = ['stock-prep:admin', 'integration:admin']
+    installRoutes()
+    // Everything up to the ledger ensure behaves; the ensure gets an auth proxy's sign-in page.
+    const good = h.apiFetch.getMockImplementation() as (input: string) => Promise<Response>
+    h.apiFetch.mockImplementation(async (input: string) => (
+      String(input).includes('/confirmation-decisions/ensure')
+        ? new Response('<!doctype html><title>Sign in</title>', { status: 200, headers: { 'Content-Type': 'text/html' } })
+        : good(input)
+    ))
+
+    const root = await mountView()
+    ;(root.querySelector('[data-testid="stock-prep-install-run"]') as HTMLButtonElement).click()
+    await flush(14)
+
+    const managed = root.querySelector('[data-testid="stock-prep-install-step"][data-step="managed-tables"]') as HTMLElement
+    expect(managed.dataset.status, 'a 200 carrying HTML must not read as a provisioned table').toBe('fail')
+    expect(managed.textContent).toContain('status=200')
+    // The operator is told WHICH failure this is — a gateway answered, not the server refusing.
+    expect(managed.textContent).toContain('网关')
+    expect(text(root, '[data-testid="stock-prep-install-summary"]')).toContain('FAIL 1')
+    // And nothing of the HTML body reaches the page.
+    expect(root.textContent ?? '').not.toContain('Sign in')
   })
 
   // ---------------------------------------------------------------------------

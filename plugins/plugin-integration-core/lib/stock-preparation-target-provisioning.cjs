@@ -75,6 +75,29 @@ function hashEvidenceValue(value) {
 // The sandbox namespace, named once so the guard, the refusal message and any caller quoting it in
 // a runbook can never drift apart.
 const SANDBOX_OBJECT_ID_NAMESPACE = 'plm_stock_preparation_sandbox'
+// The namespace RULE, as one pattern rather than as a regex literal typed at each use site. The
+// assert below and `isSandboxNamespaceObjectId` are the only two readers, so the two can never
+// disagree about what "in the namespace" means.
+const SANDBOX_OBJECT_ID_NAMESPACE_PATTERN = /^plm_stock_preparation_sandbox(?:$|[_-])/
+
+/**
+ * The same rule as `assertSandboxObjectId`'s namespace clause, as a PURE PREDICATE.
+ *
+ * Why a predicate and not just the assert: a caller that is FILTERING rather than validating must
+ * not have to throw-and-catch per entry, and — more importantly — it must not have to re-type the
+ * regex. The deployment preflight filters the sandbox write allowlist through this before any of it
+ * reaches a response, because that allowlist comes from raw `process.env` and nothing upstream
+ * constrains what a polluted environment can put there.
+ *
+ * DELIBERATELY NARROWER THAN THE ASSERT in one respect: it answers only the namespace question and
+ * says nothing about the production canonical target, which IS an identifier and is safe to display.
+ * `assertSandboxObjectId` refuses that id for a different reason (it is not a sandbox target), and
+ * conflating the two would make the preflight report a legitimate constant as pollution.
+ */
+function isSandboxNamespaceObjectId(value) {
+  return typeof value === 'string' && SANDBOX_OBJECT_ID_NAMESPACE_PATTERN.test(value)
+}
+
 function assertSandboxObjectId(value, field = 'objectId') {
   const objectId = requiredString(value, field)
   if (objectId === STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId) {
@@ -85,7 +108,7 @@ function assertSandboxObjectId(value, field = 'objectId') {
       { reason: 'prod_canonical' },
     )
   }
-  if (!/^plm_stock_preparation_sandbox(?:$|[_-])/.test(objectId)) {
+  if (!SANDBOX_OBJECT_ID_NAMESPACE_PATTERN.test(objectId)) {
     throw new StockPreparationTargetProvisioningError(
       422,
       'TARGET_SANDBOX_OBJECT_ID_INVALID',
@@ -675,7 +698,9 @@ module.exports = {
   CANONICAL_KEY_FIELD,
   REQUIRED_PERMISSION,
   StockPreparationTargetProvisioningError,
+  SANDBOX_OBJECT_ID_NAMESPACE,
   assertSandboxObjectId,
+  isSandboxNamespaceObjectId,
   buildStockPreparationTargetDescriptor,
   summarizeStockPreparationTargetReadiness,
   hashEvidenceValue,

@@ -74,6 +74,7 @@ export type StockPreparationInstallReason =
   | 'PACK_INSTALL_NOT_IDEMPOTENT'
   | 'PACK_INSTALLED'
   | 'HELD_FOR_OPERATOR'
+  | 'MALFORMED_RESPONSE'
   | 'RECHECK_READY'
   | 'RECHECK_STILL_BLOCKED'
 
@@ -189,6 +190,44 @@ export const STOCK_PREPARATION_INSTALL_STEPS: readonly StockPreparationInstallSt
   }),
 ])
 
+/**
+ * THE ENSURE-MODE VOCABULARY, mirrored from the two server modules that produce it:
+ * `stock-preparation-confirmation-decisions.cjs` (the ledger) and
+ * `stock-preparation-target-provisioning.cjs` (the sandbox target, whose modes are the
+ * `modePrefix`-prefixed set with `modePrefix = 'sandbox'` on this route).
+ *
+ * Why an allowlist rather than a type: `mode` arrives as JSON and this file is the boundary. Today's
+ * server vocabularies are closed, but nothing on THIS side enforced that, so `mode` was a
+ * server-controlled unbounded string being rendered into a chip. Clamping makes the rendered set
+ * finite by construction — an unrecognised token becomes `other` and the raw value is dropped rather
+ * than displayed. The cost is that a mode added server-side reads as `other` until it is added here;
+ * that is a display degradation on a line whose real content is the step's OK/SKIP/FAIL, and it is
+ * the right way round.
+ */
+export const STOCK_PREPARATION_ENSURE_MODES: readonly string[] = Object.freeze([
+  'confirmation_decision_created',
+  'confirmation_decision_existing',
+  'confirmation_decision_incomplete',
+  'confirmation_decision_missing',
+  'sandbox_already_ready',
+  'sandbox_create',
+  'sandbox_existing',
+  'sandbox_incomplete',
+  'sandbox_missing',
+  'sandbox_repaired',
+  // This module's own stand-in for a route that answered without naming a mode.
+  'ok',
+])
+
+/** The token that stands in for anything outside the vocabulary. The raw value is never carried. */
+export const STOCK_PREPARATION_UNKNOWN_MODE = 'other'
+
+export function clampEnsureMode(value: unknown): string {
+  return typeof value === 'string' && STOCK_PREPARATION_ENSURE_MODES.includes(value)
+    ? value
+    : STOCK_PREPARATION_UNKNOWN_MODE
+}
+
 export interface StockPreparationInstallStepResult {
   index: number
   id: StockPreparationInstallStepId
@@ -261,10 +300,15 @@ export function heldStepResult(
 export function classifyPreflightStep(
   index: number,
   preflight: StockPreparationPreflight | null,
-  options: { routeAbsent?: boolean; status?: number; recheck?: boolean } = {},
+  options: { routeAbsent?: boolean; status?: number; recheck?: boolean; malformed?: boolean } = {},
 ): StockPreparationInstallStepResult {
   const id: StockPreparationInstallStepId = options.recheck ? 'preflight-recheck' : 'preflight'
 
+  // Checked BEFORE the route-absent degrade: an absent route answers 404/501, so the two can never
+  // both be true, and a malformed 2xx must never be softened into "this deployment is just old".
+  if (options.malformed) {
+    return result(index, id, 'fail', 'MALFORMED_RESPONSE', { status: options.status ?? 0 })
+  }
   if (options.routeAbsent) {
     // The bootstrap degrades here too, and for the same reason: a deployment that predates the
     // route is old, not broken.
@@ -337,15 +381,31 @@ export interface StockPreparationInstallApi {
 export class StockPreparationInstallCallError extends Error {
   status: number
 
-  constructor(status: number, route: string) {
-    super(`stock-preparation install call failed (${route} -> ${status})`)
+  /**
+   * True when the transport SUCCEEDED and the payload was not this API's envelope — a 2xx carrying
+   * an HTML sign-in page, an empty body, an array. Kept apart from an ordinary failure because the
+   * two need different words: one says the server refused, the other says something that is not the
+   * server answered in its place.
+   */
+  malformed: boolean
+
+  constructor(status: number, route: string, options: { malformed?: boolean } = {}) {
+    super(`stock-preparation install call failed (${route} -> ${status}${options.malformed ? ', malformed' : ''})`)
     this.name = 'StockPreparationInstallCallError'
     this.status = status
+    this.malformed = options.malformed === true
   }
 }
 
 function statusOf(error: unknown): number {
   return error instanceof StockPreparationInstallCallError ? error.status : 0
+}
+
+/** A malformed 2xx gets its own reason wherever it happens — never the step's ordinary failure. */
+function reasonFor(error: unknown, ordinary: StockPreparationInstallReason): StockPreparationInstallReason {
+  return error instanceof StockPreparationInstallCallError && error.malformed
+    ? 'MALFORMED_RESPONSE'
+    : ordinary
 }
 
 // ---------------------------------------------------------------------------
@@ -384,27 +444,30 @@ export async function runStockPreparationInstall(
 
     if (descriptor.id === 'preflight' || descriptor.id === 'preflight-recheck') {
       let read: { preflight: StockPreparationPreflight | null; routeAbsent: boolean; status: number }
+      let malformed = false
       try {
         read = await api.readPreflight()
       } catch (error) {
         read = { preflight: null, routeAbsent: false, status: statusOf(error) }
+        malformed = reasonFor(error, 'PREFLIGHT_READ_FAILED') === 'MALFORMED_RESPONSE'
       }
       const step = record(classifyPreflightStep(index, read.preflight, {
         routeAbsent: read.routeAbsent,
         status: read.status,
         recheck: descriptor.id === 'preflight-recheck',
+        malformed,
       }))
       if (step.status === 'fail') break
       continue
     }
 
     if (descriptor.id === 'managed-tables') {
-      let ledgerMode = 'unknown'
+      let ledgerMode = STOCK_PREPARATION_UNKNOWN_MODE
       try {
         const ledger = await api.ensureConfirmationLedger()
-        ledgerMode = typeof ledger?.mode === 'string' ? ledger.mode : 'ok'
+        ledgerMode = clampEnsureMode(ledger?.mode ?? 'ok')
       } catch (error) {
-        record(result(index, descriptor.id, 'fail', 'LEDGER_ENSURE_FAILED', { status: statusOf(error) }))
+        record(result(index, descriptor.id, 'fail', reasonFor(error, 'LEDGER_ENSURE_FAILED'), { status: statusOf(error) }))
         break
       }
 
@@ -412,7 +475,7 @@ export async function runStockPreparationInstall(
       try {
         catalog = await api.listCustomerPacks()
       } catch (error) {
-        record(result(index, descriptor.id, 'fail', 'PACK_CATALOG_READ_FAILED', { status: statusOf(error), ledgerMode }))
+        record(result(index, descriptor.id, 'fail', reasonFor(error, 'PACK_CATALOG_READ_FAILED'), { status: statusOf(error), ledgerMode }))
         break
       }
 
@@ -436,13 +499,13 @@ export async function runStockPreparationInstall(
         const sandbox = await api.ensureSandboxTarget(objectId)
         record(result(index, descriptor.id, 'ok', 'MANAGED_TABLES_READY', {
           ledgerMode,
-          sandboxMode: typeof sandbox?.mode === 'string' ? sandbox.mode : 'ok',
+          sandboxMode: clampEnsureMode(sandbox?.mode ?? 'ok'),
           objectId,
           packId: pack.packId,
         }))
       } catch (error) {
         pack = null
-        record(result(index, descriptor.id, 'fail', 'SANDBOX_ENSURE_FAILED', { status: statusOf(error), objectId }))
+        record(result(index, descriptor.id, 'fail', reasonFor(error, 'SANDBOX_ENSURE_FAILED'), { status: statusOf(error), objectId }))
         break
       }
       continue
@@ -468,7 +531,7 @@ export async function runStockPreparationInstall(
           break
         }
       } catch (error) {
-        record(result(index, descriptor.id, 'fail', 'PACK_DRY_RUN_FAILED', { packId, status: statusOf(error) }))
+        record(result(index, descriptor.id, 'fail', reasonFor(error, 'PACK_DRY_RUN_FAILED'), { packId, status: statusOf(error) }))
         break
       }
 
@@ -477,7 +540,7 @@ export async function runStockPreparationInstall(
         const first = await api.installCustomerPack(packId)
         createdCount = Array.isArray(first?.createdFields) ? first.createdFields.length : 0
       } catch (error) {
-        record(result(index, descriptor.id, 'fail', 'PACK_INSTALL_FAILED', { packId, status: statusOf(error) }))
+        record(result(index, descriptor.id, 'fail', reasonFor(error, 'PACK_INSTALL_FAILED'), { packId, status: statusOf(error) }))
         break
       }
 
@@ -495,7 +558,7 @@ export async function runStockPreparationInstall(
           break
         }
       } catch (error) {
-        record(result(index, descriptor.id, 'fail', 'PACK_INSTALL_FAILED', { packId, status: statusOf(error) }))
+        record(result(index, descriptor.id, 'fail', reasonFor(error, 'PACK_INSTALL_FAILED'), { packId, status: statusOf(error) }))
         break
       }
 
@@ -511,17 +574,37 @@ export async function runStockPreparationInstall(
 // the default API implementation — existing routes only, existing gates only
 // ---------------------------------------------------------------------------
 
+/**
+ * A 2xx IS NOT AN ANSWER — the envelope has to be there.
+ *
+ * The first cut let any 2xx through as `{}` when the body would not parse or was not an envelope,
+ * which meant an install step recorded OK on a response the plugin never wrote. The realistic case
+ * is not exotic: an auth proxy or an ingress answering `200` with an HTML sign-in page, at which
+ * point `sandbox-target/ensure` and `customer-packs/:id/install` both report success and the page
+ * tells an admin the tables are in place. Reporting a table that does not exist is worse than
+ * reporting a failure, so a malformed 2xx FAILs with its own reason instead.
+ *
+ * `data` may legitimately be absent (a route that answers `{ ok: true }` and nothing else); `ok:
+ * true` is what must be present.
+ */
 async function readEnvelope<T>(response: Response | undefined, route: string): Promise<T> {
-  let payload: IntegrationApiEnvelope<T> | null = null
+  let payload: unknown = null
   try {
-    payload = await response?.json() as IntegrationApiEnvelope<T>
+    payload = await response?.json()
   } catch {
     payload = null
   }
-  if (!response?.ok || payload?.ok === false) {
-    throw new StockPreparationInstallCallError(typeof response?.status === 'number' ? response.status : 0, route)
+  const status = typeof response?.status === 'number' ? response.status : 0
+  const envelope = (payload && typeof payload === 'object' && !Array.isArray(payload))
+    ? payload as IntegrationApiEnvelope<T>
+    : null
+  if (!response?.ok || envelope?.ok === false) {
+    throw new StockPreparationInstallCallError(status, route)
   }
-  return (payload?.data ?? {}) as T
+  if (!envelope || envelope.ok !== true) {
+    throw new StockPreparationInstallCallError(status, route, { malformed: true })
+  }
+  return (envelope.data ?? {}) as T
 }
 
 export function createStockPreparationInstallApi(scope: IntegrationScope): StockPreparationInstallApi {
