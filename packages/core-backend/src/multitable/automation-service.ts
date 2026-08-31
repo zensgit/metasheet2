@@ -66,7 +66,7 @@ import {
   type AutomationConditionField,
   type ConditionGroup,
 } from './automation-conditions'
-import { AutomationExecutor, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps, type ExecutionContext, type ActionJobLifecycle, type AutomationStepResult } from './automation-executor'
+import { AutomationExecutor, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps, type ExecutionContext, type ActionJobLifecycle, type AutomationStepResult, type AutomationDispatchMode } from './automation-executor'
 import { ALL_ACTION_TYPES, type AutomationAction } from './automation-actions'
 import type { AutomationTrigger } from './automation-triggers'
 import {
@@ -116,6 +116,34 @@ export class AutomationRuleValidationError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'AutomationRuleValidationError'
+  }
+}
+
+export type AutomationTestRunMode = 'simulate' | 'real_fire'
+
+export interface AutomationTestRunOptions {
+  mode?: AutomationTestRunMode
+}
+
+function valuesFreeSimulationStep(step: AutomationStepResult): AutomationStepResult {
+  return {
+    actionType: step.actionType,
+    status: step.status,
+    ...(step.simulated === true
+      ? { simulated: true, output: { dryRun: true, dispatched: false } }
+      : {}),
+    ...(typeof step.durationMs === 'number' ? { durationMs: step.durationMs } : {}),
+    ...(step.error ? { error: 'SIMULATION_STEP_FAILED' } : {}),
+  }
+}
+
+function valuesFreeSimulationExecution(execution: AutomationExecution): AutomationExecution {
+  return {
+    ...execution,
+    steps: execution.steps.map(valuesFreeSimulationStep),
+    triggerEvent: undefined,
+    ruleSnapshot: undefined,
+    ...(execution.error ? { error: 'SIMULATION_FAILED' } : { error: undefined }),
   }
 }
 
@@ -2455,28 +2483,44 @@ export class AutomationService {
     rule: ExecutorRule,
     triggerEvent: unknown,
     retryMeta?: { rerunOfExecutionId: string; initiatedBy: string; rootExecutionId?: string },
+    dispatchMode: AutomationDispatchMode = 'live',
   ): Promise<AutomationExecution> {
     const persistJobs = rule.executionMode === 'workflow_job_v1'
     // A6-1: ONLY opted-in rules ('workflow_job_v1') get a per-action job lifecycle. Legacy rules
     // pass no factory → executor writes zero job rows (opt-out path is byte-identical to today).
     // This is the single place the path is chosen, so a retry of an opt-in rule also writes jobs.
     const jobLifecycleFactory = persistJobs
-      ? (executionId: string) => this.buildJobLifecycle(executionId, rule, triggerEvent, retryMeta?.rootExecutionId)
+      ? (executionId: string) => this.buildJobLifecycle(
+          executionId,
+          rule,
+          triggerEvent,
+          retryMeta?.rootExecutionId,
+          dispatchMode,
+        )
       : undefined
     // #4196: thread the retry lineage root into the executor so its ExecutionContext.rootExecutionId keys
     // Class-A claims on the ORIGINAL execution's root (a retry re-running the same action → duplicate →
     // skip). A first run has no retryMeta, so the executor defaults the root to its own execution id.
-    const execution = await this.executor.execute(rule, triggerEvent, jobLifecycleFactory, retryMeta?.rootExecutionId)
+    const execution = await this.executor.execute(
+      rule,
+      triggerEvent,
+      jobLifecycleFactory,
+      retryMeta?.rootExecutionId,
+      dispatchMode,
+    )
     if (retryMeta) {
       // A5: stamp retry provenance onto the NEW execution before persistence.
       execution.rerunOfExecutionId = retryMeta.rerunOfExecutionId
       execution.initiatedBy = retryMeta.initiatedBy
     }
     try {
+      const persistedExecution = dispatchMode === 'simulate'
+        ? valuesFreeSimulationExecution(execution)
+        : execution
       if (persistJobs) {
-        await this.logService.updateRecordedExecution(execution)
+        await this.logService.updateRecordedExecution(persistedExecution)
       } else {
-        await this.logService.record(execution)
+        await this.logService.record(persistedExecution)
       }
     } catch (err) {
       logger.error('Automation execution log persistence failed', err instanceof Error ? err : undefined)
@@ -2489,10 +2533,21 @@ export class AutomationService {
     rule: ExecutorRule,
     triggerEvent: unknown,
     rootExecutionId?: string,
+    dispatchMode: AutomationDispatchMode = 'live',
   ): ActionJobLifecycle {
+    const jobLifecycle = this.jobService.lifecycleFor(executionId, { id: rule.id, sheetId: rule.sheetId })
     return {
-      onExecutionStarted: (execution: AutomationExecution) => this.logService.record(execution),
-      ...this.jobService.lifecycleFor(executionId, { id: rule.id, sheetId: rule.sheetId }),
+      onExecutionStarted: (execution: AutomationExecution) => this.logService.record(
+        dispatchMode === 'simulate' ? valuesFreeSimulationExecution(execution) : execution,
+      ),
+      onStart: jobLifecycle.onStart,
+      onSettled: (stepIndex, action, result, meta) => jobLifecycle.onSettled(
+        stepIndex,
+        action,
+        dispatchMode === 'simulate' ? valuesFreeSimulationStep(result) : result,
+        meta,
+      ),
+      onSkipped: jobLifecycle.onSkipped,
       // A6-2: a wait_for_callback step persists the suspension + suspended job, then the executor stops.
       onSuspend: (stepIndex: number, action: AutomationAction): Promise<void> =>
         this.suspensionService
@@ -3498,9 +3553,18 @@ export class AutomationService {
   }
 
   /**
-   * Manual test run: execute a rule immediately with synthetic event.
+   * Manual test run: simulate the saved rule immediately with a synthetic event.
    */
-  async testRun(ruleId: string, sheetId: string): Promise<AutomationExecution> {
+  async testRun(
+    ruleId: string,
+    sheetId: string,
+    options: AutomationTestRunOptions = {},
+  ): Promise<AutomationExecution> {
+    const mode = options.mode ?? 'simulate'
+    if (mode !== 'simulate') {
+      throw new Error('Real-fire automation test runs are disabled')
+    }
+
     const rule = await this.getRule(ruleId)
     // G8 hardening (review P3): the route gates `canManageAutomation` on the PATH `sheetId`, but
     // getRule(ruleId) is not sheet-bound — so a caller authorized on sheet A could otherwise run a
@@ -3517,7 +3581,7 @@ export class AutomationService {
       actorId: 'system',
       _triggeredBy: 'manual_test',
     }
-    return this.executeRule(execRule, syntheticEvent)
+    return this.executeRule(execRule, syntheticEvent, undefined, 'simulate')
   }
 
   /**

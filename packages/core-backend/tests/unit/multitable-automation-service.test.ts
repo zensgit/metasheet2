@@ -394,6 +394,45 @@ describe('AutomationService', () => {
       expect(emitSpy).not.toHaveBeenCalled()
       expect(automationLogMocks.record).not.toHaveBeenCalled()
     })
+
+    it('defaults to simulate, persists the audit execution, and emits no notification', async () => {
+      const rule = createMockRule({ id: 'atr_x', sheet_id: 'sheet1', enabled: true })
+      const query = createMockQuery([rule])
+      service = new AutomationService(bus, createMockDb([rule]) as never, query)
+      const emitSpy = vi.spyOn(bus, 'emit')
+
+      const execution = await service.testRun('atr_x', 'sheet1')
+
+      expect(execution).toMatchObject({
+        status: 'success',
+        triggeredBy: 'manual_test',
+        dryRun: true,
+        steps: [{
+          actionType: 'send_notification',
+          status: 'success',
+          simulated: true,
+          output: { dryRun: true, dispatched: false },
+        }],
+      })
+      expect(emitSpy).not.toHaveBeenCalled()
+      expect(automationLogMocks.record).toHaveBeenCalledWith(expect.objectContaining({
+        id: execution.id,
+        triggeredBy: 'manual_test',
+        dryRun: true,
+      }))
+    })
+
+    it('fails closed when a direct caller requests real_fire', async () => {
+      const rule = createMockRule({ id: 'atr_x', sheet_id: 'sheet1', enabled: true })
+      const query = createMockQuery([rule])
+      service = new AutomationService(bus, createMockDb([rule]) as never, query)
+      const emitSpy = vi.spyOn(bus, 'emit')
+
+      await expect(service.testRun('atr_x', 'sheet1', { mode: 'real_fire' }))
+        .rejects.toThrow('Real-fire automation test runs are disabled')
+      expect(emitSpy).not.toHaveBeenCalled()
+      expect(automationLogMocks.record).not.toHaveBeenCalled()
+    })
   })
 
   describe('init / shutdown', () => {

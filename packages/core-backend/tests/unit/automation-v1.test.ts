@@ -449,6 +449,42 @@ describe('AutomationExecutor', () => {
     expect(emitSpy).toHaveBeenCalledWith('automation.notification', expect.objectContaining({ userIds: ['u1', 'u2'] }))
   })
 
+  it('simulate derives steps but dispatches no Class-A, outbound, notification, or approval side effect', async () => {
+    const emitSpy = vi.spyOn(deps.eventBus, 'emit')
+    const rule = createMockRule({
+      actions: [
+        { type: 'update_record', config: { fields: { status: 'done' } } },
+        { type: 'send_webhook', config: { url: 'https://example.com/hook' } },
+        { type: 'send_notification', config: { userIds: ['u1'], message: 'Hello' } },
+        { type: 'start_approval', config: { templateId: 'tpl_1', formDataMapping: {} } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      { recordId: 'r1', data: { status: 'active' }, sheetId: 'sheet_1' },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('success')
+    expect(result.dryRun).toBe(true)
+    expect(result.steps).toEqual(rule.actions.map((action) => ({
+      actionType: action.type,
+      status: 'success',
+      simulated: true,
+      output: { dryRun: true, dispatched: false },
+      durationMs: 0,
+    })))
+    const sqlCalls = vi.mocked(deps.queryFn).mock.calls.map(([sql]) => String(sql))
+    expect(sqlCalls).not.toEqual(expect.arrayContaining([
+      expect.stringMatching(/\b(?:INSERT\s+INTO|UPDATE\s+\S+\s+SET|DELETE\s+FROM)\b/i),
+    ]))
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+    expect(emitSpy).not.toHaveBeenCalled()
+  })
+
   it('executes send_email action successfully through NotificationService email channel', async () => {
     const send = vi.fn(async () => ({ id: 'notif_1', status: 'sent' as const }))
     deps = createMockDeps({ notificationService: { send } })
@@ -4415,6 +4451,54 @@ describe('AutomationExecutor — A6-1 job lifecycle hooks', () => {
     expect(deps.fetchFn).toHaveBeenCalledTimes(1) // non-selected branch webhook did not run; only the after action did.
   })
 
+  it('simulate derives a selected branch containing wait + notification without suspending or emitting', async () => {
+    const emitSpy = vi.spyOn(deps.eventBus, 'emit')
+    const lc = recordingLifecycle()
+    const rule = createMockRule({
+      actions: [{
+        type: 'condition_branch',
+        config: {
+          branches: [{
+            key: 'vip',
+            conditions: { logic: 'and', conditions: [{ fieldId: 'tier', operator: 'equals', value: 'vip' }] },
+            actions: [
+              { type: 'wait_for_callback', config: {} },
+              { type: 'send_notification', config: { userIds: ['u1'], message: 'Hello' } },
+            ],
+          }],
+        },
+      }],
+    })
+
+    const execution = await executor.execute(
+      rule,
+      { recordId: 'r1', data: { tier: 'vip' }, sheetId: 'sheet_1' },
+      lc.factory,
+      undefined,
+      'simulate',
+    )
+
+    expect(execution).toMatchObject({
+      status: 'success',
+      dryRun: true,
+      steps: [{
+        actionType: 'condition_branch',
+        status: 'success',
+        output: { selectedBranchKey: 'vip', matched: true },
+      }],
+    })
+    expect(lc.calls).toEqual([
+      'start:0',
+      'start:0',
+      'settled:0:success',
+      'start:0',
+      'settled:0:success',
+      'settled:0:success',
+    ])
+    expect(emitSpy).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+  })
+
   it('A6-3-1: condition_branch fails closed in legacy mode and skips later actions', async () => {
     const rule = createMockRule({
       actions: [
@@ -4803,6 +4887,80 @@ describe('AutomationService — A6-1 opt-in path choice', () => {
     const execSpy = vi.spyOn(service['executor'], 'execute').mockResolvedValue(storedExecutionForPath())
     await service.executeRule(execRule({ executionMode: 'workflow_job_v1' }), { recordId: 'r1' })
     expect(typeof execSpy.mock.calls[0][2]).toBe('function')
+  })
+
+  it('simulate persists a values-free execution projection while returning the in-memory plan', async () => {
+    const recordSpy = vi.spyOn(service.logs, 'record').mockResolvedValue()
+    const execution = await service.executeRule(execRule({
+      name: 'private_rule_name',
+      actions: [{
+        type: 'send_notification',
+        config: { userIds: ['private_recipient'], message: 'private_message' },
+      }],
+    }), {
+      recordId: 'private_record',
+      actorId: 'private_actor',
+      data: { salary: 'private_salary' },
+    }, undefined, 'simulate')
+
+    expect(JSON.stringify(execution)).toContain('private_salary')
+    const persisted = recordSpy.mock.calls[0]?.[0]
+    expect(persisted).toMatchObject({
+      dryRun: true,
+      steps: [{
+        actionType: 'send_notification',
+        status: 'success',
+        simulated: true,
+        output: { dryRun: true, dispatched: false },
+      }],
+    })
+    expect(persisted?.triggerEvent).toBeUndefined()
+    expect(persisted?.ruleSnapshot).toBeUndefined()
+    expect(JSON.stringify(persisted)).not.toContain('private_')
+  })
+
+  it('simulate keeps workflow parent, final execution, and job results values-free', async () => {
+    const onStart = vi.fn(async () => undefined)
+    const onSettled = vi.fn(async () => undefined)
+    const onSkipped = vi.fn(async () => undefined)
+    vi.spyOn(service['jobService'], 'lifecycleFor').mockReturnValue({ onStart, onSettled, onSkipped })
+    const recordSpy = vi.spyOn(service.logs, 'record').mockResolvedValue()
+    const updateSpy = vi.spyOn(service.logs, 'updateRecordedExecution').mockResolvedValue()
+
+    const execution = await service.executeRule(execRule({
+      executionMode: 'workflow_job_v1',
+      actions: [{
+        type: 'condition_branch',
+        config: {
+          branches: [{
+            key: 'private_branch_key',
+            conditions: { logic: 'and', conditions: [{ fieldId: 'tier', operator: 'equals', value: 'private_tier' }] },
+            actions: [{
+              type: 'send_notification',
+              config: { userIds: ['private_recipient'], message: 'private_message' },
+            }],
+          }],
+        },
+      }],
+    }), {
+      recordId: 'private_record',
+      actorId: 'private_actor',
+      data: { tier: 'private_tier' },
+    }, undefined, 'simulate')
+
+    expect(JSON.stringify(execution)).toContain('private_branch_key')
+    const persistedChannels = [
+      recordSpy.mock.calls[0]?.[0],
+      updateSpy.mock.calls[0]?.[0],
+      ...onSettled.mock.calls.map((call) => call[2]),
+    ]
+    expect(recordSpy).toHaveBeenCalledTimes(1)
+    expect(updateSpy).toHaveBeenCalledTimes(1)
+    expect(onStart).toHaveBeenCalledTimes(2)
+    expect(onSettled).toHaveBeenCalledTimes(2)
+    for (const channel of persistedChannels) {
+      expect(JSON.stringify(channel)).not.toContain('private_')
+    }
   })
 
   it('opt-IN rule pre-creates the parent execution before side effects, then final-updates it', async () => {
