@@ -888,6 +888,9 @@ jobs:
         # Whole-file args so a name filter matching zero tests cannot skip-green.
         run: |
           pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/dingtalk-directory-user-hire-date.test.ts \
+            tests/unit/directory-elearning-onboarding-lifecycle.test.ts \
+            tests/unit/directory-elearning-onboarding-wiring.test.ts \
             tests/unit/elearning-assignment-lifecycle-routes.test.ts \
             tests/unit/elearning-assignment-lifecycle.test.ts \
             tests/unit/elearning-assignment-reminder.test.ts \
@@ -902,6 +905,10 @@ jobs:
             tests/unit/elearning-assessment-admin-routes.test.ts \
             tests/unit/elearning-assessment-import.test.ts \
             tests/unit/elearning-notification-delivery.test.ts \
+            tests/unit/elearning-onboarding-assignment.test.ts \
+            tests/unit/elearning-onboarding-policy.test.ts \
+            tests/unit/elearning-onboarding-routes.test.ts \
+            tests/unit/elearning-onboarding-weekly-report.test.ts \
             tests/unit/elearning-open-completion-policy.test.ts \
             tests/unit/elearning-open-completion-postgres.test.ts \
             tests/unit/elearning-reminder-port-scoping.test.ts \
@@ -1086,6 +1093,7 @@ jobs:
             tests/integration/elearning-admin-access.db.test.ts \
             tests/integration/elearning-notification-delivery.db.test.ts \
             tests/integration/elearning-notification-worker.db.test.ts \
+            tests/integration/elearning-onboarding.db.test.ts \
             tests/integration/elearning-assessment-catalog.db.test.ts \
             tests/integration/elearning-paper-exam.db.test.ts \
             tests/integration/elearning-question-practice.db.test.ts \
