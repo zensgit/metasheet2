@@ -57,8 +57,17 @@ function run(name, fn) {
 
 // In-memory provisioning fake. NO real I/O. Tracks every provisioning call and
 // records created object metadata so create -> resolve round-trips work.
-function createContext({ existingObjectIds = [], missingFieldsByObject = {}, failPatch = false } = {}) {
-  const calls = { findObjectSheet: [], resolveFieldIds: [], ensureObject: [], patchObjectFieldProperty: [], ensureMissingObjectFields: [] }
+function createContext({
+  existingObjectIds = [],
+  missingFieldsByObject = {},
+  failPatch = false,
+  // The options each field ALREADY carries, keyed `${objectId}.${fieldId}` — the hand-seeded state a
+  // re-ensure must not destroy. Absent => the field has no options yet (a fresh provision).
+  currentOptionsByField = {},
+  // Omit getObjectField entirely, to exercise the read-less host refusal.
+  withoutGetObjectField = false,
+} = {}) {
+  const calls = { findObjectSheet: [], resolveFieldIds: [], ensureObject: [], patchObjectFieldProperty: [], ensureMissingObjectFields: [], getObjectField: [] }
   const sheets = new Map()
   const missing = {}
   for (const objectId of existingObjectIds) {
@@ -163,6 +172,10 @@ function createContext({ existingObjectIds = [], missingFieldsByObject = {}, fai
         error.code = 'FIELD_GONE'
         throw error
       }
+      // The patch lands: a later read in the same run sees what was written, so an idempotence
+      // assertion measures the real second pass rather than a frozen first one.
+      currentOptionsByField[`${input.objectId}.${input.fieldId}`] = (input.propertyPatch.options || [])
+        .map((option) => ({ ...option }))
       return {
         id: `fld_${input.objectId}_${input.fieldId}`,
         sheetId: `sheet_${input.objectId}`,
@@ -171,7 +184,18 @@ function createContext({ existingObjectIds = [], missingFieldsByObject = {}, fai
         property: input.propertyPatch,
       }
     },
+    // The read half of the append/keep_existing merge.
+    async getObjectField(input) {
+      calls.getObjectField.push({ ...input })
+      const options = currentOptionsByField[`${input.objectId}.${input.fieldId}`]
+      if (!options) return { id: `fld_${input.objectId}_${input.fieldId}`, property: {} }
+      return {
+        id: `fld_${input.objectId}_${input.fieldId}`,
+        property: { options: options.map((option) => ({ ...option })) },
+      }
+    },
   }
+  if (withoutGetObjectField) delete provisioning.getObjectField
   return { context: { api: { multitable: { provisioning } } }, calls }
 }
 
@@ -287,7 +311,25 @@ async function main() {
     assert.equal(result.evidence.rowsSeeded, 0)
     assert.ok(result.tables.every((t) => t.created === true && t.mode === 'mvp_create' && t.rowsSeeded === 0))
     assert.equal(calls.ensureObject.length, 9)
-    assert.equal(calls.patchObjectFieldProperty.length, 0, 'ensure never patches field metadata')
+    // WAS `patchObjectFieldProperty.length === 0`. That assertion was the defect, written down: it
+    // pinned an ensure that created every `optionSource: { type: 'contract' }` select with an EMPTY
+    // allowed set, which the multitable validator then refused every value against — the live
+    // `Invalid select option … 'draft'` failure. Ensure now runs the additive option-seed pass, so a
+    // patch per contract-sourced select is the CORRECT count. The descriptor itself is still
+    // metadata-only; the options arrive in the separate pass asserted below.
+    assert.ok(calls.patchObjectFieldProperty.length > 0, 'ensure seeds the contract select vocabularies')
+    assert.equal(result.optionSeed.seeded, true)
+    assert.equal(result.optionSeed.mode, 'option_seed_synced')
+    assert.equal(result.optionSeed.syncedFieldCount, calls.patchObjectFieldProperty.length)
+    for (const patch of calls.patchObjectFieldProperty) {
+      assert.ok(Array.isArray(patch.propertyPatch.options), 'every seeded field carries an options array')
+      assert.ok(patch.propertyPatch.options.length > 0, `${patch.fieldId} must not be seeded empty`)
+      for (const option of patch.propertyPatch.options) {
+        // The validator reads `options[].value` — an entry keyed anything else is invisible to it.
+        assert.equal(typeof option.value, 'string')
+        assert.ok(option.value.length > 0)
+      }
+    }
 
     // Every descriptor reaching ensureObject is structure-only: NO rows key.
     for (const call of calls.ensureObject) {
@@ -348,10 +390,17 @@ async function main() {
       projectId: LEAKY_PROJECT_ID,
       permission: 'admin',
       objectIds: [PROJECT_OBJECT_ID],
+      // ADDITIVE-ONLY: a caller set must carry the whole contract vocabulary plus whatever it adds.
+      // (The short two-value form this test used to pass is now a removal attempt — see the guard
+      // below. That form is exactly how an admin "adding one value" wiped a field's vocabulary.)
       optionSets: {
         [PROJECT_STATUS_SOURCE_KEY]: [
           { value: 'topsecretvalue', label: 'TopSecretLabel' },
+          { value: 'active' },
+          { value: 'paused' },
           { value: 'closed', label: 'Closed' },
+          { value: 'archived' },
+          { value: 'completed' },
         ],
       },
     })
@@ -363,14 +412,105 @@ async function main() {
     assert.equal(calls.patchObjectFieldProperty[0].fieldId, 'projectStatus')
     assert.equal(calls.patchObjectFieldProperty[0].objectId, PROJECT_OBJECT_ID)
     // The option VALUE rides the patch body (necessary field metadata)...
-    assert.equal(calls.patchObjectFieldProperty[0].propertyPatch.options[0].value, 'topsecretvalue')
+    const patched = calls.patchObjectFieldProperty[0].propertyPatch.options.map((option) => option.value)
+    assert.ok(patched.includes('topsecretvalue'), 'the caller-added value lands')
     assert.equal(result.evidence.syncedFieldCount, 1)
     // ...but the option VALUE/label MUST NOT appear anywhere in the evidence.
     assertValuesFree(result.evidence, 'option-sync evidence', ['topsecretvalue', 'TopSecretLabel'])
   })
 
-  // ---- option sync: realistic no-op (targeted table, no supplied set) ----
-  await run('option sync is a no-op when no set is supplied for a targeted table', async () => {
+  // ---- P2: a caller set may ADD to a contract vocabulary, never drop one of its values ----
+  await run('a supplied set that drops a contract value is refused with a code', async () => {
+    const { context, calls } = createContext({ existingObjectIds: [PROJECT_OBJECT_ID] })
+    const err = await rejectsWith(
+      () => syncStockPreparationMvpOptions({
+        context,
+        projectId: LEAKY_PROJECT_ID,
+        permission: 'admin',
+        objectIds: [PROJECT_OBJECT_ID],
+        // The realistic mistake: an admin means to ADD 'on_hold' and writes only that. Under a
+        // replace-per-key merge this shrank projectStatus to one value and broke every writer.
+        optionSets: { [PROJECT_STATUS_SOURCE_KEY]: [{ value: 'on_hold' }] },
+      }),
+      StockPreparationOptionSyncError,
+      'OPTION_SYNC_CONTRACT_VALUE_REMOVAL_REFUSED',
+    )
+    assert.equal(err.status, 422)
+    assert.equal(err.details.sourceKey, PROJECT_STATUS_SOURCE_KEY)
+    assert.deepEqual(err.details.missingContractValues.slice().sort(), ['active', 'archived', 'closed', 'completed', 'paused'])
+    assert.equal(err.details.missingContractValueCount, 5)
+    // REFUSED, not partially applied: the field is never touched on the way to the refusal.
+    assert.equal(calls.patchObjectFieldProperty.length, 0)
+    // The caller's own option value never enters the refusal details.
+    assert.equal(JSON.stringify(err.details).includes('on_hold'), false)
+  })
+
+  // ---- P1-B: a re-sync must never destroy options that are already there ----
+  await run('a re-sync preserves hand-seeded values and operator labels byte-for-byte', async () => {
+    // The live deployment's state: options hand-seeded to clear the outage, one of them carrying a
+    // value the catalog does not know and one carrying a human's label + colour.
+    const currentOptionsByField = {
+      [`${RUN_OBJECT_ID}.status`]: [
+        { value: 'succeeded', label: '成功', color: '#2f9e44' },
+        { value: 'cancelled', label: '已取消' },
+      ],
+    }
+    const { context, calls } = createContext({ existingObjectIds: [RUN_OBJECT_ID], currentOptionsByField })
+    await syncStockPreparationMvpOptions({
+      context,
+      projectId: LEAKY_PROJECT_ID,
+      permission: 'admin',
+      objectIds: [RUN_OBJECT_ID],
+      optionSets: {},
+    })
+    const statusPatch = calls.patchObjectFieldProperty.find((call) => call.fieldId === 'status').propertyPatch
+    const byValue = new Map(statusPatch.options.map((option) => [option.value, option]))
+
+    // NOTHING REMOVED: the hand-seeded value the catalog has never heard of survives. Dropping it
+    // would make every row already carrying it unwritable.
+    assert.ok(byValue.has('cancelled'), 'a hand-seeded value outside the catalog must survive a re-sync')
+    // NOTHING STRIPPED: the operator's label and colour on an option the catalog ALSO declares are
+    // preserved byte-for-byte, rather than replaced by the catalog's bare { value }.
+    assert.deepEqual(byValue.get('succeeded'), { value: 'succeeded', label: '成功', color: '#2f9e44' })
+    // ...and the catalog values that were genuinely missing are added.
+    for (const value of ['running', 'failed', 'partial']) {
+      assert.ok(byValue.has(value), `${value} must be added by the seed`)
+    }
+    // The merge READ before it wrote — an unread field is an overwrite by another name.
+    assert.ok(calls.getObjectField.length > 0, 'the merge reads current options before patching')
+  })
+
+  await run('a host that can patch but cannot read refuses the sync instead of overwriting', async () => {
+    const { context, calls } = createContext({ existingObjectIds: [RUN_OBJECT_ID], withoutGetObjectField: true })
+    await rejectsWith(
+      () => syncStockPreparationMvpOptions({
+        context,
+        projectId: LEAKY_PROJECT_ID,
+        permission: 'admin',
+        objectIds: [RUN_OBJECT_ID],
+        optionSets: {},
+      }),
+      StockPreparationTargetProvisioningError,
+      'MVP_OPTION_SYNC_API_UNAVAILABLE',
+    )
+    assert.equal(calls.patchObjectFieldProperty.length, 0)
+  })
+
+  await run('ensure degrades to option_seed_api_unavailable rather than overwriting on a read-less host', async () => {
+    const { context, calls } = createContext({ existingObjectIds: [], withoutGetObjectField: true })
+    const result = await ensureStockPreparationMvpTargets({ context, projectId: LEAKY_PROJECT_ID, permission: 'admin' })
+    assert.equal(result.ready, true, 'the schema still ensures on an older host')
+    assert.equal(result.optionSeed.seeded, false)
+    assert.equal(result.optionSeed.mode, 'option_seed_api_unavailable')
+    assert.equal(calls.patchObjectFieldProperty.length, 0, 'a host we cannot read from is never patched')
+  })
+
+  // ---- option sync: a body-less sync seeds the CONTRACT vocabularies ----
+  // WAS 'option sync is a no-op when no set is supplied for a targeted table', asserting
+  // mode === 'mvp_options_not_supplied' and zero patches. That was the second half of the live
+  // defect: a contract-sourced select had no resolver anywhere, so the operator's only recovery from
+  // an empty vocabulary was to type the whole enum into the request body by hand.
+  await run('option sync seeds the declared contract vocabulary when the caller supplies nothing', async () => {
     const { context, calls } = createContext({ existingObjectIds: [RUN_OBJECT_ID] })
     const result = await syncStockPreparationMvpOptions({
       context,
@@ -380,10 +520,45 @@ async function main() {
       optionSets: {},
     })
     assert.equal(result.ok, true)
-    assert.equal(result.tables[0].syncedCount, 0)
-    assert.equal(result.tables[0].mode, 'mvp_options_not_supplied')
-    assert.ok(result.tables[0].skippedCount > 0, 'run table option fields are recorded as skipped')
-    assert.equal(calls.patchObjectFieldProperty.length, 0, 'no supplied set => no patch')
+    assert.equal(result.tables[0].mode, 'mvp_options_synced')
+    assert.equal(result.tables[0].syncedCount, 2, 'the run table has runType + status')
+    assert.equal(calls.patchObjectFieldProperty.length, 2)
+    const byField = new Map(calls.patchObjectFieldProperty.map((call) => [call.fieldId, call.propertyPatch]))
+    assert.deepEqual(
+      byField.get('runType').options.map((option) => option.value),
+      ['plm_sync', 'erp_material_sync', 'mapping_match', 'unit_match', 'prep_generate'],
+    )
+    assert.deepEqual(
+      byField.get('status').options.map((option) => option.value),
+      ['running', 'succeeded', 'failed', 'partial'],
+    )
+    assertValuesFree(result.evidence, 'seeded option-sync evidence')
+  })
+
+  // ---- option sync: a caller ADDS to the seeded default ----
+  await run('a caller-supplied set adds to the contract default without shrinking it', async () => {
+    const { context, calls } = createContext({ existingObjectIds: [RUN_OBJECT_ID] })
+    const result = await syncStockPreparationMvpOptions({
+      context,
+      projectId: LEAKY_PROJECT_ID,
+      permission: 'admin',
+      objectIds: [RUN_OBJECT_ID],
+      optionSets: {
+        stock_preparation_run_status_v1: [
+          { value: 'running' }, { value: 'succeeded' }, { value: 'failed' }, { value: 'partial' },
+          { value: 'cancelled' },
+        ],
+      },
+    })
+    assert.equal(result.ok, true)
+    const byField = new Map(calls.patchObjectFieldProperty.map((call) => [call.fieldId, call.propertyPatch]))
+    // The whole contract vocabulary is still there, plus the caller's addition.
+    assert.deepEqual(
+      byField.get('status').options.map((option) => option.value).sort(),
+      ['cancelled', 'failed', 'partial', 'running', 'succeeded'],
+    )
+    // ...while the key the caller said nothing about keeps its seeded default.
+    assert.equal(byField.get('runType').options.length, 5)
   })
 
   // ---- option sync: defensive no-op for a template with ZERO option fields ----
@@ -417,11 +592,14 @@ async function main() {
       projectId: LEAKY_PROJECT_ID,
       permission: 'admin',
       objectIds: [PROJECT_OBJECT_ID],
-      optionSets: { [PROJECT_STATUS_SOURCE_KEY]: [{ value: 'active', label: 'Active' }] },
+      // The seeded contract defaults alone are enough to reach the patch — which is what makes this
+      // assertion meaningful: there IS a set for this field, and it is still not written.
+      optionSets: {},
     })
     assert.equal(result.tables[0].mode, 'mvp_target_not_ready')
     assert.equal(result.tables[0].syncedCount, 0)
     assert.equal(calls.patchObjectFieldProperty.length, 0, 'never patch an unprovisioned target')
+    assert.equal(calls.getObjectField.length, 0, 'an unprovisioned target is not even read')
   })
 
   // ---- option sync: unknown source key fails closed ----

@@ -16,6 +16,7 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 import {
   ensureObject,
   findObjectSheet,
+  getObjectField,
   patchObjectFieldProperty,
   resolveObjectFieldIds,
   type MultitableProvisioningObjectDescriptor,
@@ -122,6 +123,10 @@ function createRealMultitableFacade() {
       findObjectSheet(readQuery, projectId, objectId),
     resolveFieldIds: ({ projectId, objectId, fieldIds }: { projectId: string; objectId: string; fieldIds: string[] }) =>
       resolveObjectFieldIds(projectId, objectId, fieldIds),
+    // The option-sync merge reads a field's current options before patching (append + keep_existing),
+    // so the facade must expose the read half — a read-only SELECT, no transaction.
+    getObjectField: ({ projectId, objectId, fieldId }: { projectId: string; objectId: string; fieldId: string }) =>
+      getObjectField({ query: readQuery, projectId, objectId, fieldId }),
     ensureObject: ({ projectId, baseId, descriptor }: {
       projectId: string
       baseId?: string | null
@@ -394,8 +399,12 @@ describeIfDatabase('stock-preparation T3b-2 PLM source auto-persist (real DB)', 
       projectId: TARGET_PROJECT_ID,
       permission: 'admin',
       objectIds: OBJECT_IDS,
+      // A caller set may ADD to a contract vocabulary but never drop one of its values, so each set
+      // below carries the whole contract catalogue. project_status is the full five members; the
+      // persist writes 'active', which the auto-seeded catalogue already covers.
       optionSets: {
-        stock_preparation_project_status_v1: ['active'].map((value) => ({ value })),
+        stock_preparation_project_status_v1: ['active', 'paused', 'closed', 'archived', 'completed']
+          .map((value) => ({ value })),
         stock_preparation_snapshot_status_v1: ['draft', 'active', 'superseded', 'rejected']
           .map((value) => ({ value })),
         stock_preparation_bom_line_status_v1: ['imported', 'active', 'inactive', 'incomplete']

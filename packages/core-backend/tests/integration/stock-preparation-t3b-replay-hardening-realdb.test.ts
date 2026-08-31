@@ -211,8 +211,12 @@ describeIfDatabase('stock-preparation T3b immutable replay hardening (real DB)',
       projectId: TARGET_PROJECT_ID,
       permission: 'admin',
       objectIds,
+      // A caller set may ADD to a contract vocabulary but never drop one of its values, so each set
+      // below carries the whole contract catalogue. project_status is the full five members; the
+      // persist writes 'active', which the auto-seeded catalogue already covers.
       optionSets: {
-        stock_preparation_project_status_v1: ['active'].map((value) => ({ value })),
+        stock_preparation_project_status_v1: ['active', 'paused', 'closed', 'archived', 'completed']
+          .map((value) => ({ value })),
         stock_preparation_snapshot_status_v1: ['draft', 'active', 'superseded', 'rejected']
           .map((value) => ({ value })),
         stock_preparation_bom_line_status_v1: ['imported', 'active', 'inactive', 'incomplete']
