@@ -13,6 +13,7 @@ const {
   HUMAN_PRESERVED_FIELD_IDS,
   buildSheetStructureFromTemplate,
   resolveTemplateLabelLocale,
+  pickDefaultViewName,
 } = require('./stock-preparation-templates.cjs')
 
 // W2 canonical repair: namespace positive control for a repaired-in field.
@@ -435,6 +436,35 @@ async function ensureStockPreparationSandboxTarget(input = {}) {
   })
 }
 
+// THE one place a stock-preparation managed table gets its default view. A multitable
+// base renders each sheet's default view, so a sheet with ZERO views cannot be opened --
+// and one unopenable sheet blocks the entire base. Measured on the first real deployment:
+// the pack-installed sandbox had 3 role views (created by the pack) and opened; the
+// ledger, the canonical main and a second sandbox each had 0 views, and the base stayed
+// unopenable until three grid views were inserted by hand.
+//
+// NEVER-TOUCH-EXISTING-VIEWS: the host primitive writes only when the sheet has no views
+// at all. A sheet that already carries views -- the pack's three role views above -- is
+// left completely alone: not appended to, not renamed, not reordered. This helper adds
+// nothing to that guarantee and cannot weaken it; it only names the view and reports.
+//
+// OPTIONAL CAPABILITY: an older host without `ensureObjectDefaultView` is not a failure.
+// Provisioning proceeds exactly as it does today and the evidence says so, so a plugin
+// newer than its host still installs the tables it always installed.
+async function ensureManagedTableDefaultView({ provisioning, projectId, objectId, viewKind, locale } = {}) {
+  if (!provisioning || typeof provisioning.ensureObjectDefaultView !== 'function') {
+    return { created: false, skipped: 'api_unavailable' }
+  }
+  const result = await provisioning.ensureObjectDefaultView({
+    projectId,
+    objectId,
+    name: pickDefaultViewName(viewKind, { locale }),
+  })
+  const existingViewCount = Number(result && result.existingViewCount) || 0
+  if (result && result.created === true) return { created: true, skipped: null }
+  return { created: false, skipped: existingViewCount > 0 ? 'existing_views' : 'concurrent_create' }
+}
+
 async function ensureStockPreparationTarget(input = {}) {
   const context = input.context || {}
   const provisioning = getProvisioningApi(context)
@@ -501,9 +531,22 @@ async function ensureStockPreparationTarget(input = {}) {
           },
     )
   }
+  // Created tables are created USABLE: the fresh sheet gets its one grid view, named in
+  // the same language its sheet name and columns just got. Only the CREATE path does
+  // this -- the already-ready path above returned before any write and still does, so an
+  // existing deployment's tables (hand-renamed headers, hand-created views) are provisioned
+  // exactly as they are today.
+  const defaultView = await ensureManagedTableDefaultView({
+    provisioning,
+    projectId,
+    objectId: template.objectId,
+    viewKind: 'records',
+    locale: input.locale,
+  })
   return {
     ready: true,
     mode: `${modePrefix}_create`,
+    defaultView,
     target: buildCanonicalTargetBinding({ sheetId: ensured.sheet.id, objectId: template.objectId, fieldIdMap: resolvedAfterCreate }),
     evidence: summarizeStockPreparationTargetReadiness({
       template,
@@ -677,6 +720,7 @@ module.exports = {
   StockPreparationTargetProvisioningError,
   assertSandboxObjectId,
   buildStockPreparationTargetDescriptor,
+  ensureManagedTableDefaultView,
   summarizeStockPreparationTargetReadiness,
   hashEvidenceValue,
   sandboxStockPreparationTemplate,
