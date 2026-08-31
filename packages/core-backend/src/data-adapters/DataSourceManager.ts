@@ -8,7 +8,7 @@ import { MSSQLAdapter } from './MSSQLAdapter'
 import { MySQLAdapter } from './MySQLAdapter'
 import { PLMAdapter } from './PLMAdapter'
 import { encryptStoredSecretValue, decryptStoredSecretValue, isEncryptedSecretValue } from '../security/encrypted-secrets'
-import { assertNotK3Destination, assertNotK3MarkedDestination } from './k3-destination-write-fence'
+import { assertNotK3Destination, assertNotK3MarkedDestination, assertNotK3SqlWrite } from './k3-destination-write-fence'
 import type { IConfigService, ILogger } from '../di/identifiers'
 
 // PostgreSQL SQLSTATE for undefined_table. The referential delete guard trusts
@@ -809,10 +809,15 @@ export class DataSourceManager extends EventEmitter {
     params?: DbValue[]
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
-    // G-4 DESTINATION FENCE (query). A raw statement against a source DECLARED to be a K3 destination
-    // is refused before anything connects — a raw statement is write-capable and the ban is on the
-    // write. No table argument here, so this is the marker-only check.
+    // G-4 DESTINATION FENCE (query), fail-early before connect. Two independent refusals:
+    //   - a source DECLARED a K3 destination refuses ANY raw statement (a raw statement is
+    //     write-capable and the ban is on the write); and
+    //   - a raw statement that WRITES a K3 business table is refused on any destination — this is the
+    //     switch-the-verb bypass (INSERT/UPDATE/DELETE/MERGE/EXEC naming t_ICItem &c.). Reads pass.
+    // The adapter's own query() re-checks at the true chokepoint, so a caller who skips this manager
+    // wrapper (getDataSource(id).query(...)) is still refused; this layer only saves a connect.
     assertNotK3MarkedDestination(adapter.getConfig())
+    assertNotK3SqlWrite(adapter.getConfig(), sql)
     if (isGenericQueryDisabledConfig(adapter.getConfig())) {
       throw new Error(c6WriteTargetQueryDisabledMessage(dataSourceId))
     }
@@ -982,9 +987,10 @@ export class DataSourceManager extends EventEmitter {
     // Execute queries in parallel
     const promises = queries.map(async ({ dataSourceId, sql, params, alias }) => {
       const adapter = this.getDataSource(dataSourceId)
-      // G-4 DESTINATION FENCE (federated query). A federated leg runs raw SQL, so a leg against a
-      // source DECLARED to be a K3 destination is refused — same reason as `query`.
+      // G-4 DESTINATION FENCE (federated query). A federated leg runs raw SQL: refuse a marked K3
+      // destination, and refuse any leg whose statement WRITES a K3 business table. Reads pass.
       assertNotK3MarkedDestination(adapter.getConfig())
+      assertNotK3SqlWrite(adapter.getConfig(), sql)
       if (isGenericQueryDisabledConfig(adapter.getConfig())) {
         throw new Error(c6WriteTargetQueryDisabledMessage(dataSourceId))
       }
