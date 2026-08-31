@@ -9449,6 +9449,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/watch/sessions/{sessionId}/challenges/{challengeId}/ack": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Confirm an active or timed-out watch challenge
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires the master, content, media,
+         *     and watch-challenge flags to equal the exact literal `true`. The server derives organization and actor.
+         *     An on-time acknowledgement commits only the provisional eligible watch interval; a late acknowledgement
+         *     discards that interval and resumes the existing watch session. Same requestId and logical payload replay
+         *     the stored result; a different payload with the same requestId returns a values-free conflict.
+         */
+        post: operations["acknowledgeElearningWatchChallenge"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/watch/items/{itemId}/playback-ticket": {
         parameters: {
             query?: never;
@@ -19451,6 +19475,18 @@ export interface components {
             durationMs: number;
             creditedMs: number;
             duplicate: boolean;
+            challenge?: components["schemas"]["ElearningWatchChallenge"] | null;
+        };
+        ElearningWatchChallenge: {
+            challengeId: components["schemas"]["ElearningUuid"];
+            /** Format: date-time */
+            deadlineAt: string;
+            ordinal: number;
+            /** @enum {string} */
+            status: "challenged" | "paused";
+        };
+        ElearningWatchChallengeAckRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
         };
         ElearningHeartbeatRequest: {
             sequence: number;
@@ -22636,6 +22672,47 @@ export interface operations {
             /** @description not_found or watch flags off */
             404: components["responses"]["ElearningError"];
             /** @description course_withdrawn, conflict, sequence_gap, or session_inactive */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    acknowledgeElearningWatchChallenge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: components["schemas"]["ElearningUuid"];
+                challengeId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningWatchChallengeAckRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated server-derived watch state; challenge is null after acknowledgement. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningWatchState"];
+                };
+            };
+            /** @description invalid_input or unsupported policy */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or watch-challenge flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description challenge_mismatch, challenge_stale, conflict, course_withdrawn, or session_inactive */
             409: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];

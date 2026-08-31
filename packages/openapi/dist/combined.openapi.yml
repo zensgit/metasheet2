@@ -8487,6 +8487,40 @@ components:
           minimum: 0
         duplicate:
           type: boolean
+        challenge:
+          allOf:
+            - $ref: '#/components/schemas/ElearningWatchChallenge'
+          nullable: true
+    ElearningWatchChallenge:
+      type: object
+      additionalProperties: false
+      required:
+        - challengeId
+        - deadlineAt
+        - ordinal
+        - status
+      properties:
+        challengeId:
+          $ref: '#/components/schemas/ElearningUuid'
+        deadlineAt:
+          type: string
+          format: date-time
+        ordinal:
+          type: integer
+          minimum: 1
+        status:
+          type: string
+          enum:
+            - challenged
+            - paused
+    ElearningWatchChallengeAckRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - requestId
+      properties:
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
     ElearningHeartbeatRequest:
       type: object
       additionalProperties: false
@@ -20956,6 +20990,78 @@ paths:
           $ref: '#/components/responses/ElearningError'
         '409':
           description: course_withdrawn, conflict, sequence_gap, or session_inactive
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+  /api/elearning/watch/sessions/{sessionId}/challenges/{challengeId}/ack:
+    post:
+      operationId: acknowledgeElearningWatchChallenge
+      summary: Confirm an active or timed-out watch challenge
+      description: >
+        RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+        Requires the master, content, media,
+
+        and watch-challenge flags to equal the exact literal `true`. The server
+        derives organization and actor.
+
+        An on-time acknowledgement commits only the provisional eligible watch
+        interval; a late acknowledgement
+
+        discards that interval and resumes the existing watch session. Same
+        requestId and logical payload replay
+
+        the stored result; a different payload with the same requestId returns a
+        values-free conflict.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: sessionId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+        - in: path
+          name: challengeId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningWatchChallengeAckRequest'
+      responses:
+        '200':
+          description: >-
+            Updated server-derived watch state; challenge is null after
+            acknowledgement.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningWatchState'
+        '400':
+          description: invalid_input or unsupported policy
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: >-
+            assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient
+            permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or watch-challenge flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: >-
+            challenge_mismatch, challenge_stale, conflict, course_withdrawn, or
+            session_inactive
           $ref: '#/components/responses/ElearningError'
         '500':
           description: internal_error

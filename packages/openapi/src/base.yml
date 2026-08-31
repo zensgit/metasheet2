@@ -7013,6 +7013,33 @@ components:
           type: integer
           minimum: 0
         duplicate: { type: boolean }
+        challenge:
+          allOf:
+            - $ref: '#/components/schemas/ElearningWatchChallenge'
+          nullable: true
+    ElearningWatchChallenge:
+      type: object
+      additionalProperties: false
+      required: [challengeId, deadlineAt, ordinal, status]
+      properties:
+        challengeId:
+          $ref: '#/components/schemas/ElearningUuid'
+        deadlineAt:
+          type: string
+          format: date-time
+        ordinal:
+          type: integer
+          minimum: 1
+        status:
+          type: string
+          enum: [challenged, paused]
+    ElearningWatchChallengeAckRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId]
+      properties:
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
     ElearningHeartbeatRequest:
       type: object
       additionalProperties: false
