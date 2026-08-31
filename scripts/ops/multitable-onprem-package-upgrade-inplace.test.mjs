@@ -533,15 +533,21 @@ test('Update-Plugins copies loose root files and, with -Force, a hidden plugin d
 test('Write-RestoreBlock prints the backup path and an exact copy-back command per replaced path', () => {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-unit-'))
   try {
+    // Real, platform-native paths (not a hardcoded Windows drive letter): a bare
+    // "C:\..." literal makes PowerShell try to resolve PSDrive 'C', which does not
+    // exist on Linux pwsh ("Cannot find drive") even for a pure string Join-Path —
+    // this test does not need the paths to exist, only to be valid on the host OS.
+    const backupPath = path.join(scratch, 'backup', 'x')
+    const rootDir = path.join(scratch, 'live')
     const harness =
       dotSourcePrelude(scratch) +
-      "Write-RestoreBlock -BackupPath 'C:\\backup\\x' -RootDir 'C:\\live' -ReplacedRelativePaths @('packages/core-backend/dist', 'plugins') -Pm2AppName 'metasheet-backend'"
+      `Write-RestoreBlock -BackupPath '${backupPath}' -RootDir '${rootDir}' -ReplacedRelativePaths @('packages/core-backend/dist', 'plugins') -Pm2AppName 'metasheet-backend'`
     const result = runPwshHarness(harness)
     assert.equal(result.status, 0, result.stderr || result.stdout)
     assert.match(result.stdout, /RESTORE REQUIRED/)
-    assert.match(result.stdout, /Backup path: C:\\backup\\x/)
-    assert.match(result.stdout, /Copy-Item -LiteralPath 'C:\\backup\\x\\packages\\core-backend\\dist'/)
-    assert.match(result.stdout, /Copy-Item -LiteralPath 'C:\\backup\\x\\plugins'/)
+    assert.ok(result.stdout.includes(`Backup path: ${backupPath}`))
+    assert.ok(result.stdout.includes(`Copy-Item -LiteralPath '${path.join(backupPath, 'packages', 'core-backend', 'dist')}'`))
+    assert.ok(result.stdout.includes(`Copy-Item -LiteralPath '${path.join(backupPath, 'plugins')}'`))
     assert.match(result.stdout, /pm2 restart metasheet-backend --update-env/)
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true })
