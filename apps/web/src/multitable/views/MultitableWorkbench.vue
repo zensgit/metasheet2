@@ -147,9 +147,11 @@
               :bases="basePickerBases"
               :active-base-id="activeBaseId"
               :can-create="canCreateBasesAndSheets"
+              :can-manage-fields="caps.canManageFields.value"
               @select="onSelectBase"
               @create="onCreateBase"
               @toggle-favorite="onToggleFavoriteBase"
+              @rename="onRenameBase"
             />
           </div>
           <button
@@ -163,7 +165,7 @@
             @click="railCollapsed = !railCollapsed"
           >{{ railCollapsed ? '›' : '‹' }}</button>
         </div>
-        <MetaSheetViewRail v-show="!railCollapsed" :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" />
+        <MetaSheetViewRail v-show="!railCollapsed" :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :can-manage-fields="caps.canManageFields.value" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" @rename-sheet="onRenameSheet" />
       </aside>
       <div class="mt-workbench__main">
         <MetaDashboardView
@@ -3126,6 +3128,19 @@ async function onCreateSheet(name: string) {
   } catch (e: any) { showError(e.message ?? wb('toast.sheetCreateFailed', isZh.value)) }
 }
 
+// Rename gates server-side on canManageFields — the affordance is hidden client-side for that
+// same reason (MetaSheetViewRail's canManageFields prop), but a 403 here (stale capability, a
+// role change mid-session) still surfaces through the same showError path as every other mutation
+// on this file, never a silent no-op. Refreshed the same way onUpdateField refreshes field
+// changes: workbench.loadSheetMeta re-pulls the base's full sheet list (renamed sheet included)
+// regardless of whether sheetId is the currently active sheet.
+async function onRenameSheet(sheetId: string, name: string) {
+  try {
+    await workbench.client.renameSheet(sheetId, name)
+    await workbench.loadSheetMeta(workbench.activeSheetId.value)
+  } catch (e: any) { showError(e.message ?? wb('toast.sheetRenameFailed', isZh.value)) }
+}
+
 // --- Base management ---
 async function loadBases() {
   try {
@@ -3478,6 +3493,19 @@ async function onCreateBase(name: string) {
     bases.value.push(res.base)
     await onSelectBase(res.base.id)
   } catch (e: any) { showError(e.message ?? wb('toast.baseCreateFailed', isZh.value)) }
+}
+
+// Rename gates server-side on canManageFields — the affordance is hidden client-side for that
+// same reason (MetaBasePicker's canManageFields prop), but a 403 here still surfaces through
+// showError, never a silent no-op. Local array update mirrors onCreateBase's push above (bases
+// pass through client.renameBase's own invalidateBasesCache, so a later force-refresh will not
+// see a stale cached name either).
+async function onRenameBase(baseId: string, name: string) {
+  try {
+    const res = await workbench.client.renameBase(baseId, name)
+    const idx = bases.value.findIndex((base) => base.id === baseId)
+    if (idx >= 0) bases.value[idx] = { ...bases.value[idx], ...res.base }
+  } catch (e: any) { showError(e.message ?? wb('toast.baseRenameFailed', isZh.value)) }
 }
 
 async function loadTemplateLibrary() {

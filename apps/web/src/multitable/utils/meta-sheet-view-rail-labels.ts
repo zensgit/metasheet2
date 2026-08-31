@@ -8,10 +8,16 @@
 export type MetaSheetViewRailLabelKey =
   | 'rail.treeLabel'
   | 'rail.addSheet'
+  // Rename affordance (feat/multitable-rename): pencil button + inline confirm/cancel, gated
+  // server-side on canManageFields — see MultitableWorkbench.vue's onRenameSheet.
+  | 'rail.renameSheet' | 'rail.confirmRenameSheet' | 'rail.cancelRenameSheet'
 
 const META_SHEET_VIEW_RAIL_LABELS: Record<MetaSheetViewRailLabelKey, { en: string; zh: string }> = {
   'rail.treeLabel': { en: 'Tables and views', zh: '数据表与视图' },
   'rail.addSheet': { en: 'New table', zh: '新建数据表' },
+  'rail.renameSheet': { en: 'Rename', zh: '重命名' },
+  'rail.confirmRenameSheet': { en: 'Confirm rename', zh: '确认重命名' },
+  'rail.cancelRenameSheet': { en: 'Cancel rename', zh: '取消重命名' },
 }
 
 export function railLabel(key: MetaSheetViewRailLabelKey, isZh: boolean): string {
