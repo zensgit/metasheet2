@@ -726,6 +726,45 @@ describe('ElearningAdminView', () => {
     expect(h.assign).not.toHaveBeenCalled()
   })
 
+  it('keeps onboarding assignment hidden without the content authority', async () => {
+    h.capabilities.mockResolvedValue({
+      enabled: true,
+      capabilities: {
+        content: false,
+        assignment: true,
+        assessment: false,
+        incentive: false,
+        analytics: false,
+        media: false,
+      },
+    })
+    const root = mountView()
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-onboarding-section"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-admin-status"]')?.textContent)
+      .toContain('feature_disabled')
+  })
+
+  it('mounts onboarding assignment only with content and assignment authority', async () => {
+    h.capabilities.mockResolvedValue({
+      enabled: true,
+      capabilities: {
+        content: true,
+        assignment: true,
+        assessment: false,
+        incentive: false,
+        analytics: false,
+        media: false,
+      },
+    })
+    const root = mountView()
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-onboarding-section"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="elearning-onboarding-policy-form"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="elearning-onboarding-report-form"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-admin-status"]')).toBeNull()
+  })
+
   it('keeps option ids unique after delete then add and offers only MP4', async () => {
     const root = mountView()
     await fillMinimum(root)

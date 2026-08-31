@@ -249,6 +249,12 @@
 
     <ElearningAnalyticsPeriodSection v-if="analyticsEnabled" />
 
+    <ElearningOnboardingAdminSection
+      v-if="assignmentEnabled || analyticsEnabled"
+      :assignment-enabled="assignmentEnabled"
+      :analytics-enabled="analyticsEnabled"
+    />
+
     <ElearningPracticeAdminSection v-if="practiceEnabled" />
 
     <div class="elearning-admin__assessment-toggle">
@@ -287,6 +293,7 @@ import ElearningAnalyticsPeriodSection from './ElearningAnalyticsPeriodSection.v
 import ElearningContentAdminSection from './ElearningContentAdminSection.vue'
 import ElearningPortalAdminSection from './ElearningPortalAdminSection.vue'
 import ElearningCreditAdminSection from './ElearningCreditAdminSection.vue'
+import ElearningOnboardingAdminSection from './ElearningOnboardingAdminSection.vue'
 import ElearningPracticeAdminSection from './ElearningPracticeAdminSection.vue'
 import { isElearningPracticeReady } from '../services/elearningPractice'
 import {
@@ -529,7 +536,7 @@ function buildAssignmentPayload(courseVersionId: string): ElearningDirectAssignm
 async function ensureV01Ready(): Promise<void> {
   const capabilities = await getElearningCapabilities()
   contentEnabled.value = isElearningContentReady(capabilities)
-  assignmentEnabled.value = capabilities.enabled === true
+  assignmentEnabled.value = contentEnabled.value
     && capabilities.capabilities.assignment === true
   incentiveEnabled.value = capabilities.enabled === true
     && capabilities.capabilities.incentive === true
@@ -540,6 +547,7 @@ async function ensureV01Ready(): Promise<void> {
   if (
     !ready.value
     && !contentEnabled.value
+    && !assignmentEnabled.value
     && !incentiveEnabled.value
     && !analyticsEnabled.value
     && !practiceEnabled.value
