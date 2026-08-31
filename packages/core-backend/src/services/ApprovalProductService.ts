@@ -94,6 +94,7 @@ import {
   type ApprovalDesignatedFallbackEligibilitySnapshot,
 } from './approval-designated-fallback-eligibility'
 import {
+  inheritSequentialQueueMetadata,
   isSequentialQueueActive,
   promoteNextSequentialQueueAssignment,
   readSequentialQueueMetadata,
@@ -730,6 +731,24 @@ function toNullableRecord(value: unknown): Record<string, unknown> | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function handoverAssignmentMetadata(
+  sourceAssignments: readonly Pick<ApprovalAssignmentRow, 'metadata'>[],
+  metadata: Record<string, unknown>,
+): Record<string, unknown> {
+  const inherited = inheritSequentialQueueMetadata(
+    sourceAssignments.map((assignment) => assignment.metadata),
+    metadata,
+  )
+  if (!inherited) {
+    throw new ServiceError(
+      'Sequential approval queue handover metadata is invalid',
+      409,
+      'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+    )
+  }
+  return inherited
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -8358,11 +8377,11 @@ export class ApprovalProductService {
             assigneeId: toUserId,
             sourceStep: assignment.source_step ?? 0,
             nodeKey: assignment.node_key || '',
-            metadata: {
+            metadata: handoverAssignmentMetadata([assignment], {
               reassignedFrom: fromUserId,
               adminReassign: true,
               previousAssignmentId: assignment.id,
-            },
+            }),
           })
           reassignmentsByEpoch.set(epoch, bucket)
         }
@@ -8788,11 +8807,11 @@ export class ApprovalProductService {
             assigneeId: resolvedManagerId,
             sourceStep: assignment.source_step ?? 0,
             nodeKey: assignment.node_key || '',
-            metadata: {
+            metadata: handoverAssignmentMetadata([assignment], {
               departureTransfer: true,
               reassignedFrom: userId,
               previousAssignmentId: assignment.id,
-            },
+            }),
           })
           reassignmentsByEpoch.set(epoch, bucket)
         }
@@ -9010,6 +9029,15 @@ export class ApprovalProductService {
         // Read the current epoch BEFORE the node-wide deactivate below (afterwards the node is empty)
         // and stamp the handed-to assignee with it; NEVER bump node_activation_seq.
         const timeoutTransferEntryEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
+        const timeoutTransferSources = await client.query<ApprovalAssignmentRow>(
+          `SELECT *
+             FROM approval_assignments
+            WHERE instance_id = $1 AND node_key = $2 AND is_active = TRUE
+            ORDER BY created_at ASC
+            FOR UPDATE`,
+          [id, currentNodeKey],
+        )
+        const timeoutTransferMetadata = handoverAssignmentMetadata(timeoutTransferSources.rows, {})
         // Hand the WHOLE node over: every active assignment at the node is deactivated and the
         // static target takes it (mode semantics reset to the single handed-over approver).
         await client.query(
@@ -9018,7 +9046,9 @@ export class ApprovalProductService {
            WHERE instance_id = $1 AND node_key = $2 AND is_active = TRUE`,
           [id, currentNodeKey],
         )
-        const createdTaskEvents = await this.insertAssignments(client, id, executor.buildTransferAssignments(currentNodeKey, targetUserId), timeoutTransferEntryEpoch)
+        const timeoutTransferAssignments = executor.buildTransferAssignments(currentNodeKey, targetUserId)
+          .map((assignment) => ({ ...assignment, metadata: timeoutTransferMetadata }))
+        const createdTaskEvents = await this.insertAssignments(client, id, timeoutTransferAssignments, timeoutTransferEntryEpoch)
         // Parity with the dispatch transfer: an in-place handover does not bump the instance version.
         await this.insertApprovalRecord(client, id, {
           action: 'transfer',
@@ -9678,8 +9708,11 @@ export class ApprovalProductService {
         // current epoch BEFORE deactivating the actor's seat (a single-approver node would be EMPTY at
         // the read otherwise) and stamp the handed-to assignee with it; NEVER bump node_activation_seq.
         const transferEntryEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
+        const transferMetadata = handoverAssignmentMetadata(actorAssignments, {})
         await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
-        const createdTaskEvents = await this.insertAssignments(client, id, executor.buildTransferAssignments(currentNodeKey, request.targetUserId), transferEntryEpoch)
+        const transferAssignments = executor.buildTransferAssignments(currentNodeKey, request.targetUserId)
+          .map((assignment) => ({ ...assignment, metadata: transferMetadata }))
+        const createdTaskEvents = await this.insertAssignments(client, id, transferAssignments, transferEntryEpoch)
         await this.insertApprovalRecord(client, id, {
           action: 'transfer',
           actorId: actor.userId,

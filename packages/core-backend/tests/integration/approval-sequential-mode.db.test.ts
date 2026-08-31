@@ -3,9 +3,11 @@ import net from 'net'
 import { fetch as undiciFetch } from 'undici'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { ApprovalProductService } from '../../src/services/ApprovalProductService'
 import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
+const fixtureUserIds = new Set<string>()
 
 // TOP-LEVEL: this file is excluded from no-DB collection. Any direct integration invocation must
 // therefore prove it is the dedicated DB lane instead of silently skipping the gated suite.
@@ -32,6 +34,7 @@ async function canListenOnEphemeralPort(): Promise<boolean> {
 }
 
 async function authToken(baseUrl: string, userId: string): Promise<string> {
+  fixtureUserIds.add(userId)
   await grantApprovalWriteForIntegrationActor(userId)
   const response = await undiciFetch(
     `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('*:*')}`,
@@ -103,6 +106,7 @@ describeIfDatabase('Approval Lock-1 K6 sequential mode', () => {
   let baseUrl = ''
   const templateIds = new Set<string>()
   const approvalIds = new Set<string>()
+  const userIds = new Set<string>()
   const suffix = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`
   const admin = `k6-admin-${suffix}`
   const requester = `k6-requester-${suffix}`
@@ -133,8 +137,26 @@ describeIfDatabase('Approval Lock-1 K6 sequential mode', () => {
       await pool.query('DELETE FROM approval_template_versions WHERE template_id = ANY($1::uuid[])', [templates])
       await pool.query('DELETE FROM approval_templates WHERE id = ANY($1::uuid[])', [templates])
     }
+    if (fixtureUserIds.size > 0) {
+      await pool.query('DELETE FROM user_orgs WHERE user_id = ANY($1::text[])', [[...fixtureUserIds]])
+      await pool.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[...fixtureUserIds]])
+    }
+    if (userIds.size > 0) {
+      await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [[...userIds]])
+    }
     await server?.stop()
   })
+
+  async function ensureActiveUser(userId: string): Promise<void> {
+    userIds.add(userId)
+    fixtureUserIds.add(userId)
+    await poolManager.get().query(
+      `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active)
+       VALUES ($1, $2, $1, 'test', 'user', '[]'::jsonb, TRUE)
+       ON CONFLICT (id) DO UPDATE SET is_active = TRUE, updated_at = now()`,
+      [userId, `${userId}@example.test`],
+    )
+  }
 
   async function publish(
     graph: object,
@@ -188,6 +210,26 @@ describeIfDatabase('Approval Lock-1 K6 sequential mode', () => {
       [instanceId],
     )
     return result.rows
+  }
+
+  async function expectHandoverCanAdvance(
+    instanceId: string,
+    targetUserId: string,
+    nextUserId: string,
+  ): Promise<void> {
+    const activeAfterHandover = (await sequentialRows(instanceId)).filter((row) => row.is_active)
+    expect(activeAfterHandover).toEqual([
+      expect.objectContaining({
+        assignee_id: targetUserId,
+        metadata: expect.objectContaining({
+          sequentialQueue: { position: 1, length: 2, state: 'active' },
+        }),
+      }),
+    ])
+    const approved = await act(instanceId, targetUserId, { action: 'approve' })
+    expect(approved.status).toBe(200)
+    expect((await sequentialRows(instanceId)).filter((row) => row.is_active).map((row) => row.assignee_id))
+      .toEqual([nextUserId])
   }
 
   it('activates one head, advances in order, and restarts at position 1 on a fresh re-entry epoch (G-15)', async () => {
@@ -252,6 +294,70 @@ describeIfDatabase('Approval Lock-1 K6 sequential mode', () => {
     expect(rows.map((row) => row.assignee_id)).toEqual(approvers)
     expect(rows.every((row) => row.is_active)).toBe(true)
     expect(rows.every((row) => row.metadata.sequentialQueue === undefined)).toBe(true)
+  })
+
+  it('preserves the active sequential queue slot across manual transfer', async () => {
+    const source = `k6-manual-source-${suffix}`
+    const next = `k6-manual-next-${suffix}`
+    const target = `k6-manual-target-${suffix}`
+    const templateId = await publish(linearGraph([source, next], 'sequential'), 'sequential-manual-transfer')
+    const instanceId = await create(templateId)
+    const transferred = await act(instanceId, source, { action: 'transfer', targetUserId: target })
+    expect(transferred.status).toBe(200)
+    await expectHandoverCanAdvance(instanceId, target, next)
+  })
+
+  it('preserves the active sequential queue slot across admin bulk reassignment', async () => {
+    const source = `k6-admin-source-${suffix}`
+    const next = `k6-admin-next-${suffix}`
+    const target = `k6-admin-target-${suffix}`
+    await ensureActiveUser(target)
+    const templateId = await publish(linearGraph([source, next], 'sequential'), 'sequential-admin-reassign')
+    const instanceId = await create(templateId)
+    const adminToken = await authToken(baseUrl, admin)
+    const reassigned = await request(baseUrl, '/api/approvals/admin/reassign', adminToken, {
+      method: 'POST',
+      body: { fromUserId: source, toUserId: target, reason: 'handover', instanceIds: [instanceId] },
+    })
+    expect(reassigned.status, await reassigned.clone().text()).toBe(200)
+    await expectHandoverCanAdvance(instanceId, target, next)
+  })
+
+  it('preserves the active sequential queue slot across departure transfer', async () => {
+    const source = `k6-departure-source-${suffix}`
+    const next = `k6-departure-next-${suffix}`
+    const target = `k6-departure-target-${suffix}`
+    await ensureActiveUser(target)
+    const templateId = await publish(linearGraph([source, next], 'sequential'), 'sequential-departure-transfer')
+    const instanceId = await create(templateId)
+    const result = await new ApprovalProductService().applyApprovalDepartureTransfer(source, {
+      resolvedManagerId: target,
+    })
+    expect(result.transferred).toContain(instanceId)
+    await expectHandoverCanAdvance(instanceId, target, next)
+  })
+
+  it('preserves the active sequential queue slot across timeout transfer', async () => {
+    const source = `k6-timeout-source-${suffix}`
+    const next = `k6-timeout-next-${suffix}`
+    const target = `k6-timeout-target-${suffix}`
+    const graph = linearGraph([source, next], 'sequential')
+    const node = graph.nodes.find((candidate) => candidate.key === 'approval_seq')!
+    node.config = {
+      ...node.config,
+      timeout: { afterMinutes: 1, effect: 'transfer', transferToUserId: target },
+    }
+    const templateId = await publish(graph, 'sequential-timeout-transfer')
+    const instanceId = await create(templateId)
+    await poolManager.get().query(
+      `UPDATE approval_metrics
+          SET current_node_deadline_at = now() - interval '1 minute',
+              current_node_timeout_effect = 'transfer'
+        WHERE instance_id = $1`,
+      [instanceId],
+    )
+    expect(await new ApprovalProductService().applyNodeTimeoutEffect(instanceId, 'transfer')).toBe('applied')
+    await expectHandoverCanAdvance(instanceId, target, next)
   })
 
   it('fails closed and rolls back the head decision when persisted queue ordering is corrupt', async () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   applySequentialQueueMetadata,
+  inheritSequentialQueueMetadata,
   promoteNextSequentialQueueAssignment,
   readSequentialQueueMetadata,
 } from '../../src/services/approval-sequential-mode'
@@ -57,6 +58,26 @@ describe('approval sequential mode', () => {
     ])
     expect(promoteNextSequentialQueueAssignment([{ ...queued[0], metadata: { sequentialQueue: { position: 1, length: 3, state: 'queued' } } }])).toBeNull()
     expect(promoteNextSequentialQueueAssignment([queued[0], { ...queued[1], metadata: queued[0].metadata }])).toBeNull()
+  })
+
+  it('carries exactly one active queue slot across a handover and rejects malformed sources', () => {
+    const active = { sequentialQueue: { position: 2, length: 3, state: 'active' } }
+    expect(inheritSequentialQueueMetadata([active], { adminReassign: true })).toEqual({
+      adminReassign: true,
+      sequentialQueue: active.sequentialQueue,
+    })
+    expect(inheritSequentialQueueMetadata([{}], { adminReassign: true })).toEqual({ adminReassign: true })
+    expect(inheritSequentialQueueMetadata([
+      active,
+      { sequentialQueue: { position: 3, length: 3, state: 'active' } },
+    ])).toBeNull()
+    expect(inheritSequentialQueueMetadata([active, {}], { adminReassign: true })).toBeNull()
+    expect(inheritSequentialQueueMetadata([
+      { sequentialQueue: { position: 2, length: 3, state: 'queued' } },
+    ])).toBeNull()
+    expect(inheritSequentialQueueMetadata([
+      { sequentialQueue: { position: '2', length: 3, state: 'active' } },
+    ])).toBeNull()
   })
 
   it('keeps transfer and return but denies add/reduce sign for a sequential node', () => {
