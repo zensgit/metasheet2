@@ -216,6 +216,14 @@ export interface ElearningWatchState {
   durationMs: number
   creditedMs: number
   duplicate: boolean
+  challenge?: ElearningWatchChallenge | null
+}
+
+export interface ElearningWatchChallenge {
+  challengeId: string
+  deadlineAt: string
+  ordinal: number
+  status: 'challenged' | 'paused'
 }
 
 export interface ElearningHeartbeatRequest {
@@ -542,7 +550,8 @@ function parseExamStartResult(value: unknown, status: number): ElearningExamStar
 }
 
 function parseWatchState(value: unknown, status: number): ElearningWatchState {
-  if (!isPlainObject(value) || !exactKeys(value, [
+  if (!isPlainObject(value)) failShape(status)
+  const baseKeys = [
     'sessionId',
     'status',
     'lastSequence',
@@ -552,12 +561,13 @@ function parseWatchState(value: unknown, status: number): ElearningWatchState {
     'durationMs',
     'creditedMs',
     'duplicate',
-  ])) {
-    failShape(status)
-  }
+  ] as const
+  const challengeKeys = [...baseKeys, 'challenge'] as const
+  const challengeIncluded = exactKeys(value, challengeKeys)
+  if (!challengeIncluded && !exactKeys(value, baseKeys)) failShape(status)
   if (value.status !== 'in_progress' && value.status !== 'completed') failShape(status)
   const sessionId = value.sessionId === null ? null : requireUuid(value.sessionId, status)
-  return {
+  const result: ElearningWatchState = {
     sessionId,
     status: value.status,
     lastSequence: requireSafeInt(value.lastSequence, status, 0),
@@ -568,6 +578,29 @@ function parseWatchState(value: unknown, status: number): ElearningWatchState {
     creditedMs: requireSafeInt(value.creditedMs, status, 0),
     duplicate: requireBoolean(value.duplicate, status),
   }
+  if (challengeIncluded) {
+    if (value.challenge === null) {
+      result.challenge = null
+    } else {
+      if (!isPlainObject(value.challenge) || !exactKeys(value.challenge, [
+        'challengeId',
+        'deadlineAt',
+        'ordinal',
+        'status',
+      ])) failShape(status)
+      if (value.challenge.status !== 'challenged' && value.challenge.status !== 'paused') {
+        failShape(status)
+      }
+      result.challenge = {
+        challengeId: requireUuid(value.challenge.challengeId, status),
+        deadlineAt: requireCanonicalIsoInstant(value.challenge.deadlineAt, status),
+        ordinal: requireSafeInt(value.challenge.ordinal, status, 1),
+        status: value.challenge.status,
+      }
+    }
+  }
+  if (result.status === 'completed' && result.challenge) failShape(status)
+  return result
 }
 
 function isLearnerVideoStatus(value: unknown): value is ElearningLearnerVideoStatus {
@@ -955,6 +988,20 @@ export async function sendElearningHeartbeat(
       positionMs: input.positionMs,
       playing: input.playing,
     },
+  )
+  return parseWatchState(payload, 200)
+}
+
+export async function acknowledgeElearningWatchChallenge(
+  sessionId: string,
+  challengeId: string,
+  requestId: string,
+): Promise<ElearningWatchState> {
+  const payload = await postJson(
+    `/api/elearning/watch/sessions/${encodeURIComponent(sessionId)}`
+      + `/challenges/${encodeURIComponent(challengeId)}/ack`,
+    200,
+    { requestId },
   )
   return parseWatchState(payload, 200)
 }

@@ -6,6 +6,7 @@ vi.mock('../src/utils/api', () => ({
 }))
 
 import {
+  acknowledgeElearningWatchChallenge,
   assignElearningDirect,
   elearningPlaybackSourceUrl,
   ElearningApiError,
@@ -46,6 +47,7 @@ const Q2 = '99999999-9999-4999-8999-999999999999'
 const ASSIGNMENT = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const MEMBER = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 const REQUEST = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+const CHALLENGE = 'abababab-abab-4bab-8bab-abababababab'
 const BANK = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
 const PAPER_ID = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
 const SHA256 = 'ab'.repeat(32)
@@ -473,6 +475,50 @@ describe('elearning client transport', () => {
     expect(lastCall().path).toBe(`/api/elearning/watch/sessions/${SESSION}/heartbeat`)
     expect(lastJson()).toEqual({ sequence: 2, positionMs: 1000, playing: true })
     assertNoIdentityOverrides(lastJson())
+  })
+
+  it('parses the closed challenge union and acks with requestId only', async () => {
+    const challenge = {
+      challengeId: CHALLENGE,
+      deadlineAt: CREATED_AT,
+      ordinal: 2,
+      status: 'challenged',
+    }
+    apiFetchMock
+      .mockResolvedValueOnce(jsonResponse(200, watchState({ challenge })))
+      .mockResolvedValueOnce(jsonResponse(200, watchState({
+        challenge: null,
+        duplicate: false,
+      })))
+    await expect(sendElearningHeartbeat(SESSION, {
+      sequence: 2,
+      positionMs: 1000,
+      playing: true,
+    })).resolves.toMatchObject({ challenge })
+    await expect(acknowledgeElearningWatchChallenge(
+      SESSION,
+      CHALLENGE,
+      REQUEST,
+    )).resolves.toMatchObject({ challenge: null })
+    expect(lastCall().path).toBe(
+      `/api/elearning/watch/sessions/${SESSION}/challenges/${CHALLENGE}/ack`,
+    )
+    expect(lastJson()).toEqual({ requestId: REQUEST })
+    assertNoIdentityOverrides(lastJson())
+  })
+
+  it.each([
+    ['extra challenge key', { challenge: { challengeId: CHALLENGE, deadlineAt: CREATED_AT, ordinal: 1, status: 'challenged', extra: true } }],
+    ['invalid challenge timestamp', { challenge: { challengeId: CHALLENGE, deadlineAt: IMPOSSIBLE_AT, ordinal: 1, status: 'challenged' } }],
+    ['invalid challenge ordinal', { challenge: { challengeId: CHALLENGE, deadlineAt: CREATED_AT, ordinal: 0, status: 'challenged' } }],
+    ['invalid challenge status', { challenge: { challengeId: CHALLENGE, deadlineAt: CREATED_AT, ordinal: 1, status: 'unknown' } }],
+    ['challenge on completed watch', { status: 'completed', challenge: { challengeId: CHALLENGE, deadlineAt: CREATED_AT, ordinal: 1, status: 'challenged' } }],
+  ])('rejects %s in a watch response', async (_label, over) => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, watchState(over)))
+    await expect(startElearningWatch(VIDEO)).rejects.toMatchObject({
+      code: 'invalid_response',
+      status: 200,
+    })
   })
 
   it('starts an exam and submits answers without identity overrides', async () => {

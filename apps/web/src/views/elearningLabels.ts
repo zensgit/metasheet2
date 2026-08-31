@@ -33,6 +33,13 @@ export type ElearningLabelKey =
   | 'learner.startExam'
   | 'learner.continueExam'
   | 'learner.videoUnsupported'
+  | 'learner.challengeTitle'
+  | 'learner.challengePrompt'
+  | 'learner.challengePaused'
+  | 'learner.challengeConfirm'
+  | 'learner.challengeResume'
+  | 'learner.challengeConfirming'
+  | 'learner.challengeConfirmed'
   | 'learner.examTimeRemaining'
   | 'learner.examExpired'
   | 'learner.submitExam'
@@ -243,6 +250,19 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
     en: 'Your browser does not support video playback.',
     zh: '您的浏览器不支持视频播放。',
   },
+  'learner.challengeTitle': { en: 'Learning check', zh: '学习验证' },
+  'learner.challengePrompt': {
+    en: 'Confirm that you are still watching before the countdown ends.',
+    zh: '请在倒计时结束前确认您仍在观看。',
+  },
+  'learner.challengePaused': {
+    en: 'The check timed out. Unverified watch time was discarded; confirm to resume learning.',
+    zh: '本次验证已超时，未验证的观看时长不会计入；确认后可继续学习。',
+  },
+  'learner.challengeConfirm': { en: 'I am watching', zh: '我正在观看' },
+  'learner.challengeResume': { en: 'Confirm and resume', zh: '确认并继续' },
+  'learner.challengeConfirming': { en: 'Confirming...', zh: '正在确认…' },
+  'learner.challengeConfirmed': { en: 'Learning check confirmed.', zh: '学习验证已确认。' },
   'learner.examTimeRemaining': { en: 'Time remaining', zh: '剩余时间' },
   'learner.examExpired': {
     en: 'The server has closed this timed attempt. Your answers are locked.',
@@ -684,6 +704,13 @@ export function elearningExamCountdown(remainingMs: number, isZh: boolean): stri
     .map((part) => String(part).padStart(2, '0'))
     .join(':')
   return `${elearningLabel('learner.examTimeRemaining', isZh)} ${clock}`
+}
+
+export function elearningChallengeCountdown(remainingMs: number, isZh: boolean): string {
+  const seconds = Number.isFinite(remainingMs)
+    ? Math.max(0, Math.ceil(remainingMs / 1000))
+    : 0
+  return isZh ? `剩余 ${seconds} 秒` : `${seconds}s remaining`
 }
 
 export function elearningCorrectOptionAria(optionId: string, isZh: boolean): string {
