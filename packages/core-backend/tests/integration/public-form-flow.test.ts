@@ -5,6 +5,7 @@
 import express from 'express'
 import request from 'supertest'
 import { afterEach, describe, expect, test, vi } from 'vitest'
+import { answerSheetLiveness, isSheetLivenessQuery } from './sheet-liveness-mock'
 
 type QueryResult = {
   rows: any[]
@@ -136,6 +137,9 @@ function buildQueryHandler(
 
 function createMockPool(queryHandler: QueryHandler) {
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    // SHEET LIVENESS (soft delete) — see ./sheet-liveness-mock.ts. Translated, not enumerated, so
+    // this fixture keeps its own notion of which sheets exist.
+    if (isSheetLivenessQuery(sql)) return answerSheetLiveness(queryHandler, params)
     if (sql.includes('INSERT INTO meta_config_revisions')) return { rows: [], rowCount: 1 }
     if (sql.includes('FROM spreadsheet_permissions')) return { rows: [], rowCount: 0 }
     if (sql.includes('FROM field_permissions')) return { rows: [], rowCount: 0 }
