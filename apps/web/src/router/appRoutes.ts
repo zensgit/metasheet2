@@ -17,6 +17,7 @@ import PlatformAppLauncherView from '../views/PlatformAppLauncherView.vue'
 import PlatformAppShellView from '../views/PlatformAppShellView.vue'
 import DingTalkAuthCallbackView from '../views/DingTalkAuthCallbackView.vue'
 import HomeRedirect from '../views/HomeRedirect.vue'
+import MyAppsLandingView from '../views/MyAppsLandingView.vue'
 import LoginView from '../views/LoginView.vue'
 
 // Route-level code split: AttendanceExperienceView chains in the attendance
@@ -32,6 +33,17 @@ export const appRoutes: RouteRecordRaw[] = [
     name: 'home',
     component: HomeRedirect,
     meta: { title: 'Home', hideNavbar: true, requiresAuth: true }
+  },
+  {
+    // #5392: the post-login / unknown-deep-link default landing page (see
+    // featureFlags.ts#resolveHomePath and the '/:pathMatch(.*)*' catch-all below, which both
+    // route here now instead of '/attendance'). App cards from the platform apps catalog +
+    // 最近打开的 Base — deliberately NOT a nav-IA change: no top-nav entry points here, it is
+    // reached only as the default/fallback destination.
+    path: '/home',
+    name: 'my-apps-landing',
+    component: MyAppsLandingView,
+    meta: { title: 'My Apps', titleZh: '我的应用', requiresAuth: true }
   },
   {
     path: ROUTE_PATHS.LOGIN,

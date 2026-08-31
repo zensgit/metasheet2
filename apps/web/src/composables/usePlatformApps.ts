@@ -37,6 +37,12 @@ export interface PlatformAppSummary {
   pluginStatus: 'active' | 'inactive' | 'failed'
   pluginError?: string
   displayName: string
+  /**
+   * One-line "what this app does for whoever reads the name" (app-manifest.ts §
+   * PlatformAppManifestSchema doc comment). Optional — a manifest written before this field
+   * existed serves `undefined`, and a reader falls back to `boundedContext.description`.
+   */
+  valueStatement?: string
   runtimeModel: 'instance' | 'direct'
   boundedContext: {
     code: string
