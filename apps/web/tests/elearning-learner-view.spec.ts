@@ -14,6 +14,10 @@ const h = vi.hoisted(() => ({
   openContent: vi.fn(),
   listCertificates: vi.fn(),
   getProfile: vi.fn(),
+  listPractice: vi.fn(),
+  startPractice: vi.fn(),
+  answerPractice: vi.fn(),
+  wrongPractice: vi.fn(),
 }))
 
 vi.mock('../src/services/elearning', async () => {
@@ -50,6 +54,19 @@ vi.mock('../src/services/elearningProfile', async () => {
     '../src/services/elearningProfile',
   )
   return { ...actual, getMyElearningLearningProfile: h.getProfile }
+})
+
+vi.mock('../src/services/elearningPractice', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/elearningPractice')>(
+    '../src/services/elearningPractice',
+  )
+  return {
+    ...actual,
+    listElearningPracticeSets: h.listPractice,
+    startElearningPracticeSession: h.startPractice,
+    submitElearningPracticeAnswer: h.answerPractice,
+    listElearningWrongQuestions: h.wrongPractice,
+  }
 })
 
 import {
@@ -330,10 +347,16 @@ describe('ElearningLearnerView', () => {
     h.openContent.mockReset()
     h.listCertificates.mockReset()
     h.getProfile.mockReset()
+    h.listPractice.mockReset()
+    h.startPractice.mockReset()
+    h.answerPractice.mockReset()
+    h.wrongPractice.mockReset()
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout', 'Date'] })
     h.capabilities.mockResolvedValue(v01Capabilities())
     h.list.mockResolvedValue({ courses: [course()] })
     h.listCertificates.mockResolvedValue([])
+    h.listPractice.mockResolvedValue({ practiceSets: [] })
+    h.wrongPractice.mockResolvedValue({ practiceSetId: COURSE, questions: [] })
     h.getProfile.mockResolvedValue({
       userId: 'learner-1',
       summary: { completedCourses: 0, assessmentCourses: 0, contentCourses: 0 },
@@ -1197,6 +1220,25 @@ describe('ElearningLearnerView', () => {
     expect(h.startWatch).not.toHaveBeenCalled()
     expect(h.startExam).not.toHaveBeenCalled()
     expect(root.querySelector('[data-testid^="elearning-course-"]')).toBeNull()
+  })
+
+  it('mounts objective practice with assessment only without requesting media courses', async () => {
+    h.capabilities.mockResolvedValue(v01Capabilities({}, {
+      content: false,
+      assignment: false,
+      assessment: true,
+      incentive: false,
+      analytics: false,
+      media: false,
+    }))
+    const root = mountView()
+    await flushUi()
+
+    expect(root.querySelector('[data-testid="elearning-practice-learner-section"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')).toBeNull()
+    expect(root.querySelector('[data-testid^="elearning-course-"]')).toBeNull()
+    expect(h.list).not.toHaveBeenCalled()
+    expect(h.listPractice).toHaveBeenCalledTimes(1)
   })
 
   it('does not leak stale queued beats from a stopped session into a new session', async () => {

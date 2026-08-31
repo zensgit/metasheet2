@@ -966,6 +966,9 @@ jobs:
             tests/unit/elearning-portal-routes.test.ts \
             tests/unit/elearning-portal-settings.test.ts \
             tests/unit/elearning-profile-routes.test.ts \
+            tests/unit/elearning-question-practice-routes.test.ts \
+            tests/unit/elearning-question-practice-runtime.test.ts \
+            tests/unit/elearning-question-practice.test.ts \
             tests/unit/elearning-stats-daily-job-producer.test.ts \
             tests/unit/elearning-stats-daily-projection.test.ts \
             tests/unit/elearning-stats-daily-read.test.ts \
@@ -1082,6 +1085,7 @@ jobs:
             tests/integration/elearning-notification-worker.db.test.ts \
             tests/integration/elearning-assessment-catalog.db.test.ts \
             tests/integration/elearning-paper-exam.db.test.ts \
+            tests/integration/elearning-question-practice.db.test.ts \
             tests/integration/elearning-manual-grading-schema.db.test.ts \
             tests/integration/elearning-manual-grading-service.db.test.ts \
             tests/integration/elearning-manual-grading-read.db.test.ts \

@@ -8617,6 +8617,126 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/admin/practice-sets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create an objective-question practice set from a published paper
+         * @description Global `elearning:admin` only. `ELEARNING_ENABLED` and
+         *     `ELEARNING_ASSESSMENT_ENABLED` must each equal the exact literal `true`;
+         *     CONTENT and MEDIA are not readiness inputs. Organization and actor are
+         *     server-derived. Reusing requestId with the same normalized paperId and
+         *     title replays the original closed result; changed values return a
+         *     values-free conflict.
+         */
+        post: operations["createElearningPracticeSet"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/me/practice-sets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List active objective-question practice sets
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+         *     Requires only the master and ASSESSMENT exact-true gates. Organization
+         *     and learner are server-derived. The closed result contains active set
+         *     metadata only and never answer keys, explanations, or paper snapshots.
+         */
+        get: operations["listMyElearningPracticeSets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/me/practice-sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start an immutable objective-question practice session
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+         *     Requires only the master and ASSESSMENT exact-true gates. Organization,
+         *     learner, session identity, order, and time are server-derived. The
+         *     public questions are closed and never contain answer keys or explanations.
+         */
+        post: operations["startElearningPracticeSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/me/practice-sessions/{sessionId}/answers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Submit one answer to an immutable practice-session question
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+         *     Requires only the master and ASSESSMENT exact-true gates. Organization
+         *     and learner are server-derived. selectedOptionIds is the only answer
+         *     material accepted. The closed result reports own-answer correctness and
+         *     wrong-book transition, but never the answer key, correct option ids,
+         *     explanation, or raw snapshot.
+         */
+        post: operations["submitElearningPracticeAnswer"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/me/practice-sets/{practiceSetId}/wrong-questions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List unresolved wrong questions for one practice set
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+         *     Requires only the master and ASSESSMENT exact-true gates. Organization
+         *     and learner are server-derived. The projection is computed from
+         *     append-only wrong/resolved events and returns only closed public questions
+         *     without answer keys, correct option ids, or explanations.
+         */
+        get: operations["listMyElearningWrongQuestions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/credits/wallet": {
         parameters: {
             query?: never;
@@ -18693,6 +18813,80 @@ export interface components {
         };
         ElearningOpenCompletionResult: components["schemas"]["ElearningContentArticleOpenResult"] | components["schemas"]["ElearningContentExternalLinkOpenResult"];
         /** @enum {string} */
+        ElearningPracticeMode: "sequential" | "random" | "wrong_book";
+        ElearningPracticeSetCreateRequest: {
+            paperId: components["schemas"]["ElearningUuid"];
+            requestId: components["schemas"]["ElearningUuid"];
+            title: string;
+        };
+        ElearningPracticeSet: {
+            practiceSetId: components["schemas"]["ElearningUuid"];
+            paperId: components["schemas"]["ElearningUuid"];
+            title: string;
+            /** @enum {string} */
+            status: "active";
+            /** Format: date-time */
+            createdAt: string;
+        };
+        ElearningPracticeSetCreateResult: {
+            practiceSetId: components["schemas"]["ElearningUuid"];
+            paperId: components["schemas"]["ElearningUuid"];
+            title: string;
+            /** @enum {string} */
+            status: "active";
+            /** Format: date-time */
+            createdAt: string;
+            duplicate: boolean;
+        };
+        ElearningPracticeSetList: {
+            practiceSets: components["schemas"]["ElearningPracticeSet"][];
+        };
+        /** @description Closed public objective question. No answer key, correct option ids, explanation, or snapshot. */
+        ElearningPracticeQuestion: {
+            questionId: components["schemas"]["ElearningUuid"];
+            questionRevisionId: components["schemas"]["ElearningUuid"];
+            questionType: components["schemas"]["ElearningObjectiveQuestionType"];
+            prompt: string;
+            options: components["schemas"]["ElearningPublicOption"][];
+            points: number;
+            position: number;
+        };
+        ElearningPracticeSessionStartRequest: {
+            mode: components["schemas"]["ElearningPracticeMode"];
+            practiceSetId: components["schemas"]["ElearningUuid"];
+            requestId: components["schemas"]["ElearningUuid"];
+        };
+        ElearningPracticeSessionStartResult: {
+            sessionId: components["schemas"]["ElearningUuid"];
+            practiceSetId: components["schemas"]["ElearningUuid"];
+            mode: components["schemas"]["ElearningPracticeMode"];
+            questions: components["schemas"]["ElearningPracticeQuestion"][];
+            /** Format: date-time */
+            createdAt: string;
+            duplicate: boolean;
+        };
+        ElearningPracticeAnswerRequest: {
+            questionRevisionId: components["schemas"]["ElearningUuid"];
+            requestId: components["schemas"]["ElearningUuid"];
+            selectedOptionIds: string[];
+        };
+        ElearningPracticeAnswerResult: {
+            answerId: components["schemas"]["ElearningUuid"];
+            sessionId: components["schemas"]["ElearningUuid"];
+            questionRevisionId: components["schemas"]["ElearningUuid"];
+            /** @description Correctness of the authenticated learner's submitted answer; never an answer key. */
+            correct: boolean;
+            /** @enum {string} */
+            wrongState: "wrong" | "resolved" | "unchanged";
+            /** Format: date-time */
+            createdAt: string;
+            duplicate: boolean;
+        };
+        ElearningPracticeWrongQuestionList: {
+            practiceSetId: components["schemas"]["ElearningUuid"];
+            questions: components["schemas"]["ElearningPracticeQuestion"][];
+        };
+        /** @enum {string} */
         ElearningMediaRejectCode: "file_too_large" | "too_many_files" | "mime_not_allowed" | "extension_not_allowed" | "extension_mime_mismatch" | "content_mime_mismatch" | "invalid_size" | "org_quota_exceeded" | "upload_rejected";
         ElearningMediaReject: {
             code: components["schemas"]["ElearningMediaRejectCode"];
@@ -20954,6 +21148,189 @@ export interface operations {
             413: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    createElearningPracticeSet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningPracticeSetCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Exact idempotent replay of the original practice set. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPracticeSetCreateResult"];
+                };
+            };
+            /** @description Newly created practice set. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPracticeSetCreateResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Published paper not found or assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description requestId reused with a different normalized payload */
+            409: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    listMyElearningPracticeSets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Active practice sets ordered by creation identity. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPracticeSetList"];
+                };
+            };
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient learner RBAC */
+            403: components["responses"]["ElearningError"];
+            /** @description Assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    startElearningPracticeSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningPracticeSessionStartRequest"];
+            };
+        };
+        responses: {
+            /** @description Exact idempotent replay of the original session. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPracticeSessionStartResult"];
+                };
+            };
+            /** @description Newly started immutable practice session. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPracticeSessionStartResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or inactive organization membership */
+            403: components["responses"]["ElearningError"];
+            /** @description Practice set not found or assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description requestId reused with a different normalized payload */
+            409: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    submitElearningPracticeAnswer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningPracticeAnswerRequest"];
+            };
+        };
+        responses: {
+            /** @description Appended answer or exact idempotent replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPracticeAnswerResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or inactive organization membership */
+            403: components["responses"]["ElearningError"];
+            /** @description Session question not found or assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description requestId conflict or question already answered in this session */
+            409: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    listMyElearningWrongQuestions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                practiceSetId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current unresolved wrong-question projection. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPracticeWrongQuestionList"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or inactive organization membership */
+            403: components["responses"]["ElearningError"];
+            /** @description Practice set not found or assessment flags off */
+            404: components["responses"]["ElearningError"];
             /** @description unavailable */
             503: components["responses"]["ElearningError"];
         };
