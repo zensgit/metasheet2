@@ -16,31 +16,54 @@
  *     - core table names and join topology (product schema, same at every customer);
  *     - WHICH tables are the dictionaries and HOW to read them (rows name columns; enabled flag);
  *     - the RULE that a given semantic (e.g. a BOM line's quantity) lives in some
- *       dictionary-assigned slot of a generic column family — plus hints (declared-type words,
- *       label vocabulary) for ranking candidates;
+ *       dictionary-assigned slot of a generic column family, plus CLOSED-ENUM hints for ranking;
  *     - identifier / version / sort conventions of the product.
  *
  *   CUSTOMER-SPECIFIC (must NEVER be in a preset; the probe reads it from the customer's own
  *   dictionary tables at run time):
  *     - WHICH concrete slot carries which meaning (that is a row of the customer's dictionary);
- *     - option vocabularies, business values, connection/runtime values of any kind.
+ *     - option vocabularies, business values, observed enablement states, connection/runtime
+ *       values, and any proper names.
  *
- * The schema makes smuggling STRUCTURAL, not aspirational:
- *   1. STRICT KEY ALLOWLISTS everywhere — there is no free-form field to hide a value in, and any
- *      key shaped like a value carrier (`default*`, `value(s)`, `sample*`, `example*`, `data`,
- *      `rows`…) is refused with its own coded reason even before the allowlist speaks.
- *   2. IDENTIFIER FIELDS accept only SQL-identifier-shaped strings, so a connection string, IP,
- *      or path cannot occupy a table/column position at all.
- *   3. CONCRETE-SLOT REJECTION — a preset DECLARES its generic column families as anchored
- *      patterns (`genericColumnFamilies`), and the validator then refuses ANY string leaf in the
- *      whole document that names a concrete member of a declared family. "Slot N of this family
- *      means X" is precisely a discovered fact; a preset may only speak of the family.
- *   4. VALUE-SHAPE REJECTION over every string leaf (notes included): connection strings, database
- *      URLs, bare IP addresses, credential material / credential file paths, and probe-env
- *      assignments are refused, naming the offending path but never echoing the content. The
- *      vocabulary MIRRORS the probe's own leak guard (`ENV_VAR_NAMES`, `isBareIpAddress`,
- *      `assertValuesFree` in scripts/ops/source-discovery-probe.mjs) — keep the two aligned when
- *      either grows; do not invent a third vocabulary.
+ * The schema makes smuggling STRUCTURAL. An adversarial review of the first cut EXECUTED several
+ * smuggles through channels that prose alone had declared closed; each mechanism below exists
+ * because a specific attack got through without it, and each is pinned by a refusing regression
+ * test carrying the attack's exact fragment:
+ *
+ *   1. NO FREE-FORM REGEX ANYWHERE. presetVersion 1 has zero pattern-typed fields. A generic
+ *      column family is declared STRUCTURED — { stems, indexMin, indexMax } — and its matcher is
+ *      GENERATED (familyColumnMatcher), so a "family" cannot be authored as a single-member
+ *      language ('^Slot7$'): a stem must not end in a digit, indexMin must be 0 or 1 (an offset
+ *      would encode WHERE the interesting slots sit), and cardinality must be at least
+ *      FAMILY_MIN_CARDINALITY. The enabled flag is a list of identifier candidates, not a regex.
+ *   2. THE CONCRETE-MEMBER SCAN IS UNCONDITIONAL AND TOTAL. genericColumnFamilies is REQUIRED
+ *      (an undeclared family was the first cut's bypass: the scan only policed families the
+ *      preset chose to declare). Every string leaf — notes, ids, every nested level, with NO
+ *      key-name exemptions — is scanned for stem+digit of every declared stem AND of every
+ *      stem's underscore-stripped base (narrowing 'Part_ExAttr' cannot exempt bare 'ExAttr9'),
+ *      and a second RAW-TEXT pass over the serialized preset catches carriers the leaf walk
+ *      cannot see (e.g. a role-map KEY).
+ *   3. HINT CHANNEL: CLOSED ENUMS, VOCABULARY IN CODE. Free-form hint patterns were the one
+ *      string slot no scan touched, and an executed attack parked both a concrete slot and an
+ *      option vocabulary there. v1 keeps hints but as enums (labelHint / dictionaryTypeHint);
+ *      the actual word lists live HERE (LABEL_HINT_VOCABULARY / DICTIONARY_TYPE_HINT_WORDS) and
+ *      in the probe — code, not data. An enum cannot smuggle. The value-set table family is the
+ *      same structured shape as a column family.
+ *   4. NOTES ARE HARD-CAPPED (NOTES_MAX_COUNT / NOTE_MAX_LENGTH) and the whole document is
+ *      byte-capped (PRESET_MAX_JSON_BYTES); every note passes the full leak + concrete-member
+ *      scans. RESIDUAL, stated honestly: a proper name (company, plant, person) inside a short
+ *      note is NOT mechanically detectable — that channel is review-gated, and the stem scans at
+ *      least catch any note that names a concrete slot or value-set table.
+ *   5. VALUE-SHAPE REJECTION over every string leaf: connection strings, database URLs, bare
+ *      IPv4, IPv6, bare FQDN hostnames, credential material / credential file paths, and
+ *      probe-env assignments are refused naming the offending path but never echoing the
+ *      content. The vocabulary MIRRORS the probe's own leak guard (`ENV_VAR_NAMES`,
+ *      `isBareIpAddress`, `assertValuesFree` in scripts/ops/source-discovery-probe.mjs) — keep
+ *      the two aligned when either grows; do not invent a third vocabulary.
+ *   6. STRICT PER-VERSION KEY ALLOWLISTS at EVERY nesting depth (each depth pinned by its own
+ *      refusing test), and any key shaped like a value carrier (`default*`, `value(s)`,
+ *      `sample*`, `example*`, `data`, `rows`…) is refused with its own coded reason before the
+ *      allowlist speaks.
  *
  * ── IDENTITY: SIGNATURE, NOT BRAND ──────────────────────────────────────────────────────────────
  *
@@ -48,10 +71,11 @@
  * catalog (`matches.signatureTables` + `matches.minSignatureTablesPresent`) — never by vendor
  * brand or customer name. No company names belong in this repository; the presetId names the
  * table-name family (e.g. `dn-pdm-family`). Selection is fail-closed: a catalog that does not
- * meet a preset's own confidence floor selects nothing, and an ambiguous tie between presets
- * selects nothing — there is no "best guess". Matching is case-insensitive because the same
- * schema is CamelCase on SQL Server and folded to lower case on PostgreSQL (see the header of
- * scripts/ops/fixtures/stock-prep-synthetic-plm/schema.sql).
+ * meet a preset's own confidence floor selects nothing, and MORE THAN ONE preset clearing its
+ * floor selects nothing (AMBIGUOUS) regardless of match counts — a count race is not a
+ * disambiguator; a future legitimate-superset case must earn an explicit priority mechanism.
+ * Matching is case-insensitive because the same schema is CamelCase on SQL Server and folded to
+ * lower case on PostgreSQL (see scripts/ops/fixtures/stock-prep-synthetic-plm/schema.sql).
  *
  * ── VERSIONING: `presetVersion`, ADDITIVE EVOLUTION ─────────────────────────────────────────────
  *
@@ -65,7 +89,8 @@
  *
  * Consumed by: scripts/ops/source-discovery-probe.mjs (preset auto-selection + directed
  * dictionary reads; coordinated via this file shape — the probe may import this module or mirror
- * `evaluatePresetMatch` exactly). Preset files live next to this module as `*.preset.json`.
+ * `evaluatePresetMatch`/`familyColumnMatcher` exactly). Preset files live next to this module as
+ * `*.preset.json`.
  */
 
 const fs = require('node:fs')
@@ -82,6 +107,17 @@ const PRESET_FILE_SUFFIX = '.preset.json'
  */
 const SIGNATURE_MATCH_FLOOR = 3
 
+/**
+ * Minimum members of a structured generic column family (indexMax - indexMin + 1). A "family"
+ * narrower than this is a pointer to specific slots — i.e. discovered per-customer data wearing
+ * a structural coat. The real families this schema exists for run 30-70 slots wide.
+ */
+const FAMILY_MIN_CARDINALITY = 10
+
+/** Whole-document byte cap on the serialized preset. A preset is a mechanism declaration; bulk
+ * is a smuggling surface (an executed attack carried 12KB of prose in notes). */
+const PRESET_MAX_JSON_BYTES = 16384
+
 const VENDOR_PRESET_ERROR_CODES = Object.freeze({
   PRESET_NOT_AN_OBJECT: 'PRESET_NOT_AN_OBJECT',
   PRESET_SCHEMA_MARKER_INVALID: 'PRESET_SCHEMA_MARKER_INVALID',
@@ -91,7 +127,7 @@ const VENDOR_PRESET_ERROR_CODES = Object.freeze({
   PRESET_FIELD_INVALID: 'PRESET_FIELD_INVALID',
   PRESET_MATCHES_INVALID: 'PRESET_MATCHES_INVALID',
   PRESET_IDENTIFIER_INVALID: 'PRESET_IDENTIFIER_INVALID',
-  PRESET_PATTERN_INVALID: 'PRESET_PATTERN_INVALID',
+  PRESET_FAMILY_INVALID: 'PRESET_FAMILY_INVALID',
   PRESET_ROLE_REF_INVALID: 'PRESET_ROLE_REF_INVALID',
   PRESET_VALUE_KEY_REJECTED: 'PRESET_VALUE_KEY_REJECTED',
   PRESET_CONCRETE_SLOT_REJECTED: 'PRESET_CONCRETE_SLOT_REJECTED',
@@ -107,16 +143,22 @@ const VENDOR_PRESET_ERROR_CODES = Object.freeze({
 const SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
 const IDENTIFIER_MAX_LENGTH = 128
 
+/** A family stem: identifier charset, 3..64 chars, and it must NOT end in a digit — a stem
+ * ending in a digit IS a concrete slot prefix (`Slot7` + range would name slot 7x). */
+const FAMILY_STEM = /^[A-Za-z_][A-Za-z0-9_]{1,62}[A-Za-z_]$/
+const FAMILY_STEMS_MAX = 4
+const FAMILY_INDEX_MAX_BOUND = 9999
+
 /** presetId / dictionary id / semantic id: lowercase kebab, names a FAMILY, never a company. */
 const KEBAB_ID = /^[a-z][a-z0-9-]{2,63}$/
 
 /** Role keys inside coreTables / genericColumnFamilies: lowerCamel. */
 const ROLE_NAME = /^[a-z][A-Za-z0-9]*$/
 
-const NOTE_MAX_LENGTH = 500
-const NOTES_MAX_COUNT = 24
-const PATTERN_MAX_LENGTH = 200
+const NOTE_MAX_LENGTH = 300
+const NOTES_MAX_COUNT = 6
 const SIGNATURE_TABLES_MAX = 64
+const ENABLED_FLAG_CANDIDATES_MAX = 4
 
 /**
  * Keys that are value carriers by shape. A preset declares HOW TO DISCOVER, so no field of it may
@@ -124,6 +166,25 @@ const SIGNATURE_TABLES_MAX = 64
  * this rule, not a generic "unknown key".
  */
 const VALUE_CARRIER_KEY = /^(?:defaults?|values?|samples?|examples?|literals?|seeds?|rows?|data)$|^(?:default|sample|example|literal|seed)[A-Z_]/
+
+// ---------------------------------------------------------------------------
+// Closed-enum hint vocabulary. The WORDS live here (and mirrored in the probe)
+// — code, not preset data — so the hint channel cannot carry a vocabulary or a
+// concrete slot. Extending the enum is a code change reviewed like any other.
+// ---------------------------------------------------------------------------
+
+const LABEL_HINT_VOCABULARY = Object.freeze({
+  quantity: /数量|qty|quantity/i,
+  unit: /单位|unit/i,
+  'material-code': /物料编码|matcode|material/i,
+})
+
+const DICTIONARY_TYPE_HINTS = Object.freeze(['numeric', 'list', 'text'])
+const DICTIONARY_TYPE_HINT_WORDS = Object.freeze({
+  numeric: /float|numeric|decimal|double|real|int/i,
+  list: /list|enum|select/i,
+  text: /text|char|string/i,
+})
 
 // ---------------------------------------------------------------------------
 // Value-shape leak vocabulary — MIRRORS scripts/ops/source-discovery-probe.mjs
@@ -143,6 +204,19 @@ const VALUE_SHAPE_PATTERNS = Object.freeze([
     // Probe's isBareIpAddress, unanchored so a dotted quad inside prose is caught too.
     shape: 'bare-ip-address',
     pattern: /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/,
+  }),
+  Object.freeze({
+    // Compressed (with '::') and full (4+ hextet) IPv6 forms. Clock times (two colons) and
+    // ordinary prose ratios do not match; a bare 'fe80::' with no tail is accepted as the cost
+    // of not flagging every '::' in code-like prose.
+    shape: 'ipv6-address',
+    pattern: /(?:^|[\s"'=[])(?:(?:[0-9a-f]{1,4}:){1,6}:[0-9a-f]{1,4}|::[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}:){4,}[0-9a-f]{1,4})/i,
+  }),
+  Object.freeze({
+    // Bare FQDN with a real-world or intranet TLD. Repo-relative file paths and dotted plan ids
+    // do not match (their final segment is not in the TLD set).
+    shape: 'bare-hostname',
+    pattern: /\b[a-z0-9][a-z0-9-]{0,62}(?:\.[a-z0-9][a-z0-9-]{0,62})*\.(?:com|net|org|io|co|cn|de|fr|jp|uk|us|ru|in|edu|gov|mil|info|biz|cloud|dev|app|ai|internal|local|corp|lan|intra|example)\b/i,
   }),
   Object.freeze({
     // The probe's own connection env vars (ENV_VAR_NAMES). Naming a variable is documentation;
@@ -174,7 +248,8 @@ function findValueShapeViolation(text) {
 
 // ---------------------------------------------------------------------------
 // Version 1 key allowlists. Evolution is additive BY VERSION (see header):
-// a new field means a new version with its own widened table here.
+// a new field means a new version with its own widened table here. EVERY depth
+// is pinned by a refusing test — loosening a nested list is a visible RED.
 // ---------------------------------------------------------------------------
 
 const V1_KEYS = Object.freeze({
@@ -194,19 +269,20 @@ const V1_KEYS = Object.freeze({
     'notes',
   ]),
   matches: Object.freeze(['kind', 'signatureTables', 'minSignatureTablesPresent', 'note']),
-  family: Object.freeze(['onRole', 'pattern', 'note']),
+  family: Object.freeze(['onRole', 'stems', 'indexMin', 'indexMax', 'note']),
+  tableFamily: Object.freeze(['stems', 'indexMin', 'indexMax', 'note']),
   coreTable: Object.freeze(['table', 'roles', 'optionalRoles', 'note']),
   join: Object.freeze(['fromRole', 'fromColumn', 'toRole', 'toColumn', 'note']),
   dictionary: Object.freeze(['id', 'table', 'labelsColumnsOfRole', 'columnFamily', 'mechanism', 'enabledFlag', 'note']),
-  enabledFlag: Object.freeze(['columnPattern', 'polarity', 'note']),
+  enabledFlag: Object.freeze(['columnCandidates', 'polarity', 'note']),
   semanticExpectation: Object.freeze([
     'semantic',
     'locus',
     'columnFamily',
     'dictionary',
-    'dictionaryTypeHintPattern',
-    'labelHintPattern',
-    'valueSetTableNamePattern',
+    'dictionaryTypeHint',
+    'labelHint',
+    'valueSetTableFamily',
     'role',
     'roleColumn',
     'note',
@@ -272,62 +348,14 @@ function checkIdentifier(collector, value, atPath) {
   return true
 }
 
-function checkAnchoredPattern(collector, value, atPath) {
-  if (typeof value !== 'string' || value.length === 0 || value.length > PATTERN_MAX_LENGTH) {
-    collector.add(
-      VENDOR_PRESET_ERROR_CODES.PRESET_PATTERN_INVALID,
-      atPath,
-      `must be a non-empty regular-expression string of at most ${PATTERN_MAX_LENGTH} chars`,
-    )
-    return false
-  }
-  if (!value.startsWith('^') || !value.endsWith('$')) {
-    collector.add(
-      VENDOR_PRESET_ERROR_CODES.PRESET_PATTERN_INVALID,
-      atPath,
-      `must be anchored '^...$' — an unanchored family/column pattern would match inside unrelated ` +
-        `identifiers. Acceptable form: '^Prefix_Slot[0-9]+$'.`,
-    )
-    return false
-  }
-  try {
-    // Patterns are evaluated case-insensitively everywhere (SQL Server collations are
-    // case-insensitive; PostgreSQL folds unquoted identifiers to lower case).
-    new RegExp(value, 'i')
-  } catch {
-    collector.add(VENDOR_PRESET_ERROR_CODES.PRESET_PATTERN_INVALID, atPath, `must compile as a RegExp (with the 'i' flag)`)
-    return false
-  }
-  return true
-}
-
-function checkHintPattern(collector, value, atPath) {
-  if (value === undefined) return true
-  if (typeof value !== 'string' || value.length === 0 || value.length > PATTERN_MAX_LENGTH) {
-    collector.add(
-      VENDOR_PRESET_ERROR_CODES.PRESET_PATTERN_INVALID,
-      atPath,
-      `must be a non-empty regular-expression string of at most ${PATTERN_MAX_LENGTH} chars (hint ` +
-        `patterns may be unanchored)`,
-    )
-    return false
-  }
-  try {
-    new RegExp(value, 'i')
-  } catch {
-    collector.add(VENDOR_PRESET_ERROR_CODES.PRESET_PATTERN_INVALID, atPath, `must compile as a RegExp (with the 'i' flag)`)
-    return false
-  }
-  return true
-}
-
 function checkNote(collector, value, atPath) {
   if (value === undefined) return
   if (typeof value !== 'string' || value.length === 0 || value.length > NOTE_MAX_LENGTH) {
     collector.add(
       VENDOR_PRESET_ERROR_CODES.PRESET_FIELD_INVALID,
       atPath,
-      `must be a non-empty string of at most ${NOTE_MAX_LENGTH} chars`,
+      `must be a non-empty string of at most ${NOTE_MAX_LENGTH} chars — bulk prose is a smuggling ` +
+        `surface; cite a repo doc instead of restating observations`,
     )
   }
 }
@@ -336,28 +364,144 @@ function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
-/** Walks every string leaf (values only, never keys), reporting the leaf's key name and path. */
-function walkStringLeaves(value, atPath, keyName, visit) {
+/** Walks every string leaf (values only — object KEYS are covered by the raw-text pass),
+ * reporting the leaf's path. */
+function walkStringLeaves(value, atPath, visit) {
   if (typeof value === 'string') {
-    visit(value, atPath, keyName)
+    visit(value, atPath)
     return
   }
   if (Array.isArray(value)) {
-    value.forEach((item, index) => walkStringLeaves(item, `${atPath}[${index}]`, keyName, visit))
+    value.forEach((item, index) => walkStringLeaves(item, `${atPath}[${index}]`, visit))
     return
   }
   if (isPlainObject(value)) {
     for (const [key, child] of Object.entries(value)) {
-      walkStringLeaves(child, `${atPath}.${key}`, key, visit)
+      walkStringLeaves(child, `${atPath}.${key}`, visit)
     }
   }
 }
 
-function stripPatternAnchors(pattern) {
-  let out = String(pattern)
-  if (out.startsWith('^')) out = out.slice(1)
-  if (out.endsWith('$')) out = out.slice(0, -1)
-  return out
+function escapeForRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+// ---------------------------------------------------------------------------
+// Structured generic column families — pattern GENERATED, never authored.
+// ---------------------------------------------------------------------------
+
+/**
+ * Validates one structured family `{ stems, indexMin, indexMax }` (with `onRole` when
+ * `requireOnRole`). Returns the stems array when structurally sound enough to scan with,
+ * else null. Refusals name the acceptable form.
+ */
+function validateStructuredFamily(collector, family, atPath, { coreTables, requireOnRole }) {
+  if (!isPlainObject(family)) {
+    collector.add(
+      VENDOR_PRESET_ERROR_CODES.PRESET_FAMILY_INVALID,
+      atPath,
+      `must be a structured family object { ${requireOnRole ? 'onRole, ' : ''}stems, indexMin, indexMax, note? } — ` +
+        `presetVersion 1 has no free-form pattern fields; the matcher is generated from the structure`,
+    )
+    return null
+  }
+  checkKeys(collector, family, atPath, requireOnRole ? V1_KEYS.family : V1_KEYS.tableFamily)
+  checkNote(collector, family.note, `${atPath}.note`)
+  if (requireOnRole && (!coreTables || !isPlainObject(coreTables[family.onRole]))) {
+    collector.add(
+      VENDOR_PRESET_ERROR_CODES.PRESET_ROLE_REF_INVALID,
+      `${atPath}.onRole`,
+      `must name a declared coreTables role (declared: ${Object.keys(coreTables || {}).join(', ')})`,
+    )
+  }
+
+  let stems = null
+  if (!Array.isArray(family.stems) || family.stems.length === 0 || family.stems.length > FAMILY_STEMS_MAX) {
+    collector.add(
+      VENDOR_PRESET_ERROR_CODES.PRESET_FAMILY_INVALID,
+      `${atPath}.stems`,
+      `must be an array of 1..${FAMILY_STEMS_MAX} stem strings (e.g. spelling variants of one slot prefix)`,
+    )
+  } else {
+    stems = []
+    const seen = new Set()
+    family.stems.forEach((stem, index) => {
+      const stemPath = `${atPath}.stems[${index}]`
+      if (typeof stem !== 'string' || !FAMILY_STEM.test(stem)) {
+        collector.add(
+          VENDOR_PRESET_ERROR_CODES.PRESET_FAMILY_INVALID,
+          stemPath,
+          `each stem must match ${FAMILY_STEM} (identifier charset, 3..64 chars, NOT ending in a ` +
+            `digit — a stem ending in a digit IS a concrete slot prefix)`,
+        )
+        return
+      }
+      const lower = stem.toLowerCase()
+      if (seen.has(lower)) {
+        collector.add(VENDOR_PRESET_ERROR_CODES.PRESET_FAMILY_INVALID, stemPath, `duplicate (case-insensitive) stem`)
+        return
+      }
+      seen.add(lower)
+      stems.push(stem)
+    })
+    if (stems.length === 0) stems = null
+  }
+
+  const { indexMin, indexMax } = family
+  if (indexMin !== 0 && indexMin !== 1) {
+    collector.add(
+      VENDOR_PRESET_ERROR_CODES.PRESET_FAMILY_INVALID,
+      `${atPath}.indexMin`,
+      `must be 0 or 1 — a generic slot family is numbered from its base; a chosen offset would ` +
+        `encode WHERE the interesting slots sit, which is discovered per-customer data`,
+    )
+  }
+  if (!Number.isInteger(indexMax) || indexMax > FAMILY_INDEX_MAX_BOUND || !Number.isInteger(indexMin) || indexMax < indexMin) {
+    collector.add(
+      VENDOR_PRESET_ERROR_CODES.PRESET_FAMILY_INVALID,
+      `${atPath}.indexMax`,
+      `must be an integer >= indexMin and <= ${FAMILY_INDEX_MAX_BOUND} (a discovery iteration bound)`,
+    )
+  } else if (indexMax - indexMin + 1 < FAMILY_MIN_CARDINALITY) {
+    collector.add(
+      VENDOR_PRESET_ERROR_CODES.PRESET_FAMILY_INVALID,
+      `${atPath}.indexMax`,
+      `family cardinality (indexMax - indexMin + 1) must be at least ${FAMILY_MIN_CARDINALITY} — a ` +
+        `narrower range is a pointer to specific slots, i.e. discovered per-customer data; a real ` +
+        `generic slot family is wide by construction`,
+    )
+  }
+
+  return stems
+}
+
+/** Generated matcher for one structured family: anchored, case-insensitive, stems alternated. */
+function familyColumnMatcher(family) {
+  const stems = Array.isArray(family && family.stems) ? family.stems : []
+  return new RegExp(`^(?:${stems.map(escapeForRegExp).join('|')})([0-9]{1,4})$`, 'i')
+}
+
+/** Whether a live column name is a member of a structured family (stem match + index range). */
+function isFamilyColumn(family, columnName) {
+  const match = familyColumnMatcher(family).exec(String(columnName))
+  if (!match) return false
+  const index = Number(match[1])
+  return Number.isInteger(index) && index >= family.indexMin && index <= family.indexMax
+}
+
+/**
+ * Concrete-member scanners for a stem set: one per stem AND one per stem's underscore-stripped
+ * base (>= 3 chars). The base scanner is what defeats the narrowing bypass — a preset that
+ * declares only 'Part_ExAttr' still cannot carry bare 'ExAttr9' anywhere.
+ */
+function buildConcreteMemberScanners(stems) {
+  const sources = new Set()
+  for (const stem of stems) {
+    sources.add(stem.toLowerCase())
+    const base = stem.includes('_') ? stem.slice(stem.lastIndexOf('_') + 1) : stem
+    if (base.length >= 3) sources.add(base.toLowerCase())
+  }
+  return [...sources].map((source) => ({ stem: source, regex: new RegExp(`${escapeForRegExp(source)}[0-9]`, 'i') }))
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +534,22 @@ function validateVendorPreset(preset) {
         `integer presetVersion from [${SUPPORTED_PRESET_VERSIONS.join(', ')}]`,
     )
     return { ok: false, errors }
+  }
+
+  let serialized = null
+  try {
+    serialized = JSON.stringify(preset)
+  } catch {
+    collector.add(VENDOR_PRESET_ERROR_CODES.PRESET_FIELD_INVALID, '$', 'must be JSON-serializable (no cycles)')
+    return { ok: false, errors }
+  }
+  if (Buffer.byteLength(serialized, 'utf8') > PRESET_MAX_JSON_BYTES) {
+    collector.add(
+      VENDOR_PRESET_ERROR_CODES.PRESET_FIELD_INVALID,
+      '$',
+      `serialized preset exceeds ${PRESET_MAX_JSON_BYTES} bytes — a preset is a mechanism ` +
+        `declaration, not a document; move prose to a cited repo doc`,
+    )
   }
 
   // Envelope first: an unsupported version must be refused BEFORE key allowlists, because a later
@@ -543,37 +703,29 @@ function validateVendorPreset(preset) {
     }
   }
 
-  // -- genericColumnFamilies -------------------------------------------------
+  // -- genericColumnFamilies (REQUIRED — the concrete-member scan's scope) ----
   const families = isPlainObject(preset.genericColumnFamilies) ? preset.genericColumnFamilies : null
-  if (preset.genericColumnFamilies !== undefined && !families) {
+  const allStems = []
+  const validFamilyNames = new Set()
+  if (!families || Object.keys(families).length === 0) {
     collector.add(
-      VENDOR_PRESET_ERROR_CODES.PRESET_FIELD_INVALID,
+      VENDOR_PRESET_ERROR_CODES.PRESET_FAMILY_INVALID,
       '$.genericColumnFamilies',
-      `must be an object mapping family names to { onRole, pattern, note? }`,
+      `is REQUIRED and must declare at least one structured family { onRole, stems, indexMin, ` +
+        `indexMax } — the concrete-member scan's scope is the declared stems, so an absent ` +
+        `declaration would silently exempt the whole document (the executed S1/A3 bypass); a ` +
+        `vendor family without generic slot columns does not need this schema at all`,
     )
-  }
-  const familyPatterns = new Map() // familyName -> searcher RegExp (anchors stripped, 'i')
-  if (families) {
+  } else {
     for (const [familyName, family] of Object.entries(families)) {
       const atPath = `$.genericColumnFamilies.${familyName}`
       if (!ROLE_NAME.test(familyName)) {
         collector.add(VENDOR_PRESET_ERROR_CODES.PRESET_FIELD_INVALID, atPath, `family name must match ${ROLE_NAME}`)
       }
-      if (!isPlainObject(family)) {
-        collector.add(VENDOR_PRESET_ERROR_CODES.PRESET_FIELD_INVALID, atPath, `must be { onRole, pattern, note? }`)
-        continue
-      }
-      checkKeys(collector, family, atPath, V1_KEYS.family)
-      checkNote(collector, family.note, `${atPath}.note`)
-      if (coreTables && !isPlainObject(coreTables[family.onRole])) {
-        collector.add(
-          VENDOR_PRESET_ERROR_CODES.PRESET_ROLE_REF_INVALID,
-          `${atPath}.onRole`,
-          `must name a declared coreTables role (declared: ${Object.keys(coreTables || {}).join(', ')})`,
-        )
-      }
-      if (checkAnchoredPattern(collector, family.pattern, `${atPath}.pattern`)) {
-        familyPatterns.set(familyName, new RegExp(stripPatternAnchors(family.pattern), 'i'))
+      const stems = validateStructuredFamily(collector, family, atPath, { coreTables, requireOnRole: true })
+      if (stems) {
+        allStems.push(...stems)
+        validFamilyNames.add(familyName)
       }
     }
   }
@@ -657,11 +809,11 @@ function validateVendorPreset(preset) {
             `must name a declared coreTables role (declared: ${Object.keys(coreTables || {}).join(', ')})`,
           )
         }
-        if (dictionary.columnFamily !== undefined && !familyPatterns.has(dictionary.columnFamily) && !(families && families[dictionary.columnFamily])) {
+        if (dictionary.columnFamily !== undefined && !validFamilyNames.has(dictionary.columnFamily)) {
           collector.add(
             VENDOR_PRESET_ERROR_CODES.PRESET_ROLE_REF_INVALID,
             `${atPath}.columnFamily`,
-            `must name a declared genericColumnFamilies entry (declared: ${Object.keys(families || {}).join(', ')})`,
+            `must name a declared genericColumnFamilies entry (declared: ${[...validFamilyNames].join(', ')})`,
           )
         }
         if (!DICTIONARY_MECHANISMS.includes(dictionary.mechanism)) {
@@ -674,11 +826,27 @@ function validateVendorPreset(preset) {
         }
         if (dictionary.enabledFlag !== undefined) {
           if (!isPlainObject(dictionary.enabledFlag)) {
-            collector.add(VENDOR_PRESET_ERROR_CODES.PRESET_FIELD_INVALID, `${atPath}.enabledFlag`, `must be { columnPattern, polarity, note? }`)
+            collector.add(
+              VENDOR_PRESET_ERROR_CODES.PRESET_FIELD_INVALID,
+              `${atPath}.enabledFlag`,
+              `must be { columnCandidates, polarity, note? }`,
+            )
           } else {
             checkKeys(collector, dictionary.enabledFlag, `${atPath}.enabledFlag`, V1_KEYS.enabledFlag)
             checkNote(collector, dictionary.enabledFlag.note, `${atPath}.enabledFlag.note`)
-            checkAnchoredPattern(collector, dictionary.enabledFlag.columnPattern, `${atPath}.enabledFlag.columnPattern`)
+            const candidates = dictionary.enabledFlag.columnCandidates
+            if (!Array.isArray(candidates) || candidates.length === 0 || candidates.length > ENABLED_FLAG_CANDIDATES_MAX) {
+              collector.add(
+                VENDOR_PRESET_ERROR_CODES.PRESET_FIELD_INVALID,
+                `${atPath}.enabledFlag.columnCandidates`,
+                `must be an array of 1..${ENABLED_FLAG_CANDIDATES_MAX} column-name identifiers (spelling ` +
+                  `variants of the vendor's enabled flag) — presetVersion 1 has no free-form pattern fields`,
+              )
+            } else {
+              candidates.forEach((candidate, candidateIndex) =>
+                checkIdentifier(collector, candidate, `${atPath}.enabledFlag.columnCandidates[${candidateIndex}]`),
+              )
+            }
             if (!ENABLED_FLAG_POLARITIES.includes(dictionary.enabledFlag.polarity)) {
               collector.add(
                 VENDOR_PRESET_ERROR_CODES.PRESET_FIELD_INVALID,
@@ -720,17 +888,12 @@ function validateVendorPreset(preset) {
           )
           return
         }
-        checkHintPattern(collector, expectation.dictionaryTypeHintPattern, `${atPath}.dictionaryTypeHintPattern`)
-        checkHintPattern(collector, expectation.labelHintPattern, `${atPath}.labelHintPattern`)
-        if (expectation.valueSetTableNamePattern !== undefined) {
-          checkAnchoredPattern(collector, expectation.valueSetTableNamePattern, `${atPath}.valueSetTableNamePattern`)
-        }
         if (expectation.locus === 'dictionary-assigned-column') {
-          if (!familyPatterns.has(expectation.columnFamily) && !(families && families[expectation.columnFamily])) {
+          if (!validFamilyNames.has(expectation.columnFamily)) {
             collector.add(
               VENDOR_PRESET_ERROR_CODES.PRESET_ROLE_REF_INVALID,
               `${atPath}.columnFamily`,
-              `must name a declared genericColumnFamilies entry (declared: ${Object.keys(families || {}).join(', ')})`,
+              `must name a declared genericColumnFamilies entry (declared: ${[...validFamilyNames].join(', ')})`,
             )
           }
           if (!dictionaryIds.has(expectation.dictionary)) {
@@ -740,17 +903,51 @@ function validateVendorPreset(preset) {
               `must name a declared dictionaries[].id (declared: ${[...dictionaryIds].join(', ')})`,
             )
           }
+          if (expectation.labelHint !== undefined && !(expectation.labelHint in LABEL_HINT_VOCABULARY)) {
+            collector.add(
+              VENDOR_PRESET_ERROR_CODES.PRESET_FIELD_INVALID,
+              `${atPath}.labelHint`,
+              `must be one of [${Object.keys(LABEL_HINT_VOCABULARY).join(', ')}] — a CLOSED enum; the ` +
+                `word lists live in code (LABEL_HINT_VOCABULARY), never in a preset, so this channel ` +
+                `cannot carry a vocabulary or a slot name`,
+            )
+          }
+          if (expectation.dictionaryTypeHint !== undefined && !DICTIONARY_TYPE_HINTS.includes(expectation.dictionaryTypeHint)) {
+            collector.add(
+              VENDOR_PRESET_ERROR_CODES.PRESET_FIELD_INVALID,
+              `${atPath}.dictionaryTypeHint`,
+              `must be one of [${DICTIONARY_TYPE_HINTS.join(', ')}] — a CLOSED enum; the type-word lists ` +
+                `live in code (DICTIONARY_TYPE_HINT_WORDS), never in a preset`,
+            )
+          }
+          if (expectation.valueSetTableFamily !== undefined) {
+            const valueSetStems = validateStructuredFamily(collector, expectation.valueSetTableFamily, `${atPath}.valueSetTableFamily`, {
+              coreTables,
+              requireOnRole: false,
+            })
+            if (valueSetStems) allStems.push(...valueSetStems)
+          }
           if (expectation.role !== undefined || expectation.roleColumn !== undefined) {
             collector.add(
               VENDOR_PRESET_ERROR_CODES.PRESET_FIELD_INVALID,
               `${atPath}.roleColumn`,
               `a dictionary-assigned expectation must NOT pin a role/roleColumn — WHICH slot carries ` +
                 `this semantic is exactly the per-customer fact the probe discovers from the customer's ` +
-                `dictionary at run time. Acceptable: columnFamily + dictionary + hint patterns only.`,
+                `dictionary at run time. Acceptable: columnFamily + dictionary + enum hints only.`,
             )
           }
         } else {
           // native-column
+          for (const forbidden of ['labelHint', 'dictionaryTypeHint', 'valueSetTableFamily', 'columnFamily', 'dictionary']) {
+            if (expectation[forbidden] !== undefined) {
+              collector.add(
+                VENDOR_PRESET_ERROR_CODES.PRESET_FIELD_INVALID,
+                `${atPath}.${forbidden}`,
+                `only meaningful on a dictionary-assigned expectation — a native-column expectation ` +
+                  `carries role + roleColumn only`,
+              )
+            }
+          }
           const role = expectation.role
           if (!coreTables || !isPlainObject(coreTables[role])) {
             collector.add(
@@ -845,51 +1042,65 @@ function validateVendorPreset(preset) {
       collector.add(
         VENDOR_PRESET_ERROR_CODES.PRESET_FIELD_INVALID,
         '$.notes',
-        `must be an array of at most ${NOTES_MAX_COUNT} strings`,
+        `must be an array of at most ${NOTES_MAX_COUNT} strings of at most ${NOTE_MAX_LENGTH} chars ` +
+          `each — cite repo docs instead of restating observations. RESIDUAL: a proper name inside ` +
+          `a short note is not mechanically detectable; that channel is review-gated.`,
       )
     } else {
       preset.notes.forEach((note, index) => checkNote(collector, note, `$.notes[${index}]`))
     }
   }
 
-  // -- CONCRETE-SLOT SCAN (discover-vs-discovered, made structural) ----------
-  // A leaf naming a concrete member of a declared generic column family is a discovered
-  // per-customer fact wearing a committable coat. Pattern-declaration fields themselves are
-  // skipped (their text is the family, not a member; an anchored pattern also cannot match its
-  // own source, but skipping by key keeps that independent of pattern spelling).
-  if (familyPatterns.size > 0) {
-    walkStringLeaves(preset, '$', null, (leaf, atPath, keyName) => {
-      if (typeof keyName === 'string' && (keyName === 'pattern' || keyName.endsWith('Pattern'))) return
-      for (const [familyName, searcher] of familyPatterns) {
-        if (searcher.test(leaf)) {
+  // -- CONCRETE-MEMBER SCAN (discover-vs-discovered, made structural) --------
+  // Unconditional and total: every string leaf, NO key-name exemptions, against every declared
+  // stem AND its underscore-stripped base; then a raw-text pass over the serialized document for
+  // carriers the leaf walk cannot see (object keys). A leaf naming a concrete member of a
+  // declared family is a discovered per-customer fact wearing a committable coat.
+  const scanners = buildConcreteMemberScanners(allStems)
+  if (scanners.length > 0) {
+    walkStringLeaves(preset, '$', (leaf, atPath) => {
+      for (const scanner of scanners) {
+        if (scanner.regex.test(leaf)) {
           collector.add(
             VENDOR_PRESET_ERROR_CODES.PRESET_CONCRETE_SLOT_REJECTED,
             atPath,
-            `names a concrete member of generic column family '${familyName}'. WHICH slot of that ` +
-              `family carries a meaning is per-customer dictionary data the probe reads at run time — ` +
-              `a preset may speak of the family only via its declared pattern and discovery rules ` +
-              `(dictionaries / semanticExpectations).`,
+            `names a concrete member of a declared generic family (stem '${scanner.stem}' followed by ` +
+              `a digit). WHICH slot of a family carries a meaning is per-customer dictionary data the ` +
+              `probe reads at run time — a preset may speak of a family only through its structured ` +
+              `declaration and discovery rules.`,
           )
           break
         }
       }
     })
+    for (const scanner of scanners) {
+      if (scanner.regex.test(serialized)) {
+        collector.add(
+          VENDOR_PRESET_ERROR_CODES.PRESET_CONCRETE_SLOT_REJECTED,
+          '$(serialized preset)',
+          `the serialized document carries a concrete member of a declared generic family (stem ` +
+            `'${scanner.stem}' followed by a digit) — this raw-text pass exists so a member hiding in ` +
+            `an object KEY or any other non-leaf position is still refused.`,
+        )
+        break
+      }
+    }
   }
 
   // -- VALUE-SHAPE SCAN (leak guard, mirroring the probe's vocabulary) -------
-  // Every string leaf, notes and patterns included. The offending content is never echoed into
-  // the error (echoing a credential into a message is itself a leak — same posture as the probe's
-  // masked violations).
-  walkStringLeaves(preset, '$', null, (leaf, atPath) => {
+  // Every string leaf, notes included. The offending content is never echoed into the error
+  // (echoing a credential into a message is itself a leak — same posture as the probe's masked
+  // violations).
+  walkStringLeaves(preset, '$', (leaf, atPath) => {
     const violation = findValueShapeViolation(leaf)
     if (violation) {
       collector.add(
         VENDOR_PRESET_ERROR_CODES.PRESET_VALUE_SHAPE_REJECTED,
         atPath,
         `string of length ${leaf.length} matches forbidden value shape '${violation.shape}' (content ` +
-          `not echoed). A preset carries discovery structure only — identifiers and patterns; ` +
-          `connection/runtime values live exclusively in the probe's environment (PROBE_MSSQL_*, ` +
-          `see scripts/ops/source-discovery-probe.mjs).`,
+          `not echoed). A preset carries discovery structure only — identifiers, structured families ` +
+          `and enums; connection/runtime values live exclusively in the probe's environment ` +
+          `(PROBE_MSSQL_*, see scripts/ops/source-discovery-probe.mjs).`,
       )
     }
   })
@@ -953,9 +1164,13 @@ function evaluatePresetMatch(preset, tableNames) {
 /**
  * Selects at most ONE preset for a discovered table list. Fail-closed on every edge:
  *   - an invalid preset in the catalog throws (a broken catalog must not half-work);
- *   - no preset meeting its own floor  -> { selected: null, reason: 'NO_PRESET_MATCHED' };
- *   - two presets tied at the top      -> { selected: null, reason: 'AMBIGUOUS_PRESET_MATCH' }.
- * There is deliberately no "best guess below the floor".
+ *   - no preset meeting its own floor      -> { selected: null, reason: 'NO_PRESET_MATCHED' };
+ *   - MORE THAN ONE preset meeting its floor -> { selected: null, reason: 'AMBIGUOUS_PRESET_MATCH' },
+ *     REGARDLESS of match counts. A higher count is not a disambiguator (a count race between
+ *     overlapping signatures silently picks a winner — the refuted A1b behavior); if a
+ *     legitimate superset-family case ever arises it must earn an explicit priority mechanism
+ *     in a new preset version, not an implicit race.
+ * There is deliberately no "best guess".
  */
 function selectVendorPreset(presets, tableNames) {
   const list = Array.isArray(presets) ? presets : []
@@ -968,11 +1183,11 @@ function selectVendorPreset(presets, tableNames) {
     ids.add(preset.presetId)
   }
   const evaluations = list.map((preset) => evaluatePresetMatch(preset, tableNames))
-  const selectedEvals = evaluations.filter((e) => e.selected).sort((a, b) => b.matchedCount - a.matchedCount)
+  const selectedEvals = evaluations.filter((e) => e.selected)
   if (selectedEvals.length === 0) {
     return { selected: null, reason: 'NO_PRESET_MATCHED', evaluations }
   }
-  if (selectedEvals.length > 1 && selectedEvals[0].matchedCount === selectedEvals[1].matchedCount) {
+  if (selectedEvals.length > 1) {
     return { selected: null, reason: 'AMBIGUOUS_PRESET_MATCH', evaluations }
   }
   const winner = list.find((preset) => preset.presetId === selectedEvals[0].presetId)
@@ -1008,11 +1223,18 @@ module.exports = {
   SUPPORTED_PRESET_VERSIONS,
   PRESET_FILE_SUFFIX,
   SIGNATURE_MATCH_FLOOR,
+  FAMILY_MIN_CARDINALITY,
+  PRESET_MAX_JSON_BYTES,
   VENDOR_PRESET_ERROR_CODES,
   VALUE_SHAPE_PATTERNS,
+  LABEL_HINT_VOCABULARY,
+  DICTIONARY_TYPE_HINTS,
+  DICTIONARY_TYPE_HINT_WORDS,
   VendorPresetError,
   findValueShapeViolation,
-  stripPatternAnchors,
+  familyColumnMatcher,
+  isFamilyColumn,
+  buildConcreteMemberScanners,
   normalizeTableName,
   validateVendorPreset,
   assertVendorPreset,

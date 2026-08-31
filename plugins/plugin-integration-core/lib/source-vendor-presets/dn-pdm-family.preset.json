@@ -19,18 +19,20 @@
       "DN_PM_BomExAttrInfo_header"
     ],
     "minSignatureTablesPresent": 6,
-    "note": "Evaluated case-insensitively against the discovered table list (bare or schema-qualified names): SQL Server keeps CamelCase, PostgreSQL folds unquoted identifiers to lower case — see scripts/ops/fixtures/stock-prep-synthetic-plm/schema.sql. At or above the floor the preset is selected; below it NOTHING is selected (no best guess). The floor tolerates real drift: a deployment without the order module, or without the dictionary tables exposed to the read login, still clears 6."
+    "note": "Case-insensitive over bare or schema-qualified names (SQL Server CamelCase; PostgreSQL folds to lower case — see the synthetic fixture). Below the floor nothing is selected. Drift such as a missing order module or unexposed dictionary tables still clears 6."
   },
   "genericColumnFamilies": {
     "bomDetailExAttr": {
       "onRole": "bomDetail",
-      "pattern": "^Bom_ExAttr[0-9]+$",
-      "note": "About 30 of the BOM detail table's columns are members of this family; the column names carry zero semantics."
+      "stems": ["Bom_ExAttr"],
+      "indexMin": 1,
+      "indexMax": 30
     },
     "partExAttr": {
       "onRole": "part",
-      "pattern": "^(Part_)?ExAttr[0-9]+$",
-      "note": "About 70 of the part table's columns are members of this family (both spellings occur); the column names carry zero semantics."
+      "stems": ["ExAttr", "Part_ExAttr"],
+      "indexMin": 1,
+      "indexMax": 70
     }
   },
   "coreTables": {
@@ -43,7 +45,7 @@
         "material": "Material",
         "version": "SysVer"
       },
-      "note": "Row identity in the legacy read model is the drawing-number column (code role), not any generic slot. This is also the row the stock-preparation ext-field mapping reads."
+      "note": "Row identity in the family's legacy read model is the native code role (drawing number), not any generic slot; see docs/development/takeover-beiliao-20260821."
     },
     "bomHead": {
       "table": "DN_PDM_BomHeadInfo",
@@ -64,7 +66,7 @@
         "component": "part_id",
         "sort": "sort_id"
       },
-      "note": "Quantity and unit are deliberately NOT declared here: they live in dictionary-assigned generic slots — see semanticExpectations. Declaring a concrete slot would encode one customer's dictionary row."
+      "note": "Quantity and unit are deliberately NOT declared here: they live in dictionary-assigned generic slots — see semanticExpectations. Declaring a concrete slot would encode one customer's dictionary row, and the validator refuses it."
     },
     "pathInfo": {
       "table": "DN_PDM_PathInfo",
@@ -74,7 +76,7 @@
       "optionalRoles": {
         "parent": "Parent_OBJ_ID"
       },
-      "note": "Hierarchy nodes; see conventions.hierarchy — the structure is a tree of id/parent-id rows, not a materialized path string."
+      "note": "Hierarchy nodes; see conventions.hierarchy — a tree of id/parent-id rows, not a materialized path string."
     },
     "pathExAttr": {
       "table": "DN_PDM_PathExAttrInfo",
@@ -120,11 +122,11 @@
       "columnFamily": "bomDetailExAttr",
       "mechanism": "rows-name-columns",
       "enabledFlag": {
-        "columnPattern": "^is_?able$",
+        "columnCandidates": ["isable", "is_able"],
         "polarity": "zero-means-enabled",
-        "note": "Polarity is inverted relative to intuition on this family (zero marks the usable row). Confirm against the live dictionary before trusting a draft."
+        "note": "Polarity is inverted relative to intuition on this family. Confirm against the live dictionary before trusting a draft."
       },
-      "note": "One row per BOM-detail generic slot (about 30). Only enabled rows carry an assignment; at the first live deployment exactly two slots were enabled — one numeric-typed and one list-typed. The assignments themselves are per-customer and are deliberately not recorded here."
+      "note": "One row per BOM-detail generic slot. Only enabled rows carry an assignment; the assignments are per-customer run-time reads (first-deployment record: docs/development/takeover-beiliao-20260821)."
     },
     {
       "id": "bom-head-exattr-labels",
@@ -132,10 +134,10 @@
       "labelsColumnsOfRole": "bomHead",
       "mechanism": "rows-name-columns",
       "enabledFlag": {
-        "columnPattern": "^is_?able$",
+        "columnCandidates": ["isable", "is_able"],
         "polarity": "zero-means-enabled"
       },
-      "note": "Labels the BOM HEAD table's generic slots (about 10 rows; all disabled at the first live deployment). No columnFamily is declared because the head-side slot naming is not recorded in-repo — the rows-name-columns mechanism identifies the columns at run time."
+      "note": "Labels the BOM HEAD table's generic slots. No columnFamily is declared because head-side slot naming is not recorded in-repo — rows-name-columns identifies the labeled columns at run time."
     },
     {
       "id": "part-exattr-labels",
@@ -144,10 +146,10 @@
       "columnFamily": "partExAttr",
       "mechanism": "rows-name-columns",
       "enabledFlag": {
-        "columnPattern": "^is_?able$",
+        "columnCandidates": ["isable", "is_able"],
         "polarity": "zero-means-enabled"
       },
-      "note": "One row per part-side generic slot (about 70); a minority are enabled and those carry the customer's part-side field vocabulary (their labels are what the probe reports as decoded entries)."
+      "note": "One row per part-side generic slot; enabled rows carry the customer's part-side field vocabulary, surfaced by the probe as decoded entries (see docs/development/takeover-beiliao-20260821)."
     }
   ],
   "semanticExpectations": [
@@ -156,8 +158,8 @@
       "locus": "dictionary-assigned-column",
       "columnFamily": "bomDetailExAttr",
       "dictionary": "bom-detail-exattr-labels",
-      "dictionaryTypeHintPattern": "float|numeric|decimal|double|real|int",
-      "labelHintPattern": "数量|qty|quantity",
+      "dictionaryTypeHint": "numeric",
+      "labelHint": "quantity",
       "note": "The BOM line quantity lives in WHICHEVER slot of the family the customer's dictionary declares numeric with a quantity-like label. Reading that dictionary at run time is the discovery step; this entry only says where to look and how to rank."
     },
     {
@@ -165,17 +167,21 @@
       "locus": "dictionary-assigned-column",
       "columnFamily": "bomDetailExAttr",
       "dictionary": "bom-detail-exattr-labels",
-      "dictionaryTypeHintPattern": "list",
-      "labelHintPattern": "单位|unit",
-      "valueSetTableNamePattern": "^DN_Test_BomParam[0-9]+$",
-      "note": "A list-typed assignment points at one of the family's value-set tables (the pattern names that table family); WHICH value-set table, and its vocabulary, are per-customer run-time reads."
+      "dictionaryTypeHint": "list",
+      "labelHint": "unit",
+      "valueSetTableFamily": {
+        "stems": ["DN_Test_BomParam"],
+        "indexMin": 1,
+        "indexMax": 30
+      },
+      "note": "A list-typed assignment points at one of the family's value-set tables (the structured family names that table family; the range is a discovery iteration bound). WHICH value-set table, and its vocabulary, are per-customer run-time reads."
     },
     {
       "semantic": "erp-material-code",
       "locus": "dictionary-assigned-column",
       "columnFamily": "partExAttr",
       "dictionary": "part-exattr-labels",
-      "labelHintPattern": "物料编码|matcode|material",
+      "labelHint": "material-code",
       "note": "The ERP-facing material code is a part-side dictionary assignment at deployments that use one; the legacy read model identifies rows by the native code role (drawing number) instead."
     },
     {
@@ -208,13 +214,13 @@
       "column": "bom_able",
       "rule": "null-or-one-means-active",
       "presence": "verify-live-before-use",
-      "note": "The legacy read model treats null and one as active. The column has been seen ABSENT on one live catalog of this same family while present in another deployment's read model (schema drift between deployments) — verify against the live catalog before generating any read that references it."
+      "note": "The family's legacy read model treats null and one as active. The column has been seen ABSENT on one live catalog of this family while present in another deployment's read model (drift) — verify against the live catalog before generating any read that references it."
     },
     "note": "Every level of a BOM expansion resolves its component's version via the version column (pin-per-level) and orders lines by the sort column."
   },
   "notes": [
-    "Knowledge provenance, all in-repo: the read-plan defaults in plugins/plugin-integration-core/lib/stock-preparation-bom-expansion.cjs (plan id plm.stock-preparation.bom-read.dn-pdm.v1), the synthetic fixture scripts/ops/fixtures/stock-prep-synthetic-plm/schema.sql, and docs/development/takeover-beiliao-20260821 (runbook and first-deployment lessons).",
-    "DISCOVER, NOT DISCOVERED: this file encodes the family's mechanism — which tables are dictionaries, how their rows name columns, where each semantic is allowed to live. It never encodes which concrete slot a customer assigned to a meaning; the probe reads that from the customer's own dictionary tables at run time and emits a DRAFT for a human to CONFIRM.",
-    "Consumed by scripts/ops/source-discovery-probe.mjs (preset auto-selection via matches, then directed dictionary reads). Validation contract: lib/source-vendor-presets/preset-schema.cjs — validateVendorPreset / evaluatePresetMatch / selectVendorPreset."
+    "Knowledge provenance, in-repo only: the read-plan defaults in plugins/plugin-integration-core/lib/stock-preparation-bom-expansion.cjs, the synthetic fixture scripts/ops/fixtures/stock-prep-synthetic-plm/schema.sql, and docs/development/takeover-beiliao-20260821.",
+    "DISCOVER, NOT DISCOVERED: this file encodes the family's mechanism only. Which concrete slot a customer assigned to a meaning is read from the customer's own dictionary tables at run time and drafted for a human to CONFIRM.",
+    "Consumed by scripts/ops/source-discovery-probe.mjs; validation contract lib/source-vendor-presets/preset-schema.cjs (validateVendorPreset / evaluatePresetMatch / selectVendorPreset / familyColumnMatcher)."
   ]
 }
