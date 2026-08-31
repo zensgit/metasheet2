@@ -107,6 +107,7 @@ describe('e-learning onboarding assignment', () => {
         return [{
           id: EFFECT,
           hire_date: HIRE_DATE,
+          job_occurrence_key: deriveElearningOnboardingOccurrenceKey(keyInput()),
           source_key: deriveElearningOnboardingPlanSourceKey(keyInput()),
           training_plan_assignment_id: PLAN_ASSIGNMENT,
         }]
@@ -147,6 +148,7 @@ describe('e-learning onboarding assignment', () => {
         return [{
           id: EFFECT,
           hire_date: HIRE_DATE,
+          job_occurrence_key: deriveElearningOnboardingOccurrenceKey(keyInput()),
           source_key: 'wrong',
           training_plan_assignment_id: PLAN_ASSIGNMENT,
         }]
@@ -154,6 +156,24 @@ describe('e-learning onboarding assignment', () => {
       return []
     })
     await expect(processElearningOnboardingAssignment(tamperedEffect, {
+      orgId: ORG, jobId: JOB,
+    })).rejects.toMatchObject({ code: 'conflict' })
+
+    const tamperedEffectOccurrence = new RoutingDb((sql) => {
+      if (sql.includes('process:job')) return [runningJob()]
+      if (sql.includes('process:effect-lock')) return []
+      if (sql.includes('process:existing')) {
+        return [{
+          id: EFFECT,
+          hire_date: HIRE_DATE,
+          job_occurrence_key: 'onboarding-assign-v1:wrong',
+          source_key: deriveElearningOnboardingPlanSourceKey(keyInput()),
+          training_plan_assignment_id: PLAN_ASSIGNMENT,
+        }]
+      }
+      return []
+    })
+    await expect(processElearningOnboardingAssignment(tamperedEffectOccurrence, {
       orgId: ORG, jobId: JOB,
     })).rejects.toMatchObject({ code: 'conflict' })
   })

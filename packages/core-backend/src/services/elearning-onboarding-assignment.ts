@@ -362,7 +362,7 @@ export async function processElearningOnboardingAssignment(
       )
       const existing = await tx.query(
         `/* elearning-onboarding-process:existing */
-         SELECT id, hire_date::text AS hire_date, source_key,
+         SELECT id, hire_date::text AS hire_date, job_occurrence_key, source_key,
                 training_plan_assignment_id
          FROM elearning_onboarding_assignment_effects
          WHERE org_id = $1 AND policy_id = $2 AND user_id = $3
@@ -378,6 +378,7 @@ export async function processElearningOnboardingAssignment(
         })
         if (
           storedDate(existing.rows[0].hire_date) !== payload.hireDate
+          || storedText(existing.rows[0].job_occurrence_key) !== expectedOccurrenceKey
           || storedText(existing.rows[0].source_key) !== expectedSourceKey
         ) fail('conflict')
         return {
@@ -453,13 +454,13 @@ export async function processElearningOnboardingAssignment(
       const inserted = await tx.query(
         `/* elearning-onboarding-process:insert-effect */
          INSERT INTO elearning_onboarding_assignment_effects (
-           id, org_id, policy_id, user_id, hire_date, source_key,
+           id, org_id, policy_id, user_id, hire_date, job_occurrence_key, source_key,
            training_plan_assignment_id
-         ) VALUES ($1, $2, $3, $4, $5::date, $6, $7)
+         ) VALUES ($1, $2, $3, $4, $5::date, $6, $7, $8)
          RETURNING id`,
         [
           effectId, orgId, policy.policyId, payload.userId, hireDate,
-          sourceKey, assignment.planAssignmentId,
+          expectedOccurrenceKey, sourceKey, assignment.planAssignmentId,
         ],
       )
       if (inserted.rows.length !== 1) fail('unavailable')

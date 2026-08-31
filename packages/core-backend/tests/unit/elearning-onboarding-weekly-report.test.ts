@@ -14,6 +14,18 @@ const JOB = '33333333-3333-4333-8333-333333333333'
 const REPORT = '44444444-4444-4444-8444-444444444444'
 const WEEK = '2026-08-24'
 
+function jobRow(
+  status = 'running',
+  payload: Record<string, unknown> = { policyId: POLICY, weekStart: WEEK },
+) {
+  return {
+    occurrence_key: `policy:${POLICY}:week:${WEEK}`,
+    ref: POLICY,
+    status,
+    payload,
+  }
+}
+
 async function expectErrorCode(promise: Promise<unknown>, code: string) {
   await expect(promise).rejects.toMatchObject({
     name: 'ElearningOnboardingWeeklyReportError',
@@ -113,7 +125,7 @@ describe('e-learning onboarding weekly aggregate report', () => {
       async query(sql) {
         calls.push(sql)
         if (sql.includes('lock-weekly-report-job')) {
-          return { rows: [{ status: 'running', payload: { policyId: POLICY, weekStart: WEEK } }] }
+          return { rows: [jobRow()] }
         }
         if (sql.includes('lock-weekly-report-policy')) {
           return { rows: [{ status: 'active', weekly_report_enabled: true }] }
@@ -158,9 +170,10 @@ describe('e-learning onboarding weekly aggregate report', () => {
     expect(calls[1]).toContain('FOR UPDATE')
     const aggregate = calls.find((sql) => sql.includes('aggregate-weekly-report'))!
     expect(aggregate).toContain('count(*)')
-    expect(aggregate).toContain('count(DISTINCT effect.user_id)')
+    expect(aggregate).toContain('count(effect.id)')
+    expect(aggregate).toContain('effect.job_occurrence_key = job.occurrence_key')
     expect(aggregate).toContain("job.kind = 'onboarding_assign'")
-    expect(aggregate).toContain('enqueued_count::bigint < 5')
+    expect(aggregate).toContain('count(job.id) < 5')
     expect(aggregate).not.toContain('answer')
     expect(aggregate).not.toContain('score')
   })
@@ -171,7 +184,7 @@ describe('e-learning onboarding weekly aggregate report', () => {
       async query(sql) {
         calls.push(sql)
         if (sql.includes('lock-weekly-report-job')) {
-          return { rows: [{ status: 'running', payload: { policyId: POLICY, weekStart: WEEK } }] }
+          return { rows: [jobRow()] }
         }
         if (sql.includes('lock-weekly-report-policy')) {
           return { rows: [{ status: 'retired', weekly_report_enabled: false }] }
@@ -196,7 +209,7 @@ describe('e-learning onboarding weekly aggregate report', () => {
 
     const badCount: ElearningOnboardingWeeklyReportQueryable = {
       async query(sql) {
-        if (sql.includes('lock-weekly-report-job')) return { rows: [{ status: 'running', payload: { policyId: POLICY, weekStart: WEEK } }] }
+        if (sql.includes('lock-weekly-report-job')) return { rows: [jobRow()] }
         if (sql.includes('lock-weekly-report-policy')) return { rows: [{ status: 'active', weekly_report_enabled: true }] }
         if (sql.includes('load-weekly-report')) return { rows: [reportRow({ enqueued_count: '-1' })] }
         return { rows: [] }
@@ -209,7 +222,7 @@ describe('e-learning onboarding weekly aggregate report', () => {
     const notRunning: ElearningOnboardingWeeklyReportQueryable = {
       async query(sql) {
         if (sql.includes('lock-weekly-report-job')) {
-          return { rows: [{ status: 'succeeded', payload: { policyId: POLICY, weekStart: WEEK } }] }
+          return { rows: [jobRow('succeeded')] }
         }
         return { rows: [] }
       },
@@ -219,10 +232,26 @@ describe('e-learning onboarding weekly aggregate report', () => {
       'conflict',
     )
 
+    const wrongOccurrence: ElearningOnboardingWeeklyReportQueryable = {
+      async query(sql) {
+        if (sql.includes('lock-weekly-report-job')) {
+          return { rows: [{ ...jobRow(), occurrence_key: 'policy:wrong:week:2026-08-24' }] }
+        }
+        return { rows: [] }
+      },
+    }
+    await expectErrorCode(
+      materializeElearningOnboardingWeeklyReport(
+        materializeDb(wrongOccurrence),
+        { orgId: ORG, jobId: JOB },
+      ),
+      'conflict',
+    )
+
     const suppressed: ElearningOnboardingWeeklyReportQueryable = {
       async query(sql) {
         if (sql.includes('lock-weekly-report-job')) {
-          return { rows: [{ status: 'running', payload: { policyId: POLICY, weekStart: WEEK } }] }
+          return { rows: [jobRow()] }
         }
         if (sql.includes('lock-weekly-report-policy')) {
           return { rows: [{ status: 'active', weekly_report_enabled: true }] }

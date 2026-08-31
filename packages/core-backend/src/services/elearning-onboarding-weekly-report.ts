@@ -91,7 +91,7 @@ SELECT $1::text AS week_start, count(*)::text AS enqueued_count
 FROM inserted`
 
 const LOCK_JOB_SQL = `/* elearning-onboarding:lock-weekly-report-job */
-SELECT id, org_id, kind, status, payload
+SELECT id, org_id, kind, occurrence_key, ref, status, payload
 FROM elearning_jobs
 WHERE org_id = $1
   AND id = $2
@@ -123,34 +123,23 @@ WHERE org_id = $1
   AND week_start = $3::date`
 
 const AGGREGATE_SQL = `/* elearning-onboarding:aggregate-weekly-report */
-WITH job_counts AS (
+WITH measured AS (
   SELECT
-    count(*)::text AS enqueued_count,
+    count(job.id)::text AS enqueued_count,
+    count(effect.id)::text AS assigned_user_count,
     count(*) FILTER (WHERE job.status = 'failed')::text AS failed_count,
-    count(*) FILTER (WHERE job.status = 'dead')::text AS dead_count
+    count(*) FILTER (WHERE job.status = 'dead')::text AS dead_count,
+    (count(job.id) < 5) AS suppressed,
+    5::integer AS min_group_size
   FROM elearning_jobs job
+  LEFT JOIN elearning_onboarding_assignment_effects effect
+    ON effect.org_id = job.org_id
+   AND effect.job_occurrence_key = job.occurrence_key
   WHERE job.org_id = $1
     AND job.kind = 'onboarding_assign'
     AND job.ref = $2
     AND job.due_at >= $3::date
     AND job.due_at < $4::date
-), effect_counts AS (
-  SELECT count(DISTINCT effect.user_id)::text AS assigned_user_count
-  FROM elearning_onboarding_assignment_effects effect
-  WHERE effect.org_id = $1
-    AND effect.policy_id = $2
-    AND effect.created_at >= $3::date
-    AND effect.created_at < $4::date
-), measured AS (
-  SELECT
-    job_counts.enqueued_count,
-    job_counts.failed_count,
-    job_counts.dead_count,
-    effect_counts.assigned_user_count,
-    (job_counts.enqueued_count::bigint < 5) AS suppressed,
-    5::integer AS min_group_size
-  FROM job_counts
-  CROSS JOIN effect_counts
 )
 SELECT
   measured.suppressed,
@@ -320,7 +309,10 @@ export async function materializeElearningOnboardingWeeklyReport(
       const job = jobResult.rows[0]
       const payload = requireClosedPayload(job.payload)
       if (job.status !== 'running') fail('conflict')
-
+      const expectedOccurrenceKey = `policy:${payload.policyId}:week:${payload.weekStart}`
+      if (job.ref !== payload.policyId || job.occurrence_key !== expectedOccurrenceKey) {
+        fail('conflict')
+      }
       const policyResult = await tx.query(LOCK_POLICY_SQL, [orgId, payload.policyId])
       if (policyResult.rows.length !== 1) fail('not_found')
 
