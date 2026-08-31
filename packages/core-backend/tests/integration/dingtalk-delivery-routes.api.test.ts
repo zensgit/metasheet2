@@ -13,8 +13,27 @@ const SHEET_ID = 'sheet_dingtalk_delivery_routes'
 const OTHER_SHEET_ID = 'sheet_other'
 const RULE_ID = 'rule_dingtalk_delivery_routes'
 
+/**
+ * The sheets this fixture's rules belong to.
+ *
+ * Like its sibling dingtalk-automation-link-routes.api.test.ts, this file never modelled
+ * `meta_sheets` — its default handler answers `{ rows: [] }` for everything — so every sheet it
+ * referenced was, in the database it simulated, a sheet that did not exist. The delivery routes
+ * proceeded because they never asked; sheet liveness made them ask (see ./sheet-liveness-mock.ts).
+ *
+ * The TRANSLATION used elsewhere in this class cannot help here: there is no existence answer to
+ * translate. So these sheets are declared directly. Only the ids the fixture actually uses resolve —
+ * an unmodelled id still correctly 404s.
+ */
+const LIVE_SHEET_IDS = new Set([SHEET_ID, OTHER_SHEET_ID])
+
 function createMockPool(queryHandler: QueryHandler = () => ({ rows: [], rowCount: 0 })) {
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    if (sql.includes('FROM meta_sheets') && sql.includes('WHERE id = $1')) {
+      const sheetId = typeof params?.[0] === 'string' ? params[0] : ''
+      const rows = LIVE_SHEET_IDS.has(sheetId) ? [{ id: sheetId, deleted_at: null }] : []
+      return { rows, rowCount: rows.length }
+    }
     if (sql.includes('FROM spreadsheet_permissions')) {
       return { rows: [], rowCount: 0 }
     }

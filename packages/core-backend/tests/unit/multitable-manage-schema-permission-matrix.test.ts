@@ -12,6 +12,14 @@
  * (src/multitable/manage-schema-permission.ts). This file pins that separation on EVERY route that
  * gates on `canManageFields`.
  *
+ * F21 extends the table with the two DISPLAY-RENAME routes (R12 `PATCH /sheets/:sheetId`, R13
+ * `PATCH /bases/:baseId`). They belong here rather than in a suite of their own because they assert
+ * the SAME doctrine: renaming an object is schema authority, not record-write authority. R13 is also
+ * deliberately TIGHTER than its sibling `POST /bases`, which is `rbacGuard('multitable','write')` —
+ * an operator may create a base of their own, and may not rename one other people depend on. The
+ * rename-specific legs (validation, 404, the recorded history event, the no-op rename) live in
+ * tests/unit/multitable-display-rename-authority.test.ts.
+ *
  * ACTOR TIERS (no sheet-scoped `spreadsheet_permissions` rows exist for any of them, so
  * `applyContextSheetSchemaWriteGrant` is inert and the GLOBAL derivation — the defect's actual path —
  * is what these cells measure):
@@ -139,6 +147,11 @@ function createMockPool(fields: Map<string, Field>) {
     }
     if (sql.includes('FROM meta_bases') && sql.includes('WHERE id = $1')) {
       return { rows: p(0) === BASE_ID ? [{ ...BASE_ROW }] : [] }
+    }
+    // F21 base rename — the only route that UPDATEs meta_bases. Returns the renamed row for the
+    // known base and NOTHING for an unknown one, so the route's 404 leg stays reachable.
+    if (/^\s*UPDATE\s+meta_bases\b/i.test(sql)) {
+      return { rows: p(0) === BASE_ID ? [{ ...BASE_ROW, name: p(1) }] : [] }
     }
     if (sql.includes('FROM meta_sheets') && sql.includes('WHERE base_id = $1')) {
       return { rows: [{ ...SHEET_ROW }, { ...PEOPLE_SHEET_ROW }] }
@@ -324,7 +337,36 @@ type RouteCell = {
    * so the anonymous tier is refused one step earlier there. Both are refusals; the code differs.
    */
   deniedStatus?: Partial<Record<TierId, number>>
+  /**
+   * Exact 403 body when it is not the generic FORBIDDEN_BODY. The F21 rename routes name the
+   * authority that WOULD be accepted (an actionable refusal), so their body is pinned separately
+   * rather than loosening the matrix's exact-body assertion.
+   */
+  forbiddenBody?: unknown
   send: (app: Express) => request.Test
+}
+
+/** F21: values-free, and it says what would be accepted. Pinned so it cannot silently regress to a bare 403. */
+const RENAME_FORBIDDEN_BODY = {
+  ok: false,
+  error: {
+    code: 'FORBIDDEN',
+    message:
+      'Renaming requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.',
+  },
+}
+
+// Sheet delete/restore asks for MORE than canManageFields — see hasSheetLifecycleAuthority. These
+// cells all run with NO sheet-scoped grant, so they measure the global half; the sheet-SCOPED half
+// (spreadsheet:write refused, spreadsheet:admin allowed) is §7 of
+// tests/unit/multitable-display-rename-authority.test.ts.
+const SHEET_DELETE_FORBIDDEN_BODY = {
+  ok: false,
+  error: {
+    code: 'FORBIDDEN',
+    message:
+      'Deleting or restoring a sheet requires whole-sheet authority: an admin role, the multitable:manage-schema permission, or a sheet-scoped admin grant on this sheet. multitable:write — global or sheet-scoped — is not sufficient.',
+  },
 }
 
 const SCHEMA_ROUTES: RouteCell[] = [
@@ -393,6 +435,46 @@ const SCHEMA_ROUTES: RouteCell[] = [
     label: 'POST /sheets/:sheetId/formula/dry-run (author a formula against the schema)',
     allowedStatus: 200,
     send: (app) => on(app).post(`/api/multitable/sheets/${SHEET_ID}/formula/dry-run`).send({ expression: '1 + 1' }),
+  },
+  // F21 — display renames join the matrix because renaming is the SAME authority as renaming a field.
+  // The operator cell (T2) is the point: it is the #5357 boundary re-asserted at the sheet and base
+  // level, and it is enforced by the SERVER, so hiding the affordance in the UI is not what refuses it.
+  {
+    key: 'R12',
+    label: 'PATCH /sheets/:sheetId (rename the sheet)',
+    allowedStatus: 200,
+    forbiddenBody: RENAME_FORBIDDEN_BODY,
+    send: (app) => on(app).patch(`/api/multitable/sheets/${SHEET_ID}`).send({ name: 'Renamed sheet' }),
+  },
+  {
+    key: 'R13',
+    label: 'PATCH /bases/:baseId (rename the base)',
+    allowedStatus: 200,
+    // The base route runs an explicit `!access.userId => 401 UNAUTHENTICATED` check before the
+    // authority gate (base authority is global — there is no sheet row to resolve it against).
+    deniedStatus: { T5_anonymous: 401 },
+    forbiddenBody: RENAME_FORBIDDEN_BODY,
+    send: (app) => on(app).patch(`/api/multitable/bases/${BASE_ID}`).send({ name: 'Renamed base' }),
+  },
+  // F21 deletion half — the SEVERE cell. `DELETE /sheets/:sheetId` used to accept `canManageViews`,
+  // which T2 (the shop-floor operator) HOLDS — so the operator who is refused R2 (rename ONE field
+  // header) could destroy the WHOLE sheet. It is now the same tier as R2/R3/R12.
+  {
+    key: 'R14',
+    label: 'DELETE /sheets/:sheetId (soft-delete the whole sheet)',
+    allowedStatus: 200,
+    forbiddenBody: SHEET_DELETE_FORBIDDEN_BODY,
+    send: (app) => on(app).delete(`/api/multitable/sheets/${SHEET_ID}`),
+  },
+  {
+    key: 'R15',
+    label: 'POST /sheets/:sheetId/restore (undo a soft delete)',
+    // Past the gate this mock's sheet row carries no `deleted_at`, so the route answers "nothing to
+    // restore" (404). That is the point of the cell: the AUTHORITY gate runs BEFORE the existence
+    // distinction, so a tier without schema authority never learns whether an id is deleted or live.
+    allowedStatus: 404,
+    forbiddenBody: SHEET_DELETE_FORBIDDEN_BODY,
+    send: (app) => on(app).post(`/api/multitable/sheets/${SHEET_ID}/restore`),
   },
 ]
 
@@ -466,7 +548,7 @@ describe('multitable:manage-schema — actor x route matrix', () => {
           const app = await buildApp(tier, freshFields())
           const res = await route.send(app)
           expect(res.status).toBe(expected)
-          if (!allowed && expected === 403) expect(res.body).toEqual(FORBIDDEN_BODY)
+          if (!allowed && expected === 403) expect(res.body).toEqual(route.forbiddenBody ?? FORBIDDEN_BODY)
         })
       }
     }
