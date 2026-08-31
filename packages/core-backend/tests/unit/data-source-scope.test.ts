@@ -5,6 +5,20 @@ import { describe, expect, it, vi } from 'vitest'
 // auditLog writes to the DB; in these in-memory tests it must be a no-op so the
 // create/update/delete handlers don't fail on a missing connection.
 vi.mock('../../src/audit/audit', () => ({ auditLog: vi.fn(async () => {}) }))
+// The route tests below exercise NON-ADMIN users (platform admins now legitimately
+// see every source — tests/unit/data-source-visibility-authority-matrix.test.ts).
+// rbacGuard resolves non-admin grants from req.user.permissions; stub its DB-backed
+// fallbacks so the guard is deterministic without a pool.
+vi.mock('../../src/rbac/service', () => ({
+  isAdmin: vi.fn(async () => false),
+  userHasPermission: vi.fn(async () => false),
+  listUserPermissions: vi.fn(async () => []),
+  invalidateUserPerms: vi.fn(),
+  getPermCacheStatus: vi.fn(),
+}))
+vi.mock('../../src/rbac/namespace-admission', () => ({
+  isPermissionAllowedByNamespaceAdmission: vi.fn(async () => true),
+}))
 
 import { DataSourceManager } from '../../src/data-adapters/DataSourceManager'
 import { dataSourcesRouter } from '../../src/routes/data-sources'
@@ -200,7 +214,7 @@ describe('DataSourceManager ownership scope (A0.1)', () => {
 })
 
 describe('data-sources route ownership scope (A0.1)', () => {
-  let currentUser: { id: string; role?: string } | undefined
+  let currentUser: { id: string; roles?: string[]; permissions?: string[] } | undefined
   const app = express()
   app.use(express.json())
   app.use((req, _res, next) => {
@@ -209,31 +223,39 @@ describe('data-sources route ownership scope (A0.1)', () => {
   })
   app.use(dataSourcesRouter())
 
-  const admin = (id: string) => ({ id, role: 'admin' })
+  // NON-ADMIN users holding the data_sources permission codes: under the
+  // authority model these are the tier for whom ownership scoping is the
+  // boundary (platform admins now see every source by design — the admin
+  // matrix lives in data-source-visibility-authority-matrix.test.ts).
+  const member = (id: string) => ({
+    id,
+    roles: ['member'],
+    permissions: ['data_sources:read', 'data_sources:write', 'data_sources:execute'],
+  })
 
   it('a non-owner gets 404 on another user’s data source; the owner gets 200', async () => {
-    currentUser = admin('alice')
+    currentUser = member('alice')
     pinned.setApp(app)
     const create = await request(pinned.url()).post('/api/data-sources').send(pgConfig('ds-get-1'))
     expect(create.status).toBe(201)
 
-    currentUser = admin('bob')
+    currentUser = member('bob')
     const asBob = await request(pinned.url()).get('/api/data-sources/ds-get-1')
     expect(asBob.status).toBe(404)
 
-    currentUser = admin('alice')
+    currentUser = member('alice')
     const asAlice = await request(pinned.url()).get('/api/data-sources/ds-get-1')
     expect(asAlice.status).toBe(200)
   })
 
   it('list returns only the caller’s own data sources', async () => {
-    currentUser = admin('alice2')
+    currentUser = member('alice2')
     pinned.setApp(app)
     await request(pinned.url()).post('/api/data-sources').send(pgConfig('ds-list-a'))
-    currentUser = admin('bob2')
+    currentUser = member('bob2')
     await request(pinned.url()).post('/api/data-sources').send(pgConfig('ds-list-b'))
 
-    currentUser = admin('alice2')
+    currentUser = member('alice2')
     const list = await request(pinned.url()).get('/api/data-sources')
     expect(list.status).toBe(200)
     const ids = (list.body.data.items as Array<{ id: string }>).map((i) => i.id)
@@ -242,13 +264,13 @@ describe('data-sources route ownership scope (A0.1)', () => {
   })
 
   it('health route is reachable and returns only the caller’s own data sources', async () => {
-    currentUser = admin('alice-health')
+    currentUser = member('alice-health')
     pinned.setApp(app)
     await request(pinned.url()).post('/api/data-sources').send(pgConfig('ds-health-a'))
-    currentUser = admin('bob-health')
+    currentUser = member('bob-health')
     await request(pinned.url()).post('/api/data-sources').send(pgConfig('ds-health-b'))
 
-    currentUser = admin('alice-health')
+    currentUser = member('alice-health')
     const res = await request(pinned.url()).get('/api/data-sources/health')
     expect(res.status).toBe(200)
     const ids = (res.body.data.items as Array<{ id: string }>).map((i) => i.id)
@@ -257,7 +279,7 @@ describe('data-sources route ownership scope (A0.1)', () => {
   })
 
   it('PUT preserves the owner — a non-owner still gets 404 after the update', async () => {
-    currentUser = admin('alice3')
+    currentUser = member('alice3')
     pinned.setApp(app)
     const create = await request(pinned.url()).post('/api/data-sources').send(pgConfig('ds-put-1'))
     expect(create.status).toBe(201)
@@ -266,10 +288,10 @@ describe('data-sources route ownership scope (A0.1)', () => {
     expect(put.status).toBe(200)
 
     // Without owner preservation the re-add would revert to 'system' and leak
-    currentUser = admin('bob3')
+    currentUser = member('bob3')
     expect((await request(pinned.url()).get('/api/data-sources/ds-put-1')).status).toBe(404)
 
-    currentUser = admin('alice3')
+    currentUser = member('alice3')
     expect((await request(pinned.url()).get('/api/data-sources/ds-put-1')).status).toBe(200)
   })
 
@@ -281,7 +303,7 @@ describe('data-sources route ownership scope (A0.1)', () => {
   })
 
   it('rejects unsupported create types at validation time', async () => {
-    currentUser = admin('alice4')
+    currentUser = member('alice4')
     // mysql is now supported (#2227); mongodb/redis/elasticsearch remain out of the verified runtime set.
     pinned.setApp(app)
     for (const unsupportedType of ['mongodb', 'redis', 'elasticsearch']) {
@@ -296,7 +318,7 @@ describe('data-sources route ownership scope (A0.1)', () => {
 
   it('accepts a mysql create type and constructs a read-only MySQLAdapter (#2227)', async () => {
     // Route accepts type=mysql (no longer "Unsupported data source type").
-    currentUser = admin('alice-mysql')
+    currentUser = member('alice-mysql')
     pinned.setApp(app)
     const res = await request(pinned.url())
       .post('/api/data-sources')

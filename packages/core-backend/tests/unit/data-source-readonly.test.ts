@@ -3,6 +3,20 @@ import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('../../src/audit/audit', () => ({ auditLog: vi.fn(async () => {}) }))
+// The cross-owner rotation pin below now needs a NON-ADMIN denied user (platform
+// admins legitimately rotate any source's credentials — see
+// data-source-visibility-authority-matrix.test.ts). Stub rbacGuard's DB-backed
+// fallbacks so a member with req.user.permissions is deterministic without a pool.
+vi.mock('../../src/rbac/service', () => ({
+  isAdmin: vi.fn(async () => false),
+  userHasPermission: vi.fn(async () => false),
+  listUserPermissions: vi.fn(async () => []),
+  invalidateUserPerms: vi.fn(),
+  getPermCacheStatus: vi.fn(),
+}))
+vi.mock('../../src/rbac/namespace-admission', () => ({
+  isPermissionAllowedByNamespaceAdmission: vi.fn(async () => true),
+}))
 
 import { auditLog } from '../../src/audit/audit'
 import { DataSourceManager } from '../../src/data-adapters/DataSourceManager'
@@ -278,7 +292,7 @@ describe('data-sources PUT deep-merge (A-RO)', () => {
     expect(blank.body.error.code).toBe('VALIDATION_ERROR')
   })
 
-  it('scopes credential rotation to the source owner', async () => {
+  it('scopes credential rotation to the source owner (non-admin denied; admins may — by design)', async () => {
     currentUser = admin('alice')
     pinned.setApp(app)
     await request(pinned.url()).post('/api/data-sources').send({
@@ -288,7 +302,9 @@ describe('data-sources PUT deep-merge (A-RO)', () => {
       options: { autoConnect: false, readOnly: true },
     })
 
-    currentUser = admin('bob')
+    // bob is a NON-ADMIN holding the global write code: rbacGuard passes, the
+    // manager's ownership scope must still refuse with the uniform 404.
+    currentUser = { id: 'bob', roles: ['member'], permissions: ['data_sources:write'] } as never
     const denied = await request(pinned.url())
       .put('/api/data-sources/rotate-scope/credentials')
       .send({ credentials: { password: 'bob-password' } })
