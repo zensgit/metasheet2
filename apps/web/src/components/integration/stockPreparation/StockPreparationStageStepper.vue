@@ -6,7 +6,7 @@
       data-testid="stock-prep-stage-loading"
       role="status"
     >
-      {{ bi('正在加载阶段概览…', 'Loading stage overview…') }}
+      {{ bi('正在读取各步进展…', 'Reading how far each step has got…') }}
     </p>
 
     <p
@@ -41,11 +41,11 @@
           >{{ bi(STATUS_LABELS[stage.status].zh, STATUS_LABELS[stage.status].en) }}</span>
 
           <span v-if="stage.status === 'forbidden'" class="sp-stage__forbidden" :data-testid="`stock-prep-stage-forbidden-${stage.key}`">
-            {{ bi('需要管理员权限查看详情', 'Requires admin access to view detail') }}
+            {{ bi('这一步的详情要管理员权限才能看', 'You need admin access to see this one') }}
           </span>
           <template v-else>
             <span class="sp-stage__metric" :data-testid="`stock-prep-stage-count-${stage.key}`">
-              {{ bi('数量', 'Count') }}: {{ stage.count ?? '—' }}
+              {{ bi('共', 'Total') }} {{ stage.count ?? '—' }}
             </span>
             <span
               v-if="stage.blockingCount !== null"
@@ -53,7 +53,7 @@
               :class="{ 'sp-stage__metric--warn': stage.blockingCount > 0 }"
               :data-testid="`stock-prep-stage-blocking-${stage.key}`"
             >
-              {{ bi('阻断', 'Blocking') }}: {{ stage.blockingCount }}
+              {{ bi('卡住', 'Stuck') }} {{ stage.blockingCount }}
             </span>
 
             <!-- The caveat qualifies a rendered number (scope / read-time-vs-gate honesty) — it has
@@ -123,34 +123,40 @@ const orderedStages = computed<StockPreparationStageMetric[]>(() => {
   )
 })
 
+// The six phases, named by what a person DOES in them rather than by the subsystem that does it.
+// `Blocked` / `Not started` / `Clear` keep their English wording — they are the three states the
+// stepper's own suite reads back, and they were already plain.
 const STAGE_LABELS: Record<StockPreparationStageKey, { zh: string; en: string }> = {
-  provision: { zh: '选定项目', en: 'Provision' },
-  sync: { zh: '同步快照', en: 'Sync' },
-  map: { zh: '映射确认', en: 'Map' },
-  unit: { zh: '单位确认', en: 'Unit' },
-  generate: { zh: '生成备料行', en: 'Generate' },
-  exception: { zh: '异常队列', en: 'Exception' },
+  provision: { zh: '选项目', en: 'Pick a project' },
+  sync: { zh: '从 PLM 同步', en: 'Sync from PLM' },
+  map: { zh: '对上 ERP 物料', en: 'Match materials' },
+  unit: { zh: '定好单位', en: 'Settle the units' },
+  generate: { zh: '生成备料明细', en: 'Build the prep lines' },
+  exception: { zh: '处理卡住的事', en: 'Clear what is stuck' },
 }
 
 const STATUS_LABELS: Record<StockPreparationStageStatus, { zh: string; en: string }> = {
-  not_started: { zh: '尚未开始', en: 'Not started' },
-  pending: { zh: '待选择', en: 'Pending' },
-  blocked: { zh: '有阻断', en: 'Blocked' },
-  clear: { zh: '正常', en: 'Clear' },
-  forbidden: { zh: '权限不足', en: 'Forbidden' },
-  unknown: { zh: '未知', en: 'Unknown' },
+  not_started: { zh: '还没开始', en: 'Not started' },
+  pending: { zh: '等您选项目', en: 'Waiting for a project' },
+  blocked: { zh: '有事卡着', en: 'Blocked' },
+  clear: { zh: '没问题', en: 'Clear' },
+  forbidden: { zh: '看不了,要管理员', en: 'Needs an admin to view' },
+  unknown: { zh: '还不知道', en: 'Not known yet' },
 }
 
+// A caveat qualifies a NUMBER: it says why the figure beside it is not quite the thing the reader
+// would assume. Both now say that in the reader's terms; the tooltip keeps the precise statement,
+// including the vocabulary (租户 / generation gate) an implementer matches against the server.
 const CAVEAT_LABELS: Record<StockPreparationStageCaveat, { zh: string; en: string; zhTitle: string; enTitle: string }> = {
   tenant_wide: {
-    zh: '(租户级,非本项目专属)',
-    en: '(tenant-wide, not project-specific)',
+    zh: '(全公司共用,不只这个项目)',
+    en: '(shared company-wide, not just this project)',
     zhTitle: '物料映射为租户级、跨项目复用资产,此计数覆盖当前租户全部映射,不按已选项目过滤。',
     enTitle: 'Material mappings are a tenant-level, cross-project asset — this count covers the whole tenant, not filtered to the selected project.',
   },
   display_only: {
-    zh: '(展示口径,非生成闸判定值)',
-    en: '(display only, not the generation gate)',
+    zh: '(这里显示的数,不是最终判定)',
+    en: '(what is shown here, not the final verdict)',
     zhTitle: '当前为读取时的展示计数,并非生成闸实际执行的判定值;生成时服务端会基于全量重新计算真实值。',
     enTitle: 'A read-time display figure — not the value the generation gate enforces; the server recomputes it from the full set when generation runs.',
   },

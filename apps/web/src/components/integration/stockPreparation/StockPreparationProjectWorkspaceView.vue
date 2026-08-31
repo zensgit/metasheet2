@@ -38,14 +38,14 @@
       class="sp-project__state sp-project__state--muted"
       data-testid="stock-prep-project-empty"
     >
-      {{ bi('尚无已同步项目。', 'No projects synced yet.') }}
+      {{ bi('还没有同步过任何项目。', 'Nothing has been synced yet.') }}
     </p>
 
     <!-- Data: values-free summary + per-project rows. -->
     <div v-else-if="overview" class="sp-project__overview" data-testid="stock-prep-project-overview">
       <header class="sp-project__summary" data-testid="stock-prep-project-summary">
         <span class="sp-project__summary-count">
-          {{ bi('已同步项目', 'Synced projects') }}: {{ overview.projectCount }}
+          {{ bi('已同步的项目', 'Projects synced') }}: {{ overview.projectCount }}
         </span>
         <span
           v-for="entry in statusEntries"
@@ -70,11 +70,11 @@
           <thead>
             <tr>
               <th scope="col">{{ bi('项目状态', 'Project status') }}</th>
-              <th scope="col">{{ bi('快照批次数', 'Snapshot batches') }}</th>
-              <th scope="col">{{ bi('待处理异常', 'Open exceptions') }}</th>
-              <th scope="col">{{ bi('就绪备料行', 'Ready lines') }}</th>
-              <th scope="col">{{ bi('暂挂备料行', 'Held lines') }}</th>
-              <th scope="col">{{ bi('最近同步运行', 'Last sync run') }}</th>
+              <th scope="col">{{ bi('同步过几次', 'Times synced') }}</th>
+              <th scope="col">{{ bi('几件事待处理', 'Things waiting') }}</th>
+              <th scope="col">{{ bi('几行可以用', 'Rows usable') }}</th>
+              <th scope="col">{{ bi('几行卡着', 'Rows stuck') }}</th>
+              <th scope="col">{{ bi('最近一次同步', 'Last sync') }}</th>
               <th scope="col" class="sp-project__col-action">{{ bi('操作', 'Actions') }}</th>
             </tr>
           </thead>
@@ -108,13 +108,27 @@
                   data-testid="stock-prep-project-select"
                   @click="emit('select-project', project.projectId)"
                 >
-                  {{ bi('查看快照批次', 'View snapshot batches') }}
+                  {{ bi('看这个项目同步了什么', 'See what this project synced') }}
                 </button>
               </td>
             </tr>
           </tbody>
         </table>
       </div>
+
+      <StockPrepTechnicalDetails testid="stock-prep-project-tech">
+        <dl>
+          <dt>{{ bi('这张表显示什么、不显示什么', 'What this table does and does not show') }}</dt>
+          <dd>
+            {{ bi(
+              '只读状态枚举、计数与内部导航句柄(lastSyncRunId)。projectId 只走 option value 与事件,从不作为可见文本;图号、物料编码、数量、项目名等业务值从不进入这个投影。',
+              'Status enums, counts and one internal navigation handle (lastSyncRunId). The projectId rides option values and events only and is never rendered as text; drawing numbers, material codes, quantities and project names never enter this projection at all.',
+            ) }}
+          </dd>
+          <dt>{{ bi('读取端点', 'Read endpoint') }}</dt>
+          <dd><code>GET /api/integration/stock-preparation/projects</code></dd>
+        </dl>
+      </StockPrepTechnicalDetails>
     </div>
   </div>
 </template>
@@ -137,6 +151,7 @@ import {
   getStockPreparationWorkspaceOverview,
   type StockPreparationWorkspaceOverview,
 } from '../../../services/integration/stockPreparation/projectWorkspace'
+import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
 
 const props = withDefaults(
   defineProps<{
