@@ -83,7 +83,7 @@ describe('e-learning onboarding policy', () => {
 
   it('creates after same-org actor and active plan checks', async () => {
     const db = new SequenceDb([
-      [], [], [{ id: ACTOR }], [{ id: PLAN }], [policyRow()],
+      [], [{ id: ACTOR }], [], [{ id: PLAN }], [policyRow()],
     ])
     await expect(createElearningOnboardingPolicy(db, command())).resolves.toEqual({
       policyId: POLICY,
@@ -110,19 +110,37 @@ describe('e-learning onboarding policy', () => {
       weeklyReportEnabled: true,
     })
     const replay = new SequenceDb([
-      [], [policyRow({ request_hash: requestHash, request_hash_version: 1 })],
+      [], [{ id: ACTOR }], [policyRow({ request_hash: requestHash, request_hash_version: 1 })],
     ])
     await expect(createElearningOnboardingPolicy(replay, command())).resolves.toMatchObject({
       policyId: POLICY,
       duplicate: true,
     })
     const conflict = new SequenceDb([
-      [], [policyRow({ request_hash: requestHash, request_hash_version: 1 })],
+      [], [{ id: ACTOR }], [policyRow({ request_hash: requestHash, request_hash_version: 1 })],
     ])
     await expect(createElearningOnboardingPolicy(
       conflict,
       command({ deadlineDays: 15 }),
     )).rejects.toMatchObject({ code: 'conflict', message: 'conflict' })
+  })
+
+  it('rejects replay after the actor loses active same-org membership', async () => {
+    const requestHash = hashElearningOnboardingPolicyRequest({
+      trainingPlanId: PLAN,
+      matchRules: RULES,
+      hireWindowDays: 30,
+      deadlineDays: 14,
+      weeklyReportEnabled: true,
+    })
+    const revoked = new SequenceDb([
+      [],
+      [],
+      [policyRow({ request_hash: requestHash, request_hash_version: 1 })],
+    ])
+    await expect(createElearningOnboardingPolicy(revoked, command()))
+      .rejects.toMatchObject({ code: 'forbidden', message: 'forbidden' })
+    expect(revoked.statements.some((sql) => sql.includes('load-request'))).toBe(false)
   })
 
   it('retires once and replays an already retired policy', async () => {

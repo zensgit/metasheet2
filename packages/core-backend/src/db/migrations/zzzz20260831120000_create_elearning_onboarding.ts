@@ -169,6 +169,7 @@ const EFFECT_AUTHORITY_BODY = `
     policy_status text;
     assignment_plan_id uuid;
     assignment_members text[];
+    assignment_source_key text;
     member_active boolean;
     job_matches boolean;
   BEGIN
@@ -180,8 +181,8 @@ const EFFECT_AUTHORITY_BODY = `
       FROM elearning_onboarding_policies
      WHERE org_id = NEW.org_id AND id = NEW.policy_id
      FOR SHARE;
-    SELECT training_plan_id, member_ids
-      INTO assignment_plan_id, assignment_members
+    SELECT training_plan_id, member_ids, source_key
+      INTO assignment_plan_id, assignment_members, assignment_source_key
       FROM elearning_training_plan_assignments
      WHERE org_id = NEW.org_id AND id = NEW.training_plan_assignment_id
      FOR SHARE;
@@ -206,6 +207,7 @@ const EFFECT_AUTHORITY_BODY = `
      FOR SHARE;
     IF policy_status IS DISTINCT FROM 'active'
        OR assignment_plan_id IS DISTINCT FROM policy_plan_id
+       OR NEW.source_key IS DISTINCT FROM assignment_source_key
        OR NOT (NEW.user_id = ANY(assignment_members))
        OR member_active IS DISTINCT FROM true
        OR job_matches IS DISTINCT FROM true THEN

@@ -14,6 +14,11 @@ const ONBOARDING_NOT_ELIGIBLE = 'ONBOARDING_NOT_ELIGIBLE'
 const ONBOARDING_PORT_REQUIRED = 'ONBOARDING_PORT_REQUIRED'
 const ONBOARDING_ASSIGNMENT_METHOD_REQUIRED = 'ONBOARDING_ASSIGNMENT_METHOD_REQUIRED'
 const ONBOARDING_WEEKLY_REPORT_METHOD_REQUIRED = 'ONBOARDING_WEEKLY_REPORT_METHOD_REQUIRED'
+const ONBOARDING_WEEKLY_REPORT_PRODUCER_METHOD_REQUIRED =
+  'ONBOARDING_WEEKLY_REPORT_PRODUCER_METHOD_REQUIRED'
+const ONBOARDING_WEEKLY_REPORT_PRODUCER_UNAVAILABLE =
+  'ONBOARDING_WEEKLY_REPORT_PRODUCER_UNAVAILABLE'
+const ONBOARDING_WEEKLY_REPORT_PRODUCER_INTERVAL_MS = 60_000
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -21,6 +26,12 @@ const ERROR_CODE_RE = /^[A-Z][A-Z0-9_]{1,63}$/
 const ASSIGNMENT_PAYLOAD_KEYS = 'hireDate,policyId,userId'
 const WEEKLY_REPORT_PAYLOAD_KEYS = 'policyId,weekStart'
 const ASSIGNMENT_DOMAIN = 'elearning.onboarding.assignment.v1'
+
+let weeklyProducerTimer = null
+let weeklyProducerGeneration = 0
+let weeklyProducerRunningGeneration = null
+let weeklyProducerPort = null
+let weeklyProducerLogger = null
 
 function codedError(code) {
   return Object.assign(new Error(code), { code })
@@ -37,6 +48,87 @@ function isOnboardingWeeklyReportEnabled() {
 function resolveElearningOnboardingPort(context) {
   const port = context && context.services && context.services.elearningOnboarding
   return port && typeof port === 'object' && !Array.isArray(port) ? port : null
+}
+
+function previousClosedUtcWeekStart(now = new Date()) {
+  const current = now instanceof Date ? new Date(now.getTime()) : new Date(now)
+  if (Number.isNaN(current.getTime())) {
+    throw codedError(ONBOARDING_WEEKLY_REPORT_PRODUCER_UNAVAILABLE)
+  }
+  current.setUTCHours(0, 0, 0, 0)
+  current.setUTCDate(current.getUTCDate() - ((current.getUTCDay() + 6) % 7) - 7)
+  return current.toISOString().slice(0, 10)
+}
+
+function validateWeeklyReportProducerResult(result, weekStart) {
+  if (
+    !exactKeys(result, 'enqueuedCount,weekStart')
+    || result.weekStart !== weekStart
+    || !Number.isSafeInteger(result.enqueuedCount)
+    || result.enqueuedCount < 0
+  ) throw codedError(ONBOARDING_WEEKLY_REPORT_PRODUCER_UNAVAILABLE)
+  return result
+}
+
+function stopOnboardingWeeklyReportProducerRuntime() {
+  weeklyProducerGeneration += 1
+  if (weeklyProducerTimer != null) {
+    clearInterval(weeklyProducerTimer)
+    weeklyProducerTimer = null
+  }
+  weeklyProducerPort = null
+  weeklyProducerLogger = null
+}
+
+async function runOnboardingWeeklyReportProducerTick(override) {
+  const options = override && typeof override === 'object' ? override : {}
+  const port = options.port || weeklyProducerPort
+  const generation = weeklyProducerGeneration
+  if (!isOnboardingWeeklyReportEnabled()) return { enqueuedCount: 0, skipped: true }
+  if (!port || typeof port.enqueueWeeklyReports !== 'function') {
+    throw codedError(ONBOARDING_WEEKLY_REPORT_PRODUCER_METHOD_REQUIRED)
+  }
+  if (weeklyProducerRunningGeneration === generation) {
+    return { enqueuedCount: 0, skipped: true }
+  }
+  const weekStart = previousClosedUtcWeekStart(options.now)
+  weeklyProducerRunningGeneration = generation
+  try {
+    return validateWeeklyReportProducerResult(
+      await port.enqueueWeeklyReports({ weekStart }),
+      weekStart,
+    )
+  } catch (error) {
+    if (error && error.code === ONBOARDING_WEEKLY_REPORT_PRODUCER_METHOD_REQUIRED) throw error
+    throw codedError(ONBOARDING_WEEKLY_REPORT_PRODUCER_UNAVAILABLE)
+  } finally {
+    if (weeklyProducerRunningGeneration === generation) {
+      weeklyProducerRunningGeneration = null
+    }
+  }
+}
+
+function startOnboardingWeeklyReportProducerRuntime(context) {
+  stopOnboardingWeeklyReportProducerRuntime()
+  if (!isOnboardingWeeklyReportEnabled()) return false
+  const port = resolveElearningOnboardingPort(context)
+  if (!port || typeof port.enqueueWeeklyReports !== 'function') {
+    throw codedError(ONBOARDING_WEEKLY_REPORT_PRODUCER_METHOD_REQUIRED)
+  }
+  weeklyProducerPort = port
+  weeklyProducerLogger = context && context.logger ? context.logger : null
+  weeklyProducerTimer = setInterval(() => {
+    const logger = weeklyProducerLogger
+    void runOnboardingWeeklyReportProducerTick().catch(() => {
+      if (logger && typeof logger.warn === 'function') {
+        logger.warn('elearning onboarding weekly report producer', {
+          code: 'ONBOARDING_WEEKLY_REPORT_PRODUCER_TICK_FAILED',
+        })
+      }
+    })
+  }, ONBOARDING_WEEKLY_REPORT_PRODUCER_INTERVAL_MS)
+  if (typeof weeklyProducerTimer.unref === 'function') weeklyProducerTimer.unref()
+  return true
 }
 
 function requiredText(value, code, max = 512) {
@@ -254,6 +346,9 @@ module.exports = {
   ONBOARDING_PORT_REQUIRED,
   ONBOARDING_ASSIGNMENT_METHOD_REQUIRED,
   ONBOARDING_WEEKLY_REPORT_METHOD_REQUIRED,
+  ONBOARDING_WEEKLY_REPORT_PRODUCER_METHOD_REQUIRED,
+  ONBOARDING_WEEKLY_REPORT_PRODUCER_UNAVAILABLE,
+  ONBOARDING_WEEKLY_REPORT_PRODUCER_INTERVAL_MS,
   isOnboardingAssignmentEnabled,
   isOnboardingWeeklyReportEnabled,
   resolveElearningOnboardingPort,
@@ -268,4 +363,8 @@ module.exports = {
   validateAssignmentResult,
   validateWeeklyReportResult,
   registerOnboardingWorker,
+  previousClosedUtcWeekStart,
+  runOnboardingWeeklyReportProducerTick,
+  startOnboardingWeeklyReportProducerRuntime,
+  stopOnboardingWeeklyReportProducerRuntime,
 }

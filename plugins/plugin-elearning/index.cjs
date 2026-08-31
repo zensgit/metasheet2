@@ -7,7 +7,11 @@ const { registerAssignmentReminderProducer } = require('./lib/reminder-producer.
 const { registerExamExpirySettlement } = require('./lib/exam-expiry.cjs')
 const { registerStatsDailyProjector } = require('./lib/stats-daily-projector.cjs')
 const { registerAnalyticsExportWorker } = require('./lib/analytics-export-worker.cjs')
-const { registerOnboardingWorker } = require('./lib/onboarding-worker.cjs')
+const {
+  registerOnboardingWorker,
+  startOnboardingWeeklyReportProducerRuntime,
+  stopOnboardingWeeklyReportProducerRuntime,
+} = require('./lib/onboarding-worker.cjs')
 const {
   startStatsDailyProducerRuntime,
   stopStatsDailyProducerRuntime,
@@ -37,6 +41,7 @@ async function activate(context) {
   stopNotificationRuntime()
   stopStatsDailyProducerRuntime()
   stopJobsWorker()
+  stopOnboardingWeeklyReportProducerRuntime()
   clearJobHandlers()
   if (!isMasterEnabled()) {
     return
@@ -74,10 +79,12 @@ async function activate(context) {
 
     startJobsWorker(context)
     startStatsDailyProducerRuntime(context)
+    startOnboardingWeeklyReportProducerRuntime(context)
     startNotificationRuntime(context)
   } catch (error) {
     stopNotificationRuntime()
     stopStatsDailyProducerRuntime()
+    stopOnboardingWeeklyReportProducerRuntime()
     stopJobsWorker()
     clearJobHandlers()
     throw error
@@ -88,6 +95,7 @@ async function deactivate() {
   stopNotificationRuntime()
   stopStatsDailyProducerRuntime()
   stopJobsWorker()
+  stopOnboardingWeeklyReportProducerRuntime()
   clearJobHandlers()
 }
 

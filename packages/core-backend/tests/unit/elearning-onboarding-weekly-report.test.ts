@@ -80,6 +80,7 @@ describe('e-learning onboarding weekly aggregate report', () => {
     expect(calls[0]?.sql).toContain('policy.weekly_report_enabled IS TRUE')
     expect(calls[0]?.sql).toContain("'policy:' || policy.id::text || ':week:'")
     expect(calls[0]?.sql).toContain("'onboarding_weekly_report'")
+    expect(calls[0]?.sql).toContain("($1::date + interval '8 days')")
     expect(calls[0]?.sql).toContain(
       'ON CONFLICT (org_id, kind, occurrence_key) DO NOTHING',
     )
@@ -107,6 +108,10 @@ describe('e-learning onboarding weekly aggregate report', () => {
       },
     }
     await expectErrorCode(enqueueElearningOnboardingWeeklyReports(baseQuery, { weekStart: '2026-02-30' }), 'invalid_input')
+    await expectErrorCode(enqueueElearningOnboardingWeeklyReports(
+      baseQuery,
+      { weekStart: '2099-12-28' },
+    ), 'invalid_input')
     await expectErrorCode(materializeElearningOnboardingWeeklyReport(materializeDb(baseQuery), { orgId: ORG, jobId: JOB }), 'invalid_input')
 
     const extraKeyQuery: ElearningOnboardingWeeklyReportQueryable = {
@@ -200,6 +205,42 @@ describe('e-learning onboarding weekly aggregate report', () => {
       duplicate: true,
     })
     expect(calls.some((sql) => sql.includes('aggregate-weekly-report'))).toBe(false)
+  })
+
+  it('materializes an already-enqueued closed week after policy retirement', async () => {
+    const db: ElearningOnboardingWeeklyReportQueryable = {
+      async query(sql) {
+        if (sql.includes('lock-weekly-report-job')) return { rows: [jobRow()] }
+        if (sql.includes('lock-weekly-report-policy')) {
+          return { rows: [{ status: 'retired', weekly_report_enabled: true }] }
+        }
+        if (sql.includes('load-weekly-report')) return { rows: [] }
+        if (sql.includes('aggregate-weekly-report')) {
+          return { rows: [{
+            suppressed: true,
+            min_group_size: 5,
+            enqueued_count: null,
+            assigned_user_count: null,
+            failed_count: null,
+            dead_count: null,
+          }] }
+        }
+        if (sql.includes('insert-weekly-report')) {
+          return { rows: [reportRow({
+            suppressed: true,
+            enqueued_count: null,
+            assigned_user_count: null,
+            failed_count: null,
+            dead_count: null,
+          })] }
+        }
+        throw new Error('unexpected query')
+      },
+    }
+    await expect(materializeElearningOnboardingWeeklyReport(
+      materializeDb(db),
+      { orgId: ORG, jobId: JOB },
+    )).resolves.toMatchObject({ policyId: POLICY, weekStart: WEEK, duplicate: false })
   })
 
   it('maps missing policy/job and malformed stored counts to closed errors', async () => {

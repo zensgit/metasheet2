@@ -1205,6 +1205,11 @@ export interface PluginServices {
    * authority, assignment effects, suppression and immutable weekly reports.
    */
   elearningOnboarding?: {
+    enqueueWeeklyReports(
+      input: import('../services/elearning-onboarding-weekly-report').EnqueueElearningOnboardingWeeklyReportsInput,
+    ): Promise<
+      import('../services/elearning-onboarding-weekly-report').EnqueueElearningOnboardingWeeklyReportsResult
+    >
     processAssignment(
       input: import('../services/elearning-onboarding-assignment').ProcessElearningOnboardingAssignmentInput,
     ): Promise<

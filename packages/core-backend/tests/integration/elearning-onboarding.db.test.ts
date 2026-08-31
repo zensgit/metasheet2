@@ -29,6 +29,7 @@ const USER = `user-${randomUUID()}`
 const PLAN = randomUUID()
 const POLICY = randomUUID()
 const PLAN_ASSIGNMENT = randomUUID()
+const PLAN_SOURCE = 'onboarding-plan-source'
 const DEPARTMENT = randomUUID()
 const REQUEST = randomUUID()
 const JOB_OCCURRENCE = `onboarding-assign-v1:${'d'.repeat(64)}`
@@ -72,6 +73,7 @@ async function createPrerequisites(): Promise<void> {
       org_id text NOT NULL,
       training_plan_id uuid NOT NULL,
       member_ids text[] NOT NULL,
+      source_key text NOT NULL,
       UNIQUE (org_id, id)
     );
     CREATE TABLE elearning_jobs (
@@ -103,9 +105,9 @@ async function createPrerequisites(): Promise<void> {
   )
   await firstPool.query(
     `INSERT INTO elearning_training_plan_assignments (
-       id, org_id, training_plan_id, member_ids
-     ) VALUES ($1, $2, $3, $4::text[])`,
-    [PLAN_ASSIGNMENT, ORG, PLAN, [USER]],
+       id, org_id, training_plan_id, member_ids, source_key
+     ) VALUES ($1, $2, $3, $4::text[], $5)`,
+    [PLAN_ASSIGNMENT, ORG, PLAN, [USER], PLAN_SOURCE],
   )
 }
 
@@ -278,6 +280,14 @@ describe.sequential('e-learning onboarding PostgreSQL authority', () => {
        )`,
       [ORG, JOB_OCCURRENCE, POLICY, USER],
     )
+    const sourceResult = await firstPool.query(
+      `SELECT source_key
+         FROM elearning_training_plan_assignments
+        WHERE org_id = $1 AND id = $2`,
+      [ORG, PLAN_ASSIGNMENT],
+    )
+    const assignmentSourceKey = sourceResult.rows[0]?.source_key
+    expect(typeof assignmentSourceKey).toBe('string')
     await expect(firstPool.query(
       `INSERT INTO elearning_onboarding_assignment_effects (
          org_id, policy_id, user_id, hire_date, job_occurrence_key, source_key,
@@ -286,12 +296,19 @@ describe.sequential('e-learning onboarding PostgreSQL authority', () => {
                  'wrong-job', $4)`,
       [ORG, POLICY, USER, PLAN_ASSIGNMENT],
     )).rejects.toThrow('authority mismatch')
+    await expect(firstPool.query(
+      `INSERT INTO elearning_onboarding_assignment_effects (
+         org_id, policy_id, user_id, hire_date, job_occurrence_key, source_key,
+         training_plan_assignment_id
+       ) VALUES ($1, $2, $3, DATE '2026-08-20', $4, 'wrong-source', $5)`,
+      [ORG, POLICY, USER, JOB_OCCURRENCE, PLAN_ASSIGNMENT],
+    )).rejects.toThrow('authority mismatch')
     const insert = (pool: Pool, id: string) => pool.query(
       `INSERT INTO elearning_onboarding_assignment_effects (
          id, org_id, policy_id, user_id, hire_date, job_occurrence_key, source_key,
          training_plan_assignment_id
        ) VALUES ($1, $2, $3, $4, DATE '2026-08-20', $5, $6, $7)`,
-      [id, ORG, POLICY, USER, JOB_OCCURRENCE, `source-${id}`, PLAN_ASSIGNMENT],
+      [id, ORG, POLICY, USER, JOB_OCCURRENCE, assignmentSourceKey, PLAN_ASSIGNMENT],
     )
     const results = await Promise.allSettled([
       insert(firstPool, randomUUID()),

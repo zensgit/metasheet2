@@ -50,6 +50,7 @@ describe('e-learning L2 reminder producer port scoping', () => {
     expect(typeof elearning.elearningExamExpirySettlement?.settle).toBe('function')
     expect(typeof elearning.elearningStatsDailyProjection?.project).toBe('function')
     expect(typeof elearning.elearningStatsDailyProjection?.enqueueDue).toBe('function')
+    expect(typeof elearning.elearningOnboarding?.enqueueWeeklyReports).toBe('function')
     expect(typeof elearning.elearningOnboarding?.processAssignment).toBe('function')
     expect(typeof elearning.elearningOnboarding?.materializeWeeklyReport).toBe('function')
     expect(typeof elearning.elearningNotificationEligibility?.check).toBe('function')
@@ -82,8 +83,10 @@ describe('e-learning L2 reminder producer port scoping', () => {
       orgId: 'org-onboarding-port',
       jobId: '11111111-1111-4111-8111-111111111111',
     }
+    const enqueueInput = { weekStart: '2026-08-24' }
 
     setFlags({})
+    await expect(port.enqueueWeeklyReports(enqueueInput)).rejects.toMatchObject({ code: 'unavailable' })
     await expect(port.processAssignment(input)).rejects.toMatchObject({ code: 'unavailable' })
     await expect(port.materializeWeeklyReport(input)).rejects.toMatchObject({ code: 'unavailable' })
     expect(poolGet).not.toHaveBeenCalled()
@@ -94,15 +97,17 @@ describe('e-learning L2 reminder producer port scoping', () => {
       ELEARNING_ASSIGNMENT_ENABLED: 'true',
     })
     await expect(port.processAssignment(input)).rejects.toThrow('database touched')
+    await expect(port.enqueueWeeklyReports(enqueueInput)).rejects.toMatchObject({ code: 'unavailable' })
     await expect(port.materializeWeeklyReport(input)).rejects.toMatchObject({ code: 'unavailable' })
 
     setFlags({
       ELEARNING_ENABLED: 'true',
       ELEARNING_ANALYTICS_ENABLED: 'true',
     })
+    await expect(port.enqueueWeeklyReports(enqueueInput)).rejects.toThrow('database touched')
     await expect(port.materializeWeeklyReport(input)).rejects.toThrow('database touched')
     await expect(port.processAssignment(input)).rejects.toMatchObject({ code: 'unavailable' })
-    expect(poolGet).toHaveBeenCalledTimes(2)
+    expect(poolGet).toHaveBeenCalledTimes(3)
   })
 
   it('rechecks master and analytics flags before touching the database', async () => {

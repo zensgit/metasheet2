@@ -86,7 +86,7 @@ WITH inserted AS (
       'policyId', policy.id::text,
       'weekStart', $1::text
     ),
-    clock_timestamp()
+    ($1::date + interval '8 days')
   FROM elearning_onboarding_policies policy
   WHERE policy.status = 'active'
     AND policy.weekly_report_enabled IS TRUE
@@ -214,6 +214,11 @@ function addDays(date: string, days: number): string {
   return parsed.toISOString().slice(0, 10)
 }
 
+function assertClosedWeek(weekStart: string): void {
+  const currentDate = new Date().toISOString().slice(0, 10)
+  if (addDays(weekStart, 7) > currentDate) fail('invalid_input')
+}
+
 function count(value: unknown): number {
   const parsed = typeof value === 'number'
     ? value
@@ -291,6 +296,7 @@ export async function enqueueElearningOnboardingWeeklyReports(
   input: EnqueueElearningOnboardingWeeklyReportsInput,
 ): Promise<EnqueueElearningOnboardingWeeklyReportsResult> {
   const weekStart = requireCanonicalDate(input.weekStart)
+  assertClosedWeek(weekStart)
   try {
     const result = await db.query(elearningOnboardingWeeklyReportEnqueueSql, [weekStart])
     if (result.rows.length !== 1) fail('unavailable')
@@ -314,6 +320,7 @@ export async function materializeElearningOnboardingWeeklyReport(
       if (jobResult.rows.length !== 1) fail('not_found')
       const job = jobResult.rows[0]
       const payload = requireClosedPayload(job.payload)
+      assertClosedWeek(payload.weekStart)
       if (job.status !== 'running') fail('conflict')
       const expectedOccurrenceKey = `policy:${payload.policyId}:week:${payload.weekStart}`
       if (job.ref !== payload.policyId || job.occurrence_key !== expectedOccurrenceKey) {
@@ -329,7 +336,10 @@ export async function materializeElearningOnboardingWeeklyReport(
       }
 
       const policy = policyResult.rows[0]
-      if (policy.status !== 'active' || policy.weekly_report_enabled !== true) fail('not_found')
+      if (
+        !['active', 'retired'].includes(String(policy.status))
+        || policy.weekly_report_enabled !== true
+      ) fail('not_found')
       const weekEnd = addDays(payload.weekStart, 7)
       const aggregateResult = await tx.query(AGGREGATE_SQL, [
         orgId,

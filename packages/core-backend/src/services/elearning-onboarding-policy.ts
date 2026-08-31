@@ -264,6 +264,7 @@ export async function createElearningOnboardingPolicy(
          SELECT pg_advisory_xact_lock(hashtext($1))`,
         [`elearning-onboarding-policy:${orgId}:${requestId}`],
       )
+      await assertActiveActor(tx, orgId, actorId)
       const existing = await tx.query(
         `/* elearning-onboarding-policy:load-request */
          SELECT id, training_plan_id, match_rules, hire_window_days,
@@ -283,7 +284,6 @@ export async function createElearningOnboardingPolicy(
         return dto(existing.rows[0], true)
       }
 
-      await assertActiveActor(tx, orgId, actorId)
       const plan = await tx.query(
         `/* elearning-onboarding-policy:plan */
          SELECT id

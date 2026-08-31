@@ -310,6 +310,7 @@ import {
   processElearningOnboardingAssignment,
 } from './services/elearning-onboarding-assignment'
 import {
+  enqueueElearningOnboardingWeeklyReports,
   ElearningOnboardingWeeklyReportError,
   materializeElearningOnboardingWeeklyReport,
 } from './services/elearning-onboarding-weekly-report'
@@ -2360,6 +2361,14 @@ export class MetaSheetServer {
         elearningOnboarding:
           manifest.name === 'plugin-elearning'
             ? {
+                enqueueWeeklyReports: async (
+                  input: import('./services/elearning-onboarding-weekly-report').EnqueueElearningOnboardingWeeklyReportsInput,
+                ) => {
+                  if (!isElearningAnalyticsSurfaceEnabled()) {
+                    throw new ElearningOnboardingWeeklyReportError('unavailable')
+                  }
+                  return enqueueElearningOnboardingWeeklyReports(poolManager.get(), input)
+                },
                 processAssignment: async (
                   input: import('./services/elearning-onboarding-assignment').ProcessElearningOnboardingAssignmentInput,
                 ) => {

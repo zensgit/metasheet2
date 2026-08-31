@@ -2,6 +2,8 @@
 
 const assert = require('node:assert/strict')
 const { createHash } = require('node:crypto')
+const fs = require('node:fs')
+const path = require('node:path')
 const {
   ONBOARDING_ASSIGN_JOB_KIND,
   ONBOARDING_WEEKLY_REPORT_JOB_KIND,
@@ -11,11 +13,17 @@ const {
   ONBOARDING_WEEKLY_REPORT_UNAVAILABLE,
   ONBOARDING_ASSIGNMENT_METHOD_REQUIRED,
   ONBOARDING_WEEKLY_REPORT_METHOD_REQUIRED,
+  ONBOARDING_WEEKLY_REPORT_PRODUCER_METHOD_REQUIRED,
+  ONBOARDING_WEEKLY_REPORT_PRODUCER_INTERVAL_MS,
   isOnboardingAssignmentEnabled,
   isOnboardingWeeklyReportEnabled,
   onboardingAssignmentInputFromJob,
   onboardingWeeklyReportInputFromJob,
+  previousClosedUtcWeekStart,
   registerOnboardingWorker,
+  runOnboardingWeeklyReportProducerTick,
+  startOnboardingWeeklyReportProducerRuntime,
+  stopOnboardingWeeklyReportProducerRuntime,
 } = require('../lib/onboarding-worker.cjs')
 const {
   clearJobHandlers,
@@ -112,12 +120,24 @@ async function run(kind, claimed, port) {
 
 async function main() {
   stopJobsWorker()
+  stopOnboardingWeeklyReportProducerRuntime()
   clearJobHandlers()
 
+  assert.equal(ONBOARDING_WEEKLY_REPORT_PRODUCER_INTERVAL_MS, 60_000)
+  assert.equal(previousClosedUtcWeekStart('2026-08-31T12:00:00.000Z'), '2026-08-24')
+  assert.equal(previousClosedUtcWeekStart('2026-09-06T23:59:59.999Z'), '2026-08-24')
+  const indexSource = fs.readFileSync(path.join(__dirname, '../index.cjs'), 'utf8')
+  assert.match(indexSource, /startOnboardingWeeklyReportProducerRuntime\(context\)/)
+  assert.match(indexSource, /stopOnboardingWeeklyReportProducerRuntime\(\)/)
+
   await withFlagsAsync({}, async () => {
+    const throwingContext = new Proxy({}, {
+      get() { throw new Error('flags OFF must not inspect context') },
+    })
     assert.equal(isOnboardingAssignmentEnabled(), false)
     assert.equal(isOnboardingWeeklyReportEnabled(), false)
     assert.equal(registerOnboardingWorker({ services: {} }), false)
+    assert.equal(startOnboardingWeeklyReportProducerRuntime(throwingContext), false)
     assert.deepEqual(registeredKinds(), [])
   })
   for (const lookalike of LOOKALIKES) {
@@ -151,6 +171,37 @@ async function main() {
     )
   })
   clearJobHandlers()
+
+  await withFlagsAsync({
+    ELEARNING_ENABLED: 'true',
+    ELEARNING_ANALYTICS_ENABLED: 'true',
+  }, async () => {
+    assert.throws(
+      () => startOnboardingWeeklyReportProducerRuntime({ services: {} }),
+      (error) => error && error.code === ONBOARDING_WEEKLY_REPORT_PRODUCER_METHOD_REQUIRED,
+    )
+    let calls = 0
+    const port = {
+      async enqueueWeeklyReports(input) {
+        calls += 1
+        assert.deepEqual(input, { weekStart: WEEK_START })
+        return { weekStart: WEEK_START, enqueuedCount: 2 }
+      },
+    }
+    assert.equal(startOnboardingWeeklyReportProducerRuntime({
+      services: { elearningOnboarding: port },
+    }), true)
+    assert.equal(calls, 0, 'start must wait for the bounded producer tick')
+    assert.deepEqual(await runOnboardingWeeklyReportProducerTick({
+      port,
+      now: '2026-08-31T12:00:00.000Z',
+    }), {
+      weekStart: WEEK_START,
+      enqueuedCount: 2,
+    })
+    assert.equal(calls, 1)
+    stopOnboardingWeeklyReportProducerRuntime()
+  })
   await withFlagsAsync({ ...FLAGS, ELEARNING_ASSIGNMENT_ENABLED: undefined }, async () => {
     assert.throws(
       () => registerOnboardingWorker({ services: { elearningOnboarding: {} } }),
@@ -300,11 +351,13 @@ async function main() {
   })
 
   clearJobHandlers()
+  stopOnboardingWeeklyReportProducerRuntime()
   stopJobsWorker()
   console.log('✓ onboarding-worker: assignment and weekly report durable handlers')
 }
 
 main().catch((error) => {
+  stopOnboardingWeeklyReportProducerRuntime()
   stopJobsWorker()
   clearJobHandlers()
   console.error(error)

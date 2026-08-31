@@ -135,6 +135,9 @@ async function main() {
           },
         },
         elearningOnboarding: {
+          async enqueueWeeklyReports() {
+            return { weekStart: '2026-08-24', enqueuedCount: 0 }
+          },
           async materializeWeeklyReport() {
             throw new Error('not called')
           },
