@@ -275,9 +275,12 @@ function createQuery(): {
     }
 
     if (normalized.startsWith('UPDATE meta_records')) {
-      const [dataJson, recordId, sheetId] = params as [string, string, string]
+      const [dataJson, recordId, sheetId, expectedVersion] = params as [string, string, string, number?]
       const existing = records.find((record) => record.id === recordId && record.sheet_id === sheetId)
       if (!existing) return { rows: [], rowCount: 0 }
+      if (normalized.includes('AND version = $4') && existing.version !== expectedVersion) {
+        return { rows: [], rowCount: 0 }
+      }
       existing.data = JSON.parse(dataJson)
       existing.version += 1
       return {
@@ -594,6 +597,73 @@ describe('multitable records helper', () => {
       lockedAt: null,
     })
   })
+
+  it('patches when the optional expected version matches', async () => {
+    const { query, records } = createQuery()
+    records.push({
+      id: 'rec_existing',
+      sheet_id: 'sheet_service_ticket',
+      data: { ticketNo: 'TK-1001', title: 'Before', priority: 'normal' },
+      version: 2,
+    })
+
+    await expect(patchRecord({
+      query,
+      sheetId: 'sheet_service_ticket',
+      recordId: 'rec_existing',
+      expectedVersion: 2,
+      changes: { title: 'After' },
+    })).resolves.toMatchObject({
+      version: 3,
+      data: { title: 'After' },
+    })
+  })
+
+  it('fails closed on a stale expected version without data, version, or revision mutation', async () => {
+    const { query, records, revisions } = createQuery()
+    records.push({
+      id: 'rec_existing',
+      sheet_id: 'sheet_service_ticket',
+      data: { ticketNo: 'TK-1001', title: 'Canonical', priority: 'normal' },
+      version: 3,
+    })
+
+    await expect(patchRecord({
+      query,
+      sheetId: 'sheet_service_ticket',
+      recordId: 'rec_existing',
+      expectedVersion: 2,
+      changes: { title: 'Stale writer' },
+    })).rejects.toMatchObject({
+      code: 'VERSION_CONFLICT',
+      message: 'Record version conflict',
+    })
+    expect(records[0]).toMatchObject({ version: 3, data: { title: 'Canonical' } })
+    expect(revisions).toEqual([])
+  })
+
+  it.each([0, -1, 1.5, Number.NaN])(
+    'rejects invalid expectedVersion %s before touching the record',
+    async (expectedVersion) => {
+      const { query, records, revisions } = createQuery()
+      records.push({
+        id: 'rec_existing',
+        sheet_id: 'sheet_service_ticket',
+        data: { ticketNo: 'TK-1001', title: 'Canonical', priority: 'normal' },
+        version: 1,
+      })
+
+      await expect(patchRecord({
+        query,
+        sheetId: 'sheet_service_ticket',
+        recordId: 'rec_existing',
+        expectedVersion,
+        changes: { title: 'Invalid writer' },
+      })).rejects.toBeInstanceOf(MultitableRecordValidationError)
+      expect(records[0]).toMatchObject({ version: 1, data: { title: 'Canonical' } })
+      expect(revisions).toEqual([])
+    },
+  )
 
   it('allows clearing a date field with null during patch', async () => {
     const { query, records } = createQuery()

@@ -928,7 +928,7 @@ export class MetaSheetServer {
               recordId,
             })
           },
-          patchRecord: async ({ sheetId, recordId, changes }) => {
+          patchRecord: async ({ sheetId, recordId, changes, expectedVersion }) => {
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
                 const result = await query(sql, params)
@@ -946,6 +946,7 @@ export class MetaSheetServer {
                 sheetId,
                 recordId,
                 changes,
+                expectedVersion,
               })
             })
           },
@@ -2069,12 +2070,13 @@ export class MetaSheetServer {
                     }),
                   createRecord: ({ sheetId, data }) =>
                     createMultitableRecord({ query: txQuery, sheetId, data }),
-                  patchRecord: ({ sheetId, recordId, changes }) =>
+                  patchRecord: ({ sheetId, recordId, changes, expectedVersion }) =>
                     patchMultitableRecord({
                       query: txQuery,
                       sheetId,
                       recordId,
                       changes,
+                      expectedVersion,
                     }),
                 })
               })
@@ -4319,3 +4321,4 @@ export type {
  */
 export { MultitableRecordDeleteCapExceededError } from './multitable/record-errors'
 export { MultitableSideDoorDeleteNonTransactionalError } from './multitable/side-door-delete-trash'
+export { MultitableRecordVersionConflictError } from './multitable/record-errors'

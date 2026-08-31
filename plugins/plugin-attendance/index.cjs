@@ -15,6 +15,9 @@ const attendanceWorkDateAdaptersLib = require('./lib/attendance-work-date-adapte
 const attendanceShiftServiceLib = require('./lib/attendance-shift-service.cjs')
 const attendanceGroupFixedScheduleConfigServiceLib = require('./lib/attendance-group-fixed-schedule-config-service.cjs')
 const attendanceGroupFixedScheduleEffectivenessServiceLib = require('./lib/attendance-group-fixed-schedule-effectiveness-service.cjs')
+const {
+  buildAttendanceReportManagedContentPlan,
+} = require('./lib/attendance-report-managed-content-drift.cjs')
 // W6-1 (#4556): the fixed-schedule producer key has exactly one
 // implementation, in lib/, so the backend can inject the same function into
 // the FSER instance the /effective-policy route builds.
@@ -2977,6 +2980,8 @@ function createAttendanceReportRecordsSyncEmptyResult(extra = {}) {
     synced: 0,
     rowsSynced: 0,
     patched: 0,
+    repaired: 0,
+    conflicts: 0,
     created: 0,
     skipped: 0,
     failed: 0,
@@ -2993,7 +2998,7 @@ async function syncAttendanceReportRecords(context, db, orgId, logger, params) {
   const userId = String(params?.userId || '').trim()
   const from = String(params?.from || '').trim()
   const to = String(params?.to || '').trim()
-  const empty = { synced: 0, patched: 0, created: 0, skipped: 0, failed: 0, duplicateRowKeys: 0 }
+  const empty = { synced: 0, patched: 0, repaired: 0, conflicts: 0, created: 0, skipped: 0, failed: 0, duplicateRowKeys: 0 }
 
   const ensured = await ensureAttendanceReportRecords(context, orgId, logger)
   if (!ensured.available) {
@@ -3126,12 +3131,36 @@ async function syncAttendanceReportRecords(context, db, orgId, logger, params) {
       const existingData = (target && target.data && typeof target.data === 'object') ? target.data : {}
       const existingSource = existingData[physical(ATTENDANCE_REPORT_RECORDS_FIELDS.sourceFingerprint)]
       const existingField = existingData[physical(ATTENDANCE_REPORT_RECORDS_FIELDS.fieldFingerprint)]
-      if (existingSource === sourceFingerprint && existingField === fieldFingerprint) {
+      const plan = buildAttendanceReportManagedContentPlan({
+        existingData,
+        desiredData: data,
+        managedFieldIds: Object.keys(data),
+        volatileFieldId: physical(ATTENDANCE_REPORT_RECORDS_FIELDS.syncedAt),
+        fingerprintsMatch: existingSource === sourceFingerprint && existingField === fieldFingerprint,
+      })
+      if (plan.action === 'skip') {
         result.skipped += 1
         continue
       }
-      await records.patchRecord({ sheetId: ensured.sheetId, recordId: target.id, changes: data })
+      if (!Number.isSafeInteger(target?.version) || target.version < 1) {
+        throw new Error('ATTENDANCE_REPORT_MANAGED_CONTENT_VERSION_INVALID')
+      }
+      try {
+        await records.patchRecord({
+          sheetId: ensured.sheetId,
+          recordId: target.id,
+          changes: plan.changes,
+          expectedVersion: target.version,
+        })
+      } catch (error) {
+        if (error?.code !== 'VERSION_CONFLICT') throw error
+        result.conflicts += 1
+        result.failed += 1
+        logger?.warn?.('attendance report record sync version conflict', { code: 'VERSION_CONFLICT' })
+        continue
+      }
       result.patched += 1
+      if (plan.reason === 'managed_drift') result.repaired += 1
     } catch (error) {
       result.failed += 1
       logger?.warn?.('attendance report record sync row failed', {
@@ -3203,6 +3232,8 @@ async function syncAttendanceReportRecordsForUsers(context, db, orgId, logger, p
       aggregate.rowsSynced = aggregate.synced
       aggregate.created += Number(result.created ?? 0)
       aggregate.patched += Number(result.patched ?? 0)
+      aggregate.repaired += Number(result.repaired ?? 0)
+      aggregate.conflicts += Number(result.conflicts ?? 0)
       aggregate.skipped += Number(result.skipped ?? 0)
       aggregate.failed += Number(result.failed ?? 0)
       aggregate.duplicateRowKeys += Number(result.duplicateRowKeys ?? 0)
@@ -3313,6 +3344,8 @@ function createAttendanceReportSyncJobEmptyTotals() {
     rowsSynced: 0,
     created: 0,
     patched: 0,
+    repaired: 0,
+    conflicts: 0,
     skipped: 0,
     failed: 0,
     duplicateRowKeys: 0,
@@ -3481,6 +3514,8 @@ const ATTENDANCE_REPORT_SYNC_JOB_TOTAL_KEYS = Object.freeze([
   'rowsSynced',
   'created',
   'patched',
+  'repaired',
+  'conflicts',
   'skipped',
   'failed',
   'duplicateRowKeys',
@@ -3545,6 +3580,8 @@ function sanitizeAttendanceReportSyncJobLastResult(pageResult = {}) {
     'rowsSynced',
     'created',
     'patched',
+    'repaired',
+    'conflicts',
     'skipped',
     'failed',
     'duplicateRowKeys',
@@ -4268,7 +4305,7 @@ async function resolveAttendanceReportPeriodSyncPeriod(db, orgId, params = {}) {
 async function syncAttendanceReportPeriodSummary(context, db, orgId, logger, params) {
   const userId = String(params?.userId || '').trim()
   const period = params?.period
-  const empty = { synced: 0, patched: 0, created: 0, skipped: 0, failed: 0, duplicateRowKeys: 0 }
+  const empty = { synced: 0, patched: 0, repaired: 0, conflicts: 0, created: 0, skipped: 0, failed: 0, duplicateRowKeys: 0 }
   if (!userId || !period?.from || !period?.to) {
     return { ...empty, failed: 1, reason: 'INVALID_SYNC_PARAMS' }
   }
@@ -4404,11 +4441,34 @@ async function syncAttendanceReportPeriodSummary(context, db, orgId, logger, par
       const existingData = (target && target.data && typeof target.data === 'object') ? target.data : {}
       const existingSource = existingData[physical(ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.sourceFingerprint)]
       const existingField = existingData[physical(ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.fieldFingerprint)]
-      if (existingSource === sourceFingerprint && existingField === fieldFingerprint) {
+      const plan = buildAttendanceReportManagedContentPlan({
+        existingData,
+        desiredData: data,
+        managedFieldIds: Object.keys(data),
+        volatileFieldId: physical(ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.syncedAt),
+        fingerprintsMatch: existingSource === sourceFingerprint && existingField === fieldFingerprint,
+      })
+      if (plan.action === 'skip') {
         result.skipped += 1
       } else {
-        await records.patchRecord({ sheetId: ensured.sheetId, recordId: target.id, changes: data })
-        result.patched += 1
+        if (!Number.isSafeInteger(target?.version) || target.version < 1) {
+          throw new Error('ATTENDANCE_REPORT_MANAGED_CONTENT_VERSION_INVALID')
+        }
+        try {
+          await records.patchRecord({
+            sheetId: ensured.sheetId,
+            recordId: target.id,
+            changes: plan.changes,
+            expectedVersion: target.version,
+          })
+          result.patched += 1
+          if (plan.reason === 'managed_drift') result.repaired += 1
+        } catch (error) {
+          if (error?.code !== 'VERSION_CONFLICT') throw error
+          result.conflicts += 1
+          result.failed += 1
+          logger?.warn?.('attendance report period summary sync version conflict', { code: 'VERSION_CONFLICT' })
+        }
       }
     }
   } catch (error) {
@@ -4497,6 +4557,8 @@ async function syncAttendanceReportPeriodSummariesForUsers(context, db, orgId, l
       aggregate.rowsSynced = aggregate.synced
       aggregate.created += Number(result.created ?? 0)
       aggregate.patched += Number(result.patched ?? 0)
+      aggregate.repaired += Number(result.repaired ?? 0)
+      aggregate.conflicts += Number(result.conflicts ?? 0)
       aggregate.skipped += Number(result.skipped ?? 0)
       aggregate.failed += Number(result.failed ?? 0)
       aggregate.duplicateRowKeys += Number(result.duplicateRowKeys ?? 0)
@@ -49701,6 +49763,8 @@ module.exports = {
           synced: result.synced,
           rowsSynced: result.rowsSynced,
           patched: result.patched,
+          repaired: result.repaired,
+          conflicts: result.conflicts,
           created: result.created,
           skipped: result.skipped,
           failed: result.failed,
@@ -49822,6 +49886,8 @@ module.exports = {
             synced: result.synced,
             rowsSynced: result.rowsSynced,
             patched: result.patched,
+            repaired: result.repaired,
+            conflicts: result.conflicts,
             created: result.created,
             skipped: result.skipped,
             failed: result.failed,

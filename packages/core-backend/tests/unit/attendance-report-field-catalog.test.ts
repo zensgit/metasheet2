@@ -1127,8 +1127,9 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(() => helpers.buildAttendanceRecordReportExportItem(exportRow, exportFields)).not.toThrow()
 
     // store-backed records mock (Map by physical row_key value) for upsert/skip/duplicate
-    const store: Array<{ id: string; data: Record<string, unknown> }> = []
+    const store: Array<{ id: string; version: number; data: Record<string, unknown> }> = []
     let seq = 0
+    let forceVersionConflict = false
     const rowKeyFid = 'fld_row_key'
     const records = {
       queryRecords: async ({ filters }: { filters?: Record<string, unknown> }) => {
@@ -1136,13 +1137,24 @@ describe('attendance report field catalog multitable foundation', () => {
         return store.filter(r => r.data[rowKeyFid] === want)
       },
       createRecord: async ({ data }: { data: Record<string, unknown> }) => {
-        const rec = { id: `rec-${++seq}`, data: { ...data } }
+        const rec = { id: `rec-${++seq}`, version: 1, data: { ...data } }
         store.push(rec)
         return rec
       },
-      patchRecord: async ({ recordId, changes }: { recordId: string; changes: Record<string, unknown> }) => {
+      patchRecord: async ({ recordId, changes, expectedVersion }: { recordId: string; changes: Record<string, unknown>; expectedVersion?: number }) => {
         const rec = store.find(r => r.id === recordId)
-        if (rec) rec.data = { ...rec.data, ...changes }
+        if (rec && rec.version !== expectedVersion) {
+          throw Object.assign(new Error('Record version conflict'), { code: 'VERSION_CONFLICT' })
+        }
+        if (rec && forceVersionConflict) {
+          forceVersionConflict = false
+          rec.version += 1
+          throw Object.assign(new Error('Record version conflict'), { code: 'VERSION_CONFLICT' })
+        }
+        if (rec) {
+          rec.data = { ...rec.data, ...changes }
+          rec.version += 1
+        }
         return rec
       },
     }
@@ -1200,17 +1212,38 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(r2).toMatchObject({ synced: 2, created: 0, skipped: 2, patched: 0 })
     expect(store.length).toBe(2)
 
+    // Same fingerprints are not proof of content integrity: repair only the managed projection map.
+    store[0].data.fld_department = 'tampered-report-value'
+    store[0].data.fld_custom_note = { exact: 'preserve-me' }
+    const r3 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
+    expect(r3).toMatchObject({ synced: 2, created: 0, repaired: 1, patched: 1, skipped: 1 })
+    expect(store[0].data.fld_department).toBe('Assembly')
+    expect(store[0].data.fld_custom_note).toEqual({ exact: 'preserve-me' })
+    expect(store[0].version).toBe(2)
+
+    store[0].data.fld_department = 'concurrent-drift-remains-retryable'
+    forceVersionConflict = true
+    const conflictLogger = { warn: vi.fn() }
+    const conflict = await helpers.syncAttendanceReportRecords(context, db, 'org-1', conflictLogger, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
+    expect(conflict).toMatchObject({ patched: 0, repaired: 0, conflicts: 1, failed: 1, skipped: 1 })
+    expect(store[0].data.fld_department).toBe('concurrent-drift-remains-retryable')
+    expect(conflictLogger.warn).toHaveBeenCalledWith(
+      'attendance report record sync version conflict',
+      { code: 'VERSION_CONFLICT' },
+    )
+
     // skip-boundary: source unchanged but field_fingerprint stale → must patch, not skip
     store[0].data['fld_field_fingerprint'] = 'STALE-FIELD-FP'
-    const r3 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
-    expect(r3.patched).toBe(1)
-    expect(r3.skipped).toBe(1)
+    const r4 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
+    expect(r4.patched).toBe(1)
+    expect(r4.repaired).toBe(0)
+    expect(r4.skipped).toBe(1)
     expect(store[0].data['fld_field_fingerprint']).not.toBe('STALE-FIELD-FP') // rewritten
 
     // duplicate row_key fuse: inject a 2nd record same row_key → patch first, count duplicate
-    store.push({ id: 'rec-dup', data: { ...store[0].data } })
-    const r4 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
-    expect(r4.duplicateRowKeys).toBeGreaterThanOrEqual(1)
+    store.push({ id: 'rec-dup', version: 1, data: { ...store[0].data } })
+    const r5 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
+    expect(r5.duplicateRowKeys).toBeGreaterThanOrEqual(1)
     expect(store.filter(r => r.data[rowKeyFid] === 'org-1:u-1:2026-05-13').length).toBe(2) // not auto-deleted (v1)
   })
 
@@ -1220,7 +1253,7 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(helpers.normalizeAttendanceReportRecordsSyncPage('2', '500'))
       .toMatchObject({ page: 2, pageSize: 100, offset: 100 })
 
-    const store: Array<{ id: string; data: Record<string, unknown> }> = []
+    const store: Array<{ id: string; version: number; data: Record<string, unknown> }> = []
     let seq = 0
     const rowKeyFid = 'fld_row_key'
     const records = {
@@ -1378,6 +1411,7 @@ describe('attendance report field catalog multitable foundation', () => {
 
     const store = [{
       id: 'rec-existing',
+      version: 1,
       data: {
         fld_row_key: 'org-1:u-1:2026-05-13',
         fld_field_fingerprint: 'STALE-FIELD',
@@ -1392,9 +1426,15 @@ describe('attendance report field catalog multitable foundation', () => {
         return store.filter(r => r.data.fld_row_key === want)
       },
       createRecord: vi.fn(),
-      patchRecord: vi.fn(async ({ recordId, changes }: { recordId: string; changes: Record<string, unknown> }) => {
+      patchRecord: vi.fn(async ({ recordId, changes, expectedVersion }: { recordId: string; changes: Record<string, unknown>; expectedVersion?: number }) => {
         const rec = store.find(r => r.id === recordId)
-        if (rec) rec.data = { ...rec.data, ...changes }
+        if (rec && rec.version !== expectedVersion) {
+          throw Object.assign(new Error('Record version conflict'), { code: 'VERSION_CONFLICT' })
+        }
+        if (rec) {
+          rec.data = { ...rec.data, ...changes }
+          rec.version += 1
+        }
         return rec
       }),
     }
@@ -1620,13 +1660,19 @@ describe('attendance report field catalog multitable foundation', () => {
         return store.filter(record => record.data.fld_row_key === want)
       }),
       createRecord: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
-        const record = { id: `rec-${++seq}`, data: { ...data } }
+        const record = { id: `rec-${++seq}`, version: 1, data: { ...data } }
         store.push(record)
         return record
       }),
-      patchRecord: vi.fn(async ({ recordId, changes }: { recordId: string; changes: Record<string, unknown> }) => {
+      patchRecord: vi.fn(async ({ recordId, changes, expectedVersion }: { recordId: string; changes: Record<string, unknown>; expectedVersion?: number }) => {
         const record = store.find(item => item.id === recordId)
-        if (record) record.data = { ...record.data, ...changes }
+        if (record && record.version !== expectedVersion) {
+          throw Object.assign(new Error('Record version conflict'), { code: 'VERSION_CONFLICT' })
+        }
+        if (record) {
+          record.data = { ...record.data, ...changes }
+          record.version += 1
+        }
         return record
       }),
     }
@@ -1735,6 +1781,21 @@ describe('attendance report field catalog multitable foundation', () => {
     )
     expect(second).toMatchObject({ synced: 1, created: 0, patched: 0, skipped: 1 })
 
+    store[0].data.fld_total_minutes = 999
+    store[0].data.fld_custom_note = ['preserve', 1]
+    const repaired = await helpers.syncAttendanceReportPeriodSummary(
+      context,
+      db,
+      'org-1',
+      { warn: vi.fn() },
+      { period, userId: 'u-1' },
+    )
+    expect(repaired).toMatchObject({ patched: 1, repaired: 1, skipped: 0, conflicts: 0 })
+    expect(records.patchRecord.mock.calls.at(-1)?.[0].expectedVersion).toBe(1)
+    expect(store[0].data.fld_total_minutes).toBe(960)
+    expect(store[0].data.fld_custom_note).toEqual(['preserve', 1])
+    expect(store[0].version).toBe(2)
+
     store[0].data.fld_field_fingerprint = 'STALE-FIELD'
     store[0].data.fld_period_score = 99
     const third = await helpers.syncAttendanceReportPeriodSummary(
@@ -1750,7 +1811,7 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(store[0].data.fld_period_score).toBeNull()
     expect(store[0].data.fld_field_fingerprint).not.toBe('STALE-FIELD')
 
-    store.push({ id: 'rec-duplicate', data: { ...store[0].data } })
+    store.push({ id: 'rec-duplicate', version: 1, data: { ...store[0].data } })
     const fourth = await helpers.syncAttendanceReportPeriodSummary(
       context,
       db,
