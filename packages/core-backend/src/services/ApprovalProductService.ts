@@ -5265,6 +5265,11 @@ export class ApprovalProductService {
         return resolution
       }
 
+      const currentNode = runtimeGraph.nodes.find((node) => node.key === nodeKey)
+      if (currentNode?.type === 'handler') {
+        return resolution
+      }
+
       const approvalMode = executor.getApprovalMode(nodeKey)
       const evaluationCandidates = approvalMode === 'sequential'
         ? resolution.assignments.filter((assignment) => isSequentialQueueActive(assignment.metadata))
