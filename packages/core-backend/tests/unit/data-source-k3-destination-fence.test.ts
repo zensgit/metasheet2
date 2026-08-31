@@ -20,6 +20,7 @@ import {
   isPureReadStatement,
   normalizeDestinationTable,
   preserveK3Marker,
+  referencesCrossServer,
   sqlTargetsK3BusinessTable,
 } from '../../src/data-adapters/k3-destination-write-fence'
 import { isReadOnlySql } from '../../src/routes/data-sources'
@@ -403,24 +404,46 @@ const ROUND3_P0 = [
   "UPDATE TOP (5) t_ICItem SET FNumber='X'",                       // TOP between verb and table
   "INSERT INTO srv.AIS.dbo.t_ICItem (FItemID) VALUES (1)",         // 4-part linked-server name
 ]
+// Round-4: data-modifying CTEs. A leading WITH passed the old allowlist (route isReadOnlySql admits
+// it does not catch these); the gate now refuses every WITH-led statement outright.
+const ROUND4_CTE = [
+  "WITH c AS (SELECT 1 AS n) DELETE FROM t_ICItem",
+  "WITH c AS (SELECT 1 AS n) UPDATE t_ICItem SET FNumber='X'",
+  "WITH c AS (SELECT 1 AS n) INSERT INTO t_ICItem (FItemID) SELECT n FROM c",
+  "WITH c AS (SELECT 1 AS n) MERGE INTO t_ICItem AS t USING c ON t.id=c.n WHEN MATCHED THEN UPDATE SET a=1",
+]
 
 describe('K3 connection read-only gate — the pure-read allowlist', () => {
-  it('isPureReadStatement mirrors the route isReadOnlySql exactly (pinned equivalent)', () => {
-    const cases = [
-      'SELECT 1', '  select * from t ', 'WITH x AS (SELECT 1) SELECT * FROM x', 'EXPLAIN SELECT 1',
-      'show tables', 'SELECT 1;', 'SELECT 1; DROP TABLE t', 'SELECT * INTO backup FROM t',
-      'INSERT INTO t VALUES (1)', 'UPDATE t SET a=1', 'DELETE FROM t', 'MERGE INTO t USING s ON 1=1',
-      'EXEC sp_who', 'UPDATE TOP (5) t_ICItem SET a=1', "INSERT INTO srv.a.dbo.t VALUES (1)", '',
+  it('isPureReadStatement is STRICTER than the route isReadOnlySql: it refuses CTEs (WITH)', () => {
+    // They AGREE on non-CTE statements…
+    const agree = [
+      'SELECT 1', '  select * from t ', 'EXPLAIN SELECT 1', 'show tables', 'SELECT 1;',
+      'SELECT 1; DROP TABLE t', 'SELECT * INTO backup FROM t', 'INSERT INTO t VALUES (1)',
+      'UPDATE t SET a=1', 'DELETE FROM t', 'MERGE INTO t USING s ON 1=1', 'EXEC sp_who',
+      'UPDATE TOP (5) t_ICItem SET a=1', "INSERT INTO srv.a.dbo.t VALUES (1)", '',
     ]
-    for (const c of cases) {
-      expect(isPureReadStatement(c)).toBe(isReadOnlySql(c)) // the adapter's allowlist == the route's
+    for (const c of agree) expect(isPureReadStatement(c)).toBe(isReadOnlySql(c))
+    // …but DIVERGE on data-modifying CTEs the route's own INTO-less check misses (DELETE/UPDATE/MERGE
+    // after a WITH, and a plain CTE-SELECT): the route admits them as read-only, the gate refuses.
+    // Only the INTO-less CTEs slip the route (it happens to catch INSERT INTO / MERGE INTO via its
+    // own `\binto\b` check); the DELETE/UPDATE CTEs and a plain CTE-SELECT are the route's real hole.
+    const routeMisses = [
+      "WITH c AS (SELECT 1 AS n) DELETE FROM t_ICItem",
+      "WITH c AS (SELECT 1 AS n) UPDATE t_ICItem SET FNumber='X'",
+      'WITH x AS (SELECT 1) SELECT * FROM x',
+    ]
+    for (const cte of routeMisses) {
+      expect(isReadOnlySql(cte)).toBe(true)         // the route would allow it (its documented hole)
+      expect(isPureReadStatement(cte)).toBe(false)  // the K3 gate refuses it (fail-closed)
     }
+    // Every data-modifying CTE — including the INSERT…INTO one the route happens to catch — is
+    // refused by the gate.
+    for (const cte of ROUND4_CTE) expect(isPureReadStatement(cte)).toBe(false)
   })
 
-  it('none of the round-3 bypasses is a pure read; ordinary reads are', () => {
-    for (const sql of ROUND3_P0) expect(isPureReadStatement(sql)).toBe(false)
+  it('none of the round-3/4 bypasses is a pure read; ordinary SELECT reads are', () => {
+    for (const sql of [...ROUND3_P0, ...ROUND4_CTE]) expect(isPureReadStatement(sql)).toBe(false)
     expect(isPureReadStatement("SELECT TOP 10 * FROM t_ICItem")).toBe(true) // read of a K3 table is fine
-    expect(isPureReadStatement("WITH c AS (SELECT 1 AS n) SELECT n FROM c")).toBe(true)
   })
 
   it('isK3ReachingConnection is true when marked OR detected', () => {
@@ -446,10 +469,10 @@ describe('K3 connection read-only gate — the pure-read allowlist', () => {
   })
 })
 
-describe('DataSourceManager query() — the round-3 T-SQL bypasses are all refused (connection gate)', () => {
-  it('refuses UPDATE…FROM / DELETE…FROM / UPDATE TOP / 4-part-name on a MARKED source, before the driver', async () => {
+describe('DataSourceManager query() — the round-3/4 T-SQL bypasses are all refused (connection gate)', () => {
+  it('refuses UPDATE…FROM / DELETE…FROM / UPDATE TOP / 4-part / and every data-modifying CTE on a MARKED source', async () => {
     const { m, querySpy } = await managerWithStubbedWrite(sqlserverConfig('k3-round3', { k3Destination: true }))
-    for (const sql of ROUND3_P0) {
+    for (const sql of [...ROUND3_P0, ...ROUND4_CTE]) {
       expect((await asyncRefusal(m.query('k3-round3', sql))).code).toBe(FIXED_CODE)
     }
     expect(querySpy).not.toHaveBeenCalled() // none reached the driver
@@ -506,5 +529,62 @@ describe('K3 marker durability (P1) — set-once, not clearable', () => {
     expect(m.getDataSource('durable').getConfig().options?.k3Destination).toBe(true) // still K3, still read-only
     // And the value-pinned refusal code the route returns.
     expect(K3_DESTINATION_MARKER_IMMUTABLE).toBe('K3_DESTINATION_MARKER_IMMUTABLE')
+  })
+})
+
+// ── ROUND-4 — cross-server / linked-server laundering (P0-LAUNDER, tractable close) ────────────
+// An UNMARKED, non-K3-local source can launder a K3 write across a LINKED server, which the local
+// read-only gate and the local-catalog probe cannot see. Cross-server primitives are refused on ANY
+// sqlserver source, without identifying the K3 table.
+describe('K3 cross-server write refusal — the linked-server laundering vector', () => {
+  const CROSS_SERVER_WRITES = [
+    "INSERT INTO K3SRV.AIS.dbo.t_ICItem (FItemID) VALUES (1)",     // 4-part linked-server write target
+    "UPDATE K3SRV.AIS.dbo.t_ICItem SET FNumber='X'",
+    "DELETE FROM [K3SRV].[AIS].[dbo].[t_ICItem]",
+    "SELECT * FROM OPENQUERY(K3SRV, 'DELETE FROM t_ICItem')",      // write smuggled inside a read shape
+    "SELECT * FROM OPENROWSET('SQLNCLI','Server=K3SRV;','SELECT 1')",
+    "INSERT INTO t (a) SELECT a FROM OPENDATASOURCE('SQLNCLI','...').AIS.dbo.t_ICItem",
+  ]
+
+  it('referencesCrossServer flags 4-part names, OPENQUERY, OPENROWSET, OPENDATASOURCE, EXEC…AT', () => {
+    for (const sql of CROSS_SERVER_WRITES) expect(referencesCrossServer(sql)).toBe(true)
+    expect(referencesCrossServer("EXEC ('SELECT 1') AT K3SRV")).toBe(true)
+    // Local, single-server statements are NOT cross-server.
+    expect(referencesCrossServer("INSERT INTO integration_material_stage VALUES (1)")).toBe(false)
+    expect(referencesCrossServer("SELECT * FROM dbo.t_ICItem")).toBe(false)      // 2-part local read
+    expect(referencesCrossServer("SELECT * FROM AIS.dbo.t_ICItem")).toBe(false)  // 3-part cross-DB (same server)
+  })
+
+  it('the adapter refuses every cross-server write on an UNMARKED, non-K3-local source', async () => {
+    // This is the exact P0-LAUNDER shape: no marker, local catalog is innocuous, K3 sits behind a link.
+    const m = new DataSourceManager()
+    await m.addDataSource(sqlserverConfig('local-nonk3'), { ownerId: 'o' })
+    const a = m.getDataSource('local-nonk3')
+    for (const sql of CROSS_SERVER_WRITES) {
+      expect((await asyncRefusal(a.query(sql))).code).toBe(FIXED_CODE)
+    }
+  })
+
+  it('the manager refuses a cross-server write fail-early on a sqlserver source', async () => {
+    const { m, querySpy } = await managerWithStubbedWrite(sqlserverConfig('local-nonk3-mgr'))
+    expect((await asyncRefusal(m.query('local-nonk3-mgr', "INSERT INTO K3SRV.AIS.dbo.t_ICItem VALUES (1)"))).code).toBe(FIXED_CODE)
+    expect(querySpy).not.toHaveBeenCalled()
+  })
+
+  it('GREEN LANE: a local non-K3 write and a local/cross-DB read still pass the cross-server check', async () => {
+    const a = (async () => {
+      const m = new DataSourceManager()
+      await m.addDataSource(sqlserverConfig('local-green'), { ownerId: 'o' })
+      return m.getDataSource('local-green')
+    })
+    const adapter = await a()
+    // Local non-K3 write: passes both checks, fails later only at connect.
+    const w = await asyncRefusal(adapter.query("INSERT INTO integration_material_stage (code) VALUES ('X')")) as { code?: string; message?: string }
+    expect(w.code).not.toBe(FIXED_CODE)
+    expect(String(w.message)).toMatch(/Not connected/)
+    // A 3-part cross-DB READ (same server) passes — reads are not fenced and this is not cross-server.
+    const r = await asyncRefusal(adapter.query("SELECT TOP 1 * FROM AIS.dbo.t_ICItem")) as { code?: string; message?: string }
+    expect(r.code).not.toBe(FIXED_CODE)
+    expect(String(r.message)).toMatch(/Not connected/)
   })
 })

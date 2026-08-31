@@ -29,6 +29,7 @@ import type {
 import { BaseDataAdapter, getStringConfig, getNumberConfig } from './BaseAdapter'
 import {
   assertNotK3ConnectionWrite,
+  assertNoCrossServerWrite,
   catalogIndicatesK3,
   isK3ReachingConnection,
   K3DestinationWriteError,
@@ -240,16 +241,24 @@ export class MSSQLAdapter extends BaseDataAdapter {
     }
   }
 
-  // G-4 DETECTION flag: set true after connect if the catalog contains K3 tables. Per live pool, so
-  // it is re-probed on every (re)connect — durability across restarts comes from re-detection, and
-  // from the durable marker. Reset on disconnect so a reused instance never carries a stale verdict.
+  // G-4 DETECTION flag — BEST-EFFORT DEFENSE IN DEPTH, not a guarantee. Set true after connect if the
+  // LOCAL catalog contains K3 tables. It is fail-OPEN (a probe error leaves it false), sees only the
+  // local catalog (never a linked server), and cannot see a K3 table fronted by a renamed local
+  // view/synonym — so it does NOT close the laundering residual; the DECLARED marker is the control.
+  // Reset on disconnect so a reused instance never carries a stale verdict.
   private k3DetectedReaching = false
 
   private async probeK3Reaching(): Promise<void> {
     if (!this.pool) return
     try {
+      // TARGETED existence probe: ask only for tables that MATCH the K3 signature, so the answer does
+      // not depend on an unordered TOP sample of a large catalog. The JS classifier is the authority
+      // (catalogIndicatesK3); the LIKE pre-filter is a cheap bound, escaped so `_` is a literal.
       const result = await this.pool.request().query<{ name: string }>(
-        "SELECT TOP 5000 TABLE_NAME AS name FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE IN ('BASE TABLE', 'VIEW')"
+        "SELECT TABLE_NAME AS name FROM INFORMATION_SCHEMA.TABLES " +
+          "WHERE TABLE_NAME LIKE 't\\_ic%' ESCAPE '\\' OR TABLE_NAME LIKE 't\\_bd%' ESCAPE '\\' " +
+          "OR TABLE_NAME IN ('t_MeasureUnit','t_Organization','ICMO','ICMOEntry','ICStockBill'," +
+          "'ICStockBillEntry','POOrder','POOrderEntry','SEOrder','SEOrderEntry','Bill1002535','Bill1002502')"
       )
       const names = (result.recordset ?? []).map((row) => row.name)
       if (catalogIndicatesK3(names)) this.k3DetectedReaching = true
@@ -310,6 +319,11 @@ export class MSSQLAdapter extends BaseDataAdapter {
     // not known to be K3, a best-effort statement signature is the defense-in-depth backstop. A SELECT
     // — including every internal select() and a read of a K3 table — always passes. Placed FIRST,
     // before the pool is touched.
+    //
+    // Cross-server refusal runs UNCONDITIONALLY (every sqlserver source): a linked-server write
+    // (4-part name / OPENQUERY / OPENROWSET) reaches K3 across a server the local gate and the local
+    // catalog probe cannot see, so it is refused here regardless of marker or detection.
+    assertNoCrossServerWrite(sql)
     assertNotK3ConnectionWrite(this.config, sql, this.k3DetectedReaching)
     if (!this.pool) {
       throw new Error('Not connected to database')
