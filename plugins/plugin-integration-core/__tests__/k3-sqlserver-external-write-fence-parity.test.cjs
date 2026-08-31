@@ -78,7 +78,25 @@ test('E4S-00 (control): the ban now has exactly TWO subjects, and still discrimi
   // the default `targetKind` in a refusal's details, so no existing refusal shape moved.
   assert.equal(fence.K3_EXTERNAL_WRITE_TARGET_KIND, WEBAPI_KIND)
   assert.equal(fence.K3_EXTERNAL_WRITE_SQLSERVER_TARGET_KIND, SQL_KIND)
+
+  // N4 VALUE PIN (not derivation). The frozen subject set must LITERALLY contain both kind strings,
+  // by value and by count — an earlier version pinned only membership via `isK3ExternalWriteTargetKind`,
+  // which reads the two constants directly, so removing `erp:k3-wise-sqlserver` from the SET left the
+  // membership test green (a BAD GREEN). These assertions red the instant the set shrinks.
   assert.deepEqual([...fence.K3_EXTERNAL_WRITE_TARGET_KINDS], [WEBAPI_KIND, SQL_KIND])
+  assert.equal(fence.K3_EXTERNAL_WRITE_TARGET_KINDS.length, 2, 'exactly two subjects, no more, no fewer')
+  assert.ok(fence.K3_EXTERNAL_WRITE_TARGET_KINDS.includes('erp:k3-wise-webapi'), 'the WebAPI kind is in the set by string')
+  assert.ok(fence.K3_EXTERNAL_WRITE_TARGET_KINDS.includes('erp:k3-wise-sqlserver'), 'the SQL Server kind is in the set by string')
+
+  // And the SET and the PREDICATE must AGREE, so the two cannot diverge (the predicate reading a
+  // now-smaller set of constants while the set still lists the kind, or vice versa): every member of
+  // the set is accepted by the predicate, and every banned literal is a member of the set.
+  for (const kind of fence.K3_EXTERNAL_WRITE_TARGET_KINDS) {
+    assert.equal(fence.isK3ExternalWriteTargetKind(kind), true, `${kind} is in the set AND accepted by the predicate`)
+  }
+  for (const banned of [WEBAPI_KIND, SQL_KIND]) {
+    assert.ok(fence.K3_EXTERNAL_WRITE_TARGET_KINDS.includes(banned), `${banned} the predicate bans is present in the set`)
+  }
 
   assert.equal(fence.isK3ExternalWriteTargetKind(WEBAPI_KIND), true)
   assert.equal(fence.isK3ExternalWriteTargetKind(SQL_KIND), true, 'the sibling kind is now a subject')
