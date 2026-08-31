@@ -12581,7 +12581,8 @@ function scheduleDispatchGroupLabel(groupId: string): string {
 function scheduleDispatchShiftLabel(item: AttendanceScheduleDispatchRequest): string {
   if (item.targetShiftLabel) return item.targetShiftLabel
   if (item.targetShiftId) {
-    return shifts.value.find(shift => shift.id === item.targetShiftId)?.name ?? item.targetShiftId
+    return shifts.value.find(shift => shift.id === item.targetShiftId)?.name
+      ?? tr('Deleted or unavailable shift', '班次已删除或不可用')
   }
   return tr('Deleted or unavailable shift', '班次已删除或不可用')
 }
@@ -22078,7 +22079,8 @@ function employeeScheduleDispatchTargetShift(item: AttendanceRequest): string {
   if (label) return label
   const shiftId = String(dispatch.targetShiftId ?? dispatch.target_shift_id ?? '').trim()
   if (!shiftId) return tr('Deleted or unavailable shift', '班次已删除或不可用')
-  return shifts.value.find(shift => shift.id === shiftId)?.name ?? shiftId
+  return shifts.value.find(shift => shift.id === shiftId)?.name
+    ?? tr('Deleted or unavailable shift', '班次已删除或不可用')
 }
 
 function employeeScheduleDispatchSlot(item: AttendanceRequest): number {

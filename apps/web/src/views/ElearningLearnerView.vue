@@ -11,6 +11,8 @@
     <ElearningCertificateWalletSection v-if="incentiveEnabled" />
     <ElearningLearningProfileSection v-if="incentiveEnabled" />
 
+    <ElearningPracticeLearnerSection v-if="practiceEnabled" />
+
     <p
       v-if="status"
       class="elearning-status"
@@ -22,8 +24,8 @@
       {{ status }}
     </p>
 
-    <p v-if="loading && courses.length === 0" class="elearning-muted">{{ elearningLabel('learner.loading', isZh) }}</p>
-    <p v-else-if="courses.length === 0 && statusTone !== 'error'" class="elearning-muted">{{ elearningLabel('learner.empty', isZh) }}</p>
+    <p v-if="ready && loading && courses.length === 0" class="elearning-muted">{{ elearningLabel('learner.loading', isZh) }}</p>
+    <p v-else-if="ready && courses.length === 0 && statusTone !== 'error'" class="elearning-muted">{{ elearningLabel('learner.empty', isZh) }}</p>
 
     <article
       v-for="course in courses"
@@ -234,6 +236,8 @@ import ElearningCreditWalletSection from './ElearningCreditWalletSection.vue'
 import ElearningCertificateWalletSection from './ElearningCertificateWalletSection.vue'
 import ElearningLearningProfileSection from './ElearningLearningProfileSection.vue'
 import ElearningPortalHero from './ElearningPortalHero.vue'
+import ElearningPracticeLearnerSection from './ElearningPracticeLearnerSection.vue'
+import { isElearningPracticeReady } from '../services/elearningPractice'
 import {
   elearningExamAnswerProgress,
   elearningExamCountdown,
@@ -254,6 +258,7 @@ const ready = ref(false)
 const assessmentReady = ref(false)
 const contentEnabled = ref(false)
 const incentiveEnabled = ref(false)
+const practiceEnabled = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
 const activeCourseVersionId = ref<string | null>(null)
@@ -608,7 +613,13 @@ async function ensureV01Ready(): Promise<void> {
   contentEnabled.value = isElearningContentReady(capabilities)
   incentiveEnabled.value = capabilities.enabled === true
     && capabilities.capabilities.incentive === true
-  if (!assessmentReady.value && !contentEnabled.value && !incentiveEnabled.value) {
+  practiceEnabled.value = isElearningPracticeReady(capabilities)
+  if (
+    !assessmentReady.value
+    && !contentEnabled.value
+    && !incentiveEnabled.value
+    && !practiceEnabled.value
+  ) {
     throw new ElearningApiError('feature_disabled', 404)
   }
   ready.value = assessmentReady.value || contentEnabled.value

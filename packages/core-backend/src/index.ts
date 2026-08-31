@@ -281,6 +281,7 @@ import {
 import { createElearningMediaPlaybackRouter } from './routes/elearning-media-playback'
 import { isElearningCreditSurfaceEnabled } from './services/elearning-credit-ledger'
 import { getBootedElearningMediaRangeStore } from './services/elearning-media-runtime'
+import { isElearningPracticeSurfaceEnabled } from './services/elearning-question-practice-postgres'
 import { createElearningPilotRuntime } from './services/elearning-pilot-runtime'
 import {
   checkElearningAssignmentReminderEligibility,
@@ -299,6 +300,11 @@ import {
   ElearningStatsDailyJobProducerError,
   enqueueElearningStatsDailyJobs,
 } from './services/elearning-stats-daily-job-producer'
+import {
+  cleanupElearningAnalyticsExport,
+  ElearningAnalyticsExportError,
+  materializeElearningAnalyticsExport,
+} from './services/elearning-analytics-export'
 import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
 import { adminUsersRouter } from './routes/admin-users'
@@ -922,7 +928,7 @@ export class MetaSheetServer {
               recordId,
             })
           },
-          patchRecord: async ({ sheetId, recordId, changes }) => {
+          patchRecord: async ({ sheetId, recordId, changes, expectedVersion }) => {
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
                 const result = await query(sql, params)
@@ -940,6 +946,7 @@ export class MetaSheetServer {
                 sheetId,
                 recordId,
                 changes,
+                expectedVersion,
               })
             })
           },
@@ -1454,6 +1461,7 @@ export class MetaSheetServer {
       isElearningContentSurfaceEnabled(process.env)
       || isElearningCreditSurfaceEnabled(process.env)
       || isElearningAnalyticsSurfaceEnabled(process.env)
+      || isElearningPracticeSurfaceEnabled(process.env)
     )
       ? createElearningPilotRuntime({ db: poolManager.get() })
       : null
@@ -2062,12 +2070,13 @@ export class MetaSheetServer {
                     }),
                   createRecord: ({ sheetId, data }) =>
                     createMultitableRecord({ query: txQuery, sheetId, data }),
-                  patchRecord: ({ sheetId, recordId, changes }) =>
+                  patchRecord: ({ sheetId, recordId, changes, expectedVersion }) =>
                     patchMultitableRecord({
                       query: txQuery,
                       sheetId,
                       recordId,
                       changes,
+                      expectedVersion,
                     }),
                 })
               })
@@ -2313,6 +2322,29 @@ export class MetaSheetServer {
                     throw new ElearningStatsDailyProjectionError('unavailable')
                   }
                   return projectElearningDepartmentStatsDaily(poolManager.get(), input)
+                },
+              }
+            : undefined,
+        // L5 aggregate exports are at-least-once job effects. Core owns the
+        // request ledger, suppression-safe CSV bytes and idempotent storage.
+        elearningAnalyticsExport:
+          manifest.name === 'plugin-elearning'
+            ? {
+                materialize: async (
+                  input: import('./services/elearning-analytics-export').MaterializeElearningAnalyticsExportInput,
+                ) => {
+                  if (!isElearningAnalyticsSurfaceEnabled()) {
+                    throw new ElearningAnalyticsExportError('disabled')
+                  }
+                  return materializeElearningAnalyticsExport(poolManager.get(), input)
+                },
+                cleanup: async (
+                  input: import('./services/elearning-analytics-export').MaterializeElearningAnalyticsExportInput,
+                ) => {
+                  if (!isElearningAnalyticsSurfaceEnabled()) {
+                    throw new ElearningAnalyticsExportError('disabled')
+                  }
+                  return cleanupElearningAnalyticsExport(poolManager.get(), input)
                 },
               }
             : undefined,
@@ -4289,3 +4321,4 @@ export type {
  */
 export { MultitableRecordDeleteCapExceededError } from './multitable/record-errors'
 export { MultitableSideDoorDeleteNonTransactionalError } from './multitable/side-door-delete-trash'
+export { MultitableRecordVersionConflictError } from './multitable/record-errors'

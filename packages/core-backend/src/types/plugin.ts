@@ -578,6 +578,7 @@ export interface MultitableRecordsAPI {
     sheetId: string
     recordId: string
     changes: Record<string, unknown>
+    expectedVersion?: number
   }): Promise<{
     id: string
     sheetId: string
@@ -1180,6 +1181,23 @@ export interface PluginServices {
       input: import('../services/elearning-stats-daily-projection').ProjectElearningDepartmentStatsDailyInput,
     ): Promise<
       import('../services/elearning-stats-daily-projection').ProjectElearningDepartmentStatsDailyResult
+    >
+  }
+  /**
+   * E-learning L5 aggregate export materialization. Only plugin-elearning
+   * receives this port. Core owns export rows, suppression, byte storage,
+   * idempotency and cleanup; the plugin supplies only persisted job identity.
+   */
+  elearningAnalyticsExport?: {
+    materialize(
+      input: import('../services/elearning-analytics-export').MaterializeElearningAnalyticsExportInput,
+    ): Promise<
+      import('../services/elearning-analytics-export').MaterializeElearningAnalyticsExportResult
+    >
+    cleanup(
+      input: import('../services/elearning-analytics-export').MaterializeElearningAnalyticsExportInput,
+    ): Promise<
+      import('../services/elearning-analytics-export').CleanupElearningAnalyticsExportResult
     >
   }
   /**

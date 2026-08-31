@@ -58,6 +58,16 @@ vi.mock('../../src/db/db', () => {
 import { AutomationLogService } from '../../src/multitable/automation-log-service'
 import { AutomationRuleValidationError, AutomationService, toExecutorRule } from '../../src/multitable/automation-service'
 import { deriveRuleActionSetFingerprint } from '../../src/multitable/automation-rule-fingerprint'
+import {
+  AUTOMATION_RETRY_LEDGER_RETENTION_MS,
+  AUTOMATION_RETRY_LEDGER_SWEEP_INTERVAL_MS,
+  automationRetryLedgerRetentionCutoffIso,
+  claimFirstAutomationRetryAttempt,
+  hasAutomationRetryLedgerEvidence,
+  isWithinAutomationRetryWindow,
+  realFireTestRunEligibility,
+  retryLedgerFamiliesForActions,
+} from '../../src/multitable/automation-retry-eligibility'
 import { AutomationJobService } from '../../src/multitable/automation-job-service'
 import { normalizeWorkflowJob } from '../../src/multitable/workflow-job-contract'
 
@@ -447,6 +457,1044 @@ describe('AutomationExecutor', () => {
     const result = await executor.execute(rule, { recordId: 'r1', sheetId: 'sheet_1' })
     expect(result.status).toBe('success')
     expect(emitSpy).toHaveBeenCalledWith('automation.notification', expect.objectContaining({ userIds: ['u1', 'u2'] }))
+  })
+
+  it('simulate derives steps but dispatches no Class-A, outbound, notification, or approval side effect', async () => {
+    const emitSpy = vi.spyOn(deps.eventBus, 'emit')
+    const rule = createMockRule({
+      actions: [
+        { type: 'update_record', config: { fields: { status: 'done' } } },
+        { type: 'send_webhook', config: { url: 'https://example.com/hook' } },
+        { type: 'send_notification', config: { userIds: ['u1'], message: 'Hello' } },
+        { type: 'start_approval', config: { templateId: 'tpl_1', formDataMapping: { status: 'status' } } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      { recordId: 'r1', data: { status: 'active' }, sheetId: 'sheet_1' },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('success')
+    expect(result.dryRun).toBe(true)
+    expect(result.steps).toEqual([
+      {
+        actionType: 'update_record',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: {
+            target: { sheetId: 'sheet_1', recordId: 'r1' },
+            payload: { status: 'done' },
+          },
+        },
+        durationMs: 0,
+      },
+      {
+        actionType: 'send_webhook',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: {
+            target: { host: 'example.com' },
+            payload: {
+              method: 'POST',
+              body: {
+                ruleId: 'sheet_1',
+                recordId: 'r1',
+                data: { status: 'active' },
+                triggeredAt: expect.any(String),
+              },
+            },
+          },
+        },
+        durationMs: 0,
+      },
+      {
+        actionType: 'send_notification',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: {
+            target: { userIds: ['u1'] },
+            payload: { message: 'Hello' },
+          },
+        },
+        durationMs: 0,
+      },
+      {
+        actionType: 'start_approval',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: {
+            wouldCreateApproval: true,
+            target: { templateId: 'tpl_1', requesterMode: 'trigger_actor' },
+            payload: { formData: { status: 'active' } },
+          },
+        },
+        durationMs: 0,
+      },
+    ])
+    const sqlCalls = vi.mocked(deps.queryFn).mock.calls.map(([sql]) => String(sql))
+    expect(sqlCalls).not.toEqual(expect.arrayContaining([
+      expect.stringMatching(/\b(?:INSERT\s+INTO|UPDATE\s+\S+\s+SET|DELETE\s+FROM)\b/i),
+    ]))
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+    expect(emitSpy).not.toHaveBeenCalled()
+  })
+
+  it('simulate resolves a redacted start_approval creation plan without calling the approval bridge', async () => {
+    const emitSpy = vi.spyOn(deps.eventBus, 'emit')
+    const onStart = vi.fn(async () => undefined)
+    const onSettled = vi.fn(async () => undefined)
+    const onSkipped = vi.fn(async () => undefined)
+    const onStartApproval = vi.fn(async () => ({ suspended: true }))
+    const rule = createMockRule({
+      actions: [
+        {
+          type: 'start_approval',
+          config: {
+            templateId: ' tpl_expense ',
+            formDataMapping: {
+              amount: 'amount',
+              description: '{{record.title}} / {{record.status}}',
+              password: 'apiToken',
+              missing: 'record.missing',
+            },
+            requester: { mode: 'rule_creator' },
+          },
+        },
+        { type: 'send_notification', config: { userIds: ['u1'], message: 'After approval plan' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      {
+        recordId: 'record_sample',
+        sheetId: 'sheet_1',
+        actorId: 'actor_private',
+        data: {
+          amount: 125,
+          title: 'Expense',
+          status: 'pending',
+          apiToken: 'source-secret',
+        },
+      },
+      () => ({ onStart, onSettled, onSkipped, onStartApproval }),
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('success')
+    expect(result.finishedAt).toEqual(expect.any(String))
+    expect(result.steps).toEqual([
+      {
+        actionType: 'start_approval',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: {
+            wouldCreateApproval: true,
+            target: { templateId: 'tpl_expense', requesterMode: 'rule_creator' },
+            payload: {
+              formData: {
+                amount: 125,
+                description: 'Expense / pending',
+                password: '<redacted>',
+                missing: '',
+              },
+            },
+          },
+        },
+        durationMs: 0,
+      },
+      {
+        actionType: 'send_notification',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: { target: { userIds: ['u1'] }, payload: { message: 'After approval plan' } },
+        },
+        durationMs: 0,
+      },
+    ])
+    expect(onStartApproval).not.toHaveBeenCalled()
+    expect(onStart).toHaveBeenCalledTimes(2)
+    expect(onSettled).toHaveBeenCalledTimes(2)
+    expect(onSkipped).not.toHaveBeenCalled()
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+    expect(emitSpy).not.toHaveBeenCalled()
+    expect(JSON.stringify(result.steps)).not.toContain('source-secret')
+    expect(JSON.stringify(result.steps)).not.toContain('actor_private')
+  })
+
+  it('simulate resolves values-free FWB create/update plans without reading or writing business data', async () => {
+    const emitSpy = vi.spyOn(deps.eventBus, 'emit')
+    const rule = createMockRule({
+      trigger: { type: 'approval.completed', config: { templateId: 'tpl_expense' } },
+      actions: [
+        {
+          type: 'write_approval_form_values',
+          config: {
+            sourceTemplateVersionId: 'version_1',
+            confirmationHash: 'private-confirmation-hash',
+            mappings: [
+              { formFieldId: 'amount', targetFieldId: 'total', targetType: 'text' },
+            ],
+          },
+        },
+        {
+          type: 'write_approval_form_values',
+          config: {
+            mode: 'update',
+            sourceTemplateVersionId: 'version_1',
+            recordLinkFieldId: 'linked_record',
+            confirmationHash: 'private-update-confirmation',
+            mappings: [
+              {
+                formFieldId: 'category',
+                targetFieldId: 'classification',
+                targetType: 'select',
+                selectOptions: ['private-select-option'],
+              },
+            ],
+          },
+        },
+        { type: 'send_notification', config: { userIds: ['u1'], message: 'After FWB plans' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      {
+        sheetId: 'sheet_1',
+        recordId: 'test_record',
+        data: { password: 'snapshot-secret-must-not-be-used' },
+        actorId: 'actor_private',
+        _triggeredBy: 'manual_test',
+      },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('success')
+    expect(result.steps).toEqual([
+      {
+        actionType: 'write_approval_form_values',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: {
+            wouldWriteApprovalFormValues: true,
+            target: {
+              mode: 'create',
+              sheetId: 'sheet_1',
+              sourceTemplateVersionId: 'version_1',
+            },
+            payload: {
+              valueSource: 'immutable_approved_form_snapshot',
+              mappings: [
+                { formFieldId: 'amount', targetFieldId: 'total', targetType: 'text' },
+              ],
+            },
+          },
+        },
+        durationMs: 0,
+      },
+      {
+        actionType: 'write_approval_form_values',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: {
+            wouldWriteApprovalFormValues: true,
+            target: {
+              mode: 'update',
+              sourceTemplateVersionId: 'version_1',
+              recordLinkFieldId: 'linked_record',
+              derivedFrom: 'published_template_record_link',
+            },
+            payload: {
+              valueSource: 'immutable_approved_form_snapshot',
+              mappings: [
+                { formFieldId: 'category', targetFieldId: 'classification', targetType: 'select' },
+              ],
+            },
+          },
+        },
+        durationMs: 0,
+      },
+      {
+        actionType: 'send_notification',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: { target: { userIds: ['u1'] }, payload: { message: 'After FWB plans' } },
+        },
+        durationMs: 0,
+      },
+    ])
+    const serialized = JSON.stringify(result.steps)
+    expect(serialized).not.toContain('private-confirmation-hash')
+    expect(serialized).not.toContain('private-update-confirmation')
+    expect(serialized).not.toContain('private-select-option')
+    expect(serialized).not.toContain('snapshot-secret-must-not-be-used')
+    expect(serialized).not.toContain('actor_private')
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+    expect(emitSpy).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    {
+      name: 'unknown mode',
+      config: {
+        mode: 'replace',
+        sourceTemplateVersionId: 'version_1',
+        mappings: [{ formFieldId: 'source', targetFieldId: 'target', targetType: 'text' }],
+      },
+      error: 'fwb_rejected:mapping_config:unknown_mode',
+    },
+    {
+      name: 'empty mappings',
+      config: { sourceTemplateVersionId: 'version_1', mappings: [] },
+      error: 'fwb_rejected:mapping_config:empty_config',
+    },
+    {
+      name: 'unavailable exact-number mapping',
+      config: {
+        sourceTemplateVersionId: 'version_1',
+        mappings: [{ formFieldId: 'source', targetFieldId: 'target', targetType: 'number' }],
+      },
+      error: 'fwb_rejected:exact_number_mapping_unavailable',
+    },
+    {
+      name: 'missing source template version',
+      config: { mappings: [{ formFieldId: 'source', targetFieldId: 'target', targetType: 'text' }] },
+      error: 'fwb_rejected:source_template_version',
+    },
+    {
+      name: 'missing update record-link field',
+      config: {
+        mode: 'update',
+        sourceTemplateVersionId: 'version_1',
+        mappings: [{ formFieldId: 'source', targetFieldId: 'target', targetType: 'text' }],
+      },
+      error: 'fwb_rejected:mapping_config:record_link_field_missing',
+    },
+  ])('simulate fail-stops malformed FWB config: $name', async ({ config, error }) => {
+    const rule = createMockRule({
+      trigger: { type: 'approval.completed', config: { templateId: 'tpl_expense' } },
+      actions: [
+        { type: 'write_approval_form_values', config },
+        { type: 'send_notification', config: { userIds: ['should_skip'], message: 'should skip' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      { sheetId: 'sheet_1', recordId: 'test_record', data: {}, _triggeredBy: 'manual_test' },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('failed')
+    expect(result.steps).toEqual([
+      { actionType: 'write_approval_form_values', status: 'failed', error, durationMs: 0 },
+      { actionType: 'send_notification', status: 'skipped', durationMs: 0 },
+    ])
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['missing template', { templateId: ' ', formDataMapping: { status: 'status' } }, 'start_approval.templateId is required'],
+    ['missing mapping', { templateId: 'tpl_1' }, 'start_approval.formDataMapping is required'],
+    ['empty mapping', { templateId: 'tpl_1', formDataMapping: {} }, 'start_approval.formDataMapping is required'],
+    [
+      'blank mapping entry',
+      { templateId: 'tpl_1', formDataMapping: { ' ': 'status' } },
+      'start_approval.formDataMapping entries must be non-empty strings',
+    ],
+    [
+      'non-object requester',
+      { templateId: 'tpl_1', formDataMapping: { status: 'status' }, requester: 'rule_creator' },
+      'start_approval.requester must be an object',
+    ],
+    [
+      'unknown requester mode',
+      { templateId: 'tpl_1', formDataMapping: { status: 'status' }, requester: { mode: 'owner_secret' } },
+      'start_approval.requester.mode must be trigger_actor or rule_creator',
+    ],
+  ])('simulate fail-stops malformed start_approval config: %s', async (_label, config, error) => {
+    const rule = createMockRule({
+      actions: [
+        { type: 'start_approval', config },
+        { type: 'send_notification', config: { userIds: ['should_skip'], message: 'should skip' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      { recordId: 'record_sample', data: { status: 'pending' }, sheetId: 'sheet_1' },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('failed')
+    expect(result.steps).toEqual([
+      { actionType: 'start_approval', status: 'failed', error, durationMs: 0 },
+      { actionType: 'send_notification', status: 'skipped', durationMs: 0 },
+    ])
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+    expect(JSON.stringify(result.steps)).not.toContain('owner_secret')
+  })
+
+  it('simulate resolves generic Class-B targets and redacted payloads without dispatch', async () => {
+    const send = vi.fn(async () => ({ id: 'notif_1', status: 'sent' as const }))
+    deps = createMockDeps({ notificationService: { send } })
+    executor = new AutomationExecutor(deps)
+    const emitSpy = vi.spyOn(deps.eventBus, 'emit')
+    const rule = createMockRule({
+      actions: [
+        {
+          type: 'send_webhook',
+          config: {
+            url: 'https://user:pass@example.com:8443/hook?token=secret',
+            method: 'PUT',
+            headers: { Authorization: 'Bearer secret' },
+            secret: 'signing-secret',
+            body: { status: 'ready', password: 'source-secret' },
+          },
+        },
+        { type: 'send_notification', config: { userIds: ['u1', 'u2'], message: 'Ready' } },
+        {
+          type: 'send_email',
+          config: {
+            recipients: [' first@example.com ', 'second@example.com', 'first@example.com'],
+            subjectTemplate: 'Record {{record.title}} changed',
+            bodyTemplate: 'Status: {{record.status}}',
+          },
+        },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      {
+        recordId: 'record_sample',
+        data: { title: 'Sample', status: 'active' },
+        sheetId: 'sheet_1',
+      },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.steps.map((step) => step.output)).toEqual([
+      {
+        dryRun: true,
+        dispatched: false,
+        plan: {
+          target: { host: 'example.com:8443' },
+          payload: { method: 'PUT', body: { status: 'ready', password: '<redacted>' } },
+        },
+      },
+      {
+        dryRun: true,
+        dispatched: false,
+        plan: { target: { userIds: ['u1', 'u2'] }, payload: { message: 'Ready' } },
+      },
+      {
+        dryRun: true,
+        dispatched: false,
+        plan: {
+          target: { recipients: ['first@example.com', 'second@example.com'] },
+          payload: { subject: 'Record Sample changed', content: 'Status: active' },
+        },
+      },
+    ])
+    const serializedPlans = JSON.stringify(result.steps.map((step) => step.output))
+    expect(serializedPlans).not.toContain('user:pass')
+    expect(serializedPlans).not.toContain('token=secret')
+    expect(serializedPlans).not.toContain('signing-secret')
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+    expect(emitSpy).not.toHaveBeenCalled()
+  })
+
+  it('simulate resolves intended DingTalk group targets and redacted rendered content without DB-backed validation', async () => {
+    const emitSpy = vi.spyOn(deps.eventBus, 'emit')
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'group_static',
+          destinationIds: [' group_static ', 'group_second'],
+          destinationIdFieldPaths: ['record.groupTargets'],
+          titleTemplate: 'Record {{record.title}}',
+          bodyTemplate: 'API_TOKEN={{record.apiToken}} status={{record.status}}',
+          publicFormViewId: 'view_requires_live_db_validation',
+        },
+      }],
+    })
+
+    const result = await executor.execute(
+      rule,
+      {
+        recordId: 'record_sample',
+        data: {
+          title: 'Sample',
+          status: 'active',
+          apiToken: 'source-secret',
+          groupTargets: ['group_second', { destinationId: 'group_dynamic' }],
+        },
+        sheetId: 'sheet_1',
+      },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('success')
+    expect(result.steps).toEqual([{
+      actionType: 'send_dingtalk_group_message',
+      status: 'success',
+      simulated: true,
+      output: {
+        dryRun: true,
+        dispatched: false,
+        plan: {
+          target: { destinationIds: ['group_static', 'group_second', 'group_dynamic'] },
+          payload: {
+            title: 'Record Sample',
+            body: 'API_TOKEN=<redacted> status=active',
+          },
+        },
+      },
+      durationMs: 0,
+    }])
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+    expect(emitSpy).not.toHaveBeenCalled()
+    expect(JSON.stringify(result.steps)).not.toContain('source-secret')
+    expect(JSON.stringify(result.steps)).not.toContain('view_requires_live_db_validation')
+  })
+
+  it('simulate fail-stops an unresolved DingTalk group target before later actions', async () => {
+    const rule = createMockRule({
+      actions: [
+        {
+          type: 'send_dingtalk_group_message',
+          config: {
+            destinationIdFieldPath: 'record.missingTargets',
+            titleTemplate: 'Record {{record.title}}',
+            bodyTemplate: 'Open form',
+          },
+        },
+        { type: 'send_notification', config: { userIds: ['should_skip'], message: 'should skip' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      { recordId: 'record_sample', data: { title: 'Sample' }, sheetId: 'sheet_1' },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('failed')
+    expect(result.steps).toEqual([
+      {
+        actionType: 'send_dingtalk_group_message',
+        status: 'failed',
+        error: 'No DingTalk destinationIds resolved from record field paths: missingTargets',
+        durationMs: 0,
+      },
+      { actionType: 'send_notification', status: 'skipped', durationMs: 0 },
+    ])
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('simulate resolves DingTalk person targets and redacted content without directory or view queries', async () => {
+    const emitSpy = vi.spyOn(deps.eventBus, 'emit')
+    const rule = createMockRule({
+      actions: [
+        {
+          type: 'send_dingtalk_person_message',
+          config: {
+            userIds: ['user_static', ' user_static '],
+            memberGroupIds: ['group_static'],
+            userIdFieldPaths: ['record.assigneeUserIds'],
+            memberGroupIdFieldPath: 'record.watcherGroupIds',
+            titleTemplate: 'Record {{record.title}}',
+            bodyTemplate: 'API_TOKEN={{record.apiToken}} status={{record.status}}',
+            publicFormViewId: 'view_requires_live_form_validation',
+            internalViewId: 'view_requires_live_access_validation',
+          },
+        },
+        { type: 'send_notification', config: { userIds: ['u1'], message: 'After person plan' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      {
+        recordId: 'record_sample',
+        data: {
+          title: 'Sample',
+          status: 'active',
+          apiToken: 'source-secret',
+          assigneeUserIds: ['user_dynamic', { id: 'user_second' }, 'user_static'],
+          watcherGroupIds: [{ memberGroupId: 'group_dynamic' }, 'group_static'],
+        },
+        sheetId: 'sheet_1',
+      },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('success')
+    expect(result.steps).toEqual([
+      {
+        actionType: 'send_dingtalk_person_message',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: {
+            target: {
+              userIds: ['user_static', 'user_dynamic', 'user_second'],
+              memberGroupIds: ['group_static', 'group_dynamic'],
+            },
+            payload: {
+              title: 'Record Sample',
+              body: 'API_TOKEN=<redacted> status=active',
+              linkConfiguration: {
+                publicFormViewConfigured: true,
+                internalViewConfigured: true,
+              },
+            },
+          },
+        },
+        durationMs: 0,
+      },
+      {
+        actionType: 'send_notification',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: { target: { userIds: ['u1'] }, payload: { message: 'After person plan' } },
+        },
+        durationMs: 0,
+      },
+    ])
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+    expect(emitSpy).not.toHaveBeenCalled()
+    const serialized = JSON.stringify(result.steps)
+    expect(serialized).not.toContain('source-secret')
+    expect(serialized).not.toContain('view_requires_live_form_validation')
+    expect(serialized).not.toContain('view_requires_live_access_validation')
+  })
+
+  it('simulate fail-stops an unresolved DingTalk person target before later actions', async () => {
+    const rule = createMockRule({
+      actions: [
+        {
+          type: 'send_dingtalk_person_message',
+          config: {
+            userIdFieldPath: 'record.missingUsers',
+            titleTemplate: 'Record {{record.title}}',
+            bodyTemplate: 'Open form',
+          },
+        },
+        { type: 'send_notification', config: { userIds: ['should_skip'], message: 'should skip' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      { recordId: 'record_sample', data: { title: 'Sample' }, sheetId: 'sheet_1' },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('failed')
+    expect(result.steps).toEqual([
+      {
+        actionType: 'send_dingtalk_person_message',
+        status: 'failed',
+        error: 'No local userIds resolved from record field paths: missingUsers',
+        durationMs: 0,
+      },
+      { actionType: 'send_notification', status: 'skipped', durationMs: 0 },
+    ])
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('simulate resolves the event-fixed DingTalk approval-card target without directory or transport calls', async () => {
+    const emitSpy = vi.spyOn(deps.eventBus, 'emit')
+    const rule = createMockRule({
+      trigger: { type: 'approval.task_created', config: {} },
+      actions: [
+        { type: 'send_dingtalk_approval_card', config: {} },
+        { type: 'send_notification', config: { userIds: ['u1'], message: 'After card plan' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      {
+        eventType: 'approval.task_created',
+        recordId: 'record_sample',
+        data: {},
+        approval: { instanceId: 'approval_1', requestNo: 'AP-1', templateId: 'tpl_1' },
+        task: { nodeKey: 'finance', assigneeUserId: 'user_finance', entryEpoch: 2, sourceStep: 1 },
+      },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('success')
+    expect(result.steps).toEqual([
+      {
+        actionType: 'send_dingtalk_approval_card',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: {
+            target: {
+              approvalInstanceId: 'approval_1',
+              nodeKey: 'finance',
+              assigneeUserId: 'user_finance',
+            },
+            payload: { cardKind: 'approval_task' },
+          },
+        },
+        durationMs: 0,
+      },
+      {
+        actionType: 'send_notification',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: { target: { userIds: ['u1'] }, payload: { message: 'After card plan' } },
+        },
+        durationMs: 0,
+      },
+    ])
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+    expect(emitSpy).not.toHaveBeenCalled()
+  })
+
+  it('simulate fail-stops a DingTalk approval card without the fixed pending-task target', async () => {
+    const rule = createMockRule({
+      trigger: { type: 'approval.task_created', config: {} },
+      actions: [
+        { type: 'send_dingtalk_approval_card', config: {} },
+        { type: 'send_notification', config: { userIds: ['should_skip'], message: 'should skip' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      {
+        eventType: 'approval.task_created',
+        recordId: 'record_sample',
+        data: {},
+        approval: { instanceId: 'approval_1' },
+        task: { nodeKey: 'finance' },
+      },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('failed')
+    expect(result.steps).toEqual([
+      {
+        actionType: 'send_dingtalk_approval_card',
+        status: 'failed',
+        error: 'send_dingtalk_approval_card requires an approval.task_created trigger event',
+        durationMs: 0,
+      },
+      { actionType: 'send_notification', status: 'skipped', durationMs: 0 },
+    ])
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('simulate records wait_for_callback as a token-free suspension plan and continues the action chain', async () => {
+    const emitSpy = vi.spyOn(deps.eventBus, 'emit')
+    const rule = createMockRule({
+      actions: [
+        { type: 'wait_for_callback', config: { reason: 'external_event' } },
+        { type: 'send_notification', config: { userIds: ['u1'], message: 'After wait' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      { recordId: 'record_sample', data: {}, sheetId: 'sheet_1' },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('success')
+    expect(result.finishedAt).toEqual(expect.any(String))
+    expect(result.steps).toEqual([
+      {
+        actionType: 'wait_for_callback',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: {
+            wouldSuspend: true,
+            reason: 'external_event',
+            resumeTokenIssued: false,
+          },
+        },
+        durationMs: 0,
+      },
+      {
+        actionType: 'send_notification',
+        status: 'success',
+        simulated: true,
+        output: {
+          dryRun: true,
+          dispatched: false,
+          plan: { target: { userIds: ['u1'] }, payload: { message: 'After wait' } },
+        },
+        durationMs: 0,
+      },
+    ])
+    expect(JSON.stringify(result)).not.toMatch(/"(?:resumeToken|resume_token)"\s*:/)
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+    expect(emitSpy).not.toHaveBeenCalled()
+  })
+
+  it('simulate fail-stops invalid generic Class-B plans before any later action', async () => {
+    const rule = createMockRule({
+      actions: [
+        { type: 'send_webhook', config: { url: 'not a URL' } },
+        { type: 'send_notification', config: { userIds: ['should_skip'], message: 'should skip' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      { recordId: 'record_sample', data: {}, sheetId: 'sheet_1' },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('failed')
+    expect(result.steps).toEqual([
+      { actionType: 'send_webhook', status: 'failed', error: 'Webhook URL is invalid', durationMs: 0 },
+      { actionType: 'send_notification', status: 'skipped', durationMs: 0 },
+    ])
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    {
+      name: 'notification recipients',
+      action: { type: 'send_notification', config: { userIds: [], message: 'Ready' } },
+      error: 'No user IDs specified',
+    },
+    {
+      name: 'notification message',
+      action: { type: 'send_notification', config: { userIds: ['u1'], message: '' } },
+      error: 'Notification message is required',
+    },
+    {
+      name: 'email recipients',
+      action: { type: 'send_email', config: { recipients: [], subjectTemplate: 'Subject', bodyTemplate: 'Body' } },
+      error: 'send_email requires at least one recipient',
+    },
+    {
+      name: 'email subject',
+      action: { type: 'send_email', config: { recipients: ['u@example.com'], subjectTemplate: '', bodyTemplate: 'Body' } },
+      error: 'send_email subjectTemplate is required',
+    },
+    {
+      name: 'email body',
+      action: { type: 'send_email', config: { recipients: ['u@example.com'], subjectTemplate: 'Subject', bodyTemplate: '' } },
+      error: 'send_email bodyTemplate is required',
+    },
+    {
+      name: 'DingTalk group target',
+      action: { type: 'send_dingtalk_group_message', config: { titleTemplate: 'Title', bodyTemplate: 'Body' } },
+      error: 'At least one DingTalk destination or record destination field path is required',
+    },
+    {
+      name: 'DingTalk group title',
+      action: { type: 'send_dingtalk_group_message', config: { destinationId: 'group_1', titleTemplate: '', bodyTemplate: 'Body' } },
+      error: 'DingTalk title template is required',
+    },
+    {
+      name: 'DingTalk group body',
+      action: { type: 'send_dingtalk_group_message', config: { destinationId: 'group_1', titleTemplate: 'Title', bodyTemplate: '' } },
+      error: 'DingTalk body template is required',
+    },
+  ])('simulate rejects invalid $name before dispatch', async ({ action, error }) => {
+    const result = await executor.execute(
+      createMockRule({ actions: [action as AutomationAction] }),
+      { recordId: 'record_sample', data: {}, sheetId: 'sheet_1' },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('failed')
+    expect(result.steps).toEqual([{
+      actionType: action.type,
+      status: 'failed',
+      error,
+      durationMs: 0,
+    }])
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('simulate returns redacted Class-A targets and payloads without touching a business handler', async () => {
+    const emitSpy = vi.spyOn(deps.eventBus, 'emit')
+    const rule = createMockRule({
+      actions: [
+        {
+          type: 'update_record',
+          config: {
+            fields: { status: 'done', password: 'source-secret' },
+            targetBaseId: 'base_target',
+            targetSheetId: 'sheet_target',
+            targetRecordId: 'record_target',
+          },
+        },
+        { type: 'create_record', config: { sheetId: 'sheet_created', data: { title: 'New' } } },
+        { type: 'delete_record', config: {} },
+        { type: 'lock_record', config: { locked: false } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      { recordId: 'record_sample', data: {}, sheetId: 'sheet_1' },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.steps.map((step) => step.output)).toEqual([
+      {
+        dryRun: true,
+        dispatched: false,
+        plan: {
+          target: { baseId: 'base_target', sheetId: 'sheet_target', recordId: 'record_target' },
+          payload: { status: 'done', password: '<redacted>' },
+        },
+      },
+      {
+        dryRun: true,
+        dispatched: false,
+        plan: { target: { sheetId: 'sheet_created' }, payload: { title: 'New' } },
+      },
+      {
+        dryRun: true,
+        dispatched: false,
+        plan: { target: { sheetId: 'sheet_1', recordId: 'record_sample' } },
+      },
+      {
+        dryRun: true,
+        dispatched: false,
+        plan: {
+          target: { sheetId: 'sheet_1', recordId: 'record_sample' },
+          payload: { locked: false },
+        },
+      },
+    ])
+    expect(deps.queryFn).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+    expect(emitSpy).not.toHaveBeenCalled()
+  })
+
+  it('simulate rejects malformed cross-base Class-A targets before reporting a plan', async () => {
+    const rule = createMockRule({
+      actions: [
+        {
+          type: 'delete_record',
+          config: { targetBaseId: 'base_target', targetSheetId: 'sheet_target' },
+        },
+        { type: 'send_notification', config: { userIds: ['should_skip'], message: 'should skip' } },
+      ],
+    })
+
+    const result = await executor.execute(
+      rule,
+      { recordId: 'record_sample', data: {}, sheetId: 'sheet_1' },
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(result.status).toBe('failed')
+    expect(result.steps).toEqual([
+      {
+        actionType: 'delete_record',
+        status: 'failed',
+        error: 'Cross-base delete_record requires targetBaseId + targetSheetId + targetRecordId',
+        durationMs: 0,
+      },
+      { actionType: 'send_notification', status: 'skipped', durationMs: 0 },
+    ])
+    expect(deps.queryFn).not.toHaveBeenCalled()
   })
 
   it('executes send_email action successfully through NotificationService email channel', async () => {
@@ -4084,12 +5132,18 @@ describe('AutomationService — Rule CRUD', () => {
 
 describe('AutomationService — retryExecution (A5)', () => {
   let service: AutomationService
+  let queryFn: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
     const eventBus = new EventBus()
-    const queryFn = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+    queryFn = vi.fn(async () => ({ rows: [], rowCount: 0 }))
     // Minimal kysely-ish stub; retryExecution collaborators are spied, so the db is unused.
     service = new AutomationService(eventBus, {} as never, queryFn)
+  })
+
+  afterEach(() => {
+    delete process.env.AUTOMATION_CLASSA_CLAIM_ENABLED
+    delete process.env.AUTOMATION_CLASSB_OUTBOUND_ENABLED
   })
 
   function storedExecution(over: Partial<AutomationExecution> = {}): AutomationExecution {
@@ -4097,7 +5151,7 @@ describe('AutomationService — retryExecution (A5)', () => {
       id: 'axe_orig',
       ruleId: 'atr_1',
       triggeredBy: 'event',
-      triggeredAt: '2026-05-29T00:00:00.000Z',
+      triggeredAt: new Date().toISOString(),
       status: 'failed',
       steps: [],
       triggerEvent: { recordId: 'rec1', data: { name: 'Bolt' } },
@@ -4114,6 +5168,121 @@ describe('AutomationService — retryExecution (A5)', () => {
     } as never
   }
 
+  it('#4196 §6 real-fire admission classifies nested actions and fails closed on unsupported families', () => {
+    const actions = [{
+      type: 'condition_branch',
+      config: { branches: [{ key: 'yes', actions: [{ type: 'update_record', config: {} }, { type: 'send_email', config: {} }] }] },
+    }]
+    expect(realFireTestRunEligibility(actions, {} as NodeJS.ProcessEnv)).toEqual({
+      ok: false,
+      code: 'TEST_RUN_CLASS_A_PROTECTION_DISABLED',
+    })
+    expect(realFireTestRunEligibility(actions, {
+      AUTOMATION_CLASSA_CLAIM_ENABLED: 'true',
+    } as NodeJS.ProcessEnv)).toEqual({
+      ok: false,
+      code: 'TEST_RUN_CLASS_B_PROTECTION_DISABLED',
+    })
+    expect(realFireTestRunEligibility(actions, {
+      AUTOMATION_CLASSA_CLAIM_ENABLED: 'true',
+      AUTOMATION_CLASSB_OUTBOUND_ENABLED: 'true',
+    } as NodeJS.ProcessEnv)).toEqual({ ok: true })
+    expect(realFireTestRunEligibility([{ type: 'send_notification', config: {} }], process.env)).toEqual({
+      ok: false,
+      code: 'TEST_RUN_ACTION_UNSUPPORTED',
+    })
+    expect(realFireTestRunEligibility([{ type: 'write_approval_form_values', config: {} }], process.env)).toEqual({
+      ok: false,
+      code: 'TEST_RUN_ACTION_UNSUPPORTED',
+    })
+
+    const defaultBranch = (action: { type: string; config: Record<string, unknown> }) => [{
+      type: 'condition_branch',
+      config: { branches: [], defaultBranch: { key: 'default', actions: [action] } },
+    }]
+    expect(realFireTestRunEligibility(
+      defaultBranch({ type: 'create_record', config: {} }),
+      {} as NodeJS.ProcessEnv,
+    )).toEqual({ ok: false, code: 'TEST_RUN_CLASS_A_PROTECTION_DISABLED' })
+    expect(realFireTestRunEligibility(
+      defaultBranch({ type: 'send_email', config: {} }),
+      { AUTOMATION_CLASSA_CLAIM_ENABLED: 'true' } as NodeJS.ProcessEnv,
+    )).toEqual({ ok: false, code: 'TEST_RUN_CLASS_B_PROTECTION_DISABLED' })
+    expect(realFireTestRunEligibility(
+      defaultBranch({ type: 'send_notification', config: {} }),
+      {
+        AUTOMATION_CLASSA_CLAIM_ENABLED: 'true',
+        AUTOMATION_CLASSB_OUTBOUND_ENABLED: 'true',
+      } as NodeJS.ProcessEnv,
+    )).toEqual({ ok: false, code: 'TEST_RUN_ACTION_UNSUPPORTED' })
+  })
+
+  it('#4196 V5 helper: retry window is inclusive and malformed/future timestamps fail closed', () => {
+    const now = Date.parse('2026-08-30T12:00:00.000Z')
+    expect(automationRetryLedgerRetentionCutoffIso(now)).toBe('2026-08-23T12:00:00.000Z')
+    expect(isWithinAutomationRetryWindow(new Date(now - AUTOMATION_RETRY_LEDGER_RETENTION_MS).toISOString(), now)).toBe(true)
+    expect(isWithinAutomationRetryWindow(new Date(now - AUTOMATION_RETRY_LEDGER_RETENTION_MS - 1).toISOString(), now)).toBe(false)
+    expect(isWithinAutomationRetryWindow(new Date(now + 1).toISOString(), now)).toBe(false)
+    expect(isWithinAutomationRetryWindow('not-a-time', now)).toBe(false)
+  })
+
+  it('#4196 V5 helper: only enabled Class-A/B families require ledger evidence, including nested actions', () => {
+    const actions = [{
+      type: 'condition_branch',
+      config: { branches: [{ key: 'yes', actions: [{ type: 'update_record', config: {} }, { type: 'send_email', config: {} }] }] },
+    }]
+    expect(retryLedgerFamiliesForActions(actions, {} as NodeJS.ProcessEnv)).toEqual({ classA: false, classB: false })
+    expect(retryLedgerFamiliesForActions(actions, {
+      AUTOMATION_CLASSA_CLAIM_ENABLED: 'true',
+      AUTOMATION_CLASSB_OUTBOUND_ENABLED: 'true',
+    } as NodeJS.ProcessEnv)).toEqual({ classA: true, classB: true })
+  })
+
+  it('#4196 V5 helper: malformed or absent query evidence is never coerced to present', async () => {
+    const families = { classA: true, classB: false }
+    await expect(hasAutomationRetryLedgerEvidence(
+      vi.fn(async () => ({ rows: [{ has_class_a_evidence: 'true', has_class_b_evidence: false }] })),
+      'axe_root',
+      families,
+    )).resolves.toBe(false)
+    await expect(hasAutomationRetryLedgerEvidence(
+      vi.fn(async () => ({ rows: [] })),
+      'axe_root',
+      families,
+    )).resolves.toBe(false)
+  })
+
+  it('#4196 V5 helper: every enabled ledger family needs its own evidence', async () => {
+    const query = vi.fn(async () => ({
+      rows: [{ has_class_a_evidence: true, has_class_b_evidence: false }],
+    }))
+    await expect(hasAutomationRetryLedgerEvidence(
+      query,
+      'axe_root',
+      { classA: true, classB: true },
+    )).resolves.toBe(false)
+    await expect(hasAutomationRetryLedgerEvidence(
+      query,
+      'axe_root',
+      { classA: true, classB: false },
+    )).resolves.toBe(true)
+  })
+
+  it('#4196 V5 helper: the independent first-attempt marker only accepts a strict successful CAS', async () => {
+    await expect(claimFirstAutomationRetryAttempt(
+      vi.fn(async () => ({ rows: [{ first_retry_attempt: true }] })),
+      'axe_root',
+    )).resolves.toBe(true)
+    await expect(claimFirstAutomationRetryAttempt(
+      vi.fn(async () => ({ rows: [{ first_retry_attempt: false }] })),
+      'axe_root',
+    )).resolves.toBe(false)
+    await expect(claimFirstAutomationRetryAttempt(
+      vi.fn(async () => ({ rows: [{ first_retry_attempt: 'true' }] })),
+      'axe_root',
+    )).resolves.toBe(false)
+  })
+
   it('404 NOT_FOUND when the original execution is missing', async () => {
     vi.spyOn(service.logs, 'getById').mockResolvedValue(undefined)
     const r = await service.retryExecution('axe_missing', 'admin1')
@@ -4126,6 +5295,73 @@ describe('AutomationService — retryExecution (A5)', () => {
       const r = await service.retryExecution('axe_orig', 'admin1')
       expect(r).toMatchObject({ status: 409, code: 'NOT_RETRYABLE' })
     }
+  })
+
+  it('#4196 §2.2: a failed test-run execution cannot enter the live retry namespace', async () => {
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(storedExecution({
+      triggeredBy: 'manual_test',
+      status: 'failed',
+    }))
+    const getRule = vi.spyOn(service, 'getRule')
+    const execSpy = vi.spyOn(service, 'executeRule')
+
+    await expect(service.retryExecution('axe_orig', 'admin1')).resolves.toMatchObject({
+      status: 409,
+      code: 'TEST_RUN_NOT_RETRYABLE',
+    })
+    expect(getRule).not.toHaveBeenCalled()
+    expect(execSpy).not.toHaveBeenCalled()
+    expect(queryFn).not.toHaveBeenCalled()
+  })
+
+  it('#4196 §5: a retention-sweep failure is best-effort and does not block an eligible retry', async () => {
+    const original = storedExecution()
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(original)
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentRule())
+    const retried = storedExecution({ id: 'axe_next', status: 'success' })
+    vi.spyOn(service, 'executeRule').mockResolvedValue(retried)
+    queryFn.mockResolvedValue({ rows: [{ first_retry_attempt: true }], rowCount: 1 })
+    const sweep = vi.fn().mockRejectedValue(new Error('retention unavailable'))
+    ;(service as unknown as {
+      sweepAutomationRetryLedger: (nowMs?: number) => Promise<number>
+    }).sweepAutomationRetryLedger = sweep
+
+    await expect(service.retryExecution(original.id, 'admin1')).resolves.toEqual({ execution: retried })
+    expect(sweep).toHaveBeenCalledTimes(1)
+  })
+
+  it('#4196 §5: opportunistic retention is limited to one sweep per interval', async () => {
+    const sweep = vi.fn().mockResolvedValue(0)
+    const hooks = service as unknown as {
+      sweepAutomationRetryLedger: (nowMs?: number) => Promise<number>
+      kickAutomationRetryLedgerSweepIfDue: (nowMs: number) => void
+    }
+    hooks.sweepAutomationRetryLedger = sweep
+    const firstDue = AUTOMATION_RETRY_LEDGER_SWEEP_INTERVAL_MS
+
+    hooks.kickAutomationRetryLedgerSweepIfDue(firstDue)
+    hooks.kickAutomationRetryLedgerSweepIfDue(firstDue + AUTOMATION_RETRY_LEDGER_SWEEP_INTERVAL_MS - 1)
+    expect(sweep).toHaveBeenCalledTimes(1)
+
+    hooks.kickAutomationRetryLedgerSweepIfDue(firstDue + AUTOMATION_RETRY_LEDGER_SWEEP_INTERVAL_MS)
+    expect(sweep).toHaveBeenCalledTimes(2)
+  })
+
+  it('#4196 §5: a pending retention sweep does not delay an eligible retry', async () => {
+    const original = storedExecution()
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(original)
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentRule())
+    vi.spyOn(service, 'executeRule').mockResolvedValue(storedExecution({ id: 'axe_next', status: 'success' }))
+    queryFn.mockResolvedValue({ rows: [{ first_retry_attempt: true }], rowCount: 1 })
+    ;(service as unknown as {
+      sweepAutomationRetryLedger: (nowMs?: number) => Promise<number>
+    }).sweepAutomationRetryLedger = vi.fn(() => new Promise<number>(() => {}))
+
+    const outcome = await Promise.race([
+      service.retryExecution(original.id, 'admin1').then(() => 'done'),
+      new Promise((resolve) => setTimeout(() => resolve('timeout'), 25)),
+    ])
+    expect(outcome).toBe('done')
   })
 
   it('409 MISSING_TRIGGER_EVENT fail-closed: absent / empty {} / array — never silent empty-context retry', async () => {
@@ -4148,6 +5384,95 @@ describe('AutomationService — retryExecution (A5)', () => {
     const r = await service.retryExecution('axe_orig', 'admin1')
     expect('execution' in r).toBe(true)
     expect(execSpy.mock.calls[0][1]).toEqual({ _triggeredBy: 'schedule' }) // passes the non-empty guard
+  })
+
+  it('#4196 V5: refuses when the lineage root is older than the ledger retention window', async () => {
+    const child = storedExecution({ id: 'axe_child', rerunOfExecutionId: 'axe_root' })
+    const root = storedExecution({
+      id: 'axe_root',
+      triggeredAt: new Date(Date.now() - AUTOMATION_RETRY_LEDGER_RETENTION_MS - 1).toISOString(),
+    })
+    vi.spyOn(service.logs, 'getById').mockImplementation(async (id) => id === child.id ? child : root)
+    const getRule = vi.spyOn(service, 'getRule')
+    const execSpy = vi.spyOn(service, 'executeRule')
+
+    const result = await service.retryExecution(child.id, 'admin1')
+
+    expect(result).toMatchObject({ status: 409, code: 'RETRY_WINDOW_EXPIRED' })
+    expect(getRule).not.toHaveBeenCalled()
+    expect(execSpy).not.toHaveBeenCalled()
+  })
+
+  it('#4196 V5: directly retrying the same root again fails closed when its marker exists but evidence is gone', async () => {
+    process.env.AUTOMATION_CLASSB_OUTBOUND_ENABLED = 'true'
+    const root = storedExecution({ id: 'axe_root' })
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(root)
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentRule())
+    queryFn.mockImplementation(async (statement: unknown) => (
+      typeof statement === 'string' && statement.includes('AS first_retry_attempt')
+        ? { rows: [{ first_retry_attempt: false }], rowCount: 1 }
+        : typeof statement === 'string' && statement.includes('AS has_class_a_evidence')
+          ? { rows: [{ has_class_a_evidence: false, has_class_b_evidence: false }], rowCount: 1 }
+          : { rows: [], rowCount: 0 }
+    ))
+    const execSpy = vi.spyOn(service, 'executeRule')
+
+    const result = await service.retryExecution(root.id, 'admin1')
+
+    expect(result).toMatchObject({ status: 409, code: 'RETRY_LEDGER_EVIDENCE_MISSING' })
+    expect(execSpy).not.toHaveBeenCalled()
+    expect(queryFn).toHaveBeenCalledWith(expect.stringContaining('meta_automation_outbound_intent'), [root.id])
+  })
+
+  it('#4196 V5 positive control: a first retry proceeds without pre-existing ledger evidence', async () => {
+    process.env.AUTOMATION_CLASSB_OUTBOUND_ENABLED = 'true'
+    const original = storedExecution()
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(original)
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentRule())
+    const retried = storedExecution({ id: 'axe_next', status: 'success' })
+    const execSpy = vi.spyOn(service, 'executeRule').mockResolvedValue(retried)
+    queryFn.mockResolvedValue({ rows: [{ first_retry_attempt: true }], rowCount: 1 })
+
+    await expect(service.retryExecution(original.id, 'admin1')).resolves.toEqual({ execution: retried })
+    expect(execSpy).toHaveBeenCalledTimes(1)
+    expect(queryFn).toHaveBeenCalledWith(expect.stringContaining('first_retry_attempted_at IS NULL'), [original.id])
+    expect(queryFn).not.toHaveBeenCalledWith(expect.stringContaining('AS has_class_a_evidence'), expect.anything())
+  })
+
+  it('#4196 V5 positive control: lineage evidence lets a non-first Class-B retry proceed', async () => {
+    process.env.AUTOMATION_CLASSB_OUTBOUND_ENABLED = 'true'
+    const child = storedExecution({ id: 'axe_child', rerunOfExecutionId: 'axe_root' })
+    const root = storedExecution({ id: 'axe_root' })
+    vi.spyOn(service.logs, 'getById').mockImplementation(async (id) => id === child.id ? child : root)
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentRule())
+    queryFn.mockImplementation(async (statement: unknown) => (
+      typeof statement === 'string' && statement.includes('AS first_retry_attempt')
+        ? { rows: [{ first_retry_attempt: false }], rowCount: 1 }
+        : typeof statement === 'string' && statement.includes('AS has_class_a_evidence')
+          ? { rows: [{ has_class_a_evidence: false, has_class_b_evidence: true }], rowCount: 1 }
+          : { rows: [], rowCount: 0 }
+    ))
+    const retried = storedExecution({ id: 'axe_next', status: 'success' })
+    const execSpy = vi.spyOn(service, 'executeRule').mockResolvedValue(retried)
+
+    await expect(service.retryExecution(child.id, 'admin1')).resolves.toEqual({ execution: retried })
+    expect(execSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('#4196 V5 rollout control: flag-OFF and pure control-flow retries do not demand nonexistent ledger rows', async () => {
+    const child = storedExecution({ id: 'axe_child', rerunOfExecutionId: 'axe_root' })
+    const root = storedExecution({ id: 'axe_root' })
+    vi.spyOn(service.logs, 'getById').mockImplementation(async (id) => id === child.id ? child : root)
+    const getRule = vi.spyOn(service, 'getRule').mockResolvedValue(currentRule())
+    const execSpy = vi.spyOn(service, 'executeRule').mockResolvedValue(storedExecution({ id: 'axe_next', status: 'success' }))
+
+    await expect(service.retryExecution(child.id, 'admin1')).resolves.toHaveProperty('execution')
+    expect(queryFn).not.toHaveBeenCalledWith(expect.stringContaining('AS has_class_a_evidence'), expect.anything())
+
+    process.env.AUTOMATION_CLASSB_OUTBOUND_ENABLED = 'true'
+    getRule.mockResolvedValue(currentRule({ action_type: 'record_click', action_config: {} }))
+    await expect(service.retryExecution(child.id, 'admin1')).resolves.toHaveProperty('execution')
+    expect(execSpy).toHaveBeenCalledTimes(2)
   })
 
   it('409 RULE_MISSING_OR_DISABLED when current rule is gone or disabled', async () => {
@@ -4248,15 +5573,18 @@ describe('AutomationExecutor — A6-1 job lifecycle hooks', () => {
   // A recording lifecycle; throwOn lets a test simulate a job-write failure at a phase.
   function recordingLifecycle(throwOn?: { phase: 'start' | 'settled'; index: number }) {
     const calls: string[] = []
+    const settledResults: Array<{ actionType?: string; status: string; output?: unknown }> = []
     return {
       calls,
+      settledResults,
       factory: (_executionId: string) => ({
         onStart: async (i: number) => {
           calls.push(`start:${i}`)
           if (throwOn?.phase === 'start' && throwOn.index === i) throw new Error('job create failed')
         },
-        onSettled: async (i: number, _a: unknown, r: { status: string }) => {
+        onSettled: async (i: number, _a: unknown, r: { actionType?: string; status: string; output?: unknown }) => {
           calls.push(`settled:${i}:${r.status}`)
+          settledResults.push(r)
           if (throwOn?.phase === 'settled' && throwOn.index === i) throw new Error('job update failed')
         },
         onSkipped: async (i: number) => { calls.push(`skipped:${i}`) },
@@ -4413,6 +5741,115 @@ describe('AutomationExecutor — A6-1 job lifecycle hooks', () => {
       { phase: 'settled', index: 1, type: 'send_webhook', status: 'success' },
     ])
     expect(deps.fetchFn).toHaveBeenCalledTimes(1) // non-selected branch webhook did not run; only the after action did.
+  })
+
+  it('simulate derives a selected branch containing wait + notification without suspending or emitting', async () => {
+    const emitSpy = vi.spyOn(deps.eventBus, 'emit')
+    const lc = recordingLifecycle()
+    const rule = createMockRule({
+      actions: [{
+        type: 'condition_branch',
+        config: {
+          branches: [{
+            key: 'vip',
+            conditions: { logic: 'and', conditions: [{ fieldId: 'tier', operator: 'equals', value: 'vip' }] },
+            actions: [
+              { type: 'wait_for_callback', config: {} },
+              { type: 'send_notification', config: { userIds: ['u1'], message: 'Hello' } },
+            ],
+          }],
+        },
+      }],
+    })
+
+    const execution = await executor.execute(
+      rule,
+      { recordId: 'r1', data: { tier: 'vip' }, sheetId: 'sheet_1' },
+      lc.factory,
+      undefined,
+      'simulate',
+    )
+
+    expect(execution).toMatchObject({
+      status: 'success',
+      dryRun: true,
+      steps: [{
+        actionType: 'condition_branch',
+        status: 'success',
+        output: { selectedBranchKey: 'vip', matched: true },
+      }],
+    })
+    expect(lc.calls).toEqual([
+      'start:0',
+      'start:0',
+      'settled:0:success',
+      'start:0',
+      'settled:0:success',
+      'settled:0:success',
+    ])
+    expect(lc.settledResults[0]).toMatchObject({
+      actionType: 'wait_for_callback',
+      status: 'success',
+      output: {
+        dryRun: true,
+        dispatched: false,
+        plan: {
+          wouldSuspend: true,
+          reason: 'external_event',
+          resumeTokenIssued: false,
+        },
+      },
+    })
+    expect(emitSpy).not.toHaveBeenCalled()
+    expect(deps.fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('simulate fail-stops a selected branch when its Class-A target is malformed', async () => {
+    const lc = recordingLifecycle()
+    const rule = createMockRule({
+      actions: [{
+        type: 'condition_branch',
+        config: {
+          branches: [{
+            key: 'vip',
+            conditions: { logic: 'and', conditions: [{ fieldId: 'tier', operator: 'equals', value: 'vip' }] },
+            actions: [
+              {
+                type: 'lock_record',
+                config: { targetBaseId: 'base_target', targetSheetId: 'sheet_target' },
+              },
+              { type: 'send_notification', config: { userIds: ['should_skip'], message: 'should skip' } },
+            ],
+          }],
+        },
+      }],
+    })
+
+    const execution = await executor.execute(
+      rule,
+      { recordId: 'r1', data: { tier: 'vip' }, sheetId: 'sheet_1' },
+      lc.factory,
+      undefined,
+      'simulate',
+    )
+
+    expect(execution).toMatchObject({
+      status: 'failed',
+      dryRun: true,
+      steps: [{
+        actionType: 'condition_branch',
+        status: 'failed',
+        error: 'Cross-base lock_record requires targetBaseId + targetSheetId + targetRecordId',
+      }],
+    })
+    expect(lc.calls).toEqual([
+      'start:0',
+      'start:0',
+      'settled:0:failed',
+      'skipped:0',
+      'settled:0:failed',
+    ])
+    expect(deps.queryFn).not.toHaveBeenCalled()
   })
 
   it('A6-3-1: condition_branch fails closed in legacy mode and skips later actions', async () => {
@@ -4803,6 +6240,80 @@ describe('AutomationService — A6-1 opt-in path choice', () => {
     const execSpy = vi.spyOn(service['executor'], 'execute').mockResolvedValue(storedExecutionForPath())
     await service.executeRule(execRule({ executionMode: 'workflow_job_v1' }), { recordId: 'r1' })
     expect(typeof execSpy.mock.calls[0][2]).toBe('function')
+  })
+
+  it('simulate persists a values-free execution projection while returning the in-memory plan', async () => {
+    const recordSpy = vi.spyOn(service.logs, 'record').mockResolvedValue()
+    const execution = await service.executeRule(execRule({
+      name: 'private_rule_name',
+      actions: [{
+        type: 'send_notification',
+        config: { userIds: ['private_recipient'], message: 'private_message' },
+      }],
+    }), {
+      recordId: 'private_record',
+      actorId: 'private_actor',
+      data: { salary: 'private_salary' },
+    }, undefined, 'simulate')
+
+    expect(JSON.stringify(execution)).toContain('private_salary')
+    const persisted = recordSpy.mock.calls[0]?.[0]
+    expect(persisted).toMatchObject({
+      dryRun: true,
+      steps: [{
+        actionType: 'send_notification',
+        status: 'success',
+        simulated: true,
+        output: { dryRun: true, dispatched: false },
+      }],
+    })
+    expect(persisted?.triggerEvent).toBeUndefined()
+    expect(persisted?.ruleSnapshot).toBeUndefined()
+    expect(JSON.stringify(persisted)).not.toContain('private_')
+  })
+
+  it('simulate keeps workflow parent, final execution, and job results values-free', async () => {
+    const onStart = vi.fn(async () => undefined)
+    const onSettled = vi.fn(async () => undefined)
+    const onSkipped = vi.fn(async () => undefined)
+    vi.spyOn(service['jobService'], 'lifecycleFor').mockReturnValue({ onStart, onSettled, onSkipped })
+    const recordSpy = vi.spyOn(service.logs, 'record').mockResolvedValue()
+    const updateSpy = vi.spyOn(service.logs, 'updateRecordedExecution').mockResolvedValue()
+
+    const execution = await service.executeRule(execRule({
+      executionMode: 'workflow_job_v1',
+      actions: [{
+        type: 'condition_branch',
+        config: {
+          branches: [{
+            key: 'private_branch_key',
+            conditions: { logic: 'and', conditions: [{ fieldId: 'tier', operator: 'equals', value: 'private_tier' }] },
+            actions: [{
+              type: 'send_notification',
+              config: { userIds: ['private_recipient'], message: 'private_message' },
+            }],
+          }],
+        },
+      }],
+    }), {
+      recordId: 'private_record',
+      actorId: 'private_actor',
+      data: { tier: 'private_tier' },
+    }, undefined, 'simulate')
+
+    expect(JSON.stringify(execution)).toContain('private_branch_key')
+    const persistedChannels = [
+      recordSpy.mock.calls[0]?.[0],
+      updateSpy.mock.calls[0]?.[0],
+      ...onSettled.mock.calls.map((call) => call[2]),
+    ]
+    expect(recordSpy).toHaveBeenCalledTimes(1)
+    expect(updateSpy).toHaveBeenCalledTimes(1)
+    expect(onStart).toHaveBeenCalledTimes(2)
+    expect(onSettled).toHaveBeenCalledTimes(2)
+    for (const channel of persistedChannels) {
+      expect(JSON.stringify(channel)).not.toContain('private_')
+    }
   })
 
   it('opt-IN rule pre-creates the parent execution before side effects, then final-updates it', async () => {

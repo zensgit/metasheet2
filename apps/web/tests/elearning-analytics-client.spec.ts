@@ -6,6 +6,9 @@ vi.mock('../src/utils/api', () => ({
 }))
 
 import {
+  createElearningAnalyticsExport,
+  downloadElearningAnalyticsExport,
+  getElearningAnalyticsExport,
   getElearningDepartmentStatsDaily,
   getElearningDepartmentStatsPeriod,
 } from '../src/services/elearningAnalytics'
@@ -15,6 +18,9 @@ const DATE = '2026-08-29'
 const START = '2026-08-29T00:00:00.000Z'
 const END = '2026-08-30T00:00:00.000Z'
 const PROJECTED = '2026-08-30T00:01:02.003Z'
+const REQUEST = '22222222-2222-4222-8222-222222222222'
+const EXPORT = '33333333-3333-4333-8333-333333333333'
+const EXPIRES = '2026-09-06T00:01:02.003Z'
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -47,6 +53,21 @@ function base(over: Record<string, unknown> = {}) {
       memberCount: 12,
       overdueCount: 1,
     },
+    ...over,
+  }
+}
+
+function exportResult(over: Record<string, unknown> = {}) {
+  return {
+    exportId: EXPORT,
+    departmentId: DEPARTMENT,
+    periodStart: START,
+    periodEnd: END,
+    status: 'pending',
+    expiresAt: EXPIRES,
+    completedAt: null,
+    errorCode: null,
+    duplicate: false,
     ...over,
   }
 }
@@ -172,5 +193,99 @@ describe('e-learning analytics client', () => {
     await expect(getElearningDepartmentStatsPeriod(DEPARTMENT, END, START))
       .rejects.toMatchObject({ code: 'invalid_input', status: 400 })
     expect(apiFetchMock).not.toHaveBeenCalled()
+  })
+
+  it('creates, reads, and downloads an aggregate export through exact routes', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(response(exportResult(), 202))
+      .mockResolvedValueOnce(response(exportResult({ status: 'succeeded', completedAt: PROJECTED })))
+      .mockResolvedValueOnce(new Response('department_id\nvalue\n', {
+        status: 200,
+        headers: { 'Content-Type': 'text/csv; charset=utf-8' },
+      }))
+
+    await expect(createElearningAnalyticsExport({
+      requestId: REQUEST,
+      departmentId: DEPARTMENT,
+      periodStart: START,
+      periodEnd: END,
+    })).resolves.toEqual(exportResult())
+    expect(apiFetchMock).toHaveBeenNthCalledWith(1, '/api/elearning/admin/analytics/exports', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        requestId: REQUEST,
+        departmentId: DEPARTMENT,
+        periodStart: START,
+        periodEnd: END,
+      }),
+    })
+
+    await expect(getElearningAnalyticsExport(EXPORT)).resolves.toEqual(
+      exportResult({ status: 'succeeded', completedAt: PROJECTED }),
+    )
+    expect(apiFetchMock).toHaveBeenNthCalledWith(
+      2,
+      `/api/elearning/admin/analytics/exports/${EXPORT}`,
+      { method: 'GET' },
+    )
+
+    const download = await downloadElearningAnalyticsExport(EXPORT)
+    expect(download.filename).toBe(`elearning-department-stats-${EXPORT}.csv`)
+    expect(Object.prototype.toString.call(download.blob)).toBe('[object Blob]')
+    expect(download.blob.type).toBe('text/csv;charset=utf-8')
+    expect(download.blob.size).toBe(new TextEncoder().encode('department_id\nvalue\n').length)
+    expect(apiFetchMock).toHaveBeenNthCalledWith(
+      3,
+      `/api/elearning/admin/analytics/exports/${EXPORT}/download`,
+      { method: 'GET' },
+    )
+  })
+
+  it.each([
+    exportResult({ extra: true }),
+    exportResult({ exportId: 'not-a-uuid' }),
+    exportResult({ periodStart: '2026-08-29T00:00:00Z' }),
+    exportResult({ periodStart: END, periodEnd: START }),
+    exportResult({ status: 'ready' }),
+    exportResult({ expiresAt: '2026-09-06T00:01:02Z' }),
+    exportResult({ completedAt: '2026-08-30T00:01:02Z' }),
+    exportResult({ errorCode: 'storage unavailable' }),
+    exportResult({ duplicate: 1 }),
+  ])('rejects malformed export DTO %#', async (payload) => {
+    apiFetchMock.mockResolvedValueOnce(response(payload, 202))
+    await expect(createElearningAnalyticsExport({
+      requestId: REQUEST,
+      departmentId: DEPARTMENT,
+      periodStart: START,
+      periodEnd: END,
+    })).rejects.toMatchObject({ code: 'invalid_response', status: 202 })
+  })
+
+  it('keeps export commands closed and failures values-free', async () => {
+    await expect(createElearningAnalyticsExport({
+      requestId: 'not-a-uuid',
+      departmentId: DEPARTMENT,
+      periodStart: START,
+      periodEnd: END,
+    })).rejects.toMatchObject({ code: 'invalid_input', status: 400 })
+    expect(apiFetchMock).not.toHaveBeenCalled()
+
+    apiFetchMock.mockResolvedValueOnce(response({ error: 'conflict', detail: 'sensitive' }, 409))
+    await expect(createElearningAnalyticsExport({
+      requestId: REQUEST,
+      departmentId: DEPARTMENT,
+      periodStart: START,
+      periodEnd: END,
+    })).rejects.toMatchObject({ code: 'conflict', status: 409 })
+
+    apiFetchMock.mockResolvedValueOnce(new Response('not csv', {
+      status: 200,
+      headers: { 'Content-Type': 'text/plain' },
+    }))
+    await expect(downloadElearningAnalyticsExport(EXPORT)).rejects.toMatchObject({
+      code: 'invalid_response',
+      status: 200,
+    })
   })
 })
