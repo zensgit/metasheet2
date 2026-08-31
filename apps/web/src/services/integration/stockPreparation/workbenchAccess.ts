@@ -142,3 +142,35 @@ export function visibleStockPrepControls(hasPermission: StockPrepPermissionProbe
 export function canUseLegacyMvpTabs(hasPermission: StockPrepPermissionProbe): boolean {
   return hasPermission(INTEGRATION_ADMIN)
 }
+
+/**
+ * THE INSTALL / 体检 TAB — who may OPEN it.
+ *
+ * `stock-prep:admin` is the workbench-scoped ceiling, and opening this tab is exactly a
+ * workbench-admin act: it READS the app manifest (the platform app-catalog route, which every
+ * authenticated principal may read) and READS the deployment preflight (stock-prep:read, which
+ * `stock-prep:admin` satisfies). Nothing behind this gate can 403, so R-11's "visible must be
+ * actionable" holds for the panel as a whole.
+ *
+ * Deliberately NOT a member of STOCK_PREP_WORKBENCH_CAPABILITIES: that manifest is the
+ * confirmation-queue control set, asserted control-for-control against the queue view by the
+ * permission-matrix suites on both sides. Adding a control that lives in a different component would
+ * make that alignment assertion measure the wrong DOM. This is the same shape as
+ * `canUseLegacyMvpTabs` above — a tab-level predicate, mirrored by its own test.
+ */
+export function canOpenStockPrepInstallView(hasPermission: StockPrepPermissionProbe): boolean {
+  return hasPermission(STOCK_PREP_ADMIN)
+}
+
+/**
+ * ...and who may RUN it.
+ *
+ * The install run drives the two ensure routes and the two customer-pack routes, and all four are
+ * `requireAccess(req, 'admin')` server-side — PROVISIONING, which R-11 names as precisely what the
+ * operator tier must not open. This PR does not move them, so the run control renders only for a
+ * platform admin. A `stock-prep:admin` holder still sees the defaults, the preflight and its fixes;
+ * showing them a button that 403s is the "visible but not actionable" failure R-11 forbids.
+ */
+export function canRunStockPrepInstall(hasPermission: StockPrepPermissionProbe): boolean {
+  return hasPermission(INTEGRATION_ADMIN)
+}

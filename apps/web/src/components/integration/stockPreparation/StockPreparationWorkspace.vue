@@ -47,9 +47,7 @@
       <!-- The dashboard tab aggregates MULTIPLE existing readonly endpoints client-side (H1/H2) — it
            has no single endpoint to badge, so this line is skipped for it only. -->
       <p v-if="!activeView.noEndpointBadge" class="stock-prep__panel-endpoint" data-testid="stock-prep-panel-endpoint">
-        <span class="stock-prep__badge">{{
-          activeView.confirmWrites ? bi('只读 + 人工确认', 'readonly + human confirm') : `${bi('只读', 'readonly')} · GET`
-        }}</span>
+        <span class="stock-prep__badge">{{ badgeLabel(activeView) }}</span>
         <code>{{ activeView.endpoint }}</code>
       </p>
       <!-- H1/H2 (UI humanization, H0 plane-boundary design-lock PR #4202): the dashboard tab is the
@@ -63,6 +61,14 @@
            six MVP tabs below were explicitly not revived by that ruling and stay platform-admin. -->
       <StockPreparationConfirmationQueueView
         v-if="effectiveKey === 'confirmation-queue'"
+        :scope="scope"
+      />
+      <!-- §14 (multitable-application-model-20260830.md): the INSTALL page — the app's defaults laid
+           out for a customer admin to confirm, the deployment preflight, and a SKIP-aware install run
+           that walks the bootstrap script's own step order. Workbench-admin tier; the run control
+           inside it is platform-admin because the four routes it drives are. -->
+      <StockPreparationInstallView
+        v-else-if="effectiveKey === 'install'"
         :scope="scope"
       />
       <StockPreparationDashboardView
@@ -136,8 +142,12 @@ import StockPreparationUnitConfirmView from './StockPreparationUnitConfirmView.v
 import StockPreparationPrepLineView from './StockPreparationPrepLineView.vue'
 import StockPreparationExceptionQueueView from './StockPreparationExceptionQueueView.vue'
 import StockPreparationConfirmationQueueView from './StockPreparationConfirmationQueueView.vue'
+import StockPreparationInstallView from './StockPreparationInstallView.vue'
 import { useAuth } from '../../../composables/useAuth'
-import { canUseLegacyMvpTabs } from '../../../services/integration/stockPreparation/workbenchAccess'
+import {
+  canOpenStockPrepInstallView,
+  canUseLegacyMvpTabs,
+} from '../../../services/integration/stockPreparation/workbenchAccess'
 
 const { locale } = useLocale()
 const auth = useAuth()
@@ -151,6 +161,7 @@ function bi(zh: string, en: string): string {
 
 type StockPreparationViewKey =
   | 'confirmation-queue'
+  | 'install'
   | 'dashboard'
   | 'project-workspace'
   | 'bom-snapshot-diff'
@@ -173,6 +184,13 @@ interface StockPreparationViewTab {
    * resolutions). Still no external ERP/K3 write — the badge copy reflects the human-confirm nature.
    */
   confirmWrites?: boolean
+  /**
+   * True for the install tab alone. Its badge must not claim "readonly · GET": the panel reads the
+   * manifest and the preflight, and its admin-only run calls the EXISTING idempotent ensure /
+   * customer-pack routes. Still no external write and still no new authority — the badge just says
+   * what it is instead of what the two older shapes are.
+   */
+  provisioning?: boolean
   /** True only for the dashboard tab — it aggregates multiple existing GETs client-side (H1/H2), so
    *  it has no single endpoint to badge (see the panel-endpoint paragraph's v-if). */
   noEndpointBadge?: boolean
@@ -183,6 +201,14 @@ interface StockPreparationViewTab {
    * of controls on screen that 403 on click — the "visible but not actionable" half of R-11.
    */
   legacyMvp?: boolean
+  /**
+   * §14 install tab. Gated on `stock-prep:admin` — the workbench-scoped ceiling — rather than on
+   * platform admin, because everything the PANEL itself reads (the app-catalog manifest and the
+   * read-tier preflight) is answerable to that holder. The one control inside it that needs more
+   * (the install run, which drives four platform-admin routes) does its own R-11 gating there, so a
+   * workbench admin never sees a button that would 403.
+   */
+  workbenchAdminOnly?: boolean
 }
 
 // Tab order follows the MVP business loop (design §"MVP Goal"). Descriptions are values-free — they
@@ -200,6 +226,20 @@ const views: StockPreparationViewTab[] = [
     enDesc: 'Pending decision queue: keep_multiple_rows / accept_current / manual_hold plus the O1\'-A value entry. The queue projection is values-free; entered content appears only in the per-decision readback.',
     endpoint: '/api/integration/stock-preparation/confirmation-decisions',
     confirmWrites: true,
+  },
+  // §14 (docs/development/platform-overall-design/multitable-application-model-20260830.md):
+  // "安装页展示默认配置,由客户确认". Listed SECOND so the confirmation queue stays the landing view
+  // for the operator this page was adopted for, while the customer admin who has to install the app
+  // finds it one click away rather than in a separate console.
+  {
+    key: 'install',
+    workbenchAdminOnly: true,
+    zh: '安装 / 体检',
+    en: 'Install / Health',
+    zhDesc: '清单里的默认配置摆出来由您确认(显示名可改、表标识与权限码只读、围栏姿态无开关),再按自举脚本的顺序预检、建表、复检 —— 跳过项是人工待办,不是失败。',
+    enDesc: 'The manifest\'s defaults laid out for confirmation (names adjustable, objectIds and permission codes read-only, fences shown with no switch), then preflight, provisioning and a recheck in the bootstrap script\'s order — a SKIP is human work outstanding, not a failure.',
+    endpoint: '/api/platform/apps/stock-preparation',
+    provisioning: true,
   },
   // H1/H2 (UI humanization, H0 plane-boundary design-lock PR #4202 — PLANE A, values-free): the
   // task-oriented entry for the legacy MVP surface.
@@ -278,9 +318,14 @@ const views: StockPreparationViewTab[] = [
 // a tab whose panel would 403 on every action is not rendered. The six legacy MVP tabs are still
 // platform-admin gated end to end, so only a platform admin sees them; a customer operator holding
 // stock-prep:read sees exactly the confirmation queue this page was adopted for.
-const visibleViews = computed(() => views.filter(
-  (view) => !view.legacyMvp || canUseLegacyMvpTabs((permission) => auth.hasPermission(permission)),
-))
+const visibleViews = computed(() => {
+  const probe = (permission: string): boolean => auth.hasPermission(permission)
+  return views.filter((view) => {
+    if (view.legacyMvp) return canUseLegacyMvpTabs(probe)
+    if (view.workbenchAdminOnly) return canOpenStockPrepInstallView(probe)
+    return true
+  })
+})
 // The landing tab is the first VISIBLE one, and activeKey can never name a hidden tab: without this
 // fold an operator arriving on a stale/deep-linked legacy key would render a panel of controls that
 // all 403 — the exact "visible but not actionable" failure, reintroduced through the back door.
@@ -332,6 +377,13 @@ function handleDashboardProjectSelect(projectId: string): void {
 // hold is one of this file's own StockPreparationViewKey literals.
 function handleNavigateStage(viewKey: string): void {
   activeKey.value = viewKey as StockPreparationViewKey
+}
+
+/** What the panel's endpoint badge claims. One expression, so no tab can claim the wrong shape. */
+function badgeLabel(view: StockPreparationViewTab): string {
+  if (view.provisioning) return bi('读清单 + 幂等建表(管理员)', 'manifest read + idempotent ensure (admin)')
+  if (view.confirmWrites) return bi('只读 + 人工确认', 'readonly + human confirm')
+  return `${bi('只读', 'readonly')} · GET`
 }
 </script>
 
