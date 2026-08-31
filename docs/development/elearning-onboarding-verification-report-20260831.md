@@ -4,8 +4,8 @@
 >
 > 非结论：不是 exact-head CI、Ready、merge、flag、UAT、deploy、production 或 L0–L6 完成证明。
 >
-> 被测代码：`f8f29007379d58b70728d7935aec91d353591c95`
->（tree `1a91fbcf4febaa64200f0eb69bd36dafb70917c1`）。
+> 被测代码：`bbaa4149b486a6d74db52a08a9565bc83a01ca09`
+>（tree `2f20a81a6a9ad459ed3524ab73d4b5c5e6349539`）。
 >
 > 后续报告提交只更新开发/验证文档，不改变上述被测代码树。
 
@@ -18,6 +18,7 @@
 | second parent / main | `25635e67db5145a5998499c4adc8f030e156daf7` |
 | product merge head/tree | `21f3d489c8...` / `6f75b039af...` |
 | shared landing candidate head/tree | `f8f2900737...` / `1a91fbcf4f...` |
+| review fix head/tree | `bbaa4149b4...` / `2f20a81a6a...` |
 | merge conflict | 0 |
 | pre-merge path overlap | 0 |
 | manual resolution files | 0 |
@@ -37,7 +38,7 @@
 | Source ESLint | Core package config + Web package config | PASS |
 | OpenAPI build/guard | official build + SDK generation + codegen guard | PASS，生成物零 tracked drift |
 | Shared wiring | `elearning-media-ci-wiring.test.mjs` | 15/15 PASS |
-| Backend onboarding canaries | 7 个 whole-file canary | 7/7 files，52/52 tests PASS |
+| Backend onboarding + port neighbors | 8 个 whole-file | 8/8 files，59/59 tests PASS；其中 7 个 canary 为 54/54 |
 | Required Web | canonical required-Web script | 410/410 files，5244/5244 tests PASS |
 | E-learning Web lane | 29 个 whole-file spec | 29/29 files，374/374 tests PASS |
 | Plugin package chain | plugin-elearning package tests | 14 suites PASS，0 intentional exclusion |
@@ -56,9 +57,12 @@
 - migration apply + replay：PASS。
 - schema drift（constraint/function）：RED as expected，canonical restore GREEN。
 - policy closed rules、request replay/conflict、one-way retirement：PASS。
+- policy replay 在读取既有 request 前重验 active same-org actor；revoked-membership replay：values-free forbidden。
 - assignment global effect serialization 与 cross-org negative：PASS。
+- assignment effect 的 `source_key` 由数据库 trigger 精确绑定被引用 training-plan assignment。
 - `hire_date` fill-only-null 与调用方外层事务回滚：PASS。
 - 周报小样本抑制与 append-only：PASS。
+- 周报 producer 只 enqueue 上一个已闭合 UTC 周，job 在周结束后 24 小时到期；已入队报告在 policy 后续退役时仍可完成。
 - nonempty down fail-closed；empty down/reapply：PASS。
 - `scratchDrain=CLEAN`，`residualBackends=0`。
 
@@ -81,6 +85,11 @@
 3. 移除 null-hire-date 的不符合条件分支：lifecycle 测试 RED；恢复 GREEN。
 4. outer transaction 中提前提交 first enqueue 或吞掉第二次 authority failure：real-DB 回滚断言 RED；恢复 GREEN。
 5. 移除 `hire_date IS NULL` 更新条件：保留已有日期断言 RED；恢复 GREEN。
+6. 将 active actor 校验移回 request replay 之后：revoked-membership replay negative RED；恢复 GREEN。
+7. 删除 production weekly producer start：plugin runtime wiring RED；恢复 GREEN。
+8. 删除 closed-week enqueue guard：未来周 negative RED；恢复 GREEN。
+9. 恢复“retired policy 不可完成已入队报告”：retired materialization negative RED；恢复 GREEN。
+10. 删除 effect trigger 的 assignment `source_key` 比较：真库 wrong-source insert negative RED；恢复后 authority 6/6 GREEN。
 
 ### 4.2 OpenAPI
 
@@ -105,7 +114,8 @@
 | wiring contract deletion mutations | PASS，15/15 restored |
 | official provenance old RED / new GREEN / full S5 | PASS |
 | merge-head Sol review | bounded cutoff；无 terminal verdict，不作为通过依据 |
-| final shared-head Sol review | NOT RUN |
+| pre-fix shared-head Sol/Terra review | 发现 1 P1 / 3 P2，已在 `bbaa4149b4` 逐项修复 |
+| final fixed-head Sol/Terra review | NOT RUN |
 | remote exact-head CI | NOT RUN |
 | merged-main CI | NOT APPLICABLE |
 | browser UAT / real tenant | NOT AUTHORIZED |
@@ -113,8 +123,8 @@
 
 ## 6. 当前 P1/P2/P3
 
-- P1：本地已知产品与 landing selector P1 为 0；等待 fresh exact-head 独立审阅。
-- P2：本地已知产品与 landing selector P2 为 0；等待 fresh exact-head 独立审阅。
+- P1：已知产品与 landing selector P1 为 0；等待 `bbaa4149b4` fresh exact-head 独立复门。
+- P2：已知产品与 landing selector P2 为 0；等待 `bbaa4149b4` fresh exact-head 独立复门。
 - P3：未做真实目录 tenant、通知通道、浏览器 UAT 或生产容量/运维验收；这些不由本地 unit/DB 证明。
 
 ## 7. 发布状态
