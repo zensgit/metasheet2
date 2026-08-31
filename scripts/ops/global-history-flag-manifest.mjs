@@ -537,7 +537,7 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     danger: 'low',
     purpose:
       'L6 watch-challenge gate. Default OFF; exact literal \'true\' only. The route and runtime additionally require the master, content, and media gates, and disabled mode remains byte-compatible with ordinary verified watch progress.',
-    source: 'packages/core-backend/src/elearning/feature-flags.ts#ELEARNING_WATCH_CHALLENGE_FLAG',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts#ELEARNING_WATCH_CHALLENGE_ENABLED',
   },
 ])
 

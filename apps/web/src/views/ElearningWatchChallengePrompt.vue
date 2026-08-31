@@ -10,12 +10,12 @@
       {{ elearningLabel('learner.challengeTitle', isZh) }}
     </h3>
     <p data-testid="elearning-watch-challenge-message">
-      {{ challenge.status === 'paused'
+      {{ timedOut
         ? elearningLabel('learner.challengePaused', isZh)
         : elearningLabel('learner.challengePrompt', isZh) }}
     </p>
     <p
-      v-if="challenge.status === 'challenged'"
+      v-if="!timedOut"
       class="elearning-watch-challenge__countdown"
       data-testid="elearning-watch-challenge-countdown"
       aria-live="polite"
@@ -31,7 +31,7 @@
     >
       {{ busy
         ? elearningLabel('learner.challengeConfirming', isZh)
-        : challenge.status === 'paused'
+        : timedOut
           ? elearningLabel('learner.challengeResume', isZh)
           : elearningLabel('learner.challengeConfirm', isZh) }}
     </button>
@@ -58,6 +58,7 @@ const nowMs = ref(Date.now())
 let timer: number | null = null
 
 const remainingMs = computed(() => Math.max(0, Date.parse(props.challenge.deadlineAt) - nowMs.value))
+const timedOut = computed(() => props.challenge.status === 'paused' || remainingMs.value === 0)
 
 function refreshClock(): void {
   nowMs.value = Date.now()

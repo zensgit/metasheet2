@@ -651,6 +651,10 @@ describe('ElearningLearnerView', () => {
       video.paused = true
       video.dispatchEvent(new Event('pause'))
     })
+    const play = vi.spyOn(video, 'play').mockImplementation(async () => {
+      video.paused = false
+      video.dispatchEvent(new Event('play'))
+    })
     video.dispatchEvent(new Event('play'))
     await flushUi()
     expect(pause).toHaveBeenCalledTimes(1)
@@ -662,11 +666,15 @@ describe('ElearningLearnerView', () => {
     await flushUi()
     const firstRequestId = h.acknowledgeChallenge.mock.calls[0]?.[2]
     expect(firstRequestId).toMatch(/^[0-9a-f-]{36}$/)
+    expect(play).not.toHaveBeenCalled()
     expect(root.querySelector('[data-testid="elearning-watch-challenge"]')).toBeTruthy()
     ;(root.querySelector('[data-testid="elearning-watch-challenge-confirm"]') as HTMLButtonElement).click()
     await flushUi()
     expect(h.acknowledgeChallenge.mock.calls[1]?.[2]).toBe(firstRequestId)
     expect(root.querySelector('[data-testid="elearning-watch-challenge"]')).toBeNull()
+    expect(play).toHaveBeenCalledTimes(1)
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')?.textContent)
+      .toContain('视频已继续播放')
 
     h.heartbeat.mockResolvedValueOnce(watchState({
       lastSequence: 3,
@@ -680,13 +688,13 @@ describe('ElearningLearnerView', () => {
     expect(h.acknowledgeChallenge.mock.calls[2]?.[2]).not.toBe(firstRequestId)
   })
 
-  it('shows an expired challenge as resumable without crediting it client-side', async () => {
+  it('shows a locally expired challenged prompt as timed out and resumable', async () => {
     h.startWatch.mockResolvedValue(watchState({
       challenge: {
         challengeId: CHALLENGE,
         deadlineAt: new Date(Date.now() - 1000).toISOString(),
         ordinal: 1,
-        status: 'paused',
+        status: 'challenged',
       },
     }))
     const root = mountView()

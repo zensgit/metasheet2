@@ -337,6 +337,7 @@ let examEpoch = 0
 let statusSource: 'draft' | null = null
 let examCountdownTimer: number | null = null
 let challengeAckIdentity: { key: string; requestId: string } | null = null
+let resumePlaybackAfterChallenge = false
 
 function formatError(error: unknown): string {
   if (error instanceof ElearningApiError) {
@@ -443,6 +444,7 @@ function stopWatchSession(): void {
   activeChallenge.value = null
   challengeAckPending.value = false
   challengeAckIdentity = null
+  resumePlaybackAfterChallenge = false
 }
 
 function applyWatchChallenge(challenge: ElearningWatchChallenge | null | undefined): void {
@@ -450,7 +452,10 @@ function applyWatchChallenge(challenge: ElearningWatchChallenge | null | undefin
   if (!challenge) return
   clearHeartbeatTimer()
   pendingBeats = []
-  if (videoNode && !videoNode.paused) videoNode.pause()
+  if (videoNode && !videoNode.paused) {
+    resumePlaybackAfterChallenge = true
+    videoNode.pause()
+  }
 }
 
 function watchChallengeRequestId(session: string, challengeId: string): string {
@@ -462,6 +467,20 @@ function watchChallengeRequestId(session: string, challengeId: string): string {
   const requestId = crypto.randomUUID()
   challengeAckIdentity = { key, requestId }
   return requestId
+}
+
+async function resumePlaybackAfterWatchChallenge(
+  shouldResume: boolean,
+): Promise<'acknowledged' | 'manual' | 'resumed'> {
+  const video = videoNode
+  if (!shouldResume || !video || video.ended || watchStopped) return 'acknowledged'
+  try {
+    await video.play()
+    if (!video.paused) startHeartbeatTimer()
+    return 'resumed'
+  } catch {
+    return 'manual'
+  }
 }
 
 async function confirmWatchChallenge(): Promise<void> {
@@ -478,15 +497,31 @@ async function confirmWatchChallenge(): Promise<void> {
     )
     if (watchStopped || epoch !== watchEpoch || sessionId !== currentSession) return
     challengeAckIdentity = null
+    const shouldResume = resumePlaybackAfterChallenge
+    resumePlaybackAfterChallenge = false
     lastSequence = result.lastSequence
     if (activeCourseVersionId.value) {
       applyServerWatchProgress(activeCourseVersionId.value, result)
     }
     applyWatchChallenge(result.challenge)
-    writeStatus(elearningLabel('learner.challengeConfirmed', isZh.value), 'info')
     if (result.status === 'completed') {
       stopWatchSession()
       await refreshCourses()
+    } else {
+      const resumeStatus = await resumePlaybackAfterWatchChallenge(
+        shouldResume && result.challenge === null,
+      )
+      writeStatus(
+        elearningLabel(
+          resumeStatus === 'resumed'
+            ? 'learner.challengePlaybackResumed'
+            : resumeStatus === 'manual'
+              ? 'learner.challengeResumeManual'
+              : 'learner.challengeAcknowledged',
+          isZh.value,
+        ),
+        'info',
+      )
     }
   } catch (error) {
     if (!watchStopped && epoch === watchEpoch && sessionId === currentSession) {

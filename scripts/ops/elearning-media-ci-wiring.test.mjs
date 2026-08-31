@@ -188,6 +188,10 @@ const V01_PARKED_FLAGS = [
   'ELEARNING_ANALYTICS_ENABLED',
 ]
 
+const L6_EXTENSION_FLAGS = [
+  'ELEARNING_WATCH_CHALLENGE_ENABLED',
+]
+
 const MEDIA_CLAIM_UNIT_FILES = [
   'tests/unit/elearning-media-runtime.test.ts',
   'tests/unit/elearning-media-reconciler.test.ts',
@@ -552,6 +556,18 @@ test('env example documents the seven canonical flags default false and V0.1 req
       env,
       new RegExp(`^#\\s*${key}=false\\s*$`, 'm'),
       `.env.example must keep the canonical ${key}=false line`,
+    )
+  }
+  for (const key of L6_EXTENSION_FLAGS) {
+    assert.match(
+      env,
+      new RegExp(`^#\\s*${key}=false\\s*$`, 'm'),
+      `.env.example must keep the L6 extension ${key}=false line`,
+    )
+    assert.equal(
+      CANONICAL_ELEARNING_FLAGS.includes(key),
+      false,
+      `${key} is an extension gate, not an eighth canonical capability`,
     )
   }
   const requiredBlock = commentBlockStarting(env, /V0\.1 required flags/, 'V0.1 required flags')

@@ -39,7 +39,9 @@ export type ElearningLabelKey =
   | 'learner.challengeConfirm'
   | 'learner.challengeResume'
   | 'learner.challengeConfirming'
-  | 'learner.challengeConfirmed'
+  | 'learner.challengeAcknowledged'
+  | 'learner.challengePlaybackResumed'
+  | 'learner.challengeResumeManual'
   | 'learner.examTimeRemaining'
   | 'learner.examExpired'
   | 'learner.submitExam'
@@ -262,7 +264,18 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   'learner.challengeConfirm': { en: 'I am watching', zh: '我正在观看' },
   'learner.challengeResume': { en: 'Confirm and resume', zh: '确认并继续' },
   'learner.challengeConfirming': { en: 'Confirming...', zh: '正在确认…' },
-  'learner.challengeConfirmed': { en: 'Learning check confirmed.', zh: '学习验证已确认。' },
+  'learner.challengeAcknowledged': {
+    en: 'Learning check acknowledged.',
+    zh: '学习验证已确认。',
+  },
+  'learner.challengePlaybackResumed': {
+    en: 'Learning check acknowledged. Playback resumed.',
+    zh: '学习验证已确认，视频已继续播放。',
+  },
+  'learner.challengeResumeManual': {
+    en: 'Learning check acknowledged. Resume playback manually.',
+    zh: '学习验证已确认，请手动继续播放。',
+  },
   'learner.examTimeRemaining': { en: 'Time remaining', zh: '剩余时间' },
   'learner.examExpired': {
     en: 'The server has closed this timed attempt. Your answers are locked.',
