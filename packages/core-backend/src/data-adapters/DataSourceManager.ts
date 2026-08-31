@@ -1,4 +1,5 @@
 import { EventEmitter } from 'eventemitter3'
+import { sql } from 'kysely'
 import type { Kysely } from 'kysely'
 import type { BaseDataAdapter, DataSourceConfig, QueryOptions, QueryResult, DbValue, WhereClause, ConnectionConfig, Credentials, AdapterOptions } from './BaseAdapter'
 import { PostgresAdapter } from './PostgresAdapter'
@@ -7,6 +8,7 @@ import { MSSQLAdapter } from './MSSQLAdapter'
 import { MySQLAdapter } from './MySQLAdapter'
 import { PLMAdapter } from './PLMAdapter'
 import { encryptStoredSecretValue, decryptStoredSecretValue, isEncryptedSecretValue } from '../security/encrypted-secrets'
+import { isDatabaseSchemaError } from '../utils/database-errors'
 import type { IConfigService, ILogger } from '../di/identifiers'
 
 // Credential fields that hold secrets and are encrypted at rest. Identifiers
@@ -15,6 +17,39 @@ import type { IConfigService, ILogger } from '../di/identifiers'
 const SENSITIVE_CREDENTIAL_KEYS = ['password', 'apiKey', 'token']
 export const DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED_CODE = 'DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED'
 export const DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED_CODE = 'DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED'
+// Referential delete guard (see countExternalSystemReferences): a source referenced by an
+// integration external system's config.dataSourceId refuses a plain delete with this code.
+export const DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE = 'DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS'
+export const DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY_CODE = 'DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY'
+
+/**
+ * Actor context for data-source access decisions (the authority model).
+ *
+ * Two call shapes, two tiers of meaning:
+ * - a plain user-id string (or undefined) is the DATA-PLANE shape: strictly
+ *   owner-scoped, no admin bypass. This is what adapter/facade/workbench call
+ *   sites pass — reading customer data THROUGH a connection stays owner-only.
+ * - a {@link DataSourceActorContext} object is the MANAGEMENT shape resolved
+ *   from the request: `platformAdmin: true` (the rbac global-admin tier that
+ *   already bypasses every `data_sources:*` rbacGuard) grants management
+ *   access to every source. It never grants credential readback — credentials
+ *   are write-only for every tier at the response-sanitization layer.
+ *
+ * Because the scoping semantics live HERE (not in individual routes), every
+ * assertAccess call site inherits the model — including ones added on other
+ * branches that pass a bare user id.
+ */
+export interface DataSourceActorContext {
+  userId?: string
+  platformAdmin?: boolean
+}
+export type DataSourceActor = string | DataSourceActorContext | undefined
+
+function normalizeActor(actor: DataSourceActor): DataSourceActorContext {
+  if (actor === undefined) return {}
+  if (typeof actor === 'string') return { userId: actor }
+  return actor
+}
 
 type AdapterConstructor = new (config: DataSourceConfig) => BaseDataAdapter
 
@@ -373,13 +408,33 @@ export class DataSourceManager extends EventEmitter {
   }
 
   /**
-   * Assert the requester owns this data source (A0.1 scope enforcement).
-   * Throws the same "not found" wording as getDataSource so callers return a
-   * uniform 404 — a non-owner must not learn that someone else's source exists.
+   * Assert the actor may access this data source (A0.1 scope enforcement).
+   *
+   * Semantics by actor shape (see {@link DataSourceActor}):
+   * - bare user-id string / undefined: OWNER-ONLY — unchanged legacy behavior
+   *   for data-plane call sites (facade, workbench).
+   * - actor context with `platformAdmin: true`: passes for any EXISTING
+   *   source — the management tier that already holds the rbac global-admin
+   *   bypass over `data_sources:*` codes is no longer stopped here.
+   * - actor context without platformAdmin: owner equality on `userId`.
+   *
+   * Throws the same "not found" wording as getDataSource in every refusal so
+   * callers return a uniform 404 — a non-admin non-owner must not learn that
+   * someone else's source exists. A platform admin probing a nonexistent id
+   * gets the identical not-found.
+   *
+   * workspace_id is stored but NOT consulted (phase-2 lever: workspace-shared
+   * access would extend this single choke point, and every call site would
+   * inherit it).
    */
-  assertAccess(id: string, ownerId: string | undefined): void {
+  assertAccess(id: string, actor: DataSourceActor): void {
     const scope = this.scopes.get(id)
-    if (!this.adapters.has(id) || !scope || scope.ownerId !== ownerId) {
+    if (!this.adapters.has(id) || !scope) {
+      throw new Error(`Data source with id '${id}' not found`)
+    }
+    const { userId, platformAdmin } = normalizeActor(actor)
+    if (platformAdmin === true) return
+    if (userId === undefined || scope.ownerId !== userId) {
       throw new Error(`Data source with id '${id}' not found`)
     }
   }
@@ -387,6 +442,32 @@ export class DataSourceManager extends EventEmitter {
   /** Stored ownership scope for a data source, if present. */
   getScope(id: string): { ownerId: string; workspaceId: string | null } | undefined {
     return this.scopes.get(id)
+  }
+
+  /**
+   * COUNT of integration_external_systems rows whose config->>'dataSourceId'
+   * references this source (the referential delete guard's input).
+   *
+   * - No bound db: the manager is memory-only, nothing persisted can hold a
+   *   reference — 0 is exact, not fail-open.
+   * - integration schema not installed (undefined_table): the referencing
+   *   layer does not exist — 0 is exact.
+   * - Any OTHER query failure propagates, failing the delete CLOSED rather
+   *   than permitting a blind delete past an unreadable reference table.
+   */
+  async countExternalSystemReferences(id: string): Promise<number> {
+    if (!this.db) return 0
+    try {
+      const rows = await this.db
+        .selectFrom('integration_external_systems' as never)
+        .select(sql<number>`count(*)::int`.as('count') as never)
+        .where(sql`config->>'dataSourceId'` as never, '=', id as never)
+        .execute() as Array<{ count: number }>
+      return rows[0]?.count ?? 0
+    } catch (err) {
+      if (isDatabaseSchemaError(err)) return 0
+      throw err
+    }
   }
 
   /**
@@ -877,40 +958,65 @@ export class DataSourceManager extends EventEmitter {
     return allResults
   }
 
+  /**
+   * True when this id is visible to the scoping filter. Two filter shapes:
+   * - `{ actor }`: the authority model — platformAdmin sees every source;
+   *   a plain actor sees only its own (an actor with no userId sees NOTHING —
+   *   fail closed, unlike the legacy unfiltered call).
+   * - `{ ownerId }` (legacy): owner equality, unchanged.
+   * - no filter: unscoped (internal/ops callers only).
+   */
+  private scopePermitsListing(id: string, filter?: { ownerId?: string; actor?: DataSourceActor }): boolean {
+    if (filter && 'actor' in filter) {
+      const { userId, platformAdmin } = normalizeActor(filter.actor)
+      if (platformAdmin === true) return true
+      if (userId === undefined) return false
+      const scope = this.scopes.get(id)
+      return scope !== undefined && scope.ownerId === userId
+    }
+    if (filter?.ownerId !== undefined) {
+      const scope = this.scopes.get(id)
+      return scope !== undefined && scope.ownerId === filter.ownerId
+    }
+    return true
+  }
+
   // Management methods
-  listDataSources(filter?: { ownerId?: string }): Array<{
+  listDataSources(filter?: { ownerId?: string; actor?: DataSourceActor }): Array<{
     id: string
     name: string
     type: string
     connected: boolean
+    ownerId?: string
   }> {
     const sources: Array<{
       id: string
       name: string
       type: string
       connected: boolean
+      ownerId?: string
     }> = []
 
     for (const [id, adapter] of this.adapters) {
-      // A0.1: when an owner filter is supplied, only that owner's sources are listed
-      if (filter?.ownerId !== undefined) {
-        const scope = this.scopes.get(id)
-        if (!scope || scope.ownerId !== filter.ownerId) {
-          continue
-        }
+      // A0.1: scope the listing (owner filter, or the actor-tier model)
+      if (!this.scopePermitsListing(id, filter)) {
+        continue
       }
       sources.push({
         id,
         name: adapter.getName(),
         type: adapter.getType(),
-        connected: adapter.isConnected()
+        connected: adapter.isConnected(),
+        // Owner is management metadata (name/type/status/owner) — NEVER part
+        // of config/credentials. Lets an admin listing attribute each source.
+        ownerId: this.scopes.get(id)?.ownerId
       })
     }
 
     return sources
   }
 
-  async healthCheck(filter?: { ownerId?: string }): Promise<Map<string, {
+  async healthCheck(filter?: { ownerId?: string; actor?: DataSourceActor }): Promise<Map<string, {
     connected: boolean
     responsive: boolean
     latency?: number
@@ -924,11 +1030,8 @@ export class DataSourceManager extends EventEmitter {
     for (const [id, adapter] of this.adapters) {
       // A0.1: health is a read surface too; keep it scoped with list/get so
       // fixing the /health route shadow does not leak cross-owner source ids.
-      if (filter?.ownerId !== undefined) {
-        const scope = this.scopes.get(id)
-        if (!scope || scope.ownerId !== filter.ownerId) {
-          continue
-        }
+      if (!this.scopePermitsListing(id, filter)) {
+        continue
       }
 
       const startTime = Date.now()
