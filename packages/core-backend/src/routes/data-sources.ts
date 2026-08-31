@@ -48,6 +48,12 @@ const DataSourceCreateSchema = z.object({
     // C6 external-write target marker. When set, raw /query is disabled even if readOnly=false.
     c6WriteTarget: z.boolean().optional(),
     genericQueryDisabled: z.boolean().optional(),
+    // G-4 DESTINATION MARKER. A durable, positive attestation that this source's destination IS the
+    // customer K3 database. When true, DataSourceManager refuses EVERY write to it permanently
+    // (insert/update/delete/copyData/raw query), no flag can re-enable it. This schema strips unknown
+    // option keys, so the marker must be declared here to be settable and to survive persistence;
+    // it can only ever make a source MORE restricted (a K3 write is banned by G-4), never less.
+    k3Destination: z.boolean().optional(),
     // PLMAdapter runtime options for persisted Yuantus PLM sources.
     apiMode: z.string().optional(),
     tenantId: z.string().optional(),
@@ -102,6 +108,12 @@ const DataSourceUpdateSchema = z.object({
     // C6 external-write target marker. When set, raw /query is disabled even if readOnly=false.
     c6WriteTarget: z.boolean().optional(),
     genericQueryDisabled: z.boolean().optional(),
+    // G-4 DESTINATION MARKER. A durable, positive attestation that this source's destination IS the
+    // customer K3 database. When true, DataSourceManager refuses EVERY write to it permanently
+    // (insert/update/delete/copyData/raw query), no flag can re-enable it. This schema strips unknown
+    // option keys, so the marker must be declared here to be settable and to survive persistence;
+    // it can only ever make a source MORE restricted (a K3 write is banned by G-4), never less.
+    k3Destination: z.boolean().optional(),
     // PLMAdapter runtime options for persisted Yuantus PLM sources.
     apiMode: z.string().optional(),
     tenantId: z.string().optional(),
