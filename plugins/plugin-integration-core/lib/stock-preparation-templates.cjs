@@ -65,6 +65,30 @@ function pickTemplateLabel(labelled, locale) {
   return labelled.label
 }
 
+// DEFAULT VIEW NAMES, beside the labels they belong with. A managed table is created
+// with one grid view (a sheet with zero views cannot be opened, and blocks its base),
+// and that view needs a human name in the SAME language the sheet and its columns got.
+// These are labelled things exactly like a template or a field, so they go through the
+// same `pickTemplateLabel` + `resolveTemplateLabelLocale` mechanism -- there is no second
+// locale reader anywhere. With the locale unset, both resolve to the English name.
+const STOCK_PREPARATION_DEFAULT_VIEW_LABELS = Object.freeze({
+  // The canonical main table and every sandbox target.
+  records: Object.freeze({ label: 'All Records', labelZh: '全部记录' }),
+  // The confirmation-decision ledger.
+  decisions: Object.freeze({ label: 'All Decisions', labelZh: '全部裁决' }),
+})
+
+// `options.locale` is the creation-time display language, defaulting -- like every other
+// builder here -- to the deployment setting.
+function pickDefaultViewName(kind, options = {}) {
+  const labelled = STOCK_PREPARATION_DEFAULT_VIEW_LABELS[kind]
+  if (!labelled) {
+    throw new StockPreparationTemplateError(`unknown default view kind: ${String(kind)}`)
+  }
+  const locale = options.locale === undefined ? resolveTemplateLabelLocale() : options.locale
+  return pickTemplateLabel(labelled, locale)
+}
+
 const REQUIRED_SYSTEM_FIELDS = Object.freeze([
   'projectNo',
   'idempotencyKey',
@@ -1008,6 +1032,8 @@ module.exports = {
   normalizeTemplateLabelLocale,
   resolveTemplateLabelLocale,
   pickTemplateLabel,
+  STOCK_PREPARATION_DEFAULT_VIEW_LABELS,
+  pickDefaultViewName,
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
