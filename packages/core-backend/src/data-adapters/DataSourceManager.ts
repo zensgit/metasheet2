@@ -8,6 +8,7 @@ import { MSSQLAdapter } from './MSSQLAdapter'
 import { MySQLAdapter } from './MySQLAdapter'
 import { PLMAdapter } from './PLMAdapter'
 import { encryptStoredSecretValue, decryptStoredSecretValue, isEncryptedSecretValue } from '../security/encrypted-secrets'
+import { assertNotK3Destination, assertNotK3MarkedDestination } from './k3-destination-write-fence'
 import type { IConfigService, ILogger } from '../di/identifiers'
 
 // PostgreSQL SQLSTATE for undefined_table. The referential delete guard trusts
@@ -808,6 +809,10 @@ export class DataSourceManager extends EventEmitter {
     params?: DbValue[]
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
+    // G-4 DESTINATION FENCE (query). A raw statement against a source DECLARED to be a K3 destination
+    // is refused before anything connects — a raw statement is write-capable and the ban is on the
+    // write. No table argument here, so this is the marker-only check.
+    assertNotK3MarkedDestination(adapter.getConfig())
     if (isGenericQueryDisabledConfig(adapter.getConfig())) {
       throw new Error(c6WriteTargetQueryDisabledMessage(dataSourceId))
     }
@@ -840,6 +845,10 @@ export class DataSourceManager extends EventEmitter {
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
     adapter.assertWritable() // defense-in-depth: reject mutations on a read-only source
+    // G-4 DESTINATION FENCE (insert). Refuse a K3 destination — declared (marker) or betrayed by a
+    // K3 business-table target — before connecting or touching the driver. This is the chokepoint the
+    // by-kind fences leak past: a sql-write-gated source pointed at K3 arrives here as a generic write.
+    assertNotK3Destination(adapter.getConfig(), table)
 
     if (!adapter.isConnected()) {
       await this.connectDataSource(dataSourceId)
@@ -856,6 +865,9 @@ export class DataSourceManager extends EventEmitter {
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
     adapter.assertWritable() // defense-in-depth: reject mutations on a read-only source
+    // G-4 DESTINATION FENCE (update). Same refusal as insert — a K3 destination is a K3 destination
+    // whichever mutation verb reaches it.
+    assertNotK3Destination(adapter.getConfig(), table)
 
     if (!adapter.isConnected()) {
       await this.connectDataSource(dataSourceId)
@@ -871,6 +883,8 @@ export class DataSourceManager extends EventEmitter {
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
     adapter.assertWritable() // defense-in-depth: reject mutations on a read-only source
+    // G-4 DESTINATION FENCE (delete). A delete against a K3 destination is an external write-back too.
+    assertNotK3Destination(adapter.getConfig(), table)
     if (isC6WriteTargetConfig(adapter.getConfig())) {
       throw new Error(c6WriteTargetDeleteUnsupportedMessage(dataSourceId))
     }
@@ -897,6 +911,11 @@ export class DataSourceManager extends EventEmitter {
     const startTime = Date.now()
     const sourceAdapter = this.getDataSource(sourceId)
     const targetAdapter = this.getDataSource(targetId)
+    // G-4 DESTINATION FENCE (copy target). copyData ends in `targetAdapter.insert(targetTable, ...)`,
+    // so the target side is a write into `targetTable`. Refuse a K3 destination here, before the
+    // first source read — a copy TO K3 is a K3 external write-back regardless of where the rows come
+    // from. The source side is a READ and is deliberately not fenced.
+    assertNotK3Destination(targetAdapter.getConfig(), targetTable)
     if (isGenericQueryDisabledConfig(sourceAdapter.getConfig())) {
       throw new Error(c6WriteTargetQueryDisabledMessage(sourceId))
     }
@@ -963,6 +982,9 @@ export class DataSourceManager extends EventEmitter {
     // Execute queries in parallel
     const promises = queries.map(async ({ dataSourceId, sql, params, alias }) => {
       const adapter = this.getDataSource(dataSourceId)
+      // G-4 DESTINATION FENCE (federated query). A federated leg runs raw SQL, so a leg against a
+      // source DECLARED to be a K3 destination is refused — same reason as `query`.
+      assertNotK3MarkedDestination(adapter.getConfig())
       if (isGenericQueryDisabledConfig(adapter.getConfig())) {
         throw new Error(c6WriteTargetQueryDisabledMessage(dataSourceId))
       }
