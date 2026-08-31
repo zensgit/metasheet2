@@ -4,8 +4,8 @@
 >
 > 非结论：不是 exact-head CI、Ready、merge、flag、UAT、deploy、production 或 L0–L6 完成证明。
 >
-> 被测代码：`bbaa4149b486a6d74db52a08a9565bc83a01ca09`
->（tree `2f20a81a6a9ad459ed3524ab73d4b5c5e6349539`）。
+> 被测代码：`6e2a1c8b5e7550f5ab39e724aaef577b680f33a0`
+>（tree `742dfb90da1b197c5cdea1375a59bee9eb3a0e78`）。
 >
 > 后续报告提交只更新开发/验证文档，不改变上述被测代码树。
 
@@ -19,6 +19,7 @@
 | product merge head/tree | `21f3d489c8...` / `6f75b039af...` |
 | shared landing candidate head/tree | `f8f2900737...` / `1a91fbcf4f...` |
 | review fix head/tree | `bbaa4149b4...` / `2f20a81a6a...` |
+| Web contract fix head/tree | `6e2a1c8b5e...` / `742dfb90da...` |
 | merge conflict | 0 |
 | pre-merge path overlap | 0 |
 | manual resolution files | 0 |
@@ -30,7 +31,7 @@
 | 面 | 命令/范围 | 结果 |
 |---|---|---|
 | Core unit | 12 个 onboarding/目录/激活/pilot 邻接文件 | 12/12 files，98/98 tests PASS |
-| Web | onboarding client/admin + admin view | 3/3 files，46/46 tests PASS |
+| Web | onboarding client/admin + admin view | 3/3 files，48/48 tests PASS |
 | Plugin | onboarding worker + reminder/stats 邻接 | 3/3 files PASS |
 | OpenAPI | `dist-sdk/tests/elearning-paths.test.ts` | 17/17 PASS |
 | Core typecheck | `@metasheet/core-backend type-check` | PASS |
@@ -40,7 +41,7 @@
 | Shared wiring | `elearning-media-ci-wiring.test.mjs` | 15/15 PASS |
 | Backend onboarding + port neighbors | 8 个 whole-file | 8/8 files，59/59 tests PASS；其中 7 个 canary 为 54/54 |
 | Required Web | canonical required-Web script | 410/410 files，5244/5244 tests PASS |
-| E-learning Web lane | 29 个 whole-file spec | 29/29 files，374/374 tests PASS |
+| E-learning Web lane | 29 个 whole-file spec | 29/29 files，376/376 tests PASS |
 | Plugin package chain | plugin-elearning package tests | 14 suites PASS，0 intentional exclusion |
 | Provenance / S5 | official pin + full sealed-export S5 | old pin RED，new pin GREEN，frozen/live differenceCount=0，full S5 PASS |
 | diff/status | diff-check + clean worktree | PASS |
@@ -90,6 +91,8 @@
 8. 删除 closed-week enqueue guard：未来周 negative RED；恢复 GREEN。
 9. 恢复“retired policy 不可完成已入队报告”：retired materialization negative RED；恢复 GREEN。
 10. 删除 effect trigger 的 assignment `source_key` 比较：真库 wrong-source insert negative RED；恢复后 authority 6/6 GREEN。
+11. 将管理端默认周恢复为本周周一：默认闭合周断言精确 RED（`2026-08-31` 而非 `2026-08-24`）；恢复 GREEN。
+12. 删除 `failedCount + deadCount <= enqueuedCount`：不可能响应被接受，客户端 negative 精确 RED；恢复 GREEN。
 
 ### 4.2 OpenAPI
 
@@ -108,14 +111,15 @@
 
 | 证据 | 当前状态 |
 |---|---|
-| backend unit whole-file canary union | PASS，7/7 files / 52 tests |
+| backend unit whole-file canary union | PASS，7/7 files / 54 tests |
 | onboarding real-DB no-DB exclude + post-migrate arg | PASS，双点 selector + 删除 mutation |
 | Web guard + required-Web 双点 selector | PASS，29-file domain lane + required-Web 410/5244 |
 | wiring contract deletion mutations | PASS，15/15 restored |
 | official provenance old RED / new GREEN / full S5 | PASS |
 | merge-head Sol review | bounded cutoff；无 terminal verdict，不作为通过依据 |
 | pre-fix shared-head Sol/Terra review | 发现 1 P1 / 3 P2，已在 `bbaa4149b4` 逐项修复 |
-| final fixed-head Sol/Terra review | NOT RUN |
+| `bbaa4149b4` Sol/Terra exact-code review | 0 P1 / 1 P2 / 1 P3；两项均在 `6e2a1c8b5e` 修复 |
+| final `6e2a1c8b5e` Sol review | PASS，0 P1 / 0 P2 / 0 P3；只读，未运行 PostgreSQL |
 | remote exact-head CI | NOT RUN |
 | merged-main CI | NOT APPLICABLE |
 | browser UAT / real tenant | NOT AUTHORIZED |
@@ -123,8 +127,8 @@
 
 ## 6. 当前 P1/P2/P3
 
-- P1：已知产品与 landing selector P1 为 0；等待 `bbaa4149b4` fresh exact-head 独立复门。
-- P2：已知产品与 landing selector P2 为 0；等待 `bbaa4149b4` fresh exact-head 独立复门。
+- P1：本地产品、数据库与 landing selector 为 0；fresh `6e2a1c8b5e` Sol exact-head 复门为 0。
+- P2：默认闭合周和聚合计数缺口已修复并具备判别 mutation；fresh `6e2a1c8b5e` Sol exact-head 复门为 0。
 - P3：未做真实目录 tenant、通知通道、浏览器 UAT 或生产容量/运维验收；这些不由本地 unit/DB 证明。
 
 ## 7. 发布状态

@@ -4,8 +4,8 @@
 >
 > 设计合同：`docs/development/elearning-plugin-design-lock-20260810.md`（§11 L5「新员工自动指派+周报」）
 >
-> 已验证代码 checkpoint：`bbaa4149b486a6d74db52a08a9565bc83a01ca09`
->（tree `2f20a81a6a9ad459ed3524ab73d4b5c5e6349539`）
+> 已验证代码 checkpoint：`6e2a1c8b5e7550f5ab39e724aaef577b680f33a0`
+>（tree `742dfb90da1b197c5cdea1375a59bee9eb3a0e78`）
 >
 > 本报告不授权 Ready、merge、feature flag、dispatch、deploy、UAT 或 production。
 
@@ -20,6 +20,7 @@
 5. `elearning_jobs` 只承载稳定 occurrence identity；assignment effect 由效果侧唯一键防重，worker 租约重领不产生第二次指派。
 6. 周报只保存按组织汇总的计数，人数小于 5 时所有数值保持 `null`，不伪造 0，也不写入个人答案、轨迹或成绩。
 7. 管理端提供 policy 创建/退役和周报查看；OpenAPI 使用 closed request/response 与 suppressed/visible 判别联合。
+8. 周报查询默认选中上一个完整闭合的 UTC 周；客户端拒绝失败数与终止数之和超过入队数的不可能响应。
 
 所有云课堂 flag 仍默认 OFF。没有真实租户读取、外部消息发送、部署或生产启用。
 
@@ -53,6 +54,7 @@
 | 11 | `f8f2900737` | shared selector 严格并集、wiring contract 与 provenance 重算 |
 | 12 | `51499fe72b` | shared-tail 验证证据绑定 |
 | 13 | `bbaa4149b4` | 关闭周报 producer、replay actor 与 effect lineage 审阅缺口 |
+| 14 | `6e2a1c8b5e` | 关闭默认闭合周与周报聚合计数客户端合同缺口 |
 
 最终 merge 的父顺序为：
 
@@ -82,7 +84,7 @@ git diff --name-status 25635e67db5145a5998499c4adc8f030e156daf7..21f3d489c8d376a
 - 6 个 shared CI/provenance 文件：backend unit 与 real-DB 双点接线、Web 双点接线、机械 wiring contract 和官方 provenance pin；
 - 2 份本开发/验证报告。
 
-因此 `main@25635e67db..bbaa4149b4` 的代码与报告文件面仍为 52 个；审阅 fix 只修改其中 13 个既有 onboarding owned 文件，shared 提交仍严格限定为已授权的 6 个路径。
+因此 `main@25635e67db..6e2a1c8b5e` 的代码与报告文件面仍为 52 个；两轮审阅 fix 只修改既有 onboarding owned 文件，shared 提交仍严格限定为已授权的 6 个路径。
 
 ## 5. 明确未完成
 
@@ -94,15 +96,14 @@ git diff --name-status 25635e67db5145a5998499c4adc8f030e156daf7..21f3d489c8d376a
 ## 6. 模型与验证来源
 
 - Codex：唯一 writer；合同收敛、实现、真库验证、main replay 与本报告。
-- Sol high：pre-merge 审阅发现 flag OFF 持久化、pending activation、空 hire date 和测试证明力问题；前三项已在 `81d0d0fcb5` 关闭。shared-head 复审又指出周报无生产 producer、未闭合周/退役竞态和 assignment effect lineage 缺口；均在 `bbaa4149b4` 关闭，等待 fresh exact-head 复门。
-- Terra high：指出 policy request replay 绕过 active same-org actor 校验；已在 `bbaa4149b4` 前置校验并加入 revoked-membership replay negative，等待 fresh exact-head 复门。
+- Sol high：pre-merge 审阅发现 flag OFF 持久化、pending activation、空 hire date 和测试证明力问题；前三项已在 `81d0d0fcb5` 关闭。shared-head 复审又指出周报无生产 producer、未闭合周/退役竞态和 assignment effect lineage 缺口，均在 `bbaa4149b4` 关闭；随后 exact-code 复审指出管理端默认周与客户端聚合计数缺口，均在 `6e2a1c8b5e` 关闭。fresh `6e2a1c8b5e` 终审为 0 P1 / 0 P2 / 0 P3。
+- Terra high：指出 policy request replay 绕过 active same-org actor 校验，已在 `bbaa4149b4` 关闭；随后 exact-code 复审独立复现默认周与聚合计数缺口，均在 `6e2a1c8b5e` 关闭。
 - Luna：shared selector 机械复核超过 bounded cutoff 后关闭，状态同样为“无 terminal verdict”，不作为通过依据。
 - Grok 4.6：早期 bounded 只读审阅未在 cutoff 前形成 terminal verdict，不作为通过依据。
 - 未调用无真实入口的 Opus 5、Fable 5 或 Sonnet 5，也未虚构其贡献。
 
 ## 7. 下一步
 
-1. 对 `bbaa4149b4` 启动 bounded Sol/Terra/Luna 只读 exact-head 复审，要求已知 P1/P2=0；超时必须据实记录，不阻塞主路径。
-2. push 前复核 `origin/main` 仍精确为 `25635e67db...`；若漂移则停止，不自行 replay。
-3. 主线稳定时 ordinary push 并创建一个 Draft/HOLD PR，等待远端 exact-head CI。
-4. Ready、merge、flag、UAT 与部署继续分别等待 owner 授权。
+1. push 前复核 `origin/main` 仍精确为 `25635e67db...`；若漂移则停止，不自行 replay。
+2. 主线稳定时 ordinary push 并创建一个 Draft/HOLD PR，等待远端 exact-head CI。
+3. Ready、merge、flag、UAT 与部署继续分别等待 owner 授权。
