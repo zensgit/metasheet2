@@ -18,11 +18,14 @@ const { createDirectoryAdmittedUserInTransaction } = __directorySyncInternalsFor
  */
 function fakeClient(account = CORP_ACCOUNT_WITHOUT_OPENID) {
   const queries: string[] = []
+  const calls: Array<{ sql: string; params?: unknown[] }> = []
   const aliasOwners = new Map<string, string>()
   return {
     queries,
+    calls,
     query: async (sql: string, params?: unknown[]) => {
       queries.push(sql)
+      calls.push({ sql, params })
       if (/INSERT INTO user_login_aliases/i.test(sql)) {
         aliasOwners.set(String(params?.[2] ?? ''), String(params?.[0] ?? ''))
         return { rows: [] as Array<Record<string, unknown>> }
@@ -106,14 +109,28 @@ describe('DT-HARDEN-02 auto-admission orphan guard', () => {
     const created = await createDirectoryAdmittedUserInTransaction(client, {
       ...baseOptions,
       account: CORP_ACCOUNT_WITHOUT_OPENID,
+      hireDate: '2026-08-31',
       enableDingTalkGrant: false,
     })
 
     expect(created.userId).toBeTruthy()
     expect(insertedUsers(client.queries)).toHaveLength(1)
+    const userInsert = client.calls.find((call) => /INSERT INTO users\b/i.test(call.sql))
+    expect(userInsert?.params?.[5]).toBe('2026-08-31')
     // Directory binding still happens; only the DingTalk login grant is withheld.
     expect(client.queries.some((sql) => /INSERT INTO directory_account_links/i.test(sql))).toBe(true)
     expect(client.queries.some((sql) => /user_external_auth_grants/i.test(sql))).toBe(false)
+  })
+
+  it('rejects a noncanonical directory hire date before inserting a user', async () => {
+    const client = fakeClient()
+    await expect(createDirectoryAdmittedUserInTransaction(client, {
+      ...baseOptions,
+      account: CORP_ACCOUNT_WITHOUT_OPENID,
+      hireDate: '2026-02-31',
+      enableDingTalkGrant: false,
+    })).rejects.toThrow('Invalid directory hire date')
+    expect(insertedUsers(client.queries)).toHaveLength(0)
   })
 
   it('still grants a corp account that has an openId', async () => {

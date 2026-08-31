@@ -52,6 +52,7 @@ import { deliverDirectorySyncFailureAlert, getDirectoryManagerBindingCoverage } 
 import { resolveDirectoryScheduleTimezone } from './directory-sync-timezone'
 import { acquireSourceSyncFreezeLock } from './source-sync-freeze-lock'
 import { applyDirectoryDeprovisionCandidate } from './deprovision-ledger'
+import { enqueueDirectoryElearningOnboarding } from './elearning-onboarding-lifecycle'
 import {
   DIRECTORY_DEPROVISION_POLICIES,
   resolveDirectoryDeprovisionPolicy,
@@ -3929,6 +3930,7 @@ export async function syncDirectoryIntegration(
       const changedAccessGraphUserIds = new Set<string>()
       const alreadySupersededUserIds = new Set<string>()
       const newlyAdmittedUserIds = new Set<string>()
+      const onboardingLifecycleUsers = new Map<string, string | undefined>()
 
       // R5: created-vs-updated split for the run summary. `departmentsSynced`/`accountsSynced`
       // conflate "0 new" and "500 new"; the discriminator is `(xmax = 0)` on the upserted row —
@@ -4283,6 +4285,7 @@ export async function syncDirectoryIntegration(
                   email: cleanEmail,
                   username: generatedUsername,
                   mobile: cleanMobile,
+                  hireDate: directoryUser.hiredDate ?? null,
                   passwordHash,
                   mustChangePassword: !pendingMode,
                   enableDingTalkGrant: canGrantDingTalkLogin,
@@ -4326,6 +4329,9 @@ export async function syncDirectoryIntegration(
                 }
                 localUserId = created.userId
                 newlyAdmittedUserIds.add(created.userId)
+                if (!pendingMode) {
+                  onboardingLifecycleUsers.set(created.userId, directoryUser.hiredDate)
+                }
                 if (
                   existing?.local_user_id
                   && existing.local_user_id !== created.userId
@@ -4446,6 +4452,7 @@ export async function syncDirectoryIntegration(
           })
           if (membershipChanged && !newlyAdmittedUserIds.has(localUserId)) {
             changedAccessGraphUserIds.add(localUserId)
+            onboardingLifecycleUsers.set(localUserId, directoryUser?.hiredDate)
           }
         }
 
@@ -4503,6 +4510,16 @@ export async function syncDirectoryIntegration(
         const normalizedUserId = normalizeText(userId)
         if (normalizedUserId) governedUserIds.add(normalizedUserId)
       }
+
+      const onboardingLifecycle = await enqueueDirectoryElearningOnboarding({
+        client,
+        orgId: integration.org_id,
+        users: Array.from(onboardingLifecycleUsers, ([userId, hiredDate]) => ({
+          userId,
+          hiredDate,
+        })),
+        eventAt: syncTimestamp,
+      })
 
       // DT-OPS-01: run after the link loop so the linked/unmatched state is final.
       // Default-off: this only counts what it WOULD do unless explicitly enabled.
@@ -4609,6 +4626,15 @@ export async function syncDirectoryIntegration(
         memberGroupGovernedUserCount: memberGroupProjection.memberGroupGovernedUserCount,
         memberGroupDefaultRoleAssignmentsCount: memberGroupProjection.memberGroupDefaultRoleAssignmentsCount,
         memberGroupDefaultNamespaceAdmissionsCount: memberGroupProjection.memberGroupDefaultNamespaceAdmissionsCount,
+        ...(onboardingLifecycle.enabled
+          ? {
+              elearningOnboardingCandidateUserCount: onboardingLifecycle.candidateUserCount,
+              elearningOnboardingEligibleUserCount: onboardingLifecycle.eligibleUserCount,
+              elearningOnboardingSkippedUserCount: onboardingLifecycle.skippedUserCount,
+              elearningOnboardingMatchedPolicyCount: onboardingLifecycle.matchedPolicyCount,
+              elearningOnboardingEnqueuedCount: onboardingLifecycle.enqueuedCount,
+            }
+          : {}),
         ...directoryDiagnosticStats,
       }
 
@@ -6094,6 +6120,7 @@ async function createDirectoryAdmittedUserInTransaction(
     email: string | null
     username: string | null
     mobile: string | null
+    hireDate?: string | null
     passwordHash: string
     mustChangePassword: boolean
     enableDingTalkGrant: boolean
@@ -6108,6 +6135,13 @@ async function createDirectoryAdmittedUserInTransaction(
   const isActive = pendingMode ? false : true
   const activationStatus = pendingMode ? 'pending_activation' : 'activated'
   const localPasswordSet = pendingMode ? false : true
+  const hireDate = options.hireDate == null
+    ? null
+    : /^\d{4}-\d{2}-\d{2}$/.test(options.hireDate)
+        && new Date(`${options.hireDate}T00:00:00.000Z`).toISOString().slice(0, 10)
+          === options.hireDate
+      ? options.hireDate
+      : (() => { throw new Error('Invalid directory hire date') })()
   // DT-HARDEN-02: assert grant feasibility BEFORE inserting the users row — the cheapest
   // and most common orphan cause (grant requested for an account that cannot hold one).
   // But this alone is not sufficient: applyDirectoryAccountBindInTransaction (called AFTER
@@ -6212,15 +6246,15 @@ async function createDirectoryAdmittedUserInTransaction(
   try {
     await client.query(
       `INSERT INTO users (
-         id, email, username, name, mobile, password_hash, must_change_password,
+         id, email, username, name, mobile, hire_date, password_hash, must_change_password,
          role, permissions, is_active, is_admin,
          activation_status, local_password_set,
          created_at, updated_at
        )
        VALUES (
-         $1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::boolean,
-         'user', $8::jsonb, $9::boolean, FALSE,
-         $10::text, $11::boolean,
+         $1::text, $2::text, $3::text, $4::text, $5::text, $6::date, $7::text, $8::boolean,
+         'user', $9::jsonb, $10::boolean, FALSE,
+         $11::text, $12::boolean,
          NOW(), NOW()
        )`,
       [
@@ -6229,6 +6263,7 @@ async function createDirectoryAdmittedUserInTransaction(
         options.username,
         options.name,
         options.mobile,
+        hireDate,
         options.passwordHash,
         options.mustChangePassword,
         JSON.stringify([]),
