@@ -264,6 +264,7 @@ export async function enqueueElearningOnboardingForUser(
         [orgId, userId],
       )
       if (!principal.rows[0]) fail('not_eligible')
+      if (principal.rows[0].hire_date == null) fail('not_eligible')
       const hireDate = storedDate(principal.rows[0].hire_date)
       const policies = await tx.query(
         `/* elearning-onboarding-enqueue:policies */

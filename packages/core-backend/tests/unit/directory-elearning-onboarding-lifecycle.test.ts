@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { enqueueDirectoryElearningOnboarding } from '../../src/directory/elearning-onboarding-lifecycle'
+import {
+  enqueueDirectoryElearningOnboarding,
+  resolveDirectoryElearningOnboardingHireDate,
+} from '../../src/directory/elearning-onboarding-lifecycle'
 import { ElearningOnboardingAssignmentError } from '../../src/services/elearning-onboarding-assignment'
 
 const ON = {
@@ -56,6 +59,11 @@ describe('directory e-learning onboarding lifecycle', () => {
     expect(value.client.query).not.toHaveBeenCalled()
   })
 
+  it('does not expose a provider hire date to directory persistence while disabled', () => {
+    expect(resolveDirectoryElearningOnboardingHireDate('2026-08-31', {})).toBeNull()
+    expect(resolveDirectoryElearningOnboardingHireDate('2026-08-31', ON)).toBe('2026-08-31')
+  })
+
   it('deduplicates users, fills only a missing hire date, and skips an ineligible candidate', async () => {
     const value = input()
     const enqueue = vi.fn()
@@ -109,5 +117,23 @@ describe('directory e-learning onboarding lifecycle', () => {
     const error = new ElearningOnboardingAssignmentError('unavailable')
     const enqueue = vi.fn().mockRejectedValue(error)
     await expect(enqueueDirectoryElearningOnboarding(input(), enqueue)).rejects.toBe(error)
+  })
+
+  it('skips an active user with no authoritative hire date without failing the directory transaction', async () => {
+    const value = input()
+    value.users = [{ userId: 'user-without-hire-date' }]
+    value.client.query.mockResolvedValueOnce({
+      rows: [{ hire_date: null }],
+      rowCount: 1,
+    })
+
+    await expect(enqueueDirectoryElearningOnboarding(value)).resolves.toEqual({
+      enabled: true,
+      candidateUserCount: 1,
+      eligibleUserCount: 0,
+      skippedUserCount: 1,
+      matchedPolicyCount: 0,
+      enqueuedCount: 0,
+    })
   })
 })

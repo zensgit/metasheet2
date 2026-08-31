@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { __directorySyncInternalsForTests } from '../../src/directory/directory-sync'
+import { resolveDirectoryElearningOnboardingHireDate } from '../../src/directory/elearning-onboarding-lifecycle'
 
 const { createDirectoryAdmittedUserInTransaction } = __directorySyncInternalsForTests
 
@@ -105,6 +106,17 @@ describe('T1 directory admit pending-activation flag (default off)', () => {
     expect(params[10]).toBe('activated')
     expect(params[11]).toBe(true) // local_password_set
     expect(client.queries.some((q) => /INSERT INTO user_orgs\b/i.test(q.sql))).toBe(true)
+  })
+
+  it('default OFF: a provider hire date is not persisted by directory admission', async () => {
+    const client = fakeClient()
+    await createDirectoryAdmittedUserInTransaction(client, {
+      ...baseOptions,
+      hireDate: resolveDirectoryElearningOnboardingHireDate('2026-08-31', {}),
+    })
+
+    const params = findUsersInsert(client)!.params ?? []
+    expect(params[5]).toBeNull()
   })
 
   it('when ON: INSERT params are pending + is_active false + local_password_set false; no user_orgs', async () => {

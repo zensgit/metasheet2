@@ -12,7 +12,7 @@ const source = fs.readFileSync(
 
 describe('directory e-learning onboarding wiring', () => {
   it('carries the provider hire date into the admitted user row', () => {
-    expect(source).toContain('hireDate: directoryUser.hiredDate ?? null')
+    expect(source).toContain('hireDate: resolveDirectoryElearningOnboardingHireDate(')
     expect(source).toMatch(/mobile, hire_date, password_hash/)
     expect(source).toMatch(/options\.mobile,\s+hireDate,\s+options\.passwordHash/)
   })
@@ -20,7 +20,7 @@ describe('directory e-learning onboarding wiring', () => {
   it('collects activated admissions and membership reactivations', () => {
     expect(source).toContain('onboardingLifecycleUsers.set(created.userId, directoryUser.hiredDate)')
     expect(source).toMatch(
-      /if \(membershipChanged && !newlyAdmittedUserIds\.has\(localUserId\)\) \{[\s\S]*?onboardingLifecycleUsers\.set\(localUserId, directoryUser\?\.hiredDate\)/,
+      /if \([\s\S]*?directoryElearningOnboardingEnabled[\s\S]*?membershipChanged[\s\S]*?!newlyAdmittedUserIds\.has\(localUserId\)[\s\S]*?\) \{[\s\S]*?onboardingLifecycleUsers\.set\(localUserId, directoryUser\?\.hiredDate\)/,
     )
   })
 

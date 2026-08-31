@@ -52,7 +52,11 @@ import { deliverDirectorySyncFailureAlert, getDirectoryManagerBindingCoverage } 
 import { resolveDirectoryScheduleTimezone } from './directory-sync-timezone'
 import { acquireSourceSyncFreezeLock } from './source-sync-freeze-lock'
 import { applyDirectoryDeprovisionCandidate } from './deprovision-ledger'
-import { enqueueDirectoryElearningOnboarding } from './elearning-onboarding-lifecycle'
+import {
+  enqueueDirectoryElearningOnboarding,
+  isDirectoryElearningOnboardingEnabled,
+  resolveDirectoryElearningOnboardingHireDate,
+} from './elearning-onboarding-lifecycle'
 import {
   DIRECTORY_DEPROVISION_POLICIES,
   resolveDirectoryDeprovisionPolicy,
@@ -3805,6 +3809,7 @@ export async function syncDirectoryIntegration(
 
   const config = parseIntegrationConfig(integration)
   const directoryDeprovisionEnabled = isDirectoryDeprovisionEnabled()
+  const directoryElearningOnboardingEnabled = isDirectoryElearningOnboardingEnabled()
   let directoryApplyCommitted = false
   // T2 (§12.2): cheap freeze gate BEFORE the lease claim — a freeze already active at entry
   // must not create a run row, consume provider quota, or reach local apply. The apply
@@ -4285,7 +4290,9 @@ export async function syncDirectoryIntegration(
                   email: cleanEmail,
                   username: generatedUsername,
                   mobile: cleanMobile,
-                  hireDate: directoryUser.hiredDate ?? null,
+                  hireDate: resolveDirectoryElearningOnboardingHireDate(
+                    directoryUser.hiredDate,
+                  ),
                   passwordHash,
                   mustChangePassword: !pendingMode,
                   enableDingTalkGrant: canGrantDingTalkLogin,
@@ -4329,7 +4336,7 @@ export async function syncDirectoryIntegration(
                 }
                 localUserId = created.userId
                 newlyAdmittedUserIds.add(created.userId)
-                if (!pendingMode) {
+                if (directoryElearningOnboardingEnabled && !pendingMode) {
                   onboardingLifecycleUsers.set(created.userId, directoryUser.hiredDate)
                 }
                 if (
@@ -4450,7 +4457,11 @@ export async function syncDirectoryIntegration(
             userId: localUserId,
             orgId: integration.org_id,
           })
-          if (membershipChanged && !newlyAdmittedUserIds.has(localUserId)) {
+          if (
+            directoryElearningOnboardingEnabled
+            && membershipChanged
+            && !newlyAdmittedUserIds.has(localUserId)
+          ) {
             changedAccessGraphUserIds.add(localUserId)
             onboardingLifecycleUsers.set(localUserId, directoryUser?.hiredDate)
           }

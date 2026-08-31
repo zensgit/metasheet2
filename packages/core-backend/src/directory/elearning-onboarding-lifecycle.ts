@@ -30,6 +30,19 @@ export interface EnqueueDirectoryElearningOnboardingResult {
   enqueuedCount: number
 }
 
+export function isDirectoryElearningOnboardingEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return isElearningAssignmentSurfaceEnabled(env)
+}
+
+export function resolveDirectoryElearningOnboardingHireDate(
+  hiredDate: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  return isDirectoryElearningOnboardingEnabled(env) ? hiredDate ?? null : null
+}
+
 type EnqueueUser = (
   db: {
     query: ElearningOnboardingAssignmentQueryable['query']
@@ -58,7 +71,7 @@ export async function enqueueDirectoryElearningOnboarding(
     matchedPolicyCount: 0,
     enqueuedCount: 0,
   }
-  if (!isElearningAssignmentSurfaceEnabled(input.env ?? process.env)) return empty
+  if (!isDirectoryElearningOnboardingEnabled(input.env ?? process.env)) return empty
 
   const users = new Map<string, string | undefined>()
   for (const candidate of input.users) {

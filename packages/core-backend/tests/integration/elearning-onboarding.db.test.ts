@@ -16,6 +16,8 @@ import {
   formatScratchDropFailure,
   formatScratchDropOutcome,
 } from '../helpers/scratch-database'
+import { enqueueDirectoryElearningOnboarding } from '../../src/directory/elearning-onboarding-lifecycle'
+import { ElearningOnboardingAssignmentError } from '../../src/services/elearning-onboarding-assignment'
 
 const DATABASE_URL = process.env.DATABASE_URL
 const scratchPrefix = 'ms2_elonboard_'
@@ -54,6 +56,11 @@ async function createPrerequisites(): Promise<void> {
       is_active boolean NOT NULL DEFAULT true,
       PRIMARY KEY (user_id, org_id)
     );
+    CREATE TABLE users (
+      id text PRIMARY KEY,
+      hire_date date,
+      is_active boolean NOT NULL DEFAULT true
+    );
     CREATE TABLE elearning_training_plans (
       id uuid PRIMARY KEY,
       org_id text NOT NULL,
@@ -79,6 +86,11 @@ async function createPrerequisites(): Promise<void> {
       UNIQUE (org_id, kind, occurrence_key)
     );
   `)
+  await firstPool.query(
+    `INSERT INTO users (id, hire_date)
+     VALUES ($1, DATE '2026-08-20'), ($2, NULL)`,
+    [ACTOR, USER],
+  )
   await firstPool.query(
     `INSERT INTO user_orgs (user_id, org_id, is_active)
      VALUES ($1, $2, true), ($3, $2, true)`,
@@ -305,6 +317,64 @@ describe.sequential('e-learning onboarding PostgreSQL authority', () => {
        WHERE org_id = $1 AND policy_id = $2 AND user_id = $3`,
       [ORG, POLICY, USER],
     )).rejects.toThrow('immutable')
+  })
+
+  it('uses the outer directory transaction for fill-only-null and rolls back earlier enqueue effects', async () => {
+    const env = {
+      ELEARNING_ENABLED: 'true',
+      ELEARNING_CONTENT_ENABLED: 'true',
+      ELEARNING_ASSIGNMENT_ENABLED: 'true',
+    }
+    const preserveClient = await firstPool.connect()
+    try {
+      await preserveClient.query('BEGIN')
+      await enqueueDirectoryElearningOnboarding({
+        client: preserveClient,
+        orgId: ORG,
+        users: [{ userId: ACTOR, hiredDate: '2026-08-31' }],
+        eventAt: '2026-08-31T00:00:00.000Z',
+        env,
+      }, async () => ({ matchedPolicyCount: 0, enqueuedCount: 0 }))
+      await preserveClient.query('COMMIT')
+    } catch (error) {
+      await preserveClient.query('ROLLBACK')
+      throw error
+    } finally {
+      preserveClient.release()
+    }
+    const preserved = await firstPool.query('SELECT hire_date::text AS hire_date FROM users WHERE id = $1', [ACTOR])
+    expect(preserved.rows[0]?.hire_date).toBe('2026-08-20')
+
+    const rollbackClient = await firstPool.connect()
+    await rollbackClient.query('BEGIN')
+    await expect((async () => {
+      let call = 0
+      await enqueueDirectoryElearningOnboarding({
+        client: rollbackClient,
+        orgId: ORG,
+        users: [
+          { userId: ACTOR, hiredDate: '2026-08-20' },
+          { userId: USER, hiredDate: '2026-08-31' },
+        ],
+        eventAt: '2026-08-31T00:00:00.000Z',
+        env,
+      }, async (db) => {
+        call += 1
+        if (call === 2) throw new ElearningOnboardingAssignmentError('unavailable')
+        await db.query(
+          `INSERT INTO elearning_jobs (org_id, kind, occurrence_key, ref, payload, due_at, status)
+           VALUES ($1, 'onboarding_assign', $2, $3, '{}'::jsonb, now(), 'queued')`,
+          [ORG, `rollback-${randomUUID()}`, POLICY],
+        )
+        return { matchedPolicyCount: 1, enqueuedCount: 1 }
+      })
+    })()).rejects.toMatchObject({ code: 'unavailable' })
+    await rollbackClient.query('ROLLBACK')
+    rollbackClient.release()
+    const rolledBack = await firstPool.query(
+      `SELECT count(*)::int AS count FROM elearning_jobs WHERE occurrence_key LIKE 'rollback-%'`,
+    )
+    expect(rolledBack.rows[0]?.count).toBe(0)
   })
 
   it('suppresses small cohorts and makes every report append-only', async () => {
