@@ -16,7 +16,8 @@
       "DN_PDM_OrderDetailInfo",
       "DN_PM_BomExAttrInfo",
       "DN_PM_PartExAttrInfo",
-      "DN_PM_BomExAttrInfo_header"
+      "DN_PM_BomExAttrInfo_header",
+      "DN_PM_OrderExAttrInfo"
     ],
     "minSignatureTablesPresent": 6,
     "note": "Case-insensitive over bare or schema-qualified names (SQL Server CamelCase; PostgreSQL folds to lower case — see the synthetic fixture). Below the floor nothing is selected. Drift such as a missing order module or unexposed dictionary tables still clears 6."
@@ -28,17 +29,32 @@
       "indexMin": 1,
       "indexMax": 30
     },
+    "bomHeadExAttr": {
+      "onRole": "bomHead",
+      "stems": ["Bom_ExAttr"],
+      "indexMin": 1,
+      "indexMax": 30,
+      "note": "Measured live: the BOM HEAD table carries the same slot-stem family as details."
+    },
     "partExAttr": {
       "onRole": "part",
       "stems": ["ExAttr", "Part_ExAttr"],
       "indexMin": 1,
       "indexMax": 70
+    },
+    "orderDetailExAttr": {
+      "onRole": "orderDetail",
+      "stems": ["order_exAttr"],
+      "indexMin": 1,
+      "indexMax": 30,
+      "note": "Measured live: ORDER details carry their own generic slot family — the vendor slot doctrine applies to both detail families."
     }
   },
   "coreTables": {
     "part": {
       "table": "DN_PDM_PartLibraryInfo",
       "roles": {
+        "rowId": "ID",
         "id": "OBJ_ID",
         "code": "IdentityNo",
         "name": "IdentityName",
@@ -53,6 +69,7 @@
     "bomHead": {
       "table": "DN_PDM_BomHeadInfo",
       "roles": {
+        "rowId": "ID",
         "parentPart": "part_id",
         "bomId": "bom_id",
         "version": "SysVer"
@@ -65,6 +82,7 @@
     "bomDetail": {
       "table": "DN_PDM_BomDetailsInfo",
       "roles": {
+        "rowId": "ID",
         "bomParent": "bom_pid",
         "component": "part_id",
         "sort": "sort_id"
@@ -100,22 +118,46 @@
     "orderDetail": {
       "table": "DN_PDM_OrderDetailInfo",
       "roles": {
+        "rowId": "ID",
         "orderId": "order_id",
         "component": "part_id",
-        "quantity": "quantity",
         "sort": "sort_id"
       },
-      "note": "Top-level order lines carry quantity in a NATIVE product column — only recursive BOM detail lines use a dictionary-assigned slot for it."
+      "note": "Measured live: there is NO native quantity column here — order-line quantity is dictionary-assigned (see semanticExpectations and order-exattr-labels), mirroring the BOM side. The in-repo synthetic fixture models a literal quantity column; that is a synthetic-only shape."
     }
   },
   "joins": [
     { "fromRole": "pathExAttr", "fromColumn": "Parent_OBJ_ID", "toRole": "pathInfo", "toColumn": "OBJ_ID" },
     { "fromRole": "orderHead", "fromColumn": "path_id", "toRole": "pathInfo", "toColumn": "OBJ_ID" },
     { "fromRole": "orderDetail", "fromColumn": "order_id", "toRole": "orderHead", "toColumn": "OBJ_ID" },
-    { "fromRole": "orderDetail", "fromColumn": "part_id", "toRole": "part", "toColumn": "OBJ_ID" },
-    { "fromRole": "bomHead", "fromColumn": "part_id", "toRole": "part", "toColumn": "OBJ_ID" },
-    { "fromRole": "bomDetail", "fromColumn": "bom_pid", "toRole": "bomHead", "toColumn": "bom_id" },
-    { "fromRole": "bomDetail", "fromColumn": "part_id", "toRole": "part", "toColumn": "OBJ_ID" }
+    {
+      "fromRole": "orderDetail",
+      "fromColumn": "part_id",
+      "toRole": "part",
+      "toColumn": "OBJ_ID",
+      "note": "Measured live: shape-consistent. The test catalog's only order references parts absent from the library, so zero hits there is missing data, not a wrong key."
+    },
+    {
+      "fromRole": "bomHead",
+      "fromColumn": "part_id",
+      "toRole": "part",
+      "toColumn": "OBJ_ID",
+      "note": "Measured live: 142/143 head rows joined; the single orphan is data, not topology."
+    },
+    {
+      "fromRole": "bomDetail",
+      "fromColumn": "bom_pid",
+      "toRole": "bomHead",
+      "toColumn": "bom_id",
+      "note": "Measured live: 1319/1319 detail rows joined — full. The join key is bom_id (the business key), not the physical row id."
+    },
+    {
+      "fromRole": "bomDetail",
+      "fromColumn": "part_id",
+      "toRole": "part",
+      "toColumn": "OBJ_ID",
+      "note": "Measured live: 728/1319 detail rows joined; the shortfall is missing catalog data, not a wrong key."
+    }
   ],
   "dictionaries": [
     {
@@ -135,13 +177,14 @@
       "id": "bom-head-exattr-labels",
       "table": "DN_PM_BomExAttrInfo_header",
       "labelsColumnsOfRole": "bomHead",
+      "columnFamily": "bomHeadExAttr",
       "mechanism": "rows-name-columns",
       "enabledFlag": {
         "columnCandidates": ["isable", "is_able"],
         "polarity": "nonzero-means-enabled",
         "note": "Same measured polarity as bom-detail-exattr-labels — see that entry's enabledFlag note."
       },
-      "note": "Labels the BOM HEAD table's generic slots. No columnFamily is declared because head-side slot naming is not recorded in-repo — rows-name-columns identifies the labeled columns at run time."
+      "note": "Labels the BOM HEAD table's generic slots — measured live: the head table carries the same slot-stem family as details (see genericColumnFamilies.bomHeadExAttr)."
     },
     {
       "id": "part-exattr-labels",
@@ -155,6 +198,19 @@
         "note": "Same measured polarity as bom-detail-exattr-labels — see that entry's enabledFlag note."
       },
       "note": "One row per part-side generic slot; enabled rows carry the customer's part-side field vocabulary, surfaced by the probe as decoded entries (see docs/development/takeover-beiliao-20260821)."
+    },
+    {
+      "id": "order-exattr-labels",
+      "table": "DN_PM_OrderExAttrInfo",
+      "labelsColumnsOfRole": "orderDetail",
+      "columnFamily": "orderDetailExAttr",
+      "mechanism": "rows-name-columns",
+      "enabledFlag": {
+        "columnCandidates": ["isable", "is_able"],
+        "polarity": "nonzero-means-enabled",
+        "note": "Same measured polarity as bom-detail-exattr-labels — see that entry's enabledFlag note."
+      },
+      "note": "Measured live: the vendor slot-dictionary doctrine applies to ORDER details exactly as to BOM details — this dictionary assigns per-customer meanings to the order detail slot family."
     }
   ],
   "semanticExpectations": [
@@ -191,9 +247,12 @@
     },
     {
       "semantic": "order-line-quantity",
-      "locus": "native-column",
-      "role": "orderDetail",
-      "roleColumn": "quantity"
+      "locus": "dictionary-assigned-column",
+      "columnFamily": "orderDetailExAttr",
+      "dictionary": "order-exattr-labels",
+      "dictionaryTypeHint": "numeric",
+      "labelHint": "quantity",
+      "note": "Measured live: no native quantity column exists on order details — quantity is a dictionary-assigned slot, mirroring the BOM side. The synthetic fixture and read-plan defaults still model a literal column; reconcile there, not here."
     },
     {
       "semantic": "project-number",
@@ -226,6 +285,7 @@
   "notes": [
     "Knowledge provenance, in-repo only: the read-plan defaults in plugins/plugin-integration-core/lib/stock-preparation-bom-expansion.cjs, the synthetic fixture scripts/ops/fixtures/stock-prep-synthetic-plm/schema.sql, and docs/development/takeover-beiliao-20260821.",
     "DISCOVER, NOT DISCOVERED: this file encodes the family's mechanism only. Which concrete slot a customer assigned to a meaning is read from the customer's own dictionary tables at run time and drafted for a human to CONFIRM.",
-    "Consumed by scripts/ops/source-discovery-probe.mjs; validation contract lib/source-vendor-presets/preset-schema.cjs (validateVendorPreset / evaluatePresetMatch / selectVendorPreset / familyColumnMatcher)."
+    "Consumed by scripts/ops/source-discovery-probe.mjs; validation contract lib/source-vendor-presets/preset-schema.cjs (validateVendorPreset / evaluatePresetMatch / selectVendorPreset / familyColumnMatcher).",
+    "Topology measured live by cold probe reads with join-count verification (see joins[].note). Each measured table carries a physical row id (ID) alongside its business keys (OBJ_ID / bom_id); part references join the part table's OBJ_ID, never its row id."
   ]
 }

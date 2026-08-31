@@ -105,6 +105,7 @@ function shippedPresetIsValid() {
   const familyStems = Object.values(SHIPPED.genericColumnFamilies).flatMap((f) => f.stems.map((s) => s.toLowerCase()))
   assert.ok(familyStems.includes('bom_exattr'), 'dn-pdm must declare the Bom_ExAttr family')
   assert.ok(familyStems.includes('exattr'), 'dn-pdm must declare the bare ExAttr stem')
+  assert.ok(familyStems.includes('order_exattr'), 'dn-pdm must declare the order-detail slot family (measured live)')
 
   // Independent tripwire, NOT via the validator: the committed artifact itself must never name a
   // concrete generic-family slot or value-set table (stem followed by a digit is a discovered
@@ -420,7 +421,7 @@ function signatureMatching() {
   assert.equal(evaluation.selected, true, 'the synthetic fixture table list must select the dn-pdm preset')
   assert.equal(evaluation.matchedCount, 7)
   assert.equal(evaluation.requiredCount, SHIPPED.matches.minSignatureTablesPresent)
-  assert.equal(evaluation.missingTables.length, 3)
+  assert.equal(evaluation.missingTables.length, 4)
 
   const picked = selectVendorPreset([SHIPPED], fixtureTables)
   assert.equal(picked.reason, 'MATCHED')
@@ -473,7 +474,7 @@ function signatureMatching() {
   // The floor itself is real: the shipped preset's floor sits at or above the schema floor.
   assert.ok(SHIPPED.matches.minSignatureTablesPresent >= SIGNATURE_MATCH_FLOOR)
 
-  console.log('  ✓ signature matching: fixture selects (7/10 >= 6); noise, near-miss, ties AND unequal multi-clears select nothing')
+  console.log('  ✓ signature matching: fixture selects (7/11 >= 6); noise, near-miss, ties AND unequal multi-clears select nothing')
 }
 
 // ---------------------------------------------------------------------------
@@ -548,8 +549,98 @@ function dictionaryPolarityIsPinned() {
 }
 
 // ---------------------------------------------------------------------------
-// 9. Directory loading is fail-closed: an invalid preset file throws naming the
-//    file — it is never silently skipped.
+// 9. MEASURED TOPOLOGY (round-4 live backfill) — per-table row ids, join keys,
+//    and the order-side slot dictionary, pinned with a structural fixture.
+//
+// Measured on the real vendor test catalog by cold reads with join-count
+// verification: key columns are NOT uniformly OBJ_ID (each measured table
+// carries a physical row id `ID` beside its business keys); the head/detail
+// join key is bom_id, not the row id; part references join PartLibrary.OBJ_ID;
+// and the ORDER detail table has NO native quantity column — its quantity is
+// dictionary-assigned (DN_PM_OrderExAttrInfo), same doctrine as the BOM side.
+// The fixture below uses synthetic ids only; the pinned thing is which
+// COLUMNS join, not any content.
+// ---------------------------------------------------------------------------
+
+function measuredTopologyIsPinned() {
+  // Per-table physical row id alongside business keys — measured live.
+  for (const role of ['part', 'bomHead', 'bomDetail', 'orderDetail']) {
+    assert.equal(SHIPPED.coreTables[role].roles.rowId, 'ID', `${role} must declare the measured physical row id`)
+  }
+  assert.equal(
+    SHIPPED.coreTables.part.roles.id,
+    'OBJ_ID',
+    'part join identity stays OBJ_ID (the measured join target), distinct from the physical row id',
+  )
+
+  // Order detail: NO native quantity column (measured live) — the native role and the native
+  // expectation must stay gone; quantity is dictionary-assigned like the BOM side.
+  assert.equal(SHIPPED.coreTables.orderDetail.roles.quantity, undefined, 'order detail must not declare a native quantity column')
+  const orderQuantity = SHIPPED.semanticExpectations.find((e) => e.semantic === 'order-line-quantity')
+  assert.equal(orderQuantity.locus, 'dictionary-assigned-column')
+  assert.equal(orderQuantity.columnFamily, 'orderDetailExAttr')
+  assert.equal(orderQuantity.dictionary, 'order-exattr-labels')
+  const orderDictionary = SHIPPED.dictionaries.find((d) => d.id === 'order-exattr-labels')
+  assert.equal(orderDictionary.table, 'DN_PM_OrderExAttrInfo')
+  assert.equal(orderDictionary.labelsColumnsOfRole, 'orderDetail')
+  assert.equal(isFamilyColumn(SHIPPED.genericColumnFamilies.orderDetailExAttr, 'order_exAttr3'), true)
+  assert.equal(isFamilyColumn(SHIPPED.genericColumnFamilies.bomHeadExAttr, 'Bom_ExAttr2'), true, 'the measured head-side slot family must stay declared')
+
+  // Measured join keys, pinned exactly (the round-4 evidence: 1319/1319 on bom_pid=bom_id;
+  // 142/143 and 728/1319 on part_id=OBJ_ID, partials being data, not topology).
+  const joinSet = SHIPPED.joins.map((j) => `${j.fromRole}.${j.fromColumn}->${j.toRole}.${j.toColumn}`)
+  for (const required of [
+    'bomDetail.bom_pid->bomHead.bom_id',
+    'bomHead.part_id->part.OBJ_ID',
+    'bomDetail.part_id->part.OBJ_ID',
+    'orderDetail.part_id->part.OBJ_ID',
+    'orderDetail.order_id->orderHead.OBJ_ID',
+  ]) {
+    assert.ok(joinSet.includes(required), `measured join must stay declared: ${required}`)
+  }
+
+  // Structural fixture (synthetic ids only) mirroring the measured shapes: resolving the joins
+  // AS DECLARED reproduces the measured pattern — head/detail joins FULLY, detail->part joins
+  // PARTIALLY (missing catalog data, tolerated), and a reverted key declaration (e.g. joining
+  // the head's physical row id instead of bom_id) resolves nothing.
+  const fixture = {
+    part: [
+      { ID: 'row-1', OBJ_ID: 'part-1' },
+      { ID: 'row-2', OBJ_ID: 'part-2' },
+    ],
+    bomHead: [{ ID: 'row-3', bom_id: 'bom-1', part_id: 'part-1', SysVer: 'v-1' }],
+    bomDetail: [
+      { ID: 'row-4', bom_pid: 'bom-1', part_id: 'part-2', sort_id: 1 },
+      { ID: 'row-5', bom_pid: 'bom-1', part_id: 'part-absent', sort_id: 2 },
+    ],
+    orderHead: [{ OBJ_ID: 'order-1', path_id: 'path-1' }],
+    orderDetail: [{ ID: 'row-6', order_id: 'order-1', part_id: 'part-1', sort_id: 1 }],
+    pathInfo: [{ OBJ_ID: 'path-1' }],
+    pathExAttr: [{ FileCode: 'code-1', Parent_OBJ_ID: 'path-1' }],
+  }
+  const resolveJoinCount = (fromRole, toRole) => {
+    const join = SHIPPED.joins.find((j) => j.fromRole === fromRole && j.toRole === toRole)
+    assert.ok(join, `a ${fromRole}->${toRole} join must be declared`)
+    const targetKeys = new Set(fixture[toRole].map((r) => r[join.toColumn]))
+    return fixture[fromRole].filter((r) => targetKeys.has(r[join.fromColumn])).length
+  }
+  assert.equal(resolveJoinCount('bomDetail', 'bomHead'), 2, 'declared head/detail key columns must join FULLY (the measured 1319/1319 shape)')
+  assert.equal(resolveJoinCount('bomHead', 'part'), 1)
+  assert.equal(
+    resolveJoinCount('bomDetail', 'part'),
+    1,
+    'detail->part joins partially in the fixture as it did live — the declared key still joins every present row',
+  )
+  assert.equal(resolveJoinCount('orderDetail', 'part'), 1)
+  assert.equal(resolveJoinCount('orderDetail', 'orderHead'), 1)
+  assert.equal(resolveJoinCount('pathExAttr', 'pathInfo'), 1)
+
+  console.log('  ✓ measured topology: row ids, join keys, and the order-side slot dictionary pinned to the live shape')
+}
+
+// ---------------------------------------------------------------------------
+// 10. Directory loading is fail-closed: an invalid preset file throws naming
+//     the file — it is never silently skipped.
 // ---------------------------------------------------------------------------
 
 function loadingIsFailClosed() {
@@ -591,6 +682,7 @@ function main() {
   detectorControls()
   signatureMatching()
   dictionaryPolarityIsPinned()
+  measuredTopologyIsPinned()
   loadingIsFailClosed()
   console.log('✓ source-vendor-presets: schema, poison rejection, adversarial regressions and signature selection all hold')
 }
