@@ -311,6 +311,12 @@ interface PendingBeat {
   epoch: number
 }
 
+interface ChallengeResumeAttempt {
+  epoch: number
+  sessionId: string
+  video: HTMLVideoElement
+}
+
 const TICKET_RENEWAL_LEAD_MS = 30_000
 const TICKET_RENEWAL_MIN_DELAY_MS = 5_000
 
@@ -338,6 +344,7 @@ let statusSource: 'draft' | null = null
 let examCountdownTimer: number | null = null
 let challengeAckIdentity: { key: string; requestId: string } | null = null
 let resumePlaybackAfterChallenge = false
+let challengeResumeAttempt: ChallengeResumeAttempt | null = null
 
 function formatError(error: unknown): string {
   if (error instanceof ElearningApiError) {
@@ -471,15 +478,49 @@ function watchChallengeRequestId(session: string, challengeId: string): string {
 
 async function resumePlaybackAfterWatchChallenge(
   shouldResume: boolean,
-): Promise<'acknowledged' | 'manual' | 'resumed'> {
+  expectedEpoch: number,
+  expectedSession: string,
+): Promise<'acknowledged' | 'manual' | 'resumed' | 'stale'> {
   const video = videoNode
-  if (!shouldResume || !video || video.ended || watchStopped) return 'acknowledged'
+  if (!shouldResume || !video || video.ended) return 'acknowledged'
+  if (
+    watchStopped
+    || watchEpoch !== expectedEpoch
+    || sessionId !== expectedSession
+  ) return 'stale'
+  const attempt: ChallengeResumeAttempt = {
+    epoch: expectedEpoch,
+    sessionId: expectedSession,
+    video,
+  }
+  challengeResumeAttempt = attempt
   try {
     await video.play()
-    if (!video.paused) startHeartbeatTimer()
+    if (
+      challengeResumeAttempt !== attempt
+      || watchStopped
+      || watchEpoch !== attempt.epoch
+      || sessionId !== attempt.sessionId
+      || videoNode !== attempt.video
+    ) {
+      if (challengeResumeAttempt === attempt) challengeResumeAttempt = null
+      return 'stale'
+    }
+    challengeResumeAttempt = null
+    if (video.paused) return 'manual'
+    startHeartbeatTimer()
+    enqueueBeat(true)
     return 'resumed'
   } catch {
-    return 'manual'
+    const stale = (
+      challengeResumeAttempt !== attempt
+      || watchStopped
+      || watchEpoch !== attempt.epoch
+      || sessionId !== attempt.sessionId
+      || videoNode !== attempt.video
+    )
+    if (challengeResumeAttempt === attempt) challengeResumeAttempt = null
+    return stale ? 'stale' : 'manual'
   }
 }
 
@@ -510,7 +551,10 @@ async function confirmWatchChallenge(): Promise<void> {
     } else {
       const resumeStatus = await resumePlaybackAfterWatchChallenge(
         shouldResume && result.challenge === null,
+        epoch,
+        currentSession,
       )
+      if (resumeStatus === 'stale') return
       writeStatus(
         elearningLabel(
           resumeStatus === 'resumed'
@@ -809,6 +853,7 @@ function tryApplyResumeCursor(event: Event): void {
 function onPlay(event: Event): void {
   const video = bindVideo(event)
   if (applyingTicketRenewal) return
+  if (challengeResumeAttempt?.video === video) return
   if (activeChallenge.value) {
     if (video && !video.paused) video.pause()
     return
