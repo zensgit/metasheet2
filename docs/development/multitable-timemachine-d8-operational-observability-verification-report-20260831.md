@@ -8,6 +8,8 @@ staging, flags, deployment, production, and tenant UAT are not claimed.
 - Base: `25635e67db5145a5998499c4adc8f030e156daf7`
 - Product/design checkpoint: `9c093f9b88636faf917b909f419ea652825fc8c5`
 - Product/design tree: `ec45c33c4ff5d35b6e04c1c4e713aa5c99396e5d`
+- Outcome-exhaustiveness fix-forward: `af90e770a21ee28bc97b2cead42560092fc6c484`
+- Current implementation tree: `509e493238f66e38ed1599a679be0e0525cfee27`
 - Worktree: `/private/tmp/codex-tm-d8-operational-observability-20260831`
 - Remote exact head: `NOT AVAILABLE`
 - Merged-main SHA: `NOT AVAILABLE`
@@ -39,6 +41,7 @@ The focused suite included:
 | Remove application `onResult` forwarding | observer producer test failed because `recordRun` was called 0 times | Restored; focused suite green |
 | Remove `drain_failed` lifecycle event | bounded-drain failure test failed because the second lifecycle event was absent | Restored; focused suite green |
 | Ignore extra run-result keys | values-free closed-shape test accepted a `sheetId` property and failed its throw assertion | Restored; focused suite green |
+| Remove `tick_failed` from the exhaustive outcome record | `tsc` failed with TS1360 because the `RecoveryArchiveRestoreWorkerRunKind` member was missing | Restored; typecheck and focused suite green |
 
 The initial observability test also failed before implementation because the
 production module did not exist. The metrics test failed before registry wiring
@@ -61,7 +64,7 @@ because the production observer export was absent.
 |---|---|
 | Source and local focused tests | PASS at product checkpoint |
 | Local typecheck/lint/diff | PASS with recorded baseline warnings |
-| Independent exact-range model review | PENDING |
+| Independent exact-range model review | Terra high `P1=0 / P2=0 / P3=0` after the bounded exhaustiveness fix-forward |
 | Draft PR exact-head CI | NOT RUN |
 | Ready / merge | NOT AUTHORIZED by this report |
 | Merged-main rerun | NOT RUN |
