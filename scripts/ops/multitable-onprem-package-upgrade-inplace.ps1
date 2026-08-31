@@ -35,8 +35,14 @@
        packages/core-backend/migrations, and plugins/ — plugins by walking
        files, preserving each plugin's own node_modules.
     5. Assert a manifest of must-exist files after the swap (the F22
-       tripwire) and print a package-vs-deployed file count per plugin
-       lib/. Refuses to proceed on any missing file.
+       tripwire), THEN assert every file under the package's plugins/ tree
+       (node_modules excluded) exists on disk with an IDENTICAL SHA-256 —
+       the real F22 net, strictly stronger than the file-count comparison
+       still printed alongside it for human skimming — THEN assert none of
+       the package's own excluded node_modules content leaked to an
+       unexpected location (the negative half of the net; the positive hash
+       check alone cannot see this). Refuses to proceed on any missing file,
+       hash mismatch, or detected leak.
     6. Run migrations with env loaded from docker/app.env into this process
        (pm2 holds stale env otherwise).
     7. Restart pm2 with env reload; poll the health endpoint until ok or
@@ -45,10 +51,14 @@
        health, and the exact operator commands to run next (preflight +
        acceptance bootstrap).
 
-  NO ROLLBACK AUTOMATION in this MVP. On a failed assertion (checksum
-  mismatch, missing file after swap, failed migration, failed restart) this
-  script STOPS, prints the backup path, and states what to restore by hand.
-  It never continues past a failed assertion.
+  NO ROLLBACK AUTOMATION in this MVP. Steps 4-7 (the entire mutation window,
+  from the first file replaced through the health check) run inside ONE
+  failure handler: ANY exception there — a mid-swap failure, a failed
+  assertion, a failed migration, a failed pm2 restart, or a failed
+  healthcheck — stops pm2 (so a broken build is never left running), prints
+  a clearly-boxed restore block naming the backup path and the exact
+  copy-back command for every replaced path, then rethrows. It never
+  continues past a failure in that window.
 
   Dot-sourceable: `. .\multitable-onprem-package-upgrade-inplace.ps1` (invoke
   with InvocationName '.') defines every function below without running the
@@ -231,6 +241,12 @@ function Copy-TreeExcludingNodeModules {
     files one at a time and testing each file's own relative path is the fix.
 
     Returns a [pscustomobject] with Copied and Skipped file counts.
+
+    NON-GOAL, DOCUMENTED RATHER THAN FIXED: this function walks FILES, so a
+    genuinely empty directory under $Source is never recreated under
+    $Destination. Harmless for this script's actual payloads (dist/,
+    migrations/, plugin lib/ trees never ship meaningfully-empty
+    directories), but worth stating plainly rather than implying otherwise.
   #>
   param(
     [Parameter(Mandatory = $true)][string]$Source,
@@ -426,13 +442,24 @@ function Update-ReplaceDirs {
 
 function Update-Plugins {
   <#
-    Overlays every plugin directory shipped in the package onto the live
-    plugins/ tree, one plugin at a time, walking files and skipping any
-    node_modules path on both sides. The live plugin's node_modules is never
-    scanned, never deleted, never written to — this is the "preserving each
-    plugin's node_modules" requirement, and it holds even though on-prem
-    packages ship no node_modules of their own (build-time policy), because
-    this function does not depend on that policy to stay true.
+    Overlays every plugin directory, AND any loose file, shipped at the
+    package's plugins/ root onto the live plugins/ tree, walking files and
+    skipping any node_modules path on both sides. The live plugin's
+    node_modules is never scanned, never deleted, never written to — this is
+    the "preserving each plugin's node_modules" requirement.
+
+    NON-GOAL, DOCUMENTED RATHER THAN FIXED: a directory literally named
+    `node_modules` sitting directly at the package's plugins/ root (i.e.
+    plugins/node_modules/..., as opposed to plugins/<name>/node_modules/...)
+    would be enumerated by the -Directory listing below like any other
+    plugin and copied under that name — this function does not special-case
+    that shape. It is safe only because
+    multitable-onprem-package-build.sh's prune_node_modules sweeps every
+    node_modules directory out of the package before it is archived, so a
+    package never actually ships that shape. An earlier revision of this
+    docstring claimed this function's node_modules handling did not depend
+    on that build-time policy; that claim was wrong for this specific case
+    and has been corrected here.
   #>
   param(
     [string]$PackageRoot,
@@ -447,7 +474,19 @@ function Update-Plugins {
   $livePluginsDir = Join-Path $RootDir 'plugins'
   New-Item -ItemType Directory -Force -Path $livePluginsDir | Out-Null
 
-  Get-ChildItem -LiteralPath $packagePluginsDir -Directory | ForEach-Object {
+  # Loose files directly at plugins/ (not inside any plugin subdirectory) are
+  # real package content too — a per-directory-only listing silently dropped
+  # these. -Force so a hidden loose file is not silently skipped either.
+  Get-ChildItem -LiteralPath $packagePluginsDir -File -Force | ForEach-Object {
+    $destPath = Join-Path $livePluginsDir $_.Name
+    Copy-Item -LiteralPath $_.FullName -Destination $destPath -Force
+    Write-Info ("Replaced plugins/{0} (loose file)" -f $_.Name)
+  }
+
+  # -Force: a plugin directory marked hidden must not be silently skipped —
+  # a directory listing this function trusts must not quietly drop entries,
+  # the same lesson F22 taught about copy operations in general.
+  Get-ChildItem -LiteralPath $packagePluginsDir -Directory -Force | ForEach-Object {
     $pluginSrc = $_.FullName
     $pluginName = $_.Name
     $pluginDst = Join-Path $livePluginsDir $pluginName
@@ -486,12 +525,164 @@ function Assert-MustExistFiles {
   return $true
 }
 
+function Assert-PluginTreesMatchPackage {
+  <#
+    THE REAL F22 NET. Assert-MustExistFiles only proves a FIXED list of
+    paths exist; a file-COUNT comparison (Write-PluginLibFileCountReport
+    below) is weaker still and actively misleading in the steady state: this
+    overlay copy never deletes stale files, so "deployed count > package
+    count" is NORMAL after even one prior upgrade — a chronic false
+    MISMATCH, not a signal. Neither would catch a same-count,
+    different-content regression, a repeat upgrade where a STALE file from a
+    prior install happens to satisfy Assert-MustExistFiles by existing at
+    the right path with the WRONG content, or any future silent-skip
+    regression regardless of what syntax caused it.
+
+    This is the actual gate: for EVERY file under $PackageRoot/plugins
+    (walked with Get-ChildItem -Recurse -File -Force, node_modules paths
+    excluded via Test-IsNodeModulesRelativePath — never -Exclude), assert
+    the matching relative path exists under $RootDir/plugins with an
+    IDENTICAL SHA-256 to the package's copy. It does not care HOW a file
+    failed to arrive correctly, only THAT it did.
+
+    Throws UPGRADE_PLUGIN_HASH_VERIFICATION_FAILED naming every offending
+    relative path (MISSING or HASH_MISMATCH, capped for readability) when
+    any file fails to verify. Returns the number of files checked on
+    success.
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$PackageRoot,
+    [Parameter(Mandatory = $true)][string]$RootDir
+  )
+
+  $packagePluginsDir = Join-Path $PackageRoot 'plugins'
+  if (-not (Test-Path -LiteralPath $packagePluginsDir -PathType Container)) {
+    throw "PACKAGE_MISSING_PLUGINS_DIR: plugins/ not found under extracted package"
+  }
+  $packageFull = (Resolve-Path -LiteralPath $packagePluginsDir).Path.TrimEnd('\', '/')
+  $liveDir = Join-Path $RootDir 'plugins'
+
+  $problems = @()
+  $checked = 0
+
+  Get-ChildItem -LiteralPath $packageFull -Recurse -File -Force | ForEach-Object {
+    $relative = $_.FullName.Substring($packageFull.Length).TrimStart('\', '/')
+    if (Test-IsNodeModulesRelativePath -RelativePath $relative) {
+      return
+    }
+    $checked += 1
+    $deployedPath = Join-Path $liveDir $relative
+    if (-not (Test-Path -LiteralPath $deployedPath -PathType Leaf)) {
+      $problems += "MISSING: $relative"
+      return
+    }
+    $packageHash = Get-FileSha256Hex -Path $_.FullName
+    $deployedHash = Get-FileSha256Hex -Path $deployedPath
+    if ($packageHash -ne $deployedHash) {
+      $problems += "HASH_MISMATCH: $relative"
+    }
+  }
+
+  if ($problems.Count -gt 0) {
+    $shown = $problems | Select-Object -First 25
+    $more = ''
+    if ($problems.Count -gt 25) {
+      $more = " (+$($problems.Count - 25) more)"
+    }
+    throw "UPGRADE_PLUGIN_HASH_VERIFICATION_FAILED ($checked files checked): $($shown -join '; ')$more"
+  }
+
+  return $checked
+}
+
+function Assert-NoNodeModulesContentLeaked {
+  <#
+    THE NEGATIVE HALF OF THE F22 NET. Assert-PluginTreesMatchPackage is
+    strictly one-directional: it proves every file that SHOULD be copied WAS
+    copied correctly, but it cannot notice that node_modules content ALSO
+    leaked through to some other, wrong location — which is exactly what the
+    forbidden `-Exclude` pattern does. `Get-ChildItem -Recurse -Exclude
+    'node_modules' | Copy-Item -Recurse` excludes only items literally NAMED
+    node_modules from a flat listing; every descendant of an excluded
+    node_modules directory is still individually emitted by -Recurse and
+    still gets copied — typically to a wrong, flattened path rather than
+    being dropped, so the CORRECT files can end up present and correct at
+    the same time node_modules content leaks in elsewhere. A pure
+    existence+hash check on the package's own file list would not notice.
+
+    Hashes every file under $PackageRoot/plugins whose relative path DOES
+    contain a node_modules segment (the files a correct walk skips), then
+    asserts none of those hashes appear anywhere under the deployed plugins
+    tree OUTSIDE of a node_modules segment (a legitimately preserved LIVE
+    node_modules is out of scope for this check by design). Files under 8
+    bytes are skipped on both sides to avoid a false positive between two
+    unrelated, incidentally-empty/trivial files — real leaked module content
+    is never that small. Throws UPGRADE_NODE_MODULES_LEAK_DETECTED naming
+    the leaked relative path(s) when found. Returns the number of excluded
+    package files it hashed (0 when the package ships no node_modules at
+    all, the normal case per build policy).
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$PackageRoot,
+    [Parameter(Mandatory = $true)][string]$RootDir
+  )
+
+  $packagePluginsDir = Join-Path $PackageRoot 'plugins'
+  if (-not (Test-Path -LiteralPath $packagePluginsDir -PathType Container)) {
+    return 0
+  }
+  $packageFull = (Resolve-Path -LiteralPath $packagePluginsDir).Path.TrimEnd('\', '/')
+  $liveDir = Join-Path $RootDir 'plugins'
+  if (-not (Test-Path -LiteralPath $liveDir -PathType Container)) {
+    return 0
+  }
+  $liveFull = (Resolve-Path -LiteralPath $liveDir).Path.TrimEnd('\', '/')
+
+  $excludedHashes = @{}
+  Get-ChildItem -LiteralPath $packageFull -Recurse -File -Force | ForEach-Object {
+    if ($_.Length -lt 8) {
+      return
+    }
+    $relative = $_.FullName.Substring($packageFull.Length).TrimStart('\', '/')
+    if (Test-IsNodeModulesRelativePath -RelativePath $relative) {
+      $excludedHashes[(Get-FileSha256Hex -Path $_.FullName)] = $relative
+    }
+  }
+  if ($excludedHashes.Count -eq 0) {
+    return 0
+  }
+
+  $leaks = @()
+  Get-ChildItem -LiteralPath $liveFull -Recurse -File -Force | ForEach-Object {
+    if ($_.Length -lt 8) {
+      return
+    }
+    $relative = $_.FullName.Substring($liveFull.Length).TrimStart('\', '/')
+    if (Test-IsNodeModulesRelativePath -RelativePath $relative) {
+      return
+    }
+    $hash = Get-FileSha256Hex -Path $_.FullName
+    if ($excludedHashes.ContainsKey($hash)) {
+      $leaks += ("{0} (leaked package node_modules source: {1})" -f $relative, $excludedHashes[$hash])
+    }
+  }
+
+  if ($leaks.Count -gt 0) {
+    throw "UPGRADE_NODE_MODULES_LEAK_DETECTED: $($leaks -join '; ')"
+  }
+
+  return $excludedHashes.Count
+}
+
 function Write-PluginLibFileCountReport {
   <#
-    Informational, not a gate on its own (Assert-MustExistFiles is the gate):
-    prints package-declared vs now-deployed file count for each plugin's
-    lib/, side by side, so a count regression is visible even when it does
-    not happen to touch a manifest path.
+    INFORMATIONAL ONLY — this is deliberately NOT a gate. A file-count
+    comparison chronically false-MISMATCHes in the normal steady state
+    (this overlay copy never deletes stale files, so deployed count >
+    package count after even one prior upgrade is expected, not a defect),
+    and it cannot detect a same-count/different-content regression at all.
+    Assert-PluginTreesMatchPackage is the actual gate; this print exists
+    only so a human skimming the log sees a side-by-side number.
   #>
   param(
     [string]$PackageRoot,
@@ -637,6 +828,45 @@ function Wait-ForHealthOk {
   return [pscustomobject]@{ Ok = $false; Attempt = $Attempts; StatusCode = $null; Body = $null }
 }
 
+# ── Failure handling: the restore block ─────────────────────────────────────
+
+function Write-RestoreBlock {
+  <#
+    Prints a clearly-boxed, copy-pasteable restore procedure: the backup
+    path plus an exact per-directory copy-back command for every path this
+    script may have replaced. Called from the SINGLE outer failure handler
+    that wraps the entire mutation window (extract through health check) in
+    Main below, so ANY exception in that window prints this — not just the
+    handful of specific assertions that used to print their own ad-hoc
+    message. Before this existed, a mid-swap failure (for example, a thrown
+    error from inside Update-ReplaceDirs/Update-Plugins themselves) died
+    with a raw, uncaught exception and the backup path existed only in
+    scrollback the operator had to scroll back to find.
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$BackupPath,
+    [Parameter(Mandatory = $true)][string]$RootDir,
+    [string[]]$ReplacedRelativePaths = @(),
+    [string]$Pm2AppName = 'metasheet-backend'
+  )
+
+  Write-Host ''
+  Write-Host '=========================== RESTORE REQUIRED ==========================='
+  Write-Host "Backup path: $BackupPath"
+  Write-Host ''
+  Write-Host 'The upgrade did not complete. Restore each replaced path from the backup,'
+  Write-Host 'then restart pm2:'
+  foreach ($rel in $ReplacedRelativePaths) {
+    $backupSrc = Join-Path $BackupPath $rel
+    $liveDst = Join-Path $RootDir $rel
+    Write-Host ("  Remove-Item -LiteralPath '{0}' -Recurse -Force -ErrorAction SilentlyContinue" -f $liveDst)
+    Write-Host ("  Copy-Item -LiteralPath '{0}' -Destination '{1}' -Recurse -Force" -f $backupSrc, $liveDst)
+  }
+  Write-Host ("  pm2 restart {0} --update-env" -f $Pm2AppName)
+  Write-Host '=========================================================================='
+  Write-Host ''
+}
+
 # ── Main (skipped when dot-sourced, so tests can load the functions above
 #    without running the upgrade) ───────────────────────────────────────────
 
@@ -659,6 +889,10 @@ if ($MyInvocation.InvocationName -ne '.') {
   New-Item -ItemType Directory -Force -Path $resolvedBackupRoot | Out-Null
 
   $pm2Command = Resolve-Pm2Command -BaseDir $resolvedRoot
+  # Every path this run may replace, for the restore block below — the
+  # replace-in-full dirs plus plugins/ (overlaid, not replaced-in-full, but
+  # still a path an operator must be told how to restore).
+  $restoredRelativePaths = @($ReplaceDirs) + @('plugins')
 
   Write-Info '=== Step 1/8: verify package checksum ==='
   $verifiedSha = Test-PackageChecksum -ArchivePath $resolvedArchive
@@ -671,95 +905,107 @@ if ($MyInvocation.InvocationName -ne '.') {
   $backupPath = New-TimestampedBackup -RootDir $resolvedRoot -BackupRoot $resolvedBackupRoot -RelativePaths $BackupPaths
   Write-Host "BACKUP_PATH=$backupPath"
 
-  Write-Info '=== Step 4/8: extract + replace runtime paths ==='
-  $stagingBase = Resolve-StagingBase -Candidate $StagingRoot
-  $extractRoot = New-ShortTempDirectory -Prefix 'mspui' -BaseRoot $stagingBase
-  Write-Info "Staging extract root: $extractRoot"
+  # THE MUTATION WINDOW. From here through the health check, ANY exception —
+  # a mid-swap failure inside Update-ReplaceDirs/Update-Plugins, a failed
+  # F22/hash assertion, a failed migration, a failed pm2 restart, or a failed
+  # healthcheck (raised as an exception below, deliberately, so it flows
+  # through this SAME handler instead of a second, easily-forgotten copy of
+  # this logic) — is caught by the single handler at the bottom of this
+  # block. That handler stops pm2 (a broken deployment must not be left
+  # running; Stop-Pm2App tolerates pm2 already being stopped, which is the
+  # normal case for every failure point except a failed healthcheck) and
+  # prints the restore block, then rethrows. Nothing past step 3 may fail
+  # without telling the operator where the backup is.
   try {
-    Expand-UpgradePackage -ArchivePath $resolvedArchive -TargetDir $extractRoot
-    $packageRoot = Resolve-PackageRoot -ExtractRoot $extractRoot
-    Write-Info "Extracted package root: $packageRoot"
-
-    Update-ReplaceDirs -PackageRoot $packageRoot -RootDir $resolvedRoot -RelativeDirs $ReplaceDirs
-    Update-Plugins -PackageRoot $packageRoot -RootDir $resolvedRoot
-
-    Write-Info '=== Step 5/8: assert must-exist files (F22 tripwire) ==='
+    Write-Info '=== Step 4/8: extract + replace runtime paths ==='
+    $stagingBase = Resolve-StagingBase -Candidate $StagingRoot
+    $extractRoot = New-ShortTempDirectory -Prefix 'mspui' -BaseRoot $stagingBase
+    Write-Info "Staging extract root: $extractRoot"
     try {
+      Expand-UpgradePackage -ArchivePath $resolvedArchive -TargetDir $extractRoot
+      $packageRoot = Resolve-PackageRoot -ExtractRoot $extractRoot
+      Write-Info "Extracted package root: $packageRoot"
+
+      Update-ReplaceDirs -PackageRoot $packageRoot -RootDir $resolvedRoot -RelativeDirs $ReplaceDirs
+      Update-Plugins -PackageRoot $packageRoot -RootDir $resolvedRoot
+
+      Write-Info '=== Step 5/8: assert must-exist files (F22 tripwire) + per-file hash verification ==='
       Assert-MustExistFiles -RootDir $resolvedRoot -RelativePaths $MustExistManifest | Out-Null
-    } catch {
-      Write-Err $_.Exception.Message
-      Write-Err "STOP. Restore packages/core-backend/dist, apps/web/dist, packages/core-backend/migrations, and plugins/ from: $backupPath"
-      throw
+      Write-Info 'Must-exist manifest: OK, all files present'
+      $verifiedFileCount = Assert-PluginTreesMatchPackage -PackageRoot $packageRoot -RootDir $resolvedRoot
+      Write-Info "Plugin hash verification: OK ($verifiedFileCount files checked)"
+      $excludedCheckedCount = Assert-NoNodeModulesContentLeaked -PackageRoot $packageRoot -RootDir $resolvedRoot
+      Write-Info "Plugin node_modules leak check: OK ($excludedCheckedCount excluded package files checked)"
+      Write-PluginLibFileCountReport -PackageRoot $packageRoot -RootDir $resolvedRoot
+    } finally {
+      Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
-    Write-Info 'Must-exist manifest: OK, all files present'
-    Write-PluginLibFileCountReport -PackageRoot $packageRoot -RootDir $resolvedRoot
-  } finally {
-    Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
-  }
 
-  Write-Info '=== Step 6/8: run migrations ==='
-  Set-Location $resolvedRoot
-  $migrationExit = 'skipped'
-  if ($RunMigrations -ne '0') {
-    if (-not (Test-Path -LiteralPath $resolvedEnvFile -PathType Leaf)) {
-      throw "ENV_FILE_MISSING: $resolvedEnvFile. STOP. Restore from: $backupPath"
-    }
-    $importedCount = Import-AppEnvFile -EnvFile $resolvedEnvFile
-    Write-Info "Loaded $importedCount vars from $resolvedEnvFile (migration/restart/healthcheck inherit these)"
+    Write-Info '=== Step 6/8: run migrations ==='
+    Set-Location $resolvedRoot
+    $migrationExit = 'skipped'
+    if ($RunMigrations -ne '0') {
+      if (-not (Test-Path -LiteralPath $resolvedEnvFile -PathType Leaf)) {
+        throw "ENV_FILE_MISSING: $resolvedEnvFile"
+      }
+      $importedCount = Import-AppEnvFile -EnvFile $resolvedEnvFile
+      Write-Info "Loaded $importedCount vars from $resolvedEnvFile (migration/restart/healthcheck inherit these)"
 
-    $migratePath = Join-Path $resolvedRoot 'packages\core-backend\dist\src\db\migrate.js'
-    if (-not (Test-Path -LiteralPath $migratePath -PathType Leaf)) {
-      throw "MIGRATE_ENTRYPOINT_MISSING: $migratePath. STOP. Restore from: $backupPath"
-    }
-    try {
+      $migratePath = Join-Path $resolvedRoot 'packages\core-backend\dist\src\db\migrate.js'
+      if (-not (Test-Path -LiteralPath $migratePath -PathType Leaf)) {
+        throw "MIGRATE_ENTRYPOINT_MISSING: $migratePath"
+      }
       Invoke-CheckedCommand "Run database migrations ($migratePath)" { node $migratePath }
       $migrationExit = 0
+    } else {
+      Write-Info 'RunMigrations=0: skipped'
+    }
+
+    Write-Info '=== Step 7/8: restart pm2 + healthcheck ==='
+    if ($RestartService -ne '0') {
+      & $pm2Command restart $Pm2AppName --update-env
+      if ($LASTEXITCODE -ne 0) {
+        throw "PM2_RESTART_FAILED: exit=$LASTEXITCODE"
+      }
+    } else {
+      Write-Info 'RestartService=0: skipped'
+    }
+
+    $health = [pscustomobject]@{ Ok = $true; Attempt = 0; StatusCode = $null; Body = 'skipped (RestartService=0)' }
+    if ($RestartService -ne '0') {
+      $health = Wait-ForHealthOk -HealthUrl $HealthUrl -Attempts $HealthcheckAttempts -DelaySec $HealthcheckDelaySec
+    }
+    Write-PluginsSummary -RootDir $resolvedRoot
+
+    Write-Info '=== Step 8/8: final report ==='
+    Write-Host ''
+    Write-Host '===== multitable-onprem-package-upgrade-inplace: final report ====='
+    Write-Host "package:          $packageBaseName"
+    Write-Host "backup path:      $backupPath"
+    Write-Host "migration exit:   $migrationExit"
+    Write-Host "health:           $(if ($health.Ok) { 'OK' } else { 'FAILED' }) (attempt=$($health.Attempt), status=$($health.StatusCode))"
+    Write-Host ''
+    Write-Host 'Next (do not skip these):'
+    Write-Host '  1) Preflight:'
+    Write-Host '       GET <base-url>/api/integration/stock-preparation/preflight'
+    Write-Host '     Fix every listed blocker with its own fix.run until "ready": true.'
+    Write-Host '  2) Acceptance bootstrap (env-only input, see script header for full list):'
+    Write-Host '       node scripts/ops/stock-prep-acceptance-bootstrap.mjs'
+    Write-Host '     Requires MS_API, MS_TOKEN, MS_PROJECT_NO, MS_PACK_ID, MS_DATA_SOURCE_ID,'
+    Write-Host '     MS_EXTERNAL_SYSTEM_ID set in the environment beforehand.'
+    Write-Host '===================================================================='
+
+    if (-not $health.Ok) {
+      throw "HEALTHCHECK_FAILED after $HealthcheckAttempts attempts against $HealthUrl"
+    }
+  } catch {
+    Write-Err $_.Exception.Message
+    try {
+      Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName
     } catch {
-      Write-Err $_.Exception.Message
-      Write-Err "STOP. Migrations failed. Restore packages/core-backend/dist and packages/core-backend/migrations from: $backupPath"
-      throw
+      Write-Err "pm2 stop itself failed while handling the error above: $($_.Exception.Message)"
     }
-  } else {
-    Write-Info 'RunMigrations=0: skipped'
-  }
-
-  Write-Info '=== Step 7/8: restart pm2 + healthcheck ==='
-  if ($RestartService -ne '0') {
-    & $pm2Command restart $Pm2AppName --update-env
-    if ($LASTEXITCODE -ne 0) {
-      Write-Err "pm2 restart failed for $Pm2AppName (exit=$LASTEXITCODE)"
-      Write-Err "STOP. Service did not restart. Restore from: $backupPath"
-      throw "PM2_RESTART_FAILED: exit=$LASTEXITCODE"
-    }
-  } else {
-    Write-Info 'RestartService=0: skipped'
-  }
-
-  $health = [pscustomobject]@{ Ok = $true; Attempt = 0; StatusCode = $null; Body = 'skipped (RestartService=0)' }
-  if ($RestartService -ne '0') {
-    $health = Wait-ForHealthOk -HealthUrl $HealthUrl -Attempts $HealthcheckAttempts -DelaySec $HealthcheckDelaySec
-  }
-  Write-PluginsSummary -RootDir $resolvedRoot
-
-  Write-Info '=== Step 8/8: final report ==='
-  Write-Host ''
-  Write-Host '===== multitable-onprem-package-upgrade-inplace: final report ====='
-  Write-Host "package:          $packageBaseName"
-  Write-Host "backup path:      $backupPath"
-  Write-Host "migration exit:   $migrationExit"
-  Write-Host "health:           $(if ($health.Ok) { 'OK' } else { 'FAILED' }) (attempt=$($health.Attempt), status=$($health.StatusCode))"
-  Write-Host ''
-  Write-Host 'Next (do not skip these):'
-  Write-Host '  1) Preflight:'
-  Write-Host '       GET <base-url>/api/integration/stock-preparation/preflight'
-  Write-Host '     Fix every listed blocker with its own fix.run until "ready": true.'
-  Write-Host '  2) Acceptance bootstrap (env-only input, see script header for full list):'
-  Write-Host '       node scripts/ops/stock-prep-acceptance-bootstrap.mjs'
-  Write-Host '     Requires MS_API, MS_TOKEN, MS_PROJECT_NO, MS_PACK_ID, MS_DATA_SOURCE_ID,'
-  Write-Host '     MS_EXTERNAL_SYSTEM_ID set in the environment beforehand.'
-  Write-Host '===================================================================='
-
-  if (-not $health.Ok) {
-    throw "HEALTHCHECK_FAILED after $HealthcheckAttempts attempts against $HealthUrl. STOP. Backup at: $backupPath"
+    Write-RestoreBlock -BackupPath $backupPath -RootDir $resolvedRoot -ReplacedRelativePaths $restoredRelativePaths -Pm2AppName $Pm2AppName
+    throw
   }
 }
