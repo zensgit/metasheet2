@@ -13,6 +13,7 @@ import {
   existsElsewhere,
   sampleSmallTableRows,
   detectDictionaryTables,
+  detectCompanionColumns,
   detectBomPairCandidates,
   detectTreeCandidates,
   detectQuantityCandidates,
@@ -468,6 +469,90 @@ describe('main()', () => {
   })
 })
 
+describe('live-instance regressions (second wave: the first real CUSTOMER PLM, 277 tables)', () => {
+  test('a SHORT ALL-ASCII guarded value does not fire inside this tool\'s own prose', () => {
+    // Shape, structurally: of 1959 guarded values on the live instance, 237 were <= 3 characters,
+    // and one two-character ASCII business value sat as a delimited token inside the tool's own
+    // static sentence "no shared part-like column of matching type found between head and detail".
+    // The run failed closed over a report that leaked nothing. This file's own comment had named the
+    // case ("'no' is a substring of some structural string in every report") and only the NUMERIC
+    // half was ever implemented.
+    const prose = { schemaInventory: [], dictionaries: [], bomPairCandidates: [{ confidenceNotes: ['no shared part-like column of matching type found between head and detail'] }] }
+    for (const short of ['no', 'of', 'on', 'low']) {
+      assert.doesNotThrow(
+        () => assertValuesFree(prose, { leakGuardValues: new Set([short]) }),
+        `a ${short.length}-char ASCII value must not fire inside ordinary prose`,
+      )
+    }
+    // NOTHING IS RETIRED: the same short value still fires as its own leaf...
+    assert.throws(
+      () => assertValuesFree({ schemaInventory: [], dictionaries: [], stray: 'no' }, { leakGuardValues: new Set(['no']) }),
+      /VALUES_FREE_SELF_CHECK_FAILED/,
+    )
+    // ...and a 4-character ASCII value is long enough that a prose collision is not credible, so it
+    // keeps the token sweep.
+    assert.throws(
+      () => assertValuesFree({ schemaInventory: [], dictionaries: [], note: 'the head and detail rows' }, { leakGuardValues: new Set(['head']) }),
+      /VALUES_FREE_SELF_CHECK_FAILED/,
+    )
+    // A short CJK value is not ASCII prose's problem and keeps firing as a delimited token.
+    assert.throws(
+      () => assertValuesFree({ schemaInventory: [], dictionaries: [], note: '单位: 件' }, { leakGuardValues: new Set(['件']) }),
+      /VALUES_FREE_SELF_CHECK_FAILED/,
+    )
+  })
+
+  test('a short connection value does not fire inside this tool\'s own constants', () => {
+    // The customer database is named `plm`; this tool's frozen ownership vocabulary contains
+    // `plm_system`. Every draft run failed closed on the tool's own literal.
+    const report = { schemaInventory: [], dictionaries: [], draftEmission: { resolvedTargets: [{ ownership: 'plm_system' }] } }
+    assert.doesNotThrow(() => assertValuesFree(report, { env: { PROBE_MSSQL_DATABASE: 'plm' } }))
+    // It still fires as its own leaf, inside a sentence, and inside a connection string.
+    for (const leaf of ['plm', 'connected to plm today', 'Server=x;Database=plm;Uid=y']) {
+      assert.throws(
+        () => assertValuesFree({ schemaInventory: [], dictionaries: [], stray: leaf }, { env: { PROBE_MSSQL_DATABASE: 'plm' } }),
+        /VALUES_FREE_SELF_CHECK_FAILED/,
+      )
+    }
+    // A long credential keeps the broadest possible sweep, substring and all.
+    assert.throws(
+      () => assertValuesFree({ schemaInventory: [], dictionaries: [], stray: 'xxhunter2-longpassxx' }, { env: { PROBE_MSSQL_PASSWORD: 'hunter2-longpass' } }),
+      /VALUES_FREE_SELF_CHECK_FAILED/,
+    )
+  })
+
+  test('the display-name column is chosen by COVERAGE x non-ASCII ratio, not ratio alone', () => {
+    // The live shape, to scale: `ShowName` is populated on 73/73 rows and is almost entirely CJK;
+    // a rarely-used template column is populated on 8/73, all CJK, so its ratio is a perfect 1.0 and
+    // under ratio-alone it WON. Every row the winner had nothing for then read as "an enabled slot
+    // with no label", both dictionaries yielded ZERO usable entries, and the draft came out empty —
+    // a false negative shaped exactly like a correct answer.
+    const rows = []
+    for (let i = 0; i < 73; i += 1) {
+      rows.push({
+        Name: `ExAttr${i + 1}`,
+        // Mostly CJK but not purely so, exactly like a real label column.
+        ShowName: `属性${i + 1}`,
+        filetemplatehead: i < 8 ? '模板' : null,
+      })
+    }
+    const table = {
+      schema: 'dbo',
+      name: 'T_ATTR_DICT',
+      rowCount: 73,
+      columns: [
+        col('Name', 'varchar'),
+        col('ShowName', 'varchar'),
+        col('filetemplatehead', 'nvarchar'),
+      ],
+    }
+    const companions = detectCompanionColumns({ table, keyColumn: 'Name', rows })
+    assert.equal(companions.displayNameColumn, 'ShowName')
+    // The sparse column really does have the higher RATIO — that is why ratio alone lost.
+    assert.equal(companions.displayNameNonAsciiRatio < 1, true)
+  })
+})
+
 describe('live-instance regressions (all four found by the first real SQL Server run)', () => {
   test('a bigint row count arriving as a STRING is still a row count', () => {
     // SUM() over sys.partitions.rows returns bigint, which the driver hands back as a string. A
@@ -497,6 +582,91 @@ describe('live-instance regressions (all four found by the first real SQL Server
     assert.equal(isBareIpAddress('plm.internal.example'), false)
     assert.equal(isBareIpAddress(''), false)
     assert.equal(isBareIpAddress(undefined), false)
+  })
+
+  test('CJK BOUNDARIES: embedded in a word no fire, delimited token fires, composition fires', () => {
+    // Three shapes an adversarial pass proved must all come out right at once. The first fix here
+    // exempted every non-ASCII value from the sweep, which got case 1 right by retiring the sweep —
+    // and thereby got cases 2 and 3 wrong. Boundaries are decided by SCRIPT CONTINUATION instead.
+    const guarded = new Set(['件'])
+    // 1. 件 INSIDE 附件 — a matched dictionary row's label the report is entitled to emit. NO FIRE:
+    //    CJK continues CJK, exactly as `workshop` does not match inside `base_workshop`.
+    assert.doesNotThrow(() =>
+      assertValuesFree(
+        { schemaInventory: [], dictionaries: [{ table: 'dbo.T', keyColumn: 'c', companions: {}, entries: [{ attrName: 'part_ExAttr21', displayLabel: '附件' }] }] },
+        { leakGuardValues: guarded },
+      ),
+    )
+    // 2. 件 AS A DELIMITED TOKEN inside a longer sentence leaf. FIRES: a space is not CJK, so this
+    //    is an occurrence, not a fragment. Retiring the sweep for the script lost exactly this.
+    assert.throws(
+      () => assertValuesFree({ schemaInventory: [], dictionaries: [], note: '单位: 件' }, { leakGuardValues: guarded }),
+      /VALUES_FREE_SELF_CHECK_FAILED/,
+    )
+    // 3. A leaf that is nothing but two guarded values CONCATENATED. Neither piece equals the leaf
+    //    and neither is delimited at the seam, yet the leaf carries both in full.
+    assert.throws(
+      () => assertValuesFree({ schemaInventory: [], dictionaries: [], note: '零件图纸' }, { leakGuardValues: new Set(['零件', '图纸']) }),
+      /composed-sample-values/,
+    )
+    // ...and an ordinary leaf that merely contains one of them is not a composition.
+    assert.doesNotThrow(() =>
+      assertValuesFree({ schemaInventory: [], dictionaries: [], stray: 'A' }, { leakGuardValues: new Set(['零件', '图纸']) }),
+    )
+  })
+
+  test('IDENTIFIER SUBTRACTION IS SCOPED: a value coinciding with a table name still fires elsewhere', () => {
+    // Subtracting table names globally meant a sampled customer value that happened to equal a table
+    // name (or the bare schema `dbo`) stopped firing anywhere at all.
+    const identifiers = new Set(['dbo.t_unit', 't_unit', 'dbo'])
+    const guarded = new Set(['T_UNIT'])
+    // At an identifier field: legitimate output, no fire.
+    assert.doesNotThrow(() =>
+      assertValuesFree(
+        { schemaInventory: [], dictionaries: [{ table: 'dbo.T_UNIT', keyColumn: 'c', companions: {}, entries: [] }] },
+        { leakGuardValues: guarded, emittedIdentifiers: identifiers },
+      ),
+    )
+    // OUTSIDE an identifier field, the same string is a customer value and still fires. (The
+    // decoded-entry section is excluded by name for its own documented reason — see
+    // isDecodedDictionaryEntryPath — so the scoping is demonstrated on an ordinary section.)
+    assert.throws(
+      () => assertValuesFree(
+        { schemaInventory: [], dictionaries: [], someSection: { label: 'T_UNIT' } },
+        { leakGuardValues: guarded, emittedIdentifiers: identifiers },
+      ),
+      /VALUES_FREE_SELF_CHECK_FAILED/,
+    )
+    // ...and the bare schema name gets no free pass outside an identifier field either.
+    assert.throws(
+      () => assertValuesFree(
+        { schemaInventory: [], dictionaries: [], someSection: { label: 'dbo' } },
+        { leakGuardValues: new Set(['dbo']), emittedIdentifiers: identifiers },
+      ),
+      /VALUES_FREE_SELF_CHECK_FAILED/,
+    )
+  })
+
+  test('PROBE_SELF_CHECK_DIAG names the leaf PATH and the collector CATEGORY, never the value', () => {
+    const guarded = new Set(['SEKRIT_LABEL'])
+    const categories = new Map([['SEKRIT_LABEL', 'matched-row-companion-cell']])
+    const report = { schemaInventory: [], dictionaries: [], someSection: { nested: ['SEKRIT_LABEL'] } }
+    let message = ''
+    try {
+      assertValuesFree(report, { leakGuardValues: guarded, valueCategories: categories, diagnostics: true })
+    } catch (err) { message = err.message }
+    assert.match(message, /path=someSection\.nested\[0\]/)
+    assert.match(message, /category=matched-row-companion-cell/)
+    assert.match(message, /masked=S\*+L/)
+    assert.equal(message.includes('SEKRIT_LABEL'), false, 'the value itself must never enter the message')
+    // Without the flag the refusal is identical minus the diagnostics — the DECISION never depends
+    // on it.
+    let plain = ''
+    try {
+      assertValuesFree(report, { leakGuardValues: guarded, valueCategories: categories })
+    } catch (err) { plain = err.message }
+    assert.match(plain, /VALUES_FREE_SELF_CHECK_FAILED/)
+    assert.equal(plain.includes('path='), false)
   })
 
   test('a NON-ASCII guarded value is compared whole-leaf, never as a substring', () => {

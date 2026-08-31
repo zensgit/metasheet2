@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, existsSync, rmSync, symlinkSync, realpathSync } from 'node:fs'
 import { writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
@@ -22,12 +22,14 @@ import {
   renderDraftReadme,
   buildDraftEmissionSummary,
   assertDraftOutDirOutsideRepo,
+  canonicalizeExistingAncestor,
   matchesEnabledValue,
   completeDictionarySpec,
   discoverValueSetRefColumn,
   discoverValueSetColumns,
   deriveSemanticExtFieldId,
   fieldTypeForCatalogColumn,
+  DELETED_PATTERN_KEYS,
 } from './source-discovery-draft-emitter.mjs'
 
 import {
@@ -90,8 +92,10 @@ function buildVendorCatalog(overrides = {}) {
       ['part_ExAttr11', 'nvarchar'],
       ['part_ExAttr12', 'nvarchar'],
       ['part_ExAttr14', 'nvarchar'],
+      ['part_ExAttr15', 'nvarchar'],
       ['part_ExAttr20', 'nvarchar'],
       ['part_ExAttr21', 'nvarchar'],
+      ['part_ExAttr22', 'varbinary'],
       ['2ndSource', 'nvarchar'],
     ]),
     ...tableRows('DN_PDM_BomHeadInfo', '3000', [
@@ -163,7 +167,9 @@ const CUSTOMER_LABELS = Object.freeze({
   unit: '单位',
   ghost: '幽灵字段',
   duplicateModel: '重复型号',
+  duplicateRival: '重复备注',
   attachment: '附件',
+  binaryBlob: '附加文件',
   secondSource: '第二货源',
 })
 const CUSTOMER_UNIT_VOCABULARY = Object.freeze(['件', '套', '公斤'])
@@ -184,9 +190,14 @@ function partExAttrRows() {
     { ExAttrCode: 'part_ExAttr20', ExAttrName: CUSTOMER_LABELS.surface, isable: 0, ExAttrType: 'list', ParamTable: 'DN_Test_BomParam1' },
     // A slot naming a column that does not exist on the described table.
     { ExAttrCode: 'part_ExAttrNope', ExAttrName: CUSTOMER_LABELS.ghost, isable: 0, ExAttrType: 'text', ParamTable: null },
-    // A SECOND enabled row for a slot already taken.
-    { ExAttrCode: 'part_ExAttr10', ExAttrName: CUSTOMER_LABELS.duplicateModel, isable: 0, ExAttrType: 'text', ParamTable: null },
+    // TWO enabled rows claiming ONE slot. Neither may justify anything: nothing here can tell which
+    // the customer meant, and 'the first one' is whatever order the driver returned.
+    { ExAttrCode: 'part_ExAttr15', ExAttrName: CUSTOMER_LABELS.duplicateModel, isable: 0, ExAttrType: 'text', ParamTable: null },
+    { ExAttrCode: 'part_ExAttr15', ExAttrName: CUSTOMER_LABELS.duplicateRival, isable: 0, ExAttrType: 'text', ParamTable: null },
     // A vendor type token the preset's typeMap does not carry.
+    // No usable type token AND no usable catalog type: the only remaining way to be typeless.
+    { ExAttrCode: 'part_ExAttr22', ExAttrName: CUSTOMER_LABELS.binaryBlob, isable: 0, ExAttrType: 'blob', ParamTable: null },
+    // Unmapped token, but the CATALOG knows the column is text — typed from the column itself.
     { ExAttrCode: 'part_ExAttr21', ExAttrName: CUSTOMER_LABELS.attachment, isable: 0, ExAttrType: 'blob', ParamTable: null },
     // A slot whose column name cannot become an ASCII camelCase identifier.
     { ExAttrCode: '2ndSource', ExAttrName: CUSTOMER_LABELS.secondSource, isable: 0, ExAttrType: 'text', ParamTable: null },
@@ -419,6 +430,28 @@ describe('preset signature', () => {
     assert.equal(selection.reason, 'PRESET_SIGNATURE_AMBIGUOUS')
   })
 
+  test('SIGNATURE REFUSAL: a HIGHER-COUNT rival is refused too — a count race is not a disambiguator', () => {
+    // The earlier reading refused only an exact TIE at the top and otherwise let the higher count
+    // win, which is a count race silently picking a winner. Two presets that each clear their own
+    // floor are two vendors that both explain this database.
+    const tableIndex = buildCatalogTableIndex(buildVendorCatalog())
+    const wide = adaptVendorPresetShape(rawVendorPreset())
+    const narrow = adaptVendorPresetShape(
+      rawVendorPreset({
+        presetId: 'narrow-rival',
+        matches: { requiredTables: ['DN_PDM_PartLibraryInfo', 'DN_PDM_BomHeadInfo'], minimumConfidence: 1 },
+      }),
+    )
+    const wideScore = scorePresetSignature({ preset: wide, tableIndex })
+    const narrowScore = scorePresetSignature({ preset: narrow, tableIndex })
+    assert.equal(wideScore.matchedRequiredTableCount > narrowScore.matchedRequiredTableCount, true)
+    assert.equal(wideScore.meetsThreshold && narrowScore.meetsThreshold, true)
+
+    const selection = selectVendorPreset({ presets: [wide, narrow], tableIndex })
+    assert.equal(selection.ok, false)
+    assert.equal(selection.reason, 'PRESET_SIGNATURE_AMBIGUOUS')
+  })
+
   test('an empty preset set is refused rather than treated as "no constraints"', () => {
     const tableIndex = buildCatalogTableIndex(buildVendorCatalog())
     assert.equal(selectVendorPreset({ presets: [], tableIndex }).reason, 'PRESET_SET_EMPTY')
@@ -458,7 +491,7 @@ describe('readDictionaryEntries', () => {
   test('enabled-row filtering keeps only the live slots and counts every drop by reason', () => {
     const { partRead } = fixtureResolution()
     const slots = partRead.entries.map((e) => e.slot)
-    assert.deepEqual(slots, ['part_ExAttr14', 'part_ExAttr10', 'part_ExAttr20', 'part_ExAttr21', '2ndSource'])
+    assert.deepEqual(slots, ['part_ExAttr14', 'part_ExAttr10', 'part_ExAttr20', 'part_ExAttr22', 'part_ExAttr21', '2ndSource'])
 
     // A DISABLED row is not a non-event: it is counted.
     assert.equal(partRead.skippedByReason.ROW_DISABLED, 1)
@@ -467,8 +500,8 @@ describe('readDictionaryEntries', () => {
     // A slot naming a column that does not exist on the described table.
     assert.equal(partRead.skippedByReason.ROW_SLOT_NOT_A_COLUMN, 1)
     // A second enabled row for an already-taken slot.
-    assert.equal(partRead.skippedByReason.ROW_SLOT_DUPLICATE, 1)
-    assert.equal(partRead.skipped.length, 4)
+    assert.equal(partRead.skippedByReason.ROW_SLOT_DUPLICATE, 2)
+    assert.equal(partRead.skipped.length, 5)
     assert.equal(partRead.entries.length + partRead.skipped.length, partExAttrRows().length)
   })
 
@@ -496,18 +529,73 @@ describe('readDictionaryEntries', () => {
     assert.equal(read.entries[0].slot, 'part_ExAttr14')
   })
 
-  test('a dictionary with no enabled column reads every row (and the preset must then say so)', () => {
-    const tableIndex = buildCatalogTableIndex(buildVendorCatalog())
+  test('a dictionary that names NO enabled column is refused — the filter cannot be a no-op', () => {
+    // Omitting the flag column read as "this dictionary has no flag" and silently promoted every
+    // row, including the ones the customer switched off. The sibling dialect already refused a
+    // missing enabledFlag; this dialect gets no weaker gate.
     const raw = rawVendorPreset()
-    raw.dictionaries[0] = { ...raw.dictionaries[0], enabledColumn: null, enabledValues: [] }
-    const preset = adaptVendorPresetShape(raw)
-    const read = readDictionaryEntries({
-      spec: preset.dictionaries.get('partExAttr'),
-      rows: partExAttrRows(),
-      describedColumns: tableIndex.columnsOf(tableIndex.resolve('DN_PDM_PartLibraryInfo').table),
-    })
-    assert.equal(read.skippedByReason.ROW_DISABLED, undefined)
-    assert.ok(read.entries.some((e) => e.label === CUSTOMER_LABELS.brandDisabled))
+    // enabledValues left INTACT, so the only thing missing is the column itself — otherwise the
+    // enabledValues check would refuse it for a different reason and this test would pass without
+    // the guarantee holding.
+    raw.dictionaries[0] = { ...raw.dictionaries[0], enabledColumn: null }
+    assert.throws(
+      () => adaptVendorPresetShape(raw),
+      (err) => err instanceof SourceDraftEmitterError &&
+        err.reason === 'PRESET_DICTIONARY_INVALID' &&
+        String(err.details.field).endsWith('.enabledColumn'),
+    )
+  })
+
+  test('a pattern-typed preset key deleted in v1 is REFUSED, never silently ignored', () => {
+    // Free-form patterns were the one string slot no anti-smuggling scan touched, and an executed
+    // attack parked both a concrete slot and an option vocabulary in one. v1 deleted the keys; a
+    // preset still carrying one must fail loudly rather than have its payload quietly dropped into a
+    // file nobody re-reads.
+    const withTargetPattern = rawVendorPreset()
+    withTargetPattern.targets[0] = { ...withTargetPattern.targets[0], labelPattern: '数量|qty' }
+    assert.throws(
+      () => adaptVendorPresetShape(withTargetPattern),
+      (err) => err.reason === 'PRESET_TARGET_INVALID' && String(err.details.field).endsWith('.labelPattern'),
+    )
+
+    const withDictPattern = rawVendorPreset()
+    withDictPattern.dictionaries[0] = { ...withDictPattern.dictionaries[0], columnPattern: '^is_?able$' }
+    assert.throws(
+      () => adaptVendorPresetShape(withDictPattern),
+      (err) => err.reason === 'PRESET_DICTIONARY_INVALID' && String(err.details.field).endsWith('.columnPattern'),
+    )
+
+    const sibling = siblingVendorPreset()
+    sibling.semanticExpectations[0] = { ...sibling.semanticExpectations[0], labelHintPattern: '数量' }
+    assert.throws(
+      () => adaptVendorPresetShape(sibling),
+      (err) => err.reason === 'PRESET_TARGET_INVALID' && String(err.details.field).endsWith('.labelHintPattern'),
+    )
+
+    const siblingFlag = siblingVendorPreset()
+    siblingFlag.dictionaries[0] = {
+      ...siblingFlag.dictionaries[0],
+      enabledFlag: { ...siblingFlag.dictionaries[0].enabledFlag, columnPattern: '^is_?able$' },
+    }
+    assert.throws(
+      () => adaptVendorPresetShape(siblingFlag),
+      (err) => err.reason === 'PRESET_DICTIONARY_INVALID' && String(err.details.field).endsWith('.columnPattern'),
+    )
+
+    // And NO RegExp is ever built from preset text anywhere: the deleted-key list is the closed
+    // vocabulary that says so.
+    assert.ok(DELETED_PATTERN_KEYS.includes('labelHintPattern'))
+    assert.ok(DELETED_PATTERN_KEYS.includes('valueSetTableNamePattern'))
+  })
+
+  test('DUPLICATE SLOT: two enabled rows claiming one slot refuse BOTH, never first-wins', () => {
+    const { partRead } = fixtureResolution()
+    // Neither row justifies anything — "the first one" would have been whatever order the driver
+    // returned, and the basis string would have cited a row chosen by the storage engine.
+    assert.equal(partRead.entries.some((e) => e.slot === 'part_ExAttr15'), false)
+    const dupes = partRead.skipped.filter((s) => s.reason === 'ROW_SLOT_DUPLICATE')
+    assert.equal(dupes.length, 2)
+    assert.ok(dupes.every((d) => d.slot === 'part_ExAttr15'))
   })
 })
 
@@ -634,6 +722,55 @@ describe('resolveTargets', () => {
     assert.equal(resolution.resolved.find((r) => r.target === 'ext_materialCode'), undefined)
   })
 
+  test('P2-4: a slot orphaned by an ambiguity refusal is CONFIRM-BLOCKED, not quietly installable', () => {
+    // Both candidate slots of a refused ambiguity used to come back as ordinary placeholders, so
+    // "confirm everything" installed both halves of the thing the emitter had just refused to
+    // decide. They are now blocked: absent from the mapping entries AND from the pack fields, with a
+    // cross-reference to the target whose ambiguity they belong to.
+    const tableIndex = buildCatalogTableIndex(buildVendorCatalog())
+    const preset = adaptVendorPresetShape(rawVendorPreset())
+    const read = readDictionaryEntries({
+      spec: preset.dictionaries.get('partExAttr'),
+      rows: [
+        { ExAttrCode: 'part_ExAttr14', ExAttrName: '物料编码', isable: 0, ExAttrType: 'text' },
+        { ExAttrCode: 'part_ExAttr20', ExAttrName: '物料编码', isable: 0, ExAttrType: 'text' },
+      ],
+      describedColumns: tableIndex.columnsOf(tableIndex.resolve('DN_PDM_PartLibraryInfo').table),
+    })
+    const resolution = resolveTargets({
+      preset,
+      tableIndex,
+      entriesByDictionary: new Map([['partExAttr', { ok: true, ...read }], ['bomExAttr', { ok: false, reason: 'DICTIONARY_NOT_READ' }]]),
+    })
+
+    assert.equal(resolution.blocked.length, 2)
+    for (const item of resolution.blocked) {
+      assert.deepEqual(item.confirmBlockedBy, ['ext_materialCode'])
+      assert.equal(item.confirmBlockedReason, 'DICTIONARY_AMBIGUOUS_ALIAS_MATCH')
+      assert.equal(resolution.mappable.some((m) => m.target === item.target), false)
+    }
+
+    const mappingDraft = buildExtFieldMappingDraft({ preset, resolution, generatedAt: 'x' })
+    const packDraft = buildCustomerPackDraft({ preset, resolution, optionSets: new Map(), generatedAt: 'x' })
+    assert.equal(mappingDraft.$confirmBlocked.length, 2)
+    assert.equal(packDraft.$confirmBlocked.length, 2)
+    const pack = packDraft.stockPreparationCustomerPacks['dn-pdm-plm']
+    for (const item of resolution.blocked) {
+      assert.equal(mappingDraft.stockPreparationExtFieldMapping.mappings.some((m) => m.target === item.target), false)
+      assert.equal(pack.extensionFields.some((f) => f.id === item.target), false)
+    }
+    const readme = renderDraftReadme({
+      preset,
+      score: scorePresetSignature({ preset, tableIndex }),
+      resolution,
+      optionSets: new Map(),
+      dictionaryReads: [{ key: 'partExAttr', table: 'DN_PM_PartExAttrInfo', describesTable: 'DN_PDM_PartLibraryInfo', ok: true, rowsRead: 2, ...read }],
+      generatedAt: 'x',
+    })
+    assert.match(readme, /CONFIRM-BLOCKED/)
+    assert.ok(readme.includes('ext_materialCode'))
+  })
+
   test('a dictionary that could not be read leaves its targets UNRESOLVED with the read reason', () => {
     const tableIndex = buildCatalogTableIndex(buildVendorCatalog())
     const preset = adaptVendorPresetShape(rawVendorPreset())
@@ -661,11 +798,22 @@ describe('resolveTargets', () => {
     assert.ok(resolution.unclaimed.some((u) => u.target === 'ext_partExAttr10'))
   })
 
-  test('an unmapped vendor type token and an underivable id are UNRESOLVED, not defaulted', () => {
+  test('a typeless dictionary row takes the slot COLUMN\'s catalog type, and stays a gap when even that is unmapped', () => {
     const { resolution } = fixtureResolution()
+    // The dictionary's own token (`blob`) is in no vocabulary, but the CATALOG says this column is
+    // nvarchar — a discovered fact, the same derivation a native target uses. On the first real PLM
+    // the type column was populated on only 35 of 73 rows, so without this most of a customer's
+    // dictionary is untypeable and the draft comes out mostly empty.
+    const fromCatalog = resolution.resolved.find((r) => r.sourceColumn === 'part_ExAttr21')
+    assert.ok(fromCatalog)
+    assert.equal(fromCatalog.type, 'string')
+    assert.equal(fromCatalog.typeSource, 'catalog-datatype')
+
+    // ...and when the catalog type is unmapped too, it is STILL a gap — never a defaulted `string`.
     const typeGap = resolution.unresolved.find((u) => u.reason === 'DICTIONARY_TYPE_UNMAPPED')
-    assert.ok(typeGap, 'a dictionary type token the preset does not map must be a gap')
-    assert.equal(typeGap.target, 'ext_partExAttr21')
+    assert.ok(typeGap, 'a row with no usable token and no usable catalog type must be a gap')
+    assert.equal(typeGap.target, 'ext_partExAttr22')
+
     const idGap = resolution.unresolved.find((u) => u.reason === 'PLACEHOLDER_ID_UNDERIVABLE')
     assert.ok(idGap, 'a slot that cannot become an ASCII id must be a gap')
     assert.match(idGap.lookedFor, /2ndSource/)
@@ -733,7 +881,7 @@ describe('draft artifacts', () => {
     const draft = buildCustomerPackDraft({ preset, resolution, optionSets, generatedAt: 'x' })
     const pack = draft.stockPreparationCustomerPacks['dn-pdm-plm']
 
-    assert.equal(pack.extensionFields.length, resolution.resolved.length)
+    assert.equal(pack.extensionFields.length, resolution.resolved.filter((r) => !r.confirmBlockedBy).length)
     const materialCode = pack.extensionFields.find((f) => f.id === 'ext_materialCode')
     assert.equal(materialCode.label, CUSTOMER_LABELS.materialCode)
     assert.equal(materialCode.ownership, 'plm_system')
@@ -745,7 +893,7 @@ describe('draft artifacts', () => {
     // targetObjectId is DELIBERATELY absent — a draft may not choose where it installs.
     assert.equal(Object.prototype.hasOwnProperty.call(pack, 'targetObjectId'), false)
     assert.ok(draft.$confirmRequired.some((line) => line.includes('targetObjectId')))
-    assert.equal(draft.$fieldBasis.length, resolution.resolved.length)
+    assert.equal(draft.$fieldBasis.length, resolution.resolved.filter((r) => !r.confirmBlockedBy).length)
   })
 
   test('a select field whose value set could not be read gets an EXPLICIT gap, not a silent field', () => {
@@ -841,6 +989,7 @@ const NEVER_IN_THE_DRAFT = new Set([
   CUSTOMER_LABELS.brandDisabled,
   CUSTOMER_LABELS.ghost,
   CUSTOMER_LABELS.duplicateModel,
+  CUSTOMER_LABELS.duplicateRival,
 ])
 
 describe('values in the draft, values NOT in the report', () => {
@@ -870,7 +1019,7 @@ describe('values in the draft, values NOT in the report', () => {
     const catalog = buildVendorCatalog()
     const sampleFn = buildFixtureSampleFn()
     const presets = [adaptVendorPresetShape(rawVendorPreset())]
-    const { report, leakGuardValues, draft } = await runProbe({ catalog, sampleFn, presets })
+    const { report, leakGuardValues, emittedIdentifiers, draft } = await runProbe({ catalog, sampleFn, presets })
 
     assert.ok(report.draftEmission, 'the report must carry the values-free draft summary')
     assert.equal(report.draftEmission.presetId, 'dn-pdm-plm')
@@ -893,7 +1042,7 @@ describe('values in the draft, values NOT in the report', () => {
     assert.ok(leaves.includes(CUSTOMER_LABELS.materialCode), 'pre-existing dictionary output is unchanged')
     assert.equal(hasNonAscii(JSON.stringify(report.draftEmission)), false)
     // The leak guard still passes over the assembled report.
-    assert.doesNotThrow(() => assertValuesFree(report, { env: {}, leakGuardValues }))
+    assert.doesNotThrow(() => assertValuesFree(report, { env: {}, leakGuardValues, emittedIdentifiers }))
 
     // ...and the very same values ARE in the drafts — including the labels of the rows the emitter
     // could NOT turn into a proposal, because a gap a human cannot recognise is not a loud gap.
@@ -910,7 +1059,7 @@ describe('values in the draft, values NOT in the report', () => {
 
   test('the option vocabulary never reaches the report even though a dictionary heuristic sampled it', async () => {
     const catalog = buildVendorCatalog()
-    const { report, leakGuardValues } = await runProbe({
+    const { report, leakGuardValues, emittedIdentifiers } = await runProbe({
       catalog,
       sampleFn: buildFixtureSampleFn(),
       presets: [adaptVendorPresetShape(rawVendorPreset())],
@@ -920,7 +1069,7 @@ describe('values in the draft, values NOT in the report', () => {
     for (const value of CUSTOMER_UNIT_VOCABULARY) {
       assert.ok(leakGuardValues.has(value), `"${value}" should be leak-guarded`)
     }
-    assert.doesNotThrow(() => assertValuesFree(report, { env: {}, leakGuardValues }))
+    assert.doesNotThrow(() => assertValuesFree(report, { env: {}, leakGuardValues, emittedIdentifiers }))
   })
 })
 
@@ -957,6 +1106,12 @@ function siblingVendorPreset(overrides = {}) {
       ],
       minSignatureTablesPresent: 6,
     },
+    // REQUIRED and STRUCTURED in v1: no authored regex, and the cardinality floor keeps a "family"
+    // from being narrowed into a pointer at one customer's slot.
+    genericColumnFamilies: {
+      bomDetailExAttr: { onRole: 'bomDetail', stems: ['Bom_ExAttr'], indexMin: 1, indexMax: 30 },
+      partExAttr: { onRole: 'part', stems: ['ExAttr', 'Part_ExAttr'], indexMin: 1, indexMax: 70 },
+    },
     coreTables: {
       part: { table: 'DN_PDM_PartLibraryInfo', roles: { id: 'OBJ_ID', code: 'IdentityNo', name: 'IdentityName' } },
       bomHead: { table: 'DN_PDM_BomHeadInfo', roles: { parentPart: 'part_id', bomId: 'bom_id' } },
@@ -971,45 +1126,50 @@ function siblingVendorPreset(overrides = {}) {
         id: 'bom-detail-exattr-labels',
         table: 'DN_PM_BomExAttrInfo',
         labelsColumnsOfRole: 'bomDetail',
+        columnFamily: 'bomDetailExAttr',
         mechanism: 'rows-name-columns',
-        enabledFlag: { columnPattern: '^is_?able$', polarity: 'zero-means-enabled' },
+        enabledFlag: { columnCandidates: ['isable', 'is_able'], polarity: 'zero-means-enabled' },
       },
       {
         id: 'bom-head-exattr-labels',
         table: 'DN_PM_BomExAttrInfo_header',
         labelsColumnsOfRole: 'bomHead',
         mechanism: 'rows-name-columns',
-        enabledFlag: { columnPattern: '^is_?able$', polarity: 'zero-means-enabled' },
+        enabledFlag: { columnCandidates: ['isable', 'is_able'], polarity: 'zero-means-enabled' },
       },
       {
         id: 'part-exattr-labels',
         table: 'DN_PM_PartExAttrInfo',
         labelsColumnsOfRole: 'part',
+        columnFamily: 'partExAttr',
         mechanism: 'rows-name-columns',
-        enabledFlag: { columnPattern: '^is_?able$', polarity: 'zero-means-enabled' },
+        enabledFlag: { columnCandidates: ['isable', 'is_able'], polarity: 'zero-means-enabled' },
       },
     ],
     semanticExpectations: [
       {
         semantic: 'bom-line-quantity',
         locus: 'dictionary-assigned-column',
+        columnFamily: 'bomDetailExAttr',
         dictionary: 'bom-detail-exattr-labels',
-        dictionaryTypeHintPattern: 'float|numeric|decimal|double|real|int',
-        labelHintPattern: '数量|qty|quantity',
+        dictionaryTypeHint: 'numeric',
+        labelHint: 'quantity',
       },
       {
         semantic: 'bom-line-unit',
         locus: 'dictionary-assigned-column',
+        columnFamily: 'bomDetailExAttr',
         dictionary: 'bom-detail-exattr-labels',
-        dictionaryTypeHintPattern: 'list',
-        labelHintPattern: '单位|unit',
-        valueSetTableNamePattern: '^DN_Test_BomParam[0-9]+$',
+        dictionaryTypeHint: 'list',
+        labelHint: 'unit',
+        valueSetTableFamily: { stems: ['DN_Test_BomParam'], indexMin: 1, indexMax: 30 },
       },
       {
         semantic: 'erp-material-code',
         locus: 'dictionary-assigned-column',
+        columnFamily: 'partExAttr',
         dictionary: 'part-exattr-labels',
-        labelHintPattern: '物料编码|matcode|material',
+        labelHint: 'material-code',
       },
       { semantic: 'order-line-quantity', locus: 'native-column', role: 'orderDetail', roleColumn: 'quantity' },
       { semantic: 'project-number', locus: 'native-column', role: 'pathExAttr', roleColumn: 'FileCode' },
@@ -1045,7 +1205,7 @@ describe('adaptVendorPresetShape — the sibling schema dialect', () => {
     assert.equal(preset.targets[3].table, 'DN_PDM_OrderDetailInfo')
     assert.equal(preset.targets[3].column, 'quantity')
     // The value-set table-name pattern is hoisted onto the dictionary that carries the reference.
-    assert.ok(preset.dictionaries.get('bom-detail-exattr-labels').valueSetTableNamePattern)
+    assert.ok(preset.dictionaries.get('bom-detail-exattr-labels').valueSetTableFamily)
   })
 
   test('a semantic name becomes a mechanical ext_ id', () => {
@@ -1071,7 +1231,7 @@ describe('adaptVendorPresetShape — the sibling schema dialect', () => {
 
   test('a dictionary-assigned semantic with no label hint has nothing to be justified BY', () => {
     const raw = siblingVendorPreset()
-    delete raw.semanticExpectations[0].labelHintPattern
+    delete raw.semanticExpectations[0].labelHint
     assert.throws(() => adaptVendorPresetShape(raw), (err) => err.reason === 'PRESET_TARGET_INVALID')
   })
 })
@@ -1127,13 +1287,13 @@ describe('rows-name-columns discovery', () => {
     const found = discoverValueSetRefColumn({
       rows: partExAttrRows(),
       columns,
-      pattern: /^DN_Test_BomParam[0-9]+$/i,
+      isValueSetTableName: (name) => /^DN_Test_BomParam[0-9]+$/i.test(name),
       exclude: ['ExAttrCode', 'ExAttrName', 'isable', 'ExAttrType'],
     })
     assert.equal(found, 'ParamTable')
     // A column carrying anything that does NOT match is not adopted — one stray match is not enough.
     assert.equal(
-      discoverValueSetRefColumn({ rows: partExAttrRows(), columns, pattern: /^nothing-matches$/i, exclude: [] }),
+      discoverValueSetRefColumn({ rows: partExAttrRows(), columns, isValueSetTableName: (n) => /^nothing-matches$/i.test(n), exclude: [] }),
       null,
     )
   })
@@ -1143,7 +1303,7 @@ describe('rows-name-columns discovery', () => {
       ['name', { name: 'name', dataType: 'nvarchar' }],
       ['isable', { name: 'isable', dataType: 'int' }],
     ])
-    assert.deepEqual(discoverValueSetColumns({ columns: one, enabledColumnPattern: /^is_?able$/i }), {
+    assert.deepEqual(discoverValueSetColumns({ columns: one, enabledColumnCandidates: ['isable'] }), {
       ok: true,
       valueColumn: 'name',
       enabledColumn: 'isable',
@@ -1152,7 +1312,7 @@ describe('rows-name-columns discovery', () => {
       ['name', { name: 'name', dataType: 'nvarchar' }],
       ['alias', { name: 'alias', dataType: 'nvarchar' }],
     ])
-    const result = discoverValueSetColumns({ columns: two, enabledColumnPattern: /^is_?able$/i })
+    const result = discoverValueSetColumns({ columns: two, enabledColumnCandidates: ['isable'] })
     assert.equal(result.ok, false)
     assert.equal(result.reason, 'VALUE_SET_COLUMN_AMBIGUOUS')
     assert.deepEqual(result.candidates, ['name', 'alias'])
@@ -1215,7 +1375,15 @@ describe('end to end on the sibling preset', () => {
     // Gaps stay gaps.
     const reasons = new Set(draft.resolution.unresolved.map((u) => u.reason))
     assert.ok(reasons.has('DICTIONARY_TYPE_UNMAPPED'))
-    assert.ok(reasons.has('PLACEHOLDER_ID_UNDERIVABLE'))
+
+    // FAMILY MEMBERSHIP. `2ndSource` is a real, enabled, labelled row of the customer's dictionary
+    // — and it names a NATIVE product column, not a member of the generic slot family this
+    // dictionary labels. Under the structured family it is refused at read time, so it never
+    // reaches the id-derivation step at all. (The flat dialect, which declares no family, still
+    // exercises PLACEHOLDER_ID_UNDERIVABLE.)
+    const partRead = report.draftEmission.dictionaryReads.find((r) => r.key === 'part-exattr-labels')
+    assert.equal(partRead.skippedByReason.ROW_SLOT_OUTSIDE_COLUMN_FAMILY, 1)
+    assert.equal(draft.resolution.resolved.some((r) => r.sourceColumn === '2ndSource'), false)
 
     // And the split holds on this dialect too.
     assert.equal(hasNonAscii(JSON.stringify(report.draftEmission)), false)
@@ -1252,6 +1420,62 @@ describe('end to end on the sibling preset', () => {
 // Output placement + CLI.
 // ---------------------------------------------------------------------------
 
+describe('P1-A: an UNVERIFIED value-set reference never reaches the values-free report', () => {
+  // The executed leak: a dictionary row's ParamTable cell that FAILS the vendor family check was
+  // echoed verbatim into report.draftEmission.optionSets[].valueSetKey/.table, and the self-check
+  // passed because a MATCHED row's companion cells were never armed. The fixture's cell is
+  // deliberately a CJK secret, not a plausible table name — the original test passed only because
+  // its fixture used a legitimate name.
+  const POISON = '机密取值表名'
+
+  async function runWithPoisonedRef() {
+    const catalog = buildVendorCatalog()
+    const sampleFn = async ({ table, cap }) => {
+      const key = `${table.schema}.${table.name}`
+      if (key === 'dbo.DN_PM_BomExAttrInfo') {
+        return [
+          { ExAttrCode: 'Bom_ExAttr1', ExAttrName: CUSTOMER_LABELS.quantity, isable: 0, ExAttrType: 'float', ParamTable: 'DN_Test_BomParam1' },
+          { ExAttrCode: 'Bom_ExAttr2', ExAttrName: CUSTOMER_LABELS.unit, isable: 0, ExAttrType: 'list', ParamTable: POISON },
+        ].slice(0, cap)
+      }
+      return buildFixtureSampleFn()({ table, cap })
+    }
+    return runProbe({ catalog, sampleFn, presets: [adaptVendorPresetShape(siblingVendorPreset())] })
+  }
+
+  test('the refused reference is reported as a LOCATOR, and its text never appears', async () => {
+    const { report, draft } = await runWithPoisonedRef()
+    const serialized = JSON.stringify(report)
+    assert.equal(serialized.includes(POISON), false, 'the refused reference must never reach the report')
+    assert.equal(hasNonAscii(JSON.stringify(report.draftEmission)), false)
+
+    const entry = report.draftEmission.optionSets.find((o) => o.reason === 'VALUE_SET_TABLE_PATTERN_MISMATCH')
+    assert.ok(entry, 'the refusal itself must still be reported — silence would be the other failure')
+    assert.equal(entry.verified, false)
+    assert.equal(entry.valueSetKey, null)
+    assert.equal(entry.table, null)
+    // Actionable without the value: which dictionary, which rows, how long.
+    assert.equal(entry.locator.dictionaryKey, 'bom-detail-exattr-labels')
+    assert.deepEqual(entry.locator.rowIndexes, [1])
+    assert.equal(entry.refLength, POISON.length)
+    // A VERIFIED reference is a declared-family table name and does travel, as an identifier.
+    assert.ok(report.draftEmission.optionSets.some((o) => o.verified && o.table === 'DN_Test_BomParam1'))
+    // The draft, which is deploy-host output, is where the value legitimately goes.
+    assert.ok(Object.values(draft.files).join('\n').includes(POISON))
+  })
+
+  test('the guard itself is armed for it: a matched row\'s companion cells are swept', async () => {
+    const { report, leakGuardValues, emittedIdentifiers } = await runWithPoisonedRef()
+    assert.ok(leakGuardValues.has(POISON), 'a matched row\'s non-emitted companion cell must be armed')
+    assert.doesNotThrow(() => assertValuesFree(report, { env: {}, leakGuardValues, emittedIdentifiers }))
+    // ...and if it HAD been echoed, the guard would refuse the run.
+    assert.throws(
+      () => assertValuesFree({ ...report, draftEmission: { leaked: POISON } }, { env: {}, leakGuardValues, emittedIdentifiers }),
+      /VALUES_FREE_SELF_CHECK_FAILED/,
+    )
+  })
+})
+
 describe('--out-dir placement', () => {
   test('an --out-dir inside this repository is REFUSED (the drafts carry customer values)', () => {
     assert.throws(
@@ -1265,6 +1489,52 @@ describe('--out-dir placement', () => {
   test('a deploy-host directory outside the repository is accepted', () => {
     const outside = path.join(tmpdir(), 'source-discovery-drafts')
     assert.equal(assertDraftOutDirOutsideRepo(outside, REPO_ROOT), path.resolve(outside))
+  })
+
+  test('P1-B: a DIRECTORY JUNCTION pointing into the repository is refused', () => {
+    // `path.resolve` follows no link, so a junction under $TEMP resolved to a string outside the
+    // repo and was ACCEPTED — and a customer-pack draft carrying real dictionary labels was written
+    // inside plugins/.../customer-packs, the exact incident this guard's header claims to refuse
+    // structurally. A junction needs no privileges on Windows (a symlink does), which is what made
+    // it a real bypass rather than a theoretical one.
+    const root = mkdtempSync(path.join(tmpdir(), 'source-draft-junction-'))
+    const link = path.join(root, 'looks-outside')
+    try {
+      try {
+        symlinkSync(REPO_ROOT, link, 'junction')
+      } catch {
+        return // no link support in this environment; the string-level cases above still hold
+      }
+      const viaLink = path.join(link, 'plugins', 'plugin-integration-core', 'lib', 'customer-packs')
+      // The string form looks innocent...
+      assert.equal(path.relative(REPO_ROOT, path.resolve(viaLink)).startsWith('..'), true)
+      // ...and canonicalization sees through it.
+      assert.throws(
+        () => assertDraftOutDirOutsideRepo(viaLink, REPO_ROOT, { realpath: realpathSync.native }),
+        (err) => err.reason === 'DRAFT_OUT_DIR_INSIDE_REPO',
+      )
+      // The deepest-existing-ancestor walk also covers a directory that does not exist yet.
+      assert.throws(
+        () => assertDraftOutDirOutsideRepo(path.join(link, 'not', 'created', 'yet'), REPO_ROOT, { realpath: realpathSync.native }),
+        (err) => err.reason === 'DRAFT_OUT_DIR_INSIDE_REPO',
+      )
+      // A genuine outside directory is still accepted with canonicalization on.
+      assert.ok(assertDraftOutDirOutsideRepo(path.join(root, 'real-out'), REPO_ROOT, { realpath: realpathSync.native }))
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('canonicalizeExistingAncestor re-appends a not-yet-created tail', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'source-draft-canon-'))
+    try {
+      const target = path.join(root, 'a', 'b')
+      const canonical = canonicalizeExistingAncestor(target, realpathSync.native)
+      assert.equal(path.basename(canonical), 'b')
+      assert.equal(path.basename(path.dirname(canonical)), 'a')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
 
