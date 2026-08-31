@@ -13,6 +13,7 @@ const {
   HUMAN_PRESERVED_FIELD_IDS,
   buildSheetStructureFromTemplate,
   resolveTemplateLabelLocale,
+  pickDefaultViewName,
 } = require('./stock-preparation-templates.cjs')
 
 // W2 canonical repair: namespace positive control for a repaired-in field.
@@ -75,6 +76,29 @@ function hashEvidenceValue(value) {
 // The sandbox namespace, named once so the guard, the refusal message and any caller quoting it in
 // a runbook can never drift apart.
 const SANDBOX_OBJECT_ID_NAMESPACE = 'plm_stock_preparation_sandbox'
+// The namespace RULE, as one pattern rather than as a regex literal typed at each use site. The
+// assert below and `isSandboxNamespaceObjectId` are the only two readers, so the two can never
+// disagree about what "in the namespace" means.
+const SANDBOX_OBJECT_ID_NAMESPACE_PATTERN = /^plm_stock_preparation_sandbox(?:$|[_-])/
+
+/**
+ * The same rule as `assertSandboxObjectId`'s namespace clause, as a PURE PREDICATE.
+ *
+ * Why a predicate and not just the assert: a caller that is FILTERING rather than validating must
+ * not have to throw-and-catch per entry, and — more importantly — it must not have to re-type the
+ * regex. The deployment preflight filters the sandbox write allowlist through this before any of it
+ * reaches a response, because that allowlist comes from raw `process.env` and nothing upstream
+ * constrains what a polluted environment can put there.
+ *
+ * DELIBERATELY NARROWER THAN THE ASSERT in one respect: it answers only the namespace question and
+ * says nothing about the production canonical target, which IS an identifier and is safe to display.
+ * `assertSandboxObjectId` refuses that id for a different reason (it is not a sandbox target), and
+ * conflating the two would make the preflight report a legitimate constant as pollution.
+ */
+function isSandboxNamespaceObjectId(value) {
+  return typeof value === 'string' && SANDBOX_OBJECT_ID_NAMESPACE_PATTERN.test(value)
+}
+
 function assertSandboxObjectId(value, field = 'objectId') {
   const objectId = requiredString(value, field)
   if (objectId === STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId) {
@@ -85,7 +109,7 @@ function assertSandboxObjectId(value, field = 'objectId') {
       { reason: 'prod_canonical' },
     )
   }
-  if (!/^plm_stock_preparation_sandbox(?:$|[_-])/.test(objectId)) {
+  if (!SANDBOX_OBJECT_ID_NAMESPACE_PATTERN.test(objectId)) {
     throw new StockPreparationTargetProvisioningError(
       422,
       'TARGET_SANDBOX_OBJECT_ID_INVALID',
@@ -435,6 +459,35 @@ async function ensureStockPreparationSandboxTarget(input = {}) {
   })
 }
 
+// THE one place a stock-preparation managed table gets its default view. A multitable
+// base renders each sheet's default view, so a sheet with ZERO views cannot be opened --
+// and one unopenable sheet blocks the entire base. Measured on the first real deployment:
+// the pack-installed sandbox had 3 role views (created by the pack) and opened; the
+// ledger, the canonical main and a second sandbox each had 0 views, and the base stayed
+// unopenable until three grid views were inserted by hand.
+//
+// NEVER-TOUCH-EXISTING-VIEWS: the host primitive writes only when the sheet has no views
+// at all. A sheet that already carries views -- the pack's three role views above -- is
+// left completely alone: not appended to, not renamed, not reordered. This helper adds
+// nothing to that guarantee and cannot weaken it; it only names the view and reports.
+//
+// OPTIONAL CAPABILITY: an older host without `ensureObjectDefaultView` is not a failure.
+// Provisioning proceeds exactly as it does today and the evidence says so, so a plugin
+// newer than its host still installs the tables it always installed.
+async function ensureManagedTableDefaultView({ provisioning, projectId, objectId, viewKind, locale } = {}) {
+  if (!provisioning || typeof provisioning.ensureObjectDefaultView !== 'function') {
+    return { created: false, skipped: 'api_unavailable' }
+  }
+  const result = await provisioning.ensureObjectDefaultView({
+    projectId,
+    objectId,
+    name: pickDefaultViewName(viewKind, { locale }),
+  })
+  const existingViewCount = Number(result && result.existingViewCount) || 0
+  if (result && result.created === true) return { created: true, skipped: null }
+  return { created: false, skipped: existingViewCount > 0 ? 'existing_views' : 'concurrent_create' }
+}
+
 async function ensureStockPreparationTarget(input = {}) {
   const context = input.context || {}
   const provisioning = getProvisioningApi(context)
@@ -501,9 +554,22 @@ async function ensureStockPreparationTarget(input = {}) {
           },
     )
   }
+  // Created tables are created USABLE: the fresh sheet gets its one grid view, named in
+  // the same language its sheet name and columns just got. Only the CREATE path does
+  // this -- the already-ready path above returned before any write and still does, so an
+  // existing deployment's tables (hand-renamed headers, hand-created views) are provisioned
+  // exactly as they are today.
+  const defaultView = await ensureManagedTableDefaultView({
+    provisioning,
+    projectId,
+    objectId: template.objectId,
+    viewKind: 'records',
+    locale: input.locale,
+  })
   return {
     ready: true,
     mode: `${modePrefix}_create`,
+    defaultView,
     target: buildCanonicalTargetBinding({ sheetId: ensured.sheet.id, objectId: template.objectId, fieldIdMap: resolvedAfterCreate }),
     evidence: summarizeStockPreparationTargetReadiness({
       template,
@@ -675,8 +741,11 @@ module.exports = {
   CANONICAL_KEY_FIELD,
   REQUIRED_PERMISSION,
   StockPreparationTargetProvisioningError,
+  SANDBOX_OBJECT_ID_NAMESPACE,
   assertSandboxObjectId,
+  isSandboxNamespaceObjectId,
   buildStockPreparationTargetDescriptor,
+  ensureManagedTableDefaultView,
   summarizeStockPreparationTargetReadiness,
   hashEvidenceValue,
   sandboxStockPreparationTemplate,

@@ -852,7 +852,11 @@ export class ApprovalGraphExecutor {
   constructor(
     private readonly runtimeGraph: RuntimeGraph,
     private readonly formData: Record<string, unknown>,
-    private readonly options: { assignmentResolver?: ApprovalGraphAssignmentResolver; requesterContext?: RequesterFormulaContext | null } = {},
+    private readonly options: {
+      assignmentResolver?: ApprovalGraphAssignmentResolver
+      designatedFallbackResolver?: ApprovalGraphAssignmentResolver
+      requesterContext?: RequesterFormulaContext | null
+    } = {},
   ) {
     for (const node of runtimeGraph.nodes) {
       this.nodeMap.set(node.key, node)
@@ -1842,22 +1846,12 @@ export class ApprovalGraphExecutor {
    * a real but narrow observability gap, not a correctness defect. Not fixed here (no new metadata
    * shape is in the ratified Lock-4 §3 text); flag if a future consumer needs to distinguish it.
    *
-   * GATE B-2 DISCLOSURE (fix-round P2-1, gate P3A-F4B-20260819): the lock's B-2 clause names THREE
-   * zero-assignee cases — "empty list, deactivated ids, role with no members" — but only the first
-   * is enforced below (the `userIds.length === 0 && roleIds.length === 0` early return). The other
-   * two are NOT filtered: `static_user`/`static_role` (via `resolveApprovalAssignees`, which this
-   * method routes through) apply no active-status check and no role-membership expansion — an
-   * inherited, uniform property shared with every primary `static_user`/`static_role` source, not a
-   * regression this fallback introduces. A designated fallback pointing at a deactivated id or an
-   * empty role therefore dispatches a seat nobody can act on, rather than terminating at
-   * `APPROVAL_ASSIGNEE_EMPTY` as B-2's text promises — and OD-L4-3(a)'s own recommended usage
-   * (designate the approval-admin ROLE for 转审批管理员) is exactly the empty-role case. Filtering it
-   * properly would need either a live directory/role-membership read inside this resolver (forbidden
-   * by Lock-1 §2.1: "no kind may add a database call inside the resolver"; "no live directory query
-   * runs at dispatch") or a new frozen-snapshot mechanism (Lock-1 §2.1's `includeManagerChain`
-   * opt-in-snapshot pattern) — either is a scope decision for the owner, not something this fix round
-   * decides unilaterally. Left as-is; see the executor test file's own B-2 disclosure for the test-side
-   * half of this note.
+   * GATE B-2: production callers inject a designated-only resolver whose eligibility input is
+   * frozen at instance creation and read from internal instance metadata on later activations. It
+   * removes user ids that were deactivated and roles that had no active members at that boundary,
+   * while the existing resolver still owns delegation, metadata, and deduplication. Ordinary static
+   * sources do not use that filter. A unit-level executor without the service injection retains the
+   * direct fallback below so this class stays independently testable.
    */
   private resolveDesignatedFallbackAssignments(
     nodeKey: string,
@@ -1872,8 +1866,9 @@ export class ApprovalGraphExecutor {
       ...(userIds.length > 0 ? [{ kind: 'static_user' as const, userIds }] : []),
       ...(roleIds.length > 0 ? [{ kind: 'static_role' as const, roleIds }] : []),
     ]
-    const fallbackAssignments: ApprovalGraphAssignment[] = this.options.assignmentResolver
-      ? this.options.assignmentResolver({ nodeKey, sourceStep, config: { assigneeSources: fallbackSources } })
+    const fallbackResolver = this.options.designatedFallbackResolver ?? this.options.assignmentResolver
+    const fallbackAssignments: ApprovalGraphAssignment[] = fallbackResolver
+      ? fallbackResolver({ nodeKey, sourceStep, config: { assigneeSources: fallbackSources } })
       // No resolver injected (unit-level executor without the service resolver, mirroring
       // `resolveAssignmentsForApprovalNode`'s own no-resolver branch immediately above): no
       // delegation substitution is available at this layer either way, so build directly.
