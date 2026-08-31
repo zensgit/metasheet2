@@ -751,10 +751,43 @@ function isPlmCapabilityAdapter(adapter: unknown): adapter is PlmCapabilityAdapt
   )
 }
 
+/**
+ * Owner identity resolved EXACTLY as `routes/data-sources.ts` resolves it (id -> userId -> sub),
+ * so the principal compared here is the same string that was persisted as `owner_id` when the
+ * source was registered. Kept local rather than imported so this fix stays inside this file.
+ */
+function resolveDataSourceOwnerId(req: Request): string | undefined {
+  const u = req.user
+  if (!u) return undefined
+  const raw = u.id ?? u.userId ?? u.sub
+  return raw != null ? String(raw) : undefined
+}
+
+/**
+ * Resolve a CLIENT-SUPPLIED `:id` into an adapter under the same per-user ownership assertion
+ * every other data-source consumer enforces (`DataSourceManager.assertAccess`, owner_id strict
+ * equality). `authenticate` alone only proves *a* user is calling — without this, any
+ * authenticated user who learns or guesses a data source id could drive these PLM workbench
+ * routes against ANOTHER user's registered connection.
+ *
+ * Throws on denial, and `assertAccess` throws the IDENTICAL "not found" wording as
+ * `getDataSource`, so a non-owner and a nonexistent id are indistinguishable: every caller's
+ * existing `catch` emits the same uniform 404 body. No existence oracle.
+ *
+ * Owner-only is deliberate for now. If a PLM workbench flow legitimately needs an org-shared
+ * source, that relaxation belongs to the data-source visibility model, not here.
+ */
+function getOwnedDataSource(req: Request, dataSourceId: string): unknown {
+  const manager = getDataSourceManager()
+  manager.assertAccess(dataSourceId, resolveDataSourceOwnerId(req))
+  return manager.getDataSource(dataSourceId)
+}
+
 // GET /api/plm-workbench/data-sources/:id/capabilities -- ADVISORY-ONLY passthrough of the
 // PLM adapter's integration capability manifest for UI degradation. No entitlement/role
-// judgement, no license read; it just relays the C1 result. Missing data source -> 404;
-// a non-PLM data source -> unsupported-mode (it simply does not speak the PLM handshake).
+// judgement, no license read; it just relays the C1 result. Missing OR not-owned data source ->
+// the same uniform 404; a non-PLM data source -> unsupported-mode (it simply does not speak the
+// PLM handshake).
 router.get(
   '/api/plm-workbench/data-sources/:id/capabilities',
   authenticate,
@@ -764,9 +797,10 @@ router.get(
     const dataSourceId = req.params.id
     let adapter: unknown
     try {
-      adapter = getDataSourceManager().getDataSource(dataSourceId)
+      adapter = getOwnedDataSource(req, dataSourceId)
     } catch {
-      // getDataSource throws a not-found error for an unknown id.
+      // Uniform 404: an unknown id and a source owned by SOMEONE ELSE are indistinguishable here
+      // (assertAccess and getDataSource throw the same not-found wording).
       return res
         .status(404)
         .json({ error: 'Data source not found', data_source_id: dataSourceId })
@@ -964,7 +998,7 @@ router.get(
     const partId = req.params.partId
     let adapter: unknown
     try {
-      adapter = getDataSourceManager().getDataSource(dataSourceId)
+      adapter = getOwnedDataSource(req, dataSourceId)
     } catch {
       return res
         .status(404)
@@ -1027,7 +1061,7 @@ router.patch(
     const bomLineId = req.params.bomLineId
     let adapter: unknown
     try {
-      adapter = getDataSourceManager().getDataSource(dataSourceId)
+      adapter = getOwnedDataSource(req, dataSourceId)
     } catch {
       return res
         .status(404)
@@ -1128,7 +1162,7 @@ router.post(
     const partId = req.params.partId
     let adapter: unknown
     try {
-      adapter = getDataSourceManager().getDataSource(dataSourceId)
+      adapter = getOwnedDataSource(req, dataSourceId)
     } catch {
       return res
         .status(404)
