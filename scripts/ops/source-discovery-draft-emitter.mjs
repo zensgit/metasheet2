@@ -1893,10 +1893,13 @@ function buildDraftEmissionSummary({ preset, score, resolution, optionSets, dict
 // ---------------------------------------------------------------------------
 // Output placement. The drafts carry customer values, so they are DEPLOY-HOST
 // output and must never be written into a working copy of this repository — the
-// exact accident that put a customer's 领料节点 / 交接工段 option sets into
-// plugins/plugin-integration-core/lib/customer-packs/factory-a.rehearsal.cjs
-// (see stock-preparation-customer-pack-catalog.cjs's header). Refused
-// structurally rather than by convention.
+// exact accident that once committed a customer's live option sets into
+// plugins/plugin-integration-core/lib/customer-packs/factory-a.rehearsal.cjs,
+// past a header in that very file forbidding it (#5074; the incident and the
+// vocabulary/data distinction are argued in stock-preparation-customer-pack-
+// catalog.cjs's header, which is also where the affected fields are named — this
+// comment does not repeat them). A rule stated only in prose gets read once, so
+// this one is refused structurally rather than by convention.
 // ---------------------------------------------------------------------------
 
 function assertDraftOutDirOutsideRepo(outDir, repoRoot) {
