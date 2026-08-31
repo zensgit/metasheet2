@@ -89,6 +89,10 @@ function addressesASheet(h: Handler): boolean {
  */
 const GUARD_PATTERNS: Array<[RegExp, string]> = [
   [/sheetLiveness !== 'live'/, "explicit sheetLiveness refusal"],
+  // A handler resolving TWO sheets names them apart (`livenessA` / `livenessB`), so match the
+  // refusal CALL as well as the canonical variable — otherwise such a handler would be classified
+  // guarded only by accident, or not at all.
+  [/\bsendSheetNotLive\(/, 'sendSheetNotLive refusal'],
   [/\bassertSheetLive\b/, 'assertSheetLive'],
   [/\bSheetNotLiveError\b/, 'SheetNotLiveError (thrown from a service callback)'],
   [/\bloadSheetRow\b/, 'loadSheetRow (deleted_at IS NULL)'],
@@ -147,6 +151,42 @@ describe('sheet-liveness closure over univer-meta routes', () => {
       return h ? guardOf(h) !== null : false
     })
     expect(redundant, `these routes are now guarded and no longer need an exemption: ${redundant.join(', ')}`).toEqual([])
+  })
+
+  /**
+   * PROPORTIONALITY. Presence of *a* refusal is not enough for a handler that resolves MORE THAN ONE
+   * sheet: `POST /crossbase/mirror-link` resolves both ends of the edge, and dropping the guard on
+   * either one leaves the other's `sendSheetNotLive(` in the body, so a presence-only classifier still
+   * calls it guarded. (Found by a witnessed-RED mutation that SURVIVED — the mutation was kept and the
+   * guard strengthened, rather than the anchor quietly moved.)
+   *
+   * So: a handler that resolves N sheets through the capability resolver must carry at least N
+   * liveness refusals, unless it establishes liveness some other way (loadSheetRow et al.) for all of
+   * them, or is exempt.
+   */
+  it('every bound liveness variable is USED to refuse — counting refusals is not enough', () => {
+    // Bind-and-use, not count-and-hope. `POST /crossbase/mirror-link` binds `livenessA` and
+    // `livenessB`; a count-based check passes when one guard is dropped, because the OTHER end's
+    // refusal is still in the body. Tie each BINDING to a refusal that names THAT variable.
+    const offenders: string[] = []
+    for (const h of inScope) {
+      if (h.key in EXEMPT) continue
+      const bound = new Set<string>()
+      for (const m of h.body.matchAll(/sheetLiveness\s*:\s*(\w+)/g)) bound.add(m[1]!)
+      if (/\{[^}]*\bsheetLiveness\b\s*[,}]/.test(h.body)) bound.add('sheetLiveness')
+      for (const name of bound) {
+        const used = new RegExp(`${name}\\s*!==\\s*'live'|sendSheetNotLive\\(\\s*res\\s*,\\s*${name}\\b|SheetNotLiveError\\(\\s*[^,]+,\\s*${name}\\b`)
+          .test(h.body)
+        if (!used) offenders.push(`${h.key} (line ${h.line}): binds \`${name}\` but never refuses on it`)
+      }
+    }
+
+    expect(
+      offenders,
+      `${offenders.length} handler(s) resolve a sheet's liveness and then ignore it. A cross-sheet `
+      + `write must not proceed because the OTHER end happened to be live:\n`
+      + offenders.map((r) => `  - ${r}`).join('\n'),
+    ).toEqual([])
   })
 
   // THE TRIPWIRE. A refactor that changes the registration STYLE (or a CRLF regression like the one
