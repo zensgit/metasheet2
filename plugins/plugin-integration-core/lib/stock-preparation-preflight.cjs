@@ -53,8 +53,10 @@ const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
 } = require('./stock-preparation-templates.cjs')
 const {
+  SANDBOX_OBJECT_ID_NAMESPACE,
   inspectStockPreparationCanonicalTarget,
   inspectStockPreparationSandboxTarget,
+  isSandboxNamespaceObjectId,
 } = require('./stock-preparation-target-provisioning.cjs')
 const {
   inspectConfirmationDecisionTarget,
@@ -85,8 +87,13 @@ const B2A_REGISTRY_PATH_ENV = 'INTEGRATION_CORE_B2A_REGISTRY_PATH'
 const SANDBOX_MODE_ENV = 'STOCK_PREP_SANDBOX_MODE'
 const SANDBOX_TARGET_OBJECT_IDS_ENV = 'STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS'
 
-/** The namespace incident 1's refusal failed to name. Quoted in the fix line so it cannot be guessed. */
-const SANDBOX_OBJECT_ID_NAMESPACE_PREFIX = 'plm_stock_preparation_sandbox'
+/**
+ * The namespace incident 1's refusal failed to name. Quoted in the fix line so it cannot be guessed.
+ *
+ * TAKEN FROM THE GUARD, not restated: it is the same constant `assertSandboxObjectId` enforces, so a
+ * rename there cannot leave this quoting a namespace nothing checks.
+ */
+const SANDBOX_OBJECT_ID_NAMESPACE_PREFIX = SANDBOX_OBJECT_ID_NAMESPACE
 
 const CANONICAL_TARGET_OBJECT_ID = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
 
@@ -428,9 +435,31 @@ async function computeStockPreparationPreflight({
   // succeeds, apply is refused. So the allowlist is checked against each pack's DECLARED target.
   const sandboxPolicy = resolveStockPrepApplySandboxPolicy(config, env)
   const sandboxEnabled = Boolean(sandboxPolicy && sandboxPolicy.enabled === true)
-  const allowlist = sandboxPolicy && Array.isArray(sandboxPolicy.allowedTargetObjectIds)
+  const configuredAllowlist = sandboxPolicy && Array.isArray(sandboxPolicy.allowedTargetObjectIds)
     ? [...sandboxPolicy.allowedTargetObjectIds]
     : []
+  // THE ALLOWLIST IS THE ONE INPUT ON THIS ROUTE WHOSE CONTENT IS UNCONSTRAINED.
+  //
+  // Everything else the preflight quotes is deployment-AUTHORED and shape-checked upstream: objectIds
+  // come off packs the normalizer validated through `assertSandboxObjectId`, env PATHS are named by
+  // key and never read. This one is different. `resolveStockPrepApplySandboxPolicy` splits
+  // STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS on commas and trims — that is all — so whatever a polluted
+  // environment holds becomes an "objectId" here, and from here it reached `fix.run` (as
+  // `KEY=<the values>`), `detail.currentAllowlist`, and `checks…allowlist`. All three render in the
+  // install page's preflight panel to any stock-prep:read viewer. By convention that env holds
+  // sandbox objectIds, which are identifier-class and safe to show; NOTHING ENFORCED IT.
+  //
+  // So it is enforced here, at the point of REPORTING, through the same predicate the provisioning
+  // guard uses. Non-conforming entries never appear anywhere in the response — not even truncated or
+  // hashed — and are represented only by a COUNT, which is enough for an operator to learn the
+  // environment is polluted without the response becoming the thing that publishes it.
+  //
+  // This changes what the preflight SAYS, never what apply DOES: `resolveStockPrepApplySandboxPolicy`
+  // is untouched and the write gate still reads the raw env. Dropping a non-conforming entry from the
+  // suggested `fix` line is deliberate and is the correct advice either way — the write gate would
+  // refuse such a target anyway, so re-pasting it would only carry the pollution forward.
+  const allowlist = configuredAllowlist.filter((entry) => isSandboxNamespaceObjectId(entry))
+  const droppedNonNamespaceEntries = configuredAllowlist.length - allowlist.length
   // The canonical production target is NEVER appliable on the sandbox path regardless of allowlist
   // membership (the apply gate refuses it structurally, and production Apply is a separate owner
   // gate reported under `posture`). Listing it would be advice that cannot work, so a
@@ -444,6 +473,9 @@ async function computeStockPreparationPreflight({
     declaredSandboxTargetObjectIds: Object.freeze(sandboxDeclaredTargets.map((target) => target.objectId)),
     unlistedDeclaredTargetObjectIds: Object.freeze(unlistedTargets.map((target) => target.objectId)),
     objectIdNamespacePrefix: SANDBOX_OBJECT_ID_NAMESPACE_PREFIX,
+    // A COUNT, never the entries: how many configured allowlist members sit outside the namespace
+    // and were therefore withheld from every field above. Non-zero means the env is polluted.
+    droppedNonNamespaceEntries,
   })
   if (sandboxDeclaredTargets.length > 0 && !sandboxEnabled) {
     blockers.push(blocker({
@@ -461,11 +493,14 @@ async function computeStockPreparationPreflight({
     }
     blockers.push(blocker({
       code: PREFLIGHT_BLOCKER_CODES.SANDBOX_ALLOWLIST_MISSING_TARGET,
-      what: `the sandbox write allowlist does not contain ${unlistedTargets.map((target) => `"${target.objectId}"`).join(', ')}, which ${unlistedTargets.length === 1 ? 'is' : 'are'} declared by a configured customer pack. Column install will succeed and row apply will be refused — a late, confusing failure. Every declared sandbox target must be in the \`${SANDBOX_OBJECT_ID_NAMESPACE_PREFIX}\` namespace and listed here`,
+      what: `the sandbox write allowlist does not contain ${unlistedTargets.map((target) => `"${target.objectId}"`).join(', ')}, which ${unlistedTargets.length === 1 ? 'is' : 'are'} declared by a configured customer pack. Column install will succeed and row apply will be refused — a late, confusing failure. Every declared sandbox target must be in the \`${SANDBOX_OBJECT_ID_NAMESPACE_PREFIX}\` namespace and listed here${droppedNonNamespaceEntries > 0 ? `. ${droppedNonNamespaceEntries} configured entr${droppedNonNamespaceEntries === 1 ? 'y is' : 'ies are'} outside that namespace and ${droppedNonNamespaceEntries === 1 ? 'was' : 'were'} withheld from this line and from the allowlist reported above — the environment holds something that is not a sandbox objectId, and it is not shown here` : ''}`,
       fix: envFix({ name: SANDBOX_TARGET_OBJECT_IDS_ENV, value: merged.join(',') }),
       detail: {
         missingFromAllowlist: unlistedTargets.map((target) => target.objectId),
+        // The NAMESPACE-CONFORMING members only (see the filter above). A non-conforming entry is
+        // counted, never carried.
         currentAllowlist: [...allowlist],
+        droppedNonNamespaceEntries,
       },
     }))
   }

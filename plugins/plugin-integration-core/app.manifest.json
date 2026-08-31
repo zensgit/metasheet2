@@ -1,0 +1,202 @@
+{
+  "id": "stock-preparation",
+  "version": "0.1.0",
+  "displayName": "BOM备料",
+  "valueStatement": "从 PLM 拉取项目 BOM,逐层展开为备料明细;冲突交人工确认,人工列永不被系统覆盖。",
+  "pluginId": "plugin-integration-core",
+  "runtimeModel": "direct",
+  "boundedContext": {
+    "code": "stock-preparation",
+    "owner": "integration",
+    "description": "BOM备料 — the first multitable-backed application: managed multitable objects, a confirmation-queue workbench, three permission codes, two deployment-data config surfaces, and two acceptance criteria. Installing it means tables and configuration, never code."
+  },
+  "platformDependencies": [
+    "auth",
+    "rbac",
+    "multitable",
+    "plugins"
+  ],
+  "navigation": [
+    {
+      "id": "stock-prep-confirmation-queue",
+      "title": "备料工作台",
+      "path": "/stock-prep",
+      "icon": "clipboard-check",
+      "order": 55,
+      "location": "main-nav"
+    }
+  ],
+  "permissions": [
+    "stock-prep:read",
+    "stock-prep:operate",
+    "stock-prep:admin"
+  ],
+  "permissionPolicy": {
+    "automaticHolders": [],
+    "seededBy": "STOCK_PREP_PERMISSION_DESCRIPTORS (RBAC seed rows)",
+    "source": "plugins/plugin-integration-core/lib/stock-preparation-workbench-access.cjs",
+    "note": "R-11 映射零自动:安装只把三个码种子化,持有者为零。没有任何既有 scope 会自动变成备料 scope —— integration:write 不会成为 operate。每一次授予都是显式的、按角色的。"
+  },
+  "featureFlags": [],
+  "objects": [
+    {
+      "id": "confirmationDecisionLedger",
+      "name": "备料确认账本",
+      "backing": "multitable",
+      "objectIdPolicy": "fixed",
+      "objectId": "plm_stock_preparation_confirmation_decision",
+      "displayNames": {
+        "zh-CN": "备料确认账本",
+        "en": "Stock Preparation Confirmation Decision"
+      },
+      "columnCount": 16,
+      "ensure": {
+        "idempotent": true,
+        "method": "POST",
+        "path": "/api/integration/stock-preparation/confirmation-decisions/ensure",
+        "body": {},
+        "permission": "admin"
+      },
+      "note": "受管对象,按需创建 —— 它不在 SQL 迁移链里,所以「部署完成」≠「它存在」。objectId 是固定值,任何部署都不得自拟。"
+    },
+    {
+      "id": "sandboxTarget",
+      "name": "备料沙箱目标表",
+      "backing": "multitable",
+      "objectIdPolicy": "from-config",
+      "objectIdNamespace": "plm_stock_preparation_sandbox",
+      "objectIdFrom": {
+        "configSurface": "customerPack",
+        "field": "targetObjectId"
+      },
+      "displayNames": {
+        "zh-CN": "备料沙箱目标表",
+        "en": "PLM Stock Preparation Sandbox"
+      },
+      "columnCount": 25,
+      "ensure": {
+        "idempotent": true,
+        "method": "POST",
+        "path": "/api/integration/stock-preparation/sandbox-target/ensure",
+        "bodyFrom": {
+          "objectId": "customerPack.targetObjectId"
+        },
+        "permission": "admin"
+      },
+      "note": "具体 objectId 不写死在清单里,它来自已配置客户包的 targetObjectId —— 但必须落在上面的命名空间内(服务端 assertSandboxObjectId 强制)。首次真机部署两次事故都出在这里:一人手拟 objectId 被拒(拒绝语当时没点名命名空间),两人并行配同一台机各拟一个名,包声明 A、建出来的表叫 B。清单把名字交出来,人就不再取名。"
+    }
+  ],
+  "workflows": [],
+  "integrations": [
+    {
+      "id": "plm-bom-readonly",
+      "type": "plm",
+      "direction": "inbound"
+    }
+  ],
+  "configSurfaces": [
+    {
+      "id": "customerPack",
+      "name": "客户包(装 ext_ 列与字典)",
+      "kind": "deployment-data-file",
+      "envVar": "INTEGRATION_CORE_STOCK_PREPARATION_CUSTOMER_PACKS_PATH",
+      "serverConfigKey": "stockPreparationCustomerPacks",
+      "committed": false,
+      "note": "部署期数据,永不入库、永不经请求、永不进仓库:env 只给出部署机上那个未提交的 JSON 文件路径。未设 = 目录为空 = 每个 packId 都被拒(fail-closed,没有「放行一切」状态)。"
+    },
+    {
+      "id": "extFieldMapping",
+      "name": "源列 → ext_ 字段映射",
+      "kind": "deployment-data-file",
+      "envVar": "INTEGRATION_CORE_STOCK_PREPARATION_EXT_FIELD_MAPPING_PATH",
+      "serverConfigKey": "stockPreparationExtFieldMapping",
+      "committed": false,
+      "note": "同样是部署期数据,同样只由 env 指向部署机上的未提交文件。包说「哪些 ext_ 列存在」,映射说「值从哪来」;缺映射时列会装上而值一个都不写。"
+    },
+    {
+      "id": "sandboxWriteAuthorization",
+      "name": "沙箱写行授权(允许清单)",
+      "kind": "env-allowlist",
+      "envVars": [
+        "STOCK_PREP_SANDBOX_MODE",
+        "STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS"
+      ],
+      "committed": false,
+      "note": "装列(包)和写行(apply)是两道独立授权,都要开。允许清单里没有包声明的目标时,装列会成功、写行会被拒 —— 这种晚失败最费时间。"
+    }
+  ],
+  "acceptance": {
+    "verifiedBy": {
+      "script": "scripts/ops/stock-prep-acceptance-bootstrap.mjs",
+      "note": "合成验收自举:一条命令从空部署跑到证绿,逐条断言下面两条判据。该脚本走 feat/stock-prep-acceptance-bootstrap 一支单独合入,本清单只声明由谁来验,不搬运脚本本身。"
+    },
+    "runbook": "docs/development/takeover-beiliao-20260821/r6-upgrade-222-runbook.md",
+    "criteria": [
+      {
+        "id": "ext-columns-written-human-band-untouched",
+        "statement": "install → dry-run → apply 之后,映射到的 ext_ 列出现非空值,而 human_preserved 一档保持为空。",
+        "after": [
+          "pack-install",
+          "dry-run",
+          "apply"
+        ],
+        "assertions": [
+          {
+            "scope": "target-rows",
+            "columns": "mapped-ext",
+            "predicate": "some-non-empty",
+            "minMatchingRows": 1
+          },
+          {
+            "scope": "target-rows",
+            "columns": "human-preserved",
+            "predicate": "all-empty"
+          }
+        ]
+      },
+      {
+        "id": "second-refresh-all-skip",
+        "statement": "同配置的第二次 dry-run 计划全部为 skip(幂等)。",
+        "after": [
+          "apply"
+        ],
+        "assertions": [
+          {
+            "scope": "dry-run-plan",
+            "run": 2,
+            "predicate": "all-actions-skip"
+          }
+        ]
+      }
+    ]
+  },
+  "posture": {
+    "mode": "reported-not-installed",
+    "installerMayModify": false,
+    "note": "这四道围栏只报状态,永远没有「修复」按钮:未设/关闭就是正确姿态。安装器不得武装其中任何一项 —— no installer may ever set them。同一条纪律在服务端由 stock-preparation-preflight.cjs 的 buildPosture 执行:posture 条目永不携带 fix。",
+    "entries": [
+      {
+        "id": "productionApply",
+        "expectedState": "closed",
+        "what": "生产 Apply 关闭:服务端没有 production 策略,canonical 目标不可 apply(R-09 未签发)。"
+      },
+      {
+        "id": "k3ExternalWrite",
+        "expectedState": "permanently_disabled",
+        "what": "K3 外部写永久、结构化拒绝:K3 目标 dry-run 仍可、apply 恒拒 —— 这是围栏,不是故障。"
+      },
+      {
+        "id": "b2aTrialRegistry",
+        "expectedState": "dormant",
+        "envVar": "INTEGRATION_CORE_B2A_REGISTRY_PATH",
+        "what": "B2a 试用登记休眠:休眠即字节级原行为,武装属 owner 决策。"
+      },
+      {
+        "id": "outboundHttpWrite",
+        "expectedState": "unset",
+        "envVar": "INTEGRATION_CORE_OUTBOUND_HTTP_WRITE_TARGETS",
+        "what": "通用出站 HTTP 写门未设 = 拒绝,这就是正确姿态。"
+      }
+    ]
+  }
+}
