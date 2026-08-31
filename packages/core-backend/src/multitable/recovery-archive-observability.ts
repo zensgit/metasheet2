@@ -3,20 +3,24 @@ import type {
   RecoveryArchiveRestoreWorkerRunResult,
 } from './recovery-archive-restore-worker'
 
-export const RECOVERY_ARCHIVE_WORKER_RUN_KINDS = Object.freeze([
-  'idle',
-  'completed',
-  'paused_retryable',
-  'abandoned',
-  'claim_contended',
-  'lease_lost',
-  'yielded',
-  'stopped',
-  'sweep_failed',
-  'selection_failed',
-  'terminalization_failed',
-  'tick_failed',
-] as const satisfies readonly RecoveryArchiveRestoreWorkerRunKind[])
+const RECOVERY_ARCHIVE_WORKER_RUN_KIND_MEMBERS = Object.freeze({
+  idle: true,
+  completed: true,
+  paused_retryable: true,
+  abandoned: true,
+  claim_contended: true,
+  lease_lost: true,
+  yielded: true,
+  stopped: true,
+  sweep_failed: true,
+  selection_failed: true,
+  terminalization_failed: true,
+  tick_failed: true,
+} as const satisfies Record<RecoveryArchiveRestoreWorkerRunKind, true>)
+
+export const RECOVERY_ARCHIVE_WORKER_RUN_KINDS = Object.freeze(
+  Object.keys(RECOVERY_ARCHIVE_WORKER_RUN_KIND_MEMBERS) as RecoveryArchiveRestoreWorkerRunKind[],
+)
 
 export type RecoveryArchiveWorkerLifecycle = 'started' | 'drained' | 'drain_failed'
 export type RecoveryArchiveWorkerDrainOutcome = 'success' | 'failure'

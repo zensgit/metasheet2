@@ -15,7 +15,20 @@ describe('recovery archive operational observability', () => {
     expect(sink.incrementRun).toHaveBeenCalledWith('completed')
     expect(sink.incrementSwept).toHaveBeenCalledWith(2)
     expect(sink.incrementChunks).toHaveBeenCalledWith(3)
-    expect(RECOVERY_ARCHIVE_WORKER_RUN_KINDS).toContain('completed')
+    expect(RECOVERY_ARCHIVE_WORKER_RUN_KINDS).toEqual([
+      'idle',
+      'completed',
+      'paused_retryable',
+      'abandoned',
+      'claim_contended',
+      'lease_lost',
+      'yielded',
+      'stopped',
+      'sweep_failed',
+      'selection_failed',
+      'terminalization_failed',
+      'tick_failed',
+    ])
   })
 
   it.each([
