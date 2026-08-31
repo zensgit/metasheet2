@@ -401,7 +401,7 @@ export function validateApprovalNodeEdits(
         errors.push(`办理节点 ${edit.nodeKey} 不支持门槛会签人数`)
       }
     } else {
-      if (edit.approvalMode !== undefined && !(['single', 'all', 'any', 'threshold'] as const).includes(edit.approvalMode)) {
+      if (edit.approvalMode !== undefined && !(['single', 'all', 'any', 'threshold', 'sequential'] as const).includes(edit.approvalMode)) {
         errors.push(`审批节点 ${edit.nodeKey} 的审批模式无效`)
       }
       // Fix-round P1-1 / P3-2 (gate P3A-F4B-20260819) — widened to admit `'designated'`, seeded
@@ -426,6 +426,9 @@ export function validateApprovalNodeEdits(
         // No static N<=M bound here for the SAME reason as the linear preview: this editor always
         // emits `assigneeSources` (never the legacy shape the backend's static bound is scoped to),
         // so M is always resolved at runtime — do not invent a stricter client check (M8).
+      }
+      if (edit.approvalMode === 'sequential' && inParallelRegion) {
+        errors.push(`审批节点 ${edit.nodeKey} 位于并行分支内，不支持依次审批（v1 仅支持线性路径）`)
       }
       if (edit.timeout !== undefined && edit.timeout !== null) {
         const timeout = edit.timeout
