@@ -29,6 +29,9 @@ interface AdapterStubOptions {
   // requestTimeoutMs) without disturbing every OTHER test's postgres default.
   type?: string
   connection?: Record<string, unknown>
+  // 对接总览: the display descriptor reads getName()/getType(), so a test can give the stub a name
+  // distinct from its id and prove the descriptor reports the adapter's own, not the requested id.
+  name?: string
 }
 
 function adapterStub(opts: AdapterStubOptions = {}) {
@@ -36,6 +39,8 @@ function adapterStub(opts: AdapterStubOptions = {}) {
     isConnected: () => opts.connected ?? true,
     testConnection: vi.fn(async () => opts.healthy ?? true),
     isReadOnly: () => opts.readOnly ?? true,
+    getName: () => opts.name ?? 'pg',
+    getType: () => opts.type ?? 'postgres',
     getConfig: () => ({
       id: 'pg',
       name: 'pg',
@@ -77,7 +82,9 @@ function managerStub(opts: ManagerStubOptions = {}) {
 describe('createDataSourcePluginFacade', () => {
   it('is read-only by construction — exposes only read methods, no write/credential surface', () => {
     const facade = createDataSourcePluginFacade(() => managerStub().manager)
-    expect(Object.keys(facade).sort()).toEqual(['getSchema', 'getTableInfo', 'select', 'test'])
+    // `describe` joined this list for the 对接总览 screen. It belongs to the same read-only class as
+    // the other four: no mutation, no credentials, principal-gated — see its own tests below.
+    expect(Object.keys(facade).sort()).toEqual(['describe', 'getSchema', 'getTableInfo', 'select', 'test'])
     const surface = facade as unknown as Record<string, unknown>
     for (const forbidden of [
       'insert', 'update', 'delete', 'create', 'remove', 'rotate', 'connect', 'disconnect',
@@ -85,6 +92,54 @@ describe('createDataSourcePluginFacade', () => {
     ]) {
       expect(surface).not.toHaveProperty(forbidden)
     }
+  })
+
+  describe('describe (对接总览 display descriptor)', () => {
+    it('returns EXACTLY {id,name,type,status} — no connection detail can ride along', async () => {
+      const m = managerStub({ adapter: adapterStub({ name: 'PLM 只读库', type: 'sqlserver', connected: true }) })
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      const descriptor = await facade.describe('ds_plm', 'owner-1')
+      expect(descriptor).toEqual({ id: 'ds_plm', name: 'PLM 只读库', type: 'sqlserver', status: 'connected' })
+      // Values-free: the ONLY object in this layer carrying connection/credentials is getConfig(),
+      // and the descriptor must never have gone near it.
+      expect(Object.keys(descriptor).sort()).toEqual(['id', 'name', 'status', 'type'])
+      expect(JSON.stringify(descriptor)).not.toContain('connection')
+    })
+
+    it('reports the LIVE connection state, not the stored column', async () => {
+      const m = managerStub({ adapter: adapterStub({ connected: false }) })
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      await expect(facade.describe('pg', 'owner-1')).resolves.toMatchObject({ status: 'disconnected' })
+    })
+
+    it('never opens a connection (a summary screen must not dial every database it lists)', async () => {
+      const m = managerStub({ adapter: adapterStub({ connected: false }) })
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      await facade.describe('pg', 'owner-1')
+      expect(m.stub.connectDataSource).not.toHaveBeenCalled()
+      expect(m.adapter.testConnection).not.toHaveBeenCalled()
+    })
+
+    it('is principal-gated and fails closed with the uniform not-found wording (no existence leak)', async () => {
+      const denied = managerStub({ deny: true })
+      const facade = createDataSourcePluginFacade(() => denied.manager)
+      await expect(facade.describe('someone-elses', 'owner-1')).rejects.toMatchObject({
+        status: 422,
+        code: DATA_SOURCE_NOT_FOUND_CODE,
+        message: "Data source with id 'someone-elses' not found",
+      })
+      const getManager = vi.fn(() => managerStub().manager)
+      const strict = createDataSourcePluginFacade(getManager)
+      await expect(strict.describe('pg', undefined)).rejects.toThrow(MISSING_PRINCIPAL_MESSAGE)
+      // No fallback identity: a missing principal short-circuits before the manager is resolved.
+      expect(getManager).not.toHaveBeenCalled()
+    })
+
+    it('describes a WRITABLE source too — the read-only guard is deliberately not applied here', async () => {
+      const m = managerStub({ adapter: adapterStub({ readOnly: false, name: 'K3 写入库', type: 'sqlserver' }) })
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      await expect(facade.describe('ds_write', 'owner-1')).resolves.toMatchObject({ name: 'K3 写入库' })
+    })
   })
 
   it('resolves the manager lazily (not at construction time)', async () => {

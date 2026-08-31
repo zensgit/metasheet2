@@ -24,7 +24,34 @@ export interface DataSourceReadOnlyFacadeTestResult {
   success: boolean
 }
 
+/**
+ * The DISPLAY descriptor of one data source: what an operator needs to recognize a connection on
+ * a summary screen, and nothing else.
+ *
+ * Exactly four fields, and none of them is a connection detail: no host, port, database, schema,
+ * username, connection string, options or credential state. `status` is the LIVE connection state
+ * (`adapter.isConnected()`), not the `data_sources.status` column — the column is written once at
+ * creation and does not track reality.
+ */
+export interface DataSourceDescriptor {
+  id: string
+  name: string
+  type: string
+  status: 'connected' | 'disconnected'
+}
+
 export interface DataSourceReadOnlyFacade {
+  /**
+   * Resolve a data source id to its display descriptor. Principal-gated exactly like every other
+   * method here (`assertAccess`), so a caller reaches only sources its principal owns and a
+   * non-owner gets the same uniform "not found" a deleted row gets — no existence leak.
+   *
+   * Read-only in the strongest sense available: it does NOT connect (no `connectDataSource`), does
+   * NOT decrypt, and never touches `adapter.getConfig()` — the only object in this layer that
+   * carries `connection` and `credentials`. Added for the 对接总览 screen, which must be able to
+   * say "this bridge uses the connection named X" without being handed anything it could leak.
+   */
+  describe(dataSourceId: string, principal: string | undefined): Promise<DataSourceDescriptor>
   test(dataSourceId: string, principal: string | undefined): Promise<DataSourceReadOnlyFacadeTestResult>
   getSchema(dataSourceId: string, principal: string | undefined, schema?: string): Promise<SchemaInfo>
   getTableInfo(
@@ -440,6 +467,29 @@ export function createDataSourcePluginFacade(
   }
 
   return {
+    async describe(dataSourceId, principal) {
+      // Deliberately NOT routed through `authorize`: that helper connects the adapter and enforces
+      // the read-only-source guard, both of which are wrong here. Describing a connection must not
+      // open one (a summary screen listing ten bridges would otherwise dial ten databases), and a
+      // WRITABLE data source bound to a `data-source:sql-write-gated` target is a legitimate thing
+      // for that screen to name — refusing it would blank out exactly the row an operator most
+      // needs to see. Ownership is still enforced, by the same assertAccess every read uses.
+      const owner = requirePrincipal(principal)
+      const manager = getManager()
+      let adapter
+      try {
+        manager.assertAccess(dataSourceId, owner)
+        adapter = manager.getDataSource(dataSourceId)
+      } catch (err) {
+        throw new DataSourceUnavailableError(err instanceof Error ? err.message : String(err))
+      }
+      return {
+        id: dataSourceId,
+        name: adapter.getName(),
+        type: adapter.getType(),
+        status: adapter.isConnected() ? 'connected' : 'disconnected',
+      }
+    },
     async test(dataSourceId, principal) {
       const { adapter } = await authorize(dataSourceId, principal)
       const healthy = await adapter.testConnection()
