@@ -8,8 +8,14 @@ import { MSSQLAdapter } from './MSSQLAdapter'
 import { MySQLAdapter } from './MySQLAdapter'
 import { PLMAdapter } from './PLMAdapter'
 import { encryptStoredSecretValue, decryptStoredSecretValue, isEncryptedSecretValue } from '../security/encrypted-secrets'
-import { isDatabaseSchemaError } from '../utils/database-errors'
 import type { IConfigService, ILogger } from '../di/identifiers'
+
+// PostgreSQL SQLSTATE for undefined_table. The referential delete guard trusts
+// ONLY this code for its "integration schema not installed → zero references"
+// short-circuit — never the message-prose fallback of isDatabaseSchemaError,
+// which would let any error worded like a missing table silently PERMIT a
+// delete (P2-B).
+const UNDEFINED_TABLE_SQLSTATE = '42P01'
 
 // Credential fields that hold secrets and are encrypted at rest. Identifiers
 // like `username` are left as-is (matching the codebase's encrypt-secrets-only
@@ -445,27 +451,53 @@ export class DataSourceManager extends EventEmitter {
   }
 
   /**
-   * COUNT of integration_external_systems rows whose config->>'dataSourceId'
-   * references this source (the referential delete guard's input).
+   * COUNT of integration_external_systems rows that reference this source
+   * ATTRIBUTABLY (the referential delete guard's input): rows whose
+   * config->>'dataSourceId' equals the id AND whose server-stamped
+   * config->>'dataSourceOwnerId' equals the source's OWNER.
    *
+   * WHY owner-attributed, not raw (P2-A): the raw dataSourceId match let any
+   * integration:write holder in ANY tenant pin a foreign user's source id and
+   * make it permanently un-deletable by its owner, and the count aggregated
+   * across tenants. data_sources carries no tenant column — owner_id is its
+   * only authority key, and the integration read path already authorizes
+   * per-owner (the plugin facade refuses non-owner principals at every read,
+   * and a pipeline's runtime principal is its creator) — so owner-attribution
+   * is the join the model actually supports. The stamp is written server-side
+   * at bind time by the external-system registry AFTER the facade's
+   * assertReferenceable validated principal == owner; a client cannot forge
+   * it. Unstamped rows (legacy, or written past the API) do not count: their
+   * attribution is unknowable, and an unattributable reference must not deny
+   * the owner their delete — its read path already fails closed per-owner at
+   * runtime, exactly as before this guard existed.
+   *
+   * Failure posture:
    * - No bound db: the manager is memory-only, nothing persisted can hold a
    *   reference — 0 is exact, not fail-open.
-   * - integration schema not installed (undefined_table): the referencing
-   *   layer does not exist — 0 is exact.
-   * - Any OTHER query failure propagates, failing the delete CLOSED rather
-   *   than permitting a blind delete past an unreadable reference table.
+   * - SQLSTATE 42P01 (undefined_table): the integration schema is not
+   *   installed, the referencing layer does not exist — 0 is exact. STRICTLY
+   *   the code, never message prose (P2-B): a non-schema failure worded like
+   *   a missing table must fail the delete CLOSED, and if these tables ever
+   *   move to a separate DB a message heuristic would become genuinely
+   *   fail-open.
+   * - Any OTHER query failure propagates — the delete does not happen.
    */
   async countExternalSystemReferences(id: string): Promise<number> {
     if (!this.db) return 0
+    const ownerId = this.scopes.get(id)?.ownerId
+    // No known owner scope → nothing can be attributed to it. (Route callers
+    // sit behind assertAccess, so the scope exists on every real delete path.)
+    if (ownerId === undefined) return 0
     try {
       const rows = await this.db
         .selectFrom('integration_external_systems' as never)
         .select(sql<number>`count(*)::int`.as('count') as never)
         .where(sql`config->>'dataSourceId'` as never, '=', id as never)
+        .where(sql`config->>'dataSourceOwnerId'` as never, '=', ownerId as never)
         .execute() as Array<{ count: number }>
       return rows[0]?.count ?? 0
     } catch (err) {
-      if (isDatabaseSchemaError(err)) return 0
+      if ((err as { code?: string } | null)?.code === UNDEFINED_TABLE_SQLSTATE) return 0
       throw err
     }
   }

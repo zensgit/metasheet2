@@ -242,7 +242,17 @@ async function maybeEncryptCredentials(credentialStore, credentials) {
   throw new ExternalSystemValidationError('credentials must be a string, a plain object, or null', { field: 'credentials' })
 }
 
-function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypto.randomUUID } = {}) {
+// `dataSourceBinder` (P2-A referential-integrity fix): the host's data-source facade
+// (context.api.dataSources), whose assertReferenceable(dataSourceId, principal) validates that the
+// AUTHENTICATED principal owns the referenced core data source. Every upsert that asserts a
+// config.dataSourceId binding must pass it; on success the registry stamps
+// config.dataSourceOwnerId = principal SERVER-SIDE (client-sent values are discarded), which is what
+// the core delete guard counts (DataSourceManager.countExternalSystemReferences — owner-attributed).
+// Fail-closed: a dataSourceId-bearing config with no wired binder, no principal, or a refusing
+// binder is rejected — a binding nobody could ever read through (the facade authorizes every read
+// with the owner principal; a pipeline's runtime principal is its creator) must not be persisted,
+// and an unvalidated pin must never be able to deny the source owner their delete.
+function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypto.randomUUID, dataSourceBinder } = {}) {
   if (
     !db ||
     typeof db.selectOne !== 'function' ||
@@ -269,6 +279,55 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
       ...scopeWhere(input),
       name: input.name,
     })
+  }
+
+  // P2-A bind-time validation + server-side attribution stamp. `config` is the EFFECTIVE new
+  // config about to persist (create payload, or the private-key-merged update payload); `rawInput`
+  // carries the authenticated principal the route/host attached. Only runs when the caller is
+  // ASSERTING a config (an update that preserves the stored config verbatim — e.g. the
+  // test-result persist — neither re-validates nor needs a principal).
+  async function withValidatedDataSourceBinding(config, rawInput) {
+    if (!isPlainObject(config)) return config
+    const dataSourceId = typeof config.dataSourceId === 'string' ? config.dataSourceId.trim() : ''
+    if (!dataSourceId) {
+      // No binding asserted: discard any client-sent attribution stamp — it is
+      // server-owned metadata and must never be forgeable.
+      if (Object.prototype.hasOwnProperty.call(config, 'dataSourceOwnerId')) {
+        const cleaned = { ...config }
+        delete cleaned.dataSourceOwnerId
+        return cleaned
+      }
+      return config
+    }
+    const principal = typeof rawInput.principal === 'string' ? rawInput.principal.trim() : ''
+    if (!principal) {
+      throw new ExternalSystemValidationError(
+        'config.dataSourceId binding requires an authenticated principal',
+        { field: 'config.dataSourceId' },
+      )
+    }
+    if (!dataSourceBinder || typeof dataSourceBinder.assertReferenceable !== 'function') {
+      // Fail CLOSED: an unvalidated pin could deny the core source's owner their delete.
+      throw new ExternalSystemValidationError(
+        'config.dataSourceId binding requires the host data-source binder (context.api.dataSources); it is not wired',
+        { field: 'config.dataSourceId' },
+      )
+    }
+    try {
+      await dataSourceBinder.assertReferenceable(dataSourceId, principal)
+    } catch (err) {
+      // Re-raise the facade's uniform wording verbatim (deleted vs not-yours
+      // indistinguishable — no existence leak), as a validation error the
+      // routes map to a clean 4xx.
+      throw new ExternalSystemValidationError(
+        err && err.message ? String(err.message) : 'config.dataSourceId is not referenceable by this principal',
+        { field: 'config.dataSourceId' },
+      )
+    }
+    // Server-side stamp: the principal was just validated as the source's owner.
+    // The core delete guard counts ONLY rows carrying this stamp
+    // (DataSourceManager.countExternalSystemReferences — owner-attributed).
+    return { ...config, dataSourceOwnerId: principal }
   }
 
   async function upsertExternalSystem(input) {
@@ -310,7 +369,10 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
       // the exception: public reads omit them, so their absence on update means preserve; a
       // trusted-admin caller clears one explicitly with a matching `{ privateKey: null }`.
       if (input.config === undefined) updateRow.config = existing.config
-      else updateRow.config = preservePrivateConfigOnPublicUpdate(existing.kind, existing.config, updateRow.config)
+      else updateRow.config = await withValidatedDataSourceBinding(
+        preservePrivateConfigOnPublicUpdate(existing.kind, existing.config, updateRow.config),
+        input,
+      )
       if (input.capabilities === undefined) updateRow.capabilities = existing.capabilities
       if (credentialsEncrypted !== undefined) {
         updateRow.credentials_encrypted = credentialsEncrypted
@@ -333,6 +395,7 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     const insertRow = {
       id: normalized.id || idGenerator(),
       ...baseRow,
+      config: await withValidatedDataSourceBinding(normalized.config, input),
       credentials_encrypted: credentialsEncrypted === undefined ? null : credentialsEncrypted,
     }
     const rows = await db.insertOne(TABLE, insertRow)

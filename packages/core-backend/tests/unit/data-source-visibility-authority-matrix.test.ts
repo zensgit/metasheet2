@@ -89,24 +89,33 @@ const POISON = {
 const POISON_VALUES = Object.values(POISON)
 
 // ── fake db bound to the route singleton: empty data_sources at load; a controllable
-//    integration_external_systems reference count keyed by data source id. ─────
-const externalRefCounts = new Map<string, number>()
+//    integration_external_systems reference table. Rows carry the server-side attribution stamp
+//    (config.dataSourceOwnerId) the P2-A guard counts by; the count query issues TWO where
+//    predicates (dataSourceId, then dataSourceOwnerId) which the fake captures in order. ─────
+const externalRefRows: Array<{ dataSourceId: string; ownerId: string }> = []
 const refCountQueriedIds: string[] = []
 
 function fakeDb() {
   return {
     selectFrom: (table: string) => {
       if (table === 'integration_external_systems') {
-        let capturedId: string | undefined
+        const captured: string[] = []
         const b = {
           select: () => b,
           where: (_lhs: unknown, _op: unknown, value: unknown) => {
-            capturedId = String(value)
+            captured.push(String(value))
             return b
           },
           execute: async () => {
-            refCountQueriedIds.push(capturedId ?? '')
-            return [{ count: externalRefCounts.get(capturedId ?? '') ?? 0 }]
+            const [id, owner] = captured
+            refCountQueriedIds.push(id ?? '')
+            // BOTH predicates must be present: a count filtered only by id would
+            // resurrect the cross-tenant denial this fake exists to pin away.
+            expect(captured.length).toBe(2)
+            const count = externalRefRows.filter(
+              (r) => r.dataSourceId === id && r.ownerId === owner,
+            ).length
+            return [{ count }]
           },
         }
         return b
@@ -424,10 +433,27 @@ describe('data_sources referential delete guard', () => {
     expect(refCountQueriedIds).toContain(ID)
   })
 
-  it('REFERENCED source: owner delete => coded 409 naming the COUNT and the force escape hatch; source survives', async () => {
+  it('a FOREIGN-ATTRIBUTED pin does NOT block the owner delete (P2-A: no stranger denial-of-delete)', async () => {
+    const ID = 'dsv-del-foreign'
+    await createAsOwner(ID)
+    // A stranger (any tenant) pinned this source id. The stamp is not the owner's,
+    // so the reference is unattributable — it must neither block nor be counted.
+    externalRefRows.push({ dataSourceId: ID, ownerId: 'u_hostile_other_tenant' })
+
+    const res = await as(OWNER).delete(`/api/data-sources/${ID}`)
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual({ id: ID, removed: true })
+  })
+
+  it('REFERENCED source: owner delete => coded 409 naming the OWNER-ATTRIBUTED count and the force escape hatch; source survives', async () => {
     const ID = 'dsv-del-ref'
     await createAsOwner(ID)
-    externalRefCounts.set(ID, 2)
+    externalRefRows.push(
+      { dataSourceId: ID, ownerId: OWNER.id },
+      { dataSourceId: ID, ownerId: OWNER.id },
+      // a third, foreign-attributed pin must NOT inflate the count the owner sees
+      { dataSourceId: ID, ownerId: 'u_hostile_other_tenant' },
+    )
 
     const res = await as(OWNER).delete(`/api/data-sources/${ID}`)
     expect(res.status).toBe(409)
@@ -599,34 +625,89 @@ describe('DataSourceManager.assertAccess — actor semantics', () => {
   })
 })
 
-describe('DataSourceManager.countExternalSystemReferences', () => {
+describe('DataSourceManager.countExternalSystemReferences (owner-attributed, P2-A)', () => {
+  function countCfg(id: string): DataSourceConfig {
+    return {
+      id,
+      name: id,
+      type: 'postgres',
+      connection: { host: 'localhost', port: 5432, database: 'x' },
+      options: { autoConnect: false },
+    }
+  }
+
   it('no bound db => 0 (memory-only manager: nothing persisted can reference it)', async () => {
     const m = new DataSourceManager()
     await expect(m.countExternalSystemReferences('any')).resolves.toBe(0)
   })
 
-  it('counts rows for exactly the requested id through the bound db', async () => {
+  it('counts ONLY rows attributed to the source owner (id AND dataSourceOwnerId predicates)', async () => {
     const m = new DataSourceManager({ db: fakeDb() as never })
-    externalRefCounts.set('counted-src', 3)
+    await m.addDataSource(countCfg('counted-src'), { ownerId: 'alice' })
+    externalRefRows.push(
+      { dataSourceId: 'counted-src', ownerId: 'alice' },
+      { dataSourceId: 'counted-src', ownerId: 'alice' },
+      { dataSourceId: 'counted-src', ownerId: 'alice' },
+      // foreign-attributed and unstamped pins are invisible to the guard
+      { dataSourceId: 'counted-src', ownerId: 'mallory' },
+      { dataSourceId: 'counted-src', ownerId: '' },
+    )
     await expect(m.countExternalSystemReferences('counted-src')).resolves.toBe(3)
     expect(refCountQueriedIds).toContain('counted-src')
   })
 
-  it('missing integration schema (undefined_table) => 0; any OTHER failure propagates (delete fails closed)', async () => {
-    const schemaError = Object.assign(new Error('relation "integration_external_systems" does not exist'), {
-      code: '42P01',
-    })
+  it('every reference is foreign-attributed => 0: a stranger cannot deny the owner their delete', async () => {
+    const m = new DataSourceManager({ db: fakeDb() as never })
+    await m.addDataSource(countCfg('pinned-src'), { ownerId: 'alice' })
+    externalRefRows.push({ dataSourceId: 'pinned-src', ownerId: 'u_hostile_other_tenant' })
+    await expect(m.countExternalSystemReferences('pinned-src')).resolves.toBe(0)
+  })
+
+  it('unknown scope (no such source) => 0 without touching the reference table', async () => {
+    const before = refCountQueriedIds.length
+    const m = new DataSourceManager({ db: fakeDb() as never })
+    await expect(m.countExternalSystemReferences('never-registered')).resolves.toBe(0)
+    expect(refCountQueriedIds.length).toBe(before)
+  })
+
+  it('P2-B: exact-zero ONLY on SQLSTATE 42P01 — a prose-worded error without the code propagates (fail closed)', async () => {
     const throwingDb = (err: Error) => ({
       selectFrom: () => {
         const b = { select: () => b, where: () => b, execute: async () => { throw err } }
         return b
       },
+      // addDataSource persists through these; only the reference COUNT read throws.
+      insertInto: () => {
+        const b = { values: () => b, onConflict: () => b, execute: async () => [] }
+        return b
+      },
+      updateTable: () => {
+        const b = { set: () => b, where: () => b, execute: async () => [] }
+        return b
+      },
     })
+    const withSource = async (db: unknown) => {
+      const m = new DataSourceManager({ db: db as never })
+      await m.addDataSource(countCfg('err-src'), { ownerId: 'alice' })
+      return m
+    }
 
-    const degraded = new DataSourceManager({ db: throwingDb(schemaError) as never })
-    await expect(degraded.countExternalSystemReferences('x')).resolves.toBe(0)
+    // The real undefined_table signal: SQLSTATE code — message wording irrelevant.
+    const coded = Object.assign(new Error('anything at all'), { code: '42P01' })
+    await expect((await withSource(throwingDb(coded))).countExternalSystemReferences('err-src')).resolves.toBe(0)
 
-    const broken = new DataSourceManager({ db: throwingDb(new Error('connection reset by peer')) as never })
-    await expect(broken.countExternalSystemReferences('x')).rejects.toThrow(/connection reset/)
+    // Message SOUNDS like a missing table but carries no code: a delete guard
+    // must not be talked into fail-open by prose (e.g. a proxy error, or a
+    // future separate-DB deployment surfacing connection failures this way).
+    const prose = new Error('relation "integration_external_systems" does not exist')
+    await expect((await withSource(throwingDb(prose))).countExternalSystemReferences('err-src')).rejects.toThrow(
+      /does not exist/,
+    )
+
+    // Any other failure propagates too.
+    const broken = new Error('connection reset by peer')
+    await expect((await withSource(throwingDb(broken))).countExternalSystemReferences('err-src')).rejects.toThrow(
+      /connection reset/,
+    )
   })
 })

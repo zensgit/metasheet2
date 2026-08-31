@@ -25,6 +25,18 @@ export interface DataSourceReadOnlyFacadeTestResult {
 }
 
 export interface DataSourceReadOnlyFacade {
+  /**
+   * BIND-TIME ownership probe (referential-delete guard, P2-A): asserts that
+   * `principal` may reference this data source in a persisted binding
+   * (integration_external_systems.config.dataSourceId) — i.e. the source
+   * exists AND the principal OWNS it, the exact authorization every later
+   * read through this facade enforces at runtime. Throws the facade's uniform
+   * DataSourceUnavailableError (deleted vs not-yours indistinguishable — no
+   * existence leak). Deliberately does NOT connect, and does NOT require the
+   * source to be read-only: write-gated target bindings reference writable
+   * sources.
+   */
+  assertReferenceable(dataSourceId: string, principal: string | undefined): Promise<void>
   test(dataSourceId: string, principal: string | undefined): Promise<DataSourceReadOnlyFacadeTestResult>
   getSchema(dataSourceId: string, principal: string | undefined, schema?: string): Promise<SchemaInfo>
   getTableInfo(
@@ -440,6 +452,19 @@ export function createDataSourcePluginFacade(
   }
 
   return {
+    async assertReferenceable(dataSourceId, principal) {
+      // Existence + ownership ONLY — the same two throws authorize() wraps, with the same uniform
+      // message. No read-only requirement (write-gated target bindings use writable sources), no
+      // connect (binding metadata must not dial the customer system).
+      const owner = requirePrincipal(principal)
+      const manager = getManager()
+      try {
+        manager.assertAccess(dataSourceId, owner)
+        manager.getDataSource(dataSourceId)
+      } catch (err) {
+        throw new DataSourceUnavailableError(err instanceof Error ? err.message : String(err))
+      }
+    },
     async test(dataSourceId, principal) {
       const { adapter } = await authorize(dataSourceId, principal)
       const healthy = await adapter.testConnection()

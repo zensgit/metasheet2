@@ -75,9 +75,9 @@ function managerStub(opts: ManagerStubOptions = {}) {
 }
 
 describe('createDataSourcePluginFacade', () => {
-  it('is read-only by construction — exposes only read methods, no write/credential surface', () => {
+  it('is read-only by construction — exposes only read methods plus the bind probe, no write/credential surface', () => {
     const facade = createDataSourcePluginFacade(() => managerStub().manager)
-    expect(Object.keys(facade).sort()).toEqual(['getSchema', 'getTableInfo', 'select', 'test'])
+    expect(Object.keys(facade).sort()).toEqual(['assertReferenceable', 'getSchema', 'getTableInfo', 'select', 'test'])
     const surface = facade as unknown as Record<string, unknown>
     for (const forbidden of [
       'insert', 'update', 'delete', 'create', 'remove', 'rotate', 'connect', 'disconnect',
@@ -85,6 +85,38 @@ describe('createDataSourcePluginFacade', () => {
     ]) {
       expect(surface).not.toHaveProperty(forbidden)
     }
+  })
+
+  describe('assertReferenceable (P2-A bind-time ownership probe)', () => {
+    it('passes for the owner WITHOUT connecting and WITHOUT requiring read-only', async () => {
+      // A writable source: write-gated target bindings legitimately reference one,
+      // so the probe must not impose the read path's read-only floor.
+      const m = managerStub({ adapter: adapterStub({ readOnly: false, connected: false }) })
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      await expect(facade.assertReferenceable('pg', 'owner-1')).resolves.toBeUndefined()
+      expect(m.stub.assertAccess).toHaveBeenCalledWith('pg', 'owner-1')
+      // binding metadata must never dial the customer system
+      expect(m.stub.connectDataSource).not.toHaveBeenCalled()
+      expect(m.adapter.testConnection).not.toHaveBeenCalled()
+    })
+
+    it('refuses a non-owner with the uniform not-found wording (no existence leak)', async () => {
+      const m = managerStub({ deny: true })
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      await expect(facade.assertReferenceable('pg', 'stranger')).rejects.toMatchObject({
+        code: DATA_SOURCE_NOT_FOUND_CODE,
+        message: "Data source with id 'pg' not found",
+      })
+      await expect(facade.assertReferenceable('pg', 'stranger')).rejects.toBeInstanceOf(DataSourceUnavailableError)
+    })
+
+    it('refuses a missing principal before resolving the manager (never a default identity)', async () => {
+      const getManager = vi.fn(() => managerStub().manager)
+      const facade = createDataSourcePluginFacade(getManager)
+      await expect(facade.assertReferenceable('pg', undefined)).rejects.toThrow(MISSING_PRINCIPAL_MESSAGE)
+      await expect(facade.assertReferenceable('pg', '   ')).rejects.toThrow(MISSING_PRINCIPAL_MESSAGE)
+      expect(getManager).not.toHaveBeenCalled()
+    })
   })
 
   it('resolves the manager lazily (not at construction time)', async () => {
