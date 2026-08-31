@@ -47,6 +47,12 @@ export interface MaterializeElearningOnboardingWeeklyReportInput {
   jobId: unknown
 }
 
+export interface GetElearningOnboardingWeeklyReportInput {
+  orgId: unknown
+  policyId: unknown
+  weekStart: unknown
+}
+
 export interface ElearningOnboardingWeeklyReportDto {
   reportId: string
   policyId: string
@@ -359,6 +365,23 @@ export async function materializeElearningOnboardingWeeklyReport(
       if (racedResult.rows.length === 1) return duplicate(storedReport(racedResult.rows[0]))
       fail('conflict')
     })
+  } catch (error) {
+    throw valuesFree(error)
+  }
+}
+
+export async function getElearningOnboardingWeeklyReport(
+  db: ElearningOnboardingWeeklyReportQueryable,
+  input: GetElearningOnboardingWeeklyReportInput,
+): Promise<ElearningOnboardingWeeklyReportDto> {
+  const orgId = requireOrgId(input.orgId)
+  const policyId = requireUuid(input.policyId)
+  const weekStart = requireCanonicalDate(input.weekStart)
+  try {
+    const result = await db.query(LOAD_REPORT_SQL, [orgId, policyId, weekStart])
+    if (result.rows.length === 0) fail('not_found')
+    if (result.rows.length !== 1) fail('unavailable')
+    return storedReport(result.rows[0])
   } catch (error) {
     throw valuesFree(error)
   }

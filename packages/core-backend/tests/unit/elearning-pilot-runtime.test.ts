@@ -35,6 +35,12 @@ const FLAG_EXAM_ON = {
   ELEARNING_ASSESSMENT_ENABLED: 'true',
 } as unknown as NodeJS.ProcessEnv
 
+const FLAG_ASSIGNMENT_ONLY = {
+  ELEARNING_ENABLED: 'true',
+  ELEARNING_CONTENT_ENABLED: 'true',
+  ELEARNING_ASSIGNMENT_ENABLED: 'true',
+} as unknown as NodeJS.ProcessEnv
+
 const FLAG_NAMES = ['ELEARNING_ENABLED', 'ELEARNING_CONTENT_ENABLED'] as const
 
 const LOOKALIKES: Array<string | undefined> = [
@@ -277,6 +283,21 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     })
     expect(runtime).not.toBeNull()
     expect(used).toBe(0)
+  })
+
+  test('assignment-only capability mounts onboarding without startup DB I/O', () => {
+    let used = 0
+    const runtime = createElearningPilotRuntime({
+      db: dummyDb(() => { used += 1 }),
+      env: FLAG_ASSIGNMENT_ONLY,
+    })
+
+    expect(runtime).not.toBeNull()
+    expect(used).toBe(0)
+    const source = readFileSync(RUNTIME_SRC, 'utf8')
+    expect(source).toMatch(/isElearningAssignmentSurfaceEnabled\(env\)/)
+    expect(source).toMatch(/createElearningOnboardingRouter/)
+    expect(source).toMatch(/if\s*\(onboarding\)\s*router\.use\(onboarding\)/)
   })
 
   test('defaults wrap authenticate on /api/elearning and use rbacGuard elearning admin plus learner-read any', () => {
@@ -868,7 +889,7 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     const setupSrc = src.slice(setupAt, setupEndAt)
     const startSrc = src.slice(startAt)
     expect(setupSrc).toMatch(
-      /isElearningContentSurfaceEnabled\(process\.env\)[\s\S]*\|\|\s*isElearningCreditSurfaceEnabled\(process\.env\)[\s\S]*\|\|\s*isElearningAnalyticsSurfaceEnabled\(process\.env\)/,
+      /isElearningContentSurfaceEnabled\(process\.env\)[\s\S]*\|\|\s*isElearningAssignmentSurfaceEnabled\(process\.env\)[\s\S]*\|\|\s*isElearningCreditSurfaceEnabled\(process\.env\)[\s\S]*\|\|\s*isElearningAnalyticsSurfaceEnabled\(process\.env\)/,
     )
     const createAt = setupSrc.search(/createElearningPilotRuntime/)
     const mountAt = setupSrc.search(

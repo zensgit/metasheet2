@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   elearningOnboardingWeeklyReportEnqueueSql,
+  getElearningOnboardingWeeklyReport,
   materializeElearningOnboardingWeeklyReport,
   enqueueElearningOnboardingWeeklyReports,
   type ElearningOnboardingWeeklyReportDb,
@@ -216,6 +217,32 @@ describe('e-learning onboarding weekly aggregate report', () => {
       },
     }
     await expectErrorCode(materializeElearningOnboardingWeeklyReport(materializeDb(badCount), { orgId: ORG, jobId: JOB }), 'unavailable')
+  })
+
+  it('reads one closed same-org report and fails closed on missing or duplicate rows', async () => {
+    const calls: unknown[][] = []
+    const found: ElearningOnboardingWeeklyReportQueryable = {
+      async query(_sql, params = []) {
+        calls.push([...params])
+        return { rows: [reportRow()] }
+      },
+    }
+    await expect(getElearningOnboardingWeeklyReport(found, {
+      orgId: ORG,
+      policyId: POLICY,
+      weekStart: WEEK,
+    })).resolves.toEqual({ ...reportRowToDto(), duplicate: false })
+    expect(calls).toEqual([[ORG, POLICY, WEEK]])
+
+    for (const rows of [[], [reportRow(), reportRow()]]) {
+      await expectErrorCode(getElearningOnboardingWeeklyReport({
+        async query() { return { rows } },
+      }, {
+        orgId: ORG,
+        policyId: POLICY,
+        weekStart: WEEK,
+      }), rows.length === 0 ? 'not_found' : 'unavailable')
+    }
   })
 
   it('requires a running persisted job and suppresses all counts below five', async () => {

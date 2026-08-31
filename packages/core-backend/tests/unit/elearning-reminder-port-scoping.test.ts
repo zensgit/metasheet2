@@ -50,21 +50,59 @@ describe('e-learning L2 reminder producer port scoping', () => {
     expect(typeof elearning.elearningExamExpirySettlement?.settle).toBe('function')
     expect(typeof elearning.elearningStatsDailyProjection?.project).toBe('function')
     expect(typeof elearning.elearningStatsDailyProjection?.enqueueDue).toBe('function')
+    expect(typeof elearning.elearningOnboarding?.processAssignment).toBe('function')
+    expect(typeof elearning.elearningOnboarding?.materializeWeeklyReport).toBe('function')
     expect(typeof elearning.elearningNotificationEligibility?.check).toBe('function')
     expect(elearning.elearningNotificationDispatch).toBeUndefined()
 
     expect(contextFor('plugin-attendance').services.elearningReminderProducer).toBeUndefined()
     expect(contextFor('plugin-attendance').services.elearningExamExpirySettlement).toBeUndefined()
     expect(contextFor('plugin-attendance').services.elearningStatsDailyProjection).toBeUndefined()
+    expect(contextFor('plugin-attendance').services.elearningOnboarding).toBeUndefined()
     expect(contextFor('plugin-attendance').services.elearningNotificationEligibility).toBeUndefined()
     expect(contextFor('plugin-integration-core').services.elearningReminderProducer).toBeUndefined()
     expect(contextFor('plugin-integration-core').services.elearningExamExpirySettlement).toBeUndefined()
     expect(contextFor('plugin-integration-core').services.elearningStatsDailyProjection).toBeUndefined()
+    expect(contextFor('plugin-integration-core').services.elearningOnboarding).toBeUndefined()
     expect(contextFor('plugin-integration-core').services.elearningNotificationEligibility).toBeUndefined()
     expect(contextFor('plugin-some-other').services.elearningReminderProducer).toBeUndefined()
     expect(contextFor('plugin-some-other').services.elearningExamExpirySettlement).toBeUndefined()
     expect(contextFor('plugin-some-other').services.elearningStatsDailyProjection).toBeUndefined()
+    expect(contextFor('plugin-some-other').services.elearningOnboarding).toBeUndefined()
     expect(contextFor('plugin-some-other').services.elearningNotificationEligibility).toBeUndefined()
+  })
+
+  it('rechecks independent onboarding assignment and analytics gates before database access', async () => {
+    const port = contextFor('plugin-elearning').services.elearningOnboarding
+    if (!port) throw new Error('expected e-learning onboarding port')
+    const poolGet = vi.spyOn(poolManager, 'get').mockImplementation(() => {
+      throw new Error('database touched')
+    })
+    const input = {
+      orgId: 'org-onboarding-port',
+      jobId: '11111111-1111-4111-8111-111111111111',
+    }
+
+    setFlags({})
+    await expect(port.processAssignment(input)).rejects.toMatchObject({ code: 'unavailable' })
+    await expect(port.materializeWeeklyReport(input)).rejects.toMatchObject({ code: 'unavailable' })
+    expect(poolGet).not.toHaveBeenCalled()
+
+    setFlags({
+      ELEARNING_ENABLED: 'true',
+      ELEARNING_CONTENT_ENABLED: 'true',
+      ELEARNING_ASSIGNMENT_ENABLED: 'true',
+    })
+    await expect(port.processAssignment(input)).rejects.toThrow('database touched')
+    await expect(port.materializeWeeklyReport(input)).rejects.toMatchObject({ code: 'unavailable' })
+
+    setFlags({
+      ELEARNING_ENABLED: 'true',
+      ELEARNING_ANALYTICS_ENABLED: 'true',
+    })
+    await expect(port.materializeWeeklyReport(input)).rejects.toThrow('database touched')
+    await expect(port.processAssignment(input)).rejects.toMatchObject({ code: 'unavailable' })
+    expect(poolGet).toHaveBeenCalledTimes(2)
   })
 
   it('rechecks master and analytics flags before touching the database', async () => {

@@ -305,6 +305,14 @@ import {
   ElearningAnalyticsExportError,
   materializeElearningAnalyticsExport,
 } from './services/elearning-analytics-export'
+import {
+  ElearningOnboardingAssignmentError,
+  processElearningOnboardingAssignment,
+} from './services/elearning-onboarding-assignment'
+import {
+  ElearningOnboardingWeeklyReportError,
+  materializeElearningOnboardingWeeklyReport,
+} from './services/elearning-onboarding-weekly-report'
 import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
 import { adminUsersRouter } from './routes/admin-users'
@@ -1458,6 +1466,7 @@ export class MetaSheetServer {
     // no startup query. Do not remount from start().
     const elearningPilotRuntime = (
       isElearningContentSurfaceEnabled(process.env)
+      || isElearningAssignmentSurfaceEnabled(process.env)
       || isElearningCreditSurfaceEnabled(process.env)
       || isElearningAnalyticsSurfaceEnabled(process.env)
       || isElearningPracticeSurfaceEnabled(process.env)
@@ -2343,6 +2352,29 @@ export class MetaSheetServer {
                     throw new ElearningAnalyticsExportError('disabled')
                   }
                   return cleanupElearningAnalyticsExport(poolManager.get(), input)
+                },
+              }
+            : undefined,
+        // L5 onboarding jobs are persisted materialization requests. Core
+        // repeats the exact capability gates and owns assignment/report SoR.
+        elearningOnboarding:
+          manifest.name === 'plugin-elearning'
+            ? {
+                processAssignment: async (
+                  input: import('./services/elearning-onboarding-assignment').ProcessElearningOnboardingAssignmentInput,
+                ) => {
+                  if (!isElearningAssignmentSurfaceEnabled()) {
+                    throw new ElearningOnboardingAssignmentError('unavailable')
+                  }
+                  return processElearningOnboardingAssignment(poolManager.get(), input)
+                },
+                materializeWeeklyReport: async (
+                  input: import('./services/elearning-onboarding-weekly-report').MaterializeElearningOnboardingWeeklyReportInput,
+                ) => {
+                  if (!isElearningAnalyticsSurfaceEnabled()) {
+                    throw new ElearningOnboardingWeeklyReportError('unavailable')
+                  }
+                  return materializeElearningOnboardingWeeklyReport(poolManager.get(), input)
                 },
               }
             : undefined,
