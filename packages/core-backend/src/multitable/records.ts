@@ -570,12 +570,12 @@ export async function patchRecord(
     ...patch,
   }
 
-  // lock-guarded: plugin-SDK patchRecord (M1) — guardRecordNotLockedForPlugin(actor=null) rejected above.
-  // revision-emitted: D-1c slice ② (A2) — recordRecordRevision(action:'update', source:'plugin') @559.
   const updateParams: unknown[] = [JSON.stringify(nextData), input.recordId, input.sheetId]
   const versionPredicate = input.expectedVersion === undefined ? '' : ' AND version = $4'
   if (input.expectedVersion !== undefined) updateParams.push(input.expectedVersion)
   const updated = await query(
+    // lock-guarded: plugin-SDK patchRecord (M1) — guardRecordNotLockedForPlugin(actor=null) rejected above.
+    // revision-emitted: D-1c slice ② (A2) — recordRecordRevision(action:'update', source:'plugin') below.
     `UPDATE meta_records
      SET data = $1::jsonb, version = version + 1, updated_at = now()
      WHERE id = $2 AND sheet_id = $3${versionPredicate}

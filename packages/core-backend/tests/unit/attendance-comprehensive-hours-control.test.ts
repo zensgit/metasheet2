@@ -709,7 +709,7 @@ describe('comprehensive-hours period value-plumbing (PR6)', () => {
     const r1 = await helpers.syncAttendanceReportPeriodSummary(mt.context, createSyncDb(monthCap(10560)), orgId, logger, { userId, period: naturalMonth })
     expect(r1.created).toBe(1)
     const stored = mt.createRecord.mock.calls[0][0].data
-    mt.queryRecords.mockResolvedValue([{ id: 'rec-1', data: stored }])
+    mt.queryRecords.mockResolvedValue([{ id: 'rec-1', version: 1, data: stored }])
 
     helpers.resetAttendanceSettingsCacheForTests()
     const r2 = await helpers.syncAttendanceReportPeriodSummary(mt.context, createSyncDb(monthCap(10560)), orgId, logger, { userId, period: naturalMonth })
@@ -726,7 +726,7 @@ describe('comprehensive-hours period value-plumbing (PR6)', () => {
 
   it('re-syncs a pre-PR6 row whose fingerprint predates the comprehensive-hours columns', async () => {
     const mt = createMultitableContext()
-    mt.queryRecords.mockResolvedValue([{ id: 'rec-old', data: { source_fingerprint: 'stale-old-fp', field_fingerprint: 'stale-old-ff' } }])
+    mt.queryRecords.mockResolvedValue([{ id: 'rec-old', version: 1, data: { source_fingerprint: 'stale-old-fp', field_fingerprint: 'stale-old-ff' } }])
     const result = await helpers.syncAttendanceReportPeriodSummary(mt.context, createSyncDb(monthCap(10560)), orgId, logger, { userId, period: naturalMonth })
     expect(result.patched).toBe(1)
     expect(mt.patchRecord).toHaveBeenCalledTimes(1)
@@ -961,7 +961,7 @@ describe('comprehensive-hours payroll_cycle cap-mapping (§7 precise template-wi
     const stored = createRecord.mock.calls[0][0].data
     expect(stored.comprehensive_hours_cap_source).toBe(PAYROLL_SOURCE)
     expect(stored.comprehensive_hours_cap_minutes).toBe(10560)
-    queryRecords.mockResolvedValue([{ id: 'rec-1', data: stored }])
+    queryRecords.mockResolvedValue([{ id: 'rec-1', version: 1, data: stored }])
 
     helpers.resetAttendanceSettingsCacheForTests()
     const r2 = await helpers.syncAttendanceReportPeriodSummary(context, syncDb(monthCap(9000)), orgId, logger, { userId, period })
