@@ -1261,6 +1261,36 @@ async function main() {
     assert.equal(k3LetterAfter.status, 'open', 'the letter stays open — refusal is not consumption')
   }
 
+  // --- E4 / G-4 PARITY (20260901): the SIBLING K3 kind, refused at the SAME replay gate ---
+  // The gate above named `erp:k3-wise-webapi` as a literal, so `erp:k3-wise-sqlserver` — the other
+  // K3 transport — walked past it and replayed a live write. It is now matched by the fence's
+  // kind predicate, with the same code and the same "letter stays open" property. The mock-target
+  // replay above remains the POSITIVE CONTROL: this refusal is attributable to the KIND.
+  {
+    const sqlReplay = createRunnerHarness({ sourceRecords: [], targetSystemKind: 'erp:k3-wise-sqlserver' })
+    const sqlLetters = createDeadLetterStore({ db: sqlReplay.db, idGenerator: () => 'dl_k3sql' })
+    await sqlLetters.createDeadLetter({
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      runId: 'run_k3sql',
+      pipelineId: 'pipe_1',
+      sourcePayload: { code: 'c-k3sql', revision: 'r1', qty: '1', name: 'K3 SQL row', updatedAt: '2026-09-01T00:00:00.000Z' },
+      transformedPayload: null,
+      errorCode: 'VALIDATION_FAILED',
+      errorMessage: 'k3 sqlserver row failed',
+    })
+    const sqlRefusal = await sqlReplay.runner.replayDeadLetter({
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      id: 'dl_k3sql',
+    }).catch((error) => error)
+    assert.ok(sqlRefusal instanceof Error, 'K3 SQL Server-target replay must refuse')
+    assert.equal(sqlRefusal.details && sqlRefusal.details.code, 'K3_WISE_REPLAY_DISABLED')
+    assert.equal(sqlReplay.targetRows.size, 0, 'nothing may be written by a refused replay')
+    const sqlLetterAfter = await sqlLetters.getDeadLetter({ tenantId: 'tenant_1', workspaceId: null, id: 'dl_k3sql' })
+    assert.equal(sqlLetterAfter.status, 'open', 'the letter stays open — refusal is not consumption')
+  }
+
   const doubleReplay = await replay.runner.replayDeadLetter({
     tenantId: 'tenant_1',
     workspaceId: null,
