@@ -805,6 +805,95 @@ export async function listWorkbenchExternalSystems(scope: IntegrationScope = {})
   return Array.isArray(data) ? data : []
 }
 
+// ---------------------------------------------------------------------------
+// 对接总览 (GET /api/integration/hub/overview)
+//
+// ONE read-tier call answering "对接了哪些系统、各用哪个连接、谁在用、状态如何". The backend does the
+// join and enforces the values-free boundary; these types mirror its response EXACTLY, and
+// deliberately have no field for a host, port, connection string, credential or error text —
+// if such a field ever appeared here it would mean the backend regressed.
+// ---------------------------------------------------------------------------
+export interface IntegrationHubBilingualLabel {
+  zh: string
+  en: string
+}
+
+export type IntegrationHubConnectionModel = 'data-source' | 'self-contained' | 'internal'
+export type IntegrationHubConnectionUnresolvedReason = 'not_bound' | 'not_visible' | 'directory_unavailable' | null
+export type IntegrationHubWriteCapability = 'none' | 'internal' | 'gated' | 'fenced' | 'unregistered'
+export type IntegrationHubConsumerType = 'table-action' | 'pipeline' | 'read-source-config' | 'read-source-composition'
+
+export interface IntegrationHubConnection {
+  model: IntegrationHubConnectionModel
+  bound: boolean
+  dataSourceId: string | null
+  resolved: boolean
+  name: string | null
+  type: string | null
+  status: string | null
+  unresolvedReason: IntegrationHubConnectionUnresolvedReason
+}
+
+export interface IntegrationHubConsumer {
+  type: IntegrationHubConsumerType
+  id: string | null
+  name: string | null
+  label: IntegrationHubBilingualLabel
+  role: string
+  count: number
+}
+
+export interface IntegrationHubSystem {
+  id: string
+  name: string | null
+  kind: string
+  kindLabel: IntegrationHubBilingualLabel
+  kindRegistered: boolean
+  role: string | null
+  status: string | null
+  lastTestedAt: string | null
+  /** A BOOLEAN, never the failure text — the backend refuses to send the string. */
+  hasLastError: boolean
+  connection: IntegrationHubConnection
+  writeCapability: {
+    reads: string
+    writes: IntegrationHubWriteCapability
+    fenced: boolean
+    notice: IntegrationHubBilingualLabel
+  }
+  consumers: IntegrationHubConsumer[]
+  technical: {
+    systemId: string
+    kind: string
+    role: string | null
+    status: string | null
+    dataSourceId: string | null
+    workspaceId: string | null
+    createdAt: string | null
+    updatedAt: string | null
+  }
+}
+
+export interface IntegrationHubOverview {
+  systemCount: number
+  systems: IntegrationHubSystem[]
+  dataSourceDirectory: { available: boolean }
+}
+
+export async function fetchIntegrationHubOverview(scope: IntegrationScope = {}): Promise<IntegrationHubOverview> {
+  const query = buildQueryString({
+    tenantId: scope.tenantId,
+    workspaceId: scope.workspaceId,
+  })
+  const response = await apiFetch(`/api/integration/hub/overview${query ? `?${query}` : ''}`)
+  const data = await parseIntegrationResponse<IntegrationHubOverview>(response)
+  return {
+    systemCount: typeof data?.systemCount === 'number' ? data.systemCount : 0,
+    systems: Array.isArray(data?.systems) ? data.systems : [],
+    dataSourceDirectory: { available: data?.dataSourceDirectory?.available === true },
+  }
+}
+
 export async function getPlmDataSourceCapabilities(dataSourceId: string): Promise<PlmIntegrationCapabilitiesResult> {
   const normalizedId = dataSourceId.trim()
   if (!normalizedId) {

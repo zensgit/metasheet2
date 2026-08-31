@@ -40,6 +40,16 @@ vi.mock('../src/utils/api', () => ({
   apiGet: (...args: unknown[]) => apiGetMock(...args),
 }))
 
+// 对接总览: the view's FIRST section fires GET /api/integration/hub/overview on mount, so every
+// mock table in this file has to answer it. This is the empty answer — tests that care about the
+// overview's CONTENT live in IntegrationHubOverviewSection.spec.ts, which drives the section
+// directly; here it only has to not be an unexpected URL.
+const EMPTY_HUB_OVERVIEW = {
+  systemCount: 0,
+  systems: [] as unknown[],
+  dataSourceDirectory: { available: false },
+}
+
 function jsonResponse(data: unknown): Response {
   return new Response(JSON.stringify({ ok: true, data }), {
     status: 200,
@@ -129,15 +139,16 @@ describe('IntegrationWorkbenchView', () => {
   // IU-2a quality gate: the rail↔view WIRING is pinned here (the rail component's own spec uses
   // fixture groups, so without this a dropped group — or the whole rail — in the view would pass
   // every existing test). Six IU-2a groups + the BA-UI-1 bridge-agent group (add-only extension,
-  // docs/development/bridge-agent-admin-page-design-lock-20260707.md), each anchoring an existing
-  // section id.
-  it('wires the seven rail groups to real section anchors', async () => {
+  // docs/development/bridge-agent-admin-page-design-lock-20260707.md) + the 对接总览 group, each
+  // anchoring an existing section id.
+  it('wires the eight rail groups to real section anchors, overview FIRST', async () => {
     localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
     apiFetchMock.mockImplementation(async (url: string) => {
       if (url === '/api/integration/adapters') return jsonResponse([])
       if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
       if (url === '/api/integration/staging/descriptors') return jsonResponse([])
       if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/hub/overview?tenantId=default') return jsonResponse(EMPTY_HUB_OVERVIEW)
       throw new Error(`unexpected URL ${url}`)
     })
     container = document.createElement('div')
@@ -149,13 +160,15 @@ describe('IntegrationWorkbenchView', () => {
     await flushUi(8)
     const root = container
     const expected: Array<[string, string]> = [
+      // 对接总览: prepended, and ORDER is load-bearing here — this is the first screen.
+      ['hub-overview', 'int-sec-hub-overview'],
       ['connection', 'int-sec-connection'],
       ['read-source', 'int-sec-read-source'],
       ['combination', 'int-sec-combination-config'],
       ['cleaning-mapping', 'int-sec-object-template'],
       ['run-push', 'int-sec-run-push'],
       ['monitoring', 'int-sec-monitoring'],
-      // BA-UI-1: 7th group (add-only — the six IU-2a pairs above are unchanged).
+      // BA-UI-1: add-only — the six IU-2a pairs above are unchanged.
       ['bridge-agent', 'int-sec-bridge-agent'],
     ]
     for (const [groupId, sectionId] of expected) {
@@ -163,7 +176,15 @@ describe('IntegrationWorkbenchView', () => {
       expect(item, `rail group ${groupId} must render`).not.toBeNull()
       expect(root.querySelector(`#${sectionId}`), `section ${sectionId} must exist for ${groupId}`).not.toBeNull()
     }
-    expect(root.querySelectorAll('[data-testid^="integration-rail-"]').length).toBe(7)
+    expect(root.querySelectorAll('[data-testid^="integration-rail-"]').length).toBe(8)
+    // FIRST, not merely present: both in the rail and in the section column.
+    const railIds = Array.from(root.querySelectorAll('[data-testid^="integration-rail-"]'))
+      .map((el) => el.getAttribute('data-testid'))
+    expect(railIds[0]).toBe('integration-rail-hub-overview')
+    const sectionIds = Array.from(root.querySelectorAll('.integration-workbench__sections > section'))
+      .map((el) => el.id)
+    expect(sectionIds[0]).toBe('int-sec-hub-overview')
+    expect(sectionIds[1]).toBe('int-sec-connection')
   })
 
   it('loads systems, object schemas, and previews a template payload', async () => {

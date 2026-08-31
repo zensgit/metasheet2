@@ -37,6 +37,14 @@
         />
         <div class="integration-workbench__sections">
 
+    <!-- 对接总览: the FIRST screen. Read-only summary; both actions are navigation into the
+         existing 连接管理 affordances below, never a second editor. -->
+    <IntegrationHubOverviewSection
+      :scope="currentScope()"
+      @open-connection="openConnectionFromOverview"
+      @open-connections="scrollToConnections"
+    />
+
     <IntegrationConnectionSection
       :bi="bi"
       :refresh-bootstrap="refreshBootstrap"
@@ -516,6 +524,7 @@ import IntegrationMappingRulesSection from '../components/integration/Integratio
 import IntegrationObjectTemplateSection from '../components/integration/IntegrationObjectTemplateSection.vue'
 import IntegrationPayloadPreviewSection from '../components/integration/IntegrationPayloadPreviewSection.vue'
 import IntegrationConnectionSection from '../components/integration/IntegrationConnectionSection.vue'
+import IntegrationHubOverviewSection from '../components/integration/IntegrationHubOverviewSection.vue'
 import IntegrationBridgeAgentSection from '../components/integration/IntegrationBridgeAgentSection.vue'
 import IntegrationPipelineRunSection from '../components/integration/IntegrationPipelineRunSection.vue'
 import IntegrationStockPrepPanel from '../components/integration/IntegrationStockPrepPanel.vue'
@@ -656,6 +665,9 @@ function bi(zh: string, en: string): string {
 // button scrolls to the FIRST section id in its group; `sectionGroupIds` below drives the active
 // highlight for every section id that belongs to a group, regardless of DOM position.
 const railGroups = computed<IntegrationWorkbenchRailGroup[]>(() => [
+  // 对接总览: 8th group, prepended — the first screen an operator should land on. ADD-ONLY, exactly
+  // like the BA-UI-1 group below: every existing group keeps its id, label and target anchor.
+  { id: 'hub-overview', label: bi('总览', 'Overview'), targetId: 'int-sec-hub-overview' },
   { id: 'connection', label: bi('连接管理', 'Connections'), targetId: 'int-sec-connection' },
   { id: 'read-source', label: bi('读取源', 'Read Sources'), targetId: 'int-sec-read-source' },
   { id: 'combination', label: bi('组合', 'Composition'), targetId: 'int-sec-combination-config' },
@@ -669,6 +681,7 @@ const railGroups = computed<IntegrationWorkbenchRailGroup[]>(() => [
 ])
 
 const sectionGroupIds: Record<string, string> = {
+  'int-sec-hub-overview': 'hub-overview',
   'int-sec-connection': 'connection',
   'int-sec-read-source': 'read-source',
   'int-sec-combination-config': 'combination',
@@ -682,13 +695,27 @@ const sectionGroupIds: Record<string, string> = {
   'int-sec-bridge-agent': 'bridge-agent',
 }
 
-const activeRailGroupId = ref('connection')
+const activeRailGroupId = ref('hub-overview')
 let workbenchSectionObserver: IntersectionObserver | null = null
 
 function scrollToRailGroup(group: IntegrationWorkbenchRailGroup): void {
   activeRailGroupId.value = group.id
   if (typeof document === 'undefined') return
   document.getElementById(group.targetId)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+// 对接总览 -> 连接管理. The overview builds NO editor of its own: it hands the system id back here,
+// and the existing `editConnection` (the same function the inventory row's "编辑" button calls)
+// loads it into the connection draft. A card naming a system this page has not loaded yet — a
+// stale overview after a delete elsewhere — scrolls without selecting rather than throwing.
+function scrollToConnections(): void {
+  scrollToRailGroup({ id: 'connection', label: bi('连接管理', 'Connections'), targetId: 'int-sec-connection' })
+}
+
+function openConnectionFromOverview(systemId: string): void {
+  const system = systems.value.find((candidate) => candidate.id === systemId)
+  if (system) editConnection(system)
+  scrollToConnections()
 }
 
 onMounted(() => {

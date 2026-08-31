@@ -24,7 +24,41 @@ export interface DataSourceReadOnlyFacadeTestResult {
   success: boolean
 }
 
+/**
+ * The DISPLAY descriptor of one data source: what an operator needs to recognize a connection on
+ * a summary screen, and nothing else.
+ *
+ * Exactly four fields, and none of them is a connection detail: no host, port, database, schema,
+ * username, connection string, options or credential state. `status` is the LIVE connection state
+ * (`adapter.isConnected()`), not the `data_sources.status` column — the column is written once at
+ * creation and does not track reality.
+ */
+export interface DataSourceDescriptor {
+  id: string
+  name: string
+  type: string
+  status: 'connected' | 'disconnected'
+}
+
 export interface DataSourceReadOnlyFacade {
+  /**
+   * Resolve a data source id to its display descriptor, for the 对接总览 hub screen.
+   *
+   * AUTHORITY (aligned with #5401's visibility model): OWNER-ONLY. `principal` is passed to
+   * `assertAccess` as a bare user-id string, which `normalizeActor` treats as the DATA-PLANE shape
+   * — strictly owner-scoped, NO platform-admin bypass. This is deliberate and load-bearing: the
+   * overview shows a NON-admin the connection name a system points at, and #5401 made non-admin
+   * data-plane access owner-only, so `describe` must NOT become a side channel that reveals a
+   * connection name the same non-admin could not see on `/data-sources`. A non-owner (admin or not)
+   * gets the uniform DataSourceUnavailableError — deleted vs not-yours indistinguishable, no
+   * existence leak — and the hub card renders 连接:已配置(他人管理) instead of a name. Management
+   * visibility (an admin listing every source) stays on the management routes, never here.
+   *
+   * Read-only in the strongest sense available: it does NOT connect (no `connectDataSource`), does
+   * NOT decrypt, and never touches `adapter.getConfig()` — the only object in this layer that
+   * carries `connection` and `credentials`. Returns only {id, name, type, status}.
+   */
+  describe(dataSourceId: string, principal: string | undefined): Promise<DataSourceDescriptor>
   /**
    * BIND-TIME ownership probe (referential-delete guard, P2-A): asserts that
    * `principal` may reference this data source in a persisted binding
@@ -452,6 +486,34 @@ export function createDataSourcePluginFacade(
   }
 
   return {
+    async describe(dataSourceId, principal) {
+      // OWNER-ONLY (see the interface doc): `owner` is a bare principal string, so #5401's
+      // normalizeActor treats this as the data-plane shape — no platform-admin bypass. A non-owner
+      // gets the uniform not-found and the hub renders 已配置(他人管理); describe is never a side
+      // channel for a connection name the caller could not see on /data-sources.
+      //
+      // Deliberately NOT routed through `authorize`: that helper connects the adapter and enforces
+      // the read-only-source guard, both of which are wrong here. Describing a connection must not
+      // open one (a summary screen listing ten bridges would otherwise dial ten databases), and a
+      // WRITABLE data source bound to a `data-source:sql-write-gated` target is a legitimate thing
+      // for that screen to name — refusing it would blank out exactly the row an operator most
+      // needs to see. Ownership is still enforced, by the same assertAccess every read uses.
+      const owner = requirePrincipal(principal)
+      const manager = getManager()
+      let adapter
+      try {
+        manager.assertAccess(dataSourceId, owner)
+        adapter = manager.getDataSource(dataSourceId)
+      } catch (err) {
+        throw new DataSourceUnavailableError(err instanceof Error ? err.message : String(err))
+      }
+      return {
+        id: dataSourceId,
+        name: adapter.getName(),
+        type: adapter.getType(),
+        status: adapter.isConnected() ? 'connected' : 'disconnected',
+      }
+    },
     async assertReferenceable(dataSourceId, principal) {
       // Existence + ownership ONLY — the same two throws authorize() wraps, with the same uniform
       // message. No read-only requirement (write-gated target bindings use writable sources), no
