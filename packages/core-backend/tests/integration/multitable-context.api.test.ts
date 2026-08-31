@@ -1049,20 +1049,23 @@ describe('Multitable context API', () => {
     })
   })
 
-  test('deletes a multitable sheet by id', async () => {
+  // F21 deletion half — this test changed DELIBERATELY, in two ways.
+  //  (1) AUTHORITY: `multitable:write` alone no longer deletes a sheet. Deleting a whole table is the
+  //      same schema authority as renaming one field header (#5357), so the actor now needs
+  //      `multitable:manage-schema`. The old actor's refusal is pinned in the sibling assertion below.
+  //  (2) SOFT DELETE: the route sets `deleted_at` instead of `DELETE FROM meta_sheets`, and no longer
+  //      destroys inbound `meta_links` — the rows stay so `POST /sheets/:sheetId/restore` is complete.
+  //      The old `DELETE FROM meta_links ...` handler is gone because the route no longer issues it;
+  //      an unhandled SQL in this harness throws, so a route that still deleted links would fail here.
+  test('soft-deletes a multitable sheet by id for a schema-authority actor', async () => {
     const { app } = await createApp({
-      tokenPerms: ['multitable:write'],
+      tokenPerms: ['multitable:write', 'multitable:manage-schema'],
       queryHandler: async (sql, params) => {
         if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [{ id: 'sheet_ops' }], rowCount: 1 }
         }
-        if (sql.includes('DELETE FROM meta_links WHERE foreign_record_id IN')) {
-          // sheet-delete cascade: clean inbound dangling edges before the sheet's records vanish (same txn).
-          expect(params).toEqual(['sheet_ops'])
-          return { rows: [], rowCount: 0 }
-        }
-        if (sql.includes('DELETE FROM meta_sheets WHERE id = $1')) {
+        if (sql.includes('UPDATE meta_sheets SET deleted_at = now()')) {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [], rowCount: 1 }
         }
@@ -1082,6 +1085,37 @@ describe('Multitable context API', () => {
 
     expect(response.body.ok).toBe(true)
     expect(response.body.data).toEqual({ deleted: 'sheet_ops' })
+  })
+
+  // The severe half of the finding: before this change a write-only operator held `canManageViews`,
+  // which was all the delete route asked for — so an actor who could not rename ONE field header
+  // could destroy the WHOLE sheet. The refusal is the SERVER's, not the UI's.
+  test('refuses a sheet delete from a write-only operator, naming the authority that would be accepted', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read', 'multitable:write'],
+      queryHandler: async (sql) => {
+        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
+          return { rows: [{ id: 'sheet_ops' }], rowCount: 1 }
+        }
+        if (/^\s*(UPDATE|DELETE)\s+(FROM\s+)?meta_sheets\b/i.test(sql)) {
+          throw new Error('the operator must never reach the write')
+        }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .delete('/api/multitable/sheets/sheet_ops')
+      .expect(403)
+
+    expect(response.body.ok).toBe(false)
+    expect(response.body.error.code).toBe('FORBIDDEN')
+    // Actionable: it says what WOULD be accepted, and it says multitable:write is not it.
+    expect(response.body.error.message).toContain('multitable:manage-schema')
+    expect(response.body.error.message).toContain('multitable:write alone is not sufficient')
   })
 
   test('returns 404 when deleting a missing multitable sheet', async () => {

@@ -1130,7 +1130,6 @@ describe('Multitable sheet-scoped permissions API', () => {
       await request(app).post('/api/multitable/views').send({ sheetId: 'sheet_ops', name: 'Blocked View', type: 'grid' }),
       await request(app).patch('/api/multitable/views/view_grid').send({ name: 'Blocked view rename' }),
       await request(app).delete('/api/multitable/views/view_grid'),
-      await request(app).delete('/api/multitable/sheets/sheet_ops'),
     ]
 
     for (const response of responses) {
@@ -1140,6 +1139,13 @@ describe('Multitable sheet-scoped permissions API', () => {
         error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
       })
     }
+
+    // The sheet delete is refused too — split out only because its refusal now NAMES the authority
+    // that would be accepted instead of the generic 'Insufficient permissions'. Same 403, more useful.
+    const sheetDelete = await request(app).delete('/api/multitable/sheets/sheet_ops')
+    expect(sheetDelete.status).toBe(403)
+    expect(sheetDelete.body.error.code).toBe('FORBIDDEN')
+    expect(sheetDelete.body.error.message).toContain('multitable:manage-schema')
   })
 
   test('lists fields and views when sheet permission is read-only without global multitable permission', async () => {
@@ -2489,7 +2495,19 @@ describe('Multitable sheet-scoped permissions API', () => {
     })
   })
 
-  test('allows sheet delete when sheet permission is admin without global multitable write', async () => {
+  // F21 deletion half — the AUTHORITY here is unchanged, only the MECHANISM is.
+  //
+  // The route's gate moved from `canManageViews` to `canManageFields`, which closes the GLOBAL
+  // `multitable:write` operator's hole. It does not close this one, deliberately: a sheet-scoped FULL
+  // WRITE grant already confers `canManageFields` ON THAT SHEET through
+  // `applyContextSheetSchemaWriteGrant` (sheet-capabilities.ts) — sheet-scoped full write IS schema
+  // authority for that sheet, and #5357 left that intact. So a sheet-scoped admin still deletes, as
+  // before, and this test still asserts a 200.
+  //
+  // What DID change is the write: `deleted_at` instead of `DELETE FROM meta_sheets`, with the sheet's
+  // records and inbound links left in place for `POST /sheets/:sheetId/restore`.
+  test('allows sheet delete when sheet permission is admin without global multitable write, and the delete is soft', async () => {
+    const softDeleteParams: unknown[][] = []
     const { app } = await createApp({
       tokenPerms: ['multitable:read'],
       queryHandler: async (sql, params) => {
@@ -2501,10 +2519,12 @@ describe('Multitable sheet-scoped permissions API', () => {
           expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
           return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
         }
-        if (sql.includes('DELETE FROM meta_sheets WHERE id = $1')) {
-          expect(params).toEqual(['sheet_ops'])
+        if (sql.includes('UPDATE meta_sheets SET deleted_at = now()')) {
+          softDeleteParams.push([...(params ?? [])])
           return { rows: [], rowCount: 1 }
         }
+        // Nothing may be destroyed: an unhandled SQL throws in this harness, so a route that still
+        // issued `DELETE FROM meta_sheets` / `DELETE FROM meta_links` would fail here rather than pass.
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
@@ -2520,6 +2540,7 @@ describe('Multitable sheet-scoped permissions API', () => {
       ok: true,
       data: { deleted: 'sheet_ops' },
     })
+    expect(softDeleteParams).toEqual([['sheet_ops']])
   })
 
   test('rejects records summary when sheet permission has no read access', async () => {

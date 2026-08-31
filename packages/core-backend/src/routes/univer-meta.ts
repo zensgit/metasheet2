@@ -153,6 +153,7 @@ import {
   fieldDeleteDiff,
   fieldDeleteDiffWithSequence,
 } from '../multitable/config-revision-recorder'
+import { checkDisplayNameHygiene } from '../multitable/display-name-hygiene'
 import {
   isTombstoneCaptureEnabled,
   countFieldDeleteCaptureRows,
@@ -2778,10 +2779,19 @@ async function loadLinkValuesByRecord(
     const linkRes = await query(
       // Repair-on-read remains required for historical dangling rows admitted by the target FK's
       // NOT VALID rollout. New writes are FK-checked, but legacy ghosts must never reach a read.
+      //
+      // The sheet join carries the SOFT-DELETE half: `DELETE /sheets/:sheetId` no longer destroys the
+      // sheet's records (so a restore can be complete), so "the target sheet is gone" is now a
+      // `deleted_at` fact rather than an absent row. Filtering here keeps the observable read
+      // behaviour identical to the old hard-delete cascade — a source sheet shows no link into a
+      // deleted sheet — while the edge itself survives for the restore.
       `SELECT field_id, record_id, foreign_record_id
        FROM meta_links
        WHERE field_id = ANY($1::text[]) AND record_id = ANY($2::text[])
-         AND EXISTS (SELECT 1 FROM meta_records r WHERE r.id = foreign_record_id)`,
+         AND EXISTS (
+           SELECT 1 FROM meta_records r
+             JOIN meta_sheets s ON s.id = r.sheet_id
+            WHERE r.id = foreign_record_id AND s.deleted_at IS NULL)`,
       [fieldIds, recordIds],
     )
     for (const raw of linkRes.rows as any[]) {
@@ -2806,10 +2816,15 @@ async function loadLinkValuesByRecord(
       // repair-on-read (symmetry / defense-in-depth): the mirror value is the SOURCE record_id, which is
       // FK-cascade-protected (record_id REFERENCES meta_records ON DELETE CASCADE) so a ghost source is not
       // expected today — but filter it too so NO read path can ever surface a deleted record id.
+      // The sheet join mirrors the forward side's soft-delete filter: a source record whose SHEET was
+      // deleted must not surface through the reverse projection either.
       `SELECT field_id, record_id, foreign_record_id
        FROM meta_links
        WHERE field_id = ANY($1::text[]) AND foreign_record_id = ANY($2::text[])
-         AND EXISTS (SELECT 1 FROM meta_records r WHERE r.id = record_id)`,
+         AND EXISTS (
+           SELECT 1 FROM meta_records r
+             JOIN meta_sheets s ON s.id = r.sheet_id
+            WHERE r.id = record_id AND s.deleted_at IS NULL)`,
       [forwardIds, recordIds],
     )
     for (const raw of reverseRes.rows as any[]) {
@@ -4377,6 +4392,14 @@ const DISPLAY_RENAME_FORBIDDEN_MESSAGE =
   'Renaming requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.'
 
 /**
+ * Deleting or restoring a whole sheet is the SAME authority as renaming one field header — it was
+ * `canManageViews`, which a write-only operator holds, so an operator could destroy a table they
+ * could not rename a column in.
+ */
+const SHEET_DELETE_FORBIDDEN_MESSAGE =
+  'Deleting or restoring a sheet requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.'
+
+/**
  * Strict `{ name }` parse. `.strict()` is deliberate: silently ignoring an extra property would tell
  * the caller a change landed when it did not. The trim runs BEFORE the length check, so a
  * whitespace-only name is refused (zod's `.min(1)` alone would accept `'   '`).
@@ -4394,6 +4417,25 @@ function sendInvalidDisplayName(res: Response) {
     ok: false,
     error: { code: 'INVALID_NAME', message: INVALID_DISPLAY_NAME_MESSAGE },
   })
+}
+
+/**
+ * MOJIBAKE GATE — shared by EVERY display-name write on this router (field create, field rename,
+ * sheet rename, base rename). Returns a sent 400 when the name cannot be stored, or `null` when the
+ * caller should proceed.
+ *
+ * A live deployment stored two field names full of U+FFFD because a Windows-shell curl mangled the
+ * CJK bytes before they reached the wire; the grid then rendered ����, and only a direct DB UPDATE
+ * could repair it. The decoder's own "bytes were lost" marker is not a name, so it is REFUSED rather
+ * than normalized or stripped (fail-closed). The refusal names the offending code points and their
+ * positions and never echoes the submitted text — see multitable/display-name-hygiene.ts.
+ *
+ * `name` must already be TRIMMED by the caller; trimming is unchanged by this gate.
+ */
+function sendDisplayNameHygieneRefusal(res: Response, name: string): Response | null {
+  const refusal = checkDisplayNameHygiene(name)
+  if (!refusal) return null
+  return res.status(400).json({ ok: false, error: { code: refusal.code, message: refusal.message } })
 }
 
 function sendRecoveryAuthorityBusy(res: Response) {
@@ -7099,6 +7141,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     const parsed = parseDisplayRenamePayload(req.body)
     if (!parsed.ok) return sendInvalidDisplayName(res)
+    const hygieneRefusal = sendDisplayNameHygieneRefusal(res, parsed.name)
+    if (hygieneRefusal) return hygieneRefusal
 
     try {
       const pool = poolManager.get()
@@ -12002,6 +12046,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const sheetId = parsed.data.sheetId
     const fieldId = parsed.data.id ?? buildId('fld').slice(0, 50)
     const name = parsed.data.name.trim()
+    // Mojibake gate — the live incident created FIELDS this way, so the create path is gated first.
+    const createHygieneRefusal = sendDisplayNameHygieneRefusal(res, name)
+    if (createHygieneRefusal) return createHygieneRefusal
     const requestedType = parsed.data.type
     const rawProperty = parsed.data.property ?? {}
     const desiredOrder = parsed.data.order
@@ -12339,6 +12386,13 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const parsed = schema.safeParse(req.body)
     if (!parsed.success) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    // Mojibake gate — checked on the RAW payload before any DB work, so a corrupt rename costs
+    // nothing and lands nowhere. A PATCH that carries no `name` is unaffected.
+    if (typeof parsed.data.name === 'string') {
+      const renameHygieneRefusal = sendDisplayNameHygieneRefusal(res, parsed.data.name.trim())
+      if (renameHygieneRefusal) return renameHygieneRefusal
     }
 
     try {
@@ -13666,6 +13720,43 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
   })
 
+  /**
+   * Delete a sheet — SOFT, and behind SCHEMA authority. Two faults were found on the live
+   * deployment and both are closed here.
+   *
+   * FAULT 1 (authority). This route used to admit `canManageViews` (or `canManageSheetAccess` for a
+   * scoped sheet). After the #5357 split a write-only OPERATOR still holds `canManageViews` — so an
+   * operator who may not rename ONE field header could permanently destroy the WHOLE sheet. The gate
+   * is now `canManageFields`: the same schema-authority tier as renaming a field, renaming this sheet,
+   * or deleting a field.
+   *
+   * Precisely what that moves, in both directions — this is NOT a uniform tightening:
+   *   - a GLOBAL `multitable:write` operator LOSES sheet delete (the reported fault);
+   *   - a `multitable:manage-schema` holder without `multitable:write` GAINS it, which is the
+   *     doctrine, not an accident: an actor trusted to delete a FIELD is the actor trusted to delete
+   *     the SHEET;
+   *   - a SHEET-SCOPED full-write grant is UNCHANGED — `applyContextSheetSchemaWriteGrant` already
+   *     confers `canManageFields` on that sheet, so a sheet admin deletes exactly as before;
+   *   - the sheet-scoped branch on `canManageSheetAccess` is gone, because that grant's holders reach
+   *     `canManageFields` through the same scope path when they hold full write, and a share-only
+   *     grant is not schema authority.
+   *
+   * FAULT 2 (recoverability). This route used to `DELETE FROM meta_sheets`, cascading the sheet's
+   * records away with no recovery at all. It now sets `deleted_at` and leaves `meta_records` and
+   * `meta_links` untouched, so `POST /sheets/:sheetId/restore` below brings the sheet back COMPLETE.
+   * Every listing already filters `deleted_at IS NULL` (GET /sheets, GET /bases, `loadSheetRow`), so
+   * the sheet disappears from the product exactly as before.
+   *
+   * INBOUND EDGES. The old cascade had to physically delete inbound `meta_links` rows because
+   * `meta_links.foreign_record_id` carries no FK and its targets were about to vanish. Nothing
+   * vanishes now, so the edges are KEPT (that is what makes a restore complete) and the READ path
+   * hides them instead: `loadLinkValuesByRecord`'s repair-on-read now also requires the foreign
+   * record's sheet to be live. A source sheet therefore still shows no link into a deleted sheet —
+   * the same observable behaviour, with the rows still there to restore.
+   *
+   * The link-delete fence plan is unchanged: the same participants must be quiescent, because the
+   * same edges stop being readable.
+   */
   router.delete('/sheets/:sheetId', async (req: Request, res: Response) => {
     const sheetId = req.params.sheetId
     if (!sheetId || typeof sheetId !== 'string') {
@@ -13674,30 +13765,21 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1', [sheetId])
+      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
       if (sheetRes.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (sheetScope?.hasAssignments) {
-        if (!capabilities.canManageSheetAccess) return sendForbidden(res)
-      } else if (!capabilities.canManageViews) {
-        return sendForbidden(res)
-      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageFields) return sendForbidden(res, SHEET_DELETE_FORBIDDEN_MESSAGE)
       const sheetDeleteFencePlan = await prepareSheetLinkDeleteFencePlan(
         pool.query.bind(pool),
         sheetId,
       )
-      // Referential integrity: the sheet's records are about to be deleted by the
-      // meta_sheets -> meta_records cascade. Source-side links cascade, but `meta_links.foreign_record_id`
-      // carries NO FK at all (closeout removed it; the containment guard enforces its absence); remove
-      // inbound edges explicitly in the same transaction before their targets vanish.
       await pool.transaction(async ({ query }) => {
         if (sheetDeleteFencePlan) {
           await enterSheetLinkDeleteFencePlan(query, sheetDeleteFencePlan)
         }
-        await query('DELETE FROM meta_links WHERE foreign_record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)', [sheetId])
-        return query('DELETE FROM meta_sheets WHERE id = $1', [sheetId])
+        return query('UPDATE meta_sheets SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL', [sheetId])
       })
       invalidateSheetSummaryCache(sheetId)
       invalidateFieldCache(sheetId)
@@ -13710,6 +13792,80 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] delete sheet failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete sheet' } })
+    }
+  })
+
+  /**
+   * Undo a soft delete. Same schema-authority gate as the delete itself — undoing a destructive act
+   * is not a lesser authority than performing it, and a restore makes a table (and every record and
+   * inbound link in it) visible again.
+   *
+   * 404 when the sheet id is unknown OR when it is not soft-deleted: "restore" has no meaning for a
+   * live sheet, and answering 200 would tell a caller a recovery happened when nothing did. The
+   * capability gate runs BEFORE that distinction is drawn, so a caller without schema authority never
+   * learns whether a given id is deleted, live, or absent.
+   *
+   * NOTE (deliberate, stated in the PR): this is the API half only. There is no recycle-bin UI in
+   * this slice — listing and browsing soft-deleted sheets is a follow-up.
+   */
+  router.post('/sheets/:sheetId/restore', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      // The sheet is soft-deleted, so `loadSheetRow` (deleted_at IS NULL) cannot see it — read the row
+      // directly, including its deleted_at, and let the gate run before the row is interpreted.
+      const sheetRes = await pool.query('SELECT id, base_id, name, description, deleted_at FROM meta_sheets WHERE id = $1', [sheetId])
+      const row = (sheetRes.rows as any[])[0] as
+        | { id: unknown; base_id?: unknown; name?: unknown; description?: unknown; deleted_at?: unknown }
+        | undefined
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageFields) return sendForbidden(res, SHEET_DELETE_FORBIDDEN_MESSAGE)
+      if (!row || row.deleted_at === null || typeof row.deleted_at === 'undefined') {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `No deleted sheet to restore: ${sheetId}` } })
+      }
+      const restored = await pool.transaction(async ({ query }) => {
+        await fenceWriterEntry(query, sheetId)
+        return query(
+          'UPDATE meta_sheets SET deleted_at = NULL WHERE id = $1 AND deleted_at IS NOT NULL RETURNING id, base_id, name, description',
+          [sheetId],
+        )
+      })
+      const restoredRow = ((restored as any).rows ?? [])[0] as
+        | { id: unknown; base_id?: unknown; name?: unknown; description?: unknown }
+        | undefined
+      if (!restoredRow) {
+        // Lost a race with a concurrent restore: the sheet is live, so nothing here restored it.
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `No deleted sheet to restore: ${sheetId}` } })
+      }
+      invalidateSheetSummaryCache(sheetId)
+      invalidateFieldCache(sheetId)
+      invalidateViewConfigCache()
+      return res.json({
+        ok: true,
+        data: {
+          restored: sheetId,
+          sheet: {
+            id: String(restoredRow.id),
+            baseId: typeof restoredRow.base_id === 'string' ? restoredRow.base_id : null,
+            name: String(restoredRow.name ?? ''),
+            description: typeof restoredRow.description === 'string' ? restoredRow.description : null,
+          },
+        },
+      })
+    } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] restore sheet failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to restore sheet' } })
     }
   })
 
@@ -13739,6 +13895,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     const parsed = parseDisplayRenamePayload(req.body)
     if (!parsed.ok) return sendInvalidDisplayName(res)
+    const hygieneRefusal = sendDisplayNameHygieneRefusal(res, parsed.name)
+    if (hygieneRefusal) return hygieneRefusal
 
     try {
       const pool = poolManager.get()
