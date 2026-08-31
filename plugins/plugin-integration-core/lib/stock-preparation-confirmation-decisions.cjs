@@ -180,6 +180,7 @@ const {
 const { createTargetScopedRecordsApi } = require('./stock-preparation-table-actions.cjs')
 const {
   StockPreparationTargetProvisioningError,
+  ensureManagedTableDefaultView,
   __internals: {
     assertAdminPermission,
     getProvisioningApi,
@@ -472,10 +473,22 @@ async function ensureConfirmationDecisionTarget({ context, projectId, permission
       { objectId: OBJECT_ID, missingFields: verified.missingFields, requiredFields: templateFieldIds(TEMPLATE) },
     )
   }
+  // Created READABLE and now created USABLE: a sheet with zero views cannot be opened and
+  // blocks its whole base, so the fresh ledger gets its one grid view (全部裁决 on a zh-CN
+  // deployment, "All Decisions" otherwise) in the same pass. Only this CREATE path does it
+  // -- the already-ready return above is unchanged and still writes nothing.
+  const defaultView = await ensureManagedTableDefaultView({
+    provisioning,
+    projectId: scopedProjectId,
+    objectId: OBJECT_ID,
+    viewKind: 'decisions',
+    locale,
+  })
   return {
     ready: true,
     created: true,
     mode: 'confirmation_decision_created',
+    defaultView,
     evidence: { objectId: OBJECT_ID, created: true, rowsSeeded: 0, fieldCounts: templateFieldCounts(TEMPLATE) },
   }
 }

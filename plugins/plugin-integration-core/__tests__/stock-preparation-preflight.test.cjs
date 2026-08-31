@@ -828,6 +828,216 @@ async function requestCannotSteerTheTarget() {
 }
 
 // ---------------------------------------------------------------------------
+// P-15 — a POLLUTED sandbox allowlist env cannot reach the response
+// ---------------------------------------------------------------------------
+//
+// THE ONE INPUT ON THIS ROUTE WHOSE CONTENT IS UNCONSTRAINED. Every other string the preflight
+// quotes is deployment-AUTHORED and shape-checked upstream: pack objectIds went through
+// `assertSandboxObjectId`, env PATHS are named by key and never read. The sandbox write allowlist is
+// different — `resolveStockPrepApplySandboxPolicy` splits STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS on
+// commas and trims, and that is the whole of it — so whatever a polluted environment holds became an
+// "objectId" and rode out through THREE fields at once: `fix.run` (as `KEY=<the values>`),
+// `detail.currentAllowlist`, and `checks.sandboxWriteAuthorization.allowlist`. All three render
+// verbatim in the install page's preflight panel, to any stock-prep:read viewer.
+//
+// P-11 above did not catch it: it seeds secrets into the two PATH env vars and into an unrelated
+// one, and passes a clean allowlist. So this case seeds the pollution where it actually lands.
+
+const POLLUTED_ALLOWLIST_ENTRIES = Object.freeze([
+  // Comma-free on purpose: the resolver splits on commas, so an entry containing one would be
+  // scattered into fragments and the assertion would be testing the fragments, not the value.
+  'Server=10.4.4.9;Database=PLM;User Id=sa;Password=hunter2',
+  '涡轮增压器总成-DWG-90014',
+  '/var/secrets/plm-readonly-credentials.json',
+])
+
+async function pollutedAllowlistEnvIsWithheldNotEchoed() {
+  const { harness } = greenDeployment()
+  const res = await preflight(harness, {
+    env: {
+      [SANDBOX_MODE_ENV]: 'true',
+      [SANDBOX_TARGET_OBJECT_IDS_ENV]: [EXISTING_SANDBOX_OBJECT_ID, ...POLLUTED_ALLOWLIST_ENTRIES].join(','),
+    },
+  })
+
+  // Per-string, not a serialized substring search — for the reason P-11 documents: a Windows path is
+  // escaped in the JSON text and unescaped in the value, so a serialized search reports clean while
+  // the value is right there.
+  const strings = collectStrings(res.body)
+  for (const poison of POLLUTED_ALLOWLIST_ENTRIES) {
+    const leak = strings.find((entry) => entry.includes(poison))
+    assert.equal(leak, undefined, `P-15: a non-namespace allowlist entry reached the response (in ${JSON.stringify(leak)})`)
+  }
+
+  const found = blockerByCode(res.body, PREFLIGHT_BLOCKER_CODES.SANDBOX_ALLOWLIST_MISSING_TARGET)
+  // The three fields it used to ride out through, each checked for its exact expected content — a
+  // "does not contain the poison" assertion alone would also pass on an empty response.
+  assert.equal(
+    found.fix.run,
+    `${SANDBOX_TARGET_OBJECT_IDS_ENV}=${EXISTING_SANDBOX_OBJECT_ID},${DECLARED_SANDBOX_OBJECT_ID}`,
+    'P-15: the paste-able fix line carries the conforming entries and the declared target, and nothing else',
+  )
+  assert.deepEqual(found.detail.currentAllowlist, [EXISTING_SANDBOX_OBJECT_ID], 'P-15: detail carries the conforming entries only')
+  assert.deepEqual(
+    res.body.data.checks.sandboxWriteAuthorization.allowlist,
+    [EXISTING_SANDBOX_OBJECT_ID],
+    'P-15: the check carries the conforming entries only',
+  )
+
+  // ...and the operator is TOLD the environment is polluted, by count, without being shown it.
+  assert.equal(found.detail.droppedNonNamespaceEntries, POLLUTED_ALLOWLIST_ENTRIES.length)
+  assert.equal(res.body.data.checks.sandboxWriteAuthorization.droppedNonNamespaceEntries, POLLUTED_ALLOWLIST_ENTRIES.length)
+  assert.ok(found.what.includes('withheld'), 'P-15: the blocker says entries were withheld')
+  assert.ok(
+    !POLLUTED_ALLOWLIST_ENTRIES.some((poison) => found.what.includes(poison)),
+    'P-15: ...without naming them',
+  )
+
+  // Precondition: the response is not vacuously clean.
+  assert.ok(strings.some((entry) => entry.includes(DECLARED_SANDBOX_OBJECT_ID)), 'P-15: precondition — the response carries the declared objectId')
+  assert.ok(strings.some((entry) => entry.includes(EXISTING_SANDBOX_OBJECT_ID)), 'P-15: precondition — and the conforming allowlisted one')
+
+  // A CLEAN environment must report zero dropped and must not acquire the pollution sentence: the
+  // count has to distinguish states, not be a constant.
+  const clean = await preflight(harness, { env: sandboxEnv([EXISTING_SANDBOX_OBJECT_ID]) })
+  const cleanBlocker = blockerByCode(clean.body, PREFLIGHT_BLOCKER_CODES.SANDBOX_ALLOWLIST_MISSING_TARGET)
+  assert.equal(clean.body.data.checks.sandboxWriteAuthorization.droppedNonNamespaceEntries, 0)
+  assert.equal(cleanBlocker.detail.droppedNonNamespaceEntries, 0)
+  assert.ok(!cleanBlocker.what.includes('withheld'), 'P-15: a clean environment gets no pollution sentence')
+
+  // An allowlist that is ENTIRELY pollution reports an empty allowlist plus the count — never a
+  // partially-sanitized list, and never the entries.
+  const allPoison = await preflight(harness, {
+    env: {
+      [SANDBOX_MODE_ENV]: 'true',
+      [SANDBOX_TARGET_OBJECT_IDS_ENV]: POLLUTED_ALLOWLIST_ENTRIES.join(','),
+    },
+  })
+  assert.deepEqual(allPoison.body.data.checks.sandboxWriteAuthorization.allowlist, [])
+  assert.equal(allPoison.body.data.checks.sandboxWriteAuthorization.droppedNonNamespaceEntries, POLLUTED_ALLOWLIST_ENTRIES.length)
+  for (const poison of POLLUTED_ALLOWLIST_ENTRIES) {
+    const leak = collectStrings(allPoison.body).find((entry) => entry.includes(poison))
+    assert.equal(leak, undefined, `P-15: an all-pollution allowlist echoes nothing (found ${JSON.stringify(leak)})`)
+  }
+
+  // The FILTER IS THE GUARD'S OWN RULE, not a second copy of it: a namespace-conforming entry the
+  // guard would accept must survive, or the sanitizer would be silently dropping real config.
+  const hyphenated = `${SANDBOX_OBJECT_ID_NAMESPACE_PREFIX}-alt`
+  const conforming = await preflight(harness, {
+    env: { [SANDBOX_MODE_ENV]: 'true', [SANDBOX_TARGET_OBJECT_IDS_ENV]: [SANDBOX_OBJECT_ID_NAMESPACE_PREFIX, hyphenated].join(',') },
+  })
+  assert.deepEqual(
+    conforming.body.data.checks.sandboxWriteAuthorization.allowlist,
+    [SANDBOX_OBJECT_ID_NAMESPACE_PREFIX, hyphenated],
+    'P-15: the bare namespace and its `-` form are both in-namespace, exactly as assertSandboxObjectId reads them',
+  )
+  assert.equal(conforming.body.data.checks.sandboxWriteAuthorization.droppedNonNamespaceEntries, 0)
+}
+
+// ---------------------------------------------------------------------------
+// P-16 — every `what` interpolates IDENTIFIER-CLASS expressions only
+// ---------------------------------------------------------------------------
+//
+// P-11 and P-15 prove that today's inputs do not leak. Neither can prove that the NEXT blocker
+// message will not interpolate something value-bearing — a source cell, a pack label, a server error
+// string — because a test can only poison the channels it knows about. So this one reads the source
+// and pins the expression set itself: every `${…}` a `what` template stringifies must be on the list
+// below, and adding one is a reviewable edit to this file rather than silence.
+//
+// The scanner descends into nested templates and records the LEAVES, which is what actually reaches
+// the message. The site count is asserted too: a `what` written in a form the scanner walks past
+// would otherwise make the whole guard vacuous.
+
+const APPROVED_WHAT_INTERPOLATIONS = Object.freeze([
+  // Deployment-authored constants: env KEY names and the namespace prefix.
+  'CUSTOMER_PACKS_PATH_ENV',
+  'EXT_FIELD_MAPPING_PATH_ENV',
+  'SANDBOX_OBJECT_ID_NAMESPACE_PREFIX',
+  // Managed object ids and logical field ids — the shared vocabulary remote support uses.
+  'checks.confirmationLedger.objectId',
+  "missingFields.join(', ')",
+  "missingTemplateFields.join(', ')",
+  'packId',
+  'target.objectId',
+  // Counts.
+  'checks.confirmationLedger.missingFieldCount',
+  'droppedNonNamespaceEntries',
+  'missingExtensionFields.length',
+  'missingFields.length',
+  // Grammar-only ternaries: every branch is a literal English fragment.
+  "droppedNonNamespaceEntries === 1 ? 'was' : 'were'",
+  "droppedNonNamespaceEntries === 1 ? 'y is' : 'ies are'",
+  "unlistedTargets.length === 1 ? 'is' : 'are'",
+].sort())
+
+function whatInterpolationLeaves(source) {
+  const leaves = new Set()
+  let sites = 0
+
+  function walk(text) {
+    let i = 0
+    let template = false
+    let depth = 0
+    let start = -1
+    while (i < text.length) {
+      const ch = text[i]
+      if (ch === '\\') { i += 2; continue }
+      if (ch === '`') { template = !template; i += 1; continue }
+      if (template || depth > 0) {
+        if (ch === '$' && text[i + 1] === '{') {
+          if (depth === 0) start = i + 2
+          depth += 1; i += 2; continue
+        }
+        if (ch === '}' && depth > 0) {
+          depth -= 1
+          if (depth === 0) {
+            const expr = text.slice(start, i)
+            // A nested template is not itself an interpolated value — descend to what is.
+            if (expr.includes('`')) walk(expr)
+            else leaves.add(expr.trim())
+          }
+          i += 1; continue
+        }
+        i += 1; continue
+      }
+      // Outside any template, a comma ends the `what` property.
+      if (ch === ',') break
+      i += 1
+    }
+  }
+
+  const marker = 'what:'
+  let at = source.indexOf(marker)
+  while (at !== -1) {
+    sites += 1
+    walk(source.slice(at + marker.length))
+    at = source.indexOf(marker, at + marker.length)
+  }
+  return { sites, leaves: [...leaves].sort() }
+}
+
+function whatTemplatesCarryIdentifiersOnly() {
+  const source = fs.readFileSync(path.join(LIB, 'stock-preparation-preflight.cjs'), 'utf8')
+  const { sites, leaves } = whatInterpolationLeaves(source)
+
+  // Anti-vacuity: the scanner really walked every blocker's message.
+  assert.equal(sites, 7, 'P-16: the scanner found every `what:` site (update this count when a blocker is added)')
+  assert.ok(leaves.length > 0, 'P-16: ...and really extracted interpolations from them')
+
+  assert.deepEqual(
+    leaves,
+    [...APPROVED_WHAT_INTERPOLATIONS],
+    'P-16: a `what` interpolates something not on the approved identifier-class list. If the new one is '
+      + 'an objectId / field id / packId / env KEY name / count / grammar ternary, add it above; if it is a '
+      + 'source value, a customer label or a server message, it must not be interpolated into a blocker at all.',
+  )
+
+  // The scanner is not fooled by a `what` that is not a plain template: prove it walks the ternary
+  // form (the ledger blocker uses one) by checking a leaf only that form contributes.
+  assert.ok(leaves.includes('checks.confirmationLedger.objectId'), 'P-16: the ternary-form `what` was walked')
+}
+
+// ---------------------------------------------------------------------------
 
 async function main() {
   await routeIsRegisteredAndReadGated()
@@ -844,6 +1054,8 @@ async function main() {
   await blockersAreOrderedMostBlockingFirst()
   envVarNamesMatchTheirOwners()
   await requestCannotSteerTheTarget()
+  await pollutedAllowlistEnvIsWithheldNotEchoed()
+  whatTemplatesCarryIdentifiersOnly()
   console.log('stock-preparation-preflight: OK')
 }
 
