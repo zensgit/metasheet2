@@ -50,9 +50,33 @@
 // have. This is the minimal reliable marker in this pass, and the boundary is drawn where it is
 // because that is where reliability actually ends.
 //
-// READS ARE UNTOUCHED. This fence gates only the WRITE surface (insert / update / delete / copyData
-// target, plus a marker-only guard on raw `query`). `select` is never gated: reading a K3 source is
-// legitimate, and a blanket deny that killed reads would be a FAIL, not a pass (§15.2 E4-05).
+// READS ARE UNTOUCHED. This fence gates only the WRITE surface. `select` and any pure-read statement
+// are never gated: reading a K3 source is legitimate, and a blanket deny that killed reads would be a
+// FAIL, not a pass (§15.2 E4-05).
+//
+// ── WHY THE LOAD-BEARING CONTROL IS THE CONNECTION, NOT THE STATEMENT ─────────────────────────────
+// An earlier design tried to PROVE a write hits K3 by extracting the write-target table from the raw
+// SQL. That is unbounded: the attack surface is the entire T-SQL dialect, and every patch reopened
+// the class — `UPDATE t SET … FROM t_ICItem AS t` / `DELETE t FROM t_ICItem t` (the real target is in
+// FROM, the extractor grabs the alias), `UPDATE TOP (5) t_ICItem` (TOP sits between verb and table),
+// `INSERT INTO srv.AIS.dbo.t_ICItem` (4-part linked-server name), `MERGE … OUTPUT`, CTEs, batches,
+// `EXEC sp_executesql`. A guarantee as absolute as G-4 must NOT rest on out-parsing SQL.
+//
+// So the invariant is made a property of the CONNECTION: "no external WRITE to a K3 database, ever."
+// A `data_sources` connection that reaches K3 is READ-ONLY at the adapter level, regardless of the
+// source's own readOnly flag. The parser burden inverts from "prove this statement writes K3"
+// (unbounded) to "prove this statement is a PURE READ" (a tractable allowlist — leading SELECT/WITH/
+// EXPLAIN/SHOW, single statement, no INTO; ANYTHING else is refused WITHOUT needing to find a table).
+// The three bypasses above all lead with UPDATE/INSERT, so none is a pure read: all refused as a
+// "write on a K3 connection", not because a parser finally saw the table. K3 reads stay functional.
+//
+// "K3-reaching" is decided two ways, neither of which parses the write:
+//   (A) the DURABLE MARKER `options.k3Destination === true` — set once at registration and, per the
+//       route + manager, NOT clearable by any later edit (K3_DESTINATION_MARKER_IMMUTABLE); and
+//   (B) DETECTION at connect time — the adapter probes its own catalog and, if K3 tables are present,
+//       flags the live connection K3-reaching even if the marker was never set.
+// The by-kind fences and the widened business-table signature remain as DEFENSE IN DEPTH, but the
+// connection read-only gate is the control that does not depend on correctly parsing arbitrary SQL.
 
 import type { AdapterOptions, DataSourceConfig } from './BaseAdapter'
 
@@ -70,6 +94,11 @@ export const K3_DESTINATION_TABLE_REFUSAL_MESSAGE =
   'K3 external write-back is permanently disabled; the target table is a K3 business table'
 export const K3_DESTINATION_SQL_REFUSAL_MESSAGE =
   'K3 external write-back is permanently disabled; the statement writes to a K3 business table'
+export const K3_CONNECTION_READONLY_REFUSAL_MESSAGE =
+  'K3 external write-back is permanently disabled; a K3-reaching connection is read-only (only a pure SELECT is allowed)'
+export const K3_DESTINATION_MARKER_IMMUTABLE = 'K3_DESTINATION_MARKER_IMMUTABLE'
+export const K3_DESTINATION_MARKER_IMMUTABLE_MESSAGE =
+  'the k3Destination marker is set-once and cannot be cleared or unset'
 
 // The K3 WISE write-target signature. FROZEN and pinned BY VALUE in the fence test: shrinking or
 // mutating it at runtime would be an unlock, and deriving it from elsewhere would let that elsewhere
@@ -271,4 +300,77 @@ export function assertNotK3SqlWrite(config: Pick<DataSourceConfig, 'options'>, s
   if (targets.some((target) => isK3BusinessTable(target))) {
     throw new K3DestinationWriteError(K3_DESTINATION_SQL_REFUSAL_MESSAGE)
   }
+}
+
+// ── THE CONNECTION READ-ONLY GATE (load-bearing; does NOT parse the write) ────────────────────
+// The tractable allowlist: a statement is a PURE READ iff it is a single statement, leads with
+// SELECT/WITH/EXPLAIN/SHOW, and contains no `INTO` (which would make it a write). This mirrors the
+// route-level `isReadOnlySql` exactly; a test pins the two equivalent so they cannot drift. Anything
+// that is not clearly a pure read is refused on a K3 connection — no table extraction, so no T-SQL
+// idiom (UPDATE…FROM, TOP, 4-part names, MERGE…OUTPUT, batches, EXEC) can slip a write past it.
+export function isPureReadStatement(sql: string): boolean {
+  const trimmed = String(sql ?? '').trim().replace(/;\s*$/, '') // drop a single trailing semicolon
+  if (trimmed.length === 0) return false // nothing to allow
+  if (trimmed.includes(';')) return false // no multiple statements — a batch could smuggle a write
+  if (/\binto\b/i.test(trimmed)) return false // reject SELECT … INTO (a write)
+  return /^\s*(select|with|explain|show)\b/i.test(trimmed)
+}
+
+// A connection is K3-reaching when it is DECLARED so (the durable marker) or DETECTED so (the adapter
+// probed its catalog and found K3 tables). Either makes the connection read-only.
+export function isK3ReachingConnection(
+  options: AdapterOptions | undefined,
+  detected?: boolean,
+): boolean {
+  return isK3MarkedDestination(options) || detected === true
+}
+
+// DETECTION classifier — pure and testable. Given the table names a catalog probe returned, is any a
+// K3 business table? Used by the adapter to flag a live connection K3-reaching even when unmarked.
+export function catalogIndicatesK3(tableNames: readonly string[] | null | undefined): boolean {
+  if (!Array.isArray(tableNames)) return false
+  return tableNames.some((name) => typeof name === 'string' && isK3BusinessTable(name))
+}
+
+// THE LOAD-BEARING ASSERTION. On a K3-reaching connection (marked or detected) only a pure read is
+// allowed — every other statement is refused as a write on a read-only K3 connection, WITHOUT
+// inspecting a single table name. On a connection NOT known to be K3-reaching, fall through to the
+// best-effort statement signature (defense in depth) so a disguised unmarked K3-table write is still
+// caught by name. `detected` is the adapter's connect-time flag; callers without it (the manager
+// wrappers, running before the adapter) pass nothing and rely on the marker — the adapter re-checks
+// with its detected flag at the true chokepoint.
+export function assertNotK3ConnectionWrite(
+  config: Pick<DataSourceConfig, 'options'>,
+  sql: string,
+  detected?: boolean,
+): void {
+  if (isK3ReachingConnection(config.options, detected)) {
+    if (!isPureReadStatement(sql)) {
+      throw new K3DestinationWriteError(K3_CONNECTION_READONLY_REFUSAL_MESSAGE)
+    }
+    return
+  }
+  // Not known K3-reaching — defense in depth on the statement's write targets.
+  assertNotK3SqlWrite(config, sql)
+}
+
+// Durability enforcement (P1): once `k3Destination` is true it is set-once — no later config edit may
+// clear or unset it. `refuseIfClearsK3Marker` is the coded refusal for a client edit that tries; the
+// manager additionally FORCES it true on every update so no path can drop it silently.
+export function attemptsToClearK3Marker(
+  oldOptions: AdapterOptions | undefined,
+  incomingOptions: AdapterOptions | undefined,
+): boolean {
+  if (oldOptions?.k3Destination !== true) return false
+  if (!incomingOptions || typeof incomingOptions !== 'object') return false
+  return 'k3Destination' in incomingOptions && incomingOptions.k3Destination !== true
+}
+
+// Force the marker to survive any merge — the set-once guarantee at the manager chokepoint.
+export function preserveK3Marker(
+  oldOptions: AdapterOptions | undefined,
+  mergedOptions: AdapterOptions | undefined,
+): AdapterOptions | undefined {
+  if (oldOptions?.k3Destination !== true) return mergedOptions
+  return { ...(mergedOptions ?? {}), k3Destination: true }
 }
