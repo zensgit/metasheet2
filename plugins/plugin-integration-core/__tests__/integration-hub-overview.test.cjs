@@ -34,6 +34,10 @@ const {
 } = require(path.join(__dirname, '..', 'lib', 'integration-hub-overview.cjs'))
 const {
   K3_EXTERNAL_WRITE_TARGET_KIND,
+  // The SAME predicate describeWriteCapability consults. The write-capability test derives the
+  // expected fence dimension from it rather than hardcoding today's answer, so the assertion tracks
+  // the in-flight fence extension (#5402) in lock-step instead of tripping whoever merges second.
+  isK3ExternalWriteTargetKind,
 } = require(path.join(__dirname, '..', 'lib', 'k3-external-write-permanent-fence.cjs'))
 const {
   PLM_STOCK_PREPARATION_ACTION_ID,
@@ -162,9 +166,27 @@ function createEnvironment(options = {}) {
     return rows
   }
 
+  // TENANT-AWARE fake, mirroring external-systems.cjs listExternalSystems, which BOTH requires a
+  // tenantId (requiredString throws without one) AND scopes its query to it. A fake that ignored its
+  // argument — the previous `listOrThrow` shape here — is exactly the BAD GREEN this closes: it let
+  // the handler's own tenant predicate be dropped with every suite still green, because nothing ever
+  // looked at the tenantId reaching the store. Rows that DECLARE a tenant are scoped to it; rows
+  // with no tenantId (the pipeline/config fixtures the other suites seed) are left untouched.
+  const tenantScopedList = (name, rows) => async (input = {}) => {
+    record(name, input)
+    const tenantId = typeof input.tenantId === 'string' ? input.tenantId.trim() : ''
+    if (!tenantId) {
+      // Faithful to requiredString(input.tenantId, 'tenantId') in the real store: no tenant, no read.
+      const error = new Error(`${name}: tenantId is required`)
+      error.name = 'ExternalSystemValidationError'
+      throw error
+    }
+    return rows.filter((row) => !row || typeof row.tenantId !== 'string' || row.tenantId === tenantId)
+  }
+
   const services = {
     externalSystemRegistry: {
-      listExternalSystems: listOrThrow('listExternalSystems', systems),
+      listExternalSystems: tenantScopedList('listExternalSystems', systems),
       async upsertExternalSystem(input) { record('upsertExternalSystem', input); throw new Error('the overview must never write') },
       async getExternalSystem(input) { record('getExternalSystem', input); return systems[0] || null },
       async deleteExternalSystem(input) { record('deleteExternalSystem', input); throw new Error('the overview must never delete') },
@@ -310,6 +332,59 @@ async function testReadTierGate() {
   assert.equal(crossTenant.body.error.code, 'TENANT_MISMATCH')
 
   console.log('  testReadTierGate OK')
+}
+
+// ===========================================================================================
+// RED-1b — tenant scoping at the STORE boundary (not just the request-tenant door).
+//
+// The gate test above exercises the request-tenant-mismatch door (a caller supplying a foreign
+// query.tenantId is refused by resolveTenantId BEFORE any store read). It says nothing about the
+// OTHER half: that the overview's own systems read is actually SCOPED to the resolved tenant. That
+// half was a BAD GREEN — dropping `tenantId` from the handler's listScope left every suite green,
+// because the fake store ignored its argument and no assertion inspected the tenantId it received.
+//
+// This pins it at the store: the fake is tenant-aware (see tenantScopedList), seeded with two
+// tenants' systems, and the assertion is isolation — tenant A sees only A's systems, none of B's,
+// AND the id that reached the store is A's. Same cross-tenant class the sibling PR #5401 hardened;
+// pinned here where the overview does its reads.
+//
+// Witnessed RED: delete `tenantId:` from `const listScope = { tenantId: scope.tenantId, ... }` in
+// http-routes.cjs → the store is called with no tenantId → the faithful fake throws (as the real
+// requiredString does) → statusCode is no longer 200 and this test reds. Restore → green.
+// ===========================================================================================
+async function testTenantScopingAtStoreBoundary() {
+  const systems = [
+    externalSystem({ id: 'sys_a1', name: '甲租户·系统一', tenantId: 'tenant_a', kind: 'http', config: {} }),
+    externalSystem({ id: 'sys_a2', name: '甲租户·系统二', tenantId: 'tenant_a', kind: 'http', config: {} }),
+    externalSystem({ id: 'sys_b1', name: '乙租户·系统', tenantId: 'tenant_b', kind: 'http', config: {} }),
+  ]
+
+  // Tenant A sees ONLY A's systems, never B's.
+  const envA = createEnvironment({ systems })
+  const resA = await getOverview(envA, { id: 'ua', tenantId: 'tenant_a', permissions: ['integration:read'] })
+  assert.equal(resA.statusCode, 200, 'tenant A overview succeeds')
+  assert.deepEqual(
+    resA.body.data.systems.map((system) => system.id).sort(),
+    ['sys_a1', 'sys_a2'],
+    'tenant A sees exactly its own two systems',
+  )
+  assert.equal(
+    resA.body.data.systems.some((system) => system.id === 'sys_b1'),
+    false,
+    'tenant A must NEVER see tenant B systems',
+  )
+  // The tenant predicate actually reached the store — not just the request door.
+  const listCallA = envA.calls.find(([name]) => name === 'listExternalSystems')
+  assert.ok(listCallA, 'listExternalSystems must be called')
+  assert.equal(listCallA[1].tenantId, 'tenant_a', 'the overview scopes its systems read to the resolved tenant')
+
+  // Tenant B sees ONLY B's system — the reverse direction, so the filter is not vacuously matching.
+  const envB = createEnvironment({ systems })
+  const resB = await getOverview(envB, { id: 'ub', tenantId: 'tenant_b', permissions: ['integration:read'] })
+  assert.equal(resB.statusCode, 200)
+  assert.deepEqual(resB.body.data.systems.map((system) => system.id), ['sys_b1'])
+
+  console.log('  testTenantScopingAtStoreBoundary OK')
 }
 
 // ===========================================================================================
@@ -513,42 +588,61 @@ async function testConnectionJoin() {
 // Write-capability truth, including the permanent K3 fence and the honest 'unregistered' state.
 // ===========================================================================================
 async function testWriteCapabilityTruth() {
-  const expectations = [
-    [K3_EXTERNAL_WRITE_TARGET_KIND, 'fenced', true],
-    ['metasheet:multitable', 'internal', false],
-    ['data-source:sql-write-gated', 'gated', false],
-    ['data-source:sql-readonly', 'none', false],
-    ['bridge:legacy-sql-readonly', 'none', false],
-    ['metasheet:staging', 'none', false],
-    ['plm:yuantus-wrapper', 'none', false],
-    // NOT claimed read-only: the http adapter declares source/target/bidirectional roles and the
-    // K3 SQL Server channel declares a middle-table write mode. Saying 只读 about either would be
-    // a false absolute on the first screen an operator sees.
-    ['http', 'unregistered', false],
-    ['erp:k3-wise-sqlserver', 'unregistered', false],
-    ['some:kind-nobody-registered', 'unregistered', false],
-  ]
+  // The register's NON-fence baseline, as independent literals — this half of the test still pins
+  // the exact write-capability mapping (a bug returning 'none' for metasheet:multitable reds here).
+  //
+  // The FENCE is a SEPARATE authority. describeWriteCapability asks isK3ExternalWriteTargetKind
+  // FIRST and returns 'fenced' whenever it is true, whatever the register would otherwise say. So we
+  // derive the expected FENCE dimension from that same predicate rather than hardcoding today's
+  // answer. This keeps the test correct across the in-flight fence extension #5402 (which adds
+  // erp:k3-wise-sqlserver to the fence): the day the product auto-returns 'fenced' for that kind,
+  // this expectation flips in lock-step — no edit, no CI break for whoever merges second. It is not
+  // circular: the baseline values below are literal, only the fence branch tracks the predicate,
+  // and that is exactly the one dimension #5402 changes.
+  //
+  // erp:k3-wise-sqlserver is 'unregistered' TODAY precisely because it is not yet fenced; http is
+  // 'unregistered' because it declares source/target/bidirectional roles with a real upsert path.
+  // Neither is claimed 只读 — a false absolute on the first screen an operator sees.
+  const baselineWrites = {
+    'metasheet:multitable': 'internal',
+    'data-source:sql-write-gated': 'gated',
+    'data-source:sql-readonly': 'none',
+    'bridge:legacy-sql-readonly': 'none',
+    'metasheet:staging': 'none',
+    'plm:yuantus-wrapper': 'none',
+    http: 'unregistered',
+    'erp:k3-wise-sqlserver': 'unregistered',
+    'some:kind-nobody-registered': 'unregistered',
+  }
+  const kinds = [K3_EXTERNAL_WRITE_TARGET_KIND, ...Object.keys(baselineWrites)]
+  const expectedFor = (kind) => (isK3ExternalWriteTargetKind(kind)
+    ? { writes: 'fenced', fenced: true }
+    : { writes: baselineWrites[kind], fenced: false })
 
   const env = createEnvironment({
-    systems: expectations.map(([kind], index) => externalSystem({ id: `sys_${index}`, kind, config: {} })),
+    systems: kinds.map((kind, index) => externalSystem({ id: `sys_${index}`, kind, config: {} })),
   })
   const res = await getOverview(env, { id: 'u1', tenantId: 'tenant_1', permissions: ['integration:read'] })
 
-  expectations.forEach(([kind, writes, fenced], index) => {
+  kinds.forEach((kind, index) => {
     const system = systemById(res, `sys_${index}`)
+    const expected = expectedFor(kind)
     assert.equal(system.writeCapability.reads, 'real', `${kind} reads are real`)
-    assert.equal(system.writeCapability.writes, writes, `${kind} write capability`)
-    assert.equal(system.writeCapability.fenced, fenced, `${kind} fence flag`)
+    assert.equal(system.writeCapability.writes, expected.writes, `${kind} write capability`)
+    assert.equal(system.writeCapability.fenced, expected.fenced, `${kind} fence flag`)
     assert.equal(system.kind, kind, 'the raw kind token is carried verbatim for 技术详情')
     assert.equal(system.technical.kind, kind)
   })
 
-  const k3 = systemById(res, 'sys_0')
+  // The K3 WebAPI target is fenced TODAY and its card renders the fence sentence verbatim. This is
+  // stable across #5402 — that PR ADDS a fenced kind, it never un-fences this one.
+  const k3 = systemById(res, `sys_${kinds.indexOf(K3_EXTERNAL_WRITE_TARGET_KIND)}`)
+  assert.equal(k3.writeCapability.fenced, true, 'the K3 WebAPI target is fenced')
   assert.deepEqual(k3.writeCapability.notice, { ...K3_FENCE_NOTICE })
   assert.equal(k3.writeCapability.notice.zh, '只读·永不写入', 'the K3 card renders the fence sentence verbatim')
 
   // An unregistered kind still gets a usable card.
-  const custom = systemById(res, `sys_${expectations.length - 1}`)
+  const custom = systemById(res, `sys_${kinds.indexOf('some:kind-nobody-registered')}`)
   assert.equal(custom.kindRegistered, false)
   assert.equal(custom.kindLabel.zh, '自定义连接器')
 
@@ -609,6 +703,7 @@ async function testEmptyStateAndPureBuilder() {
 
 async function main() {
   await testReadTierGate()
+  await testTenantScopingAtStoreBoundary()
   await testValuesFreeBoundary()
   await testConsumersJoin()
   await testConnectionJoin()
