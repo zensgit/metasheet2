@@ -133,6 +133,7 @@ import {
   type ElearningPortalDb,
 } from './elearning-portal-settings'
 import type {
+  AcknowledgeElearningWatchChallengeInput,
   ElearningWatchDb,
   ElearningWatchState,
   RecordElearningHeartbeatInput,
@@ -238,6 +239,10 @@ export interface ElearningPilotRuntimeOptions {
   recordElearningHeartbeat?: (
     db: ElearningWatchDb,
     input: RecordElearningHeartbeatInput,
+  ) => Promise<ElearningWatchState>
+  acknowledgeElearningWatchChallenge?: (
+    db: ElearningWatchDb,
+    input: AcknowledgeElearningWatchChallengeInput,
   ) => Promise<ElearningWatchState>
   issueElearningMediaPlaybackTicket?: (
     db: ElearningPlaybackDb,
@@ -432,6 +437,7 @@ export function createElearningPilotRuntime(
     assignElearningBatch: opts.assignElearningBatch,
     startElearningWatch: opts.startElearningWatch,
     recordElearningHeartbeat: opts.recordElearningHeartbeat,
+    acknowledgeElearningWatchChallenge: opts.acknowledgeElearningWatchChallenge,
     issueElearningMediaPlaybackTicket: issuePlayback,
     startElearningExam: opts.startElearningExam ?? startElearningExam,
     submitElearningExam: submitExam,

@@ -18,6 +18,7 @@ import {
   isElearningContentSurfaceEnabled,
   isElearningExamSurfaceEnabled,
   isElearningWatchSurfaceEnabled,
+  isElearningWatchChallengeSurfaceEnabled,
 } from '../elearning/feature-flags'
 import {
   createElearningAdminAccessRouter,
@@ -121,6 +122,7 @@ import {
 } from '../services/elearning-admin-access'
 import {
   ElearningWatchError,
+  acknowledgeElearningWatchChallenge,
   recordElearningHeartbeat,
   startElearningWatch,
   type ElearningWatchDb,
@@ -143,6 +145,7 @@ const BATCH_ASSIGN_KEYS = new Set([
   'rules',
 ])
 const HEARTBEAT_KEYS = new Set(['sequence', 'positionMs', 'playing'])
+const WATCH_CHALLENGE_ACK_KEYS = new Set(['requestId'])
 const SUBMIT_KEYS = new Set(['answers'])
 const PUBLISH_KEYS = new Set([
   'requestId',
@@ -189,6 +192,8 @@ const WATCH_STATUS: Record<ElearningWatchErrorCode, number> = {
   conflict: 409,
   sequence_gap: 409,
   session_inactive: 409,
+  challenge_mismatch: 409,
+  challenge_stale: 409,
   unavailable: 503,
 }
 
@@ -340,6 +345,7 @@ export interface ElearningPilotRouteDeps {
     typeof revokeElearningTrainingPlanAssignmentAuthorized
   startElearningWatch?: typeof startElearningWatch
   recordElearningHeartbeat?: typeof recordElearningHeartbeat
+  acknowledgeElearningWatchChallenge?: typeof acknowledgeElearningWatchChallenge
   issueElearningMediaPlaybackTicket?: typeof issueElearningMediaPlaybackTicket
   startElearningExam?: typeof startElearningExam
   saveElearningExamAnswers?: typeof saveElearningExamAnswers
@@ -498,6 +504,8 @@ export function createElearningPilotRouter(
     ?? revokeElearningTrainingPlanAssignmentAuthorized
   const startWatch = deps.startElearningWatch ?? startElearningWatch
   const heartbeat = deps.recordElearningHeartbeat ?? recordElearningHeartbeat
+  const acknowledgeChallenge =
+    deps.acknowledgeElearningWatchChallenge ?? acknowledgeElearningWatchChallenge
   const issuePlayback = deps.issueElearningMediaPlaybackTicket ?? issueElearningMediaPlaybackTicket
   const startExam = deps.startElearningExam ?? startElearningExam
   const saveExamAnswers = deps.saveElearningExamAnswers ?? saveElearningExamAnswers
@@ -581,6 +589,18 @@ export function createElearningPilotRouter(
     next()
   }
 
+  const requireWatchChallengeFlags = (
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): void => {
+    if (!isElearningWatchChallengeSurfaceEnabled(envOf(deps))) {
+      res.status(404).json({ error: 'not_found' })
+      return
+    }
+    next()
+  }
+
   const requireContentFlags = (
     _req: Request,
     res: Response,
@@ -643,7 +663,7 @@ export function createElearningPilotRouter(
 
   const gate = (
     guard: RequestHandler,
-    surface: 'content' | 'assignment' | 'watch' | 'exam' = 'watch',
+    surface: 'content' | 'assignment' | 'watch' | 'challenge' | 'exam' = 'watch',
     parser: RequestHandler | null = parseJson,
   ): RequestHandler[] => [
     surface === 'content'
@@ -652,6 +672,8 @@ export function createElearningPilotRouter(
         ? requireAssignmentFlags
         : surface === 'exam'
           ? requireExamFlags
+          : surface === 'challenge'
+            ? requireWatchChallengeFlags
           : requireWatchFlags,
     requireIdentity,
     requireOrg,
@@ -662,7 +684,7 @@ export function createElearningPilotRouter(
   const recheck = (
     req: Request,
     res: Response,
-    surface: 'content' | 'assignment' | 'watch' | 'exam' = 'watch',
+    surface: 'content' | 'assignment' | 'watch' | 'challenge' | 'exam' = 'watch',
   ): { actorId: string; orgId: string } | null => {
     const enabled =
       surface === 'content'
@@ -671,6 +693,8 @@ export function createElearningPilotRouter(
           ? isElearningAssignmentSurfaceEnabled(envOf(deps))
           : surface === 'exam'
             ? isElearningExamSurfaceEnabled(envOf(deps))
+            : surface === 'challenge'
+              ? isElearningWatchChallengeSurfaceEnabled(envOf(deps))
             : isElearningWatchSurfaceEnabled(envOf(deps))
     if (!enabled) {
       res.status(404).json({ error: 'not_found' })
@@ -1114,6 +1138,9 @@ export function createElearningPilotRouter(
           orgId: ctx.orgId,
           userId: ctx.actorId,
           itemId,
+          ...(isElearningWatchChallengeSurfaceEnabled(envOf(deps))
+            ? { challengeEnabled: true as const }
+            : {}),
         })
         res.status(200).json(result)
       } catch (error) {
@@ -1161,6 +1188,49 @@ export function createElearningPilotRouter(
           sequence,
           positionMs,
           playing,
+          ...(isElearningWatchChallengeSurfaceEnabled(envOf(deps))
+            ? { challengeEnabled: true as const }
+            : {}),
+        })
+        res.status(200).json(result)
+      } catch (error) {
+        if (error instanceof ElearningWatchError) {
+          res.status(WATCH_STATUS[error.code]).json({ error: error.code })
+          return
+        }
+        res.status(500).json({ error: 'internal_error' })
+      }
+    }),
+  )
+
+  router.post(
+    '/api/elearning/watch/sessions/:sessionId/challenges/:challengeId/ack',
+    ...gate(deps.readGuard, 'challenge'),
+    asyncHandler(async (req: Request, res: Response) => {
+      const ctx = recheck(req, res, 'challenge')
+      if (!ctx) return
+      const sessionId = uuidParam(req, 'sessionId')
+      const challengeId = uuidParam(req, 'challengeId')
+      const body = readObject(req.body)
+      if (
+        !sessionId || !challengeId || !body
+        || rejectUnknownKeys(body, WATCH_CHALLENGE_ACK_KEYS)
+      ) {
+        invalid(res)
+        return
+      }
+      const requestId = readUuid(body.requestId)
+      if (!requestId) {
+        invalid(res)
+        return
+      }
+      try {
+        const result = await acknowledgeChallenge(deps.db, {
+          orgId: ctx.orgId,
+          userId: ctx.actorId,
+          sessionId,
+          challengeId,
+          requestId,
         })
         res.status(200).json(result)
       } catch (error) {
