@@ -9,6 +9,7 @@ import type {
   RecordElearningHeartbeatInput,
   StartElearningWatchInput,
 } from '../../src/services/elearning-watch-progress'
+import { usePinnedServer } from '../utils/pinned-server'
 
 const ORG = 'org-watch-challenge'
 const USER = 'user-watch-challenge'
@@ -69,17 +70,23 @@ function app(input: {
 }
 
 describe('elearning watch challenge routes', () => {
+  const pinned = usePinnedServer()
+  const api = (input: Parameters<typeof app>[0] = {}) => {
+    pinned.setApp(app(input))
+    return request(pinned.url())
+  }
+
   it('passes the exact challenge gate into start and heartbeat only when enabled', async () => {
     const starts: StartElearningWatchInput[] = []
     const heartbeats: RecordElearningHeartbeatInput[] = []
-    await request(app({
+    await api({
       start: async (value) => { starts.push(value); return STATE },
       heartbeat: async (value) => { heartbeats.push(value); return STATE },
-    })).post(`/api/elearning/watch/items/${ITEM}/start`).send({}).expect(200)
-    await request(app({
+    }).post(`/api/elearning/watch/items/${ITEM}/start`).send({}).expect(200)
+    await api({
       start: async (value) => { starts.push(value); return STATE },
       heartbeat: async (value) => { heartbeats.push(value); return STATE },
-    })).post(`/api/elearning/watch/sessions/${SESSION}/heartbeat`).send({
+    }).post(`/api/elearning/watch/sessions/${SESSION}/heartbeat`).send({
       sequence: 1,
       positionMs: 1000,
       playing: true,
@@ -98,16 +105,16 @@ describe('elearning watch challenge routes', () => {
 
   it('keeps the legacy start payload byte-shaped when the challenge flag is off', async () => {
     const start = vi.fn(async () => STATE)
-    await request(app({
+    await api({
       env: { ...FLAGS, ELEARNING_WATCH_CHALLENGE_ENABLED: 'false' },
       start,
-    })).post(`/api/elearning/watch/items/${ITEM}/start`).send({}).expect(200)
+    }).post(`/api/elearning/watch/items/${ITEM}/start`).send({}).expect(200)
     expect(start).toHaveBeenCalledWith({ orgId: ORG, userId: USER, itemId: ITEM })
   })
 
   it('acks with server-derived org/user and a closed request body', async () => {
     const ack = vi.fn(async () => STATE)
-    const response = await request(app({ ack }))
+    const response = await api({ ack })
       .post(`/api/elearning/watch/sessions/${SESSION}/challenges/${CHALLENGE}/ack`)
       .send({ requestId: REQUEST })
       .expect(200)
@@ -119,7 +126,7 @@ describe('elearning watch challenge routes', () => {
       challengeId: CHALLENGE,
       requestId: REQUEST,
     })
-    await request(app({ ack }))
+    await api({ ack })
       .post(`/api/elearning/watch/sessions/${SESSION}/challenges/${CHALLENGE}/ack`)
       .send({ requestId: REQUEST, answer: 'secret' })
       .expect(400, { error: 'invalid_input' })
@@ -127,13 +134,13 @@ describe('elearning watch challenge routes', () => {
   })
 
   it('fails closed for missing identity and every non-exact challenge flag', async () => {
-    await request(app({ viewerId: null }))
+    await api({ viewerId: null })
       .post(`/api/elearning/watch/sessions/${SESSION}/challenges/${CHALLENGE}/ack`)
       .send({ requestId: REQUEST })
       .expect(401, { error: 'unauthenticated' })
     for (const value of [undefined, 'false', 'TRUE', 'true ']) {
       const env = { ...FLAGS, ELEARNING_WATCH_CHALLENGE_ENABLED: value }
-      await request(app({ env }))
+      await api({ env })
         .post(`/api/elearning/watch/sessions/${SESSION}/challenges/${CHALLENGE}/ack`)
         .send({ requestId: REQUEST })
         .expect(404, { error: 'not_found' })
