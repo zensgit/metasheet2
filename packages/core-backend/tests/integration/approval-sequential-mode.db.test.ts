@@ -115,7 +115,11 @@ describeIfDatabase('Approval Lock-1 K6 sequential mode', () => {
     await server?.stop()
   })
 
-  async function publish(graph: object, label: string): Promise<string> {
+  async function publish(
+    graph: object,
+    label: string,
+    policy: object = { allowRevoke: true },
+  ): Promise<string> {
     const token = await authToken(baseUrl, admin)
     const created = await request(baseUrl, '/api/approval-templates', token, {
       method: 'POST',
@@ -131,7 +135,7 @@ describeIfDatabase('Approval Lock-1 K6 sequential mode', () => {
     templateIds.add(templateId)
     const published = await request(baseUrl, `/api/approval-templates/${templateId}/publish`, token, {
       method: 'POST',
-      body: { policy: { allowRevoke: true } },
+      body: { policy },
     })
     expect(published.status).toBe(200)
     return templateId
@@ -296,6 +300,54 @@ describeIfDatabase('Approval Lock-1 K6 sequential mode', () => {
           originalApprover: { id: requester, type: 'user' },
         }),
       }),
+    ])
+  })
+
+  it('leaves a handler frontier pending before applying sequential auto-approval', async () => {
+    const graph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'handler_first',
+          type: 'handler',
+          config: { assigneeSources: [{ kind: 'requester' }], handlerMode: 'all' },
+        },
+        {
+          key: 'approval_seq',
+          type: 'approval',
+          config: {
+            assigneeType: 'user',
+            assigneeIds: [requester, approvers[1]],
+            approvalMode: 'sequential',
+          },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-handler', source: 'start', target: 'handler_first' },
+        { key: 'edge-handler-seq', source: 'handler_first', target: 'approval_seq' },
+        { key: 'edge-seq-end', source: 'approval_seq', target: 'end' },
+      ],
+    }
+    const templateId = await publish(
+      graph,
+      'handler-before-sequential',
+      { allowRevoke: true, autoApproval: { mergeWithRequester: true } },
+    )
+    const instanceId = await create(templateId)
+    const initial = await poolManager.get().query<{ current_node_key: string; assignee_id: string }>(
+      `SELECT i.current_node_key, a.assignee_id
+         FROM approval_instances i
+         JOIN approval_assignments a ON a.instance_id = i.id AND a.is_active IS TRUE
+        WHERE i.id = $1`,
+      [instanceId],
+    )
+    expect(initial.rows).toEqual([{ current_node_key: 'handler_first', assignee_id: requester }])
+
+    const handled = await act(instanceId, requester, { action: 'handle' })
+    expect(handled.status).toBe(200)
+    expect((await sequentialRows(instanceId)).map((row) => ({ id: row.assignee_id, active: row.is_active }))).toEqual([
+      { id: approvers[1], active: true },
     ])
   })
 })
