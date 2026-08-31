@@ -484,6 +484,11 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
         elearningExamExpirySettlement: {
           settle: (input) => settleExpiredElearningExamAttempt(database, input),
         },
+        elearningOnboarding: {
+          async processAssignment() {
+            throw new Error('onboarding assignment must not execute in the auth gate')
+          },
+        },
       },
     })
     if (!capabilitiesMounted) {
