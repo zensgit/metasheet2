@@ -40,6 +40,136 @@ paths:
                   code: FEATURE_DISABLED
                   message: Feature is disabled
 
+  /api/elearning/admin/onboarding/policies:
+    post:
+      operationId: createElearningOnboardingPolicy
+      summary: Create an immutable new-hire onboarding policy
+      description: |
+        Global `elearning:admin` only. Requires the master, content, and assignment
+        flags to each equal the exact literal `true`. Organization and actor are
+        server-derived. The organization-scoped `requestId` replays the original
+        closed result for the same normalized payload and returns a values-free
+        conflict for a different payload.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningOnboardingPolicyCreateRequest'
+      responses:
+        '200':
+          description: Exact idempotent replay of the existing policy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningOnboardingPolicy'
+        '201':
+          description: Newly created immutable active policy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningOnboardingPolicy'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient elearning:admin
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Assignment surface flags off or referenced authority not found
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: requestId reused with a different normalized payload
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/admin/onboarding/policies/{policyId}/retire:
+    post:
+      operationId: retireElearningOnboardingPolicy
+      summary: Retire one active onboarding policy
+      description: |
+        Global `elearning:admin` only. Organization and actor are server-derived.
+        Retirement is one-way and does not mutate the immutable policy payload.
+        Requires the master, content, and assignment flags to be exact `true`.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: policyId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      responses:
+        '200':
+          description: Retired policy, or the exact already-retired state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningOnboardingPolicy'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient elearning:admin
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Assignment surface flags off or policy not found
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/admin/onboarding/policies/{policyId}/reports/{weekStart}:
+    get:
+      operationId: getElearningOnboardingWeeklyReport
+      summary: Read one privacy-suppressed onboarding weekly report
+      description: |
+        Requires `elearning:stats` or global `elearning:admin`, plus the master and
+        analytics flags set to exact `true`. Organization is server-derived. Groups
+        smaller than five return the suppressed variant with every numeric measure
+        null; no individual learning data is returned.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: policyId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+        - in: path
+          name: weekStart
+          required: true
+          schema:
+            type: string
+            format: date
+            pattern: '^\d{4}-\d{2}-\d{2}$'
+      responses:
+        '200':
+          description: Closed suppressed or visible weekly aggregate.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningOnboardingWeeklyReport'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient statistics permission
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Analytics surface flags off or report not found
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
   /api/elearning/admin/credit-rules:
     get:
       operationId: listElearningCreditRules
