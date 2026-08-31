@@ -92,6 +92,34 @@ export type ElearningLabelKey =
   | 'contentAdmin.publish'
   | 'contentAdmin.publishing'
   | 'contentAdmin.publishSuccess'
+  // --- Objective practice chrome ---
+  | 'practiceAdmin.title'
+  | 'practiceAdmin.subtitle'
+  | 'practiceAdmin.paperId'
+  | 'practiceAdmin.setTitle'
+  | 'practiceAdmin.create'
+  | 'practiceAdmin.creating'
+  | 'practiceAdmin.created'
+  | 'practiceAdmin.available'
+  | 'practiceAdmin.empty'
+  | 'practiceLearner.title'
+  | 'practiceLearner.subtitle'
+  | 'practiceLearner.loading'
+  | 'practiceLearner.empty'
+  | 'practiceLearner.mode'
+  | 'practiceLearner.modeSequential'
+  | 'practiceLearner.modeRandom'
+  | 'practiceLearner.modeWrongBook'
+  | 'practiceLearner.start'
+  | 'practiceLearner.starting'
+  | 'practiceLearner.submit'
+  | 'practiceLearner.submitting'
+  | 'practiceLearner.correct'
+  | 'practiceLearner.wrong'
+  | 'practiceLearner.resolved'
+  | 'practiceLearner.finished'
+  | 'practiceLearner.wrongBook'
+  | 'practiceLearner.wrongBookEmpty'
   // --- Assessment resource admin chrome ---
   | 'assessment.title'
   | 'assessment.subtitle'
@@ -188,6 +216,10 @@ export type ElearningLabelKey =
   | 'validation.contentItemTitleRequired'
   | 'validation.articleBodyRequired'
   | 'validation.externalUrlRequired'
+  | 'validation.practicePaperRequired'
+  | 'validation.practiceTitleRequired'
+  | 'validation.practiceSetRequired'
+  | 'validation.practiceAnswerRequired'
 
 const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = {
   'learner.title': { en: 'Learning Center', zh: '学习中心' },
@@ -289,6 +321,40 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   'contentAdmin.publish': { en: 'Publish content course', zh: '发布内容课程' },
   'contentAdmin.publishing': { en: 'Publishing content course...', zh: '正在发布内容课程…' },
   'contentAdmin.publishSuccess': { en: 'Content course published.', zh: '内容课程已发布。' },
+
+  'practiceAdmin.title': { en: 'Objective practice', zh: '客观题练习' },
+  'practiceAdmin.subtitle': {
+    en: 'Create a practice set from a published objective paper.',
+    zh: '从已发布的客观题试卷创建练习集。',
+  },
+  'practiceAdmin.paperId': { en: 'Published paper ID', zh: '已发布试卷 ID' },
+  'practiceAdmin.setTitle': { en: 'Practice set title', zh: '练习集名称' },
+  'practiceAdmin.create': { en: 'Create practice set', zh: '创建练习集' },
+  'practiceAdmin.creating': { en: 'Creating...', zh: '正在创建…' },
+  'practiceAdmin.created': { en: 'Practice set created.', zh: '练习集已创建。' },
+  'practiceAdmin.available': { en: 'Available practice sets', zh: '可用练习集' },
+  'practiceAdmin.empty': { en: 'No practice sets yet.', zh: '暂无练习集。' },
+  'practiceLearner.title': { en: 'Question practice', zh: '刷题练习' },
+  'practiceLearner.subtitle': {
+    en: 'Practice published objective questions without starting an exam.',
+    zh: '无需进入考试即可练习已发布的客观题。',
+  },
+  'practiceLearner.loading': { en: 'Loading practice sets...', zh: '正在加载练习集…' },
+  'practiceLearner.empty': { en: 'No practice sets are available.', zh: '暂无可用练习集。' },
+  'practiceLearner.mode': { en: 'Practice mode', zh: '练习模式' },
+  'practiceLearner.modeSequential': { en: 'In order', zh: '顺序练习' },
+  'practiceLearner.modeRandom': { en: 'Random order', zh: '随机练习' },
+  'practiceLearner.modeWrongBook': { en: 'Wrong questions', zh: '错题练习' },
+  'practiceLearner.start': { en: 'Start practice', zh: '开始练习' },
+  'practiceLearner.starting': { en: 'Starting...', zh: '正在开始…' },
+  'practiceLearner.submit': { en: 'Submit answer', zh: '提交答案' },
+  'practiceLearner.submitting': { en: 'Submitting...', zh: '正在提交…' },
+  'practiceLearner.correct': { en: 'Correct.', zh: '回答正确。' },
+  'practiceLearner.wrong': { en: 'Incorrect. Added to wrong questions.', zh: '回答错误，已加入错题。' },
+  'practiceLearner.resolved': { en: 'Correct. Removed from wrong questions.', zh: '回答正确，已移出错题。' },
+  'practiceLearner.finished': { en: 'Practice complete.', zh: '本次练习已完成。' },
+  'practiceLearner.wrongBook': { en: 'Current wrong questions', zh: '当前错题' },
+  'practiceLearner.wrongBookEmpty': { en: 'No unresolved wrong questions.', zh: '暂无未解决错题。' },
 
   'assessment.title': { en: 'Assessment resources', zh: '题库与考试资源' },
   'assessment.subtitle': {
@@ -495,6 +561,22 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   'validation.externalUrlRequired': {
     en: 'Enter an HTTPS URL.',
     zh: '请填写 HTTPS 链接。',
+  },
+  'validation.practicePaperRequired': {
+    en: 'Enter a valid published paper ID.',
+    zh: '请输入有效的已发布试卷 ID。',
+  },
+  'validation.practiceTitleRequired': {
+    en: 'Enter a practice set title.',
+    zh: '请输入练习集名称。',
+  },
+  'validation.practiceSetRequired': {
+    en: 'Select a practice set.',
+    zh: '请选择练习集。',
+  },
+  'validation.practiceAnswerRequired': {
+    en: 'Select at least one answer.',
+    zh: '请至少选择一个答案。',
   },
 }
 

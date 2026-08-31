@@ -5609,6 +5609,185 @@ components:
         mapping:
           article: '#/components/schemas/ElearningContentArticleOpenResult'
           external_link: '#/components/schemas/ElearningContentExternalLinkOpenResult'
+    ElearningPracticeMode:
+      type: string
+      enum: [sequential, random, wrong_book]
+    ElearningPracticeSetCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [paperId, requestId, title]
+      properties:
+        paperId:
+          $ref: '#/components/schemas/ElearningUuid'
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+    ElearningPracticeSet:
+      type: object
+      additionalProperties: false
+      required: [practiceSetId, paperId, title, status, createdAt]
+      properties:
+        practiceSetId:
+          $ref: '#/components/schemas/ElearningUuid'
+        paperId:
+          $ref: '#/components/schemas/ElearningUuid'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        status:
+          type: string
+          enum: [active]
+        createdAt:
+          type: string
+          format: date-time
+          pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$'
+    ElearningPracticeSetCreateResult:
+      type: object
+      additionalProperties: false
+      required: [practiceSetId, paperId, title, status, createdAt, duplicate]
+      properties:
+        practiceSetId:
+          $ref: '#/components/schemas/ElearningUuid'
+        paperId:
+          $ref: '#/components/schemas/ElearningUuid'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        status:
+          type: string
+          enum: [active]
+        createdAt:
+          type: string
+          format: date-time
+          pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$'
+        duplicate:
+          type: boolean
+    ElearningPracticeSetList:
+      type: object
+      additionalProperties: false
+      required: [practiceSets]
+      properties:
+        practiceSets:
+          type: array
+          maxItems: 10000
+          items:
+            $ref: '#/components/schemas/ElearningPracticeSet'
+    ElearningPracticeQuestion:
+      type: object
+      additionalProperties: false
+      required: [questionId, questionRevisionId, questionType, prompt, options, points, position]
+      description: Closed public objective question. No answer key, correct option ids, explanation, or snapshot.
+      properties:
+        questionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        questionRevisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        questionType:
+          $ref: '#/components/schemas/ElearningObjectiveQuestionType'
+        prompt:
+          type: string
+          minLength: 1
+        options:
+          type: array
+          minItems: 2
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/ElearningPublicOption'
+        points:
+          type: integer
+          minimum: 0
+        position:
+          type: integer
+          minimum: 1
+    ElearningPracticeSessionStartRequest:
+      type: object
+      additionalProperties: false
+      required: [mode, practiceSetId, requestId]
+      properties:
+        mode:
+          $ref: '#/components/schemas/ElearningPracticeMode'
+        practiceSetId:
+          $ref: '#/components/schemas/ElearningUuid'
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+    ElearningPracticeSessionStartResult:
+      type: object
+      additionalProperties: false
+      required: [sessionId, practiceSetId, mode, questions, createdAt, duplicate]
+      properties:
+        sessionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        practiceSetId:
+          $ref: '#/components/schemas/ElearningUuid'
+        mode:
+          $ref: '#/components/schemas/ElearningPracticeMode'
+        questions:
+          type: array
+          maxItems: 2000
+          items:
+            $ref: '#/components/schemas/ElearningPracticeQuestion'
+        createdAt:
+          type: string
+          format: date-time
+          pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$'
+        duplicate:
+          type: boolean
+    ElearningPracticeAnswerRequest:
+      type: object
+      additionalProperties: false
+      required: [questionRevisionId, requestId, selectedOptionIds]
+      properties:
+        questionRevisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+        selectedOptionIds:
+          type: array
+          maxItems: 20
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+    ElearningPracticeAnswerResult:
+      type: object
+      additionalProperties: false
+      required: [answerId, sessionId, questionRevisionId, correct, wrongState, createdAt, duplicate]
+      properties:
+        answerId:
+          $ref: '#/components/schemas/ElearningUuid'
+        sessionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        questionRevisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        correct:
+          type: boolean
+          description: Correctness of the authenticated learner's submitted answer; never an answer key.
+        wrongState:
+          type: string
+          enum: [wrong, resolved, unchanged]
+        createdAt:
+          type: string
+          format: date-time
+          pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$'
+        duplicate:
+          type: boolean
+    ElearningPracticeWrongQuestionList:
+      type: object
+      additionalProperties: false
+      required: [practiceSetId, questions]
+      properties:
+        practiceSetId:
+          $ref: '#/components/schemas/ElearningUuid'
+        questions:
+          type: array
+          maxItems: 2000
+          items:
+            $ref: '#/components/schemas/ElearningPracticeQuestion'
     ElearningMediaRejectCode:
       type: string
       enum:
@@ -7319,6 +7498,65 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ElearningExamReviewQuestion'
+    ElearningAnalyticsExportCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, departmentId, periodStart, periodEnd]
+      properties:
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+        departmentId:
+          $ref: '#/components/schemas/ElearningUuid'
+        periodStart:
+          type: string
+          format: date-time
+        periodEnd:
+          type: string
+          format: date-time
+    ElearningAnalyticsExportStatus:
+      type: string
+      enum: [pending, running, succeeded, failed, expired]
+    ElearningAnalyticsExportResult:
+      type: object
+      additionalProperties: false
+      required:
+        - exportId
+        - departmentId
+        - periodStart
+        - periodEnd
+        - status
+        - expiresAt
+        - completedAt
+        - errorCode
+        - duplicate
+      properties:
+        exportId:
+          $ref: '#/components/schemas/ElearningUuid'
+        departmentId:
+          $ref: '#/components/schemas/ElearningUuid'
+        periodStart:
+          type: string
+          format: date-time
+        periodEnd:
+          type: string
+          format: date-time
+        status:
+          $ref: '#/components/schemas/ElearningAnalyticsExportStatus'
+        expiresAt:
+          type: string
+          format: date-time
+        completedAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
+        errorCode:
+          oneOf:
+            - type: string
+              pattern: '^[A-Z][A-Z0-9_]{1,63}$'
+            - type: 'null'
+        duplicate:
+          type: boolean
   responses:
     ElearningError:
       description: 'Values-free e-learning error `{ error: "<code>" }`'

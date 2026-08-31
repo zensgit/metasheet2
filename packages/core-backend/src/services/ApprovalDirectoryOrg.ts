@@ -90,6 +90,91 @@ export interface ApprovalRequesterOrgRelations {
   deptHeadChainIds?: string[]
 }
 
+/**
+ * F4-E — the last authoritative directory position of an account that just departed.
+ * `syncDirectoryIntegration` captures this before it rebuilds account-department memberships;
+ * the post-commit departure consumer then resolves the manager from current active accounts.
+ */
+export interface ApprovalDepartureManagerContext {
+  integrationId: string
+  requesterExternalId: string
+  primaryDepartmentExternalId: string | null
+}
+
+type ApprovalDepartureManagerContextRow = {
+  directory_account_id: string
+  integration_id: string
+  requester_external_id: string
+  primary_department_external_id: string | null
+  primary_department_count: number
+}
+
+/**
+ * Capture only source identity + primary-department identity. No manager id is frozen here: the
+ * manager must be a live post-signal read. A malformed account with zero or multiple primary
+ * memberships fails closed to a null department rather than electing one arbitrarily.
+ */
+export async function captureApprovalDepartureManagerContexts(
+  directoryAccountIds: readonly string[],
+  query: QueryFn,
+): Promise<Map<string, ApprovalDepartureManagerContext>> {
+  const ids = [...new Set(directoryAccountIds.map((id) => id.trim()).filter(Boolean))]
+  const contexts = new Map<string, ApprovalDepartureManagerContext>()
+  if (ids.length === 0) return contexts
+
+  const rows = await query<ApprovalDepartureManagerContextRow>(
+    `SELECT a.id::text AS directory_account_id,
+            a.integration_id::text AS integration_id,
+            a.external_user_id AS requester_external_id,
+            MIN(d.external_department_id) AS primary_department_external_id,
+            COUNT(d.id)::int AS primary_department_count
+       FROM directory_accounts a
+       LEFT JOIN directory_account_departments ad
+         ON ad.directory_account_id = a.id
+        AND ad.is_primary = true
+       LEFT JOIN directory_departments d
+         ON d.id = ad.directory_department_id
+        AND d.integration_id = a.integration_id
+      WHERE a.id = ANY($1::uuid[])
+      GROUP BY a.id, a.integration_id, a.external_user_id
+      ORDER BY a.id ASC`,
+    [ids],
+  )
+
+  for (const row of rows.rows) {
+    const accountId = row.directory_account_id?.trim()
+    const integrationId = row.integration_id?.trim()
+    const requesterExternalId = row.requester_external_id?.trim()
+    if (!accountId || !integrationId || !requesterExternalId) continue
+    contexts.set(accountId, {
+      integrationId,
+      requesterExternalId,
+      primaryDepartmentExternalId:
+        Number(row.primary_department_count) === 1
+          ? normalizeExternalId(row.primary_department_external_id)
+          : null,
+    })
+  }
+  return contexts
+}
+
+/** Resolve a departed account's direct manager from current active directory state. */
+export async function resolveApprovalDepartureManagerFromContext(
+  context: ApprovalDepartureManagerContext,
+  query: QueryFn,
+): Promise<string | undefined> {
+  const integrationId = context.integrationId.trim()
+  const requesterExternalId = context.requesterExternalId.trim()
+  const primaryDepartmentExternalId = normalizeExternalId(context.primaryDepartmentExternalId)
+  if (!integrationId || !requesterExternalId || !primaryDepartmentExternalId) return undefined
+  return resolveDirectManager(
+    integrationId,
+    primaryDepartmentExternalId,
+    requesterExternalId,
+    query,
+  )
+}
+
 /** Default cap on how far up the org tree the bake-time walk climbs when unconfigured. */
 export const DEFAULT_MAX_MANAGER_CHAIN_LEVELS = 10
 /** Hard upper bound on the *configurable* cap — even a misconfigured env can't make the
@@ -450,42 +535,9 @@ export async function resolveApprovalRequesterOrgRelations(
   //    seam for the DIRECT manager here. The manager CHAIN (step 4) and the department HEAD
   //    (step 3, a distinct `dept_manager_userid_list` source) are intentionally left on their
   //    legacy sources in this increment.
-  let managerId: string | undefined
-  if (requesterDeptId) {
-    const normalized = await resolveNormalizedDeptManager(
-      integrationId,
-      requesterDeptId,
-      requester.external_user_id,
-      query,
-    )
-    if (normalized.present) {
-      // The dept is normalized-managed: the normalized relation is authoritative even when it
-      // resolves to no LINKED local user (e.g. the flagged manager is unlinked) — we never blend
-      // back into the provider raw for a dept an admin explicitly manages.
-      managerId = normalized.managerId
-    } else {
-      // LEGACY (unchanged): the account flagged leader for the requester's primary
-      // department in its own `leader_in_dept`. Exclude the requester themselves.
-      const candidateRows = await query<{ account_id: string; raw: unknown }>(
-        `SELECT a.id::text AS account_id, a.raw AS raw
-           FROM directory_accounts a
-           JOIN directory_account_departments ad
-             ON ad.directory_account_id = a.id
-           JOIN directory_departments d
-             ON d.id = ad.directory_department_id
-          WHERE a.integration_id = $1::uuid
-            AND a.is_active = true
-            AND d.external_department_id = $2
-            AND a.external_user_id <> $3`,
-        [integrationId, requesterDeptId, requester.external_user_id],
-      )
-      const managerAccountId = candidateRows.rows.find((row) =>
-        parseLeaderDeptIds(asRecord(row.raw)).includes(requesterDeptId))?.account_id
-      if (managerAccountId) {
-        managerId = await resolveLinkedLocalUserId(managerAccountId, query)
-      }
-    }
-  }
+  const managerId = requesterDeptId
+    ? await resolveDirectManager(integrationId, requesterDeptId, requester.external_user_id, query)
+    : undefined
 
   // 3) Department head: first manager external id on the primary department's raw
   //    that resolves to a linked local user (and is not the requester).
@@ -799,6 +851,45 @@ async function resolveNormalizedDeptManager(
   const manager = rows.rows.find((row) => row.external_user_id !== requesterExternalId)
   if (!manager) return { present: true }
   return { present: true, managerId: await resolveLinkedLocalUserId(manager.account_id, query) }
+}
+
+async function resolveDirectManager(
+  integrationId: string,
+  deptExternalId: string,
+  requesterExternalId: string,
+  query: QueryFn,
+): Promise<string | undefined> {
+  const normalized = await resolveNormalizedDeptManager(
+    integrationId,
+    deptExternalId,
+    requesterExternalId,
+    query,
+  )
+  if (normalized.present) {
+    // An explicitly normalized-managed department is authoritative even when its manager is not
+    // linked to a local user. Never blend back into provider raw in that case.
+    return normalized.managerId
+  }
+
+  const candidateRows = await query<{ account_id: string; raw: unknown }>(
+    `SELECT a.id::text AS account_id, a.raw AS raw
+       FROM directory_accounts a
+       JOIN directory_account_departments ad
+         ON ad.directory_account_id = a.id
+       JOIN directory_departments d
+         ON d.id = ad.directory_department_id
+      WHERE a.integration_id = $1::uuid
+        AND a.is_active = true
+        AND d.integration_id = $1::uuid
+        AND d.external_department_id = $2
+        AND a.external_user_id <> $3`,
+    [integrationId, deptExternalId, requesterExternalId],
+  )
+  const managerAccountId = candidateRows.rows.find((row) =>
+    parseLeaderDeptIds(asRecord(row.raw)).includes(deptExternalId))?.account_id
+  return managerAccountId
+    ? resolveLinkedLocalUserId(managerAccountId, query)
+    : undefined
 }
 
 async function resolveLinkedLocalUserId(accountId: string, query: QueryFn): Promise<string | undefined> {

@@ -84,6 +84,18 @@ type PortalActiveSettings = components['schemas']['ElearningPortalActiveSettings
 type PortalSettings = components['schemas']['ElearningPortalSettings']
 type PortalPublishRequest = components['schemas']['ElearningPortalPublishRequest']
 type PortalPublishResult = components['schemas']['ElearningPortalPublishResult']
+type PracticeMode = components['schemas']['ElearningPracticeMode']
+type PracticeSetCreateRequest = components['schemas']['ElearningPracticeSetCreateRequest']
+type PracticeSetCreateResult = components['schemas']['ElearningPracticeSetCreateResult']
+type PracticeSetList = components['schemas']['ElearningPracticeSetList']
+type PracticeQuestion = components['schemas']['ElearningPracticeQuestion']
+type PracticeSessionStartRequest = components['schemas']['ElearningPracticeSessionStartRequest']
+type PracticeSessionStartResult = components['schemas']['ElearningPracticeSessionStartResult']
+type PracticeAnswerRequest = components['schemas']['ElearningPracticeAnswerRequest']
+type PracticeAnswerResult = components['schemas']['ElearningPracticeAnswerResult']
+type PracticeWrongQuestionList = components['schemas']['ElearningPracticeWrongQuestionList']
+type AnalyticsExportCreateRequest = components['schemas']['ElearningAnalyticsExportCreateRequest']
+type AnalyticsExportResult = components['schemas']['ElearningAnalyticsExportResult']
 
 const FORBIDDEN_LEARNER_KEYS = new Set([
   'answerKey',
@@ -114,6 +126,8 @@ const LEARNER_OUTPUT_ROOTS = [
   'ElearningAssignmentProgressResult',
   'ElearningAssignmentProgressMember',
   'ElearningAssignmentRevocationResult',
+  'ElearningPracticeSessionStartResult',
+  'ElearningPracticeWrongQuestionList',
 ] as const
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -207,6 +221,14 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<paths['/api/elearning/admin/content-revisions']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/admin/courses/content/publish']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/me/course-items/{itemId}/open']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/admin/practice-sets']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/me/practice-sets']['get']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/me/practice-sessions']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/me/practice-sessions/{sessionId}/answers']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/me/practice-sets/{practiceSetId}/wrong-questions']['get']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/admin/analytics/exports']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/admin/analytics/exports/{exportId}']['get']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/admin/analytics/exports/{exportId}/download']['get']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/media']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/courses/publish']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/assessment/question-banks']['post']>().not.toBeNever()
@@ -278,6 +300,21 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<
       paths['/api/elearning/me/course-items/{itemId}/open']['post']['responses']['200']['content']['application/json']
     >().toEqualTypeOf<OpenCompletionResult>()
+    expectTypeOf<
+      paths['/api/elearning/admin/practice-sets']['post']['responses']['201']['content']['application/json']
+    >().toEqualTypeOf<PracticeSetCreateResult>()
+    expectTypeOf<
+      paths['/api/elearning/me/practice-sets']['get']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<PracticeSetList>()
+    expectTypeOf<
+      paths['/api/elearning/me/practice-sessions']['post']['responses']['201']['content']['application/json']
+    >().toEqualTypeOf<PracticeSessionStartResult>()
+    expectTypeOf<
+      paths['/api/elearning/me/practice-sessions/{sessionId}/answers']['post']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<PracticeAnswerResult>()
+    expectTypeOf<
+      paths['/api/elearning/me/practice-sets/{practiceSetId}/wrong-questions']['get']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<PracticeWrongQuestionList>()
     expectTypeOf<
       paths['/api/elearning/media']['post']['responses']['201']['content']['application/json']
     >().toEqualTypeOf<MediaUpload>()
@@ -362,6 +399,83 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<
       paths['/api/elearning/exams/attempts/{attemptId}/review']['get']['responses']['200']['content']['application/json']
     >().toEqualTypeOf<ExamReview>()
+    expectTypeOf<
+      paths['/api/elearning/admin/analytics/exports']['post']['responses']['202']['content']['application/json']
+    >().toEqualTypeOf<AnalyticsExportResult>()
+    expectTypeOf<
+      paths['/api/elearning/admin/analytics/exports/{exportId}']['get']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<AnalyticsExportResult>()
+  })
+
+  it('keeps aggregate export commands and status results closed and values-free', () => {
+    expectTypeOf<AnalyticsExportCreateRequest>().toEqualTypeOf<{
+      requestId: string
+      departmentId: string
+      periodStart: string
+      periodEnd: string
+    }>()
+    expectTypeOf<AnalyticsExportResult>().toEqualTypeOf<{
+      exportId: string
+      departmentId: string
+      periodStart: string
+      periodEnd: string
+      status: 'pending' | 'running' | 'succeeded' | 'failed' | 'expired'
+      expiresAt: string
+      completedAt: string | null
+      errorCode: string | null
+      duplicate: boolean
+    }>()
+    expectTypeOf<
+      paths['/api/elearning/admin/analytics/exports/{exportId}/download']['get']['responses']['200']['content']['text/csv']
+    >().toEqualTypeOf<string>()
+
+    const doc = JSON.parse(readFileSync(join(here, '..', '..', 'dist', 'openapi.json'), 'utf8')) as {
+      paths?: Record<string, any>
+      components?: { schemas?: Record<string, JsonSchema> }
+    }
+    const schemas = doc.components?.schemas ?? {}
+    const create = doc.paths?.['/api/elearning/admin/analytics/exports']?.post
+    const read = doc.paths?.['/api/elearning/admin/analytics/exports/{exportId}']?.get
+    const download = doc.paths?.['/api/elearning/admin/analytics/exports/{exportId}/download']?.get
+
+    expect(create?.security).toEqual([{ bearerAuth: [] }])
+    expect(create?.description).toContain('elearning:admin')
+    expect(create?.description).toContain('server-derived')
+    expect(create?.description).not.toMatch(/storageKey|fileSha|fileSize|querySnapshot|actorId|orgId/)
+    expect(create?.requestBody?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningAnalyticsExportCreateRequest' })
+    expect(create?.responses?.['202']?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningAnalyticsExportResult' })
+    expect(read?.responses?.['200']?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningAnalyticsExportResult' })
+    expect(download?.responses?.['200']?.content?.['text/csv']?.schema)
+      .toEqual({ type: 'string', format: 'binary' })
+    for (const operation of [create, read, download]) {
+      expect(operation?.security).toEqual([{ bearerAuth: [] }])
+      expect(JSON.stringify(operation?.responses ?? {})).not.toContain('detail')
+    }
+
+    expect(schemas.ElearningAnalyticsExportCreateRequest).toMatchObject({
+      additionalProperties: false,
+      required: ['requestId', 'departmentId', 'periodStart', 'periodEnd'],
+    })
+    expect(Object.keys(schemas.ElearningAnalyticsExportCreateRequest?.properties ?? {}).sort())
+      .toEqual(['departmentId', 'periodEnd', 'periodStart', 'requestId'])
+    expect(schemas.ElearningAnalyticsExportResult).toMatchObject({
+      additionalProperties: false,
+      required: [
+        'exportId', 'departmentId', 'periodStart', 'periodEnd', 'status',
+        'expiresAt', 'completedAt', 'errorCode', 'duplicate',
+      ],
+    })
+    expect(Object.keys(schemas.ElearningAnalyticsExportResult?.properties ?? {}).sort())
+      .toEqual([
+        'completedAt', 'departmentId', 'duplicate', 'errorCode', 'expiresAt',
+        'exportId', 'periodEnd', 'periodStart', 'status',
+      ])
+    expect(JSON.stringify(schemas.ElearningAnalyticsExportResult)).not.toMatch(
+      /storageKey|fileSha|fileSize|querySnapshot|snapshot|orgId|actorId|answer|trace|grade/,
+    )
   })
 
   it('documents playback Range 200/206/416 without a JSON success body', () => {
@@ -1557,6 +1671,131 @@ describe('elearning V0.1 OpenAPI paths', () => {
       expect.arrayContaining(['correctOptionIds', 'explanation']),
     )
     expect(LEARNER_OUTPUT_ROOTS).not.toContain('ElearningCoursePublishRequest')
+  })
+
+  it('keeps objective practice paths, DTOs, and learner outputs closed', () => {
+    expectTypeOf<PracticeMode>().toEqualTypeOf<'sequential' | 'random' | 'wrong_book'>()
+    expectTypeOf<PracticeSetCreateRequest>().toEqualTypeOf<{
+      paperId: string
+      requestId: string
+      title: string
+    }>()
+    expectTypeOf<PracticeSetCreateResult>().toEqualTypeOf<{
+      practiceSetId: string
+      paperId: string
+      title: string
+      status: 'active'
+      createdAt: string
+      duplicate: boolean
+    }>()
+    expectTypeOf<PracticeQuestion>().toEqualTypeOf<{
+      questionId: string
+      questionRevisionId: string
+      questionType: 'single_choice' | 'multiple_choice' | 'true_false'
+      prompt: string
+      options: Array<{ id: string; text: string }>
+      points: number
+      position: number
+    }>()
+    expectTypeOf<PracticeSessionStartRequest>().toEqualTypeOf<{
+      mode: PracticeMode
+      practiceSetId: string
+      requestId: string
+    }>()
+    expectTypeOf<PracticeSessionStartResult>().toEqualTypeOf<{
+      sessionId: string
+      practiceSetId: string
+      mode: PracticeMode
+      questions: PracticeQuestion[]
+      createdAt: string
+      duplicate: boolean
+    }>()
+    expectTypeOf<PracticeAnswerRequest>().toEqualTypeOf<{
+      questionRevisionId: string
+      requestId: string
+      selectedOptionIds: string[]
+    }>()
+    expectTypeOf<PracticeAnswerResult>().toEqualTypeOf<{
+      answerId: string
+      sessionId: string
+      questionRevisionId: string
+      correct: boolean
+      wrongState: 'wrong' | 'resolved' | 'unchanged'
+      createdAt: string
+      duplicate: boolean
+    }>()
+    expectTypeOf<PracticeWrongQuestionList>().toEqualTypeOf<{
+      practiceSetId: string
+      questions: PracticeQuestion[]
+    }>()
+    expectTypeOf<
+      NonNullable<paths['/api/elearning/admin/practice-sets']['post']['requestBody']>['content']['application/json']
+    >().toEqualTypeOf<PracticeSetCreateRequest>()
+    expectTypeOf<
+      NonNullable<paths['/api/elearning/me/practice-sessions']['post']['requestBody']>['content']['application/json']
+    >().toEqualTypeOf<PracticeSessionStartRequest>()
+    expectTypeOf<
+      NonNullable<paths['/api/elearning/me/practice-sessions/{sessionId}/answers']['post']['requestBody']>['content']['application/json']
+    >().toEqualTypeOf<PracticeAnswerRequest>()
+
+    const doc = JSON.parse(readFileSync(join(here, '..', '..', 'dist', 'openapi.json'), 'utf8')) as {
+      paths?: Record<string, any>
+      components?: { schemas?: Record<string, JsonSchema> }
+    }
+    const schemas = doc.components?.schemas ?? {}
+    const operations = [
+      ['/api/elearning/admin/practice-sets', 'post', '201'],
+      ['/api/elearning/me/practice-sets', 'get', '200'],
+      ['/api/elearning/me/practice-sessions', 'post', '201'],
+      ['/api/elearning/me/practice-sessions/{sessionId}/answers', 'post', '200'],
+      ['/api/elearning/me/practice-sets/{practiceSetId}/wrong-questions', 'get', '200'],
+    ] as const
+    for (const [path, method, success] of operations) {
+      const operation = doc.paths?.[path]?.[method]
+      expect(operation?.security).toEqual([{ bearerAuth: [] }])
+      expect(operation?.description).toMatch(/ASSESSMENT/)
+      expect(operation?.responses?.[success]?.content?.['application/json']?.schema?.$ref)
+        .toMatch(/^#\/components\/schemas\/ElearningPractice/)
+    }
+    for (const name of [
+      'ElearningPracticeSetCreateRequest',
+      'ElearningPracticeSet',
+      'ElearningPracticeSetCreateResult',
+      'ElearningPracticeSetList',
+      'ElearningPracticeQuestion',
+      'ElearningPracticeSessionStartRequest',
+      'ElearningPracticeSessionStartResult',
+      'ElearningPracticeAnswerRequest',
+      'ElearningPracticeAnswerResult',
+      'ElearningPracticeWrongQuestionList',
+    ]) expect(schemas[name]?.additionalProperties).toBe(false)
+    expect(schemas.ElearningPracticeMode?.enum).toEqual(['sequential', 'random', 'wrong_book'])
+    expect(schemas.ElearningPracticeAnswerResult?.properties?.wrongState?.enum)
+      .toEqual(['wrong', 'resolved', 'unchanged'])
+    expect(schemas.ElearningPracticeQuestion?.properties?.questionType?.$ref)
+      .toBe('#/components/schemas/ElearningObjectiveQuestionType')
+    expect(schemas.ElearningPracticeQuestion?.properties?.answerKey).toBeUndefined()
+    expect(schemas.ElearningPracticeQuestion?.properties?.correctOptionIds).toBeUndefined()
+    expect(schemas.ElearningPracticeQuestion?.properties?.explanation).toBeUndefined()
+    expect(collectForbiddenKeys(
+      schemas,
+      jsonSchemaAt(doc, '/api/elearning/me/practice-sessions', 'post', '201'),
+    )).toEqual([])
+    expect(collectForbiddenKeys(
+      schemas,
+      jsonSchemaAt(
+        doc,
+        '/api/elearning/me/practice-sets/{practiceSetId}/wrong-questions',
+        'get',
+        '200',
+      ),
+    )).toEqual([])
+    expect(collectForbiddenKeys(
+      schemas,
+      jsonSchemaAt(doc, '/api/elearning/me/practice-sessions/{sessionId}/answers', 'post', '200'),
+      new Set<string>(),
+      new Set(['correct']),
+    )).toEqual([])
   })
 
   it('keeps write and heartbeat request objects closed', () => {

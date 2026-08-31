@@ -439,6 +439,17 @@ export interface MultitableProvisioningAPI {
     objectId: string
     fields: MultitableProvisioningFieldDescriptor[]
   }): Promise<{ addedFieldIds: string[]; skippedExistingFieldIds: string[] }>
+  // Default-view provisioning. A sheet with ZERO views cannot be opened and blocks its
+  // whole base, so a managed table must be created WITH one. Creates a single grid view
+  // ONLY when the sheet has no views at all; a sheet that already has any view (e.g. the
+  // role views a customer pack created) is left completely alone — never appended to,
+  // renamed or reordered. Idempotent: a re-ensure writes nothing.
+  ensureObjectDefaultView(input: {
+    projectId: string
+    objectId: string
+    name: string
+    type?: string
+  }): Promise<{ created: boolean; viewId: string | null; existingViewCount: number }>
   // W2/P2-3 (round-5 review): run a repair's read → additive-write → re-read → verify
   // sequence inside ONE host transaction. If `fn` throws (mutated/incomplete/race), the
   // additive write ROLLS BACK — atomic fail-close, not a post-commit detection canary.
@@ -1170,6 +1181,23 @@ export interface PluginServices {
       input: import('../services/elearning-stats-daily-projection').ProjectElearningDepartmentStatsDailyInput,
     ): Promise<
       import('../services/elearning-stats-daily-projection').ProjectElearningDepartmentStatsDailyResult
+    >
+  }
+  /**
+   * E-learning L5 aggregate export materialization. Only plugin-elearning
+   * receives this port. Core owns export rows, suppression, byte storage,
+   * idempotency and cleanup; the plugin supplies only persisted job identity.
+   */
+  elearningAnalyticsExport?: {
+    materialize(
+      input: import('../services/elearning-analytics-export').MaterializeElearningAnalyticsExportInput,
+    ): Promise<
+      import('../services/elearning-analytics-export').MaterializeElearningAnalyticsExportResult
+    >
+    cleanup(
+      input: import('../services/elearning-analytics-export').MaterializeElearningAnalyticsExportInput,
+    ): Promise<
+      import('../services/elearning-analytics-export').CleanupElearningAnalyticsExportResult
     >
   }
   /**

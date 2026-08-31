@@ -28,6 +28,28 @@ export interface PlatformAppSummary {
   objects: PlatformAppManifest['objects']
   workflows: PlatformAppManifest['workflows']
   integrations: PlatformAppManifest['integrations']
+  /**
+   * THE INSTALL-PAGE HALF of the manifest (§14 of
+   * docs/development/platform-overall-design/multitable-application-model-20260830.md: "the install
+   * page shows defaults for confirmation"). Every field below is already PARSED by
+   * `PlatformAppManifestSchema`; until this projection they were parsed and then dropped, so the
+   * install page had no way to read the defaults it exists to put in front of a customer admin.
+   *
+   * All five are OPTIONAL, exactly as they are in the schema, so a manifest that predates them
+   * projects to `undefined` for each and every existing consumer keeps the shape it had.
+   *
+   * VALUES-FREE BY CONSTRUCTION, and not by care taken here: `configSurfaces` and `posture` name the
+   * env VARS a deployment reads its data from, never their values, and the schema is what makes that
+   * true — `PlatformAppConfigSurfaceSchema` carries `envVar`/`envVars` name strings with
+   * `committed: false`, and `PlatformAppPostureSchema.entries` is `.strict()` over
+   * `{ id, expectedState, what, envVar? }`. This projection reads the parsed MANIFEST and never
+   * `process.env`, so no deployment value can enter it.
+   */
+  valueStatement?: PlatformAppManifest['valueStatement']
+  permissionPolicy?: PlatformAppManifest['permissionPolicy']
+  configSurfaces?: PlatformAppManifest['configSurfaces']
+  acceptance?: PlatformAppManifest['acceptance']
+  posture?: PlatformAppManifest['posture']
   entryPath: string | null
 }
 
@@ -71,6 +93,11 @@ interface CachedManifestSummary {
   objects: PlatformAppManifest['objects']
   workflows: PlatformAppManifest['workflows']
   integrations: PlatformAppManifest['integrations']
+  valueStatement?: PlatformAppManifest['valueStatement']
+  permissionPolicy?: PlatformAppManifest['permissionPolicy']
+  configSurfaces?: PlatformAppManifest['configSurfaces']
+  acceptance?: PlatformAppManifest['acceptance']
+  posture?: PlatformAppManifest['posture']
   entryPath: string | null
 }
 
@@ -146,6 +173,11 @@ export async function collectPlatformApps(options: CollectPlatformAppsOptions): 
         objects: parsedManifest.objects,
         workflows: parsedManifest.workflows,
         integrations: parsedManifest.integrations,
+        valueStatement: parsedManifest.valueStatement,
+        permissionPolicy: parsedManifest.permissionPolicy,
+        configSurfaces: parsedManifest.configSurfaces,
+        acceptance: parsedManifest.acceptance,
+        posture: parsedManifest.posture,
         entryPath: resolveEntryPath(parsedManifest),
       }
       manifestSummaryCache.set(cacheKey, cachedSummary)
@@ -179,6 +211,11 @@ export async function collectPlatformApps(options: CollectPlatformAppsOptions): 
       objects: cachedSummary.objects,
       workflows: cachedSummary.workflows,
       integrations: cachedSummary.integrations,
+      valueStatement: cachedSummary.valueStatement,
+      permissionPolicy: cachedSummary.permissionPolicy,
+      configSurfaces: cachedSummary.configSurfaces,
+      acceptance: cachedSummary.acceptance,
+      posture: cachedSummary.posture,
       entryPath: cachedSummary.entryPath,
     })
   }

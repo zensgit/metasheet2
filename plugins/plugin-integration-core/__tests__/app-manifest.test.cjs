@@ -1,6 +1,6 @@
 'use strict'
 
-// `plugins/plugin-integration-core/app.manifest.json` — the BOM 备料 application declaration,
+// `plugins/plugin-integration-core/app.manifest.json` — the BOM备料 application declaration,
 // checked against the RUNNING CODE it describes.
 //
 // WHY THIS SUITE EXISTS
@@ -68,7 +68,7 @@ assert.equal(typeof manifest, 'object')
 assert.equal(manifest.id, 'stock-preparation')
 assert.equal(manifest.pluginId, 'plugin-integration-core')
 assert.equal(manifest.pluginId, JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, 'plugin.json'), 'utf8')).name)
-assert.equal(manifest.displayName, 'BOM 备料')
+assert.equal(manifest.displayName, 'BOM备料')
 assert.equal(typeof manifest.valueStatement, 'string')
 assert.ok(manifest.valueStatement.length > 0, 'the one-line value statement must not be empty')
 // The identity is not the display name. If these ever collapse into one field, the "rename for the
@@ -83,7 +83,7 @@ assert.match(manifest.version, /^\d+\.\d+\.\d+/)
 
 const APP_OBJECT_ID_PREFIX = 'plm_stock_preparation'
 const managedObjects = manifest.objects.filter((object) => object.objectIdPolicy !== undefined)
-assert.equal(managedObjects.length, 2, 'BOM 备料 declares exactly two managed objects')
+assert.equal(managedObjects.length, 2, 'BOM备料 declares exactly two managed objects')
 assert.equal(
   managedObjects.length,
   manifest.objects.length,
@@ -404,7 +404,7 @@ assert.throws(
 )
 
 console.log(
-  `✓ app-manifest: BOM 备料 declared — ${managedObjects.length} managed objects, ` +
+  `✓ app-manifest: BOM备料 declared — ${managedObjects.length} managed objects, ` +
     `${manifest.permissions.length} permission codes, ${configSurfaces.length} config surfaces, ` +
     `${acceptance.criteria.length} acceptance criteria, ${posture.entries.length} reported-not-installed fences`,
 )

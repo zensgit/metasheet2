@@ -2,8 +2,8 @@
   <div class="stock-prep-confirm" data-testid="stock-prep-confirmation-queue">
     <p class="stock-prep-confirm__scope" data-testid="stock-prep-confirmation-scope">
       {{ bi(
-        '本面为人工确认闭环入口:队列为 values-free 投影(仅计数、指纹、状态与动作枚举);值内容仅在下方「值录入」单条读取中出现。',
-        'Human confirmation loop entry. The queue is a values-free projection (counts, fingerprints, status and action enums only); entered content appears only in the per-decision value-entry read below.',
+        '这里列出系统拿不准、需要您拿主意的事。每一条说明是什么情况,您选一个处理办法,系统按您的决定继续。列表本身不显示具体内容,只有点开某一条时才会读出您填过的值。',
+        'This is where the system lists what it cannot decide on its own. Each row says what the situation is; you pick how to handle it and the system carries on from there. The list itself shows no content — what you typed is read back only when you open a single row.',
       ) }}
     </p>
 
@@ -23,11 +23,11 @@
       </label>
 
       <label class="stock-prep-confirm__field">
-        <span>{{ bi('状态', 'Status') }}</span>
+        <span>{{ bi('只看这种进展', 'Show only') }}</span>
         <select v-model="statusFilter" data-testid="stock-prep-confirmation-status-filter">
           <option value="">{{ bi('全部', 'All') }}</option>
           <option v-for="status in STOCK_PREPARATION_DECISION_STATUSES" :key="status" :value="status">
-            {{ status }}
+            {{ decisionStatusLabel(status) }}
           </option>
         </select>
       </label>
@@ -39,7 +39,7 @@
         :disabled="busy"
         @click="loadQueue"
       >
-        {{ bi('刷新队列', 'Refresh queue') }}
+        {{ bi('刷新列表', 'Refresh the list') }}
       </button>
 
       <button
@@ -49,7 +49,7 @@
         :disabled="busy"
         @click="loadReadiness"
       >
-        {{ bi('检查就绪', 'Check readiness') }}
+        {{ bi('检查是否准备好', 'Check it is ready') }}
       </button>
 
       <!-- Platform-admin capabilities. Reconcile performs a SOURCE READ (and consumes a B2a
@@ -62,7 +62,7 @@
         :disabled="busy"
         @click="emit('admin-action', 'ensure')"
       >
-        {{ bi('初始化账本(管理员)', 'Provision ledger (admin)') }}
+        {{ bi('创建确认账本(管理员)', 'Create the confirmation ledger (admin)') }}
       </button>
 
       <button
@@ -72,40 +72,51 @@
         :disabled="busy"
         @click="emit('admin-action', 'reconcile')"
       >
-        {{ bi('重算队列(管理员)', 'Reconcile queue (admin)') }}
+        {{ bi('重新扫描待确认的事(管理员)', 'Re-scan for things to confirm (admin)') }}
       </button>
     </div>
 
+    <!-- The clamped enum code is what a person quotes when they ask us for help, so it stays on
+         screen — subordinate to a sentence that says what actually happened to their data. -->
     <p v-if="errorCode" class="stock-prep-confirm__error" data-testid="stock-prep-confirmation-error">
-      {{ errorCode }}
+      {{ bi(errorPlain(errorCode).zh, errorPlain(errorCode).en) }}
+      <code class="stock-prep-confirm__token">{{ errorCode }}</code>
     </p>
 
     <p v-if="readiness !== null" class="stock-prep-confirm__readiness" data-testid="stock-prep-confirmation-readiness-result">
-      {{ readiness.ready === true ? bi('账本已就绪', 'Ledger ready') : bi('账本未就绪', 'Ledger not ready') }}
+      {{ readiness.ready === true
+        ? bi('可以开始:记录确认结果的表已经建好了。', 'Ready to go: the table that records your decisions is in place.')
+        : bi('还不能开始:记录确认结果的表还没建好,需要管理员先创建。', 'Not ready yet: the table that records your decisions has not been created — an admin has to create it first.') }}
     </p>
 
     <div v-if="queue" class="stock-prep-confirm__counts" data-testid="stock-prep-confirmation-counts">
-      <span>{{ bi('行数', 'Rows') }}: {{ queue.rowCount }}</span>
-      <span>{{ bi('人工暂挂', 'Parked') }}: {{ queue.parkedCount }}</span>
+      <span>{{ bi('等您处理', 'Waiting for you') }}: {{ queue.rowCount }}</span>
+      <span>{{ bi('先挂起的', 'Parked for later') }}: {{ queue.parkedCount }}</span>
     </div>
 
     <table v-if="queue && queue.rows.length > 0" class="stock-prep-confirm__table" data-testid="stock-prep-confirmation-rows">
       <thead>
         <tr>
-          <th>{{ bi('决定 id', 'Decision id') }}</th>
-          <th>{{ bi('冲突类型', 'Conflict') }}</th>
-          <th>{{ bi('状态', 'Status') }}</th>
-          <th>{{ bi('动作', 'Action') }}</th>
-          <th>{{ bi('已填值', 'Value entered') }}</th>
+          <th>{{ bi('编号', 'Reference') }}</th>
+          <th>{{ bi('什么情况', 'What happened') }}</th>
+          <th>{{ bi('进展', 'Where it stands') }}</th>
+          <th>{{ bi('已选的处理办法', 'How it was handled') }}</th>
+          <th>{{ bi('填过值了吗', 'Value filled in') }}</th>
           <th />
         </tr>
       </thead>
       <tbody>
         <tr v-for="row in queue.rows" :key="row.decisionId || ''" data-testid="stock-prep-confirmation-row">
-          <td>{{ row.decisionId }}</td>
+          <td><code class="stock-prep-confirm__token">{{ row.decisionId }}</code></td>
           <td>{{ row.conflictType }}</td>
-          <td>{{ row.status }}</td>
-          <td>{{ row.resolutionAction }}</td>
+          <td>
+            <span>{{ decisionStatusLabel(row.status) }}</span>
+            <code v-if="row.status" class="stock-prep-confirm__token">{{ row.status }}</code>
+          </td>
+          <td>
+            <span>{{ decisionActionLabel(row.resolutionAction) }}</span>
+            <code v-if="row.resolutionAction" class="stock-prep-confirm__token">{{ row.resolutionAction }}</code>
+          </td>
           <!-- PRESENCE only — the queue never carries the value itself. -->
           <td>{{ row.resolvedValuePresent ? bi('是', 'yes') : bi('否', 'no') }}</td>
           <td>
@@ -116,7 +127,7 @@
               :disabled="busy || !row.decisionId"
               @click="loadValueEntry(row.decisionId)"
             >
-              {{ bi('查看值录入', 'View value entry') }}
+              {{ bi('看我填过什么', 'See what I entered') }}
             </button>
             <button
               v-if="can('confirmationQueue.confirm')"
@@ -125,7 +136,7 @@
               :disabled="busy || !row.decisionId"
               @click="selectRow(row)"
             >
-              {{ bi('确认…', 'Confirm…') }}
+              {{ bi('我来定…', 'I\'ll decide…') }}
             </button>
           </td>
         </tr>
@@ -133,7 +144,7 @@
     </table>
 
     <p v-else-if="queue" class="stock-prep-confirm__empty" data-testid="stock-prep-confirmation-empty">
-      {{ bi('该项目号下没有待确认决定。', 'No confirmation decisions for this project number.') }}
+      {{ bi('这个项目号下没有需要您处理的事 —— 都清了。', 'Nothing here needs your attention for this project number — it is all clear.') }}
     </p>
 
     <!-- The value-entry pane: the ONE content-bearing surface, gated on the same code as confirm. -->
@@ -142,13 +153,13 @@
       class="stock-prep-confirm__pane"
       data-testid="stock-prep-confirmation-value-entry-pane"
     >
-      <h3>{{ bi('值录入(本人回读)', 'Value entry (author readback)') }}</h3>
+      <h3>{{ bi('您在这一条上填过的内容', 'What you entered on this one') }}</h3>
       <dl>
-        <dt>resolvedValue</dt>
+        <dt>{{ bi('填的值', 'The value you entered') }} <code class="stock-prep-confirm__token">resolvedValue</code></dt>
         <dd data-testid="stock-prep-confirmation-value-entry-value">{{ valueEntry.valueEntry.resolvedValue }}</dd>
-        <dt>resolvedAuxValue</dt>
+        <dt>{{ bi('附带的值', 'The extra value') }} <code class="stock-prep-confirm__token">resolvedAuxValue</code></dt>
         <dd data-testid="stock-prep-confirmation-value-entry-aux">{{ valueEntry.valueEntry.resolvedAuxValue }}</dd>
-        <dt>notes</dt>
+        <dt>{{ bi('备注', 'Your note') }} <code class="stock-prep-confirm__token">notes</code></dt>
         <dd data-testid="stock-prep-confirmation-value-entry-notes">{{ valueEntry.valueEntry.notes }}</dd>
       </dl>
     </section>
@@ -160,31 +171,63 @@
       data-testid="stock-prep-confirmation-form"
       @submit.prevent="submitConfirm"
     >
-      <h3>{{ bi('确认决定', 'Confirm decision') }}</h3>
+      <h3>{{ bi('这一条您打算怎么处理', 'How do you want to handle this one') }}</h3>
       <label class="stock-prep-confirm__field">
-        <span>{{ bi('处理动作', 'Resolution action') }}</span>
+        <span>{{ bi('处理办法', 'What to do') }}</span>
         <select v-model="resolutionAction" data-testid="stock-prep-confirmation-action-select">
           <option v-for="action in STOCK_PREPARATION_RESOLUTION_ACTIONS" :key="action" :value="action">
-            {{ action }}
+            {{ decisionActionLabel(action) }}
           </option>
         </select>
       </label>
+      <p v-if="selectedActionHint" class="stock-prep-confirm__hint" data-testid="stock-prep-confirmation-action-hint">
+        {{ selectedActionHint }}
+      </p>
       <label class="stock-prep-confirm__field">
-        <span>resolvedValue</span>
+        <span>{{ bi('填一个值(按上面的办法需要时)', 'A value, if the choice above needs one') }}</span>
         <input v-model="resolvedValue" type="text" data-testid="stock-prep-confirmation-value-input">
       </label>
       <label class="stock-prep-confirm__field">
-        <span>resolvedAuxValue</span>
+        <span>{{ bi('附带的值(可不填)', 'An extra value (optional)') }}</span>
         <input v-model="resolvedAuxValue" type="text" data-testid="stock-prep-confirmation-aux-input">
       </label>
       <label class="stock-prep-confirm__field">
-        <span>notes</span>
+        <span>{{ bi('备注:为什么这么定(可不填)', 'Note: why you decided this (optional)') }}</span>
         <input v-model="notes" type="text" data-testid="stock-prep-confirmation-notes-input">
       </label>
       <button type="submit" data-testid="stock-prep-confirmation-confirm" :disabled="busy">
-        {{ bi('提交确认', 'Submit confirmation') }}
+        {{ bi('就这么定', 'Save this decision') }}
       </button>
     </form>
+
+    <!-- Everything this pane used to lead with, kept and one click away: the frozen server
+         vocabularies (which is what an implementer matches a support thread against) and the exact
+         field names a request body carries. -->
+    <StockPrepTechnicalDetails testid="stock-prep-confirmation-tech">
+      <dl>
+        <dt>{{ bi('进展枚举', 'Decision status vocabulary') }}</dt>
+        <dd>
+          <span v-for="status in STOCK_PREPARATION_DECISION_STATUSES" :key="status">
+            <code>{{ status }}</code> = {{ decisionStatusLabel(status) }};
+          </span>
+        </dd>
+        <dt>{{ bi('处理办法枚举(服务端冻结)', 'Resolution-action vocabulary (frozen server-side)') }}</dt>
+        <dd>
+          <span v-for="action in STOCK_PREPARATION_RESOLUTION_ACTIONS" :key="action">
+            <code>{{ action }}</code> = {{ decisionActionLabel(action) }};
+          </span>
+        </dd>
+        <dt>{{ bi('请求体字段名', 'Request-body field names') }}</dt>
+        <dd><code>resolvedValue</code> · <code>resolvedAuxValue</code> · <code>notes</code> · <code>inputFingerprint</code></dd>
+        <dt>{{ bi('队列投影是 values-free 的', 'The queue projection is values-free') }}</dt>
+        <dd>
+          {{ bi(
+            '队列只携带计数、指纹、状态与动作枚举;值内容仅在单条「值录入」读取中出现。',
+            'The queue carries counts, fingerprints and the status/action enums only; entered content appears solely in the per-decision value-entry read.',
+          ) }}
+        </dd>
+      </dl>
+    </StockPrepTechnicalDetails>
   </div>
 </template>
 
@@ -225,6 +268,13 @@ import {
   canStockPrepCapability,
 } from '../../../services/integration/stockPreparation/workbenchAccess'
 import { StockPreparationConfirmApiError } from '../../../services/integration/stockPreparation/confirmApi'
+import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
+import {
+  STOCK_PREP_DECISION_ACTION_PLAIN,
+  STOCK_PREP_DECISION_STATUS_PLAIN,
+  stockPrepEnumPlain,
+  stockPrepErrorPlain,
+} from '../../../services/integration/stockPreparation/plainLanguage'
 
 const props = defineProps<{ scope: IntegrationScope; projectNo?: string }>()
 const emit = defineEmits<{ (event: 'admin-action', action: 'ensure' | 'reconcile'): void }>()
@@ -249,6 +299,22 @@ function can(capabilityId: string): boolean {
   return canStockPrepCapability(capability, (permission) => auth.hasPermission(permission))
 }
 
+/**
+ * The server vocabularies, in words. Both fall back to the raw token for anything the table does not
+ * know, so a status or action added server-side reads exactly as it does today rather than blanking.
+ */
+function decisionStatusLabel(status: string | null): string {
+  const plain = stockPrepEnumPlain(STOCK_PREP_DECISION_STATUS_PLAIN, status)
+  return plain ? bi(plain.zh, plain.en) : (status ?? '—')
+}
+
+function decisionActionLabel(action: string | null): string {
+  const plain = stockPrepEnumPlain(STOCK_PREP_DECISION_ACTION_PLAIN, action)
+  return plain ? bi(plain.zh, plain.en) : (action ?? '—')
+}
+
+const errorPlain = stockPrepErrorPlain
+
 const projectNo = ref<string>(props.projectNo ?? '')
 const statusFilter = ref<StockPreparationDecisionStatus | ''>('')
 const busy = ref(false)
@@ -261,6 +327,14 @@ const resolutionAction = ref<StockPreparationResolutionAction>('keep_multiple_ro
 const resolvedValue = ref('')
 const resolvedAuxValue = ref('')
 const notes = ref('')
+
+/** What the currently chosen handling actually does, in one line, before the operator commits. */
+const selectedActionHint = computed<string>(() => {
+  const plain = stockPrepEnumPlain(STOCK_PREP_DECISION_ACTION_PLAIN, resolutionAction.value)
+  if (!plain) return ''
+  const entry = STOCK_PREP_DECISION_ACTION_PLAIN[resolutionAction.value]
+  return bi(entry?.zhNext ?? '', entry?.enNext ?? '')
+})
 
 /** Only the clamped enum code reaches state — a server message could carry a value. */
 function recordError(error: unknown): void {
@@ -359,6 +433,24 @@ defineExpose({ can })
   margin: 0 0 var(--ms-space-3);
   color: var(--el-color-danger, #c45656);
   font-size: 13px;
+}
+
+/* A grep-able identifier that is no longer the point of the line: still selectable and copyable,
+   visibly subordinate to the sentence beside it. */
+.stock-prep-confirm__token {
+  display: inline-block;
+  margin-left: var(--ms-space-1);
+  color: var(--ms-text-3);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.stock-prep-confirm__hint {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .stock-prep-confirm__counts {

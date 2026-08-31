@@ -3,17 +3,29 @@
     <PageHeader
       :title="bi('备料工作台', 'Stock Preparation')"
       :subtitle="bi(
-        '只读优先的备料 MVP:PLM 项目 / BOM 与 ERP·K3 物料只读同步,人工确认映射与单位,再生成备料行。',
-        'Readonly-first stock preparation MVP: readonly sync of PLM project/BOM and ERP/K3 material, human-confirmed mapping and units, then prep-line generation.',
+        '从 PLM 读项目和 BOM、从 ERP·K3 读物料,拿不准的地方交给人确认,再生成备料明细。全程不改动这两个系统里的数据。',
+        'Reads projects and BOMs from PLM and materials from ERP/K3, brings anything uncertain to a person, then builds the prep lines. It changes nothing inside either of those systems.',
       )"
     />
 
-    <p class="stock-prep__boundary" data-testid="stock-prep-boundary">
-      {{ bi(
-        '本工作台只读:不做 ERP/K3 写入,不触发 K3 Save / Submit / Audit,不自动创建 ERP 物料,不提供原始 SQL 入口。生成/写回仅为 multitable 内部表操作。',
-        'This workspace is readonly: no ERP/K3 write, no K3 Save / Submit / Audit, no automatic ERP material creation, no raw SQL entry point. Any generate/write is a multitable-internal table op only.',
-      ) }}
-    </p>
+    <!-- THE FENCE SENTENCE. It keeps every promise the old one made; what changed is that it makes
+         them to the customer admin who has to trust them rather than to the reviewer who wrote them.
+         The API-shaped original is one click away, unedited, because "no K3 Save / Submit / Audit"
+         is the phrasing an implementer matches against the K3 documentation. -->
+    <div class="stock-prep__boundary" data-testid="stock-prep-boundary">
+      <p class="stock-prep__boundary-text">
+        {{ bi(
+          '本工作台只读:不会改动您 ERP/K3 里的任何数据,不会自动去 ERP 新建物料,也没有直接执行 SQL 的入口。这里生成或写回的内容,只落在本系统自己的表里。',
+          'This workspace only reads: it changes nothing inside your ERP/K3, never creates a material there on its own, and offers no direct SQL entry point. Anything it generates or writes lands only in this system\'s own tables.',
+        ) }}
+      </p>
+      <StockPrepTechnicalDetails testid="stock-prep-boundary-tech">
+        {{ bi(
+          '本工作台只读:不做 ERP/K3 写入,不触发 K3 Save / Submit / Audit,不自动创建 ERP 物料,不提供原始 SQL 入口。生成/写回仅为 multitable 内部表操作。',
+          'This workspace is readonly: no ERP/K3 write, no K3 Save / Submit / Audit, no automatic ERP material creation, no raw SQL entry point. Any generate/write is a multitable-internal table op only.',
+        ) }}
+      </StockPrepTechnicalDetails>
+    </div>
 
     <!-- Tabbed container placeholder. Each tab is one of the six MVP views (design §"Frontend MVP");
          they land later in their own DISJOINT files and get mounted here in place of the placeholder. -->
@@ -45,13 +57,18 @@
         {{ bi(activeView.zhDesc, activeView.enDesc) }}
       </p>
       <!-- The dashboard tab aggregates MULTIPLE existing readonly endpoints client-side (H1/H2) — it
-           has no single endpoint to badge, so this line is skipped for it only. -->
-      <p v-if="!activeView.noEndpointBadge" class="stock-prep__panel-endpoint" data-testid="stock-prep-panel-endpoint">
-        <span class="stock-prep__badge">{{
-          activeView.confirmWrites ? bi('只读 + 人工确认', 'readonly + human confirm') : `${bi('只读', 'readonly')} · GET`
-        }}</span>
-        <code>{{ activeView.endpoint }}</code>
-      </p>
+           has no single endpoint to badge, so this line is skipped for it only.
+
+           What this line says first is now WHAT THIS TAB CAN CHANGE — the only part of it a customer
+           admin has a use for. The shape badge and the route path are what an implementer greps, so
+           they stay, one click down. -->
+      <div v-if="!activeView.noEndpointBadge" class="stock-prep__panel-endpoint" data-testid="stock-prep-panel-endpoint">
+        <p class="stock-prep__panel-effect">{{ effectLabel(activeView) }}</p>
+        <StockPrepTechnicalDetails testid="stock-prep-panel-endpoint-tech">
+          <span class="stock-prep__badge">{{ badgeLabel(activeView) }}</span>
+          <code>{{ activeView.endpoint }}</code>
+        </StockPrepTechnicalDetails>
+      </div>
       <!-- H1/H2 (UI humanization, H0 plane-boundary design-lock PR #4202): the dashboard tab is the
            new default landing view — "operator enters the system and immediately sees current
            project / current stage / blocking count / recommended next step". Its own picker updates
@@ -63,6 +80,14 @@
            six MVP tabs below were explicitly not revived by that ruling and stay platform-admin. -->
       <StockPreparationConfirmationQueueView
         v-if="effectiveKey === 'confirmation-queue'"
+        :scope="scope"
+      />
+      <!-- §14 (multitable-application-model-20260830.md): the INSTALL page — the app's defaults laid
+           out for a customer admin to confirm, the deployment preflight, and a SKIP-aware install run
+           that walks the bootstrap script's own step order. Workbench-admin tier; the run control
+           inside it is platform-admin because the four routes it drives are. -->
+      <StockPreparationInstallView
+        v-else-if="effectiveKey === 'install'"
         :scope="scope"
       />
       <StockPreparationDashboardView
@@ -136,8 +161,13 @@ import StockPreparationUnitConfirmView from './StockPreparationUnitConfirmView.v
 import StockPreparationPrepLineView from './StockPreparationPrepLineView.vue'
 import StockPreparationExceptionQueueView from './StockPreparationExceptionQueueView.vue'
 import StockPreparationConfirmationQueueView from './StockPreparationConfirmationQueueView.vue'
+import StockPreparationInstallView from './StockPreparationInstallView.vue'
+import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
 import { useAuth } from '../../../composables/useAuth'
-import { canUseLegacyMvpTabs } from '../../../services/integration/stockPreparation/workbenchAccess'
+import {
+  canOpenStockPrepInstallView,
+  canUseLegacyMvpTabs,
+} from '../../../services/integration/stockPreparation/workbenchAccess'
 
 const { locale } = useLocale()
 const auth = useAuth()
@@ -151,6 +181,7 @@ function bi(zh: string, en: string): string {
 
 type StockPreparationViewKey =
   | 'confirmation-queue'
+  | 'install'
   | 'dashboard'
   | 'project-workspace'
   | 'bom-snapshot-diff'
@@ -173,6 +204,13 @@ interface StockPreparationViewTab {
    * resolutions). Still no external ERP/K3 write — the badge copy reflects the human-confirm nature.
    */
   confirmWrites?: boolean
+  /**
+   * True for the install tab alone. Its badge must not claim "readonly · GET": the panel reads the
+   * manifest and the preflight, and its admin-only run calls the EXISTING idempotent ensure /
+   * customer-pack routes. Still no external write and still no new authority — the badge just says
+   * what it is instead of what the two older shapes are.
+   */
+  provisioning?: boolean
   /** True only for the dashboard tab — it aggregates multiple existing GETs client-side (H1/H2), so
    *  it has no single endpoint to badge (see the panel-endpoint paragraph's v-if). */
   noEndpointBadge?: boolean
@@ -183,6 +221,14 @@ interface StockPreparationViewTab {
    * of controls on screen that 403 on click — the "visible but not actionable" half of R-11.
    */
   legacyMvp?: boolean
+  /**
+   * §14 install tab. Gated on `stock-prep:admin` — the workbench-scoped ceiling — rather than on
+   * platform admin, because everything the PANEL itself reads (the app-catalog manifest and the
+   * read-tier preflight) is answerable to that holder. The one control inside it that needs more
+   * (the install run, which drives four platform-admin routes) does its own R-11 gating there, so a
+   * workbench admin never sees a button that would 403.
+   */
+  workbenchAdminOnly?: boolean
 }
 
 // Tab order follows the MVP business loop (design §"MVP Goal"). Descriptions are values-free — they
@@ -196,10 +242,24 @@ const views: StockPreparationViewTab[] = [
     key: 'confirmation-queue',
     zh: '确认队列',
     en: 'Confirmation Queue',
-    zhDesc: '待确认决定队列:keep_multiple_rows / accept_current / manual_hold 与 O1′-A 值录入;队列投影 values-free,值内容仅在单条值录入回读中出现。',
-    enDesc: 'Pending decision queue: keep_multiple_rows / accept_current / manual_hold plus the O1\'-A value entry. The queue projection is values-free; entered content appears only in the per-decision readback.',
+    zhDesc: '系统拿不准的地方会停下来问您:同一样东西出现了好几条,或者前后两份数据对不上。您在这里逐条拿主意,系统按您的决定继续往下走。',
+    enDesc: 'Wherever the system is not sure — the same thing appearing several times, or two records that disagree — it stops and asks you here. You decide each one, and it carries on from your decision.',
     endpoint: '/api/integration/stock-preparation/confirmation-decisions',
     confirmWrites: true,
+  },
+  // §14 (docs/development/platform-overall-design/multitable-application-model-20260830.md):
+  // "安装页展示默认配置,由客户确认". Listed SECOND so the confirmation queue stays the landing view
+  // for the operator this page was adopted for, while the customer admin who has to install the app
+  // finds it one click away rather than in a separate console.
+  {
+    key: 'install',
+    workbenchAdminOnly: true,
+    zh: '安装 / 体检',
+    en: 'Install / Health',
+    zhDesc: '把这套部署会装的东西摆出来给您确认,然后看看还缺什么、建该建的表、再检查一次。跳过的步骤是还需要人来做的事,不是装失败了。',
+    enDesc: 'Lays out what this deployment installs for you to confirm, then checks what is missing, creates what needs creating, and checks again. A skipped step is work still waiting for a person, not a failed install.',
+    endpoint: '/api/platform/apps/stock-preparation',
+    provisioning: true,
   },
   // H1/H2 (UI humanization, H0 plane-boundary design-lock PR #4202 — PLANE A, values-free): the
   // task-oriented entry for the legacy MVP surface.
@@ -208,8 +268,8 @@ const views: StockPreparationViewTab[] = [
     legacyMvp: true,
     zh: '仪表盘',
     en: 'Dashboard',
-    zhDesc: '当前项目、当前阶段、阻断数与推荐下一步;六阶段进度均复用下方各视图的既有只读端点聚合,不新增后端。',
-    enDesc: 'Current project, current stage, blocking count, and a recommended next step; the six-stage progress aggregates the existing readonly endpoints below client-side — no new backend.',
+    zhDesc: '一眼看清:这个项目做到哪一步了、有几件事卡着、接下来该做什么。上面的数字都是从下面各页汇总来的。',
+    enDesc: 'At a glance: how far this project has got, how many things are stuck, and what to do next. Every number is summed up from the pages below.',
     endpoint: '',
     noEndpointBadge: true,
   },
@@ -218,8 +278,8 @@ const views: StockPreparationViewTab[] = [
     legacyMvp: true,
     zh: '项目工作台',
     en: 'Project Workspace',
-    zhDesc: '按项目查看备料概览:快照批次数、待处理异常数、就绪与暂挂的备料行数。',
-    enDesc: 'Per-project stock-preparation overview: snapshot-batch count, open exception count, ready vs held prep-line counts.',
+    zhDesc: '按项目看备料进度:同步过几批、有几件事待处理、有多少行可以用、多少行卡着。',
+    enDesc: 'Progress per project: how many syncs have run, how many things are waiting to be handled, how many lines are usable and how many are stuck.',
     endpoint: '/api/integration/stock-preparation/projects',
   },
   {
@@ -227,8 +287,8 @@ const views: StockPreparationViewTab[] = [
     legacyMvp: true,
     zh: 'BOM 快照批次与差异',
     en: 'BOM Snapshot Batch & Diff',
-    zhDesc: '每次同步生成不可变的快照批次;旧批次保留,与前一批次按新增/删除/数量/单位/版本等差异对比。',
-    enDesc: 'Each sync creates an immutable snapshot batch; older batches are kept and diffed against the predecessor by added/removed/quantity/unit/version change.',
+    zhDesc: '每次从 PLM 同步都会存下当时的样子,旧的一份都不会被覆盖。这里可以拿最新一份和上一份比,看这次到底改了什么。',
+    enDesc: 'Every sync from PLM keeps a copy of what it saw, and older copies are never overwritten. Compare the latest with the one before it to see exactly what changed.',
     endpoint: '/api/integration/stock-preparation/snapshot-batches',
   },
   {
@@ -236,8 +296,8 @@ const views: StockPreparationViewTab[] = [
     legacyMvp: true,
     zh: '物料映射确认',
     en: 'Material Mapping Confirm',
-    zhDesc: '将 PLM 图号/版本映射到 ERP 物料编码/内部 id;歧义或未匹配的行进入人工确认,不自动创建 ERP 物料。',
-    enDesc: 'Map PLM drawing/version to ERP material code/internal id; ambiguous or unmatched rows go to manual confirmation, never auto-create ERP material.',
+    zhDesc: '把 PLM 的图号对到 ERP 里的物料。对不上、或者对上了好几个的,都交给您来定 —— 系统绝不会自己去 ERP 建物料。',
+    enDesc: 'Match a PLM drawing to a material in ERP. Anything that does not match, or matches several, comes to you to decide — the system never creates a material in ERP by itself.',
     endpoint: '/api/integration/stock-preparation/material-mappings/summary',
     confirmWrites: true,
   },
@@ -246,8 +306,8 @@ const views: StockPreparationViewTab[] = [
     legacyMvp: true,
     zh: '单位换算确认',
     en: 'Unit Conversion Confirm',
-    zhDesc: '将设计单位换算为 ERP 领用单位;无唯一有效规则时进入异常队列,不做静默猜测。',
-    enDesc: 'Convert the design unit to the ERP issue unit; with no unique active rule the line enters the exception queue rather than a silent guess.',
+    zhDesc: '把图纸上的设计单位换算成实际领用的单位。没有唯一一条规则可用时,这一行会进待处理清单 —— 系统不会替您猜。',
+    enDesc: 'Convert the unit on the drawing into the unit things are actually issued in. Where no single rule applies, the row goes to the problem list rather than being guessed at.',
     endpoint: '/api/integration/stock-preparation/unit-conversions/summary',
     confirmWrites: true,
   },
@@ -256,8 +316,8 @@ const views: StockPreparationViewTab[] = [
     legacyMvp: true,
     zh: '备料行',
     en: 'Prep Lines',
-    zhDesc: '仅由已确认的快照、映射与单位规则生成备料行;未解决的映射/单位冲突不会产出就绪行。',
-    enDesc: 'Prep lines generated only from confirmed snapshots, mappings, and unit rules; unresolved mapping/unit conflicts never produce ready lines.',
+    zhDesc: '只有确认过的数据才会生成备料明细。物料对应关系或单位还没定下来的,不会产出可以用的行。',
+    enDesc: 'Prep lines are built only from data you have confirmed. While a material match or a unit is still unresolved, no usable line is produced.',
     endpoint: '/api/integration/stock-preparation/prep-lines',
     // View 5's generation run is a MULTITABLE-INTERNAL table op (W4a) — badge drops the GET-only claim.
     confirmWrites: true,
@@ -267,8 +327,8 @@ const views: StockPreparationViewTab[] = [
     legacyMvp: true,
     zh: '异常队列',
     en: 'Exception Queue',
-    zhDesc: '所有不确定的行都可见、可处理;阻断级异常保持可见并阻止最终确认。',
-    enDesc: 'Every uncertain row is visible and actionable; blocking exceptions stay visible and prevent final confirmation.',
+    zhDesc: '所有拿不准的行都在这里,可以逐条处理。拦路的问题会一直显示着,不处理就出不了最终结果。',
+    enDesc: 'Everything the system is unsure about is here and can be worked through. Blocking problems stay visible and hold up the final result until they are handled.',
     endpoint: '/api/integration/stock-preparation/exceptions',
     confirmWrites: true,
   },
@@ -278,9 +338,14 @@ const views: StockPreparationViewTab[] = [
 // a tab whose panel would 403 on every action is not rendered. The six legacy MVP tabs are still
 // platform-admin gated end to end, so only a platform admin sees them; a customer operator holding
 // stock-prep:read sees exactly the confirmation queue this page was adopted for.
-const visibleViews = computed(() => views.filter(
-  (view) => !view.legacyMvp || canUseLegacyMvpTabs((permission) => auth.hasPermission(permission)),
-))
+const visibleViews = computed(() => {
+  const probe = (permission: string): boolean => auth.hasPermission(permission)
+  return views.filter((view) => {
+    if (view.legacyMvp) return canUseLegacyMvpTabs(probe)
+    if (view.workbenchAdminOnly) return canOpenStockPrepInstallView(probe)
+    return true
+  })
+})
 // The landing tab is the first VISIBLE one, and activeKey can never name a hidden tab: without this
 // fold an operator arriving on a stale/deep-linked legacy key would render a panel of controls that
 // all 403 — the exact "visible but not actionable" failure, reintroduced through the back door.
@@ -332,6 +397,35 @@ function handleDashboardProjectSelect(projectId: string): void {
 // hold is one of this file's own StockPreparationViewKey literals.
 function handleNavigateStage(viewKey: string): void {
   activeKey.value = viewKey as StockPreparationViewKey
+}
+
+/** What the panel's endpoint badge claims. One expression, so no tab can claim the wrong shape. */
+function badgeLabel(view: StockPreparationViewTab): string {
+  if (view.provisioning) return bi('读清单 + 幂等建表(管理员)', 'manifest read + idempotent ensure (admin)')
+  if (view.confirmWrites) return bi('只读 + 人工确认', 'readonly + human confirm')
+  return `${bi('只读', 'readonly')} · GET`
+}
+
+/**
+ * THE SAME FACT AS `badgeLabel`, said to the person who has to trust it rather than to the reviewer
+ * who has to audit it. It is derived from the identical two flags, so the two can never disagree —
+ * and the badge itself is still one click away in the disclosure beside this line, because "readonly
+ * · GET" is what an implementer matches against the route table.
+ */
+function effectLabel(view: StockPreparationViewTab): string {
+  if (view.provisioning) {
+    return bi(
+      '这一页会读取安装清单;建表由平台管理员执行,重复运行不会重复建。',
+      'This tab reads the install manifest. Creating tables is a platform administrator\'s action, and running it again creates nothing twice.',
+    )
+  }
+  if (view.confirmWrites) {
+    return bi(
+      '这一页可以由您做确认。确认的结果只写进本系统自己的表,不会写到 ERP/K3。',
+      'You can confirm things on this tab. What you confirm is written only into this system\'s own tables, never into ERP/K3.',
+    )
+  }
+  return bi('这一页只看不改:不会改动任何数据。', 'This tab only looks: it changes no data.')
 }
 </script>
 
@@ -394,14 +488,21 @@ function handleNavigateStage(viewKey: string): void {
   line-height: 1.6;
 }
 
+.stock-prep__boundary-text {
+  margin: 0;
+}
+
 .stock-prep__panel-endpoint {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--ms-space-2);
   margin: 0 0 var(--ms-space-3);
   font-size: 12px;
   color: var(--ms-text-3);
+}
+
+.stock-prep__panel-effect {
+  margin: 0;
+  color: var(--ms-text-2);
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .stock-prep__panel-endpoint code {

@@ -55,6 +55,7 @@ import {
   resolveExistingObjectFieldIds as resolveExistingMultitableObjectFieldIds,
   readObjectFieldsContent as readMultitableObjectFieldsContent,
   ensureView as ensureMultitableView,
+  ensureObjectDefaultView as ensureMultitableObjectDefaultView,
   patchObjectFieldProperty as patchProvisionedObjectFieldProperty,
   getObjectField as getProvisionedObjectField,
   runObjectFieldsRepairTransactionWith,
@@ -280,6 +281,7 @@ import {
 import { createElearningMediaPlaybackRouter } from './routes/elearning-media-playback'
 import { isElearningCreditSurfaceEnabled } from './services/elearning-credit-ledger'
 import { getBootedElearningMediaRangeStore } from './services/elearning-media-runtime'
+import { isElearningPracticeSurfaceEnabled } from './services/elearning-question-practice-postgres'
 import { createElearningPilotRuntime } from './services/elearning-pilot-runtime'
 import {
   checkElearningAssignmentReminderEligibility,
@@ -298,6 +300,11 @@ import {
   ElearningStatsDailyJobProducerError,
   enqueueElearningStatsDailyJobs,
 } from './services/elearning-stats-daily-job-producer'
+import {
+  cleanupElearningAnalyticsExport,
+  ElearningAnalyticsExportError,
+  materializeElearningAnalyticsExport,
+} from './services/elearning-analytics-export'
 import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
 import { adminUsersRouter } from './routes/admin-users'
@@ -738,6 +745,23 @@ export class MetaSheetServer {
                 objectId,
                 fields,
               })
+            })
+          },
+          // Default-view provisioning: a managed table is created WITH a view, because a
+          // sheet with zero views cannot be opened and blocks its whole base. Writes only
+          // when the sheet has NO views; any existing view list is left untouched.
+          ensureObjectDefaultView: async ({ projectId, objectId, name, type }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                }
+              }
+              return ensureMultitableObjectDefaultView({ query: txQuery, projectId, objectId, name, type })
             })
           },
           // W2/P2-3 (round-5 review): ATOMIC repair transaction. Runs the caller's whole
@@ -1437,6 +1461,7 @@ export class MetaSheetServer {
       isElearningContentSurfaceEnabled(process.env)
       || isElearningCreditSurfaceEnabled(process.env)
       || isElearningAnalyticsSurfaceEnabled(process.env)
+      || isElearningPracticeSurfaceEnabled(process.env)
     )
       ? createElearningPilotRuntime({ db: poolManager.get() })
       : null
@@ -2297,6 +2322,29 @@ export class MetaSheetServer {
                     throw new ElearningStatsDailyProjectionError('unavailable')
                   }
                   return projectElearningDepartmentStatsDaily(poolManager.get(), input)
+                },
+              }
+            : undefined,
+        // L5 aggregate exports are at-least-once job effects. Core owns the
+        // request ledger, suppression-safe CSV bytes and idempotent storage.
+        elearningAnalyticsExport:
+          manifest.name === 'plugin-elearning'
+            ? {
+                materialize: async (
+                  input: import('./services/elearning-analytics-export').MaterializeElearningAnalyticsExportInput,
+                ) => {
+                  if (!isElearningAnalyticsSurfaceEnabled()) {
+                    throw new ElearningAnalyticsExportError('disabled')
+                  }
+                  return materializeElearningAnalyticsExport(poolManager.get(), input)
+                },
+                cleanup: async (
+                  input: import('./services/elearning-analytics-export').MaterializeElearningAnalyticsExportInput,
+                ) => {
+                  if (!isElearningAnalyticsSurfaceEnabled()) {
+                    throw new ElearningAnalyticsExportError('disabled')
+                  }
+                  return cleanupElearningAnalyticsExport(poolManager.get(), input)
                 },
               }
             : undefined,

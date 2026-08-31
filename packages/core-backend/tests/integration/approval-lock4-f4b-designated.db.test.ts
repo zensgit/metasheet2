@@ -28,19 +28,14 @@ import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from
  * resolution and resolveAfterApprove)" wording under-names this; the scout's correction stands, and
  * this file builds the parallel fixture required to reach it for real.
  *
- * ── B-2 disclosure (carried verbatim, real-DB half) ──
- * The lock names THREE zero-assignee cases for the designated fallback — "empty list, deactivated
- * ids, role with no members". Only the FIRST is enforced anywhere in this codebase today: the
- * authoring choke (`validateEmptyAssigneeFallbackConfigs`) rejects an empty/absent fallback at
- * publish, and `resolveDesignatedFallbackAssignments` (`ApprovalGraphExecutor.ts`) independently
- * fails closed if one somehow reaches dispatch anyway. The other two are NOT filtered: `static_user`
- * / `static_role` (`ApprovalAssigneeResolver.ts`, the SAME resolver path the fallback routes
- * through) apply no active-status check and — per that file's own gate-B-2 disclosure comment —
- * NO role-membership expansion at all: a `roleIds` entry is pushed through as a literal assignee id,
- * never queried against real role membership. There is structurally no "role with N members" to
- * exhaust through this path. This file therefore proves the ONE enforced arm (empty/absent), not a
- * general "any invalid designated set fails closed" claim — asserting the latter would be the
- * overclaim `feedback_absolute_claim_sweep_must_be_mechanical.md` warns about.
+ * ── B-2 create-time eligibility ──
+ * The service freezes eligibility only when a runtime graph carries a designated fallback: user ids
+ * must exist and be active; role ids must have at least one active member. Later activations read the
+ * internal instance snapshot instead of re-reading directory membership. That input is passed to a
+ * designated-only pure resolver before the existing assignment resolver applies delegation,
+ * metadata, and deduplication. Ordinary static sources remain byte-identical. This lane covers the
+ * lock's three named zero-assignee cases: empty list, deactivated id, and role with no active members,
+ * through both create and later-node activation.
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -173,6 +168,8 @@ describeIfDatabase('Lock-4 F4-B — designated empty-assignee fallback: server d
   const createdTemplateIds = new Set<string>()
   const createdApprovalIds = new Set<string>()
   const grantedUserIds = new Set<string>()
+  const createdUserIds = new Set<string>()
+  const createdRoleIds = new Set<string>()
 
   const pool = () => poolManager.get()
 
@@ -204,6 +201,18 @@ describeIfDatabase('Lock-4 F4-B — designated empty-assignee fallback: server d
       }
       if (grantedUserIds.size > 0) {
         await pool().query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[...grantedUserIds]])
+      }
+      if (createdUserIds.size > 0 || createdRoleIds.size > 0) {
+        await pool().query(
+          'DELETE FROM user_roles WHERE user_id = ANY($1::text[]) OR role_id = ANY($2::text[])',
+          [[...createdUserIds], [...createdRoleIds]],
+        )
+      }
+      if (createdRoleIds.size > 0) {
+        await pool().query('DELETE FROM roles WHERE id = ANY($1::text[])', [[...createdRoleIds]])
+      }
+      if (createdUserIds.size > 0) {
+        await pool().query('DELETE FROM users WHERE id = ANY($1::text[])', [[...createdUserIds]])
       }
     } finally {
       await server?.stop()
@@ -272,6 +281,30 @@ describeIfDatabase('Lock-4 F4-B — designated empty-assignee fallback: server d
     await grantApprovalWriteForIntegrationActor(userId)
   }
 
+  async function seedUser(userId: string, isActive: boolean): Promise<void> {
+    createdUserIds.add(userId)
+    await pool().query(
+      `INSERT INTO users (id, email, name, password_hash, is_active)
+       VALUES ($1, $2, $1, 'x', $3)
+       ON CONFLICT (id) DO UPDATE SET is_active = EXCLUDED.is_active, updated_at = now()`,
+      [userId, `${userId}@example.test`, isActive],
+    )
+  }
+
+  async function seedRole(roleId: string, activeMemberId?: string): Promise<void> {
+    createdRoleIds.add(roleId)
+    await pool().query(
+      'INSERT INTO roles (id, name) VALUES ($1, $1) ON CONFLICT (id) DO NOTHING',
+      [roleId],
+    )
+    if (!activeMemberId) return
+    await seedUser(activeMemberId, true)
+    await pool().query(
+      'INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+      [activeMemberId, roleId],
+    )
+  }
+
   async function assignmentsFor(instanceId: string, nodeKey: string): Promise<Array<{ assignee_id: string; assignment_type: string; is_active: boolean; metadata: Record<string, unknown> | null }>> {
     const result = await pool().query(
       'SELECT assignee_id, assignment_type, is_active, metadata FROM approval_assignments WHERE instance_id = $1 AND node_key = $2 ORDER BY id ASC',
@@ -291,6 +324,7 @@ describeIfDatabase('Lock-4 F4-B — designated empty-assignee fallback: server d
     const requesterId = `l4-f4b-req-${TS}-${suffix}`
     const requesterToken = await authToken(baseUrl, requesterId)
     await grantWrite(requesterId)
+    await seedUser(adminId, true)
 
     const graph = linearGraph({ emptyAssigneePolicy: 'designated', emptyAssigneeFallback: { userIds: [adminId] } })
     const templateId = await publishGraphTemplate(adminToken, graph, suffix)
@@ -308,6 +342,36 @@ describeIfDatabase('Lock-4 F4-B — designated empty-assignee fallback: server d
     // Routed through the SAME resolveApprovalAssignees path as static_user — resolvedFrom.kind
     // proves it, never hand-built inline in the executor.
     expect((rows[0].metadata?.resolvedFrom as Record<string, unknown> | undefined)?.kind).toBe('static_user')
+  })
+
+  it('B-2 SITE 1: a deactivated designated user fails create closed with values-free evidence and no rows', async () => {
+    const suffix = 's1-inactive-user'
+    const inactiveUserId = `l4-f4b-inactive-${TS}-${suffix}`
+    const adminToken = await authToken(baseUrl, `l4-f4b-tpladmin-${TS}-${suffix}`)
+    const requesterId = `l4-f4b-req-${TS}-${suffix}`
+    const requesterToken = await authToken(baseUrl, requesterId)
+    await grantWrite(requesterId)
+    await seedUser(inactiveUserId, false)
+
+    const graph = linearGraph({
+      emptyAssigneePolicy: 'designated',
+      emptyAssigneeFallback: { userIds: [inactiveUserId] },
+    })
+    const templateId = await publishGraphTemplate(adminToken, graph, suffix)
+    const response = await tryCreateApproval(requesterToken, templateId)
+
+    expect(response.status).toBe(400)
+    const body = (await response.json()) as { error: { code: string; details?: Record<string, unknown> } }
+    expect(body.error).toEqual(expect.objectContaining({
+      code: 'APPROVAL_ASSIGNEE_EMPTY',
+      details: { nodeKey: 'empty-node' },
+    }))
+    expect(JSON.stringify(body.error)).not.toContain(inactiveUserId)
+    const instanceCount = await pool().query(
+      'SELECT count(*)::int AS n FROM approval_instances WHERE template_id = $1::uuid',
+      [templateId],
+    )
+    expect(instanceCount.rows[0].n).toBe(0)
   })
 
   it('CONTROL for B-1 SITE 1 (Gate 2) — "error" on the IDENTICAL linear fixture still throws APPROVAL_ASSIGNEE_EMPTY, at create', async () => {
@@ -338,11 +402,21 @@ describeIfDatabase('Lock-4 F4-B — designated empty-assignee fallback: server d
     const requesterId = `l4-f4b-req-${TS}-${suffix}`
     const requesterToken = await authToken(baseUrl, requesterId)
     await grantWrite(requesterId)
+    const fallbackRoleId = `l4-f4b-role-${TS}-${suffix}`
+    const fallbackRoleMemberId = `l4-f4b-role-member-${TS}-${suffix}`
+    await seedRole(fallbackRoleId, fallbackRoleMemberId)
 
-    const graph = afterApproveGraph(mgrId, { emptyAssigneePolicy: 'designated', emptyAssigneeFallback: { roleIds: ['approval-admin'] } })
+    const graph = afterApproveGraph(mgrId, { emptyAssigneePolicy: 'designated', emptyAssigneeFallback: { roleIds: [fallbackRoleId] } })
     const templateId = await publishGraphTemplate(adminToken, graph, suffix)
     const inst = await createApproval(requesterToken, templateId)
     expect(inst.currentNodeKey).toBe('manager-review')
+
+    // Freeze proof in the opposite direction: losing the membership AFTER create does not rewrite
+    // the instance snapshot. A live dispatch-time user_roles read would make this approve fail 400.
+    await pool().query('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [
+      fallbackRoleMemberId,
+      fallbackRoleId,
+    ])
 
     const advance = await act(mgrToken, inst.id, { action: 'approve' })
     expect(advance.status, await advance.clone().text()).toBe(200)
@@ -352,9 +426,43 @@ describeIfDatabase('Lock-4 F4-B — designated empty-assignee fallback: server d
 
     const rows = await assignmentsFor(inst.id, 'empty-node')
     expect(rows).toHaveLength(1)
-    expect(rows[0].assignee_id).toBe('approval-admin')
+    expect(rows[0].assignee_id).toBe(fallbackRoleId)
     expect(rows[0].assignment_type).toBe('role')
     expect(rows[0].is_active).toBe(true)
+  })
+
+  it('B-2 SITE 1 re-entry: a designated role with no active members fails the approve action closed and rolls the predecessor back', async () => {
+    const suffix = 's1-empty-role'
+    const mgrId = `l4-f4b-mgr-${TS}-${suffix}`
+    const mgrToken = await authToken(baseUrl, mgrId)
+    const fallbackRoleId = `l4-f4b-role-${TS}-${suffix}`
+    const adminToken = await authToken(baseUrl, `l4-f4b-tpladmin-${TS}-${suffix}`)
+    const requesterId = `l4-f4b-req-${TS}-${suffix}`
+    const requesterToken = await authToken(baseUrl, requesterId)
+    await grantWrite(requesterId)
+    await seedRole(fallbackRoleId)
+
+    const graph = afterApproveGraph(mgrId, {
+      emptyAssigneePolicy: 'designated',
+      emptyAssigneeFallback: { roleIds: [fallbackRoleId] },
+    })
+    const templateId = await publishGraphTemplate(adminToken, graph, suffix)
+    const inst = await createApproval(requesterToken, templateId)
+
+    // Freeze proof: membership appearing AFTER create cannot retroactively make the fallback
+    // eligible. A live dispatch-time user_roles read would turn the approve below into 200.
+    await seedRole(fallbackRoleId, `l4-f4b-late-role-member-${TS}-${suffix}`)
+
+    const advance = await act(mgrToken, inst.id, { action: 'approve' })
+    expect(advance.status).toBe(400)
+    const body = (await advance.json()) as { error: { code: string; details?: Record<string, unknown> } }
+    expect(body.error).toEqual(expect.objectContaining({
+      code: 'APPROVAL_ASSIGNEE_EMPTY',
+      details: { nodeKey: 'empty-node' },
+    }))
+    expect(JSON.stringify(body.error)).not.toContain(fallbackRoleId)
+    expect((await assignmentsFor(inst.id, 'manager-review')).map((row) => row.is_active)).toEqual([true])
+    expect(await assignmentsFor(inst.id, 'empty-node')).toEqual([])
   })
 
   it('CONTROL for the re-entry fixture (Gate 2) — "error" 400s the APPROVE action itself, and the predecessor\'s assignment is rolled back untouched (never a wedge)', async () => {
@@ -403,6 +511,7 @@ describeIfDatabase('Lock-4 F4-B — designated empty-assignee fallback: server d
     const requesterId = `l4-f4b-req-${TS}-${suffix}`
     const requesterToken = await authToken(baseUrl, requesterId)
     await grantWrite(requesterId)
+    await seedUser(adminFallbackId, true)
 
     const graph = parallelSecondNodeGraph(
       { legal: legalId, compliance: complianceId, finance: financeId },
