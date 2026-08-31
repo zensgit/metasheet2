@@ -1138,9 +1138,12 @@ describe('Multitable context API', () => {
     expect(response.body.error.message).toContain('is not sufficient')
   })
 
-  test('returns 404 when deleting a missing multitable sheet', async () => {
+  // AUTHZ-FIRST (real-DB goldens). The actor now needs schema authority to reach the 404 at all:
+  // an unauthorized caller must not be able to use 404-vs-403 to discover whether a sheet exists.
+  // The write-only actor's refusal is the sibling assertion below.
+  test('returns 404 when deleting a missing multitable sheet, for an actor who could have deleted it', async () => {
     const { app } = await createApp({
-      tokenPerms: ['multitable:write'],
+      tokenPerms: ['multitable:write', 'multitable:manage-schema'],
       queryHandler: async (sql, params) => {
         if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_missing'])
@@ -1166,7 +1169,29 @@ describe('Multitable context API', () => {
 
     expect(response.body.ok).toBe(false)
     expect(response.body.error.code).toBe('NOT_FOUND')
-    expect(response.body.error.message).toBe('Sheet not found: sheet_missing')
+    // VALUES-FREE: the refusal must not echo the requested id back (the #L5-wire no-leak golden).
+    expect(JSON.stringify(response.body)).not.toContain('sheet_missing')
+  })
+
+  test('ANTI-ORACLE: a write-only operator gets 403 for a MISSING sheet, same as for an existing one', async () => {
+    const handler = async (sql: string) => {
+      if (sql.includes('FROM meta_sheets') && sql.includes('WHERE id = $1')) return { rows: [], rowCount: 0 }
+      if (/^\s*(UPDATE|DELETE)\s+(FROM\s+)?meta_sheets/i.test(sql)) {
+        throw new Error('an unauthorized actor must never reach the write')
+      }
+      { const cr = configRevisionNoop(sql); if (cr) return cr }
+      if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+      if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
+      return { rows: [], rowCount: 0 }
+    }
+    const missing = await createApp({ tokenPerms: ['multitable:read', 'multitable:write'], queryHandler: handler })
+    const res = await request(missing.app).delete('/api/multitable/sheets/sheet_missing')
+
+    // 403, NOT 404: the operator learns nothing about whether `sheet_missing` exists — identical to
+    // the refusal it gets for a sheet that does exist (pinned above).
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('FORBIDDEN')
+    expect(JSON.stringify(res.body)).not.toContain('sheet_missing')
   })
 
   test('rejects context access without multitable read permission', async () => {

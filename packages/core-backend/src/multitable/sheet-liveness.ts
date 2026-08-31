@@ -41,6 +41,9 @@ export const SHEET_DELETED_CODE = 'SHEET_DELETED'
 export const SHEET_DELETED_MESSAGE =
   'This sheet has been deleted. It can be restored with POST /api/multitable/sheets/{sheetId}/restore by an actor with schema authority.'
 
+/** The absent-sheet refusal. Values-free by construction — no id, so it cannot become an oracle. */
+export const SHEET_NOT_FOUND_MESSAGE = 'Sheet not found'
+
 type LivenessQuery = (text: string, params: unknown[]) => Promise<{ rows: unknown[] }>
 
 /** Thrown by {@link assertSheetLive} so service-layer callers (Yjs bridge, automations) can refuse too. */
@@ -50,7 +53,11 @@ export class SheetNotLiveError extends Error {
   readonly code: string
 
   constructor(sheetId: string, liveness: Exclude<SheetLiveness, 'live'>) {
-    super(liveness === 'deleted' ? SHEET_DELETED_MESSAGE : `Sheet not found: ${sheetId}`)
+    // VALUES-FREE: the message never echoes the requested id. `sheetId` is carried as a FIELD for
+    // callers that need it (logging, metrics), never interpolated into anything a caller can observe.
+    // The #L5-wire no-leak golden pins this: a refusal that pastes the id back is an existence oracle,
+    // and an owner fix (2026-08-25) had already removed exactly that from the checkpoint route.
+    super(liveness === 'deleted' ? SHEET_DELETED_MESSAGE : SHEET_NOT_FOUND_MESSAGE)
     this.name = 'SheetNotLiveError'
     this.sheetId = sheetId
     this.liveness = liveness

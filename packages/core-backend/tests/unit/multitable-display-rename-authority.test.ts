@@ -634,6 +634,57 @@ describe('F21 — sheet and base display rename', () => {
       })
     }
 
+    // AUTHZ-FIRST. The real-DB goldens (multitable-records-list-authz T8) pin that an actor who may
+    // not read a sheet gets 403 WITHOUT learning whether it exists — "identical to T1's
+    // existing-but-denied sheet". My first wiring checked liveness straight after resolving
+    // capabilities and therefore BEFORE checking them, turning every unauthorized request against a
+    // missing or deleted sheet into a 404 existence oracle. The rule is now: authorization answers
+    // first; liveness 404s only an actor who WOULD have been allowed through.
+    it('an UNAUTHORIZED actor gets 403 for a deleted sheet — no existence oracle', async () => {
+      const store = freshStore()
+      store.sheet.deleted_at = '2026-08-30T00:00:00.000Z'
+      const app = await buildApp(OPERATOR_USER, store)
+      const res = await on(app).patch(`/api/multitable/sheets/${SHEET_ID}`).send({ name: 'Ghost' })
+      expect(res.status).toBe(403)
+      expect(res.body.error.code).toBe('FORBIDDEN')
+    })
+
+    it('...and the SAME 403 for a sheet that never existed — the two are indistinguishable', async () => {
+      const store = freshStore()
+      const app = await buildApp(OPERATOR_USER, store)
+      const deleted = await (async () => {
+        store.sheet.deleted_at = '2026-08-30T00:00:00.000Z'
+        return on(app).patch(`/api/multitable/sheets/${SHEET_ID}`).send({ name: 'Ghost' })
+      })()
+      const absent = await on(app).patch(`/api/multitable/sheets/${MISSING_SHEET_ID}`).send({ name: 'Ghost' })
+      expect({ status: absent.status, body: absent.body }).toEqual({ status: deleted.status, body: deleted.body })
+      expect(deleted.status).toBe(403)
+    })
+
+    it('an AUTHORIZED actor still gets the 404 — the security property is intact, not traded away', async () => {
+      const store = freshStore()
+      store.sheet.deleted_at = '2026-08-30T00:00:00.000Z'
+      const app = await buildApp(ADMIN_USER, store)
+      const res = await on(app).patch(`/api/multitable/sheets/${SHEET_ID}`).send({ name: 'Ghost' })
+      expect(res.status).toBe(404)
+      expect(res.body.error.code).toBe('SHEET_DELETED')
+    })
+
+    // VALUES-FREE. An owner fix (2026-08-25) removed an echoed sheet id from the checkpoint route's
+    // refusal; my first version reintroduced it through a shared helper. `sendSheetNotLive` now takes
+    // no id at all, so it cannot echo one.
+    it('no refusal echoes the requested sheet id', async () => {
+      const store = freshStore()
+      const app = await buildApp(ADMIN_USER, store)
+      const absent = await on(app).get('/api/multitable/records').query({ sheetId: MISSING_SHEET_ID })
+      expect(JSON.stringify(absent.body)).not.toContain(MISSING_SHEET_ID)
+
+      store.sheet.deleted_at = '2026-08-30T00:00:00.000Z'
+      const deletedApp = await buildApp(ADMIN_USER, store)
+      const deleted = await on(deletedApp).get('/api/multitable/records').query({ sheetId: SHEET_ID })
+      expect(JSON.stringify(deleted.body)).not.toContain(SHEET_ID)
+    })
+
     it('a deleted sheet is distinguishable from an absent one — different codes, same status', async () => {
       const { app } = await deletedSheetApp()
       const deleted = await on(app).get('/api/multitable/records').query({ sheetId: SHEET_ID })
