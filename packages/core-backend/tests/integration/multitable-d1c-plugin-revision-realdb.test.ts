@@ -119,6 +119,7 @@ type CoreApiShape = {
         sheetId: string
         recordId: string
         changes: Record<string, unknown>
+        expectedVersion?: number
       }) => Promise<{ id: string; sheetId: string; version: number; data: Record<string, unknown> }>
     }
   }
@@ -543,6 +544,51 @@ describeIfDatabase('D-1c slice ② — plugin-SDK createRecord/patchRecord write
       ).rejects.toThrow(/not found/i)
       expect(await revisionsOf(ghost)).toHaveLength(0)
     })
+
+    test('CAS golden: a concurrent version bump between inspect and UPDATE rejects with a typed values-free conflict and writes no revision', async () => {
+      const created = await sdk.createRecord({ sheetId: SHEET_RACE, data: { [FLD_RACE_TITLE]: 'cas-v1' } })
+      const rawPool = poolManager.get().getInternalPool()
+      const holder = await rawPool.connect()
+      let patchRejection: unknown
+      try {
+        await holder.query('BEGIN')
+        await holder.query(
+          'UPDATE meta_records SET version = version + 1 WHERE id = $1 AND sheet_id = $2',
+          [created.id, SHEET_RACE],
+        )
+        const holderPid = Number((await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+
+        const patchPromise = sdk.patchRecord({
+          sheetId: SHEET_RACE,
+          recordId: created.id,
+          expectedVersion: created.version,
+          changes: { [FLD_RACE_TITLE]: 'stale-writer-must-not-land' },
+        }).then(
+          () => undefined,
+          (error: unknown) => {
+            patchRejection = error
+            return undefined
+          },
+        )
+
+        await waitUntilBlockedOnRecordLock(holderPid, '%UPDATE meta_records%')
+        await holder.query('COMMIT')
+        await patchPromise
+      } finally {
+        await holder.query('ROLLBACK').catch(() => {})
+        holder.release()
+      }
+
+      expect(patchRejection).toMatchObject({
+        code: 'VERSION_CONFLICT',
+        message: 'Record version conflict',
+      })
+      expect(await recordRow(created.id)).toMatchObject({
+        version: 2,
+        data: { [FLD_RACE_TITLE]: 'cas-v1' },
+      })
+      expect(await revisionsOf(created.id)).toHaveLength(1)
+    }, 15000)
 
     // ── THE P1 FIX GOLDEN ────────────────────────────────────────────────────────────────────────────
     // GENUINE two-connection lock race (never a sleep heuristic): Connection A (this test's "holder")
