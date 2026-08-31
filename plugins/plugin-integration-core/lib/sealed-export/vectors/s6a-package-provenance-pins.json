@@ -67,7 +67,7 @@
     "pg": "^8.11.3"
   },
   "runtimeFiles": {
-    "pluginPackageJson": "2145759044ee0c385e0e9129ce8cc27f4e988854063fe1b9329c8fdf234ca17f",
+    "pluginPackageJson": "6c1c174b8b548631effd0b438df30fe3774e0cb4b34c9a3b81d17795bf96bf8b",
     "pnpmLock": "95f095233951bbe488cb70da25cc3c9a0a25c1354bfd861b4ee999ccc857019b",
     "pluginIndex": "c9d9ac7a879462adf0055004c55d6ab87a3819c00aa8ced903b70f5aea3cd112",
     "pluginHttpRoutes": "3b15fa798fc40dc279024b9b4017f69a82092edf892fe7d01a6a06e8c2c9c39c",
