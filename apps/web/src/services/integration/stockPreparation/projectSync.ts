@@ -81,6 +81,7 @@ export type StockPreparationProjectSyncReason =
   // 4. 批次存档
   | 'BATCH_ARCHIVED'
   | 'BATCH_ALREADY_ARCHIVED'
+  | 'BATCH_ARCHIVE_OUTCOME_UNKNOWN'
   | 'BATCH_ARCHIVE_DISABLED'
   | 'BATCH_ARCHIVE_NOT_ATTEMPTED'
   | 'BATCH_ARCHIVE_FAILED'
@@ -177,10 +178,18 @@ export interface StockPreparationProjectSyncStepResult {
   detail: Record<string, string | number>
 }
 
-/** What actually happened, in the terms the panel's first sentence is written from. */
+/**
+ * What actually happened, in the terms the panel's first sentence is written from.
+ *
+ * `partial` is its own verdict rather than a shade of `blocked`, and the distinction is not cosmetic:
+ * a partial apply has ALREADY PUT ROWS IN THE SHEET. Folding it into `blocked` made the panel say
+ * 「这次没有导入成功,数据没有变化」 over an import that had changed data — a false statement, and the
+ * kind an operator acts on by re-running or by telling someone the sync did nothing.
+ */
 export type StockPreparationProjectSyncVerdict =
   | 'imported'
   | 'already_up_to_date'
+  | 'partial'
   | 'held'
   | 'blocked'
   | 'not_run'
@@ -329,6 +338,9 @@ export function summarizeProjectSync(
   let verdict: StockPreparationProjectSyncVerdict = 'not_run'
   if (imported) verdict = 'imported'
   else if (upToDate) verdict = 'already_up_to_date'
+  // ROWS ARE IN THE SHEET. Checked before `held`/`blocked` because a partial write is the one outcome
+  // where the panel must not say "nothing changed" — see the verdict type's note.
+  else if (write?.reason === 'WRITE_PARTIAL') verdict = 'partial'
   else if (write?.reason === 'WRITE_HELD_FOR_CONFIRMATION') verdict = 'held'
   else if (steps.length > 0) verdict = 'blocked'
 
@@ -555,8 +567,15 @@ export async function runStockPreparationProjectSync(
       lines: intOf(created.lines),
       run: intOf(created.run),
     }
+    // A 2xx IS NOT AN ANSWER — and neither is a missing discriminator. `persisted` is the ONLY thing
+    // that distinguishes "a new batch was stored" from "this batch was already there", and both are
+    // POSITIVE CLAIMS about the customer's data. Treating an absent or non-boolean `persisted` as
+    // `false` would have made the panel assert 「这一批之前已经存过了」 on a response that said no such
+    // thing — a claim the client cannot possibly know. An unusable discriminator gets its own
+    // outcome instead, which names what IS known (the call succeeded) and where to look.
     if (archived?.persisted === true) record(result(4, 'archive', 'ok', 'BATCH_ARCHIVED', detail))
-    else record(result(4, 'archive', 'ok', 'BATCH_ALREADY_ARCHIVED', detail))
+    else if (archived?.persisted === false) record(result(4, 'archive', 'ok', 'BATCH_ALREADY_ARCHIVED', detail))
+    else record(result(4, 'archive', 'ok', 'BATCH_ARCHIVE_OUTCOME_UNKNOWN', detail))
   } catch (error) {
     const code = codeOf(error)
     const detail: Record<string, string | number> = { status: statusOf(error) }

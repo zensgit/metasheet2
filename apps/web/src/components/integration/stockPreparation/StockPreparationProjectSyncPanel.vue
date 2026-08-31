@@ -60,6 +60,11 @@
     <!-- 「导进去了吗?」 — one sentence, before any step is read. -->
     <p v-if="report" class="sp-sync__verdict" data-testid="stock-prep-project-sync-verdict" :data-verdict="report.verdict">
       <strong>{{ verdictText }}</strong>
+      <!-- The count that makes a partial write actionable: HOW MANY are still missing. It lives here
+           rather than inside the plain-language table because only the component has the number. -->
+      <strong v-if="verdictCount" class="sp-sync__verdict-count" data-testid="stock-prep-project-sync-verdict-count">
+        {{ verdictCount }}
+      </strong>
       <span v-if="verdictNext" class="sp-sync__verdict-next">{{ verdictNext }}</span>
       <span class="sp-sync__token">
         OK {{ report.okCount }} · SKIP {{ report.skipCount }} · FAIL {{ report.failCount }}
@@ -73,8 +78,10 @@
 
     <!-- Where to go next. Both are navigation inside this same workbench; neither is a new route. -->
     <div v-if="report" class="sp-sync__next">
+      <!-- SHOWN whenever rows are actually in the sheet — which INCLUDES a partial write. Hiding it
+           there told an operator to go and not look at data that was sitting in front of them. -->
       <button
-        v-if="report.imported || report.verdict === 'already_up_to_date'"
+        v-if="showsSheetLink"
         type="button"
         class="sp-sync__link"
         data-testid="stock-prep-project-sync-open-multitable"
@@ -309,6 +316,24 @@ const verdictNext = computed<string>(() => {
   return bi(plain.zhNext ?? '', plain.enNext ?? '')
 })
 
+/** The one verdict that needs a number in its headline: how many rows are still missing. */
+const verdictCount = computed<string>(() => {
+  const value = report.value
+  if (!value || value.verdict !== 'partial') return ''
+  const failedRows = value.written?.failed ?? 0
+  if (failedRows <= 0) return ''
+  return bi(`还有 ${failedRows} 行没有写成。`, `${failedRows} rows did not write.`)
+})
+
+/**
+ * Whether "open the multitable" renders. The test is ROWS ARE IN THE SHEET, not "the run was tidy":
+ * a partial write put rows there, and `already_up_to_date` means the rows were there all along.
+ */
+const showsSheetLink = computed<boolean>(() => {
+  const verdict = report.value?.verdict
+  return verdict === 'imported' || verdict === 'already_up_to_date' || verdict === 'partial'
+})
+
 /**
  * The plan's five numbers as ONE sentence. The clauses that are zero are dropped — "新增 0 行,更新 0
  * 行,跳过 12 行" makes a reader hunt for the number that matters.
@@ -437,6 +462,10 @@ const countsSentence = computed<string>(() => {
   margin: 0;
   color: var(--ms-text-1);
   line-height: 1.6;
+}
+
+.sp-sync__verdict-count {
+  color: var(--ms-color-warning, #b8860b);
 }
 
 .sp-sync__verdict-next,

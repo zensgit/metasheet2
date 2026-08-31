@@ -248,6 +248,57 @@ describe('StockPreparationProjectSyncPanel', () => {
     expect((root.textContent || '')).not.toContain('失败')
   })
 
+  // ---- P-06: the partial-write headline tells the truth ------------------------------------
+  it('P-06: a partial write says rows landed, counts what did not, and KEEPS the sheet link', async () => {
+    const double = api({
+      apply: vi.fn().mockResolvedValue({
+        status: 'partial',
+        apply: { counts: { created: 2, updated: 0, inactive: 0, skipped: 0, held: 0, failed: 1 } },
+      }),
+    })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+
+    const verdict = root.querySelector('[data-testid="stock-prep-project-sync-verdict"]') as HTMLElement
+    // THE VERDICT AND THE HEADLINE, both pinned. Asserting only the step reason is what let the false
+    // headline ship: the step said WRITE_PARTIAL while the sentence above it said nothing changed.
+    expect(verdict.getAttribute('data-verdict')).toBe('partial')
+    expect(verdict.textContent).toContain('写入了一部分')
+    expect(verdict.textContent).not.toContain('数据没有变化')
+    expect(verdict.textContent).not.toContain('没有导入成功')
+
+    // ...and HOW MANY are missing, which is what makes it actionable.
+    const count = root.querySelector('[data-testid="stock-prep-project-sync-verdict-count"]') as HTMLElement
+    expect(count).not.toBeNull()
+    expect(count.textContent).toContain('1')
+
+    // The rows ARE in the sheet, so the way to look at them must be on screen.
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-open-multitable"]')).not.toBeNull()
+  })
+
+  it('P-06: a genuinely blocked run keeps the "nothing changed" headline and hides the sheet link', async () => {
+    const double = api({
+      apply: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(500, '/apply')),
+    })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    const verdict = root.querySelector('[data-testid="stock-prep-project-sync-verdict"]') as HTMLElement
+    expect(verdict.getAttribute('data-verdict')).toBe('blocked')
+    expect(verdict.textContent).toContain('数据没有变化')
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-open-multitable"]')).toBeNull()
+  })
+
+  it('P-06: an archive whose outcome the server did not state makes no claim about it', async () => {
+    const double = api({ archive: vi.fn().mockResolvedValue({ status: 'created' }) })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    const archive = root.querySelector('[data-step="archive"]') as HTMLElement
+    expect(archive.getAttribute('data-status')).toBe('ok')
+    // No positive claim in either direction.
+    expect(archive.textContent).not.toContain('之前已经存过了')
+    expect(archive.textContent).toContain('没说清')
+  })
+
   // ---- P-05 --------------------------------------------------------------------------------
   it('P-05: no business value from a response reaches the DOM; the typed number does', async () => {
     const root = mountPanel({ api: api() })

@@ -302,7 +302,8 @@ describe('項目接入 — the four-step import run', () => {
     expect(api.apply).not.toHaveBeenCalled()
   })
 
-  it('a partial write is reported as partial — an import AND unfinished work', async () => {
+  // ---- G-4: a partial write is an IMPORT, and the verdict must say so ------------------------
+  it('G-4: a partial write gets its OWN verdict — never the "nothing was changed" one', async () => {
     const api = makeApi({
       apply: vi.fn().mockResolvedValue(applied({
         status: 'partial',
@@ -311,9 +312,52 @@ describe('項目接入 — the four-step import run', () => {
     })
     const report = await runStockPreparationProjectSync(api, PROJECT_NO)
     expect(stepOf(report, 'apply')).toMatchObject({ status: 'skip', reason: 'WRITE_PARTIAL' })
+    // THE VERDICT, not just the step reason. Folding this into 'blocked' made the panel headline read
+    // 「这次没有导入成功,数据没有变化」 over two rows that were sitting in the sheet.
+    expect(report.verdict).toBe('partial')
+    expect(report.verdict).not.toBe('blocked')
+    // `imported` stays false — it means "the whole plan landed", which this did not — so the count of
+    // what DID land has to be readable for the headline to be truthful.
+    expect(report.imported).toBe(false)
+    expect(report.written).toMatchObject({ created: 2, failed: 1 })
     // The archive still runs: rows landed, so this run has a batch worth keeping.
     expect(api.archive).toHaveBeenCalled()
-    expect(report.imported).toBe(false)
+  })
+
+  it('G-4: "blocked" is reserved for runs where nothing was written', async () => {
+    // Every path that reaches `blocked` must genuinely have changed nothing, or the headline lies.
+    for (const api of [
+      makeApi({ apply: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(500, '/apply')) }),
+      makeApi({ dryRun: vi.fn().mockResolvedValue(plan({ status: 'failed', canApply: false, dryRunToken: null })) }),
+      makeApi({ dryRun: vi.fn().mockResolvedValue(plan({ status: 'not_found', canApply: false, dryRunToken: null })) }),
+      makeApi({ dryRun: vi.fn().mockResolvedValue(plan({ dryRunToken: null })) }),
+    ]) {
+      const report = await runStockPreparationProjectSync(api, PROJECT_NO)
+      expect(report.verdict).toBe('blocked')
+      const write = report.steps.find((step) => step.id === 'apply')
+      expect(write === undefined || write.reason !== 'WRITE_PARTIAL').toBe(true)
+    }
+  })
+
+  // ---- G-5: the archive outcome is a claim, so an unusable discriminator is not one -----------
+  it('G-5: an archive response with no `persisted` gets an unknown outcome, not a positive claim', async () => {
+    for (const archiveResponse of [
+      { status: 'created', created: { batch: 1 } }, // no `persisted` at all
+      { persisted: 'yes' }, // not a boolean
+      {},
+    ]) {
+      const api = makeApi({ archive: vi.fn().mockResolvedValue(archiveResponse) })
+      const report = await runStockPreparationProjectSync(api, PROJECT_NO)
+      expect(stepOf(report, 'archive')).toMatchObject({ status: 'ok', reason: 'BATCH_ARCHIVE_OUTCOME_UNKNOWN' })
+      // The import is untouched by the discriminator being unreadable.
+      expect(report.imported).toBe(true)
+    }
+  })
+
+  it('G-5: an explicit persisted:false still reads as already-archived', async () => {
+    const api = makeApi({ archive: vi.fn().mockResolvedValue(archived({ persisted: false })) })
+    const report = await runStockPreparationProjectSync(api, PROJECT_NO)
+    expect(stepOf(report, 'archive')).toMatchObject({ status: 'ok', reason: 'BATCH_ALREADY_ARCHIVED' })
   })
 
   it('a failed write blocks the archive and reports 数据没有变化', async () => {

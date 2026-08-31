@@ -663,6 +663,12 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zh: '这一批之前已经存过了,没有重复存',
     en: 'This batch was already kept; nothing was stored twice',
   }),
+  BATCH_ARCHIVE_OUTCOME_UNKNOWN: Object.freeze({
+    zh: '存档这一步跑完了,但服务器没说清这批是新存的还是原本就有',
+    en: 'The archive step finished, but the server did not say whether this batch is new or was already there',
+    zhNext: '到「BOM 快照批次与差异」看一眼就知道;导入本身不受影响。',
+    enNext: 'The snapshot-batch and diff tab shows which; the import itself is unaffected.',
+  }),
   BATCH_ARCHIVE_DISABLED: Object.freeze({
     zh: '这套部署没有开启批次存档',
     en: 'This deployment does not keep snapshot batches',
@@ -698,6 +704,17 @@ export const STOCK_PREP_SYNC_VERDICT_PLAIN: Record<string, StockPrepPlainEntry> 
   already_up_to_date: Object.freeze({
     zh: '已经是最新的 —— 表里的数据和 PLM 一致,这次没有需要改的行。',
     en: 'Already current — the table matches PLM and no row needed changing.',
+  }),
+  /**
+   * A PARTIAL WRITE IS AN IMPORT. Rows are in the sheet. This sentence used to be the `blocked` one —
+   * 「这次没有导入成功,数据没有变化」 — which was simply false, and false in the direction that costs
+   * an operator the most: they go looking for data they are told is not there.
+   */
+  partial: Object.freeze({
+    zh: '写入了一部分 —— 已经写进去的行现在就在多维表里,还有几行没有写成。',
+    en: 'Partly written — the rows that landed are in the multitable now, and some did not write.',
+    zhNext: '已经写进去的不会重复写。再点一次同步会把剩下的补上;还是补不上的话,下面每一步都写了卡在哪里。',
+    enNext: 'What landed will not be written twice. Sync again to pick up the rest; if it still does not, each step below says where it stopped.',
   }),
   held: Object.freeze({
     zh: '还差一步:有几行需要您先拿个主意,定完再同步一次就写进去了。',
