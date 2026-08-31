@@ -19,14 +19,12 @@ export const APPROVAL_ROLE_CONFIGURE_SENTINEL = '__APPROVAL_ROLE_PLACEHOLDER__'
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
 export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver' | 'user_group' | 'form_field_user_manager' | 'form_field_user_dept_head'
-// P1-C (approval-parity-master-design-lock-20260817.md §P1-C / M6): 'threshold' is the shipped
-// ENGINE 4th mode (N-of-M / 门槛会签, ApprovalGraphExecutor.ts `normalizeApprovalMode`) — this type
-// was FE-unexposed until this slice. Byte-mirrors backend packages/core-backend/src/types/
-// approval-product.ts `ApprovalMode`. Linear-only in v1: the backend rejects a 'threshold' node
-// INSIDE a parallel region (`APPROVAL_THRESHOLD_IN_PARALLEL`, ApprovalProductService.ts
-// :2706-2712 / :2757-2763) — see `collectParallelRegionNodeKeys` in templateAuthoring.ts for the FE
-// mirror of that exact region definition.
-export type ApprovalMode = 'single' | 'all' | 'any' | 'threshold'
+// P1-C + Lock-1 K6: threshold (N-of-M / 门槛会签) and sequential (依次审批) are the fourth and
+// fifth shipped engine modes. This union byte-mirrors backend
+// packages/core-backend/src/types/approval-product.ts `ApprovalMode`. Both are linear-only in v1:
+// the backend rejects either mode inside a parallel region; `collectParallelRegionNodeKeys` in
+// templateAuthoring.ts mirrors that exact region definition for authoring feedback.
+export type ApprovalMode = 'single' | 'all' | 'any' | 'threshold' | 'sequential'
 export type ParallelJoinMode = 'all' | 'any'
 // Fix-round P1-1 (gate P3A-F4B-20260819): widened to add 'designated', byte-mirroring backend
 // packages/core-backend/src/types/approval-product.ts `EmptyAssigneePolicy`

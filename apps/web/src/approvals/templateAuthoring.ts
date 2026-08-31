@@ -1287,7 +1287,7 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     // string is what blocks `persistDraft` from ever re-saving it.
     if (
       config.approvalMode !== undefined
-      && !['single', 'all', 'any', 'threshold'].includes(config.approvalMode as string)
+      && !['single', 'all', 'any', 'threshold', 'sequential'].includes(config.approvalMode as string)
     ) return true
     if (thresholdConfigHasBackendDrop(config)) return true
     if (config.approvalMode === 'threshold' && !(Number.isInteger(config.approvalThreshold) && (config.approvalThreshold as number) >= 1)) return true
