@@ -8,7 +8,7 @@ import { MSSQLAdapter } from './MSSQLAdapter'
 import { MySQLAdapter } from './MySQLAdapter'
 import { PLMAdapter } from './PLMAdapter'
 import { encryptStoredSecretValue, decryptStoredSecretValue, isEncryptedSecretValue } from '../security/encrypted-secrets'
-import { assertNotK3Destination, assertNotK3MarkedDestination, assertNotK3SqlWrite } from './k3-destination-write-fence'
+import { assertNotK3Destination, assertNotK3ConnectionWrite, preserveK3Marker } from './k3-destination-write-fence'
 import type { IConfigService, ILogger } from '../di/identifiers'
 
 // PostgreSQL SQLSTATE for undefined_table. The referential delete guard trusts
@@ -386,6 +386,15 @@ export class DataSourceManager extends EventEmitter {
     const priorScope = this.scopes.get(id)
     const ownerId = options?.ownerId ?? priorScope?.ownerId ?? 'system'
     const workspaceId = options?.workspaceId ?? priorScope?.workspaceId ?? undefined
+
+    // G-4 MARKER DURABILITY (P1). The k3Destination marker is SET-ONCE: once a source is a declared
+    // K3 destination, no later update — from any caller, through any merge — may clear or unset it.
+    // This is the manager chokepoint that makes the marker immutable; the route additionally returns a
+    // coded refusal for an explicit clear attempt. Forcing it here means even a silent/buggy path that
+    // dropped the key cannot re-open writes on a K3 connection.
+    if (existing.getConfig().options?.k3Destination === true) {
+      config = { ...config, options: preserveK3Marker(existing.getConfig().options, config.options) }
+    }
 
     // Validate the target type before touching anything live.
     if (!this.adapterTypes.get(config.type.toLowerCase())) {
@@ -809,15 +818,14 @@ export class DataSourceManager extends EventEmitter {
     params?: DbValue[]
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
-    // G-4 DESTINATION FENCE (query), fail-early before connect. Two independent refusals:
-    //   - a source DECLARED a K3 destination refuses ANY raw statement (a raw statement is
-    //     write-capable and the ban is on the write); and
-    //   - a raw statement that WRITES a K3 business table is refused on any destination — this is the
-    //     switch-the-verb bypass (INSERT/UPDATE/DELETE/MERGE/EXEC naming t_ICItem &c.). Reads pass.
-    // The adapter's own query() re-checks at the true chokepoint, so a caller who skips this manager
-    // wrapper (getDataSource(id).query(...)) is still refused; this layer only saves a connect.
-    assertNotK3MarkedDestination(adapter.getConfig())
-    assertNotK3SqlWrite(adapter.getConfig(), sql)
+    // G-4 CONNECTION READ-ONLY GATE (query), fail-early before connect. On a K3-reaching connection
+    // (the durable marker; connect-time detection is re-checked at the adapter) only a PURE READ is
+    // allowed — every write, whatever T-SQL shape, is refused as a write on a read-only K3 connection,
+    // without parsing a table. On a non-K3 connection a best-effort statement signature is the
+    // defense-in-depth backstop. Reads pass, so a raw SELECT (including from a K3 table) works. The
+    // adapter's own query() re-checks with its detected flag, so a caller who skips this wrapper
+    // (getDataSource(id).query(...)) is still refused; this layer only saves a connect.
+    assertNotK3ConnectionWrite(adapter.getConfig(), sql)
     if (isGenericQueryDisabledConfig(adapter.getConfig())) {
       throw new Error(c6WriteTargetQueryDisabledMessage(dataSourceId))
     }
@@ -987,10 +995,10 @@ export class DataSourceManager extends EventEmitter {
     // Execute queries in parallel
     const promises = queries.map(async ({ dataSourceId, sql, params, alias }) => {
       const adapter = this.getDataSource(dataSourceId)
-      // G-4 DESTINATION FENCE (federated query). A federated leg runs raw SQL: refuse a marked K3
-      // destination, and refuse any leg whose statement WRITES a K3 business table. Reads pass.
-      assertNotK3MarkedDestination(adapter.getConfig())
-      assertNotK3SqlWrite(adapter.getConfig(), sql)
+      // G-4 CONNECTION READ-ONLY GATE (federated query). A federated leg runs raw SQL: on a
+      // K3-reaching connection only a pure read is allowed; on a non-K3 connection the statement
+      // signature is the backstop. Reads pass.
+      assertNotK3ConnectionWrite(adapter.getConfig(), sql)
       if (isGenericQueryDisabledConfig(adapter.getConfig())) {
         throw new Error(c6WriteTargetQueryDisabledMessage(dataSourceId))
       }

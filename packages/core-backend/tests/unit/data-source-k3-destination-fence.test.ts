@@ -6,15 +6,23 @@ import type { DataSourceConfig } from '../../src/data-adapters/BaseAdapter'
 import {
   K3_WISE_EXTERNAL_WRITE_DISABLED,
   K3_WISE_BUSINESS_TABLE_SIGNATURE,
+  K3_DESTINATION_MARKER_IMMUTABLE,
   assertNotK3Destination,
   assertNotK3MarkedDestination,
   assertNotK3SqlWrite,
+  assertNotK3ConnectionWrite,
+  attemptsToClearK3Marker,
+  catalogIndicatesK3,
   classifySqlWrite,
   isK3BusinessTable,
   isK3MarkedDestination,
+  isK3ReachingConnection,
+  isPureReadStatement,
   normalizeDestinationTable,
+  preserveK3Marker,
   sqlTargetsK3BusinessTable,
 } from '../../src/data-adapters/k3-destination-write-fence'
+import { isReadOnlySql } from '../../src/routes/data-sources'
 
 // G-4 / E4 DESTINATION FENCE — the by-kind ban made destination-oriented at the true chokepoint.
 //
@@ -184,7 +192,7 @@ describe('K3 destination fence — table normalization and signature match', () 
 })
 
 describe('DataSourceManager destination fence — a MARKED K3 destination is refused (declared)', () => {
-  it('refuses insert/update/delete/query on a k3Destination source before touching the driver', async () => {
+  it('refuses insert/update/delete and every non-read query on a k3Destination source, but ALLOWS reads', async () => {
     const { m, insertSpy, updateSpy, deleteSpy, querySpy } =
       await managerWithStubbedWrite(sqlserverConfig('k3-marked', { k3Destination: true }))
 
@@ -192,12 +200,17 @@ describe('DataSourceManager destination fence — a MARKED K3 destination is ref
     expect((await asyncRefusal(m.insert('k3-marked', 'harmless_stage', { code: 'X' }))).code).toBe(FIXED_CODE)
     expect((await asyncRefusal(m.update('k3-marked', 'harmless_stage', { name: 'Y' }, { code: 'X' }))).code).toBe(FIXED_CODE)
     expect((await asyncRefusal(m.delete('k3-marked', 'harmless_stage', { code: 'X' }))).code).toBe(FIXED_CODE)
-    expect((await asyncRefusal(m.query('k3-marked', 'SELECT 1'))).code).toBe(FIXED_CODE)
-
+    // A raw WRITE query is refused as a write on a read-only K3 connection.
+    expect((await asyncRefusal(m.query('k3-marked', "INSERT INTO harmless_stage VALUES (1)"))).code).toBe(FIXED_CODE)
     expect(insertSpy).not.toHaveBeenCalled()
     expect(updateSpy).not.toHaveBeenCalled()
     expect(deleteSpy).not.toHaveBeenCalled()
-    expect(querySpy).not.toHaveBeenCalled()
+
+    // But a PURE READ passes — K3 reads stay functional (the ban is on writes). This is the crux of
+    // the connection-level re-architecture: a K3 connection is read-only, not raw-query-forbidden.
+    await expect(m.query('k3-marked', 'SELECT 1')).resolves.toBeDefined()
+    await expect(m.query('k3-marked', "SELECT TOP 5 * FROM t_ICItem WHERE a=1")).resolves.toBeDefined()
+    expect(querySpy).toHaveBeenCalledTimes(2)
   })
 
   it('the marker survives the in-memory registration round-trip (getConfig reports it)', async () => {
@@ -376,5 +389,122 @@ describe('MSSQLAdapter.query() — the adapter-boundary chokepoint (P1a)', () =>
     const err = await asyncRefusal(a.query("INSERT INTO integration_material_stage (code) VALUES ('X')")) as { code?: string; message?: string }
     expect(err.code).not.toBe(FIXED_CODE)
     expect(String(err.message)).toMatch(/Not connected/)
+  })
+})
+
+// ── ROUND-3 — the CONNECTION READ-ONLY gate (the load-bearing re-architecture) ────────────────
+// A hand-rolled SQL-target extractor cannot hold G-4: UPDATE…FROM alias, TOP between verb and table,
+// and 4-part linked-server names all defeat target extraction. The fix makes the fence a property of
+// the CONNECTION — a K3-reaching connection is read-only, and only a PURE READ passes, with NO table
+// parsing. These are the three executed round-3 bypasses.
+const ROUND3_P0 = [
+  "UPDATE t SET FNumber='X' FROM t_ICItem AS t WHERE t.FItemID=1", // UPDATE…FROM: real target in FROM
+  "DELETE t FROM t_ICItem t WHERE t.FItemID=1",                    // DELETE…FROM: alias, real target in FROM
+  "UPDATE TOP (5) t_ICItem SET FNumber='X'",                       // TOP between verb and table
+  "INSERT INTO srv.AIS.dbo.t_ICItem (FItemID) VALUES (1)",         // 4-part linked-server name
+]
+
+describe('K3 connection read-only gate — the pure-read allowlist', () => {
+  it('isPureReadStatement mirrors the route isReadOnlySql exactly (pinned equivalent)', () => {
+    const cases = [
+      'SELECT 1', '  select * from t ', 'WITH x AS (SELECT 1) SELECT * FROM x', 'EXPLAIN SELECT 1',
+      'show tables', 'SELECT 1;', 'SELECT 1; DROP TABLE t', 'SELECT * INTO backup FROM t',
+      'INSERT INTO t VALUES (1)', 'UPDATE t SET a=1', 'DELETE FROM t', 'MERGE INTO t USING s ON 1=1',
+      'EXEC sp_who', 'UPDATE TOP (5) t_ICItem SET a=1', "INSERT INTO srv.a.dbo.t VALUES (1)", '',
+    ]
+    for (const c of cases) {
+      expect(isPureReadStatement(c)).toBe(isReadOnlySql(c)) // the adapter's allowlist == the route's
+    }
+  })
+
+  it('none of the round-3 bypasses is a pure read; ordinary reads are', () => {
+    for (const sql of ROUND3_P0) expect(isPureReadStatement(sql)).toBe(false)
+    expect(isPureReadStatement("SELECT TOP 10 * FROM t_ICItem")).toBe(true) // read of a K3 table is fine
+    expect(isPureReadStatement("WITH c AS (SELECT 1 AS n) SELECT n FROM c")).toBe(true)
+  })
+
+  it('isK3ReachingConnection is true when marked OR detected', () => {
+    expect(isK3ReachingConnection({ k3Destination: true } as never)).toBe(true)
+    expect(isK3ReachingConnection({} as never, true)).toBe(true)      // detected
+    expect(isK3ReachingConnection({} as never, false)).toBe(false)
+    expect(isK3ReachingConnection(undefined)).toBe(false)
+  })
+
+  it('assertNotK3ConnectionWrite: K3 connection refuses every non-read; passes reads; non-K3 falls to signature', () => {
+    // Marked (K3-reaching): all four bypasses refused, no table parsing.
+    for (const sql of ROUND3_P0) {
+      expect(syncRefusal(() => assertNotK3ConnectionWrite({ options: { k3Destination: true } } as never, sql)).code).toBe(FIXED_CODE)
+    }
+    // Detected (K3-reaching via the flag): same.
+    expect(syncRefusal(() => assertNotK3ConnectionWrite({ options: {} } as never, "UPDATE TOP (5) t_ICItem SET a=1", true)).code).toBe(FIXED_CODE)
+    // A read passes on a K3 connection.
+    expect(() => assertNotK3ConnectionWrite({ options: { k3Destination: true } } as never, "SELECT * FROM t_ICItem")).not.toThrow()
+    // A NON-K3 connection falls through to the signature backstop: a t_ICItem write is still caught by name…
+    expect(syncRefusal(() => assertNotK3ConnectionWrite({ options: {} } as never, "INSERT INTO t_ICItem VALUES (1)")).code).toBe(FIXED_CODE)
+    // …but a plain non-K3 write is allowed.
+    expect(() => assertNotK3ConnectionWrite({ options: {} } as never, "INSERT INTO integration_material_stage VALUES (1)")).not.toThrow()
+  })
+})
+
+describe('DataSourceManager query() — the round-3 T-SQL bypasses are all refused (connection gate)', () => {
+  it('refuses UPDATE…FROM / DELETE…FROM / UPDATE TOP / 4-part-name on a MARKED source, before the driver', async () => {
+    const { m, querySpy } = await managerWithStubbedWrite(sqlserverConfig('k3-round3', { k3Destination: true }))
+    for (const sql of ROUND3_P0) {
+      expect((await asyncRefusal(m.query('k3-round3', sql))).code).toBe(FIXED_CODE)
+    }
+    expect(querySpy).not.toHaveBeenCalled() // none reached the driver
+  })
+
+  it('the SAME bypasses are refused at the ADAPTER when the connection is DETECTED K3 (unmarked)', async () => {
+    const m = new DataSourceManager()
+    await m.addDataSource(sqlserverConfig('detected-k3'), { ownerId: 'o' }) // NO marker
+    const a = m.getDataSource('detected-k3')
+    ;(a as unknown as { k3DetectedReaching: boolean }).k3DetectedReaching = true // simulate connect-time detection
+    for (const sql of ROUND3_P0) {
+      expect((await asyncRefusal(a.query(sql))).code).toBe(FIXED_CODE)
+    }
+    // A read still passes on the detected connection (fails later only at connect).
+    const readErr = await asyncRefusal(a.query("SELECT TOP 1 * FROM t_ICItem")) as { code?: string; message?: string }
+    expect(readErr.code).not.toBe(FIXED_CODE)
+    expect(String(readErr.message)).toMatch(/Not connected/)
+  })
+})
+
+describe('K3 connection detection — catalogIndicatesK3', () => {
+  it('flags a connection whose catalog contains K3 tables, not a plain staging catalog', () => {
+    expect(catalogIndicatesK3(['t_ICItem', 'integration_material_stage'])).toBe(true)
+    expect(catalogIndicatesK3(['ICMO', 'orders'])).toBe(true)          // widened family
+    expect(catalogIndicatesK3(['dbo.t_BDMaterial'])).toBe(true)        // prefix
+    expect(catalogIndicatesK3(['integration_material_stage', 'staging_bom'])).toBe(false)
+    expect(catalogIndicatesK3([])).toBe(false)
+    expect(catalogIndicatesK3(null)).toBe(false)
+  })
+})
+
+describe('K3 marker durability (P1) — set-once, not clearable', () => {
+  it('attemptsToClearK3Marker detects only a real clear on an already-marked source', () => {
+    expect(attemptsToClearK3Marker({ k3Destination: true } as never, { k3Destination: false } as never)).toBe(true)
+    expect(attemptsToClearK3Marker({ k3Destination: true } as never, { k3Destination: true } as never)).toBe(false)
+    // Absent in the incoming patch = not clearing (the deep-merge preserves it).
+    expect(attemptsToClearK3Marker({ k3Destination: true } as never, { timeout: 5 } as never)).toBe(false)
+    // Not marked to begin with: nothing to protect.
+    expect(attemptsToClearK3Marker({} as never, { k3Destination: false } as never)).toBe(false)
+  })
+
+  it('preserveK3Marker forces the marker true through any merge on a marked source', () => {
+    expect(preserveK3Marker({ k3Destination: true } as never, { timeout: 5 } as never)).toEqual({ timeout: 5, k3Destination: true })
+    expect(preserveK3Marker({ k3Destination: true } as never, { k3Destination: false } as never)).toEqual({ k3Destination: true })
+    // Unmarked source: unchanged.
+    expect(preserveK3Marker({} as never, { k3Destination: false } as never)).toEqual({ k3Destination: false })
+  })
+
+  it('DataSourceManager.updateDataSource cannot clear the marker (belt-and-suspenders net)', async () => {
+    const m = new DataSourceManager()
+    await m.addDataSource(sqlserverConfig('durable', { k3Destination: true }), { ownerId: 'o' })
+    // A malicious/buggy update that tries to drop the marker.
+    await m.updateDataSource('durable', { ...sqlserverConfig('durable'), options: { autoConnect: false, readOnly: false, k3Destination: false } }, { ownerId: 'o' })
+    expect(m.getDataSource('durable').getConfig().options?.k3Destination).toBe(true) // still K3, still read-only
+    // And the value-pinned refusal code the route returns.
+    expect(K3_DESTINATION_MARKER_IMMUTABLE).toBe('K3_DESTINATION_MARKER_IMMUTABLE')
   })
 })

@@ -27,7 +27,13 @@ import type {
   ConnectionConfig
 } from './BaseAdapter';
 import { BaseDataAdapter, getStringConfig, getNumberConfig } from './BaseAdapter'
-import { assertNotK3SqlWrite, assertNotK3MarkedDestination } from './k3-destination-write-fence'
+import {
+  assertNotK3ConnectionWrite,
+  catalogIndicatesK3,
+  isK3ReachingConnection,
+  K3DestinationWriteError,
+  K3_CONNECTION_READONLY_REFUSAL_MESSAGE,
+} from './k3-destination-write-fence'
 
 // Minimal structural typing for the optional `mssql` driver (avoid `any` and a
 // hard build-time dependency on @types/mssql).
@@ -221,6 +227,9 @@ export class MSSQLAdapter extends BaseDataAdapter {
       await this.pool.connect()
       await this.pool.request().query('SELECT 1 AS ok')
       this.connected = true
+      // G-4 DETECTION: flag a K3-reaching connection even when the marker was never set, so the
+      // read-only gate applies. Best-effort and fail-safe — a probe failure never blocks connect.
+      await this.probeK3Reaching()
       await this.onConnect()
     } catch (error) {
       // Close (not just drop) the pool so a failed connect leaks no open ConnectionPool.
@@ -231,12 +240,31 @@ export class MSSQLAdapter extends BaseDataAdapter {
     }
   }
 
+  // G-4 DETECTION flag: set true after connect if the catalog contains K3 tables. Per live pool, so
+  // it is re-probed on every (re)connect — durability across restarts comes from re-detection, and
+  // from the durable marker. Reset on disconnect so a reused instance never carries a stale verdict.
+  private k3DetectedReaching = false
+
+  private async probeK3Reaching(): Promise<void> {
+    if (!this.pool) return
+    try {
+      const result = await this.pool.request().query<{ name: string }>(
+        "SELECT TOP 5000 TABLE_NAME AS name FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE IN ('BASE TABLE', 'VIEW')"
+      )
+      const names = (result.recordset ?? []).map((row) => row.name)
+      if (catalogIndicatesK3(names)) this.k3DetectedReaching = true
+    } catch {
+      // Detection is best-effort; a probe failure leaves the marker as the control and never throws.
+    }
+  }
+
   async disconnect(): Promise<void> {
     if (!this.connected || !this.pool) return
     try {
       await this.pool.close()
       this.pool = null
       this.connected = false
+      this.k3DetectedReaching = false
       await this.onDisconnect()
     } catch (error) {
       await this.onError(error as Error)
@@ -273,15 +301,16 @@ export class MSSQLAdapter extends BaseDataAdapter {
   }
 
   async query<T = Record<string, DbValue>>(sql: string, params?: DbValue[]): Promise<QueryResult<T>> {
-    // G-4 DESTINATION FENCE — THE ADAPTER-BOUNDARY CHOKEPOINT (P0 + P1a).
+    // G-4 CONNECTION READ-ONLY GATE — THE ADAPTER-BOUNDARY CHOKEPOINT (P0 + P1a).
     // Every write this adapter performs funnels here: insert/update/delete/select/stream/batchInsert
     // all build SQL and call query(), and a caller who bypasses DataSourceManager entirely
-    // (getDataSource(id).query('INSERT …') or .insert(…)) still lands here. Classifying the raw SQL
-    // at THIS boundary closes both the switch-the-verb bypass (query() ran any statement, incl.
-    // INSERT INTO t_ICItem) and the raw-adapter path (the manager wrappers were only one of several
-    // parallel routes). A SELECT is not a write and is never fenced, so reads — including reads of K3
-    // tables and every internal select() — pass untouched. Placed FIRST, before the pool is touched.
-    assertNotK3SqlWrite(this.config, sql)
+    // (getDataSource(id).query('INSERT …') or .insert(…)) still lands here. On a K3-reaching
+    // connection (marked OR detected) only a PURE READ passes — no table is parsed, so no T-SQL idiom
+    // (UPDATE…FROM, TOP, 4-part names, MERGE…OUTPUT, batches) can slip a write past. On a connection
+    // not known to be K3, a best-effort statement signature is the defense-in-depth backstop. A SELECT
+    // — including every internal select() and a read of a K3 table — always passes. Placed FIRST,
+    // before the pool is touched.
+    assertNotK3ConnectionWrite(this.config, sql, this.k3DetectedReaching)
     if (!this.pool) {
       throw new Error('Not connected to database')
     }
@@ -550,14 +579,13 @@ export class MSSQLAdapter extends BaseDataAdapter {
   }
 
   async beginTransaction(): Promise<Transaction> {
-    // G-4 DESTINATION FENCE (transaction). A transaction hands the caller a raw driver object whose
-    // Requests execute SQL OUTSIDE this adapter's query() funnel — the one write path the SQL
-    // classifier cannot see. A destination DECLARED to be K3 must therefore not vend a transaction at
-    // all. (The table-signature backstop cannot apply here: the tables a transaction will write are
-    // unknown until the caller issues statements against the raw object.) An unmarked source's
-    // transaction path is the same residual class as direct driver access and is documented on the
-    // fence module; the manager/facade never expose transactions.
-    assertNotK3MarkedDestination(this.config)
+    // G-4 CONNECTION READ-ONLY GATE (transaction). A transaction hands the caller a raw driver object
+    // whose Requests execute SQL OUTSIDE this adapter's query() funnel. A K3-reaching connection
+    // (marked OR detected) is read-only, so it must not vend a transaction at all — there is no
+    // read-only transaction to allow here. The manager/facade never expose transactions.
+    if (isK3ReachingConnection(this.config.options, this.k3DetectedReaching)) {
+      throw new K3DestinationWriteError(K3_CONNECTION_READONLY_REFUSAL_MESSAGE)
+    }
     if (!this.pool || !mssql) {
       throw new Error('Not connected to database')
     }
