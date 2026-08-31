@@ -1250,11 +1250,16 @@ async function testDiscoveryRoutes() {
       requiresTableAllowlist: true,
       allowlistKeys: ['readTables', 'allowedTables'],
     },
+    // E4 / G-4 PARITY (20260901). This used to publish `requiresMiddleTableMode: true` plus a
+    // `middle-table` write mode and a write allowlist — i.e. the public adapter listing told an
+    // integrator that configuring the channel a particular way made K3 SQL writes work. It did,
+    // and that was the doctrine gap. `erp:k3-wise-sqlserver` is now a subject of the permanent
+    // K3 external-write ban, so the listing states a refusal instead of a recipe. The READ
+    // guardrail above is deliberately unchanged: the read path is legitimate and in use.
     write: {
-      requiresMiddleTableMode: true,
-      requiresTableAllowlist: true,
-      allowlistKeys: ['writeTables', 'allowedTables'],
-      writeModes: ['middle-table'],
+      permanentlyRefused: true,
+      refusalCode: 'K3_WISE_EXTERNAL_WRITE_DISABLED',
+      authority: 'E4',
     },
     ui: {
       hiddenByDefault: true,
