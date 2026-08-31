@@ -47,6 +47,7 @@ const {
   StockPreparationTargetProvisioningError,
   buildStockPreparationTargetDescriptor,
   sandboxStockPreparationTemplate,
+  inspectStockPreparationCanonicalTarget,
   ensureStockPreparationCanonicalTarget,
   repairStockPreparationCanonicalTarget,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-target-provisioning.cjs'))
@@ -418,13 +419,17 @@ function existingHeaderName(fieldId) {
   return HAND_RENAMED_HEADERS[fieldId] || `hand-renamed ${fieldId}`
 }
 
-function createEnsureContext({ sheetExists, missingFields = [] }) {
+function createEnsureContext({ sheetExists, missingFields = [], sheetName } = {}) {
   const missing = new Set(missingFields)
   const calls = { ensureObject: [], findObjectSheet: 0 }
   const provisioning = {
     async findObjectSheet() {
       calls.findObjectSheet += 1
-      return sheetExists ? { id: 'sheet_hand_renamed', baseId: 'base_x' } : null
+      // `sheetName` is a pure fake-observability knob: readiness is resolved from
+      // `objectId` (a deterministic id hash) via this same `findObjectSheet`, so a
+      // display name attached here -- however different from the template's -- is
+      // never read by inspect/ensure. It exists only so a caller can prove that.
+      return sheetExists ? { id: 'sheet_hand_renamed', baseId: 'base_x', name: sheetName || 'sheet_hand_renamed' } : null
     },
     async resolveFieldIds({ fieldIds }) {
       const out = {}
@@ -597,6 +602,91 @@ async function assertNeverRenamesExistingFields() {
   assert.equal(mutationError.status, 409)
 }
 
+// ---------------------------------------------------------------------------
+// 5. A RENAMED SHEET IS INERT TO READINESS
+// ---------------------------------------------------------------------------
+
+// A customer who renames the managed SHEET itself (not just a column header) by hand
+// against their own deployment. `findObjectSheet` resolves the sheet by `objectId` (a
+// deterministic id hash), never by display name, so this rename must be as invisible to
+// inspect/ensure as the hand-renamed column headers above are. Two variants -- one
+// keeping the Chinese wording family, one switching scripts entirely -- so the claim is
+// not "a Chinese rename survives" but "any rename survives".
+const RENAMED_SHEET_NAMES = Object.freeze(['备料主表(客户改名)', 'Customer Renamed Stock Prep Sheet'])
+
+async function assertRenamedSheetSurvivesInspectAndEnsure() {
+  for (const locale of [null, 'zh-CN']) {
+    for (const renamedName of RENAMED_SHEET_NAMES) {
+      const label = `locale=${locale} renamedName=${JSON.stringify(renamedName)}`
+      const original = createEnsureContext({ sheetExists: true })
+      const renamed = createEnsureContext({ sheetExists: true, sheetName: renamedName })
+
+      // (1) INSPECT still reports the renamed sheet ready, under canonical_existing --
+      // exactly the mode an untouched deployment reports.
+      const originalInspected = await withLocaleEnvAsync(locale, () => inspectStockPreparationCanonicalTarget({
+        context: original.context,
+        projectId: 'proj_hand_renamed_sheet',
+        permission: 'admin',
+      }))
+      const renamedInspected = await withLocaleEnvAsync(locale, () => inspectStockPreparationCanonicalTarget({
+        context: renamed.context,
+        projectId: 'proj_hand_renamed_sheet',
+        permission: 'admin',
+      }))
+      assert.equal(renamedInspected.ready, true, `${label}: a renamed sheet still inspects as ready`)
+      assert.equal(renamedInspected.mode, 'canonical_existing', `${label}: a renamed sheet keeps mode canonical_existing`)
+
+      // (2) ENSURE never re-describes it: ensureObject stays empty, so nothing in this
+      // path can hand the host a new name for the sheet and undo the customer's rename.
+      const originalEnsured = await withLocaleEnvAsync(locale, () => ensureStockPreparationCanonicalTarget({
+        context: original.context,
+        projectId: 'proj_hand_renamed_sheet',
+        permission: 'admin',
+      }))
+      const renamedEnsured = await withLocaleEnvAsync(locale, () => ensureStockPreparationCanonicalTarget({
+        context: renamed.context,
+        projectId: 'proj_hand_renamed_sheet',
+        permission: 'admin',
+      }))
+      assert.equal(renamedEnsured.ready, true, `${label}: a renamed sheet still ensures as ready`)
+      assert.equal(renamedEnsured.mode, 'canonical_existing', `${label}: ensure reuses inspect's canonical_existing, it does not fall through to create`)
+      assert.deepEqual(
+        renamed.calls.ensureObject,
+        [],
+        `${label}: a renamed sheet is never re-described, so ensureObject cannot rename it back`,
+      )
+
+      // (3) The returned target binding -- sheetId/objectId/keyField/fieldIdMap -- is
+      // IDENTICAL whether or not the sheet carries its original name. Readiness is keyed
+      // on the stable ids `findObjectSheet`/`resolveFieldIds` resolve, never on the name
+      // this fake attached to the sheet, so the binding a caller writes rows against does
+      // not move when a customer renames the sheet.
+      assert.deepEqual(
+        renamedInspected.target,
+        originalInspected.target,
+        `${label}: inspect's target binding is identical for the renamed and original-name sheet`,
+      )
+      assert.deepEqual(
+        renamedEnsured.target,
+        originalEnsured.target,
+        `${label}: ensure's target binding is identical for the renamed and original-name sheet`,
+      )
+    }
+  }
+
+  // POSITIVE CONTROL: ensureObject IS reachable on this same fake shape, for a target that
+  // does not exist yet. Without this, every "ensureObject stays []" assertion above could
+  // be passing because the fake never calls it at all, not because the guarantee held.
+  const fresh = createEnsureContext({ sheetExists: false })
+  const created = await withLocaleEnvAsync('zh-CN', () => ensureStockPreparationCanonicalTarget({
+    context: fresh.context,
+    projectId: 'proj_fresh_renamed_sheet_check',
+    permission: 'admin',
+  }))
+  assert.equal(created.mode, 'canonical_create')
+  assert.equal(fresh.calls.ensureObject.length, 1, 'a genuinely MISSING target is still created')
+}
+
 async function main() {
   assertCompletenessAndFrozenIds()
   assertLocaleNormalization()
@@ -605,6 +695,7 @@ async function main() {
   assertLegsDifferOnlyInNames()
   assertUnsetIsByteIdentical()
   await assertNeverRenamesExistingFields()
+  await assertRenamedSheetSurvivesInspectAndEnsure()
 
   console.log('stock-preparation-template-zh-labels.test.cjs OK')
 }

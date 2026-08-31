@@ -153,6 +153,15 @@ import {
   fieldDeleteDiff,
   fieldDeleteDiffWithSequence,
 } from '../multitable/config-revision-recorder'
+import { checkDisplayNameHygiene } from '../multitable/display-name-hygiene'
+import {
+  SHEET_DELETED_CODE,
+  SHEET_DELETED_MESSAGE,
+  SHEET_NOT_FOUND_MESSAGE,
+  SheetNotLiveError,
+  assertSheetLive,
+  type SheetLiveness,
+} from '../multitable/sheet-liveness'
 import {
   isTombstoneCaptureEnabled,
   countFieldDeleteCaptureRows,
@@ -2778,10 +2787,19 @@ async function loadLinkValuesByRecord(
     const linkRes = await query(
       // Repair-on-read remains required for historical dangling rows admitted by the target FK's
       // NOT VALID rollout. New writes are FK-checked, but legacy ghosts must never reach a read.
+      //
+      // The sheet join carries the SOFT-DELETE half: `DELETE /sheets/:sheetId` no longer destroys the
+      // sheet's records (so a restore can be complete), so "the target sheet is gone" is now a
+      // `deleted_at` fact rather than an absent row. Filtering here keeps the observable read
+      // behaviour identical to the old hard-delete cascade — a source sheet shows no link into a
+      // deleted sheet — while the edge itself survives for the restore.
       `SELECT field_id, record_id, foreign_record_id
        FROM meta_links
        WHERE field_id = ANY($1::text[]) AND record_id = ANY($2::text[])
-         AND EXISTS (SELECT 1 FROM meta_records r WHERE r.id = foreign_record_id)`,
+         AND EXISTS (
+           SELECT 1 FROM meta_records r
+             JOIN meta_sheets s ON s.id = r.sheet_id
+            WHERE r.id = foreign_record_id AND s.deleted_at IS NULL)`,
       [fieldIds, recordIds],
     )
     for (const raw of linkRes.rows as any[]) {
@@ -2806,10 +2824,15 @@ async function loadLinkValuesByRecord(
       // repair-on-read (symmetry / defense-in-depth): the mirror value is the SOURCE record_id, which is
       // FK-cascade-protected (record_id REFERENCES meta_records ON DELETE CASCADE) so a ghost source is not
       // expected today — but filter it too so NO read path can ever surface a deleted record id.
+      // The sheet join mirrors the forward side's soft-delete filter: a source record whose SHEET was
+      // deleted must not surface through the reverse projection either.
       `SELECT field_id, record_id, foreign_record_id
        FROM meta_links
        WHERE field_id = ANY($1::text[]) AND foreign_record_id = ANY($2::text[])
-         AND EXISTS (SELECT 1 FROM meta_records r WHERE r.id = record_id)`,
+         AND EXISTS (
+           SELECT 1 FROM meta_records r
+             JOIN meta_sheets s ON s.id = r.sheet_id
+            WHERE r.id = record_id AND s.deleted_at IS NULL)`,
       [forwardIds, recordIds],
     )
     for (const raw of reverseRes.rows as any[]) {
@@ -4351,6 +4374,125 @@ function sendForbidden(res: Response, message = 'Insufficient permissions') {
   return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message } })
 }
 
+/**
+ * SHEET LIVENESS refusal — the 404 that soft delete made necessary.
+ *
+ * The hard delete was safe by construction: the row and (by FK cascade) every `meta_records` row were
+ * gone, so a path that addressed records by `sheet_id` and never joined `meta_sheets` still found
+ * nothing. Soft delete removed that guarantee — a deleted sheet stays fully addressable to anyone
+ * holding its id — so every sheet-addressed path now refuses explicitly.
+ *
+ * 404, not 403: the actor's authority is not the problem; there is no live sheet to act on.
+ * `SHEET_DELETED` is distinct from `NOT_FOUND` so a client can offer the restore instead of
+ * reporting a phantom.
+ */
+/**
+ * VALUES-FREE by construction: this helper takes NO sheet id, so it cannot echo one. That is
+ * deliberate rather than conventional — the #L5-wire no-leak golden pins that a refusal never pastes
+ * the requested id back (an owner fix on 2026-08-25 removed exactly that from the checkpoint route,
+ * and my first version re-introduced it). Not having the value is the only way not to leak it.
+ */
+function sendSheetNotLive(res: Response, liveness: SheetLiveness) {
+  if (liveness === 'deleted') {
+    return res.status(404).json({ ok: false, error: { code: SHEET_DELETED_CODE, message: SHEET_DELETED_MESSAGE } })
+  }
+  return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } })
+}
+
+// ── F21: display-name rename (sheet + base) ────────────────────────────────────
+// The delivery contract (§12/§15 of the multitable application model) says display names are the
+// CUSTOMER'S to change. Until this slice no route could write `meta_sheets.name` or `meta_bases.name`
+// at all, so the live deployment's sheet/base renames had to be done by direct DB UPDATE — an ops
+// action a customer cannot take (first-deployment fault F21, hit twice).
+//
+// AUTHORITY: renaming is SCHEMA authority, not record-write authority (#5357). Both routes therefore
+// gate on `canManageFields` (= isAdminRole || multitable:manage-schema, plus the owner-gated legacy
+// transition switch) — the SAME tier that renames a FIELD. A `multitable:write` operator who may fill
+// every cell may NOT rename the table it lives in.
+//
+// SAFETY: a display rename is inert for every consumer — readiness, dry-run counts and the managed-table
+// provisioning ensure all address fields/objects by stable ids, never by display name.
+
+const DISPLAY_NAME_MIN_LENGTH = 1
+const DISPLAY_NAME_MAX_LENGTH = 255
+
+/** Values-free: states what WOULD be accepted, never echoes what was sent. */
+const INVALID_DISPLAY_NAME_MESSAGE =
+  `This endpoint accepts only { name }: a string of ${DISPLAY_NAME_MIN_LENGTH}-${DISPLAY_NAME_MAX_LENGTH} characters after trimming.`
+
+/** Values-free: names the authority that WOULD be accepted, so a refusal is actionable. */
+const DISPLAY_RENAME_FORBIDDEN_MESSAGE =
+  'Renaming requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.'
+
+const SHEET_DELETE_FORBIDDEN_MESSAGE =
+  'Deleting or restoring a sheet requires whole-sheet authority: an admin role, the multitable:manage-schema permission, or a sheet-scoped admin grant on this sheet. multitable:write — global or sheet-scoped — is not sufficient.'
+
+/**
+ * Authority to DESTROY or RESURRECT a whole sheet.
+ *
+ * Deliberately NOT plain `capabilities.canManageFields`. That capability is post-scope-grant, and
+ * `applyContextSheetSchemaWriteGrant` sets it for any sheet-scoped grant with `canRead && canWrite`
+ * — so gating on it would hand sheet DELETE to a scoped `spreadsheet:write` holder, who is NOT a
+ * sheet admin (`SHEET_ADMIN_PERMISSION_CODES` excludes `spreadsheet:write`) and who was refused by
+ * the old `canManageSheetAccess` branch. On the takeover deployment roles are assigned PER SHEET, so
+ * that population is real: shop-floor writers on their own sheet. Editing a sheet's fields is not
+ * the authority to delete the sheet.
+ *
+ * So the rule is GLOBAL schema authority, or sheet ADMIN on this specific sheet:
+ *   - `deriveCapabilities(...)` on the GLOBAL permissions (pre-scope-grant) = admin role or
+ *     `multitable:manage-schema`, honouring the #5357 transition switch;
+ *   - OR `sheetScope.canAdmin` — exactly the holders the old scoped branch admitted.
+ *
+ * This keeps #5357's residual where #5357 left it (field-level), instead of silently widening it to
+ * whole-sheet delete + restore.
+ */
+function hasSheetLifecycleAuthority(
+  access: { permissions: string[]; isAdminRole: boolean },
+  sheetScope: { canAdmin?: boolean } | null | undefined,
+): boolean {
+  if (deriveCapabilities(access.permissions, access.isAdminRole).canManageFields) return true
+  return sheetScope?.canAdmin === true
+}
+
+/**
+ * Strict `{ name }` parse. `.strict()` is deliberate: silently ignoring an extra property would tell
+ * the caller a change landed when it did not. The trim runs BEFORE the length check, so a
+ * whitespace-only name is refused (zod's `.min(1)` alone would accept `'   '`).
+ */
+function parseDisplayRenamePayload(body: unknown): { ok: true; name: string } | { ok: false } {
+  const parsed = z.object({ name: z.string() }).strict().safeParse(body)
+  if (!parsed.success) return { ok: false }
+  const name = parsed.data.name.trim()
+  if (name.length < DISPLAY_NAME_MIN_LENGTH || name.length > DISPLAY_NAME_MAX_LENGTH) return { ok: false }
+  return { ok: true, name }
+}
+
+function sendInvalidDisplayName(res: Response) {
+  return res.status(400).json({
+    ok: false,
+    error: { code: 'INVALID_NAME', message: INVALID_DISPLAY_NAME_MESSAGE },
+  })
+}
+
+/**
+ * MOJIBAKE GATE — shared by EVERY display-name write on this router (field create, field rename,
+ * sheet rename, base rename). Returns a sent 400 when the name cannot be stored, or `null` when the
+ * caller should proceed.
+ *
+ * A live deployment stored two field names full of U+FFFD because a Windows-shell curl mangled the
+ * CJK bytes before they reached the wire; the grid then rendered ����, and only a direct DB UPDATE
+ * could repair it. The decoder's own "bytes were lost" marker is not a name, so it is REFUSED rather
+ * than normalized or stripped (fail-closed). The refusal names the offending code points and their
+ * positions and never echoes the submitted text — see multitable/display-name-hygiene.ts.
+ *
+ * `name` must already be TRIMMED by the caller; trimming is unchanged by this gate.
+ */
+function sendDisplayNameHygieneRefusal(res: Response, name: string): Response | null {
+  const refusal = checkDisplayNameHygiene(name)
+  if (!refusal) return null
+  return res.status(400).json({ ok: false, error: { code: refusal.code, message: refusal.message } })
+}
+
 function sendRecoveryAuthorityBusy(res: Response) {
   return res.status(409).json({
     ok: false,
@@ -4383,7 +4525,16 @@ export async function requireRecordReadable(
     }
   }
 
-  const { access, capabilities, capabilityOrigin, sheetScope } = await resolveSheetReadableCapabilities(req, query, sheetId)
+  const { access, capabilities, capabilityOrigin, sheetScope, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, sheetId)
+  // Soft delete: the record row survives a sheet delete, so the existence check above can no longer
+  // stand in for "this sheet is still a thing". Guarding HERE covers every record-addressed caller of
+  // this helper at once (subscriptions, record history, duplicate's source read, restore previews)
+  // rather than leaving each to remember.
+  if (sheetLiveness !== 'live') {
+    return sheetLiveness === 'deleted'
+      ? { status: 404, body: { ok: false, error: { code: SHEET_DELETED_CODE, message: SHEET_DELETED_MESSAGE } } }
+      : { status: 404, body: { ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } } }
+  }
   if (!access.userId) {
     return { status: 401, body: { error: 'Authentication required' } }
   }
@@ -7036,6 +7187,56 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
   })
 
+  /**
+   * F21 (base half) — rename a base's DISPLAY NAME. Accepts `{ name }` and nothing else.
+   *
+   * GATE — TIGHTER THAN CREATE. `POST /bases` above is `rbacGuard('multitable','write')`, so any
+   * operator can create a base of their own. Renaming an EXISTING base is a change to something other
+   * people already depend on, so it takes SCHEMA authority (`canManageFields` = admin role or
+   * `multitable:manage-schema`) — the same tier that renames a field or a sheet. Base authority is
+   * GLOBAL (there is no per-base capability resolution the way `resolveSheetCapabilities` resolves a
+   * sheet), so the authority check runs BEFORE the existence check: an actor without schema authority
+   * is not told whether a given base id exists.
+   */
+  router.patch('/bases/:baseId', async (req: Request, res: Response) => {
+    const baseId = typeof req.params.baseId === 'string' ? req.params.baseId.trim() : ''
+    if (!baseId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'baseId is required' } })
+    }
+    const parsed = parseDisplayRenamePayload(req.body)
+    if (!parsed.ok) return sendInvalidDisplayName(res)
+    const hygieneRefusal = sendDisplayNameHygieneRefusal(res, parsed.name)
+    if (hygieneRefusal) return hygieneRefusal
+
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) {
+        return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      }
+      const capabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+      if (!capabilities.canManageFields) return sendForbidden(res, DISPLAY_RENAME_FORBIDDEN_MESSAGE)
+
+      const updated = await pool.query(
+        `UPDATE meta_bases
+         SET name = $2
+         WHERE id = $1 AND deleted_at IS NULL
+         RETURNING id, name, icon, color, owner_id, workspace_id`,
+        [baseId, parsed.name],
+      )
+      const row = (updated as any).rows?.[0]
+      if (!row) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Base not found: ${baseId}` } })
+      }
+      return res.json({ ok: true, data: { base: serializeBaseRow(row) } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] rename base failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to rename base' } })
+    }
+  })
+
   router.get('/templates', rbacGuard('multitable', 'read'), async (_req: Request, res: Response) => {
     return res.json({ ok: true, data: { templates: listMultitableTemplates() } })
   })
@@ -7508,8 +7709,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const items = await listSheetPermissionEntries(pool.query.bind(pool), sheetId)
       return res.json({ ok: true, data: { items } })
@@ -7537,8 +7739,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const items = await listSheetPermissionCandidates(pool.query.bind(pool), sheetId, { q, limit })
       return res.json({ ok: true, data: { items, total: items.length, limit, query: q } })
@@ -7567,8 +7770,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canEditRecord) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const fields = await loadFieldsForSheet(pool.query.bind(pool), sheetId)
       const field = fields.find((f) => f.id === fieldId)
@@ -7611,8 +7815,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       if (subjectType !== 'user' && parsed.data.accessLevel === 'write-own') {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'write-own is only supported for direct user grants' } })
@@ -7747,8 +7952,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const r = await pool.query('SELECT row_level_read_permissions_enabled AS enabled FROM meta_sheets WHERE id = $1', [sheetId])
       return res.json({ ok: true, data: { enabled: (r.rows[0] as { enabled?: boolean } | undefined)?.enabled === true } })
     } catch (err) {
@@ -7774,8 +7980,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       await pool.transaction(async ({ query }) => {
         // D-H1: sheet_config writer (row-level-read-deny). Fence-before-check, then the live column
         // read + UPDATE. Flag-off ⇒ no-op / byte-identical.
@@ -7828,8 +8035,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const r = await pool.query('SELECT conditional_read_rules AS rules FROM meta_sheets WHERE id = $1', [sheetId])
       const raw = (r.rows[0] as { rules?: unknown } | undefined)?.rules
       // parseConditionalRules round-trips the stored rules; `rejected` surfaces any legacy/unknown rows so
@@ -7865,8 +8073,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       await pool.transaction(async ({ query }) => {
         // D-H1: sheet_config writer (conditional-read rules). Fence-before-check, then the live
         // column read + UPDATE. Flag-off ⇒ no-op / byte-identical.
@@ -7919,8 +8128,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
       }
       const sheetId = String((viewRow.rows[0] as any).sheet_id)
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       let result: { rows: any[] }
       try {
@@ -8040,8 +8250,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
       }
       const sheetId = String((viewRow.rows[0] as any).sheet_id)
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       if (subjectType === 'user') {
         const userCheck = await pool.query('SELECT id FROM users WHERE id = $1', [subjectId])
@@ -8133,8 +8344,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       let result: { rows: any[] }
       try {
@@ -8259,8 +8471,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const fieldCheck = await pool.query('SELECT id FROM meta_fields WHERE id = $1 AND sheet_id = $2', [fieldId, sheetId])
       if (fieldCheck.rows.length === 0) {
@@ -8385,8 +8598,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const recordCheck = await pool.query('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, sheetId])
       if (recordCheck.rows.length === 0) {
@@ -8622,9 +8836,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 200) : 50
       const offset = Number.isFinite(offsetParam) ? Math.max(offsetParam, 0) : 0
 
-      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       // Scope to CURRENTLY-LIVE records (deleted-since-T are out of v1).
       const liveIds = ((await pool.query('SELECT id FROM meta_records WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: unknown }>).map((r) => String(r.id))
@@ -8682,11 +8897,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
       }
 
-      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       if (!access.isAdminRole) {
         const hasRecordPerms = await hasRecordPermissionAssignments(pool.query.bind(pool), sheetId)
@@ -8840,8 +9056,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const pool = poolManager.get()
       const sheetCheck = await pool.query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
       if (sheetCheck.rows.length === 0) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       // Per-entity-type gate IN the WHERE clause. Condition strings are STATIC (no user input) — safe to interpolate;
       // every value (sheetId, entityType, limit, offset) is parameterized. A `permission` row's kind is its entity_id
@@ -8907,8 +9124,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const revRes = await pool.query('SELECT id, sheet_id, entity_type, entity_id, action, before, after, changed_keys FROM meta_config_revisions WHERE id = $1 AND sheet_id = $2', [revisionId, sheetId])
       const rev = revRes.rows[0] as ConfigRevisionRow | undefined
       if (!rev) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Config revision not found: ${revisionId}` } })
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const cap = rev.entity_type === 'field' ? capabilities.canManageFields
         : rev.entity_type === 'view' ? capabilities.canManageViews
         : rev.entity_type === 'sheet_config' ? capabilities.canManageSheetAccess
@@ -9108,8 +9326,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const revRes = await pool.query('SELECT id, sheet_id, entity_type, entity_id, action, before, after, changed_keys FROM meta_config_revisions WHERE id = $1 AND sheet_id = $2', [revisionId, sheetId])
       const rev = revRes.rows[0] as ConfigRevisionRow | undefined
       if (!rev) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Config revision not found: ${revisionId}` } })
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const cap = rev.entity_type === 'field' ? capabilities.canManageFields
         : rev.entity_type === 'view' ? capabilities.canManageViews
         : rev.entity_type === 'sheet_config' ? capabilities.canManageSheetAccess
@@ -9617,9 +9836,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if ((await pool.query('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, sheetId])).rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
       }
-      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
       if (!capabilities.canEditRecord) return sendForbidden(res) // D5: gate the preview on the RESTORE capability
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       if (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId))) {
         const denied = await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
         if (denied.has(recordId)) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } }) // row-deny → 404 no-oracle
@@ -9700,9 +9920,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const uniqueIds = [...new Set(requestedIds)] // the scope is a SET (BS-1); order/dups irrelevant
     try {
       const pool = poolManager.get()
-      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
       if (!capabilities.canEditRecord) return sendForbidden(res) // D5: gate on the RESTORE capability
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const previewCtx = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
       if (!previewCtx) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       // shared context hoisted out of the per-record loop (once per sheet+actor, not once per record):
@@ -9812,11 +10033,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canEditRecord) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       // Live record only — undelete (resurrect + meta_links rebuild) is Slice 2.
       const currentRes = await pool.query(
@@ -10029,9 +10251,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
     try {
       const pool = poolManager.get()
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
       if (!capabilities.canEditRecord) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const currentRes = await pool.query('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, sheetId])
       if (currentRes.rows.length === 0) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
@@ -10180,9 +10403,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
     try {
       const pool = poolManager.get()
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
       if (!capabilities.canEditRecord) return sendForbidden(res) // D5: gate on the RESTORE capability
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
       if (!patchContext) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       // fieldPermissions = the SAME deriveFieldPermissions(layer-3) the legacy /restore gates with — `allowed` is a
@@ -10374,11 +10598,20 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     if (!sheetId) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId required' } })
     try {
       const pool = poolManager.get()
+      // LIVENESS-EXEMPT AT THIS LAYER (see the note below the capability floor): `sheetLiveness` is not
+      // even destructured, so nothing here can accidentally begin refusing on it out of order.
       const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
       // D2 floor: provisioning the trust anchor for destructive recovery is a sheet-admin capability, the
       // same floor as revert/reset themselves — a plain writer must not move the sheet's trust floor.
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+      // NO liveness refusal here, deliberately. Existence — and therefore soft-deleted-ness — is a
+      // DIFFERENTIATED response, and this route moved every such response INSIDE the transaction, after
+      // the authority lease and the post-lease final authorization, precisely so a revoked-but-unexpired
+      // claims-admin cannot enumerate designated canaries. A pre-transaction 404 here re-opens exactly
+      // that oracle (it broke the GATE-ORDER and ORACLE-AFTER-LEASE goldens). The liveness condition
+      // lives in `assertTrustCheckpointSheetExists` at step 4c below, which is where it inherits the
+      // correct ordering.
       // DB-FRESH pre-check, BEFORE any differentiated response. The capability floor above can be
       // satisfied by JWT claims alone, so without this a REVOKED-but-unexpired claims-admin token could
       // still tell 409 (not allowlisted) from 404 (no such sheet) and enumerate which sheets are
@@ -11130,16 +11363,22 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     try {
       const pool = poolManager.get()
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
       if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2: sheet-admin floor, above plain record-write
-      const exists = await pool.query('SELECT 1 FROM meta_sheets WHERE id = $1', [sheetId])
       // A non-system-admin who can manage some sheets must not use 404 vs 403 to probe whether another sheet
       // exists. Only a system admin may receive an explicit missing-sheet result; everyone else gets the same
       // values-free 403 as an existing sheet they cannot read in full.
-      if (exists.rows.length === 0) {
+      //
+      // SOFT DELETE added a SECOND way to ask that question, so it is hidden on exactly the same terms:
+      // this check runs AFTER the authority gate (unlike every other route on this router, which follows
+      // the file's 404-before-gate convention), and a non-admin gets the same 403 for deleted as for
+      // absent. `sheetLiveness` also subsumes the existence probe this branch used to run itself, so the
+      // separate `SELECT 1 FROM meta_sheets` — which lacked the deleted_at filter its siblings carry — is
+      // gone rather than merely corrected.
+      if (sheetLiveness !== 'live') {
         if (!access.isAdminRole) return sendForbidden(res)
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+        return sendSheetNotLive(res, sheetLiveness)
       }
       // Conservative full-table read before anchor/history/size adjudication — an actor without it sees 403
       // before any recovery-state oracle.
@@ -11264,15 +11503,16 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     try {
       const pool = poolManager.get()
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
       if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2
-      const exists = await pool.query('SELECT 1 FROM meta_sheets WHERE id = $1', [sheetId])
       // Match preview's existence-hiding contract before token verification. A non-system-admin must not
-      // distinguish an unknown sheet from an existing sheet they cannot read in full by observing 409 vs 403.
-      if (exists.rows.length === 0) {
+      // distinguish an unknown sheet from an existing sheet they cannot read in full by observing 409 vs 403
+      // — nor, since soft delete, a DELETED one. Liveness is checked here (after the authority gate, unlike
+      // the file's usual 404-before-gate convention) and subsumes the old unfiltered existence probe.
+      if (sheetLiveness !== 'live') {
         if (!access.isAdminRole) return sendForbidden(res)
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+        return sendSheetNotLive(res, sheetLiveness)
       }
       // Fresh conservative full-read BEFORE token/anchor adjudication — no oracle for denied actors.
       if (!(await hasFullTableReadAccess(req, pool.query.bind(pool), sheetId, access, capabilities))) {
@@ -11874,8 +12114,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (sheetRes.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const result = await pool.query(
         'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC LIMIT 500',
@@ -11909,6 +12150,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const sheetId = parsed.data.sheetId
     const fieldId = parsed.data.id ?? buildId('fld').slice(0, 50)
     const name = parsed.data.name.trim()
+    // Mojibake gate — the live incident created FIELDS this way, so the create path is gated first.
+    const createHygieneRefusal = sendDisplayNameHygieneRefusal(res, name)
+    if (createHygieneRefusal) return createHygieneRefusal
     const requestedType = parsed.data.type
     const rawProperty = parsed.data.property ?? {}
     const desiredOrder = parsed.data.order
@@ -11919,8 +12163,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (sheetRes.rows.length === 0) {
         throw new NotFoundError(`Sheet not found: ${sheetId}`)
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       await pool.transaction(async ({ query }) => {
         // Exact-anchor recovery binds its plan to the complete field schema. Join the canonical
         // sheet fence before reading or changing that schema so a create cannot commit between
@@ -12055,12 +12300,13 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const sheetId = resolved.sheetId
       const viewConfig = resolved.view
       const widgets = parsed.data.widgets.map((widget) => serializeDashboardWidget(widget as DashboardWidgetInput))
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
 
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const fields = await loadSheetFields(pool as unknown as { query: QueryFn }, sheetId)
       const fieldScopeMap = access.userId
@@ -12157,8 +12403,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const pool = poolManager.get()
       const sourceSheet = await loadSheetRow(pool.query.bind(pool), parsed.data.sheetId)
       if (!sourceSheet) throw new NotFoundError(`Sheet not found: ${parsed.data.sheetId}`)
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), parsed.data.sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), parsed.data.sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const baseId = sourceSheet.baseId ?? await pool.transaction(async ({ query }) => ensureLegacyBase(query as unknown as QueryFn))
       const plan = await planPeopleSheetPreset(pool.query.bind(pool) as unknown as QueryFn, baseId)
       const preset = await pool.transaction(async ({ query }) => {
@@ -12203,8 +12450,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.json({ ok: true, data: { items: [] } })
       }
 
-      const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, peopleSheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, peopleSheetId)
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       // F5 (#2106 §3 F5): gate the people sheet's default display field by its own layer-2 ∧ layer-3 allowed set.
       // §2a.3 DISPLAY-PROJECTION chokepoint (resolveDisplayFieldTaint) — C2 (auto-pick parity): drop any
@@ -12248,6 +12496,13 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
     }
 
+    // Mojibake gate — checked on the RAW payload before any DB work, so a corrupt rename costs
+    // nothing and lands nowhere. A PATCH that carries no `name` is unaffected.
+    if (typeof parsed.data.name === 'string') {
+      const renameHygieneRefusal = sendDisplayNameHygieneRefusal(res, parsed.data.name.trim())
+      if (renameHygieneRefusal) return renameHygieneRefusal
+    }
+
     try {
       const pool = poolManager.get()
       const existing = await pool.query(
@@ -12256,8 +12511,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       )
       if (existing.rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
       const preflightSheetId = String((existing.rows[0] as any).sheet_id ?? '')
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), preflightSheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), preflightSheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       let sheetId = ''
       // W1-1 (design-lock 2026-07-05 §3 LOCK-B, B2/B3): set INSIDE the transaction when this PATCH
       // triggers the expression-change bulk recompute; the snapshot of live record ids is reused
@@ -12580,8 +12836,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const existing = await pool.query('SELECT id, sheet_id FROM meta_fields WHERE id = $1', [fieldId])
       if (existing.rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
       const sheetId = String((existing.rows[0] as any).sheet_id ?? '')
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const fieldLinkDropFencePlan = await prepareFieldLinkDropFencePlan(pool.query.bind(pool), {
         sourceSheetId: sheetId,
         fieldId,
@@ -12646,8 +12903,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (sheetRes.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       let result = await pool.query(
         'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = $1 ORDER BY created_at ASC LIMIT 200',
@@ -12769,8 +13027,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (sheetRes.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       if (parsed.data.filterInfo !== undefined && filterInfoExceedsMaxDepth(parsed.data.filterInfo, 0)) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Filter nesting exceeds the maximum depth of ${MAX_FILTER_DEPTH}` } })
@@ -12885,8 +13144,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
 
       const row: any = current.rows[0]
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), String(row.sheet_id))
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), String(row.sheet_id))
       if (!capabilities.canManageViews) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const beforeView = viewConfigSnapshotFromRow(row)
       // #2068 re-save guard: compute the writer's allowed-field set up front, then merge the incoming
       // filterInfo against the current DB filter so a redacted denied condition (echoed back with NO `value`)
@@ -13026,8 +13286,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View ${viewId} does not belong to sheet ${sheetId}` } })
       }
 
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const view: UniverMetaViewConfig = {
         id: viewId,
@@ -13092,8 +13353,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View ${viewId} does not belong to sheet ${sheetId}` } })
       }
 
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const beforeView = viewConfigSnapshotFromRow(row)
       const nextConfig = normalizeJson(row.config)
@@ -13299,8 +13561,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View ${viewId} does not belong to sheet ${sheetId}` } })
       }
 
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const beforeView = viewConfigSnapshotFromRow(row)
       const nextConfig = normalizeJson(row.config)
@@ -13394,8 +13657,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const candidates = (await listSheetPermissionCandidates(pool.query.bind(pool), sheetId, { q, limit }))
         .filter((candidate) => candidate.subjectType === 'user' || candidate.subjectType === 'member-group')
@@ -13426,8 +13690,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
       const row: any = current.rows[0]
       const sheetId = String(row.sheet_id ?? '')
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       await pool.transaction(async ({ query }) => {
         // D-H1: view delete is a config/view source deleter. Fence-before-check, then dropViewCascade.
         // Flag-off ⇒ no-op / byte-identical.
@@ -13487,9 +13752,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!view) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
       }
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
       if (!access.userId) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const record = await getPersonalViewConfig(pool.query.bind(pool), viewId, access.userId)
       let config: PersonalViewConfigOverlay | null = null
@@ -13520,11 +13786,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!view) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
       }
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
       // Presentation-only overlay of a view the actor can already READ (§1-A); this is not a
       // write to shared config/permissions, so the gate is read access, not canManageViews.
       if (!capabilities.canRead) return sendForbidden(res)
       if (!access.userId) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       // Any `userId`/`actorId` field inside the request body is ignored entirely —
       // `sanitizePersonalOverlayConfig` only ever extracts the known presentation facets.
@@ -13559,9 +13826,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!view) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
       }
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
       if (!access.userId) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const deleted = await deletePersonalViewConfig(pool.query.bind(pool), viewId, access.userId)
       return res.json({ ok: true, data: { viewId, deleted } })
@@ -13573,6 +13841,48 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
   })
 
+  /**
+   * Delete a sheet — SOFT, and behind SCHEMA authority. Two faults were found on the live
+   * deployment and both are closed here.
+   *
+   * FAULT 1 (authority). This route used to admit `canManageViews` (or `canManageSheetAccess` for a
+   * scoped sheet). After the #5357 split a write-only OPERATOR still holds `canManageViews` — so an
+   * operator who may not rename ONE field header could permanently destroy the WHOLE sheet. The gate
+   * is now `canManageFields`: the same schema-authority tier as renaming a field, renaming this sheet,
+   * or deleting a field.
+   *
+   * The gate is `hasSheetLifecycleAuthority` (see its docblock) — NOT plain `canManageFields`, which
+   * is post-scope-grant and would hand sheet delete to a scoped `spreadsheet:write` holder. Precisely
+   * what moves, in every direction; this is NOT a uniform tightening:
+   *   - a GLOBAL `multitable:write` operator LOSES sheet delete (the reported fault);
+   *   - a `multitable:manage-schema` holder without `multitable:write` GAINS it, which is the
+   *     doctrine, not an accident: an actor trusted to delete a FIELD is trusted to delete the SHEET;
+   *   - a SHEET-SCOPED ADMIN (`spreadsheet:admin`) is UNCHANGED — admitted before via
+   *     `canManageSheetAccess`, admitted now via `sheetScope.canAdmin`;
+   *   - a SHEET-SCOPED `spreadsheet:write` holder stays REFUSED. It is not in
+   *     `SHEET_ADMIN_PERMISSION_CODES`, so the old scoped branch refused it, and gating on the
+   *     post-grant `canManageFields` would have silently flipped it to allowed — widening #5357's
+   *     documented field-level residual into whole-sheet delete + restore. It does not;
+   *   - a GLOBAL `multitable:share` holder without schema authority LOSES it on a scoped sheet.
+   *     Share authority decides WHO MAY SEE a sheet; it was never authority over whether the sheet
+   *     exists.
+   *
+   * FAULT 2 (recoverability). This route used to `DELETE FROM meta_sheets`, cascading the sheet's
+   * records away with no recovery at all. It now sets `deleted_at` and leaves `meta_records` and
+   * `meta_links` untouched, so `POST /sheets/:sheetId/restore` below brings the sheet back COMPLETE.
+   * Every listing already filters `deleted_at IS NULL` (GET /sheets, GET /bases, `loadSheetRow`), so
+   * the sheet disappears from the product exactly as before.
+   *
+   * INBOUND EDGES. The old cascade had to physically delete inbound `meta_links` rows because
+   * `meta_links.foreign_record_id` carries no FK and its targets were about to vanish. Nothing
+   * vanishes now, so the edges are KEPT (that is what makes a restore complete) and the READ path
+   * hides them instead: `loadLinkValuesByRecord`'s repair-on-read now also requires the foreign
+   * record's sheet to be live. A source sheet therefore still shows no link into a deleted sheet —
+   * the same observable behaviour, with the rows still there to restore.
+   *
+   * The link-delete fence plan is unchanged: the same participants must be quiescent, because the
+   * same edges stop being readable.
+   */
   router.delete('/sheets/:sheetId', async (req: Request, res: Response) => {
     const sheetId = req.params.sheetId
     if (!sheetId || typeof sheetId !== 'string') {
@@ -13581,42 +13891,201 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1', [sheetId])
-      if (sheetRes.rows.length === 0) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      const { capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (sheetScope?.hasAssignments) {
-        if (!capabilities.canManageSheetAccess) return sendForbidden(res)
-      } else if (!capabilities.canManageViews) {
-        return sendForbidden(res)
-      }
+      // AUTHZ-FIRST (real-DB goldens, not the file's 404-first habit). An actor without authority
+      // must not learn whether the sheet exists: capabilities are resolved and refused BEFORE any
+      // existence or liveness answer. Only an actor who WOULD have been allowed through sees the
+      // 404. The `loadSheetRow` below is then a TOCTOU backstop, not the existence gate.
+      const { access, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!hasSheetLifecycleAuthority(access, sheetScope)) return sendForbidden(res, SHEET_DELETE_FORBIDDEN_MESSAGE)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const sheetDeleteFencePlan = await prepareSheetLinkDeleteFencePlan(
         pool.query.bind(pool),
         sheetId,
       )
-      // Referential integrity: the sheet's records are about to be deleted by the
-      // meta_sheets -> meta_records cascade. Source-side links cascade, but `meta_links.foreign_record_id`
-      // carries NO FK at all (closeout removed it; the containment guard enforces its absence); remove
-      // inbound edges explicitly in the same transaction before their targets vanish.
       await pool.transaction(async ({ query }) => {
         if (sheetDeleteFencePlan) {
           await enterSheetLinkDeleteFencePlan(query, sheetDeleteFencePlan)
         }
-        await query('DELETE FROM meta_links WHERE foreign_record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)', [sheetId])
-        return query('DELETE FROM meta_sheets WHERE id = $1', [sheetId])
+        return query('UPDATE meta_sheets SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL', [sheetId])
       })
       invalidateSheetSummaryCache(sheetId)
       invalidateFieldCache(sheetId)
       invalidateViewConfigCache()
       return res.json({ ok: true, data: { deleted: sheetId } })
     } catch (err) {
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const writerFenceResponse = sendWriterFenceConflict(res, err)
       if (writerFenceResponse) return writerFenceResponse
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] delete sheet failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete sheet' } })
+    }
+  })
+
+  /**
+   * Undo a soft delete. Same schema-authority gate as the delete itself — undoing a destructive act
+   * is not a lesser authority than performing it, and a restore makes a table (and every record and
+   * inbound link in it) visible again.
+   *
+   * 404 when the sheet id is unknown OR when it is not soft-deleted: "restore" has no meaning for a
+   * live sheet, and answering 200 would tell a caller a recovery happened when nothing did. The
+   * capability gate runs BEFORE that distinction is drawn, so a caller without schema authority never
+   * learns whether a given id is deleted, live, or absent.
+   *
+   * NOTE (deliberate, stated in the PR): this is the API half only. There is no recycle-bin UI in
+   * this slice — listing and browsing soft-deleted sheets is a follow-up.
+   */
+  router.post('/sheets/:sheetId/restore', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      // The sheet is soft-deleted, so `loadSheetRow` (deleted_at IS NULL) cannot see it — read the row
+      // directly, including its deleted_at, and let the gate run before the row is interpreted.
+      const sheetRes = await pool.query('SELECT id, base_id, name, description, deleted_at FROM meta_sheets WHERE id = $1', [sheetId])
+      const row = (sheetRes.rows as any[])[0] as
+        | { id: unknown; base_id?: unknown; name?: unknown; description?: unknown; deleted_at?: unknown }
+        | undefined
+      // RESTORE-FLOW EXEMPT from the sheet-liveness refusal: resurrecting a deleted sheet is the one
+      // operation that MUST see one. It is gated on the restore authority instead
+      // (hasSheetLifecycleAuthority), and it can only ever clear `deleted_at` — never read or write
+      // the sheet's records. Every other sheet-addressed path refuses; see sheet-liveness.ts.
+      const { access, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!hasSheetLifecycleAuthority(access, sheetScope)) return sendForbidden(res, SHEET_DELETE_FORBIDDEN_MESSAGE)
+      if (!row || row.deleted_at === null || typeof row.deleted_at === 'undefined') {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `No deleted sheet to restore: ${sheetId}` } })
+      }
+      const restored = await pool.transaction(async ({ query }) => {
+        await fenceWriterEntry(query, sheetId)
+        return query(
+          'UPDATE meta_sheets SET deleted_at = NULL WHERE id = $1 AND deleted_at IS NOT NULL RETURNING id, base_id, name, description',
+          [sheetId],
+        )
+      })
+      const restoredRow = ((restored as any).rows ?? [])[0] as
+        | { id: unknown; base_id?: unknown; name?: unknown; description?: unknown }
+        | undefined
+      if (!restoredRow) {
+        // Lost a race with a concurrent restore: the sheet is live, so nothing here restored it.
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `No deleted sheet to restore: ${sheetId}` } })
+      }
+      invalidateSheetSummaryCache(sheetId)
+      invalidateFieldCache(sheetId)
+      invalidateViewConfigCache()
+      return res.json({
+        ok: true,
+        data: {
+          restored: sheetId,
+          sheet: {
+            id: String(restoredRow.id),
+            baseId: typeof restoredRow.base_id === 'string' ? restoredRow.base_id : null,
+            name: String(restoredRow.name ?? ''),
+            description: typeof restoredRow.description === 'string' ? restoredRow.description : null,
+          },
+        },
+      })
+    } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] restore sheet failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to restore sheet' } })
+    }
+  })
+
+  /**
+   * F21 (sheet half) — rename a sheet's DISPLAY NAME. Accepts `{ name }` and nothing else.
+   *
+   * GATE: `canManageFields` via `resolveSheetCapabilities` — the SAME tier as `PATCH /fields/:fieldId`
+   * (#5357). A `multitable:write` operator is refused; an admin or a `multitable:manage-schema` holder
+   * is allowed. Existence is checked first (mirrors `DELETE /sheets/:sheetId` and the
+   * `PUT /sheets/:sheetId/row-level-read-deny` sheet_config writer), so a deleted or unknown sheet is
+   * a 404 for everybody.
+   *
+   * HISTORY: recorded on the EXISTING config-revision channel as a `sheet_config` update with
+   * `changedKeys: ['name']` — the same machinery `PUT /sheets/:sheetId/row-level-read-deny` writes, so
+   * the rename shows up in `GET /bases/:baseId/history/events` and `GET /sheets/:sheetId/config-history`
+   * with no new event system. It opens no new RESTORE path: `isSupportedSheetConfigRevert` admits only
+   * `{conditionalReadRules, rowLevelReadPermissionsEnabled}`, so a `name` revision stays gated
+   * fail-closed exactly like every other sheet_config key outside the Tier-1 set.
+   *
+   * A rename-to-the-same-name records nothing and writes nothing (`configUpdateDiff` → null, the
+   * recorder's no-spam contract).
+   */
+  router.patch('/sheets/:sheetId', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+    const parsed = parseDisplayRenamePayload(req.body)
+    if (!parsed.ok) return sendInvalidDisplayName(res)
+    const hygieneRefusal = sendDisplayNameHygieneRefusal(res, parsed.name)
+    if (hygieneRefusal) return hygieneRefusal
+
+    try {
+      const pool = poolManager.get()
+      // AUTHZ-FIRST (real-DB goldens, not the file's 404-first habit). An actor without authority
+      // must not learn whether the sheet exists: capabilities are resolved and refused BEFORE any
+      // existence or liveness answer. Only an actor who WOULD have been allowed through sees the
+      // 404. The `loadSheetRow` below is then a TOCTOU backstop, not the existence gate.
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageFields) return sendForbidden(res, DISPLAY_RENAME_FORBIDDEN_MESSAGE)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) return sendSheetNotLive(res, 'absent')
+
+      const nextName = parsed.name
+      await pool.transaction(async ({ query }) => {
+        // D-H1: sheet_config writer. Fence-before-check, then the live name read + UPDATE, so a rename
+        // cannot interleave with a recovery that is hashing/applying one schema generation.
+        // Flag-off ⇒ no-op / byte-identical.
+        await fenceWriterEntry(query, sheetId)
+        const beforeResult = await query('SELECT name FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
+        const beforeRow = ((beforeResult as any).rows ?? [])[0] as { name?: unknown } | undefined
+        if (!beforeRow) throw new NotFoundError(`Sheet not found: ${sheetId}`)
+        const diff = configUpdateDiff({ name: String(beforeRow.name ?? '') }, { name: nextName }, ['name'])
+        if (!diff) return
+        await query('UPDATE meta_sheets SET name = $1 WHERE id = $2 AND deleted_at IS NULL', [nextName, sheetId])
+        await recordConfigRevision(query, {
+          sheetId,
+          entityType: 'sheet_config',
+          entityId: sheetId,
+          action: 'update',
+          before: diff.before,
+          after: diff.after,
+          changedKeys: diff.changedKeys,
+          batchId: randomUUID(),
+          actorId: getRequestActorId(req),
+        })
+      })
+      // The sheet summary cache carries the display name (`{ id, name }`) — drop it or readers keep
+      // serving the old label.
+      invalidateSheetSummaryCache(sheetId)
+      return res.json({
+        ok: true,
+        data: { sheet: { id: sheetId, baseId: sheet.baseId, name: nextName, description: sheet.description } },
+      })
+    } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
+      if (err instanceof NotFoundError) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+      }
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] rename sheet failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to rename sheet' } })
     }
   })
 
@@ -13783,11 +14252,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
         }
 
-        const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+        const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
         if (!access.userId) {
           return res.status(401).json({ error: 'Authentication required' })
         }
         if (!capabilities.canCreateRecord) return sendForbidden(res)
+        if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
         const xlsx = await loadXlsxModule()
         let parsed: ParsedXlsxResult
@@ -13929,11 +14399,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         viewHiddenFieldIds = view.hiddenFieldIds ?? []
       }
 
-      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canRead || !capabilities.canExport) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       // D3c: export must mirror the view path's field masking — apply subject-scoped
       // field_permissions + view.hidden_field_ids, not only static property.hidden.
@@ -14232,11 +14703,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
         }
       }
-      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       // max-rows guard: COUNT first, HARD-FAIL (413) with total — never truncate (aggregates must be exact)
       const maxRows = Number(process.env.MULTITABLE_AGGREGATE_MAX_ROWS || '10000')
@@ -14566,11 +15038,21 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       })
       const sheetId = resolved.sheetId
       const viewConfig = resolved.view
-      const { access, capabilities, capabilityOrigin, sheetScope } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, capabilityOrigin, sheetScope, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canRead) return sendForbidden(res)
+      // SEED PATH: `?seed=true` MATERIALIZES the sheet on first touch, so an ABSENT sheet is this
+      // route's normal input, not an error — the TOCTOU goldens require 200 (created at the legacy base)
+      // for a clean id and 400 VALIDATION_ERROR for one that would retroactively cross an existing link,
+      // and a liveness 404 preempts both.
+      //
+      // 'deleted' is NOT exempted, and the distinction is the point: re-seeding over a soft-deleted sheet
+      // would RESURRECT IT BY GET — a plain read silently undoing a delete, bypassing the restore
+      // authority entirely. Absent means "create it"; deleted means "it was deliberately removed".
+      const seedMayMaterialize = seed && sheetLiveness === 'absent'
+      if (!seedMayMaterialize && sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const rawSortRules = viewConfig ? parseMetaSortRules(viewConfig.sortInfo) : []
       const rawFilterInfo = viewConfig ? parseMetaFilterInfo(viewConfig.filterInfo) : null
       if (seed) {
@@ -15074,7 +15556,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         viewId: viewIdParam,
       })
       const sheetId = resolved.sheetId
-      const { access, capabilities, capabilityOrigin, sheetScope } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, capabilityOrigin, sheetScope, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       const publicAccessAllowed = isPublicFormAccessAllowed(resolved.view, publicTokenParam)
       const protectedPublicAccess = publicAccessAllowed
         ? await evaluateProtectedPublicFormAccess(pool.query.bind(pool), req, resolved.view)
@@ -15093,6 +15575,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!effectivePublicAccessAllowed && !capabilities.canRead) return sendForbidden(res)
+      // AUTHZ-FIRST: liveness is checked only AFTER this route has decided the caller may see the
+      // sheet at all (public-token access OR canRead). An anonymous caller with no valid token must
+      // get the ordinary refusal, never a 404 telling them the sheet was deleted.
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
@@ -15272,7 +15758,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${view.sheetId}` } })
       }
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
+      const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
       const publicTokenParam = typeof parsed.data.publicToken === 'string'
         ? parsed.data.publicToken.trim()
         : typeof req.query.publicToken === 'string'
@@ -15306,6 +15792,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
       const canWriteFormRecord = parsed.data.recordId ? effectiveCapabilities.canEditRecord : effectiveCapabilities.canCreateRecord
       if (!canWriteFormRecord) return sendForbidden(res)
+      // AUTHZ-FIRST: liveness is checked only AFTER this route has decided the caller may see the
+      // sheet at all (public-token access OR canRead). An anonymous caller with no valid token must
+      // get the ordinary refusal, never a 404 telling them the sheet was deleted.
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const fields = await loadFieldsForSheet(pool.query.bind(pool), view.sheetId)
       const fieldById = buildFieldMutationGuardMap(fields)
@@ -15864,6 +16354,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         },
       })
     } catch (err) {
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const writerFenceResponse = sendWriterFenceConflict(res, err)
       if (writerFenceResponse) return writerFenceResponse
       if (err instanceof VersionConflictError) {
@@ -15939,11 +16430,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canEditRecord) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       // W1-3 (multitable-per-subject-field-write-gate-w13-designlock-20260705, LOCK-F1/F3/F4): Layer-3
       // per-subject field-WRITE gate, parity with grid `/patch` (`buildRecordPatchContext` is the SAME
@@ -16063,6 +16555,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         },
       })
     } catch (err) {
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const writerFenceResponse = sendWriterFenceConflict(res, err)
       if (writerFenceResponse) return writerFenceResponse
       if (err instanceof RecordServicePatchFieldValidationError) {
@@ -16147,11 +16640,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // the deleted records-query-cache block): a subject-scoped mask cannot ride a subject-less cache key
       // without cross-subject poisoning, and this is not the grid hot path (the grid uses GET /view), so
       // dropping the cache is smaller and safer than designing a subject-aware key.
-      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       // Field-read gate: layer-2 (property.hidden) ∧ layer-3 (field_permissions.visible) — the #2015
       // composite shared with GET /view. hiddenFieldIds:[] keeps layer-1 a display-only concern (this list
@@ -16454,11 +16948,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (sheetRes.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const baseAllowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
       // §2a.3 DISPLAY-PROJECTION chokepoint (resolveDisplayFieldTaint) — C2: /records-summary projects
@@ -16558,8 +17053,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!targetSheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Target sheet not found: ${linkConfig.foreignSheetId}` } })
       }
-      const { access: foreignAccess, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), linkConfig.foreignSheetId)
+      const { access: foreignAccess, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), linkConfig.foreignSheetId)
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       // ②b §3.2 Sink B-2 / decision (d) — the EXPLICIT cross-base candidate pull. Unlike the inline
       // summary sinks (silent mask), this endpoint deliberately enumerates the foreign sheet's records,
@@ -16734,7 +17230,17 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           if (sheetRes.rows.length === 0) {
             return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
           }
-          const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+          const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+          // Inside a SERVICE CALLBACK: throw instead of writing a response — the route's catch maps
+          // SheetNotLiveError to the same 404. A soft-deleted sheet's recycle bin must not list, its
+          // records must not be deleted, and a trashed record must not be restored into it.
+          //
+          // `=== 'deleted'` and NOT `!== 'live'`: an ABSENT sheet already has pinned semantics that
+          // belong to the service, not to this guard — the recycle-bin golden requires that restoring
+          // into a HARD-deleted sheet answers 409 from RecordService's orphan guard ("rejected, not
+          // resurrected"), and a 404 here would preempt it. Only the soft-deleted case is new: the row
+          // still exists, so the orphan guard would happily resurrect a record into a deleted sheet.
+          if (sheetLiveness === 'deleted') throw new SheetNotLiveError(sheetId, sheetLiveness)
           if (!capabilities.canEditRecord) return sendForbidden(res)
 
           if (fieldId) {
@@ -16867,6 +17373,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
       const access = await resolveRequestAccess(req)
       const sheetCapabilities = await resolveSheetCapabilities(req, pool.query.bind(pool), attachmentRow.sheetId)
+      if (sheetCapabilities.sheetLiveness !== 'live') {
+        return sendSheetNotLive(res, sheetCapabilities.sheetLiveness)
+      }
       if (!sheetCapabilities.capabilities.canEditRecord) return sendForbidden(res)
       if (attachmentRow.recordId) {
         const creatorMap = await loadRecordCreatorMap(
@@ -17062,10 +17571,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       })
       const sheetId = resolved.sheetId
 
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const recordService = new RecordService(pool, eventBus)
       // A-min-create (#2255): compute the new record's same-record formula-over-lookup on create.
       recordService.setFormulaRecalcHook((q, sid, ids) => recalcNewRecordFormulas(req, q, sid, ids))
@@ -17109,6 +17619,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         },
       })
     } catch (err) {
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const writerFenceResponse = sendWriterFenceConflict(res, err)
       if (writerFenceResponse) return writerFenceResponse
       if (isRecordCreateValidationError(err)) {
@@ -17275,6 +17786,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         },
       })
     } catch (err) {
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const writerFenceResponse = sendWriterFenceConflict(res, err)
       if (writerFenceResponse) return writerFenceResponse
       if (isRecordCreateValidationError(err)) {
@@ -17328,7 +17840,17 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         expectedVersion,
         access,
         resolveSheetAccess: async (sheetId) => {
-          const { capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+          const { capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+          // Inside a SERVICE CALLBACK: throw instead of writing a response — the route's catch maps
+          // SheetNotLiveError to the same 404. A soft-deleted sheet's recycle bin must not list, its
+          // records must not be deleted, and a trashed record must not be restored into it.
+          //
+          // `=== 'deleted'` and NOT `!== 'live'`: an ABSENT sheet already has pinned semantics that
+          // belong to the service, not to this guard — the recycle-bin golden requires that restoring
+          // into a HARD-deleted sheet answers 409 from RecordService's orphan guard ("rejected, not
+          // resurrected"), and a 404 here would preempt it. Only the soft-deleted case is new: the row
+          // still exists, so the orphan guard would happily resurrect a record into a deleted sheet.
+          if (sheetLiveness === 'deleted') throw new SheetNotLiveError(sheetId, sheetLiveness)
           return { capabilities, ...(sheetScope ? { sheetScope } : {}) }
         },
         oapiAudit: buildOapiAuditContext(req, 'delete', 'records:write'),
@@ -17336,6 +17858,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       return res.json({ ok: true, data: { deleted: recordId } })
     } catch (err) {
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const writerFenceResponse = sendWriterFenceConflict(res, err)
       if (writerFenceResponse) return writerFenceResponse
       if (err instanceof RecordServicePermissionError) {
@@ -17403,14 +17926,19 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         ...(Number.isFinite(limitRaw) ? { limit: limitRaw } : {}),
         ...(Number.isFinite(offsetRaw) ? { offset: offsetRaw } : {}),
         resolveSheetAccess: async (sid) => {
-          const { capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sid)
+          const { capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sid)
+          // Inside a SERVICE CALLBACK: throw instead of writing a response (see above). `=== 'deleted'`
+          // for the same reason: an absent sheet's behaviour is the service's to define (409 orphan
+          // guard), and only the soft-deleted case is this change's to close.
+          if (sheetLiveness === 'deleted') throw new SheetNotLiveError(sid, sheetLiveness)
           return { capabilities, ...(sheetScope ? { sheetScope } : {}) }
         },
       })
       // Field-read mask: listDeletedRecords returns raw stored data, so mirror the live read/history path
       // here — project each trashed record's data through the actor's visible field set so a
       // field_permissions.visible=false (or taint-masked formula) value can't leak through the trash API.
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const visibleFields = filterVisiblePropertyFields(await loadFieldsForSheetShared(pool.query.bind(pool), sheetId))
       const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
       const allowedFieldIds = computeAllowedFieldIds(visibleFields, capabilities, fieldScopeMap)
@@ -17480,13 +18008,18 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         actorId: getRequestActorId(req),
         access,
         resolveSheetAccess: async (sid) => {
-          const { capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sid)
+          const { capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sid)
+          // Inside a SERVICE CALLBACK: throw instead of writing a response (see above). `=== 'deleted'`
+          // for the same reason: an absent sheet's behaviour is the service's to define (409 orphan
+          // guard), and only the soft-deleted case is this change's to close.
+          if (sheetLiveness === 'deleted') throw new SheetNotLiveError(sid, sheetLiveness)
           return { capabilities, ...(sheetScope ? { sheetScope } : {}) }
         },
       })
       // 4c-3 §6 honest signal (omitted-when-off/absent — flag-off responses stay byte-identical):
       return res.json({ ok: true, data: { restored: result.recordId, sheetId: result.sheetId, ...(result.inbound ? { inbound: result.inbound } : {}) } })
     } catch (err) {
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const writerFenceResponse = sendWriterFenceConflict(res, err)
       if (writerFenceResponse) return writerFenceResponse
       if (err instanceof RecordServicePermissionError) {
@@ -17543,10 +18076,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       sheetId = String(recordRow.sheet_id)
       const createdBy = typeof recordRow.created_by === 'string' ? recordRow.created_by : null
 
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const actorId = getRequestActorId(req)
 
       if (parsed.data.locked) {
@@ -17677,10 +18211,13 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       // base-B sheet resolution: only `access` is taken here — the base-B capability is re-derived UNDER the
       // guard's sheet lock (§4, below) so it cannot drift between this resolve and the edge write.
-      const { access } = await resolveSheetCapabilities(req, q, sheetB)
+      const { access, sheetLiveness: livenessB } = await resolveSheetCapabilities(req, q, sheetB)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
+      // Soft delete: BOTH ends of a cross-base mirror edge must be live. Sheet A is checked below, at
+      // its own resolve — an edge must never be written into, or out of, a deleted sheet.
+      if (livenessB !== 'live') return sendSheetNotLive(res, livenessB)
       const actorId = getRequestActorId(req)
       const actorUserId = access.userId
 
@@ -17722,7 +18259,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       // Sheet-A write context (schema/echo-mask/guards) — config-level, resolved pre-transaction; the
       // per-row gating happens under FOR UPDATE inside the guard below.
-      const { capabilities: capsA, sheetScope: scopeA } = await resolveSheetCapabilities(req, q, sheetA)
+      const { capabilities: capsA, sheetScope: scopeA, sheetLiveness: livenessA } = await resolveSheetCapabilities(req, q, sheetA)
+      if (livenessA !== 'live') return sendSheetNotLive(res, livenessA)
       const patchContext = await buildRecordPatchContext(req, q, sheetA, access, capsA)
       if (!patchContext) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetA}` } })
@@ -17857,6 +18395,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         },
       })
     } catch (err) {
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const writerFenceResponse = sendWriterFenceConflict(res, err)
       if (writerFenceResponse) return writerFenceResponse
       if (err instanceof MirrorLinkTargetUnavailableError) {
@@ -17925,11 +18464,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         viewId: parsed.data.viewId,
       })
       const sheetId = resolved.sheetId
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canEditRecord) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       // F3 (#2106 §3 F3) echo-mask composition + write-gate guard map — extracted to
       // `buildRecordPatchContext` (single source of truth shared with the A2 AI shortcut
@@ -18117,8 +18657,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     try {
       const pool = poolManager.get()
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const automationService = getAutomationServiceInstance()
       if (!automationService) {
         return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' } })
@@ -18144,8 +18685,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const pool = poolManager.get()
       const access = await resolveRequestAccess(req)
       if (!access.userId) return res.status(401).json({ error: 'Authentication required' })
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const automationService = getAutomationServiceInstance()
       if (!automationService) {
         return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' } })
@@ -18183,8 +18725,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const pool = poolManager.get()
       const access = await resolveRequestAccess(req)
       if (!access.userId) return res.status(401).json({ error: 'Authentication required' })
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const automationService = getAutomationServiceInstance()
       if (!automationService) {
         return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' } })
@@ -18231,8 +18774,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     try {
       const pool = poolManager.get()
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const automationService = getAutomationServiceInstance()
       if (!automationService) {
         return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' } })
@@ -18261,8 +18805,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     try {
       const pool = poolManager.get()
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const automationService = getAutomationServiceInstance()
       if (!automationService) {
         return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' } })
@@ -18292,8 +18837,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     try {
       const pool = poolManager.get()
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const automationService = getAutomationServiceInstance()
       if (!automationService) {
         return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' } })

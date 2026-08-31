@@ -600,6 +600,9 @@ describe('permission-service: request-keyed resolvers', () => {
     vi.mocked(listUserPermissions).mockResolvedValue(['multitable:read'])
     vi.mocked(isAdmin).mockResolvedValue(false)
     const { query } = makeQuery([
+      // The resolver now establishes SHEET LIVENESS first (soft delete): a deleted sheet must not be
+      // invisible to a path that only ever asked "may this actor?". This sheet is live.
+      () => ({ rows: [{ deleted_at: null }] }),
       () => ({
         rows: [
           { sheet_id: 'sheet_1', perm_code: 'multitable:admin', subject_type: 'user' },
@@ -608,6 +611,7 @@ describe('permission-service: request-keyed resolvers', () => {
     ])
     const req = { user: { id: 'user_1', roles: ['user'] } } as any
     const res = await resolveSheetCapabilities(req, query, 'sheet_1')
+    expect(res.sheetLiveness).toBe('live')
     expect(res.capabilities.canManageFields).toBe(true)
     expect(res.capabilities.canManageSheetAccess).toBe(true)
     expect(res.capabilityOrigin.source).toBe('sheet-grant')
