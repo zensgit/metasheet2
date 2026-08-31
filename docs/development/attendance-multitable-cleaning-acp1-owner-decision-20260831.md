@@ -1,6 +1,6 @@
 # Attendance x Multitable Cleaning ACP-1 Owner Decision Packet
 
-Status: **OWNER CHOICE RATIFIED — BLOCKING OD-ATC-10 FACTUAL CONFLICT; DESIGN LOCK NOT MERGEABLE; NO RUNTIME AUTHORITY**
+Status: **OWNER DECISIONS RATIFIED — DESIGN LOCK DRAFT/HOLD; NO RUNTIME AUTHORITY UNTIL THE EXACT MERGED SHA**
 Prepared: 2026-08-31 (Asia/Taipei)
 Repository: MetaSheet2
 Authority rule: runtime work may start only after the owner ratifies the exact decisions below and the ratified lock is bound to an exact merged commit.
@@ -18,6 +18,8 @@ The following is the proposal-head audit snapshot ratified by the owner. Later s
 - The current platform multitable application model is DRAFT. It is architectural context, not attendance runtime authority.
 
 Follow-up at ratification: `origin/main` is `919dc42366d3464c0b941448fad880c88f3f7cf5`; PR #5362 has since merged as `f45f6bb399d4d8131e3bf39e314212828b80e5b2`, and PR #5348 has since merged as `919dc42366d3464c0b941448fad880c88f3f7cf5`. Neither merge overlaps the six ACP-1 product files. PR #5372 remains Draft/HOLD and unmerged, so its old exact-head green checks are not proof of a then-current-main merge candidate.
+
+Follow-up at OD-ATC-10R ratification: `origin/main` is `1a936c7dbfb3e62dd3e05b60f91cecbd28862e45`; the intervening #5368, #5365, and #5367 approval/automation changes do not overlap the six ACP-1 product files. PR #5372 remains Draft/HOLD and unmerged.
 
 Conclusion: the owner-decision gate is closed, but **STOP before runtime implementation** until the exact ratified design-lock SHA is merged and the Section 5 dependency, fresh-main, and post-merge gates are satisfied. This evidence record cannot authorize itself.
 
@@ -49,7 +51,7 @@ The multitable is a collaboration and cleaning workspace, **never the attendance
 
 The decision applies prospectively from that owner turn. It does not retroactively authorize earlier work, authorize Ready/merge, or satisfy the exact merged-SHA runtime gate.
 
-### Blocking ratification consistency finding
+### OD-ATC-10R finding and ratified amendment
 
 A post-ratification current-main audit found that OD-ATC-10 contains a false factual premise that was not visible in the proposal packet:
 
@@ -57,14 +59,21 @@ A post-ratification current-main audit found that OD-ATC-10 contains a false fac
 - The route at `plugins/plugin-attendance/index.cjs:31360-31373` falls back to that default and denies only when `enabled === false`.
 - The web client at `apps/web/src/views/AttendanceView.vue:17250-17252` also treats an absent policy as enabled.
 
-Therefore the ratified requirements “the existing result-edit policy/flag remains default OFF” and “ACP-1 adds no new flag” cannot both be implemented without either changing an established global default or exposing ACP under a default-ON gate. Neither interpretation is authorized. The 11 ratified decision rows below remain byte-identical evidence, but the design lock must not merge and runtime work must not start until the owner ratifies one explicit correction:
+Therefore the original requirements “the existing result-edit policy/flag remains default OFF” and “ACP-1 adds no new flag” could not both be implemented without either changing an established global default or exposing ACP under a default-ON gate.
 
-1. **OD-ATC-10R option (a), fail-closed:** add a dedicated attendance-owned ACP enable policy that defaults OFF; leave the existing result-edit policy/default unchanged. This revises the “no new flag” clause and requires a re-censused attendance-owned settings/test boundary.
-2. **OD-ATC-10R option (b), no new gate:** correct the premise to default ON and govern ACP only with the existing result-edit policy plus permissions. This can expose ACP wherever the plugin, managed sheet, sheet access, and `attendance:admin` already coexist, so release cannot truthfully be called default OFF.
+The owner ratified the fail-closed correction:
 
-Changing the existing global result-edit default from ON to OFF is excluded because it would alter an already shipped manual-edit product outside ACP-1. No option is inferred from the earlier blanket ratification.
+- Source: direct owner turn in Codex task `01a0528d-2a67-7ce3-9e23-3d3820d7d733`; no separate owner display identity was exposed, so none is inferred.
+- Received: 2026-08-31 (Asia/Taipei); no unverifiable time is invented.
+- Ratified amendment packet: PR #5381 head `f777f94e3d0eb5ab35e5462a9c249f3b73c80bc7`, document blob `3c66bda8a3c0f524c325b7f232262c0879c54b3b`.
+- Scope: `ACP-1A`, `OD-ATC-10R`, option `(a)`. Deltas are limited to the two conflicting OD-ATC-10 clauses.
+- Exact owner text:
 
-To choose the fail-closed correction explicitly, the owner may respond: `RATIFY ACP-1A OD-ATC-10R，采用 (a)`.
+  > RATIFY ACP-1A OD-ATC-10R，采用 (a)
+
+**Controlling amendment — OD-ATC-10R(a):** add exactly one attendance-owned ACP policy, `attendanceMultitableCleaningPolicy.enabled`, normalized fail-closed to `false` when absent, malformed, or false. Leave the existing `attendanceResultEditPolicy` and its default-ON behavior unchanged. ACP list, approve-and-apply, and UI exposure require both `attendanceMultitableCleaningPolicy.enabled === true` and the existing result-edit policy to permit editing; neither condition may substitute for the other. ACP apply always supplies notification suppression regardless of the existing notification default. This packet adds no enable action: tests may enable the gate only in isolated fixtures, while Draft/HOLD, release, staging, deployment, production, and real-customer environments remain OFF unless separately authorized.
+
+Option `(b)` is unselected. Changing the existing global result-edit default is excluded. The 11 original decision rows below remain byte-identical evidence; OD-ATC-10R(a) supersedes only the original “existing ... default OFF” and “adds no new flag” clauses. All other OD-ATC-10 restrictions remain in force. Like the original ratification, this amendment does not authorize Ready/merge or satisfy the exact merged-SHA runtime gate.
 
 | ID | Ratified option (a) |
 | --- | --- |
@@ -105,12 +114,12 @@ Option A intentionally combines review and apply. It does not expose a standalon
 
 ## 5. Locked implementation boundary
 
-Implementation must first wait for an exact owner decision on OD-ATC-10R. It must then wait until #5372 is merged to then-current `main` and post-merge checks are terminal green. ACP-1 must start from a fresh worktree at that then-current `origin/main`; it must not stack on #5372 or copy its CAS code.
+Implementation must wait until #5372 is merged to then-current `main` and post-merge checks are terminal green. This amended design lock must then be merged and bound to its exact merged SHA. ACP-1 must start from a fresh worktree at the later then-current `origin/main`; it must not stack on #5372 or copy its CAS code.
 
 Attendance-owned product and dedicated tests:
 
 1. `plugins/plugin-attendance/lib/attendance-report-cleaning-proposal.cjs` — new pure policy/planning module.
-2. `plugins/plugin-attendance/index.cjs` — additive fields and minimal route/injection wiring only.
+2. `plugins/plugin-attendance/index.cjs` — dedicated default-OFF ACP policy normalization, additive fields, and minimal route/injection wiring only.
 3. `packages/core-backend/tests/unit/attendance-report-cleaning-proposal.test.ts` — new dedicated unit contract.
 4. `packages/core-backend/tests/integration/attendance-report-cleaning-proposal.db.test.ts` — new isolated real-DB contract.
 5. `apps/web/src/views/attendance/AttendanceReportFieldsSection.vue` — pending list and single-record approval UI.
@@ -124,7 +133,7 @@ Explicitly excluded from the product slice:
 - migrations and PostgreSQL schema
 - OpenAPI and shared manifests
 - workflow and global selector files
-- flags, external writes, dispatch, deployment, and production
+- global/shared flags, changes to existing result-edit defaults, ACP gate enablement, external writes, dispatch, deployment, and production
 
 ## 6. Conditional shared decision/window
 
@@ -161,6 +170,7 @@ Option B cannot be delivered in the six attendance-owned Option A files and requ
 ### Pre-fix RED
 
 - New policy module and routes are absent.
+- The dedicated ACP gate is absent; the existing result-edit policy is default ON and cannot stand in for it.
 - The two proposal fields are absent and are not protected by an ownership contract.
 - The admin component has no pending-proposal approval flow.
 - The real-DB path has no dual-CAS/idempotency proof.
@@ -170,6 +180,7 @@ These failures must be captured before implementation; a newly written test that
 ### Unit contract
 
 - Exactly two additive user-owned fields; repeated provisioning is a no-op; managed projection IDs exclude both.
+- `attendanceMultitableCleaningPolicy.enabled` accepts only explicit boolean `true` as enabled; absent, malformed, and false inputs normalize to false without mutating persisted settings.
 - Parser accepts only `cleaning_requested === true` and a trimmed, bounded reason.
 - Target is a server literal `normal`; custom target, metrics, punch, and business-trip keys are ignored/rejected.
 - Logical proposal digest and operation identity are deterministic across `meta_records.version` and unrelated custom-column changes, but change with normalized reason or canonical source fingerprint.
@@ -179,7 +190,9 @@ These failures must be captured before implementation; a newly written test that
 ### Real-DB contract
 
 - Happy path creates one W4 manual edit, one immutable result-edit audit, one sealed operation, and clears only proposal fields; unrelated custom data survives.
-- Policy/flag OFF fails closed with zero proposal, canonical, audit, or revision mutation and never enables a setting.
+- An absent, malformed, or false ACP gate makes list and approve-and-apply fail closed with zero proposal, canonical, audit, notification, or revision mutation and never enables a setting, even when the existing result-edit policy is default ON.
+- An enabled ACP gate cannot bypass an explicitly disabled existing result-edit policy; both gates are required.
+- With both gates permitting apply, notification/external fan-out remains suppressed even though the existing notification default is true.
 - A token with generic multitable write but no same-org active `attendance:admin` cannot list or approve.
 - Cross-organization and tampered anchor attempts fail non-leaking with zero writes.
 - Stale proposal version is rejected before canonical mutation.
@@ -192,7 +205,8 @@ These failures must be captured before implementation; a newly written test that
 
 ### Web contract
 
-- Pending list/count and fixed action "Approve correction to normal" are visible only to authorized admins.
+- Pending list/count and fixed action "Approve correction to normal" are visible only when the ACP gate is explicitly true and the user is an authorized admin.
+- Gate false, absent, malformed, or changed during reload hides/clears proposal UI state and sends no list/approve request.
 - Approval sends only `expectedVersion` to the record-specific route; double-click sends one request.
 - Success/already-applied removes the row.
 - Pre-canonical conflict asks for reload; post-canonical cleanup conflict keeps the row and offers safe retry; neither shows false success.
@@ -216,6 +230,7 @@ The following mutations must each make a named test RED:
 10. log raw proposal/canonical values;
 11. add proposal fields to the managed projection map;
 12. remove the new real-DB/web test from required CI selection.
+13. default the ACP gate to true, treat a truthy non-boolean as enabled, replace the two-gate conjunction with OR, or inherit the existing result-edit/notification defaults.
 
 ## 10. Validation commands and closure evidence
 
@@ -253,7 +268,8 @@ Outputs from unavailable external models are optional independent reviews, not r
 Stop immediately and report the exact blocker if:
 
 - the ratification source cannot be verified, the decision table differs from PR #5381 head `c50f65f55273842ba8b96245e3004ca58832af9d` / document blob `50e9ff52abd45b2616031c43b5e30222c23c6539`, or a later owner decision conflicts with this packet;
-- OD-ATC-10R has not been explicitly ratified and folded into the lock;
+- the dedicated ACP gate is not fail-closed, is silently enabled, bypasses the existing result-edit policy, or permits notification/external fan-out;
+- implementation would change an existing result-edit default, touch a shared/global flag, or add a seventh product file without a new bounded window;
 - #5372 changes or is not merged on the starting main;
 - `origin/main` drifts after preflight or relevant OPEN PR overlap changes;
 - Option A requires permission or actor semantics beyond the ratified Draft/HOLD boundary;
