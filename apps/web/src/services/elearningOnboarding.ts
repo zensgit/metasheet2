@@ -277,6 +277,7 @@ function parseReport(value: unknown, status: number): ElearningOnboardingWeeklyR
     assignedUserCount > enqueuedCount
     || failedCount > enqueuedCount
     || deadCount > enqueuedCount
+    || failedCount + deadCount > enqueuedCount
   ) failShape(status)
   return {
     ...common,

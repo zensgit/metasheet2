@@ -139,6 +139,7 @@ describe('e-learning onboarding client', () => {
     report(false, { assignedUserCount: null }),
     report(false, { weekEnd: '2026-08-30' }),
     report(false, { minGroupSize: 4 }),
+    report(false, { enqueuedCount: 5, assignedUserCount: 3, failedCount: 4, deadCount: 2 }),
     report(false, { rawAssignments: [] }),
   ])('rejects malformed, unsuppressed, or leaky weekly report shapes', async (body) => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse(200, body))

@@ -108,6 +108,7 @@ describe('ElearningOnboardingAdminSection', () => {
     app = null
     root = null
     randomUuid?.mockRestore()
+    vi.useRealTimers()
     vi.clearAllMocks()
   })
 
@@ -159,6 +160,16 @@ describe('ElearningOnboardingAdminSection', () => {
     expect(h.retirePolicy).toHaveBeenCalledWith(POLICY)
     expect(view.querySelector('[data-testid="elearning-onboarding-policy-result"]')?.textContent)
       .toContain('retired')
+  })
+
+  it('defaults the report query to the previous fully closed UTC week', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-31T12:00:00.000Z'))
+    const view = mount(false, true)
+    const weekStart = view.querySelector(
+      '[data-testid="elearning-onboarding-week-start"]',
+    ) as HTMLInputElement
+    expect(weekStart.value).toBe('2026-08-24')
   })
 
   it('renders no numeric values for a suppressed weekly report', async () => {

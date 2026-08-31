@@ -129,7 +129,7 @@ const weeklyReportEnabled = ref(true)
 const busy = ref(false)
 const policy = ref<ElearningOnboardingPolicy | null>(null)
 const reportPolicyId = ref('')
-const weekStart = ref(previousMonday())
+const weekStart = ref(previousClosedWeekMonday())
 const reportBusy = ref(false)
 const report = ref<ElearningOnboardingWeeklyReport | null>(null)
 const status = ref('')
@@ -157,10 +157,10 @@ function description(): string {
       )
 }
 
-function previousMonday(): string {
+function previousClosedWeekMonday(): string {
   const date = new Date()
   const day = date.getUTCDay()
-  date.setUTCDate(date.getUTCDate() - ((day + 6) % 7))
+  date.setUTCDate(date.getUTCDate() - ((day + 6) % 7) - 7)
   return date.toISOString().slice(0, 10)
 }
 
