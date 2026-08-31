@@ -144,6 +144,15 @@ const EXEMPT: Record<string, string> = {
     + 'restore authority (hasSheetLifecycleAuthority) instead, and it can only ever clear `deleted_at`; '
     + 'it never reads or writes the sheet’s records. The call site carries a RESTORE-FLOW EXEMPT marker, '
     + 'asserted below.',
+  'POST /sheets/:sheetId/trust-checkpoint-activate':
+    'GUARDED, but DELIBERATELY NOT AT THIS LAYER. Existence — and so soft-deleted-ness — is a '
+    + 'DIFFERENTIATED response on this route, and it moved every such response INSIDE the transaction, '
+    + 'after the actor-authority lease and the post-lease final authorization, so a revoked-but-unexpired '
+    + 'claims-admin cannot enumerate designated canary sheets. A refusal at the usual place re-opens that '
+    + 'oracle (it broke the GATE-ORDER and ORACLE-AFTER-LEASE goldens). The `deleted_at IS NULL` filter '
+    + 'therefore lives in `assertTrustCheckpointSheetExists` (multitable/trust-checkpoint-activation-authz.ts) '
+    + 'at step 4c, where it inherits the correct ordering. The route does not even destructure '
+    + '`sheetLiveness`, so nothing here can begin refusing on it out of order.',
   'POST /bases':
     'creates a BASE. It never resolves a sheet — the only `sheetId` token in its body belongs to the '
     + 'template-install helper text further down the file, not to this handler.',

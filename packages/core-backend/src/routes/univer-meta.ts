@@ -10598,12 +10598,20 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     if (!sheetId) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId required' } })
     try {
       const pool = poolManager.get()
-      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      // LIVENESS-EXEMPT AT THIS LAYER (see the note below the capability floor): `sheetLiveness` is not
+      // even destructured, so nothing here can accidentally begin refusing on it out of order.
+      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
       // D2 floor: provisioning the trust anchor for destructive recovery is a sheet-admin capability, the
       // same floor as revert/reset themselves — a plain writer must not move the sheet's trust floor.
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
-      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // NO liveness refusal here, deliberately. Existence — and therefore soft-deleted-ness — is a
+      // DIFFERENTIATED response, and this route moved every such response INSIDE the transaction, after
+      // the authority lease and the post-lease final authorization, precisely so a revoked-but-unexpired
+      // claims-admin cannot enumerate designated canaries. A pre-transaction 404 here re-opens exactly
+      // that oracle (it broke the GATE-ORDER and ORACLE-AFTER-LEASE goldens). The liveness condition
+      // lives in `assertTrustCheckpointSheetExists` at step 4c below, which is where it inherits the
+      // correct ordering.
       // DB-FRESH pre-check, BEFORE any differentiated response. The capability floor above can be
       // satisfied by JWT claims alone, so without this a REVOKED-but-unexpired claims-admin token could
       // still tell 409 (not allowlisted) from 404 (no such sheet) and enumerate which sheets are
@@ -15035,7 +15043,16 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canRead) return sendForbidden(res)
-      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // SEED PATH: `?seed=true` MATERIALIZES the sheet on first touch, so an ABSENT sheet is this
+      // route's normal input, not an error — the TOCTOU goldens require 200 (created at the legacy base)
+      // for a clean id and 400 VALIDATION_ERROR for one that would retroactively cross an existing link,
+      // and a liveness 404 preempts both.
+      //
+      // 'deleted' is NOT exempted, and the distinction is the point: re-seeding over a soft-deleted sheet
+      // would RESURRECT IT BY GET — a plain read silently undoing a delete, bypassing the restore
+      // authority entirely. Absent means "create it"; deleted means "it was deliberately removed".
+      const seedMayMaterialize = seed && sheetLiveness === 'absent'
+      if (!seedMayMaterialize && sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const rawSortRules = viewConfig ? parseMetaSortRules(viewConfig.sortInfo) : []
       const rawFilterInfo = viewConfig ? parseMetaFilterInfo(viewConfig.filterInfo) : null
       if (seed) {

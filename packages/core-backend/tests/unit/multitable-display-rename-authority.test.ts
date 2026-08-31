@@ -685,6 +685,32 @@ describe('F21 — sheet and base display rename', () => {
       expect(JSON.stringify(deleted.body)).not.toContain(SHEET_ID)
     })
 
+    // THE SEED PATH, both directions. `GET /view?seed=true` materializes the sheet on first touch, so an
+    // ABSENT sheet is its normal input and a liveness 404 would break seeding outright (the cross-base
+    // TOCTOU goldens need 200 for a clean id and 400 for one that would retroactively cross a link).
+    // A DELETED sheet is the opposite case and must stay refused: re-seeding over it would RESURRECT IT
+    // BY GET — a plain read silently undoing a delete and bypassing the restore authority. The
+    // real-DB goldens cover the absent leg; the deleted leg is pinned here because nothing else does.
+    it('seed=true on a DELETED sheet is still refused — no resurrect-by-GET', async () => {
+      const store = freshStore()
+      store.sheet.deleted_at = '2026-08-30T00:00:00.000Z'
+      const app = await buildApp(ADMIN_USER, store)
+      const res = await on(app).get('/api/multitable/view').query({ seed: 'true', sheetId: SHEET_ID })
+      expect(res.status).toBe(404)
+      expect(res.body.error.code).toBe('SHEET_DELETED')
+      expect(store.sheet.deleted_at).not.toBeNull()
+    })
+
+    it('seed=true on an ABSENT sheet is NOT refused — seeding is what the route is for', async () => {
+      const store = freshStore()
+      const app = await buildApp(ADMIN_USER, store)
+      const res = await on(app).get('/api/multitable/view').query({ seed: 'true', sheetId: MISSING_SHEET_ID })
+      // It may fail later on this mock's thin substrate; the load-bearing fact is that it is NOT the
+      // liveness refusal — the seed flow was allowed to begin.
+      expect(res.body?.error?.code).not.toBe('SHEET_DELETED')
+      expect(res.body?.error?.code).not.toBe('NOT_FOUND')
+    })
+
     it('a deleted sheet is distinguishable from an absent one — different codes, same status', async () => {
       const { app } = await deletedSheetApp()
       const deleted = await on(app).get('/api/multitable/records').query({ sheetId: SHEET_ID })
