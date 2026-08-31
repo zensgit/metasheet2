@@ -54,6 +54,13 @@ const {
 // option sync, so there is no parallel write path.
 const { syncFieldOptions } = require('./field-option-sync-runtime.cjs')
 
+// The 18 contract vocabularies the nine MVP templates declare. Before this module existed a
+// `{ type: 'contract', key }` optionSource resolved to NOTHING on this path, so every ensured select
+// was created with an empty allowed set and the first record write died on `Invalid select option`.
+const {
+  contractOptionSetsForTemplates,
+} = require('./stock-preparation-mvp-option-catalog.cjs')
+
 function optionalString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null
 }
@@ -293,6 +300,51 @@ function buildEnsureEvidence(templates, tables) {
   }
 }
 
+/**
+ * SEED THE ENSURED TABLES' SELECT VOCABULARIES — the second half of "the table is ready".
+ *
+ * A select column whose `property.options` is empty is not a usable column: the multitable record
+ * validator reads that array and refuses every value outside it, so a table ensure that stops at the
+ * schema hands the operator nine tables and a guaranteed `Invalid select option` on the first write.
+ * That is exactly what the first live deployment hit, five fields deep, and it could only be cleared
+ * by hand-seeding — which is the definition of a provisioning step that did not finish.
+ *
+ * Run AFTER the ensure loop rather than folded into the descriptor: `buildMvpTargetDescriptor` is
+ * asserted metadata-only and byte-identical between the fresh and the repaired leg, and putting
+ * option values inside it would break both properties. This is a second, additive
+ * `patchObjectFieldProperty` pass over the SAME frozen templates, through the SAME option-sync
+ * function an operator would call by hand.
+ *
+ * ONE soft failure, deliberately: a host whose provisioning API predates `patchObjectFieldProperty`
+ * cannot be patched at all, and refusing to ensure its schema over that would be a regression for a
+ * deployment that is merely old. It is recorded in the evidence as `option_seed_api_unavailable`
+ * instead. Every other failure propagates — an unseeded select IS the defect, and reporting `ready`
+ * over it is what let this reach a customer.
+ */
+async function seedEnsuredMvpContractOptions({ context, projectId, templates }) {
+  try {
+    const result = await syncStockPreparationMvpOptions({
+      context,
+      projectId,
+      permission: 'admin',
+      objectIds: templates.map((template) => template.objectId),
+      // No caller sets: the contract catalog is the whole point of this pass.
+      optionSets: {},
+    })
+    return {
+      seeded: true,
+      mode: 'option_seed_synced',
+      syncedFieldCount: result.evidence.syncedFieldCount,
+      skippedFieldCount: result.evidence.skippedFieldCount,
+    }
+  } catch (error) {
+    if (error && error.code === 'MVP_OPTION_SYNC_API_UNAVAILABLE') {
+      return { seeded: false, mode: 'option_seed_api_unavailable', syncedFieldCount: 0, skippedFieldCount: 0 }
+    }
+    throw error
+  }
+}
+
 async function ensureStockPreparationMvpTargets({ context, projectId, permission, objectIds, baseId } = {}) {
   assertAdminPermission(permission)
   const provisioning = getProvisioningApi(context || {})
@@ -302,10 +354,14 @@ async function ensureStockPreparationMvpTargets({ context, projectId, permission
   for (const template of templates) {
     tables.push(await ensureMvpTemplate({ provisioning, projectId: scopedProjectId, baseId: baseId || null, template }))
   }
+  // The tables exist; now their selects have to mean something. See seedEnsuredMvpContractOptions.
+  const optionSeed = await seedEnsuredMvpContractOptions({ context, projectId: scopedProjectId, templates })
   return {
     ready: tables.every((table) => table.ensured),
     tables,
-    evidence: buildEnsureEvidence(templates, tables),
+    optionSeed,
+    // Counts and a closed mode token only — the option VALUES ride the patch body, never the evidence.
+    evidence: { ...buildEnsureEvidence(templates, tables), optionSeed },
   }
 }
 
@@ -633,10 +689,26 @@ async function syncStockPreparationMvpOptions({ context, projectId, permission, 
   const scopedProjectId = requiredString(projectId, 'projectId')
   const templates = resolveTargetTemplates(objectIds)
 
-  // Reuse the canonical option-set normalization (safe-string / executable-key
-  // / secret-shape validation). Option VALUES are caller-supplied admin
-  // governance vocabulary — nothing is hardcoded here.
-  const suppliedSets = optionSetsFromInput(optionSets || {})
+  // THE CONTRACT VOCABULARIES ARE SEEDED, THE CALLER STILL WINS.
+  //
+  // `{ type: 'contract', key }` names a vocabulary the PLATFORM declares — it is the plugin's own
+  // closed enum, the same class of constant as PREP_STATUSES, and it has to exist without anybody
+  // typing it into a request. Until this merge nothing resolved it: a body-less
+  // `POST /mvp/options/sync` answered `ok: true` having patched nothing, and the fields it declined
+  // to patch recorded the reason `contract_not_available`.
+  //
+  // Spread order is the whole governance story: the catalog goes UNDER the caller's sets, so a
+  // deployment that needs a different vocabulary still supplies it in the body and overrides the
+  // default outright. Nothing here can override an operator; it only removes the empty case. The
+  // defaults are scoped to the TARGETED templates (see contractOptionSetsForTemplates) so they can
+  // never trip the unknown-source-key check below.
+  //
+  // Both halves then go through the canonical normalization (safe-string / executable-key /
+  // secret-shape validation) — the catalog gets no shortcut past the checks caller input faces.
+  const suppliedSets = optionSetsFromInput({
+    ...contractOptionSetsForTemplates(templates),
+    ...(optionSets || {}),
+  })
 
   const declaredSourceKeys = new Set()
   for (const template of templates) {
@@ -680,5 +752,6 @@ module.exports = {
     buildPropertyPatch,
     resolveSkipReason,
     getMvpOptionSyncApi,
+    seedEnsuredMvpContractOptions,
   },
 }
