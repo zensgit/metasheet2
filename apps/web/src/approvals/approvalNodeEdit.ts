@@ -332,12 +332,11 @@ function isAssigneeSourceValid(source: ApprovalAssigneeSource, topLevelUserField
  * arbiter). Each edited node needs at least one assignee source, every source must be well-formed,
  * and a `form_field_user` source must reference a top-level `user` field (when `fields` is given).
  *
- * P1-C: `parallelRegionNodeKeys` (from `collectParallelRegionNodeKeys` in templateAuthoring.ts) is the
- * linear-only fail-closed gate for `approvalMode: 'threshold'` and `timeout` — both are backend-
- * rejected inside a parallel region (`APPROVAL_THRESHOLD_IN_PARALLEL` /
- * `APPROVAL_NODE_TIMEOUT_PARALLEL_UNSUPPORTED`). Optional so existing callers/tests that don't touch
- * threshold/timeout are unaffected; omitting it treats every node as outside a parallel region (the
- * caller — `validateTemplateApprovalFlow` — always supplies the real set for the live app).
+ * P1-C + Lock-1 K6: `parallelRegionNodeKeys` (from `collectParallelRegionNodeKeys` in
+ * templateAuthoring.ts) is the linear-only fail-closed gate for threshold, sequential, and timeout.
+ * Each is backend-rejected inside a parallel region. Optional so existing callers/tests that don't
+ * touch these controls are unaffected; omitting it treats every node as outside a parallel region
+ * (the caller — `validateTemplateApprovalFlow` — always supplies the real set for the live app).
  *
  * `approvalNodeKeys` (fix-round follow-up, gate P2-1): the set of the preserved graph's `approval`-
  * type node keys, mirroring backend `timeout.jumpToNodeKey references unknown node` /
