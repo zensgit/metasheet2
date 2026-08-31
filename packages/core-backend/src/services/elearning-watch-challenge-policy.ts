@@ -37,7 +37,6 @@ export class ElearningWatchChallengePolicyError extends Error {
     this.name = 'ElearningWatchChallengePolicyError'
   }
 }
-
 export interface ElearningActiveWatchChallenge {
   readonly challengeId: string
   readonly deadlineAtMs: number
@@ -334,4 +333,3 @@ export function advanceElearningWatchChallenge(
     trustedMs: onTime ? checkedAdd(state.trustedMs, pendingMs) : state.trustedMs,
   }, onTime ? pendingMs : 0, onTime ? 0 : pendingMs)
 }
-

@@ -46,7 +46,6 @@ export class ElearningWatchChallengeScheduleError extends Error {
     this.name = 'ElearningWatchChallengeScheduleError'
   }
 }
-
 export interface ElearningWatchChallengeCheckpoint {
   readonly ordinal: number
   readonly targetTrustedMs: number
@@ -278,4 +277,3 @@ export function resolveElearningWatchChallengeDue(
     targetTrustedMs: checkpoint.targetTrustedMs,
   })
 }
-

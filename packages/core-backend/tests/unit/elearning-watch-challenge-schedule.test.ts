@@ -229,4 +229,3 @@ describe('elearning watch challenge schedule', () => {
     })), 'invalid_input')
   })
 })
-

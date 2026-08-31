@@ -12,8 +12,8 @@ describe('elearning watch challenge migration contract', () => {
     expect(source).toContain("item_type = 'video'")
     expect(source).toContain('watch_challenge_count BETWEEN 1 AND 10')
     expect(source).toContain('watch_challenge_response_window_ms BETWEEN 1 AND 120000')
-    expect(source).toContain('FOREIGN KEY (org_id, session_id)')
-    expect(source).toContain('REFERENCES elearning_learning_sessions (org_id, id) ON DELETE RESTRICT')
+    expect(source).toContain('org_id, session_id, course_version_id, course_version_item_id, user_id')
+    expect(source).toContain('org_id, id, course_version_id, course_version_item_id, user_id')
     expect(source).toContain('FOREIGN KEY (org_id, course_version_item_id)')
   })
 
@@ -27,11 +27,13 @@ describe('elearning watch challenge migration contract', () => {
     expect(source).toContain('request_hash_version = 1')
   })
 
-  it('fails replay on partial tables, columns, constraints, or trigger rebinding', async () => {
+  it('fails replay on partial tables, columns/defaults, constraints, functions, or trigger rebinding', async () => {
     const source = await readFile(migrationUrl, 'utf8')
     expect(source).toContain('migration drift: partial tables')
     expect(source).toContain('migration drift: table columns')
+    expect(source).toContain('migration drift: item defaults')
     expect(source).toContain('migration drift: constraints')
+    expect(source).toContain('migration drift: functions')
     expect(source).toContain('migration drift: triggers')
     expect(source).toContain('row.function_oid !== row.canonical_oid')
   })

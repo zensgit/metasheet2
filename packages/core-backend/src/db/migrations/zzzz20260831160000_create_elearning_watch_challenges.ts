@@ -23,6 +23,7 @@ const ITEM_COLUMNS = new Map([
 const EXPECTED_COLUMNS = new Map<string, Map<string, string>>([
   [ELEARNING_WATCH_CHALLENGE_SCHEDULES_TABLE, new Map([
     ['id', 'uuid:NO'], ['org_id', 'text:NO'], ['session_id', 'uuid:NO'],
+    ['course_version_id', 'uuid:NO'],
     ['course_version_item_id', 'uuid:NO'], ['user_id', 'text:NO'], ['mode', 'text:NO'],
     ['policy_revision', 'text:NO'], ['response_window_ms', 'bigint:NO'],
     ['video_duration_ms', 'bigint:NO'], ['checkpoints', 'jsonb:NO'],
@@ -35,7 +36,8 @@ const EXPECTED_COLUMNS = new Map<string, Map<string, string>>([
   ])],
   [ELEARNING_WATCH_CHALLENGE_EVENTS_TABLE, new Map([
     ['id', 'uuid:NO'], ['org_id', 'text:NO'], ['schedule_id', 'uuid:NO'],
-    ['session_id', 'uuid:NO'], ['course_version_item_id', 'uuid:NO'], ['user_id', 'text:NO'],
+    ['session_id', 'uuid:NO'], ['course_version_id', 'uuid:NO'],
+    ['course_version_item_id', 'uuid:NO'], ['user_id', 'text:NO'],
     ['challenge_id', 'uuid:NO'], ['ordinal', 'smallint:NO'], ['kind', 'text:NO'],
     ['policy_revision', 'text:NO'], ['credited_ms', 'bigint:NO'],
     ['discarded_ms', 'bigint:NO'], ['occurred_at', 'timestamp with time zone:NO'],
@@ -43,7 +45,9 @@ const EXPECTED_COLUMNS = new Map<string, Map<string, string>>([
   [ELEARNING_WATCH_CHALLENGE_REQUESTS_TABLE, new Map([
     ['id', 'uuid:NO'], ['org_id', 'text:NO'], ['user_id', 'text:NO'],
     ['request_id', 'uuid:NO'], ['request_hash', 'text:NO'],
-    ['request_hash_version', 'integer:NO'], ['session_id', 'uuid:NO'],
+    ['request_hash_version', 'integer:NO'], ['schedule_id', 'uuid:NO'],
+    ['session_id', 'uuid:NO'], ['course_version_id', 'uuid:NO'],
+    ['course_version_item_id', 'uuid:NO'],
     ['challenge_id', 'uuid:NO'], ['result', 'jsonb:YES'],
     ['created_at', 'timestamp with time zone:NO'],
   ])],
@@ -64,7 +68,7 @@ const EXPECTED_CONSTRAINTS = new Map<string, { table: string; definition: string
   }],
   ['elearning_watch_challenge_events_schedule_fk', {
     table: ELEARNING_WATCH_CHALLENGE_EVENTS_TABLE,
-    definition: 'FOREIGN KEY (org_id, schedule_id) REFERENCES elearning_watch_challenge_schedules(org_id, id) ON DELETE RESTRICT',
+    definition: 'FOREIGN KEY (org_id, schedule_id, session_id, course_version_id, course_version_item_id, user_id) REFERENCES elearning_watch_challenge_schedules(org_id, id, session_id, course_version_id, course_version_item_id, user_id) ON DELETE RESTRICT',
   }],
   ['elearning_watch_challenge_requests_hash_chk', {
     table: ELEARNING_WATCH_CHALLENGE_REQUESTS_TABLE,
@@ -80,7 +84,7 @@ const EXPECTED_CONSTRAINTS = new Map<string, { table: string; definition: string
   }],
   ['elearning_watch_challenge_requests_schedule_fk', {
     table: ELEARNING_WATCH_CHALLENGE_REQUESTS_TABLE,
-    definition: 'FOREIGN KEY (org_id, session_id) REFERENCES elearning_watch_challenge_schedules(org_id, session_id) ON DELETE RESTRICT',
+    definition: 'FOREIGN KEY (org_id, schedule_id, session_id, course_version_id, course_version_item_id, user_id) REFERENCES elearning_watch_challenge_schedules(org_id, id, session_id, course_version_id, course_version_item_id, user_id) ON DELETE RESTRICT',
   }],
   ['elearning_watch_challenge_schedules_active_shape_chk', {
     table: ELEARNING_WATCH_CHALLENGE_SCHEDULES_TABLE,
@@ -94,13 +98,17 @@ const EXPECTED_CONSTRAINTS = new Map<string, { table: string; definition: string
     table: ELEARNING_WATCH_CHALLENGE_SCHEDULES_TABLE,
     definition: 'UNIQUE (org_id, id)',
   }],
+  ['elearning_watch_challenge_schedules_identity_uniq', {
+    table: ELEARNING_WATCH_CHALLENGE_SCHEDULES_TABLE,
+    definition: 'UNIQUE (org_id, id, session_id, course_version_id, course_version_item_id, user_id)',
+  }],
   ['elearning_watch_challenge_schedules_pkey', {
     table: ELEARNING_WATCH_CHALLENGE_SCHEDULES_TABLE,
     definition: 'PRIMARY KEY (id)',
   }],
   ['elearning_watch_challenge_schedules_session_fk', {
     table: ELEARNING_WATCH_CHALLENGE_SCHEDULES_TABLE,
-    definition: 'FOREIGN KEY (org_id, session_id) REFERENCES elearning_learning_sessions(org_id, id) ON DELETE RESTRICT',
+    definition: 'FOREIGN KEY (org_id, session_id, course_version_id, course_version_item_id, user_id) REFERENCES elearning_learning_sessions(org_id, id, course_version_id, course_version_item_id, user_id) ON DELETE RESTRICT',
   }],
   ['elearning_watch_challenge_schedules_session_uniq', {
     table: ELEARNING_WATCH_CHALLENGE_SCHEDULES_TABLE,
@@ -108,7 +116,7 @@ const EXPECTED_CONSTRAINTS = new Map<string, { table: string; definition: string
   }],
   ['elearning_watch_challenge_schedules_snapshot_chk', {
     table: ELEARNING_WATCH_CHALLENGE_SCHEDULES_TABLE,
-    definition: "CHECK ((mode = ANY (ARRAY['scheduled'::text, 'short_video_exempt'::text])) AND btrim(org_id) <> ''::text AND org_id = btrim(org_id) AND btrim(user_id) <> ''::text AND user_id = btrim(user_id) AND btrim(policy_revision) <> ''::text AND policy_revision = btrim(policy_revision) AND response_window_ms >= 1 AND response_window_ms <= 120000 AND video_duration_ms > 0 AND jsonb_typeof(checkpoints) = 'array'::text AND issued_count >= 0 AND issued_count <= 10 AND provisional_ms >= 0)",
+    definition: "CHECK ((mode = ANY (ARRAY['disabled'::text, 'scheduled'::text, 'short_video_exempt'::text])) AND btrim(org_id) <> ''::text AND org_id = btrim(org_id) AND btrim(user_id) <> ''::text AND user_id = btrim(user_id) AND btrim(policy_revision) <> ''::text AND policy_revision = btrim(policy_revision) AND response_window_ms >= 1 AND response_window_ms <= 120000 AND video_duration_ms > 0 AND jsonb_typeof(checkpoints) = 'array'::text AND issued_count >= 0 AND issued_count <= 10 AND provisional_ms >= 0)",
   }],
 ])
 
@@ -124,7 +132,7 @@ const EXPECTED_DEFAULTS = new Map<string, string>([
 
 const EXPECTED_FUNCTION_DIGESTS = new Map<string, string>([
   ['elearning_watch_challenge_deny_mutation', 'c744df6580a005e5d2656687e09398ea'],
-  ['elearning_watch_challenge_schedule_authority', '1af8ce8842ec5a36e9ddb6ea98b40151'],
+  ['elearning_watch_challenge_schedule_authority', 'de589898ab2790a3ffc870f8642036d8'],
 ])
 
 async function tableExists(db: Kysely<unknown>, table: string): Promise<boolean> {
@@ -162,6 +170,21 @@ async function assertCanonical(db: Kysely<unknown>): Promise<void> {
   const itemColumns = await columnsOf(db, 'elearning_course_version_items', [...ITEM_COLUMNS.keys()])
   if (!equalMaps(itemColumns, ITEM_COLUMNS)) {
     throw new Error('elearning watch challenge migration drift: item columns')
+  }
+  const itemDefaults = await sql<{ column_name: string }>`
+    SELECT attribute.attname AS column_name
+      FROM pg_attrdef default_row
+      JOIN pg_attribute attribute
+        ON attribute.attrelid = default_row.adrelid
+       AND attribute.attnum = default_row.adnum
+      JOIN pg_class table_row ON table_row.oid = default_row.adrelid
+      JOIN pg_namespace namespace_row ON namespace_row.oid = table_row.relnamespace
+     WHERE namespace_row.nspname = current_schema()
+       AND table_row.relname = 'elearning_course_version_items'
+       AND attribute.attname = ANY(${sql.val([...ITEM_COLUMNS.keys()])}::text[])
+  `.execute(db)
+  if (itemDefaults.rows.length !== 0) {
+    throw new Error('elearning watch challenge migration drift: item defaults')
   }
   for (const [table, expected] of EXPECTED_COLUMNS) {
     const actual = await columnsOf(db, table)
@@ -345,6 +368,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       id uuid PRIMARY KEY,
       org_id text NOT NULL,
       session_id uuid NOT NULL,
+      course_version_id uuid NOT NULL,
       course_version_item_id uuid NOT NULL,
       user_id text NOT NULL,
       mode text NOT NULL,
@@ -363,9 +387,11 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       created_at timestamptz NOT NULL DEFAULT now(),
       updated_at timestamptz NOT NULL DEFAULT now(),
       CONSTRAINT elearning_watch_challenge_schedules_org_id_id_uniq UNIQUE (org_id, id),
+      CONSTRAINT elearning_watch_challenge_schedules_identity_uniq
+        UNIQUE (org_id, id, session_id, course_version_id, course_version_item_id, user_id),
       CONSTRAINT elearning_watch_challenge_schedules_session_uniq UNIQUE (org_id, session_id),
       CONSTRAINT elearning_watch_challenge_schedules_snapshot_chk CHECK (
-        mode IN ('scheduled', 'short_video_exempt')
+        mode IN ('disabled', 'scheduled', 'short_video_exempt')
         AND btrim(org_id) <> '' AND org_id = btrim(org_id)
         AND btrim(user_id) <> '' AND user_id = btrim(user_id)
         AND btrim(policy_revision) <> '' AND policy_revision = btrim(policy_revision)
@@ -390,8 +416,11 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         )
       ),
       CONSTRAINT elearning_watch_challenge_schedules_session_fk
-        FOREIGN KEY (org_id, session_id)
-        REFERENCES elearning_learning_sessions (org_id, id) ON DELETE RESTRICT,
+        FOREIGN KEY (
+          org_id, session_id, course_version_id, course_version_item_id, user_id
+        ) REFERENCES elearning_learning_sessions (
+          org_id, id, course_version_id, course_version_item_id, user_id
+        ) ON DELETE RESTRICT,
       CONSTRAINT elearning_watch_challenge_schedules_item_fk
         FOREIGN KEY (org_id, course_version_item_id)
         REFERENCES elearning_course_version_items (org_id, id) ON DELETE RESTRICT
@@ -404,6 +433,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       org_id text NOT NULL,
       schedule_id uuid NOT NULL,
       session_id uuid NOT NULL,
+      course_version_id uuid NOT NULL,
       course_version_item_id uuid NOT NULL,
       user_id text NOT NULL,
       challenge_id uuid NOT NULL,
@@ -419,8 +449,11 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         AND credited_ms >= 0 AND discarded_ms >= 0
       ),
       CONSTRAINT elearning_watch_challenge_events_schedule_fk
-        FOREIGN KEY (org_id, schedule_id)
-        REFERENCES elearning_watch_challenge_schedules (org_id, id) ON DELETE RESTRICT
+        FOREIGN KEY (
+          org_id, schedule_id, session_id, course_version_id, course_version_item_id, user_id
+        ) REFERENCES elearning_watch_challenge_schedules (
+          org_id, id, session_id, course_version_id, course_version_item_id, user_id
+        ) ON DELETE RESTRICT
     )
   `.execute(db)
   await sql`
@@ -431,7 +464,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       request_id uuid NOT NULL,
       request_hash text NOT NULL,
       request_hash_version integer NOT NULL,
+      schedule_id uuid NOT NULL,
       session_id uuid NOT NULL,
+      course_version_id uuid NOT NULL,
+      course_version_item_id uuid NOT NULL,
       challenge_id uuid NOT NULL,
       result jsonb,
       created_at timestamptz NOT NULL DEFAULT now(),
@@ -442,8 +478,11 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         AND (result IS NULL OR jsonb_typeof(result) = 'object')
       ),
       CONSTRAINT elearning_watch_challenge_requests_schedule_fk
-        FOREIGN KEY (org_id, session_id)
-        REFERENCES elearning_watch_challenge_schedules (org_id, session_id) ON DELETE RESTRICT
+        FOREIGN KEY (
+          org_id, schedule_id, session_id, course_version_id, course_version_item_id, user_id
+        ) REFERENCES elearning_watch_challenge_schedules (
+          org_id, id, session_id, course_version_id, course_version_item_id, user_id
+        ) ON DELETE RESTRICT
     )
   `.execute(db)
 
@@ -457,6 +496,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       IF NEW.id IS DISTINCT FROM OLD.id
          OR NEW.org_id IS DISTINCT FROM OLD.org_id
          OR NEW.session_id IS DISTINCT FROM OLD.session_id
+         OR NEW.course_version_id IS DISTINCT FROM OLD.course_version_id
          OR NEW.course_version_item_id IS DISTINCT FROM OLD.course_version_item_id
          OR NEW.user_id IS DISTINCT FROM OLD.user_id
          OR NEW.mode IS DISTINCT FROM OLD.mode

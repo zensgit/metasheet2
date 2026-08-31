@@ -349,4 +349,3 @@ describe('elearning watch challenge policy', () => {
     expect(result.state.status).toBe('watching')
   })
 })
-

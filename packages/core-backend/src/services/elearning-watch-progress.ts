@@ -502,6 +502,7 @@ async function initializeChallengeForState(
     orgId: string
     userId: string
     sessionId: string
+    versionId: string
     itemId: string
     durationMs: number
   },
@@ -559,6 +560,7 @@ export async function startElearningWatch(
         orgId,
         userId,
         sessionId: existing.id,
+        versionId: item.versionId,
         itemId: item.itemId,
         durationMs: item.durationMs,
       })
@@ -611,6 +613,7 @@ export async function startElearningWatch(
       orgId,
       userId,
       sessionId,
+      versionId: item.versionId,
       itemId: item.itemId,
       durationMs: item.durationMs,
     })
@@ -911,6 +914,7 @@ export async function recordElearningHeartbeat(
     })
     let challengeResult = {
       challenge: undefined as ElearningWatchChallengeView | null | undefined,
+      completionReady: true,
       creditedMs: credit.creditedMs,
       discardedMs: 0,
       maxPositionMs: credit.maxPositionMs,
@@ -940,7 +944,7 @@ export async function recordElearningHeartbeat(
     const digest = rollElearningWatchEventDigest(session.rollingEventDigest, parts)
     const completed =
       nextEffective >= elearningWatchCompletionThresholdMs(durationMs, ELEARNING_WATCH_THRESHOLD_BPS)
-      && (!challengeEnabled || challengeResult.challenge === null)
+      && (!challengeEnabled || challengeResult.completionReady)
 
     await tx.query(
       `/* elearning-watch:insert-event */
@@ -1138,10 +1142,11 @@ export async function acknowledgeElearningWatchChallenge(
           String(transition.creditedMs),
           String(transition.discardedMs),
         ].join('\n'), 'utf8').digest('hex')
-        const completed = nextEffective >= elearningWatchCompletionThresholdMs(
-          durationMs,
-          ELEARNING_WATCH_THRESHOLD_BPS,
-        )
+        const completed = transition.completionReady
+          && nextEffective >= elearningWatchCompletionThresholdMs(
+            durationMs,
+            ELEARNING_WATCH_THRESHOLD_BPS,
+          )
         const sessionUpdate = await tx.query(
           `/* elearning-watch-challenge:update-session */
            UPDATE elearning_learning_sessions

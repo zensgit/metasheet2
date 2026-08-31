@@ -25,6 +25,7 @@ export interface ElearningWatchChallengeView {
 
 export interface ElearningWatchChallengeHeartbeatResult {
   challenge: ElearningWatchChallengeView | null
+  completionReady: boolean
   creditedMs: number
   discardedMs: number
   maxPositionMs: number
@@ -47,6 +48,7 @@ interface ScheduleRow {
   id: string
   orgId: string
   sessionId: string
+  versionId: string
   itemId: string
   userId: string
   schedule: ElearningWatchChallengeSchedule
@@ -117,6 +119,7 @@ function parseScheduleRow(row: Record<string, unknown>): ScheduleRow {
   const id = asText(row.id)
   const orgId = asText(row.org_id)
   const sessionId = asText(row.session_id)
+  const versionId = asText(row.course_version_id)
   const itemId = asText(row.course_version_item_id)
   const userId = asText(row.user_id)
   const status = asText(row.status)
@@ -132,7 +135,7 @@ function parseScheduleRow(row: Record<string, unknown>): ScheduleRow {
     : asInt(row.challenge_base_max_position_ms)
   const now = asDate(row.now_at)
   if (
-    !id || !orgId || !sessionId || !itemId || !userId || !now
+    !id || !orgId || !sessionId || !versionId || !itemId || !userId || !now
     || !status || !['watching', 'challenged', 'paused', 'completed'].includes(status)
     || (row.active_challenge_id !== null && !activeChallengeId)
     || (row.active_ordinal !== null && activeOrdinal === null)
@@ -143,6 +146,7 @@ function parseScheduleRow(row: Record<string, unknown>): ScheduleRow {
     id,
     orgId,
     sessionId,
+    versionId,
     itemId,
     userId,
     schedule: parseScheduleSnapshot({
@@ -161,6 +165,12 @@ function parseScheduleRow(row: Record<string, unknown>): ScheduleRow {
     provisionalMs: requireInt(row.provisional_ms),
     now,
   }
+}
+
+function isCompletionReady(row: ScheduleRow): boolean {
+  return row.status === 'watching'
+    && (row.schedule.mode !== 'scheduled'
+      || row.issuedCount === row.schedule.checkpoints.length)
 }
 
 function view(row: ScheduleRow): ElearningWatchChallengeView | null {
@@ -218,6 +228,7 @@ export async function initializeElearningWatchChallenge(
     orgId: string
     userId: string
     sessionId: string
+    versionId: string
     itemId: string
     durationMs: number
   },
@@ -233,21 +244,25 @@ export async function initializeElearningWatchChallenge(
   )
   const row = policy.rows[0]
   if (!row) fail('unavailable')
-  if (
+  const policyDisabled = (
     row.watch_challenge_policy_revision === null
     && row.watch_challenge_count === null
     && row.watch_challenge_min_duration_ms === null
     && row.watch_challenge_response_window_ms === null
-  ) return null
-  const policyRevision = asText(row.watch_challenge_policy_revision)
-  const challengeCount = asInt(row.watch_challenge_count)
-  const minimumVideoDurationMs = asInt(row.watch_challenge_min_duration_ms)
-  const responseWindowMs = asInt(row.watch_challenge_response_window_ms)
-  if (
-    !policyRevision || challengeCount === null || minimumVideoDurationMs === null
-    || responseWindowMs === null
-  ) fail('unavailable')
-  const entropy = input.durationMs < minimumVideoDurationMs
+  )
+  const policyRevision = policyDisabled
+    ? 'watch-challenge-disabled-v1'
+    : asText(row.watch_challenge_policy_revision)
+  const challengeCount = policyDisabled ? 0 : asInt(row.watch_challenge_count)
+  const minimumVideoDurationMs = policyDisabled
+    ? 1
+    : asInt(row.watch_challenge_min_duration_ms)
+  const responseWindowMs = policyDisabled
+    ? 1
+    : asInt(row.watch_challenge_response_window_ms)
+  if (!policyRevision || challengeCount === null || minimumVideoDurationMs === null
+    || responseWindowMs === null) fail('unavailable')
+  const entropy = challengeCount === 0 || input.durationMs < minimumVideoDurationMs
     ? []
     : Array.from({ length: challengeCount }, () => randomInt(0, 0x1_0000_0000))
   const schedule = createElearningWatchChallengeSchedule({
@@ -261,12 +276,12 @@ export async function initializeElearningWatchChallenge(
   await tx.query(
     `/* elearning-watch-challenge:insert-schedule */
      INSERT INTO elearning_watch_challenge_schedules (
-       id, org_id, session_id, course_version_item_id, user_id, mode,
+       id, org_id, session_id, course_version_id, course_version_item_id, user_id, mode,
        policy_revision, response_window_ms, video_duration_ms, checkpoints
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
      ON CONFLICT (org_id, session_id) DO NOTHING`,
     [
-      randomUUID(), input.orgId, input.sessionId, input.itemId, input.userId,
+      randomUUID(), input.orgId, input.sessionId, input.versionId, input.itemId, input.userId,
       schedule.mode, schedule.policyRevision, schedule.responseWindowMs,
       schedule.videoDurationMs, JSON.stringify(schedule.checkpoints),
     ],
@@ -296,12 +311,7 @@ export async function applyElearningWatchChallengeHeartbeat(
   },
 ): Promise<ElearningWatchChallengeHeartbeatResult> {
   const row = await lockSchedule(tx, input.orgId, input.sessionId, input.userId)
-  if (!row) return {
-    challenge: null,
-    creditedMs: input.rawCreditedMs,
-    discardedMs: 0,
-    maxPositionMs: input.rawMaxPositionMs,
-  }
+  if (!row) fail('unavailable')
   if (row.status === 'completed') fail('unavailable')
 
   if (row.status === 'challenged' && row.activeDeadlineAt && row.now > row.activeDeadlineAt) {
@@ -316,6 +326,7 @@ export async function applyElearningWatchChallengeHeartbeat(
     await insertEvent(tx, row, 'timeout', 0, discardedMs)
     return {
       challenge: { ...view({ ...row, status: 'paused' })! },
+      completionReady: false,
       creditedMs: 0,
       discardedMs,
       maxPositionMs: row.challengeBaseMaxPositionMs ?? input.rawMaxPositionMs,
@@ -324,6 +335,7 @@ export async function applyElearningWatchChallengeHeartbeat(
   if (row.status === 'paused') {
     return {
       challenge: view(row),
+      completionReady: false,
       creditedMs: 0,
       discardedMs: input.rawCreditedMs,
       maxPositionMs: row.challengeBaseMaxPositionMs ?? input.rawMaxPositionMs,
@@ -339,6 +351,7 @@ export async function applyElearningWatchChallengeHeartbeat(
     )
     return {
       challenge: view(row),
+      completionReady: false,
       creditedMs: 0,
       discardedMs: 0,
       maxPositionMs: input.rawMaxPositionMs,
@@ -352,6 +365,7 @@ export async function applyElearningWatchChallengeHeartbeat(
   if (!due) {
     return {
       challenge: null,
+      completionReady: isCompletionReady(row),
       creditedMs: input.rawCreditedMs,
       discardedMs: 0,
       maxPositionMs: input.rawMaxPositionMs,
@@ -396,6 +410,7 @@ export async function applyElearningWatchChallengeHeartbeat(
       ordinal: due.ordinal,
       status: 'challenged',
     },
+    completionReady: false,
     creditedMs: 0,
     discardedMs: 0,
     maxPositionMs: input.rawMaxPositionMs,
@@ -413,11 +428,11 @@ async function insertEvent(
   await tx.query(
     `/* elearning-watch-challenge:insert-event */
      INSERT INTO elearning_watch_challenge_events (
-       id, org_id, schedule_id, session_id, course_version_item_id, user_id,
+       id, org_id, schedule_id, session_id, course_version_id, course_version_item_id, user_id,
        challenge_id, ordinal, kind, policy_revision, credited_ms, discarded_ms
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
     [
-      randomUUID(), row.orgId, row.id, row.sessionId, row.itemId, row.userId,
+      randomUUID(), row.orgId, row.id, row.sessionId, row.versionId, row.itemId, row.userId,
       row.activeChallengeId, row.activeOrdinal, kind, row.schedule.policyRevision,
       creditedMs, discardedMs,
     ],
@@ -434,11 +449,17 @@ export async function acknowledgeElearningWatchChallengeState<T extends object>(
     challengeId: string
   },
   finalize: (transition: {
+    completionReady: boolean
     creditedMs: number
     discardedMs: number
     maxPositionMs: number
   }) => Promise<T>,
 ): Promise<{ duplicate: boolean; result: T }> {
+  await tx.query(
+    `/* elearning-watch-challenge:lock-request-identity */
+     SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+    [`${ELEARNING_WATCH_CHALLENGE_REQUEST_DOMAIN}\n${input.orgId}\n${input.userId}\n${input.requestId}`],
+  )
   const row = await lockSchedule(tx, input.orgId, input.sessionId, input.userId)
   if (!row) fail('challenge_stale')
   const requestHash = deriveElearningWatchChallengeRequestHash(input)
@@ -476,17 +497,23 @@ export async function acknowledgeElearningWatchChallengeState<T extends object>(
     [input.orgId, row.id],
   )
   await insertEvent(tx, row, 'ack', creditedMs, discardedMs)
-  const result = await finalize({ creditedMs, discardedMs, maxPositionMs })
+  const result = await finalize({
+    completionReady: row.issuedCount === row.schedule.checkpoints.length,
+    creditedMs,
+    discardedMs,
+    maxPositionMs,
+  })
   await tx.query(
     `/* elearning-watch-challenge:insert-request */
      INSERT INTO elearning_watch_challenge_requests (
        id, org_id, user_id, request_id, request_hash, request_hash_version,
-       session_id, challenge_id, result
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)`,
+       schedule_id, session_id, course_version_id, course_version_item_id,
+       challenge_id, result
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)`,
     [
       randomUUID(), input.orgId, input.userId, input.requestId, requestHash,
-      ELEARNING_WATCH_CHALLENGE_REQUEST_HASH_VERSION, input.sessionId,
-      input.challengeId, JSON.stringify(result),
+      ELEARNING_WATCH_CHALLENGE_REQUEST_HASH_VERSION, row.id, input.sessionId,
+      row.versionId, row.itemId, input.challengeId, JSON.stringify(result),
     ],
   )
   return { duplicate: false, result }
