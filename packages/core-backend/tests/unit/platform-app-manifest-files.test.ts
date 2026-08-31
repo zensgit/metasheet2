@@ -100,7 +100,7 @@ describe('shipped app.manifest.json files', () => {
       JSON.parse(fs.readFileSync(path.join(PLUGINS_DIR, 'plugin-integration-core', 'app.manifest.json'), 'utf8'))
     )
     expect(parsed.id).toBe('stock-preparation')
-    expect(parsed.displayName).toBe('BOM 备料')
+    expect(parsed.displayName).toBe('BOM备料')
     expect(parsed.valueStatement).toBeTruthy()
     expect(parsed.objects.every((object) => object.backing === 'multitable')).toBe(true)
     expect(parsed.objects.every((object) => object.ensure?.idempotent === true)).toBe(true)
