@@ -379,7 +379,13 @@ describe('parseArgs', () => {
   })
 
   test('parses --out and --help', () => {
-    assert.deepEqual(parseArgs(['--out', 'x.json']), { out: 'x.json', help: false })
+    assert.deepEqual(parseArgs(['--out', 'x.json']), {
+      out: 'x.json',
+      help: false,
+      emitDraft: false,
+      preset: null,
+      outDir: null,
+    })
     assert.equal(parseArgs(['--help']).help, true)
   })
 })
@@ -491,6 +497,31 @@ describe('live-instance regressions (all four found by the first real SQL Server
     assert.equal(isBareIpAddress('plm.internal.example'), false)
     assert.equal(isBareIpAddress(''), false)
     assert.equal(isBareIpAddress(undefined), false)
+  })
+
+  test('a NON-ASCII guarded value is compared whole-leaf, never as a substring', () => {
+    // The whole-word sweep is meaningless around CJK: `isWordChar` recognises only [0-9a-z_], so
+    // every position inside a CJK string is a "boundary" and containsAsWholeWord degrades to exactly
+    // the naive substring test this guard rejects by name. The guard's own comment said a non-ASCII
+    // value falls back to whole-leaf equality; until this change the code did not do it, and the
+    // collision below -- a unit vocabulary carrying 件 alongside an attribute label 附件 that a
+    // MATCHED dictionary row legitimately contributes -- failed the whole run closed over output that
+    // leaked nothing.
+    const report = {
+      schemaInventory: [],
+      dictionaries: [{ table: 'dbo.T_DICT', keyColumn: 'code', companions: {}, entries: [{ attrName: 'part_ExAttr21', displayLabel: '附件' }] }],
+    }
+    assert.doesNotThrow(() => assertValuesFree(report, { leakGuardValues: new Set(['件']) }))
+    // ...and a real leak of the same value, arriving as its own leaf, is still caught.
+    assert.throws(
+      () => assertValuesFree({ schemaInventory: [], dictionaries: [], stray: '件' }, { leakGuardValues: new Set(['件']) }),
+      /VALUES_FREE_SELF_CHECK_FAILED/,
+    )
+    // A multi-character CJK value leaked as its own leaf is caught too.
+    assert.throws(
+      () => assertValuesFree({ schemaInventory: [], dictionaries: [], stray: '机密业务备注' }, { leakGuardValues: new Set(['机密业务备注']) }),
+      /VALUES_FREE_SELF_CHECK_FAILED/,
+    )
   })
 
   test('the values-free check compares whole leaves, not substrings', () => {

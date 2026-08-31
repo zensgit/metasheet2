@@ -53,15 +53,52 @@
  * This is a real, currently-unresolved packaging gap for this script's actual use as an ops tool
  * (as opposed to its hermetic test suite, which never imports `mssql` at all — see connect()).
  *
+ * DRAFT MODE (H1, `--emit-draft --preset <path> --out-dir <dir>`). Given a VENDOR PRESET — which
+ * encodes HOW TO DISCOVER (vendor table topology + where the dictionary tables are) and never WHAT
+ * WAS DISCOVERED — the probe additionally reads the CUSTOMER'S OWN dictionary tables (through the
+ * same row-cap guard, enabled rows only) and emits a draft `ext_` field mapping plus a customer-pack
+ * skeleton for a human to confirm. See scripts/ops/source-discovery-draft-emitter.mjs for the
+ * fail-closed rule (nothing the dictionaries do not positively justify is ever proposed) and for
+ * `adaptVendorPresetShape`, the single function that isolates the assumed preset schema.
+ *
+ * THE VALUES SPLIT, and it is the whole point of the flag being separate:
+ *   * the DRAFT files (in --out-dir, which must be OUTSIDE this repository) CONTAIN customer values —
+ *     dictionary labels and option vocabularies — because a draft a human confirms has to;
+ *   * the REPORT (--out) and STDOUT stay values-free exactly as before. What crosses back is
+ *     `report.draftEmission`: identifiers, coded tokens and counts, no label, no option value and no
+ *     prose. It is NOT in assertValuesFree's excluded-section list, so the leak guard sweeps it.
+ *
  * Exit codes:
  *   0  report produced (structural findings may be empty — that is a valid, informative result)
  *   1  unexpected runtime/DB error, or the values-free self-check refused to write the report
- *   2  required input missing (env vars or --out)
+ *   2  required input missing (env vars, --out, or a draft flag / bad --out-dir / bad preset file)
+ *   3  draft emission REFUSED with a coded reason — most often no vendor preset's signature was met,
+ *      or two tied. Never a guess. The report itself is not written in this case.
  */
 
-import { writeFileSync, mkdirSync } from 'node:fs'
+import { writeFileSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+// H1 — the confirm-ready DRAFT EMITTER. Every function it exports is pure (rows in, drafts out);
+// this file keeps ALL the I/O, the connection, the row-cap guard and the values-free self-check.
+// See its header for the fail-closed rule and for the one adapter function
+// (adaptVendorPresetShape) that isolates what a vendor preset is assumed to look like.
+import {
+  DRAFT_FILE_NAMES,
+  SourceDraftEmitterError,
+  adaptVendorPresetShape,
+  buildCatalogTableIndex,
+  selectVendorPreset,
+  readDictionaryEntries,
+  extractOptionSet,
+  resolveTargets,
+  buildExtFieldMappingDraft,
+  buildCustomerPackDraft,
+  renderDraftReadme,
+  buildDraftEmissionSummary,
+  assertDraftOutDirOutsideRepo,
+} from './source-discovery-draft-emitter.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
 const REPO_ROOT = path.resolve(path.dirname(__filename), '../..')
@@ -762,6 +799,16 @@ function containsAsWholeWord(haystack, needle) {
     from = at + 1
   }
 }
+// Written as an explicit code-point walk rather than a RegExp with hex escapes: this predicate
+// decides whether a guarded value is exempted from the whole-word sweep, so it must be readable in a
+// diff without anyone having to decode an escape sequence.
+function hasNonAscii(text) {
+  for (const ch of String(text)) {
+    if (ch.codePointAt(0) > 127) return true
+  }
+  return false
+}
+
 function assertValuesFree(report, { env = {}, leakGuardValues = new Set() } = {}) {
   const leaves = []
   collectStringLeaves(report, leaves)
@@ -826,6 +873,16 @@ function assertValuesFree(report, { env = {}, leakGuardValues = new Set() } = {}
       // legitimately prints -- a sampled '2026' is a whole word inside this run's own generatedAt
       // timestamp. Such a value stays armed for whole-leaf equality, which a timestamp never trips.
       if (/^[0-9]+$/.test(norm)) return false
+      // A NON-ASCII guarded value is excluded from the whole-word sweep for the same reason, and the
+      // paragraph above already SAYS so -- but the code did not do it. `isWordChar` recognises only
+      // [0-9a-z_], so every position inside a CJK string is a "word boundary" and containsAsWholeWord
+      // degrades to precisely the naive substring test this guard rejects by name. Live shape that
+      // proves it: a unit vocabulary carrying 件 and an attribute dictionary carrying the label 附件.
+      // The unit is guarded (it matches no column name), the label is intended output (it is a matched
+      // dictionary row's), and the substring fires -- failing the whole run closed over output that
+      // leaked nothing. Such a value stays armed for WHOLE-LEAF EQUALITY, which is how a real leak of
+      // it arrives; the legitimate-emission subtraction in runProbe keeps those precise.
+      if (hasNonAscii(norm)) return false
       return containsAsWholeWord(lower, norm)
     })
     if (hit) {
@@ -902,6 +959,52 @@ function renderMarkdownSummary(report) {
 
   lines.push('')
   lines.push('_(\\* = column name matches a quantity-like pattern)_')
+
+  if (report.draftEmission) {
+    const d = report.draftEmission
+    lines.push('')
+    lines.push('## Draft emission (H1)')
+    lines.push('')
+    // Prose lives HERE, in the renderer, and never in the report object: the
+    // report's string leaves are swept for guarded values with whole-word
+    // matching, and an ordinary-English sentence is precisely the surface a
+    // sampled business word collides with.
+    lines.push('The drafts contain customer values by design and were written to the `--out-dir` given on the')
+    lines.push('command line. This report does not carry them: counts and identifiers only.')
+    lines.push('')
+    lines.push(`- preset: \`${d.presetId}\` v${d.presetVersion} (vendor \`${d.vendor}\`)`)
+    lines.push(
+      `- signature: confidence ${d.signature.confidence.toFixed(2)} (minimum ${d.signature.minimumConfidence.toFixed(2)}), ` +
+      `${d.signature.matchedRequiredTableCount}/${d.signature.requiredTableCount} required tables`,
+    )
+    lines.push(
+      `- targets: ${d.targetCounts.declared} declared, ${d.targetCounts.resolved} resolved ` +
+      `(${d.targetCounts.mappable} mappable, ${d.targetCounts.deferred} deferred), ` +
+      `**${d.targetCounts.unresolved} UNRESOLVED**, ${d.targetCounts.placeholderProposed} placeholder proposals`,
+    )
+    lines.push(`- draft files: ${Object.values(DRAFT_FILE_NAMES).map((n) => `\`${n}\``).join(', ')}`)
+    lines.push('')
+    lines.push('| dictionary | table | read | rows | enabled entries |')
+    lines.push('|---|---|---|---|---|')
+    for (const read of d.dictionaryReads) {
+      // Plain ASCII on purpose, em dash included: this whole section is asserted to carry no
+      // non-ASCII character at all, which is the cheapest possible proof that no customer label or
+      // option value slipped into it.
+      lines.push(
+        `| ${read.key} | ${read.table} | ${read.read ? 'yes' : `NO (${read.reason})`} | ` +
+        `${read.rowsRead ?? 'n/a'} | ${read.enabledEntryCount ?? 'n/a'} |`,
+      )
+    }
+    if (d.unresolvedTargets.length > 0) {
+      lines.push('')
+      lines.push('| unresolved target | via | reason |')
+      lines.push('|---|---|---|')
+      for (const item of d.unresolvedTargets) {
+        lines.push(`| ${item.target ?? '(placeholder)'} | ${item.via} | \`${item.reason}\` |`)
+      }
+    }
+  }
+
   lines.push('')
   lines.push(`> ${report.limits.note}`)
   lines.push('')
@@ -910,15 +1013,143 @@ function renderMarkdownSummary(report) {
 }
 
 // ---------------------------------------------------------------------------
+// DRAFT EMISSION (H1) — orchestration only. Every decision lives in the pure
+// functions of source-discovery-draft-emitter.mjs; what happens here is
+// (a) resolving the preset's table references against the discovered catalog,
+// (b) reading the named dictionary/value-set tables THROUGH THE EXISTING ROW-CAP
+// GUARD, and (c) assembling the artifacts.
+//
+// (b) is the part that matters: `sampleSmallTableRows` is the single choke point
+// every data read in this file goes through, and the draft mode does not get its
+// own back door. A dictionary table above the cap is simply NOT READ, and the
+// draft says so with a coded reason instead of quietly producing fewer entries.
+// ---------------------------------------------------------------------------
+
+async function readPresetTable({ tableIndex, sampleFn, reference }) {
+  const hit = tableIndex.resolve(reference)
+  if (!hit.ok) return { ok: false, reason: hit.reason }
+  try {
+    const rows = await sampleSmallTableRows({ sampleFn, table: hit.table })
+    return { ok: true, table: hit.table, rows }
+  } catch (err) {
+    const message = String(err && err.message ? err.message : err)
+    // ROW_CAP_REFUSED / SAMPLE_CAP_EXCEEDED both land here. The code is kept, the
+    // message is not: it names a table and a count, never a value.
+    return { ok: false, reason: message.startsWith('ROW_CAP_REFUSED') ? 'ROW_CAP_REFUSED' : 'SAMPLER_ERROR' }
+  }
+}
+
+async function buildDraftArtifacts({ catalog, sampleFn, presets, generatedAt }) {
+  const tableIndex = buildCatalogTableIndex(catalog)
+
+  // NEVER GUESS A VENDOR. A preset applies only when its OWN signature clears its
+  // OWN declared bar and no rival preset ties with it.
+  const selection = selectVendorPreset({ presets, tableIndex })
+  if (!selection.ok) {
+    throw new SourceDraftEmitterError(
+      `draft emission refused: ${selection.detail}`,
+      selection.reason,
+      { scores: selection.scores.map((s) => ({ presetId: s.presetId, confidence: s.confidence })) },
+    )
+  }
+  const { preset, score } = selection
+
+  // --- dictionaries ---------------------------------------------------------
+  const dictionaryReads = []
+  const entriesByDictionary = new Map()
+  for (const spec of preset.dictionaries.values()) {
+    const base = { key: spec.key, table: spec.table, describesTable: spec.describesTable }
+    const described = tableIndex.resolve(spec.describesTable)
+    if (!described.ok) {
+      const record = { ...base, ok: false, reason: described.reason }
+      dictionaryReads.push(record)
+      entriesByDictionary.set(spec.key, record)
+      continue
+    }
+    const read = await readPresetTable({ tableIndex, sampleFn, reference: spec.table })
+    if (!read.ok) {
+      const record = { ...base, ok: false, reason: read.reason }
+      dictionaryReads.push(record)
+      entriesByDictionary.set(spec.key, record)
+      continue
+    }
+    const parsed = readDictionaryEntries({
+      spec,
+      rows: read.rows,
+      describedColumns: tableIndex.columnsOf(described.table),
+    })
+    const record = { ...base, ok: true, rowsRead: read.rows.length, ...parsed }
+    dictionaryReads.push(record)
+    entriesByDictionary.set(spec.key, record)
+  }
+
+  // --- value sets -----------------------------------------------------------
+  const optionSets = new Map()
+  for (const spec of preset.valueSets.values()) {
+    const read = await readPresetTable({ tableIndex, sampleFn, reference: spec.table })
+    if (!read.ok) {
+      optionSets.set(spec.key, { ok: false, reason: read.reason === 'TABLE_ABSENT' ? 'VALUE_SET_NOT_READ' : read.reason, valueSetKey: spec.key, table: spec.table })
+      continue
+    }
+    optionSets.set(spec.key, extractOptionSet({ spec, rows: read.rows }))
+  }
+
+  const resolution = resolveTargets({ preset, tableIndex, entriesByDictionary })
+
+  return {
+    preset,
+    score,
+    resolution,
+    optionSets,
+    dictionaryReads,
+    summary: buildDraftEmissionSummary({ preset, score, resolution, optionSets, dictionaryReads }),
+    files: {
+      [DRAFT_FILE_NAMES.mapping]: JSON.stringify(buildExtFieldMappingDraft({ preset, resolution, generatedAt }), null, 2) + '\n',
+      [DRAFT_FILE_NAMES.pack]: JSON.stringify(buildCustomerPackDraft({ preset, resolution, optionSets, generatedAt }), null, 2) + '\n',
+      [DRAFT_FILE_NAMES.readme]: renderDraftReadme({ preset, score, resolution, optionSets, dictionaryReads, generatedAt }),
+    },
+  }
+}
+
+/**
+ * Load vendor presets from a FILE (one preset) or a DIRECTORY (`*.json`, auto-selected by signature).
+ * Each one goes through the adapter, so a malformed preset fails here with the adapter's own coded
+ * reason rather than producing a subtly wrong draft.
+ */
+function loadVendorPresets(presetPath) {
+  const resolved = path.resolve(presetPath)
+  const stat = statSync(resolved)
+  const files = stat.isDirectory()
+    ? readdirSync(resolved).filter((name) => name.toLowerCase().endsWith('.json')).sort().map((name) => path.join(resolved, name))
+    : [resolved]
+  if (files.length === 0) {
+    throw new SourceDraftEmitterError(`no *.json vendor preset found under ${presetPath}`, 'PRESET_SET_EMPTY', {})
+  }
+  return files.map((file) => adaptVendorPresetShape(JSON.parse(readFileSync(file, 'utf8'))))
+}
+
+// ---------------------------------------------------------------------------
 // End-to-end orchestration — a pure function of (catalog, sampleFn); no I/O.
 // ---------------------------------------------------------------------------
 
-async function runProbe({ catalog, sampleFn }) {
+async function runProbe({ catalog, sampleFn, presets = null }) {
   const dictionaryResult = await detectDictionaryTables({ catalog, sampleFn })
   const bomPairCandidates = detectBomPairCandidates(catalog)
   const treeCandidates = detectTreeCandidates(catalog)
   const quantityCandidates = detectQuantityCandidates(catalog, bomPairCandidates)
   const report = buildReport({ catalog, dictionaryResult, bomPairCandidates, treeCandidates, quantityCandidates })
+
+  // DRAFT EMISSION. The artifacts CONTAIN customer values (dictionary labels, option vocabularies)
+  // and are returned separately, to be written to the deploy-host --out-dir. What crosses back into
+  // the REPORT is `summary` only: identifiers, coded tokens and counts, no label, no option value and
+  // no prose. It is deliberately NOT added to CATALOG_DERIVED_SECTIONS, so assertValuesFree sweeps it
+  // like any other section -- the fail-safe direction.
+  let draft = null
+  if (presets) {
+    draft = await buildDraftArtifacts({ catalog, sampleFn, presets, generatedAt: report.generatedAt })
+    report.draftEmission = draft.summary
+  }
+
   // CROSS-TABLE FALSE POSITIVE. `leakGuardValues` is global, but a value one table left UNMATCHED
   // can be identical to a label another table legitimately CONTRIBUTES to the report -- a generic
   // word like a field's display name is the common case. Guarding it globally fails the whole run
@@ -930,7 +1161,7 @@ async function runProbe({ catalog, sampleFn }) {
   for (const value of dictionaryResult.leakGuardValues) {
     if (!emitted.has(String(value).trim().toLowerCase())) guarded.add(value)
   }
-  return { report, leakGuardValues: guarded }
+  return { report, leakGuardValues: guarded, draft }
 }
 
 function collectEmittedDictionaryStrings(report) {
@@ -952,6 +1183,17 @@ function collectEmittedDictionaryStrings(report) {
   // used AS a column name is ordinary in these systems) can equal some other table's unmatched
   // sample value; guarding it would fail the run closed on the tool's own intended output.
   for (const t of report.schemaInventory || []) {
+    // buildSchemaInventory emits the QUALIFIED key on `table` ("schema.name") and carries no separate
+    // `name`/`schema` properties -- so the two adds below were reading undefined and TABLE names were
+    // never actually subtracted, only column names. That gap was invisible while nothing but the
+    // dictionary sections named a table; the draft-emission summary names source tables, so the
+    // paragraph above is now made true. Both spellings are kept: other report shapes (and the
+    // regression test for whole-leaf matching) build inventory entries as { schema, name }.
+    add(t.table)
+    if (typeof t.table === 'string') {
+      const dot = t.table.indexOf('.')
+      if (dot > 0) { add(t.table.slice(0, dot)); add(t.table.slice(dot + 1)) }
+    }
     add(t.name); add(t.schema)
     for (const c of t.columns || []) add(typeof c === 'string' ? c : c && c.name)
   }
@@ -963,7 +1205,7 @@ function collectEmittedDictionaryStrings(report) {
 // ---------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const opts = { out: null, help: false }
+  const opts = { out: null, help: false, emitDraft: false, preset: null, outDir: null }
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i]
     switch (a) {
@@ -975,6 +1217,25 @@ function parseArgs(argv) {
         opts.out = value
         break
       }
+      case '--emit-draft':
+        opts.emitDraft = true
+        break
+      case '--preset': {
+        const value = argv[++i]
+        if (typeof value !== 'string' || value.length === 0) {
+          throw new Error('--preset requires a file or directory path argument')
+        }
+        opts.preset = value
+        break
+      }
+      case '--out-dir': {
+        const value = argv[++i]
+        if (typeof value !== 'string' || value.length === 0) {
+          throw new Error('--out-dir requires a directory path argument')
+        }
+        opts.outDir = value
+        break
+      }
       case '--help':
       case '-h':
         opts.help = true
@@ -982,6 +1243,19 @@ function parseArgs(argv) {
       default:
         throw new Error(`unknown argument: ${a}`)
     }
+  }
+  // Both flags are REQUIRED by --emit-draft rather than defaulted. A defaulted
+  // --out-dir would eventually default into a working copy, and the drafts carry
+  // customer values; a defaulted --preset would mean guessing a vendor.
+  if (opts.emitDraft) {
+    const missing = []
+    if (!opts.preset) missing.push('--preset')
+    if (!opts.outDir) missing.push('--out-dir')
+    if (missing.length > 0) {
+      throw new Error(`--emit-draft requires ${missing.join(' and ')}`)
+    }
+  } else if (opts.preset || opts.outDir) {
+    throw new Error('--preset/--out-dir are only meaningful together with --emit-draft')
   }
   return opts
 }
@@ -997,6 +1271,17 @@ function printHelp() {
       '    node scripts/ops/source-discovery-probe.mjs --out <file.json>',
       '',
       'Writes <file.json> and a human-readable <file>.md summary alongside it.',
+      '',
+      'Draft mode (H1) — read the customer\'s OWN dictionary tables per a vendor preset and emit a',
+      'confirm-ready ext-field mapping + customer-pack skeleton:',
+      '',
+      '  ... node scripts/ops/source-discovery-probe.mjs --out <file.json> \\',
+      '        --emit-draft --preset <preset.json|preset-dir> --out-dir <deploy-host dir>',
+      '',
+      `Writes ${Object.values(DRAFT_FILE_NAMES).join(', ')} into --out-dir.`,
+      'THE DRAFTS CONTAIN CUSTOMER VALUES (dictionary labels, option vocabularies) by design; the',
+      'report on --out stays values-free. --out-dir must be OUTSIDE this repository and the run is',
+      'refused if it is not.',
       '',
     ].join('\n'),
   )
@@ -1031,15 +1316,31 @@ async function main(argv = process.argv.slice(2), env = process.env, { dialects 
 
   const dialect = dialects.mssql
 
+  // Resolved BEFORE the connection: an --out-dir inside a working copy of this
+  // repository must fail before a single customer row has been read, not after.
+  let draftOutDir = null
+  let presets = null
+  if (opts.emitDraft) {
+    try {
+      draftOutDir = assertDraftOutDirOutsideRepo(opts.outDir, REPO_ROOT)
+      presets = loadVendorPresets(opts.preset)
+    } catch (err) {
+      writeError(err && err.reason ? `${err.reason}: ${err.message}` : String(err && err.message ? err.message : err))
+      return 2
+    }
+  }
+
   let pool = null
   try {
     pool = await dialect.connect(env)
     const catalog = await dialect.fetchCatalog(pool)
     const sampleFn = ({ table, cap }) => dialect.sampleRows(pool, table, cap)
 
-    const { report, leakGuardValues } = await runProbe({ catalog, sampleFn })
+    const { report, leakGuardValues, draft } = await runProbe({ catalog, sampleFn, presets })
 
-    // Load-bearing: refuses to write anything if the self-check fails.
+    // Load-bearing: refuses to write ANYTHING — report and drafts alike — if the
+    // self-check fails. The drafts are written last, and only after the report has
+    // proven itself values-free.
     assertValuesFree(report, { env, leakGuardValues })
 
     const outDir = path.dirname(path.resolve(opts.out))
@@ -1050,11 +1351,40 @@ async function main(argv = process.argv.slice(2), env = process.env, { dialects 
     process.stdout.write(
       `[source-discovery-probe] wrote ${opts.out} (${report.schemaInventory.length} tables, ${report.dictionaries.length} dictionaries, ${report.bomPairCandidates.length} BOM candidates, ${report.treeCandidates.length} tree candidates)\n`,
     )
+
+    if (draft) {
+      mkdirSync(draftOutDir, { recursive: true })
+      for (const [name, contents] of Object.entries(draft.files)) {
+        writeFileSync(path.join(draftOutDir, name), contents, 'utf8')
+      }
+      const counts = draft.summary.targetCounts
+      // Counts and file names only — the drafts' contents are customer values and
+      // STDOUT is not a deploy-host file.
+      process.stdout.write(
+        `[source-discovery-probe] wrote ${Object.keys(draft.files).length} draft files (preset ${draft.summary.presetId} v${draft.summary.presetVersion}, ` +
+        `confidence ${draft.summary.signature.confidence.toFixed(2)}: ${counts.mappable} mappable, ${counts.deferred} deferred, ${counts.unresolved} UNRESOLVED, ${counts.placeholderProposed} placeholder)\n`,
+      )
+      if (counts.unresolved > 0 || counts.mappable === 0) {
+        // Loud on STDERR too: a draft with gaps that scrolls past on STDOUT is the
+        // silent-omission failure wearing a different hat.
+        process.stderr.write(
+          `[source-discovery-probe] DRAFT HAS GAPS: ${counts.unresolved} unresolved, ${counts.mappable} mappable entries — read ${DRAFT_FILE_NAMES.readme} before installing anything\n`,
+        )
+      }
+    }
     return 0
   } catch (err) {
     if (err && /^PROBE_ENV_(MISSING|INVALID):/.test(err.message)) {
       writeError(err.message)
       return 2
+    }
+    if (err instanceof SourceDraftEmitterError) {
+      // A CODED REFUSAL, not a crash: the probe connected, read the catalog and
+      // then declined to draft anything (most often because no vendor preset's
+      // signature was met). Its own exit code so an operator's script can tell
+      // "we would have had to guess" apart from "the tool broke".
+      writeError(`${err.reason}: ${err.message}`)
+      return 3
     }
     writeError(err && err.message ? err.message : String(err))
     return 1
@@ -1107,4 +1437,9 @@ export {
   main,
   DIALECTS,
   REPO_ROOT,
+  collectEmittedDictionaryStrings,
+  // H1 draft mode
+  buildDraftArtifacts,
+  loadVendorPresets,
+  readPresetTable,
 }
