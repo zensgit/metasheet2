@@ -61,21 +61,58 @@ import type { AdapterOptions, DataSourceConfig } from './BaseAdapter'
 // side reds rather than silently diverging.
 export const K3_WISE_EXTERNAL_WRITE_DISABLED = 'K3_WISE_EXTERNAL_WRITE_DISABLED'
 
-// Fixed, values-free operator-facing text. Two variants only so an operator learns WHICH check
-// fired (a declared destination vs. a K3 table shape) — neither carries a customer value.
+// Fixed, values-free operator-facing text. Three variants so an operator learns WHICH check fired
+// (a declared destination / a K3 table shape / a raw statement that writes a K3 table) — none carries
+// a customer value.
 export const K3_DESTINATION_MARKER_REFUSAL_MESSAGE =
   'K3 external write-back is permanently disabled; this data source is marked as a K3 destination'
 export const K3_DESTINATION_TABLE_REFUSAL_MESSAGE =
   'K3 external write-back is permanently disabled; the target table is a K3 business table'
+export const K3_DESTINATION_SQL_REFUSAL_MESSAGE =
+  'K3 external write-back is permanently disabled; the statement writes to a K3 business table'
 
-// The K3 WISE business-table signature. FROZEN and pinned by value in the fence test: shrinking or
+// The K3 WISE write-target signature. FROZEN and pinned BY VALUE in the fence test: shrinking or
 // mutating it at runtime would be an unlock, and deriving it from elsewhere would let that elsewhere
-// defeat it. `exact` are the tables the plugin's sqlserver channel already treats as K3; `prefixes`
-// are the two Kingdee K3 WISE physical families a write-back would land in — `t_IC*` (inventory /
-// item master, incl. BOM) and `t_BD*` (base data). Kept deliberately CONSERVATIVE: staging / middle
-// tables never carry these, so the legitimate C6 lane is unaffected.
+// defeat it.
+//
+// SCOPE — the PHYSICAL TABLE plane. This fence guards a SQL write into a `data_sources` destination.
+// The legacy ErpController K3 write surface is expressed as WebAPI FormIds (`Material/Save`,
+// `BOM/Save`, `Bill1002535/Save` 工程变更单, `Bill1002502/Save` 生产投料变更单, `PD/Save` 生产任务单) —
+// those are fenced on the ENDPOINT plane by the plugin's by-kind permanent fence, a different
+// transport. Here we must recognise the PHYSICAL tables a direct-SQL write would name, including the
+// tables those FormIds ultimately land in.
+//
+// `exact` — physical tables this repo's own docs name as K3 write-forbidden "core tables"
+// (`integration-core-k3wise-adapters-design-20260424.md`, `integration-k3wise-sql-executor-bridge-handoff.md`),
+// PLUS the physical tables behind the legacy write FormIds (production order `ICMO` from `PD/Save`,
+// inventory bills `ICStockBill`, purchase/sales orders, and the ECN bill numbers). `prefixes` — the
+// two Kingdee K3 WISE physical families every item/BOM/base-data write lands in: `t_IC*` and `t_BD*`.
+//
+// CAVEAT, load-bearing and honest: physical K3 table names are DEPLOYMENT-VARIABLE — a customer may
+// front K3 through readonly views / synonyms with arbitrary names
+// (`data-factory-legacy-sql-readonly-bridge-agent-plan-20260520.md`: "customer readonly view",
+// `v_MetaSheet_MaterialRead`). A physical-name signature therefore cannot be COMPLETE. That is why
+// the explicit marker (A) is the PRIMARY, reliable control and this signature (B) is a BACKSTOP that
+// must at minimum cover the tables the legacy system actually wrote — which it now does. The
+// residual (an unmarked source writing through a renamed alias) is documented at the top of this
+// module and is out of reach of any in-process check without a physical-destination oracle.
 export const K3_WISE_BUSINESS_TABLE_SIGNATURE = Object.freeze({
-  exact: Object.freeze(['t_icitem', 't_icbom', 't_icbomchild', 't_icitembase']),
+  exact: Object.freeze([
+    // item / inventory / BOM — enumerated as K3 read objects in the sqlserver channel, write-forbidden
+    't_icitem', 't_icbom', 't_icbomchild', 't_icitembase',
+    // base-data "K3 core tables" the bridge handoff names explicitly — NO t_ic/t_bd prefix, so they
+    // were a real gap before this widening
+    't_measureunit', 't_organization',
+    // production order (PD/Save -> ICMO) + its entry/detail
+    'icmo', 'icmoentry',
+    // inventory bills (ICStockBill family)
+    'icstockbill', 'icstockbillentry',
+    // purchase / sales orders
+    'poorder', 'poorderentry', 'seorder', 'seorderentry',
+    // ECN / material-change bills — primarily WebAPI FormIds; matched here too in case a deployment
+    // exposes them as physical bill tables of the same name
+    'bill1002535', 'bill1002502',
+  ]),
   prefixes: Object.freeze(['t_ic', 't_bd']),
 })
 
@@ -100,12 +137,12 @@ export function isK3MarkedDestination(options: AdapterOptions | undefined): bool
 // `AIS.dbo.t_ICItem` all reduce to `t_icitem`.
 export function normalizeDestinationTable(table: string): string {
   let name = String(table ?? '').trim()
-  // Take the last dotted segment (the table), tolerating bracket-quoted segments that contain dots.
-  const segments = name.match(/\[[^\]]*\]|[^.]+/g)
+  // Take the last dotted segment (the table), tolerating bracket/quote-wrapped segments with dots.
+  const segments = name.match(/\[[^\]]*\]|"[^"]*"|[^.]+/g)
   if (segments && segments.length > 0) {
     name = segments[segments.length - 1]
   }
-  name = name.replace(/^\[/, '').replace(/\]$/, '').trim().toLowerCase()
+  name = name.trim().replace(/^[["]/, '').replace(/[\]"]$/, '').trim().toLowerCase()
   return name
 }
 
@@ -138,5 +175,100 @@ export function assertNotK3Destination(
 export function assertNotK3MarkedDestination(config: Pick<DataSourceConfig, 'options'>): void {
   if (isK3MarkedDestination(config.options)) {
     throw new K3DestinationWriteError(K3_DESTINATION_MARKER_REFUSAL_MESSAGE)
+  }
+}
+
+// ── Raw-SQL write classification (P0 — SWITCH-THE-VERB bypass) ────────────────────────────────
+// A destination check that inspects only a structured `table` argument is defeated by switching the
+// verb: `query("INSERT INTO t_ICItem …")` names the K3 table by hand and reaches the driver
+// untouched, because the structured `insert/update/delete` are fenced but the raw SQL path was not.
+// So the RAW SQL is classified: its WRITE-TARGET identifiers are extracted (never FROM/JOIN read
+// sources) and matched against the K3 signature, and a write of any shape to a marked K3 destination
+// is refused. READS (a SELECT with no INTO) produce no write-target and are never fenced.
+//
+// This is a conservative static classifier, not a full T-SQL parser. It errs toward REFUSAL on a
+// marked destination (fail-safe) and toward PRECISION on the signature match (only real write-target
+// positions are captured), so it cannot silently allow a K3 write while it may over-refuse an exotic
+// statement on an already-K3-marked source. Two residuals are out of a static classifier's reach and
+// are covered by the marker instead: dynamic SQL assembled and run as `EXEC(@sql)`, and a write
+// routed through a customer-created view/synonym that renames a K3 table off the signature.
+
+const SQL_STRING_LITERAL = /'(?:[^']|'')*'/g
+const SQL_BLOCK_COMMENT = /\/\*[\s\S]*?\*\//g
+const SQL_LINE_COMMENT = /--[^\n\r]*/g
+
+// A possibly schema-qualified identifier (up to three dotted parts); each part bare / [bracketed] /
+// "quoted", with whitespace tolerated around the dots.
+const SQL_ID = String.raw`(?:\[[^\]]+\]|"[^"]+"|[A-Za-z_@#][\w$#]*)(?:\s*\.\s*(?:\[[^\]]+\]|"[^"]+"|[A-Za-z_@#][\w$#]*)){0,2}`
+
+// Each pattern captures the WRITE-TARGET identifier — the table/proc being mutated, never a read
+// source. `INTO (id)` also covers `SELECT … INTO newtable`, which creates and populates a table.
+const SQL_WRITE_TARGET_PATTERNS: readonly RegExp[] = [
+  new RegExp(String.raw`\bINSERT\s+(?:INTO\s+)?(${SQL_ID})`, 'gi'),
+  new RegExp(String.raw`\bUPDATE\s+(${SQL_ID})`, 'gi'),
+  new RegExp(String.raw`\bDELETE\s+(?:FROM\s+)?(${SQL_ID})`, 'gi'),
+  new RegExp(String.raw`\bMERGE\s+(?:INTO\s+)?(${SQL_ID})`, 'gi'),
+  new RegExp(String.raw`\b(?:EXEC|EXECUTE)\s+(${SQL_ID})`, 'gi'),
+  new RegExp(String.raw`\bTRUNCATE\s+TABLE\s+(${SQL_ID})`, 'gi'),
+  new RegExp(String.raw`\bBULK\s+INSERT\s+(${SQL_ID})`, 'gi'),
+  new RegExp(String.raw`\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(${SQL_ID})`, 'gi'),
+  new RegExp(String.raw`\bALTER\s+TABLE\s+(${SQL_ID})`, 'gi'),
+  new RegExp(String.raw`\bINTO\s+(${SQL_ID})`, 'gi'),
+]
+
+// Any statement head that mutates — used to decide isWrite for the MARKER case, independent of
+// whether a concrete target was captured (e.g. `EXEC(@sql)` dynamic SQL, or `GRANT`).
+const SQL_WRITE_VERB = /\b(INSERT|UPDATE|DELETE|MERGE|EXEC|EXECUTE|TRUNCATE|DROP|ALTER|CREATE|BULK\s+INSERT|GRANT|REVOKE|DENY)\b/i
+const SQL_SELECT_INTO = /\bSELECT\b[\s\S]*?\bINTO\b/i
+
+// Keywords a write-target regex can capture as a spurious identifier (e.g. `MERGE … WHEN MATCHED
+// THEN UPDATE SET a=1` makes the `UPDATE <id>` pattern grab `SET`). Dropped from the target set so
+// a bare keyword is never treated as a K3 table. Harmless even if one slipped through — no keyword
+// is a K3 table — but kept precise so the classifier's output is exactly the real write targets.
+const SQL_NON_TABLE_KEYWORDS = new Set([
+  'set', 'from', 'where', 'values', 'select', 'table', 'as', 'on', 'output', 'with', 'when',
+  'then', 'matched', 'using', 'default', 'top', 'into',
+])
+
+function stripSqlNoise(sql: string): string {
+  return String(sql ?? '')
+    .replace(SQL_BLOCK_COMMENT, ' ')
+    .replace(SQL_LINE_COMMENT, ' ')
+    .replace(SQL_STRING_LITERAL, " '' ")
+}
+
+// Classify a raw statement: whether it mutates at all, and every write-target identifier it names
+// (normalised to the signature's form).
+export function classifySqlWrite(sql: string): { isWrite: boolean; targets: string[] } {
+  const cleaned = stripSqlNoise(sql)
+  const isWrite = SQL_WRITE_VERB.test(cleaned) || SQL_SELECT_INTO.test(cleaned)
+  const targets = new Set<string>()
+  for (const pattern of SQL_WRITE_TARGET_PATTERNS) {
+    pattern.lastIndex = 0
+    let match: RegExpExecArray | null
+    while ((match = pattern.exec(cleaned)) !== null) {
+      const normalized = normalizeDestinationTable(match[1])
+      if (normalized && !SQL_NON_TABLE_KEYWORDS.has(normalized)) targets.add(normalized)
+    }
+  }
+  return { isWrite, targets: [...targets] }
+}
+
+// True when a raw statement writes to a K3 business table, whatever the verb.
+export function sqlTargetsK3BusinessTable(sql: string): boolean {
+  return classifySqlWrite(sql).targets.some((target) => isK3BusinessTable(target))
+}
+
+// The destination assertion for a RAW SQL statement (query / federatedQuery / the adapter's own
+// query funnel). Refuses (a) any write against a marked K3 destination, and (b) any write whose
+// target is a K3 business table on ANY destination — marked or not. A read is never a write and is
+// always allowed, so this never fences a SELECT.
+export function assertNotK3SqlWrite(config: Pick<DataSourceConfig, 'options'>, sql: string): void {
+  const { isWrite, targets } = classifySqlWrite(sql)
+  if (isWrite && isK3MarkedDestination(config.options)) {
+    throw new K3DestinationWriteError(K3_DESTINATION_MARKER_REFUSAL_MESSAGE)
+  }
+  if (targets.some((target) => isK3BusinessTable(target))) {
+    throw new K3DestinationWriteError(K3_DESTINATION_SQL_REFUSAL_MESSAGE)
   }
 }
