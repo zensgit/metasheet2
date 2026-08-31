@@ -1,21 +1,25 @@
 # Attendance x Multitable Cleaning ACP-1 Owner Decision Packet
 
-Status: **PROPOSED — NOT RATIFIED — NO IMPLEMENTATION AUTHORITY**
+Status: **RATIFIED — DESIGN LOCK; RUNTIME AUTHORITY REQUIRES THE EXACT MERGED DESIGN-LOCK SHA**
 Prepared: 2026-08-31 (Asia/Taipei)
 Repository: MetaSheet2
 Authority rule: runtime work may start only after the owner ratifies the exact decisions below and the ratified lock is bound to an exact merged commit.
 
 ## 1. Exact audit snapshot
 
+The following is the proposal-head audit snapshot ratified by the owner. Later state changes are recorded separately and do not rewrite the approved decisions.
+
 - `origin/main`: `5e657ea9b321f5b3c9b771da9d3159ba8943e0e5`
 - Audit worktree: detached `42afaa030d7d9be6279e8cb32df73c39f4f608a5`, clean; no edits made there.
 - PR #5372: Draft/CLEAN, head `1b9c20c1a3d8bd687fcbf7973d751bfa0b002dc0`, base `de9e6ceb88d0b388c6283d22744e2190e1eb7269`.
 - PR #5362: bounded replay in progress, Draft/MERGEABLE, head `43b8fa2e7cc7ecc789a508476477b9e60b49eff0`, base `5e657ea9b321f5b3c9b771da9d3159ba8943e0e5`; relative scope remains exactly `AttendanceView.vue` plus its admin regression spec and does not overlap Option A files.
-- All OPEN attendance PR bodies, file lists, and full diffs were searched for `ACP-1`, `OD-ATC`, cleaning proposal/review/apply, and multitable attendance writeback authority. No exact ratification exists.
+- At proposal head `c50f65f55273842ba8b96245e3004ca58832af9d`, all OPEN attendance PR bodies, file lists, and full diffs were searched for `ACP-1`, `OD-ATC`, cleaning proposal/review/apply, and multitable attendance writeback authority. No earlier exact ratification existed; the later direct-owner decision is recorded in Section 3.
 - The RATIFIED #5372 OD-MCD lock authorizes managed projection CAS/self-heal only. It explicitly keeps the projection one-way and excludes reverse write, UI, OpenAPI, permission expansion, and notification changes.
 - The current platform multitable application model is DRAFT. It is architectural context, not attendance runtime authority.
 
-Conclusion: **STOP before runtime implementation.** This packet must not be cited as product authority until the owner ratifies it and the ratified text is committed on the accepted base.
+Follow-up at ratification: `origin/main` is `919dc42366d3464c0b941448fad880c88f3f7cf5`; PR #5362 has since merged as `f45f6bb399d4d8131e3bf39e314212828b80e5b2`, and PR #5348 has since merged as `919dc42366d3464c0b941448fad880c88f3f7cf5`. Neither merge overlaps the six ACP-1 product files. PR #5372 remains Draft/HOLD and unmerged, so its old exact-head green checks are not proof of a then-current-main merge candidate.
+
+Conclusion: the owner-decision gate is closed, but **STOP before runtime implementation** until the exact ratified design-lock SHA is merged and the Section 5 dependency, fresh-main, and post-merge gates are satisfied. This evidence record cannot authorize itself.
 
 ## 2. Product objective
 
@@ -31,13 +35,21 @@ Allow an attendance administrator to use a multitable daily-report row as a cont
 
 The multitable is a collaboration and cleaning workspace, **never the attendance system of record**.
 
-## 3. Proposed owner decisions
+## 3. Ratified owner decisions
 
-The owner may ratify the recommended **Option A** contract in one response:
+### Ratification evidence
 
-> RATIFY ACP-1A OD-ATC-0..10, all option (a).
+- Source: direct owner turn in Codex task `01a0528d-2a67-7ce3-9e23-3d3820d7d733`; no separate owner display identity was exposed, so none is inferred.
+- Received: 2026-08-31 (Asia/Taipei); no time is recorded because the source did not expose a verifiable timestamp here.
+- Ratified proposal: PR #5381 head `c50f65f55273842ba8b96245e3004ca58832af9d`, document blob `50e9ff52abd45b2616031c43b5e30222c23c6539`.
+- Scope: `ACP-1A`, `OD-ATC-0..10`, 11 decisions, all option `(a)`. Deltas: none.
+- Exact owner text:
 
-| ID | Recommended option (a) |
+  > RATIFY ACP-1A OD-ATC-0..10，全部采用 (a)
+
+The decision applies prospectively from that owner turn. It does not retroactively authorize earlier work, authorize Ready/merge, or satisfy the exact merged-SHA runtime gate.
+
+| ID | Ratified option (a) |
 | --- | --- |
 | OD-ATC-0 Authority | Only an exact merged design-lock SHA authorizes runtime work. Before that SHA, no runtime implementation, migration, API, UI, or CI wiring. |
 | OD-ATC-1 Source of truth | `attendance_*` and the W4 calculation/result-edit boundary are the sole canonical source. Multitable data is an untrusted proposal and can never directly overwrite attendance facts. |
@@ -74,7 +86,7 @@ The approve request must not accept client-supplied organization, employee, work
 
 Option A intentionally combines review and apply. It does not expose a standalone approval state or immutable proposal ledger. A later full-lifecycle design is described in Section 7 and is not part of this slice.
 
-## 5. Proposed implementation boundary
+## 5. Locked implementation boundary
 
 Implementation must wait until #5372 is merged to then-current `main` and post-merge checks are terminal green. ACP-1 must start from a fresh worktree at that then-current `origin/main`; it must not stack on #5372 or copy its CAS code.
 
@@ -106,10 +118,10 @@ Current multitable permissions do not by themselves prove tenant-safe proposal-s
 - plugin provisioning currently has no API to create the required organization/admin sheet grant;
 - plugin record revision history currently records a system actor rather than the human reviewer.
 
-Before release, the owner must choose one of these permission/evidence contracts:
+ACP-1A ratifies the first permission/evidence contract below. That selection does not prove or deliver a tenant-safe sheet grant; release/enable remains blocked until that grant is separately reviewed and proven.
 
-1. **Option A contract:** the Draft/HOLD only serves existing same-org attendance administrators and adds no grant. Release/enable waits for an explicit tenant-safe sheet grant through a separately reviewed shared seam. Canonical W4 audit remains the human actor authority; multitable revision is system projection evidence.
-2. Require human actor identity in multitable revision history, which adds an actor-aware shared patch API and its own real-DB tests.
+1. **Selected — Option A contract:** the Draft/HOLD only serves existing same-org attendance administrators and adds no grant. Release/enable waits for an explicit tenant-safe sheet grant through a separately reviewed shared seam. Canonical W4 audit remains the human actor authority; multitable revision is system projection evidence.
+2. **Unselected and deferred:** require human actor identity in multitable revision history, which adds an actor-aware shared patch API and its own real-DB tests.
 
 If existing `spreadsheet_permissions` can express the grant, prefer it and avoid a migration. A migration is requested only after proving the existing schema insufficient. The attendance-owned Draft/HOLD may close before this shared seam, but it must remain disabled and cannot be called release-ready.
 
@@ -223,7 +235,7 @@ Outputs from unavailable external models are optional independent reviews, not r
 
 Stop immediately and report the exact blocker if:
 
-- owner decisions are not ratified or conflict with this packet;
+- the ratification source cannot be verified, the decision table differs from PR #5381 head `c50f65f55273842ba8b96245e3004ca58832af9d` / document blob `50e9ff52abd45b2616031c43b5e30222c23c6539`, or a later owner decision conflicts with this packet;
 - #5372 changes or is not merged on the starting main;
 - `origin/main` drifts after preflight or relevant OPEN PR overlap changes;
 - Option A requires permission or actor semantics beyond the ratified Draft/HOLD boundary;
