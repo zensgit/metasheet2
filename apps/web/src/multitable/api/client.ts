@@ -1747,6 +1747,20 @@ export class MultitableApiClient implements CommentsApiClient {
     return data
   }
 
+  // Rename gates server-side on canManageFields (admin role or multitable:manage-schema) — a 403
+  // here is expected for a caller lacking schema authority; the client throws (MultitableApiError)
+  // rather than swallowing it, so the caller can surface the server's message.
+  async renameBase(baseId: string, name: string): Promise<{ base: MetaBase }> {
+    const res = await this.fetch(`/api/multitable/bases/${encodeURIComponent(baseId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })
+    const data = await this.parseJson<{ base: MetaBase }>(res)
+    this.invalidateBasesCache()
+    return data
+  }
+
   async listTemplates(opts?: { force?: boolean }): Promise<{ templates: MetaTemplate[] }> {
     if (opts?.force) {
       this.invalidateTemplatesCache()
@@ -1864,6 +1878,18 @@ export class MultitableApiClient implements CommentsApiClient {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
+    })
+    return this.parseJson(res)
+  }
+
+  // Rename gates server-side on canManageFields (admin role or multitable:manage-schema) — a 403
+  // here is expected for a caller lacking schema authority; the client throws (MultitableApiError)
+  // rather than swallowing it, so the caller can surface the server's message.
+  async renameSheet(sheetId: string, name: string): Promise<{ sheet: MetaSheet }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
     })
     return this.parseJson(res)
   }

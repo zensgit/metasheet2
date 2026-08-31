@@ -112,6 +112,7 @@ import {
   automationUserHasApprovalRead,
 } from './automation-approval-template-access'
 import { metrics } from '../metrics/metrics'
+import { loadSheetLiveness } from './sheet-liveness'
 import {
   normalizeDingTalkAutomationActionInputs,
   validateDingTalkAutomationActionConfigs,
@@ -1004,6 +1005,24 @@ export class AutomationService {
     this.approvalBridgeService = new AutomationApprovalBridgeService(this.jobService)
     this.scheduler = new AutomationScheduler(
       async (rule) => {
+        // SHEET LIVENESS (soft delete) — the SCHEDULED lane.
+        //
+        // The record-triggered lanes are gated by `loadEnabledRules` below, but a scheduled rule
+        // (cron / interval / date-field) never passes through it: the scheduler holds pre-registered
+        // rules and fires them on its own clock. Without this, a soft-deleted sheet's cron rules kept
+        // running — sending webhooks, emails and DingTalk messages, and mutating records on other,
+        // live sheets through cross-sheet actions.
+        //
+        // Guarded at the two DISPATCH entry points (here and `loadEnabledRules`) rather than inside
+        // `AutomationExecutor.execute`: the executor is on the hot path of every action and its
+        // `simulate` mode is contractually values-free (it must not touch the DB at all).
+        if ((await loadSheetLiveness(this.queryFn, rule.sheetId)) === 'deleted') {
+          console.warn('[automation] skipping a scheduled rule on a sheet that is not live', {
+            ruleId: rule.id,
+            sheetId: rule.sheetId,
+          })
+          return
+        }
         // Date-reminder rules scan → claim → fire per due record; other schedule rules execute once.
         if (rule.trigger.type === 'schedule.date_field') {
           await this.evaluateDateReminders(rule)
@@ -3752,7 +3771,31 @@ export class AutomationService {
   /**
    * Load enabled rules for a sheet (Kysely).
    */
+  /**
+   * Enabled rules for a sheet — the single gate every record-triggered automation passes through
+   * (both the live event-bus lane and the durable-outbox redelivery lane call `handleEvent`, which
+   * calls this).
+   *
+   * SHEET LIVENESS (soft delete). `executeCrossBaseWriteGate` already refuses a soft-deleted cross-sheet
+   * TARGET (`resolveSheetBaseId` filters `deleted_at IS NULL`), but the TRIGGER sheet had no equivalent
+   * check — and its most common shape (an action writing back to its own sheet with no declared target
+   * base) short-circuits that gate before any lookup happens. So a soft-deleted sheet's rules stayed
+   * armed: a write reaching it could still send a webhook, an email or a DingTalk message, and could
+   * still mutate records on OTHER, live sheets through a cross-sheet action.
+   *
+   * Refusing HERE, rather than at each action, means a dead sheet contributes NO rules at all — the
+   * executor is never entered, so there is no partial execution and no audit row for work that must not
+   * happen. Returning an empty list (rather than throwing) matches this method's contract and leaves the
+   * triggering record write itself to be refused by its own route's liveness guard.
+   */
   async loadEnabledRules(sheetId: string): Promise<AutomationRule[]> {
+    // `=== 'deleted'` for the same reason as the executor: this closes the soft-delete gap exactly,
+    // and an absent sheet cannot produce a record trigger in the first place.
+    if ((await loadSheetLiveness(this.queryFn, sheetId)) === 'deleted') {
+      console.warn('[automation] skipping rules for a sheet that is not live', { sheetId })
+      return []
+    }
+
     const rows = await this.db
       .selectFrom('automation_rules')
       .selectAll()
