@@ -16,6 +16,8 @@ import { db } from '../../src/db/db'
 import { eventBus } from '../../src/integration/events/event-bus'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { AutomationService } from '../../src/multitable/automation-service'
+import { deriveActionKey } from '../../src/multitable/automation-action-idempotency'
+import { deriveTestRunScopedRoot } from '../../src/multitable/automation-execution-ledger'
 import { normalizeWorkflowJob } from '../../src/multitable/workflow-job-contract'
 import { ApprovalProductService } from '../../src/services/ApprovalProductService'
 import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
@@ -49,6 +51,7 @@ const executionIds: string[] = []
 const ruleIds: string[] = []
 const templateIds: string[] = []
 const approvalIds: string[] = []
+const testRunRoots: string[] = []
 let templateSeq = 0
 
 function makeAutomationService(fetchFn?: typeof fetch): AutomationService {
@@ -409,6 +412,10 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
   })
 
   afterAll(async () => {
+    if (testRunRoots.length > 0) {
+      await q('DELETE FROM meta_automation_outbound_intent WHERE root_execution_id = ANY($1::text[])', [testRunRoots])
+      await q('DELETE FROM meta_automation_action_applied WHERE root_execution_id = ANY($1::text[])', [testRunRoots])
+    }
     for (const id of executionIds) {
       await q('DELETE FROM multitable_automation_approval_bridges WHERE execution_id = $1', [id])
       await q('DELETE FROM multitable_automation_suspensions WHERE execution_id = $1', [id])
@@ -544,6 +551,82 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
       expect(finalJobs[0].result).toMatchObject({ outcome: 'approved' })
       finalJobs.forEach((job) => expect(() => normalizeWorkflowJob(job)).not.toThrow())
     } finally {
+      svc.shutdown()
+    }
+  })
+
+  test('#4196 real_fire preserves test-run identity across approval completion and the Class-B tail', async () => {
+    const calls: string[] = []
+    const svc = makeAutomationService((async (url: string) => {
+      calls.push(url)
+      return new Response('OK', { status: 200 })
+    }) as never)
+    process.env.AUTOMATION_CLASSB_OUTBOUND_ENABLED = 'true'
+    try {
+      const templateId = await createPublishedTemplate()
+      const ruleId = await createStartApprovalRule(svc, templateId)
+      await seedSheetRecord('Real-fire approval bridge')
+      const operationId = `approval_bridge_${TS}`
+      const root = deriveTestRunScopedRoot({
+        actorId: REQUESTER,
+        ruleId,
+        testRunOperationId: operationId,
+      })
+      testRunRoots.push(root)
+
+      const execution = await svc.testRun(ruleId, SHEET, {
+        mode: 'real_fire',
+        actorId: REQUESTER,
+        testRunOperationId: operationId,
+        confirmSideEffects: true,
+        sampleRecord: { recordId: RECORD, data: { title: 'Real-fire approval bridge' } },
+      })
+      executionIds.push(execution.id)
+      expect(execution.status).toBe('running')
+      expect(calls).toEqual([])
+
+      const bridge = await q(
+        `SELECT status, root_execution_id, ledger_kind, approval_instance_id
+           FROM multitable_automation_approval_bridges
+          WHERE execution_id = $1`,
+        [execution.id],
+      )
+      expect(bridge.rows).toEqual([expect.objectContaining({
+        status: 'pending',
+        root_execution_id: root,
+        ledger_kind: 'test_run',
+      })])
+      approvalIds.push(bridge.rows[0].approval_instance_id)
+
+      const approvals = new ApprovalProductService()
+      await approvals.dispatchAction(
+        bridge.rows[0].approval_instance_id,
+        { action: 'approve', comment: 'real-fire continuation' },
+        { userId: APPROVER, userName: APPROVER },
+      )
+      const resumed = await waitForExecutionStatus(svc, execution.id, 'success')
+      expect(resumed.steps.map((step) => [step.actionType, step.status])).toEqual([
+        ['start_approval', 'success'],
+        ['send_webhook', 'success'],
+      ])
+      expect(calls).toEqual(['https://example.test/w6-tail'])
+      expect((await q(
+        `SELECT kind, root_execution_id, action_key, status
+           FROM meta_automation_outbound_intent
+          WHERE root_execution_id = $1`,
+        [root],
+      )).rows).toEqual([{
+        kind: 'test_run',
+        root_execution_id: root,
+        action_key: deriveActionKey({
+          structuralPath: '1',
+          actionType: 'send_webhook',
+          canonicalConfig: { url: 'https://example.test/w6-tail' },
+        }),
+        status: 'sent',
+      }])
+    } finally {
+      delete process.env.AUTOMATION_CLASSB_OUTBOUND_ENABLED
       svc.shutdown()
     }
   })

@@ -20,7 +20,11 @@
  */
 
 import express, { Router, type Request, type Response } from 'express'
-import type { AutomationService } from '../multitable/automation-service'
+import {
+  AutomationTestRunRejectedError,
+  type AutomationService,
+  type AutomationTestRunSampleRecord,
+} from '../multitable/automation-service'
 import { redactAutomationExecutionForResponse } from '../multitable/automation-log-service'
 import type { AutomationExecution, AutomationStepResult } from '../multitable/automation-executor'
 import { legacyAutomationStatusToJobStatus } from '../multitable/workflow-job-contract'
@@ -49,6 +53,7 @@ import {
   resolveRecordLinkTargetFromSchema,
 } from '../multitable/approval-fwb-activation'
 import { canReadApprovalTemplateForAutomation } from '../multitable/automation-approval-template-access'
+import { loadReadableAutomationSampleRecord } from './automation-test-run-sample'
 
 // ── A2 run-governance read mappers (boundary only — no storage change) ───────
 
@@ -538,13 +543,12 @@ export function createAutomationRoutes(
       return res.status(400).json({ error: 'sheetId and ruleId are required' })
     }
 
-    // G8 (retry/test-run governance lock §6): the test route REALLY executes the rule (fires
-    // writes/notifications/webhooks). Until now it had no backend capability gate at all — only the
-    // FE hides the button behind `canManageAutomation`. Enforce that same per-sheet capability on
-    // the backend so a caller who cannot manage automation on this sheet cannot trigger a real run.
+    // G8 (retry/test-run governance lock §6): test-run requires the same per-sheet
+    // canManageAutomation capability as rule authoring. The default run is simulate and dispatches
+    // no business side effect; real_fire remains capability-gated too.
     // Mirrors the automation rule-CRUD gate at routes/univer-meta.ts (resolveSheetCapabilities →
-    // canManageAutomation). Standalone security fix; no flag, no behaviour change for a privileged
-    // caller (the FE test button already only renders for canManageAutomation holders).
+    // canManageAutomation). The FE test button already only renders for canManageAutomation holders;
+    // the route additionally makes the safe simulation default authoritative server-side.
     try {
       const pool = poolManager.get()
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
@@ -570,17 +574,89 @@ export function createAutomationRoutes(
     const svc = getService(res)
     if (!svc) return undefined
 
+    const body = req.body && typeof req.body === 'object'
+      ? req.body as Record<string, unknown>
+      : {}
+    const rawMode = body.mode
+    if (rawMode !== undefined && rawMode !== 'simulate' && rawMode !== 'real_fire') {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'INVALID_TEST_RUN_MODE', message: 'mode must be simulate or real_fire' },
+      })
+    }
+    if (rawMode === 'real_fire' && body.confirmSideEffects !== true) {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'CONFIRM_SIDE_EFFECTS_REQUIRED', message: 'confirmSideEffects must be true for a real-fire test run' },
+      })
+    }
+
+    const rawRecordId = body.recordId
+    if (
+      rawRecordId !== undefined
+      && (typeof rawRecordId !== 'string' || rawRecordId.trim().length === 0 || rawRecordId.trim().length > 256)
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'INVALID_TEST_RUN_RECORD_ID', message: 'recordId must be a non-empty string of at most 256 characters' },
+      })
+    }
+
+    let sampleRecord: AutomationTestRunSampleRecord | undefined
+    if (typeof rawRecordId === 'string') {
+      try {
+        const pool = poolManager.get()
+        const loaded = await loadReadableAutomationSampleRecord(
+          req,
+          pool.query.bind(pool),
+          sheetId,
+          rawRecordId.trim(),
+        )
+        if ('status' in loaded) return res.status(loaded.status).json(loaded.body)
+        sampleRecord = loaded.sampleRecord
+      } catch (err) {
+        const raw = err instanceof Error ? err.message : ''
+        const transient = /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
+        return res.status(transient ? 503 : 500).json({
+          ok: false,
+          error: {
+            code: transient ? 'DB_NOT_READY' : 'SAMPLE_RECORD_READ_FAILED',
+            message: transient ? 'Service temporarily unavailable' : 'Failed to read sample record',
+          },
+        })
+      }
+    }
+
     try {
-      const execution = await svc.testRun(ruleId, sheetId)
-      // The in-memory execution carries the live rule (credentials) in ruleSnapshot + raw
-      // action output in steps; record()'s at-persist redaction returns new objects and does
-      // NOT mutate it. Serialize the PERSISTED (redacted) row; if it didn't land, fall back to
-      // a response-level redaction (NEVER the raw execution). Flat AutomationExecution shape is
-      // preserved either way (client does parseJson<AutomationExecution>(res)).
-      // safeGet: a log-read failure must not 500 a completed test run → redacted fallback.
-      const persisted = await safeGetPersistedExecution(svc, execution.id)
-      return res.json(persisted ?? redactAutomationExecutionForResponse(execution))
+      const actorId = req.user?.id?.toString() ?? req.user?.sub?.toString() ?? req.user?.userId?.toString() ?? ''
+      const execution = await svc.testRun(ruleId, sheetId, {
+        mode: rawMode === 'real_fire' ? 'real_fire' : 'simulate',
+        ...(sampleRecord ? { sampleRecord } : {}),
+        ...(rawMode === 'real_fire'
+          ? {
+            actorId,
+            testRunOperationId: typeof body.testRunOperationId === 'string'
+              ? body.testRunOperationId
+              : undefined,
+            confirmSideEffects: true,
+          }
+          : {}),
+      })
+      // Simulation persistence is values-free and intentionally omits rule/record values. The
+      // authorized caller still receives the response-level secret-redacted execution so future
+      // sample-record previews can describe the planned action without widening the audit row.
+      const response = redactAutomationExecutionForResponse(execution)
+      return res.json({ ...response, dryRun: rawMode !== 'real_fire' })
     } catch (err) {
+      if (err instanceof AutomationTestRunRejectedError) {
+        return res.status(err.status).json({ ok: false, error: { code: err.code, message: err.message } })
+      }
+      if (rawMode === 'real_fire') {
+        return res.status(500).json({
+          ok: false,
+          error: { code: 'TEST_RUN_FAILED', message: 'Test run failed' },
+        })
+      }
       const message = err instanceof Error ? err.message : 'Test run failed'
       const code = message.includes('not found') ? 404 : 500
       return res.status(code).json({ error: message })

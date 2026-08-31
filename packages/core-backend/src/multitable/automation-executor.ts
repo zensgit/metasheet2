@@ -8,7 +8,11 @@ import { recordRecordRevision, recordVersionMarker } from './record-history-serv
 import { mintOperation, sealOperation } from './operation-ledger'
 import { branchChildStepKey, topLevelStepKey } from './automation-step-key'
 import { deriveRuleActionSetFingerprint } from './automation-rule-fingerprint'
-import { claimExecutionAction, isClassAExecutionClaimEnabled } from './automation-execution-ledger'
+import {
+  claimExecutionAction,
+  isClassAExecutionClaimEnabled,
+  type ExecutionLedgerKind,
+} from './automation-execution-ledger'
 import { deriveActionKey } from './automation-action-idempotency'
 import {
   classifyFetchError,
@@ -57,7 +61,7 @@ import {
   resolveSheetCapabilitiesForUserOnQuery,
 } from '../services/approval-record-link-txn-auth'
 import { acquireRecordLinkRowAuthLockOnQuery } from '../services/approval-record-link-row-auth-lock'
-import { redactString } from './automation-log-redact'
+import { redactString, redactValue } from './automation-log-redact'
 import { computeActionFingerprint } from './automation-suspension-service'
 import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
 import { isRichLongTextProperty, normalizeJson, sanitizeRichLongText } from './field-codecs'
@@ -778,6 +782,8 @@ export interface AutomationExecution {
   finishedAt?: string
   /** Forward-compat tag for the snapshot shape. */
   schemaVersion?: number
+  /** #4196 Q2/Q6 response marker: business dispatch was suppressed for this manual test run. */
+  dryRun?: boolean
   // ── A5 retry provenance (set by AutomationService.retryExecution; plain ids, not redacted) ──
   /** The original execution id this run re-ran (only on a retry-created execution). */
   rerunOfExecutionId?: string
@@ -788,6 +794,8 @@ export interface AutomationExecution {
 export interface AutomationStepResult {
   actionType: AutomationActionType
   status: 'success' | 'failed' | 'skipped'
+  /** Test-run simulation marker: this step was planned but no business dispatch occurred. */
+  simulated?: boolean
   output?: unknown
   error?: string
   durationMs?: number
@@ -800,6 +808,592 @@ export interface AutomationStepResult {
   alreadyApplied?: boolean
 }
 
+export type AutomationDispatchMode = 'live' | 'simulate'
+
+function simulationDisposition(actionType: AutomationActionType): 'execute' | 'simulate' {
+  switch (actionType) {
+    case 'condition_branch':
+    case 'parallel_branch':
+    case 'record_click':
+      return 'execute'
+    case 'update_record':
+    case 'create_record':
+    case 'delete_record':
+    case 'send_webhook':
+    case 'send_notification':
+    case 'send_email':
+    case 'send_dingtalk_group_message':
+    case 'send_dingtalk_person_message':
+    case 'send_dingtalk_approval_card':
+    case 'lock_record':
+    case 'wait_for_callback':
+    case 'start_approval':
+    case 'write_approval_form_values':
+      return 'simulate'
+  }
+
+  const unreachable: never = actionType
+  return unreachable
+}
+
+function nonBlankConfigString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function simulatedClassAPlan(
+  action: AutomationAction,
+  context: ExecutionContext,
+): AutomationStepResult | null {
+  const config = action.config
+  const targetBaseId = nonBlankConfigString(config.targetBaseId)
+  const configuredSheetId = nonBlankConfigString(config.targetSheetId)
+  const configuredRecordId = nonBlankConfigString(config.targetRecordId)
+  const crossBaseTarget = (): { baseId: string; sheetId: string; recordId: string } | AutomationStepResult => {
+    if (!configuredSheetId || !configuredRecordId) {
+      return {
+        actionType: action.type,
+        status: 'failed',
+        error: `Cross-base ${action.type} requires targetBaseId + targetSheetId + targetRecordId`,
+        durationMs: 0,
+      }
+    }
+    return { baseId: targetBaseId as string, sheetId: configuredSheetId, recordId: configuredRecordId }
+  }
+
+  let target: { baseId?: string; sheetId: string; recordId?: string }
+  let payload: unknown
+  switch (action.type) {
+    case 'update_record': {
+      const fields = isPlainRecord(config.fields) ? config.fields : null
+      if (!fields || Object.keys(fields).length === 0) {
+        return { actionType: action.type, status: 'failed', error: 'No fields specified', durationMs: 0 }
+      }
+      if (targetBaseId) {
+        const resolved = crossBaseTarget()
+        if ('actionType' in resolved) return resolved
+        target = resolved
+      } else {
+        target = { sheetId: context.sheetId, recordId: context.recordId }
+      }
+      payload = fields
+      break
+    }
+    case 'create_record':
+      target = {
+        ...(targetBaseId ? { baseId: targetBaseId } : {}),
+        sheetId: nonBlankConfigString(config.sheetId) ?? context.sheetId,
+      }
+      payload = isPlainRecord(config.data) ? config.data : {}
+      break
+    case 'delete_record':
+    case 'lock_record': {
+      if (targetBaseId) {
+        const resolved = crossBaseTarget()
+        if ('actionType' in resolved) return resolved
+        target = resolved
+      } else {
+        target = { sheetId: context.sheetId, recordId: context.recordId }
+      }
+      if (action.type === 'lock_record') payload = { locked: config.locked !== false }
+      break
+    }
+    default:
+      return null
+  }
+
+  return {
+    actionType: action.type,
+    status: 'success',
+    simulated: true,
+    output: {
+      dryRun: true,
+      dispatched: false,
+      plan: {
+        target,
+        ...(payload === undefined ? {} : { payload: redactValue(payload) }),
+      },
+    },
+    durationMs: 0,
+  }
+}
+
+function simulatedGenericClassBPlan(
+  action: AutomationAction,
+  context: ExecutionContext,
+): AutomationStepResult | null {
+  const config = action.config
+  let target: Record<string, unknown>
+  let payload: unknown
+
+  switch (action.type) {
+    case 'send_webhook': {
+      const url = typeof config.url === 'string' ? config.url : ''
+      if (!url) {
+        return { actionType: action.type, status: 'failed', error: 'Webhook URL is required', durationMs: 0 }
+      }
+      let host: string
+      try {
+        host = new URL(url).host
+      } catch {
+        return { actionType: action.type, status: 'failed', error: 'Webhook URL is invalid', durationMs: 0 }
+      }
+      if (!host) {
+        return { actionType: action.type, status: 'failed', error: 'Webhook URL is invalid', durationMs: 0 }
+      }
+      target = { host }
+      payload = {
+        method: typeof config.method === 'string' ? config.method : 'POST',
+        body: config.body ?? {
+          ruleId: context.sheetId,
+          recordId: context.recordId,
+          data: context.recordData,
+          triggeredAt: new Date().toISOString(),
+        },
+      }
+      break
+    }
+    case 'send_notification': {
+      const userIds = Array.isArray(config.userIds)
+        ? config.userIds.filter((entry): entry is string => typeof entry === 'string' && Boolean(entry))
+        : []
+      const message = typeof config.message === 'string' ? config.message : ''
+      if (!userIds.length) {
+        return { actionType: action.type, status: 'failed', error: 'No user IDs specified', durationMs: 0 }
+      }
+      if (!message) {
+        return { actionType: action.type, status: 'failed', error: 'Notification message is required', durationMs: 0 }
+      }
+      target = { userIds }
+      payload = { message }
+      break
+    }
+    case 'send_email': {
+      const recipients = Array.from(new Set(
+        (Array.isArray(config.recipients) ? config.recipients : [])
+          .filter((entry): entry is string => typeof entry === 'string')
+          .map((entry) => entry.trim())
+          .filter(Boolean),
+      ))
+      const subjectTemplate = typeof config.subjectTemplate === 'string' ? config.subjectTemplate.trim() : ''
+      const bodyTemplate = typeof config.bodyTemplate === 'string' ? config.bodyTemplate.trim() : ''
+      if (!recipients.length) {
+        return { actionType: action.type, status: 'failed', error: 'send_email requires at least one recipient', durationMs: 0 }
+      }
+      if (!subjectTemplate) {
+        return { actionType: action.type, status: 'failed', error: 'send_email subjectTemplate is required', durationMs: 0 }
+      }
+      if (!bodyTemplate) {
+        return { actionType: action.type, status: 'failed', error: 'send_email bodyTemplate is required', durationMs: 0 }
+      }
+      const templateData: Record<string, unknown> = {
+        sheetId: context.sheetId,
+        recordId: context.recordId,
+        actorId: context.actorId ?? '',
+        record: context.recordData,
+      }
+      target = { recipients }
+      payload = {
+        subject: renderAutomationTemplate(subjectTemplate, templateData).trim(),
+        content: renderAutomationTemplate(bodyTemplate, templateData).trim(),
+      }
+      break
+    }
+    case 'send_dingtalk_group_message': {
+      const groupConfig = config as unknown as SendDingTalkGroupMessageConfig
+      const staticDestinationIds = Array.from(new Set([
+        ...(Array.isArray(groupConfig.destinationIds)
+          ? groupConfig.destinationIds
+            .filter((value): value is string => typeof value === 'string')
+            .map((value) => value.trim())
+            .filter(Boolean)
+          : []),
+        ...(typeof groupConfig.destinationId === 'string' && groupConfig.destinationId.trim()
+          ? [groupConfig.destinationId.trim()]
+          : []),
+      ]))
+      const destinationFieldPaths = normalizeRecipientFieldPaths(
+        groupConfig.destinationIdFieldPath,
+        groupConfig.destinationIdFieldPaths,
+      )
+      const recordDestinationIds = resolveGroupDestinationIdsFromRecord(context.recordData, destinationFieldPaths)
+      const destinationIds = Array.from(new Set([...staticDestinationIds, ...recordDestinationIds]))
+      const titleTemplate = typeof groupConfig.titleTemplate === 'string' ? groupConfig.titleTemplate.trim() : ''
+      const bodyTemplate = typeof groupConfig.bodyTemplate === 'string' ? groupConfig.bodyTemplate.trim() : ''
+      if (!destinationIds.length) {
+        if (destinationFieldPaths.length > 0) {
+          return {
+            actionType: action.type,
+            status: 'failed',
+            error: `No DingTalk destinationIds resolved from record field paths: ${destinationFieldPaths.join(', ')}`,
+            durationMs: 0,
+          }
+        }
+        return {
+          actionType: action.type,
+          status: 'failed',
+          error: 'At least one DingTalk destination or record destination field path is required',
+          durationMs: 0,
+        }
+      }
+      if (!titleTemplate) {
+        return { actionType: action.type, status: 'failed', error: 'DingTalk title template is required', durationMs: 0 }
+      }
+      if (!bodyTemplate) {
+        return { actionType: action.type, status: 'failed', error: 'DingTalk body template is required', durationMs: 0 }
+      }
+      const templateData: Record<string, unknown> = {
+        sheetId: context.sheetId,
+        recordId: context.recordId,
+        actorId: context.actorId ?? '',
+        record: context.recordData,
+      }
+      target = { destinationIds }
+      payload = {
+        title: truncateDingTalkMessageText(
+          renderAutomationTemplate(titleTemplate, templateData).trim(),
+          DINGTALK_MESSAGE_TITLE_MAX_LENGTH,
+        ),
+        body: renderAutomationTemplate(bodyTemplate, templateData).trim(),
+      }
+      break
+    }
+    case 'send_dingtalk_person_message': {
+      const personConfig = config as unknown as SendDingTalkPersonMessageConfig
+      const recipientFieldPaths = normalizeRecipientFieldPaths(
+        personConfig.userIdFieldPath,
+        personConfig.userIdFieldPaths,
+      )
+      const memberGroupRecipientFieldPaths = normalizeRecipientFieldPaths(
+        personConfig.memberGroupIdFieldPath,
+        personConfig.memberGroupIdFieldPaths,
+      )
+      const userIds = Array.from(new Set([
+        ...normalizeUserIds(personConfig.userIds),
+        ...resolveRecipientUserIdsFromRecord(context.recordData, recipientFieldPaths),
+      ]))
+      const memberGroupIds = Array.from(new Set([
+        ...normalizeUserIds(personConfig.memberGroupIds),
+        ...resolveRecipientMemberGroupIdsFromRecord(context.recordData, memberGroupRecipientFieldPaths),
+      ]))
+      const titleTemplate = typeof personConfig.titleTemplate === 'string'
+        ? personConfig.titleTemplate.trim()
+        : ''
+      const bodyTemplate = typeof personConfig.bodyTemplate === 'string'
+        ? personConfig.bodyTemplate.trim()
+        : ''
+      if (!titleTemplate) {
+        return { actionType: action.type, status: 'failed', error: 'DingTalk title template is required', durationMs: 0 }
+      }
+      if (!bodyTemplate) {
+        return { actionType: action.type, status: 'failed', error: 'DingTalk body template is required', durationMs: 0 }
+      }
+      if (userIds.length === 0 && memberGroupIds.length === 0) {
+        if (recipientFieldPaths.length > 0) {
+          return {
+            actionType: action.type,
+            status: 'failed',
+            error: `No local userIds resolved from record field paths: ${recipientFieldPaths.join(', ')}`,
+            durationMs: 0,
+          }
+        }
+        if (memberGroupRecipientFieldPaths.length > 0) {
+          return {
+            actionType: action.type,
+            status: 'failed',
+            error: `No local userIds resolved from member group record field paths: ${memberGroupRecipientFieldPaths.join(', ')}`,
+            durationMs: 0,
+          }
+        }
+        return {
+          actionType: action.type,
+          status: 'failed',
+          error: 'At least one local userId, memberGroupId, record recipient field path, or member group record field path is required',
+          durationMs: 0,
+        }
+      }
+      const templateData: Record<string, unknown> = {
+        sheetId: context.sheetId,
+        recordId: context.recordId,
+        actorId: context.actorId ?? '',
+        record: context.recordData,
+      }
+      target = { userIds, memberGroupIds }
+      payload = {
+        title: truncateDingTalkMessageText(
+          renderAutomationTemplate(titleTemplate, templateData).trim(),
+          DINGTALK_MESSAGE_TITLE_MAX_LENGTH,
+        ),
+        body: renderAutomationTemplate(bodyTemplate, templateData).trim(),
+        linkConfiguration: {
+          publicFormViewConfigured: Boolean(nonBlankConfigString(personConfig.publicFormViewId)),
+          internalViewConfigured: Boolean(nonBlankConfigString(personConfig.internalViewId)),
+        },
+      }
+      break
+    }
+    case 'send_dingtalk_approval_card': {
+      const event = context.triggerEvent as {
+        eventType?: unknown
+        approval?: { instanceId?: unknown }
+        task?: { nodeKey?: unknown; assigneeUserId?: unknown }
+      } | null
+      const approvalInstanceId = nonBlankConfigString(event?.approval?.instanceId)
+      const nodeKey = nonBlankConfigString(event?.task?.nodeKey)
+      const assigneeUserId = nonBlankConfigString(event?.task?.assigneeUserId)
+      if (event?.eventType !== 'approval.task_created' || !approvalInstanceId || !nodeKey || !assigneeUserId) {
+        return {
+          actionType: action.type,
+          status: 'failed',
+          error: 'send_dingtalk_approval_card requires an approval.task_created trigger event',
+          durationMs: 0,
+        }
+      }
+      target = { approvalInstanceId, nodeKey, assigneeUserId }
+      payload = { cardKind: 'approval_task' }
+      break
+    }
+    default:
+      return null
+  }
+
+  return {
+    actionType: action.type,
+    status: 'success',
+    simulated: true,
+    output: {
+      dryRun: true,
+      dispatched: false,
+      plan: { target, payload: redactValue(payload) },
+    },
+    durationMs: 0,
+  }
+}
+
+function simulatedStartApprovalPlan(
+  action: AutomationAction,
+  context: ExecutionContext,
+): AutomationStepResult | null {
+  if (action.type !== 'start_approval') return null
+
+  const templateId = nonBlankConfigString(action.config.templateId)
+  if (!templateId) {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: 'start_approval.templateId is required',
+      durationMs: 0,
+    }
+  }
+
+  const rawMapping = isPlainRecord(action.config.formDataMapping)
+    ? action.config.formDataMapping
+    : null
+  if (!rawMapping || Object.keys(rawMapping).length === 0) {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: 'start_approval.formDataMapping is required',
+      durationMs: 0,
+    }
+  }
+
+  const formDataMapping: Record<string, string> = {}
+  for (const [rawFieldId, rawExpression] of Object.entries(rawMapping)) {
+    const fieldId = rawFieldId.trim()
+    const expression = nonBlankConfigString(rawExpression)
+    if (!fieldId || !expression) {
+      return {
+        actionType: action.type,
+        status: 'failed',
+        error: 'start_approval.formDataMapping entries must be non-empty strings',
+        durationMs: 0,
+      }
+    }
+    formDataMapping[fieldId] = expression
+  }
+
+  if (action.config.requester !== undefined && !isPlainRecord(action.config.requester)) {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: 'start_approval.requester must be an object',
+      durationMs: 0,
+    }
+  }
+  const requester = isPlainRecord(action.config.requester) ? action.config.requester : undefined
+  const requesterMode = requester?.mode ?? 'trigger_actor'
+  if (requesterMode !== 'trigger_actor' && requesterMode !== 'rule_creator') {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: 'start_approval.requester.mode must be trigger_actor or rule_creator',
+      durationMs: 0,
+    }
+  }
+
+  const templateData: Record<string, unknown> = {
+    ...context.recordData,
+    record: context.recordData,
+    trigger: context.triggerEvent,
+    sheetId: context.sheetId,
+    recordId: context.recordId,
+    actorId: context.actorId,
+    ruleId: context.ruleId,
+    executionId: context.executionId,
+  }
+  const formData = Object.fromEntries(
+    Object.entries(formDataMapping).map(([fieldId, expression]) => {
+      const value = expression.includes('{{')
+        ? renderAutomationTemplate(expression, templateData)
+        : lookupTemplateValue(expression, templateData)
+      return [fieldId, value === undefined ? '' : value]
+    }),
+  )
+
+  return {
+    actionType: action.type,
+    status: 'success',
+    simulated: true,
+    output: {
+      dryRun: true,
+      dispatched: false,
+      plan: {
+        wouldCreateApproval: true,
+        target: { templateId, requesterMode },
+        payload: redactValue({ formData }),
+      },
+    },
+    durationMs: 0,
+  }
+}
+
+function simulatedWriteApprovalFormValuesPlan(
+  action: AutomationAction,
+  context: ExecutionContext,
+): AutomationStepResult | null {
+  if (action.type !== 'write_approval_form_values') return null
+
+  const mode = parseFwbWriteMode(action.config.mode)
+  if (!mode.ok) {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: 'fwb_rejected:mapping_config:unknown_mode',
+      durationMs: 0,
+    }
+  }
+  const mappings = normalizeFwbMappings(action.config.mappings)
+  if (mappings.ok === false) {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: `fwb_rejected:mapping_config:${mappings.issue}`,
+      durationMs: 0,
+    }
+  }
+  if (hasUnavailableFwbNumberMapping(mappings.mappings)) {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: 'fwb_rejected:exact_number_mapping_unavailable',
+      durationMs: 0,
+    }
+  }
+  const sourceTemplateVersionId = nonBlankConfigString(action.config.sourceTemplateVersionId)
+  if (!sourceTemplateVersionId) {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: 'fwb_rejected:source_template_version',
+      durationMs: 0,
+    }
+  }
+
+  let target: Record<string, unknown>
+  if (mode.mode === 'update') {
+    const linkField = normalizeFwbUpdateRecordLinkFieldId(action.config.recordLinkFieldId)
+    if (linkField.ok === false) {
+      return {
+        actionType: action.type,
+        status: 'failed',
+        error: `fwb_rejected:mapping_config:${linkField.issue}`,
+        durationMs: 0,
+      }
+    }
+    target = {
+      mode: 'update',
+      sourceTemplateVersionId,
+      recordLinkFieldId: linkField.recordLinkFieldId,
+      derivedFrom: 'published_template_record_link',
+    }
+  } else {
+    target = {
+      mode: 'create',
+      sheetId: context.sheetId,
+      sourceTemplateVersionId,
+    }
+  }
+
+  const mappingPlan = mappings.mappings.map(({ formFieldId, targetFieldId, targetType }) => ({
+    formFieldId,
+    targetFieldId,
+    targetType,
+  }))
+  return {
+    actionType: action.type,
+    status: 'success',
+    simulated: true,
+    output: {
+      dryRun: true,
+      dispatched: false,
+      plan: {
+        wouldWriteApprovalFormValues: true,
+        target,
+        payload: {
+          valueSource: 'immutable_approved_form_snapshot',
+          mappings: mappingPlan,
+        },
+      },
+    },
+    durationMs: 0,
+  }
+}
+
+function simulatedStep(action: AutomationAction, context: ExecutionContext): AutomationStepResult {
+  if (action.type === 'wait_for_callback') {
+    return {
+      actionType: action.type,
+      status: 'success',
+      simulated: true,
+      output: {
+        dryRun: true,
+        dispatched: false,
+        plan: {
+          wouldSuspend: true,
+          reason: 'external_event',
+          resumeTokenIssued: false,
+        },
+      },
+      durationMs: 0,
+    }
+  }
+  const classAPlan = simulatedClassAPlan(action, context)
+  if (classAPlan) return classAPlan
+  const genericClassBPlan = simulatedGenericClassBPlan(action, context)
+  if (genericClassBPlan) return genericClassBPlan
+  const startApprovalPlan = simulatedStartApprovalPlan(action, context)
+  if (startApprovalPlan) return startApprovalPlan
+  const writeApprovalFormValuesPlan = simulatedWriteApprovalFormValuesPlan(action, context)
+  if (writeApprovalFormValuesPlan) return writeApprovalFormValuesPlan
+  return {
+    actionType: action.type,
+    status: 'success',
+    simulated: true,
+    output: { dryRun: true, dispatched: false },
+    durationMs: 0,
+  }
+}
+
 /**
  * #4196 Class-A action identity threaded to the four Class-A executors so each can claim its
  * (lineage-root, structural-path, action-type, config) tuple in the SAME transaction as its mutation.
@@ -810,6 +1404,7 @@ export interface AutomationStepResult {
 export interface ClassAActionIdentity {
   structuralPath: string
   rootExecutionId: string
+  kind?: ExecutionLedgerKind
 }
 
 export interface ExecutionContext {
@@ -828,6 +1423,10 @@ export interface ExecutionContext {
    * for back-compat: builders that omit it fall back to `executionId` at the claim call site.
    */
   rootExecutionId?: string
+  /** #4196 §6.1: real-fire test runs use a structurally disjoint applied/outbound ledger namespace. */
+  ledgerKind?: ExecutionLedgerKind
+  /** #4196 Q2/Q6: simulate derives control flow but dispatches no business action. */
+  dispatchMode?: AutomationDispatchMode
 }
 
 // ── Dependencies interface for action executors ───────────────────────────
@@ -986,6 +1585,8 @@ export class AutomationExecutor {
     triggerEvent: unknown,
     jobLifecycleFactory?: ActionJobLifecycleFactory,
     rootExecutionId?: string,
+    dispatchMode: AutomationDispatchMode = 'live',
+    ledgerKind: ExecutionLedgerKind = 'execution',
   ): Promise<AutomationExecution> {
     const executionId = `axe_${randomUUID()}`
     // A6-1: opt-in rules get a per-action job lifecycle bound to this executionId. The factory
@@ -1007,6 +1608,7 @@ export class AutomationExecutor {
       // #4196 §4: the RAW-config §2.1 fingerprint (the Class-A claim identity) captured before any redaction.
       ruleActionFingerprint: deriveRuleActionSetFingerprint(rule.actions).hash,
       schemaVersion: AUTOMATION_EXECUTION_SCHEMA_VERSION,
+      ...(dispatchMode === 'simulate' ? { dryRun: true } : {}),
     }
 
     // A6-1: opt-in job persistence needs a visible parent execution before any
@@ -1027,6 +1629,8 @@ export class AutomationExecutor {
       // #4196: the lineage root. A retry threads the original execution's root in; a first run has no
       // parent, so it defaults to its own id. Class-A claims key on this (retry of the same action → dup).
       rootExecutionId: rootExecutionId ?? executionId,
+      ledgerKind,
+      dispatchMode,
     }
 
     // Evaluate conditions
@@ -1235,6 +1839,7 @@ export class AutomationExecutor {
         const branchActionResult = await this.executeSingleAction(branchAction, context, {
           structuralPath: stepKey,
           rootExecutionId: context.rootExecutionId ?? context.executionId,
+          kind: context.ledgerKind,
         })
         await jobLifecycle.onSettled(cursor.parentStepIndex, branchAction, branchActionResult, meta)
         upstreamJobId = jobId
@@ -1339,6 +1944,21 @@ export class AutomationExecutor {
         ? { upstreamJobId: nextTopLevelUpstreamJobId }
         : undefined
       nextTopLevelUpstreamJobId = undefined
+
+      if (context.dispatchMode === 'simulate' && simulationDisposition(action.type) === 'simulate') {
+        if (jobLifecycle) await jobLifecycle.onStart(index, action, topLevelMeta)
+        const result = simulatedStep(action, context)
+        results.push(result)
+        if (jobLifecycle) await jobLifecycle.onSettled(index, action, result)
+        if (result.status === 'failed') {
+          for (let i = index + 1; i < actions.length; i++) {
+            if (jobLifecycle) await jobLifecycle.onSkipped(i, actions[i])
+            results.push({ actionType: actions[i].type, status: 'skipped', durationMs: 0 })
+          }
+          break
+        }
+        continue
+      }
 
       // A6-2 suspend point: a `wait_for_callback` in an opted-in rule suspends here.
       if (action.type === 'wait_for_callback') {
@@ -1478,6 +2098,7 @@ export class AutomationExecutor {
       const result = await this.executeSingleAction(action, context, {
         structuralPath: topLevelStepKey(index),
         rootExecutionId: context.rootExecutionId ?? context.executionId,
+        kind: context.ledgerKind,
       })
 
       results.push(result)
@@ -1555,6 +2176,7 @@ export class AutomationExecutor {
         const branchActionResult = await this.executeSingleAction(branchAction, context, {
           structuralPath: stepKey,
           rootExecutionId: context.rootExecutionId ?? context.executionId,
+          kind: context.ledgerKind,
         })
         await jobLifecycle.onSettled(stepIndex, branchAction, branchActionResult, meta)
 
@@ -1708,6 +2330,39 @@ export class AutomationExecutor {
       const jobId = `${context.executionId}:job:${stepIndex}:branch:${selectedBranchKey}:${actionIndex}`
       const meta = { stepKey, jobId, upstreamJobId }
 
+      if (context.dispatchMode === 'simulate' && simulationDisposition(branchAction.type) === 'simulate') {
+        await jobLifecycle.onStart(stepIndex, branchAction, meta)
+        const branchActionResult = simulatedStep(branchAction, context)
+        await jobLifecycle.onSettled(stepIndex, branchAction, branchActionResult, meta)
+        lastJobId = jobId
+        upstreamJobId = jobId
+        if (branchActionResult.status === 'failed') {
+          for (let skippedIndex = actionIndex + 1; skippedIndex < branchActions.length; skippedIndex++) {
+            const skippedAction = branchActions[skippedIndex]
+            const skippedStepKey = `${stepIndex}.branch.${selectedBranchKey}.${skippedIndex}`
+            const skippedJobId = `${context.executionId}:job:${stepIndex}:branch:${selectedBranchKey}:${skippedIndex}`
+            await jobLifecycle.onSkipped(stepIndex, skippedAction, {
+              stepKey: skippedStepKey,
+              jobId: skippedJobId,
+              upstreamJobId,
+            })
+            upstreamJobId = skippedJobId
+            lastJobId = skippedJobId
+          }
+          return {
+            lastJobId,
+            result: {
+              actionType: 'condition_branch',
+              status: 'failed',
+              error: branchActionResult.error ?? `Branch action ${actionIndex} failed`,
+              output,
+              durationMs: Date.now() - startMs,
+            },
+          }
+        }
+        continue
+      }
+
       if (branchAction.type === 'wait_for_callback') {
         // A6-3-3 branch-local suspend. Fail closed if no resume capability (shouldn't happen:
         // condition_branch already requires workflow_job_v1, which supplies onSuspendBranch).
@@ -1755,6 +2410,7 @@ export class AutomationExecutor {
       const branchActionResult = await this.executeSingleAction(branchAction, context, {
         structuralPath: stepKey,
         rootExecutionId: context.rootExecutionId ?? context.executionId,
+        kind: context.ledgerKind,
       })
       await jobLifecycle.onSettled(stepIndex, branchAction, branchActionResult, meta)
       lastJobId = jobId
@@ -1825,6 +2481,10 @@ export class AutomationExecutor {
     // claim-then-skip-on-duplicate; every other action ignores it.
     identity?: ClassAActionIdentity,
   ): Promise<AutomationStepResult> {
+    if (context.dispatchMode === 'simulate' && simulationDisposition(action.type) === 'simulate') {
+      return simulatedStep(action, context)
+    }
+
     const startMs = Date.now()
     let result: AutomationStepResult
 
@@ -1856,10 +2516,18 @@ export class AutomationExecutor {
           result = await this.executeSendEmail(action.config as unknown as SendEmailConfig, context, identity)
           break
         case 'send_dingtalk_group_message':
-          result = await this.executeSendDingTalkGroupMessage(action.config as unknown as SendDingTalkGroupMessageConfig, context)
+          result = await this.executeSendDingTalkGroupMessage(
+            action.config as unknown as SendDingTalkGroupMessageConfig,
+            context,
+            identity,
+          )
           break
         case 'send_dingtalk_person_message':
-          result = await this.executeSendDingTalkPersonMessage(action.config as unknown as SendDingTalkPersonMessageConfig, context)
+          result = await this.executeSendDingTalkPersonMessage(
+            action.config as unknown as SendDingTalkPersonMessageConfig,
+            context,
+            identity,
+          )
           break
         case 'send_dingtalk_approval_card':
           // #4196 Class-B follow-up: thread the raw config + execution identity so the approval card can take
@@ -2758,7 +3426,7 @@ export class AutomationExecutor {
     const outcome = await claimExecutionAction(
       { query, isTransaction: true } as unknown as TransactionalQueryable,
       {
-        kind: 'execution',
+        kind: identity.kind ?? 'execution',
         rootExecutionId: identity.rootExecutionId,
         actionKey: deriveActionKey({ structuralPath: identity.structuralPath, actionType, canonicalConfig: config }),
         actionType,
@@ -3547,7 +4215,7 @@ export class AutomationExecutor {
   ): OutboundIntentIdentity | null {
     if (!isClassBOutboundEnabled() || !identity) return null
     return {
-      kind: 'execution',
+      kind: identity.kind ?? 'execution',
       rootExecutionId: identity.rootExecutionId,
       actionKey: deriveActionKey({ structuralPath: identity.structuralPath, actionType, canonicalConfig: config }),
     }
@@ -4134,6 +4802,7 @@ export class AutomationExecutor {
   private async executeSendDingTalkPersonMessage(
     config: SendDingTalkPersonMessageConfig,
     context: ExecutionContext,
+    identity?: ClassAActionIdentity,
   ): Promise<AutomationStepResult> {
     const staticUserIds = normalizeUserIds(config.userIds)
     const staticMemberGroupIds = normalizeUserIds(config.memberGroupIds)
@@ -4402,6 +5071,17 @@ export class AutomationExecutor {
         chunkItems(recipients, DINGTALK_PERSON_BATCH_SIZE).map((batch) => ({ integrationId, batch })),
     )
 
+    // #4196 Class-B two-phase intent/outcome. Claim the action before the first token/send network
+    // call. A prior sent or ambiguous attempt short-circuits the whole multi-batch action: retrying
+    // it could duplicate any recipient batch that DingTalk already accepted.
+    const outboundId = this.classBOutboundIdentity(identity, 'send_dingtalk_person_message', config)
+    if (outboundId) {
+      const decision = await claimOutboundIntent(this.deps.queryFn, outboundId)
+      if (decision === 'skip_sent' || decision === 'skip_unknown') {
+        return this.alreadyAppliedResult('send_dingtalk_person_message')
+      }
+    }
+
     // DT-HARDEN-06: recipients whose batch already reached DingTalk. A later batch
     // throwing must not re-mark them failed — that used to write BOTH a success and a
     // failed delivery row for the same recipient in the same send attempt.
@@ -4463,6 +5143,15 @@ export class AutomationExecutor {
         for (const recipient of batch) sentRecipients.add(recipient)
       }
 
+      if (outboundId) {
+        await recordOutboundOutcome(
+          this.deps.queryFn,
+          outboundId,
+          'sent',
+          'dingtalk_person_sent',
+        )
+      }
+
       return {
         actionType: 'send_dingtalk_person_message',
         status: 'success',
@@ -4508,6 +5197,28 @@ export class AutomationExecutor {
       const outcomeUnknownRecipients = outcomeUnknown && inFlightSendBatch
         ? new Set<(typeof resolvedRecipients)[number]>(inFlightSendBatch)
         : new Set<(typeof resolvedRecipients)[number]>()
+
+      if (outboundId) {
+        // The durable action outcome is deliberately more conservative than the legacy per-recipient
+        // delivery label. Per #4196 Q-B, every response/business rejection after a send began is
+        // ambiguous for automatic retry. Any earlier confirmed batch makes the whole action terminal
+        // sent; only a provable pre-dispatch failure with no successful batch remains retryable.
+        const outcome: OutboundOutcome = sentRecipients.size > 0
+          ? 'sent'
+          : inFlightSendBatch
+            ? classifyOutboundResult(classifyFetchError(error))
+            : 'failed'
+        await recordOutboundOutcome(
+          this.deps.queryFn,
+          outboundId,
+          outcome,
+          outcome === 'sent'
+            ? 'dingtalk_person_sent'
+            : outcome === 'outcome_unknown'
+              ? 'dingtalk_person_outcome_unknown'
+              : 'dingtalk_person_definite_non_delivery',
+        )
+      }
 
       await Promise.all(unsentRecipients.map((recipient) => recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
         localUserId: recipient.localUserId,
@@ -4669,6 +5380,7 @@ export class AutomationExecutor {
   private async executeSendDingTalkGroupMessage(
     config: SendDingTalkGroupMessageConfig,
     context: ExecutionContext,
+    identity?: ClassAActionIdentity,
   ): Promise<AutomationStepResult> {
     const staticDestinationIds = Array.from(new Set([
       ...(Array.isArray(config.destinationIds)
@@ -4916,10 +5628,28 @@ export class AutomationExecutor {
       }
     }
 
+    // #4196 Class-B two-phase intent/outcome. All local validation and authorization above remains
+    // outside the intent: an invalid rule has dispatched nothing and needs no retry evidence. Once
+    // this claim commits, every destination send belongs to one action identity. A prior sent or
+    // ambiguous attempt must short-circuit the WHOLE action because retrying it would duplicate any
+    // destination that already received the message.
+    const outboundId = this.classBOutboundIdentity(identity, 'send_dingtalk_group_message', config)
+    if (outboundId) {
+      const decision = await claimOutboundIntent(this.deps.queryFn, outboundId)
+      if (decision === 'skip_sent' || decision === 'skip_unknown') {
+        return this.alreadyAppliedResult('send_dingtalk_group_message')
+      }
+    }
+
+    let sendSucceeded = false
+    let outcomeUnknownObserved = false
+
     for (const destination of orderedDestinations) {
       let deliveryRecorded = false
       let responseStatus: number | null = null
       let responseBody: string | null = null
+      let sendAttemptStarted = false
+      let destinationSendSucceeded = false
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS)
       try {
@@ -4927,8 +5657,10 @@ export class AutomationExecutor {
         if (!runtimeWebhook) {
           throw new Error(`DingTalk destination ${destination.name || destination.id} was not validated before send`)
         }
+        const signedWebhookUrl = buildSignedDingTalkWebhookUrl(runtimeWebhook.webhookUrl, runtimeWebhook.secret)
+        sendAttemptStarted = true
         const response = await (this.deps.fetchFn ?? globalThis.fetch)(
-          buildSignedDingTalkWebhookUrl(runtimeWebhook.webhookUrl, runtimeWebhook.secret),
+          signedWebhookUrl,
           {
             method: 'POST',
             headers: {
@@ -4943,6 +5675,9 @@ export class AutomationExecutor {
         responseStatus = response.status
         responseBody = parsed ? JSON.stringify(parsed) : response.statusText || null
         if (!response.ok) {
+          // The request body left this process and a response came back. Per #4196 Q-B this is
+          // ambiguous even for 4xx: never turn it into retryable `failed`.
+          outcomeUnknownObserved = true
           const errorMessage = `DingTalk request failed with HTTP ${response.status}`
           deliveryRecorded = true
           await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
@@ -4964,6 +5699,9 @@ export class AutomationExecutor {
         try {
           validateDingTalkRobotResponse(parsed)
         } catch (err) {
+          // HTTP 2xx with a DingTalk business error still proves only that the request was received,
+          // not that no downstream effect occurred. It is therefore outcome_unknown, not retryable.
+          outcomeUnknownObserved = true
           const errorMessage = err instanceof Error ? err.message : String(err)
           deliveryRecorded = true
           await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
@@ -4982,6 +5720,8 @@ export class AutomationExecutor {
           failedDestinations.push({ id: destination.id, name: destination.name, error: errorMessage })
           continue
         }
+        destinationSendSucceeded = true
+        sendSucceeded = true
         deliveryRecorded = true
         await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
           destinationId: destination.id,
@@ -4997,6 +5737,10 @@ export class AutomationExecutor {
         })
         successfulDestinations.push({ id: destination.id, name: destination.name })
       } catch (err) {
+        if (!destinationSendSucceeded && sendAttemptStarted) {
+          const outcome = classifyOutboundResult(classifyFetchError(err))
+          if (outcome !== 'failed') outcomeUnknownObserved = true
+        }
         if (!deliveryRecorded) {
           await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
             destinationId: destination.id,
@@ -5020,6 +5764,28 @@ export class AutomationExecutor {
       } finally {
         clearTimeout(timeout)
       }
+    }
+
+    if (outboundId) {
+      // Multi-destination aggregate: any confirmed success makes the action terminal `sent`, even
+      // when a later destination fails. Replaying the action would duplicate that confirmed send.
+      // With no success, any post-dispatch ambiguity is terminal outcome_unknown. Only when every
+      // attempted send is provably pre-dispatch non-delivery is the action retryable `failed`.
+      const outcome: OutboundOutcome = sendSucceeded
+        ? 'sent'
+        : outcomeUnknownObserved
+          ? 'outcome_unknown'
+          : 'failed'
+      await recordOutboundOutcome(
+        this.deps.queryFn,
+        outboundId,
+        outcome,
+        outcome === 'sent'
+          ? 'dingtalk_group_sent'
+          : outcome === 'outcome_unknown'
+            ? 'dingtalk_group_outcome_unknown'
+            : 'dingtalk_group_definite_non_delivery',
+      )
     }
 
     if (failedDestinations.length) {
