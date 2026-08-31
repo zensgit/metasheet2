@@ -62,6 +62,22 @@
  * identifiers, coded tokens and counts exclusively — no label, no option value, no free prose (prose
  * would give the probe's whole-word leak sweep an ordinary-English surface to collide with).
  *
+ * ============================================================================
+ * ONE ADAPTER, TWO PRESET DIALECTS
+ * ============================================================================
+ * `adaptVendorPresetShape` is the ONLY function that knows what a preset file looks like; every
+ * other function downstream (here and in source-discovery-probe.mjs) sees one normalized internal
+ * shape. It reads two dialects:
+ *
+ *   * the SIBLING SCHEMA (`presetSchema: "metasheet.source-vendor-preset"`), defined on branch
+ *     feat/stock-prep-vendor-presets — a count-floor signature, `rows-name-columns` dictionaries
+ *     whose own columns are DISCOVERED rather than declared, an enabled-flag column pattern plus a
+ *     polarity, and `semanticExpectations` instead of `ext_` ids. This is the real one; the
+ *     branch's dn-pdm-family.preset.json is read unmodified. See adaptSiblingVendorPreset().
+ *   * a flat shape that names everything outright, kept because it is the smallest input a test (or
+ *     a one-off vendor) can hand this module, and because it is what this side was written against
+ *     before the schema landed.
+ *
  * PURE. Every function here is a pure function of its arguments — rows arrive as arrays, nothing
  * here opens a connection, reads a file or holds a clock. The probe owns all I/O.
  */
@@ -98,9 +114,14 @@ const DRAFT_EMITTER_REASONS = Object.freeze([
   'ROW_LABEL_EMPTY',
   'ROW_SLOT_NOT_A_COLUMN',
   'ROW_SLOT_DUPLICATE',
+  // --- dictionary column discovery (rows-name-columns presets) ---------------
+  'DICTIONARY_SLOT_COLUMN_UNDISCOVERED',
+  'DICTIONARY_LABEL_COLUMN_UNDISCOVERED',
+  'DICTIONARY_ENABLED_COLUMN_UNDISCOVERED',
   // --- target resolution -----------------------------------------------------
   'NATIVE_TABLE_ABSENT',
   'NATIVE_COLUMN_ABSENT',
+  'NATIVE_TYPE_UNMAPPED',
   'DICTIONARY_NOT_READ',
   'DICTIONARY_NO_ALIAS_MATCH',
   'DICTIONARY_AMBIGUOUS_ALIAS_MATCH',
@@ -114,6 +135,8 @@ const DRAFT_EMITTER_REASONS = Object.freeze([
   'VALUE_SET_NOT_READ',
   'VALUE_SET_EMPTY',
   'VALUE_SET_OVER_CAP',
+  'VALUE_SET_TABLE_PATTERN_MISMATCH',
+  'VALUE_SET_COLUMN_AMBIGUOUS',
   // --- output placement ------------------------------------------------------
   'DRAFT_OUT_DIR_INSIDE_REPO',
   'DRAFT_OUT_DIR_INVALID',
@@ -184,6 +207,59 @@ function matchesEnabledValue(raw, enabledValues) {
   return false
 }
 
+/**
+ * "Is this row enabled", the one predicate every dictionary read goes through. Two ways a preset can
+ * say it, because the two preset dialects say it differently:
+ *   * an explicit VALUE LIST (`enabledValues`), and
+ *   * a POLARITY (`zero-means-enabled` / `nonzero-means-enabled`), which is how the vendor-preset
+ *     schema states it — the family's flag is inverted relative to intuition, so the polarity is a
+ *     vendor fact and belongs in the preset rather than in a reader's assumption.
+ * A blank cell is never enabled under either reading: "no answer" is not "yes".
+ */
+function isEnabledCell(raw, spec) {
+  const text = cellText(raw)
+  if (spec.enabledPolarity === 'zero-means-enabled') return text === '0'
+  if (spec.enabledPolarity === 'nonzero-means-enabled') return text !== '' && text !== '0'
+  return matchesEnabledValue(raw, spec.enabledValues)
+}
+
+// Mirrors the probe's own MSSQL_TEXT_TYPES. Kept as a local copy rather than imported because this
+// module must stay a pure leaf (the probe imports IT, not the other way round); it is used only to
+// decide which column of a vocabulary table could be its value column, and a miss there produces a
+// LOUD ambiguity gap, never a wrong pick.
+const TEXT_LIKE_TYPES = new Set(['char', 'nchar', 'varchar', 'nvarchar', 'text', 'ntext'])
+
+function isTextLikeColumn(column) {
+  return TEXT_LIKE_TYPES.has(String((column && column.dataType) || '').toLowerCase())
+}
+
+// Catalog data type -> the field type a pack can declare. Used ONLY for a NATIVE target whose preset
+// entry declares no type: the column's own type is a fact the discovery read established, so reading
+// it is a derivation, not a guess. An unmapped type is a gap, never a defaulted `string`.
+const CATALOG_TYPE_TO_FIELD_TYPE = Object.freeze({
+  char: 'string', nchar: 'string', varchar: 'string', nvarchar: 'string', text: 'string', ntext: 'string',
+  tinyint: 'number', smallint: 'number', int: 'number', bigint: 'number',
+  decimal: 'number', numeric: 'number', float: 'number', real: 'number', money: 'number', smallmoney: 'number',
+  bit: 'boolean',
+  date: 'date', datetime: 'date', datetime2: 'date', smalldatetime: 'date', datetimeoffset: 'date',
+})
+
+function fieldTypeForCatalogColumn(column) {
+  return CATALOG_TYPE_TO_FIELD_TYPE[String((column && column.dataType) || '').toLowerCase()] || null
+}
+
+// A preset-supplied pattern is compiled ONCE, in the adapter, so a malformed one is a preset refusal
+// rather than a mid-run throw. Never global: a stateful lastIndex would make matching order-dependent.
+function compilePattern(source, reason, label) {
+  if (source === null || source === undefined || cellText(source) === '') return null
+  try {
+    return new RegExp(String(source), 'i')
+  } catch {
+    fail(reason, `${label} is not a valid regular expression`, { field: label })
+  }
+  return null
+}
+
 // Labels are compared for alias matching. Case folding is safe for ASCII and a
 // no-op for CJK; the comparison is EQUALITY on the trimmed, folded text — never
 // a substring or a fuzzy distance, because "近似" is how a draft acquires a
@@ -207,18 +283,20 @@ function uniqueStrings(values) {
 // ---------------------------------------------------------------------------
 // >>> THE ADAPTER <<<
 //
-// adaptVendorPresetShape() is the ONE place in this codebase that assumes what a
-// vendor preset LOOKS LIKE. The preset schema itself is being defined on the
-// sibling branch `feat/stock-prep-vendor-presets`
-// (plugins/plugin-integration-core/lib/source-vendor-presets/). When that lands,
-// reconciling the consumption side is a change to THIS FUNCTION AND NOTHING
-// ELSE: everything downstream operates on the normalized internal shape it
-// returns, and no other function in this module or in source-discovery-probe.mjs
-// touches a raw preset key.
+// adaptVendorPresetShape() is the ONE place in this codebase that knows what a
+// vendor preset LOOKS LIKE. Everything downstream operates on the normalized
+// internal shape it returns, and no other function in this module or in
+// source-discovery-probe.mjs touches a raw preset key — so teaching this tool a
+// new preset dialect is a change to this function and nothing else. (That claim
+// was paid for rather than asserted: the sibling schema landed shaped quite
+// differently from the flat form below and was absorbed entirely here.)
 //
-// The assumption is deliberately conservative and, above all, obeys the schema's
-// core rule: every key below describes WHERE TO LOOK and HOW TO READ. There is
-// no key in which a preset could record a customer's actual ExAttr assignment.
+// Below is the FLAT dialect: everything named outright. The sibling schema's
+// reader is adaptSiblingVendorPreset(), further down.
+//
+// Both obey the schema's core rule: every key describes WHERE TO LOOK and HOW TO
+// READ. There is no key in which a preset could record a customer's actual
+// ExAttr assignment.
 // ---------------------------------------------------------------------------
 
 function isPlainObject(value) {
@@ -236,11 +314,23 @@ function optionalString(value) {
   return text || null
 }
 
+// The sibling branch's schema marker (feat/stock-prep-vendor-presets,
+// plugins/plugin-integration-core/lib/source-vendor-presets/preset-schema.cjs
+// SOURCE_VENDOR_PRESET_SCHEMA_MARKER). Presence of this key is what routes a preset to the
+// sibling-shape reader below; anything else is read as the documented flat shape.
+const SIBLING_PRESET_SCHEMA_MARKER = 'metasheet.source-vendor-preset'
+
 function adaptVendorPresetShape(raw) {
   if (!isPlainObject(raw)) {
     fail('PRESET_NOT_AN_OBJECT', 'a vendor preset must be a plain object', {})
   }
+  if (cellText(raw.presetSchema) === SIBLING_PRESET_SCHEMA_MARKER) {
+    return adaptSiblingVendorPreset(raw)
+  }
+  return adaptFlatVendorPreset(raw)
+}
 
+function adaptFlatVendorPreset(raw) {
   const presetId = requireString(raw.presetId, 'PRESET_ID_INVALID', 'preset.presetId')
   if (!PACK_ID_PATTERN.test(presetId)) {
     // The preset id seeds the draft packId and mappingId, both of which are
@@ -305,6 +395,11 @@ function adaptVendorPresetShape(raw) {
       enabledValues: Object.freeze(enabledValues),
       typeColumn: optionalString(entry.typeColumn),
       valueSetColumn: optionalString(entry.valueSetColumn),
+      // Columns are named outright in this shape, so nothing has to be discovered.
+      discoverColumns: false,
+      enabledColumnPattern: null,
+      enabledPolarity: null,
+      valueSetTableNamePattern: null,
     }))
   }
 
@@ -415,6 +510,8 @@ function adaptVendorPresetShape(raw) {
       ownership,
       label: optionalString(entry.label),
       valueSet: optionalString(entry.valueSet),
+      labelPattern: compilePattern(entry.labelPattern, 'PRESET_TARGET_INVALID', `${at}.labelPattern`),
+      typeHintPattern: compilePattern(entry.typeHintPattern, 'PRESET_TARGET_INVALID', `${at}.typeHintPattern`),
     }
 
     if (via === 'native') {
@@ -436,11 +533,11 @@ function adaptVendorPresetShape(raw) {
       })
     }
     const labelAliases = uniqueStrings(Array.isArray(entry.labelAliases) ? entry.labelAliases : [])
-    if (labelAliases.length === 0) {
+    if (labelAliases.length === 0 && !common.labelPattern) {
       // A dictionary-justified target with no aliases has nothing to be
       // justified BY, and would either match nothing or (worse) invite a
       // fallback. Refuse the preset instead.
-      fail('PRESET_TARGET_INVALID', `${at}.labelAliases must list at least one vendor-standard label`, {
+      fail('PRESET_TARGET_INVALID', `${at} must carry labelAliases or a labelPattern to be justified BY`, {
         field: `${at}.labelAliases`,
         target,
       })
@@ -477,6 +574,276 @@ function adaptVendorPresetShape(raw) {
     // emits `targetObjectId` and the README lists it as CONFIRM-REQUIRED. This
     // is deliberate: omitting the key means "the frozen canonical main table",
     // and an unconfirmed draft must not be able to say that by accident either.
+    packTargetObjectIdIsDeploymentDecision: true,
+  })
+}
+
+// ---------------------------------------------------------------------------
+// >>> THE ADAPTER, SECOND DIALECT <<<
+//
+// The vendor-preset schema as it actually landed on the sibling branch
+// (plugins/plugin-integration-core/lib/source-vendor-presets/preset-schema.cjs,
+// marker `metasheet.source-vendor-preset`). Read here and translated into the
+// SAME normalized internal shape, so nothing downstream knows there are two
+// dialects. Four things it says differently, and each is a genuine improvement
+// this side simply had to learn to read:
+//
+//   1. `matches` is a COUNT FLOOR (`minSignatureTablesPresent` of
+//      `signatureTables`), not a ratio. present >= floor is identical to
+//      confidence >= floor/total, so it maps exactly onto the ratio this module
+//      already computes — and the floor's purpose (tolerate a deployment without
+//      the order module) survives the translation.
+//   2. Dictionary COLUMNS are not declared at all: `mechanism:
+//      'rows-name-columns'` says the rows name columns, and WHICH column of the
+//      dictionary is the slot / the label / the flag is DISCOVERED. That is
+//      exactly what the probe's own dictionary heuristic already proves per
+//      table, so the spec is left incomplete here and completed against that
+//      heuristic's output by completeDictionarySpec(). A dictionary the
+//      heuristic did not resolve becomes a loud gap, never a guess.
+//   3. The enabled flag is a COLUMN PATTERN plus a POLARITY
+//      (`zero-means-enabled` on this family — inverted, and a vendor fact).
+//   4. Targets are SEMANTICS (`bom-line-quantity`), not `ext_` ids, and they
+//      match by `labelHintPattern` rather than by exact alias. The `ext_` id is
+//      therefore a MECHANICAL transform of the semantic name — an ASCII string
+//      the preset itself declares, never of a customer label.
+//
+// ONE DELIBERATE DIVERGENCE, stated rather than smuggled: the schema's notes
+// describe the hint patterns as saying "how to RANK" candidates. This module
+// does not rank. A pattern that matches two enabled rows produces
+// DICTIONARY_AMBIGUOUS_ALIAS_MATCH with both candidates listed, because ranking
+// picks a winner and a picked winner is a guess wearing a score. Where a
+// `dictionaryTypeHintPattern` is present it is applied as a FILTER (a candidate
+// must match it), which narrows rather than orders.
+// ---------------------------------------------------------------------------
+
+// `bom-line-quantity` -> `ext_bomLineQuantity`. Mechanical, over an ASCII identifier the PRESET
+// declares — never over a customer label (that would be transliteration, i.e. a guess).
+function deriveSemanticExtFieldId(semantic) {
+  const parts = cellText(semantic).split(/[^A-Za-z0-9]+/).filter(Boolean)
+  if (parts.length === 0) return { ok: false, reason: 'PRESET_TARGET_INVALID' }
+  const camel = parts[0].charAt(0).toLowerCase() + parts[0].slice(1) +
+    parts.slice(1).map((p) => p.charAt(0).toUpperCase() + p.slice(1)).join('')
+  if (!EXT_FIELD_SUFFIX_PATTERN.test(camel)) return { ok: false, reason: 'PRESET_TARGET_INVALID' }
+  return { ok: true, fieldId: `${EXT_FIELD_ID_PREFIX}${camel}` }
+}
+
+function adaptSiblingVendorPreset(raw) {
+  const presetId = requireString(raw.presetId, 'PRESET_ID_INVALID', 'preset.presetId')
+  if (!PACK_ID_PATTERN.test(presetId)) {
+    fail('PRESET_ID_INVALID', `preset.presetId must match ${PACK_ID_PATTERN}`, { field: 'preset.presetId', presetId })
+  }
+  if (!Number.isInteger(raw.presetVersion) || raw.presetVersion < 1) {
+    fail('PRESET_VERSION_INVALID', 'preset.presetVersion must be a positive integer', { field: 'preset.presetVersion' })
+  }
+
+  // --- matches --------------------------------------------------------------
+  const matches = isPlainObject(raw.matches) ? raw.matches : null
+  if (!matches) fail('PRESET_MATCHES_INVALID', 'preset.matches must be a plain object', { field: 'preset.matches' })
+  const requiredTables = uniqueStrings(Array.isArray(matches.signatureTables) ? matches.signatureTables : [])
+  if (requiredTables.length === 0) {
+    fail('PRESET_MATCHES_INVALID', 'preset.matches.signatureTables must list at least one table', {
+      field: 'preset.matches.signatureTables',
+    })
+  }
+  const floor = Number(matches.minSignatureTablesPresent)
+  if (!Number.isInteger(floor) || floor < 1 || floor > requiredTables.length) {
+    fail('PRESET_MATCHES_INVALID', 'preset.matches.minSignatureTablesPresent must be an integer within the signature size', {
+      field: 'preset.matches.minSignatureTablesPresent',
+    })
+  }
+
+  // --- coreTables: role -> table + role columns -----------------------------
+  const roleTables = new Map()
+  const roleColumns = new Map()
+  const coreTables = isPlainObject(raw.coreTables) ? raw.coreTables : {}
+  for (const [role, entry] of Object.entries(coreTables)) {
+    if (!isPlainObject(entry)) continue
+    const table = optionalString(entry.table)
+    if (!table) continue
+    roleTables.set(role, table)
+    const columns = new Map()
+    for (const source of [entry.roles, entry.optionalRoles]) {
+      if (!isPlainObject(source)) continue
+      for (const [roleName, column] of Object.entries(source)) {
+        const text = optionalString(column)
+        if (text) columns.set(roleName, text)
+      }
+    }
+    roleColumns.set(role, columns)
+  }
+
+  // The row `applyExtFieldMapping` is handed. The schema's own note on the part role says so:
+  // "This is also the row the stock-preparation ext-field mapping reads."
+  const mappingSourceTable = roleTables.get('part')
+  if (!mappingSourceTable) {
+    fail('PRESET_MAPPING_SOURCE_TABLE_MISSING', 'preset.coreTables.part.table is required — it is the row the ext-field mapper reads', {
+      field: 'preset.coreTables.part.table',
+    })
+  }
+
+  // --- dictionaries ---------------------------------------------------------
+  const dictionaries = new Map()
+  for (const [index, entry] of (Array.isArray(raw.dictionaries) ? raw.dictionaries : []).entries()) {
+    const at = `preset.dictionaries[${index}]`
+    if (!isPlainObject(entry)) fail('PRESET_DICTIONARY_INVALID', `${at} must be a plain object`, { field: at })
+    const key = requireString(entry.id, 'PRESET_DICTIONARY_INVALID', `${at}.id`)
+    if (dictionaries.has(key)) fail('PRESET_DICTIONARY_INVALID', `${at}.id is declared twice`, { field: `${at}.id`, key })
+    const role = requireString(entry.labelsColumnsOfRole, 'PRESET_DICTIONARY_INVALID', `${at}.labelsColumnsOfRole`)
+    const describesTable = roleTables.get(role)
+    if (!describesTable) {
+      fail('PRESET_DICTIONARY_INVALID', `${at}.labelsColumnsOfRole names a role with no coreTables entry`, {
+        field: `${at}.labelsColumnsOfRole`,
+        role,
+      })
+    }
+    if (cellText(entry.mechanism) !== 'rows-name-columns') {
+      // The only mechanism this reader knows how to complete against the probe's
+      // dictionary heuristic. A future mechanism must be taught here explicitly
+      // rather than fall through to a default reading.
+      fail('PRESET_DICTIONARY_INVALID', `${at}.mechanism is not one this emitter can read`, {
+        field: `${at}.mechanism`,
+        mechanism: cellText(entry.mechanism),
+      })
+    }
+    const flag = isPlainObject(entry.enabledFlag) ? entry.enabledFlag : null
+    if (!flag) {
+      // No flag means every row would be read as live. On this family two of
+      // thirty bom-side slots are enabled — over-collection here is silent and
+      // total, so it is refused.
+      fail('PRESET_DICTIONARY_INVALID', `${at}.enabledFlag is required — "enabled rows only" cannot be a no-op`, {
+        field: `${at}.enabledFlag`,
+      })
+    }
+    const polarity = requireString(flag.polarity, 'PRESET_DICTIONARY_INVALID', `${at}.enabledFlag.polarity`)
+    if (polarity !== 'zero-means-enabled' && polarity !== 'nonzero-means-enabled') {
+      fail('PRESET_DICTIONARY_INVALID', `${at}.enabledFlag.polarity is not a polarity this emitter can read`, {
+        field: `${at}.enabledFlag.polarity`,
+        polarity,
+      })
+    }
+    dictionaries.set(key, Object.freeze({
+      key,
+      table: requireString(entry.table, 'PRESET_DICTIONARY_INVALID', `${at}.table`),
+      describesTable,
+      // Discovered, not declared — see completeDictionarySpec().
+      slotColumn: null,
+      labelColumn: null,
+      enabledColumn: null,
+      enabledValues: Object.freeze([]),
+      typeColumn: null,
+      valueSetColumn: null,
+      discoverColumns: true,
+      enabledColumnPattern: compilePattern(flag.columnPattern, 'PRESET_DICTIONARY_INVALID', `${at}.enabledFlag.columnPattern`),
+      enabledPolarity: polarity,
+      valueSetTableNamePattern: null,
+    }))
+  }
+
+  // --- semanticExpectations -> targets --------------------------------------
+  const targets = []
+  const seenTargets = new Set()
+  const valueSetPatternByDictionary = new Map()
+  for (const [index, entry] of (Array.isArray(raw.semanticExpectations) ? raw.semanticExpectations : []).entries()) {
+    const at = `preset.semanticExpectations[${index}]`
+    if (!isPlainObject(entry)) fail('PRESET_TARGET_INVALID', `${at} must be a plain object`, { field: at })
+    const semantic = requireString(entry.semantic, 'PRESET_TARGET_INVALID', `${at}.semantic`)
+    const derived = deriveSemanticExtFieldId(semantic)
+    if (!derived.ok) {
+      fail('PRESET_TARGET_INVALID', `${at}.semantic cannot become an ASCII camelCase extension field id`, {
+        field: `${at}.semantic`,
+        semantic,
+      })
+    }
+    if (seenTargets.has(derived.fieldId)) {
+      fail('PRESET_TARGET_DUPLICATE', `${at}.semantic yields an extension field id already claimed`, {
+        field: `${at}.semantic`,
+        target: derived.fieldId,
+      })
+    }
+    seenTargets.add(derived.fieldId)
+
+    const locus = requireString(entry.locus, 'PRESET_TARGET_INVALID', `${at}.locus`)
+    const common = {
+      target: derived.fieldId,
+      // The semantic name IS the best label the preset can offer; it is ASCII and generic, and the
+      // README marks every label CONFIRM-REQUIRED. A dictionary-justified target overrides it with
+      // the customer's own label anyway.
+      label: semantic,
+      type: null,
+      ownership: 'plm_system',
+      valueSet: null,
+      labelPattern: compilePattern(entry.labelHintPattern, 'PRESET_TARGET_INVALID', `${at}.labelHintPattern`),
+      typeHintPattern: compilePattern(entry.dictionaryTypeHintPattern, 'PRESET_TARGET_INVALID', `${at}.dictionaryTypeHintPattern`),
+    }
+
+    if (locus === 'native-column') {
+      const role = requireString(entry.role, 'PRESET_TARGET_INVALID', `${at}.role`)
+      const table = roleTables.get(role)
+      if (!table) {
+        fail('PRESET_TARGET_INVALID', `${at}.role names a role with no coreTables entry`, { field: `${at}.role`, role })
+      }
+      const column = optionalString(entry.roleColumn) || (roleColumns.get(role) || new Map()).get(cellText(entry.roleName))
+      if (!column) {
+        fail('PRESET_TARGET_INVALID', `${at} must name the native column via roleColumn`, { field: `${at}.roleColumn` })
+      }
+      targets.push(Object.freeze({ ...common, via: 'native', table, column, dictionary: null, labelAliases: Object.freeze([]) }))
+      continue
+    }
+    if (locus !== 'dictionary-assigned-column') {
+      fail('PRESET_TARGET_INVALID', `${at}.locus is not one this emitter can read`, { field: `${at}.locus`, locus })
+    }
+
+    const dictionaryKey = requireString(entry.dictionary, 'PRESET_TARGET_INVALID', `${at}.dictionary`)
+    if (!dictionaries.has(dictionaryKey)) {
+      fail('PRESET_TARGET_INVALID', `${at}.dictionary names a dictionary the preset does not declare`, {
+        field: `${at}.dictionary`,
+        dictionary: dictionaryKey,
+      })
+    }
+    if (!common.labelPattern) {
+      fail('PRESET_TARGET_INVALID', `${at}.labelHintPattern is required — a dictionary-assigned semantic has nothing to be justified BY without it`, {
+        field: `${at}.labelHintPattern`,
+      })
+    }
+    const valueSetPattern = compilePattern(entry.valueSetTableNamePattern, 'PRESET_TARGET_INVALID', `${at}.valueSetTableNamePattern`)
+    if (valueSetPattern) valueSetPatternByDictionary.set(dictionaryKey, valueSetPattern)
+    targets.push(Object.freeze({
+      ...common,
+      via: 'dictionary',
+      table: null,
+      column: null,
+      dictionary: dictionaryKey,
+      labelAliases: Object.freeze([]),
+    }))
+  }
+
+  // A value-set table-name pattern is declared on the SEMANTIC but is a property of the DICTIONARY's
+  // rows (it is a dictionary cell that names the vocabulary table), so it is hoisted onto the
+  // dictionary spec where the reader needs it.
+  for (const [dictionaryKey, pattern] of valueSetPatternByDictionary) {
+    const spec = dictionaries.get(dictionaryKey)
+    dictionaries.set(dictionaryKey, Object.freeze({ ...spec, valueSetTableNamePattern: pattern }))
+  }
+
+  return Object.freeze({
+    presetId,
+    presetVersion: raw.presetVersion,
+    vendor: optionalString(raw.vendor) || presetId,
+    label: optionalString(raw.title) || presetId,
+    signature: Object.freeze({
+      requiredTables: Object.freeze(requiredTables),
+      optionalTables: Object.freeze([]),
+      forbiddenTables: Object.freeze([]),
+      // present >= floor is exactly confidence >= floor/total.
+      minimumConfidence: floor / requiredTables.length,
+    }),
+    dictionaries,
+    valueSets: new Map(),
+    typeMap: new Map(),
+    defaultType: null,
+    defaultOwnership: 'plm_system',
+    mappingSourceTable,
+    targets: Object.freeze(targets),
     packTargetObjectIdIsDeploymentDecision: true,
   })
 }
@@ -596,6 +963,102 @@ function selectVendorPreset({ presets, tableIndex }) {
 }
 
 // ---------------------------------------------------------------------------
+// Column discovery for `rows-name-columns` dictionaries.
+//
+// The preset declines to name the dictionary's own columns, and it is right to:
+// which column of DN_PM_PartExAttrInfo holds the slot name is not a vendor
+// constant a file should assert, it is something the probe PROVES per instance.
+// `detected` is one entry of detectDictionaryTables()'s output for this very
+// table — its `keyColumn` is the column whose values were shown to be column
+// names elsewhere (that IS "rows name columns"), and its companions are the
+// display-label / enabled-flag / type columns the same pass identified.
+//
+// Fail-closed at every step: a dictionary the heuristic did not resolve yields a
+// coded reason and its targets become explicit gaps. Nothing is inferred from a
+// column name here.
+// ---------------------------------------------------------------------------
+
+function completeDictionarySpec({ spec, tableColumns, detected }) {
+  if (!spec.discoverColumns) return { ok: true, spec }
+  const columns = tableColumns instanceof Map ? tableColumns : new Map()
+  const companions = (detected && detected.companions) || {}
+
+  const slotColumn = detected && detected.keyColumn ? detected.keyColumn : null
+  if (!slotColumn) return { ok: false, reason: 'DICTIONARY_SLOT_COLUMN_UNDISCOVERED' }
+  const labelColumn = companions.displayNameColumn || null
+  if (!labelColumn) return { ok: false, reason: 'DICTIONARY_LABEL_COLUMN_UNDISCOVERED' }
+
+  // The preset's own pattern is the authority on the flag column; the heuristic's
+  // companion is the fallback. If neither names one, the read is refused rather
+  // than run without a filter — "enabled rows only" must never degrade to "all".
+  let enabledColumn = null
+  if (spec.enabledColumnPattern) {
+    for (const column of columns.values()) {
+      if (spec.enabledColumnPattern.test(column.name)) { enabledColumn = column.name; break }
+    }
+  }
+  if (!enabledColumn) enabledColumn = companions.enabledColumn || null
+  if (!enabledColumn) return { ok: false, reason: 'DICTIONARY_ENABLED_COLUMN_UNDISCOVERED' }
+
+  return {
+    ok: true,
+    spec: Object.freeze({
+      ...spec,
+      slotColumn,
+      labelColumn,
+      enabledColumn,
+      typeColumn: companions.typeColumn || null,
+      discoverColumns: false,
+    }),
+  }
+}
+
+/**
+ * Which dictionary column names a VALUE-SET TABLE. Found by CONTENT, not by name: the first column
+ * (excluding the slot/label/flag/type columns) carrying at least one value that matches the preset's
+ * value-set table-name pattern.
+ *
+ * Identification is deliberately separate from PERMISSION. Adopting a column only says "this is
+ * where the reference lives"; every individual reference read out of it is re-checked against the
+ * same pattern before its table is opened (VALUE_SET_TABLE_PATTERN_MISMATCH), so a stray row
+ * pointing somewhere else costs that ONE vocabulary a loud gap instead of costing every vocabulary
+ * in the dictionary its column — which is what an all-must-match rule would do.
+ */
+function discoverValueSetRefColumn({ rows, columns, pattern, exclude = [] }) {
+  if (!pattern) return null
+  const excluded = new Set(exclude.filter(Boolean).map((name) => String(name).toLowerCase()))
+  for (const column of (columns instanceof Map ? [...columns.values()] : [])) {
+    if (excluded.has(String(column.name).toLowerCase())) continue
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const text = cellText(isPlainObject(row) ? row[column.name] : undefined)
+      if (text && pattern.test(text)) return column.name
+    }
+  }
+  return null
+}
+
+/**
+ * A vocabulary table's own columns, when the preset names only a table-name pattern. Exactly one
+ * candidate text column must remain after excluding keys and the enabled flag; two or more is
+ * AMBIGUOUS and the human is handed the candidate list. Picking the "most likely" one here would be
+ * a guess about the customer's schema wearing a heuristic's clothes.
+ */
+function discoverValueSetColumns({ columns, enabledColumnPattern }) {
+  const all = columns instanceof Map ? [...columns.values()] : []
+  let enabledColumn = null
+  if (enabledColumnPattern) {
+    for (const column of all) {
+      if (enabledColumnPattern.test(column.name)) { enabledColumn = column.name; break }
+    }
+  }
+  const candidates = all.filter(
+    (column) => isTextLikeColumn(column) && !column.isPrimaryKey && column.name !== enabledColumn,
+  )
+  if (candidates.length === 1) return { ok: true, valueColumn: candidates[0].name, enabledColumn }
+  return { ok: false, reason: 'VALUE_SET_COLUMN_AMBIGUOUS', candidates: candidates.map((c) => c.name) }
+}
+
+// ---------------------------------------------------------------------------
 // Dictionary reading — PURE over a row array. Enabled rows only, and every
 // dropped row is counted by reason so a draft can say WHY it saw 21 of 73.
 // ---------------------------------------------------------------------------
@@ -617,7 +1080,7 @@ function readDictionaryEntries({ spec, rows, describedColumns }) {
 
     if (spec.enabledColumn) {
       const rawFlag = source[spec.enabledColumn]
-      if (!matchesEnabledValue(rawFlag, spec.enabledValues)) {
+      if (!isEnabledCell(rawFlag, spec)) {
         // NOT a leak: only the row index and the reason are kept. The flag value
         // itself never travels.
         skipped.push({ rowIndex, reason: 'ROW_DISABLED' })
@@ -701,7 +1164,7 @@ function extractOptionSet({ spec, rows }) {
 
   for (const row of Array.isArray(rows) ? rows : []) {
     const source = isPlainObject(row) ? row : {}
-    if (spec.enabledColumn && !matchesEnabledValue(source[spec.enabledColumn], spec.enabledValues)) {
+    if (spec.enabledColumn && !isEnabledCell(source[spec.enabledColumn], spec)) {
       disabledCount += 1
       continue
     }
@@ -783,11 +1246,27 @@ function dictionaryBasis({ entry, matchedAlias }) {
   return `${entry.dictionaryTable} row #${entry.rowIndex}: slot="${entry.slot}" label="${entry.label}"${enabled}${type}${alias}`
 }
 
+// A dictionary's own TYPE vocabulary, read as a type vocabulary. This is not a semantic guess: the
+// customer's dictionary row literally says `float` / `list`, and mapping that word onto a field type
+// is reading it, not inferring what the column MEANS (which stays entirely in the label). Used only
+// after a preset's own typeMap, and the resulting `typeSource` says `builtin-type-token` so the draft
+// shows exactly which reading produced it. A token outside this vocabulary is still a gap.
+const BUILTIN_DICTIONARY_TYPE_TOKENS = Object.freeze({
+  text: 'string', string: 'string', varchar: 'string', nvarchar: 'string', char: 'string', memo: 'string',
+  int: 'number', integer: 'number', float: 'number', double: 'number', real: 'number',
+  decimal: 'number', numeric: 'number', number: 'number',
+  bool: 'boolean', boolean: 'boolean', bit: 'boolean',
+  date: 'date', datetime: 'date', time: 'date',
+  list: 'select', select: 'select', enum: 'select', combo: 'select',
+})
+
 function resolveTypeForEntry({ preset, entry, declaredType }) {
   if (declaredType) return { ok: true, type: declaredType, source: 'preset-target' }
   if (entry.typeToken) {
     const mapped = preset.typeMap.get(labelKey(entry.typeToken))
     if (mapped) return { ok: true, type: mapped, source: 'preset-typeMap' }
+    const builtin = BUILTIN_DICTIONARY_TYPE_TOKENS[labelKey(entry.typeToken)]
+    if (builtin) return { ok: true, type: builtin, source: 'builtin-type-token' }
   }
   if (preset.defaultType) return { ok: true, type: preset.defaultType, source: 'preset-defaultType' }
   // Fail-closed: no type is better than a guessed one, because the pack's `type`
@@ -855,6 +1334,21 @@ function resolveTargets({ preset, tableIndex, entriesByDictionary }) {
         continue
       }
       const qualified = `${tableHit.table.schema}.${tableHit.table.name}`
+      // TYPE, in order of authority: what the preset declared, else what the CATALOG says the column
+      // actually is (a discovered fact, not a guess), else the preset's default. None of the three
+      // available is a gap — a wrongly-typed column refuses every cell at runtime and looks exactly
+      // like "the source had no value", which is the failure this whole module exists to prevent.
+      const catalogType = fieldTypeForCatalogColumn(column)
+      const nativeType = target.type || catalogType || preset.defaultType || null
+      if (!nativeType) {
+        unresolved.push({
+          target: target.target,
+          via: 'native',
+          reason: 'NATIVE_TYPE_UNMAPPED',
+          lookedFor: `a field type for ${target.table}.${target.column} (catalog type "${column.dataType}")`,
+        })
+        continue
+      }
       resolved.push({
         target: target.target,
         via: 'native',
@@ -862,8 +1356,8 @@ function resolveTargets({ preset, tableIndex, entriesByDictionary }) {
         sourceTable: qualified,
         sourceTableName: tableHit.table.name,
         sourceColumn: column.name,
-        type: target.type || preset.defaultType || 'string',
-        typeSource: target.type ? 'preset-target' : 'preset-defaultType',
+        type: nativeType,
+        typeSource: target.type ? 'preset-target' : (catalogType ? 'catalog-datatype' : 'preset-defaultType'),
         ownership: target.ownership,
         label: target.label || target.target,
         labelIsPresetDeclared: Boolean(target.label),
@@ -886,13 +1380,28 @@ function resolveTargets({ preset, tableIndex, entriesByDictionary }) {
       continue
     }
     const aliasKeys = new Map(target.labelAliases.map((alias) => [labelKey(alias), alias]))
-    const hits = read.entries.filter((entry) => aliasKeys.has(entry.labelKey))
+    // Exact alias OR a preset-declared label pattern. Both forms are a CANDIDATE test, never a score:
+    // whatever matches, the exactly-one rule below is what decides, so a pattern that fits two
+    // enabled rows produces an ambiguity gap rather than a ranked pick.
+    const matchOf = (entry) => {
+      if (aliasKeys.has(entry.labelKey)) return aliasKeys.get(entry.labelKey)
+      if (target.labelPattern && target.labelPattern.test(entry.label)) return `/${target.labelPattern.source}/`
+      return null
+    }
+    // A type hint NARROWS the candidate set; it never orders it.
+    const typeAllows = (entry) => !target.typeHintPattern || target.typeHintPattern.test(entry.typeToken)
+    const hits = read.entries.filter((entry) => matchOf(entry) !== null && typeAllows(entry))
+    const lookedForText = target.labelAliases.length > 0
+      ? `[${target.labelAliases.join(', ')}]`
+      : `/${target.labelPattern ? target.labelPattern.source : ''}/`
     if (hits.length === 0) {
       unresolved.push({
         target: target.target,
         via: 'dictionary',
         reason: 'DICTIONARY_NO_ALIAS_MATCH',
-        lookedFor: `${spec.table}.${spec.labelColumn} in [${target.labelAliases.join(', ')}] (${read.entries.length} enabled rows read)`,
+        lookedFor: `${spec.table}.${spec.labelColumn || '(label column)'} in ${lookedForText}` +
+          `${target.typeHintPattern ? ` with type matching /${target.typeHintPattern.source}/` : ''}` +
+          ` (${read.entries.length} enabled rows read)`,
       })
       continue
     }
@@ -903,7 +1412,7 @@ function resolveTargets({ preset, tableIndex, entriesByDictionary }) {
         target: target.target,
         via: 'dictionary',
         reason: 'DICTIONARY_AMBIGUOUS_ALIAS_MATCH',
-        lookedFor: `${spec.table}.${spec.labelColumn} in [${target.labelAliases.join(', ')}]`,
+        lookedFor: `${spec.table}.${spec.labelColumn || '(label column)'} in ${lookedForText}`,
         candidates: hits.map((entry) => ({ slot: entry.slot, label: entry.label, rowIndex: entry.rowIndex })),
       })
       continue
@@ -939,7 +1448,7 @@ function resolveTargets({ preset, tableIndex, entriesByDictionary }) {
       labelIsPresetDeclared: false,
       valueSetRef: resolveValueSetKey(preset, target.valueSet, entry.valueSetRef),
       dictionaryKey: entry.dictionaryKey,
-      basis: dictionaryBasis({ entry, matchedAlias: aliasKeys.get(entry.labelKey) }),
+      basis: dictionaryBasis({ entry, matchedAlias: matchOf(entry) }),
     })
   }
 
@@ -1413,8 +1922,15 @@ export {
   DRAFT_EMITTER_REASONS,
   DRAFT_FILE_NAMES,
   MAX_OPTIONS_PER_FIELD,
+  SIBLING_PRESET_SCHEMA_MARKER,
   SourceDraftEmitterError,
   adaptVendorPresetShape,
+  completeDictionarySpec,
+  discoverValueSetRefColumn,
+  discoverValueSetColumns,
+  deriveSemanticExtFieldId,
+  fieldTypeForCatalogColumn,
+  isEnabledCell,
   buildCatalogTableIndex,
   scorePresetSignature,
   selectVendorPreset,

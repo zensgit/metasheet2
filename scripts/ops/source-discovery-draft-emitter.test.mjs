@@ -23,6 +23,11 @@ import {
   buildDraftEmissionSummary,
   assertDraftOutDirOutsideRepo,
   matchesEnabledValue,
+  completeDictionarySpec,
+  discoverValueSetRefColumn,
+  discoverValueSetColumns,
+  deriveSemanticExtFieldId,
+  fieldTypeForCatalogColumn,
 } from './source-discovery-draft-emitter.mjs'
 
 import {
@@ -916,6 +921,330 @@ describe('values in the draft, values NOT in the report', () => {
       assert.ok(leakGuardValues.has(value), `"${value}" should be leak-guarded`)
     }
     assert.doesNotThrow(() => assertValuesFree(report, { env: {}, leakGuardValues }))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// THE SIBLING PRESET DIALECT — the schema as it actually landed on
+// feat/stock-prep-vendor-presets. Structurally faithful to
+// plugins/plugin-integration-core/lib/source-vendor-presets/dn-pdm-family.preset.json
+// (marker, count-floor signature, rows-name-columns dictionaries with a flag
+// pattern + polarity, semanticExpectations instead of ext_ ids), trimmed to what
+// the emitter reads. Kept here rather than imported from that branch so this
+// suite stays hermetic and does not break when the sibling iterates.
+// ---------------------------------------------------------------------------
+
+function siblingVendorPreset(overrides = {}) {
+  return {
+    presetSchema: 'metasheet.source-vendor-preset',
+    presetVersion: 1,
+    presetId: 'dn-pdm-family',
+    title: 'DN_PDM / DN_PM table-name family',
+    dialects: ['mssql'],
+    matches: {
+      kind: 'table-name-signature',
+      signatureTables: [
+        'DN_PDM_PartLibraryInfo',
+        'DN_PDM_BomHeadInfo',
+        'DN_PDM_BomDetailsInfo',
+        'DN_PDM_PathInfo',
+        'DN_PDM_PathExAttrInfo',
+        'DN_PDM_OrderHeadInfo',
+        'DN_PDM_OrderDetailInfo',
+        'DN_PM_BomExAttrInfo',
+        'DN_PM_PartExAttrInfo',
+        'DN_PM_BomExAttrInfo_header',
+      ],
+      minSignatureTablesPresent: 6,
+    },
+    coreTables: {
+      part: { table: 'DN_PDM_PartLibraryInfo', roles: { id: 'OBJ_ID', code: 'IdentityNo', name: 'IdentityName' } },
+      bomHead: { table: 'DN_PDM_BomHeadInfo', roles: { parentPart: 'part_id', bomId: 'bom_id' } },
+      bomDetail: { table: 'DN_PDM_BomDetailsInfo', roles: { bomParent: 'bom_pid', component: 'part_id' } },
+      pathInfo: { table: 'DN_PDM_PathInfo', roles: { id: 'OBJ_ID' } },
+      pathExAttr: { table: 'DN_PDM_PathExAttrInfo', roles: { match: 'FileCode', pathId: 'Parent_OBJ_ID' } },
+      orderHead: { table: 'DN_PDM_OrderHeadInfo', roles: { id: 'OBJ_ID', pathId: 'path_id' } },
+      orderDetail: { table: 'DN_PDM_OrderDetailInfo', roles: { orderId: 'order_id', quantity: 'quantity' } },
+    },
+    dictionaries: [
+      {
+        id: 'bom-detail-exattr-labels',
+        table: 'DN_PM_BomExAttrInfo',
+        labelsColumnsOfRole: 'bomDetail',
+        mechanism: 'rows-name-columns',
+        enabledFlag: { columnPattern: '^is_?able$', polarity: 'zero-means-enabled' },
+      },
+      {
+        id: 'bom-head-exattr-labels',
+        table: 'DN_PM_BomExAttrInfo_header',
+        labelsColumnsOfRole: 'bomHead',
+        mechanism: 'rows-name-columns',
+        enabledFlag: { columnPattern: '^is_?able$', polarity: 'zero-means-enabled' },
+      },
+      {
+        id: 'part-exattr-labels',
+        table: 'DN_PM_PartExAttrInfo',
+        labelsColumnsOfRole: 'part',
+        mechanism: 'rows-name-columns',
+        enabledFlag: { columnPattern: '^is_?able$', polarity: 'zero-means-enabled' },
+      },
+    ],
+    semanticExpectations: [
+      {
+        semantic: 'bom-line-quantity',
+        locus: 'dictionary-assigned-column',
+        dictionary: 'bom-detail-exattr-labels',
+        dictionaryTypeHintPattern: 'float|numeric|decimal|double|real|int',
+        labelHintPattern: '数量|qty|quantity',
+      },
+      {
+        semantic: 'bom-line-unit',
+        locus: 'dictionary-assigned-column',
+        dictionary: 'bom-detail-exattr-labels',
+        dictionaryTypeHintPattern: 'list',
+        labelHintPattern: '单位|unit',
+        valueSetTableNamePattern: '^DN_Test_BomParam[0-9]+$',
+      },
+      {
+        semantic: 'erp-material-code',
+        locus: 'dictionary-assigned-column',
+        dictionary: 'part-exattr-labels',
+        labelHintPattern: '物料编码|matcode|material',
+      },
+      { semantic: 'order-line-quantity', locus: 'native-column', role: 'orderDetail', roleColumn: 'quantity' },
+      { semantic: 'project-number', locus: 'native-column', role: 'pathExAttr', roleColumn: 'FileCode' },
+    ],
+    ...overrides,
+  }
+}
+
+describe('adaptVendorPresetShape — the sibling schema dialect', () => {
+  test('routes on the schema marker and normalizes to the same internal shape', () => {
+    const preset = adaptVendorPresetShape(siblingVendorPreset())
+    assert.equal(preset.presetId, 'dn-pdm-family')
+    // A COUNT FLOOR maps exactly onto the ratio this module computes: 6 of 10.
+    assert.equal(preset.signature.requiredTables.length, 10)
+    assert.equal(preset.signature.minimumConfidence, 0.6)
+    // The mapper's row comes from the `part` role, as that role's own note says.
+    assert.equal(preset.mappingSourceTable, 'DN_PDM_PartLibraryInfo')
+    assert.equal(preset.dictionaries.size, 3)
+    const partDict = preset.dictionaries.get('part-exattr-labels')
+    assert.equal(partDict.describesTable, 'DN_PDM_PartLibraryInfo')
+    assert.equal(partDict.discoverColumns, true, 'rows-name-columns means the columns are discovered')
+    assert.equal(partDict.slotColumn, null)
+    assert.equal(partDict.enabledPolarity, 'zero-means-enabled')
+    // Semantics become mechanical ext_ ids; the customer's label never enters an id.
+    assert.deepEqual(preset.targets.map((t) => t.target), [
+      'ext_bomLineQuantity',
+      'ext_bomLineUnit',
+      'ext_erpMaterialCode',
+      'ext_orderLineQuantity',
+      'ext_projectNumber',
+    ])
+    assert.equal(preset.targets[3].via, 'native')
+    assert.equal(preset.targets[3].table, 'DN_PDM_OrderDetailInfo')
+    assert.equal(preset.targets[3].column, 'quantity')
+    // The value-set table-name pattern is hoisted onto the dictionary that carries the reference.
+    assert.ok(preset.dictionaries.get('bom-detail-exattr-labels').valueSetTableNamePattern)
+  })
+
+  test('a semantic name becomes a mechanical ext_ id', () => {
+    assert.deepEqual(deriveSemanticExtFieldId('bom-line-quantity'), { ok: true, fieldId: 'ext_bomLineQuantity' })
+    assert.deepEqual(deriveSemanticExtFieldId('erp-material-code'), { ok: true, fieldId: 'ext_erpMaterialCode' })
+    assert.equal(deriveSemanticExtFieldId('数量').ok, false)
+  })
+
+  test('a dictionary with no enabled flag is refused — "enabled rows only" cannot be a no-op', () => {
+    const raw = siblingVendorPreset()
+    delete raw.dictionaries[0].enabledFlag
+    assert.throws(() => adaptVendorPresetShape(raw), (err) => err.reason === 'PRESET_DICTIONARY_INVALID')
+  })
+
+  test('a mechanism or locus this emitter cannot read is refused, never defaulted', () => {
+    const a = siblingVendorPreset()
+    a.dictionaries[0].mechanism = 'columns-name-rows'
+    assert.throws(() => adaptVendorPresetShape(a), (err) => err.reason === 'PRESET_DICTIONARY_INVALID')
+    const b = siblingVendorPreset()
+    b.semanticExpectations[0].locus = 'somewhere-else'
+    assert.throws(() => adaptVendorPresetShape(b), (err) => err.reason === 'PRESET_TARGET_INVALID')
+  })
+
+  test('a dictionary-assigned semantic with no label hint has nothing to be justified BY', () => {
+    const raw = siblingVendorPreset()
+    delete raw.semanticExpectations[0].labelHintPattern
+    assert.throws(() => adaptVendorPresetShape(raw), (err) => err.reason === 'PRESET_TARGET_INVALID')
+  })
+})
+
+describe('rows-name-columns discovery', () => {
+  test('a dictionary spec is completed against the probe\'s OWN detected dictionary', () => {
+    const catalog = buildVendorCatalog()
+    const tableIndex = buildCatalogTableIndex(catalog)
+    const preset = adaptVendorPresetShape(siblingVendorPreset())
+    const table = tableIndex.resolve('DN_PM_PartExAttrInfo').table
+    const completed = completeDictionarySpec({
+      spec: preset.dictionaries.get('part-exattr-labels'),
+      tableColumns: tableIndex.columnsOf(table),
+      detected: {
+        table: 'dbo.DN_PM_PartExAttrInfo',
+        keyColumn: 'ExAttrCode',
+        companions: { displayNameColumn: 'ExAttrName', enabledColumn: 'isable', typeColumn: 'ExAttrType' },
+      },
+    })
+    assert.equal(completed.ok, true)
+    assert.equal(completed.spec.slotColumn, 'ExAttrCode')
+    assert.equal(completed.spec.labelColumn, 'ExAttrName')
+    assert.equal(completed.spec.enabledColumn, 'isable')
+    assert.equal(completed.spec.discoverColumns, false)
+  })
+
+  test('a dictionary the heuristic did not resolve is a coded GAP, not a guess by column name', () => {
+    const tableIndex = buildCatalogTableIndex(buildVendorCatalog())
+    const preset = adaptVendorPresetShape(siblingVendorPreset())
+    const spec = preset.dictionaries.get('part-exattr-labels')
+    const tableColumns = tableIndex.columnsOf(tableIndex.resolve('DN_PM_PartExAttrInfo').table)
+    assert.equal(completeDictionarySpec({ spec, tableColumns, detected: null }).reason, 'DICTIONARY_SLOT_COLUMN_UNDISCOVERED')
+    assert.equal(
+      completeDictionarySpec({ spec, tableColumns, detected: { keyColumn: 'ExAttrCode', companions: {} } }).reason,
+      'DICTIONARY_LABEL_COLUMN_UNDISCOVERED',
+    )
+    // The flag column falls back to the heuristic's companion, and if neither names one the read is
+    // refused rather than run without a filter.
+    const noFlagColumns = new Map([['exattrcode', { name: 'ExAttrCode', dataType: 'varchar' }]])
+    assert.equal(
+      completeDictionarySpec({
+        spec,
+        tableColumns: noFlagColumns,
+        detected: { keyColumn: 'ExAttrCode', companions: { displayNameColumn: 'ExAttrName' } },
+      }).reason,
+      'DICTIONARY_ENABLED_COLUMN_UNDISCOVERED',
+    )
+  })
+
+  test('the value-set REFERENCE column is found by content, not by name', () => {
+    const tableIndex = buildCatalogTableIndex(buildVendorCatalog())
+    const columns = tableIndex.columnsOf(tableIndex.resolve('DN_PM_PartExAttrInfo').table)
+    const found = discoverValueSetRefColumn({
+      rows: partExAttrRows(),
+      columns,
+      pattern: /^DN_Test_BomParam[0-9]+$/i,
+      exclude: ['ExAttrCode', 'ExAttrName', 'isable', 'ExAttrType'],
+    })
+    assert.equal(found, 'ParamTable')
+    // A column carrying anything that does NOT match is not adopted — one stray match is not enough.
+    assert.equal(
+      discoverValueSetRefColumn({ rows: partExAttrRows(), columns, pattern: /^nothing-matches$/i, exclude: [] }),
+      null,
+    )
+  })
+
+  test('a vocabulary table with two candidate columns is AMBIGUOUS, not a most-likely pick', () => {
+    const one = new Map([
+      ['name', { name: 'name', dataType: 'nvarchar' }],
+      ['isable', { name: 'isable', dataType: 'int' }],
+    ])
+    assert.deepEqual(discoverValueSetColumns({ columns: one, enabledColumnPattern: /^is_?able$/i }), {
+      ok: true,
+      valueColumn: 'name',
+      enabledColumn: 'isable',
+    })
+    const two = new Map([
+      ['name', { name: 'name', dataType: 'nvarchar' }],
+      ['alias', { name: 'alias', dataType: 'nvarchar' }],
+    ])
+    const result = discoverValueSetColumns({ columns: two, enabledColumnPattern: /^is_?able$/i })
+    assert.equal(result.ok, false)
+    assert.equal(result.reason, 'VALUE_SET_COLUMN_AMBIGUOUS')
+    assert.deepEqual(result.candidates, ['name', 'alias'])
+  })
+
+  test('a NATIVE column with no declared type takes its type from the CATALOG, not from a default', () => {
+    assert.equal(fieldTypeForCatalogColumn({ dataType: 'decimal' }), 'number')
+    assert.equal(fieldTypeForCatalogColumn({ dataType: 'nvarchar' }), 'string')
+    assert.equal(fieldTypeForCatalogColumn({ dataType: 'bit' }), 'boolean')
+    assert.equal(fieldTypeForCatalogColumn({ dataType: 'geography' }), null)
+  })
+})
+
+describe('end to end on the sibling preset', () => {
+  test('resolves the customer\'s own slot assignments and stays loud about the rest', async () => {
+    const { report, draft } = await runProbe({
+      catalog: buildVendorCatalog(),
+      sampleFn: buildFixtureSampleFn(),
+      presets: [adaptVendorPresetShape(siblingVendorPreset())],
+    })
+    const byTarget = new Map(draft.resolution.resolved.map((r) => [r.target, r]))
+
+    // The quantity slot is whichever one THIS customer's dictionary declares numeric and
+    // quantity-labelled — nothing in the preset named Bom_ExAttr1.
+    const quantity = byTarget.get('ext_bomLineQuantity')
+    assert.equal(quantity.sourceColumn, 'Bom_ExAttr1')
+    assert.equal(quantity.type, 'number')
+    assert.equal(quantity.typeSource, 'builtin-type-token')
+    assert.equal(quantity.label, CUSTOMER_LABELS.quantity)
+
+    const unit = byTarget.get('ext_bomLineUnit')
+    assert.equal(unit.sourceColumn, 'Bom_ExAttr2')
+    assert.equal(unit.type, 'select')
+    assert.equal(unit.valueSetRef, 'DN_Test_BomParam1', 'the vocabulary table is named by the CUSTOMER dictionary row')
+
+    const materialCode = byTarget.get('ext_erpMaterialCode')
+    assert.equal(materialCode.sourceColumn, 'part_ExAttr14')
+    assert.equal(materialCode.sourceTable, 'dbo.DN_PDM_PartLibraryInfo')
+
+    // A native column takes its type from the catalog.
+    const orderQuantity = byTarget.get('ext_orderLineQuantity')
+    assert.equal(orderQuantity.type, 'number')
+    assert.equal(orderQuantity.typeSource, 'catalog-datatype')
+
+    // Only the part row can become a mapping entry; the rest are deferred, not dropped.
+    for (const item of draft.resolution.mappable) assert.equal(item.sourceTable, 'dbo.DN_PDM_PartLibraryInfo')
+    assert.ok(draft.resolution.deferred.some((d) => d.target === 'ext_bomLineQuantity'))
+
+    // The head-side dictionary is absent from this catalog: reported, never silently skipped.
+    const headRead = report.draftEmission.dictionaryReads.find((r) => r.key === 'bom-head-exattr-labels')
+    assert.equal(headRead.read, false)
+    assert.equal(headRead.reason, 'TABLE_ABSENT')
+
+    // The vocabulary came off the customer's own value-set table, duplicates collapsed.
+    const optionSet = draft.optionSets.get('DN_Test_BomParam1')
+    assert.equal(optionSet.ok, true)
+    assert.deepEqual(optionSet.options.map((o) => o.value), [...CUSTOMER_UNIT_VOCABULARY])
+    assert.equal(optionSet.duplicateCount, 2)
+
+    // Gaps stay gaps.
+    const reasons = new Set(draft.resolution.unresolved.map((u) => u.reason))
+    assert.ok(reasons.has('DICTIONARY_TYPE_UNMAPPED'))
+    assert.ok(reasons.has('PLACEHOLDER_ID_UNDERIVABLE'))
+
+    // And the split holds on this dialect too.
+    assert.equal(hasNonAscii(JSON.stringify(report.draftEmission)), false)
+    const draftText = Object.values(draft.files).join('\n')
+    assert.ok(draftText.includes(CUSTOMER_LABELS.quantity))
+    for (const unitValue of CUSTOMER_UNIT_VOCABULARY) assert.ok(draftText.includes(unitValue))
+  })
+
+  test('a dictionary cell naming a table OUTSIDE the preset pattern is not read', async () => {
+    const catalog = buildVendorCatalog()
+    const sampleFn = async ({ table, cap }) => {
+      const key = `${table.schema}.${table.name}`
+      if (key === 'dbo.DN_PM_BomExAttrInfo') {
+        return [
+          { ExAttrCode: 'Bom_ExAttr1', ExAttrName: CUSTOMER_LABELS.quantity, isable: 0, ExAttrType: 'float', ParamTable: null },
+          // Points at a table that is NOT a declared value-set table.
+          { ExAttrCode: 'Bom_ExAttr2', ExAttrName: CUSTOMER_LABELS.unit, isable: 0, ExAttrType: 'list', ParamTable: 'DN_PDM_PartLibraryInfo' },
+          // A well-formed reference in the SAME column, so the column is identified as the
+          // value-set reference column and the stray row above costs only its own vocabulary.
+          { ExAttrCode: 'sort_id', ExAttrName: '排序', isable: 0, ExAttrType: 'list', ParamTable: 'DN_Test_BomParam1' },
+        ].slice(0, cap)
+      }
+      return buildFixtureSampleFn()({ table, cap })
+    }
+    const { draft } = await runProbe({ catalog, sampleFn, presets: [adaptVendorPresetShape(siblingVendorPreset())] })
+    const gap = draft.optionSets.get('DN_PDM_PartLibraryInfo')
+    assert.ok(gap, 'the reference must be recorded rather than ignored')
+    assert.equal(gap.ok, false)
+    assert.equal(gap.reason, 'VALUE_SET_TABLE_PATTERN_MISMATCH')
   })
 })
 

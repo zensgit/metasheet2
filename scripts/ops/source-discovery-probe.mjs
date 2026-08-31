@@ -91,6 +91,9 @@ import {
   buildCatalogTableIndex,
   selectVendorPreset,
   readDictionaryEntries,
+  completeDictionarySpec,
+  discoverValueSetRefColumn,
+  discoverValueSetColumns,
   extractOptionSet,
   resolveTargets,
   buildExtFieldMappingDraft,
@@ -1039,8 +1042,16 @@ async function readPresetTable({ tableIndex, sampleFn, reference }) {
   }
 }
 
-async function buildDraftArtifacts({ catalog, sampleFn, presets, generatedAt }) {
+async function buildDraftArtifacts({ catalog, sampleFn, presets, generatedAt, detectedDictionaries = [] }) {
   const tableIndex = buildCatalogTableIndex(catalog)
+  // The probe's OWN dictionary heuristic, indexed by qualified table name. A preset that declines to
+  // name a dictionary's columns (`mechanism: 'rows-name-columns'`) is completed against this: the
+  // heuristic already proved which column of that table holds values that name columns elsewhere,
+  // and which of its companions are the label / flag / type columns. Reusing it beats re-deriving it,
+  // and it means the two halves of the tool cannot disagree about what a dictionary's key column is.
+  const detectedByTable = new Map()
+  for (const entry of detectedDictionaries) detectedByTable.set(String(entry.table).toLowerCase(), entry)
+  const detectedFor = (table) => detectedByTable.get(`${table.schema}.${table.name}`.toLowerCase()) || null
 
   // NEVER GUESS A VENDOR. A preset applies only when its OWN signature clears its
   // OWN declared bar and no rival preset ties with it.
@@ -1057,21 +1068,58 @@ async function buildDraftArtifacts({ catalog, sampleFn, presets, generatedAt }) 
   // --- dictionaries ---------------------------------------------------------
   const dictionaryReads = []
   const entriesByDictionary = new Map()
+  const valueSetPatterns = []
+  // The vendor's own flag convention, taken from whichever dictionary declared it. A vocabulary table
+  // of the same family names its flag column the same way; using the vendor's declaration beats
+  // inventing a second rule for the same thing.
+  let vendorFlag = { pattern: null, polarity: null }
   for (const spec of preset.dictionaries.values()) {
-    const base = { key: spec.key, table: spec.table, describesTable: spec.describesTable }
-    const described = tableIndex.resolve(spec.describesTable)
+    if (spec.enabledColumnPattern && !vendorFlag.pattern) {
+      vendorFlag = { pattern: spec.enabledColumnPattern, polarity: spec.enabledPolarity }
+    }
+  }
+  for (const declared of preset.dictionaries.values()) {
+    const base = { key: declared.key, table: declared.table, describesTable: declared.describesTable }
+    const described = tableIndex.resolve(declared.describesTable)
     if (!described.ok) {
       const record = { ...base, ok: false, reason: described.reason }
       dictionaryReads.push(record)
-      entriesByDictionary.set(spec.key, record)
+      entriesByDictionary.set(declared.key, record)
       continue
     }
-    const read = await readPresetTable({ tableIndex, sampleFn, reference: spec.table })
+    const read = await readPresetTable({ tableIndex, sampleFn, reference: declared.table })
     if (!read.ok) {
       const record = { ...base, ok: false, reason: read.reason }
       dictionaryReads.push(record)
-      entriesByDictionary.set(spec.key, record)
+      entriesByDictionary.set(declared.key, record)
       continue
+    }
+    const dictionaryColumns = tableIndex.columnsOf(read.table)
+    const completed = completeDictionarySpec({
+      spec: declared,
+      tableColumns: dictionaryColumns,
+      detected: detectedFor(read.table),
+    })
+    if (!completed.ok) {
+      // The preset said "the rows name columns" and the heuristic could not say WHICH column does
+      // what. That is a gap, not an invitation to pick by name.
+      const record = { ...base, ok: false, reason: completed.reason }
+      dictionaryReads.push(record)
+      entriesByDictionary.set(declared.key, record)
+      continue
+    }
+    let spec = completed.spec
+    if (spec.valueSetTableNamePattern) {
+      valueSetPatterns.push(spec.valueSetTableNamePattern)
+      if (!spec.valueSetColumn) {
+        const refColumn = discoverValueSetRefColumn({
+          rows: read.rows,
+          columns: dictionaryColumns,
+          pattern: spec.valueSetTableNamePattern,
+          exclude: [spec.slotColumn, spec.labelColumn, spec.enabledColumn, spec.typeColumn],
+        })
+        if (refColumn) spec = { ...spec, valueSetColumn: refColumn }
+      }
     }
     const parsed = readDictionaryEntries({
       spec,
@@ -1080,10 +1128,15 @@ async function buildDraftArtifacts({ catalog, sampleFn, presets, generatedAt }) 
     })
     const record = { ...base, ok: true, rowsRead: read.rows.length, ...parsed }
     dictionaryReads.push(record)
-    entriesByDictionary.set(spec.key, record)
+    entriesByDictionary.set(declared.key, record)
   }
 
   // --- value sets -----------------------------------------------------------
+  // Two sources, one map, keyed by whatever string a resolved target carries as its `valueSetRef`:
+  //   * the preset's own explicitly declared value sets (keyed by their preset key), and
+  //   * vocabulary tables NAMED BY THE CUSTOMER'S OWN DICTIONARY ROWS (keyed by that table name).
+  // The second is the whole point on a rows-name-columns preset: which vocabulary table a list-typed
+  // slot points at is a customer fact, and the preset only says what such a table is NAMED like.
   const optionSets = new Map()
   for (const spec of preset.valueSets.values()) {
     const read = await readPresetTable({ tableIndex, sampleFn, reference: spec.table })
@@ -1092,6 +1145,51 @@ async function buildDraftArtifacts({ catalog, sampleFn, presets, generatedAt }) 
       continue
     }
     optionSets.set(spec.key, extractOptionSet({ spec, rows: read.rows }))
+  }
+
+  const discoveredRefs = new Set()
+  for (const record of dictionaryReads) {
+    if (record.ok !== true) continue
+    for (const entry of record.entries) {
+      if (entry.valueSetRef) discoveredRefs.add(entry.valueSetRef)
+    }
+  }
+  for (const ref of discoveredRefs) {
+    if (optionSets.has(ref)) continue
+    // FAIL-CLOSED ON WHAT WE READ: a dictionary cell naming a table is not on its own permission to
+    // read that table. It must match a table-name pattern the preset declared for value sets.
+    if (!valueSetPatterns.some((pattern) => pattern.test(ref))) {
+      optionSets.set(ref, { ok: false, reason: 'VALUE_SET_TABLE_PATTERN_MISMATCH', valueSetKey: ref, table: ref })
+      continue
+    }
+    const resolvedTable = tableIndex.resolve(ref)
+    if (!resolvedTable.ok) {
+      optionSets.set(ref, { ok: false, reason: 'VALUE_SET_NOT_READ', valueSetKey: ref, table: ref })
+      continue
+    }
+    const columns = tableIndex.columnsOf(resolvedTable.table)
+    const shape = discoverValueSetColumns({ columns, enabledColumnPattern: vendorFlag.pattern })
+    if (!shape.ok) {
+      optionSets.set(ref, { ok: false, reason: shape.reason, valueSetKey: ref, table: ref, candidates: shape.candidates })
+      continue
+    }
+    const read = await readPresetTable({ tableIndex, sampleFn, reference: ref })
+    if (!read.ok) {
+      optionSets.set(ref, { ok: false, reason: read.reason === 'TABLE_ABSENT' ? 'VALUE_SET_NOT_READ' : read.reason, valueSetKey: ref, table: ref })
+      continue
+    }
+    optionSets.set(ref, extractOptionSet({
+      spec: {
+        key: ref,
+        table: ref,
+        valueColumn: shape.valueColumn,
+        labelColumn: null,
+        enabledColumn: shape.enabledColumn,
+        enabledValues: [],
+        enabledPolarity: shape.enabledColumn ? vendorFlag.polarity : null,
+      },
+      rows: read.rows,
+    }))
   }
 
   const resolution = resolveTargets({ preset, tableIndex, entriesByDictionary })
@@ -1146,7 +1244,13 @@ async function runProbe({ catalog, sampleFn, presets = null }) {
   // like any other section -- the fail-safe direction.
   let draft = null
   if (presets) {
-    draft = await buildDraftArtifacts({ catalog, sampleFn, presets, generatedAt: report.generatedAt })
+    draft = await buildDraftArtifacts({
+      catalog,
+      sampleFn,
+      presets,
+      generatedAt: report.generatedAt,
+      detectedDictionaries: dictionaryResult.dictionaries,
+    })
     report.draftEmission = draft.summary
   }
 
