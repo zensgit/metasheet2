@@ -13,6 +13,7 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 import {
   ensureObject,
   findObjectSheet,
+  getObjectField,
   patchObjectFieldProperty,
   resolveObjectFieldIds,
   type MultitableProvisioningObjectDescriptor,
@@ -106,6 +107,10 @@ function createRealMultitableFacade() {
       findObjectSheet(readQuery, projectId, objectId),
     resolveFieldIds: ({ projectId, objectId, fieldIds }: { projectId: string; objectId: string; fieldIds: string[] }) =>
       resolveObjectFieldIds(projectId, objectId, fieldIds),
+    // The option-sync merge reads a field's current options before patching (append + keep_existing),
+    // so the facade must expose the read half — a read-only SELECT, no transaction.
+    getObjectField: ({ projectId, objectId, fieldId }: { projectId: string; objectId: string; fieldId: string }) =>
+      getObjectField({ query: readQuery, projectId, objectId, fieldId }),
     ensureObject: ({ projectId, baseId, descriptor }: {
       projectId: string
       baseId?: string | null
@@ -314,13 +319,18 @@ describeIfDatabase('stock-preparation T3a ERP source auto-persist (real DB)', ()
     if (!materialSheet || !runSheet) throw new Error('T3a real-DB provisioning did not create both target sheets')
     materialSheetId = materialSheet.id
     runSheetId = runSheet.id
+    // `ensureStockPreparationMvpTargets` already auto-seeds every contract vocabulary; this explicit
+    // sync now only re-supplies the same sets, which is a legal no-op union. The material-status set
+    // is the CANONICAL vocabulary the ERP persist writes into — the intake's default 'imported' is
+    // canonicalized to 'active' at the persist boundary, so 'active' (not 'imported') is what must be
+    // seeded, and a caller set must carry the whole contract vocabulary rather than a subset of it.
     await syncStockPreparationMvpOptions({
       context,
       projectId: TARGET_PROJECT_ID,
       permission: 'admin',
       objectIds: [MATERIAL_OBJECT_ID, RUN_OBJECT_ID],
       optionSets: {
-        stock_preparation_material_status_v1: [{ value: 'imported' }],
+        stock_preparation_material_status_v1: ['active', 'inactive', 'disabled'].map((value) => ({ value })),
         stock_preparation_run_type_v1: ['plm_sync', 'erp_material_sync', 'mapping_match', 'unit_match', 'prep_generate']
           .map((value) => ({ value })),
         stock_preparation_run_status_v1: ['running', 'succeeded', 'failed', 'partial']

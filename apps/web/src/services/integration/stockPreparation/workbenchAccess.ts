@@ -174,3 +174,31 @@ export function canOpenStockPrepInstallView(hasPermission: StockPrepPermissionPr
 export function canRunStockPrepInstall(hasPermission: StockPrepPermissionProbe): boolean {
   return hasPermission(INTEGRATION_ADMIN)
 }
+
+/**
+ * 项目接入 — who may press 「同步这个项目」.
+ *
+ * The entry drives FOUR existing routes, and the widest gate among them is what decides this:
+ *
+ *   dry-run     requireAccess(req, 'read')    integration:read | :write | platform admin
+ *   apply       requireAccess(req, 'write')   integration:write | platform admin
+ *   reconcile   requireAccess(req, 'admin')   platform admin ONLY
+ *   mvp-persist requireAccess(req, 'admin')   platform admin ONLY
+ *
+ * so a caller below platform admin would get partway through and 403 — which is the "visible but not
+ * actionable" half of R-11. The control therefore renders only for a platform admin, and everyone
+ * else is told, in words, who runs it.
+ *
+ * NOTE THE TIER THIS EXCLUDES, deliberately: the stock-prep OPERATOR (`stock-prep:operate` +
+ * `stock-prep:read`) holds no `integration:*` code at all — R-11's mapping is zero-automatic — so the
+ * server refuses them at the very first call, the dry run. Hiding the button is this file agreeing
+ * with that refusal, not substituting for it. An operator's job on this surface is the confirmation
+ * queue; pulling a customer's BOM off their PLM is an owner-level act and stays where it is.
+ *
+ * Deliberately NOT a member of STOCK_PREP_WORKBENCH_CAPABILITIES, for the same reason
+ * `canRunStockPrepInstall` is not: that manifest is the confirmation-queue control set, asserted
+ * control-for-control against the queue view by the permission-matrix suites on both sides.
+ */
+export function canRunStockPrepProjectSync(hasPermission: StockPrepPermissionProbe): boolean {
+  return hasPermission(INTEGRATION_ADMIN)
+}

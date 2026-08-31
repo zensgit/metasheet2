@@ -54,6 +54,13 @@ const {
 // option sync, so there is no parallel write path.
 const { syncFieldOptions } = require('./field-option-sync-runtime.cjs')
 
+// The 18 contract vocabularies the nine MVP templates declare. Before this module existed a
+// `{ type: 'contract', key }` optionSource resolved to NOTHING on this path, so every ensured select
+// was created with an empty allowed set and the first record write died on `Invalid select option`.
+const {
+  contractOptionSetsForTemplates,
+} = require('./stock-preparation-mvp-option-catalog.cjs')
+
 function optionalString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null
 }
@@ -293,6 +300,51 @@ function buildEnsureEvidence(templates, tables) {
   }
 }
 
+/**
+ * SEED THE ENSURED TABLES' SELECT VOCABULARIES — the second half of "the table is ready".
+ *
+ * A select column whose `property.options` is empty is not a usable column: the multitable record
+ * validator reads that array and refuses every value outside it, so a table ensure that stops at the
+ * schema hands the operator nine tables and a guaranteed `Invalid select option` on the first write.
+ * That is exactly what the first live deployment hit, five fields deep, and it could only be cleared
+ * by hand-seeding — which is the definition of a provisioning step that did not finish.
+ *
+ * Run AFTER the ensure loop rather than folded into the descriptor: `buildMvpTargetDescriptor` is
+ * asserted metadata-only and byte-identical between the fresh and the repaired leg, and putting
+ * option values inside it would break both properties. This is a second, additive
+ * `patchObjectFieldProperty` pass over the SAME frozen templates, through the SAME option-sync
+ * function an operator would call by hand.
+ *
+ * ONE soft failure, deliberately: a host whose provisioning API predates `patchObjectFieldProperty`
+ * cannot be patched at all, and refusing to ensure its schema over that would be a regression for a
+ * deployment that is merely old. It is recorded in the evidence as `option_seed_api_unavailable`
+ * instead. Every other failure propagates — an unseeded select IS the defect, and reporting `ready`
+ * over it is what let this reach a customer.
+ */
+async function seedEnsuredMvpContractOptions({ context, projectId, templates }) {
+  try {
+    const result = await syncStockPreparationMvpOptions({
+      context,
+      projectId,
+      permission: 'admin',
+      objectIds: templates.map((template) => template.objectId),
+      // No caller sets: the contract catalog is the whole point of this pass.
+      optionSets: {},
+    })
+    return {
+      seeded: true,
+      mode: 'option_seed_synced',
+      syncedFieldCount: result.evidence.syncedFieldCount,
+      skippedFieldCount: result.evidence.skippedFieldCount,
+    }
+  } catch (error) {
+    if (error && error.code === 'MVP_OPTION_SYNC_API_UNAVAILABLE') {
+      return { seeded: false, mode: 'option_seed_api_unavailable', syncedFieldCount: 0, skippedFieldCount: 0 }
+    }
+    throw error
+  }
+}
+
 async function ensureStockPreparationMvpTargets({ context, projectId, permission, objectIds, baseId } = {}) {
   assertAdminPermission(permission)
   const provisioning = getProvisioningApi(context || {})
@@ -302,10 +354,14 @@ async function ensureStockPreparationMvpTargets({ context, projectId, permission
   for (const template of templates) {
     tables.push(await ensureMvpTemplate({ provisioning, projectId: scopedProjectId, baseId: baseId || null, template }))
   }
+  // The tables exist; now their selects have to mean something. See seedEnsuredMvpContractOptions.
+  const optionSeed = await seedEnsuredMvpContractOptions({ context, projectId: scopedProjectId, templates })
   return {
     ready: tables.every((table) => table.ensured),
     tables,
-    evidence: buildEnsureEvidence(templates, tables),
+    optionSeed,
+    // Counts and a closed mode token only — the option VALUES ride the patch body, never the evidence.
+    evidence: { ...buildEnsureEvidence(templates, tables), optionSeed },
   }
 }
 
@@ -456,19 +512,28 @@ async function repairStockPreparationMvpTargets({ context, projectId, permission
 // Option sync needs patchObjectFieldProperty (not ensureObject); this mirrors
 // the canonical option-sync API accessor's method requirement while keeping the
 // single StockPreparationTargetProvisioningError gate shape.
+//
+// `getObjectField` is required TOO, and it is not optional politeness. The sync merges the contract
+// vocabulary INTO whatever the field already carries (append + keep_existing), which is only sound if
+// the current options can actually be read. A host that could patch but not read would silently fall
+// back to "add everything to an empty set" — i.e. an overwrite — and take an operator's hand-seeded
+// values with it. Refusing outright is the honest outcome: the ensure path degrades to
+// `option_seed_api_unavailable` rather than to a destructive write, and an explicit options/sync says
+// so with a 503.
 function getMvpOptionSyncApi(context) {
   const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
   if (
     !provisioning ||
     typeof provisioning.findObjectSheet !== 'function' ||
     typeof provisioning.resolveFieldIds !== 'function' ||
-    typeof provisioning.patchObjectFieldProperty !== 'function'
+    typeof provisioning.patchObjectFieldProperty !== 'function' ||
+    typeof provisioning.getObjectField !== 'function'
   ) {
     throw new StockPreparationTargetProvisioningError(
       503,
       'MVP_OPTION_SYNC_API_UNAVAILABLE',
-      'stock-preparation MVP option sync requires multitable.provisioning patchObjectFieldProperty API',
-      { requiredMethods: ['findObjectSheet', 'resolveFieldIds', 'patchObjectFieldProperty'] },
+      'stock-preparation MVP option sync requires multitable.provisioning patchObjectFieldProperty + getObjectField API',
+      { requiredMethods: ['findObjectSheet', 'resolveFieldIds', 'patchObjectFieldProperty', 'getObjectField'] },
     )
   }
   return provisioning
@@ -517,6 +582,65 @@ const OPTION_SYNC_ERROR_FACTORY = {
       'no stock-preparation MVP option fields were synchronized',
       { targetObjectId, skipped: skipped.map((entry) => ({ field: entry.field, reason: entry.reason })) },
     ),
+}
+
+/**
+ * ADDITIVE-ONLY union of the caller's option sets over the contract defaults.
+ *
+ * Per key:
+ *   * no caller set          -> the catalog default, unchanged;
+ *   * caller set ⊇ catalog   -> the caller's set (already the union), their order and labels kept;
+ *   * caller set ⊉ catalog   -> REFUSED. Omitting a contract value is the only way to express
+ *                              "remove it", and removing it breaks every writer that emits it.
+ *
+ * The refusal names the MISSING CATALOG VALUES — those are our own committed platform constants, and
+ * an operator cannot fix the request without being told which ones they dropped. The caller's own
+ * option values never enter the error details.
+ */
+function mergeContractDefaultsUnderCallerSets(contractDefaults, callerSets) {
+  const merged = { ...contractDefaults }
+  for (const [sourceKey, callerSet] of Object.entries(callerSets)) {
+    const contractSet = contractDefaults[sourceKey]
+    if (!contractSet) {
+      // A key with no catalog entry has nothing to preserve — the caller's set stands alone.
+      merged[sourceKey] = callerSet
+      continue
+    }
+    const callerValues = new Set(callerSet.options.map((option) => option.value))
+    const missing = contractSet.options
+      .map((option) => option.value)
+      .filter((value) => !callerValues.has(value))
+    if (missing.length > 0) {
+      throw new StockPreparationOptionSyncError(
+        422,
+        'OPTION_SYNC_CONTRACT_VALUE_REMOVAL_REFUSED',
+        'a supplied option set may add to a contract vocabulary but never drop one of its values',
+        { sourceKey, missingContractValues: missing, missingContractValueCount: missing.length },
+      )
+    }
+    merged[sourceKey] = callerSet
+  }
+  return merged
+}
+
+/**
+ * Read a field's CURRENT options, for the kernel's append/keep_existing merge.
+ *
+ * Read-only, and soft on absence in exactly one direction: a host without `getObjectField`, or a
+ * field whose property carries no options array, both answer `[]` — which makes the merge degrade to
+ * "add everything", i.e. today's seeding, rather than to a failure. It can never answer with STALE
+ * options, because there is no cache: an unreadable field yields the empty set, and the union of the
+ * empty set with the catalog removes nothing that was there — the patch simply adds.
+ *
+ * (A host that cannot read a field but CAN patch it is the one case where an existing hand-seeded
+ * value could still be overwritten. `getMvpOptionSyncApi` below refuses that host outright rather
+ * than relying on the two methods shipping together, so the `[]` fallback here is reachable only for a
+ * field the host genuinely reports as having no options.)
+ */
+async function readCurrentFieldOptions({ provisioning, projectId, objectId, field }) {
+  if (!provisioning || typeof provisioning.getObjectField !== 'function') return []
+  const current = await provisioning.getObjectField({ projectId, objectId, fieldId: field.id })
+  return current && current.property && Array.isArray(current.property.options) ? current.property.options : []
 }
 
 // Sync ONE MVP table's option fields. No option fields => no-op. Target not yet
@@ -582,6 +706,24 @@ async function syncMvpTemplateOptions({ provisioning, projectId, template, suppl
     buildPropertyPatch,
     resolveSkipReason,
     errorFactory: OPTION_SYNC_ERROR_FACTORY,
+    // ADDITIVE AT THE OPTION LEVEL, not just at the field level.
+    //
+    // The kernel's DEFAULT mode is `replace` + `update_from_source`, documented there as "full
+    // overwrite, no read, no merge". Under it, every sync REPLACED the whole options array — so a
+    // value an operator had hand-seeded was REMOVED (and its rows' writes then refused), and the
+    // label/colour a human had set on an option was STRIPPED, on every single run. That is precisely
+    // the hazard on the live deployment, whose options were hand-seeded to clear the outage this
+    // module exists to prevent: without these two lines the next ensure would silently revert them.
+    //
+    //   append        — keep every current option, add only the ones the source has and we lack.
+    //                   Nothing is ever removed.
+    //   keep_existing — for a value present on BOTH sides, the CURRENT entry wins byte-for-byte, so
+    //                   an operator's label/colour/extras survive a re-seed of the same value.
+    //
+    // Both are the kernel's own vocabulary; this adds no merge logic of its own.
+    syncMode: 'append',
+    conflictPolicy: 'keep_existing',
+    readCurrentOptions: (field) => readCurrentFieldOptions({ provisioning, projectId, objectId: template.objectId, field }),
   })
   const synced = syncedRaw.map((entry) => ({
     field: entry.field,
@@ -633,10 +775,37 @@ async function syncStockPreparationMvpOptions({ context, projectId, permission, 
   const scopedProjectId = requiredString(projectId, 'projectId')
   const templates = resolveTargetTemplates(objectIds)
 
-  // Reuse the canonical option-set normalization (safe-string / executable-key
-  // / secret-shape validation). Option VALUES are caller-supplied admin
-  // governance vocabulary — nothing is hardcoded here.
-  const suppliedSets = optionSetsFromInput(optionSets || {})
+  // THE CONTRACT VOCABULARIES ARE SEEDED, AND A CALLER MAY ONLY ADD TO THEM.
+  //
+  // `{ type: 'contract', key }` names a vocabulary the PLATFORM declares — the plugin's own closed
+  // enum, the same class of constant as PREP_STATUSES — and it has to exist without anybody typing it
+  // into a request. Until this merge nothing resolved it: a body-less `POST /mvp/options/sync`
+  // answered `ok: true` having patched nothing, and the fields it declined to patch recorded the
+  // reason `contract_not_available`.
+  //
+  // THE MERGE DIRECTION IS THE GOVERNANCE STORY, and a plain `{...catalog, ...caller}` spread had it
+  // backwards. Because a supplied set REPLACES a key wholesale and the patch replaces the whole
+  // options array, an admin who meant to ADD one value —
+  //
+  //     { "stock_preparation_run_status_v1": [{ "value": "cancelled" }] }
+  //
+  // — would have shrunk the field's vocabulary to that ONE value, and every writer emitting
+  // 'succeeded' / 'partial' / 'running' / 'failed' would start failing validation. The catalog exists
+  // to make a vocabulary impossible to be missing; a merge that lets a request delete it hands the
+  // same outage back through the front door.
+  //
+  // So the merge is a UNION, and it is checked rather than assumed: a caller set must be a SUPERSET
+  // of its key's catalog values. Adding is free; omitting a contract value is a REMOVAL ATTEMPT and
+  // is refused with a code, rather than silently corrected — a request whose applied effect differs
+  // from what it says is worse than one that is turned down.
+  //
+  // Both halves then go through the canonical normalization (safe-string / executable-key /
+  // secret-shape validation) — the catalog gets no shortcut past the checks caller input faces. The
+  // defaults are scoped to the TARGETED templates (see contractOptionSetsForTemplates) so they can
+  // never trip the unknown-source-key check below.
+  const contractDefaults = optionSetsFromInput(contractOptionSetsForTemplates(templates))
+  const callerSets = optionSetsFromInput(optionSets || {})
+  const suppliedSets = mergeContractDefaultsUnderCallerSets(contractDefaults, callerSets)
 
   const declaredSourceKeys = new Set()
   for (const template of templates) {
@@ -680,5 +849,6 @@ module.exports = {
     buildPropertyPatch,
     resolveSkipReason,
     getMvpOptionSyncApi,
+    seedEnsuredMvpContractOptions,
   },
 }

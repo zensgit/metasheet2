@@ -163,6 +163,44 @@ describe('StockPreparationProjectWorkspaceView (readonly, values-free)', () => {
     expect(onSelectProject).toHaveBeenCalledWith('proj-beta')
   })
 
+  // 项目接入 (the sync entry) mounts at the TOP of this view, and every row gains a 刷新 that arms it.
+  it('mounts the 项目接入 panel above the table', async () => {
+    h.getOverview.mockResolvedValue(overviewWithPlantedExtras())
+    const root = mountView()
+    await flushUi()
+    const panel = root.querySelector('[data-testid="stock-prep-project-sync"]')
+    const table = root.querySelector('.sp-project__table-wrap')
+    expect(panel).not.toBeNull()
+    expect(table).not.toBeNull()
+    // DOCUMENT ORDER is the assertion: 接入 above 已接入, so the row-level 刷新 points UP at the
+    // input rather than at a control the operator has to go looking for.
+    expect(panel!.compareDocumentPosition(table!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('every row carries a 刷新 that arms the sync panel rather than syncing a guessed project', async () => {
+    h.getOverview.mockResolvedValue(overviewWithPlantedExtras())
+    const root = mountView()
+    await flushUi()
+
+    const refreshButtons = root.querySelectorAll('[data-testid="stock-prep-project-refresh"]')
+    expect(refreshButtons.length).toBe(2)
+    expect(refreshButtons[0].getAttribute('aria-label')).toBe('重新同步这个项目')
+
+    // Before: no explanation on screen.
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-armed"]')).toBeNull()
+    ;(refreshButtons[0] as HTMLButtonElement).click()
+    await flushUi()
+
+    // After: the panel says WHY the number has to be typed. It must NOT have run anything — this
+    // projection is values-free by contract, so the row has no project NUMBER to sync with, and a
+    // panel that guessed would pull the wrong project's BOM.
+    const armed = root.querySelector('[data-testid="stock-prep-project-sync-armed"]') as HTMLElement
+    expect(armed).not.toBeNull()
+    expect(armed.textContent).toContain('系统没有保存')
+    // The internal handle is still never rendered.
+    expect(root.textContent || '').not.toContain('proj-alpha')
+  })
+
   it('renders the empty state when no projects are synced yet', async () => {
     h.getOverview.mockResolvedValue({ projectCount: 0, statusCounts: {}, projects: [] })
     const root = mountView()
