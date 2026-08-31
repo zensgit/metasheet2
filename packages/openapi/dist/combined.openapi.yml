@@ -18311,6 +18311,11 @@ paths:
           $ref: '#/components/responses/NotFound'
     delete:
       summary: Delete data source
+      description: >-
+        Refuses with 409 (DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS, naming the
+        reference count) while any integration external system's
+        config.dataSourceId references this source. force=true (platform-admin
+        only) breaks the reference deliberately and is audited.
       security:
         - bearerAuth: []
       parameters:
@@ -18319,11 +18324,23 @@ paths:
           required: true
           schema:
             type: string
+        - in: query
+          name: force
+          required: false
+          description: >-
+            Platform-admin only — delete even while referenced by external
+            systems.
+          schema:
+            type: boolean
       responses:
         '200':
           description: OK
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          description: Referenced by external systems (reference count in the error body)
   /api/data-sources/{id}/connect:
     post:
       summary: Connect data source

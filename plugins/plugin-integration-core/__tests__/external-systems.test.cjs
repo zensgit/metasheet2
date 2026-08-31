@@ -213,10 +213,21 @@ async function main() {
 
   // --- 4b. SQL lookup-projection identifiers stay on the private adapter load only ---
   const projectionDb = createMockDb()
+  // P2-A: a config.dataSourceId binding must be validated against the authenticated principal
+  // (owner-only, same as every facade read) and is stamped with the validated owner server-side.
+  const projectionBinderCalls = []
   const projectionRegistry = createExternalSystemRegistry({
     db: projectionDb,
     credentialStore,
     idGenerator: () => 'sys_lookup_projection',
+    dataSourceBinder: {
+      async assertReferenceable(dataSourceId, principal) {
+        projectionBinderCalls.push([dataSourceId, principal])
+        if (dataSourceId !== 'sql-readonly-1' || principal !== 'owner_1') {
+          throw new Error(`Data source with id '${dataSourceId}' not found`)
+        }
+      },
+    },
   })
   const lookupProjection = {
     baseObject: 'dbo.bom_detail',
@@ -233,8 +244,13 @@ async function main() {
     role: 'source',
     config: { dataSourceId: 'sql-readonly-1', schema: 'dbo', lookupProjection },
     status: 'active',
+    principal: 'owner_1',
   })
   assert.equal(publicProjectionCreate.config.dataSourceId, 'sql-readonly-1')
+  assert.equal(publicProjectionCreate.config.dataSourceOwnerId, 'owner_1',
+    'a validated binding is stamped with the owning principal (what the core delete guard counts)')
+  assert.deepEqual(projectionBinderCalls, [['sql-readonly-1', 'owner_1']],
+    'the binder saw exactly the asserted binding')
   assert.equal(publicProjectionCreate.config.schema, 'dbo')
   assert.equal(publicProjectionCreate.config.lookupProjection, undefined,
     'public create response omits the complete private lookup projection')
@@ -283,6 +299,7 @@ async function main() {
     role: 'source',
     config: { dataSourceId: 'sql-readonly-1', schema: 'dbo' },
     status: 'active',
+    principal: 'owner_1',
   })
   const preservedProjectionSystem = await projectionRegistry.getExternalSystemForAdapter({
     tenantId: 'tenant_1',
@@ -298,6 +315,7 @@ async function main() {
     role: 'source',
     config: { dataSourceId: 'sql-readonly-1', schema: 'dbo', lookupProjection: null },
     status: 'active',
+    principal: 'owner_1',
   })
   const clearedProjectionSystem = await projectionRegistry.getExternalSystemForAdapter({
     tenantId: 'tenant_1',
@@ -751,6 +769,7 @@ async function main() {
   assert.ok(deleteMissing instanceof ExternalSystemNotFoundError, 'deleting missing external system reports not found')
 
   await testInstanceDigestIsProductionBehaviour()
+  await testDataSourceBindingValidation()
 
   console.log('✓ external-systems: registry + credential boundary tests passed')
 }
@@ -953,4 +972,122 @@ async function testInstanceDigestIsProductionBehaviour() {
     + 'source and the digest is reproducible by anyone who reads the repo')
 
   console.log('  external-systems: instance digest (production function) OK')
+}
+
+// ---------------------------------------------------------------------------------------------
+// P2-A — config.dataSourceId is a persisted reference into the CORE data_sources table, and it
+// used to persist with no existence/ownership check: any integration:write holder in any tenant
+// could pin a foreign user's source id (making it un-deletable by its owner once the core
+// referential delete guard counts references). The registry now validates the binding against the
+// authenticated principal through the host facade and stamps config.dataSourceOwnerId
+// server-side; the core guard counts ONLY owner-attributed rows.
+// ---------------------------------------------------------------------------------------------
+async function testDataSourceBindingValidation() {
+  const credentialStore = createMockCredentialStore()
+
+  // fail CLOSED without a wired binder
+  const binderlessRegistry = createExternalSystemRegistry({
+    db: createMockDb(),
+    credentialStore,
+    idGenerator: () => 'sys_bind_closed',
+  })
+  await assert.rejects(
+    () => binderlessRegistry.upsertExternalSystem({
+      tenantId: 'tenant_1',
+      name: 'bind-closed',
+      kind: 'data-source:sql-readonly',
+      role: 'source',
+      config: { dataSourceId: 'ds-1' },
+      principal: 'owner_1',
+    }),
+    (err) => err instanceof ExternalSystemValidationError && /binder/.test(err.message),
+    'a dataSourceId binding with no wired binder is refused (fail closed), never silently persisted',
+  )
+
+  const binderCalls = []
+  const binder = {
+    async assertReferenceable(dataSourceId, principal) {
+      binderCalls.push([dataSourceId, principal])
+      if (dataSourceId !== 'ds-owned' || principal !== 'owner_1') {
+        throw new Error(`Data source with id '${dataSourceId}' not found`)
+      }
+    },
+  }
+  const db = createMockDb()
+  let nextId = 0
+  const registry = createExternalSystemRegistry({
+    db,
+    credentialStore,
+    idGenerator: () => `sys_bind_${nextId += 1}`,
+    dataSourceBinder: binder,
+  })
+
+  // fail CLOSED without an authenticated principal
+  await assert.rejects(
+    () => registry.upsertExternalSystem({
+      tenantId: 'tenant_1',
+      name: 'bind-no-principal',
+      kind: 'data-source:sql-readonly',
+      role: 'source',
+      config: { dataSourceId: 'ds-owned' },
+    }),
+    (err) => err instanceof ExternalSystemValidationError && /principal/.test(err.message),
+    'a dataSourceId binding without an authenticated principal is refused',
+  )
+  assert.equal(binderCalls.length, 0, 'the binder is never consulted without a principal')
+
+  // a non-owner principal is refused with the facade's uniform wording, and nothing persists
+  await assert.rejects(
+    () => registry.upsertExternalSystem({
+      tenantId: 'tenant_1',
+      name: 'bind-not-yours',
+      kind: 'data-source:sql-readonly',
+      role: 'source',
+      config: { dataSourceId: 'ds-owned' },
+      principal: 'stranger_9',
+    }),
+    (err) => err instanceof ExternalSystemValidationError
+      && err.message === "Data source with id 'ds-owned' not found",
+    'a non-owner bind is refused with the uniform not-found (no existence leak) and does not persist',
+  )
+  assert.equal(db.rows.length, 0, 'a refused bind leaves no row behind')
+
+  // a client-forged attribution stamp is discarded when no binding is asserted...
+  const unbound = await registry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    name: 'bind-forged-stamp-only',
+    kind: 'http',
+    role: 'source',
+    config: { baseUrl: 'https://example.test', dataSourceOwnerId: 'victim_7' },
+  })
+  assert.equal(unbound.config.dataSourceOwnerId, undefined,
+    'dataSourceOwnerId is server-owned metadata: a client-sent stamp without a binding is stripped')
+
+  // ...and OVERWRITTEN by the validated principal when a binding is asserted
+  const bound = await registry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    name: 'bind-owned',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    config: { dataSourceId: 'ds-owned', schema: 'dbo', dataSourceOwnerId: 'victim_7' },
+    principal: 'owner_1',
+  })
+  assert.equal(bound.config.dataSourceOwnerId, 'owner_1',
+    'the stamp is the VALIDATED principal — a client-sent value cannot survive')
+
+  // a config-preserving update (the test-result persist path) re-validates nothing and
+  // needs no principal: the stored, already-validated binding rides through untouched.
+  const preserved = await registry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    id: bound.id,
+    name: 'bind-owned',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    status: 'error',
+    lastError: 'connection test failed',
+  })
+  assert.equal(preserved.config.dataSourceId, 'ds-owned', 'preserved config keeps the binding')
+  assert.equal(preserved.config.dataSourceOwnerId, 'owner_1', 'preserved config keeps the stamp')
+
+  console.log('  external-systems: dataSourceId bind-time validation OK')
 }
