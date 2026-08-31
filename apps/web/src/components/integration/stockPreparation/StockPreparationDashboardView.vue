@@ -6,7 +6,7 @@
       data-testid="stock-prep-dashboard-loading"
       role="status"
     >
-      {{ bi('正在加载工作台概览…', 'Loading workbench overview…') }}
+      {{ bi('正在读取项目情况…', 'Reading the projects…') }}
     </p>
 
     <div
@@ -15,7 +15,7 @@
       data-testid="stock-prep-dashboard-error"
       role="status"
     >
-      <p class="sp-dash__state-msg">{{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}</p>
+      <p class="sp-dash__state-msg">{{ bi('暂时读不到数据,稍后再试。', 'Cannot read the data right now — try again shortly.') }}</p>
       <!-- H4-1 retry: re-runs the read-gated overview load. Idempotent + safe — loadOverview resets
            overviewErrored and re-fetches; no stale race (this is the coarse /projects read, and the
            stage-detail load carries its own monotonic seq guard). -->
@@ -37,7 +37,7 @@
       class="sp-dash__state sp-dash__state--muted"
       data-testid="stock-prep-dashboard-empty"
     >
-      {{ bi('尚无已同步项目。', 'No projects synced yet.') }}
+      {{ bi('还没有同步过任何项目。', 'Nothing has been synced yet.') }}
     </p>
 
     <div v-else class="sp-dash__body" data-testid="stock-prep-dashboard-body">
@@ -71,7 +71,10 @@
         class="sp-dash__state sp-dash__state--muted"
         data-testid="stock-prep-dashboard-no-project"
       >
-        {{ bi('选择一个项目以查看阶段概览与推荐下一步。', 'Select a project to see the stage overview and the recommended next step.') }}
+        {{ bi(
+          '选一个项目,这里就会显示它做到哪一步、有几件事卡着、接下来该做什么。',
+          'Select a project and this page shows how far it has got, what is stuck, and what to do next.',
+        ) }}
       </p>
 
       <template v-else>
@@ -79,8 +82,10 @@
           <span class="sp-dash__current-item" data-testid="stock-prep-dashboard-current-status">
             {{ bi('项目状态', 'Project status') }}: {{ selectedProject.projectStatus }}
           </span>
+          <!-- The run handle is an internal navigation id, not a business value. It is what we ask
+               for when someone reports "this sync looks wrong", so it stays — subordinate. -->
           <span class="sp-dash__current-item" data-testid="stock-prep-dashboard-current-run">
-            {{ bi('最近同步运行', 'Last sync run') }}: <code>{{ selectedProject.lastSyncRunId ?? '—' }}</code>
+            {{ bi('最近一次同步', 'Last sync') }} <code>{{ selectedProject.lastSyncRunId ?? '—' }}</code>
           </span>
         </div>
 
@@ -131,6 +136,43 @@
           :errored="false"
           @navigate="onStageNavigate"
         />
+
+        <!-- What the banner above decided, and what it decided it from. The recommendation is a
+             deterministic rule over counts and status (stageOverview.ts deriveRecommendedNextStep),
+             so naming the rule that fired is how an implementer checks it against the data. -->
+        <StockPrepTechnicalDetails testid="stock-prep-dashboard-tech">
+          <dl>
+            <dt>{{ bi('推荐规则命中的分支', 'Recommendation rule that fired') }}</dt>
+            <dd>
+              <code>{{ recommendedStep.reason }}</code>
+              · <code>{{ recommendedStep.kind }}</code>
+              <span v-if="recommendedStep.stage"> · <code>{{ recommendedStep.stage }}</code></span>
+            </dd>
+            <dt>{{ bi('六个阶段的原始读数', 'Raw readings for the six stages') }}</dt>
+            <dd>
+              <ul>
+                <li v-for="stage in allStages" :key="stage.key">
+                  <code>{{ stage.key }}</code> = <code>{{ stage.status }}</code>
+                  · count={{ stage.count ?? '—' }}
+                  · blocking={{ stage.blockingCount ?? '—' }}
+                  <span v-if="stage.caveat"> · <code>{{ stage.caveat }}</code></span>
+                </li>
+              </ul>
+            </dd>
+            <dt>{{ bi('权限口径', 'Permission reading') }}</dt>
+            <dd>
+              {{ detailForbidden
+                ? bi(
+                  '五个阶段详情读取被服务端拒绝(requireAccess admin),已退回到只用项目计数的粗粒度推荐。',
+                  'The five stage-detail reads were refused server-side (requireAccess admin), so the recommendation fell back to the coarser project-count rule.',
+                )
+                : bi(
+                  '五个阶段详情读取正常;它们与下面各视图复用同一批只读端点,本页不新增后端。',
+                  'The five stage-detail reads succeeded; they reuse the same readonly endpoints as the views below — this page adds no backend of its own.',
+                ) }}
+            </dd>
+          </dl>
+        </StockPrepTechnicalDetails>
       </template>
     </div>
   </div>
@@ -183,6 +225,7 @@ import {
   type StockPreparationStageMetric,
 } from '../../../services/integration/stockPreparation/stageOverview'
 import StockPreparationStageStepper from './StockPreparationStageStepper.vue'
+import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -390,33 +433,36 @@ const recommendCopy = computed<string>(() => {
     case 'admin_permission_required':
       return bi('需要管理员权限才能查看阶段详情与推荐下一步。', 'Admin access is required to see stage detail and a recommended next step.')
     case 'sync_incomplete_batches':
-      return bi(`有 ${step.count} 个不完整的快照批次 → 去同步快照查看。`, `${step.count} incomplete snapshot batch(es) → go check sync.`)
+      return bi(
+        `有 ${step.count} 批同步的数据不完整 → 去「BOM 快照批次与差异」看看是哪几批。`,
+        `${step.count} sync batch(es) came through incomplete → check which ones on the snapshot page.`,
+      )
     case 'mapping_pending_tenant_wide':
       return bi(
-        `有 ${step.count} 个待确认物料映射(租户级,非本项目专属)→ 去映射确认。`,
-        `${step.count} pending material mapping(s) (tenant-wide, not project-specific) → go confirm mappings.`,
+        `有 ${step.count} 个物料还没对上(这个数是全公司共用的,不只本项目)→ 去「物料映射确认」处理。`,
+        `${step.count} material(s) are not matched yet (that count is shared company-wide, not just this project) → handle them on the material-mapping page.`,
       )
     case 'unit_pending_lines':
-      return bi(`有 ${step.count} 个待处理单位换算行 → 去单位确认。`, `${step.count} pending unit-conversion line(s) → go confirm units.`)
+      return bi(`有 ${step.count} 行的单位还没定 → 去「单位换算确认」处理。`, `${step.count} row(s) still have no unit settled → sort them on the unit page.`)
     case 'generate_not_run':
-      return bi('尚未生成备料行 → 可以去生成。', 'No prep lines generated yet → ready to generate.')
+      return bi('还没生成过备料明细 → 现在可以生成了。', 'No prep lines have been built yet → you can build them now.')
     case 'exception_unresolved_blocking':
       return bi(
-        `有 ${step.count} 个阻断异常(展示口径)→ 去异常队列处理。`,
-        `${step.count} blocking exception(s) (display figure) → go to the exception queue.`,
+        `有 ${step.count} 件事卡着出不了料(这里显示的数,不是最终判定)→ 去「异常队列」处理。`,
+        `${step.count} thing(s) are blocking the result (this is what is shown here, not the final verdict) → clear them on the exception page.`,
       )
     case 'project_open_exceptions':
-      return bi(`该项目有 ${step.count} 个待处理异常 → 去异常队列查看。`, `This project has ${step.count} open exception(s) → go to the exception queue.`)
+      return bi(`该项目有 ${step.count} 件事待处理 → 去「异常队列」看看。`, `This project has ${step.count} thing(s) waiting to be handled → take a look at the exception page.`)
     case 'project_held_lines':
-      return bi(`该项目有 ${step.count} 条暂挂备料行 → 去备料行查看。`, `This project has ${step.count} held prep line(s) → go to prep lines.`)
+      return bi(`该项目有 ${step.count} 行备料明细卡着 → 去「备料行」看看卡在哪。`, `${step.count} prep line(s) on this project are stuck → see what is holding them up on the prep-line page.`)
     case 'project_no_snapshot_yet':
-      return bi('该项目尚无快照批次 → 去同步快照。', 'This project has no snapshot batch yet → go sync.')
+      return bi('该项目尚无快照(还没从 PLM 同步过)→ 先同步一次。', 'This project has no snapshot yet — nothing has been synced from PLM → sync it first.')
     case 'all_clear':
-      return bi('当前没有需要处理的阻断项。', 'Nothing currently needs attention.')
+      return bi('当前没有需要处理的事,可以继续往下走。', 'Nothing needs attention right now — you can carry on.')
     case 'detail_read_incomplete':
       return bi(
-        '部分阶段详情暂时读取失败,当前无法完整判断是否有阻断项 → 请稍后重试。',
-        'Some stage details failed to load, so the picture is incomplete — retry shortly.',
+        '部分阶段详情暂时读不到,现在还看不全有没有卡住的事 → 请稍后重试。',
+        'Some of the per-step detail could not be read, so this is not the whole picture yet — try again shortly.',
       )
     default:
       return ''
