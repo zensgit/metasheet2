@@ -46,6 +46,19 @@ export function isSequentialQueueActive(value: unknown): boolean {
   return readSequentialQueueMetadata(value)?.state === 'active'
 }
 
+/** Carry the one active queue slot across an in-round handover. */
+export function inheritSequentialQueueMetadata<T extends Record<string, unknown>>(
+  sourceMetadata: readonly unknown[],
+  metadata: T,
+): (T & ApprovalAssigneeResolutionMetadata) | null {
+  const queueSources = sourceMetadata.filter((value) => isRecord(value) && 'sequentialQueue' in value)
+  if (queueSources.length === 0) return { ...metadata }
+  if (sourceMetadata.length !== 1 || queueSources.length !== 1) return null
+  const queue = readSequentialQueueMetadata(queueSources[0])
+  if (!queue || queue.state !== 'active') return null
+  return { ...metadata, sequentialQueue: queue }
+}
+
 /** Promote the next queued in-memory seat after an auto-approved head is removed. */
 export function promoteNextSequentialQueueAssignment<T extends SequentialAssignment>(
   assignments: readonly T[],
