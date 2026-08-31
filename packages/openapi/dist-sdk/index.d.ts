@@ -8015,10 +8015,16 @@ export interface paths {
             };
         };
         post?: never;
-        /** Delete data source */
+        /**
+         * Delete data source
+         * @description Refuses with 409 (DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS, naming the reference count) while any integration external system's config.dataSourceId references this source. force=true (platform-admin only) breaks the reference deliberately and is audited.
+         */
         delete: {
             parameters: {
-                query?: never;
+                query?: {
+                    /** @description Platform-admin only — delete even while referenced by external systems. */
+                    force?: boolean;
+                };
                 header?: never;
                 path: {
                     id: string;
@@ -8034,7 +8040,15 @@ export interface paths {
                     };
                     content?: never;
                 };
+                403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                /** @description Referenced by external systems (reference count in the error body) */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         options?: never;

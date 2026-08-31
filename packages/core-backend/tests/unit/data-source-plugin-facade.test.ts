@@ -80,11 +80,12 @@ function managerStub(opts: ManagerStubOptions = {}) {
 }
 
 describe('createDataSourcePluginFacade', () => {
-  it('is read-only by construction — exposes only read methods, no write/credential surface', () => {
+  it('is read-only by construction — exposes only read methods plus the bind probe and the display descriptor, no write/credential surface', () => {
     const facade = createDataSourcePluginFacade(() => managerStub().manager)
-    // `describe` joined this list for the 对接总览 screen. It belongs to the same read-only class as
-    // the other four: no mutation, no credentials, principal-gated — see its own tests below.
-    expect(Object.keys(facade).sort()).toEqual(['describe', 'getSchema', 'getTableInfo', 'select', 'test'])
+    // `assertReferenceable` (P2-A bind probe, #5401) and `describe` (对接总览 display descriptor)
+    // both joined this list. Both belong to the read-only class: no mutation, no credentials,
+    // principal-gated — see their own describe blocks below.
+    expect(Object.keys(facade).sort()).toEqual(['assertReferenceable', 'describe', 'getSchema', 'getTableInfo', 'select', 'test'])
     const surface = facade as unknown as Record<string, unknown>
     for (const forbidden of [
       'insert', 'update', 'delete', 'create', 'remove', 'rotate', 'connect', 'disconnect',
@@ -120,6 +121,20 @@ describe('createDataSourcePluginFacade', () => {
       expect(m.adapter.testConnection).not.toHaveBeenCalled()
     })
 
+    it('is OWNER-ONLY under the #5401 model — passes the BARE principal to assertAccess (no admin bypass)', async () => {
+      // Load-bearing after #5401: assertAccess now takes a DataSourceActor, and a bare string is the
+      // data-plane (owner-only) shape. describe must call it with the bare principal, NOT an
+      // { platformAdmin } context — otherwise the hub would leak a non-admin a connection name they
+      // could not see on /data-sources. Pin the exact call shape.
+      const m = managerStub({ adapter: adapterStub({ name: 'PLM 只读库' }) })
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      await facade.describe('ds_plm', 'owner-1')
+      expect(m.stub.assertAccess).toHaveBeenCalledWith('ds_plm', 'owner-1')
+      // A bare string, never a management-actor context — no platformAdmin side channel.
+      const [, actorArg] = m.stub.assertAccess.mock.calls[0]
+      expect(typeof actorArg).toBe('string')
+    })
+
     it('is principal-gated and fails closed with the uniform not-found wording (no existence leak)', async () => {
       const denied = managerStub({ deny: true })
       const facade = createDataSourcePluginFacade(() => denied.manager)
@@ -139,6 +154,38 @@ describe('createDataSourcePluginFacade', () => {
       const m = managerStub({ adapter: adapterStub({ readOnly: false, name: 'K3 写入库', type: 'sqlserver' }) })
       const facade = createDataSourcePluginFacade(() => m.manager)
       await expect(facade.describe('ds_write', 'owner-1')).resolves.toMatchObject({ name: 'K3 写入库' })
+    })
+  })
+
+  describe('assertReferenceable (P2-A bind-time ownership probe)', () => {
+    it('passes for the owner WITHOUT connecting and WITHOUT requiring read-only', async () => {
+      // A writable source: write-gated target bindings legitimately reference one,
+      // so the probe must not impose the read path's read-only floor.
+      const m = managerStub({ adapter: adapterStub({ readOnly: false, connected: false }) })
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      await expect(facade.assertReferenceable('pg', 'owner-1')).resolves.toBeUndefined()
+      expect(m.stub.assertAccess).toHaveBeenCalledWith('pg', 'owner-1')
+      // binding metadata must never dial the customer system
+      expect(m.stub.connectDataSource).not.toHaveBeenCalled()
+      expect(m.adapter.testConnection).not.toHaveBeenCalled()
+    })
+
+    it('refuses a non-owner with the uniform not-found wording (no existence leak)', async () => {
+      const m = managerStub({ deny: true })
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      await expect(facade.assertReferenceable('pg', 'stranger')).rejects.toMatchObject({
+        code: DATA_SOURCE_NOT_FOUND_CODE,
+        message: "Data source with id 'pg' not found",
+      })
+      await expect(facade.assertReferenceable('pg', 'stranger')).rejects.toBeInstanceOf(DataSourceUnavailableError)
+    })
+
+    it('refuses a missing principal before resolving the manager (never a default identity)', async () => {
+      const getManager = vi.fn(() => managerStub().manager)
+      const facade = createDataSourcePluginFacade(getManager)
+      await expect(facade.assertReferenceable('pg', undefined)).rejects.toThrow(MISSING_PRINCIPAL_MESSAGE)
+      await expect(facade.assertReferenceable('pg', '   ')).rejects.toThrow(MISSING_PRINCIPAL_MESSAGE)
+      expect(getManager).not.toHaveBeenCalled()
     })
   })
 

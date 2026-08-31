@@ -3517,11 +3517,15 @@ function createHandlers(services, options = {}) {
     async externalSystemsUpsert(req, res) {
       requireAccess(req, 'write')
       const body = requestBody(req)
+      // P2-A: the registry validates a config.dataSourceId binding against the AUTHENTICATED
+      // principal (owner-only, same as every facade read) and stamps attribution server-side —
+      // so the principal comes from the request user, never the body (spread order overrides).
+      const withPrincipal = { ...body, principal: requestPrincipal(req) }
       if (hasPrivateConfigMutation(body.kind, body.config)) {
         requireAccess(req, 'admin')
-        return sendOk(res, await externalSystems.upsertExternalSystem(scopedAuthenticatedWriteInput(req, body)), 201)
+        return sendOk(res, await externalSystems.upsertExternalSystem(scopedAuthenticatedWriteInput(req, withPrincipal)), 201)
       }
-      return sendOk(res, await externalSystems.upsertExternalSystem(scopedInput(req, body)), 201)
+      return sendOk(res, await externalSystems.upsertExternalSystem(scopedInput(req, withPrincipal)), 201)
     },
 
     async externalSystemsGet(req, res) {

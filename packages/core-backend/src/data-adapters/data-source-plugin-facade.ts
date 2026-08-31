@@ -42,16 +42,35 @@ export interface DataSourceDescriptor {
 
 export interface DataSourceReadOnlyFacade {
   /**
-   * Resolve a data source id to its display descriptor. Principal-gated exactly like every other
-   * method here (`assertAccess`), so a caller reaches only sources its principal owns and a
-   * non-owner gets the same uniform "not found" a deleted row gets — no existence leak.
+   * Resolve a data source id to its display descriptor, for the 对接总览 hub screen.
+   *
+   * AUTHORITY (aligned with #5401's visibility model): OWNER-ONLY. `principal` is passed to
+   * `assertAccess` as a bare user-id string, which `normalizeActor` treats as the DATA-PLANE shape
+   * — strictly owner-scoped, NO platform-admin bypass. This is deliberate and load-bearing: the
+   * overview shows a NON-admin the connection name a system points at, and #5401 made non-admin
+   * data-plane access owner-only, so `describe` must NOT become a side channel that reveals a
+   * connection name the same non-admin could not see on `/data-sources`. A non-owner (admin or not)
+   * gets the uniform DataSourceUnavailableError — deleted vs not-yours indistinguishable, no
+   * existence leak — and the hub card renders 连接:已配置(他人管理) instead of a name. Management
+   * visibility (an admin listing every source) stays on the management routes, never here.
    *
    * Read-only in the strongest sense available: it does NOT connect (no `connectDataSource`), does
    * NOT decrypt, and never touches `adapter.getConfig()` — the only object in this layer that
-   * carries `connection` and `credentials`. Added for the 对接总览 screen, which must be able to
-   * say "this bridge uses the connection named X" without being handed anything it could leak.
+   * carries `connection` and `credentials`. Returns only {id, name, type, status}.
    */
   describe(dataSourceId: string, principal: string | undefined): Promise<DataSourceDescriptor>
+  /**
+   * BIND-TIME ownership probe (referential-delete guard, P2-A): asserts that
+   * `principal` may reference this data source in a persisted binding
+   * (integration_external_systems.config.dataSourceId) — i.e. the source
+   * exists AND the principal OWNS it, the exact authorization every later
+   * read through this facade enforces at runtime. Throws the facade's uniform
+   * DataSourceUnavailableError (deleted vs not-yours indistinguishable — no
+   * existence leak). Deliberately does NOT connect, and does NOT require the
+   * source to be read-only: write-gated target bindings reference writable
+   * sources.
+   */
+  assertReferenceable(dataSourceId: string, principal: string | undefined): Promise<void>
   test(dataSourceId: string, principal: string | undefined): Promise<DataSourceReadOnlyFacadeTestResult>
   getSchema(dataSourceId: string, principal: string | undefined, schema?: string): Promise<SchemaInfo>
   getTableInfo(
@@ -468,6 +487,11 @@ export function createDataSourcePluginFacade(
 
   return {
     async describe(dataSourceId, principal) {
+      // OWNER-ONLY (see the interface doc): `owner` is a bare principal string, so #5401's
+      // normalizeActor treats this as the data-plane shape — no platform-admin bypass. A non-owner
+      // gets the uniform not-found and the hub renders 已配置(他人管理); describe is never a side
+      // channel for a connection name the caller could not see on /data-sources.
+      //
       // Deliberately NOT routed through `authorize`: that helper connects the adapter and enforces
       // the read-only-source guard, both of which are wrong here. Describing a connection must not
       // open one (a summary screen listing ten bridges would otherwise dial ten databases), and a
@@ -488,6 +512,19 @@ export function createDataSourcePluginFacade(
         name: adapter.getName(),
         type: adapter.getType(),
         status: adapter.isConnected() ? 'connected' : 'disconnected',
+      }
+    },
+    async assertReferenceable(dataSourceId, principal) {
+      // Existence + ownership ONLY — the same two throws authorize() wraps, with the same uniform
+      // message. No read-only requirement (write-gated target bindings use writable sources), no
+      // connect (binding metadata must not dial the customer system).
+      const owner = requirePrincipal(principal)
+      const manager = getManager()
+      try {
+        manager.assertAccess(dataSourceId, owner)
+        manager.getDataSource(dataSourceId)
+      } catch (err) {
+        throw new DataSourceUnavailableError(err instanceof Error ? err.message : String(err))
       }
     },
     async test(dataSourceId, principal) {
