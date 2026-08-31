@@ -4,14 +4,14 @@
 
 ## Scope
 
-This record covers two already-coded approval candidates that require replay on a then-current `main` before they can be considered for merge:
+This record covers one approval candidate that requires replay on a then-current `main`, plus the retained verification evidence for a Lock-4 change whose runtime behavior is already present on current `main`:
 
 | Candidate | Exact candidate | Original base | Current documented base |
 | --- | --- | --- | --- |
 | K6 sequential handover | PR #5392, `f1f8b49c492efe9b8f08c75cdd2f584e8397f1dd` | `25635e67db5145a5998499c4adc8f030e156daf7` | `08d2451734efe2ad0dc1e9e20aa19380a49b5d47` |
-| Lock-4 F4-E post-commit isolation | `da359234979e3df63bc7268c9290d451fb84ea44` | `17a548b823c91940b83d6641aadcf6dda196fb1c` | `08d2451734efe2ad0dc1e9e20aa19380a49b5d47` |
+| Lock-4 F4-E post-commit isolation | retained candidate evidence `da359234979e3df63bc7268c9290d451fb84ea44`; current-main implementation via #5368 `21932d08be7bbf71de495339b49bce5906b98a7c` | `17a548b823c91940b83d6641aadcf6dda196fb1c` | `08d2451734efe2ad0dc1e9e20aa19380a49b5d47` |
 
-Both original bases are stale. The candidates are content-verified only; neither is merged-main evidence.
+K6's original base is stale, so its green candidate is content evidence only. The standalone F4-E candidate is not a main ancestor, but current main contains the committed-boundary, invitation-isolation, and real-DB fault-injection behavior through #5368; it does not need a separate replay.
 
 ## K6 Sequential Handover
 
@@ -52,14 +52,14 @@ The P2 delta is limited to these five files:
 
 ## Explicit Boundaries
 
-- No automatic retry worker or outbox is added by either candidate.
+- No automatic retry worker or outbox is added by either implementation.
 - No new feature flag, migration, workflow, branch-protection change, provider action, staging action, or production action is included.
 - F4-E's manual-recovery signal is not an automatic retry guarantee.
 - This report supersedes only the stale K6 statements in Draft #5390; it does not rewrite that historical candidate or claim that #5390 merged.
 
 ## Required Landing Sequence
 
-1. Obtain a coordinator-issued then-current-main replay window for each candidate.
-2. Replay mechanically, preserve all current-main test unions, and review the range/tree delta.
-3. Re-run the listed targeted, real-DB, mutation, type, lint, and exact-head CI gates on the replay head.
-4. Keep the resulting PRs Draft/HOLD until an owner separately authorizes Ready and merge.
+1. Obtain a coordinator-issued then-current-main replay window for K6.
+2. Replay K6 mechanically, preserve all current-main test unions, and review the range/tree delta.
+3. Re-run the listed K6 targeted, real-DB, mutation, type, lint, and exact-head CI gates on the replay head.
+4. Keep the resulting K6 PR Draft/HOLD until an owner separately authorizes Ready and merge.

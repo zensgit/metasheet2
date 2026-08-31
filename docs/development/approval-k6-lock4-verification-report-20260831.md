@@ -17,7 +17,7 @@
 | F4-E | Fresh PostgreSQL 15 | PASS, 31 tests | Directory orchestration fault injection plus departure writer suite; scratch database removed after zero residue. |
 | F4-E | Type check, lint, diff check | PASS | No type or lint errors; same pre-existing unused-import warnings noted above. |
 | F4-E | Mutation | PASS | Re-throwing a post-commit invitation-ledger fault made exactly the hostile-invite orchestration test fail; restoring isolation returned the suite green. |
-| F4-E | Refute-first review | PASS, 0 P1/P2 | Verified committed boundary, dispatch ordering, values-free warning data, and completed-run preservation. |
+| F4-E | Refute-first review | PASS, 0 P1/P2 | Verified committed boundary, dispatch ordering, values-free warning data, and completed-run preservation. Current main carries the same tested behavior through #5368, not the standalone candidate commit. |
 
 ## Discriminating F4-E Oracle
 
@@ -37,12 +37,12 @@ The mutation that rethrows the invite exception makes the exact oracle fail at t
 | --- | --- |
 | K6 is a clean Draft PR | #5392 head `f1f8b49c...`, auto-merge unset. |
 | K6 is not current-main merge evidence | Its PR base is `25635e67...`; current documented main is `08d24517...`. |
-| F4-E is a clean local/remote branch candidate | `da359234...` is retained without Ready, merge, or deployment. |
+| F4-E behavior is on current main | #5368 `21932d08...` contains the committed boundary, invitation isolation, and hostile-invite real-DB oracle. The standalone `da359...` evidence commit is not a main ancestor and needs no separate replay. |
 | Flags and operational actions | No new flag; no dispatch, staging, deployment, production, or UAT action occurred. |
 
 ## Replay Acceptance
 
-Before either candidate can move beyond Draft/HOLD, the replay head must prove:
+Before K6 can move beyond Draft/HOLD, its replay head must prove:
 
 1. Ordered parents and range-diff preserve the original candidate delta.
 2. Its changed-file census remains within the documented candidate scope plus any mechanically required current-main union.
