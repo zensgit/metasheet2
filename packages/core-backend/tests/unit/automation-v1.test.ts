@@ -58,7 +58,16 @@ vi.mock('../../src/db/db', () => {
 import { AutomationLogService } from '../../src/multitable/automation-log-service'
 import { AutomationRuleValidationError, AutomationService, toExecutorRule } from '../../src/multitable/automation-service'
 import { deriveRuleActionSetFingerprint } from '../../src/multitable/automation-rule-fingerprint'
-import { realFireTestRunEligibility } from '../../src/multitable/automation-retry-eligibility'
+import {
+  AUTOMATION_RETRY_LEDGER_RETENTION_MS,
+  AUTOMATION_RETRY_LEDGER_SWEEP_INTERVAL_MS,
+  automationRetryLedgerRetentionCutoffIso,
+  claimFirstAutomationRetryAttempt,
+  hasAutomationRetryLedgerEvidence,
+  isWithinAutomationRetryWindow,
+  realFireTestRunEligibility,
+  retryLedgerFamiliesForActions,
+} from '../../src/multitable/automation-retry-eligibility'
 import { AutomationJobService } from '../../src/multitable/automation-job-service'
 import { normalizeWorkflowJob } from '../../src/multitable/workflow-job-contract'
 
@@ -5123,12 +5132,18 @@ describe('AutomationService — Rule CRUD', () => {
 
 describe('AutomationService — retryExecution (A5)', () => {
   let service: AutomationService
+  let queryFn: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
     const eventBus = new EventBus()
-    const queryFn = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+    queryFn = vi.fn(async () => ({ rows: [], rowCount: 0 }))
     // Minimal kysely-ish stub; retryExecution collaborators are spied, so the db is unused.
     service = new AutomationService(eventBus, {} as never, queryFn)
+  })
+
+  afterEach(() => {
+    delete process.env.AUTOMATION_CLASSA_CLAIM_ENABLED
+    delete process.env.AUTOMATION_CLASSB_OUTBOUND_ENABLED
   })
 
   function storedExecution(over: Partial<AutomationExecution> = {}): AutomationExecution {
@@ -5136,7 +5151,7 @@ describe('AutomationService — retryExecution (A5)', () => {
       id: 'axe_orig',
       ruleId: 'atr_1',
       triggeredBy: 'event',
-      triggeredAt: '2026-05-29T00:00:00.000Z',
+      triggeredAt: new Date().toISOString(),
       status: 'failed',
       steps: [],
       triggerEvent: { recordId: 'rec1', data: { name: 'Bolt' } },
@@ -5201,6 +5216,73 @@ describe('AutomationService — retryExecution (A5)', () => {
       } as NodeJS.ProcessEnv,
     )).toEqual({ ok: false, code: 'TEST_RUN_ACTION_UNSUPPORTED' })
   })
+
+  it('#4196 V5 helper: retry window is inclusive and malformed/future timestamps fail closed', () => {
+    const now = Date.parse('2026-08-30T12:00:00.000Z')
+    expect(automationRetryLedgerRetentionCutoffIso(now)).toBe('2026-08-23T12:00:00.000Z')
+    expect(isWithinAutomationRetryWindow(new Date(now - AUTOMATION_RETRY_LEDGER_RETENTION_MS).toISOString(), now)).toBe(true)
+    expect(isWithinAutomationRetryWindow(new Date(now - AUTOMATION_RETRY_LEDGER_RETENTION_MS - 1).toISOString(), now)).toBe(false)
+    expect(isWithinAutomationRetryWindow(new Date(now + 1).toISOString(), now)).toBe(false)
+    expect(isWithinAutomationRetryWindow('not-a-time', now)).toBe(false)
+  })
+
+  it('#4196 V5 helper: only enabled Class-A/B families require ledger evidence, including nested actions', () => {
+    const actions = [{
+      type: 'condition_branch',
+      config: { branches: [{ key: 'yes', actions: [{ type: 'update_record', config: {} }, { type: 'send_email', config: {} }] }] },
+    }]
+    expect(retryLedgerFamiliesForActions(actions, {} as NodeJS.ProcessEnv)).toEqual({ classA: false, classB: false })
+    expect(retryLedgerFamiliesForActions(actions, {
+      AUTOMATION_CLASSA_CLAIM_ENABLED: 'true',
+      AUTOMATION_CLASSB_OUTBOUND_ENABLED: 'true',
+    } as NodeJS.ProcessEnv)).toEqual({ classA: true, classB: true })
+  })
+
+  it('#4196 V5 helper: malformed or absent query evidence is never coerced to present', async () => {
+    const families = { classA: true, classB: false }
+    await expect(hasAutomationRetryLedgerEvidence(
+      vi.fn(async () => ({ rows: [{ has_class_a_evidence: 'true', has_class_b_evidence: false }] })),
+      'axe_root',
+      families,
+    )).resolves.toBe(false)
+    await expect(hasAutomationRetryLedgerEvidence(
+      vi.fn(async () => ({ rows: [] })),
+      'axe_root',
+      families,
+    )).resolves.toBe(false)
+  })
+
+  it('#4196 V5 helper: every enabled ledger family needs its own evidence', async () => {
+    const query = vi.fn(async () => ({
+      rows: [{ has_class_a_evidence: true, has_class_b_evidence: false }],
+    }))
+    await expect(hasAutomationRetryLedgerEvidence(
+      query,
+      'axe_root',
+      { classA: true, classB: true },
+    )).resolves.toBe(false)
+    await expect(hasAutomationRetryLedgerEvidence(
+      query,
+      'axe_root',
+      { classA: true, classB: false },
+    )).resolves.toBe(true)
+  })
+
+  it('#4196 V5 helper: the independent first-attempt marker only accepts a strict successful CAS', async () => {
+    await expect(claimFirstAutomationRetryAttempt(
+      vi.fn(async () => ({ rows: [{ first_retry_attempt: true }] })),
+      'axe_root',
+    )).resolves.toBe(true)
+    await expect(claimFirstAutomationRetryAttempt(
+      vi.fn(async () => ({ rows: [{ first_retry_attempt: false }] })),
+      'axe_root',
+    )).resolves.toBe(false)
+    await expect(claimFirstAutomationRetryAttempt(
+      vi.fn(async () => ({ rows: [{ first_retry_attempt: 'true' }] })),
+      'axe_root',
+    )).resolves.toBe(false)
+  })
+
   it('404 NOT_FOUND when the original execution is missing', async () => {
     vi.spyOn(service.logs, 'getById').mockResolvedValue(undefined)
     const r = await service.retryExecution('axe_missing', 'admin1')
@@ -5213,6 +5295,73 @@ describe('AutomationService — retryExecution (A5)', () => {
       const r = await service.retryExecution('axe_orig', 'admin1')
       expect(r).toMatchObject({ status: 409, code: 'NOT_RETRYABLE' })
     }
+  })
+
+  it('#4196 §2.2: a failed test-run execution cannot enter the live retry namespace', async () => {
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(storedExecution({
+      triggeredBy: 'manual_test',
+      status: 'failed',
+    }))
+    const getRule = vi.spyOn(service, 'getRule')
+    const execSpy = vi.spyOn(service, 'executeRule')
+
+    await expect(service.retryExecution('axe_orig', 'admin1')).resolves.toMatchObject({
+      status: 409,
+      code: 'TEST_RUN_NOT_RETRYABLE',
+    })
+    expect(getRule).not.toHaveBeenCalled()
+    expect(execSpy).not.toHaveBeenCalled()
+    expect(queryFn).not.toHaveBeenCalled()
+  })
+
+  it('#4196 §5: a retention-sweep failure is best-effort and does not block an eligible retry', async () => {
+    const original = storedExecution()
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(original)
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentRule())
+    const retried = storedExecution({ id: 'axe_next', status: 'success' })
+    vi.spyOn(service, 'executeRule').mockResolvedValue(retried)
+    queryFn.mockResolvedValue({ rows: [{ first_retry_attempt: true }], rowCount: 1 })
+    const sweep = vi.fn().mockRejectedValue(new Error('retention unavailable'))
+    ;(service as unknown as {
+      sweepAutomationRetryLedger: (nowMs?: number) => Promise<number>
+    }).sweepAutomationRetryLedger = sweep
+
+    await expect(service.retryExecution(original.id, 'admin1')).resolves.toEqual({ execution: retried })
+    expect(sweep).toHaveBeenCalledTimes(1)
+  })
+
+  it('#4196 §5: opportunistic retention is limited to one sweep per interval', async () => {
+    const sweep = vi.fn().mockResolvedValue(0)
+    const hooks = service as unknown as {
+      sweepAutomationRetryLedger: (nowMs?: number) => Promise<number>
+      kickAutomationRetryLedgerSweepIfDue: (nowMs: number) => void
+    }
+    hooks.sweepAutomationRetryLedger = sweep
+    const firstDue = AUTOMATION_RETRY_LEDGER_SWEEP_INTERVAL_MS
+
+    hooks.kickAutomationRetryLedgerSweepIfDue(firstDue)
+    hooks.kickAutomationRetryLedgerSweepIfDue(firstDue + AUTOMATION_RETRY_LEDGER_SWEEP_INTERVAL_MS - 1)
+    expect(sweep).toHaveBeenCalledTimes(1)
+
+    hooks.kickAutomationRetryLedgerSweepIfDue(firstDue + AUTOMATION_RETRY_LEDGER_SWEEP_INTERVAL_MS)
+    expect(sweep).toHaveBeenCalledTimes(2)
+  })
+
+  it('#4196 §5: a pending retention sweep does not delay an eligible retry', async () => {
+    const original = storedExecution()
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(original)
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentRule())
+    vi.spyOn(service, 'executeRule').mockResolvedValue(storedExecution({ id: 'axe_next', status: 'success' }))
+    queryFn.mockResolvedValue({ rows: [{ first_retry_attempt: true }], rowCount: 1 })
+    ;(service as unknown as {
+      sweepAutomationRetryLedger: (nowMs?: number) => Promise<number>
+    }).sweepAutomationRetryLedger = vi.fn(() => new Promise<number>(() => {}))
+
+    const outcome = await Promise.race([
+      service.retryExecution(original.id, 'admin1').then(() => 'done'),
+      new Promise((resolve) => setTimeout(() => resolve('timeout'), 25)),
+    ])
+    expect(outcome).toBe('done')
   })
 
   it('409 MISSING_TRIGGER_EVENT fail-closed: absent / empty {} / array — never silent empty-context retry', async () => {
@@ -5235,6 +5384,95 @@ describe('AutomationService — retryExecution (A5)', () => {
     const r = await service.retryExecution('axe_orig', 'admin1')
     expect('execution' in r).toBe(true)
     expect(execSpy.mock.calls[0][1]).toEqual({ _triggeredBy: 'schedule' }) // passes the non-empty guard
+  })
+
+  it('#4196 V5: refuses when the lineage root is older than the ledger retention window', async () => {
+    const child = storedExecution({ id: 'axe_child', rerunOfExecutionId: 'axe_root' })
+    const root = storedExecution({
+      id: 'axe_root',
+      triggeredAt: new Date(Date.now() - AUTOMATION_RETRY_LEDGER_RETENTION_MS - 1).toISOString(),
+    })
+    vi.spyOn(service.logs, 'getById').mockImplementation(async (id) => id === child.id ? child : root)
+    const getRule = vi.spyOn(service, 'getRule')
+    const execSpy = vi.spyOn(service, 'executeRule')
+
+    const result = await service.retryExecution(child.id, 'admin1')
+
+    expect(result).toMatchObject({ status: 409, code: 'RETRY_WINDOW_EXPIRED' })
+    expect(getRule).not.toHaveBeenCalled()
+    expect(execSpy).not.toHaveBeenCalled()
+  })
+
+  it('#4196 V5: directly retrying the same root again fails closed when its marker exists but evidence is gone', async () => {
+    process.env.AUTOMATION_CLASSB_OUTBOUND_ENABLED = 'true'
+    const root = storedExecution({ id: 'axe_root' })
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(root)
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentRule())
+    queryFn.mockImplementation(async (statement: unknown) => (
+      typeof statement === 'string' && statement.includes('AS first_retry_attempt')
+        ? { rows: [{ first_retry_attempt: false }], rowCount: 1 }
+        : typeof statement === 'string' && statement.includes('AS has_class_a_evidence')
+          ? { rows: [{ has_class_a_evidence: false, has_class_b_evidence: false }], rowCount: 1 }
+          : { rows: [], rowCount: 0 }
+    ))
+    const execSpy = vi.spyOn(service, 'executeRule')
+
+    const result = await service.retryExecution(root.id, 'admin1')
+
+    expect(result).toMatchObject({ status: 409, code: 'RETRY_LEDGER_EVIDENCE_MISSING' })
+    expect(execSpy).not.toHaveBeenCalled()
+    expect(queryFn).toHaveBeenCalledWith(expect.stringContaining('meta_automation_outbound_intent'), [root.id])
+  })
+
+  it('#4196 V5 positive control: a first retry proceeds without pre-existing ledger evidence', async () => {
+    process.env.AUTOMATION_CLASSB_OUTBOUND_ENABLED = 'true'
+    const original = storedExecution()
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(original)
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentRule())
+    const retried = storedExecution({ id: 'axe_next', status: 'success' })
+    const execSpy = vi.spyOn(service, 'executeRule').mockResolvedValue(retried)
+    queryFn.mockResolvedValue({ rows: [{ first_retry_attempt: true }], rowCount: 1 })
+
+    await expect(service.retryExecution(original.id, 'admin1')).resolves.toEqual({ execution: retried })
+    expect(execSpy).toHaveBeenCalledTimes(1)
+    expect(queryFn).toHaveBeenCalledWith(expect.stringContaining('first_retry_attempted_at IS NULL'), [original.id])
+    expect(queryFn).not.toHaveBeenCalledWith(expect.stringContaining('AS has_class_a_evidence'), expect.anything())
+  })
+
+  it('#4196 V5 positive control: lineage evidence lets a non-first Class-B retry proceed', async () => {
+    process.env.AUTOMATION_CLASSB_OUTBOUND_ENABLED = 'true'
+    const child = storedExecution({ id: 'axe_child', rerunOfExecutionId: 'axe_root' })
+    const root = storedExecution({ id: 'axe_root' })
+    vi.spyOn(service.logs, 'getById').mockImplementation(async (id) => id === child.id ? child : root)
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentRule())
+    queryFn.mockImplementation(async (statement: unknown) => (
+      typeof statement === 'string' && statement.includes('AS first_retry_attempt')
+        ? { rows: [{ first_retry_attempt: false }], rowCount: 1 }
+        : typeof statement === 'string' && statement.includes('AS has_class_a_evidence')
+          ? { rows: [{ has_class_a_evidence: false, has_class_b_evidence: true }], rowCount: 1 }
+          : { rows: [], rowCount: 0 }
+    ))
+    const retried = storedExecution({ id: 'axe_next', status: 'success' })
+    const execSpy = vi.spyOn(service, 'executeRule').mockResolvedValue(retried)
+
+    await expect(service.retryExecution(child.id, 'admin1')).resolves.toEqual({ execution: retried })
+    expect(execSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('#4196 V5 rollout control: flag-OFF and pure control-flow retries do not demand nonexistent ledger rows', async () => {
+    const child = storedExecution({ id: 'axe_child', rerunOfExecutionId: 'axe_root' })
+    const root = storedExecution({ id: 'axe_root' })
+    vi.spyOn(service.logs, 'getById').mockImplementation(async (id) => id === child.id ? child : root)
+    const getRule = vi.spyOn(service, 'getRule').mockResolvedValue(currentRule())
+    const execSpy = vi.spyOn(service, 'executeRule').mockResolvedValue(storedExecution({ id: 'axe_next', status: 'success' }))
+
+    await expect(service.retryExecution(child.id, 'admin1')).resolves.toHaveProperty('execution')
+    expect(queryFn).not.toHaveBeenCalledWith(expect.stringContaining('AS has_class_a_evidence'), expect.anything())
+
+    process.env.AUTOMATION_CLASSB_OUTBOUND_ENABLED = 'true'
+    getRule.mockResolvedValue(currentRule({ action_type: 'record_click', action_config: {} }))
+    await expect(service.retryExecution(child.id, 'admin1')).resolves.toHaveProperty('execution')
+    expect(execSpy).toHaveBeenCalledTimes(2)
   })
 
   it('409 RULE_MISSING_OR_DISABLED when current rule is gone or disabled', async () => {

@@ -1462,6 +1462,8 @@ export interface MultitableAutomationExecutionsTable {
   // A5 retry provenance columns (nullable; set only on a retry-created execution).
   rerun_of_execution_id: string | null
   initiated_by: string | null
+  // #4196 V5: lineage-root compare-and-set marker that distinguishes a genuine first retry.
+  first_retry_attempted_at: Date | string | null
   created_at: CreatedAt
 }
 
