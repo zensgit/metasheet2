@@ -39,7 +39,20 @@ interface Handler {
   path: string
   key: string
   line: number
+  /** CODE only — comments stripped. See {@link stripComments}. */
   body: string
+  /** The handler verbatim, comments included — for assertions ABOUT the prose (the exemption marker). */
+  rawBody: string
+}
+
+/**
+ * Comments are stripped before classification. Without this, a handler is classified GUARDED because
+ * its PROSE mentions a guard: `POST /sheets/:sheetId/restore` explains that "`loadSheetRow`
+ * (deleted_at IS NULL) cannot see it", and that sentence alone satisfied two patterns. A guard whose
+ * verdict can be changed by a comment cannot be trusted to find a missing one.
+ */
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/.*$/gm, '$1')
 }
 
 function extractHandlers(): Handler[] {
@@ -54,12 +67,26 @@ function extractHandlers(): Handler[] {
       if (next && next[1]!.length <= indent.length) break
       j += 1
     }
+    // Cut at the handler's OWN closing `})`, not at the next registration. The gap between two
+    // handlers holds the next one's docblock, and letting that bleed in would classify a handler
+    // guarded because its NEIGHBOUR's comment mentions `loadSheetRow`. (Caught while auditing this
+    // file's own output: it was calling `POST /sheets/:sheetId/restore` guarded on the rename
+    // route's docblock.)
+    const slice = LINES.slice(i, j)
+    let close = slice.length
+    for (let k = slice.length - 1; k >= 0; k -= 1) {
+      if (slice[k] === `${indent}})`) {
+        close = k + 1
+        break
+      }
+    }
     out.push({
       verb: m[2]!.toUpperCase(),
       path: m[3]!,
       key: `${m[2]!.toUpperCase()} ${m[3]!}`,
       line: i + 1,
-      body: LINES.slice(i, j).join('\n'),
+      body: stripComments(slice.slice(0, close).join('\n')),
+      rawBody: slice.slice(0, close).join('\n'),
     })
   }
   return out
@@ -112,6 +139,11 @@ function guardOf(h: Handler): string | null {
  * or why it legitimately must see a dead one.
  */
 const EXEMPT: Record<string, string> = {
+  'POST /sheets/:sheetId/restore':
+    'THE RESTORE FLOW ITSELF — the one operation that must see a deleted sheet. It is gated on the '
+    + 'restore authority (hasSheetLifecycleAuthority) instead, and it can only ever clear `deleted_at`; '
+    + 'it never reads or writes the sheet’s records. The call site carries a RESTORE-FLOW EXEMPT marker, '
+    + 'asserted below.',
   'POST /bases':
     'creates a BASE. It never resolves a sheet — the only `sheetId` token in its body belongs to the '
     + 'template-install helper text further down the file, not to this handler.',
@@ -205,7 +237,10 @@ describe('sheet-liveness closure over univer-meta routes', () => {
     expect(restore, 'POST /sheets/:sheetId/restore not found').toBeTruthy()
     // It must NOT carry the liveness refusal — that would make restore impossible...
     expect(restore!.body).not.toContain("sheetLiveness !== 'live'")
-    // ...and its exemption must be stated at the call site, not inferred from the absence.
-    expect(restore!.body).toContain('RESTORE-FLOW EXEMPT')
+    // ...it must be exempt BY NAME, not by the classifier happening to miss it...
+    expect(Object.keys(EXEMPT)).toContain('POST /sheets/:sheetId/restore')
+    // ...and the exemption must be stated at the call site too. Checked against the RAW body: the
+    // classifier reads comment-stripped code, so this is the one assertion that is about the prose.
+    expect(restore!.rawBody).toContain('RESTORE-FLOW EXEMPT')
   })
 })
