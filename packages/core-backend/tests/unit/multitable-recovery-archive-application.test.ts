@@ -20,6 +20,7 @@ import type {
   RecoveryArchiveTransactionDepthProbe,
 } from '../../src/multitable/recovery-archive-crypto'
 import type { RecoveryArchiveObjectStoreProvider } from '../../src/multitable/recovery-archive-object-store'
+import type { RecoveryArchiveObservability } from '../../src/multitable/recovery-archive-observability'
 import type {
   CreateRecoveryArchiveRestoreWorkerInput,
   RecoveryArchiveRestoreWorker,
@@ -55,12 +56,17 @@ describe('recovery archive application composition', () => {
     const resolveDatabaseRuntime = vi.fn(() => {
       throw new Error('database resolver must remain unreachable')
     })
+    const observability: RecoveryArchiveObservability = {
+      recordRun: vi.fn(),
+      recordLifecycle: vi.fn(),
+    }
     const interval = vi.spyOn(globalThis, 'setInterval')
 
     const application = createRecoveryArchiveApplication(
       factory,
       resolveDatabaseRuntime,
       env,
+      observability,
     )
     application.startWorker()
     await application.stopWorker()
@@ -69,6 +75,8 @@ describe('recovery archive application composition', () => {
     expect(resolveDatabaseRuntime).not.toHaveBeenCalled()
     expect(workerMocks.createRecoveryArchiveRestoreWorker).not.toHaveBeenCalled()
     expect(interval).not.toHaveBeenCalled()
+    expect(observability.recordRun).not.toHaveBeenCalled()
+    expect(observability.recordLifecycle).not.toHaveBeenCalled()
     expect(application.routerOptions).toBeUndefined()
   })
 
@@ -286,14 +294,45 @@ describe('recovery archive application composition', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it('fails closed after a bounded wait when an in-flight worker never drains', async () => {
+  it('forwards closed worker results and lifecycle events without changing worker state', async () => {
     vi.useFakeTimers()
-    const chunk = deferred<RecoveryArchiveRestoreWorkerRunResult>()
-    workerMocks.createRecoveryArchiveRestoreWorker.mockReturnValue({ runOnce: () => chunk.promise })
+    const runResult = { kind: 'completed', swept: 2, chunks: 3 } as const
+    workerMocks.createRecoveryArchiveRestoreWorker.mockReturnValue({
+      runOnce: vi.fn().mockResolvedValue(runResult),
+    })
+    const observability: RecoveryArchiveObservability = {
+      recordRun: vi.fn(),
+      recordLifecycle: vi.fn(),
+    }
     const application = createRecoveryArchiveApplication(
       () => fakeComposition(fakeProviders()),
       () => fakeDatabaseRuntime().runtime,
       ENABLED_ENV,
+      observability,
+    )
+
+    application.startWorker()
+    await application.stopWorker()
+
+    expect(observability.recordRun).toHaveBeenCalledTimes(1)
+    expect(observability.recordRun).toHaveBeenCalledWith(runResult)
+    expect(observability.recordLifecycle).toHaveBeenNthCalledWith(1, 'started')
+    expect(observability.recordLifecycle).toHaveBeenNthCalledWith(2, 'drained')
+  })
+
+  it('fails closed after a bounded wait when an in-flight worker never drains', async () => {
+    vi.useFakeTimers()
+    const chunk = deferred<RecoveryArchiveRestoreWorkerRunResult>()
+    workerMocks.createRecoveryArchiveRestoreWorker.mockReturnValue({ runOnce: () => chunk.promise })
+    const observability: RecoveryArchiveObservability = {
+      recordRun: vi.fn(),
+      recordLifecycle: vi.fn(),
+    }
+    const application = createRecoveryArchiveApplication(
+      () => fakeComposition(fakeProviders()),
+      () => fakeDatabaseRuntime().runtime,
+      ENABLED_ENV,
+      observability,
     )
     application.startWorker()
 
@@ -312,6 +351,8 @@ describe('recovery archive application composition', () => {
       await stopped
     }
     expect(vi.getTimerCount()).toBe(0)
+    expect(observability.recordLifecycle).toHaveBeenNthCalledWith(1, 'started')
+    expect(observability.recordLifecycle).toHaveBeenNthCalledWith(2, 'drain_failed')
   })
 
   it('fails closed when both flags are on without a composition factory', () => {

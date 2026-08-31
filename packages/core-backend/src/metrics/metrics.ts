@@ -6,6 +6,11 @@ import client, {
   type SummaryConfiguration,
 } from 'prom-client'
 
+import {
+  createRecoveryArchiveObservability,
+  RECOVERY_ARCHIVE_WORKER_RUN_KINDS,
+} from '../multitable/recovery-archive-observability'
+
 export const registry = new client.Registry()
 client.collectDefaultMetrics({ register: registry })
 
@@ -483,6 +488,36 @@ const approvalSlaSchedulerLeaderGauge = gauge({
   labelNames: ['state'] as const
 })
 
+const recoveryArchiveWorkerRunsTotal = counter({
+  name: 'metasheet_recovery_archive_worker_runs_total',
+  help: 'Recovery archive restore worker runs by closed outcome',
+  labelNames: ['outcome'] as const
+})
+
+const recoveryArchiveWorkerSweptTotal = counter({
+  name: 'metasheet_recovery_archive_worker_swept_total',
+  help: 'Recovery archive restore jobs swept by the worker',
+  labelNames: [] as const
+})
+
+const recoveryArchiveWorkerChunksTotal = counter({
+  name: 'metasheet_recovery_archive_worker_chunks_total',
+  help: 'Recovery archive restore chunks applied by the worker',
+  labelNames: [] as const
+})
+
+const recoveryArchiveWorkerRunning = gauge({
+  name: 'metasheet_recovery_archive_worker_running',
+  help: 'Recovery archive restore worker lifecycle state',
+  labelNames: [] as const
+})
+
+const recoveryArchiveWorkerDrainTotal = counter({
+  name: 'metasheet_recovery_archive_worker_drain_total',
+  help: 'Recovery archive restore worker drain attempts by closed outcome',
+  labelNames: ['outcome'] as const
+})
+
 // DingTalk OAuth state-store operations (packages/core-backend/src/auth/dingtalk-oauth.ts).
 // `operation` is the state-store action ('write' from generateState, 'validate' from
 // validateState); `result` is the outcome ('ok' | 'error'). Cardinality is fixed at 2x2 —
@@ -573,6 +608,11 @@ registry.registerMetric(apigwCbStoreUsedTotal)
 registry.registerMetric(apigwCbInitTotal)
 registry.registerMetric(automationSchedulerLeaderGauge)
 registry.registerMetric(approvalSlaSchedulerLeaderGauge)
+registry.registerMetric(recoveryArchiveWorkerRunsTotal)
+registry.registerMetric(recoveryArchiveWorkerSweptTotal)
+registry.registerMetric(recoveryArchiveWorkerChunksTotal)
+registry.registerMetric(recoveryArchiveWorkerRunning)
+registry.registerMetric(recoveryArchiveWorkerDrainTotal)
 registry.registerMetric(dingtalkOAuthStateOperationsTotal)
 registry.registerMetric(dingtalkOAuthStateFallbackTotal)
 
@@ -590,6 +630,22 @@ for (const dingtalkOAuthStateOperation of ['write', 'validate'] as const) {
   }
   dingtalkOAuthStateFallbackTotal.inc({ operation: dingtalkOAuthStateOperation }, 0)
 }
+
+for (const outcome of RECOVERY_ARCHIVE_WORKER_RUN_KINDS) {
+  recoveryArchiveWorkerRunsTotal.inc({ outcome }, 0)
+}
+for (const outcome of ['success', 'failure'] as const) {
+  recoveryArchiveWorkerDrainTotal.inc({ outcome }, 0)
+}
+recoveryArchiveWorkerRunning.set(0)
+
+export const recoveryArchiveObservability = createRecoveryArchiveObservability({
+  incrementRun: (outcome) => recoveryArchiveWorkerRunsTotal.inc({ outcome }),
+  incrementSwept: (count) => recoveryArchiveWorkerSweptTotal.inc(count),
+  incrementChunks: (count) => recoveryArchiveWorkerChunksTotal.inc(count),
+  setRunning: (value) => recoveryArchiveWorkerRunning.set(value),
+  incrementDrain: (outcome) => recoveryArchiveWorkerDrainTotal.inc({ outcome }),
+})
 
 function trimConfiguredMetricsToken(raw: string | undefined): string | null {
   const token = typeof raw === 'string' ? raw.trim() : ''
@@ -739,6 +795,11 @@ export const metrics = {
   apigwCbInitTotal,
   automationSchedulerLeaderGauge,
   approvalSlaSchedulerLeaderGauge,
+  recoveryArchiveWorkerRunsTotal,
+  recoveryArchiveWorkerSweptTotal,
+  recoveryArchiveWorkerChunksTotal,
+  recoveryArchiveWorkerRunning,
+  recoveryArchiveWorkerDrainTotal,
   // DingTalk OAuth state-store operations
   dingtalkOAuthStateOperationsTotal,
   dingtalkOAuthStateFallbackTotal
