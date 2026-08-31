@@ -328,6 +328,8 @@
       <MetaRecordInspector
         :class="{ 'meta-record-drawer--overlay': isInspectorOverlay }"
         :visible="!!selectedRecordId" :record="selectedRecordResolved" :fields="scopedAllFields"
+        :sheet-id="workbench.activeSheetId.value ?? undefined"
+        :api-client="workbench.client"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
         :can-create="caps.canCreateRecord.value"
         :can-manage-automation="canOpenWorkflowDesigner"

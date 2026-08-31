@@ -248,6 +248,18 @@ export function createPluginScopedMultitableApi(
         })
         return multitable.provisioning.ensureMissingObjectFields(input)
       },
+      // Default-view provisioning — a WRITE capability against the plugin's own object,
+      // so it takes exactly the same two assertions as ensureMissingObjectFields:
+      // project-namespace, then object scope. Never bare-forwarded.
+      ensureObjectDefaultView: async (input) => {
+        assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+        await hooks.assertObjectScope?.({
+          pluginName,
+          projectId: input.projectId,
+          objectId: input.objectId,
+        })
+        return multitable.provisioning.ensureObjectDefaultView(input)
+      },
       // W2/P2-3: forward the ATOMIC repair transaction, wrapping the tx-bound surface so
       // scope STILL applies INSIDE the transaction. The READ/WRITE methods
       // (resolveExistingObjectFieldIds, readObjectFieldsContent, ensureMissingObjectFields)

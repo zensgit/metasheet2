@@ -254,16 +254,11 @@ export function resolveApprovalAssignees(
 
   sources.forEach((source, sourceIndex) => {
     switch (source.kind) {
-      // GATE B-2 DISCLOSURE (fix-round P2-1, gate P3A-F4B-20260819, Lock-4 §3 F4-B): these two arms
-      // apply NO active-status filter and NO role-membership expansion — an id or role is dispatched
-      // as-is, whether or not it is deactivated / has zero members. This is inherited, uniform
-      // behavior for every `static_user`/`static_role` source (primary or the F4-B designated
-      // fallback, which is built from the SAME synthetic source shape) — resolver purity (Lock-1
-      // §2.1: "no kind may add a database call inside the resolver") forbids filtering it here
-      // without a new frozen-snapshot mechanism, an owner-level scope decision. See
-      // `ApprovalGraphExecutor.resolveDesignatedFallbackAssignments`'s own doc comment for the
-      // fallback-specific consequence (Lock-4 §3 B-2 names "deactivated ids, role with no members"
-      // as cases that should fail closed; they do not, here).
+      // Static sources intentionally remain pure and are dispatched as authored. Lock-4 F4-B's
+      // designated fallback is the narrower exception: ApprovalProductService freezes its
+      // create-time eligibility and injects a designated-only wrapper before this resolver is
+      // called. Keeping the filter outside these arms prevents a designated policy from changing
+      // ordinary static source semantics or adding a database read inside the resolver.
       case 'static_user':
         source.userIds.forEach((userId) => pushResolved('user', userId, source, sourceIndex))
         break

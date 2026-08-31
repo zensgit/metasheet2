@@ -20,6 +20,8 @@ on:
       - 'apps/web/src/multitable/components/MetaCommentsDrawer.vue'
       - 'apps/web/src/multitable/views/MultitableWorkbench.vue' # UI-P2-2c drawer CSS lives here (gate NIT-3)
       - 'apps/web/src/multitable/components/MetaRecordInspector.vue' # W2 S7: .meta-record-drawer--overlay CSS lives here
+      - 'apps/web/src/multitable/components/MetaRecordHistoryPanel.vue'
+      - 'apps/web/src/multitable/components/RestorePreviewDialog.vue'
       - 'apps/web/src/multitable/utils/conditional-formatting.ts'
       # P7-R1 (FAIL-0/FAIL-1): this lane also carries approval-inspector-keyboard.spec.ts (its
       # ONLY lane — testMatch is '**/*.spec.ts' over the whole verification/ dir, so it already
