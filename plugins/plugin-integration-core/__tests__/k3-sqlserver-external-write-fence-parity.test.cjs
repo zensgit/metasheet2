@@ -348,6 +348,36 @@ test('E4S-04: a write-capable executor injected into the CHANNEL is fenced at th
   assert.equal(viaConfig.inserts, 0, 'the CONFIG-borne executor never wrote either')
 })
 
+test('E4S-04: the channel WIRES the seam — the wrapping is pinned, not merely available', () => {
+  // WITNESSED GAP, recorded honestly. The behavioural tests above drive
+  // `fenceExecutorExternalWrites` directly, and the through-the-channel test cannot distinguish
+  // "the seam refused" from "layer 3 refused first" — layer 3 always answers before the executor
+  // is touched. A guard-removal drill on the WIRING (`fenceExecutorExternalWrites(...)` reverted
+  // to the raw `queryExecutor || config.queryExecutor`) therefore turned NOTHING red: the layer
+  // was implemented and tested, but its attachment to the channel was unpinned.
+  //
+  // No behavioural witness exists for that attachment while layer 3 stands in front of it, and
+  // adding a public accessor that hands out the channel's executor would be new surface bought to
+  // satisfy a test. So the attachment is pinned STRUCTURALLY instead — the same mechanism this
+  // package already uses to pin that the permanent fence stays free of an unlock switch. Deleting
+  // the wrapping is now a RED here rather than a silent regression to "safe by default".
+  const fs = require('node:fs')
+  const source = fs.readFileSync(path.join(LIB, 'adapters', 'k3-wise-sqlserver-channel.cjs'), 'utf8')
+
+  assert.match(
+    source,
+    /const executor = fenceExecutorExternalWrites\(queryExecutor \|\| config\.queryExecutor\)/,
+    'BOTH executor sources — the injected one AND the customer-editable config-borne one — must be fenced at resolution',
+  )
+  // And the channel must never reach for an unfenced executor anywhere else.
+  const rawResolutions = source.match(/queryExecutor \|\| config\.queryExecutor/g) || []
+  assert.equal(rawResolutions.length, 1, 'there is exactly ONE executor resolution, and it is the fenced one')
+  assert.equal(
+    /const executor = queryExecutor/.test(source), false,
+    'no unfenced executor binding may exist',
+  )
+})
+
 test('E4S-04 context: the read-only default executor still refuses on its own', async () => {
   // The old posture, kept as an assertion rather than deleted: the built-in executor is still
   // read-only. It is simply no longer what the guarantee RESTS on — that was the whole finding.
