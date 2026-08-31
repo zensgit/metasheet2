@@ -27,6 +27,11 @@ import {
 } from '../data-adapters/DataSourceManager'
 import type { DataSourceActorContext } from '../data-adapters/DataSourceManager'
 import type { DataSourceConfig, QueryOptions } from '../data-adapters/BaseAdapter'
+import {
+  attemptsToClearK3Marker,
+  K3_DESTINATION_MARKER_IMMUTABLE,
+  K3_DESTINATION_MARKER_IMMUTABLE_MESSAGE,
+} from '../data-adapters/k3-destination-write-fence'
 import { DATA_SOURCE_DEFAULT_LIMIT, DATA_SOURCE_MAX_ROWS } from '../data-adapters/BaseAdapter'
 
 // Zod schemas for request validation
@@ -561,6 +566,17 @@ export function dataSourcesRouter(): Router {
       const existing = manager.getDataSource(id)
       const oldConfig = existing.getConfig()
       const scope = manager.getScope(id)
+
+      // G-4 MARKER DURABILITY (P1). The k3Destination marker is set-once: a config edit may not clear
+      // or unset it. This is the #5401 config-edit vector — {options:{k3Destination:false}} would
+      // deep-merge and silently drop the marker, contradicting the non-overridable guarantee. Refuse
+      // with a coded error (the manager also force-preserves it as a belt-and-suspenders net).
+      if (attemptsToClearK3Marker(oldConfig.options, parse.data.options)) {
+        return res.status(403).json({
+          ok: false,
+          error: { code: K3_DESTINATION_MARKER_IMMUTABLE, message: K3_DESTINATION_MARKER_IMMUTABLE_MESSAGE }
+        })
+      }
 
       const newConfig: DataSourceConfig = {
         ...oldConfig,
