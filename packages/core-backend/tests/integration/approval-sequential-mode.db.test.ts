@@ -7,6 +7,13 @@ import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
+// TOP-LEVEL: the dedicated real-DB lane sets EXPECT_DB=1, so a missing DATABASE_URL must fail
+// instead of skipping the describeIfDatabase suite and reporting a false green.
+const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+  expect(process.env.DATABASE_URL).toBeTruthy()
+})
+
 type JsonRecord = Record<string, unknown>
 
 type AssignmentRow = {
