@@ -394,6 +394,167 @@ describe('AutomationService', () => {
       expect(emitSpy).not.toHaveBeenCalled()
       expect(automationLogMocks.record).not.toHaveBeenCalled()
     })
+
+    it('defaults to simulate, persists the audit execution, and emits no notification', async () => {
+      const rule = createMockRule({ id: 'atr_x', sheet_id: 'sheet1', enabled: true })
+      const query = createMockQuery([rule])
+      service = new AutomationService(bus, createMockDb([rule]) as never, query)
+      const emitSpy = vi.spyOn(bus, 'emit')
+
+      const execution = await service.testRun('atr_x', 'sheet1')
+
+      expect(execution).toMatchObject({
+        status: 'success',
+        triggeredBy: 'manual_test',
+        dryRun: true,
+        steps: [{
+          actionType: 'send_notification',
+          status: 'success',
+          simulated: true,
+          output: { dryRun: true, dispatched: false },
+        }],
+      })
+      expect(emitSpy).not.toHaveBeenCalled()
+      expect(automationLogMocks.record).toHaveBeenCalledWith(expect.objectContaining({
+        id: execution.id,
+        triggeredBy: 'manual_test',
+        dryRun: true,
+      }))
+    })
+
+    it('evaluates rule conditions against the server-read-gated sample snapshot', async () => {
+      const rule = createMockRule({
+        id: 'atr_x',
+        sheet_id: 'sheet1',
+        enabled: true,
+        conditions: {
+          logic: 'and',
+          conditions: [{ fieldId: 'tier', operator: 'equals', value: 'gold' }],
+        },
+      })
+      const query = createMockQuery([rule])
+      service = new AutomationService(bus, createMockDb([rule]) as never, query)
+
+      const execution = await service.testRun('atr_x', 'sheet1', {
+        sampleRecord: {
+          recordId: 'rec-sample',
+          data: { tier: 'gold', amount: 12 },
+          actorId: 'server_actor',
+        },
+      })
+      const emptyExecution = await service.testRun('atr_x', 'sheet1')
+
+      expect(execution).toMatchObject({
+        status: 'success',
+        dryRun: true,
+        triggerEvent: {
+          sheetId: 'sheet1',
+          recordId: 'rec-sample',
+          data: { tier: 'gold', amount: 12 },
+          actorId: 'server_actor',
+          _triggeredBy: 'manual_test',
+        },
+      })
+      expect(emptyExecution.status).toBe('skipped')
+      expect(automationLogMocks.record).toHaveBeenCalledWith(expect.objectContaining({
+        id: execution.id,
+        triggerEvent: undefined,
+        ruleSnapshot: undefined,
+      }))
+    })
+
+    it('fails closed when a direct caller requests real_fire without confirmation', async () => {
+      const rule = createMockRule({ id: 'atr_x', sheet_id: 'sheet1', enabled: true })
+      const query = createMockQuery([rule])
+      service = new AutomationService(bus, createMockDb([rule]) as never, query)
+      const emitSpy = vi.spyOn(bus, 'emit')
+
+      await expect(service.testRun('atr_x', 'sheet1', { mode: 'real_fire' }))
+        .rejects.toMatchObject({ code: 'CONFIRM_SIDE_EFFECTS_REQUIRED', status: 400 })
+      expect(emitSpy).not.toHaveBeenCalled()
+      expect(automationLogMocks.record).not.toHaveBeenCalled()
+    })
+
+    it('rejects non-durable notification and later FWB actions from real_fire before execution', async () => {
+      for (const actionType of ['send_notification', 'write_approval_form_values'] as const) {
+        const rule = createMockRule({ id: 'atr_x', sheet_id: 'sheet1', enabled: true, action_type: actionType })
+        const query = createMockQuery([rule])
+        service = new AutomationService(bus, createMockDb([rule]) as never, query)
+
+        await expect(service.testRun('atr_x', 'sheet1', {
+          mode: 'real_fire',
+          actorId: 'u1',
+          testRunOperationId: `op_${actionType}`,
+          confirmSideEffects: true,
+        })).rejects.toMatchObject({ code: 'TEST_RUN_ACTION_UNSUPPORTED', status: 409 })
+      }
+      expect(automationLogMocks.record).not.toHaveBeenCalled()
+    })
+
+    it('rejects an invalid real-fire operation key before execution', async () => {
+      const rule = createMockRule({ id: 'atr_x', sheet_id: 'sheet1', enabled: true, action_type: 'record_click' })
+      const query = createMockQuery([rule])
+      service = new AutomationService(bus, createMockDb([rule]) as never, query)
+
+      await expect(service.testRun('atr_x', 'sheet1', {
+        mode: 'real_fire',
+        actorId: 'u1',
+        testRunOperationId: 'contains spaces',
+        confirmSideEffects: true,
+      })).rejects.toMatchObject({ code: 'INVALID_TEST_RUN_OPERATION_ID', status: 400 })
+      expect(automationLogMocks.record).not.toHaveBeenCalled()
+    })
+
+    it('requires the matching durable protection flag for class-A and class-B real-fire actions', async () => {
+      const originalClassA = process.env.AUTOMATION_CLASSA_CLAIM_ENABLED
+      const originalClassB = process.env.AUTOMATION_CLASSB_OUTBOUND_ENABLED
+      delete process.env.AUTOMATION_CLASSA_CLAIM_ENABLED
+      delete process.env.AUTOMATION_CLASSB_OUTBOUND_ENABLED
+      try {
+        for (const [actionType, code] of [
+          ['create_record', 'TEST_RUN_CLASS_A_PROTECTION_DISABLED'],
+          ['send_webhook', 'TEST_RUN_CLASS_B_PROTECTION_DISABLED'],
+        ] as const) {
+          const rule = createMockRule({ id: 'atr_x', sheet_id: 'sheet1', enabled: true, action_type: actionType })
+          const query = createMockQuery([rule])
+          service = new AutomationService(bus, createMockDb([rule]) as never, query)
+
+          await expect(service.testRun('atr_x', 'sheet1', {
+            mode: 'real_fire',
+            actorId: 'u1',
+            testRunOperationId: `op_${actionType}`,
+            confirmSideEffects: true,
+          })).rejects.toMatchObject({ code, status: 409 })
+        }
+      } finally {
+        if (originalClassA === undefined) delete process.env.AUTOMATION_CLASSA_CLAIM_ENABLED
+        else process.env.AUTOMATION_CLASSA_CLAIM_ENABLED = originalClassA
+        if (originalClassB === undefined) delete process.env.AUTOMATION_CLASSB_OUTBOUND_ENABLED
+        else process.env.AUTOMATION_CLASSB_OUTBOUND_ENABLED = originalClassB
+      }
+      expect(automationLogMocks.record).not.toHaveBeenCalled()
+    })
+
+    it('executes an inert real_fire under a server-derived test-run root', async () => {
+      const rule = createMockRule({ id: 'atr_x', sheet_id: 'sheet1', enabled: true, action_type: 'record_click' })
+      const query = createMockQuery([rule])
+      service = new AutomationService(bus, createMockDb([rule]) as never, query)
+
+      const execution = await service.testRun('atr_x', 'sheet1', {
+        mode: 'real_fire',
+        actorId: 'u1',
+        testRunOperationId: 'op_record_click',
+        confirmSideEffects: true,
+      })
+
+      expect(execution).toMatchObject({
+        status: 'success',
+        triggeredBy: 'manual_test',
+        steps: [{ actionType: 'record_click', status: 'success' }],
+      })
+      expect(execution.dryRun).toBeUndefined()
+      expect(automationLogMocks.record).toHaveBeenCalledWith(expect.objectContaining({ id: execution.id }))
+    })
   })
 
   describe('init / shutdown', () => {

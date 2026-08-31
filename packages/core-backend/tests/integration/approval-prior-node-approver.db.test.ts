@@ -54,6 +54,8 @@ import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from
  *             survivor too, mutation-verified) — the arm that actually carries reachability.
  *  G-12       no cross-node dedup: the SAME person approves at the prior node and AGAIN at the
  *             referencing node (intra-node dedup is unit-covered).
+ *  Lock-4 D-4 prior_node_approver assignments are exempt from BOTH history-derived dedup flags,
+ *             while a static-user control is consumed and mergeWithRequester still applies.
  *  freeze     the RULE is frozen with the instance's pinned published definition: re-publishing
  *             a v2 that changes the node's sources does NOT alter an in-flight instance's
  *             resolution (v1 semantics discriminated against v2's).
@@ -94,6 +96,7 @@ function pnaGraph(options: {
   againSources?: Array<Record<string, unknown>>
   againPolicy?: 'error' | 'auto-approve'
   gateAutoApproval?: Record<string, unknown>
+  againAutoApproval?: Record<string, unknown>
 } = {}) {
   return {
     nodes: [
@@ -113,6 +116,7 @@ function pnaGraph(options: {
           assigneeSources: options.againSources ?? [{ kind: 'prior_node_approver', nodeKey: 'gate' }],
           approvalMode: 'single',
           emptyAssigneePolicy: options.againPolicy ?? 'error',
+          ...(options.againAutoApproval ? { autoApprovalPolicy: options.againAutoApproval } : {}),
         },
       },
       { key: 'end', type: 'end', name: 'e', config: {} },
@@ -134,6 +138,24 @@ function fourNodeGraph(againRef: 'gate' | 'mid') {
       { key: 'gate', type: 'approval', name: 'gate', config: { assigneeSources: [{ kind: 'static_user', userIds: [DECIDER_A, DECIDER_B] }], approvalMode: 'any', emptyAssigneePolicy: 'error' } },
       { key: 'mid', type: 'approval', name: 'mid', config: { assigneeSources: [{ kind: 'static_user', userIds: [MID] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
       { key: 'again', type: 'approval', name: 'again', config: { assigneeSources: [{ kind: 'prior_node_approver', nodeKey: againRef }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'end', type: 'end', name: 'e', config: {} },
+    ],
+    edges: [
+      { key: 's2g', source: 'start', target: 'gate' },
+      { key: 'g2m', source: 'gate', target: 'mid' },
+      { key: 'm2a', source: 'mid', target: 'again' },
+      { key: 'a2e', source: 'again', target: 'end' },
+    ],
+  }
+}
+
+function historicalDedupGraph(againSources: Array<Record<string, unknown>>) {
+  return {
+    nodes: [
+      { key: 'start', type: 'start', name: 's', config: {} },
+      { key: 'gate', type: 'approval', name: 'gate', config: { assigneeSources: [{ kind: 'static_user', userIds: [DECIDER_A] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'mid', type: 'approval', name: 'mid', config: { assigneeSources: [{ kind: 'static_user', userIds: [MID] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'again', type: 'approval', name: 'again', config: { assigneeSources: againSources, approvalMode: 'single', emptyAssigneePolicy: 'error', autoApprovalPolicy: { dedupeHistoricalApprover: true } } },
       { key: 'end', type: 'end', name: 'e', config: {} },
     ],
     edges: [
@@ -339,6 +361,67 @@ describeIfDatabase('Lock-1 §K3 prior_node_approver — real-DB publish/dispatch
     const againApprove = await act(iid, aTok, { action: 'approve' })
     expect(againApprove.status, await againApprove.clone().text()).toBeLessThan(300)
     const finalStatus = await query(`SELECT status FROM approval_instances WHERE id = $1`, [iid])
+    expect(finalStatus.rows[0].status).toBe('approved')
+  })
+
+  it('Lock-4 D-4: prior_node_approver is exempt from mergeAdjacentApprover, while the same static-user seat is consumed', async () => {
+    const k3Tid = await createPublished(`pna-${TS}-d4-adjacent-k3`, pnaGraph({
+      againAutoApproval: { mergeAdjacentApprover: true },
+    }))
+    const k3Started = await createAsReq(k3Tid)
+    expect(k3Started.status, k3Started.text).toBe(201)
+    const k3Approve = await act(k3Started.iid!, aTok, { action: 'approve' })
+    expect(k3Approve.status, await k3Approve.clone().text()).toBeLessThan(300)
+    expect((await activeAssignees(k3Started.iid!, 'again')).map((row) => row.assignee_id)).toEqual([DECIDER_A])
+
+    const staticTid = await createPublished(`pna-${TS}-d4-adjacent-static`, pnaGraph({
+      againSources: [{ kind: 'static_user', userIds: [DECIDER_A] }],
+      againAutoApproval: { mergeAdjacentApprover: true },
+    }))
+    const staticStarted = await createAsReq(staticTid)
+    expect(staticStarted.status, staticStarted.text).toBe(201)
+    const staticApprove = await act(staticStarted.iid!, aTok, { action: 'approve' })
+    expect(staticApprove.status, await staticApprove.clone().text()).toBeLessThan(300)
+    const staticStatus = await query(`SELECT status FROM approval_instances WHERE id = $1`, [staticStarted.iid!])
+    expect(staticStatus.rows[0].status).toBe('approved')
+  })
+
+  it('Lock-4 D-4: prior_node_approver is exempt from dedupeHistoricalApprover, while the same static-user seat is consumed', async () => {
+    const run = async (key: string, againSources: Array<Record<string, unknown>>) => {
+      const tid = await createPublished(key, historicalDedupGraph(againSources))
+      const started = await createAsReq(tid)
+      expect(started.status, started.text).toBe(201)
+      const gateApprove = await act(started.iid!, aTok, { action: 'approve' })
+      expect(gateApprove.status, await gateApprove.clone().text()).toBeLessThan(300)
+      const midApprove = await act(started.iid!, midTok, { action: 'approve' })
+      expect(midApprove.status, await midApprove.clone().text()).toBeLessThan(300)
+      return started.iid!
+    }
+
+    const k3Id = await run(
+      `pna-${TS}-d4-historical-k3`,
+      [{ kind: 'prior_node_approver', nodeKey: 'gate' }],
+    )
+    expect((await activeAssignees(k3Id, 'again')).map((row) => row.assignee_id)).toEqual([DECIDER_A])
+
+    const staticId = await run(
+      `pna-${TS}-d4-historical-static`,
+      [{ kind: 'static_user', userIds: [DECIDER_A] }],
+    )
+    const staticStatus = await query(`SELECT status FROM approval_instances WHERE id = $1`, [staticId])
+    expect(staticStatus.rows[0].status).toBe('approved')
+  })
+
+  it('Lock-4 D-4 boundary: prior_node_approver remains subject to mergeWithRequester', async () => {
+    const tid = await createPublished(`pna-${TS}-d4-requester`, pnaGraph({
+      gateSources: [{ kind: 'static_user', userIds: [REQ] }],
+      againAutoApproval: { mergeWithRequester: true },
+    }))
+    const started = await createAsReq(tid)
+    expect(started.status, started.text).toBe(201)
+    const gateApprove = await act(started.iid!, reqTok, { action: 'approve' })
+    expect(gateApprove.status, await gateApprove.clone().text()).toBeLessThan(300)
+    const finalStatus = await query(`SELECT status FROM approval_instances WHERE id = $1`, [started.iid!])
     expect(finalStatus.rows[0].status).toBe('approved')
   })
 

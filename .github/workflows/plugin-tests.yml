@@ -193,7 +193,7 @@ jobs:
       # MULTITABLE_ flag read in packages/core-backend/src is missing from the manifest. Runs early so a
       # manifest/source drift fails the required `test` check fast, before the pnpm install/build.
       - name: Global History flag manifest contract (R12-C)
-        run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs scripts/ops/multitable-recovery-schema-containment.test.mjs
+        run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs scripts/ops/multitable-recovery-schema-containment.test.mjs scripts/ops/multitable-onprem-package-upgrade-inplace.test.mjs
 
       # W0 L6/L7 CI two-point wiring contract (no DB): both exact-anchor real-DB suites must stay
       # excluded from the no-DB Vitest lane and named in the multitable real-DB whole-file step.

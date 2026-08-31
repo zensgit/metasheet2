@@ -55,6 +55,7 @@ import {
   resolveExistingObjectFieldIds as resolveExistingMultitableObjectFieldIds,
   readObjectFieldsContent as readMultitableObjectFieldsContent,
   ensureView as ensureMultitableView,
+  ensureObjectDefaultView as ensureMultitableObjectDefaultView,
   patchObjectFieldProperty as patchProvisionedObjectFieldProperty,
   getObjectField as getProvisionedObjectField,
   runObjectFieldsRepairTransactionWith,
@@ -744,6 +745,23 @@ export class MetaSheetServer {
                 objectId,
                 fields,
               })
+            })
+          },
+          // Default-view provisioning: a managed table is created WITH a view, because a
+          // sheet with zero views cannot be opened and blocks its whole base. Writes only
+          // when the sheet has NO views; any existing view list is left untouched.
+          ensureObjectDefaultView: async ({ projectId, objectId, name, type }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                }
+              }
+              return ensureMultitableObjectDefaultView({ query: txQuery, projectId, objectId, name, type })
             })
           },
           // W2/P2-3 (round-5 review): ATOMIC repair transaction. Runs the caller's whole

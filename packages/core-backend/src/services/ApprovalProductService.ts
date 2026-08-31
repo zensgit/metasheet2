@@ -85,6 +85,14 @@ import {
 } from './ApprovalGraphExecutor'
 import { collectActiveNodeKeys, collectHiddenFieldIds, fieldAccessAtNodes, resolveFieldAccessAtNodes } from './approval-form-redaction'
 import { fieldDerivedAssigneeSourceKey, resolveApprovalAssignees, resolveFormUserValue } from './ApprovalAssigneeResolver'
+import { isPriorNodeApproverHistoryDedupExempt } from './approval-prior-node-dedup-exemption'
+import {
+  buildApprovalDesignatedFallbackResolver,
+  loadApprovalDesignatedFallbackEligibility,
+  readApprovalDesignatedFallbackEligibilitySnapshot,
+  serializeApprovalDesignatedFallbackEligibility,
+  type ApprovalDesignatedFallbackEligibilitySnapshot,
+} from './approval-designated-fallback-eligibility'
 import { validateAmountTotalConsistency } from './amount-total-check'
 import { isApprovalAttachmentsEnabled } from '../routes/approval-attachments'
 import {
@@ -486,6 +494,16 @@ export interface ApprovalDepartureTransferResult {
   /** OD-L4-9(a) fail-closed: no manager resolvable — seat(s) left in place, audited + warned. */
   noManagerResolved: string[]
   skipped: ApprovalDepartureTransferSkip[]
+}
+
+/**
+ * F4-E signal-consumer override. The directory consumer resolves the manager from the departed
+ * account's captured org position after the deprovision transaction commits. The writer still
+ * rechecks that supplied local user is active before moving any seat. Omit the whole options object
+ * to retain the direct/test entry point's legacy live requester resolution.
+ */
+export interface ApprovalDepartureTransferOptions {
+  resolvedManagerId: string | null
 }
 
 /**
@@ -4922,6 +4940,11 @@ function evaluateAutoApprovalAssignment(
     }
   }
 
+  // Lock-4 F4-D / OD-L4-7(a): a K3 seat exists specifically so the prior node's ACTUAL
+  // decider reviews again. It remains subject to mergeWithRequester above, but neither
+  // history-derived flag may consume it merely because that same decider appears in history.
+  if (isPriorNodeApproverHistoryDedupExempt(assignment.metadata)) return null
+
   if (effectivePolicy.policy.mergeAdjacentApprover) {
     const adjacent = findLatestApprovalHistory(
       history,
@@ -6909,6 +6932,7 @@ export class ApprovalProductService {
     requesterSnapshot: ApprovalRequesterSnapshot
     executor: ApprovalGraphExecutor
     attachmentsEnabled: boolean
+    designatedFallbackEligibilitySnapshot: ApprovalDesignatedFallbackEligibilitySnapshot | undefined
   }> {
     if (!pool) throw new Error('Database not available')
 
@@ -7299,15 +7323,24 @@ export class ApprovalProductService {
     // the attributable decider is not re-materialized from an unpersisted round either — the
     // fail-closed arm, never a silent wrong approver). Route previews show the honest
     // EMPTY_ASSIGNEES marker for such nodes (the §K2 pre-choice precedent).
+    const assignmentResolver = buildApprovalAssignmentResolver({
+      formSchema,
+      formSnapshot: normalizedFormData,
+      requesterSnapshot,
+      // Lock-4 F4-C — see buildApprovalAssignmentResolver's doc comment; identical provider shape
+      // at every assignmentResolver call site in this file.
+      getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
+    })
+    const designatedFallbackEligibility = await loadApprovalDesignatedFallbackEligibility(pool, runtimeGraph)
+    const designatedFallbackEligibilitySnapshot = serializeApprovalDesignatedFallbackEligibility(
+      designatedFallbackEligibility,
+    )
     const executor = new ApprovalGraphExecutor(runtimeGraph, normalizedFormData, {
-      assignmentResolver: buildApprovalAssignmentResolver({
-        formSchema,
-        formSnapshot: normalizedFormData,
-        requesterSnapshot,
-        // Lock-4 F4-C — see buildApprovalAssignmentResolver's doc comment; identical provider shape
-        // at every assignmentResolver call site in this file.
-        getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
-      }),
+      assignmentResolver,
+      designatedFallbackResolver: buildApprovalDesignatedFallbackResolver(
+        assignmentResolver,
+        designatedFallbackEligibility,
+      ),
       requesterContext: {
         department: requesterSnapshot.directoryDepartment ?? null,
         title: requesterSnapshot.directoryTitle ?? null,
@@ -7323,6 +7356,7 @@ export class ApprovalProductService {
       requesterSnapshot,
       executor,
       attachmentsEnabled,
+      designatedFallbackEligibilitySnapshot,
     }
   }
 
@@ -7485,6 +7519,7 @@ export class ApprovalProductService {
       requesterSnapshot,
       executor,
       attachmentsEnabled,
+      designatedFallbackEligibilitySnapshot,
     } =
       await this.assembleCreationContext(request, actor)
     const instanceId = crypto.randomUUID()
@@ -7495,6 +7530,9 @@ export class ApprovalProductService {
     const requestNo = await this.allocateRequestNo()
 
     const instanceMetadata: Record<string, unknown> = { templateKey: bundle.template.key }
+    if (designatedFallbackEligibilitySnapshot) {
+      instanceMetadata.designatedFallbackEligibility = designatedFallbackEligibilitySnapshot
+    }
     if (initial.parallelState) {
       instanceMetadata.parallelBranchStates = buildPersistableParallelState(initial.parallelState)
     }
@@ -7916,13 +7954,22 @@ export class ApprovalProductService {
       const jumpPriorNodeApprovers = jumpReferencedPriorNodeKeys.size > 0
         ? await this.loadPriorNodeApproverDeciders(client, id, jumpReferencedPriorNodeKeys)
         : undefined
+      const assignmentResolver = buildApprovalAssignmentResolver({
+        formSnapshot,
+        requesterSnapshot,
+        getPriorNodeApprovers: () => jumpPriorNodeApprovers,
+        getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
+      })
+      const designatedFallbackEligibility = readApprovalDesignatedFallbackEligibilitySnapshot(
+        runtimeGraph,
+        instance.metadata,
+      )
       const executor = new ApprovalGraphExecutor(runtimeGraph, formSnapshot, {
-        assignmentResolver: buildApprovalAssignmentResolver({
-          formSnapshot,
-          requesterSnapshot,
-          getPriorNodeApprovers: () => jumpPriorNodeApprovers,
-          getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
-        }),
+        assignmentResolver,
+        designatedFallbackResolver: buildApprovalDesignatedFallbackResolver(
+          assignmentResolver,
+          designatedFallbackEligibility,
+        ),
         // Re-thread the frozen directory department + title + roles at dispatch (loaded requester_snapshot record).
         requesterContext: ((d, t, r) => ({
           department: typeof d === 'string' && d ? d : null,
@@ -8374,9 +8421,10 @@ export class ApprovalProductService {
    * `mark_inactive` + `globallyClear` emit, consumed via `directory-sync.ts`'s
    * `usersDeactivatedCount`), which is gated behind `DIRECTORY_DEPROVISION_ENABLED` —
    * **default OFF per org** (`isDirectoryDeprovisionEnabled()`). 离职自动转上级 therefore does NOT
-   * fire for every org; this method is deliberately NOT wired to that consumer in this slice (P3-A
-   * scope — the wiring + operator-warning surface is a separate slice per the Lock-4 P3-A briefs).
-   * Any authoring/disclosure copy describing this feature MUST carry that limit and MUST NOT claim
+   * fire for every org. `syncDirectoryIntegration` now consumes the committed `user_changed`
+   * evidence through the post-commit departure dispatcher; infrastructure failures remain
+   * values-free manual-recovery signals because automatic retry is outside this slice. Any
+   * authoring/disclosure copy describing this feature MUST carry those limits and MUST NOT claim
    * universal coverage.
    *
    * Contract:
@@ -8435,7 +8483,10 @@ export class ApprovalProductService {
    *   is the test-only seam that pauses here, held-locked, so a test can construct that race for real
    *   rather than argue it.
    */
-  async applyApprovalDepartureTransfer(departedUserId: string): Promise<ApprovalDepartureTransferResult> {
+  async applyApprovalDepartureTransfer(
+    departedUserId: string,
+    options?: ApprovalDepartureTransferOptions,
+  ): Promise<ApprovalDepartureTransferResult> {
     if (!pool) throw new Error('Database not available')
     const userId = departedUserId.trim()
     if (!userId) throw new ServiceError('departedUserId is required', 400, 'VALIDATION_ERROR')
@@ -8445,14 +8496,16 @@ export class ApprovalProductService {
       result.skipped.push({ id, reason: reasonCode })
     }
 
-    // ONE live directory read for this departure signal (not per-instance, not inside the pure
-    // resolver — Lock-1 §2.1). A multi-org routing ambiguity / policy misconfig / transient read
-    // failure all collapse to the SAME "manager unresolved" fail-closed outcome below — OD-L4-9(a)
-    // treats every unresolved case identically, never distinguishing by cause.
+    // ONE manager resolution for this departure signal (not per-instance, not inside the pure
+    // resolver — Lock-1 §2.1). The production directory consumer supplies its post-commit live
+    // resolution because the departed source account is already inactive; the direct/test entry
+    // point keeps the legacy requester lookup. Both paths converge on the same active-user recheck.
+    // A routing ambiguity / transient read failure collapses to the SAME fail-closed outcome below.
     let resolvedManagerId: string | null = null
     try {
-      const orgRelations = await resolveApprovalRequesterOrgRelations(userId, pool.query.bind(pool), {})
-      const candidate = orgRelations.managerId ? orgRelations.managerId.trim() : ''
+      const candidate = options === undefined
+        ? (await resolveApprovalRequesterOrgRelations(userId, pool.query.bind(pool), {})).managerId?.trim() ?? ''
+        : options.resolvedManagerId?.trim() ?? ''
       if (candidate && candidate !== userId) {
         const activeManager = await pool.query<{ id: string }>(
           `SELECT id FROM users WHERE id = $1 AND COALESCE(is_active, TRUE) = TRUE LIMIT 1`,
@@ -8460,10 +8513,10 @@ export class ApprovalProductService {
         )
         if (activeManager.rows.length > 0) resolvedManagerId = candidate
       }
-    } catch (error) {
+    } catch {
       approvalProductLogger.warn(
-        `approval departure transfer: manager resolution failed for ${userId}: ${error instanceof Error ? error.message : String(error)}`,
-        error instanceof Error ? error : undefined,
+        'approval departure transfer: manager resolution failed; using fail-closed no-manager outcome',
+        { reason: 'manager_resolution_failed' },
       )
     }
 
@@ -8739,8 +8792,8 @@ export class ApprovalProductService {
       } catch (error) {
         await rollbackQuietly(client)
         approvalProductLogger.warn(
-          `approval departure transfer error for instance ${instanceId}: ${error instanceof Error ? error.message : String(error)}`,
-          error instanceof Error ? error : undefined,
+          'approval departure transfer failed; manual recovery required',
+          { reason: 'departure_transfer_instance_failed' },
         )
         skipDepartureTransfer(instanceId, 'error')
       } finally {
@@ -8876,13 +8929,22 @@ export class ApprovalProductService {
       const timeoutPriorNodeApprovers = timeoutReferencedPriorNodeKeys.size > 0
         ? await this.loadPriorNodeApproverDeciders(client, id, timeoutReferencedPriorNodeKeys)
         : undefined
+      const assignmentResolver = buildApprovalAssignmentResolver({
+        formSnapshot,
+        requesterSnapshot,
+        getPriorNodeApprovers: () => timeoutPriorNodeApprovers,
+        getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
+      })
+      const designatedFallbackEligibility = readApprovalDesignatedFallbackEligibilitySnapshot(
+        runtimeGraph,
+        instance.metadata,
+      )
       const executor = new ApprovalGraphExecutor(runtimeGraph, formSnapshot, {
-        assignmentResolver: buildApprovalAssignmentResolver({
-          formSnapshot,
-          requesterSnapshot,
-          getPriorNodeApprovers: () => timeoutPriorNodeApprovers,
-          getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
-        }),
+        assignmentResolver,
+        designatedFallbackResolver: buildApprovalDesignatedFallbackResolver(
+          assignmentResolver,
+          designatedFallbackEligibility,
+        ),
         requesterContext: ((d, t, r) => ({
           department: typeof d === 'string' && d ? d : null,
           title: typeof t === 'string' && t ? t : null,
@@ -9121,13 +9183,22 @@ export class ApprovalProductService {
       // because the executor is constructed here, earlier than that point. Stays undefined when
       // the graph carries no such source (OPT-IN — zero extra reads for unrelated approvals).
       let priorNodeApprovers: Record<string, string[]> | undefined
+      const assignmentResolver = buildApprovalAssignmentResolver({
+        formSnapshot,
+        requesterSnapshot,
+        getPriorNodeApprovers: () => priorNodeApprovers,
+        getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
+      })
+      const designatedFallbackEligibility = readApprovalDesignatedFallbackEligibilitySnapshot(
+        runtimeGraph,
+        instance.metadata,
+      )
       const executor = new ApprovalGraphExecutor(runtimeGraph, formSnapshot, {
-        assignmentResolver: buildApprovalAssignmentResolver({
-          formSnapshot,
-          requesterSnapshot,
-          getPriorNodeApprovers: () => priorNodeApprovers,
-          getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
-        }),
+        assignmentResolver,
+        designatedFallbackResolver: buildApprovalDesignatedFallbackResolver(
+          assignmentResolver,
+          designatedFallbackEligibility,
+        ),
         // Re-thread the frozen directory department + title + roles at dispatch (loaded requester_snapshot record).
         requesterContext: ((d, t, r) => ({
           department: typeof d === 'string' && d ? d : null,

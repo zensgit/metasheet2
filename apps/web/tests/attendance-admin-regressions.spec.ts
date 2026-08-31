@@ -6932,9 +6932,7 @@ describe('Attendance admin regressions', () => {
           requestStatus: 'cancelled',
           userId: 'user-history',
           targetScheduleGroupId: 'sg-dispatch',
-          targetShiftId: null,
-          targetShiftLabel: 'Deleted or unavailable shift',
-          targetShiftStatus: 'deleted',
+          targetShiftId: '00000000-0000-4000-8000-000000000321',
           slotIndex: 0,
           startDate: '2026-06-17',
           endDate: '2026-06-17',
@@ -6971,10 +6969,12 @@ describe('Attendance admin regressions', () => {
         && parsed.searchParams.get('pageSize') === '200'
     })).toBe(true)
     expect(section.querySelector('[data-attendance-schedule-dispatch-cap]')?.textContent).toContain('Showing first 2 of 250')
-    expect(section.querySelector('[data-attendance-schedule-dispatch-row]')?.textContent).toContain('Branch A')
-    expect(section.querySelector('[data-attendance-schedule-dispatch-row]')?.textContent).toContain('Day Shift')
-    expect(section.querySelector('[data-attendance-schedule-dispatch-row]')?.textContent).toContain('assignment-a, assignment-b')
-    expect(section.textContent).toContain('Deleted or unavailable shift')
+    const dispatchRows = section.querySelectorAll<HTMLElement>('[data-attendance-schedule-dispatch-row]')
+    expect(dispatchRows[0]?.textContent).toContain('Branch A')
+    expect(dispatchRows[0]?.textContent).toContain('Day Shift')
+    expect(dispatchRows[0]?.textContent).toContain('assignment-a, assignment-b')
+    expect(dispatchRows[1]?.textContent).toContain('Deleted or unavailable shift')
+    expect(dispatchRows[1]?.textContent).not.toContain('00000000-0000-4000-8000-000000000321')
 
     const groupSelect = section.querySelector<HTMLSelectElement>('[data-attendance-schedule-dispatch-group]')!
     expect(Array.from(groupSelect.options).map(option => option.value)).toEqual(['', 'sg-dispatch'])
@@ -7027,12 +7027,12 @@ describe('Attendance admin regressions', () => {
         requested_out_at: null,
         reason: 'Temporary branch support',
         status: 'pending',
-        metadata: {
-          scheduleDispatch: {
-            targetScheduleGroupId: 'sg-branch-a',
-            targetShiftId: 'shift-day',
-            startDate: '2026-06-20',
-            endDate: '2026-06-21',
+          metadata: {
+            scheduleDispatch: {
+              targetScheduleGroupId: 'sg-branch-a',
+              targetShiftId: '00000000-0000-4000-8000-000000000654',
+              startDate: '2026-06-20',
+              endDate: '2026-06-21',
             slotIndex: 1,
           },
         },
@@ -7078,7 +7078,9 @@ describe('Attendance admin regressions', () => {
     expect(section.querySelectorAll('[data-schedule-dispatch-request-row]')).toHaveLength(2)
     expect(section.textContent).toContain('2026-06-20 - 2026-06-21')
     expect(section.textContent).toContain('sg-branch-a')
-    expect(section.textContent).toContain('shift-day')
+    const employeeDispatchRows = section.querySelectorAll<HTMLElement>('[data-schedule-dispatch-request-row]')
+    expect(employeeDispatchRows[0]?.textContent).toContain('Deleted or unavailable shift')
+    expect(employeeDispatchRows[0]?.textContent).not.toContain('00000000-0000-4000-8000-000000000654')
     expect(section.textContent).toContain('Temporary branch support')
     expect(section.textContent).toContain('Deleted or unavailable shift')
     expect(section.textContent).not.toContain('Annual leave')
