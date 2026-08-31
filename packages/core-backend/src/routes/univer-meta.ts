@@ -4351,6 +4351,51 @@ function sendForbidden(res: Response, message = 'Insufficient permissions') {
   return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message } })
 }
 
+// ── F21: display-name rename (sheet + base) ────────────────────────────────────
+// The delivery contract (§12/§15 of the multitable application model) says display names are the
+// CUSTOMER'S to change. Until this slice no route could write `meta_sheets.name` or `meta_bases.name`
+// at all, so the live deployment's sheet/base renames had to be done by direct DB UPDATE — an ops
+// action a customer cannot take (first-deployment fault F21, hit twice).
+//
+// AUTHORITY: renaming is SCHEMA authority, not record-write authority (#5357). Both routes therefore
+// gate on `canManageFields` (= isAdminRole || multitable:manage-schema, plus the owner-gated legacy
+// transition switch) — the SAME tier that renames a FIELD. A `multitable:write` operator who may fill
+// every cell may NOT rename the table it lives in.
+//
+// SAFETY: a display rename is inert for every consumer — readiness, dry-run counts and the managed-table
+// provisioning ensure all address fields/objects by stable ids, never by display name.
+
+const DISPLAY_NAME_MIN_LENGTH = 1
+const DISPLAY_NAME_MAX_LENGTH = 255
+
+/** Values-free: states what WOULD be accepted, never echoes what was sent. */
+const INVALID_DISPLAY_NAME_MESSAGE =
+  `This endpoint accepts only { name }: a string of ${DISPLAY_NAME_MIN_LENGTH}-${DISPLAY_NAME_MAX_LENGTH} characters after trimming.`
+
+/** Values-free: names the authority that WOULD be accepted, so a refusal is actionable. */
+const DISPLAY_RENAME_FORBIDDEN_MESSAGE =
+  'Renaming requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.'
+
+/**
+ * Strict `{ name }` parse. `.strict()` is deliberate: silently ignoring an extra property would tell
+ * the caller a change landed when it did not. The trim runs BEFORE the length check, so a
+ * whitespace-only name is refused (zod's `.min(1)` alone would accept `'   '`).
+ */
+function parseDisplayRenamePayload(body: unknown): { ok: true; name: string } | { ok: false } {
+  const parsed = z.object({ name: z.string() }).strict().safeParse(body)
+  if (!parsed.success) return { ok: false }
+  const name = parsed.data.name.trim()
+  if (name.length < DISPLAY_NAME_MIN_LENGTH || name.length > DISPLAY_NAME_MAX_LENGTH) return { ok: false }
+  return { ok: true, name }
+}
+
+function sendInvalidDisplayName(res: Response) {
+  return res.status(400).json({
+    ok: false,
+    error: { code: 'INVALID_NAME', message: INVALID_DISPLAY_NAME_MESSAGE },
+  })
+}
+
 function sendRecoveryAuthorityBusy(res: Response) {
   return res.status(409).json({
     ok: false,
@@ -7033,6 +7078,54 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] create base failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create base' } })
+    }
+  })
+
+  /**
+   * F21 (base half) — rename a base's DISPLAY NAME. Accepts `{ name }` and nothing else.
+   *
+   * GATE — TIGHTER THAN CREATE. `POST /bases` above is `rbacGuard('multitable','write')`, so any
+   * operator can create a base of their own. Renaming an EXISTING base is a change to something other
+   * people already depend on, so it takes SCHEMA authority (`canManageFields` = admin role or
+   * `multitable:manage-schema`) — the same tier that renames a field or a sheet. Base authority is
+   * GLOBAL (there is no per-base capability resolution the way `resolveSheetCapabilities` resolves a
+   * sheet), so the authority check runs BEFORE the existence check: an actor without schema authority
+   * is not told whether a given base id exists.
+   */
+  router.patch('/bases/:baseId', async (req: Request, res: Response) => {
+    const baseId = typeof req.params.baseId === 'string' ? req.params.baseId.trim() : ''
+    if (!baseId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'baseId is required' } })
+    }
+    const parsed = parseDisplayRenamePayload(req.body)
+    if (!parsed.ok) return sendInvalidDisplayName(res)
+
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) {
+        return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      }
+      const capabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+      if (!capabilities.canManageFields) return sendForbidden(res, DISPLAY_RENAME_FORBIDDEN_MESSAGE)
+
+      const updated = await pool.query(
+        `UPDATE meta_bases
+         SET name = $2
+         WHERE id = $1 AND deleted_at IS NULL
+         RETURNING id, name, icon, color, owner_id, workspace_id`,
+        [baseId, parsed.name],
+      )
+      const row = (updated as any).rows?.[0]
+      if (!row) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Base not found: ${baseId}` } })
+      }
+      return res.json({ ok: true, data: { base: serializeBaseRow(row) } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] rename base failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to rename base' } })
     }
   })
 
@@ -13617,6 +13710,89 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] delete sheet failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete sheet' } })
+    }
+  })
+
+  /**
+   * F21 (sheet half) — rename a sheet's DISPLAY NAME. Accepts `{ name }` and nothing else.
+   *
+   * GATE: `canManageFields` via `resolveSheetCapabilities` — the SAME tier as `PATCH /fields/:fieldId`
+   * (#5357). A `multitable:write` operator is refused; an admin or a `multitable:manage-schema` holder
+   * is allowed. Existence is checked first (mirrors `DELETE /sheets/:sheetId` and the
+   * `PUT /sheets/:sheetId/row-level-read-deny` sheet_config writer), so a deleted or unknown sheet is
+   * a 404 for everybody.
+   *
+   * HISTORY: recorded on the EXISTING config-revision channel as a `sheet_config` update with
+   * `changedKeys: ['name']` — the same machinery `PUT /sheets/:sheetId/row-level-read-deny` writes, so
+   * the rename shows up in `GET /bases/:baseId/history/events` and `GET /sheets/:sheetId/config-history`
+   * with no new event system. It opens no new RESTORE path: `isSupportedSheetConfigRevert` admits only
+   * `{conditionalReadRules, rowLevelReadPermissionsEnabled}`, so a `name` revision stays gated
+   * fail-closed exactly like every other sheet_config key outside the Tier-1 set.
+   *
+   * A rename-to-the-same-name records nothing and writes nothing (`configUpdateDiff` → null, the
+   * recorder's no-spam contract).
+   */
+  router.patch('/sheets/:sheetId', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+    const parsed = parseDisplayRenamePayload(req.body)
+    if (!parsed.ok) return sendInvalidDisplayName(res)
+
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageFields) return sendForbidden(res, DISPLAY_RENAME_FORBIDDEN_MESSAGE)
+
+      const nextName = parsed.name
+      await pool.transaction(async ({ query }) => {
+        // D-H1: sheet_config writer. Fence-before-check, then the live name read + UPDATE, so a rename
+        // cannot interleave with a recovery that is hashing/applying one schema generation.
+        // Flag-off ⇒ no-op / byte-identical.
+        await fenceWriterEntry(query, sheetId)
+        const beforeResult = await query('SELECT name FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
+        const beforeRow = ((beforeResult as any).rows ?? [])[0] as { name?: unknown } | undefined
+        if (!beforeRow) throw new NotFoundError(`Sheet not found: ${sheetId}`)
+        const diff = configUpdateDiff({ name: String(beforeRow.name ?? '') }, { name: nextName }, ['name'])
+        if (!diff) return
+        await query('UPDATE meta_sheets SET name = $1 WHERE id = $2 AND deleted_at IS NULL', [nextName, sheetId])
+        await recordConfigRevision(query, {
+          sheetId,
+          entityType: 'sheet_config',
+          entityId: sheetId,
+          action: 'update',
+          before: diff.before,
+          after: diff.after,
+          changedKeys: diff.changedKeys,
+          batchId: randomUUID(),
+          actorId: getRequestActorId(req),
+        })
+      })
+      // The sheet summary cache carries the display name (`{ id, name }`) — drop it or readers keep
+      // serving the old label.
+      invalidateSheetSummaryCache(sheetId)
+      return res.json({
+        ok: true,
+        data: { sheet: { id: sheetId, baseId: sheet.baseId, name: nextName, description: sheet.description } },
+      })
+    } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
+      if (err instanceof NotFoundError) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+      }
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] rename sheet failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to rename sheet' } })
     }
   })
 
