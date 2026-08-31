@@ -578,6 +578,7 @@ export interface MultitableRecordsAPI {
     sheetId: string
     recordId: string
     changes: Record<string, unknown>
+    expectedVersion?: number
   }): Promise<{
     id: string
     sheetId: string
