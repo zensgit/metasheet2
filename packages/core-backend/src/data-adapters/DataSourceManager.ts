@@ -8,7 +8,7 @@ import { MSSQLAdapter } from './MSSQLAdapter'
 import { MySQLAdapter } from './MySQLAdapter'
 import { PLMAdapter } from './PLMAdapter'
 import { encryptStoredSecretValue, decryptStoredSecretValue, isEncryptedSecretValue } from '../security/encrypted-secrets'
-import { assertNotK3Destination, assertNotK3ConnectionWrite, preserveK3Marker } from './k3-destination-write-fence'
+import { assertNotK3Destination, assertNotK3ConnectionWrite, assertNoCrossServerWrite, preserveK3Marker } from './k3-destination-write-fence'
 import type { IConfigService, ILogger } from '../di/identifiers'
 
 // PostgreSQL SQLSTATE for undefined_table. The referential delete guard trusts
@@ -825,6 +825,7 @@ export class DataSourceManager extends EventEmitter {
     // defense-in-depth backstop. Reads pass, so a raw SELECT (including from a K3 table) works. The
     // adapter's own query() re-checks with its detected flag, so a caller who skips this wrapper
     // (getDataSource(id).query(...)) is still refused; this layer only saves a connect.
+    if (adapter.getType() === 'sqlserver') assertNoCrossServerWrite(sql)
     assertNotK3ConnectionWrite(adapter.getConfig(), sql)
     if (isGenericQueryDisabledConfig(adapter.getConfig())) {
       throw new Error(c6WriteTargetQueryDisabledMessage(dataSourceId))
@@ -998,6 +999,7 @@ export class DataSourceManager extends EventEmitter {
       // G-4 CONNECTION READ-ONLY GATE (federated query). A federated leg runs raw SQL: on a
       // K3-reaching connection only a pure read is allowed; on a non-K3 connection the statement
       // signature is the backstop. Reads pass.
+      if (adapter.getType() === 'sqlserver') assertNoCrossServerWrite(sql)
       assertNotK3ConnectionWrite(adapter.getConfig(), sql)
       if (isGenericQueryDisabledConfig(adapter.getConfig())) {
         throw new Error(c6WriteTargetQueryDisabledMessage(dataSourceId))

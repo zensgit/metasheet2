@@ -18,37 +18,27 @@
 // defeated by changing that module. So the closed token is spelled here as a literal; a test binds
 // it by VALUE to the plugin fence's token so the two provably agree.
 //
-// TWO INDEPENDENT CHECKS, because a single one has a hole the other closes:
+// THE DECLARED CONTROL, PLUS LAYERS OF DEPTH. The load-bearing control is the CONNECTION READ-ONLY
+// gate (see below), keyed on the DECLARED MARKER. The older destination-level checks remain as
+// DEFENSE IN DEPTH — best-effort, not proofs:
 //
-//   A. THE EXPLICIT DESTINATION MARKER (deterministic). A `data_sources` row may carry
+//   A. THE EXPLICIT DESTINATION MARKER (the control). A `data_sources` row may carry
 //      `options.k3Destination === true` — a durable, positive attestation, set at registration
 //      (by the K3 provisioning template / an operator following the runbook / an admin), that this
-//      source's destination IS the customer K3. When present, every write is refused, unconditionally
-//      and non-overridably. This is the honest-registration path and it is exact.
+//      source's destination IS the customer K3. When present, the CONNECTION is read-only: every
+//      write is refused, unconditionally and non-overridably, and the marker is set-once (P1). A
+//      marker is only as truthful as whoever set it — an operator who points a generic source at K3
+//      and OMITS the marker is not caught by (A).
 //
-//      Its limit, stated plainly: a marker is only as truthful as whoever set it. An owner who
-//      deliberately points a generic sqlserver source at K3 and simply OMITS the marker is not caught
-//      by (A) alone. That is the hole (B) closes.
+//   B. THE K3 BUSINESS-TABLE SIGNATURE (best-effort depth, NOT a proof). On a connection not known to
+//      be K3-reaching, a write whose TARGET TABLE matches the K3 WISE catalog (`t_IC*`/`t_BD*` + the
+//      widened order/bill families) is refused by name. This helps against a NAMED local K3-table
+//      write, but — as rounds 3–4 proved — a static SQL target-extractor cannot be complete
+//      (UPDATE…FROM, TOP, 4-part names, CTEs, EXEC all evade it), so (B) is depth, not a guarantee.
 //
-//   B. THE K3 BUSINESS-TABLE SIGNATURE (structural, catches disguise). Independently of the marker,
-//      a write whose TARGET TABLE matches the K3 WISE business-table signature (the `t_IC*` / `t_BD*`
-//      catalog — the same tables the plugin's `k3-wise-sqlserver-channel` enumerates) is refused.
-//      This is NOT the host/IP heuristic the owner rejected for the HTTP adapter (a matcher a proxy
-//      hop or an IP literal defeats): the table name is part of the write CALL, not the connection —
-//      an attacker who wants to write K3's item master must NAME `t_ICItem`, and cannot disguise that
-//      away while still hitting K3's data. The legitimate C6 middle-table lane writes to staging
-//      tables (`integration_material_stage`-style), which do not match the signature, so (B) does not
-//      touch it.
-//
-// RESIDUAL, recorded honestly: (A)+(B) do not stop an owner who BOTH leaves the source unmarked AND
-// writes only through a customer-created VIEW or SYNONYM that renames a K3 table off the signature.
-// That requires the owner to have already installed an aliasing object inside the customer database —
-// i.e. they already hold direct K3 write access out of band, at which point the plugin's fence is not
-// the operative control. No purely-structural check inside this process can distinguish, at the byte
-// level, a write to a K3 table reached through a same-database alias from a write to a legitimate
-// staging table; that discrimination needs a physical-destination oracle the deployment does not
-// have. This is the minimal reliable marker in this pass, and the boundary is drawn where it is
-// because that is where reliability actually ends.
+// See the IRREDUCIBLE RESIDUAL note further down: an unmarked write reaching a K3 table through a
+// pre-installed local synonym/view still evades, and detection is best-effort. The clean provable
+// close (a read-only DB account for K3-reaching sources) is a product decision for the owner.
 //
 // READS ARE UNTOUCHED. This fence gates only the WRITE surface. `select` and any pure-read statement
 // are never gated: reading a K3 source is legitimate, and a blanket deny that killed reads would be a
@@ -62,21 +52,41 @@
 // `INSERT INTO srv.AIS.dbo.t_ICItem` (4-part linked-server name), `MERGE … OUTPUT`, CTEs, batches,
 // `EXEC sp_executesql`. A guarantee as absolute as G-4 must NOT rest on out-parsing SQL.
 //
-// So the invariant is made a property of the CONNECTION: "no external WRITE to a K3 database, ever."
+// So the invariant is made a property of the CONNECTION: on a K3-reaching connection, no write runs.
 // A `data_sources` connection that reaches K3 is READ-ONLY at the adapter level, regardless of the
 // source's own readOnly flag. The parser burden inverts from "prove this statement writes K3"
-// (unbounded) to "prove this statement is a PURE READ" (a tractable allowlist — leading SELECT/WITH/
-// EXPLAIN/SHOW, single statement, no INTO; ANYTHING else is refused WITHOUT needing to find a table).
-// The three bypasses above all lead with UPDATE/INSERT, so none is a pure read: all refused as a
-// "write on a K3 connection", not because a parser finally saw the table. K3 reads stay functional.
+// (unbounded) to "prove this statement is a PURE READ" (a tractable allowlist — leading SELECT/EXPLAIN/
+// SHOW, single statement, no INTO, and NO leading WITH; anything else is refused WITHOUT finding a
+// table). The round-3/4 bypasses all lead with UPDATE/INSERT (or a CTE), so none is a pure read.
 //
-// "K3-reaching" is decided two ways, neither of which parses the write:
+// "K3-reaching" is decided by the DECLARED MARKER, with DETECTION as a best-effort safety net:
 //   (A) the DURABLE MARKER `options.k3Destination === true` — set once at registration and, per the
-//       route + manager, NOT clearable by any later edit (K3_DESTINATION_MARKER_IMMUTABLE); and
-//   (B) DETECTION at connect time — the adapter probes its own catalog and, if K3 tables are present,
-//       flags the live connection K3-reaching even if the marker was never set.
-// The by-kind fences and the widened business-table signature remain as DEFENSE IN DEPTH, but the
-// connection read-only gate is the control that does not depend on correctly parsing arbitrary SQL.
+//       route + manager, NOT clearable by any later edit (K3_DESTINATION_MARKER_IMMUTABLE). This is
+//       the CONTROL: a connection the operator declares K3 is provably read-only.
+//   (B) DETECTION at connect time — the adapter probes its own catalog and flags the live connection
+//       K3-reaching when K3 tables are present. This is BEST-EFFORT DEFENSE IN DEPTH ONLY, not a
+//       guarantee: it is fail-open on a probe error, sees only the LOCAL catalog (never a linked
+//       server), and cannot see a K3 table fronted by a renamed local view/synonym. It does not
+//       close the residual below; the marker does, where the marker is set.
+//
+// CROSS-SERVER: a linked-server write (`INSERT INTO K3SRV.AIS.dbo.t_ICItem`, `OPENQUERY`, `OPENROWSET`)
+// is invisible to a local read-only gate and a local-catalog probe, so cross-server / distributed
+// primitives are refused outright on any sqlserver source (assertNoCrossServerWrite) — the tractable
+// close for the laundering vector, without identifying the K3 table.
+//
+// IRREDUCIBLE RESIDUAL, stated plainly (do not read any absolute claim above as contradicting this):
+// this fence is a STRONG DEFENSE IN DEPTH, NOT a mathematical proof, against a PRIVILEGED operator
+// (`data_sources:write` + `execute`) who deliberately launders a K3 write through a generic writable
+// source. Specifically, an UNMARKED, non-K3-local source whose write reaches a K3 table through a
+// LOCAL synonym or view pre-installed to point at a linked K3 table still evades: the marker was
+// never set, detection sees only the innocuous local name, and the statement carries no cross-server
+// token. Closing that requires either the operator to have declared the source (the marker) or a
+// setup that already presumes privileged access adjacent to K3 write. The clean, provable close is a
+// product decision escalated to the owner: require K3-reaching data sources to use a READ-ONLY DB
+// account at registration (making read-only a property of the credential, not of statement
+// inspection). Until then, the marker is the declared control and everything else is depth.
+//
+// The by-kind fences and the widened business-table signature also remain DEFENSE IN DEPTH.
 
 import type { AdapterOptions, DataSourceConfig } from './BaseAdapter'
 
@@ -96,6 +106,8 @@ export const K3_DESTINATION_SQL_REFUSAL_MESSAGE =
   'K3 external write-back is permanently disabled; the statement writes to a K3 business table'
 export const K3_CONNECTION_READONLY_REFUSAL_MESSAGE =
   'K3 external write-back is permanently disabled; a K3-reaching connection is read-only (only a pure SELECT is allowed)'
+export const K3_CROSS_SERVER_REFUSAL_MESSAGE =
+  'K3 external write-back is permanently disabled; cross-server / distributed writes (linked-server 4-part names, OPENQUERY, OPENROWSET) are refused on a managed SQL data source'
 export const K3_DESTINATION_MARKER_IMMUTABLE = 'K3_DESTINATION_MARKER_IMMUTABLE'
 export const K3_DESTINATION_MARKER_IMMUTABLE_MESSAGE =
   'the k3Destination marker is set-once and cannot be cleared or unset'
@@ -303,17 +315,55 @@ export function assertNotK3SqlWrite(config: Pick<DataSourceConfig, 'options'>, s
 }
 
 // ── THE CONNECTION READ-ONLY GATE (load-bearing; does NOT parse the write) ────────────────────
-// The tractable allowlist: a statement is a PURE READ iff it is a single statement, leads with
-// SELECT/WITH/EXPLAIN/SHOW, and contains no `INTO` (which would make it a write). This mirrors the
-// route-level `isReadOnlySql` exactly; a test pins the two equivalent so they cannot drift. Anything
-// that is not clearly a pure read is refused on a K3 connection — no table extraction, so no T-SQL
-// idiom (UPDATE…FROM, TOP, 4-part names, MERGE…OUTPUT, batches, EXEC) can slip a write past it.
+// The tractable allowlist: on a K3-reaching connection a statement is a PURE READ iff it is a single
+// statement, leads with SELECT/EXPLAIN/SHOW, and contains no `INTO`. Anything else is refused — no
+// table extraction, so no T-SQL idiom (UPDATE…FROM, TOP, 4-part names, MERGE…OUTPUT, batches, EXEC)
+// can slip a write past.
+//
+// WITH IS REFUSED, DELIBERATELY (fail-closed). A leading `WITH` is a CTE, and SQL Server allows a CTE
+// to precede a data-modifying statement: `WITH c AS (SELECT …) DELETE/UPDATE/INSERT/MERGE …`. The
+// route-level `isReadOnlySql` admits in its own docstring that it does not catch data-modifying CTEs,
+// so this gate must NOT mirror it here. Rather than try to parse past the CTE to the terminal verb
+// (the same unbounded game that reopened rounds 3–4), a K3 READ connection simply does not get CTEs:
+// refusing every WITH-led statement loses nothing important and needs no parsing. A plain
+// `WITH c AS (SELECT 1) SELECT * FROM c` is refused too — acceptable and documented.
 export function isPureReadStatement(sql: string): boolean {
   const trimmed = String(sql ?? '').trim().replace(/;\s*$/, '') // drop a single trailing semicolon
   if (trimmed.length === 0) return false // nothing to allow
   if (trimmed.includes(';')) return false // no multiple statements — a batch could smuggle a write
   if (/\binto\b/i.test(trimmed)) return false // reject SELECT … INTO (a write)
-  return /^\s*(select|with|explain|show)\b/i.test(trimmed)
+  if (/^\s*with\b/i.test(trimmed)) return false // reject CTEs outright — a WITH can precede a write
+  return /^\s*(select|explain|show)\b/i.test(trimmed)
+}
+
+// ── CROSS-SERVER / DISTRIBUTED-EXECUTION REFUSAL (P0-LAUNDER, the tractable close) ─────────────
+// The local read-only gate and the local-catalog detection cannot see a LINKED server: an UNMARKED,
+// non-K3-local connection can still launder a K3 write across a linked server —
+// `INSERT INTO K3SRV.AIS.dbo.t_ICItem …` (4-part name), or `OPENQUERY(K3SRV,'DELETE …')` /
+// `OPENROWSET(…)` (ad-hoc distributed execution). Legitimate managed data-source access is
+// single-server, so these primitives are refused on ANY sqlserver source — fail-closed, and without
+// needing to identify the K3 table. `OPENQUERY`/`OPENROWSET`/`OPENDATASOURCE` and `EXEC … AT` are
+// refused outright (they can carry a remote write inside a read-shaped statement); a 4-part name is
+// refused when the statement is not a pure read (a cross-server WRITE target).
+const SQL_OPEN_DISTRIBUTED = /\b(openquery|openrowset|opendatasource)\s*\(/i
+const SQL_EXEC_AT = /\b(?:exec|execute)\b[\s\S]*?\bat\b\s+(?:\[[^\]]+\]|[A-Za-z_@#][\w$#]*)/i
+// Four or more bare/[bracketed] identifier segments joined by dots — a linked-server 4-part name.
+// A single quoted identifier that contains dots is ONE segment, so it does not match.
+const SQL_FOUR_PART_NAME = /(?:\[[^\]]+\]|[A-Za-z_@#][\w$#]*)(?:\s*\.\s*(?:\[[^\]]+\]|[A-Za-z_@#][\w$#]*)){3,}/
+
+export function referencesCrossServer(sql: string): boolean {
+  const cleaned = stripSqlNoise(sql)
+  return SQL_OPEN_DISTRIBUTED.test(cleaned) || SQL_EXEC_AT.test(cleaned) || SQL_FOUR_PART_NAME.test(cleaned)
+}
+
+export function assertNoCrossServerWrite(sql: string): void {
+  const cleaned = stripSqlNoise(sql)
+  if (SQL_OPEN_DISTRIBUTED.test(cleaned) || SQL_EXEC_AT.test(cleaned)) {
+    throw new K3DestinationWriteError(K3_CROSS_SERVER_REFUSAL_MESSAGE)
+  }
+  if (!isPureReadStatement(sql) && SQL_FOUR_PART_NAME.test(cleaned)) {
+    throw new K3DestinationWriteError(K3_CROSS_SERVER_REFUSAL_MESSAGE)
+  }
 }
 
 // A connection is K3-reaching when it is DECLARED so (the durable marker) or DETECTED so (the adapter
