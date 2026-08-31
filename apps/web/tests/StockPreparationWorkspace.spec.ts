@@ -536,6 +536,60 @@ describe('StockPreparationWorkspace shell', () => {
     expect(root.querySelector('[data-testid="stock-prep-confirmation-queue"]')).not.toBeNull()
   })
 
+  // §14 (multitable-application-model-20260830.md) — the INSTALL tab. Gated on `stock-prep:admin`,
+  // the workbench-scoped ceiling, because everything the PANEL reads (the app-catalog manifest and
+  // the read-tier preflight) is answerable to that holder. The run control INSIDE it is
+  // platform-admin and does its own gating (StockPreparationInstallView.spec.ts V-05).
+  it('hides the install tab from an operator and shows it to a workbench admin', async () => {
+    h.permissions = ['stock-prep:read']
+    const operatorRoot = await mountShell()
+    expect(operatorRoot.querySelector('[data-testid="stock-prep-tab-install"]')).toBeNull()
+
+    if (app) app.unmount()
+    app = null
+    container!.innerHTML = ''
+
+    h.permissions = ['stock-prep:read', 'stock-prep:admin']
+    const adminRoot = await mountShell()
+    expect(adminRoot.querySelector('[data-testid="stock-prep-tab-install"]')).not.toBeNull()
+    // Exactly two: the confirmation queue this page was adopted for, plus install. The seven legacy
+    // MVP tabs stay platform-admin and did NOT come along with the workbench-admin code.
+    expect(adminRoot.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(2)
+    for (const key of LEGACY_MVP_VIEW_KEYS) {
+      expect(adminRoot.querySelector(`[data-testid="stock-prep-tab-${key}"]`), `${key} must stay hidden`).toBeNull()
+    }
+    // ...and the landing tab is unchanged: install is reachable, not imposed.
+    const panel = adminRoot.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
+    expect(panel.getAttribute('data-active')).toBe('confirmation-queue')
+  })
+
+  it('opens the install tab and badges it as a manifest read plus an idempotent ensure', async () => {
+    h.permissions = ['integration:admin', 'stock-prep:read', 'stock-prep:admin']
+    h.apiFetch.mockImplementation(async () => new Response(JSON.stringify({
+      id: 'stock-preparation',
+      displayName: 'BOM备料',
+      permissions: [],
+      objects: [],
+    }), { status: 200 }))
+
+    const root = await mountShell()
+    // Nine tabs now: the queue, install, and the seven legacy MVP tabs.
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(9)
+    ;(root.querySelector('[data-testid="stock-prep-tab-install"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const panel = root.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
+    expect(panel.getAttribute('data-active')).toBe('install')
+    expect(root.querySelector('[data-testid="stock-prep-install"]')).not.toBeNull()
+
+    // The badge must not claim "readonly · GET": the panel's admin-only run calls the existing
+    // idempotent ensure / customer-pack routes.
+    const endpoint = root.querySelector('[data-testid="stock-prep-panel-endpoint"]') as HTMLElement
+    expect(endpoint.textContent).toContain('/api/platform/apps/stock-preparation')
+    expect(endpoint.textContent).toContain('幂等建表')
+    expect(endpoint.textContent).not.toMatch(/· GET/)
+  })
+
   it('renders Chinese labels + the readonly-boundary copy when locale is zh-CN', async () => {
     h.locale = 'zh-CN'
     const root = await mountShell()
