@@ -7,7 +7,7 @@
       data-testid="stock-prep-mapping-no-project"
       role="status"
     >
-      {{ bi('请选择一个项目以查看物料映射确认队列。', 'Select a project to see the material-mapping confirmation queue.') }}
+      {{ bi('请选择一个项目,这里会列出等着对物料的行。', 'Select a project and this page lists what still needs matching to a material.') }}
     </p>
 
     <!-- Loading: values-free spinner copy only. -->
@@ -17,7 +17,7 @@
       data-testid="stock-prep-mapping-loading"
       role="status"
     >
-      {{ bi('正在加载映射确认状态…', 'Loading mapping confirmation state…') }}
+      {{ bi('正在读取物料对应关系…', 'Reading the material matches…') }}
     </p>
 
     <!-- Error / endpoint-not-ready (GET rejects or 404s): neutral, never the raw body. -->
@@ -46,19 +46,19 @@
       <!-- Summary header card: the five values-free summary indicators. -->
       <header class="sp-map__summary" data-testid="stock-prep-mapping-summary">
         <div class="sp-map__metric" data-testid="stock-prep-mapping-metric" data-kind="total">
-          <span class="sp-map__metric-label">{{ bi('映射总数', 'Total mappings') }}</span>
+          <span class="sp-map__metric-label">{{ bi('一共记了多少条对应关系', 'Matches on record') }}</span>
           <span class="sp-map__metric-value">{{ summary.totalMappingCount }}</span>
         </div>
         <div class="sp-map__metric" data-testid="stock-prep-mapping-metric" data-kind="active">
-          <span class="sp-map__metric-label">{{ bi('生效映射', 'Active mappings') }}</span>
+          <span class="sp-map__metric-label">{{ bi('正在用的', 'In use') }}</span>
           <span class="sp-map__metric-value">{{ summary.activeMappingCount }}</span>
         </div>
         <div class="sp-map__metric" data-testid="stock-prep-mapping-metric" data-kind="pending-confirm">
-          <span class="sp-map__metric-label">{{ bi('待人工确认', 'Pending confirmation') }}</span>
+          <span class="sp-map__metric-label">{{ bi('等您确认的', 'Waiting for you' ) }}</span>
           <span class="sp-map__metric-value">{{ summary.pendingConfirmCount }}</span>
         </div>
         <div class="sp-map__metric sp-map__metric--chips" data-testid="stock-prep-mapping-metric" data-kind="match-status">
-          <span class="sp-map__metric-label">{{ bi('按匹配状态', 'By match status') }}</span>
+          <span class="sp-map__metric-label">{{ bi('对上了没有', 'Matched or not') }}</span>
           <span class="sp-map__chips">
             <span
               v-for="entry in summaryStatusEntries"
@@ -66,11 +66,12 @@
               class="sp-map__chip"
               data-testid="stock-prep-mapping-status-count"
               :data-status="entry.key"
-            >{{ entry.key }}: {{ entry.count }}</span>
+              :title="entry.key"
+            >{{ matchStatusLabel(entry.key) }}: {{ entry.count }}</span>
           </span>
         </div>
         <div class="sp-map__metric sp-map__metric--chips" data-testid="stock-prep-mapping-metric" data-kind="version-policy">
-          <span class="sp-map__metric-label">{{ bi('按版本策略', 'By version policy') }}</span>
+          <span class="sp-map__metric-label">{{ bi('按什么算同一个物料', 'What counts as the same material') }}</span>
           <span class="sp-map__chips">
             <span
               v-for="entry in summaryPolicyEntries"
@@ -78,7 +79,8 @@
               class="sp-map__chip"
               data-testid="stock-prep-mapping-policy-count"
               :data-policy="entry.key"
-            >{{ entry.key }}: {{ entry.count }}</span>
+              :title="entry.key"
+            >{{ versionPolicyLabel(entry.key) }}: {{ entry.count }}</span>
           </span>
         </div>
       </header>
@@ -88,8 +90,8 @@
            by design, so the five counts above are NOT filtered to the project selected in this view. -->
       <p class="sp-map__scope-note" data-testid="stock-prep-mapping-scope-note" role="note">
         {{ bi(
-          '物料映射为租户级、跨项目复用资产:以上计数统计当前租户内的全部映射,不按此处已选项目过滤。',
-          'Material mappings are a tenant-level, cross-project reuse asset: the counts above cover all mappings in this tenant, not filtered to the project selected here.',
+          '物料对应关系是全公司共用的:一旦对上,别的项目也能直接用。所以上面这几个数统计的是全部,不只是当前选中的项目。',
+          'A material match is shared company-wide: once it is made, other projects reuse it. So the counts above cover everything, not just the project selected here.',
         ) }}
       </p>
 
@@ -97,10 +99,10 @@
            (OD2) — the sync entry stays disabled until the operator picks one. -->
       <div class="sp-map__sync" data-testid="stock-prep-mapping-sync-block">
         <label class="sp-map__field">
-          <span class="sp-map__field-label">{{ bi('候选默认版本策略(必选)', 'Default version policy (required)') }}</span>
+          <span class="sp-map__field-label">{{ bi('按什么算同一个物料(必选)', 'What counts as the same material (required)') }}</span>
           <select v-model="syncPolicy" data-testid="stock-prep-mapping-sync-policy">
-            <option value="" disabled>{{ bi('请选择版本策略', 'Select a version policy') }}</option>
-            <option v-for="policy in versionPolicies" :key="policy" :value="policy">{{ policy }}</option>
+            <option value="" disabled>{{ bi('请先选一个', 'Pick one first') }}</option>
+            <option v-for="policy in versionPolicies" :key="policy" :value="policy">{{ versionPolicyLabel(policy) }}</option>
           </select>
         </label>
         <button
@@ -110,38 +112,41 @@
           :disabled="!syncPolicy || busy"
           @click="runCandidateSync"
         >
-          {{ bi('同步候选', 'Sync candidates') }}
+          {{ bi('去找可能对得上的物料', 'Look for materials that might match') }}
         </button>
         <span v-if="syncResult" class="sp-map__note" data-testid="stock-prep-mapping-sync-result">
-          {{ bi('同步完成', 'Sync done') }}: {{ syncResult.mode }} · {{ bi('新建', 'created') }} {{ syncResult.created.mappings }}
+          {{ bi('找完了,新增了', 'Done — added') }} {{ syncResult.created.mappings }} {{ bi('条待确认的对应关系。', 'match(es) for you to confirm.') }}
+          <code class="sp-map__token">{{ syncResult.mode }}</code>
         </span>
       </div>
 
       <!-- Row-action feedback (values-free: clamped code / field NAME / mode enums only). -->
       <p v-if="actionNotice" class="sp-map__state sp-map__state--ok" data-testid="stock-prep-mapping-action-notice">
-        {{ bi('操作完成', 'Action done') }}: {{ actionNotice.mode }}
+        {{ bi('保存好了。', 'Saved.') }}
+        <code class="sp-map__token">{{ actionNotice.mode }}</code>
         <code v-if="actionNotice.handle" class="sp-map__handle">{{ actionNotice.handle }}</code>
       </p>
       <p v-if="actionError" class="sp-map__state sp-map__state--warn" data-testid="stock-prep-mapping-action-error" role="alert">
-        {{ bi('操作失败', 'Action failed') }} ({{ actionError.code }}<template v-if="actionError.field">/{{ actionError.field }}</template>)
+        {{ bi(errorPlain(actionError.code).zh, errorPlain(actionError.code).en) }}
+        <code class="sp-map__token">{{ actionError.code }}<template v-if="actionError.field">/{{ actionError.field }}</template></code>
       </p>
 
       <!-- Review queue: matchStatus filter + values-free candidate rows. -->
       <div class="sp-map__queue-head">
         <span class="sp-map__queue-count" data-testid="stock-prep-mapping-queue-count">
-          {{ bi('候选行', 'Candidate rows') }}: {{ queue.rowCount }}
+          {{ bi('待看的对应关系', 'Matches to review') }}: {{ queue.rowCount }}
         </span>
         <label class="sp-map__field sp-map__field--inline">
-          <span class="sp-map__field-label">{{ bi('匹配状态过滤', 'Match-status filter') }}</span>
+          <span class="sp-map__field-label">{{ bi('只看', 'Show only') }}</span>
           <select v-model="statusFilter" data-testid="stock-prep-mapping-filter">
             <option value="">{{ bi('全部', 'all') }}</option>
-            <option v-for="status in matchStatuses" :key="status" :value="status">{{ status }}</option>
+            <option v-for="status in matchStatuses" :key="status" :value="status">{{ matchStatusLabel(status) }}</option>
           </select>
         </label>
       </div>
 
       <p v-if="queue.rowCount === 0" class="sp-map__state sp-map__state--muted" data-testid="stock-prep-mapping-empty">
-        {{ bi('当前无候选映射行。', 'No candidate mapping rows.') }}
+        {{ bi('没有等着看的对应关系。', 'Nothing here is waiting to be reviewed.') }}
       </p>
       <!-- H4-3 keyboard: this wrap is the scroll container (both axes). Confirm/Retire are DISABLED
            when a row lacks mappingId/hasErpTarget — if every row in the current filter lacked those,
@@ -157,14 +162,14 @@
         <table class="sp-map__table" data-testid="stock-prep-mapping-queue">
           <thead>
             <tr>
-              <th scope="col">{{ bi('映射标识', 'Mapping handle') }}</th>
-              <th scope="col">{{ bi('匹配状态', 'Match status') }}</th>
-              <th scope="col">{{ bi('匹配方法', 'Match method') }}</th>
-              <th scope="col">{{ bi('置信度', 'Confidence') }}</th>
-              <th scope="col">{{ bi('版本策略', 'Version policy') }}</th>
-              <th scope="col">{{ bi('ERP 目标齐备', 'ERP target') }}</th>
-              <th scope="col">{{ bi('PLM 版本', 'PLM version') }}</th>
-              <th scope="col">{{ bi('已确认', 'Confirmed') }}</th>
+              <th scope="col">{{ bi('编号', 'Reference') }}</th>
+              <th scope="col">{{ bi('对上了没有', 'Matched or not') }}</th>
+              <th scope="col">{{ bi('凭什么认为是它', 'Why we think it matches') }}</th>
+              <th scope="col">{{ bi('有多确定', 'How sure') }}</th>
+              <th scope="col">{{ bi('按什么算同一个', 'What counts as the same') }}</th>
+              <th scope="col">{{ bi('ERP 物料齐了吗', 'ERP material complete') }}</th>
+              <th scope="col">{{ bi('有 PLM 版本吗', 'PLM version present') }}</th>
+              <th scope="col">{{ bi('确认过了吗', 'Confirmed yet') }}</th>
               <th scope="col" class="sp-map__col-action">{{ bi('操作', 'Actions') }}</th>
             </tr>
           </thead>
@@ -176,22 +181,30 @@
               data-testid="stock-prep-mapping-row"
             >
               <td><code class="sp-map__handle" data-testid="stock-prep-mapping-row-handle">{{ row.mappingId ?? '—' }}</code></td>
+              <!-- PLAIN FIRST, TOKEN KEPT: the badge carries the words, the testid'd element keeps
+                   the server enum byte-exact for grepping and for the values-free suites. -->
               <td>
-                <span class="sp-map__badge" data-testid="stock-prep-mapping-row-status" :data-status="row.matchStatus">
-                  {{ row.matchStatus }}
-                </span>
+                <span class="sp-map__badge">{{ matchStatusLabel(row.matchStatus) }}</span>
+                <code class="sp-map__token" data-testid="stock-prep-mapping-row-status" :data-status="row.matchStatus">{{ row.matchStatus }}</code>
               </td>
-              <td data-testid="stock-prep-mapping-row-method">{{ row.matchMethod ?? '—' }}</td>
+              <td data-testid="stock-prep-mapping-row-method">
+                <span v-if="row.matchMethod">{{ matchMethodLabel(row.matchMethod) }}</span>
+                <code v-if="row.matchMethod" class="sp-map__token">{{ row.matchMethod }}</code>
+                <template v-else>—</template>
+              </td>
               <td class="sp-map__num" data-testid="stock-prep-mapping-row-confidence">{{ row.confidence ?? '—' }}</td>
-              <td data-testid="stock-prep-mapping-row-policy">{{ row.versionPolicy }}</td>
+              <td data-testid="stock-prep-mapping-row-policy">
+                <span>{{ versionPolicyLabel(row.versionPolicy) }}</span>
+                <code class="sp-map__token">{{ row.versionPolicy }}</code>
+              </td>
               <td data-testid="stock-prep-mapping-row-erp-target" :data-flag="String(row.hasErpTarget)">
-                {{ row.hasErpTarget ? bi('齐备', 'complete') : bi('缺失', 'missing') }}
+                {{ row.hasErpTarget ? bi('齐了', 'yes') : bi('还差', 'not yet') }}
               </td>
               <td data-testid="stock-prep-mapping-row-version-present" :data-flag="String(row.plmVersionPresent)">
-                {{ row.plmVersionPresent ? bi('有', 'present') : bi('无', 'absent') }}
+                {{ row.plmVersionPresent ? bi('有', 'yes') : bi('无', 'no') }}
               </td>
               <td data-testid="stock-prep-mapping-row-confirmed" :data-flag="String(row.confirmed)">
-                {{ row.confirmed ? bi('已确认', 'confirmed') : bi('未确认', 'unconfirmed') }}
+                {{ row.confirmed ? bi('已确认', 'yes') : bi('还没确认', 'not yet') }}
               </td>
               <td class="sp-map__col-action">
                 <!-- Confirm (mappingId mode): only a row with BOTH ERP identifiers is confirmable —
@@ -203,7 +216,7 @@
                   :disabled="!row.hasErpTarget || !row.mappingId || busy"
                   @click="confirmRow(row)"
                 >
-                  {{ bi('确认', 'Confirm') }}
+                  {{ bi('就是它', 'That\'s the one') }}
                 </button>
                 <button
                   type="button"
@@ -212,7 +225,7 @@
                   :disabled="!row.mappingId || busy"
                   @click="retireRow(row)"
                 >
-                  {{ bi('退役', 'Retire') }}
+                  {{ bi('停用这条', 'Stop using this one') }}
                 </button>
               </td>
             </tr>
@@ -223,7 +236,7 @@
       <!-- Manual create-confirm form (create mode): fully operator-specified mapping. Client
            validation MIRRORS the server rules, but the server's {field} error stays authoritative. -->
       <form class="sp-map__form" data-testid="stock-prep-mapping-create-form" @submit.prevent="submitCreate">
-        <h3 class="sp-map__form-title">{{ bi('手工新建已确认映射', 'Create a confirmed mapping manually') }}</h3>
+        <h3 class="sp-map__form-title">{{ bi('系统没找到?自己填一条', 'Nothing found? Enter the match yourself') }}</h3>
         <div class="sp-map__form-grid">
           <label class="sp-map__field">
             <span class="sp-map__field-label">{{ bi('PLM 图号(必填)', 'PLM drawing no (required)') }}</span>
@@ -258,10 +271,10 @@
             <input v-model.trim="form.erpSpec" type="text" data-testid="stock-prep-mapping-form-erp-spec" />
           </label>
           <label class="sp-map__field">
-            <span class="sp-map__field-label">{{ bi('版本策略(必选)', 'Version policy (required)') }}</span>
+            <span class="sp-map__field-label">{{ bi('按什么算同一个物料(必选)', 'What counts as the same material (required)') }}</span>
             <select v-model="form.versionPolicy" data-testid="stock-prep-mapping-form-policy">
-              <option value="" disabled>{{ bi('请选择版本策略', 'Select a version policy') }}</option>
-              <option v-for="policy in versionPolicies" :key="policy" :value="policy">{{ policy }}</option>
+              <option value="" disabled>{{ bi('请先选一个', 'Pick one first') }}</option>
+              <option v-for="policy in versionPolicies" :key="policy" :value="policy">{{ versionPolicyLabel(policy) }}</option>
             </select>
           </label>
           <label class="sp-map__field">
@@ -271,12 +284,39 @@
         </div>
         <!-- Field error: the offending field NAME only — never a submitted value. -->
         <p v-if="formErrorField" class="sp-map__state sp-map__state--warn" data-testid="stock-prep-mapping-form-error" role="alert">
-          {{ bi('字段无效', 'Invalid field') }}: {{ formErrorField }}
+          {{ bi('这一项还没填对,请检查:', 'One field still needs attention:') }} <code class="sp-map__token">{{ formErrorField }}</code>
         </p>
         <button type="submit" class="sp-map__action" data-testid="stock-prep-mapping-form-submit" :disabled="busy">
-          {{ bi('新建并确认', 'Create confirmed') }}
+          {{ bi('保存这条对应关系', 'Save this match') }}
         </button>
       </form>
+
+      <StockPrepTechnicalDetails testid="stock-prep-mapping-tech">
+        <dl>
+          <dt>{{ bi('匹配状态枚举', 'Match-status vocabulary') }}</dt>
+          <dd>
+            <span v-for="status in matchStatuses" :key="status"><code>{{ status }}</code> = {{ matchStatusLabel(status) }}; </span>
+          </dd>
+          <dt>{{ bi('版本策略枚举', 'Version-policy vocabulary') }}</dt>
+          <dd>
+            <span v-for="policy in versionPolicies" :key="policy"><code>{{ policy }}</code> = {{ versionPolicyLabel(policy) }}; </span>
+          </dd>
+          <dt>{{ bi('作用范围', 'Scope') }}</dt>
+          <dd>
+            {{ bi(
+              '映射表没有 projectId 字段(服务端 R3):它是租户级、跨项目复用资产,上方计数不按已选项目过滤。',
+              'The mapping table has no projectId field (server R3): it is a tenant-level, cross-project reuse asset, so the counts above are not filtered to the selected project.',
+            ) }}
+          </dd>
+          <dt>{{ bi('确认的两种模式', 'The two confirm modes') }}</dt>
+          <dd>
+            {{ bi(
+              '行内确认走 mappingId 模式(仅当两个 ERP 标识都齐备时可用,否则服务端 409);手工新建走 create 模式,字段名与服务端 {field} 报错一致。',
+              'Confirming a row uses mappingId mode (available only when both ERP identifiers are present; otherwise the server answers 409). The manual form uses create mode, and its field names match the server\'s {field} error exactly.',
+            ) }}
+          </dd>
+        </dl>
+      </StockPrepTechnicalDetails>
     </div>
   </div>
 </template>
@@ -312,6 +352,14 @@ import {
   type StockPreparationMatchStatus,
   type StockPreparationVersionPolicy,
 } from '../../../services/integration/stockPreparation/materialMapping'
+import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
+import {
+  STOCK_PREP_MATCH_METHOD_PLAIN,
+  STOCK_PREP_MATCH_STATUS_PLAIN,
+  STOCK_PREP_VERSION_POLICY_PLAIN,
+  stockPrepEnumPlain,
+  stockPrepErrorPlain,
+} from '../../../services/integration/stockPreparation/plainLanguage'
 
 const props = withDefaults(
   defineProps<{
@@ -332,6 +380,24 @@ function bi(zh: string, en: string): string {
 
 const matchStatuses = STOCK_PREPARATION_MATCH_STATUSES
 const versionPolicies = STOCK_PREPARATION_VERSION_POLICIES
+
+/** The three vocabularies in words; each falls back to the raw token it does not know. */
+function matchStatusLabel(status: string | null): string {
+  const plain = stockPrepEnumPlain(STOCK_PREP_MATCH_STATUS_PLAIN, status)
+  return plain ? bi(plain.zh, plain.en) : (status ?? '—')
+}
+
+function versionPolicyLabel(policy: string | null): string {
+  const plain = stockPrepEnumPlain(STOCK_PREP_VERSION_POLICY_PLAIN, policy)
+  return plain ? bi(plain.zh, plain.en) : (policy ?? '—')
+}
+
+function matchMethodLabel(method: string | null): string {
+  const plain = stockPrepEnumPlain(STOCK_PREP_MATCH_METHOD_PLAIN, method)
+  return plain ? bi(plain.zh, plain.en) : (method ?? '—')
+}
+
+const errorPlain = stockPrepErrorPlain
 
 const hasProject = computed(() => Boolean(props.projectId))
 
@@ -771,6 +837,15 @@ watch(statusFilter, reloadQueue)
 .sp-map__handle {
   color: var(--ms-text-3);
   font-size: 12px;
+}
+
+/* The server token, kept beside the words it means — subordinate, still copyable. */
+.sp-map__token {
+  display: inline-block;
+  margin-left: var(--ms-space-1);
+  color: var(--ms-text-3);
+  font-size: 11px;
+  word-break: break-all;
 }
 
 .sp-map__col-action {

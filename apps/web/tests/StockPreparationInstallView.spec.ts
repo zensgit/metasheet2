@@ -281,11 +281,19 @@ describe('BOM备料 install page (§14 defaults for confirmation)', () => {
       expect(permissions).toContain(code)
     }
     expect(permissions).toContain('不可改')
-    expect(text(root, '[data-testid="stock-prep-install-permission-holders"]')).toContain('零自动持有')
+    // ...each led by WHAT THE HOLDER CAN DO, not by the code (2026-08-31 plain-language wave).
+    expect(permissions).toContain('填写数据')
+    expect(permissions).toContain('管理表结构')
+    // R-11's zero automatic holders, said the way the person reading it needs to hear it: nobody
+    // holds these yet and an admin has to assign them. The manifest's own wording is not lost — it
+    // is in the panel's 技术详情 disclosure, asserted below.
+    const holders = text(root, '[data-testid="stock-prep-install-permission-holders"]')
+    expect(holders).toContain('暂无人持有')
+    expect(holders).toContain('管理员')
 
-    // Config surfaces: marked deployment data, named by their ENV VAR (never a value).
+    // Config surfaces: what has to be set up on the server, named by their ENV VAR (never a value).
     const surface = root.querySelector('[data-testid="stock-prep-install-config-surface"]') as HTMLElement
-    expect(surface.textContent).toContain('部署期数据')
+    expect(surface.textContent).toContain('装在服务器上')
     expect(surface.textContent).toContain(PACKS_PATH_ENV)
 
     // Fences: shown, with the contract that no installer may arm one.
@@ -293,7 +301,11 @@ describe('BOM备料 install page (§14 defaults for confirmation)', () => {
     expect(fences.length).toBe(2)
     expect(fences[0].textContent).toContain('productionApply')
     expect(fences[0].textContent).toContain('closed')
-    expect(text(root, '[data-testid="stock-prep-install-no-switch"]')).toContain('无开关')
+    // §4's 「只展示,无开关」 contract, said as a promise rather than as a posture name: this page
+    // reports the boundaries and offers no switch, and an unset/closed reading is the correct one.
+    const noSwitch = text(root, '[data-testid="stock-prep-install-no-switch"]')
+    expect(noSwitch).toContain('没有开关')
+    expect(noSwitch).toContain('不是漏配')
     expect(text(root, '[data-testid="stock-prep-install-installer-may-modify"]')).toContain('false')
 
     // Acceptance: what "installed" means, and who proves it.
@@ -409,8 +421,86 @@ describe('BOM备料 install page (§14 defaults for confirmation)', () => {
     // A run of OK + SKIP has NOT failed. Saying so is the whole point of a first-class SKIP.
     const summary = text(root, '[data-testid="stock-prep-install-summary"]')
     expect(summary).toContain('FAIL 0')
-    expect(summary).toContain('无失败')
+    // The verdict answers 「装好了吗?」 in words before the tally that an implementer scans for.
+    expect(summary).toContain('没有失败')
+    expect(text(root, '[data-testid="stock-prep-install-verdict"]')).toContain('装好了')
     expect(root.querySelectorAll('[data-status="fail"]').length).toBe(0)
+  })
+
+  // ---------------------------------------------------------------------------
+  // V-09 / V-10 — the two behaviours the plain-language rewrite must not regress
+  // ---------------------------------------------------------------------------
+
+  it('V-09: a skipped step still renders its REASON — the sentence that stops SKIP reading as failure', async () => {
+    // The rewrite turned `SKIP` into 跳过 and put the raw token beside it. The load-bearing half is
+    // NOT the badge: it is the reason underneath, which says why this step was skipped and whether
+    // that is a problem. A SKIP with no reason is indistinguishable from a broken install, which is
+    // the exact confusion this page existed to cause and now exists to prevent.
+    h.permissions = ['stock-prep:admin', 'integration:admin']
+    installRoutes({ packs: [] })
+    const root = await mountView()
+    ;(root.querySelector('[data-testid="stock-prep-install-run"]') as HTMLButtonElement).click()
+    await flush(14)
+
+    const managed = root.querySelector(
+      '[data-testid="stock-prep-install-step"][data-step="managed-tables"]',
+    ) as HTMLElement
+    expect(managed.dataset.status).toBe('skip')
+    // 跳过, in words, in the colour the panel already uses for that state.
+    expect(managed.textContent).toContain('跳过')
+
+    const reason = managed.querySelector('[data-testid="stock-prep-install-step-reason"]') as HTMLElement
+    expect(reason, 'a skipped step must carry a reason element').not.toBeNull()
+    const reasonText = (reason.textContent ?? '').trim()
+    expect(reasonText.length, 'the reason must not be blank').toBeGreaterThan(20)
+    expect(reasonText).toContain('客户包未配置')
+    // ...and it must say this is outstanding work rather than a failure.
+    expect(reasonText).toContain('不是安装失败')
+
+    // Every HELD step carries one too — those are the five that are ALWAYS skipped, so a blank
+    // reason there would leave the operator with five unexplained amber lines and no next step.
+    for (const key of ['source-wiring', 'confirmation-queue', 'acceptance-dry-run', 'acceptance-apply', 'acceptance-idempotent']) {
+      const step = root.querySelector(`[data-testid="stock-prep-install-step"][data-step="${key}"]`) as HTMLElement
+      const held = step.querySelector('[data-testid="stock-prep-install-step-reason"]') as HTMLElement
+      expect(held, `${key} must carry a reason element`).not.toBeNull()
+      expect((held.textContent ?? '').trim().length, `${key} must say why it is skipped`).toBeGreaterThan(20)
+    }
+  })
+
+  it('V-10: the 技术详情 disclosure carries the paste-able fix line VERBATIM', async () => {
+    // Plain language is the default and the technical detail is DEMOTED, never deleted. The fix line
+    // is the sharpest case: an operator copies it into a terminal, so a summarised, prettified or
+    // re-composed version is a WRONG fix. It has to survive the rewrite byte-for-byte, inside a real
+    // disclosure that is keyboard-operable and reports its own state.
+    installRoutes({ preflightReady: false })
+    const root = await mountView()
+    ;(root.querySelector('[data-testid="stock-prep-install-preflight-run"]') as HTMLButtonElement).click()
+    await flush()
+
+    const disclosure = root.querySelector('[data-testid="stock-prep-install-preflight-tech"]') as HTMLDetailsElement
+    expect(disclosure, 'the preflight panel must carry a technical disclosure').not.toBeNull()
+    expect(disclosure.tagName.toLowerCase(), 'a real <details>, not a CSS-only hide').toBe('details')
+
+    // Collapsed by default, and the state is on the summary rather than implied.
+    const summary = disclosure.querySelector('summary') as HTMLElement
+    expect(summary).not.toBeNull()
+    expect(summary.getAttribute('aria-expanded')).toBe('false')
+    expect(disclosure.open).toBe(false)
+    summary.click()
+    await nextTick()
+    expect(summary.getAttribute('aria-expanded')).toBe('true')
+    expect(disclosure.open).toBe(true)
+
+    // THE fix line, inside that disclosure, verbatim and alone in its element.
+    const fix = disclosure.querySelector('[data-testid="stock-prep-install-blocker-fix"]') as HTMLElement
+    expect(fix, 'the fix line must live inside the technical disclosure').not.toBeNull()
+    expect((fix.textContent ?? '').trim()).toBe(LEDGER_FIX)
+
+    // ...and the blocker itself reads as a sentence out in the open, with its code subordinate.
+    const blocker = root.querySelector('[data-testid="stock-prep-install-blocker"]') as HTMLElement
+    expect(blocker.textContent).toContain('确认账本这张表还没建好')
+    expect(text(root, '[data-testid="stock-prep-install-blocker-next"]')).toContain('开始安装')
+    expect(blocker.textContent).toContain('STOCK_PREP_CONFIRMATION_LEDGER_NOT_READY')
   })
 
   // ---------------------------------------------------------------------------

@@ -1,0 +1,291 @@
+{
+  "presetSchema": "metasheet.source-vendor-preset",
+  "presetVersion": 1,
+  "presetId": "dn-pdm-family",
+  "title": "DN_PDM / DN_PM table-name family — generic-slot PLM with per-customer dictionary semantics",
+  "dialects": ["mssql"],
+  "matches": {
+    "kind": "table-name-signature",
+    "signatureTables": [
+      "DN_PDM_PartLibraryInfo",
+      "DN_PDM_BomHeadInfo",
+      "DN_PDM_BomDetailsInfo",
+      "DN_PDM_PathInfo",
+      "DN_PDM_PathExAttrInfo",
+      "DN_PDM_OrderHeadInfo",
+      "DN_PDM_OrderDetailInfo",
+      "DN_PM_BomExAttrInfo",
+      "DN_PM_PartExAttrInfo",
+      "DN_PM_BomExAttrInfo_header",
+      "DN_PM_OrderExAttrInfo"
+    ],
+    "minSignatureTablesPresent": 6,
+    "note": "Case-insensitive over bare or schema-qualified names (SQL Server CamelCase; PostgreSQL folds to lower case — see the synthetic fixture). Below the floor nothing is selected. Drift such as a missing order module or unexposed dictionary tables still clears 6."
+  },
+  "genericColumnFamilies": {
+    "bomDetailExAttr": {
+      "onRole": "bomDetail",
+      "stems": ["Bom_ExAttr"],
+      "indexMin": 1,
+      "indexMax": 30
+    },
+    "bomHeadExAttr": {
+      "onRole": "bomHead",
+      "stems": ["Bom_ExAttr"],
+      "indexMin": 1,
+      "indexMax": 30,
+      "note": "Measured live: the BOM HEAD table carries the same slot-stem family as details."
+    },
+    "partExAttr": {
+      "onRole": "part",
+      "stems": ["ExAttr", "Part_ExAttr"],
+      "indexMin": 1,
+      "indexMax": 70
+    },
+    "orderDetailExAttr": {
+      "onRole": "orderDetail",
+      "stems": ["order_exAttr"],
+      "indexMin": 1,
+      "indexMax": 30,
+      "note": "Measured live: ORDER details carry their own generic slot family — the vendor slot doctrine applies to both detail families."
+    }
+  },
+  "coreTables": {
+    "part": {
+      "table": "DN_PDM_PartLibraryInfo",
+      "roles": {
+        "rowId": "ID",
+        "id": "OBJ_ID",
+        "code": "IdentityNo",
+        "name": "IdentityName",
+        "material": "Material",
+        "version": "SysVer"
+      },
+      "optionalRoles": {
+        "available": "isable"
+      },
+      "note": "Row identity in the legacy read model is the native code role (drawing number). The row-availability flag here is INVERTED vs the dictionaries' enabled flag (zero marks an available part) — never generalize one family's polarity to the other; see docs/development/takeover-beiliao-20260821."
+    },
+    "bomHead": {
+      "table": "DN_PDM_BomHeadInfo",
+      "roles": {
+        "rowId": "ID",
+        "parentPart": "part_id",
+        "bomId": "bom_id",
+        "version": "SysVer"
+      },
+      "optionalRoles": {
+        "active": "bom_able"
+      },
+      "note": "One BOM revision per parent part; see conventions.bomActiveFilter for the active-row rule and its drift caveat."
+    },
+    "bomDetail": {
+      "table": "DN_PDM_BomDetailsInfo",
+      "roles": {
+        "rowId": "ID",
+        "bomParent": "bom_pid",
+        "component": "part_id",
+        "sort": "sort_id"
+      },
+      "note": "Quantity and unit are deliberately NOT declared here: they live in dictionary-assigned generic slots — see semanticExpectations. Declaring a concrete slot would encode one customer's dictionary row, and the validator refuses it."
+    },
+    "pathInfo": {
+      "table": "DN_PDM_PathInfo",
+      "roles": {
+        "id": "OBJ_ID"
+      },
+      "optionalRoles": {
+        "parent": "Parent_OBJ_ID"
+      },
+      "note": "Hierarchy nodes; see conventions.hierarchy — a tree of id/parent-id rows, not a materialized path string."
+    },
+    "pathExAttr": {
+      "table": "DN_PDM_PathExAttrInfo",
+      "roles": {
+        "match": "FileCode",
+        "pathId": "Parent_OBJ_ID"
+      },
+      "note": "The project-number entry point: match the requested number on the match role, resolve the owning path node via the pathId role."
+    },
+    "orderHead": {
+      "table": "DN_PDM_OrderHeadInfo",
+      "roles": {
+        "id": "OBJ_ID",
+        "pathId": "path_id"
+      },
+      "note": "Orders hang off project path nodes and are the top-level read entry of the family's BOM expansion."
+    },
+    "orderDetail": {
+      "table": "DN_PDM_OrderDetailInfo",
+      "roles": {
+        "rowId": "ID",
+        "orderId": "order_id",
+        "component": "part_id",
+        "sort": "sort_id"
+      },
+      "note": "Measured live: there is NO native quantity column here — order-line quantity is dictionary-assigned (see semanticExpectations and order-exattr-labels), mirroring the BOM side. The in-repo synthetic fixture models a literal quantity column; that is a synthetic-only shape."
+    }
+  },
+  "joins": [
+    { "fromRole": "pathExAttr", "fromColumn": "Parent_OBJ_ID", "toRole": "pathInfo", "toColumn": "OBJ_ID" },
+    { "fromRole": "orderHead", "fromColumn": "path_id", "toRole": "pathInfo", "toColumn": "OBJ_ID" },
+    { "fromRole": "orderDetail", "fromColumn": "order_id", "toRole": "orderHead", "toColumn": "OBJ_ID" },
+    {
+      "fromRole": "orderDetail",
+      "fromColumn": "part_id",
+      "toRole": "part",
+      "toColumn": "OBJ_ID",
+      "note": "Measured live: shape-consistent. The test catalog's only order references parts absent from the library, so zero hits there is missing data, not a wrong key."
+    },
+    {
+      "fromRole": "bomHead",
+      "fromColumn": "part_id",
+      "toRole": "part",
+      "toColumn": "OBJ_ID",
+      "note": "Measured live: 142/143 head rows joined; the single orphan is data, not topology."
+    },
+    {
+      "fromRole": "bomDetail",
+      "fromColumn": "bom_pid",
+      "toRole": "bomHead",
+      "toColumn": "bom_id",
+      "note": "Measured live: 1319/1319 detail rows joined — full. The join key is bom_id (the business key), not the physical row id."
+    },
+    {
+      "fromRole": "bomDetail",
+      "fromColumn": "part_id",
+      "toRole": "part",
+      "toColumn": "OBJ_ID",
+      "note": "Measured live: 728/1319 detail rows joined; the shortfall is missing catalog data, not a wrong key."
+    }
+  ],
+  "dictionaries": [
+    {
+      "id": "bom-detail-exattr-labels",
+      "table": "DN_PM_BomExAttrInfo",
+      "labelsColumnsOfRole": "bomDetail",
+      "columnFamily": "bomDetailExAttr",
+      "mechanism": "rows-name-columns",
+      "enabledFlag": {
+        "columnCandidates": ["isable", "is_able"],
+        "polarity": "nonzero-means-enabled",
+        "note": "Polarity MEASURED on a live vendor test catalog by a cold probe read; corroborated structurally: companion columns (is_show / is_unique / sort_id) are populated exactly on the enabled rows. Distinct from the part table's row-availability flag, which is inverted — see coreTables.part.note."
+      },
+      "note": "One row per BOM-detail generic slot. Only enabled rows carry an assignment; the assignments are per-customer run-time reads (first-deployment record: docs/development/takeover-beiliao-20260821)."
+    },
+    {
+      "id": "bom-head-exattr-labels",
+      "table": "DN_PM_BomExAttrInfo_header",
+      "labelsColumnsOfRole": "bomHead",
+      "columnFamily": "bomHeadExAttr",
+      "mechanism": "rows-name-columns",
+      "enabledFlag": {
+        "columnCandidates": ["isable", "is_able"],
+        "polarity": "nonzero-means-enabled",
+        "note": "Same measured polarity as bom-detail-exattr-labels — see that entry's enabledFlag note."
+      },
+      "note": "Labels the BOM HEAD table's generic slots — measured live: the head table carries the same slot-stem family as details (see genericColumnFamilies.bomHeadExAttr)."
+    },
+    {
+      "id": "part-exattr-labels",
+      "table": "DN_PM_PartExAttrInfo",
+      "labelsColumnsOfRole": "part",
+      "columnFamily": "partExAttr",
+      "mechanism": "rows-name-columns",
+      "enabledFlag": {
+        "columnCandidates": ["isable", "is_able"],
+        "polarity": "nonzero-means-enabled",
+        "note": "Same measured polarity as bom-detail-exattr-labels — see that entry's enabledFlag note."
+      },
+      "note": "One row per part-side generic slot; enabled rows carry the customer's part-side field vocabulary, surfaced by the probe as decoded entries (see docs/development/takeover-beiliao-20260821)."
+    },
+    {
+      "id": "order-exattr-labels",
+      "table": "DN_PM_OrderExAttrInfo",
+      "labelsColumnsOfRole": "orderDetail",
+      "columnFamily": "orderDetailExAttr",
+      "mechanism": "rows-name-columns",
+      "enabledFlag": {
+        "columnCandidates": ["isable", "is_able"],
+        "polarity": "nonzero-means-enabled",
+        "note": "Same measured polarity as bom-detail-exattr-labels — see that entry's enabledFlag note."
+      },
+      "note": "Measured live: the vendor slot-dictionary doctrine applies to ORDER details exactly as to BOM details — this dictionary assigns per-customer meanings to the order detail slot family."
+    }
+  ],
+  "semanticExpectations": [
+    {
+      "semantic": "bom-line-quantity",
+      "locus": "dictionary-assigned-column",
+      "columnFamily": "bomDetailExAttr",
+      "dictionary": "bom-detail-exattr-labels",
+      "dictionaryTypeHint": "numeric",
+      "labelHint": "quantity",
+      "note": "The BOM line quantity lives in WHICHEVER slot of the family the customer's dictionary declares numeric with a quantity-like label. Reading that dictionary at run time is the discovery step; this entry only says where to look and how to rank."
+    },
+    {
+      "semantic": "bom-line-unit",
+      "locus": "dictionary-assigned-column",
+      "columnFamily": "bomDetailExAttr",
+      "dictionary": "bom-detail-exattr-labels",
+      "dictionaryTypeHint": "list",
+      "labelHint": "unit",
+      "valueSetTableFamily": {
+        "stems": ["DN_Test_BomParam"],
+        "indexMin": 1,
+        "indexMax": 30
+      },
+      "note": "A list-typed assignment points at one of the family's value-set tables (the structured family names that table family; the range is a discovery iteration bound). WHICH value-set table, and its vocabulary, are per-customer run-time reads."
+    },
+    {
+      "semantic": "erp-material-code",
+      "locus": "dictionary-assigned-column",
+      "columnFamily": "partExAttr",
+      "dictionary": "part-exattr-labels",
+      "labelHint": "material-code",
+      "note": "The ERP-facing material code is a part-side dictionary assignment at deployments that use one; the legacy read model identifies rows by the native code role (drawing number) instead."
+    },
+    {
+      "semantic": "order-line-quantity",
+      "locus": "dictionary-assigned-column",
+      "columnFamily": "orderDetailExAttr",
+      "dictionary": "order-exattr-labels",
+      "dictionaryTypeHint": "numeric",
+      "labelHint": "quantity",
+      "note": "Measured live: no native quantity column exists on order details — quantity is a dictionary-assigned slot, mirroring the BOM side. The synthetic fixture and read-plan defaults still model a literal column; reconcile there, not here."
+    },
+    {
+      "semantic": "project-number",
+      "locus": "native-column",
+      "role": "pathExAttr",
+      "roleColumn": "FileCode"
+    }
+  ],
+  "conventions": {
+    "objectIdColumn": "OBJ_ID",
+    "versionColumn": "SysVer",
+    "versionRule": "pin-per-level",
+    "sortColumn": "sort_id",
+    "hierarchy": {
+      "role": "pathInfo",
+      "idColumn": "OBJ_ID",
+      "parentIdColumn": "Parent_OBJ_ID",
+      "shape": "tree",
+      "note": "Path construction is recursive over id/parent-id — there is no materialized path column."
+    },
+    "bomActiveFilter": {
+      "role": "bomHead",
+      "column": "bom_able",
+      "rule": "null-or-one-means-active",
+      "presence": "verify-live-before-use",
+      "note": "The family's legacy read model treats null and one as active. The column has been seen ABSENT on one live catalog of this family while present in another deployment's read model (drift) — verify against the live catalog before generating any read that references it."
+    },
+    "note": "Every level of a BOM expansion resolves its component's version via the version column (pin-per-level) and orders lines by the sort column."
+  },
+  "notes": [
+    "Knowledge provenance, in-repo only: the read-plan defaults in plugins/plugin-integration-core/lib/stock-preparation-bom-expansion.cjs, the synthetic fixture scripts/ops/fixtures/stock-prep-synthetic-plm/schema.sql, and docs/development/takeover-beiliao-20260821.",
+    "DISCOVER, NOT DISCOVERED: this file encodes the family's mechanism only. Which concrete slot a customer assigned to a meaning is read from the customer's own dictionary tables at run time and drafted for a human to CONFIRM.",
+    "Consumed by scripts/ops/source-discovery-probe.mjs; validation contract lib/source-vendor-presets/preset-schema.cjs (validateVendorPreset / evaluatePresetMatch / selectVendorPreset / familyColumnMatcher).",
+    "Topology measured live by cold probe reads with join-count verification (see joins[].note). Each measured table carries a physical row id (ID) alongside its business keys (OBJ_ID / bom_id); part references join the part table's OBJ_ID, never its row id."
+  ]
+}

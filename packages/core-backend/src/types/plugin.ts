@@ -1183,6 +1183,23 @@ export interface PluginServices {
     >
   }
   /**
+   * E-learning L5 aggregate export materialization. Only plugin-elearning
+   * receives this port. Core owns export rows, suppression, byte storage,
+   * idempotency and cleanup; the plugin supplies only persisted job identity.
+   */
+  elearningAnalyticsExport?: {
+    materialize(
+      input: import('../services/elearning-analytics-export').MaterializeElearningAnalyticsExportInput,
+    ): Promise<
+      import('../services/elearning-analytics-export').MaterializeElearningAnalyticsExportResult
+    >
+    cleanup(
+      input: import('../services/elearning-analytics-export').MaterializeElearningAnalyticsExportInput,
+    ): Promise<
+      import('../services/elearning-analytics-export').CleanupElearningAnalyticsExportResult
+    >
+  }
+  /**
    * E-learning L2 pre-dispatch eligibility recheck. Core supplies this only to
    * plugin-elearning; the notification worker must call it immediately before
    * every effect-side dispatch.

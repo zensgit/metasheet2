@@ -6,6 +6,7 @@ const { startJobsWorker, stopJobsWorker, resolveDatabasePort, clearJobHandlers }
 const { registerAssignmentReminderProducer } = require('./lib/reminder-producer.cjs')
 const { registerExamExpirySettlement } = require('./lib/exam-expiry.cjs')
 const { registerStatsDailyProjector } = require('./lib/stats-daily-projector.cjs')
+const { registerAnalyticsExportWorker } = require('./lib/analytics-export-worker.cjs')
 const {
   startStatsDailyProducerRuntime,
   stopStatsDailyProducerRuntime,
@@ -51,6 +52,7 @@ async function activate(context) {
     registerAssignmentReminderProducer(context)
     registerExamExpirySettlement(context)
     registerStatsDailyProjector(context)
+    registerAnalyticsExportWorker(context)
     context.api.http.addRoute(CANONICAL_METHOD, CANONICAL_PATH, async (req, res) => {
       if (!isMasterEnabled()) {
         sendFeatureDisabled(res)
