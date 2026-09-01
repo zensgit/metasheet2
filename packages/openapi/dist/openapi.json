@@ -7452,7 +7452,8 @@
           "assessment",
           "incentive",
           "analytics",
-          "media"
+          "media",
+          "enrollment"
         ],
         "properties": {
           "content": {
@@ -7474,6 +7475,10 @@
           },
           "media": {
             "type": "boolean"
+          },
+          "enrollment": {
+            "type": "boolean",
+            "description": "Reported from ELEARNING_ENROLLMENT_ENABLED. Requires content and gates audit-only self-study registration."
           }
         }
       },
@@ -11044,6 +11049,70 @@
           }
         }
       },
+      "ElearningLearnerEnrollment": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "enrolledAt"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "enrolled"
+            ]
+          },
+          "enrolledAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ElearningCourseEnrollmentRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "requestId"
+        ],
+        "properties": {
+          "requestId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          }
+        }
+      },
+      "ElearningCourseEnrollmentResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "enrollmentId",
+          "courseId",
+          "courseVersionId",
+          "status",
+          "enrolledAt"
+        ],
+        "properties": {
+          "enrollmentId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "courseId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "courseVersionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "enrolled"
+            ]
+          },
+          "enrolledAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "ElearningLearnerAccess": {
         "type": "object",
         "additionalProperties": false,
@@ -11199,6 +11268,7 @@
           "title",
           "access",
           "assignment",
+          "enrollment",
           "video",
           "exam",
           "completed"
@@ -11221,6 +11291,14 @@
             "allOf": [
               {
                 "$ref": "#/components/schemas/ElearningLearnerAssignment"
+              }
+            ],
+            "nullable": true
+          },
+          "enrollment": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ElearningLearnerEnrollment"
               }
             ],
             "nullable": true
@@ -11341,6 +11419,7 @@
           "title",
           "access",
           "assignment",
+          "enrollment",
           "items",
           "completed"
         ],
@@ -11363,6 +11442,14 @@
             "allOf": [
               {
                 "$ref": "#/components/schemas/ElearningLearnerAssignment"
+              }
+            ],
+            "nullable": true
+          },
+          "enrollment": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ElearningLearnerEnrollment"
               }
             ],
             "nullable": true
@@ -26924,7 +27011,7 @@
       "get": {
         "operationId": "getElearningCapabilities",
         "summary": "Report e-learning master and capability flags",
-        "description": "Plugin route. JWT session is required by the global `/api` gate.\nReturns `{ enabled, capabilities }` with keys content, assignment,\nassessment, incentive, analytics, media. V0.1 readiness is enabled\nplus content/assignment/assessment/media only; incentive and analytics\nstay parked. Secondary master-off after registration is a values-free\n404 FEATURE_DISABLED (no flag names, no capabilities object).\n",
+        "description": "Plugin route. JWT session is required by the global `/api` gate.\nReturns `{ enabled, capabilities }` with keys content, assignment,\nassessment, incentive, analytics, media, enrollment. V0.1 readiness is enabled\nplus content/assignment/assessment/media only; incentive and analytics\nstay parked. Secondary master-off after registration is a values-free\n404 FEATURE_DISABLED (no flag names, no capabilities object).\n",
         "security": [
           {
             "bearerAuth": []
@@ -29946,6 +30033,74 @@
           },
           "500": {
             "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/me/courses/{courseId}/enrollments": {
+      "post": {
+        "operationId": "enrollMyElearningCourse",
+        "summary": "Register the current learner for one visible self-study course",
+        "description": "Requires master, content, and enrollment flags to each equal exact\n`true`, plus learner read RBAC. Organization and learner are derived\nfrom the authenticated session. Registration appends immutable audit\nevidence only: it never creates an assignment, grants access, assigns\na deadline, awards credit, or records completion. Current active\nvisibility is rechecked by the existing course-access authority.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "courseId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningCourseEnrollmentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "New registration, exact request replay, or existing course registration.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningCourseEnrollmentResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED, not_enrollable, or insufficient read permission",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Course not found or enrollment surface flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "already_assigned or requestId conflict",
             "$ref": "#/components/responses/ElearningError"
           },
           "503": {

@@ -4635,7 +4635,7 @@ components:
     ElearningCapabilityFlags:
       type: object
       additionalProperties: false
-      required: [content, assignment, assessment, incentive, analytics, media]
+      required: [content, assignment, assessment, incentive, analytics, media, enrollment]
       properties:
         content: { type: boolean }
         assignment: { type: boolean }
@@ -4647,6 +4647,9 @@ components:
           type: boolean
           description: Reported from ELEARNING_ANALYTICS_ENABLED. Parked for V0.1; not part of readiness.
         media: { type: boolean }
+        enrollment:
+          type: boolean
+          description: Reported from ELEARNING_ENROLLMENT_ENABLED. Requires content and gates audit-only self-study registration.
     ElearningCapabilities:
       type: object
       additionalProperties: false
@@ -6780,6 +6783,41 @@ components:
         assignedAt:
           type: string
           format: date-time
+    ElearningLearnerEnrollment:
+      type: object
+      additionalProperties: false
+      required: [status, enrolledAt]
+      properties:
+        status:
+          type: string
+          enum: [enrolled]
+        enrolledAt:
+          type: string
+          format: date-time
+    ElearningCourseEnrollmentRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId]
+      properties:
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+    ElearningCourseEnrollmentResult:
+      type: object
+      additionalProperties: false
+      required: [enrollmentId, courseId, courseVersionId, status, enrolledAt]
+      properties:
+        enrollmentId:
+          $ref: '#/components/schemas/ElearningUuid'
+        courseId:
+          $ref: '#/components/schemas/ElearningUuid'
+        courseVersionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        status:
+          type: string
+          enum: [enrolled]
+        enrolledAt:
+          type: string
+          format: date-time
     ElearningLearnerAccess:
       type: object
       additionalProperties: false
@@ -6863,7 +6901,7 @@ components:
     ElearningLearnerAssessmentCourse:
       type: object
       additionalProperties: false
-      required: [courseId, courseVersionId, title, access, assignment, video, exam, completed]
+      required: [courseId, courseVersionId, title, access, assignment, enrollment, video, exam, completed]
       properties:
         courseId:
           $ref: '#/components/schemas/ElearningUuid'
@@ -6877,6 +6915,10 @@ components:
         assignment:
           allOf:
             - $ref: '#/components/schemas/ElearningLearnerAssignment'
+          nullable: true
+        enrollment:
+          allOf:
+            - $ref: '#/components/schemas/ElearningLearnerEnrollment'
           nullable: true
         video:
           $ref: '#/components/schemas/ElearningLearnerVideo'
@@ -6936,7 +6978,7 @@ components:
     ElearningLearnerContentCourse:
       type: object
       additionalProperties: false
-      required: [courseId, courseVersionId, title, access, assignment, items, completed]
+      required: [courseId, courseVersionId, title, access, assignment, enrollment, items, completed]
       properties:
         courseId:
           $ref: '#/components/schemas/ElearningUuid'
@@ -6951,6 +6993,10 @@ components:
         assignment:
           allOf:
             - $ref: '#/components/schemas/ElearningLearnerAssignment'
+          nullable: true
+        enrollment:
+          allOf:
+            - $ref: '#/components/schemas/ElearningLearnerEnrollment'
           nullable: true
         items:
           type: array

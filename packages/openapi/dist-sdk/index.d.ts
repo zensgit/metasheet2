@@ -8375,7 +8375,7 @@ export interface paths {
          * Report e-learning master and capability flags
          * @description Plugin route. JWT session is required by the global `/api` gate.
          *     Returns `{ enabled, capabilities }` with keys content, assignment,
-         *     assessment, incentive, analytics, media. V0.1 readiness is enabled
+         *     assessment, incentive, analytics, media, enrollment. V0.1 readiness is enabled
          *     plus content/assignment/assessment/media only; incentive and analytics
          *     stay parked. Secondary master-off after registration is a values-free
          *     404 FEATURE_DISABLED (no flag names, no capabilities object).
@@ -9415,6 +9415,31 @@ export interface paths {
         get: operations["listMyElearningCourses"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/me/courses/{courseId}/enrollments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Register the current learner for one visible self-study course
+         * @description Requires master, content, and enrollment flags to each equal exact
+         *     `true`, plus learner read RBAC. Organization and learner are derived
+         *     from the authenticated session. Registration appends immutable audit
+         *     evidence only: it never creates an assignment, grants access, assigns
+         *     a deadline, awards credit, or records completion. Current active
+         *     visibility is rechecked by the existing course-access authority.
+         */
+        post: operations["enrollMyElearningCourse"];
         delete?: never;
         options?: never;
         head?: never;
@@ -18544,6 +18569,8 @@ export interface components {
             /** @description Reported from ELEARNING_ANALYTICS_ENABLED. Parked for V0.1; not part of readiness. */
             analytics: boolean;
             media: boolean;
+            /** @description Reported from ELEARNING_ENROLLMENT_ENABLED. Requires content and gates audit-only self-study registration. */
+            enrollment: boolean;
         };
         /**
          * @description Plugin GET /api/elearning/capabilities payload. V0.1 readiness is enabled
@@ -19392,6 +19419,24 @@ export interface components {
             /** Format: date-time */
             assignedAt: string;
         };
+        ElearningLearnerEnrollment: {
+            /** @enum {string} */
+            status: "enrolled";
+            /** Format: date-time */
+            enrolledAt: string;
+        };
+        ElearningCourseEnrollmentRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+        };
+        ElearningCourseEnrollmentResult: {
+            enrollmentId: components["schemas"]["ElearningUuid"];
+            courseId: components["schemas"]["ElearningUuid"];
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            /** @enum {string} */
+            status: "enrolled";
+            /** Format: date-time */
+            enrolledAt: string;
+        };
         ElearningLearnerAccess: {
             /** @enum {string} */
             kind: "assignment" | "visibility";
@@ -19435,6 +19480,7 @@ export interface components {
             title: string;
             access: components["schemas"]["ElearningLearnerAccess"];
             assignment: components["schemas"]["ElearningLearnerAssignment"] | null;
+            enrollment: components["schemas"]["ElearningLearnerEnrollment"] | null;
             video: components["schemas"]["ElearningLearnerVideo"];
             exam: components["schemas"]["ElearningLearnerExam"];
             completed: boolean;
@@ -19472,6 +19518,7 @@ export interface components {
             title: string;
             access: components["schemas"]["ElearningLearnerAccess"];
             assignment: components["schemas"]["ElearningLearnerAssignment"] | null;
+            enrollment: components["schemas"]["ElearningLearnerEnrollment"] | null;
             items: components["schemas"]["ElearningLearnerContentItem"][];
             completed: boolean;
         };
@@ -22619,6 +22666,44 @@ export interface operations {
             404: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    enrollMyElearningCourse: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                courseId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningCourseEnrollmentRequest"];
+            };
+        };
+        responses: {
+            /** @description New registration, exact request replay, or existing course registration. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCourseEnrollmentResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, not_enrollable, or insufficient read permission */
+            403: components["responses"]["ElearningError"];
+            /** @description Course not found or enrollment surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description already_assigned or requestId conflict */
+            409: components["responses"]["ElearningError"];
             /** @description unavailable */
             503: components["responses"]["ElearningError"];
         };

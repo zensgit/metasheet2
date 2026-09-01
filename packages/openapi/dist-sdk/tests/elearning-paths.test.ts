@@ -39,6 +39,8 @@ type AdminScopeReplaceResult = components['schemas']['ElearningAdminScopeReplace
 type ObjectAclReplaceRequest = components['schemas']['ElearningObjectAclReplaceRequest']
 type ObjectAclReplaceResult = components['schemas']['ElearningObjectAclReplaceResult']
 type LearnerList = components['schemas']['ElearningLearnerCourseList']
+type EnrollmentRequest = components['schemas']['ElearningCourseEnrollmentRequest']
+type EnrollmentResult = components['schemas']['ElearningCourseEnrollmentResult']
 type WatchState = components['schemas']['ElearningWatchState']
 type WatchChallenge = components['schemas']['ElearningWatchChallenge']
 type WatchChallengeAck = components['schemas']['ElearningWatchChallengeAckRequest']
@@ -252,6 +254,7 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<paths['/api/elearning/courses/{courseId}/collaborators/{userId}']['put']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/training-plans/{planId}/collaborators/{userId}']['put']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/me/courses']['get']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/me/courses/{courseId}/enrollments']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/watch/items/{itemId}/start']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/watch/sessions/{sessionId}/heartbeat']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/watch/sessions/{sessionId}/challenges/{challengeId}/ack']['post']>().not.toBeNever()
@@ -267,6 +270,12 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<
       paths['/api/elearning/capabilities']['get']['responses']['200']['content']['application/json']
     >().toEqualTypeOf<Capabilities>()
+    expectTypeOf<
+      paths['/api/elearning/me/courses/{courseId}/enrollments']['post']['requestBody']['content']['application/json']
+    >().toEqualTypeOf<EnrollmentRequest>()
+    expectTypeOf<
+      paths['/api/elearning/me/courses/{courseId}/enrollments']['post']['responses']['201']['content']['application/json']
+    >().toEqualTypeOf<EnrollmentResult>()
     expectTypeOf<
       paths['/api/elearning/admin/credit-titles']['get']['responses']['200']['content']['application/json']
     >().toEqualTypeOf<TitleSnapshot>()
@@ -1290,6 +1299,9 @@ describe('elearning V0.1 OpenAPI paths', () => {
       'ElearningLearnerContentCourse',
       'ElearningLearnerContentItemNotStarted',
       'ElearningLearnerContentItemCompleted',
+      'ElearningLearnerEnrollment',
+      'ElearningCourseEnrollmentRequest',
+      'ElearningCourseEnrollmentResult',
     ]) expect(schemas[name]?.additionalProperties).toBe(false)
 
     expect(schemas.ElearningContentArticleRevisionRequest?.required).toEqual([
@@ -1322,6 +1334,13 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expect(schemas.ElearningLearnerAssessmentCourse?.properties?.items).toBeUndefined()
     expect(schemas.ElearningLearnerContentCourse?.properties?.video).toBeUndefined()
     expect(schemas.ElearningLearnerContentCourse?.properties?.exam).toBeUndefined()
+    expect(schemas.ElearningCapabilityFlags?.required).toContain('enrollment')
+    expect(schemas.ElearningCourseEnrollmentRequest?.required).toEqual(['requestId'])
+    expect(schemas.ElearningCourseEnrollmentResult?.required).toEqual([
+      'enrollmentId', 'courseId', 'courseVersionId', 'status', 'enrolledAt',
+    ])
+    expect(schemas.ElearningLearnerAssessmentCourse?.required).toContain('enrollment')
+    expect(schemas.ElearningLearnerContentCourse?.required).toContain('enrollment')
   })
 
   it('keeps L3 assessment admin requests and responses closed', () => {
