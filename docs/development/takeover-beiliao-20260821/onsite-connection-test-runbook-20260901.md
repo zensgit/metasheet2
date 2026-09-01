@@ -178,14 +178,24 @@ WHERE project_code = '<体检2选出的项目>' GROUP BY bom_able;
 - **预期落表列**：`图号(componentCode←DrawingType)`、`名称(←TargetName)`、
   `材料(←Material)`、`总数量(totalQuantity 逐层累乘)`、`规格(ext_spec←Specification)`；
   快照行另含 `父组件图号(parentDrawingNo，批内父连接)`。
+  > **更新**：七个字段现已全部落到**持久化的快照行**上（父组件图号 / 父组件名称 /
+  > 当前组件图号 / 当前组件名称 / 规格 / 材料 / 总数量）。`规格` 不再只走 `ext_spec`：
+  > 读计划新增**声明式** `part.specField`（默认**不声明**，即绝不猜列），声明后落为
+  > 快照行的规范列 `spec`。物料匹配器的 `plmNameOf`/`plmSpecOf` 本就读
+  > `childName`/`spec`，只是从来没有数据；字段落地后名称+规格自动匹配随之生效，
+  > 映射表单的 PLM 侧（`plmMaterialName`/`plmSpec`）不再需要人工敲入。
 - **同项目两批次按创建小时区分**：同一 `project_code` 的两次拉取，若物料
   `Createtime` 落在不同**小时**，应落到两个不同批次（`snapshotBatchId` 携小时桶），
   快照行 id 不重叠。
-  > ⚠️ **注意（见排练报告 gap #3）**：**"按小时分批"的推导目前不在发货代码里**。
-  > 发货的 mapper 需要**调用方给定**的 `snapshotBatchId`；同项目多批次现由持久化层的
-  > 单调 `snapshotVersion` 区分。现场若要"精确到小时"，需在 `snapshotBatchId` 铸造处
-  > 加一段很薄的调用方推导（排练已证明其可行）。**现场演示时用
-  > `snapshotBatchId = <project_code>|<Createtime 到小时>` 手工铸造即可复现。**
+  > **更新（排练报告 gap #3 已关闭）**：按小时分批**已进发货代码**
+  > （`lib/stock-preparation-batch-identity.cjs`，由 table-action MVP-persist 路由在
+  > `snapshotBatchId` 铸造处调用），不再需要手工铸造。但它**按部署声明启用**：在读计划
+  > 上写 `batchIdentity: { mode: 'material_create_hour' }`，并声明 `part.createTimeField`
+  > （如 `Createtime`）。**不声明 = 保持今天的行为**（内容修订摘要 id + 持久化层单调
+  > `snapshotVersion`）——批次 id 同时是持久化幂等键、advisory lock 键和每个派生子 id 的
+  > 哈希输入，默认切换会改变"哪些拉取算同一批"，所以必须由部署选择。声明了但源里没有
+  > 可用 `Createtime` 时，**回落到今天的行为，并在响应的 `batchIdentity` 证据里以编码
+  > 原因明确报告降级**，绝不静默落错桶。
 - **排练对照**：批 #1 `...|2026-08-30T09` vs 批 #2 `...|2026-08-30T10`，0 行 id 重叠。
 
 ### 步骤 3 —（已存在的部分）人工填列 + 人列墙 + 导出
@@ -203,7 +213,10 @@ WHERE project_code = '<体检2选出的项目>' GROUP BY bom_able;
 ### 现场**不**演（净新、未接线——如实说明，勿假装）
 1. **多人审批 hand-off 链到 备料 的接线**——平台有审批运行时，但**未接**到备料流。
 2. **钉钉待办推送**——无连接器接线。
-3. **按创建小时分批的推导**——见步骤 2 注意；发货代码里没有，需小段调用方推导。
+3. ~~**按创建小时分批的推导**~~——**已进发货代码，现可演**（见步骤 2 更新）。前提是
+   现场读计划声明 `part.createTimeField` 与 `batchIdentity.mode = 'material_create_hour'`；
+   不声明则维持内容修订摘要 + 单调 `snapshotVersion` 的旧行为，源里缺 `Createtime` 时
+   带编码原因降级。**要如实说明的是它是"按声明启用"，不是默认。**
 
 ---
 

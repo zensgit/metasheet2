@@ -96,6 +96,7 @@ node __tests__/stock-preparation-synthetic-sql-fixture.test.cjs
 node __tests__/stock-preparation-mvp-generation.test.cjs
 node __tests__/stock-preparation-snapshot-diff.test.cjs
 node __tests__/stock-preparation-expansion-snapshot-mapper.test.cjs
+node __tests__/stock-preparation-batch-identity.test.cjs
 node __tests__/stock-preparation-readonly-intake.test.cjs
 node __tests__/stock-preparation-material-match.test.cjs
 node __tests__/stock-preparation-unit-rule-match.test.cjs

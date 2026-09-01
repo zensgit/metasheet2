@@ -150,6 +150,27 @@ function main() {
   assert.equal(bomLineFields.material.ownership, 'plm_system')
   assert.notEqual(bomLineFields.material.required, true, 'historical batches carry no material — never required')
 
+  // THE SEVEN FIELDS A 备料 PULL MUST CARRY (owner spec). Drawing numbers, versions and per-level
+  // quantity were already columns; `material` arrived with the fingerprint decomposition. These four
+  // close the gap. Each is added on EXACTLY the terms `material` was: plm_system-owned, OPTIONAL
+  // (batches persisted before this change carry no such column, so nothing may require one), and
+  // healed onto existing installs by the W2 repair verb rather than by a migration.
+  for (const [fieldId, type] of [
+    ['parentName', 'string'], // 父组件名称
+    ['childName', 'string'], // 当前组件/零件名称
+    ['spec', 'string'], // 规格
+    ['totalQuantity', 'number'], // 总数量
+  ]) {
+    assert.ok(bomLineFields[fieldId], `snapshot lines persist ${fieldId}`)
+    assert.equal(bomLineFields[fieldId].type, type, `${fieldId} is a ${type}`)
+    assert.equal(bomLineFields[fieldId].ownership, 'plm_system', `${fieldId} is PLM-owned, never human-filled`)
+    assert.notEqual(bomLineFields[fieldId].required, true, `historical batches carry no ${fieldId} — never required`)
+    assert.equal(bomLine.requiredFields.includes(fieldId), false, `${fieldId} is not in requiredFields`)
+    assert.equal(bomLine.keyFields.includes(fieldId), false, `${fieldId} is not part of the line identity`)
+  }
+  // 总数量 does not displace the per-level quantity — both are persisted.
+  assert.ok(bomLineFields.designQty, 'the per-level quantity column stays')
+
   const unitRule = byObjectId.plm_stock_preparation_unit_conversion_rule
   const unitFields = Object.fromEntries(unitRule.fields.map((field) => [field.id, field]))
   for (const id of ['plmUnit', 'erpIssueUnit', 'conversionFactor', 'scopeType', 'lossRate', 'roundingRule', 'minimumIssueQty']) {
