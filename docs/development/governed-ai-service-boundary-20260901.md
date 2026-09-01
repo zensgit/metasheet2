@@ -2,11 +2,33 @@
 
 _Design + consumer contract. 2026-09-01._
 
-The **one place** every AI/LLM call is mediated. All AI features — the 列映射副驾
-(schema-mapping copilot) and everything after it — call `GovernedAiService.suggest()`
-and nothing else reaches a provider. The boundary, not the caller, chooses the
-provider and enforces the platform's AI-safety rules in a single spot, then returns
-a provenance-stamped, advisory-only envelope.
+The governed AI surface: new features call `GovernedAiService.suggest()`, and the
+data-class routing policy governs **every** provider call in `packages/core-backend`.
+The boundary, not the caller, chooses the provider and enforces the platform's
+AI-safety rules in a single spot, then returns a provenance-stamped, advisory-only
+envelope.
+
+## Scope — stated exactly (no unscoped absolutes)
+
+There are exactly **two** provider-call sites in this package
+(`grep -rn '\.complete(' packages/core-backend/src`), and **both** pass through the
+same routing choke `authorizeAiRoute()` before calling a provider:
+
+| Call site | What it serves | Data class |
+| --- | --- | --- |
+| `GovernedAiService.suggestInner()` | new features (the copilot) | caller-declared; unknown ⇒ `business` |
+| `runShortcutCore()` (`services/ai-bulk-shared.ts`) | the **shipped** multitable-AI path — single-record shortcut, inline bulk-fill, async bulk-job worker | pinned `business` (not a parameter) |
+
+**Not claimed:** that future code cannot add a third call site — a new direct
+`AiProviderClient` user would bypass the gate, so
+`tests/unit/ai-provider-call-site-census.test.ts` pins this census and turns red if
+one appears. Nothing here governs AI calls made outside this package (a plugin or
+the frontend calling a provider itself).
+
+> An earlier revision of this document claimed the boundary was "the ONE place every
+> AI/LLM call is mediated". That was false: nothing called `suggest()`, and the live
+> bulk-fill path called the provider directly with customer record data. The wiring
+> above is the fix; this section is the scoped claim that replaces the absolute.
 
 ## Files
 
@@ -117,19 +139,44 @@ Three states, exactly like the write gate:
 - **Default-unset = local-only.** With no policy the configured provider keeps its
   built-in tier (anthropic / openai public endpoints = `cloud`), and no class is
   cloud-permitted → every request that would touch cloud is refused.
-- **Fail-closed URL downgrade.** A provider **declared `local`** whose effective
-  `MULTITABLE_AI_BASE_URL` is unset (→ the default public endpoint) or resolves to a
-  known public cloud host (`api.anthropic.com`, `api.openai.com`) is treated as `cloud`.
-  A mistaken `local` claim pointed at the public API can never launder business data
-  off-prem. "Local" means an explicitly-set, non-public, self-hosted endpoint.
+- **A `local` declaration is a claim, not evidence — the POSITIVE local check.** A
+  provider declared `local` is treated as `local` **only if** its effective
+  `MULTITABLE_AI_BASE_URL` host is provably non-public:
+  1. it is listed in the policy's `localHosts` on-prem allowlist (exact hosts, no
+     wildcards) — the escape hatch for a private endpoint behind a public DNS name,
+     since this module classifies the hostname string and never resolves DNS; or
+  2. it is `localhost` or carries a private suffix (`.local`, `.internal`, `.lan`,
+     `.home.arpa`, `.localhost`); or
+  3. it is a non-publicly-routable IP literal — delegated to `isBlockedEgressIp`
+     (`guards/egress-guard.ts`), which covers loopback / RFC1918 / link-local /
+     unique-local / CGNAT and decodes IPv4-mapped IPv6, NAT64, 6to4 and ISATAP.
+
+  Anything else — a public DNS name, a public IP, an unset base URL — is `cloud`.
+
+  > This replaces an earlier two-entry **denylist** (`api.anthropic.com`,
+  > `api.openai.com`). Adversarial review proved the hole by execution: a policy
+  > declaring `local` with `MULTITABLE_AI_BASE_URL=https://api.deepseek.com` was
+  > treated as `local` and POSTed BOM content to DeepSeek. A denylist of public AI
+  > hosts can never be complete; a positive test fails closed on anything unrecognised.
+  > A self-hosted vLLM/Ollama endpoint is a private address, so the intended
+  > deployment is unaffected.
 
 ### To enable each mode
 
 | Goal | Deployment does |
 | --- | --- |
-| Business AI (customer data) | Point `MULTITABLE_AI_BASE_URL` at the self-hosted endpoint **and** declare `activeProvider.tier = "local"`. |
+| Business AI (customer data) — incl. **bulk-fill / shortcuts** | Point `MULTITABLE_AI_BASE_URL` at the self-hosted endpoint (a private address, or a public name listed in `localHosts`) **and** declare `activeProvider.tier = "local"`. |
 | Non-sensitive AI on cloud | Leave the provider cloud; list `"non-sensitive"` in `cloudDataClasses`. |
 | Nothing (safe default) | Leave `MULTITABLE_AI_ROUTING_POLICY` unset. |
+
+**Operational note — this changes shipped behaviour.** The multitable-AI shortcut and
+bulk-fill features carry business-class record data. A deployment that has them
+enabled today and does *not* configure a compliant local routing policy will see them
+return the existing `blocked` outcome (503 `AI_BLOCKED`, a zero-token `blocked` ledger
+row, no charge, no outbound call) instead of silently sending record data to a cloud
+provider. That is the intended fail-closed posture; enabling business AI again is the
+first row of the table above. Test suites simulate a compliant deployment via
+`tests/utils/ai-routing-policy-fixture.ts`.
 
 ## Provider selection (pluggable)
 

@@ -17,10 +17,11 @@ import { afterAll, describe, expect, it } from 'vitest'
 import {
   AI_BUILTIN_PROVIDER_TIERS,
   AI_DATA_CLASSES,
-  AI_KNOWN_CLOUD_HOSTS,
   AI_ROUTING_POLICY_PATH_ENV,
   AiRoutingPolicyError,
+  authorizeAiRoute,
   decideAiRoute,
+  isProvablyLocalHost,
   loadAiRoutingPolicyFile,
   normalizeAiRoutingPolicy,
   normalizeDataClass,
@@ -119,10 +120,23 @@ describe('resolveActiveProviderTier — declared tier + fail-closed URL downgrad
     expect(resolveActiveProviderTier('openai', policy, {}).tier).toBe('cloud')
   })
 
-  it('policy declares LOCAL + a private, explicitly-set base URL → local', () => {
+  it('policy declares LOCAL + a PROVABLY PRIVATE base URL → local', () => {
     const policy = normalizeAiRoutingPolicy({ policyId: 'p', policyVersion: 1, activeProvider: { tier: 'local' } })
-    const res = resolveActiveProviderTier('openai', policy, { [AI_BASE_URL_ENV]: 'https://qwen.internal.corp:8000' })
-    expect(res).toEqual({ tier: 'local', downgraded: false })
+    for (const url of [
+      'http://10.1.2.3:8000', // RFC1918
+      'http://192.168.4.4:11434', // RFC1918 (ollama)
+      'http://172.16.9.9', // RFC1918
+      'http://127.0.0.1:8000', // loopback
+      'http://localhost:8000',
+      'http://[::1]:8000',
+      'https://qwen.internal:8000', // private suffix
+      'https://llm.corp.local', // private suffix
+    ]) {
+      expect(resolveActiveProviderTier('openai', policy, { [AI_BASE_URL_ENV]: url }), url).toEqual({
+        tier: 'local',
+        downgraded: false,
+      })
+    }
   })
 
   it('RED: policy declares LOCAL but base URL is UNSET → DOWNGRADED to cloud (default local-only, no leak)', () => {
@@ -130,11 +144,62 @@ describe('resolveActiveProviderTier — declared tier + fail-closed URL downgrad
     expect(resolveActiveProviderTier('openai', policy, {})).toEqual({ tier: 'cloud', downgraded: true })
   })
 
-  it('RED: policy declares LOCAL but base URL is a KNOWN PUBLIC CLOUD HOST → DOWNGRADED to cloud (fail-closed)', () => {
+  it('RED (the denylist hole): a LOCAL claim on ANY public host is cloud — not just the two once-denylisted names', () => {
     const policy = normalizeAiRoutingPolicy({ policyId: 'p', policyVersion: 1, activeProvider: { tier: 'local' } })
-    for (const host of AI_KNOWN_CLOUD_HOSTS) {
-      const res = resolveActiveProviderTier('openai', policy, { [AI_BASE_URL_ENV]: `https://${host}/v1` })
-      expect(res, host).toEqual({ tier: 'cloud', downgraded: true })
+    for (const host of [
+      'api.deepseek.com', // the PROVEN leak: passed the old two-entry denylist
+      'api.openai.com',
+      'api.anthropic.com',
+      'api.moonshot.cn',
+      'dashscope.aliyuncs.com',
+      'open.bigmodel.cn',
+      'generativelanguage.googleapis.com',
+      'example.com',
+      '8.8.8.8', // a PUBLIC ip literal is not local either
+    ]) {
+      expect(
+        resolveActiveProviderTier('openai', policy, { [AI_BASE_URL_ENV]: `https://${host}/v1` }),
+        host,
+      ).toEqual({ tier: 'cloud', downgraded: true })
+    }
+  })
+
+  it('the positive check is a POSITIVE test: an unrecognised host fails it', () => {
+    expect(isProvablyLocalHost('api.deepseek.com')).toBe(false)
+    expect(isProvablyLocalHost('some-new-ai-vendor.example')).toBe(false)
+    expect(isProvablyLocalHost(null)).toBe(false)
+    expect(isProvablyLocalHost('')).toBe(false)
+    expect(isProvablyLocalHost('10.0.0.1')).toBe(true)
+    expect(isProvablyLocalHost('vllm.internal')).toBe(true)
+  })
+
+  it('the on-prem allowlist is the ONLY way a public DNS name becomes local (and it is exact-match)', () => {
+    const policy = normalizeAiRoutingPolicy({
+      policyId: 'p',
+      policyVersion: 1,
+      activeProvider: { tier: 'local' },
+      localHosts: ['llm.corp.example.com'],
+    })
+    expect(
+      resolveActiveProviderTier('openai', policy, { [AI_BASE_URL_ENV]: 'https://llm.corp.example.com/v1' }),
+    ).toEqual({ tier: 'local', downgraded: false })
+    // a DIFFERENT public host is still cloud — listing one host does not widen
+    expect(
+      resolveActiveProviderTier('openai', policy, { [AI_BASE_URL_ENV]: 'https://api.deepseek.com/v1' }),
+    ).toEqual({ tier: 'cloud', downgraded: true })
+  })
+
+  it('localHosts refuses wildcards / schemes at load (no rebuilding the "anything is local" hole)', () => {
+    for (const bad of ['*', '*.corp.example.com', 'https://llm.corp.example.com', 'a/b', 'u@h']) {
+      expect(() =>
+        normalizeAiRoutingPolicy({
+          policyId: 'p',
+          policyVersion: 1,
+          activeProvider: { tier: 'local' },
+          localHosts: [bad],
+        }),
+        bad,
+      ).toThrow(AiRoutingPolicyError)
     }
   })
 })
@@ -230,6 +295,24 @@ describe('loadAiRoutingPolicyFile — three states (unset / usable / broken)', (
     expect(() => loadAiRoutingPolicyFile({ [AI_ROUTING_POLICY_PATH_ENV]: bad })).toThrow(AiRoutingPolicyError)
     const arr = policyFile([1, 2, 3])
     expect(() => loadAiRoutingPolicyFile({ [AI_ROUTING_POLICY_PATH_ENV]: arr })).toThrow(AiRoutingPolicyError)
+  })
+
+  it('authorizeAiRoute (THE shared choke) never throws — a broken file is a REFUSAL, not an exception', () => {
+    const missing = join(scratch, 'absent-policy.json')
+    const decision = authorizeAiRoute('openai', 'business', { [AI_ROUTING_POLICY_PATH_ENV]: missing })
+    expect(decision.allowed).toBe(false)
+    if (!decision.allowed) expect(decision.reason).toBe('routing_policy_invalid')
+  })
+
+  it('authorizeAiRoute refuses business on the default (no-policy) cloud posture, and serves it on a private local one', () => {
+    expect(authorizeAiRoute('openai', 'business', {}).allowed).toBe(false)
+    const path = policyFile({ policyId: 'p', policyVersion: 1, activeProvider: { tier: 'local' } })
+    const ok = authorizeAiRoute('openai', 'business', {
+      [AI_ROUTING_POLICY_PATH_ENV]: path,
+      [AI_BASE_URL_ENV]: 'http://10.0.0.9:8000',
+    })
+    expect(ok.allowed).toBe(true)
+    if (ok.allowed) expect(ok.tier).toBe('local')
   })
 
   it('POISON CONFIG on disk: business in cloudDataClasses THROWS at load', () => {

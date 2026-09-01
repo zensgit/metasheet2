@@ -118,7 +118,7 @@ describe('business data NEVER reaches a cloud provider (end-to-end RED)', () => 
     const svc = serviceWith(fetchSpy)
     const res = await svc.suggest(
       businessReq,
-      readyEnv({ [AI_ROUTING_POLICY_PATH_ENV]: path, [AI_BASE_URL_ENV]: 'https://qwen.internal.corp:8000' }),
+      readyEnv({ [AI_ROUTING_POLICY_PATH_ENV]: path, [AI_BASE_URL_ENV]: 'http://10.1.2.3:8000' }),
     )
     expect(res.available).toBe(true)
     if (res.available) {
@@ -128,7 +128,29 @@ describe('business data NEVER reaches a cloud provider (end-to-end RED)', () => 
     // the call went to the self-hosted host, not a cloud endpoint
     expect(fetchSpy).toHaveBeenCalledTimes(1)
     const [url] = fetchSpy.mock.calls[0] as unknown as [string]
-    expect(String(url)).toContain('qwen.internal.corp')
+    expect(String(url)).toContain('10.1.2.3')
+  })
+
+  it('RED (proven leak): a `local`-declared provider on api.deepseek.com REFUSES business data, and does NOT POST it', async () => {
+    // Adversarial review executed exactly this and got available=true,
+    // providerTier='local', with the BOM grounding POSTed to api.deepseek.com —
+    // because the old guard was a two-entry denylist. The positive local check
+    // closes it: a public host is cloud whatever the policy declares.
+    const path = policyFile({ policyId: 'p', policyVersion: 1, activeProvider: { tier: 'local' } })
+    const fetchSpy = vi.fn(async () => openaiOk('LEAKED'))
+    const svc = serviceWith(fetchSpy)
+    const res = await svc.suggest(
+      {
+        feature: 'copilot',
+        dataClass: 'business',
+        prompt: 'map columns',
+        grounding: [{ id: 'bom:1', label: 'BOM', content: 'ACME-4471 qty 120 supplier Contoso' }],
+      },
+      readyEnv({ [AI_ROUTING_POLICY_PATH_ENV]: path, [AI_BASE_URL_ENV]: 'https://api.deepseek.com' }),
+    )
+    expect(res.available).toBe(false)
+    if (!res.available) expect(res.reason).toBe('business_data_cloud_forbidden')
+    expect(fetchSpy).not.toHaveBeenCalled()
   })
 })
 
@@ -218,6 +240,18 @@ describe('fail-open — the boundary is NEVER a hard dependency', () => {
     const res = await svc.suggest(businessReq, readyEnv({ [AI_ROUTING_POLICY_PATH_ENV]: path, [AI_BASE_URL_ENV]: 'https://m.internal' }))
     expect(res.available).toBe(false)
     if (!res.available) expect(res.reason).toBe('internal_error')
+  })
+
+  it('RED (P2): suggest(null) / suggest(undefined) / a malformed request RETURN, never reject', async () => {
+    const fetchSpy = vi.fn(async () => openaiOk('x'))
+    const svc = serviceWith(fetchSpy)
+    // The normalize used to run OUTSIDE the try, so these rejected instead of
+    // returning — breaking the never-throws invariant the boundary sells.
+    for (const bad of [null, undefined, 'a string', 42, {}, { feature: 'f' }]) {
+      const res = await svc.suggest(bad as never, readyEnv())
+      expect(res.available, JSON.stringify(bad)).toBe(false)
+    }
+    expect(fetchSpy).not.toHaveBeenCalled()
   })
 
   it('a provider_error result → unavailable(provider_error), still no throw', async () => {

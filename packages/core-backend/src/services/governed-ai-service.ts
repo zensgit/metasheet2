@@ -1,11 +1,32 @@
 /**
- * GOVERNED AI SERVICE BOUNDARY — the ONE place every AI/LLM call is mediated.
+ * GOVERNED AI SERVICE BOUNDARY — the consumer-facing AI surface for new features.
  *
- * Every AI feature (the 列映射副驾 schema-mapping copilot, bulk-fill helpers,
- * future assistants) calls `GovernedAiService.suggest()` and NOTHING ELSE reaches
- * a provider. The boundary — not the caller — decides the provider, enforces the
- * platform's AI-safety rules in one spot, and hands back a provenance-stamped,
- * advisory-only envelope.
+ * SCOPE — stated exactly, because the earlier revision of this header made an
+ * unscoped absolute ("the ONE place every AI/LLM call is mediated … NOTHING ELSE
+ * reaches a provider") that the code did not back: at the time NOTHING called
+ * `suggest()`, and the shipped bulk-fill path called the provider directly with
+ * customer record data. Repo doctrine: an absolute claim must be exhaustively
+ * falsified or scoped. The true, verifiable claim is:
+ *
+ *   Within `packages/core-backend/src`, there are exactly TWO provider-call sites
+ *   (`grep -rn '\.complete(' packages/core-backend/src`):
+ *     1. `GovernedAiService.suggestInner()` — this file, for NEW features; and
+ *     2. `runShortcutCore()` in services/ai-bulk-shared.ts — the SHIPPED
+ *        multitable-AI path (single-record shortcut, inline bulk-fill, and the
+ *        async bulk-job worker all funnel through it).
+ *   BOTH pass through the SAME routing choke, `authorizeAiRoute()` in
+ *   ai-routing-policy.ts, before any provider call. So the data-class routing
+ *   policy governs every provider call in this package.
+ *
+ *   NOT claimed: that no future code can add a third call site (a new direct
+ *   `AiProviderClient` user would bypass this — a contract test in
+ *   tests/unit/ai-provider-call-site-census.test.ts pins the census so adding one
+ *   turns the suite red); and nothing here governs AI calls made outside this
+ *   package (e.g. a plugin or the frontend calling a provider itself).
+ *
+ * The boundary — not the caller — decides the provider, enforces the platform's
+ * AI-safety rules in one spot, and hands back a provenance-stamped, advisory-only
+ * envelope.
  *
  * ═══════════════════════════════════════════════════════════════════════════════
  * CONSUMER INTERFACE (what a feature builds against — pinned by contract tests)
@@ -28,15 +49,20 @@
  * THE SEVEN GUARANTEES this boundary makes, and how:
  *
  *  1. DATA-CLASS ROUTING (ai-routing-policy.ts). Every request is tagged with a
- *     sensitivity class; the boundary routes per the DEPLOY-configured policy.
- *     BUSINESS data NEVER reaches a cloud provider (structural, first-branch
- *     refusal); default-unset = local-only / most-restrictive; fail-closed on a
- *     broken policy file (→ unavailable, data never sent).
+ *     sensitivity class; routing follows the DEPLOY-configured policy. Business
+ *     data does not reach a cloud provider: the refusal is the first branch on the
+ *     cloud arm, `business` is unexpressible in the policy's cloud allowlist, and
+ *     a provider may only be treated as `local` if its host PROVES it is private
+ *     (a declaration alone is not evidence). Default-unset = local-only /
+ *     most-restrictive; a broken policy file fails closed (data never sent).
  *
  *  2. PLUGGABLE PROVIDERS. The boundary reuses the existing `AiProviderClient`
- *     (anthropic + openai-compatible), which already supports a self-hosted
- *     OpenAI-compatible endpoint (Qwen / DeepSeek) via MULTITABLE_AI_BASE_URL. The
- *     provider is chosen by config + policy, NOT by the caller.
+ *     (anthropic + openai-compatible). A self-hosted OpenAI-compatible server
+ *     (vLLM / Ollama serving Qwen or DeepSeek weights) is selected via
+ *     MULTITABLE_AI_BASE_URL — and counts as `local` only because such an endpoint
+ *     sits on a PRIVATE address. Note the vendors' PUBLIC APIs (api.deepseek.com
+ *     and friends) are cloud, and the positive local check treats them as such.
+ *     The provider is chosen by config + policy, NOT by the caller.
  *
  *  3. ADVISORY-ONLY. `suggest()` is the ONLY method. It returns a SUGGESTION; it
  *     has no path to commit authoritative data or trigger a side-effect. Every
@@ -71,10 +97,8 @@ import { redactString } from '../multitable/automation-log-redact'
 import { AiProviderClient } from './ai-provider-client'
 import { resolveAiProviderReadiness, type AiReadinessEnv } from './ai-provider-readiness'
 import {
-  decideAiRoute,
-  loadAiRoutingPolicyFile,
+  authorizeAiRoute,
   normalizeDataClass,
-  resolveActiveProviderTier,
   type AiDataClass,
   type AiProviderTier,
 } from './ai-routing-policy'
@@ -254,20 +278,33 @@ export class GovernedAiService {
    * an unexpected fault is caught and returned as `internal_error`.
    */
   async suggest(request: AiAdvisoryRequest, env: AiReadinessEnv = process.env): Promise<AiAdvisoryResult> {
-    const dataClass = normalizeDataClass(request.dataClass)
+    // EVERYTHING is inside the try — including the data-class normalize. It used
+    // to sit above it, so `suggest(null)` / `suggest(undefined)` REJECTED instead
+    // of returning a result, breaking the never-throws invariant this boundary
+    // sells (adversarial-review P2). No data could leak that way (it faults before
+    // routing), but a caller could mishandle the rejection into a hard dependency —
+    // which is exactly what fail-open exists to prevent.
+    let dataClass: AiDataClass = 'business'
     try {
+      if (!request || typeof request !== 'object') {
+        return this.unavailable('internal_error', 'Malformed AI request.', null)
+      }
+      dataClass = normalizeDataClass(request.dataClass)
+      if (typeof request.prompt !== 'string' || request.prompt.length === 0) {
+        return this.finishUnavailable(request, dataClass, null, 'internal_error', 'Malformed AI request.')
+      }
       return await this.suggestInner(request, dataClass, env)
     } catch (err) {
       // Fail-open keystone: the boundary is NEVER a hard dependency. Any unexpected
       // throw degrades to "AI absent", not a 500 for the caller.
       console.error('[governed-ai] suggest() faulted; failing open (AI absent):', err)
       this.meterRecord({
-        feature: request.feature,
+        feature: typeof request?.feature === 'string' ? request.feature : 'unknown',
         dataClass,
         providerTier: null,
         outcome: 'unavailable',
         reason: 'internal_error',
-        meterKey: request.meterKey,
+        ...(typeof request?.meterKey === 'string' ? { meterKey: request.meterKey } : {}),
         usage: null,
       })
       return this.unavailable('internal_error', 'AI is temporarily unavailable.', null)
@@ -309,42 +346,24 @@ export class GovernedAiService {
     const provider = readiness.provider
     const model = readiness.model
 
-    // (2) Routing policy — fail-closed on a broken file, fail-open for the platform.
-    let policy
-    try {
-      policy = loadAiRoutingPolicyFile(env)
-    } catch (err) {
-      // A broken deploy-file must NEVER route data anywhere. Report unavailable;
-      // no provider is called. (The throw itself is values-free.)
-      console.error('[governed-ai] routing policy invalid; refusing to route (fail-closed):', (err as Error)?.name)
-      return this.finishUnavailable(
-        request,
-        dataClass,
-        null,
-        'routing_policy_invalid',
-        'AI routing policy is misconfigured; AI is unavailable.',
-      )
+    // (2) THE ROUTING GATE — policy load + tier resolution + decision, via the
+    // SHARED choke (`authorizeAiRoute`) that the live shortcut/bulk-fill path also
+    // calls. One implementation, so the two consumers can never drift apart. It
+    // never throws: a broken deploy-file comes back as `routing_policy_invalid`,
+    // fail-closed (no provider called).
+    const routing = authorizeAiRoute(provider, dataClass, env)
+    // `in`-guard (not `!routing.allowed`): non-strict tsconfig, no boolean-discriminant narrowing.
+    if ('reason' in routing) {
+      // Tier is unknown/irrelevant on a refusal — a refused request has no serving
+      // tier, so provenance stays null rather than asserting one.
+      return this.finishUnavailable(request, dataClass, null, routing.reason, routing.message)
     }
-
-    // (3) Resolve the effective provider tier (declared + fail-closed URL downgrade).
-    const resolvedTier = resolveActiveProviderTier(provider, policy, env)
-
-    // (4) THE DECISION. Business + cloud → refuse here, before any provider call.
-    const route = decideAiRoute(dataClass, resolvedTier.tier, policy ? policy.cloudDataClasses : [])
     const provenanceBase: AiProvenance = {
       aiGenerated: true,
       advisory: true,
-      providerTier: resolvedTier.tier,
+      providerTier: routing.tier,
       provider,
       model,
-    }
-    // `in`-guard (not `!route.allowed`): non-strict tsconfig, no boolean-discriminant narrowing.
-    if ('reason' in route) {
-      const message =
-        route.reason === 'business_data_cloud_forbidden'
-          ? 'Business-class data is not routed to a cloud AI provider.'
-          : 'This data class is not authorized for a cloud AI provider.'
-      return this.finishUnavailable(request, dataClass, provenanceBase, route.reason, message)
     }
 
     // (5) Assemble the grounded prompt + unsafe-input scan (secret-shaped → not sent).
@@ -377,7 +396,7 @@ export class GovernedAiService {
     const provenance: AiProvenance = {
       aiGenerated: true,
       advisory: true,
-      providerTier: resolvedTier.tier,
+      providerTier: routing.tier,
       ...(result.provider ? { provider: result.provider } : { provider }),
       ...(result.model ? { model: result.model } : { model }),
     }
@@ -385,7 +404,7 @@ export class GovernedAiService {
     this.meterRecord({
       feature: request.feature,
       dataClass,
-      providerTier: resolvedTier.tier,
+      providerTier: routing.tier,
       outcome: 'served',
       meterKey: request.meterKey,
       usage,

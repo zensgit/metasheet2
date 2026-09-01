@@ -18,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express, { type Express } from 'express'
 import request from 'supertest'
 import { usePinnedServer } from '../utils/pinned-server'
+import { AI_ROUTING_FIXTURE_ENV_KEYS, armLocalAiRoutingPolicy } from '../utils/ai-routing-policy-fixture'
 
 const SHEET_ID = 'sheet_ai_suggest'
 const FLD_PRICE = 'fld_price'
@@ -41,6 +42,8 @@ const AI_ENV_KEYS = [
   'MULTITABLE_AI_TENANT_BURST_RPM',
   'MULTITABLE_AI_ACCOUNT_DAILY_USD_CAP',
   'MULTITABLE_AI_CONFIRM_LIVE_REQUESTS',
+  // The shipped path is now data-class governed; simulate a COMPLIANT deployment.
+  ...AI_ROUTING_FIXTURE_ENV_KEYS,
 ] as const
 
 type QueryResult = { rows: any[]; rowCount?: number }
@@ -137,6 +140,7 @@ describe('M4 suggest-formula routes (mock pool)', () => {
     process.env.MULTITABLE_AI_API_KEY = API_KEY_SENTINEL
     process.env.MULTITABLE_AI_MODEL = 'claude-sonnet-4-6'
     process.env.MULTITABLE_AI_CONFIRM_LIVE_REQUESTS = '1'
+    armLocalAiRoutingPolicy()
 
     // suggest-formula is canManageFields-gated, which now needs `multitable:manage-schema`.
     currentUser = { id: 'u_ai_author', roles: ['member'], perms: ['multitable:write', 'multitable:manage-schema'] }

@@ -34,17 +34,30 @@
  * file must never silently degrade to a widening). A provider's tier is a
  * DECLARED deployment fact, not sniffed from a URL — the write-gate's ruling was
  * that URL matching gives false assurance (a proxy hop / CNAME / IP literal
- * defeats it). The one URL fact we DO enforce is a fail-closed downgrade: a
- * provider declared `local` whose effective base URL is a KNOWN PUBLIC CLOUD HOST
- * (or is unset, so the default public endpoint) is treated as `cloud`, so a
- * mistaken `local` declaration pointed at api.openai.com can never launder
- * business data to the public cloud.
+ * defeats it). But a DECLARATION ALONE IS NOT ENOUGH, and this is the correction
+ * that adversarial review forced: an earlier revision downgraded a `local` claim
+ * only when its host matched a two-entry DENYLIST of known cloud hosts, so a
+ * provider declared `local` pointed at `api.deepseek.com` (or any other public
+ * endpoint outside the two names) stayed `local` and business data was POSTed to
+ * it. A denylist of public AI hosts can never be complete.
+ *
+ * So the tier check is now POSITIVE: a provider may be treated as `local` ONLY IF
+ * its effective base-URL host is PROVABLY non-public — loopback, an RFC1918 /
+ * link-local / unique-local / CGNAT address, a `.local`/`.internal`/`.lan`/
+ * `.home.arpa` name, or a host the deployment explicitly listed in the policy's
+ * `localHosts` on-prem allowlist. ANYTHING ELSE IS `cloud`, whatever the policy
+ * declares. A self-hosted vLLM/Ollama endpoint is exactly a private address, so
+ * the intended deployment is unaffected. The IP classification REUSES the
+ * hardened `isBlockedEgressIp` from guards/egress-guard.ts (ipaddr.js), which
+ * already resolves IPv4-mapped IPv6, NAT64, 6to4 and ISATAP smuggling — a
+ * hand-rolled private-range regex here would be a strictly worse copy.
  *
  * VALUES-FREE. A refusal / an invalid-policy error carries a FIXED code, a coarse
  * reason token, the ENV KEY, and booleans/counts — never a base URL, host, key,
  * prompt, record value, or a raw fs/JSON error string.
  */
 
+import { isBlockedEgressIp } from '../guards/egress-guard'
 import { AI_BASE_URL_ENV, type AiProvider } from './ai-provider-readiness'
 
 /** Deploy-file path env (server-side JSON). Unset → most-restrictive default. */
@@ -75,11 +88,10 @@ export const AI_BUILTIN_PROVIDER_TIERS: Record<AiProvider, AiProviderTier> = {
 }
 
 /**
- * Hosts that are DEFINITIONALLY public cloud. A provider DECLARED `local` but
- * whose effective base URL resolves to one of these is downgraded to `cloud`
- * (fail-closed) — "local" must mean a non-public, self-hosted endpoint.
+ * DNS suffixes that are definitionally non-public. Everything else must prove
+ * itself private by IP class or by the policy's explicit `localHosts` allowlist.
  */
-export const AI_KNOWN_CLOUD_HOSTS = ['api.anthropic.com', 'api.openai.com'] as const
+export const AI_PRIVATE_HOST_SUFFIXES = ['.local', '.internal', '.lan', '.home.arpa', '.localhost'] as const
 
 /** The class that may NEVER appear in a policy's cloud-permitted set. */
 const CLOUD_FORBIDDEN_CLASS: AiDataClass = 'business'
@@ -89,10 +101,18 @@ const CLOUD_FORBIDDEN_CLASS: AiDataClass = 'business'
 export interface NormalizedAiRoutingPolicy {
   policyId: string
   policyVersion: number
-  /** Operator-declared tier of the configured provider (before the URL downgrade). */
+  /** Operator-declared tier of the configured provider (a CLAIM — the positive check still decides). */
   declaredProviderTier: AiProviderTier
   /** Classes a CLOUD-tier provider may serve. `business` can never be a member. */
   cloudDataClasses: readonly AiDataClass[]
+  /**
+   * Explicit on-prem host allowlist: hosts the deployment certifies are its own
+   * self-hosted infrastructure. The escape hatch for an on-prem endpoint behind a
+   * PUBLIC DNS NAME that resolves to a private address (e.g. `llm.corp.example.com`)
+   * — which the IP/suffix checks cannot see, because this module classifies the
+   * hostname STRING and never resolves DNS. Exact hosts only; no wildcards.
+   */
+  localHosts: readonly string[]
 }
 
 export class AiRoutingPolicyError extends Error {
@@ -117,7 +137,7 @@ function fail(reason: string, message: string): never {
   throw new AiRoutingPolicyError(reason, message)
 }
 
-const POLICY_KEYS = ['policyId', 'policyVersion', 'activeProvider', 'cloudDataClasses'] as const
+const POLICY_KEYS = ['policyId', 'policyVersion', 'activeProvider', 'cloudDataClasses', 'localHosts'] as const
 const ACTIVE_PROVIDER_KEYS = ['tier'] as const
 
 function assertClosedKeySet(obj: Record<string, unknown>, allowed: readonly string[], label: string): void {
@@ -179,11 +199,30 @@ export function normalizeAiRoutingPolicy(raw: unknown): NormalizedAiRoutingPolic
     }
   }
 
+  // Optional on-prem allowlist. Exact hosts only — a wildcard here would rebuild
+  // the "anything can claim local" hole the positive check exists to close.
+  const localHosts: string[] = []
+  if (raw.localHosts !== undefined && raw.localHosts !== null) {
+    if (!Array.isArray(raw.localHosts)) fail('invalid_local_hosts', 'localHosts must be an array of hosts')
+    for (const entry of raw.localHosts) {
+      if (typeof entry !== 'string' || !entry.trim()) {
+        fail('invalid_local_hosts', 'localHosts entries must be non-empty host strings')
+      }
+      const host = entry.trim().toLowerCase().replace(/\.$/, '')
+      if (host.includes('*') || host.includes('/') || host.includes('://') || host.includes('@')) {
+        fail('local_host_wildcard', 'localHosts must name exact hosts; no wildcard, scheme, path or userinfo')
+      }
+      if (localHosts.includes(host)) fail('duplicate_local_host', 'localHosts must not repeat a host')
+      localHosts.push(host)
+    }
+  }
+
   return Object.freeze({
     policyId,
     policyVersion: raw.policyVersion as number,
     declaredProviderTier: tier as AiProviderTier,
     cloudDataClasses: Object.freeze(cloudDataClasses),
+    localHosts: Object.freeze(localHosts),
   })
 }
 
@@ -224,7 +263,7 @@ export function loadAiRoutingPolicyFile(env: AiReadEnv = process.env): Normalize
   return normalizeAiRoutingPolicy(parsed)
 }
 
-// ─── Provider-tier resolution (declared tier + fail-closed URL downgrade) ────
+// ─── Provider-tier resolution (declared tier + POSITIVE local proof) ────────
 
 function effectiveBaseUrlHost(env: AiReadEnv): string | null {
   const raw = typeof env[AI_BASE_URL_ENV] === 'string' ? env[AI_BASE_URL_ENV]!.trim() : ''
@@ -236,9 +275,48 @@ function effectiveBaseUrlHost(env: AiReadEnv): string | null {
   }
 }
 
+/**
+ * POSITIVE local proof — the correction for the denylist hole. A host counts as
+ * local ONLY IF it proves itself non-public:
+ *
+ *   1. the deployment listed it in the policy's `localHosts` on-prem allowlist
+ *      (the escape hatch for a private endpoint behind a public DNS name), OR
+ *   2. it is `localhost` or carries a definitionally-private DNS suffix, OR
+ *   3. it is an IP LITERAL that is not publicly routable — delegated to
+ *      `isBlockedEgressIp` (guards/egress-guard.ts), which returns true for
+ *      loopback / RFC1918 / link-local / unique-local / CGNAT and also decodes
+ *      IPv4-mapped IPv6, NAT64, 6to4 and ISATAP smuggling.
+ *
+ * ANY other host — a public DNS name like `api.deepseek.com`, a public IP — is
+ * NOT local. This is a positive test: an unrecognised host fails it, so a new
+ * public AI vendor can never slip through the way a denylist let DeepSeek through.
+ */
+export function isProvablyLocalHost(host: string | null, localHosts: readonly string[] = []): boolean {
+  if (!host) return false
+  const h = host.trim().toLowerCase().replace(/\.$/, '')
+  if (!h) return false
+  // 1. explicit, reviewed on-prem allowlist
+  if (localHosts.includes(h)) return true
+  // 2. definitionally-private names
+  if (h === 'localhost') return true
+  for (const suffix of AI_PRIVATE_HOST_SUFFIXES) {
+    if (h.endsWith(suffix)) return true
+  }
+  // 3. non-publicly-routable IP literals (reuses the hardened egress classifier).
+  //    isBlockedEgressIp returns FALSE for a non-IP hostname, so a public DNS
+  //    name falls through to the refusal below — exactly the intended default.
+  try {
+    if (isBlockedEgressIp(h)) return true
+  } catch {
+    // A classifier fault must never be read as "local".
+    return false
+  }
+  return false
+}
+
 export interface ResolvedProviderTier {
   tier: AiProviderTier
-  /** True when a declared `local` provider was forced to `cloud` by the URL guard. */
+  /** True when a declared `local` provider failed the positive local proof and was forced to `cloud`. */
   downgraded: boolean
 }
 
@@ -247,10 +325,9 @@ export interface ResolvedProviderTier {
  *
  *   - No policy (null) OR policy declares `cloud`  -> the provider's BUILT-IN tier
  *     (anthropic / openai = cloud). Most-restrictive default.
- *   - Policy declares `local`  -> `local` ONLY IF the effective base URL is a
- *     non-public, explicitly-set host; otherwise DOWNGRADED to `cloud`
- *     (fail-closed) so a `local` claim pointed at (or defaulting to) a public
- *     cloud host can never carry business data off-prem.
+ *   - Policy declares `local`  -> `local` ONLY IF the explicitly-set base-URL host
+ *     PASSES the positive local proof; otherwise DOWNGRADED to `cloud`. A
+ *     declaration is a claim, not evidence.
  */
 export function resolveActiveProviderTier(
   provider: AiProvider,
@@ -261,9 +338,10 @@ export function resolveActiveProviderTier(
   if (!policy || policy.declaredProviderTier !== 'local') {
     return { tier: builtin, downgraded: false }
   }
-  // Declared local: require an explicit, non-public base URL.
+  // Declared local: the host must PROVE it. Unset base URL → the default public
+  // endpoint → not local.
   const host = effectiveBaseUrlHost(env)
-  if (host === null || (AI_KNOWN_CLOUD_HOSTS as readonly string[]).includes(host)) {
+  if (!isProvablyLocalHost(host, policy.localHosts)) {
     return { tier: 'cloud', downgraded: true }
   }
   return { tier: 'local', downgraded: false }
@@ -317,4 +395,62 @@ export function decideAiRoute(
 /** Normalize a caller-supplied (possibly omitted) data class to the most-restrictive certain value. */
 export function normalizeDataClass(value: AiDataClass | string | undefined | null): AiDataClass {
   return value === 'non-sensitive' ? 'non-sensitive' : 'business'
+}
+
+// ─── THE CHOKE every provider call passes through ───────────────────────────
+
+export type AiRouteAuthorizationReason = AiRouteRefusalReason | 'routing_policy_invalid'
+
+export type AiRouteAuthorization =
+  | { allowed: true; tier: AiProviderTier }
+  | { allowed: false; reason: AiRouteAuthorizationReason; message: string }
+
+/**
+ * Load the policy, resolve the effective tier, and decide — the WHOLE routing
+ * gate as ONE call, so there is exactly one implementation of "may this data
+ * class reach this provider?" and no consumer can assemble a weaker variant.
+ *
+ * BOTH consumers use this:
+ *   - `GovernedAiService.suggest()` (the boundary, for new features);
+ *   - `runShortcutCore()` in ai-bulk-shared.ts — the shipped multitable-AI
+ *     shortcut / bulk-fill / async-worker path, whose prompts carry customer
+ *     record content and which previously called the provider with NO data-class
+ *     gate at all (the adversarial-review P0).
+ *
+ * NEVER THROWS. A broken deploy-file is caught and returned as a REFUSAL
+ * (`routing_policy_invalid`) — fail-closed for routing (no provider is called),
+ * while leaving the caller free to degrade gracefully. The thrown error's message
+ * is values-free but is deliberately NOT propagated to the caller's message here;
+ * a fixed string keeps refusals uniform.
+ */
+export function authorizeAiRoute(
+  provider: AiProvider,
+  dataClass: AiDataClass | string,
+  env: AiReadEnv = process.env,
+): AiRouteAuthorization {
+  let policy: NormalizedAiRoutingPolicy | null
+  try {
+    policy = loadAiRoutingPolicyFile(env)
+  } catch {
+    return {
+      allowed: false,
+      reason: 'routing_policy_invalid',
+      message: 'AI routing policy is misconfigured; the request was not sent to any provider.',
+    }
+  }
+
+  const tier = resolveActiveProviderTier(provider, policy, env).tier
+  const decision = decideAiRoute(dataClass, tier, policy ? policy.cloudDataClasses : [])
+  // `in`-guard (not `!decision.allowed`): non-strict tsconfig, no boolean-discriminant narrowing.
+  if ('reason' in decision) {
+    return {
+      allowed: false,
+      reason: decision.reason,
+      message:
+        decision.reason === 'business_data_cloud_forbidden'
+          ? 'Business-class data is not routed to a cloud AI provider; the request was not sent.'
+          : 'This data class is not authorized for a cloud AI provider; the request was not sent.',
+    }
+  }
+  return { allowed: true, tier: decision.tier }
 }
