@@ -73,6 +73,7 @@ plugins/plugin-integration-core/package.json text eol=lf
 pnpm-lock.yaml text eol=lf
 plugins/plugin-integration-core/index.cjs text eol=lf
 plugins/plugin-integration-core/lib/http-routes.cjs text eol=lf
+plugins/plugin-integration-core/scripts/test-chain.cjs text eol=lf
 plugins/plugin-integration-core/scripts/provision-stock-preparation-sqlserver-sealed-snapshot.cjs text eol=lf
 scripts/ops/stock-preparation-s6a-onprem-acceptance.ps1 text eol=lf
 docs/operations/stock-preparation-s6a-sqlserver-onprem-runbook-20260731.md text eol=lf

@@ -33,6 +33,7 @@
     "test:stock-preparation-generation-runtime": "node __tests__/stock-preparation-generation-runtime.test.cjs",
     "test:stock-preparation-audit-store": "node __tests__/stock-preparation-audit-store.test.cjs",
     "test:stock-preparation-audit-migration": "node __tests__/stock-preparation-audit-migration.test.cjs",
+    "test:stock-preparation-source-binding": "node __tests__/stock-preparation-source-binding.test.cjs && node __tests__/stock-preparation-source-binding-routes.test.cjs",
     "test:stock-preparation-readonly-intake": "node __tests__/stock-preparation-readonly-intake.test.cjs",
     "test:stock-preparation-material-match": "node __tests__/stock-preparation-material-match.test.cjs",
     "test:stock-preparation-unit-rule-match": "node __tests__/stock-preparation-unit-rule-match.test.cjs",
