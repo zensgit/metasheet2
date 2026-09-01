@@ -2,7 +2,7 @@
 
 > 状态：DRAFT / HOLD — TESTED INTEGRATION CANDIDATE，非发布声明。
 >
-> 产品父节点：#5426 `ded7a34bdf3736e45219592d20dec29c0986975f`。
+> 产品父节点：#5426 `65efb1cc26637ec493bd2fa2fe45d571dc8a5290`。
 >
 > 闭环证明代码节点：`60fb5887543dc7302642b5c716e1bd969304ef2c`。
 >
