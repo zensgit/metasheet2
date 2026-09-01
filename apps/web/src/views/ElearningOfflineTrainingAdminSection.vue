@@ -74,6 +74,13 @@
           {{ elearningLabel('offlineAdmin.issueCheckOut', isZh) }}
         </button>
       </div>
+      <img
+        v-if="qrImageUrl"
+        class="offline-admin__qr-symbol"
+        data-testid="elearning-offline-qr-symbol"
+        :src="qrImageUrl"
+        alt="Attendance QR code"
+      >
       <label v-if="qr">
         <span>{{ elearningLabel('offlineAdmin.qrToken', isZh) }}</span>
         <textarea
@@ -85,6 +92,7 @@
       </label>
       <p v-if="qr" data-testid="elearning-offline-qr-expiry">
         {{ elearningLabel('offlineAdmin.qrExpires', isZh) }}: {{ qr.expiresAt }}
+        · {{ remainingSeconds }}s
       </p>
     </section>
 
@@ -100,10 +108,12 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
+import { qrSvgFromText } from '../multitable/utils/qr-code'
 import { ElearningApiError } from '../services/elearning'
 import {
+  createElearningOfflineAttendanceLink,
   createElearningOfflineRequestIds,
   issueElearningOfflineQr,
   publishElearningOfflineTraining,
@@ -145,6 +155,46 @@ const qr = ref<ElearningOfflineQrResult | null>(null)
 const busy = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
+const remainingSeconds = ref(0)
+const qrAction = ref<ElearningOfflineAttendanceAction | null>(null)
+let rotationTimer: ReturnType<typeof setTimeout> | undefined
+let countdownTimer: ReturnType<typeof setInterval> | undefined
+
+const qrLink = computed(() => (
+  qr.value
+    ? createElearningOfflineAttendanceLink(qr.value.token, window.location.origin)
+    : null
+))
+const qrSvg = computed(() => (
+  qrLink.value ? qrSvgFromText(qrLink.value, { ecc: 'quartile', size: 240 }) : null
+))
+const qrImageUrl = computed(() => (
+  qrSvg.value ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(qrSvg.value)}` : null
+))
+
+function clearQrTimers(): void {
+  if (rotationTimer) clearTimeout(rotationTimer)
+  if (countdownTimer) clearInterval(countdownTimer)
+  rotationTimer = undefined
+  countdownTimer = undefined
+  remainingSeconds.value = 0
+}
+
+function updateRemaining(expiresAt: string): void {
+  remainingSeconds.value = Math.max(0, Math.ceil((Date.parse(expiresAt) - Date.now()) / 1000))
+}
+
+function scheduleRotation(result: ElearningOfflineQrResult): void {
+  clearQrTimers()
+  const token = result.token
+  updateRemaining(result.expiresAt)
+  countdownTimer = setInterval(() => updateRemaining(result.expiresAt), 250)
+  rotationTimer = setTimeout(() => {
+    if (qr.value?.token !== token || qrAction.value !== result.action) return
+    qr.value = null
+    void issue(result.action, true)
+  }, Math.max(0, Date.parse(result.expiresAt) - Date.now()))
+}
 
 function errorText(error: unknown): string {
   if (error instanceof ElearningApiError) {
@@ -209,6 +259,8 @@ async function publish(): Promise<void> {
       requestId: requestIds.forPublish(command),
     })
     requestIds.settlePublish(command)
+    clearQrTimers()
+    qrAction.value = null
     qr.value = null
     statusTone.value = 'info'
     status.value = elearningLabel('offlineAdmin.published', isZh.value)
@@ -220,29 +272,41 @@ async function publish(): Promise<void> {
   }
 }
 
-async function issue(action: ElearningOfflineAttendanceAction): Promise<void> {
+async function issue(action: ElearningOfflineAttendanceAction, automatic = false): Promise<void> {
   const current = published.value
   const target = current?.targets[0]
-  if (!current || !target || busy.value) return
+  if (!current || !target) return
+  if (busy.value) {
+    if (automatic) rotationTimer = setTimeout(() => void issue(action, true), 250)
+    return
+  }
   busy.value = true
   status.value = ''
   try {
-    qr.value = await issueElearningOfflineQr({
+    const result = await issueElearningOfflineQr({
       requestId: requestIds.forQr(current.trainingId, target.targetId, action),
       trainingId: current.trainingId,
       targetId: target.targetId,
       action,
     })
     requestIds.settleQr(current.trainingId, target.targetId, action)
+    qr.value = result
+    qrAction.value = action
+    scheduleRotation(result)
     statusTone.value = 'info'
     status.value = elearningLabel('offlineAdmin.qrIssued', isZh.value)
   } catch (error) {
     statusTone.value = 'error'
     status.value = errorText(error)
+    if (automatic && qrAction.value === action) {
+      rotationTimer = setTimeout(() => void issue(action, true), 1_000)
+    }
   } finally {
     busy.value = false
   }
 }
+
+onBeforeUnmount(clearQrTimers)
 </script>
 
 <style scoped>
@@ -268,5 +332,6 @@ async function issue(action: ElearningOfflineAttendanceAction): Promise<void> {
 .offline-admin__qr button,
 .offline-admin__qr textarea { min-height: 36px; }
 .offline-admin__qr-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.offline-admin__qr-symbol { width: 240px; max-width: 100%; background: #fff; }
 .offline-admin__error { color: #b42318; }
 </style>

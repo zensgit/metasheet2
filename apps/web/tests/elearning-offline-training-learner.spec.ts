@@ -27,6 +27,7 @@ const TARGET = '33333333-3333-4333-8333-333333333333'
 const EVENT = '44444444-4444-4444-8444-444444444444'
 const REQUEST_A = '55555555-5555-4555-8555-555555555555'
 const REQUEST_B = '66666666-6666-4666-8666-666666666666'
+const TOKEN = 'A'.repeat(43)
 
 async function flush(cycles = 10): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
@@ -75,6 +76,7 @@ describe('ElearningOfflineTrainingLearnerSection', () => {
   let uuid: ReturnType<typeof vi.spyOn> | null = null
 
   beforeEach(() => {
+    window.history.replaceState(null, '', '/learn')
     useLocale().setLocale('en')
     h.list.mockReset()
     h.record.mockReset()
@@ -117,11 +119,11 @@ describe('ElearningOfflineTrainingLearnerSection', () => {
     expect(view.textContent).toContain('Safety training')
     expect(view.textContent).toContain('Not checked in')
     h.list.mockResolvedValueOnce({ trainings: [training('checked_in')] })
-    input(view, 'signed-token')
+    input(view, TOKEN)
     ;(view.querySelector('[data-testid="elearning-offline-attend"]') as HTMLButtonElement).click()
     await flush()
 
-    expect(h.record).toHaveBeenCalledWith({ requestId: REQUEST_A, token: 'signed-token' })
+    expect(h.record).toHaveBeenCalledWith({ requestId: REQUEST_A, token: TOKEN })
     expect(h.list).toHaveBeenCalledTimes(2)
     expect(view.textContent).toContain('Checked in')
     expect((view.querySelector('[data-testid="elearning-offline-attendance-token"]') as HTMLTextAreaElement).value)
@@ -131,7 +133,7 @@ describe('ElearningOfflineTrainingLearnerSection', () => {
   it('reuses an id after failure and rotates only after a successful attendance record', async () => {
     const view = await mount()
     h.record.mockRejectedValueOnce(new ElearningApiError('network_error', 0))
-    input(view, 'signed-token')
+    input(view, TOKEN)
     const button = view.querySelector('[data-testid="elearning-offline-attend"]') as HTMLButtonElement
     button.click()
     await flush()
@@ -140,10 +142,21 @@ describe('ElearningOfflineTrainingLearnerSection', () => {
     expect(h.record.mock.calls[0]?.[0].requestId).toBe(REQUEST_A)
     expect(h.record.mock.calls[1]?.[0].requestId).toBe(REQUEST_A)
 
-    input(view, 'signed-token')
+    input(view, TOKEN)
     button.click()
     await flush()
     expect(h.record.mock.calls[2]?.[0].requestId).toBe(REQUEST_B)
+  })
+
+  it('consumes a scanned fragment token once and records attendance automatically', async () => {
+    window.history.replaceState(null, '', `/learn#offline-attendance=${TOKEN}`)
+    const view = await mount()
+
+    expect(h.record).toHaveBeenCalledWith({ requestId: REQUEST_A, token: TOKEN })
+    expect(h.list).toHaveBeenCalledTimes(2)
+    expect(window.location.hash).toBe('')
+    expect((view.querySelector('[data-testid="elearning-offline-attendance-token"]') as HTMLTextAreaElement).value)
+      .toBe('')
   })
 
   it('fails locally when the token is empty', async () => {

@@ -280,13 +280,55 @@ describe.sequential('e-learning offline training PostgreSQL authority', () => {
     `)
     await migrate(offlineUp)
 
+    await firstPool.query(
+      'ALTER TABLE elearning_offline_attendance_requests DROP CONSTRAINT elearning_offline_attendance_requests_event_fk',
+    )
+    await firstPool.query(`
+      ALTER TABLE elearning_offline_attendance_requests
+      ADD CONSTRAINT elearning_offline_attendance_requests_event_fk
+      FOREIGN KEY (org_id, event_id)
+      REFERENCES elearning_offline_attendance_events(org_id, id)
+      ON DELETE RESTRICT
+    `)
+    await expect(migrate(offlineUp)).rejects.toThrow('constraint set')
+    await firstPool.query(
+      'ALTER TABLE elearning_offline_attendance_requests DROP CONSTRAINT elearning_offline_attendance_requests_event_fk',
+    )
+    await firstPool.query(`
+      ALTER TABLE elearning_offline_attendance_requests
+      ADD CONSTRAINT elearning_offline_attendance_requests_event_fk
+      FOREIGN KEY (org_id, user_id, event_id)
+      REFERENCES elearning_offline_attendance_events(org_id, user_id, id)
+      ON DELETE RESTRICT
+    `)
+    await migrate(offlineUp)
+
     await firstPool.query('DROP INDEX elearning_offline_challenges_active_uniq')
-    await expect(migrate(offlineUp)).rejects.toThrow('active challenge index')
+    await expect(migrate(offlineUp)).rejects.toThrow('index set')
     await firstPool.query(`
       CREATE UNIQUE INDEX elearning_offline_challenges_active_uniq
       ON elearning_offline_qr_challenges(org_id, revision_id, target_id, action)
       WHERE superseded_at IS NULL
     `)
+    await migrate(offlineUp)
+
+    await firstPool.query(`
+      CREATE INDEX elearning_offline_attendance_requests_extra_idx
+      ON elearning_offline_attendance_requests(created_at)
+    `)
+    await expect(migrate(offlineUp)).rejects.toThrow('index set')
+    await firstPool.query('DROP INDEX elearning_offline_attendance_requests_extra_idx')
+    await migrate(offlineUp)
+
+    await firstPool.query(`
+      CREATE TRIGGER trg_elearning_offline_attendance_requests_extra
+      BEFORE INSERT ON elearning_offline_attendance_requests
+      FOR EACH ROW EXECUTE FUNCTION elearning_offline_reject_change()
+    `)
+    await expect(migrate(offlineUp)).rejects.toThrow('trigger set')
+    await firstPool.query(
+      'DROP TRIGGER trg_elearning_offline_attendance_requests_extra ON elearning_offline_attendance_requests',
+    )
     await migrate(offlineUp)
 
     await firstPool.query('DROP TRIGGER trg_elearning_offline_publish_authority ON elearning_offline_trainings')
@@ -370,10 +412,7 @@ describe.sequential('e-learning offline training PostgreSQL authority', () => {
       orgId: ORG,
       actorId: ADMIN,
       command: { requestId, trainingId: training.trainingId, targetId, action: 'check_in' },
-    }, ENV)).rejects.toSatisfy((error: unknown) => {
-      expectCode(error, 'conflict')
-      return true
-    })
+    }, ENV)).resolves.toEqual({ ...first, duplicate: true })
     await expect(recordElearningOfflineAttendance(runtimeDb(firstPool), {
       orgId: ORG,
       userId: MEMBER,
@@ -535,6 +574,12 @@ describe.sequential('e-learning offline training PostgreSQL authority', () => {
       [ORG, training.revisionId, targetId, MEMBER],
     )
     expect(count.rows[0]?.count).toBe(1)
+    await expect(firstPool.query(
+      `INSERT INTO elearning_offline_attendance_requests
+         (org_id, user_id, request_id, request_hash, request_hash_version, event_id)
+       VALUES ($1, $2, $3, $4, 1, $5)`,
+      [ORG, OTHER_MEMBER, randomUUID(), 'a'.repeat(64), first.eventId],
+    )).rejects.toMatchObject({ code: '23503' })
   })
 
   it('fails closed across organizations, inactive membership and nonempty rollback', async () => {

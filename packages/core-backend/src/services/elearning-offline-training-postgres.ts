@@ -1,15 +1,15 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 
 import {
   ELEARNING_OFFLINE_QR_TTL_SECONDS,
   ELEARNING_OFFLINE_REQUEST_HASH_VERSION,
   ElearningOfflineError,
+  createElearningOfflineQrToken,
+  digestElearningOfflineQrToken,
   hashElearningOfflineRequest,
   normalizeIssueElearningOfflineQr,
   normalizePublishElearningOfflineTraining,
   normalizeRecordElearningOfflineAttendance,
-  signElearningOfflineQr,
-  verifyElearningOfflineQr,
   type ElearningOfflineAttendanceAction,
   type ElearningOfflineAttendanceMode,
 } from './elearning-offline-training'
@@ -348,33 +348,25 @@ async function loadQrResult(
 ): Promise<ElearningOfflineQrResult> {
   const result = await tx.query(
     `SELECT id::text AS challenge_id, training_id::text, revision_id::text,
-            target_id::text, action, issued_at, expires_at, superseded_at
+            target_id::text, action, issued_at, expires_at
      FROM elearning_offline_qr_challenges
      WHERE org_id = $1 AND id = $2::uuid`,
     [orgId, challengeId],
   )
   if (result.rows.length !== 1) fail('unavailable')
   const row = result.rows[0]!
-  if (row.superseded_at !== null && row.superseded_at !== undefined) fail('conflict')
   const issuedAt = instant(row, 'issued_at')
   const expiresAt = instant(row, 'expires_at')
-  const claims = {
-    version: 'elearning.offline.qr.v1' as const,
-    challengeId,
-    orgId,
-    trainingId: value(row, 'training_id'),
-    revisionId: value(row, 'revision_id'),
-    targetId: value(row, 'target_id'),
-    action: attendanceAction(row),
-    issuedAt,
-    expiresAt,
-  }
+  const trainingId = value(row, 'training_id')
+  const revisionId = value(row, 'revision_id')
+  const targetId = value(row, 'target_id')
+  const action = attendanceAction(row)
   return {
-    trainingId: claims.trainingId,
-    revisionId: claims.revisionId,
-    targetId: claims.targetId,
-    action: claims.action,
-    token: signElearningOfflineQr(claims, qrSecret(env)),
+    trainingId,
+    revisionId,
+    targetId,
+    action,
+    token: createElearningOfflineQrToken(challengeId, qrSecret(env)),
     issuedAt,
     expiresAt,
     duplicate,
@@ -426,19 +418,8 @@ export async function issueElearningOfflineQr(
     const expiresAt = new Date(Date.parse(issuedAt) + ELEARNING_OFFLINE_QR_TTL_SECONDS * 1000)
       .toISOString()
     const challengeId = randomUUID()
-    const claims = {
-      version: 'elearning.offline.qr.v1' as const,
-      challengeId,
-      orgId: input.orgId,
-      trainingId: command.trainingId,
-      revisionId,
-      targetId: command.targetId,
-      action: command.action,
-      issuedAt,
-      expiresAt,
-    }
-    const token = signElearningOfflineQr(claims, qrSecret(env))
-    const tokenDigest = createHash('sha256').update(token).digest('hex')
+    const token = createElearningOfflineQrToken(challengeId, qrSecret(env))
+    const tokenDigest = digestElearningOfflineQrToken(token)
     await tx.query(
       `UPDATE elearning_offline_qr_challenges
        SET superseded_at = $5::timestamptz
@@ -463,13 +444,13 @@ export async function issueElearningOfflineQr(
         challengeId],
     )
     return {
-      trainingId: claims.trainingId,
-      revisionId: claims.revisionId,
-      targetId: claims.targetId,
-      action: claims.action,
+      trainingId: command.trainingId,
+      revisionId,
+      targetId: command.targetId,
+      action: command.action,
       token,
-      issuedAt: claims.issuedAt,
-      expiresAt: claims.expiresAt,
+      issuedAt,
+      expiresAt,
       duplicate: false,
     }
   })
@@ -525,7 +506,7 @@ export async function recordElearningOfflineAttendance(
 ): Promise<ElearningOfflineAttendanceResult> {
   const command = normalizeRecordElearningOfflineAttendance(input.command)
   qrSecret(env)
-  const tokenDigest = createHash('sha256').update(command.token).digest('hex')
+  const tokenDigest = digestElearningOfflineQrToken(command.token)
   const requestHash = hashElearningOfflineRequest('attendance', { tokenDigest })
   return db.transaction(async (tx) => {
     await lockRequest(tx, 'elearning-offline-attendance', `${input.orgId}:${input.userId}:${command.requestId}`)
@@ -543,25 +524,26 @@ export async function recordElearningOfflineAttendance(
       return loadAttendanceResult(tx, input.orgId, input.userId, value(row, 'event_id'), true)
     }
     const now = await databaseNow(tx)
-    const claims = verifyElearningOfflineQr(command.token, qrSecret(env), now)
-    if (claims.orgId !== input.orgId) fail('invalid_token')
     const challenge = await tx.query(
-      `SELECT 1 AS ok
+      `SELECT challenge.id::text AS challenge_id, challenge.training_id::text,
+              challenge.revision_id::text,
+              challenge.target_id::text, challenge.action
        FROM elearning_offline_qr_challenges challenge
        JOIN elearning_offline_trainings training
          ON training.org_id = challenge.org_id AND training.id = challenge.training_id
         AND training.active_revision_id = challenge.revision_id
-       WHERE challenge.org_id = $1 AND challenge.id = $2::uuid
-         AND challenge.training_id = $3::uuid AND challenge.revision_id = $4::uuid
-         AND challenge.target_id = $5::uuid AND challenge.action = $6
-         AND challenge.token_digest = $7 AND challenge.superseded_at IS NULL
-         AND challenge.issued_at <= $8::timestamptz AND challenge.expires_at > $8::timestamptz
+       WHERE challenge.org_id = $1 AND challenge.token_digest = $2
+         AND challenge.superseded_at IS NULL
+         AND challenge.issued_at <= $3::timestamptz AND challenge.expires_at > $3::timestamptz
          AND training.status = 'active'
        FOR SHARE OF challenge, training`,
-      [input.orgId, claims.challengeId, claims.trainingId, claims.revisionId,
-        claims.targetId, claims.action, tokenDigest, now],
+      [input.orgId, tokenDigest, now],
     )
     if (challenge.rows.length !== 1) fail('invalid_token')
+    const challengeRow = challenge.rows[0]!
+    const revisionId = value(challengeRow, 'revision_id')
+    const targetId = value(challengeRow, 'target_id')
+    const challengeAction = attendanceAction(challengeRow)
     const membership = await tx.query(
       `SELECT target.check_in_opens_at, target.check_in_closes_at,
               target.check_out_opens_at, target.check_out_closes_at
@@ -572,21 +554,21 @@ export async function recordElearningOfflineAttendance(
        WHERE member.org_id = $1 AND member.revision_id = $2::uuid
          AND member.user_id = $3 AND target.id = $4::uuid
        FOR SHARE OF member, target`,
-      [input.orgId, claims.revisionId, input.userId, claims.targetId],
+      [input.orgId, revisionId, input.userId, targetId],
     )
     if (membership.rows.length !== 1) fail('forbidden')
     const target = membership.rows[0]!
-    const opensAt = instant(target, claims.action === 'check_in' ? 'check_in_opens_at' : 'check_out_opens_at')
-    const closesAt = instant(target, claims.action === 'check_in' ? 'check_in_closes_at' : 'check_out_closes_at')
+    const opensAt = instant(target, challengeAction === 'check_in' ? 'check_in_opens_at' : 'check_out_opens_at')
+    const closesAt = instant(target, challengeAction === 'check_in' ? 'check_in_closes_at' : 'check_out_closes_at')
     if (Date.parse(now) < Date.parse(opensAt)) fail('window_not_open')
     if (Date.parse(now) >= Date.parse(closesAt)) fail('window_closed')
-    if (claims.action === 'check_out') {
+    if (challengeAction === 'check_out') {
       const checkedIn = await tx.query(
         `SELECT 1 AS ok FROM elearning_offline_attendance_events
          WHERE org_id = $1 AND revision_id = $2::uuid AND target_id = $3::uuid
            AND user_id = $4 AND action = 'check_in'
          FOR SHARE`,
-        [input.orgId, claims.revisionId, claims.targetId, input.userId],
+        [input.orgId, revisionId, targetId, input.userId],
       )
       if (checkedIn.rows.length !== 1) fail('check_in_required')
     }
@@ -598,8 +580,8 @@ export async function recordElearningOfflineAttendance(
        VALUES ($1::uuid, $2, $3::uuid, $4::uuid, $5::uuid, $6, $7, $8::uuid, $9::timestamptz)
        ON CONFLICT (org_id, revision_id, target_id, user_id, action) DO NOTHING
        RETURNING id::text AS event_id`,
-      [eventId, input.orgId, claims.trainingId, claims.revisionId, claims.targetId,
-        input.userId, claims.action, claims.challengeId, now],
+      [eventId, input.orgId, value(challengeRow, 'training_id'), revisionId, targetId,
+        input.userId, challengeAction, value(challengeRow, 'challenge_id'), now],
     )
     const effectiveEventId = inserted.rows.length === 1
       ? value(inserted.rows[0]!, 'event_id')
@@ -607,7 +589,7 @@ export async function recordElearningOfflineAttendance(
         `SELECT id::text AS event_id FROM elearning_offline_attendance_events
          WHERE org_id = $1 AND revision_id = $2::uuid AND target_id = $3::uuid
            AND user_id = $4 AND action = $5`,
-        [input.orgId, claims.revisionId, claims.targetId, input.userId, claims.action],
+        [input.orgId, revisionId, targetId, input.userId, challengeAction],
       )).rows[0] ?? {}, 'event_id')
     await tx.query(
       `INSERT INTO elearning_offline_attendance_requests

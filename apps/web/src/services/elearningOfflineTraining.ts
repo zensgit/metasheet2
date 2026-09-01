@@ -4,6 +4,8 @@ import { ElearningApiError } from './elearning'
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const ERROR_CODE_RE = /^[A-Za-z][A-Za-z0-9_]{0,62}$/
 const CANONICAL_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+const OPAQUE_QR_RE = /^[A-Za-z0-9_-]{43}$/
+const OFFLINE_ATTENDANCE_HASH_PREFIX = '#offline-attendance='
 const FORBIDDEN_RESPONSE_KEYS = new Set([
   'actorId',
   'challengeId',
@@ -152,6 +154,11 @@ function canonicalInstant(value: unknown, status: number): string {
   return value
 }
 
+function opaqueQrToken(value: unknown, status: number): string {
+  if (typeof value !== 'string' || !OPAQUE_QR_RE.test(value)) failShape(status)
+  return value
+}
+
 function nullableInstant(value: unknown, status: number): string | null {
   return value === null ? null : canonicalInstant(value, status)
 }
@@ -271,6 +278,28 @@ function newRequestId(): string {
   return crypto.randomUUID()
 }
 
+export function createElearningOfflineAttendanceLink(tokenInput: unknown, originInput: unknown): string {
+  const token = opaqueQrToken(tokenInput, 0)
+  if (typeof originInput !== 'string') failShape(0)
+  let url: URL
+  try {
+    url = new URL('/learn', originInput)
+  } catch {
+    failShape(0)
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') failShape(0)
+  url.hash = `${OFFLINE_ATTENDANCE_HASH_PREFIX.slice(1)}${token}`
+  return url.toString()
+}
+
+export function readElearningOfflineAttendanceToken(hashInput: unknown): string | null {
+  if (typeof hashInput !== 'string' || !hashInput.startsWith(OFFLINE_ATTENDANCE_HASH_PREFIX)) {
+    return null
+  }
+  const token = hashInput.slice(OFFLINE_ATTENDANCE_HASH_PREFIX.length)
+  return OPAQUE_QR_RE.test(token) ? token : null
+}
+
 function normalizedPublishIdentity(input: Omit<PublishElearningOfflineInput, 'requestId'>): string {
   return JSON.stringify([
     'publish',
@@ -388,7 +417,7 @@ export async function issueElearningOfflineQr(input: {
     revisionId: uuid(payload.revisionId, status),
     targetId: uuid(payload.targetId, status),
     action: action(payload.action, status),
-    token: text(payload.token, status, 8_192),
+    token: opaqueQrToken(payload.token, status),
     issuedAt,
     expiresAt,
     duplicate: bool(payload.duplicate, status),

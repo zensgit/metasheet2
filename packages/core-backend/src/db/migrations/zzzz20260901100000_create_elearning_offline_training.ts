@@ -116,9 +116,10 @@ const EXPECTED_CONSTRAINTS = new Map<string, string>([
   ['elearning_offline_attendance_events_member_fk',
     'FOREIGN KEY (org_id, revision_id, user_id) REFERENCES elearning_offline_training_members(org_id, revision_id, user_id) ON DELETE RESTRICT'],
   ['elearning_offline_attendance_events_org_id_id_uniq', 'UNIQUE (org_id, id)'],
+  ['elearning_offline_attendance_events_org_user_id_uniq', 'UNIQUE (org_id, user_id, id)'],
   ['elearning_offline_attendance_events_pkey', 'PRIMARY KEY (id)'],
   ['elearning_offline_attendance_requests_event_fk',
-    'FOREIGN KEY (org_id, event_id) REFERENCES elearning_offline_attendance_events(org_id, id) ON DELETE RESTRICT'],
+    'FOREIGN KEY (org_id, user_id, event_id) REFERENCES elearning_offline_attendance_events(org_id, user_id, id) ON DELETE RESTRICT'],
   ['elearning_offline_attendance_requests_hash_chk',
     `CHECK (request_hash ~ '^[0-9a-f]{64}$'::text)`],
   ['elearning_offline_attendance_requests_hash_version_chk', 'CHECK (request_hash_version = 1)'],
@@ -388,6 +389,7 @@ async function assertCanonical(db: Kysely<unknown>): Promise<void> {
 
   const indexes = await sql<{
     index_name: string
+    constraint_name: string | null
     unique: boolean
     valid: boolean
     ready: boolean
@@ -395,6 +397,7 @@ async function assertCanonical(db: Kysely<unknown>): Promise<void> {
     predicate: string | null
   }>`
     SELECT index_relation.relname AS index_name,
+           constraint_row.conname AS constraint_name,
            index_row.indisunique AS unique,
            index_row.indisvalid AS valid,
            index_row.indisready AS ready,
@@ -412,20 +415,26 @@ async function assertCanonical(db: Kysely<unknown>): Promise<void> {
     JOIN pg_class index_relation ON index_relation.oid = index_row.indexrelid
     JOIN pg_class table_relation ON table_relation.oid = index_row.indrelid
     JOIN pg_namespace namespace_row ON namespace_row.oid = table_relation.relnamespace
+    LEFT JOIN pg_constraint constraint_row ON constraint_row.conindid = index_row.indexrelid
     WHERE namespace_row.nspname = current_schema()
-      AND table_relation.relname = 'elearning_offline_qr_challenges'
-      AND index_relation.relname = ${ACTIVE_CHALLENGE_INDEX}
+      AND table_relation.relname = ANY(${sql.val([...TABLES])}::text[])
   `.execute(db)
-  const activeIndex = indexes.rows[0]
+  const freeIndexes = indexes.rows.filter((row) => row.constraint_name === null)
+  const activeIndex = freeIndexes[0]
   if (
-    indexes.rows.length !== 1
+    freeIndexes.length !== 1
     || !activeIndex
+    || activeIndex.index_name !== ACTIVE_CHALLENGE_INDEX
     || !activeIndex.unique
     || !activeIndex.valid
     || !activeIndex.ready
     || activeIndex.columns.join('\0') !== 'org_id\0revision_id\0target_id\0action'
     || activeIndex.predicate !== '(superseded_at IS NULL)'
-  ) throw new Error('elearning offline training migration drift: active challenge index')
+    || indexes.rows.some((row) => row.constraint_name !== null && !(
+      EXPECTED_CONSTRAINTS.get(row.constraint_name)?.startsWith('PRIMARY KEY')
+      || EXPECTED_CONSTRAINTS.get(row.constraint_name)?.startsWith('UNIQUE')
+    ))
+  ) throw new Error('elearning offline training migration drift: index set')
 
   const functions = await sql<{
     proname: string
@@ -485,7 +494,7 @@ async function assertCanonical(db: Kysely<unknown>): Promise<void> {
     JOIN pg_proc proc ON proc.oid = tg.tgfoid
     WHERE ns.nspname = current_schema()
       AND NOT tg.tgisinternal
-      AND tg.tgname = ANY(${sql.val([...TRIGGERS])}::text[])
+      AND rel.relname = ANY(${sql.val([...TABLES])}::text[])
   `.execute(db)
   const expectedTriggers = new Map<string, {
     table: string
@@ -721,6 +730,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       challenge_id uuid NOT NULL,
       occurred_at timestamptz NOT NULL,
       CONSTRAINT elearning_offline_attendance_events_org_id_id_uniq UNIQUE (org_id, id),
+      CONSTRAINT elearning_offline_attendance_events_org_user_id_uniq UNIQUE (org_id, user_id, id),
       CONSTRAINT elearning_offline_attendance_events_effect_uniq
         UNIQUE (org_id, revision_id, target_id, user_id, action),
       CONSTRAINT elearning_offline_attendance_events_challenge_fk
@@ -746,8 +756,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       CONSTRAINT elearning_offline_attendance_requests_pkey PRIMARY KEY (org_id, user_id, request_id),
       CONSTRAINT elearning_offline_attendance_requests_hash_version_chk CHECK (request_hash_version = 1),
       CONSTRAINT elearning_offline_attendance_requests_hash_chk CHECK (request_hash ~ '^[0-9a-f]{64}$'),
-      CONSTRAINT elearning_offline_attendance_requests_event_fk FOREIGN KEY (org_id, event_id)
-        REFERENCES elearning_offline_attendance_events(org_id, id) ON DELETE RESTRICT
+      CONSTRAINT elearning_offline_attendance_requests_event_fk FOREIGN KEY (org_id, user_id, event_id)
+        REFERENCES elearning_offline_attendance_events(org_id, user_id, id) ON DELETE RESTRICT
     )
   `.execute(db)
 

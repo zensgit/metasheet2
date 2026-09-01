@@ -1,4 +1,4 @@
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 
 export const ELEARNING_OFFLINE_QR_VERSION = 'elearning.offline.qr.v1' as const
 export const ELEARNING_OFFLINE_REQUEST_HASH_VERSION = 1 as const
@@ -20,17 +20,7 @@ const TARGET_KEYS = new Set([
 ])
 const ISSUE_KEYS = new Set(['action', 'requestId', 'targetId', 'trainingId'])
 const ATTEND_KEYS = new Set(['requestId', 'token'])
-const QR_CLAIM_KEYS = new Set([
-  'action',
-  'challengeId',
-  'expiresAt',
-  'issuedAt',
-  'orgId',
-  'revisionId',
-  'targetId',
-  'trainingId',
-  'version',
-])
+const OPAQUE_QR_RE = /^[A-Za-z0-9_-]{43}$/
 
 export type ElearningOfflineAttendanceAction = 'check_in' | 'check_out'
 export type ElearningOfflineAttendanceMode = 'training' | 'session'
@@ -83,18 +73,6 @@ export interface IssueElearningOfflineQrCommand {
 export interface RecordElearningOfflineAttendanceCommand {
   requestId: string
   token: string
-}
-
-export interface ElearningOfflineQrClaims {
-  version: typeof ELEARNING_OFFLINE_QR_VERSION
-  challengeId: string
-  orgId: string
-  trainingId: string
-  revisionId: string
-  targetId: string
-  action: ElearningOfflineAttendanceAction
-  issuedAt: string
-  expiresAt: string
 }
 
 function fail(code: ElearningOfflineErrorCode): never {
@@ -243,66 +221,19 @@ function secret(value: unknown): Buffer {
   return bytes
 }
 
-function normalizeQrClaims(value: unknown, code: 'invalid_input' | 'invalid_token'): ElearningOfflineQrClaims {
-  try {
-    const row = object(value, QR_CLAIM_KEYS)
-    if (row.version !== ELEARNING_OFFLINE_QR_VERSION) fail(code)
-    const issuedAt = normalizeElearningOfflineInstant(row.issuedAt)
-    const expiresAt = normalizeElearningOfflineInstant(row.expiresAt)
-    if (Date.parse(expiresAt) <= Date.parse(issuedAt)) fail(code)
-    return {
-      version: ELEARNING_OFFLINE_QR_VERSION,
-      challengeId: normalizeElearningOfflineUuid(row.challengeId),
-      orgId: text(row.orgId, 200),
-      trainingId: normalizeElearningOfflineUuid(row.trainingId),
-      revisionId: normalizeElearningOfflineUuid(row.revisionId),
-      targetId: normalizeElearningOfflineUuid(row.targetId),
-      action: action(row.action),
-      issuedAt,
-      expiresAt,
-    }
-  } catch (error) {
-    if (error instanceof ElearningOfflineError) throw new ElearningOfflineError(code)
-    throw error
-  }
-}
-
-export function signElearningOfflineQr(claimsInput: unknown, secretInput: unknown): string {
-  const claims = normalizeQrClaims(claimsInput, 'invalid_input')
-  const payload = Buffer.from(JSON.stringify(claims), 'utf8').toString('base64url')
-  const signature = createHmac('sha256', secret(secretInput)).update(payload).digest('base64url')
-  return `${payload}.${signature}`
-}
-
-export function verifyElearningOfflineQr(
-  token: unknown,
+export function createElearningOfflineQrToken(
+  challengeIdInput: unknown,
   secretInput: unknown,
-  nowInput: unknown,
-): ElearningOfflineQrClaims {
-  if (typeof token !== 'string' || token.length === 0 || token.length > 8192) fail('invalid_token')
-  const segments = token.split('.')
-  if (segments.length !== 2) fail('invalid_token')
-  const [payload, suppliedSignature] = segments
-  if (!payload || !suppliedSignature || !/^[A-Za-z0-9_-]+$/.test(payload)
-    || !/^[A-Za-z0-9_-]+$/.test(suppliedSignature)) fail('invalid_token')
-  const expectedSignature = createHmac('sha256', secret(secretInput)).update(payload).digest()
-  const actualSignature = Buffer.from(suppliedSignature, 'base64url')
-  if (
-    actualSignature.length !== expectedSignature.length
-    || actualSignature.toString('base64url') !== suppliedSignature
-    || !timingSafeEqual(actualSignature, expectedSignature)
-  ) fail('invalid_token')
-  let parsed: unknown
-  try {
-    const decoded = Buffer.from(payload, 'base64url')
-    if (decoded.toString('base64url') !== payload) fail('invalid_token')
-    parsed = JSON.parse(decoded.toString('utf8'))
-  } catch {
-    fail('invalid_token')
-  }
-  const claims = normalizeQrClaims(parsed, 'invalid_token')
-  const now = normalizeElearningOfflineInstant(nowInput)
-  if (Date.parse(now) < Date.parse(claims.issuedAt)) fail('invalid_token')
-  if (Date.parse(now) >= Date.parse(claims.expiresAt)) fail('expired')
-  return claims
+): string {
+  const challengeId = normalizeElearningOfflineUuid(challengeIdInput)
+  return createHmac('sha256', secret(secretInput))
+    .update(`${ELEARNING_OFFLINE_QR_VERSION}\0${challengeId}`)
+    .digest('base64url')
+}
+
+export function digestElearningOfflineQrToken(tokenInput: unknown): string {
+  if (typeof tokenInput !== 'string' || !OPAQUE_QR_RE.test(tokenInput)) fail('invalid_token')
+  const decoded = Buffer.from(tokenInput, 'base64url')
+  if (decoded.byteLength !== 32 || decoded.toString('base64url') !== tokenInput) fail('invalid_token')
+  return createHash('sha256').update(tokenInput).digest('hex')
 }

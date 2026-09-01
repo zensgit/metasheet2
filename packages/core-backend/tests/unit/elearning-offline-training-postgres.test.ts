@@ -1,7 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 
-import { ElearningOfflineError, hashElearningOfflineRequest } from '../../src/services/elearning-offline-training'
+import {
+  ElearningOfflineError,
+  createElearningOfflineQrToken,
+  digestElearningOfflineQrToken,
+  hashElearningOfflineRequest,
+} from '../../src/services/elearning-offline-training'
 import {
   issueElearningOfflineQr,
   listMyElearningOfflineTrainings,
@@ -196,7 +201,7 @@ describe('e-learning offline training PostgreSQL authority', () => {
     expect(rotation).toBeGreaterThan(locks[1]!.index)
   })
 
-  it('does not re-sign a superseded challenge during request replay', async () => {
+  it('replays the exact opaque token after a later challenge supersedes it', async () => {
     const requestHash = hashElearningOfflineRequest('qr-issue', {
       action: 'check_in',
       targetId: TARGET,
@@ -230,19 +235,17 @@ describe('e-learning offline training PostgreSQL authority', () => {
         targetId: TARGET,
         action: 'check_in',
       },
-    }, { ELEARNING_OFFLINE_QR_SIGNING_SECRET: SECRET })).rejects.toSatisfy((error: unknown) => {
-      expectCode(error, 'conflict')
-      return true
+    }, { ELEARNING_OFFLINE_QR_SIGNING_SECRET: SECRET })).resolves.toMatchObject({
+      token: createElearningOfflineQrToken(EVENT, SECRET),
+      duplicate: true,
     })
   })
 
   it('replays a recorded effect before current token expiry checks', async () => {
-    const token = 'already-expired-but-never-returned-in-errors'
+    const token = createElearningOfflineQrToken(EVENT, SECRET)
     const tokenDigest = hashElearningOfflineRequest('irrelevant', {})
     const requestHash = hashElearningOfflineRequest('attendance', {
-      tokenDigest: await import('node:crypto').then(({ createHash }) => (
-        createHash('sha256').update(token).digest('hex')
-      )),
+      tokenDigest: digestElearningOfflineQrToken(token),
     })
     expect(tokenDigest).toMatch(/^[0-9a-f]{64}$/)
     const store = db(async (sql) => {

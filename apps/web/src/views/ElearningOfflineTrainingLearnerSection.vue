@@ -71,6 +71,7 @@ import { ElearningApiError } from '../services/elearning'
 import {
   createElearningOfflineRequestIds,
   listMyElearningOfflineTrainings,
+  readElearningOfflineAttendanceToken,
   recordElearningOfflineAttendance,
   type ElearningOfflineLearnerTraining,
   type ElearningOfflineLearnerTarget,
@@ -135,8 +136,20 @@ async function attend(): Promise<void> {
   }
 }
 
+function consumeScannedToken(): string | null {
+  const scanned = readElearningOfflineAttendanceToken(window.location.hash)
+  if (!scanned) return null
+  window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`)
+  return scanned
+}
+
 onMounted(() => {
+  const scanned = consumeScannedToken()
+  if (scanned) token.value = scanned
   void refresh()
+    .then(async () => {
+      if (scanned) await attend()
+    })
     .catch((error) => {
       statusTone.value = 'error'
       status.value = errorText(error)

@@ -2,21 +2,18 @@ import { randomUUID } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 
 import {
-  ELEARNING_OFFLINE_QR_TTL_SECONDS,
-  ELEARNING_OFFLINE_QR_VERSION,
   ElearningOfflineError,
+  createElearningOfflineQrToken,
+  digestElearningOfflineQrToken,
   hashElearningOfflineRequest,
   normalizeIssueElearningOfflineQr,
   normalizePublishElearningOfflineTraining,
   normalizeRecordElearningOfflineAttendance,
-  signElearningOfflineQr,
-  verifyElearningOfflineQr,
 } from '../../src/services/elearning-offline-training'
 
 const SECRET = 'offline-training-test-secret-with-more-than-32-bytes'
 const REQUEST_ID = randomUUID()
 const TRAINING_ID = randomUUID()
-const REVISION_ID = randomUUID()
 const TARGET_ID = randomUUID()
 const CHALLENGE_ID = randomUUID()
 const MEMBER_ID = randomUUID()
@@ -42,21 +39,6 @@ function publish(overrides: Record<string, unknown> = {}) {
     attendanceMode: 'training',
     targets: [target()],
     memberUserIds: [MEMBER_ID],
-    ...overrides,
-  }
-}
-
-function claims(overrides: Record<string, unknown> = {}) {
-  return {
-    version: ELEARNING_OFFLINE_QR_VERSION,
-    challengeId: CHALLENGE_ID,
-    orgId: 'org-one',
-    trainingId: TRAINING_ID,
-    revisionId: REVISION_ID,
-    targetId: TARGET_ID,
-    action: 'check_in',
-    issuedAt: '2026-09-01T08:59:00.000Z',
-    expiresAt: '2026-09-01T09:00:00.000Z',
     ...overrides,
   }
 }
@@ -141,56 +123,23 @@ describe('e-learning offline training domain', () => {
     })).toEqual({ requestId: REQUEST_ID, token: 'opaque-token' })
   })
 
-  it('signs a user-free context token and verifies the half-open TTL', () => {
-    const token = signElearningOfflineQr(claims(), SECRET)
-    expect(signElearningOfflineQr(claims(), SECRET)).toBe(token)
-    expect(verifyElearningOfflineQr(
-      token,
-      SECRET,
-      '2026-09-01T08:59:00.000Z',
-    )).toEqual(claims())
-    const decoded = JSON.parse(Buffer.from(token.split('.')[0]!, 'base64url').toString('utf8'))
-    expect(Object.keys(decoded).sort()).toEqual([
-      'action',
-      'challengeId',
-      'expiresAt',
-      'issuedAt',
-      'orgId',
-      'revisionId',
-      'targetId',
-      'trainingId',
-      'version',
-    ])
-    expect(JSON.stringify(decoded)).not.toContain('user')
-    expect(Date.parse(decoded.expiresAt) - Date.parse(decoded.issuedAt))
-      .toBe(ELEARNING_OFFLINE_QR_TTL_SECONDS * 1000)
-    expectCode(() => verifyElearningOfflineQr(
-      token,
-      SECRET,
-      '2026-09-01T09:00:00.000Z',
-    ), 'expired')
+  it('derives a deterministic opaque bearer token without embedding authority claims', () => {
+    const token = createElearningOfflineQrToken(CHALLENGE_ID, SECRET)
+    expect(createElearningOfflineQrToken(CHALLENGE_ID, SECRET)).toBe(token)
+    expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(Buffer.from(token, 'base64url')).toHaveLength(32)
+    expect(token).not.toContain(CHALLENGE_ID)
+    expect(token).not.toContain(TRAINING_ID)
+    expect(token).not.toContain(TARGET_ID)
+    expect(digestElearningOfflineQrToken(token)).toMatch(/^[0-9a-f]{64}$/)
   })
 
-  it('rejects tampering, wrong secrets, noncanonical claims and extra claim keys', () => {
-    const token = signElearningOfflineQr(claims(), SECRET)
-    const [payload, signature] = token.split('.')
-    expectCode(() => verifyElearningOfflineQr(
-      `${payload}.${signature!.slice(0, -1)}A`,
-      SECRET,
-      '2026-09-01T08:59:00.000Z',
-    ), 'invalid_token')
-    expectCode(() => verifyElearningOfflineQr(
-      token,
-      `${SECRET}-wrong`,
-      '2026-09-01T08:59:00.000Z',
-    ), 'invalid_token')
-    expectCode(() => signElearningOfflineQr({
-      ...claims(),
-      userId: MEMBER_ID,
-    }, SECRET), 'invalid_input')
-    expectCode(() => signElearningOfflineQr(claims({
-      issuedAt: '2026-09-01T08:59:00Z',
-    }), SECRET), 'invalid_input')
-    expectCode(() => signElearningOfflineQr(claims(), 'short'), 'unavailable')
+  it('separates secrets and rejects malformed opaque tokens and challenge ids', () => {
+    const token = createElearningOfflineQrToken(CHALLENGE_ID, SECRET)
+    expect(createElearningOfflineQrToken(CHALLENGE_ID, `${SECRET}-wrong`)).not.toBe(token)
+    expectCode(() => digestElearningOfflineQrToken(`${token.slice(0, -1)}.`), 'invalid_token')
+    expectCode(() => digestElearningOfflineQrToken(`${token}A`), 'invalid_token')
+    expectCode(() => createElearningOfflineQrToken('not-a-uuid', SECRET), 'invalid_input')
+    expectCode(() => createElearningOfflineQrToken(CHALLENGE_ID, 'short'), 'unavailable')
   })
 })

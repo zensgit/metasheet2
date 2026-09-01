@@ -28,6 +28,8 @@ const MEMBER = '44444444-4444-4444-8444-444444444444'
 const REQUEST_A = '55555555-5555-4555-8555-555555555555'
 const REQUEST_B = '66666666-6666-4666-8666-666666666666'
 const REQUEST_C = '77777777-7777-4777-8777-777777777777'
+const TOKEN_A = 'A'.repeat(43)
+const TOKEN_B = 'B'.repeat(43)
 
 async function flush(cycles = 10): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
@@ -86,6 +88,8 @@ describe('ElearningOfflineTrainingAdminSection', () => {
   let uuid: ReturnType<typeof vi.spyOn> | null = null
 
   beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+    vi.setSystemTime(new Date('2026-09-01T00:00:00.000Z'))
     useLocale().setLocale('en')
     h.publish.mockReset()
     h.issue.mockReset()
@@ -95,7 +99,7 @@ describe('ElearningOfflineTrainingAdminSection', () => {
       revisionId: REVISION,
       targetId: TARGET,
       action: 'check_in',
-      token: 'signed-token',
+      token: TOKEN_A,
       issuedAt: '2026-09-01T00:00:00.000Z',
       expiresAt: '2026-09-01T00:01:00.000Z',
       duplicate: false,
@@ -110,6 +114,7 @@ describe('ElearningOfflineTrainingAdminSection', () => {
     app?.unmount()
     root?.remove()
     uuid?.mockRestore()
+    vi.useRealTimers()
   })
 
   function mount(): HTMLElement {
@@ -145,7 +150,52 @@ describe('ElearningOfflineTrainingAdminSection', () => {
       action: 'check_in',
     })
     expect((view.querySelector('[data-testid="elearning-offline-qr-token"]') as HTMLTextAreaElement).value)
-      .toBe('signed-token')
+      .toBe(TOKEN_A)
+    expect((view.querySelector('[data-testid="elearning-offline-qr-symbol"]') as HTMLImageElement).src)
+      .toContain('data:image/svg+xml')
+  })
+
+  it('automatically rotates the rendered QR at the half-open expiry boundary', async () => {
+    h.issue
+      .mockResolvedValueOnce({
+        trainingId: TRAINING,
+        revisionId: REVISION,
+        targetId: TARGET,
+        action: 'check_in',
+        token: TOKEN_A,
+        issuedAt: '2026-09-01T00:00:00.000Z',
+        expiresAt: '2026-09-01T00:01:00.000Z',
+        duplicate: false,
+      })
+      .mockResolvedValueOnce({
+        trainingId: TRAINING,
+        revisionId: REVISION,
+        targetId: TARGET,
+        action: 'check_in',
+        token: TOKEN_B,
+        issuedAt: '2026-09-01T00:01:00.000Z',
+        expiresAt: '2026-09-01T00:02:00.000Z',
+        duplicate: false,
+      })
+    const view = mount()
+    fill(view)
+    ;(view.querySelector('[data-testid="elearning-offline-publish"]') as HTMLButtonElement).click()
+    await flush()
+    ;(view.querySelector('[data-testid="elearning-offline-issue-check-in"]') as HTMLButtonElement).click()
+    await flush()
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    await flush()
+
+    expect(h.issue).toHaveBeenCalledTimes(2)
+    expect(h.issue.mock.calls[1]?.[0]).toEqual({
+      requestId: REQUEST_C,
+      trainingId: TRAINING,
+      targetId: TARGET,
+      action: 'check_in',
+    })
+    expect((view.querySelector('[data-testid="elearning-offline-qr-token"]') as HTMLTextAreaElement).value)
+      .toBe(TOKEN_B)
   })
 
   it('reuses an id after failure, rotates for changed payload, and rotates after success', async () => {

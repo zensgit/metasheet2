@@ -7,11 +7,13 @@ vi.mock('../src/utils/api', () => ({
 
 import {
   createElearningOfflineRequestIds,
+  createElearningOfflineAttendanceLink,
   issueElearningOfflineQr,
   listMyElearningOfflineTrainings,
   probeElearningOfflineTraining,
   publishElearningOfflineTraining,
   recordElearningOfflineAttendance,
+  readElearningOfflineAttendanceToken,
 } from '../src/services/elearningOfflineTraining'
 
 const TRAINING = '11111111-1111-4111-8111-111111111111'
@@ -29,6 +31,7 @@ const CHECK_IN_CLOSE = '2026-09-01T02:30:00.000Z'
 const CHECK_OUT_OPEN = '2026-09-01T03:30:00.000Z'
 const CHECK_OUT_CLOSE = '2026-09-01T04:30:00.000Z'
 const CREATED = '2026-09-01T00:00:00.000Z'
+const TOKEN = 'A'.repeat(43)
 
 function response(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -124,7 +127,7 @@ describe('e-learning offline training client', () => {
       revisionId: REVISION,
       targetId: TARGET,
       action: 'check_in',
-      token: 'signed-token',
+      token: TOKEN,
       issuedAt: CREATED,
       expiresAt: '2026-09-01T00:01:00.000Z',
       duplicate: false,
@@ -134,7 +137,7 @@ describe('e-learning offline training client', () => {
       trainingId: TRAINING,
       targetId: TARGET,
       action: 'check_in',
-    })).resolves.toMatchObject({ token: 'signed-token', action: 'check_in' })
+    })).resolves.toMatchObject({ token: TOKEN, action: 'check_in' })
     expect(apiFetchMock.mock.calls[1]?.[0]).toBe(
       `/api/elearning/admin/offline-trainings/${TRAINING}/targets/${TARGET}/qr`,
     )
@@ -165,14 +168,14 @@ describe('e-learning offline training client', () => {
     }))
     await expect(recordElearningOfflineAttendance({
       requestId: REQUEST_C,
-      token: 'signed-token',
+      token: TOKEN,
     })).resolves.toMatchObject({
       eventId: EVENT,
       completionStatus: 'completed',
     })
     expect(JSON.parse(String(apiFetchMock.mock.calls[1]?.[1]?.body))).toEqual({
       requestId: REQUEST_C,
-      token: 'signed-token',
+      token: TOKEN,
     })
 
     for (const forbidden of ['challengeId', 'orgId', 'decisionHash', 'requestHash']) {
@@ -222,7 +225,7 @@ describe('e-learning offline training client', () => {
       revisionId: REVISION,
       targetId: TARGET,
       action: 'check_in',
-      token: 'signed-token',
+      token: TOKEN,
       issuedAt: CREATED,
       expiresAt: CREATED,
       duplicate: false,
@@ -239,7 +242,7 @@ describe('e-learning offline training client', () => {
       revisionId: REVISION,
       targetId: TARGET,
       action: 'check_out',
-      token: 'signed-token',
+      token: TOKEN,
       issuedAt: CREATED,
       expiresAt: '2026-09-01T00:01:00.000Z',
       duplicate: false,
@@ -266,7 +269,7 @@ describe('e-learning offline training client', () => {
     }))
     await expect(recordElearningOfflineAttendance({
       requestId: REQUEST_C,
-      token: 'signed-token',
+      token: TOKEN,
     })).rejects.toMatchObject({ code: 'invalid_response' })
   })
 
@@ -279,6 +282,16 @@ describe('e-learning offline training client', () => {
       code: 'unavailable',
       status: 503,
     })
+  })
+
+  it('builds a client-only scan link and accepts only its closed opaque token fragment', () => {
+    expect(createElearningOfflineAttendanceLink(TOKEN, 'https://learn.example.test/app'))
+      .toBe(`https://learn.example.test/learn#offline-attendance=${TOKEN}`)
+    expect(readElearningOfflineAttendanceToken(`#offline-attendance=${TOKEN}`)).toBe(TOKEN)
+    expect(readElearningOfflineAttendanceToken(`#offline-attendance=${TOKEN}A`)).toBeNull()
+    expect(readElearningOfflineAttendanceToken(`#other=${TOKEN}`)).toBeNull()
+    expect(() => createElearningOfflineAttendanceLink('not-opaque', 'https://learn.example.test'))
+      .toThrowError('invalid_response')
   })
 
   it('reuses retry identities, rotates on payload change, and settles successful commands', () => {
