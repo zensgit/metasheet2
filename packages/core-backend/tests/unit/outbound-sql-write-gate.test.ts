@@ -420,6 +420,63 @@ describe('outbound SQL write gate — the write/read split is the ONLY classific
       expect(isPureReadStatement(write)).toBe(false)
     }
   })
+
+  // FIX 1 (P0 lexer): a `/*` that is STRING CONTENT must not open a comment span, and a later `*/`
+  // (also string content) must not close one. The old strip ran the block-comment regex INDEPENDENTLY
+  // of and BEFORE the string-literal regex, so these payloads had the entire middle statement — a real
+  // UPDATE/DELETE/INSERT — deleted as a "comment", collapsing to `SELECT ''` and classifying READ. A
+  // single-pass tokenizer treats a `/*` inside a string as string content, so the write survives and
+  // is seen. Each payload is an unterminated batch (no `;`) whose verdict therefore turns ENTIRELY on
+  // the lexer: without the swallow it is plainly a write-verb-bearing batch.
+  const STRING_EMBEDDED_COMMENT_SWALLOWERS = [
+    "SELECT '/*'\nUPDATE t_ICItem SET FQty=0\nSELECT '*/'",       // swallows an UPDATE
+    "SELECT '/*'\nDELETE FROM t_ICItem\nSELECT '*/'",             // swallows a DELETE
+    "SELECT '/*'\nINSERT INTO t_ICItem(FItemID) VALUES(1)\nSELECT '*/'", // swallows an INSERT
+  ]
+
+  it('FIX 1: a comment marker that is STRING CONTENT cannot swallow a write (single-pass lexer)', () => {
+    for (const sql of STRING_EMBEDDED_COMMENT_SWALLOWERS) {
+      expect(isPureReadStatement(sql)).toBe(false)
+      expect(isSqlWriteStatement(sql)).toBe(true)
+    }
+  })
+
+  it('FIX 1 (end to end): the string-embedded-comment swallowers are refused as unarmed writes', () => {
+    delete process.env[ENV_KEY]
+    for (const sql of STRING_EMBEDDED_COMMENT_SWALLOWERS) {
+      const err = refusalOf(() => assertSqlStatementWriteAuthorized(buildError, sql, { id: 's1', name: 's1', type: 'sqlserver' }))
+      expect(err.code).toBe(OUTBOUND_SQL_WRITE_DISABLED)
+    }
+  })
+
+  it('FIX 1: a REAL block comment / line comment / bracket / quote around a read still strips to a READ', () => {
+    // The tokenizer still recognises genuine comments and quoted/bracketed identifiers — it only
+    // refuses to let STRING content open/close a comment. These remain reads.
+    expect(isPureReadStatement('/* a real comment */ SELECT 1')).toBe(true)
+    expect(isPureReadStatement('SELECT 1 -- trailing line comment that mentions DELETE FROM t')).toBe(true)
+    expect(isPureReadStatement('SELECT [delete] /* c */ FROM t')).toBe(true)
+    expect(isPureReadStatement('SELECT "update" FROM t /* note: UPDATE */')).toBe(true)
+    // SQL Server nests block comments: the inner close must not end the outer comment early.
+    expect(isPureReadStatement('SELECT 1 /* outer /* inner */ still comment */')).toBe(true)
+    expect(isPureReadStatement('SELECT 1 /* outer /* inner */ DELETE FROM t */')).toBe(true)
+  })
+
+  // FIX 4 (P2 over-block): `@@ROWCOUNT` / `@@IDENTITY` are read-only global variables that cannot
+  // mutate. The bare word `rowcount` / `identity` is reserved, so before this fix a SELECT of them was
+  // classified a WRITE. Widening the read grammar to admit them is safe: the only mutating uses of
+  // those words carry an OTHER non-read reserved token (`SET ROWCOUNT`, `SET IDENTITY_INSERT`) or lead
+  // with a non-read verb, so no write can flip to a read. `FOR UPDATE` deliberately STAYS a write — it
+  // would require admitting the primary write verb `update`, and it is not valid pure-read T-SQL.
+  it('FIX 4: SELECT of the read-only @@ROWCOUNT / @@IDENTITY globals is a READ; SET/FOR UPDATE stay writes', () => {
+    expect(isPureReadStatement('SELECT @@ROWCOUNT')).toBe(true)
+    expect(isPureReadStatement('SELECT @@IDENTITY')).toBe(true)
+    expect(isPureReadStatement('SELECT @@ROWCOUNT AS affected, @@IDENTITY AS last_id')).toBe(true)
+    // Under-block guard: the session-control / DDL uses of the same words are STILL writes.
+    expect(isPureReadStatement('SET ROWCOUNT 5')).toBe(false)
+    expect(isPureReadStatement('SET IDENTITY_INSERT t ON')).toBe(false)
+    expect(isPureReadStatement('SELECT 1\nSET ROWCOUNT 5')).toBe(false)
+    expect(isPureReadStatement('SELECT * FROM t FOR UPDATE')).toBe(false) // update stays a write verb
+  })
 })
 
 // ─────────────────── PART 3 — THE ENFORCEMENT POINTS ───────────────────
@@ -438,6 +495,48 @@ async function managerWith(config: DataSourceConfig) {
   const m = new DataSourceManager()
   await m.addDataSource(config, { ownerId: 'owner-1' })
   return { m, adapter: m.getDataSource(config.id) }
+}
+
+// FIX 2: an armed source can only be PINNED from a source that existed at allowlist-LOAD time. So the
+// enforcement tests provision the armed source the way a deployment does — as a persisted row observed
+// by `loadFromDatabase` — rather than via the API `addDataSource` (which FIX 2 now refuses for an armed
+// id). This minimal chainable stub returns the given rows for the load SELECT and swallows every other
+// kysely call (persist / soft-delete ignore their result), so the manager's LOAD path pins without a
+// live database.
+function fakeLoadDb(records: Array<Record<string, unknown>>): unknown {
+  const proxy: unknown = new Proxy(function () { /* callable */ }, {
+    get(_target, prop) {
+      if (prop === 'then') return undefined // never a thenable itself
+      if (prop === 'execute') return async () => records
+      if (prop === 'executeTakeFirst') return async () => records[0]
+      return () => proxy
+    },
+    apply: () => proxy,
+  })
+  return proxy
+}
+
+function loadRow(config: DataSourceConfig, ownerId = 'owner-1'): Record<string, unknown> {
+  return {
+    id: config.id,
+    name: config.name,
+    type: config.type,
+    config: { connection: config.connection, options: config.options },
+    status: 'disconnected',
+    last_error: null,
+    owner_id: ownerId,
+    workspace_id: null,
+    is_active: true,
+    auto_connect: false, // don't attempt a live connect during load
+    deleted_at: null,
+  }
+}
+
+// Provision + PIN one or more sources via the deploy-controlled load path, then hand back the manager.
+async function managerWithProvisioned(...configs: DataSourceConfig[]) {
+  const m = new DataSourceManager({ db: fakeLoadDb(configs.map((c) => loadRow(c))) as never })
+  await m.loadFromDatabase()
+  return { m, adapter: m.getDataSource(configs[0].id) }
 }
 
 async function asyncRefusal(p: Promise<unknown>): Promise<{ code?: string; message?: string }> {
@@ -479,7 +578,7 @@ describe('enforcement — DataSourceManager.query / federatedQuery', () => {
 
   it('ARMED: the same writes on the armed (non-K3) target are allowed', async () => {
     armFor('armed')
-    const { m, adapter } = await managerWith(sqlserverConfig('armed'))
+    const { m, adapter } = await managerWithProvisioned(sqlserverConfig('armed')) // pinned at load
     vi.spyOn(adapter, 'isConnected').mockReturnValue(true)
     const querySpy = vi.spyOn(adapter, 'query').mockResolvedValue({ data: [], rowCount: 0 } as never)
     await expect(m.query('armed', "INSERT INTO staging (a) VALUES (1)")).resolves.toBeDefined()
@@ -532,7 +631,7 @@ describe('enforcement — MSSQLAdapter.query (the raw-adapter chokepoint)', () =
 
   it('ARMED: a write passes the gate (fails only later, at connect)', async () => {
     armFor('raw-armed')
-    const { adapter } = await managerWith(sqlserverConfig('raw-armed'))
+    const { adapter } = await managerWithProvisioned(sqlserverConfig('raw-armed')) // pinned at load
     const err = await asyncRefusal(adapter.query("INSERT INTO staging (a) VALUES (1)"))
     expect(err.code).not.toBe(OUTBOUND_SQL_WRITE_DISABLED)
     expect(err.code).not.toBe(OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED)
@@ -601,9 +700,9 @@ describe('SQL write arm-binding — enforcement (P1)', () => {
 
   it('(honest) an armed source at its pinned connection still writes', async () => {
     armFor('honest')
-    const m = new DataSourceManager()
-    await m.addDataSource(config('honest', armedConn), { ownerId: 'o' }) // pins staging.local
-    const a = m.getDataSource('honest')
+    // FIX 2: the armed source is PROVISIONED at load (a deploy-controlled row), which is what pins it —
+    // not an API create, which FIX 2 now refuses for an armed id.
+    const { adapter: a } = await managerWithProvisioned(config('honest', armedConn))
     // passes gate + binding, then fails only at connect (no DB) — not with a gate/binding code.
     const err = await asyncRefusal(a.query("INSERT INTO staging (a) VALUES (1)"))
     expect(err.code).not.toBe(OUTBOUND_SQL_WRITE_DISABLED)
@@ -613,10 +712,9 @@ describe('SQL write arm-binding — enforcement (P1)', () => {
 
   it('(ii redirect) redirecting an armed source drops its authorization', async () => {
     armFor('redir')
-    const m = new DataSourceManager()
-    await m.addDataSource(config('redir', armedConn), { ownerId: 'o' }) // pins staging.local
+    const { m } = await managerWithProvisioned(config('redir', armedConn)) // pins staging.local at load
     // the operator PUT-redirects the connection to K3 (deep-merge mutable).
-    await m.updateDataSource('redir', config('redir', k3Conn), { ownerId: 'o' })
+    await m.updateDataSource('redir', config('redir', k3Conn), { ownerId: 'owner-1' })
     const a = m.getDataSource('redir')
     // armed in the file, but its connection no longer matches the pin → refused.
     const err = await asyncRefusal(a.query("INSERT INTO t_ICItem (FItemID) VALUES (1)"))
@@ -626,17 +724,18 @@ describe('SQL write arm-binding — enforcement (P1)', () => {
 
   it('(i id-reuse/revival) recreating an armed id at a new connection cannot inherit authorization', async () => {
     armFor('reuse')
-    const m = new DataSourceManager()
-    await m.addDataSource(config('reuse', armedConn), { ownerId: 'o' }) // legit source pins staging.local
-    // attacker soft-deletes and revives the SAME id pointing at K3.
+    const { m } = await managerWithProvisioned(config('reuse', armedConn)) // legit source pinned at load
+    // attacker soft-deletes and revives the SAME id pointing at K3. The load-time pin persists, so the
+    // revival is a legitimate re-observation of an already-provisioned id (not arm-ahead-of-
+    // provisioning) — the create is allowed, but the WRITE is refused by the fingerprint mismatch.
     await m.removeDataSource('reuse')
-    await m.addDataSource(config('reuse', k3Conn), { ownerId: 'o' })
+    await m.addDataSource(config('reuse', k3Conn), { ownerId: 'owner-1' })
     const a = m.getDataSource('reuse')
     const err = await asyncRefusal(a.query("INSERT INTO t_ICItem (FItemID) VALUES (1)"))
     expect(err.code).toBe(OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED) // pin (staging) ≠ current (K3)
     // and a revival to the SAME connection is not a privilege gain — it matches, but it is the legit destination.
     await m.removeDataSource('reuse')
-    await m.addDataSource(config('reuse', armedConn), { ownerId: 'o' })
+    await m.addDataSource(config('reuse', armedConn), { ownerId: 'owner-1' })
     const b = m.getDataSource('reuse')
     const ok = await asyncRefusal(b.query("INSERT INTO staging VALUES (1)"))
     expect(ok.code).not.toBe(OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED)
@@ -646,7 +745,7 @@ describe('SQL write arm-binding — enforcement (P1)', () => {
   it('the binding NEVER widens authorization: an unarmed source is still refused by the gate', async () => {
     delete process.env[ENV_KEY]
     const m = new DataSourceManager()
-    await m.addDataSource(config('unarmed', armedConn), { ownerId: 'o' })
+    await m.addDataSource(config('unarmed', armedConn), { ownerId: 'o' }) // unarmed ⇒ create is allowed
     const a = m.getDataSource('unarmed')
     expect((await asyncRefusal(a.query('INSERT INTO staging VALUES (1)'))).code).toBe(OUTBOUND_SQL_WRITE_DISABLED)
   })
@@ -658,13 +757,112 @@ describe('SQL write arm-binding — enforcement (P1)', () => {
 
   it('a redirect drops write authorization but READS still pass on the redirected source', async () => {
     armFor('redir-read')
-    const m = new DataSourceManager()
-    await m.addDataSource(config('redir-read', armedConn), { ownerId: 'o' })
-    await m.updateDataSource('redir-read', config('redir-read', k3Conn), { ownerId: 'o' })
+    const { m } = await managerWithProvisioned(config('redir-read', armedConn))
+    await m.updateDataSource('redir-read', config('redir-read', k3Conn), { ownerId: 'owner-1' })
     const a = m.getDataSource('redir-read')
     // reads are never gated — they pass to the connect attempt regardless of the binding.
     const err = await asyncRefusal(a.query('SELECT TOP 1 * FROM t_ICItem'))
     expect(err.code).not.toBe(OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED)
     expect(String(err.message)).toMatch(/Not connected/)
+  })
+})
+
+// ─── FIX 2 — arming binds ONLY to a source provisioned at allowlist-load time ─────────────────────
+describe('SQL write arm-binding — FIX 2: arm-ahead-of-provisioning is refused', () => {
+  const attackerConn = { server: 'k3.local', port: 1433, database: 'AIS' }
+  const armedConn = { server: 'staging.local', port: 1433, database: 'STAGE' }
+
+  function config(id: string, connection: Record<string, unknown>): DataSourceConfig {
+    return { id, name: id, type: 'sqlserver', connection, options: { autoConnect: false, readOnly: false } }
+  }
+
+  // A db that RECORDS every persisted row, so a test can prove a refused create never reached persist.
+  function recordingDb(inserted: Array<Record<string, unknown>>): unknown {
+    const proxy: unknown = new Proxy(function () { /* callable */ }, {
+      get(_t, prop) {
+        if (prop === 'then') return undefined
+        if (prop === 'values') return (rec: Record<string, unknown>) => { inserted.push(rec); return proxy }
+        if (prop === 'execute') return async () => []
+        if (prop === 'executeTakeFirst') return async () => undefined
+        return () => proxy
+      },
+      apply: () => proxy,
+    })
+    return proxy
+  }
+
+  it('a fresh API-tier create of an armed-but-never-provisioned id is REFUSED, not self-authorized', async () => {
+    armFor('deploy-armed-never-provisioned')
+    const m = new DataSourceManager() // no db, no load ⇒ the armed id was never provisioned at load
+    const err = await asyncRefusal(
+      m.addDataSource(config('deploy-armed-never-provisioned', attackerConn), { ownerId: 'attacker' }),
+    )
+    expect(err.code).toBe(OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED)
+    expect((err as { details?: { reason?: string } }).details?.reason).toBe('arm_ahead_of_provisioning')
+    // the source was never registered — so no create-time observation could have pinned the attacker.
+    expect(() => m.getDataSource('deploy-armed-never-provisioned')).toThrow()
+  })
+
+  it('the refusal happens BEFORE persistence, so a later restart cannot pin the attacker either', async () => {
+    armFor('armed-unprovisioned')
+    const inserted: Array<Record<string, unknown>> = []
+    const m = new DataSourceManager({ db: recordingDb(inserted) as never }) // no load ⇒ no pin for the id
+    const err = await asyncRefusal(
+      m.addDataSource(config('armed-unprovisioned', attackerConn), { ownerId: 'attacker' }),
+    )
+    expect((err as { details?: { reason?: string } }).details?.reason).toBe('arm_ahead_of_provisioning')
+    expect(inserted).toHaveLength(0) // nothing was persisted, so no row exists for a restart to pin
+  })
+
+  it('an UNARMED id is created freely (the guard only fires for armed ids)', async () => {
+    armFor('some-other-armed-id') // arms a DIFFERENT id
+    const m = new DataSourceManager()
+    await expect(m.addDataSource(config('an-ordinary-source', attackerConn), { ownerId: 'o' })).resolves.toBeDefined()
+    expect(m.getDataSource('an-ordinary-source')).toBeDefined()
+  })
+
+  it('an armed id PROVISIONED at load is pinned and its write passes the gate + binding', async () => {
+    armFor('provisioned-at-load')
+    const { adapter } = await managerWithProvisioned(config('provisioned-at-load', armedConn))
+    const ok = await asyncRefusal(adapter.query("INSERT INTO staging VALUES (1)"))
+    expect(ok.code).not.toBe(OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED)
+    expect(ok.code).not.toBe(OUTBOUND_SQL_WRITE_DISABLED)
+    expect(String(ok.message)).toMatch(/Not connected/)
+  })
+})
+
+// ─── FIX 3 — an armed source must name an explicit destination database ───────────────────────────
+describe('SQL write arm-binding — FIX 3: a blank destination database is refused', () => {
+  const blankDbConn = { server: 'sql.local', port: 1433 } // NO database ⇒ resolves to the login default
+  const explicitDbConn = { server: 'sql.local', port: 1433, database: 'STAGE' }
+
+  function config(id: string, connection: Record<string, unknown>): DataSourceConfig {
+    return { id, name: id, type: 'sqlserver', connection, options: { autoConnect: false, readOnly: false } }
+  }
+
+  it('an armed write on a BLANK-database source is refused (ambiguous, credential-redirectable target)', async () => {
+    armFor('blank-db')
+    const { adapter } = await managerWithProvisioned(config('blank-db', blankDbConn))
+    const err = await asyncRefusal(adapter.query("INSERT INTO staging VALUES (1)"))
+    expect(err.code).toBe(OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED)
+    expect((err as { details?: { reason?: string } }).details?.reason).toBe('arm_binding_ambiguous_database')
+  })
+
+  it('the same armed write with an EXPLICIT database passes the gate and the binding', async () => {
+    armFor('explicit-db')
+    const { adapter } = await managerWithProvisioned(config('explicit-db', explicitDbConn))
+    const err = await asyncRefusal(adapter.query("INSERT INTO staging VALUES (1)"))
+    expect(err.code).not.toBe(OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED)
+    expect(String(err.message)).toMatch(/Not connected/)
+  })
+
+  it('WHY: a blank database is indistinguishable by fingerprint, an explicit one is not', () => {
+    // Two blank-database connections on the same server hash identically — a login swap whose default
+    // DB differs is invisible to the pin. An explicit database folds the catalog into the fingerprint,
+    // so K3 vs STAGE on the SAME server are distinct pins and a redirect breaks the binding.
+    expect(sqlConnectionFingerprint({ server: 'sql.local', port: 1433 }))
+      .toBe(sqlConnectionFingerprint({ server: 'sql.local', port: 1433 }))
+    expect(sqlConnectionFingerprint({ server: 'sql.local', port: 1433, database: 'STAGE' }))
+      .not.toBe(sqlConnectionFingerprint({ server: 'sql.local', port: 1433, database: 'AIS' }))
   })
 })
