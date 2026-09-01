@@ -27,7 +27,27 @@ import {
 } from '../data-adapters/DataSourceManager'
 import type { DataSourceActorContext } from '../data-adapters/DataSourceManager'
 import type { DataSourceConfig, QueryOptions } from '../data-adapters/BaseAdapter'
+import {
+  attemptsToClearK3Marker,
+  K3_DESTINATION_MARKER_IMMUTABLE,
+  K3_DESTINATION_MARKER_IMMUTABLE_MESSAGE,
+} from '../data-adapters/k3-destination-write-fence'
 import { DATA_SOURCE_DEFAULT_LIMIT, DATA_SOURCE_MAX_ROWS } from '../data-adapters/BaseAdapter'
+
+// A deliberate gate refusal — the outbound-SQL-write arm/provisioning guard, the K3 destination fence —
+// throws an Error carrying a numeric `status` and a fixed `code`. Surface those verbatim so the refusal
+// reaches the client as its own 4xx (e.g. 403 arm-ahead-of-provisioning) with its coded reason, rather
+// than collapsing into a generic 500. The gate's messages are values-free by construction (they carry
+// no SQL, host, database, connection string or credential), so echoing the message here is safe.
+function codedGateRefusal(error: unknown): { status: number; code: string; message: string } | null {
+  if (!(error instanceof Error)) return null
+  const status = (error as { status?: unknown }).status
+  const code = (error as { code?: unknown }).code
+  if (typeof status === 'number' && status >= 400 && status < 600 && typeof code === 'string') {
+    return { status, code, message: error.message }
+  }
+  return null
+}
 
 // Zod schemas for request validation
 const ConnectionConfigSchema = z.record(z.union([z.string(), z.number(), z.boolean()]))
@@ -48,6 +68,12 @@ const DataSourceCreateSchema = z.object({
     // C6 external-write target marker. When set, raw /query is disabled even if readOnly=false.
     c6WriteTarget: z.boolean().optional(),
     genericQueryDisabled: z.boolean().optional(),
+    // G-4 DESTINATION MARKER. A durable, positive attestation that this source's destination IS the
+    // customer K3 database. When true, DataSourceManager refuses EVERY write to it permanently
+    // (insert/update/delete/copyData/raw query), no flag can re-enable it. This schema strips unknown
+    // option keys, so the marker must be declared here to be settable and to survive persistence;
+    // it can only ever make a source MORE restricted (a K3 write is banned by G-4), never less.
+    k3Destination: z.boolean().optional(),
     // PLMAdapter runtime options for persisted Yuantus PLM sources.
     apiMode: z.string().optional(),
     tenantId: z.string().optional(),
@@ -102,6 +128,12 @@ const DataSourceUpdateSchema = z.object({
     // C6 external-write target marker. When set, raw /query is disabled even if readOnly=false.
     c6WriteTarget: z.boolean().optional(),
     genericQueryDisabled: z.boolean().optional(),
+    // G-4 DESTINATION MARKER. A durable, positive attestation that this source's destination IS the
+    // customer K3 database. When true, DataSourceManager refuses EVERY write to it permanently
+    // (insert/update/delete/copyData/raw query), no flag can re-enable it. This schema strips unknown
+    // option keys, so the marker must be declared here to be settable and to survive persistence;
+    // it can only ever make a source MORE restricted (a K3 write is banned by G-4), never less.
+    k3Destination: z.boolean().optional(),
     // PLMAdapter runtime options for persisted Yuantus PLM sources.
     apiMode: z.string().optional(),
     tenantId: z.string().optional(),
@@ -441,6 +473,10 @@ export function dataSourcesRouter(): Router {
           error: { code: 'CONFLICT', message: error.message }
         })
       }
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
+      }
       return res.status(500).json({
         ok: false,
         error: {
@@ -550,6 +586,17 @@ export function dataSourcesRouter(): Router {
       const oldConfig = existing.getConfig()
       const scope = manager.getScope(id)
 
+      // G-4 MARKER DURABILITY (P1). The k3Destination marker is set-once: a config edit may not clear
+      // or unset it. This is the #5401 config-edit vector — {options:{k3Destination:false}} would
+      // deep-merge and silently drop the marker, contradicting the non-overridable guarantee. Refuse
+      // with a coded error (the manager also force-preserves it as a belt-and-suspenders net).
+      if (attemptsToClearK3Marker(oldConfig.options, parse.data.options)) {
+        return res.status(403).json({
+          ok: false,
+          error: { code: K3_DESTINATION_MARKER_IMMUTABLE, message: K3_DESTINATION_MARKER_IMMUTABLE_MESSAGE }
+        })
+      }
+
       const newConfig: DataSourceConfig = {
         ...oldConfig,
         ...parse.data,
@@ -599,6 +646,10 @@ export function dataSourcesRouter(): Router {
           ok: false,
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
+      }
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
       }
       return res.status(500).json({
         ok: false,
@@ -690,6 +741,10 @@ export function dataSourcesRouter(): Router {
           ok: false,
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
+      }
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
       }
       return res.status(500).json({
         ok: false,
