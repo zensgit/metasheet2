@@ -34,11 +34,17 @@ const USER_QUOTA = `u_m4_quota_${TS}`
 const API_KEY_SENTINEL = `sk-${'m4realdbleak'.repeat(2)}`
 const RECORD_VALUE_SENTINEL = `record-value-must-not-leak-${TS}`
 
+import { armLocalAiRoutingPolicy } from '../utils/ai-routing-policy-fixture'
+
 const AI_ENV_KEYS = [
   'MULTITABLE_AI_ENABLED',
   'MULTITABLE_AI_PROVIDER',
   'MULTITABLE_AI_API_KEY',
   'MULTITABLE_AI_BASE_URL',
+
+  // data-class routing gate: simulate a COMPLIANT (local) deployment
+
+  'MULTITABLE_AI_ROUTING_POLICY',
   'MULTITABLE_AI_MODEL',
   'MULTITABLE_AI_REQUEST_TIMEOUT_MS',
   'MULTITABLE_AI_MAX_OUTPUT_TOKENS',
@@ -90,6 +96,8 @@ describeIfDatabase('M4 suggest-formula (real DB)', () => {
     process.env.MULTITABLE_AI_API_KEY = API_KEY_SENTINEL
     process.env.MULTITABLE_AI_MODEL = 'claude-sonnet-4-6'
     process.env.MULTITABLE_AI_CONFIRM_LIVE_REQUESTS = '1'
+
+    armLocalAiRoutingPolicy()
 
     app = express()
     app.use(express.json())

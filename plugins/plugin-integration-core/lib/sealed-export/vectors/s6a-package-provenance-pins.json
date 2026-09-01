@@ -39,7 +39,7 @@
       "sealed-export-binding-qualification.cjs": "6b2995cb996ecfa07f348f8d09a12e4a4faa1045c3f4b941f815794bdb603a65",
       "sealed-export-signer-authority.cjs": "164babbb0ca576babacb15d3d83058e526fef7181e0a5c5ff4e729e476f7ebe1",
       "sealed-export-signer-authority-store.cjs": "043e79eca72ffc79a07c06b133acc1aca2bc5bb4828d164b86038fb10f2e7c72",
-      "sealed-export-package-provenance.cjs": "b855b028222b7c43adeaa50917acbcc4da207a53538dc938ee8820055803eb9d"
+      "sealed-export-package-provenance.cjs": "a80ef69b4b33de640e4180e760c01842cef5b377d8c4848bd4c5421c1abfd427"
     },
     "s6": {
       "sealed-export-lifecycle-provisioning.cjs": "6269485e36b540a7bbed3d64d7d889718e631122dddd82908abb67433a753802",
@@ -67,10 +67,11 @@
     "pg": "^8.11.3"
   },
   "runtimeFiles": {
-    "pluginPackageJson": "4a7da3329a660c5b8d5ae182029c2bca6966c1cd934a72e71bc8022876ccd5a6",
+    "pluginPackageJson": "82fffd4f4a057f7d362337f08992b247b801689ad33720830e96c1025448a389",
     "pnpmLock": "95f095233951bbe488cb70da25cc3c9a0a25c1354bfd861b4ee999ccc857019b",
     "pluginIndex": "2050678072a78dab4e7c52c41d5fc56a60121c5544cb8231f9a37de7ff506919",
     "pluginHttpRoutes": "e5d95a404ba6f17451272832cc00aeef7a2f8382cf6585831b6e00daadc73dd5",
+    "testChainRunner": "c6ce4f00b412038b7f4473802f9d0b0df408d693c0b117f5b9dd23e0a7b1b82d",
     "s6aProvisioningCli": "d3320b27da7ab358ca068a3766a375e669fb6922f24ba0186ba0828c3e1d9da8",
     "s6aAcceptanceRunner": "eb58824cba1ab03361a6a4fba409f3f7a120dcda61d4c3d6cad2b82311d62624",
     "s6aOnpremRunbook": "1f4ba2b7fadbad0acb97e18d13f2be7ad6071fa372ac44e0aa4e17995e94c410",

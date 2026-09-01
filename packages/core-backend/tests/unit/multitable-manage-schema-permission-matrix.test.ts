@@ -43,6 +43,11 @@ import request from 'supertest'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { usePinnedServer } from '../utils/pinned-server'
+import {
+  AI_ROUTING_POLICY_ENV,
+  LOCAL_AI_BASE_URL,
+  localAiRoutingPolicyPath,
+} from '../utils/ai-routing-policy-fixture'
 
 const SHEET_ID = 'sheet_ms'
 const PEOPLE_SHEET_ID = 'sheet_ms_people'
@@ -290,6 +295,10 @@ const AI_ENV: Record<string, string> = {
   MULTITABLE_AI_API_KEY: `sk-${'matrixmocked1'.repeat(2)}`,
   MULTITABLE_AI_MODEL: 'claude-sonnet-4-6',
   MULTITABLE_AI_CONFIRM_LIVE_REQUESTS: '1',
+  // The shipped AI path is data-class governed: an ALLOWED cell only reaches 200
+  // on a COMPLIANT deployment (local provider). See tests/utils/ai-routing-policy-fixture.ts.
+  [AI_ROUTING_POLICY_ENV]: localAiRoutingPolicyPath(),
+  MULTITABLE_AI_BASE_URL: LOCAL_AI_BASE_URL,
 }
 
 async function buildAiApp(tier: TierId, fields: Map<string, Field>): Promise<Express> {
