@@ -13,6 +13,8 @@
 
     <ElearningPracticeLearnerSection v-if="practiceEnabled" />
 
+    <ElearningOfflineTrainingLearnerSection v-if="offlineEnabled" />
+
     <p
       v-if="status"
       class="elearning-status"
@@ -238,6 +240,8 @@ import ElearningLearningProfileSection from './ElearningLearningProfileSection.v
 import ElearningPortalHero from './ElearningPortalHero.vue'
 import ElearningPracticeLearnerSection from './ElearningPracticeLearnerSection.vue'
 import { isElearningPracticeReady } from '../services/elearningPractice'
+import ElearningOfflineTrainingLearnerSection from './ElearningOfflineTrainingLearnerSection.vue'
+import { probeElearningOfflineTraining } from '../services/elearningOfflineTraining'
 import {
   elearningExamAnswerProgress,
   elearningExamCountdown,
@@ -259,6 +263,7 @@ const assessmentReady = ref(false)
 const contentEnabled = ref(false)
 const incentiveEnabled = ref(false)
 const practiceEnabled = ref(false)
+const offlineEnabled = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
 const activeCourseVersionId = ref<string | null>(null)
@@ -609,6 +614,13 @@ function isNaturalVideoEnd(video: HTMLVideoElement | null): boolean {
 
 async function ensureV01Ready(): Promise<void> {
   const capabilities = await getElearningCapabilities()
+  let offlineFailure: unknown
+  try {
+    offlineEnabled.value = await probeElearningOfflineTraining()
+  } catch (error) {
+    offlineEnabled.value = false
+    offlineFailure = error
+  }
   assessmentReady.value = isElearningLearnerReady(capabilities)
   contentEnabled.value = isElearningContentReady(capabilities)
   incentiveEnabled.value = capabilities.enabled === true
@@ -619,7 +631,9 @@ async function ensureV01Ready(): Promise<void> {
     && !contentEnabled.value
     && !incentiveEnabled.value
     && !practiceEnabled.value
+    && !offlineEnabled.value
   ) {
+    if (offlineFailure) throw offlineFailure
     throw new ElearningApiError('feature_disabled', 404)
   }
   ready.value = assessmentReady.value || contentEnabled.value

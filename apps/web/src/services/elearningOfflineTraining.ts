@@ -1,0 +1,558 @@
+import { apiFetch } from '../utils/api'
+import { ElearningApiError } from './elearning'
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const ERROR_CODE_RE = /^[A-Za-z][A-Za-z0-9_]{0,62}$/
+const CANONICAL_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+const FORBIDDEN_RESPONSE_KEYS = new Set([
+  'actorId',
+  'challengeId',
+  'decisionHash',
+  'digest',
+  'orgId',
+  'requestHash',
+  'secret',
+])
+
+export type ElearningOfflineAttendanceAction = 'check_in' | 'check_out'
+export type ElearningOfflineAttendanceMode = 'training' | 'session'
+
+export interface ElearningOfflineTargetCommand {
+  title: string
+  startsAt: string
+  endsAt: string
+  checkInOpensAt: string
+  checkInClosesAt: string
+  checkOutOpensAt: string
+  checkOutClosesAt: string
+}
+
+export interface ElearningOfflineTarget extends ElearningOfflineTargetCommand {
+  targetId: string
+  position: number
+}
+
+export interface ElearningOfflinePublishResult {
+  trainingId: string
+  revisionId: string
+  title: string
+  location: string
+  attendanceMode: ElearningOfflineAttendanceMode
+  targets: ElearningOfflineTarget[]
+  memberCount: number
+  createdAt: string
+  duplicate: boolean
+}
+
+export interface ElearningOfflineQrResult {
+  trainingId: string
+  revisionId: string
+  targetId: string
+  action: ElearningOfflineAttendanceAction
+  token: string
+  issuedAt: string
+  expiresAt: string
+  duplicate: boolean
+}
+
+export interface ElearningOfflineLearnerTarget extends ElearningOfflineTarget {
+  attendanceStatus: 'checked_in' | 'checked_out' | 'not_checked_in'
+  checkedInAt: string | null
+  checkedOutAt: string | null
+}
+
+export interface ElearningOfflineLearnerTraining {
+  trainingId: string
+  revisionId: string
+  title: string
+  location: string
+  attendanceMode: ElearningOfflineAttendanceMode
+  status: 'active' | 'archived'
+  targets: ElearningOfflineLearnerTarget[]
+  completionStatus: 'completed' | 'in_progress'
+}
+
+export interface ElearningOfflineAttendanceResult {
+  eventId: string
+  trainingId: string
+  revisionId: string
+  targetId: string
+  action: ElearningOfflineAttendanceAction
+  occurredAt: string
+  targetStatus: 'checked_in' | 'checked_out'
+  completionStatus: 'completed' | 'in_progress'
+  completedTargetCount: number
+  totalTargetCount: number
+  duplicate: boolean
+}
+
+export interface ElearningOfflineRequestIds {
+  forPublish(input: Omit<PublishElearningOfflineInput, 'requestId'>): string
+  settlePublish(input: Omit<PublishElearningOfflineInput, 'requestId'>): void
+  forQr(trainingId: string, targetId: string, action: ElearningOfflineAttendanceAction): string
+  settleQr(trainingId: string, targetId: string, action: ElearningOfflineAttendanceAction): void
+  forAttendance(token: string): string
+  settleAttendance(token: string): void
+}
+
+export interface PublishElearningOfflineInput {
+  requestId: string
+  title: string
+  location: string
+  attendanceMode: ElearningOfflineAttendanceMode
+  targets: ElearningOfflineTargetCommand[]
+  memberUserIds: string[]
+}
+
+function fail(code: string, status: number): never {
+  throw new ElearningApiError(code, status)
+}
+
+function failShape(status: number): never {
+  fail('invalid_response', status)
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value)
+  return actual.length === keys.length
+    && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key))
+}
+
+function hasForbiddenResponseKey(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(hasForbiddenResponseKey)
+  if (!isObject(value)) return false
+  return Object.entries(value).some(([key, child]) => (
+    FORBIDDEN_RESPONSE_KEYS.has(key) || hasForbiddenResponseKey(child)
+  ))
+}
+
+function uuid(value: unknown, status: number): string {
+  if (typeof value !== 'string' || !UUID_RE.test(value)) failShape(status)
+  return value.toLowerCase()
+}
+
+function text(value: unknown, status: number, max: number): string {
+  if (
+    typeof value !== 'string'
+    || value.trim() === ''
+    || value.length > max
+    || value.includes('\0')
+  ) failShape(status)
+  return value
+}
+
+function canonicalInstant(value: unknown, status: number): string {
+  if (typeof value !== 'string' || !CANONICAL_INSTANT_RE.test(value)) failShape(status)
+  const parsed = new Date(value)
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== value) failShape(status)
+  return value
+}
+
+function nullableInstant(value: unknown, status: number): string | null {
+  return value === null ? null : canonicalInstant(value, status)
+}
+
+function bool(value: unknown, status: number): boolean {
+  if (value !== true && value !== false) failShape(status)
+  return value
+}
+
+function integer(value: unknown, status: number, min: number, max: number): number {
+  if (
+    typeof value !== 'number'
+    || !Number.isSafeInteger(value)
+    || value < min
+    || value > max
+  ) failShape(status)
+  return value
+}
+
+function mode(value: unknown, status: number): ElearningOfflineAttendanceMode {
+  if (value !== 'training' && value !== 'session') failShape(status)
+  return value
+}
+
+function action(value: unknown, status: number): ElearningOfflineAttendanceAction {
+  if (value !== 'check_in' && value !== 'check_out') failShape(status)
+  return value
+}
+
+function parseTarget(value: unknown, status: number): ElearningOfflineTarget {
+  if (!isObject(value) || !exactKeys(value, [
+    'targetId',
+    'position',
+    'title',
+    'startsAt',
+    'endsAt',
+    'checkInOpensAt',
+    'checkInClosesAt',
+    'checkOutOpensAt',
+    'checkOutClosesAt',
+  ])) failShape(status)
+  const startsAt = canonicalInstant(value.startsAt, status)
+  const endsAt = canonicalInstant(value.endsAt, status)
+  const checkInOpensAt = canonicalInstant(value.checkInOpensAt, status)
+  const checkInClosesAt = canonicalInstant(value.checkInClosesAt, status)
+  const checkOutOpensAt = canonicalInstant(value.checkOutOpensAt, status)
+  const checkOutClosesAt = canonicalInstant(value.checkOutClosesAt, status)
+  if (
+    Date.parse(endsAt) <= Date.parse(startsAt)
+    || Date.parse(checkInClosesAt) <= Date.parse(checkInOpensAt)
+    || Date.parse(checkOutClosesAt) <= Date.parse(checkOutOpensAt)
+    || Date.parse(checkOutOpensAt) < Date.parse(checkInOpensAt)
+    || Date.parse(checkOutClosesAt) < Date.parse(checkInClosesAt)
+  ) failShape(status)
+  return {
+    targetId: uuid(value.targetId, status),
+    position: integer(value.position, status, 1, 100),
+    title: text(value.title, status, 200),
+    startsAt,
+    endsAt,
+    checkInOpensAt,
+    checkInClosesAt,
+    checkOutOpensAt,
+    checkOutClosesAt,
+  }
+}
+
+function parseTargetList(value: unknown, status: number): ElearningOfflineTarget[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 100) failShape(status)
+  const targets = value.map((entry) => parseTarget(entry, status))
+  const ids = new Set<string>()
+  for (const [index, target] of targets.entries()) {
+    if (target.position !== index + 1 || ids.has(target.targetId)) failShape(status)
+    ids.add(target.targetId)
+  }
+  return targets
+}
+
+function parseError(payload: unknown): string {
+  if (isObject(payload) && exactKeys(payload, ['error']) && typeof payload.error === 'string') {
+    const code = payload.error.trim()
+    if (ERROR_CODE_RE.test(code)) return code
+  }
+  return 'request_failed'
+}
+
+async function requestJson(
+  path: string,
+  method: 'GET' | 'POST',
+  expectedStatuses: readonly number[],
+  body?: object,
+): Promise<{ payload: unknown; status: number }> {
+  let response: Response
+  try {
+    response = await apiFetch(path, {
+      method,
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+  } catch {
+    fail('network_error', 0)
+  }
+  let payload: unknown
+  try {
+    payload = await response.json()
+  } catch {
+    payload = undefined
+  }
+  if (!expectedStatuses.includes(response.status)) fail(parseError(payload), response.status)
+  if (hasForbiddenResponseKey(payload)) failShape(response.status)
+  return { payload, status: response.status }
+}
+
+function newRequestId(): string {
+  if (typeof crypto === 'undefined' || typeof crypto.randomUUID !== 'function') {
+    fail('request_failed', 0)
+  }
+  return crypto.randomUUID()
+}
+
+function normalizedPublishIdentity(input: Omit<PublishElearningOfflineInput, 'requestId'>): string {
+  return JSON.stringify([
+    'publish',
+    input.title.trim(),
+    input.location.trim(),
+    input.attendanceMode,
+    input.targets.map((target) => [
+      target.title.trim(),
+      target.startsAt,
+      target.endsAt,
+      target.checkInOpensAt,
+      target.checkInClosesAt,
+      target.checkOutOpensAt,
+      target.checkOutClosesAt,
+    ]),
+    [...input.memberUserIds].map((id) => id.toLowerCase()).sort(),
+  ])
+}
+
+export function createElearningOfflineRequestIds(): ElearningOfflineRequestIds {
+  const ids = new Map<string, string>()
+  const publishIdentity = (input: Omit<PublishElearningOfflineInput, 'requestId'>): string => (
+    normalizedPublishIdentity(input)
+  )
+  const qrIdentity = (
+    trainingId: string,
+    targetId: string,
+    attendanceAction: ElearningOfflineAttendanceAction,
+  ): string => JSON.stringify(['qr', trainingId.toLowerCase(), targetId.toLowerCase(), attendanceAction])
+  const attendanceIdentity = (token: string): string => JSON.stringify(['attendance', token.trim()])
+  const forIdentity = (identity: string): string => {
+    const existing = ids.get(identity)
+    if (existing) return existing
+    const created = newRequestId()
+    ids.set(identity, created)
+    return created
+  }
+  return {
+    forPublish: (input) => forIdentity(publishIdentity(input)),
+    settlePublish: (input) => ids.delete(publishIdentity(input)),
+    forQr: (trainingId, targetId, attendanceAction) => (
+      forIdentity(qrIdentity(trainingId, targetId, attendanceAction))
+    ),
+    settleQr: (trainingId, targetId, attendanceAction) => {
+      ids.delete(qrIdentity(trainingId, targetId, attendanceAction))
+    },
+    forAttendance: (token) => forIdentity(attendanceIdentity(token)),
+    settleAttendance: (token) => ids.delete(attendanceIdentity(token)),
+  }
+}
+
+export async function publishElearningOfflineTraining(
+  input: PublishElearningOfflineInput,
+): Promise<ElearningOfflinePublishResult> {
+  const { payload, status } = await requestJson(
+    '/api/elearning/admin/offline-trainings',
+    'POST',
+    [200, 201],
+    input,
+  )
+  if (!isObject(payload) || !exactKeys(payload, [
+    'trainingId',
+    'revisionId',
+    'title',
+    'location',
+    'attendanceMode',
+    'targets',
+    'memberCount',
+    'createdAt',
+    'duplicate',
+  ])) failShape(status)
+  const targets = parseTargetList(payload.targets, status)
+  const attendanceMode = mode(payload.attendanceMode, status)
+  if (attendanceMode === 'training' && targets.length !== 1) failShape(status)
+  return {
+    trainingId: uuid(payload.trainingId, status),
+    revisionId: uuid(payload.revisionId, status),
+    title: text(payload.title, status, 200),
+    location: text(payload.location, status, 500),
+    attendanceMode,
+    targets,
+    memberCount: integer(payload.memberCount, status, 1, 10_000),
+    createdAt: canonicalInstant(payload.createdAt, status),
+    duplicate: bool(payload.duplicate, status),
+  }
+}
+
+export async function issueElearningOfflineQr(input: {
+  requestId: string
+  trainingId: string
+  targetId: string
+  action: ElearningOfflineAttendanceAction
+}): Promise<ElearningOfflineQrResult> {
+  const { payload, status } = await requestJson(
+    `/api/elearning/admin/offline-trainings/${encodeURIComponent(input.trainingId)}/targets/${encodeURIComponent(input.targetId)}/qr`,
+    'POST',
+    [200, 201],
+    { requestId: input.requestId, action: input.action },
+  )
+  if (!isObject(payload) || !exactKeys(payload, [
+    'trainingId',
+    'revisionId',
+    'targetId',
+    'action',
+    'token',
+    'issuedAt',
+    'expiresAt',
+    'duplicate',
+  ])) failShape(status)
+  const issuedAt = canonicalInstant(payload.issuedAt, status)
+  const expiresAt = canonicalInstant(payload.expiresAt, status)
+  if (Date.parse(expiresAt) <= Date.parse(issuedAt)) failShape(status)
+  const result: ElearningOfflineQrResult = {
+    trainingId: uuid(payload.trainingId, status),
+    revisionId: uuid(payload.revisionId, status),
+    targetId: uuid(payload.targetId, status),
+    action: action(payload.action, status),
+    token: text(payload.token, status, 8_192),
+    issuedAt,
+    expiresAt,
+    duplicate: bool(payload.duplicate, status),
+  }
+  if (
+    result.trainingId !== input.trainingId.toLowerCase()
+    || result.targetId !== input.targetId.toLowerCase()
+    || result.action !== input.action
+  ) failShape(status)
+  return result
+}
+
+export async function listMyElearningOfflineTrainings(): Promise<{
+  trainings: ElearningOfflineLearnerTraining[]
+}> {
+  const { payload, status } = await requestJson('/api/elearning/me/offline-trainings', 'GET', [200])
+  if (!isObject(payload) || !exactKeys(payload, ['trainings']) || !Array.isArray(payload.trainings)) {
+    failShape(status)
+  }
+  const trainings = payload.trainings.map((entry): ElearningOfflineLearnerTraining => {
+    if (!isObject(entry) || !exactKeys(entry, [
+      'trainingId',
+      'revisionId',
+      'title',
+      'location',
+      'attendanceMode',
+      'status',
+      'targets',
+      'completionStatus',
+    ]) || (entry.status !== 'active' && entry.status !== 'archived')) failShape(status)
+    if (entry.completionStatus !== 'completed' && entry.completionStatus !== 'in_progress') {
+      failShape(status)
+    }
+    if (!Array.isArray(entry.targets) || entry.targets.length === 0 || entry.targets.length > 100) {
+      failShape(status)
+    }
+    const ids = new Set<string>()
+    const targets = entry.targets.map((targetValue, index): ElearningOfflineLearnerTarget => {
+      if (!isObject(targetValue) || !exactKeys(targetValue, [
+        'targetId',
+        'position',
+        'title',
+        'startsAt',
+        'endsAt',
+        'checkInOpensAt',
+        'checkInClosesAt',
+        'checkOutOpensAt',
+        'checkOutClosesAt',
+        'attendanceStatus',
+        'checkedInAt',
+        'checkedOutAt',
+      ])) failShape(status)
+      const base = parseTarget({
+        targetId: targetValue.targetId,
+        position: targetValue.position,
+        title: targetValue.title,
+        startsAt: targetValue.startsAt,
+        endsAt: targetValue.endsAt,
+        checkInOpensAt: targetValue.checkInOpensAt,
+        checkInClosesAt: targetValue.checkInClosesAt,
+        checkOutOpensAt: targetValue.checkOutOpensAt,
+        checkOutClosesAt: targetValue.checkOutClosesAt,
+      }, status)
+      if (base.position !== index + 1 || ids.has(base.targetId)) failShape(status)
+      ids.add(base.targetId)
+      const checkedInAt = nullableInstant(targetValue.checkedInAt, status)
+      const checkedOutAt = nullableInstant(targetValue.checkedOutAt, status)
+      if (
+        (targetValue.attendanceStatus === 'not_checked_in' && (checkedInAt !== null || checkedOutAt !== null))
+        || (targetValue.attendanceStatus === 'checked_in' && (checkedInAt === null || checkedOutAt !== null))
+        || (targetValue.attendanceStatus === 'checked_out' && (checkedInAt === null || checkedOutAt === null))
+        || (
+          targetValue.attendanceStatus !== 'not_checked_in'
+          && targetValue.attendanceStatus !== 'checked_in'
+          && targetValue.attendanceStatus !== 'checked_out'
+        )
+      ) failShape(status)
+      return {
+        ...base,
+        attendanceStatus: targetValue.attendanceStatus,
+        checkedInAt,
+        checkedOutAt,
+      }
+    })
+    const allCompleted = targets.every((target) => target.attendanceStatus === 'checked_out')
+    if ((entry.completionStatus === 'completed') !== allCompleted) failShape(status)
+    return {
+      trainingId: uuid(entry.trainingId, status),
+      revisionId: uuid(entry.revisionId, status),
+      title: text(entry.title, status, 200),
+      location: text(entry.location, status, 500),
+      attendanceMode: mode(entry.attendanceMode, status),
+      status: entry.status,
+      targets,
+      completionStatus: entry.completionStatus,
+    }
+  })
+  if (new Set(trainings.map((training) => training.trainingId)).size !== trainings.length) {
+    failShape(status)
+  }
+  return { trainings }
+}
+
+export async function probeElearningOfflineTraining(): Promise<boolean> {
+  try {
+    await listMyElearningOfflineTrainings()
+    return true
+  } catch (error) {
+    if (error instanceof ElearningApiError && error.status === 404) return false
+    throw error
+  }
+}
+
+export async function recordElearningOfflineAttendance(input: {
+  requestId: string
+  token: string
+}): Promise<ElearningOfflineAttendanceResult> {
+  const { payload, status } = await requestJson(
+    '/api/elearning/me/offline-attendance',
+    'POST',
+    [200],
+    input,
+  )
+  if (!isObject(payload) || !exactKeys(payload, [
+    'eventId',
+    'trainingId',
+    'revisionId',
+    'targetId',
+    'action',
+    'occurredAt',
+    'targetStatus',
+    'completionStatus',
+    'completedTargetCount',
+    'totalTargetCount',
+    'duplicate',
+  ])) failShape(status)
+  const parsedAction = action(payload.action, status)
+  const targetStatus = payload.targetStatus === 'checked_in' || payload.targetStatus === 'checked_out'
+    ? payload.targetStatus
+    : failShape(status)
+  const completionStatus = payload.completionStatus === 'completed'
+    || payload.completionStatus === 'in_progress'
+    ? payload.completionStatus
+    : failShape(status)
+  if (
+    (parsedAction === 'check_in' && targetStatus !== 'checked_in')
+    || (parsedAction === 'check_out' && targetStatus !== 'checked_out')
+  ) failShape(status)
+  const totalTargetCount = integer(payload.totalTargetCount, status, 1, 100)
+  const completedTargetCount = integer(payload.completedTargetCount, status, 0, totalTargetCount)
+  if ((completionStatus === 'completed') !== (completedTargetCount === totalTargetCount)) {
+    failShape(status)
+  }
+  return {
+    eventId: uuid(payload.eventId, status),
+    trainingId: uuid(payload.trainingId, status),
+    revisionId: uuid(payload.revisionId, status),
+    targetId: uuid(payload.targetId, status),
+    action: parsedAction,
+    occurredAt: canonicalInstant(payload.occurredAt, status),
+    targetStatus,
+    completionStatus,
+    completedTargetCount,
+    totalTargetCount,
+    duplicate: bool(payload.duplicate, status),
+  }
+}

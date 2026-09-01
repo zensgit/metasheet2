@@ -15,6 +15,7 @@ const h = vi.hoisted(() => ({
   publishExam: vi.fn(),
   createPractice: vi.fn(),
   listPractice: vi.fn(),
+  offlineProbe: vi.fn(),
 }))
 
 vi.mock('../src/services/elearning', async () => {
@@ -52,6 +53,13 @@ vi.mock('../src/services/elearningPractice', async () => {
     createElearningPracticeSet: h.createPractice,
     listElearningPracticeSets: h.listPractice,
   }
+})
+
+vi.mock('../src/services/elearningOfflineTraining', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/elearningOfflineTraining')>(
+    '../src/services/elearningOfflineTraining',
+  )
+  return { ...actual, probeElearningOfflineTraining: h.offlineProbe }
 })
 
 import { ElearningApiError } from '../src/services/elearning'
@@ -138,7 +146,9 @@ describe('ElearningAdminView', () => {
     h.publishExam.mockReset()
     h.createPractice.mockReset()
     h.listPractice.mockReset()
+    h.offlineProbe.mockReset()
     h.listPractice.mockResolvedValue({ practiceSets: [] })
+    h.offlineProbe.mockResolvedValue(false)
     h.capabilities.mockResolvedValue({
       enabled: true,
       capabilities: {
@@ -702,6 +712,40 @@ describe('ElearningAdminView', () => {
 
     app?.unmount()
     container?.remove()
+  })
+
+  it('mounts offline training when it is the only enabled extension', async () => {
+    h.capabilities.mockResolvedValue({
+      enabled: true,
+      capabilities: {
+        content: false,
+        assignment: false,
+        assessment: false,
+        incentive: false,
+        analytics: false,
+        media: false,
+      },
+    })
+    h.offlineProbe.mockResolvedValue(true)
+    const root = mountView()
+    await flushUi()
+
+    expect(root.querySelector('[data-testid="elearning-offline-admin-section"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="elearning-admin-status"]')).toBeNull()
+    expect(h.offlineProbe).toHaveBeenCalledTimes(1)
+    expect((root.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).disabled)
+      .toBe(true)
+  })
+
+  it('does not let an unavailable offline extension mask ready canonical admin surfaces', async () => {
+    h.offlineProbe.mockRejectedValue(new ElearningApiError('unavailable', 503))
+    const root = mountView()
+    await flushUi()
+
+    expect(root.querySelector('[data-testid="elearning-offline-admin-section"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-admin-status"]')).toBeNull()
+    expect((root.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).disabled)
+      .toBe(false)
   })
 
   it('keeps all surfaces fail-closed when the master flag is disabled', async () => {
