@@ -784,8 +784,8 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
   PLAN_LARGE_BOM_BOUNDED: Object.freeze({
     zh: '这个项目的 BOM 太大,没法当场展开',
     en: 'This project’s BOM is too large to expand on the spot',
-    zhNext: '要走后台展开的通道,请联系我们安排。什么都没有改动。',
-    enNext: 'It needs the background expansion channel — ask us to arrange it. Nothing was changed.',
+    zhNext: '系统已经转去后台通道处理,下面能看到进度 —— 不用重新点同步,也不用联系我们。',
+    enNext: 'The system has switched to the background channel — progress shows below. No need to sync again, and no need to contact us.',
   }),
   PLAN_NOT_APPLYABLE: Object.freeze({
     zh: '这次试算没能得出可以写入的计划',
@@ -944,4 +944,52 @@ export const STOCK_PREP_SYNC_VERDICT_PLAIN: Record<string, StockPrepPlainEntry> 
 
 export function stockPrepSyncVerdictPlain(verdict: string): StockPrepPlainEntry | null {
   return lookup(STOCK_PREP_SYNC_VERDICT_PLAIN, verdict)
+}
+
+// ---------------------------------------------------------------------------
+// 大 BOM 后台通道 — the seven phases of largeBomPull.ts's run
+// ---------------------------------------------------------------------------
+
+/**
+ * `PLAN_LARGE_BOM_BOUNDED` above says the ONE sentence that fires the moment the SKIP lands; these
+ * six cover every NON-FAILURE phase of the background channel after that, one entry per
+ * non-`failed` `StockPreparationLargeBomPullPhase`. There is deliberately NO `failed` entry here: a
+ * failure renders through `stockPrepErrorPlain` below instead — the SAME lookup every other failure
+ * on this workbench uses (`FORBIDDEN`, a confirm-request failure, …) — rather than a second, bespoke
+ * "something went wrong" sentence living in a different table than the one an operator's other
+ * failures already come from.
+ */
+export const STOCK_PREP_LARGE_BOM_PHASE_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  queued: Object.freeze({
+    zh: '排队中,准备展开这个项目的 BOM',
+    en: 'Queued — about to expand this project’s BOM',
+  }),
+  expanding: Object.freeze({
+    zh: '正在后台展开 BOM…',
+    en: 'Expanding the BOM in the background…',
+  }),
+  planning: Object.freeze({
+    zh: '展开完成,正在核对和现有数据的差异',
+    en: 'Expansion done — checking for conflicts with what is already there',
+  }),
+  confirm_required: Object.freeze({
+    zh: '有几行系统拿不准,需要人工确认',
+    en: 'Some rows need a person to confirm',
+    zhNext: '这条 BOM 太大,现在还不能在这个面板里帮您确认这些行;请联系我们安排处理。到目前为止什么都没有写入。',
+    enNext: 'This BOM is too large for this panel to walk you through those rows yet — ask us to arrange it. Nothing has been written so far.',
+  }),
+  applying: Object.freeze({
+    zh: '正在把展开出来的数据写进多维表…',
+    en: 'Writing the expanded rows into the multitable…',
+  }),
+  done: Object.freeze({
+    zh: 'BOM 已经写进多维表',
+    en: 'The BOM is in the multitable',
+    zhNext: '可以到多维表里看数据了。',
+    enNext: 'You can open the multitable and look at the data.',
+  }),
+})
+
+export function stockPrepLargeBomPhasePlain(phase: string): StockPrepPlainEntry | null {
+  return lookup(STOCK_PREP_LARGE_BOM_PHASE_PLAIN, phase)
 }
