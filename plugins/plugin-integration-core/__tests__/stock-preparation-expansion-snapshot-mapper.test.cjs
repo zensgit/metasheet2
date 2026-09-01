@@ -87,6 +87,27 @@ run('maps expansion field vocabulary to snapshot-line vocabulary', () => {
   assert.ok(childLine.sourceFingerprint, 'sourceFingerprint stamped')
   // plan declares no unit field -> designUnit absent unless caller supplies a default
   assert.ok(!('designUnit' in childLine))
+  // material is persisted as a first-class snapshot-line field (adjudication design 20260901:
+  // fingerprint decomposition) — no longer only baked into the sourceFingerprint hash.
+  assert.equal(childLine.material, 'steel')
+})
+
+run('material is persisted when present and omitted when the expansion row lacks it', () => {
+  const withMaterial = mapExpansionRowsToSnapshotLines([expansionRow()], { snapshotBatchId: 'batch-m1' })
+  assert.equal(withMaterial.lines[0].material, 'steel')
+  const withoutMaterial = mapExpansionRowsToSnapshotLines(
+    [expansionRow({ material: null })],
+    { snapshotBatchId: 'batch-m2' },
+  )
+  assert.ok(!('material' in withoutMaterial.lines[0]), 'absent material stays absent (no invented field)')
+})
+
+run('persisting material does not change the sourceFingerprint computation (old batches stay comparable)', () => {
+  // sourceIdentity already hashed material before it became a persisted field; the fingerprint for the
+  // SAME source row must be byte-identical, so pre-change batches do not all fingerprint-differ.
+  const a = mapExpansionRowsToSnapshotLines([expansionRow({ idempotencyKey: 'fp-fixed' })], { snapshotBatchId: 'bfp' })
+  const b = mapExpansionRowsToSnapshotLines([expansionRow({ idempotencyKey: 'fp-fixed' })], { snapshotBatchId: 'bfp' })
+  assert.equal(a.lines[0].sourceFingerprint, b.lines[0].sourceFingerprint)
 })
 
 run('designQty prefers rawQuantity over the totalQuantity rollup', () => {
