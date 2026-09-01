@@ -12,7 +12,7 @@
 // entered, which the server gates one notch tighter (stock-prep:operate) for that reason. Nothing in
 // this module may route value content into a log, an error message, or an aggregate.
 import { apiFetch } from '../../../utils/api'
-import { buildQueryString, type IntegrationScope } from '../workbench'
+import { buildQuerySuffix, type IntegrationScope } from '../workbench'
 import { parseStockPreparationConfirmResponse } from './confirmApi'
 
 /** Frozen server status vocabulary (stock-preparation-confirmation-decisions.cjs STATUSES). */
@@ -95,7 +95,7 @@ export interface StockPreparationConfirmResult {
 export async function readStockPreparationDecisionReadiness(
   scope: IntegrationScope,
 ): Promise<StockPreparationDecisionReadiness> {
-  const query = buildQueryString({ tenantId: scope.tenantId, workspaceId: scope.workspaceId })
+  const query = buildQuerySuffix({ tenantId: scope.tenantId, workspaceId: scope.workspaceId })
   const response = await apiFetch(`/api/integration/stock-preparation/confirmation-decisions/readiness${query}`)
   return parseStockPreparationConfirmResponse<StockPreparationDecisionReadiness>(response)
 }
@@ -107,7 +107,7 @@ export async function readStockPreparationDecisionReadiness(
 export async function listStockPreparationDecisions(
   scope: IntegrationScope & { projectNo: string; status?: StockPreparationDecisionStatus | null },
 ): Promise<StockPreparationDecisionQueue> {
-  const query = buildQueryString({
+  const query = buildQuerySuffix({
     tenantId: scope.tenantId,
     workspaceId: scope.workspaceId,
     projectNo: scope.projectNo,
@@ -125,7 +125,7 @@ export async function listStockPreparationDecisions(
 export async function readStockPreparationValueEntry(
   scope: IntegrationScope & { decisionId: string },
 ): Promise<StockPreparationDecisionValueEntry> {
-  const query = buildQueryString({
+  const query = buildQuerySuffix({
     tenantId: scope.tenantId,
     workspaceId: scope.workspaceId,
     decisionId: scope.decisionId,
