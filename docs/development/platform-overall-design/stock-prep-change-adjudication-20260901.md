@@ -88,17 +88,44 @@
 
 **目标**:人只看"要紧且模糊"的行;纯元数据变化不打扰人;影响采购的变化连着人话影响一起给。
 
-**设计**:今天的 `BLOCKING_CHANGE_TYPES` 是全部 12 种 `CHANGE_TYPES` 的扁平集合(`stock-preparation-snapshot-diff.cjs:33-46`)。本设计不改 diff 引擎本身产出的枚举,只在它之上加一层**三级分诊映射**(纯读、纯展示层,不改变 diff/计划器任何写入行为):
+**设计**:今天的 `BLOCKING_CHANGE_TYPES` 是全部 12 种 `CHANGE_TYPES` 的扁平集合(`stock-preparation-snapshot-diff.cjs:33-46`)。本设计不改 diff 引擎已有判定,但**必须**在它之上做两处修正——一处是独立 review 指出的真实设计缺陷(tier C 的判据太粗,可能悄悄藏住一次物料替换),一处是三档分诊本身不是全集(有两种真实会出现的 `changeTypes` 组合,今天哪个档都进不去)。原设计"只在既有枚举之上加一层纯展示映射"这句话本身是本次修正要推翻的部分——tier C 需要的判据今天并不存在,不是分类问题,是缺输入的问题。
+
+**缺陷 1:tier C 的"来源指纹变了"是一个黑箱判据,必须先拆解,不能直接放行**
+
+`compareMatchedRows`(`stock-preparation-snapshot-diff.cjs:196-211`)对 `SOURCE_FINGERPRINT_CHANGED` 的判定是:除了数量/单位/版本/路径/父件这五个显式比较的字段之外,任何其它源侧字段变化,一律折叠进一个哈希(`sourceIdentity()`,`stock-preparation-expansion-snapshot-mapper.cjs:106-117`——对 `componentSourceId`/`componentCode`/`sourceVersion`/`material`/`parentSourceId`/`path`/`rawQuantity`/`totalQuantity` 八个字段整体取一次哈希)。这意味着**`material`(物料)与 `componentCode`(图号)本身的变化,和一次无关痛痒的元数据编辑(如备注文案),在今天的判据下是完全同一个 token**——原稿这里写的"大概率是名称/描述这类元数据编辑"是一句没有代码依据的猜测,而这恰恰是三档里唯一一档会把行**从人眼前拿走**的一档(不出现在收件箱,只计入汇总数)。在采购场景里物料决定买什么:一次未升版本号的物料替换(如封头材料 Q345→S30408,同一图号、同一路径、同一父件)会被这套判据静默吸收进"自动带过"计数,人永远看不到它——这与本设计§3.6 反复强调的"绝不猜"立场直接矛盾:tier C 恰恰是三档里唯一一处允许系统替人下判断、且下判断的方式本身就是猜。
+
+**修正**:tier C 的资格判定必须先把指纹变化**拆解**到具体字段,不能只看指纹这个粗粒度 token:
+
+1. **新增两个细粒度 `CHANGE_TYPES`**,直接比较已经拿在手上、但今天从未单独比较过的字段:
+   - `COMPONENT_CODE_CHANGED`——比较 `previous.childDrawingNo` vs `current.childDrawingNo`(这个字段今天已经在快照行上,`stock-preparation-expansion-snapshot-mapper.cjs:146`,只是 `compareMatchedRows` 从未读取它做比较);同一 `pathKey`、同一父件下图号发生变化,本质是"这个位置换了一个不同的物理件"——比单纯的材料替换更严重,今天同样被折叠进指纹里,完全不可见。
+   - `MATERIAL_CHANGED`——比较 `previous.material` vs `current.material`;这需要 mapper 新增一步**把 `material` 也持久化成快照行上的一个显式字段**(`toSnapshotLine`,`stock-preparation-expansion-snapshot-mapper.cjs:138-156`,今天只把它揉进 `sourceIdentity()` 哈希,原始值从未落到任何可比较的字段上)——不加这一列,`material` 的变化在快照行层面永远无法被单独比较,只能困在一个不透明哈希里。
+2. **tier C 收窄为**:命中 `SOURCE_FINGERPRINT_CHANGED`,且**同时不命中**新增的 `COMPONENT_CODE_CHANGED`/`MATERIAL_CHANGED`,且不伴随其它阻断类型——即指纹确实变了,但拆解后确认变化点不落在图号或物料这两个采购相关字段上,才允许"自动带过"。指纹哈希里还有 `componentSourceId`/`parentSourceId`/`rawQuantity`/`totalQuantity`/`path` 未被这两个新 change type 覆盖,但这几个字段的变化已经分别由别的判据兜底(`rawQuantity`/`totalQuantity` 归 `QUANTITY_CHANGED`;`path` 归 `PATH_CHANGED`;`parentSourceId` 归 `PARENT_CHANGED`;`componentSourceId` 是匹配键本身,匹配上就不可能变)——两个新 change type 补齐之后,`SOURCE_FINGERPRINT_CHANGED` 单独出现时,唯一还可能变了、又没被任何显式判据覆盖到的,才真的是纯元数据字段(不在 `IDENTITY_FIELD_IDS`/`LINEAGE_FIELD_IDS` 里的字段,如描述文案)——这时"大概率是元数据编辑"才第一次有了站得住的代码依据,不再是猜。
+3. 如果 mapper 侧新增 `material` 持久化字段这一步在实现排期上不划算,**保守回退方案是直接砍掉 tier C**——`SOURCE_FINGERPRINT_CHANGED` 命中一律归 A 档人工判断,牺牲"自动带过"带来的 toil 收敛,换回不猜的安全底线。两条路径选哪条都行,**唯一不允许的是维持今天这种"指纹变了就默认是元数据"的猜测式判据**。
+
+**缺陷 2:三档分诊不是全集——`PATH_CHANGED`/`PARENT_CHANGED` 单独出现时,今天哪个档都进不去**
+
+原表 A 档写的是"`PATH_CHANGED`+`PARENT_CHANGED` **同时出现**"——但这两个 change type 各自单独出现是真实会发生的组合,不是理论情况:
+
+- **`PATH_CHANGED` 单独出现**:`addMovedIdentityDiffs`(`:365-397`)对每一条"按图号+版本找回来、但没按路径匹配上"的行,**强制**把 `PATH_CHANGED` 塞进 `changeTypes`(`:384`,`if (!changeTypes.includes(...)) changeTypes.push(...)`)——同一父件下挪了个位置、其它什么都没变的行,今天就是这个单独组合,而且是必然出现(强制塞入),不是边缘情况。
+- **`PARENT_CHANGED` 单独出现**:`addMatchedByPathDiffs`(`:336-363`)按 `pathKey` 精确匹配的行,`previous.pathKey === current.pathKey` 是匹配成立的前提,`PATH_CHANGED` 在这条路径里恒为假;但 `parentDrawingNo`/`parentVersion` 是分别解析出来的(父件自己被改了版本,子件所在的路径字符串本身没变)——这条路径下 `PARENT_CHANGED` 完全可能单独成立。
+
+按原表:不满足 A(要求两者同时出现)、不满足 B(不是 QTY/UNIT/VERSION)、不满足 C(不是"只有指纹变了")——**这类行在原三档表里没有归宿,原稿没有说明它该出现在收件箱的哪里、还是根本不出现**,不能靠"应该不会发生"带过,因为上面已经证明它会发生、且其中一种是代码强制产出的。
+
+**修正**:把 A 档的条件从"两者同时出现"放宽为"两者任一出现"——结构性挪动(换了路径位置,和/或换了挂载的父件),不论是否同时发生,系统都无法判断这类挪动对备料/采购是否有实质影响,一律进 A 档人工判断,不要求两者同时命中才算。
+
+三档表改为(覆盖 `compareMatchedRows` 可能产出的全部组合,不再留空档):
 
 | 分诊档 | 覆盖的 `CHANGE_TYPES` | 人看到什么 |
 |---|---|---|
-| C:对备料无关,自动带过 | 只命中 `SOURCE_FINGERPRINT_CHANGED` 且不伴随其他阻断类型的行(来源整行内容变了,但数量/单位/版本/路径/父件均未变——大概率是名称/描述这类元数据编辑) | 不出现在收件箱;计入批次汇总的"已自动带过"计数 |
-| B:影响采购,给出人话影响 | `QUANTITY_CHANGED`、`UNIT_CHANGED`、`VERSION_CHANGED` | 卡片直接给影响句,如"需多备 2 件"/"材料相关的版本变了,建议核实是否需要重新采购"(§5 举例) |
-| A:真歧义,人工判断 | `DUPLICATE_PATH_KEY`、`MISSING_PATH_KEY`、`INVALID_QTY`、`MISSING_CHILD_BOM`、`PATH_CHANGED`+`PARENT_CHANGED` 同时出现(挪动了位置又换了父件,系统无法确定是搬家还是换件) | 卡片说明歧义原因(见层②"系统解释 WHY") |
+| C:对备料无关,自动带过 | 只命中 `SOURCE_FINGERPRINT_CHANGED`,且不命中新增的 `COMPONENT_CODE_CHANGED`/`MATERIAL_CHANGED`,且不伴随其他阻断类型的行(拆解确认变化点不落在图号/物料上,而不是"大概率") | 不出现在收件箱;计入批次汇总的"已自动带过"计数 |
+| B:影响采购,给出人话影响 | `QUANTITY_CHANGED`、`UNIT_CHANGED`、`VERSION_CHANGED`,或拆解后确认命中的 `COMPONENT_CODE_CHANGED`/`MATERIAL_CHANGED`(图号/物料变了,同样是"系统能说清楚变了什么、人核实要不要重新采购"的情形,不并入 C 档) | 卡片直接给影响句,如"需多备 2 件"/"材料相关的版本变了,建议核实是否需要重新采购"/"这个位置的图号或物料变了(XXX→YYY),建议核实是否需要重新采购"(§5 举例) |
+| A:真歧义,人工判断 | `DUPLICATE_PATH_KEY`、`MISSING_PATH_KEY`、`INVALID_QTY`、`MISSING_CHILD_BOM`、`PATH_CHANGED` 和/或 `PARENT_CHANGED`(不论单独出现还是同时出现——结构性挪动,系统答不出来是否影响可采购性,一律人工判断) | 卡片说明歧义原因(见层②"系统解释 WHY") |
+
+（`COMPONENT_CODE_CHANGED`/`MATERIAL_CHANGED` 归入 B 档而不是新开第四档:图号/物料变化和数量/单位/版本变化本质是同一类"系统能明确说清楚变了什么、需要人核实是否要重新采购"的情形,不是"系统答不出来"的真歧义,不需要额外的档位。）
 
 **层③的碰撞卡片不受这张表约束**(见 3.1 末段)——`hadHumanWork` 一旦为真,无论触发它的变化类型属于哪一档,都直接进人工必看的顶层。
 
-**复用 vs 新建**:复用现有 12 个 `CHANGE_TYPES` 与其判定逻辑(diff 引擎一行不改);新建的是这张三级映射(纯读)+ 收件箱按档呈现的 UI/服务层。这一层本质是**给已有枚举分类**,不是新建判定引擎。
+**复用 vs 新建**:复用现有 `CHANGE_TYPES` 中除 `SOURCE_FINGERPRINT_CHANGED` 判据本身之外的判定逻辑(diff 引擎的比较框架一行不改);新建的是:两个细粒度 change type(`COMPONENT_CODE_CHANGED`/`MATERIAL_CHANGED`)+ mapper 侧新增 `material` 显式字段(或保守回退:直接砍掉 tier C)+ 覆盖全部真实组合的三级映射(纯读)+ 收件箱按档呈现的 UI/服务层。**这一层不再是"给已有枚举分类"这么简单——tier C 这一档需要新的判定输入,不是纯展示层**,这是本次修正与原稿的关键差别,原稿"只在既有枚举之上加一层纯读展示层"的表述已不再准确,以本节为准。
 
 ### 3.3 层② —— 相同物料:系统先提方案,人只确认
 
@@ -170,9 +197,9 @@
         │
         │ planBomSnapshotDiff(previous, current)  ── 已存在,纯函数
         ▼
-  批次间 diff(values-free,pathKey/identityKey 匹配 → 12 种 CHANGE_TYPES)
+  批次间 diff(values-free,pathKey/identityKey 匹配 → 14 种 CHANGE_TYPES,新增 COMPONENT_CODE_CHANGED/MATERIAL_CHANGED,见 §3.2)
         │
-        │ 层①三级分诊映射(新建,纯读)
+        │ 层①三级分诊映射(新建;tier C 判据需要新输入,不是纯读展示层,见 §3.2 修正)
         │ 层③ hadHumanWork 碰撞判定(新建,复用 carry-policy.cjs)
         ▼
   冲突计划器 DECISIONS = {ADD, UPDATE, SKIP, INACTIVE, MANUAL_CONFIRM}  ── 已存在
@@ -244,7 +271,7 @@
 | 层 | 复用(已存在、已接线) | 复用(已存在、未接线,本设计负责接线) | 新建 |
 |---|---|---|---|
 | ③ 碰撞检测 | `assertNoHumanFields` 高墙、`makeInactiveDecision` 写入行为 | `stock-preparation-carry-policy.cjs` 全部判定 | `hadHumanWork` 存在性检查、顶级碰撞卡片 UI |
-| ① 变更分诊 | 12 种 `CHANGE_TYPES` 及其判定逻辑 | — | 三级分诊映射(纯读)、按档呈现 UI |
+| ① 变更分诊 | `CHANGE_TYPES` 中除 `SOURCE_FINGERPRINT_CHANGED` 判据本身之外的判定逻辑(diff 引擎比较框架不动) | — | `COMPONENT_CODE_CHANGED`/`MATERIAL_CHANGED` 两个细粒度 change type、mapper 新增 `material` 显式字段(或保守回退:直接砍掉 tier C)、覆盖全部真实组合的三级分诊映射、按档呈现 UI(见 §3.2 修正——tier C 判据需要新输入,不是纯展示层) |
 | ② 同物料提议 | `duplicate_expanded_key` 冲突类、台账三个已实现动作、`LINEAGE_FIELD_IDS`/`IDENTITY_FIELD_IDS` | — | 签名匹配预选层、歧义原因拼句 UI |
 | ④ 决策记忆 | 确认台账全部历史 `CONFIRMED` 行(不新建存储) | — | 签名定义 + 只读记忆索引 + 预填展示层 |
 | ⑤ 异常拦截 | `QUANTITY_CHANGED` 布尔判定 | — | 幅度阈值判定(材料兼容性字典标为远期,未交付) |
