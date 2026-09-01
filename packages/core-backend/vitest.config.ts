@@ -1558,6 +1558,10 @@ export default defineConfig({
       // publish-shape triggers, replay conflicts, and migration drift.
       // Excluded from no-DB collection and wired whole-file post-migrate.
       'tests/integration/elearning-content-runtime.db.test.ts',
+      // E-learning online self-study registration requires real PostgreSQL
+      // for immutable intent, request replay, visibility snapshots, and races.
+      // Excluded from no-DB collection and wired whole-file post-migrate.
+      'tests/integration/elearning-course-enrollment.db.test.ts',
       // E-learning L4 credit-ledger authority. Requires real PostgreSQL for
       // effect identity, replay/hash conflicts, bucket locking, and balances.
       // Excluded from the no-DB job and wired as a whole-file post-migrate gate.

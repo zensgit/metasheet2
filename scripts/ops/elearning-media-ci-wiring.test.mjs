@@ -142,6 +142,7 @@ const SCHEMA_DB_FILES = [
   'tests/integration/elearning-watch-challenge.db.test.ts',
   'tests/integration/elearning-direct-assignment.db.test.ts',
   'tests/integration/elearning-course-publish.db.test.ts',
+  'tests/integration/elearning-course-enrollment.db.test.ts',
   'tests/integration/elearning-title-runtime.db.test.ts',
   'tests/integration/elearning-certificate-runtime.db.test.ts',
   'tests/integration/elearning-learning-profile.db.test.ts',
@@ -190,6 +191,7 @@ const V01_PARKED_FLAGS = [
 
 const L6_EXTENSION_FLAGS = [
   'ELEARNING_WATCH_CHALLENGE_ENABLED',
+  'ELEARNING_ENROLLMENT_ENABLED',
 ]
 
 const MEDIA_CLAIM_UNIT_FILES = [
@@ -567,7 +569,7 @@ test('env example documents the seven canonical flags default false and V0.1 req
     assert.equal(
       CANONICAL_ELEARNING_FLAGS.includes(key),
       false,
-      `${key} is an extension gate, not an eighth canonical capability`,
+      `${key} is an extension gate, not a canonical V0.1 capability`,
     )
   }
   const requiredBlock = commentBlockStarting(env, /V0\.1 required flags/, 'V0.1 required flags')
