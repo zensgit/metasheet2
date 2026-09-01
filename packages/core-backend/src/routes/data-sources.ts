@@ -39,6 +39,8 @@ import { DATA_SOURCE_DEFAULT_LIMIT, DATA_SOURCE_MAX_ROWS } from '../data-adapter
 // reaches the client as its own 4xx (e.g. 403 arm-ahead-of-provisioning) with its coded reason, rather
 // than collapsing into a generic 500. The gate's messages are values-free by construction (they carry
 // no SQL, host, database, connection string or credential), so echoing the message here is safe.
+// Used on the management plane (create / update / rotate) AND the data plane (/query, /select): a
+// default-deny write refusal or an arm-binding revocation is a policy answer, not a query failure.
 function codedGateRefusal(error: unknown): { status: number; code: string; message: string } | null {
   if (!(error instanceof Error)) return null
   const status = (error as { status?: unknown }).status
@@ -1061,6 +1063,14 @@ export function dataSourcesRouter(): Router {
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
       }
+      // A deliberate gate refusal (default-deny SQL write, arm-binding mismatch, arm-ahead-of-
+      // provisioning) carries its own status+code — surface it, exactly as the management-plane
+      // routes do, instead of collapsing it into an anonymous 500. Presentation only: genuine
+      // query failures keep the 500 QUERY_ERROR shape below.
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
+      }
       return res.status(500).json({
         ok: false,
         error: {
@@ -1114,6 +1124,12 @@ export function dataSourcesRouter(): Router {
           ok: false,
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
+      }
+      // Same as /query: a typed gate refusal surfaces with its own status/code; everything else
+      // keeps the 500 SELECT_ERROR shape.
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
       }
       return res.status(500).json({
         ok: false,

@@ -20,6 +20,10 @@ vi.mock('../../src/rbac/namespace-admission', () => ({
 
 import { auditLog } from '../../src/audit/audit'
 import { DataSourceManager } from '../../src/data-adapters/DataSourceManager'
+import {
+  OUTBOUND_SQL_WRITE_DISABLED,
+  OUTBOUND_SQL_WRITE_TARGETS_ENV,
+} from '../../src/data-adapters/outbound-sql-write-gate'
 import { dataSourcesRouter, getDataSourceManager, isReadOnlySql } from '../../src/routes/data-sources'
 import type { DataSourceConfig } from '../../src/data-adapters/BaseAdapter'
 import { usePinnedServer } from '../utils/pinned-server'
@@ -173,6 +177,99 @@ describe('data-sources /query read-only gate (A-RO)', () => {
     expect(res.body.error.code).toBe('DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED')
     expect(querySpy).not.toHaveBeenCalled()
     querySpy.mockRestore()
+  })
+})
+
+describe('data-sources /query and /select — a typed gate refusal surfaces coded, not as a 500', () => {
+  let currentUser: { id: string; role?: string } | undefined
+  const app = express()
+  app.use(express.json())
+  app.use((req, _res, next) => {
+    req.user = currentUser as never
+    next()
+  })
+  app.use(dataSourcesRouter())
+  const admin = (id: string) => ({ id, role: 'admin' })
+
+  function sqlserverWritableConfig(id: string): DataSourceConfig {
+    return {
+      id,
+      name: id,
+      type: 'sqlserver',
+      connection: { host: 'db.local', port: 1433, database: 'STAGE' },
+      options: { autoConnect: false, readOnly: false },
+    }
+  }
+
+  it('a default-deny SQL-write refusal via /query returns the gate own 403 + code (RED: was 500 QUERY_ERROR)', async () => {
+    const savedEnv = process.env[OUTBOUND_SQL_WRITE_TARGETS_ENV]
+    delete process.env[OUTBOUND_SQL_WRITE_TARGETS_ENV] // gate shut ⇒ every write refused, typed
+    try {
+      currentUser = admin('alice')
+      pinned.setApp(app)
+      await request(pinned.url()).post('/api/data-sources').send(sqlserverWritableConfig('gate-coded'))
+      const res = await request(pinned.url())
+        .post('/api/data-sources/gate-coded/query')
+        .send({ sql: 'INSERT INTO staging (a) VALUES (1)' })
+      expect(res.status).toBe(403)
+      expect(res.body.error.code).toBe(OUTBOUND_SQL_WRITE_DISABLED)
+      expect(res.body.error.code).not.toBe('QUERY_ERROR')
+    } finally {
+      if (savedEnv === undefined) delete process.env[OUTBOUND_SQL_WRITE_TARGETS_ENV]
+      else process.env[OUTBOUND_SQL_WRITE_TARGETS_ENV] = savedEnv
+    }
+  })
+
+  it('a plain SQL failure via /query still returns 500 QUERY_ERROR (genuine failures keep their shape)', async () => {
+    currentUser = admin('alice')
+    pinned.setApp(app)
+    await request(pinned.url()).post('/api/data-sources').send(sqlserverWritableConfig('query-500'))
+    const querySpy = vi.spyOn(DataSourceManager.prototype, 'query')
+      .mockRejectedValue(new Error('Incorrect syntax near the keyword FRUM'))
+    try {
+      const res = await request(pinned.url())
+        .post('/api/data-sources/query-500/query')
+        .send({ sql: 'SELECT * FRUM t' })
+      expect(res.status).toBe(500)
+      expect(res.body.error.code).toBe('QUERY_ERROR')
+    } finally {
+      querySpy.mockRestore()
+    }
+  })
+
+  it('/select: a typed status+code refusal surfaces verbatim; a plain failure stays 500 SELECT_ERROR', async () => {
+    currentUser = admin('alice')
+    pinned.setApp(app)
+    await request(pinned.url()).post('/api/data-sources').send(sqlserverWritableConfig('select-shapes'))
+
+    const typed = vi.spyOn(DataSourceManager.prototype, 'select').mockRejectedValue(
+      Object.assign(new Error('this data source is not authorized for generic outbound SQL write'), {
+        status: 403,
+        code: 'OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED',
+        details: {},
+      })
+    )
+    try {
+      const res = await request(pinned.url())
+        .post('/api/data-sources/select-shapes/select')
+        .send({ table: 't' })
+      expect(res.status).toBe(403)
+      expect(res.body.error.code).toBe('OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED')
+    } finally {
+      typed.mockRestore()
+    }
+
+    const plain = vi.spyOn(DataSourceManager.prototype, 'select')
+      .mockRejectedValue(new Error('connection reset'))
+    try {
+      const res = await request(pinned.url())
+        .post('/api/data-sources/select-shapes/select')
+        .send({ table: 't' })
+      expect(res.status).toBe(500)
+      expect(res.body.error.code).toBe('SELECT_ERROR')
+    } finally {
+      plain.mockRestore()
+    }
   })
 })
 
