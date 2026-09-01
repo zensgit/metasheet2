@@ -37,6 +37,20 @@ test('watch-challenge manifest provenance names the canonical exported flag', ()
   )
 })
 
+test('online-enrollment manifest provenance names the canonical exported flag', () => {
+  const key = 'ELEARNING_ENROLLMENT_ENABLED'
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
+  assert.ok(spec)
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/elearning/feature-flags.ts#ELEARNING_ENROLLMENT_ENABLED',
+  )
+  assert.deepEqual(spec.dependsOn, [
+    'ELEARNING_ENABLED',
+    'ELEARNING_CONTENT_ENABLED',
+  ])
+})
+
 // NON-TAUTOLOGICAL completeness: derive the flag set from SOURCE (grep packages/core-backend/src), NOT from
 // a hand-copied list. A flag READ in source but MISSING from the manifest fails here — this is exactly how
 // the 19th flag (MULTITABLE_SHEET_REVERT_MAX_RECORDS) slipped through the earlier hardcoded-list test, which

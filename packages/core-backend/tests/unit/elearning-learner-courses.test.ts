@@ -41,6 +41,7 @@ const COMPLETED_AT = '2026-01-03T04:05:06.000Z'
 const STARTED_AT = '2026-01-04T05:06:07.000Z'
 const SUBMITTED_AT = '2026-01-04T05:16:07.000Z'
 const GRADED_AT = '2026-01-04T05:16:08.000Z'
+const ENROLLED_AT = '2026-01-05T06:07:08.000Z'
 const TITLE = 'Pilot assigned course'
 
 const SERVICE_SOURCE = path.join(
@@ -62,12 +63,14 @@ const PUBLIC_COURSE_KEYS = [
   'title',
   'access',
   'assignment',
+  'enrollment',
   'video',
   'exam',
   'completed',
 ] as const
 
 const PUBLIC_ASSIGNMENT_KEYS = ['deadline', 'assignedAt'] as const
+const PUBLIC_ENROLLMENT_KEYS = ['status', 'enrolledAt'] as const
 const PUBLIC_ACCESS_KEYS = ['kind', 'required'] as const
 const PUBLIC_VIDEO_KEYS = [
   'itemId',
@@ -95,6 +98,7 @@ const PUBLIC_CONTENT_COURSE_KEYS = [
   'title',
   'access',
   'assignment',
+  'enrollment',
   'items',
   'completed',
 ] as const
@@ -151,10 +155,12 @@ function assertPublicCourse(payload: unknown): Record<string, unknown> {
   expect(Object.keys(raw)).toEqual([...PUBLIC_COURSE_KEYS])
   const access = raw.access as Record<string, unknown>
   const assignment = raw.assignment as Record<string, unknown> | null
+  const enrollment = raw.enrollment as Record<string, unknown> | null
   const video = raw.video as Record<string, unknown>
   const exam = raw.exam as Record<string, unknown>
   expect(Object.keys(access)).toEqual([...PUBLIC_ACCESS_KEYS])
   if (assignment !== null) expect(Object.keys(assignment)).toEqual([...PUBLIC_ASSIGNMENT_KEYS])
+  if (enrollment !== null) expect(Object.keys(enrollment)).toEqual([...PUBLIC_ENROLLMENT_KEYS])
   expect(Object.keys(video)).toEqual([...PUBLIC_VIDEO_KEYS])
   expect(Object.keys(exam)).toEqual([...PUBLIC_EXAM_KEYS])
   if (exam.latestAttempt !== null) {
@@ -182,6 +188,7 @@ function baseRow(over: Record<string, unknown> = {}): Record<string, unknown> {
     access_kind: 'assignment',
     assignment_member_id: MEMBER,
     scope_revision_rule_id: null,
+    enrollment_enrolled_at: null,
     video_item_id: VIDEO,
     video_duration_ms: 10_000,
     video_status: null,
@@ -213,6 +220,7 @@ function contentRow(over: Record<string, unknown> = {}): Record<string, unknown>
     access_kind: 'assignment',
     assignment_member_id: MEMBER,
     scope_revision_rule_id: null,
+    enrollment_enrolled_at: null,
     item_id: ARTICLE_ITEM,
     item_type: 'article',
     item_position: 1,
@@ -589,6 +597,7 @@ describe('elearning learner courses public mapping', () => {
         deadline: '2000-01-01T00:00:00.000Z',
         assignedAt: ASSIGNED_AT,
       },
+      enrollment: null,
       video: {
         itemId: VIDEO,
         durationMs: 10_000,
@@ -610,6 +619,7 @@ describe('elearning learner courses public mapping', () => {
       access_kind: 'visibility',
       assignment_member_id: null,
       scope_revision_rule_id: SCOPE_RULE,
+      enrollment_enrolled_at: ENROLLED_AT,
       assignment_deadline: null,
       assignment_assigned_at: null,
     })])
@@ -617,6 +627,7 @@ describe('elearning learner courses public mapping', () => {
     const publicRow = assertPublicCourse(row)
     expect(publicRow.access).toEqual({ kind: 'visibility', required: false })
     expect(publicRow.assignment).toBeNull()
+    expect(publicRow.enrollment).toEqual({ status: 'enrolled', enrolledAt: ENROLLED_AT })
   })
 
   it('preserves assigned_at, version id order and collapses duplicate versions fail-closed', async () => {

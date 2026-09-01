@@ -13,12 +13,14 @@ import { Router, type Router as ExpressRouter } from 'express'
 import {
   isElearningAnalyticsSurfaceEnabled,
   isElearningContentSurfaceEnabled,
+  isElearningEnrollmentSurfaceEnabled,
 } from '../elearning/feature-flags'
 import { authenticate } from '../middleware/auth'
 import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
 import { createElearningAnalyticsRouter } from '../routes/elearning-analytics'
 import { createElearningCreditRouter } from '../routes/elearning-credit'
 import { createElearningContentRouter } from '../routes/elearning-content'
+import { createElearningEnrollmentRouter } from '../routes/elearning-enrollment'
 import { createElearningPilotRouter } from '../routes/elearning-pilot'
 import { createElearningPortalRouter } from '../routes/elearning-portal'
 import { createElearningProfileRouter } from '../routes/elearning-profile'
@@ -36,6 +38,12 @@ import {
   type ElearningCoursePublishResult,
   type PublishElearningCourseInput,
 } from './elearning-course-publish'
+import {
+  enrollElearningCourse,
+  type ElearningCourseEnrollmentDb,
+  type ElearningCourseEnrollmentResult,
+  type EnrollElearningCourseInput,
+} from './elearning-course-enrollment'
 import {
   publishElearningContentCourse,
   type ElearningContentCoursePublishDb,
@@ -213,7 +221,8 @@ export interface ElearningPilotRuntimeOptions {
     ElearningDepartmentStatsDb &
     ElearningAnalyticsExportDb &
     ElearningPortalDb &
-    ElearningPracticeDb
+    ElearningPracticeDb &
+    ElearningCourseEnrollmentDb
   env?: NodeJS.ProcessEnv
   authenticate?: RequestHandler
   adminGuard?: RequestHandler
@@ -292,6 +301,10 @@ export interface ElearningPilotRuntimeOptions {
     db: ElearningLearnerCoursesDb,
     input: ListElearningLearnerCoursesInput,
   ) => Promise<ElearningLearnerCourse[]>
+  enrollElearningCourse?: (
+    db: ElearningCourseEnrollmentDb,
+    input: EnrollElearningCourseInput,
+  ) => Promise<ElearningCourseEnrollmentResult>
   setElearningCourseScope?: (
     db: ElearningScopeDb,
     input: SetElearningCourseScopeAuthorizedInput,
@@ -353,6 +366,7 @@ export function createElearningPilotRuntime(
 ): ElearningPilotRuntime | null {
   const env = opts.env ?? process.env
   const contentEnabled = isElearningContentSurfaceEnabled(env)
+  const enrollmentEnabled = isElearningEnrollmentSurfaceEnabled(env)
   const creditEnabled = isElearningCreditSurfaceEnabled(env)
   const analyticsEnabled = isElearningAnalyticsSurfaceEnabled(env)
   const practiceEnabled = isElearningPracticeSurfaceEnabled(env)
@@ -421,6 +435,16 @@ export function createElearningPilotRuntime(
     startElearningPracticeSession: opts.startElearningPracticeSession,
     submitElearningPracticeAnswer: opts.submitElearningPracticeAnswer,
     listElearningWrongQuestions: opts.listElearningWrongQuestions,
+  }) : null
+
+  const enrollment = enrollmentEnabled ? createElearningEnrollmentRouter({
+    db: opts.db,
+    env,
+    viewerId: opts.viewerId ?? viewerId,
+    orgId: opts.orgId ?? orgId,
+    readGuard: opts.readGuard
+      ?? rbacGuardAny(['elearning:read', 'elearning:write', 'elearning:admin']),
+    enrollElearningCourse: opts.enrollElearningCourse ?? enrollElearningCourse,
   }) : null
 
   const inner = contentEnabled ? createElearningPilotRouter({
@@ -506,13 +530,14 @@ export function createElearningPilotRuntime(
     getElearningDepartmentStats:
       opts.getElearningDepartmentStats ?? getElearningDepartmentStats,
   }) : null
-  if (!portal && !practice && !inner && !credit && !profile && !analytics) return null
+  if (!portal && !practice && !enrollment && !inner && !credit && !profile && !analytics) return null
 
   const router = Router()
   router.use('/api/elearning', opts.authenticate ?? authenticate)
   if (content) router.use(content)
   if (portal) router.use(portal)
   if (practice) router.use(practice)
+  if (enrollment) router.use(enrollment)
   if (inner) router.use(inner)
   if (credit) router.use(credit)
   if (profile) router.use(profile)
