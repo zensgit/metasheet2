@@ -145,6 +145,11 @@ function toSnapshotLine({ row, parentIndex, snapshotBatchId, defaultDesignUnit }
       (parent ? firstValue(parent, ['sourceVersion']) : null),
     childDrawingNo: firstValue(row, ['childDrawingNo', 'componentCode']),
     childVersion: firstValue(row, ['childVersion', 'sourceVersion']),
+    // Fingerprint decomposition (stock-prep-change-adjudication-20260901): material is persisted as a
+    // first-class line field so the diff can raise MATERIAL_CHANGED by name. It was ALREADY part of
+    // sourceIdentity (hashed below), so the fingerprint computation is unchanged — historical batches
+    // simply lack the field and the diff falls back to the fingerprint for that dimension.
+    material: firstValue(row, ['material']),
     bomLevel: firstNumber(row, ['bomLevel', 'depth']),
     pathKey,
     designQty: firstNumber(row, DESIGN_QTY_KEYS),
