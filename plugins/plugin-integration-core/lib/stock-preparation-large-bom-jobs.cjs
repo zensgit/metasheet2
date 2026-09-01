@@ -911,6 +911,9 @@ async function planLargeBomBackgroundExpansionJob(input = {}) {
     // OPTIONAL pack-aware ownership projection, threaded (never fetched — this module
     // does no field I/O). Omitted => the frozen-template bands, i.e. today's behaviour.
     installedFieldProperties: input.installedFieldProperties,
+    // W4 carry: threaded from the job's stored action snapshot (cloneJson of the
+    // normalized deploy config). Absent => byte-identical pre-wiring planning.
+    carryPolicy: job.actionSnapshot && job.actionSnapshot.carryPolicy,
   })
   const revision = largeBomPlanRevision({ job, plan, existingRows, conflictPolicyReview })
   job.planRevision = revision

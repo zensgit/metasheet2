@@ -177,6 +177,13 @@ const {
   IMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES,
   __internals: { stableFingerprint: duplicateGroupFingerprint },
 } = require('./stock-preparation-conflict-planner.cjs')
+// W4 carry wiring: the three carry conflict types become LEDGERABLE here — and
+// nothing more. Their candidates travel in a SEPARATE array the duplicate-policy
+// readback structurally cannot receive, they carry NO duplicateGroupFingerprint,
+// and their confirm-apply routes ONLY through the K2 carry executor in
+// confirm-writes — never the first-cut resolution path. This module still holds
+// ZERO capability toward the canonical sheet.
+const { CARRY_CONFLICT_TYPES } = require('./stock-preparation-carry-policy.cjs')
 const { createTargetScopedRecordsApi } = require('./stock-preparation-table-actions.cjs')
 const {
   StockPreparationTargetProvisioningError,
@@ -217,6 +224,15 @@ const RESOLUTION_ACTIONS = Object.freeze({
   MANUAL_HOLD: 'manual_hold',
 })
 const RESOLUTION_ACTION_SET = new Set(Object.values(RESOLUTION_ACTIONS))
+// W4 carry. The frozen carry conflict-type set, and the RESERVED resolution
+// token the narrow carry ledger-close stamps. The token is DELIBERATELY:
+//   * NOT in RESOLUTION_ACTIONS — the generic confirm refuses it at the
+//     vocabulary gate, so no operator can stamp it through the first-cut face;
+//   * NOT in READBACK_POLICY_BY_RESOLUTION_ACTION — a carry-confirmed row maps
+//     to NO planner policy, so it can never release a duplicate hold (and carry
+//     candidates carry no duplicateGroupFingerprint to match on anyway).
+const CARRY_CONFLICT_TYPE_SET = new Set(CARRY_CONFLICT_TYPES)
+const CARRY_RESOLUTION_ACTION = 'carry_via_confirm'
 // The fixed action -> planner-policy consumption map (see the header). DERIVED
 // DISCIPLINE: an action is implemented iff it appears here, and everything it
 // maps to must already be a policy the PLANNER implements — asserted at load
@@ -611,6 +627,7 @@ function deriveDecisionCandidates({ projectNo, plan, sourceRevision } = {}) {
     )
   }
   const candidates = []
+  const carryCandidates = []
   const outOfScopeByConflictType = {}
   const identityLessByConflictType = {}
   // Insertion-ordered, so the derived candidate list is a deterministic
@@ -652,6 +669,43 @@ function deriveDecisionCandidates({ projectNo, plan, sourceRevision } = {}) {
         inputFingerprint,
         sourceRevision: revision,
         duplicateGroupFingerprint: duplicateGroupFingerprint(rowIdentity),
+      })
+      continue
+    }
+    // W4 carry: a KEYED hold of one of the three frozen carry types is
+    // ledgerable — same stable-key/fingerprint recipe as the first cut, PLUS a
+    // values-free projection of the proposal essence folded into the
+    // fingerprint (source key, component id, carried field NAMES), so a moved
+    // reattach proposal supersedes rather than rides a stale confirmation.
+    // Returned in the SEPARATE carryCandidates array: the duplicate-policy
+    // readback destructures `candidates` and structurally cannot see these —
+    // and no duplicateGroupFingerprint is attached for it to match on.
+    if (idempotencyKey && CARRY_CONFLICT_TYPE_SET.has(conflictType)) {
+      const rowIdentity = idempotencyKey
+      const stableDecisionKey = stableHash('stable-key', { projectNo: scopedProjectNo, rowIdentity, conflictType })
+      const proposal = isPlainObject(decision.carryProposal)
+        ? {
+            sourceIdempotencyKey: optionalString(decision.carryProposal.sourceIdempotencyKey),
+            componentSourceId: optionalString(decision.carryProposal.componentSourceId),
+            carryFields: Array.isArray(decision.carryProposal.carryFields) ? decision.carryProposal.carryFields.slice() : [],
+          }
+        : null
+      const inputFingerprint = stableHash('input', {
+        sourceRevision: revision,
+        stableDecisionKey,
+        conflictSummary: decision.conflictSummary || null,
+        changedFields: Array.isArray(decision.changedFields) ? decision.changedFields : [],
+        carryProposal: proposal,
+      })
+      carryCandidates.push({
+        decisionId: stableHash('revision-key', { stableDecisionKey, inputFingerprint }),
+        stableDecisionKey,
+        projectNo: scopedProjectNo,
+        rowIdentity,
+        conflictType,
+        inputFingerprint,
+        sourceRevision: revision,
+        // NO duplicateGroupFingerprint, deliberately (see above).
       })
       continue
     }
@@ -711,7 +765,7 @@ function deriveDecisionCandidates({ projectNo, plan, sourceRevision } = {}) {
       // must never be able to emit a policy that downgrades a hold.
     })
   }
-  if (candidates.length + anonymousCandidates.length > MAX_DECISIONS_PER_RECONCILE) {
+  if (candidates.length + anonymousCandidates.length + carryCandidates.length > MAX_DECISIONS_PER_RECONCILE) {
     throw new StockPreparationConfirmationDecisionError(
       413,
       'CONFIRMATION_DECISION_RECONCILE_LIMIT_EXCEEDED',
@@ -719,7 +773,7 @@ function deriveDecisionCandidates({ projectNo, plan, sourceRevision } = {}) {
       { maxDecisions: MAX_DECISIONS_PER_RECONCILE },
     )
   }
-  return { candidates, anonymousCandidates, outOfScopeByConflictType, identityLessByConflictType }
+  return { candidates, anonymousCandidates, carryCandidates, outOfScopeByConflictType, identityLessByConflictType }
 }
 
 // The DB-BACKED single-active-reconciler lease (see the CONCURRENCY header
@@ -832,14 +886,16 @@ async function reconcileConfirmationDecisions({ recordsApi, provisioning, target
   const {
     candidates: duplicateCandidates,
     anonymousCandidates,
+    carryCandidates,
     outOfScopeByConflictType,
     identityLessByConflictType,
   } = deriveDecisionCandidates({ projectNo, plan, sourceRevision })
-  // Reconcile is the ONLY consumer that sees both sets. The ledger lifecycle
-  // (create / supersede / reopen / orphan-sweep) is identical for both — an
-  // anonymous row is an ordinary pending decision row that simply happens to be
-  // addressed by a derived identity instead of an idempotencyKey.
-  const candidates = duplicateCandidates.concat(anonymousCandidates)
+  // Reconcile is the ONLY consumer that sees all three sets. The ledger
+  // lifecycle (create / supersede / reopen / orphan-sweep) is identical for
+  // each — an anonymous row is an ordinary pending decision row addressed by a
+  // derived identity, and a carry row is one addressed by its idempotencyKey
+  // whose CONFIRM face is the K2 carry route instead of the first-cut actions.
+  const candidates = duplicateCandidates.concat(anonymousCandidates, carryCandidates)
   const openedAt = normalizeIsoTime(undefined, 'openedAt', typeof now === 'function' ? now : () => new Date())
   const scopeKey = stableHash('reconcile-lock', { targetProjectId: requiredString(targetProjectId, 'targetProjectId'), projectNo: requiredString(projectNo, 'projectNo') })
   const acquired = await lease.acquire(scopeKey)
@@ -1021,6 +1077,17 @@ async function reconcileConfirmationDecisions({ recordsApi, provisioning, target
           deferredByFamily: identityLessByConflictType,
           deferralCode: ANONYMOUS_HOLD_IDENTITY_DEFERRAL_CODE,
         },
+        // W4 carry, values-free (conflict-type tokens + counts) — and CONDITIONAL,
+        // so a deployment that never opted into carry produces byte-identical
+        // reconcile evidence.
+        ...(carryCandidates.length
+          ? {
+              carryDecisions: {
+                ledgeredByConflictType: countByConflictType(carryCandidates),
+                ledgeredDecisionCount: carryCandidates.length,
+              },
+            }
+          : {}),
         concurrencyModel: CONCURRENCY_MODEL,
         orphanSweep: { closed: counts.orphanSuperseded, reason: 'conflict_vanished_from_plan', truncated: sweepTruncated },
         ...counts,
@@ -1186,6 +1253,18 @@ async function confirmConfirmationDecision({ recordsApi, provisioning, targetPro
     )
   }
   const conflictType = optionalString(readCell(record, 'conflictType'))
+  // W4 carry: a carry-type row is NEVER resolvable through the first-cut
+  // actions — its confirm-apply is the K2 carry route (which patches the
+  // canonical human fields via the carry executor and then closes the row via
+  // confirmCarryConfirmationDecision below). A dedicated code so the operator
+  // is pointed at the right surface instead of guessing at a generic mismatch.
+  if (CARRY_CONFLICT_TYPE_SET.has(conflictType)) {
+    throw new StockPreparationConfirmationDecisionError(
+      409,
+      'CONFIRMATION_DECISION_CARRY_CONFIRMS_VIA_CARRY_ROUTE',
+      'carry decisions are confirmed through the stock-preparation carry confirm surface, never the first-cut resolution actions',
+    )
+  }
   if (conflictType !== FIRST_CUT_CONFLICT_TYPE) {
     throw new StockPreparationConfirmationDecisionError(
       409,
@@ -1221,6 +1300,91 @@ async function confirmConfirmationDecision({ recordsApi, provisioning, targetPro
       // (readConfirmationDecisionValueEntry), and evidence is not it.
       resolvedValuePresent: Boolean(valueEntry.resolvedValue),
       resolvedAuxValuePresent: Boolean(valueEntry.resolvedAuxValue),
+    },
+  }
+}
+
+// W4 carry — the NARROW ledger-close the K2 carry route calls AFTER the carry
+// executor has applied (confirm-writes owns the canonical write; this module
+// still cannot address the canonical sheet at all — it patches exactly one row
+// of its OWN ledger). Stamps the RESERVED carry_via_confirm resolution token:
+// outside the first-cut vocabulary, outside the readback map, so a carry
+// confirmation can never masquerade as (or release) a duplicate resolution.
+// Idempotent: a replay of an already-carry-confirmed decision skips, never 409s
+// and never restamps.
+async function confirmCarryConfirmationDecision({ recordsApi, provisioning, targetProjectId, permission, decisionId, inputFingerprint, confirmedBy, now } = {}) {
+  assertAdminPermission(permission)
+  const id = requiredString(decisionId, 'decisionId')
+  const fingerprint = requiredString(inputFingerprint, 'inputFingerprint')
+  const actor = requiredString(confirmedBy, 'confirmedBy')
+  const scoped = await resolveScopedLedger(recordsApi, provisioning, targetProjectId, ['queryRecords', 'patchRecord'])
+  const matches = await scoped.queryRecords({ filters: { decisionId: id }, limit: 2, offset: 0 })
+  if (!Array.isArray(matches)) {
+    throw new StockPreparationConfirmationDecisionError(500, 'CONFIRMATION_DECISION_RECORDS_API_INVALID', 'queryRecords must return an array')
+  }
+  if (matches.length !== 1) {
+    throw new StockPreparationConfirmationDecisionError(
+      matches.length === 0 ? 404 : 409,
+      matches.length === 0 ? 'CONFIRMATION_DECISION_NOT_FOUND' : 'CONFIRMATION_DECISION_DUPLICATE',
+      'decisionId must resolve to exactly one decision row',
+    )
+  }
+  const record = matches[0]
+  const conflictType = optionalString(readCell(record, 'conflictType'))
+  if (!CARRY_CONFLICT_TYPE_SET.has(conflictType)) {
+    throw new StockPreparationConfirmationDecisionError(
+      409,
+      'CONFIRMATION_DECISION_ACTION_CONFLICT_MISMATCH',
+      'only a carry-type decision can be carry-confirmed',
+    )
+  }
+  const status = optionalString(readCell(record, 'status'))
+  if (status === STATUSES.CONFIRMED && optionalString(readCell(record, 'resolutionAction')) === CARRY_RESOLUTION_ACTION) {
+    return {
+      ok: true,
+      mode: 'skipped_already_confirmed',
+      persisted: false,
+      decisionId: id,
+      status: STATUSES.CONFIRMED,
+      resolutionAction: CARRY_RESOLUTION_ACTION,
+    }
+  }
+  if (status !== STATUSES.PENDING) {
+    throw new StockPreparationConfirmationDecisionError(
+      409,
+      'CONFIRMATION_DECISION_NOT_PENDING',
+      'only a pending decision can be confirmed',
+    )
+  }
+  if (optionalString(readCell(record, 'inputFingerprint')) !== fingerprint) {
+    throw new StockPreparationConfirmationDecisionError(
+      409,
+      'CONFIRMATION_DECISION_REVISION_MISMATCH',
+      'decision input fingerprint no longer matches',
+    )
+  }
+  const confirmedAt = normalizeIsoTime(undefined, 'confirmedAt', typeof now === 'function' ? now : () => new Date())
+  await scoped.patchRecord({
+    recordId: record.id,
+    changes: {
+      status: STATUSES.CONFIRMED,
+      resolutionAction: CARRY_RESOLUTION_ACTION,
+      confirmedBy: actor,
+      confirmedAt,
+    },
+  })
+  return {
+    ok: true,
+    mode: 'carry_decision_confirmed',
+    persisted: true,
+    decisionId: id,
+    status: STATUSES.CONFIRMED,
+    resolutionAction: CARRY_RESOLUTION_ACTION,
+    evidence: {
+      objectId: OBJECT_ID,
+      confirmed: 1,
+      actorPresent: true,
+      confirmedAtPresent: true,
     },
   }
 }
@@ -1277,6 +1441,7 @@ module.exports = {
   ANONYMOUS_HOLD_IDENTITY_DEFERRAL_CODE,
   STATUSES,
   RESOLUTION_ACTIONS,
+  CARRY_RESOLUTION_ACTION,
   IMPLEMENTED_RESOLUTION_ACTIONS,
   READBACK_POLICY_BY_RESOLUTION_ACTION,
   CONCURRENCY_MODEL,
@@ -1290,6 +1455,7 @@ module.exports = {
   reconcileConfirmationDecisions,
   listConfirmationDecisions,
   confirmConfirmationDecision,
+  confirmCarryConfirmationDecision,
   readConfirmationDecisionValueEntry,
   loadConfirmedDuplicatePolicyReview,
   __internals: {
