@@ -203,19 +203,112 @@ export const OUTBOUND_SQL_WRITE_OPERATIONS = Object.freeze([
 // a comment, a string literal or a QUOTED IDENTIFIER cannot change the verdict. Stripping quoted and
 // bracketed identifiers is what keeps a legitimate read of a column named `[delete]` from being
 // misclassified as a write, while a real `DELETE FROM …` is still seen.
-const SQL_BLOCK_COMMENT = /\/\*[\s\S]*?\*\//g
-const SQL_LINE_COMMENT = /--[^\n\r]*/g
-const SQL_STRING_LITERAL = /'(?:[^']|'')*'/g
-const SQL_BRACKET_IDENT = /\[[^\]]*\]/g
-const SQL_QUOTED_IDENT = /"[^"]*"/g
-
+//
+// FIX 1 — WHY THIS IS A SINGLE-PASS TOKENIZER AND NOT FIVE INDEPENDENT REGEXES.
+//
+// The previous strip applied a block-comment regex, a line-comment regex and a string-literal regex
+// INDEPENDENTLY and IN THAT ORDER. That is unsound, because a comment and a string are MUTUALLY
+// EXCLUSIVE contexts that a left-to-right lexer must resolve in one pass: a `/*` that is STRING CONTENT
+// must not open a comment, and a `'` that is COMMENT CONTENT must not open a string. Running the
+// block-comment regex first, blind to strings, let a `/*` inside one string literal pair with a `*/`
+// inside a LATER string literal and delete everything between them — including a real statement:
+//
+//     SELECT '/*'
+//     UPDATE t_ICItem SET FQty=0     ← deleted as if it were comment body
+//     SELECT '*/'
+//
+// stripped to `SELECT '' … SELECT ''`, classified a pure READ, and the UPDATE skipped the gate. You
+// cannot strip SQL comments and strings with separate regexes; the contexts interleave. So this scans
+// the text ONCE, and whichever opener it meets first (`'`, `--`, `/*`, `[`, `"`) owns the span until
+// its own matching close — anything else inside that span is literal content. Replacements match the
+// old placeholders (a string → ` '' `, an identifier → ` x `, a comment → ` `) so the downstream
+// classifier is unchanged; only the CONTEXT boundaries are now correct.
+//
+// SQL Server semantics honoured in the one pass: `''` is an embedded quote inside a string; `]]` an
+// embedded bracket inside a `[…]` identifier; `""` an embedded quote inside a `"…"` identifier; and
+// block comments NEST (`/* a /* b */ c */`), so a nested close must not end the outer comment early.
+// An UNTERMINATED string or comment consumes to end-of-input — which is fail-safe here: an unterminated
+// string/comment is itself a T-SQL syntax error the driver rejects, so nothing executes regardless of
+// how it classifies.
 function stripSqlNoise(sql: string): string {
-  return String(sql ?? '')
-    .replace(SQL_BLOCK_COMMENT, ' ')
-    .replace(SQL_LINE_COMMENT, ' ')
-    .replace(SQL_STRING_LITERAL, " '' ")
-    .replace(SQL_BRACKET_IDENT, ' x ')
-    .replace(SQL_QUOTED_IDENT, ' x ')
+  const src = String(sql ?? '')
+  const n = src.length
+  let out = ''
+  let i = 0
+  while (i < n) {
+    const ch = src[i]
+    const next = i + 1 < n ? src[i + 1] : ''
+
+    // Line comment: -- … to end of line.
+    if (ch === '-' && next === '-') {
+      i += 2
+      while (i < n && src[i] !== '\n' && src[i] !== '\r') i += 1
+      out += ' '
+      continue
+    }
+
+    // Block comment: /* … */, NESTING (SQL Server allows nested block comments).
+    if (ch === '/' && next === '*') {
+      i += 2
+      let depth = 1
+      while (i < n && depth > 0) {
+        if (src[i] === '/' && i + 1 < n && src[i + 1] === '*') { depth += 1; i += 2; continue }
+        if (src[i] === '*' && i + 1 < n && src[i + 1] === '/') { depth -= 1; i += 2; continue }
+        i += 1
+      }
+      out += ' '
+      continue
+    }
+
+    // String literal: '…', where '' is an embedded quote (stays in-string).
+    if (ch === "'") {
+      i += 1
+      while (i < n) {
+        if (src[i] === "'") {
+          if (i + 1 < n && src[i + 1] === "'") { i += 2; continue } // escaped ''
+          i += 1
+          break
+        }
+        i += 1
+      }
+      out += " '' "
+      continue
+    }
+
+    // Bracketed identifier: […], where ]] is an embedded ] (stays in-identifier).
+    if (ch === '[') {
+      i += 1
+      while (i < n) {
+        if (src[i] === ']') {
+          if (i + 1 < n && src[i + 1] === ']') { i += 2; continue } // escaped ]]
+          i += 1
+          break
+        }
+        i += 1
+      }
+      out += ' x '
+      continue
+    }
+
+    // Quoted identifier: "…", where "" is an embedded " (stays in-identifier).
+    if (ch === '"') {
+      i += 1
+      while (i < n) {
+        if (src[i] === '"') {
+          if (i + 1 < n && src[i + 1] === '"') { i += 2; continue } // escaped ""
+          i += 1
+          break
+        }
+        i += 1
+      }
+      out += ' x '
+      continue
+    }
+
+    out += ch
+    i += 1
+  }
+  return out
 }
 
 // ─── THE READ GRAMMAR IS AN ALLOWLIST, NOT A WRITE BLOCKLIST ──────────────────
@@ -263,6 +356,16 @@ const SQL_READ_GRAMMAR = new Set<string>([
   'option', 'recompile', 'optimize', 'for', 'xml', 'json', 'path', 'auto', 'raw', 'elements',
   'values', 'default', 'user', 'session_user', 'system_user', 'current_user', 'current_timestamp',
   'current_date', 'current_time', 'datefirst', 'language',
+  // FIX 4 (P2 over-block): the read-only global variables `@@ROWCOUNT` / `@@IDENTITY` tokenize to the
+  // bare reserved words `rowcount` / `identity`, so a plain `SELECT @@ROWCOUNT` was misclassified a
+  // WRITE. Admitting them is a SAFE widening — they cannot execute or mutate. It cannot under-block: a
+  // statement flips to READ only if its ONLY non-read reserved token is one of these AND it leads with
+  // a read verb with no `;`/`INTO`; any mutating use of these words (`SET ROWCOUNT`, `SET
+  // IDENTITY_INSERT`, `… IDENTITY` in DDL or `SELECT … IDENTITY(…) INTO`) carries an OTHER non-read
+  // reserved token (`set`/`create`/`alter`) or the blocked `into`, so no write can slip through. NOTE:
+  // `FOR UPDATE` deliberately stays a WRITE — admitting it would mean admitting the primary write verb
+  // `update`, and it is not valid pure-read T-SQL anyway.
+  'rowcount', 'identity',
 ])
 
 // The full T-SQL RESERVED keyword universe. A bare word here that is NOT in SQL_READ_GRAMMAR proves

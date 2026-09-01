@@ -9,7 +9,7 @@ import { MySQLAdapter } from './MySQLAdapter'
 import { PLMAdapter } from './PLMAdapter'
 import { encryptStoredSecretValue, decryptStoredSecretValue, isEncryptedSecretValue } from '../security/encrypted-secrets'
 import { assertNotK3Destination, preserveK3Marker } from './k3-destination-write-fence'
-import { assertSqlWriteAllowed, pinSqlSourceConnection } from './sql-write-arm-binding'
+import { assertSqlWriteAllowed, assertSqlSourceProvisionableAtRuntime, pinSqlSourceConnection } from './sql-write-arm-binding'
 import type { IConfigService, ILogger } from '../di/identifiers'
 
 // PostgreSQL SQLSTATE for undefined_table. The referential delete guard trusts
@@ -218,7 +218,7 @@ export class DataSourceManager extends EventEmitter {
             throw new Error(`Unsupported persisted data source type: ${record.type}`)
           }
           const config = this.recordToConfig(record)
-          await this.addDataSourceInternal(config, false) // Don't persist again
+          await this.addDataSourceInternal(config, false, 'load') // Don't persist again; LOAD phase pins
           // Ownership lives on the DB record, not in config (recordToConfig strips it)
           this.scopes.set(record.id, {
             ownerId: record.owner_id,
@@ -358,6 +358,17 @@ export class DataSourceManager extends EventEmitter {
     const ownerId = options?.ownerId || 'system'
     const workspaceId = options?.workspaceId
 
+    // FIX 2: refuse — BEFORE any persistence — to provision an id that a deploy file has armed for SQL
+    // write but that was not pinned at allowlist-load time. This is the arm-ahead-of-provisioning
+    // attack: an armed-but-never-provisioned id created at the API tier would otherwise be trusted into
+    // a fresh pin (and, once persisted, pinned again at the next restart). Refusing before persist
+    // means no such row is ever written. An unarmed id, or an armed id already pinned at load (a
+    // revival), passes untouched.
+    assertSqlSourceProvisionableAtRuntime(
+      (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
+      config.id,
+    )
+
     // Persist to database first (if enabled)
     if (persist && this.db) {
       await this.persistDataSource(config, ownerId, workspaceId)
@@ -401,6 +412,14 @@ export class DataSourceManager extends EventEmitter {
     if (!this.adapterTypes.get(config.type.toLowerCase())) {
       throw new Error(`Unsupported data source type: ${config.type}`)
     }
+
+    // FIX 2 (defense-in-depth): a redirect must not be the FIRST observation that binds an armed id. A
+    // source pinned at load passes here (it is already bound); an armed id with no load pin is refused
+    // before persistence, exactly as a runtime create is.
+    assertSqlSourceProvisionableAtRuntime(
+      (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
+      config.id,
+    )
 
     // Persist first — if this throws, the live source is untouched.
     if (this.db !== undefined) {
@@ -514,11 +533,17 @@ export class DataSourceManager extends EventEmitter {
   }
 
   /**
-   * Internal method to add data source to memory
+   * Internal method to add data source to memory.
+   *
+   * `phase` distinguishes the DEPLOY-controlled LOAD path (`loadFromDatabase`, which re-observes the
+   * sources that existed at process start) from the RUNTIME (API) path (`addDataSource` /
+   * `updateDataSource`). Only the load path may PIN an armed source's connection (FIX 2); the runtime
+   * path never pins here — its arm-provisioning refusal happens earlier, before persistence.
    */
   private async addDataSourceInternal(
     config: DataSourceConfig,
-    autoConnect = true
+    autoConnect = true,
+    phase: 'load' | 'runtime' = 'runtime'
   ): Promise<BaseDataAdapter> {
     if (this.adapters.has(config.id)) {
       throw new Error(`Data source with id '${config.id}' already exists`)
@@ -551,12 +576,15 @@ export class DataSourceManager extends EventEmitter {
 
     this.adapters.set(config.id, adapter)
 
-    // SQL WRITE ARM-BINDING (P1): pin this source's connection fingerprint the FIRST time it is
-    // observed (add / load). FIRST-SEEN-WINS, so a later redirect (updateDataSource re-enters here
-    // with a new connection) does NOT move the pin — the write authorization then fails the binding.
-    // A revival after removeDataSource likewise re-enters here but the pin persists, so an id-reuse to
-    // a different connection cannot inherit an armed source's authorization.
-    pinSqlSourceConnection(config.id, config.connection as Record<string, unknown> | undefined)
+    // SQL WRITE ARM-BINDING (P1 + FIX 2): pin this source's connection fingerprint — but ONLY on the
+    // DEPLOY-controlled LOAD path. FIRST-SEEN-WINS, so a later redirect does NOT move the pin, and a
+    // revival after removeDataSource re-enters here but the pin persists. The RUNTIME (API) create /
+    // redirect path does NOT pin: an armed id that was never provisioned at load cannot be pinned by an
+    // API-tier create (that is refused before persistence in addDataSource/updateDataSource), and an
+    // unarmed source runtime-pinning itself and then being armed-without-restart is likewise closed.
+    if (phase === 'load') {
+      pinSqlSourceConnection(config.id, config.connection as Record<string, unknown> | undefined)
+    }
 
     // Auto-connect if specified
     if (autoConnect && config.options?.autoConnect !== false) {

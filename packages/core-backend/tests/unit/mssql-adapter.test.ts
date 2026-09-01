@@ -18,12 +18,42 @@ vi.mock('../../src/rbac/namespace-admission', () => ({
   isPermissionAllowedByNamespaceAdmission: vi.fn(async () => true),
 }))
 
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
 import { MSSQLAdapter } from '../../src/data-adapters/MSSQLAdapter'
 import { dataSourcesRouter } from '../../src/routes/data-sources'
 import type { DataSourceConfig } from '../../src/data-adapters/BaseAdapter'
 import { usePinnedServer } from '../utils/pinned-server'
+import { __resetSqlArmBindingsForTests, pinSqlSourceConnection } from '../../src/data-adapters/sql-write-arm-binding'
+import { OUTBOUND_SQL_WRITE_TARGETS_ENV } from '../../src/data-adapters/outbound-sql-write-gate'
 
 const pinned = usePinnedServer()
+
+// The adapter's structured insert/update/delete build write SQL and funnel through query(), which the
+// default-deny SQL write gate now governs. To exercise SQL GENERATION for a write, arm source 's' in a
+// throwaway allowlist file and pin it to the fake-pool connection (the deploy-tier provisioning these
+// tests stand in for). Returns a cleanup to restore the env and the process-singleton pin registry.
+function armAndPinWriteSource(connection: Record<string, unknown>): () => void {
+  const saved = process.env[OUTBOUND_SQL_WRITE_TARGETS_ENV]
+  const file = path.join(os.tmpdir(), `mssql-adapter-arm-${Math.random().toString(36).slice(2)}.json`)
+  fs.writeFileSync(file, JSON.stringify({
+    allowlistId: 'mssql-adapter-test', allowlistVersion: 1,
+    targets: [{ entryId: 'e1', systemId: 's', allObjects: true }],
+  }))
+  process.env[OUTBOUND_SQL_WRITE_TARGETS_ENV] = file
+  pinSqlSourceConnection('s', connection)
+  return () => {
+    if (saved === undefined) delete process.env[OUTBOUND_SQL_WRITE_TARGETS_ENV]
+    else process.env[OUTBOUND_SQL_WRITE_TARGETS_ENV] = saved
+    __resetSqlArmBindingsForTests()
+    try { fs.unlinkSync(file) } catch { /* best effort */ }
+  }
+}
+
+// The default connection adapterWithFakePool builds (no overrides) — what the write source is pinned to.
+const FAKE_POOL_CONNECTION = { host: 'db', port: 1433, database: 'ERP' }
 
 type PoolConfig = {
   server: string
@@ -410,23 +440,33 @@ describe('MSSQLAdapter — SQL generation (fake driver)', () => {
   })
 
   it('insert: OUTPUT INSERTED.* + parameterized values (not concatenated)', async () => {
-    const fp = fakePool()
-    await adapterWithFakePool(fp).insert('t', { name: 'x', n: 3 })
-    const { sql, params } = fp.calls[0]
-    expect(sql).toContain('INSERT INTO [t]')
-    expect(sql).toContain('OUTPUT INSERTED.*')
-    expect(params.p0).toBe('x')
-    expect(params.p1).toBe(3)
-    expect(sql).not.toContain("'x'")
+    const cleanup = armAndPinWriteSource(FAKE_POOL_CONNECTION)
+    try {
+      const fp = fakePool()
+      await adapterWithFakePool(fp).insert('t', { name: 'x', n: 3 })
+      const { sql, params } = fp.calls[0]
+      expect(sql).toContain('INSERT INTO [t]')
+      expect(sql).toContain('OUTPUT INSERTED.*')
+      expect(params.p0).toBe('x')
+      expect(params.p1).toBe(3)
+      expect(sql).not.toContain("'x'")
+    } finally {
+      cleanup()
+    }
   })
 
   it('delete: OUTPUT DELETED.* + parameterized where', async () => {
-    const fp = fakePool()
-    await adapterWithFakePool(fp).delete('t', { id: 7 })
-    const { sql, params } = fp.calls[0]
-    expect(sql).toContain('DELETE FROM [t]')
-    expect(sql).toContain('OUTPUT DELETED.*')
-    expect(params.p0).toBe(7)
+    const cleanup = armAndPinWriteSource(FAKE_POOL_CONNECTION)
+    try {
+      const fp = fakePool()
+      await adapterWithFakePool(fp).delete('t', { id: 7 })
+      const { sql, params } = fp.calls[0]
+      expect(sql).toContain('DELETE FROM [t]')
+      expect(sql).toContain('OUTPUT DELETED.*')
+      expect(params.p0).toBe(7)
+    } finally {
+      cleanup()
+    }
   })
 
   it('query: translates $N to @pN and returns the recordset', async () => {
