@@ -27,14 +27,7 @@ import type {
   ConnectionConfig
 } from './BaseAdapter';
 import { BaseDataAdapter, getStringConfig, getNumberConfig } from './BaseAdapter'
-import {
-  assertNotK3ConnectionWrite,
-  assertNoCrossServerWrite,
-  catalogIndicatesK3,
-  isK3ReachingConnection,
-  K3DestinationWriteError,
-  K3_CONNECTION_READONLY_REFUSAL_MESSAGE,
-} from './k3-destination-write-fence'
+import { assertSqlStatementWriteAuthorized, isPureReadStatement } from './outbound-sql-write-gate'
 
 // Minimal structural typing for the optional `mssql` driver (avoid `any` and a
 // hard build-time dependency on @types/mssql).
@@ -228,9 +221,6 @@ export class MSSQLAdapter extends BaseDataAdapter {
       await this.pool.connect()
       await this.pool.request().query('SELECT 1 AS ok')
       this.connected = true
-      // G-4 DETECTION: flag a K3-reaching connection even when the marker was never set, so the
-      // read-only gate applies. Best-effort and fail-safe — a probe failure never blocks connect.
-      await this.probeK3Reaching()
       await this.onConnect()
     } catch (error) {
       // Close (not just drop) the pool so a failed connect leaks no open ConnectionPool.
@@ -241,39 +231,12 @@ export class MSSQLAdapter extends BaseDataAdapter {
     }
   }
 
-  // G-4 DETECTION flag — BEST-EFFORT DEFENSE IN DEPTH, not a guarantee. Set true after connect if the
-  // LOCAL catalog contains K3 tables. It is fail-OPEN (a probe error leaves it false), sees only the
-  // local catalog (never a linked server), and cannot see a K3 table fronted by a renamed local
-  // view/synonym — so it does NOT close the laundering residual; the DECLARED marker is the control.
-  // Reset on disconnect so a reused instance never carries a stale verdict.
-  private k3DetectedReaching = false
-
-  private async probeK3Reaching(): Promise<void> {
-    if (!this.pool) return
-    try {
-      // TARGETED existence probe: ask only for tables that MATCH the K3 signature, so the answer does
-      // not depend on an unordered TOP sample of a large catalog. The JS classifier is the authority
-      // (catalogIndicatesK3); the LIKE pre-filter is a cheap bound, escaped so `_` is a literal.
-      const result = await this.pool.request().query<{ name: string }>(
-        "SELECT TABLE_NAME AS name FROM INFORMATION_SCHEMA.TABLES " +
-          "WHERE TABLE_NAME LIKE 't\\_ic%' ESCAPE '\\' OR TABLE_NAME LIKE 't\\_bd%' ESCAPE '\\' " +
-          "OR TABLE_NAME IN ('t_MeasureUnit','t_Organization','ICMO','ICMOEntry','ICStockBill'," +
-          "'ICStockBillEntry','POOrder','POOrderEntry','SEOrder','SEOrderEntry','Bill1002535','Bill1002502')"
-      )
-      const names = (result.recordset ?? []).map((row) => row.name)
-      if (catalogIndicatesK3(names)) this.k3DetectedReaching = true
-    } catch {
-      // Detection is best-effort; a probe failure leaves the marker as the control and never throws.
-    }
-  }
-
   async disconnect(): Promise<void> {
     if (!this.connected || !this.pool) return
     try {
       await this.pool.close()
       this.pool = null
       this.connected = false
-      this.k3DetectedReaching = false
       await this.onDisconnect()
     } catch (error) {
       await this.onError(error as Error)
@@ -310,21 +273,24 @@ export class MSSQLAdapter extends BaseDataAdapter {
   }
 
   async query<T = Record<string, DbValue>>(sql: string, params?: DbValue[]): Promise<QueryResult<T>> {
-    // G-4 CONNECTION READ-ONLY GATE — THE ADAPTER-BOUNDARY CHOKEPOINT (P0 + P1a).
+    // W-1(c) DEFAULT-DENY SQL WRITE GATE — THE ADAPTER-BOUNDARY CHOKEPOINT.
     // Every write this adapter performs funnels here: insert/update/delete/select/stream/batchInsert
     // all build SQL and call query(), and a caller who bypasses DataSourceManager entirely
-    // (getDataSource(id).query('INSERT …') or .insert(…)) still lands here. On a K3-reaching
-    // connection (marked OR detected) only a PURE READ passes — no table is parsed, so no T-SQL idiom
-    // (UPDATE…FROM, TOP, 4-part names, MERGE…OUTPUT, batches) can slip a write past. On a connection
-    // not known to be K3, a best-effort statement signature is the defense-in-depth backstop. A SELECT
-    // — including every internal select() and a read of a K3 table — always passes. Placed FIRST,
-    // before the pool is touched.
+    // (getDataSource(id).query('INSERT …') or .insert(…)) still lands here.
     //
-    // Cross-server refusal runs UNCONDITIONALLY (every sqlserver source): a linked-server write
-    // (4-part name / OPENQUERY / OPENROWSET) reaches K3 across a server the local gate and the local
-    // catalog probe cannot see, so it is refused here regardless of marker or detection.
-    assertNoCrossServerWrite(sql)
-    assertNotK3ConnectionWrite(this.config, sql, this.k3DetectedReaching)
+    // The gate asks ONE question — is this statement PROVABLY a pure read? — and never what it writes
+    // TO. A pure read costs nothing and passes; anything else needs this data source to be an ARMED
+    // target in the server-side allowlist. That is why the destination-laundering class is dead here:
+    // an aliased UPDATE…FROM, an UPDATE TOP, a 4-part linked-server INSERT, a CTE-wrapped DELETE and
+    // an unterminated `SELECT 1 / DELETE …` batch are all simply "a write", off by default.
+    //
+    // Placed FIRST, before the pool is touched. Reads — including every internal select() and a read
+    // of any table — are byte-identical to a deployment that never heard of this gate.
+    assertSqlStatementWriteAuthorized(
+      (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
+      sql,
+      { id: this.config.id, name: this.config.name, type: this.config.type },
+    )
     if (!this.pool) {
       throw new Error('Not connected to database')
     }
@@ -593,13 +559,16 @@ export class MSSQLAdapter extends BaseDataAdapter {
   }
 
   async beginTransaction(): Promise<Transaction> {
-    // G-4 CONNECTION READ-ONLY GATE (transaction). A transaction hands the caller a raw driver object
-    // whose Requests execute SQL OUTSIDE this adapter's query() funnel. A K3-reaching connection
-    // (marked OR detected) is read-only, so it must not vend a transaction at all — there is no
-    // read-only transaction to allow here. The manager/facade never expose transactions.
-    if (isK3ReachingConnection(this.config.options, this.k3DetectedReaching)) {
-      throw new K3DestinationWriteError(K3_CONNECTION_READONLY_REFUSAL_MESSAGE)
-    }
+    // W-1(c) SQL WRITE GATE (transaction). A transaction hands the caller a raw driver object whose
+    // Requests execute SQL OUTSIDE this adapter's query() funnel — the one write path the statement
+    // gate cannot see. So vending a transaction is itself treated as a WRITE and requires an armed
+    // target. There is no "read-only transaction" to carve out: the caller controls what runs inside
+    // it. The manager/facade never expose transactions, so an unarmed deployment loses nothing.
+    assertSqlStatementWriteAuthorized(
+      (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
+      'BEGIN TRANSACTION',
+      { id: this.config.id, name: this.config.name, type: this.config.type },
+    )
     if (!this.pool || !mssql) {
       throw new Error('Not connected to database')
     }
