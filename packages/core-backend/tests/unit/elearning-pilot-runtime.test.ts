@@ -870,6 +870,9 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     expect(setupSrc).toMatch(
       /isElearningContentSurfaceEnabled\(process\.env\)[\s\S]*\|\|\s*isElearningCreditSurfaceEnabled\(process\.env\)[\s\S]*\|\|\s*isElearningAnalyticsSurfaceEnabled\(process\.env\)/,
     )
+    expect(setupSrc).toMatch(
+      /\|\|\s*isElearningOfflineTrainingSurfaceEnabled\(process\.env\)/,
+    )
     const createAt = setupSrc.search(/createElearningPilotRuntime/)
     const mountAt = setupSrc.search(
       /this\.app\.use\(\s*elearningPilotRuntime\.router\s*\)/,
