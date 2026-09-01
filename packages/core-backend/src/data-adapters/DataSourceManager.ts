@@ -8,6 +8,8 @@ import { MSSQLAdapter } from './MSSQLAdapter'
 import { MySQLAdapter } from './MySQLAdapter'
 import { PLMAdapter } from './PLMAdapter'
 import { encryptStoredSecretValue, decryptStoredSecretValue, isEncryptedSecretValue } from '../security/encrypted-secrets'
+import { assertNotK3Destination, preserveK3Marker } from './k3-destination-write-fence'
+import { assertSqlWriteAllowed, assertSqlSourceProvisionableAtRuntime, pinSqlSourceConnection } from './sql-write-arm-binding'
 import type { IConfigService, ILogger } from '../di/identifiers'
 
 // PostgreSQL SQLSTATE for undefined_table. The referential delete guard trusts
@@ -216,7 +218,7 @@ export class DataSourceManager extends EventEmitter {
             throw new Error(`Unsupported persisted data source type: ${record.type}`)
           }
           const config = this.recordToConfig(record)
-          await this.addDataSourceInternal(config, false) // Don't persist again
+          await this.addDataSourceInternal(config, false, 'load') // Don't persist again; LOAD phase pins
           // Ownership lives on the DB record, not in config (recordToConfig strips it)
           this.scopes.set(record.id, {
             ownerId: record.owner_id,
@@ -356,6 +358,17 @@ export class DataSourceManager extends EventEmitter {
     const ownerId = options?.ownerId || 'system'
     const workspaceId = options?.workspaceId
 
+    // FIX 2: refuse — BEFORE any persistence — to provision an id that a deploy file has armed for SQL
+    // write but that was not pinned at allowlist-load time. This is the arm-ahead-of-provisioning
+    // attack: an armed-but-never-provisioned id created at the API tier would otherwise be trusted into
+    // a fresh pin (and, once persisted, pinned again at the next restart). Refusing before persist
+    // means no such row is ever written. An unarmed id, or an armed id already pinned at load (a
+    // revival), passes untouched.
+    assertSqlSourceProvisionableAtRuntime(
+      (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
+      config.id,
+    )
+
     // Persist to database first (if enabled)
     if (persist && this.db) {
       await this.persistDataSource(config, ownerId, workspaceId)
@@ -386,10 +399,27 @@ export class DataSourceManager extends EventEmitter {
     const ownerId = options?.ownerId ?? priorScope?.ownerId ?? 'system'
     const workspaceId = options?.workspaceId ?? priorScope?.workspaceId ?? undefined
 
+    // G-4 MARKER DURABILITY (P1). The k3Destination marker is SET-ONCE: once a source is a declared
+    // K3 destination, no later update — from any caller, through any merge — may clear or unset it.
+    // This is the manager chokepoint that makes the marker immutable; the route additionally returns a
+    // coded refusal for an explicit clear attempt. Forcing it here means even a silent/buggy path that
+    // dropped the key cannot re-open writes on a K3 connection.
+    if (existing.getConfig().options?.k3Destination === true) {
+      config = { ...config, options: preserveK3Marker(existing.getConfig().options, config.options) }
+    }
+
     // Validate the target type before touching anything live.
     if (!this.adapterTypes.get(config.type.toLowerCase())) {
       throw new Error(`Unsupported data source type: ${config.type}`)
     }
+
+    // FIX 2 (defense-in-depth): a redirect must not be the FIRST observation that binds an armed id. A
+    // source pinned at load passes here (it is already bound); an armed id with no load pin is refused
+    // before persistence, exactly as a runtime create is.
+    assertSqlSourceProvisionableAtRuntime(
+      (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
+      config.id,
+    )
 
     // Persist first — if this throws, the live source is untouched.
     if (this.db !== undefined) {
@@ -503,11 +533,17 @@ export class DataSourceManager extends EventEmitter {
   }
 
   /**
-   * Internal method to add data source to memory
+   * Internal method to add data source to memory.
+   *
+   * `phase` distinguishes the DEPLOY-controlled LOAD path (`loadFromDatabase`, which re-observes the
+   * sources that existed at process start) from the RUNTIME (API) path (`addDataSource` /
+   * `updateDataSource`). Only the load path may PIN an armed source's connection (FIX 2); the runtime
+   * path never pins here — its arm-provisioning refusal happens earlier, before persistence.
    */
   private async addDataSourceInternal(
     config: DataSourceConfig,
-    autoConnect = true
+    autoConnect = true,
+    phase: 'load' | 'runtime' = 'runtime'
   ): Promise<BaseDataAdapter> {
     if (this.adapters.has(config.id)) {
       throw new Error(`Data source with id '${config.id}' already exists`)
@@ -539,6 +575,16 @@ export class DataSourceManager extends EventEmitter {
     })
 
     this.adapters.set(config.id, adapter)
+
+    // SQL WRITE ARM-BINDING (P1 + FIX 2): pin this source's connection fingerprint — but ONLY on the
+    // DEPLOY-controlled LOAD path. FIRST-SEEN-WINS, so a later redirect does NOT move the pin, and a
+    // revival after removeDataSource re-enters here but the pin persists. The RUNTIME (API) create /
+    // redirect path does NOT pin: an armed id that was never provisioned at load cannot be pinned by an
+    // API-tier create (that is refused before persistence in addDataSource/updateDataSource), and an
+    // unarmed source runtime-pinning itself and then being armed-without-restart is likewise closed.
+    if (phase === 'load') {
+      pinSqlSourceConnection(config.id, config.connection as Record<string, unknown> | undefined)
+    }
 
     // Auto-connect if specified
     if (autoConnect && config.options?.autoConnect !== false) {
@@ -808,9 +854,22 @@ export class DataSourceManager extends EventEmitter {
     params?: DbValue[]
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
+    // The C6 write-gated marker refuses the RAW query path outright and predates this gate; it keeps
+    // precedence because it is the more specific diagnosis for that source (and it refuses reads too,
+    // which the capability gate deliberately does not).
     if (isGenericQueryDisabledConfig(adapter.getConfig())) {
       throw new Error(c6WriteTargetQueryDisabledMessage(dataSourceId))
     }
+    // W-1(c) DEFAULT-DENY SQL WRITE GATE, fail-early before connect. A pure read passes free; anything
+    // else requires this data source to be an ARMED target. The adapter's own query() re-checks at the
+    // true chokepoint, so a caller who skips this wrapper is still refused; this layer only saves a
+    // connect. The gate never inspects what the statement writes TO. The arm-binding additionally
+    // revokes an armed source whose connection has been redirected since it was pinned.
+    assertSqlWriteAllowed(
+      (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
+      sql,
+      { id: adapter.getConfig().id, name: adapter.getConfig().name, type: adapter.getType(), connection: adapter.getConfig().connection },
+    )
 
     if (!adapter.isConnected()) {
       await this.connectDataSource(dataSourceId)
@@ -840,6 +899,10 @@ export class DataSourceManager extends EventEmitter {
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
     adapter.assertWritable() // defense-in-depth: reject mutations on a read-only source
+    // G-4 DESTINATION FENCE (insert). Refuse a K3 destination — declared (marker) or betrayed by a
+    // K3 business-table target — before connecting or touching the driver. This is the chokepoint the
+    // by-kind fences leak past: a sql-write-gated source pointed at K3 arrives here as a generic write.
+    assertNotK3Destination(adapter.getConfig())
 
     if (!adapter.isConnected()) {
       await this.connectDataSource(dataSourceId)
@@ -856,6 +919,9 @@ export class DataSourceManager extends EventEmitter {
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
     adapter.assertWritable() // defense-in-depth: reject mutations on a read-only source
+    // G-4 DESTINATION FENCE (update). Same refusal as insert — a K3 destination is a K3 destination
+    // whichever mutation verb reaches it.
+    assertNotK3Destination(adapter.getConfig())
 
     if (!adapter.isConnected()) {
       await this.connectDataSource(dataSourceId)
@@ -871,6 +937,8 @@ export class DataSourceManager extends EventEmitter {
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
     adapter.assertWritable() // defense-in-depth: reject mutations on a read-only source
+    // G-4 DESTINATION FENCE (delete). A delete against a K3 destination is an external write-back too.
+    assertNotK3Destination(adapter.getConfig())
     if (isC6WriteTargetConfig(adapter.getConfig())) {
       throw new Error(c6WriteTargetDeleteUnsupportedMessage(dataSourceId))
     }
@@ -897,6 +965,11 @@ export class DataSourceManager extends EventEmitter {
     const startTime = Date.now()
     const sourceAdapter = this.getDataSource(sourceId)
     const targetAdapter = this.getDataSource(targetId)
+    // G-4 DESTINATION FENCE (copy target). copyData ends in `targetAdapter.insert(targetTable, ...)`,
+    // so the target side is a write into `targetTable`. Refuse a K3 destination here, before the
+    // first source read — a copy TO K3 is a K3 external write-back regardless of where the rows come
+    // from. The source side is a READ and is deliberately not fenced.
+    assertNotK3Destination(targetAdapter.getConfig())
     if (isGenericQueryDisabledConfig(sourceAdapter.getConfig())) {
       throw new Error(c6WriteTargetQueryDisabledMessage(sourceId))
     }
@@ -963,9 +1036,17 @@ export class DataSourceManager extends EventEmitter {
     // Execute queries in parallel
     const promises = queries.map(async ({ dataSourceId, sql, params, alias }) => {
       const adapter = this.getDataSource(dataSourceId)
+      // The C6 write-gated marker keeps precedence on the raw path, as in `query()` above.
       if (isGenericQueryDisabledConfig(adapter.getConfig())) {
         throw new Error(c6WriteTargetQueryDisabledMessage(dataSourceId))
       }
+      // W-1(c) DEFAULT-DENY SQL WRITE GATE. A federated leg runs raw SQL: a pure read passes, a write
+      // needs an armed target (and its connection must still match the pinned one).
+      assertSqlWriteAllowed(
+        (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
+        sql,
+        { id: adapter.getConfig().id, name: adapter.getConfig().name, type: adapter.getType(), connection: adapter.getConfig().connection },
+      )
 
       if (!adapter.isConnected()) {
         await this.connectDataSource(dataSourceId)

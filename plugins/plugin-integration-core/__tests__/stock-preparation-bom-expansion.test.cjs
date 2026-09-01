@@ -293,6 +293,132 @@ async function testFailClosedGuards() {
   }
 }
 
+// Hold-not-zero: a SQL NULL or blank Bom_ExAttr1 / order-detail quantity must
+// never silently coerce to 0 (Number(null) === 0 and Number('') === 0 are both
+// finite). Before this fix that zero multiplied down through every descendant
+// (totalQuantity = parent x 0), silently zeroing an entire subtree's demand —
+// the customer's legacy system's exact hazard. A row whose SOURCE quantity is
+// genuinely blank/null must be held as invalid_quantity, never planned as a
+// writable 0. A row whose source quantity is a STATED numeric 0 is a real
+// measured zero and must keep expanding exactly as before.
+async function testBlankOrNullQuantityHeldNotZeroed() {
+  function threeLevelData(bomExAttr1AtMidTree, orderDetailQuantity = '2') {
+    return baseData({
+      DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: orderDetailQuantity }],
+      DN_PDM_PartLibraryInfo: [
+        { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1' },
+        { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Sub-assembly', Material: 'Iron', SysVer: 'V1' },
+        { OBJ_ID: 'PART-C', IdentityNo: 'C-001', IdentityName: 'Fastener', Material: 'Copper', SysVer: 'V1' },
+      ],
+      DN_PDM_BomHeadInfo: [
+        { part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V1', bom_able: true },
+        { part_id: 'PART-B', bom_id: 'BOM-B', SysVer: 'V1', bom_able: true },
+      ],
+      DN_PDM_BomDetailsInfo: [
+        { bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: bomExAttr1AtMidTree, sort_id: 1 },
+        { bom_pid: 'BOM-B', part_id: 'PART-C', Bom_ExAttr1: '4', sort_id: 1 },
+      ],
+    })
+  }
+
+  // (1) NULL quantity on a mid-tree node (PART-B, depth 1, with its own child
+  // PART-C beneath it): the row errors as invalid_quantity and the subtree
+  // (PART-C) must never be read or expanded with a silently zeroed total.
+  {
+    const { adapter, calls } = createAdapter(threeLevelData(null))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+    assert.equal(result.valid, false)
+    assert.ok(
+      result.rowErrors.some((error) => error.type === 'invalid_quantity' && error.relation === 'child' && error.depth === 1),
+      'a null mid-tree Bom_ExAttr1 is held as invalid_quantity, not coerced to 0',
+    )
+    assert.ok(!result.rows.some((row) => row.componentSourceId === 'PART-B'), 'the zero-quantity mid-tree row itself is never pushed')
+    assert.ok(!result.rows.some((row) => row.componentSourceId === 'PART-C'), 'PART-C subtree is never read once its parent quantity is held')
+    assert.ok(!calls.some((call) => call.object === 'DN_PDM_BomHeadInfo' && call.filters.part_id === 'PART-B'), 'expansion never descends into the held node to read its subtree')
+    assert.ok(!result.rows.some((row) => row.totalQuantity === 0), 'no row anywhere in this run carries a silently-zeroed totalQuantity')
+  }
+
+  // (2) Blank-string quantity on the same mid-tree node: identical hold.
+  {
+    const { adapter } = createAdapter(threeLevelData(''))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+    assert.equal(result.valid, false)
+    assert.ok(
+      result.rowErrors.some((error) => error.type === 'invalid_quantity' && error.relation === 'child' && error.depth === 1),
+      'a blank-string mid-tree Bom_ExAttr1 is held as invalid_quantity, not coerced to 0',
+    )
+    assert.ok(!result.rows.some((row) => row.componentSourceId === 'PART-B'))
+    assert.ok(!result.rows.some((row) => row.componentSourceId === 'PART-C'))
+    assert.ok(!result.rows.some((row) => row.totalQuantity === 0))
+  }
+
+  // Whitespace-only counts as blank too (isBlank trims before checking).
+  {
+    const { adapter } = createAdapter(threeLevelData('   '))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+    assert.equal(result.valid, false)
+    assert.ok(result.rowErrors.some((error) => error.type === 'invalid_quantity' && error.relation === 'child'))
+  }
+
+  // (3) A STATED numeric 0 mid-tree quantity is a real measured zero: it must
+  // keep expanding exactly as before, multiplying down as 0 (not held).
+  {
+    const { adapter } = createAdapter(threeLevelData(0))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+    assert.equal(result.valid, true, 'a stated numeric 0 is a valid measured quantity, not an error')
+    assert.equal(result.status, 'expanded')
+    assert.ok(!result.rowErrors.some((error) => error.type === 'invalid_quantity'))
+    const partB = result.rows.find((row) => row.componentSourceId === 'PART-B')
+    const partC = result.rows.find((row) => row.componentSourceId === 'PART-C')
+    assert.ok(partB, 'PART-B still expands on a stated zero')
+    assert.equal(partB.rawQuantity, 0)
+    assert.equal(partB.totalQuantity, 0, 'stated zero multiplies down exactly as before')
+    assert.ok(partC, 'PART-C subtree still expands beneath a stated zero')
+    assert.equal(partC.totalQuantity, 0)
+  }
+
+  // Root order-detail quantity is the same parseQuantity() call site (relation
+  // 'root'): null/blank must hold there too, and a stated 0 must still expand.
+  {
+    const { adapter } = createAdapter(threeLevelData('4', null))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+    assert.equal(result.valid, false)
+    assert.ok(result.rowErrors.some((error) => error.type === 'invalid_quantity' && error.relation === 'root'))
+    assert.equal(result.rows.length, 0, 'a null root order-detail quantity holds before any row is pushed')
+  }
+
+  {
+    const { adapter } = createAdapter(threeLevelData('4', ''))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+    assert.equal(result.valid, false)
+    assert.ok(result.rowErrors.some((error) => error.type === 'invalid_quantity' && error.relation === 'root'))
+    assert.equal(result.rows.length, 0)
+  }
+
+  {
+    const { adapter } = createAdapter(threeLevelData('4', 0))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+    assert.equal(result.valid, true, 'a stated numeric 0 root quantity is valid, not an error')
+    assert.equal(result.rows[0].rawQuantity, 0)
+    assert.equal(result.rows[0].totalQuantity, 0)
+  }
+
+  // (4) The existing not-a-number case is a different failure (garbled value,
+  // not absent) and must keep failing exactly as before — untouched by this
+  // fix. (Locked already in testFailClosedGuards; reasserted here for locality.)
+  {
+    const { adapter } = createAdapter(threeLevelData('4', 'not-a-number'))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+    assert.equal(result.valid, false)
+    assert.ok(result.rowErrors.some((error) => error.type === 'invalid_quantity' && error.relation === 'root'))
+    assert.equal(result.rows.length, 0)
+  }
+}
+
 async function testScaleLimitsRemainDiagnosableAndValuesFree() {
   {
     const { adapter } = createAdapter(baseData({
@@ -415,6 +541,7 @@ async function main() {
   await testSourceRowsResolveCaseVariantFieldKeys()
   await testSameComponentUnderDifferentParentsStaysDistinct()
   await testFailClosedGuards()
+  await testBlankOrNullQuantityHeldNotZeroed()
   await testScaleLimitsRemainDiagnosableAndValuesFree()
   testReadPlanValidation()
 
