@@ -111,14 +111,20 @@
 // The gate asks ONE question of a statement: is it PROVABLY a pure read? If not, it is a WRITE and
 // needs authorization. It never asks what the statement writes TO.
 //
-// Provably-a-pure-read means ALL of: a single statement (no `;` separator), no `INTO`, and a leading
-// SELECT / EXPLAIN / SHOW. Everything else — including a leading `WITH` — is treated as a WRITE.
+// Provably-a-pure-read means ALL of: the noise scan CLOSED every span it opened, a single statement
+// (no `;` separator), no `INTO`, a leading SELECT / WITH / EXPLAIN / SHOW, and every RESERVED keyword
+// in the SELECT read grammar. Everything else is a WRITE.
 //
-// WITH IS TREATED AS A WRITE, DELIBERATELY. SQL Server allows a CTE to precede a data-modifying
-// statement (`WITH c AS (SELECT …) DELETE …`), and proving a given CTE terminates in a SELECT is the
-// same unbounded parsing game this module exists to retire. So a CTE requires authorization. The cost
-// is that a CTE-shaped READ on an unarmed source is refused; that is a small, visible, documented
-// cost, and the alternative is the round-4 hole.
+// A LEADING `WITH` IS ADMITTED ONLY BECAUSE THE READ-GRAMMAR ALLOWLIST DECIDES THE TERMINAL VERB. SQL
+// Server allows a CTE to precede a data-modifying statement (`WITH c AS (SELECT …) DELETE …`), and
+// proving a given CTE terminates in a SELECT by PARSING is the unbounded game this module exists to
+// retire. It is not parsed: a CTE that hides a write carries a reserved non-read keyword (DELETE,
+// UPDATE, INSERT, MERGE …) and fails the allowlist, so the verdict falls out without a parser.
+//
+// AN UNTERMINATED SPAN IS A WRITE (FIX 5). If the scan reaches end-of-input still inside a string
+// literal, a block comment, or a bracketed / quoted identifier, the rest of the statement was consumed
+// as literal content and NOTHING about it was proved — including whether a write verb is sitting in
+// there. Unprovable is a WRITE, exactly as this section's first sentence says.
 //
 // ─────────────────────────────────────────────────────────────────────────────
 // OBJECT SCOPE IS DELIBERATELY NOT OFFERED — AND WHY
@@ -227,19 +233,53 @@ export const OUTBOUND_SQL_WRITE_OPERATIONS = Object.freeze([
 // SQL Server semantics honoured in the one pass: `''` is an embedded quote inside a string; `]]` an
 // embedded bracket inside a `[…]` identifier; `""` an embedded quote inside a `"…"` identifier; and
 // block comments NEST (`/* a /* b */ c */`), so a nested close must not end the outer comment early.
-// An UNTERMINATED string or comment consumes to end-of-input — which is fail-safe here: an unterminated
-// string/comment is itself a T-SQL syntax error the driver rejects, so nothing executes regardless of
-// how it classifies.
-function stripSqlNoise(sql: string): string {
+//
+// FIX 5 — AN UNTERMINATED SPAN IS REPORTED, NOT SWALLOWED SILENTLY.
+//
+// An earlier note here claimed that consuming an unterminated string/comment to end-of-input was
+// "fail-safe, because an unterminated string is a T-SQL syntax error the driver rejects anyway". That
+// reasoning is about the DRIVER, not about this classifier, and this classifier's contract is
+// "anything not PROVABLY a single pure read is a write". A span with no closer is exactly the case
+// where the scan proved nothing: everything after the opener was consumed as literal content, so a
+// write verb sitting there is invisible to the read-grammar allowlist. Executed proof — before this
+// fix, ALL of these classified as PURE READS:
+//
+//     SELECT N'unterminated /*                  → stripped to `SELECT N ''`
+//     SELECT 1 /* unclosed comment              → stripped to `SELECT 1 `
+//     SELECT '''                                → `''` is an ESCAPE, so the third quote opens a span
+//     SELECT 'x⏎DELETE FROM t_ICItem            → the DELETE eaten as string body
+//     SELECT * FROM [t⏎DELETE FROM t_ICItem     → the DELETE eaten as identifier body
+//
+// The real-world impact is low (an unclosed quote/comment is a syntax error the driver rejects, so
+// nothing executes), but a classifier that answers TRUE on input it could not tokenize is fail-OPEN
+// by construction, and this module's top guarantee is fail-closed. So the scan now REPORTS whether it
+// ended inside an unclosed span and the caller treats that as "not provably a read" ⇒ a WRITE.
+//
+// This covers ALL FOUR closable spans — string literal, block comment, bracketed identifier, quoted
+// identifier — because the swallow-to-end-of-input shape, and therefore the hole, is identical in each.
+// A LINE comment is deliberately NOT in that set: `--` is terminated by end-of-line OR end-of-input,
+// so `SELECT 1 -- note` with no trailing newline is well-formed and stays a READ.
+//
+// Still ONE left-to-right pass: `unterminated` is a flag set where each span's loop already discovers
+// it ran out of input, not a second scan.
+interface SqlNoiseScan {
+  /** The statement with comments / literals / quoted identifiers replaced by placeholders. */
+  readonly cleaned: string
+  /** True when the scan hit end-of-input still INSIDE a string, block comment or quoted identifier. */
+  readonly unterminated: boolean
+}
+
+function scanSqlNoise(sql: string): SqlNoiseScan {
   const src = String(sql ?? '')
   const n = src.length
   let out = ''
   let i = 0
+  let unterminated = false
   while (i < n) {
     const ch = src[i]
     const next = i + 1 < n ? src[i + 1] : ''
 
-    // Line comment: -- … to end of line.
+    // Line comment: -- … to end of line. End-of-input is a LEGAL end for it, so it never sets the flag.
     if (ch === '-' && next === '-') {
       i += 2
       while (i < n && src[i] !== '\n' && src[i] !== '\r') i += 1
@@ -256,6 +296,7 @@ function stripSqlNoise(sql: string): string {
         if (src[i] === '*' && i + 1 < n && src[i + 1] === '/') { depth -= 1; i += 2; continue }
         i += 1
       }
+      if (depth > 0) unterminated = true // ran out of input with the comment still open
       out += ' '
       continue
     }
@@ -263,14 +304,17 @@ function stripSqlNoise(sql: string): string {
     // String literal: '…', where '' is an embedded quote (stays in-string).
     if (ch === "'") {
       i += 1
+      let closed = false
       while (i < n) {
         if (src[i] === "'") {
           if (i + 1 < n && src[i + 1] === "'") { i += 2; continue } // escaped ''
           i += 1
+          closed = true
           break
         }
         i += 1
       }
+      if (!closed) unterminated = true
       out += " '' "
       continue
     }
@@ -278,14 +322,17 @@ function stripSqlNoise(sql: string): string {
     // Bracketed identifier: […], where ]] is an embedded ] (stays in-identifier).
     if (ch === '[') {
       i += 1
+      let closed = false
       while (i < n) {
         if (src[i] === ']') {
           if (i + 1 < n && src[i + 1] === ']') { i += 2; continue } // escaped ]]
           i += 1
+          closed = true
           break
         }
         i += 1
       }
+      if (!closed) unterminated = true
       out += ' x '
       continue
     }
@@ -293,14 +340,17 @@ function stripSqlNoise(sql: string): string {
     // Quoted identifier: "…", where "" is an embedded " (stays in-identifier).
     if (ch === '"') {
       i += 1
+      let closed = false
       while (i < n) {
         if (src[i] === '"') {
           if (i + 1 < n && src[i + 1] === '"') { i += 2; continue } // escaped ""
           i += 1
+          closed = true
           break
         }
         i += 1
       }
+      if (!closed) unterminated = true
       out += ' x '
       continue
     }
@@ -308,7 +358,7 @@ function stripSqlNoise(sql: string): string {
     out += ch
     i += 1
   }
-  return out
+  return { cleaned: out, unterminated }
 }
 
 // ─── THE READ GRAMMAR IS AN ALLOWLIST, NOT A WRITE BLOCKLIST ──────────────────
@@ -402,10 +452,16 @@ const SQL_WORD_TOKEN = /[A-Za-z_][A-Za-z0-9_]*/g
 /**
  * PROVABLY a pure read? ALL of, after stripping comments / string literals / bracketed & quoted
  * identifiers:
+ *   (0) the scan TERMINATED every span it opened (FIX 5 — see `scanSqlNoise`);
  *   (a) a SINGLE statement (no `;` separator);
  *   (b) no `INTO` (a `SELECT … INTO` writes a table);
  *   (c) it LEADS with SELECT / WITH / EXPLAIN / SHOW; and
  *   (d) every RESERVED keyword it contains is in the SELECT read grammar.
+ *
+ * (0) is a prerequisite for (a)–(d) rather than another rule: if a string / block comment / quoted
+ * identifier never closed, the scan consumed the rest of the statement as literal content, so the
+ * checks below would be asking their questions of a TRUNCATED statement. Nothing is provable there,
+ * and unprovable means WRITE.
  *
  * (d) is the whole point. It is an ALLOWLIST: any reserved keyword outside the read grammar — a write
  * verb, a DDL/DCL/admin command, WRITETEXT/UPDATETEXT/BACKUP/DBCC/RECONFIGURE/CHECKPOINT/KILL/RECEIVE/
@@ -421,7 +477,11 @@ const SQL_WORD_TOKEN = /[A-Za-z_][A-Za-z0-9_]*/g
 export function isPureReadStatement(sql: string): boolean {
   const raw = String(sql ?? '').trim().replace(/;\s*$/, '') // drop a single trailing semicolon
   if (raw.length === 0) return false // nothing to allow
-  const cleaned = stripSqlNoise(raw)
+  const scan = scanSqlNoise(raw)
+  // (0) FIX 5: an unclosed string / block comment / quoted identifier swallowed the rest of the input,
+  // so nothing below is being asked of the whole statement. Not provable ⇒ a WRITE.
+  if (scan.unterminated) return false
+  const cleaned = scan.cleaned
   if (cleaned.includes(';')) return false // an explicit separator — a batch could smuggle a write
   if (/\binto\b/i.test(cleaned)) return false // reject SELECT … INTO (a write)
   if (!/^\s*(select|with|explain|show)\b/i.test(cleaned)) return false // must LEAD with a read verb
