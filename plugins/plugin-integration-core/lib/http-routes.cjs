@@ -173,6 +173,12 @@ const ROUTES = [
   // Value-bearing detail reads (drawing numbers / quantities / unit symbols) stay OWNER-GATED.
   ['GET', '/api/integration/stock-preparation/exceptions', 'stockPreparationExceptionList'],
   ['GET', '/api/integration/stock-preparation/prep-lines', 'stockPreparationPrepLineList'],
+  // 按项目导出物料 Excel — 仓库/采购 export THIS PROJECT's plm_stock_preparation_main rows to xlsx after
+  // the approval chain completes. Static literal segment before the bare '/prep-lines' collection GET
+  // above cannot collide (no '/prep-lines/:id' route exists). VALUE-BEARING (material names,
+  // quantities), unlike the values-free /prep-lines summary above, so it does NOT ride the same
+  // stock-prep:read tier — see the handler for the gate choice and its justification.
+  ['GET', '/api/integration/stock-preparation/prep-lines/export', 'stockPreparationPrepLineExport'],
   // #3751 MVP W5b (#3890): values-free audit trail over the stock-prep write surface.
   ['GET', '/api/integration/stock-preparation/audit', 'stockPreparationAuditList'],
   // 工作台里选源 — WHICH source the pull action reads, chosen in the workbench instead of in a server
@@ -612,6 +618,9 @@ const { MATCH_STATUSES: STOCK_PREPARATION_MATCH_STATUSES } = require('./stock-pr
 // FOS-4: canonical stock-prep objectId — readiness is bound per TARGET, so any preset targeting this
 // table (v1 replace + the disable-missing prove-the-path preset) reuses the canonical readiness check.
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('./stock-preparation-templates.cjs')
+// 按项目导出物料 Excel: reads the ACTIVE plm_stock_preparation_main rows of one business project,
+// projected to the agreed EXPORT_COLUMNS. Structurally read-only; never touches xlsx itself.
+const { exportStockPreparationPrepLines } = require('./stock-preparation-prep-line-export.cjs')
 // FOS-2: generic field-option-sync route — resolve a FOS preset (FOS-1 catalog), validate operator
 // option sets against the preset's source keys, and patch each mapped field's options + generic
 // `fieldOptionSync` metadata through the SAME kernel stock-prep uses (no parallel write path).
@@ -799,6 +808,28 @@ function resolveTenantId(req, input = {}) {
     }
   }
   return tenantId
+}
+
+// 按项目导出物料 Excel: filename/sheet-name helpers. Pure, no I/O. buildXlsxBuffer itself sanitizes the
+// sheet name a second time (sanitizeSheetName, xlsx-service.ts) — this is belt-and-braces plus the
+// Chinese label the factory's own vocabulary uses; the filename sanitizer is load-bearing (an
+// unsanitized projectNo could otherwise carry a path/quote character into a Content-Disposition header).
+function stockPreparationExportTimestamp(now = new Date()) {
+  return now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')
+}
+
+function stockPreparationExportSafeToken(value, fallback) {
+  const safe = String(value || '').replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '')
+  return safe || fallback
+}
+
+function stockPreparationExportSheetName(projectNo) {
+  return `备料导出-${projectNo}`
+}
+
+function stockPreparationExportFilename(projectNo, now) {
+  const safeProject = stockPreparationExportSafeToken(projectNo, 'project')
+  return `stock-prep-${safeProject}-${stockPreparationExportTimestamp(now)}.xlsx`
 }
 
 // A tenant-scoped WRITE must derive its tenant from the AUTHENTICATED principal ONLY — never from the
@@ -1373,6 +1404,15 @@ const VALID_STOCK_PREPARATION_PREP_LINE_LIST_QUERY_KEYS = new Set([
   'projectId',
   'snapshotBatchId',
   'prepStatus',
+])
+// 按项目导出物料 Excel: `projectNo`, NOT `projectId` — plm_stock_preparation_main's own business-project
+// field (stock-preparation-templates.cjs), the same identifier the confirmation-decision ledger family
+// scopes on (VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_LIST_QUERY_KEYS above), not the confirm-
+// reads family's MVP-ledger `projectId`.
+const VALID_STOCK_PREPARATION_PREP_LINE_EXPORT_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectNo',
 ])
 // FOS-2: generic field-option-sync request — closed allowlist. Operator names a preset (FOS-1
 // catalog) + supplies option sets keyed by the preset's source keys. No sheetId / credentials.
@@ -3077,6 +3117,14 @@ function createHandlers(services, options = {}) {
   // reaches a provider. The server-held vendor preset catalog (committed, values-free structure) is
   // loaded once and reused for family detection + as the confirm skeleton — NEVER request-supplied.
   const governedAi = (services && services.governedAi) || null
+
+  // 按项目导出物料 Excel: the xlsx BUFFER BUILDER is INJECTED (packages/core-backend xlsx-service.ts
+  // buildXlsxBuffer, wrapped around a lazily-imported `xlsx` module), same INJECTED-per-plugin shape as
+  // governedAi above and for the same reason — the plugin has no `xlsx` dependency of its own (it is
+  // not resolvable from this package's node_modules under the workspace's strict pnpm layout) and must
+  // not add one; the ONE existing xlsx builder is reused via this host-provided seam instead. Duck-typed
+  // to { buildWorkbookBuffer({ sheetName, headers, rows }) => Promise<Buffer> }.
+  const stockPreparationXlsxExport = (services && services.stockPreparationXlsxExport) || null
   let vendorPresetCatalogCache = null
   function loadVendorPresetCatalog() {
     if (vendorPresetCatalogCache) return vendorPresetCatalogCache
@@ -6868,6 +6916,73 @@ function createHandlers(services, options = {}) {
       return sendOk(res, result)
     },
 
+    // 按项目导出物料 Excel — 仓库/采购 take THIS PROJECT's material list after the approval chain
+    // completes ("导出涉及的物料信息为 excel 到本地处理"). See the ROUTES-array comment and
+    // stock-preparation-prep-line-export.cjs's header for the read-side contract (unknown project vs.
+    // zero-active-rows, the column projection's source).
+    //
+    // GATE CHOICE: requireAccess(req, STOCK_PREP_OPERATE) — the SAME code that gates the ONE other
+    // value-bearing stock-prep read in this file, stockPreparationConfirmationDecisionsValueEntry (the
+    // per-decision value readback, O1' ruling). Every OTHER stock-prep GET in this family is
+    // deliberately values-free (stock-prep:read queue-watcher tier: counts, enums, handles); this
+    // route is the second, deliberate exception — it carries customer VALUES (material names,
+    // quantities) — so it rides the SAME notch-tighter OPERATE tier rather than the broad READ tier,
+    // for the identical reason the value-entry read does: the queue-watcher tier (supervisor, auditor,
+    // dashboard) must keep seeing counts/enums only, never a value. See the PR body for the full
+    // justification (including the alternatives considered and rejected).
+    async stockPreparationPrepLineExport(req, res) {
+      const user = requireAccess(req, STOCK_PREP_OPERATE)
+      const audit = requireStockPreparationAudit()
+      const input = normalizeStockPreparationConfirmBody(
+        requestQuery(req),
+        VALID_STOCK_PREPARATION_PREP_LINE_EXPORT_QUERY_KEYS,
+        'STOCK_PREPARATION_PREP_LINE_EXPORT_REQUEST_INVALID',
+      )
+      const projectNo = firstString(input.projectNo)
+      if (!projectNo) {
+        throw new HttpRouteError(400, 'STOCK_PREPARATION_PREP_LINE_EXPORT_REQUEST_INVALID', 'projectNo is required', { field: 'projectNo' })
+      }
+      const tenantId = resolveTenantId(req, input)
+      const exportResult = await exportStockPreparationPrepLines({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, undefined),
+        projectNo,
+        permission: 'admin',
+      })
+      // Record intent FIRST — the same "audit before the effect is observable" discipline the write
+      // routes use: if the audit store is unavailable or refuses the payload, no workbook may be
+      // streamed. Values-free: counts only, never a material name/quantity.
+      await audit.append({
+        tenantId,
+        workspaceId: input.workspaceId,
+        projectId: projectNo,
+        action: 'prep_line_export',
+        actor: user.id || user.email,
+        mode: exportResult.activeRowCount > 0 ? 'export' : 'export_empty',
+        detail: {
+          operation: 'prep_line_export',
+          totalRowCount: exportResult.totalRowCount,
+          activeRowCount: exportResult.activeRowCount,
+          columnCount: exportResult.headers.length,
+        },
+      })
+      if (!stockPreparationXlsxExport || typeof stockPreparationXlsxExport.buildWorkbookBuffer !== 'function') {
+        throw new HttpRouteError(501, 'PREP_LINE_EXPORT_XLSX_UNAVAILABLE', 'xlsx export capability is not available')
+      }
+      const buffer = await stockPreparationXlsxExport.buildWorkbookBuffer({
+        sheetName: stockPreparationExportSheetName(projectNo),
+        headers: exportResult.headers,
+        rows: exportResult.rows,
+      })
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+      res.setHeader('Content-Disposition', `attachment; filename="${stockPreparationExportFilename(projectNo)}"`)
+      // Lets the front end tell "downloaded, but this project has zero active material rows right now"
+      // apart from a normally populated export, without parsing the binary body — see the UI notice.
+      res.setHeader('X-Stock-Prep-Export-Row-Count', String(exportResult.activeRowCount))
+      return res.send(buffer)
+    },
+
     // FOS-2: generic, preset-driven field-option-sync. Admin-gated; resolves a FOS preset from the
     // FOS-1 catalog; validates operator option sets against the preset's source keys; patches each
     // mapped field's options + generic `fieldOptionSync` metadata through the SAME kernel stock-prep
@@ -7415,5 +7530,9 @@ module.exports = {
     asPositiveInt,
     redactSecretText,
     sanitizeTestConnectionResult,
+    stockPreparationExportFilename,
+    stockPreparationExportSheetName,
+    stockPreparationExportSafeToken,
+    stockPreparationExportTimestamp,
   },
 }

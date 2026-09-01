@@ -52,6 +52,20 @@
         {{ bi('检查是否准备好', 'Check it is ready') }}
       </button>
 
+      <!-- 按项目导出物料 Excel — 仓库/采购 take this after the approval chain completes. Gated one
+           notch tighter than the queue (same code as "看我填过什么"), because the workbook carries
+           material names and quantities, not just handles/enums. -->
+      <button
+        v-if="can('confirmationQueue.export')"
+        type="button"
+        data-testid="stock-prep-confirmation-export"
+        :disabled="busy || !projectNo"
+        :title="!projectNo ? bi('先填项目号', 'Enter a project number first') : ''"
+        @click="exportMaterials"
+      >
+        {{ bi('导出物料清单(Excel)', 'Export materials (Excel)') }}
+      </button>
+
       <!-- Platform-admin capabilities. Reconcile performs a SOURCE READ (and consumes a B2a
            operation claim when armed); ensure PROVISIONS the ledger table. Both stay owner-level, so
            an operator never sees either. -->
@@ -81,6 +95,14 @@
     <p v-if="errorCode" class="stock-prep-confirm__error" data-testid="stock-prep-confirmation-error">
       {{ bi(errorPlain(errorCode).zh, errorPlain(errorCode).en) }}
       <code class="stock-prep-confirm__token">{{ errorCode }}</code>
+    </p>
+
+    <!-- The download still happened — a valid, headers-only workbook — this is purely the notice. -->
+    <p v-if="exportEmptyNotice" class="stock-prep-confirm__hint" data-testid="stock-prep-confirmation-export-empty">
+      {{ bi(
+        '这个项目号下没有有效的物料行,已下载一份仅含表头的空白模板。',
+        'This project number has no active material rows — an empty, headers-only template was downloaded.',
+      ) }}
     </p>
 
     <p v-if="readiness !== null" class="stock-prep-confirm__readiness" data-testid="stock-prep-confirmation-readiness-result">
@@ -253,6 +275,7 @@ import {
   STOCK_PREPARATION_DECISION_STATUSES,
   STOCK_PREPARATION_RESOLUTION_ACTIONS,
   confirmStockPreparationDecision,
+  exportStockPreparationPrepLines,
   listStockPreparationDecisions,
   readStockPreparationDecisionReadiness,
   readStockPreparationValueEntry,
@@ -327,6 +350,9 @@ const resolutionAction = ref<StockPreparationResolutionAction>('keep_multiple_ro
 const resolvedValue = ref('')
 const resolvedAuxValue = ref('')
 const notes = ref('')
+/** Set after a successful export whose project had zero ACTIVE material rows — the download still
+ *  happened (a valid, headers-only workbook), this is purely the plain-language notice for it. */
+const exportEmptyNotice = ref(false)
 
 /** What the currently chosen handling actually does, in one line, before the operator commits. */
 const selectedActionHint = computed<string>(() => {
@@ -375,6 +401,28 @@ async function loadValueEntry(decisionId: string | null): Promise<void> {
   if (!decisionId) return
   await run(async () => {
     valueEntry.value = await readStockPreparationValueEntry({ ...props.scope, decisionId })
+  })
+}
+
+/** Same client-side trigger the generic Multitable export uses (MultitableWorkbench.vue): a Blob
+ *  object URL + a synthetic `<a download>` click, never a direct `<a href>` to the API (which would
+ *  carry no Authorization header) and never window.open. */
+function triggerExportDownload(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
+
+async function exportMaterials(): Promise<void> {
+  if (!projectNo.value) return
+  exportEmptyNotice.value = false
+  await run(async () => {
+    const result = await exportStockPreparationPrepLines({ ...props.scope, projectNo: projectNo.value })
+    triggerExportDownload(result.blob, result.filename)
+    exportEmptyNotice.value = result.activeRowCount === 0
   })
 }
 
