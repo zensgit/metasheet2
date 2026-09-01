@@ -70,6 +70,7 @@ node __tests__/stock-preparation-conflict-policies.test.cjs
 node __tests__/stock-preparation-confirmation-decisions.test.cjs
 node __tests__/stock-preparation-permission-matrix.test.cjs
 node __tests__/stock-preparation-preflight.test.cjs
+node __tests__/stock-preparation-source-preflight.test.cjs
 node __tests__/stock-preparation-production-policy.test.cjs
 node __tests__/stock-preparation-prod-gate.test.cjs
 node __tests__/stock-preparation-extension-namespace.test.cjs
