@@ -8,7 +8,7 @@
 
 ## 1. Exact-head 文件边界
 
-相对父节点 `65efb1cc26637ec493bd2fa2fe45d571dc8a5290`：
+相对父节点 `93c461568c165cfcf026039332039ed75c73c32c`：
 
 - 新增 1 个真实数据库闭环测试；
 - `plugin-tests.yml` 新增 1 个 post-migrate whole-file 参数；
@@ -54,7 +54,7 @@
 
 ## 5. 父产品 PR 状态
 
-父 PR #5426 保持 OPEN、Draft/HOLD、MERGEABLE；本报告形成时 exact head 为 `65efb1cc...`。上一节点的 Node 20 长门暴露了一条旧 scope rollback 测试未逆序卸载新增报名表的问题；一文件 test-only 修复已用相同 FK 错误 mutation 判红并在 fresh/replay 真库恢复绿色。新 exact-head 远端矩阵仍在运行，因此本文不把本地闭环证明扩大为父 PR 的终态远端结论。
+父 PR #5426 保持 OPEN、Draft/HOLD、MERGEABLE；本报告形成时 exact head 为 `93c46156...`。此前 Node 20 长门暴露两条旧测试未随报名能力更新：scope rollback 未逆序卸载报名表，以及 auth closed-capability 期望漏掉 `enrollment:false`。两项均为 test-only 修复；旧行为分别以 FK 错误和 closed-shape 不一致判红，fresh/replay scope 10/10 与 auth 21/21 恢复绿色。新 exact-head 远端矩阵仍在运行，因此本文不把本地闭环证明扩大为父 PR 的终态远端结论。
 
 ## 6. 未验证边界
 
