@@ -392,15 +392,95 @@ function normalizeActionList(actions) {
   throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'table actions config must be an array/object')
 }
 
-function createStockPreparationTableActionRegistry({ actions } = {}) {
+/**
+ * The registry, and THE ONE SEAM THAT MAKES REBINDING A SOURCE A RUNTIME ACT.
+ *
+ * `actions` is still the deploy-time config, still drained into a Map ONCE at construction (which
+ * happens inside `createHandlers`, i.e. at plugin activation). That is correct for everything in it
+ * — the target sheet, the template, the read plan, the bounds — because all of those are decisions
+ * a deployment makes about ITSELF and a restart is a fine cadence for changing them.
+ *
+ * `source.externalSystemId` is not that kind of fact, and treating it as one is the single biggest
+ * onboarding cost this product has. It is a foreign key into a table the customer's own admin
+ * already manages from the same workbench, and "point us at your PLM instead of the demo source"
+ * was a change that required an implementer to SSH in, edit
+ * INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON, and `pm2 restart` — because the value was
+ * captured in this Map at activation and every later request read the snapshot.
+ *
+ * `resolveSourceBinding` is how that stops being true, and WHERE it sits is the whole design:
+ *
+ *   * it is consulted INSIDE `getTableAction`, which every stock-prep route already calls per
+ *     request (dry-run, apply, mvp-persist, large-BOM start/run, reconcile, readiness, the hub
+ *     overview join). So a binding written at 10:00 is read by the 10:00:01 request. No restart, no
+ *     plugin reload, no cache to invalidate — because there is no cache: the override was never
+ *     read until the request asked for it.
+ *   * it is consulted AFTER `cloneJson`, so the override mutates this request's private copy and
+ *     the deploy-time snapshot in `configs` is never written to. Two tenants resolving different
+ *     sources concurrently cannot see each other's.
+ *   * it overrides EXACTLY ONE FIELD. `kind`, `readPlan`, `workspaceId`, target, template and bounds
+ *     all stay deploy-time. A persisted value that could move `kind` or `readPlan` would let a
+ *     workbench click change WHAT IS READ and HOW, not merely WHERE FROM, and would put a
+ *     request-reachable path into the B2a registration's `sourceSystemType` / `objectScope`
+ *     matching. It cannot: this assigns to `externalSystemId` and nothing else.
+ *   * the override is then RE-NORMALIZED through `normalizeSource`, so a stored empty string, a
+ *     stored non-string, or a stored value that would fail `requiredString` is refused HERE rather
+ *     than reaching `loadTableActionSourceAdapter` as a malformed lookup.
+ *
+ * FAIL-CLOSED, in both of its directions:
+ *   * a resolver that THROWS propagates. It does not fall back to the env default — "the binding
+ *     table is unreachable" and "no binding exists" are different facts, and quietly serving the
+ *     synthetic demo source because a query failed is exactly the silent-wrong-source failure this
+ *     whole line exists to prevent.
+ *   * a resolver that returns null/undefined means NO OVERRIDE, and the env default stands. That is
+ *     the pre-migration state and it is byte-identical to the behaviour before this seam existed —
+ *     which is what lets an existing deployment upgrade without touching anything.
+ *   * a wired resolver invoked WITHOUT a tenant scope is refused, not skipped. Silently declining to
+ *     look up an override because the caller forgot to pass a tenant would resolve the env default
+ *     while an admin's chosen source sat unread in the table, and it would do so invisibly. Every
+ *     stock-prep call site passes a scope; a future one that forgets gets a 500 naming the omission.
+ *
+ * NOTE WHAT THIS DOES NOT RELAX. `loadTableActionSourceAdapter` still re-checks the resolved system:
+ * it must exist in the caller's tenant, and `system.kind` must equal `action.source.kind`, or the
+ * read is refused with TABLE_ACTION_SOURCE_INVALID before any adapter is built. So a binding row
+ * left dangling by a later delete, or one written against a system whose kind no longer matches,
+ * fails loudly at read time rather than reading the wrong place.
+ */
+function createStockPreparationTableActionRegistry({ actions, resolveSourceBinding } = {}) {
   const configs = new Map()
   for (const action of normalizeActionList(actions)) {
     const normalized = normalizeStockPreparationActionConfig(action)
     configs.set(normalized.actionId, normalized)
   }
+  const sourceBindingResolver = typeof resolveSourceBinding === 'function' ? resolveSourceBinding : null
+
+  async function applyPersistedSourceBinding(action, input) {
+    if (!sourceBindingResolver) return action
+    const tenantId = optionalString(input.tenantId)
+    if (!tenantId) {
+      throw new StockPreparationTableActionError(
+        500,
+        'TABLE_ACTION_SOURCE_BINDING_SCOPE_REQUIRED',
+        'a persisted source binding is configured but this table-action lookup carried no tenant scope',
+        { actionId: action.actionId },
+      )
+    }
+    const bound = optionalString(await sourceBindingResolver({
+      tenantId,
+      workspaceId: optionalString(input.workspaceId),
+      actionId: action.actionId,
+    }))
+    if (!bound) return action
+    // Re-normalize rather than assigning in place: `normalizeSource` is the ONE definition of what a
+    // valid source is, and a stored value has to clear the same bar a configured one does.
+    return { ...action, source: normalizeSource({ ...action.source, externalSystemId: bound }) }
+  }
+
   return {
     async listTableActions() {
       const action = configs.get(PLM_STOCK_PREPARATION_ACTION_ID)
+      // Deliberately NOT binding-resolved: `publicActionMetadata` projects the action's SHAPE
+      // (parameters, permissions, labels, whether it is configured at all) and names no source, so
+      // resolving one here would be a per-request lookup nothing reads.
       return [publicActionMetadata(action)]
     },
     async getTableAction(input = {}) {
@@ -412,7 +492,7 @@ function createStockPreparationTableActionRegistry({ actions } = {}) {
       if (!action) {
         throw new StockPreparationTableActionError(422, 'TABLE_ACTION_NOT_CONFIGURED', `table action is not configured: ${actionId}`, { actionId })
       }
-      return cloneJson(action)
+      return applyPersistedSourceBinding(cloneJson(action), input)
     },
   }
 }

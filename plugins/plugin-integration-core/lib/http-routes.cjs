@@ -169,6 +169,13 @@ const ROUTES = [
   ['GET', '/api/integration/stock-preparation/prep-lines', 'stockPreparationPrepLineList'],
   // #3751 MVP W5b (#3890): values-free audit trail over the stock-prep write surface.
   ['GET', '/api/integration/stock-preparation/audit', 'stockPreparationAuditList'],
+  // 工作台里选源 — WHICH source the pull action reads, chosen in the workbench instead of in a server
+  // env file. Both legs are the integration ADMIN tier: the GET returns the eligible-source picker,
+  // i.e. exactly the choices whose Save would succeed, so it is the same authority as the POST and
+  // is gated identically rather than at the wider read tier. Taking effect needs no restart — the
+  // binding is resolved per request inside the table-action registry, not captured at activation.
+  ['GET', '/api/integration/stock-preparation/source-binding', 'stockPreparationSourceBindingGet'],
+  ['POST', '/api/integration/stock-preparation/source-binding', 'stockPreparationSourceBindingSet'],
   // B-stage confirmation-decision LEDGER surfaces. Static literal segments precede the bare
   // collection GET so they can never be mis-read as ids. The GET list is the AUTHORITATIVE
   // values-free exception queue of the takeover line (converged ruling); canonical-sheet filter
@@ -331,6 +338,7 @@ const { assertK3ExternalWriteRefused } = require('./k3-external-write-permanent-
 const {
   buildIntegrationHubOverview,
   collectDataSourcePointers,
+  describeConnectorKind,
 } = require('./integration-hub-overview.cjs')
 const {
   PLM_STOCK_PREPARATION_ACTION_ID,
@@ -350,6 +358,14 @@ const {
   resolveStockPrepApplyProductionPolicy,
   resolveStockPrepApplySandboxPolicy,
 } = require('./stock-preparation-table-actions.cjs')
+// 工作台里选源 — the eligibility contract for the pull action's source, and the durable pointer that
+// overrides the deploy-time env default. See stock-preparation-source-binding.cjs for why the
+// allowlist is the BOM read kinds and why this line deliberately does NOT reuse the K3 fence token.
+const {
+  StockPreparationSourceBindingError,
+  assertBindableSource,
+  listEligibleSources,
+} = require('./stock-preparation-source-binding.cjs')
 // B-stage confirmation-decision LEDGER (O1' semantics: duplicate_expanded_key; full frozen action
 // vocabulary + Q2-A value entry). One managed supporting table; never a canonical-sheet write
 // capability (see the module header).
@@ -639,6 +655,10 @@ function inferHttpStatus(error) {
   if (inferDataSourceBridgeErrorCode(error)) return 422
   if (error instanceof ExternalWriteDryRunError) return error.status
   if (error instanceof StockPreparationTableActionError) return error.status
+  // 工作台里选源: a 404 for "not found" (so another tenant's id, a deleted one and a typo look
+  // identical) and a 422 for every eligibility refusal. Mapped here so an ineligible pick can never
+  // reach the admin as an untyped 500 — the reason token is what tells them which property failed.
+  if (error instanceof StockPreparationSourceBindingError) return error.status
   if (error instanceof StockPreparationOptionSyncError) return error.status
   if (error instanceof StockPreparationCustomerPackInstallError) return error.status
   if (error instanceof StockPreparationCustomerPackCatalogError) return error.status
@@ -955,6 +975,17 @@ const MAX_SAMPLE_LIMIT = 10000
 // referenced by many pipelines and approved read configs.
 const HUB_OVERVIEW_SYSTEM_LIMIT = 200
 const HUB_OVERVIEW_CONSUMER_LIMIT = MAX_LIST_LIMIT
+
+// 工作台里选源 candidate page size. SERVER-HELD for the same reason and reusing the same number as
+// the overview's system cap: both screens enumerate this tenant's registered external systems, and
+// two different caps would mean a source visible on one screen and absent from the other.
+const SOURCE_BINDING_CANDIDATE_LIMIT = HUB_OVERVIEW_SYSTEM_LIMIT
+
+// The source-binding POST body may name a SOURCE and nothing else. Not "these are validated and the
+// rest ignored" — an unlisted key is a 400. `kind`, `readPlan`, `target`, `actionId` and `tenantId`
+// are all deliberately absent: the workbench moves WHERE the action reads, never what or how, and
+// never whose.
+const VALID_SOURCE_BINDING_BODY_KEYS = new Set(['externalSystemId'])
 
 function asPositiveInt(value) {
   if (value === undefined || value === null || value === '') return undefined
@@ -2875,6 +2906,24 @@ function createHandlers(services, options = {}) {
     }
     return stockPreparationAudit
   }
+  // 工作台里选源 (migration 079): the persisted source binding. Optional at REGISTRATION for the same
+  // reason the audit store is — an environment without the SQL db must still be able to register
+  // routes, and a deployment that never binds anything keeps resolving the env default forever.
+  //
+  // NOT optional where it matters. Its two ROUTES fail closed without it (an admin must never be
+  // shown a picker whose Save silently lands nowhere), and — more importantly — the RESOLVER below
+  // is only wired when the store exists. Those two facts are the same fact: if the store is absent
+  // there is no override to read, so the action resolves the env default exactly as it did before
+  // this line existed. Absence degrades to the OLD behaviour, never to a wrong source.
+  const stockPreparationSourceBinding = services.stockPreparationSourceBindingStore || null
+  function requireStockPreparationSourceBinding() {
+    if (!stockPreparationSourceBinding
+      || typeof stockPreparationSourceBinding.get !== 'function'
+      || typeof stockPreparationSourceBinding.set !== 'function') {
+      throw new HttpRouteError(501, 'SOURCE_BINDING_STORE_UNAVAILABLE', 'stock-preparation source binding store is not available; the source cannot be read or changed here')
+    }
+    return stockPreparationSourceBinding
+  }
   // Customer-pack install LEDGER. Optional at registration, exactly like the audit store above: an
   // environment without the SQL db still registers the read/dry-run routes. The INSTALL route,
   // however, fails closed without it — an install whose columns cannot be enumerated afterwards is
@@ -2918,8 +2967,25 @@ function createHandlers(services, options = {}) {
   const configuredTableActions = context && context.config
     ? (context.config.stockPreparationTableActions || context.config.tableActions)
     : undefined
+  // THE NO-RESTART SEAM. `actions` is still the deploy-time snapshot, drained into the registry's
+  // Map once, right here, at activation — correct for the target sheet, template, read plan and
+  // bounds. `resolveSourceBinding` is the one field that escapes that: it is an async callback the
+  // registry invokes INSIDE `getTableAction`, which every stock-prep route already calls per
+  // request, so a source picked in the workbench is read by the very next call. There is no cache to
+  // invalidate because nothing is cached — the override is not read until a request asks for it.
+  //
+  // Wired ONLY when the store exists, and it hands back the id or null. A throw from the store
+  // PROPAGATES (the registry does not catch): "the binding table is unreachable" must not be
+  // indistinguishable from "no binding exists", because the second one silently resolves the env
+  // default — which on a customer deployment is the synthetic demo source.
   const tableActions = createStockPreparationTableActionRegistry({
     actions: configuredTableActions,
+    resolveSourceBinding: stockPreparationSourceBinding
+      ? async (scope) => {
+          const binding = await stockPreparationSourceBinding.get(scope)
+          return binding ? binding.externalSystemId : null
+        }
+      : null,
   })
   // SERVER-HELD pack allowlist, built once at registration so a malformed deploy-time pack fails
   // here (visibly, at activation) rather than on a deployer's first install call. Absent config →
@@ -3402,6 +3468,45 @@ function createHandlers(services, options = {}) {
     })
   }
 
+  /**
+   * 工作台里选源 — the #5401 join, as a Map of externalSystemId -> boolean|undefined.
+   *
+   * `true`  — the host's `dataSources.describe` resolved it for THIS principal, i.e. they own it.
+   * `false` — the facade refused. Owner mismatch and deleted row are indistinguishable by design
+   *           (`assertAccess` throws the same wording for both), so this leaks no existence.
+   * absent  — the question does not apply (a `self-contained` kind such as the legacy SQL bridge
+   *           carries its own connection and no core data-source reference) OR the host predates the
+   *           descriptor seam. Both mean "undecided", and `sourceBindingRefusalReason` treats only an
+   *           explicit `false` as disqualifying — a host without the seam must not silently empty the
+   *           picker, which would look exactly like "you own nothing".
+   *
+   * Why the DATA-PLANE check and not an admin one: `assertAccess` has no admin bypass on the data
+   * plane, so being an integration admin does not make a colleague's connection yours. Binding is
+   * upstream of a read that will run as this same principal, so admitting a source they cannot read
+   * would only schedule a later refusal — the "visible but not actionable" failure again.
+   */
+  async function resolveDataSourceAccessibility(req, systems) {
+    const directory = context && context.api && context.api.dataSources
+    if (!directory || typeof directory.describe !== 'function') return null
+    const principal = requestPrincipal(req)
+    const rows = (Array.isArray(systems) ? systems : []).filter(isPlainObject)
+    const accessibility = new Map()
+    await Promise.all(rows.map(async (system) => {
+      if (describeConnectorKind(system.kind).connectionModel !== 'data-source') return
+      const dataSourceId = isPlainObject(system.config) ? firstString(system.config.dataSourceId) : null
+      if (!dataSourceId) return
+      try {
+        const described = await directory.describe(dataSourceId, principal)
+        accessibility.set(system.id, Boolean(described && typeof described === 'object'))
+      } catch {
+        // Uniform refusal — see the note above. Never re-thrown: one unreadable candidate must not
+        // fail the whole picker.
+        accessibility.set(system.id, false)
+      }
+    }))
+    return accessibility
+  }
+
   function applyPermissionForUser(user) {
     return isAdmin(user) ? 'admin' : 'write'
   }
@@ -3497,13 +3602,23 @@ function createHandlers(services, options = {}) {
         readSourceCompositions.list({ ...listScope, status: 'approved', limit: HUB_OVERVIEW_CONSUMER_LIMIT }),
       ])
 
-      // The stock-prep table-action binding is SERVER config (context.config), never a request
-      // input, so it is read through the registry that was built once at registration. An
-      // unconfigured deployment throws TABLE_ACTION_NOT_CONFIGURED — that is the "unplugged" state,
-      // and it must render as "no consumer", not as a 5xx on the whole overview.
+      // The stock-prep table-action binding is SERVER-HELD — the deploy-time config plus, since
+      // 工作台里选源, this scope's persisted override. Neither is a request input: the override is
+      // looked up by the registry under the tenant/workspace the route already resolved, and the
+      // body/query cannot name a source at all.
+      //
+      // SCOPED, deliberately. This used to pass only `{ actionId }`, which was harmless while the
+      // source could only come from process env — there was one answer for the whole process. It is
+      // no longer harmless: an unscoped lookup would make this card report the ENV DEFAULT while
+      // every actual read used the tenant's bound source, i.e. the 对接总览 would quietly disagree
+      // with the runtime about which system 备料 reads. `listScope` is the same tenant/workspace the
+      // five reads above are already authorized under.
+      //
+      // An unconfigured deployment throws TABLE_ACTION_NOT_CONFIGURED — that is the "unplugged"
+      // state, and it must render as "no consumer", not as a 5xx on the whole overview.
       const tableActionBindings = []
       try {
-        const action = await tableActions.getTableAction({ actionId: PLM_STOCK_PREPARATION_ACTION_ID })
+        const action = await tableActions.getTableAction({ ...listScope, actionId: PLM_STOCK_PREPARATION_ACTION_ID })
         const externalSystemId = action && action.source ? action.source.externalSystemId : null
         if (typeof externalSystemId === 'string' && externalSystemId.trim()) {
           tableActionBindings.push({ actionId: action.actionId, externalSystemId: externalSystemId.trim() })
@@ -6188,6 +6303,158 @@ function createHandlers(services, options = {}) {
         limit: firstString(rawQuery.limit),
       })
       return sendOk(res, result)
+    },
+
+    // -------------------------------------------------------------------
+    // 工作台里选源 — GET/POST /api/integration/stock-preparation/source-binding
+    //
+    // THE COST THESE TWO ROUTES REMOVE. `source.externalSystemId` was pinned in
+    // INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON and read once at plugin activation, so
+    // "read the customer's PLM instead of the demo source" meant an implementer with a shell editing
+    // a deploy file and restarting the backend. It is now a name in a dropdown, it persists, and it
+    // is resolved per request — the next dry-run reads the new source with no restart.
+    //
+    // GATE: `requireAccess(req, 'admin')` on BOTH legs — the integration ADMIN tier, which
+    // `hasPermission` satisfies only from `role:admin` / `integration:admin` (an integration WRITER
+    // is refused; line 661 returns false for every other code). The GET is at the same tier as the
+    // POST on purpose: it does not merely report the current binding, it enumerates exactly the
+    // choices whose Save would succeed, which is the POST's own authority stated in advance. Gating
+    // it at the wider read tier would hand a read-only principal a list they cannot act on — R-11's
+    // "visible but not actionable" — and the front end mirrors this by rendering the picker only for
+    // an admin and giving everyone else the read-only explanation without calling either route.
+    //
+    // TENANT: the GET resolves through `scopedInput` (a read; a tenantless platform admin keeps its
+    // existing cross-tenant capability). The POST is a WRITE and therefore uses
+    // `scopedAuthenticatedWriteInput`, which derives the tenant from the authenticated principal
+    // ONLY and refuses any mismatched carrier — a request-supplied tenant on this route would be a
+    // steering vector at another tenant's source.
+    //
+    // VALUES-FREE: ids, connector kinds, status/role enums, operator-authored system names, and the
+    // 对接总览's own plain-language kind labels. No config subtree (the public projection has already
+    // deleted every private per-kind key), no credential, no fingerprint, no host, no business value.
+    // -------------------------------------------------------------------
+
+    /**
+     * The eligible-source candidates, resolved against the caller's own visibility.
+     *
+     * TWO FILTERS, and both matter. `listExternalSystems` is already tenant/workspace scoped, and
+     * `listEligibleSources` then keeps only the two BOM read kinds, active, non-target — so a write
+     * connector (K3 WebAPI included) is not in the list because its kind is not on the allowlist,
+     * not because a fence was consulted here.
+     *
+     * The #5401 join is the second filter. A `data-source:*` system carries only a REFERENCE to a
+     * core data source, and the right to use that source belongs to its OWNER — `assertAccess` has
+     * no admin bypass on the data plane, so being an integration admin does not make someone else's
+     * connection yours. `dataSources.describe` is the host's narrow principal-gated seam (it returns
+     * {id,name,type,status} and neither connects nor decrypts), and a refusal is deliberately
+     * indistinguishable from a deleted row, so this leaks no existence either. A host that predates
+     * the seam resolves nothing and every candidate stays undecided rather than being wrongly
+     * dropped — the same honest degrade the 对接总览 card makes.
+     */
+    async stockPreparationSourceBindingGet(req, res) {
+      requireAccess(req, 'admin')
+      const scope = scopedInput(req, {})
+      const listScope = { tenantId: scope.tenantId, workspaceId: scope.workspaceId }
+      const store = requireStockPreparationSourceBinding()
+
+      const [binding, systems] = await Promise.all([
+        store.get({ ...listScope, actionId: PLM_STOCK_PREPARATION_ACTION_ID }),
+        externalSystems.listExternalSystems({ ...listScope, limit: SOURCE_BINDING_CANDIDATE_LIMIT }),
+      ])
+
+      const dataSourceAccessibility = await resolveDataSourceAccessibility(req, systems)
+      const effective = await tableActions
+        .getTableAction({ ...listScope, actionId: PLM_STOCK_PREPARATION_ACTION_ID })
+        .then((action) => action.source, () => null)
+
+      return sendOk(res, {
+        actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+        // WHAT THE ACTION WILL ACTUALLY READ on the next request, resolved through the very same
+        // registry seam a dry-run goes through — not recomputed here. `origin` is the whole point of
+        // the screen: `persisted` means an admin chose it and it is live; `deploy_default` means
+        // nothing is bound and the env value stands; `unconfigured` means neither exists.
+        effectiveExternalSystemId: effective ? effective.externalSystemId : null,
+        effectiveSourceKind: effective ? effective.kind : null,
+        origin: binding ? 'persisted' : (effective ? 'deploy_default' : 'unconfigured'),
+        persistedBinding: binding,
+        // Fixed, not computed: the property this whole design exists to deliver, stated to the
+        // screen so the affordance cannot drift from the mechanism.
+        takesEffectWithoutRestart: true,
+        eligibleSources: listEligibleSources(systems, { dataSourceAccessibility }),
+      })
+    },
+
+    /**
+     * Bind this scope's source. Validate FIRST, persist SECOND, audit THIRD — in that order and all
+     * of it before any adapter, credential or connection is touched. Nothing here reads a source.
+     */
+    async stockPreparationSourceBindingSet(req, res) {
+      requireAccess(req, 'admin')
+      const rawBody = requestBody(req)
+      if (!isPlainObject(rawBody)) {
+        throw new HttpRouteError(400, 'SOURCE_BINDING_REQUEST_INVALID', 'request must be an object')
+      }
+      for (const key of Object.keys(rawBody)) {
+        if (!VALID_SOURCE_BINDING_BODY_KEYS.has(key)) {
+          throw new HttpRouteError(400, 'SOURCE_BINDING_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+        }
+      }
+      // The body may name a SOURCE and nothing else. It cannot name a kind, a read plan, a target, a
+      // workspace or an action — so a click in the workbench can move WHERE the action reads and
+      // never WHAT it reads or HOW, and it cannot reach the B2a registration's matching inputs.
+      const externalSystemId = firstString(rawBody.externalSystemId)
+      if (!externalSystemId) {
+        throw new HttpRouteError(400, 'SOURCE_BINDING_REQUEST_INVALID', 'externalSystemId is required', { field: 'externalSystemId' })
+      }
+
+      const scope = scopedAuthenticatedWriteInput(req, {})
+      const listScope = { tenantId: scope.tenantId, workspaceId: scope.workspaceId }
+      const store = requireStockPreparationSourceBinding()
+      const audit = requireStockPreparationAudit()
+
+      // Load through the caller's own tenant scope: an id in another tenant simply is not found, and
+      // `assertBindableSource` reports that as a 404 identical to a typo's.
+      const candidate = await externalSystems.getExternalSystem({ ...listScope, id: externalSystemId })
+      const accessibility = await resolveDataSourceAccessibility(req, candidate ? [candidate] : [])
+      assertBindableSource(candidate, {
+        dataSourceAccessible: accessibility ? accessibility.get(externalSystemId) : undefined,
+      })
+
+      const { binding, previousExternalSystemId, changed } = await store.set({
+        ...listScope,
+        actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+        externalSystemId,
+        actor: requestPrincipal(req),
+      })
+
+      // ACTOR + OLD/NEW, inside the closed values-free vocabulary (migration 080). `subject_id` is
+      // the newly bound system — an internal row id, the same class of handle the existing nine
+      // actions carry — and the id it replaced rides `detail`, where the store's structural gate
+      // admits it as an enum-shaped handle. A rebind to the SAME source is still recorded, as
+      // `mode: 'rebound'` with `changed: false`: someone re-confirmed the source, and that is a fact
+      // a reviewer asking "who touched this" wants to see.
+      await audit.append({
+        tenantId: scope.tenantId,
+        workspaceId: scope.workspaceId,
+        action: 'source_binding_set',
+        subjectId: binding.externalSystemId,
+        mode: previousExternalSystemId ? 'rebound' : 'bound',
+        actor: requestPrincipal(req),
+        detail: {
+          changed,
+          ...(previousExternalSystemId ? { previousExternalSystemId } : {}),
+          sourceKind: candidate.kind,
+        },
+      })
+
+      return sendOk(res, {
+        actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+        binding,
+        changed,
+        // Not decoration: the caller is told the change is live so the UI can say so without the
+        // front end asserting a backend property on its own authority.
+        takesEffectWithoutRestart: true,
+      })
     },
 
     // B-stage confirmation-decision LEDGER surfaces (first cut) — all admin-gated; the staging
