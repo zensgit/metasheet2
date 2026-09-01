@@ -404,7 +404,14 @@ function matchesByField(rows, field, value) {
 }
 
 function parseQuantity(value, context) {
-  const numeric = Number(value)
+  // Hold-not-zero: a SQL NULL or blank/whitespace-only string is an ABSENT
+  // quantity, not a measured one — Number(null) === 0 and Number('') === 0
+  // are both finite, so without this guard an absent source quantity would
+  // silently become a real 0 and multiply down as 0 through every descendant
+  // (see totalQuantity below). Force it through the same invalid_quantity
+  // path a garbled ('not-a-number') value already takes instead. A STATED
+  // numeric 0 (isBlank(0) is false) is a real measured zero and stays valid.
+  const numeric = isBlank(value) ? NaN : Number(value)
   if (!Number.isFinite(numeric)) {
     return {
       ok: false,
