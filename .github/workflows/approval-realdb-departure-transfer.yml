@@ -7,8 +7,8 @@ name: Approval departure transfer real-DB acceptance (Lock-4 F4-E gates E-1/E-2/
 # resolvable; a delegation-substituted seat is not re-transferred on the delegator's departure but
 # IS transferred on the delegatee's own departure; plus a constructed two-connection concurrency
 # race). Ephemeral first-party PostgreSQL container; no customer source, no deployment, no flag
-# change — `applyApprovalDepartureTransfer` is invoked only by this suite's explicit test-visible
-# entry point, not wired to any directory-sync trigger.
+# change. Production invocation remains behind the default-off directory deprovision gate; this
+# lane pins the planner/ledger signal producer, post-commit dispatcher, and transfer writer together.
 #
 # WHY A STANDALONE FILE, not a plugin-tests.yml allowlist entry: plugin-tests.yml is an s6a
 # sha256-pinned provenance input (sealed-export-package-provenance.cjs PINNED_EVIDENCE_FILES), so
@@ -38,6 +38,8 @@ on:
       - 'packages/core-backend/src/services/ApprovalAssigneeResolver.ts'
       - 'packages/core-backend/src/services/ApprovalDirectoryOrg.ts'
       - 'packages/core-backend/src/directory/directory-sync.ts'
+      - 'packages/core-backend/src/directory/deprovision-ledger.ts'
+      - 'packages/core-backend/src/directory/deprovision-planner.ts'
       - 'packages/core-backend/src/approvals/approval-departure-transfer-dispatch.ts'
       - 'packages/core-backend/src/routes/approvals.ts'
       - 'packages/core-backend/src/types/approval-product.ts'
@@ -54,6 +56,8 @@ on:
       - 'packages/core-backend/src/services/ApprovalAssigneeResolver.ts'
       - 'packages/core-backend/src/services/ApprovalDirectoryOrg.ts'
       - 'packages/core-backend/src/directory/directory-sync.ts'
+      - 'packages/core-backend/src/directory/deprovision-ledger.ts'
+      - 'packages/core-backend/src/directory/deprovision-planner.ts'
       - 'packages/core-backend/src/approvals/approval-departure-transfer-dispatch.ts'
       - 'packages/core-backend/src/routes/approvals.ts'
       - 'packages/core-backend/src/types/approval-product.ts'

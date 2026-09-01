@@ -124,7 +124,7 @@ describe('G8 — test-run route capability gate', () => {
     })
   })
 
-  it('returns the record-read denial unchanged and never invokes testRun', async () => {
+  it('returns a values-free record-read denial and never invokes testRun', async () => {
     resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
     requireRecordReadable.mockResolvedValue({
       status: 403,
@@ -138,7 +138,33 @@ describe('G8 — test-run route capability gate', () => {
       .send({ recordId: 'rec-denied' })
 
     expect(res.status).toBe(403)
-    expect(res.body?.error?.code).toBe('FORBIDDEN')
+    expect(res.body).toEqual({
+      ok: false,
+      error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
+    })
+    expect(poolQuery).not.toHaveBeenCalled()
+    expect(svc.testRun).not.toHaveBeenCalled()
+  })
+
+  it('does not echo a missing sample record id from the shared read gate', async () => {
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    requireRecordReadable.mockResolvedValue({
+      status: 404,
+      body: { ok: false, error: { code: 'NOT_FOUND', message: 'Record not found: rec-sensitive' } },
+    })
+    const svc = makeService()
+
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
+      .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
+      .send({ recordId: 'rec-sensitive' })
+
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({
+      ok: false,
+      error: { code: 'NOT_FOUND', message: 'Sample record not found' },
+    })
+    expect(JSON.stringify(res.body)).not.toContain('rec-sensitive')
     expect(poolQuery).not.toHaveBeenCalled()
     expect(svc.testRun).not.toHaveBeenCalled()
   })

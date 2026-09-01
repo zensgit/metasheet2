@@ -16,6 +16,8 @@ const EXPECTED_PATHS = [
   'packages/core-backend/src/services/ApprovalAssigneeResolver.ts',
   'packages/core-backend/src/services/ApprovalDirectoryOrg.ts',
   'packages/core-backend/src/directory/directory-sync.ts',
+  'packages/core-backend/src/directory/deprovision-ledger.ts',
+  'packages/core-backend/src/directory/deprovision-planner.ts',
   'packages/core-backend/src/approvals/approval-departure-transfer-dispatch.ts',
   'packages/core-backend/src/routes/approvals.ts',
   'packages/core-backend/src/types/approval-product.ts',
