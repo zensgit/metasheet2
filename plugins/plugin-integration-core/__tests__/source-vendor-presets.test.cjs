@@ -392,7 +392,10 @@ function detectorControls() {
   assert.equal(scanners.some((s) => s.regex.test('DN_PDM_PathExAttrInfo')), false)
 
   assert.ok(FAMILY_MIN_CARDINALITY >= 2, 'cardinality floor must exist')
-  assert.deepEqual(Object.keys(LABEL_HINT_VOCABULARY).sort(), ['material-code', 'quantity', 'unit'])
+  // Re-pinned DELIBERATELY (was material-code/quantity/unit): the CLOSED hint vocabulary gained
+  // `spec` so the family can express the `part-spec` expectation — 规格 is the seventh field a 备料
+  // pull must carry and it is not a core part role. Still an enum of hint WORDS, never a slot.
+  assert.deepEqual(Object.keys(LABEL_HINT_VOCABULARY).sort(), ['material-code', 'quantity', 'spec', 'unit'])
   assert.deepEqual([...DICTIONARY_TYPE_HINTS].sort(), ['list', 'numeric', 'text'])
 
   console.log('  ✓ detector controls: every value-shape class fires; benign prose does not; generated matchers and base-stem scanners behave')

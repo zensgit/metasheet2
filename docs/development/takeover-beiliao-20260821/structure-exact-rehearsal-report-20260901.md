@@ -112,16 +112,26 @@ The customer's landing-sheet columns land on the rows, from shipped code:
    stock-preparation flow. Not exercised here; net-new.
 2. **DingTalk 待办 (to-do) push.** No connector wiring exists. Not exercised here;
    net-new.
-3. **Batch-by-creation-hour derivation (物料创建日期精确到小时) in shipped code.**
-   The shipped mapper (`mapExpansionRowsToSnapshotLines`) requires an **opaque,
-   caller-supplied** `snapshotBatchId`; same-project batches are otherwise
-   distinguished by a persist-time monotonic `snapshotVersion`, **not** by a
-   creation-hour bucket. The hour-derivation is **not** in code. This rehearsal
-   computes it caller-side (from the real `Createtime` the source carries) and
-   feeds it to the real mapper — proving the rule is **realizable** over shipped
-   code — but wiring the derivation upstream of `snapshotBatchId` minting is
-   net-new. (~a small pure function; the mapper and line-id derivation it feeds are
-   already shipped and proven.)
+3. ~~**Batch-by-creation-hour derivation (物料创建日期精确到小时) in shipped code.**~~
+   **CLOSED.** As written, this gap said: the shipped mapper requires an opaque
+   caller-supplied `snapshotBatchId`, same-project batches are distinguished by a
+   persist-time monotonic `snapshotVersion` rather than a creation-hour bucket, and
+   the hour-derivation is not in code — the rehearsal computed it caller-side to
+   prove the rule *realizable*. All three halves are now shipped:
+   `lib/stock-preparation-batch-identity.cjs` carries this rehearsal's own pure
+   derivation (the rehearsal calls that module rather than its former private copy,
+   so there is one implementation), the read plan DECLARES the creation-time column
+   (`part.createTimeField`, defaulted to absent) so the hour rides the expansion row,
+   and the table-action MVP-persist route mints `<project>|<YYYY-MM-DDTHH>` at the
+   `snapshotBatchId` site.
+   **It is OPT-IN, not the default** (`readPlan.batchIdentity.mode =
+   'material_create_hour'`): the batch id is the persist idempotency key, the
+   advisory-lock key and a hash input for every derived child id, so which pulls
+   count as one batch is a behaviour change a running install must choose. Absent
+   declaration keeps the content-revision id byte for byte; a deployment that asks
+   for the rule but whose source carries no usable creation time falls back to that
+   id and reports the degradation with a coded reason. See the module header for the
+   full trade-off.
 
 ## The single on-site variable this rehearsal deliberately leaves open
 

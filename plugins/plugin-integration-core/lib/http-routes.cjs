@@ -372,6 +372,13 @@ const {
   resolveStockPrepApplyProductionPolicy,
   resolveStockPrepApplySandboxPolicy,
 } = require('./stock-preparation-table-actions.cjs')
+// 备料 batch identity — "物料创建日期(精确到小时)区分同一项目不同批次的物料". Pure and opt-in; see
+// stock-preparation-batch-identity.cjs for why the content-revision digest stays the default.
+const {
+  StockPreparationBatchIdentityError,
+  mintStockPreparationBatchIdentity,
+  readStockPreparationBatchIdentityMode,
+} = require('./stock-preparation-batch-identity.cjs')
 // 工作台里选源 — the eligibility contract for the pull action's source, and the durable pointer that
 // overrides the deploy-time env default. See stock-preparation-source-binding.cjs for why the
 // allowlist is the BOM read kinds and why this line deliberately does NOT reuse the K3 fence token.
@@ -4885,6 +4892,43 @@ function createHandlers(services, options = {}) {
       const projectId = `stockprep_${crypto.createHash('sha256').update(stableScope).digest('hex').slice(0, 32)}`
       const batchScope = `${stableScope}\n${prepared.revision}`
       const batchDigest = crypto.createHash('sha256').update(batchScope).digest('hex').slice(0, 32)
+      // 备料 BATCH IDENTITY. The owner's rule is that the material CREATION HOUR separates a
+      // project's batches; shipped code separated them by this content-revision digest plus the
+      // persist-time monotonic `snapshotVersion`. The rule is now implemented, and DECLARED per
+      // deployment on the read plan (batchIdentity.mode) rather than switched on for everyone —
+      // the batch id is the persist idempotency key, so changing which pulls count as one batch is
+      // a behaviour change a running install must opt into. Absent => `snapshot_<digest>`, exactly
+      // as before. A deployment that asks for the hour rule but whose source carries no usable
+      // creation time falls back to the same id and SAYS SO in the evidence below.
+      //
+      // `syncRunId` stays revision-derived on purpose: under the hour rule a second pull in the same
+      // hour with CHANGED content then lands on the same batch id with a different run, which the
+      // persist replay check refuses with a coded idempotency conflict — fail closed, never a silent
+      // overwrite of a batch the operator believes is that hour's.
+      //
+      // An UNKNOWN declared mode is a deploy-time typo. It refuses with a coded 422 rather than
+      // quietly meaning "legacy", because a deployment that believes it turned the rule on and did
+      // not would batch by the wrong rule with nothing on the response to show for it.
+      let batchIdentityMode
+      try {
+        batchIdentityMode = readStockPreparationBatchIdentityMode(action.source.readPlan)
+      } catch (error) {
+        if (error instanceof StockPreparationBatchIdentityError) {
+          throw new HttpRouteError(
+            422,
+            'STOCK_PREPARATION_BATCH_IDENTITY_MODE_INVALID',
+            'source.readPlan.batchIdentity.mode is not a known batch-identity mode',
+            { field: error.details && error.details.field },
+          )
+        }
+        throw error
+      }
+      const batchIdentity = mintStockPreparationBatchIdentity({
+        mode: batchIdentityMode,
+        projectNo: prepared.parameters.projectNo,
+        rows: prepared.expansionResult,
+        legacyBatchId: `snapshot_${batchDigest}`,
+      })
       const result = await persistStockPreparationSyncRun({
         context,
         permission: 'admin',
@@ -4894,7 +4938,7 @@ function createHandlers(services, options = {}) {
         lockTenantId: tenantId,
         projectId,
         syncRunId: `sync_${batchDigest}`,
-        snapshotBatchId: `snapshot_${batchDigest}`,
+        snapshotBatchId: batchIdentity.batchId,
         allocateSnapshotVersion: true,
         sourceSystem: action.source.kind,
         sourceProjectNo: prepared.parameters.projectNo,
@@ -4906,6 +4950,9 @@ function createHandlers(services, options = {}) {
         persisted: result.persisted === true,
         created: result.created,
         source: prepared.evidence,
+        // Values-free: counts, the effective mode and a coded reason. A deployment that asked for
+        // the hour rule and silently got the legacy id would be exactly the failure this reports.
+        batchIdentity: batchIdentity.evidence,
         evidence: result.evidence,
       }, result.persisted ? 201 : 200)
     },
