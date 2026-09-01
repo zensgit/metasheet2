@@ -272,6 +272,27 @@ export class MSSQLAdapter extends BaseDataAdapter {
     }
   }
 
+  /**
+   * WHERE identifiers are BRACKETED, exactly like every other clause this adapter emits (projection,
+   * table, JOIN target, ORDER BY all go through `quoteIdent` already). The base class emits them bare
+   * because it has no dialect quoting; MSSQL must not, and the reason is specific to THIS adapter:
+   *
+   * `query()` below applies `isPureReadStatement` to the finished SQL TEXT. A bare identifier that
+   * happens to be a reserved word (`key`, `plan`, `file`, `check`, `open`, `set`, `read`, … — ~48 of
+   * them in ordinary use) is indistinguishable from the keyword to any text classifier, so a pure
+   * `SELECT TOP (n) * FROM [t] WHERE key = $1` was read as a WRITE and refused by the default-deny
+   * gate — a read-path outage, surfaced as an HTTP 500. Bracketing removes the CLASS rather than the
+   * instance: `[key]` is unambiguously an identifier, so no column name — reserved today, reserved by
+   * a future SQL Server version, or merely odd — can ever again be mistaken for a verb.
+   *
+   * Validation is unchanged: `quoteSqlServerIdentifier` enforces `/^[A-Za-z0-9_]+$/` per dot-segment,
+   * the same rule `sanitizeIdentifier` already applied, so nothing that used to be accepted is now
+   * rejected. Qualified keys quote per segment (`t.col` -> `[t].[col]`), preserving their meaning.
+   */
+  protected override whereIdentifier(key: string): string {
+    return this.quoteIdent(key)
+  }
+
   async query<T = Record<string, DbValue>>(sql: string, params?: DbValue[]): Promise<QueryResult<T>> {
     // W-1(c) DEFAULT-DENY SQL WRITE GATE — THE ADAPTER-BOUNDARY CHOKEPOINT.
     // Every write this adapter performs funnels here: insert/update/delete/select/stream/batchInsert
@@ -284,8 +305,21 @@ export class MSSQLAdapter extends BaseDataAdapter {
     // an aliased UPDATE…FROM, an UPDATE TOP, a 4-part linked-server INSERT, a CTE-wrapped DELETE and
     // an unterminated `SELECT 1 / DELETE …` batch are all simply "a write", off by default.
     //
-    // Placed FIRST, before the pool is touched. Reads — including every internal select() and a read
-    // of any table — are byte-identical to a deployment that never heard of this gate.
+    // Placed FIRST, before the pool is touched.
+    //
+    // READS: the gate classifies STATEMENT TEXT, so "a read passes" holds only as far as the text is
+    // unambiguous. It was NOT unambiguous once: this adapter emitted WHERE identifiers bare (the base
+    // class builds that clause and has no dialect quoting), so an ordinary column named after a
+    // reserved word produced `… WHERE key = $1`, which `isPureReadStatement` read as a write and
+    // refused — a read-path outage, not a security event. `whereIdentifier()` above now brackets them,
+    // which is what makes the claim true rather than aspirational: every identifier this adapter emits
+    // into a statement is quoted, so a structured read it builds cannot be misread as a write.
+    //
+    // With that closed, reads — every internal select() and a read of any table — are byte-identical
+    // to a deployment that never heard of this gate. The one fragment this adapter still passes
+    // through verbatim is `options.joins[].on` (a caller-supplied raw SQL string, `select()` below);
+    // it is not quoted here because it is an expression, not an identifier, and a caller that puts a
+    // bare reserved word in it is in the raw-SQL lane the gate is designed for.
     assertSqlWriteAllowed(
       (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
       sql,
