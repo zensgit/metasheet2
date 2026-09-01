@@ -405,8 +405,14 @@ describe('MSSQLAdapter — SQL generation (fake driver)', () => {
     })
 
     const { sql, params } = fp.calls[0]
+    // FIX B: WHERE identifiers are BRACKETED, like every other clause this adapter emits. This golden
+    // string previously pinned `WHERE status = @p0 AND ((updated_at > @p1) …)` — bare — while already
+    // expecting a bracketed `ORDER BY [updated_at]`, and that inconsistency WAS the defect: a bare
+    // identifier that happens to be a reserved word is indistinguishable from the keyword to the write
+    // gate's text classifier, so `WHERE key = @p0` was read as a WRITE and an ordinary read was refused.
+    // Only the quoting changed; the clause structure, operators, ordering and parameters are identical.
     expect(normalizeSql(sql)).toBe(
-      'SELECT TOP (100) * FROM [dbo].[orders] WHERE status = @p0 AND ((updated_at > @p1) OR (updated_at = @p2 AND id > @p3)) ORDER BY [updated_at] ASC, [id] ASC'
+      'SELECT TOP (100) * FROM [dbo].[orders] WHERE [status] = @p0 AND (([updated_at] > @p1) OR ([updated_at] = @p2 AND [id] > @p3)) ORDER BY [updated_at] ASC, [id] ASC'
     )
     expect(params).toEqual({
       p0: 'open',
