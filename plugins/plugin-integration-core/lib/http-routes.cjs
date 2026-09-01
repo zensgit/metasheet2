@@ -405,6 +405,7 @@ const {
   listConfirmationDecisions,
   confirmConfirmationDecision,
   confirmCarryConfirmationDecision,
+  assertCarryConfirmDecisionBinding,
   readConfirmationDecisionValueEntry,
   loadConfirmedDuplicatePolicyReview,
 } = require('./stock-preparation-confirmation-decisions.cjs')
@@ -6264,6 +6265,21 @@ function createHandlers(services, options = {}) {
       }
       const tenantId = resolveAuthUserTenantId(req)
       const targetProjectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+      // PRE-FLIGHT BIND, BEFORE the canonical write (the P1 fix). `decision`, `decisionId` and
+      // `inputFingerprint` arrive as three independent client fields; until they are proven to be
+      // ONE approved pair, nothing may be written. Refusing only at the ledger close would leave the
+      // carried row written with no approval record — the same defect wearing a different mask.
+      if (decisionId) {
+        await assertCarryConfirmDecisionBinding({
+          recordsApi: getMultitableRecordsApi(),
+          provisioning: getMultitableProvisioning(),
+          targetProjectId,
+          permission: 'admin',
+          decisionId,
+          inputFingerprint,
+          decision: input.decision,
+        })
+      }
       const result = await applyCarryViaConfirm({
         context,
         permission: 'admin',
@@ -6277,21 +6293,31 @@ function createHandlers(services, options = {}) {
       // bookkeeping. A typed ledger refusal (e.g. the row was superseded by a newer reconcile)
       // travels beside the applied result as a closed code — never silently swallowed, never
       // allowed to misreport the carry itself as failed.
+      const CARRY_APPLIED_MODES = ['carried', 'skipped_already_carried']
       let ledger
       if (decisionId) {
-        try {
-          ledger = await confirmCarryConfirmationDecision({
-            recordsApi: getMultitableRecordsApi(),
-            provisioning: getMultitableProvisioning(),
-            targetProjectId,
-            permission: 'admin',
-            decisionId,
-            inputFingerprint,
-            confirmedBy: user.id || user.email,
-          })
-        } catch (error) {
-          if (!(error instanceof StockPreparationConfirmationDecisionError)) throw error
-          ledger = { ok: false, code: error.code }
+        if (!CARRY_APPLIED_MODES.includes(result.mode)) {
+          // Defence in depth: only an actually-applied (or already-applied) carry may close a hold.
+          // The executor throws on every other path today, so this is unreachable — which is the
+          // point: if a future mode is added, it closes nothing until someone decides it should.
+          ledger = { ok: false, code: 'CARRY_NOT_APPLIED' }
+        } else {
+          try {
+            ledger = await confirmCarryConfirmationDecision({
+              recordsApi: getMultitableRecordsApi(),
+              provisioning: getMultitableProvisioning(),
+              targetProjectId,
+              permission: 'admin',
+              decisionId,
+              inputFingerprint,
+              // The bind is re-asserted inside the close, over the SAME decision that was applied.
+              decision: input.decision,
+              confirmedBy: user.id || user.email,
+            })
+          } catch (error) {
+            if (!(error instanceof StockPreparationConfirmationDecisionError)) throw error
+            ledger = { ok: false, code: error.code }
+          }
         }
       }
       // The audit vocabulary is migration-frozen; a carry confirm resolves a planner exception, so

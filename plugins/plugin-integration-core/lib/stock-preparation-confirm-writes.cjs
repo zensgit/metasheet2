@@ -780,6 +780,15 @@ function isBlankCell(value) {
   return value === undefined || value === null || (typeof value === 'string' && value.trim() === '')
 }
 
+// The records service's optimistic-concurrency refusal (multitable/record-errors.ts
+// MultitableRecordVersionConflictError: `code = 'VERSION_CONFLICT'`, name set in its constructor).
+// Matched on BOTH handles so neither a code rename nor a name rename silently turns a refused write
+// into an unhandled 500 — and so that a host which surfaces only one of them is still recognised.
+function isRecordVersionConflict(error) {
+  if (!error) return false
+  return error.code === 'VERSION_CONFLICT' || error.name === 'MultitableRecordVersionConflictError'
+}
+
 function assertCarryDecision(decision) {
   if (!isPlainObject(decision)) {
     throw new StockPreparationConfirmWriteError(422, 'CONFIRM_CARRY_DECISION_INVALID', 'decision must be a carry_via_confirm decision object', { field: 'decision' })
@@ -860,12 +869,37 @@ async function applyCarryViaConfirm(input = {}) {
   if (targetData.active === false) {
     throw new StockPreparationConfirmWriteError(409, 'CONFIRM_CARRY_TARGET_INACTIVE', 'the carry target row is inactive; a carry onto a removed row is refused', {})
   }
-  // Anti-forgery: the decision claims both rows share ONE componentSourceId — verify against BOTH
-  // stored rows, so a hand-crafted decision cannot reattach across unrelated components.
+  // Anti-forgery, axis 1 — COMPONENT: the decision claims both rows share ONE componentSourceId —
+  // verify against BOTH stored rows, so a hand-crafted decision cannot reattach across unrelated
+  // components.
   const claimed = optionalString(String(decision.componentSourceId))
   if (optionalString(isBlankCell(sourceData.componentSourceId) ? null : String(sourceData.componentSourceId)) !== claimed
     || optionalString(isBlankCell(targetData.componentSourceId) ? null : String(targetData.componentSourceId)) !== claimed) {
     throw new StockPreparationConfirmWriteError(409, 'CONFIRM_CARRY_COMPONENT_SOURCE_MISMATCH', 'decision, source row and target row must agree on the component source id', { field: 'componentSourceId' })
+  }
+  // Anti-forgery, axis 2 — PROJECT. The component check alone is NOT a scope: two different projects
+  // routinely share one PLM component, and such a pair satisfies it, which would let one project's
+  // human band be copied onto another project's row. The planner's carry source pool is drawn from
+  // ONE project's existing rows, so this re-asserts at write time the scope the plan already assumed.
+  const sourceProject = optionalString(isBlankCell(sourceData.projectNo) ? null : String(sourceData.projectNo))
+  const targetProject = optionalString(isBlankCell(targetData.projectNo) ? null : String(targetData.projectNo))
+  if (!sourceProject || !targetProject || sourceProject !== targetProject) {
+    throw new StockPreparationConfirmWriteError(409, 'CONFIRM_CARRY_PROJECT_MISMATCH', 'source row and target row must belong to the same project', { field: 'projectNo' })
+  }
+  // ...and since a real idempotencyKey EMBEDS its projectNo (bom-expansion makeIdempotencyKey), both
+  // keys must agree with the rows they addressed. A key that does not parse as that shape skips this
+  // leg — the stored-row check above is the load-bearing one and already stands.
+  for (const [key, field] of [[decision.idempotencyKey, 'idempotencyKey'], [decision.sourceIdempotencyKey, 'sourceIdempotencyKey']]) {
+    let parsed = null
+    try {
+      parsed = JSON.parse(key)
+    } catch (error) {
+      parsed = null
+    }
+    if (!isPlainObject(parsed) || parsed.projectNo === undefined) continue
+    if (optionalString(String(parsed.projectNo)) !== targetProject) {
+      throw new StockPreparationConfirmWriteError(409, 'CONFIRM_CARRY_PROJECT_MISMATCH', 'a carry key names a different project than the rows it addresses', { field })
+    }
   }
 
   // Steps 5+6 — classify per carried field. Field NAMES only in every refusal.
@@ -926,7 +960,25 @@ async function applyCarryViaConfirm(input = {}) {
       evidence: { ...evidenceBase, mode: 'skipped_already_carried' },
     }
   }
-  await target.scoped.patchRecord({ recordId: targetRecord.id, changes })
+  // Step 6, ENFORCED rather than merely decided. The no-overwrite verdict above was computed from a
+  // `targetData` READ; without optimistic concurrency the promise would only be as strong as the
+  // read-write window, and a human edit landing inside it would be silently clobbered — exactly what
+  // step 6 says can never happen. `expectedVersion` closes the window at the substrate: the records
+  // service checks it in code AND pins it in the UPDATE's SQL predicate, so a row that moved since
+  // the read fails the write instead of overwriting it.
+  try {
+    await target.scoped.patchRecord({ recordId: targetRecord.id, changes, expectedVersion: targetRecord.version })
+  } catch (error) {
+    if (isRecordVersionConflict(error)) {
+      throw new StockPreparationConfirmWriteError(
+        409,
+        'CONFIRM_CARRY_TARGET_VERSION_CONFLICT',
+        'the carry target row changed while this carry was being decided; re-read and confirm again',
+        { fields: carriedFields.slice() },
+      )
+    }
+    throw error
+  }
   return {
     persisted: true,
     mode: 'carried',

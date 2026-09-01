@@ -42,6 +42,7 @@ const {
 } = require(path.join(LIB, 'stock-preparation-carry-policy.cjs'))
 const {
   normalizeStockPreparationActionConfig,
+  prepareStockPreparationConfirmationDecisions,
   StockPreparationTableActionError,
 } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
 const {
@@ -538,6 +539,150 @@ async function main() {
       && decision.conflictSummary && decision.conflictSummary.type === 'carry_reattach_requires_confirm')
     assert.equal(proposalHolds.length, 1)
     assert.deepEqual(proposalHolds[0].carryProposal.carryFields, ['notes'])
+  })
+
+  // -------------------------------------------------------------------------
+  // Call-site pass-through — table-actions computeDryRun (the OTHER production caller).
+  //
+  // This is the ONLY link from deploy config to the planner for the dry-run / apply / MVP-persist /
+  // reconcile entry points. Its large-BOM twin was pinned from the start; this one was not, so
+  // deleting `carryPolicy: action.carryPolicy` left every suite green. Pinned here.
+  // -------------------------------------------------------------------------
+  await run('dry-run call site threads action.carryPolicy into the planner (mutation-pinned)', async () => {
+    const { dryRunStockPreparationAction } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
+
+    const plmData = {
+      DN_PDM_PathExAttrInfo: [{ FileCode: 'P-DRY', Parent_OBJ_ID: 'PATH-1' }],
+      DN_PDM_PathInfo: [{ OBJ_ID: 'PATH-1' }],
+      DN_PDM_OrderHeadInfo: [{ OBJ_ID: 'ORDER-1', path_id: 'PATH-1' }],
+      DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: 'COMP-D', quantity: '2' }],
+      DN_PDM_PartLibraryInfo: [{ OBJ_ID: 'COMP-D', IdentityNo: 'D-1', IdentityName: 'Part D', Material: 'Steel', SysVer: 'V1' }],
+      DN_PDM_BomHeadInfo: [],
+      DN_PDM_BomDetailsInfo: [],
+    }
+    const sourceAdapter = {
+      async read(input = {}) {
+        const rows = Array.isArray(plmData[input.object]) ? plmData[input.object] : []
+        const matches = rows.filter((entry) =>
+          Object.entries(input.filters || {}).every(([field, expected]) => entry[field] === expected))
+        return { records: matches.map((entry) => ({ ...entry })), done: true, nextCursor: null }
+      },
+    }
+    // The predecessor: same component, DIFFERENT key, inactive, carrying human work.
+    const predecessorKey = JSON.stringify({ projectNo: 'P-DRY', componentSourceId: 'COMP-D', parentSourceId: null, path: ['OLD', 'COMP-D'] })
+    const existingRow = {
+      id: 'rec_1',
+      sheetId: 'sheet_stock',
+      version: 1,
+      data: {
+        projectNo: 'P-DRY',
+        idempotencyKey: predecessorKey,
+        componentSourceId: 'COMP-D',
+        path: JSON.stringify(['OLD', 'COMP-D']),
+        totalQuantity: 2,
+        active: false,
+        notes: 'human work on the predecessor',
+      },
+    }
+    const recordsApi = {
+      async queryRecords(input = {}) {
+        return [existingRow].filter((row) => row.sheetId === input.sheetId)
+          .filter((row) => Object.entries(input.filters || {}).every(([field, expected]) => row.data[field] === expected))
+      },
+      async createRecord() { throw new Error('dry-run must not write') },
+      async patchRecord() { throw new Error('dry-run must not write') },
+    }
+    const action = (carryPolicy) => ({
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { externalSystemId: 'sys_demo', kind: 'data-source:sql-readonly' },
+      target: { sheetId: 'sheet_stock' },
+      ...(carryPolicy ? { carryPolicy } : {}),
+    })
+
+    const memoryStorage = () => {
+      const map = new Map()
+      return {
+        async get(key) { return map.get(key) || null },
+        async set(key, value) { map.set(key, JSON.parse(JSON.stringify(value))) },
+        async delete(key) { map.delete(key) },
+      }
+    }
+
+    // OPT-IN, through the REAL dry-run entry point: the carry stanza must reach route-visible
+    // evidence, and the plan must hold the proposal.
+    const optedInAction = action({ carryKey: 'component_source_id' })
+    const optedIn = await dryRunStockPreparationAction({
+      action: optedInAction,
+      parameters: { projectNo: 'P-DRY' },
+      sourceAdapter,
+      recordsApi,
+      tokenStore: memoryStorage(),
+    })
+    assert.ok(optedIn.evidence.plan.carry, 'the dry-run consulted the carry policy from the action config')
+    assert.equal(optedIn.evidence.plan.carry.counts.carryViaConfirm, 1)
+    assert.deepEqual(optedIn.evidence.plan.carry.carryPolicy, { carryKey: 'component_source_id', manualRowReattach: 'propose_confirm' })
+    assert.ok(optedIn.evidence.plan.conflictTypes.includes('carry_reattach_requires_confirm'))
+    assert.equal(optedIn.counts[DECISIONS.MANUAL_CONFIRM], 1)
+    assert.equal(optedIn.status, 'manual_confirm_required', 'a carry proposal makes the run need a human look')
+
+    // ...and the RAW plan behind the same computeDryRun path carries the proposal itself.
+    const prepared = await prepareStockPreparationConfirmationDecisions({
+      action: optedInAction,
+      parameters: { projectNo: 'P-DRY' },
+      sourceAdapter,
+      recordsApi,
+    })
+    const preparedHolds = holds(prepared.plan, 'carry_reattach_requires_confirm')
+    assert.equal(preparedHolds.length, 1, 'the carry proposal hold reached the dry-run plan')
+    assert.deepEqual(preparedHolds[0].carryProposal.carryFields, ['notes'])
+    assert.equal(preparedHolds[0].carryProposal.sourceIdempotencyKey, predecessorKey)
+    assertNoHumanFieldPresent(adds(prepared.plan)[0].record, 'dry-run ADD record')
+
+    // NO CONFIG: byte-identical to the pre-wiring dry-run — no carry stanza anywhere.
+    const noConfig = await dryRunStockPreparationAction({
+      action: action(null),
+      parameters: { projectNo: 'P-DRY' },
+      sourceAdapter,
+      recordsApi,
+      tokenStore: memoryStorage(),
+    })
+    assert.equal(Object.prototype.hasOwnProperty.call(noConfig.evidence.plan, 'carry'), false, 'no config => no carry stanza')
+    assert.equal(noConfig.evidence.plan.conflictTypes.includes('carry_reattach_requires_confirm'), false)
+    assert.equal(noConfig.counts[DECISIONS.MANUAL_CONFIRM], 0)
+  })
+
+  // -------------------------------------------------------------------------
+  // The carry-source MEMBERSHIP filter. The planner draws carry sources from the rows its
+  // missing-from-PLM sweep is about to close; the `expanded/resolvedExpanded/duplicate` exclusion is
+  // the ONLY thing keeping a row that is STILL PRESENT in the incoming PLM data out of that pool.
+  // Without it, a component that merely gained a second occurrence would look like a re-key and
+  // propose carrying a live row's human work onto the new one.
+  // -------------------------------------------------------------------------
+  await run('a component still present in PLM is NOT a carry source (membership filter, mutation-pinned)', () => {
+    const keptTokens = ['KEEP', 'COMP-K']
+    const addedTokens = ['NEW', 'COMP-K']
+    const kept = row({ componentSourceId: 'COMP-K', pathTokens: keptTokens })
+    const added = row({ componentSourceId: 'COMP-K', pathTokens: addedTokens })
+    // The SAME row survives the refresh (present in both expanded and existing) and carries human
+    // work; a second occurrence of the same component arrives under a new key.
+    const existingKept = { ...kept, notes: 'live human work — must never be carried away' }
+
+    const plan = planStockPreparationConflicts({
+      expandedRows: [kept, added],
+      existingRows: [existingKept],
+      runId: 'membership-run',
+      plannedAt: '2026-09-01T00:00:00.000Z',
+      carryPolicy: { carryKey: 'component_source_id' },
+    })
+
+    assert.equal(holds(plan, 'carry_reattach_requires_confirm').length, 0, 'a live row is never a carry source')
+    assert.equal(holds(plan, 'carry_ambiguous_component_source').length, 0)
+    assert.equal(plan.summary.carry.counts.carryViaConfirm, 0)
+    assert.equal(plan.summary.carry.noCarryByReason.no_source_match, 1, 'the new occurrence finds NO carry source')
+    assert.equal(plan.counts[DECISIONS.INACTIVE], 0, 'nothing was swept inactive')
+    // And the surviving row keeps its human work untouched (it is a SKIP/UPDATE, never a carry).
+    assert.equal(plan.decisions.some((decision) => decision.decision === DECISIONS.ADD
+      && decision.idempotencyKey === added.idempotencyKey), true)
   })
 
   // keep linters honest about intentionally-unused imports used only for typing context

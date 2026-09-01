@@ -31,6 +31,8 @@ const {
 } = require(path.join(LIB, 'stock-preparation-confirm-writes.cjs'))
 const {
   OBJECT_ID: LEDGER_OBJECT_ID,
+  createConfirmationDecisionReconcileLease,
+  reconcileConfirmationDecisions,
 } = require(path.join(LIB, 'stock-preparation-confirmation-decisions.cjs'))
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
@@ -39,6 +41,7 @@ const {
 const {
   makeFakeProvisioning,
   makeStrictRecordsApi,
+  physicalFieldId,
   physicalRow,
   logicalData,
 } = require(path.join(__dirname, 'fixtures', 'stock-preparation-multitable-fakes.cjs'))
@@ -273,20 +276,52 @@ async function call(routes, method, routePath, req = {}) {
   return res
 }
 
-function seedCarryLedgerRow({ decisionId = 'd1c1d1c1d1c1d1c1', inputFingerprint = 'f1f1f1f1f1f1f1f1', conflictType = 'carry_reattach_requires_confirm', status = 'pending' } = {}) {
-  const row = physicalRow(STAGING, LEDGER_OBJECT_ID, {
-    decisionId,
-    stableDecisionKey: 'sk1',
+function makeFakeLeaseDb() {
+  const rows = new Map()
+  return {
+    async insertOne(table, row) {
+      if (rows.has(row.scope_key)) { const e = new Error('duplicate key'); e.code = '23505'; throw e }
+      rows.set(row.scope_key, { ...row })
+      return [{ ...row }]
+    },
+    async selectOne(table, where) { const row = rows.get(where.scope_key); return row ? { ...row } : null },
+    async updateRow(table, set, where) {
+      const row = rows.get(where.scope_key)
+      if (!row || row.lease_id !== where.lease_id) return []
+      Object.assign(row, set); return [{ ...row }]
+    },
+    async deleteRows(table, where) {
+      const row = rows.get(where.scope_key)
+      if (!row || row.lease_id !== where.lease_id) return []
+      rows.delete(where.scope_key); return [{ ...row }]
+    },
+  }
+}
+
+// A GENUINE pending carry row, produced by the real reconcile over the real planner hold shape.
+// Hand-seeded rows are deliberately no longer usable here: the carry confirm binds the decision to
+// the row by re-deriving stableDecisionKey/inputFingerprint, so only a真 reconcile artifact matches.
+async function seedCarryLedgerRow(mounted, { decision = decisionFixture() } = {}) {
+  await reconcileConfirmationDecisions({
+    recordsApi: mounted.records,
+    provisioning: mounted.provisioning,
+    targetProjectId: STAGING,
+    permission: 'admin',
+    reconcileLease: createConfirmationDecisionReconcileLease({ db: makeFakeLeaseDb() }),
     projectNo: 'P-9',
-    rowIdentity: NEW_KEY,
-    conflictType,
-    inputFingerprint,
+    plan: {
+      decisions: [{
+        decision: 'manual_confirm',
+        idempotencyKey: decision.idempotencyKey,
+        conflictSummary: { type: 'carry_reattach_requires_confirm', proposed: true },
+        changedFields: [],
+        source: 'carry_policy',
+        carryProposal: decision,
+      }],
+    },
     sourceRevision: 'rev-1',
-    status,
-    openedAt: '2026-09-01T00:00:00.000Z',
-  }, 'ledger_row_1')
-  row.sheetId = LEDGER_SHEET
-  return row
+  })
+  return mounted.records.rows(LEDGER_SHEET).map((row) => logicalData(STAGING, LEDGER_OBJECT_ID, row.data))[0]
 }
 
 async function main() {
@@ -465,13 +500,14 @@ async function main() {
   // W4b — the route.
   // -------------------------------------------------------------------------
   await run('W4b-1: happy path — admin POST applies the carry, closes the named ledger row, audits values-free', async () => {
-    const mounted = mountCarryRoute({ ledgerRows: [seedCarryLedgerRow()] })
+    const mounted = mountCarryRoute()
+    const ledgerRow = await seedCarryLedgerRow(mounted)
     const res = await call(mounted.routes, 'POST', CARRY_ROUTE, {
       user: ADMIN,
       body: {
         decision: decisionFixture(),
-        decisionId: 'd1c1d1c1d1c1d1c1',
-        inputFingerprint: 'f1f1f1f1f1f1f1f1',
+        decisionId: ledgerRow.decisionId,
+        inputFingerprint: ledgerRow.inputFingerprint,
       },
     })
     assert.equal(res.statusCode, 200, JSON.stringify(res.body))
@@ -558,22 +594,59 @@ async function main() {
     assert.equal(res.body.data.mode, 'carried')
     assert.equal(Object.prototype.hasOwnProperty.call(res.body.data, 'ledger'), false)
 
-    // Ledger close failure (row already superseded): the carry applied; the response says the
-    // ledger half honestly instead of lying with a clean 200-or-500 coin flip.
-    const superseded = mountCarryRoute({ ledgerRows: [seedCarryLedgerRow({ status: 'superseded' })] })
-    const res2 = await call(superseded.routes, 'POST', CARRY_ROUTE, {
+  })
+
+  await run('W4b-7: a SUPERSEDED approval row is refused BEFORE any write (a stale approval never carries)', async () => {
+    // Tightened by the P1 fix: the pre-flight bind checks status too, so a carry whose approval was
+    // superseded (the source moved and reconcile closed the hold) writes NOTHING. Previously this
+    // carried first and merely reported the ledger half as failed — i.e. it applied a human decision
+    // that no longer stood.
+    const mounted = mountCarryRoute()
+    const ledgerRow = await seedCarryLedgerRow(mounted)
+    const stored = mounted.records.store.get(LEDGER_SHEET)[0]
+    stored.data[physicalFieldId(STAGING, LEDGER_OBJECT_ID, 'status')] = 'superseded'
+    const patchesBefore = mounted.records.patchCalls.length
+
+    const res = await call(mounted.routes, 'POST', CARRY_ROUTE, {
       user: ADMIN,
-      body: {
-        decision: decisionFixture(),
-        decisionId: 'd1c1d1c1d1c1d1c1',
-        inputFingerprint: 'f1f1f1f1f1f1f1f1',
-      },
+      body: { decision: decisionFixture(), decisionId: ledgerRow.decisionId, inputFingerprint: ledgerRow.inputFingerprint },
     })
-    assert.equal(res2.statusCode, 200)
-    assert.equal(res2.body.data.mode, 'carried')
-    assert.equal(res2.body.data.ledger.ok, false)
-    assert.equal(res2.body.data.ledger.code, 'CONFIRMATION_DECISION_NOT_PENDING')
-    const target = superseded.records.rows(CANONICAL_SHEET).map((row) => logicalData(STAGING, CANONICAL_OBJECT_ID, row.data))
+    assert.equal(res.statusCode, 409)
+    assert.equal(res.body.error.code, 'CONFIRMATION_DECISION_NOT_PENDING')
+    assert.equal(mounted.records.patchCalls.length, patchesBefore, 'nothing written')
+    const target = mounted.records.rows(CANONICAL_SHEET).map((row) => logicalData(STAGING, CANONICAL_OBJECT_ID, row.data))
+      .find((data) => data.idempotencyKey === NEW_KEY)
+    assert.equal(target.notes, undefined, 'the stale-approved carry did not happen')
+  })
+
+  await run('W4b-8: a row superseded in the RACE window (after the bind, before the close) reports the ledger half honestly', async () => {
+    // The one remaining path to a failed close: the row moves between the pre-flight bind and the
+    // close. The carry has landed by then, so the response says so — and says the ledger half
+    // failed — rather than lying in either direction.
+    const mounted = mountCarryRoute()
+    const ledgerRow = await seedCarryLedgerRow(mounted)
+    let carryPatched = false
+    const base = mounted.records
+    // Flip the ledger row to superseded the moment the canonical carry patch lands.
+    const originalPatch = base.patchRecord.bind(base)
+    base.patchRecord = async (input) => {
+      const result = await originalPatch(input)
+      if (!carryPatched && input.sheetId === CANONICAL_SHEET) {
+        carryPatched = true
+        base.store.get(LEDGER_SHEET)[0].data[physicalFieldId(STAGING, LEDGER_OBJECT_ID, 'status')] = 'superseded'
+      }
+      return result
+    }
+
+    const res = await call(mounted.routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      body: { decision: decisionFixture(), decisionId: ledgerRow.decisionId, inputFingerprint: ledgerRow.inputFingerprint },
+    })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.mode, 'carried')
+    assert.equal(res.body.data.ledger.ok, false)
+    assert.equal(res.body.data.ledger.code, 'CONFIRMATION_DECISION_NOT_PENDING')
+    const target = base.rows(CANONICAL_SHEET).map((row) => logicalData(STAGING, CANONICAL_OBJECT_ID, row.data))
       .find((data) => data.idempotencyKey === NEW_KEY)
     assert.equal(target.notes, HUMAN_NOTE, 'the carry itself stood')
   })

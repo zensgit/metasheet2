@@ -92,6 +92,7 @@ node __tests__/stock-preparation-carry-policy.test.cjs
 node __tests__/stock-preparation-carry-plan-wiring.test.cjs
 node __tests__/stock-preparation-carry-ledger.test.cjs
 node __tests__/stock-preparation-carry-confirm.test.cjs
+node __tests__/stock-preparation-carry-hardening.test.cjs
 node __tests__/stock-preparation-suggestion-operators.test.cjs
 node __tests__/stock-preparation-apply-writer.test.cjs
 node __tests__/stock-preparation-table-actions.test.cjs

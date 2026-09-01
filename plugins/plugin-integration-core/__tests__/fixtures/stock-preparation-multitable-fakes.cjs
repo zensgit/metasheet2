@@ -160,12 +160,23 @@ function makeStrictRecordsApi({ objectIdBySheetId, stagingProjectId, rowsBySheet
     },
     async patchRecord(input = {}) {
       if (unitOfWorkDepth === 0) recordsCallsOutsideUnitOfWork += 1
-      const { sheetId, recordId, changes = {} } = input
+      const { sheetId, recordId, changes = {}, expectedVersion } = input
       assertKnownFieldIds(stagingProjectId, objectIdFor(sheetId), Object.keys(changes))
-      patchCalls.push({ sheetId, recordId, changes: { ...changes } })
+      patchCalls.push({ sheetId, recordId, changes: { ...changes }, expectedVersion })
       const rows = store.get(sheetId) || []
       const record = rows.find((row) => row.id === recordId)
       if (!record) throw new Error(`Record not found: ${recordId}`)
+      // OPTIMISTIC CONCURRENCY, exactly like records.ts patchRecord: when the caller states the
+      // version it decided against, a row that moved since fails the write instead of clobbering it
+      // (`MultitableRecordVersionConflictError`, code VERSION_CONFLICT — checked in code AND pinned
+      // in the UPDATE's SQL predicate there). Without this the fake would accept a patch the real
+      // service refuses, and any test asserting the no-overwrite guarantee would be vacuous.
+      if (expectedVersion !== undefined && (record.version || 1) !== expectedVersion) {
+        const error = new Error('Record version conflict')
+        error.name = 'MultitableRecordVersionConflictError'
+        error.code = 'VERSION_CONFLICT'
+        throw error
+      }
       // Merge semantics, exactly like records.ts patchRecord (`nextData = { ...existing, ...patch }`):
       // an explicit null SETS null — it does not remove the key.
       Object.assign(record.data, changes)

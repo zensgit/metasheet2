@@ -1115,6 +1115,17 @@ function carryPolicyModule() {
 //       holding row CREATION would wedge the later K2 carry (its target row
 //       must exist), and the thing the hold protects — the human context —
 //       cannot leak through an ADD the wall already strips.
+// The proposal hold's conflict type and its EXACT emitted conflictSummary, defined ONCE.
+//
+// The ledger's carry confirm path RECOMPUTES the proposal fingerprint from the submitted decision
+// rather than trusting the client's `inputFingerprint` (the P1 fix). That recomputation must use
+// byte-identically the same summary this emitter puts on the hold, so both sides read it from here
+// and a drift breaks a test instead of silently making every carry confirm unverifiable.
+const CARRY_PROPOSAL_CONFLICT_TYPE = 'carry_reattach_requires_confirm'
+const CARRY_PROPOSAL_CONFLICT_SUMMARY = Object.freeze(makeConflictSummary(CARRY_PROPOSAL_CONFLICT_TYPE, { proposed: true }))
+// The proposal hold's `changedFields`, likewise shared with the verifier.
+const CARRY_PROPOSAL_CHANGED_FIELDS = Object.freeze([])
+
 function emitCarryOutcome({ decisions, counts, carryDecision, carryStats }) {
   const carry = carryPolicyModule()
   if (carryDecision.decision === carry.CARRY_DECISIONS.NO_CARRY) {
@@ -1124,13 +1135,13 @@ function emitCarryOutcome({ decisions, counts, carryDecision, carryStats }) {
   }
   if (carryDecision.decision === carry.CARRY_DECISIONS.CARRY_VIA_CONFIRM) {
     carryStats.counts.carryViaConfirm += 1
-    carryStats.holdsByConflictType.carry_reattach_requires_confirm =
-      (carryStats.holdsByConflictType.carry_reattach_requires_confirm || 0) + 1
+    carryStats.holdsByConflictType[CARRY_PROPOSAL_CONFLICT_TYPE] =
+      (carryStats.holdsByConflictType[CARRY_PROPOSAL_CONFLICT_TYPE] || 0) + 1
     addDecision(decisions, counts, {
       decision: DECISIONS.MANUAL_CONFIRM,
       idempotencyKey: carryDecision.idempotencyKey,
-      conflictSummary: makeConflictSummary('carry_reattach_requires_confirm', { proposed: true }),
-      changedFields: [],
+      conflictSummary: { ...CARRY_PROPOSAL_CONFLICT_SUMMARY },
+      changedFields: CARRY_PROPOSAL_CHANGED_FIELDS.slice(),
       source: 'carry_policy',
       carryProposal: carryDecision,
     })
@@ -1436,6 +1447,9 @@ module.exports = {
   LINEAGE_FIELD_IDS,
   IDENTITY_FIELD_IDS,
   ANONYMOUS_HOLD_IDENTITY_PREFIX,
+  CARRY_PROPOSAL_CONFLICT_TYPE,
+  CARRY_PROPOSAL_CONFLICT_SUMMARY,
+  CARRY_PROPOSAL_CHANGED_FIELDS,
   DUPLICATE_EXPANDED_KEY_POLICIES,
   DUPLICATE_EXPANDED_KEY_RESOLVING_POLICY,
   DUPLICATE_EXPANDED_KEY_UNSUPPORTED_HELD_REASON,

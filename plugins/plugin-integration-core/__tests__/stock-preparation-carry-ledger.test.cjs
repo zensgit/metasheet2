@@ -325,6 +325,9 @@ async function main() {
     const confirmed = await confirmCarryConfirmationDecision(scopedCall(env, {
       decisionId: row.data.decisionId,
       inputFingerprint: row.data.inputFingerprint,
+      // The close is BOUND to the decision it applies (P1 fix): the row's rowIdentity, its
+      // stableDecisionKey and its inputFingerprint are all re-derived from this object.
+      decision: carryProposalHold().carryProposal,
       confirmedBy: 'user-a',
       now: () => new Date('2026-09-02T00:00:00.000Z'),
     }))
@@ -341,6 +344,7 @@ async function main() {
     const replay = await confirmCarryConfirmationDecision(scopedCall(env, {
       decisionId: row.data.decisionId,
       inputFingerprint: row.data.inputFingerprint,
+      decision: carryProposalHold().carryProposal,
       confirmedBy: 'user-b',
     }))
     assert.equal(replay.persisted, false)
@@ -363,6 +367,7 @@ async function main() {
       () => confirmCarryConfirmationDecision(scopedCall(env, {
         decisionId: carryRow.data.decisionId,
         inputFingerprint: 'stale-fingerprint',
+        decision: carryProposalHold().carryProposal,
         confirmedBy: 'user-a',
       })),
       'CONFIRMATION_DECISION_REVISION_MISMATCH',
@@ -372,10 +377,27 @@ async function main() {
       () => confirmCarryConfirmationDecision(scopedCall(env, {
         decisionId: duplicateRow.data.decisionId,
         inputFingerprint: duplicateRow.data.inputFingerprint,
+        decision: carryProposalHold().carryProposal,
         confirmedBy: 'user-a',
       })),
       'CONFIRMATION_DECISION_ACTION_CONFLICT_MISMATCH',
       'carry ledger-close on a duplicate row',
+    )
+    // P1 fix, contract leg: the close CANNOT be called without the decision it applies — an
+    // unbound close is exactly what let one pair's carry stamp another pair's hold.
+    await rejectsWithCode(
+      () => confirmCarryConfirmationDecision(scopedCall(env, {
+        decisionId: carryRow.data.decisionId,
+        inputFingerprint: carryRow.data.inputFingerprint,
+        confirmedBy: 'user-a',
+      })),
+      'CONFIRMATION_DECISION_CARRY_DECISION_REQUIRED',
+      'carry ledger-close without the bound decision',
+    )
+    assert.equal(
+      ledgerRows(env).find((entry) => entry.data.conflictType === 'carry_reattach_requires_confirm').data.status,
+      STATUSES.PENDING,
+      'every refusal above left the row pending',
     )
   })
 
@@ -392,6 +414,7 @@ async function main() {
     await confirmCarryConfirmationDecision(scopedCall(env, {
       decisionId: row.data.decisionId,
       inputFingerprint: row.data.inputFingerprint,
+      decision: carryProposalHold().carryProposal,
       confirmedBy: 'user-a',
     }))
     const readback = await loadConfirmedDuplicatePolicyReview(scopedCall(env, {
