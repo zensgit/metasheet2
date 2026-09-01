@@ -1562,6 +1562,10 @@ export default defineConfig({
       // for immutable intent, request replay, visibility snapshots, and races.
       // Excluded from no-DB collection and wired whole-file post-migrate.
       'tests/integration/elearning-course-enrollment.db.test.ts',
+      // Cross-service online training closure requires one real database for
+      // registration, watch evidence, objective grading, and score readback.
+      // Excluded from no-DB collection and wired whole-file post-migrate.
+      'tests/integration/elearning-online-training-loop.db.test.ts',
       // E-learning L4 credit-ledger authority. Requires real PostgreSQL for
       // effect identity, replay/hash conflicts, bucket locking, and balances.
       // Excluded from the no-DB job and wired as a whole-file post-migrate gate.

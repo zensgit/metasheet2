@@ -1071,6 +1071,7 @@ jobs:
             tests/integration/elearning-course-publish.db.test.ts \
             tests/integration/elearning-content-runtime.db.test.ts \
             tests/integration/elearning-course-enrollment.db.test.ts \
+            tests/integration/elearning-online-training-loop.db.test.ts \
             tests/integration/elearning-credit-ledger-authority.db.test.ts \
             tests/integration/elearning-credit-rules-wallet.db.test.ts \
             tests/integration/elearning-credit-adjustment.db.test.ts \
