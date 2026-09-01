@@ -58,7 +58,7 @@
  */
 
 import { isBlockedEgressIp } from '../guards/egress-guard'
-import { AI_BASE_URL_ENV, type AiProvider } from './ai-provider-readiness'
+import { AI_BASE_URL_ENV, AI_LOCAL_PROVIDER, type AiProvider } from './ai-provider-readiness'
 
 /** Deploy-file path env (server-side JSON). Unset → most-restrictive default. */
 export const AI_ROUTING_POLICY_PATH_ENV = 'MULTITABLE_AI_ROUTING_POLICY'
@@ -85,6 +85,15 @@ export type AiProviderTier = (typeof AI_PROVIDER_TIERS)[number]
 export const AI_BUILTIN_PROVIDER_TIERS: Record<AiProvider, AiProviderTier> = {
   anthropic: 'cloud',
   openai: 'cloud',
+  // FAIL-CLOSED ON PURPOSE: the local lane's NAME claims local, but the builtin
+  // table never grants locality — only the positive host proof does (see
+  // resolveActiveProviderTier). An unproven `local-openai-compat` is therefore
+  // treated as cloud, so business data is REFUSED rather than sent. Written as
+  // a literal (= AI_LOCAL_PROVIDER, compiler-checked by the Record key type)
+  // so this module touches NO binding of ai-provider-readiness.ts at module
+  // evaluation — that keeps the two files' deliberate import cycle (readiness
+  // reuses this module's locality proof) safe under any load order.
+  'local-openai-compat': 'cloud',
 }
 
 /**
@@ -265,7 +274,13 @@ export function loadAiRoutingPolicyFile(env: AiReadEnv = process.env): Normalize
 
 // ─── Provider-tier resolution (declared tier + POSITIVE local proof) ────────
 
-function effectiveBaseUrlHost(env: AiReadEnv): string | null {
+/**
+ * The normalized host of MULTITABLE_AI_BASE_URL (lowercased, trailing-dot
+ * stripped), or null when unset/unparseable. EXPORTED so the readiness
+ * resolver applies the SAME derivation before the SAME positive proof — the
+ * two layers must never disagree on what "the host" even is.
+ */
+export function effectiveBaseUrlHost(env: AiReadEnv): string | null {
   const raw = typeof env[AI_BASE_URL_ENV] === 'string' ? env[AI_BASE_URL_ENV]!.trim() : ''
   if (!raw) return null
   try {
@@ -323,11 +338,13 @@ export interface ResolvedProviderTier {
 /**
  * Resolve the EFFECTIVE tier of the configured provider.
  *
- *   - No policy (null) OR policy declares `cloud`  -> the provider's BUILT-IN tier
- *     (anthropic / openai = cloud). Most-restrictive default.
- *   - Policy declares `local`  -> `local` ONLY IF the explicitly-set base-URL host
- *     PASSES the positive local proof; otherwise DOWNGRADED to `cloud`. A
- *     declaration is a claim, not evidence.
+ *   - No local claim -> the provider's BUILT-IN tier (anthropic / openai =
+ *     cloud). Most-restrictive default.
+ *   - A LOCAL CLAIM — either the policy declares `local`, or the provider IS
+ *     the local lane (`local-openai-compat` claims local by selection; no
+ *     policy file is needed to say so twice) -> `local` ONLY IF the
+ *     explicitly-set base-URL host PASSES the positive local proof; otherwise
+ *     DOWNGRADED to `cloud`. A claim — declared OR named — is not evidence.
  */
 export function resolveActiveProviderTier(
   provider: AiProvider,
@@ -335,13 +352,14 @@ export function resolveActiveProviderTier(
   env: AiReadEnv = process.env,
 ): ResolvedProviderTier {
   const builtin = AI_BUILTIN_PROVIDER_TIERS[provider] ?? 'cloud'
-  if (!policy || policy.declaredProviderTier !== 'local') {
+  const claimsLocal = provider === AI_LOCAL_PROVIDER || Boolean(policy && policy.declaredProviderTier === 'local')
+  if (!claimsLocal) {
     return { tier: builtin, downgraded: false }
   }
-  // Declared local: the host must PROVE it. Unset base URL → the default public
+  // A local claim: the host must PROVE it. Unset base URL → the default public
   // endpoint → not local.
   const host = effectiveBaseUrlHost(env)
-  if (!isProvablyLocalHost(host, policy.localHosts)) {
+  if (!isProvablyLocalHost(host, policy ? policy.localHosts : [])) {
     return { tier: 'cloud', downgraded: true }
   }
   return { tier: 'local', downgraded: false }

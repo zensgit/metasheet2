@@ -13,11 +13,44 @@
  *     (an invalid MODEL or BASE_URL value may be a mispasted secret).
  *   - E-3 is a presence-only check; the key value is never read into a message.
  *   - Non-numeric cap values (E-6..E-11) are echoed as `<invalid>` only.
- *   - The report therefore contains no env VALUES at all — only env NAMES,
- *     allowlisted constants, and parsed numbers.
+ *   - The report contains no env VALUES — only env NAMES, allowlisted
+ *     constants, and parsed numbers — with ONE scoped exception: the LOCAL
+ *     lane's `model` is operator-named (no allowlist exists to quote from), so
+ *     the report carries it VERBATIM after a shape guard + the shared
+ *     secret-shape redactor both accept it; a value either of them rejects is
+ *     echoed as `<invalid>` only.
  *   - E-12 is declared informationally and NEVER consumed in A1 (no live-call
  *     path exists for it to gate); real consumption belongs to M2.
+ *
+ * LOCAL LANE (the #5419 boundary made this deployment the design intent; this
+ * file previously made it UNEXPRESSIBLE): provider `local-openai-compat` is a
+ * self-hosted OpenAI-compatible server (vLLM / Ollama). Its contract differs
+ * from the cloud lanes in exactly three declared ways —
+ *   - E-4 BASE_URL is REQUIRED, and its host must pass the routing policy's
+ *     OWN positive local proof (`isProvablyLocalHost`, ai-routing-policy.ts —
+ *     imported, never approximated: one source of truth for "local");
+ *   - E-3 API_KEY is OPTIONAL (many local servers are keyless; when set the
+ *     client passes it through as a bearer token);
+ *   - E-5 MODEL is operator-named: free-form non-empty, no cloud allowlist —
+ *     but blank/missing still blocks (there is no local default model).
+ * Everything else (enable flag, caps, E-12 double-confirm) is identical, and
+ * the CLOUD contract is byte-for-byte unchanged.
  */
+
+import { redactString } from '../multitable/automation-log-redact'
+// DELIBERATE import cycle with ai-routing-policy.ts (which imports this file's
+// env-name/type constants): the LOCAL lane's readiness gate reuses the routing
+// policy's OWN locality proof — one source of truth, no readiness-side
+// approximation. The cycle is eval-time-safe BY CONSTRUCTION: neither module
+// touches the other's bindings during module evaluation (this side calls them
+// inside resolveAiProviderReadiness only; that side keys its builtin-tier
+// table with a literal, documented there), so load order cannot matter.
+import {
+  AI_ROUTING_POLICY_PATH_ENV,
+  effectiveBaseUrlHost,
+  isProvablyLocalHost,
+  loadAiRoutingPolicyFile,
+} from './ai-routing-policy'
 
 export const AI_ENABLED_ENV = 'MULTITABLE_AI_ENABLED' // E-1
 export const AI_PROVIDER_ENV = 'MULTITABLE_AI_PROVIDER' // E-2
@@ -52,15 +85,54 @@ export const AI_OPTIONAL_ENV = [
   AI_CONFIRM_LIVE_REQUESTS_ENV,
 ] as const
 
-/** P-1 ratified allowlist: anthropic + openai only; others → blocked. */
-export const AI_PROVIDER_ALLOWLIST = ['anthropic', 'openai'] as const
+/**
+ * The LOCAL lane's presence contract, reported when E-2 = AI_LOCAL_PROVIDER:
+ * BASE_URL moves into required (no default endpoint exists), API_KEY moves out
+ * (keyless servers are first-class). The default/cloud lists above stay the
+ * report surface for every other provider value, unchanged.
+ */
+export const AI_LOCAL_REQUIRED_ENV = [
+  AI_ENABLED_ENV,
+  AI_PROVIDER_ENV,
+  AI_MODEL_ENV,
+  AI_BASE_URL_ENV,
+] as const
+
+export const AI_LOCAL_OPTIONAL_ENV = [
+  AI_API_KEY_ENV,
+  AI_REQUEST_TIMEOUT_MS_ENV,
+  AI_MAX_OUTPUT_TOKENS_ENV,
+  AI_TENANT_DAILY_TOKEN_CAP_ENV,
+  AI_TENANT_WEEKLY_TOKEN_CAP_ENV,
+  AI_TENANT_BURST_RPM_ENV,
+  AI_ACCOUNT_DAILY_USD_CAP_ENV,
+  AI_CONFIRM_LIVE_REQUESTS_ENV,
+] as const
+
+/** P-1 ratified CLOUD allowlist: anthropic + openai. */
+export const AI_CLOUD_PROVIDER_ALLOWLIST = ['anthropic', 'openai'] as const
+export type AiCloudProvider = (typeof AI_CLOUD_PROVIDER_ALLOWLIST)[number]
+
+/**
+ * The ONE local lane: a self-hosted OpenAI-compatible server (vLLM / Ollama
+ * serving e.g. Qwen / DeepSeek weights) on a PROVABLY LOCAL host — the
+ * deployment the governed-AI boundary (#5419) names as its design intent.
+ * A single token in a closed vocabulary: a second local protocol is an
+ * extend-by-PR decision, never a runtime widening.
+ */
+export const AI_LOCAL_PROVIDER = 'local-openai-compat' as const
+
+/** The full provider vocabulary: the two cloud lanes + the one local lane; others → blocked. */
+export const AI_PROVIDER_ALLOWLIST = [...AI_CLOUD_PROVIDER_ALLOWLIST, AI_LOCAL_PROVIDER] as const
 export type AiProvider = (typeof AI_PROVIDER_ALLOWLIST)[number]
 
 /**
- * Per-provider model allowlists (E-5). Operator contract constants — extend by
- * PR, never at runtime. An explicit value outside the table blocks readiness.
+ * Per-CLOUD-provider model allowlists (E-5). Operator contract constants —
+ * extend by PR, never at runtime. An explicit value outside the table blocks
+ * readiness. The LOCAL lane deliberately has NO allowlist: the operator names
+ * whatever model their own server hosts (shape-guarded below).
  */
-export const AI_MODEL_ALLOWLISTS: Record<AiProvider, readonly string[]> = {
+export const AI_MODEL_ALLOWLISTS: Record<AiCloudProvider, readonly string[]> = {
   anthropic: [
     'claude-fable-5',
     'claude-opus-4-8',
@@ -77,11 +149,24 @@ export const AI_MODEL_ALLOWLISTS: Record<AiProvider, readonly string[]> = {
   ],
 }
 
-/** Default model per provider when E-5 is unset. */
-export const AI_DEFAULT_MODELS: Record<AiProvider, string> = {
+/** Default model per CLOUD provider when E-5 is unset. The local lane has NO default — E-5 is required there. */
+export const AI_DEFAULT_MODELS: Record<AiCloudProvider, string> = {
   anthropic: 'claude-opus-4-8',
   openai: 'gpt-4o-mini',
 }
+
+/**
+ * LOCAL-lane model shape guard. The local model name is the one env-derived
+ * value the report carries verbatim (there is no allowlist constant to quote
+ * instead), so a mispasted secret must be caught BEFORE it can ride into the
+ * report: plausible model names (`qwen2.5:14b-instruct`,
+ * `Qwen/Qwen2.5-72B-Instruct`, `llama3.1:70b-instruct-q4_K_M`) are short runs
+ * of `[A-Za-z0-9._:/-]`; anything else — whitespace, `@`, `?`, over-length —
+ * is `<invalid>`. The shared secret-shape redactor is applied on top (an
+ * `sk-…` key fits this charset; `redactString` catches it).
+ */
+export const AI_LOCAL_MODEL_MAX_LENGTH = 200
+const LOCAL_MODEL_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/
 
 /**
  * T6 status enum — FULL set declared at A1; only the first three are ever
@@ -227,13 +312,38 @@ export function resolveAiProviderReadiness(
       )
     }
 
-    if (envString(env, AI_API_KEY_ENV).length === 0) {
+    // E-3: presence is required for the CLOUD lanes (and while the provider is
+    // unset/invalid — the cloud contract is the default posture). The LOCAL
+    // lane treats the key as OPTIONAL: many self-hosted servers are keyless,
+    // and demanding a dummy value here was exactly the lie this lane removes.
+    // When set, the client passes it through as a bearer token.
+    if (provider !== AI_LOCAL_PROVIDER && envString(env, AI_API_KEY_ENV).length === 0) {
       blockers.push(
         `${AI_API_KEY_ENV} is missing or blank; readiness checks presence only and never echoes or validates the key.`,
       )
     }
 
-    if (provider) {
+    if (provider === AI_LOCAL_PROVIDER) {
+      // E-5, LOCAL lane: operator-named, free-form — but NON-EMPTY (there is no
+      // local default model) and shape-guarded (it rides into the report; see
+      // the leak-policy exception in the header).
+      const modelRaw = envString(env, AI_MODEL_ENV)
+      if (!modelRaw) {
+        blockers.push(
+          `${AI_MODEL_ENV} is required for provider '${AI_LOCAL_PROVIDER}': name the model your local server hosts; there is no default and no cloud allowlist applies.`,
+        )
+      } else if (
+        modelRaw.length > AI_LOCAL_MODEL_MAX_LENGTH ||
+        !LOCAL_MODEL_SHAPE.test(modelRaw) ||
+        redactString(modelRaw) !== modelRaw
+      ) {
+        blockers.push(
+          `${AI_MODEL_ENV}=${INVALID} is not a plausible local model name ([A-Za-z0-9._:/-], max ${AI_LOCAL_MODEL_MAX_LENGTH} chars, not secret-shaped); the raw value is never echoed.`,
+        )
+      } else {
+        model = modelRaw
+      }
+    } else if (provider) {
       const modelRaw = envString(env, AI_MODEL_ENV)
       if (!modelRaw) {
         model = AI_DEFAULT_MODELS[provider]
@@ -250,6 +360,40 @@ export function resolveAiProviderReadiness(
       blockers.push(
         `${AI_BASE_URL_ENV}=${INVALID} is not a valid http(s) URL; the raw value is never echoed (URLs may embed credentials).`,
       )
+    }
+
+    // E-4, LOCAL lane: REQUIRED, and the host must pass the routing policy's
+    // OWN positive local proof. THE GUARANTEE this lane keeps: you cannot
+    // configure business data onto a public endpoint by CALLING it local —
+    // the same `isProvablyLocalHost` that decides the routing tier decides
+    // readiness (imported from ai-routing-policy.ts; one source of truth).
+    if (provider === AI_LOCAL_PROVIDER) {
+      if (!baseUrlRaw) {
+        blockers.push(
+          `${AI_BASE_URL_ENV} is required for provider '${AI_LOCAL_PROVIDER}': the local lane has no default endpoint.`,
+        )
+      } else if (isValidHttpUrl(baseUrlRaw)) {
+        let localHosts: readonly string[] = []
+        let policyBroken = false
+        try {
+          const policy = loadAiRoutingPolicyFile(env)
+          localHosts = policy ? policy.localHosts : []
+        } catch {
+          // Fail CLOSED: a broken policy file must never silently degrade to an
+          // empty `localHosts` (that could flip a listed on-prem host to blocked
+          // silently — or worse, mask a widening the operator believes is active).
+          policyBroken = true
+        }
+        if (policyBroken) {
+          blockers.push(
+            `${AI_ROUTING_POLICY_PATH_ENV} is set but unusable, so the '${AI_LOCAL_PROVIDER}' locality proof cannot consult localHosts; failing closed (fix or unset the policy file).`,
+          )
+        } else if (!isProvablyLocalHost(effectiveBaseUrlHost(env), localHosts)) {
+          blockers.push(
+            `${AI_BASE_URL_ENV} host is NOT provably local, so provider '${AI_LOCAL_PROVIDER}' is blocked: point it at loopback / an RFC1918-class address, a .local/.internal/.lan/.home.arpa name, or a host listed in the routing policy's localHosts. Business data never reaches a public endpoint by naming it local; the raw URL is never echoed.`,
+          )
+        }
+      }
     }
 
     if (blockers.length > 0) {
@@ -276,8 +420,8 @@ export function resolveAiProviderReadiness(
       // (A1-T4b: the report must be byte-identical whether or not E-12 is set).
       `${AI_CONFIRM_LIVE_REQUESTS_ENV} is declared for M2 live-request confirmation only; A1 never consumes it and has no live call path.`,
     ],
-    requiredEnv: [...AI_REQUIRED_ENV],
-    optionalEnv: [...AI_OPTIONAL_ENV],
+    requiredEnv: provider === AI_LOCAL_PROVIDER ? [...AI_LOCAL_REQUIRED_ENV] : [...AI_REQUIRED_ENV],
+    optionalEnv: provider === AI_LOCAL_PROVIDER ? [...AI_LOCAL_OPTIONAL_ENV] : [...AI_OPTIONAL_ENV],
   }
 }
 
