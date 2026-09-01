@@ -27,7 +27,7 @@ import type {
   ConnectionConfig
 } from './BaseAdapter';
 import { BaseDataAdapter, getStringConfig, getNumberConfig } from './BaseAdapter'
-import { assertSqlStatementWriteAuthorized, isPureReadStatement } from './outbound-sql-write-gate'
+import { assertSqlWriteAllowed } from './sql-write-arm-binding'
 
 // Minimal structural typing for the optional `mssql` driver (avoid `any` and a
 // hard build-time dependency on @types/mssql).
@@ -286,10 +286,10 @@ export class MSSQLAdapter extends BaseDataAdapter {
     //
     // Placed FIRST, before the pool is touched. Reads — including every internal select() and a read
     // of any table — are byte-identical to a deployment that never heard of this gate.
-    assertSqlStatementWriteAuthorized(
+    assertSqlWriteAllowed(
       (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
       sql,
-      { id: this.config.id, name: this.config.name, type: this.config.type },
+      { id: this.config.id, name: this.config.name, type: this.config.type, connection: this.config.connection },
     )
     if (!this.pool) {
       throw new Error('Not connected to database')
@@ -564,10 +564,10 @@ export class MSSQLAdapter extends BaseDataAdapter {
     // gate cannot see. So vending a transaction is itself treated as a WRITE and requires an armed
     // target. There is no "read-only transaction" to carve out: the caller controls what runs inside
     // it. The manager/facade never expose transactions, so an unarmed deployment loses nothing.
-    assertSqlStatementWriteAuthorized(
+    assertSqlWriteAllowed(
       (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
       'BEGIN TRANSACTION',
-      { id: this.config.id, name: this.config.name, type: this.config.type },
+      { id: this.config.id, name: this.config.name, type: this.config.type, connection: this.config.connection },
     )
     if (!this.pool || !mssql) {
       throw new Error('Not connected to database')
