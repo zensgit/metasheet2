@@ -19,6 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express, { type Express } from 'express'
 import request from 'supertest'
 import { usePinnedServer } from '../utils/pinned-server'
+import { AI_ROUTING_FIXTURE_ENV_KEYS, armLocalAiRoutingPolicy } from '../utils/ai-routing-policy-fixture'
 
 const SHEET_ID = 'sheet_ai_routes'
 const REC_ID = 'rec_ai_routes'
@@ -46,6 +47,9 @@ const AI_ENV_KEYS = [
   'MULTITABLE_AI_TENANT_BURST_RPM',
   'MULTITABLE_AI_ACCOUNT_DAILY_USD_CAP',
   'MULTITABLE_AI_CONFIRM_LIVE_REQUESTS',
+  // The shipped path is now data-class governed; these suites must simulate a
+  // COMPLIANT deployment (see tests/utils/ai-routing-policy-fixture.ts).
+  ...AI_ROUTING_FIXTURE_ENV_KEYS,
 ] as const
 
 type QueryResult = { rows: any[]; rowCount?: number }
@@ -191,6 +195,7 @@ describe('A2 shortcut routes (mock pool)', () => {
     process.env.MULTITABLE_AI_API_KEY = API_KEY_SENTINEL
     process.env.MULTITABLE_AI_MODEL = 'claude-sonnet-4-6'
     process.env.MULTITABLE_AI_CONFIRM_LIVE_REQUESTS = '1'
+    armLocalAiRoutingPolicy()
 
     recordData = { [FLD_SRC]: 'hello world', [FLD_SECRET]: SECRET_VALUE }
     // canManageFields now needs `multitable:manage-schema` (the field-write leg of this test).
