@@ -43,6 +43,18 @@
 // fingerprint and is refused. The deploy tier owns the restart and the allowlist; that is the same
 // trust floor the owner accepted for the HTTP gate.
 //
+// TWO FURTHER HOLES CLOSED HERE (a bounded re-verification of the P1 fix):
+//   * FIX 2 — ARM-AHEAD-OF-PROVISIONING. Pinning now happens ONLY on the DEPLOY-controlled LOAD path.
+//     The runtime (API) create/redirect path never pins; instead it REFUSES to provision an armed id
+//     that has no load-time pin (see {@link assertSqlSourceProvisionableAtRuntime}), before any row is
+//     persisted. So a `data_sources:write` operator can no longer create a source at an armed-but-
+//     never-provisioned id and have the create-time observation pin the OPERATOR's connection.
+//   * FIX 3 — CREDENTIAL / DEFAULT-DB REDIRECT. The fingerprint is credential-blind, and a blank
+//     `connection.database` resolves to the LOGIN's default DB, so a login swap could redirect the
+//     write with an unchanged fingerprint. An armed write on a blank-database source is now refused
+//     (see the `hasExplicitDatabase` gate in {@link assertSqlWriteAllowed}); an explicit database folds
+//     the destination catalog into the pin.
+//
 // VALUES-FREE: a fingerprint is a SHA-256 hex digest; nothing here logs or returns a host, database,
 // connection string or credential. The pin map is keyed by `systemId` (a config-authored id).
 
@@ -55,6 +67,7 @@ import {
   OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED,
   assertOutboundSqlWriteAuthorized,
   isPureReadStatement,
+  loadOutboundSqlWriteAllowlist,
 } from './outbound-sql-write-gate'
 
 // The connection fields that define a DESTINATION. A change to any of them is a redirect. Kept as a
@@ -86,6 +99,20 @@ export function sqlConnectionFingerprint(connection: Record<string, unknown> | u
   return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex')
 }
 
+// FIX 3: is the destination DATABASE explicitly named on this connection? The MSSQL adapter passes
+// `connection.database` straight through as the target catalog; a blank value connects to the login's
+// default database. `catalog` is accepted as its synonym for adapters that spell it that way. A raw
+// `connectionString`/`dsn`/`url` may embed the DB opaquely, but the adapters this gate protects do not
+// use one, so — fail-closed — only an explicit structured `database`/`catalog` counts as unambiguous.
+function hasExplicitDatabase(connection: Record<string, unknown> | undefined | null): boolean {
+  const conn = connection && typeof connection === 'object' ? (connection as Record<string, unknown>) : {}
+  for (const key of ['database', 'catalog'] as const) {
+    const value = conn[key]
+    if (typeof value === 'string' && value.trim().length > 0) return true
+  }
+  return false
+}
+
 interface ArmBinding {
   readonly fingerprint: string
 }
@@ -95,9 +122,18 @@ interface ArmBinding {
 const bindings = new Map<string, ArmBinding>()
 
 /**
- * Observe a live source (call at add / load). Pins its current connection fingerprint the FIRST time
- * only; subsequent observations are no-ops, so a redirect (which re-adds an adapter with a new
- * connection) cannot move the pin. Idempotent and cheap.
+ * Pin a source's connection fingerprint AT ALLOWLIST-LOAD TIME. This is the ONLY function that adds a
+ * pin, and its ONE legitimate caller is the manager's load path (`loadFromDatabase`), which re-observes
+ * whatever persisted sources exist at process start — a deploy-controlled moment. Pins FIRST-SEEN-WINS,
+ * so a later redirect cannot move the pin. Idempotent and cheap.
+ *
+ * FIX 2 — WHY PINNING IS LOAD-ONLY. Before this fix the manager also pinned on the RUNTIME create path
+ * (`addDataSource`), so a `data_sources:write` operator could provision an id that a deploy file had
+ * armed-but-never-provisioned and the create-time observation would pin the OPERATOR's connection —
+ * arming ahead of provisioning, no restart needed. Now the runtime path never pins (it calls
+ * {@link assertSqlSourceProvisionableAtRuntime} instead), so an armed id can only ever be pinned from a
+ * source that already existed when the allowlist was loaded. An armed id with no source at load is
+ * INERT until a deploy provisions it and the process reloads.
  */
 export function pinSqlSourceConnection(systemId: string | null | undefined, connection: Record<string, unknown> | undefined | null): void {
   if (typeof systemId !== 'string' || systemId.length === 0) return
@@ -111,6 +147,62 @@ export function sqlSourceConnectionMatchesPin(systemId: string | null | undefine
   const pin = bindings.get(systemId)
   if (!pin) return false // no observation ⇒ cannot confirm the binding ⇒ fail-closed
   return pin.fingerprint === sqlConnectionFingerprint(connection)
+}
+
+/**
+ * Is this systemId named by ANY entry in the deploy allowlist? Coarse on purpose — it asks only
+ * whether the id is ARMED at all, not whether a given write would match (name/kind/operation), because
+ * the runtime provisioning guard must fail closed toward REFUSAL for any armed id. A broken allowlist
+ * (load throws) returns `false`: the gate already refuses every write with ALLOWLIST_INVALID while it
+ * is broken, so a source created during that window is harmless (its writes are refused), and blocking
+ * unrelated source creation on a config typo would be a worse operational failure than the narrow,
+ * deploy-gated residual (documented on {@link assertSqlSourceProvisionableAtRuntime}).
+ */
+function isSystemIdArmed(systemId: string, env: NodeJS.ProcessEnv): boolean {
+  let allowlist
+  try {
+    allowlist = loadOutboundSqlWriteAllowlist(env)
+  } catch {
+    return false
+  }
+  if (!allowlist) return false
+  return allowlist.targets.some((target) => target.systemId === systemId)
+}
+
+/**
+ * FIX 2 — REFUSE PROVISIONING AN ARMED-BUT-UNPINNED ID AT THE RUNTIME (API) TIER.
+ *
+ * The manager's runtime create/redirect path calls this INSTEAD of pinning. An armed id that has no
+ * load-time pin is being provisioned (or first-observed) AFTER the allowlist was loaded — the
+ * arm-ahead-of-provisioning attack — and is refused BEFORE any row is persisted, so it cannot be
+ * "trusted into a fresh pin" now nor re-observed and pinned at a later restart. An armed id that IS
+ * already pinned (provisioned at load) is a legitimate re-observation (revival / redirect) and passes
+ * here; its write is still governed by the fingerprint binding. An UNARMED id passes untouched.
+ *
+ * RESIDUAL, stated plainly: this binds within a PROCESS and reads the allowlist as it stands now. While
+ * the allowlist file is BROKEN (load throws) {@link isSystemIdArmed} reports "not armed", so a create
+ * is not blocked during that window; if a deployer later FIXES the file to arm that exact id AND
+ * restarts, the persisted row would be pinned at that restart. That requires deploy-tier intent on both
+ * the file and the restart — the same trust floor the arm binding already documents.
+ */
+export function assertSqlSourceProvisionableAtRuntime(
+  buildError: BuildGateError,
+  systemId: string | null | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if (typeof systemId !== 'string' || systemId.length === 0) return
+  if (bindings.has(systemId)) return // pinned at load ⇒ legitimate re-observation
+  if (!isSystemIdArmed(systemId, env)) return // ordinary unarmed source ⇒ nothing to guard
+  throw buildError(
+    OUTBOUND_SQL_WRITE_REFUSAL_STATUS,
+    OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED,
+    'this data source id is armed for generic SQL write but was not provisioned when the allowlist was loaded; a source armed for SQL write must already exist at load time (provision it at the deploy tier, then arm it and reload) — it cannot be created or redirected into an armed id at the API tier',
+    {
+      code: OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED,
+      systemId,
+      reason: 'arm_ahead_of_provisioning',
+    },
+  )
 }
 
 // Test-only: the pin registry is a process singleton, so suites must reset it between cases.
@@ -149,7 +241,28 @@ export function assertSqlWriteAllowed(
   // (1) the file gate — default-deny by declared identity.
   assertOutboundSqlWriteAuthorized(buildError, subject, env)
 
-  // (2) the arm binding — the armed source must still be at the connection it was pinned to.
+  // (2) FIX 3 — an armed source's destination DATABASE must be EXPLICIT. The fingerprint is
+  // credential-blind, and mssql connects to the LOGIN's DEFAULT database when `connection.database` is
+  // blank. So on a blank-database source a `data_sources:write` operator could swap to a login whose
+  // default DB is K3 (same server) and redirect the write with an UNCHANGED fingerprint. Requiring an
+  // explicit database makes the destination DB part of the pinned fingerprint, so a login swap that
+  // changes the effective DB is impossible without also changing `database` (which breaks the pin).
+  // The MSSQL adapter uses `connection.database` verbatim as the target catalog, so a blank value here
+  // is precisely the ambiguous destination — refuse it.
+  if (!hasExplicitDatabase(source.connection ?? null)) {
+    throw buildError(
+      OUTBOUND_SQL_WRITE_REFUSAL_STATUS,
+      OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED,
+      'this data source is armed for SQL write but its connection does not set an explicit destination database; a blank database resolves to the login default and is an ambiguous, credential-redirectable target — set connection.database',
+      {
+        code: OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED,
+        systemId: source.id ?? null,
+        reason: 'arm_binding_ambiguous_database',
+      },
+    )
+  }
+
+  // (3) the arm binding — the armed source must still be at the connection it was pinned to.
   if (!sqlSourceConnectionMatchesPin(source.id ?? null, source.connection ?? null)) {
     throw buildError(
       OUTBOUND_SQL_WRITE_REFUSAL_STATUS,

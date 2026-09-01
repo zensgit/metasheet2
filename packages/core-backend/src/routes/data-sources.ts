@@ -34,6 +34,21 @@ import {
 } from '../data-adapters/k3-destination-write-fence'
 import { DATA_SOURCE_DEFAULT_LIMIT, DATA_SOURCE_MAX_ROWS } from '../data-adapters/BaseAdapter'
 
+// A deliberate gate refusal — the outbound-SQL-write arm/provisioning guard, the K3 destination fence —
+// throws an Error carrying a numeric `status` and a fixed `code`. Surface those verbatim so the refusal
+// reaches the client as its own 4xx (e.g. 403 arm-ahead-of-provisioning) with its coded reason, rather
+// than collapsing into a generic 500. The gate's messages are values-free by construction (they carry
+// no SQL, host, database, connection string or credential), so echoing the message here is safe.
+function codedGateRefusal(error: unknown): { status: number; code: string; message: string } | null {
+  if (!(error instanceof Error)) return null
+  const status = (error as { status?: unknown }).status
+  const code = (error as { code?: unknown }).code
+  if (typeof status === 'number' && status >= 400 && status < 600 && typeof code === 'string') {
+    return { status, code, message: error.message }
+  }
+  return null
+}
+
 // Zod schemas for request validation
 const ConnectionConfigSchema = z.record(z.union([z.string(), z.number(), z.boolean()]))
 
@@ -458,6 +473,10 @@ export function dataSourcesRouter(): Router {
           error: { code: 'CONFLICT', message: error.message }
         })
       }
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
+      }
       return res.status(500).json({
         ok: false,
         error: {
@@ -628,6 +647,10 @@ export function dataSourcesRouter(): Router {
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
       }
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
+      }
       return res.status(500).json({
         ok: false,
         error: {
@@ -718,6 +741,10 @@ export function dataSourcesRouter(): Router {
           ok: false,
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
+      }
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
       }
       return res.status(500).json({
         ok: false,
