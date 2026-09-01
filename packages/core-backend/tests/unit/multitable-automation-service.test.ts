@@ -475,6 +475,45 @@ describe('AutomationService', () => {
       expect(automationLogMocks.record).not.toHaveBeenCalled()
     })
 
+    it('fails closed when a direct real_fire caller omits the server-read sample record', async () => {
+      const rule = createMockRule({ id: 'atr_x', sheet_id: 'sheet1', enabled: true, action_type: 'record_click' })
+      const query = createMockQuery([rule])
+      service = new AutomationService(bus, createMockDb([rule]) as never, query)
+      const emitSpy = vi.spyOn(bus, 'emit')
+
+      await expect(service.testRun('atr_x', 'sheet1', {
+        mode: 'real_fire',
+        actorId: 'u1',
+        testRunOperationId: 'op_missing_sample',
+        confirmSideEffects: true,
+      })).rejects.toMatchObject({ code: 'TEST_RUN_SAMPLE_RECORD_REQUIRED', status: 400 })
+      expect(emitSpy).not.toHaveBeenCalled()
+      expect(automationLogMocks.record).not.toHaveBeenCalled()
+    })
+
+    it('fails closed when a direct real_fire caller supplies a malformed sample record', async () => {
+      const rule = createMockRule({ id: 'atr_x', sheet_id: 'sheet1', enabled: true, action_type: 'record_click' })
+      const query = createMockQuery([rule])
+      service = new AutomationService(bus, createMockDb([rule]) as never, query)
+      const emitSpy = vi.spyOn(bus, 'emit')
+
+      for (const sampleRecord of [
+        { data: {}, actorId: 'server_actor' },
+        { recordId: 'rec_bad_data', data: [], actorId: 'server_actor' },
+        { recordId: 'rec_missing_actor', data: {}, actorId: '' },
+      ]) {
+        await expect(service.testRun('atr_x', 'sheet1', {
+          mode: 'real_fire',
+          sampleRecord: sampleRecord as never,
+          actorId: 'u1',
+          testRunOperationId: `op_malformed_${String(sampleRecord.recordId ?? 'record')}`,
+          confirmSideEffects: true,
+        })).rejects.toMatchObject({ code: 'TEST_RUN_SAMPLE_RECORD_REQUIRED', status: 400 })
+      }
+      expect(emitSpy).not.toHaveBeenCalled()
+      expect(automationLogMocks.record).not.toHaveBeenCalled()
+    })
+
     it('rejects non-durable notification and later FWB actions from real_fire before execution', async () => {
       for (const actionType of ['send_notification', 'write_approval_form_values'] as const) {
         const rule = createMockRule({ id: 'atr_x', sheet_id: 'sheet1', enabled: true, action_type: actionType })
@@ -483,6 +522,11 @@ describe('AutomationService', () => {
 
         await expect(service.testRun('atr_x', 'sheet1', {
           mode: 'real_fire',
+          sampleRecord: {
+            recordId: `rec_${actionType}`,
+            data: {},
+            actorId: 'server_actor',
+          },
           actorId: 'u1',
           testRunOperationId: `op_${actionType}`,
           confirmSideEffects: true,
@@ -498,6 +542,11 @@ describe('AutomationService', () => {
 
       await expect(service.testRun('atr_x', 'sheet1', {
         mode: 'real_fire',
+        sampleRecord: {
+          recordId: 'rec_invalid_key',
+          data: {},
+          actorId: 'server_actor',
+        },
         actorId: 'u1',
         testRunOperationId: 'contains spaces',
         confirmSideEffects: true,
@@ -521,6 +570,11 @@ describe('AutomationService', () => {
 
           await expect(service.testRun('atr_x', 'sheet1', {
             mode: 'real_fire',
+            sampleRecord: {
+              recordId: `rec_${actionType}`,
+              data: {},
+              actorId: 'server_actor',
+            },
             actorId: 'u1',
             testRunOperationId: `op_${actionType}`,
             confirmSideEffects: true,
@@ -542,6 +596,11 @@ describe('AutomationService', () => {
 
       const execution = await service.testRun('atr_x', 'sheet1', {
         mode: 'real_fire',
+        sampleRecord: {
+          recordId: 'rec_real_fire',
+          data: {},
+          actorId: 'server_actor',
+        },
         actorId: 'u1',
         testRunOperationId: 'op_record_click',
         confirmSideEffects: true,

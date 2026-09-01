@@ -216,6 +216,99 @@ function main() {
     'an unrelated metadata edit stays a lone source_fingerprint_changed — the new comparisons add no false positive',
   )
 
+  // ══════════════════════════════════════════════════════════════════════════════════════════
+  // BACKWARD COMPATIBILITY for the SEVEN-FIELD pull (parentName / childName / spec /
+  // totalQuantity). These land on the snapshot line the way `material` did, and the hazard is the
+  // same but larger: on the first refresh after this change EVERY line in the store is one-sided —
+  // the previous batch predates the columns and the current batch carries them. If any of the four
+  // reached the comparator, an entire BOM would light up as changed and every row would be held for
+  // a review of a change that never happened.
+  //
+  // The rule: the four are PERSISTED and CARRIED, never COMPARED. They are also deliberately NOT in
+  // `sourceIdentity` (the mapper hashes the same keys it always did), so the fingerprint of an
+  // unchanged row is unchanged too — see the expansion-snapshot-mapper suite for that half.
+  // ══════════════════════════════════════════════════════════════════════════════════════════
+  const SEVEN_FIELD_ADDITIONS = {
+    parentName: '筒体组件B',
+    childName: '标准封头D',
+    spec: 'EHA-DN1200x12',
+    totalQuantity: 12,
+  }
+
+  // THE headline case: a line persisted before the change vs the very same line re-read after it.
+  // Nothing about the source moved, so the fingerprint is equal — and the row must stay UNCHANGED.
+  const preChangeVsPostChange = plan({
+    previousLines: [line()], // persisted before the four columns existed
+    currentLines: [line({ snapshotBatchId: 'batch_current', ...SEVEN_FIELD_ADDITIONS })],
+  })
+  assert.equal(preChangeVsPostChange.diffs.length, 1)
+  assert.equal(
+    preChangeVsPostChange.diffs[0].diffType,
+    DIFF_TYPES.UNCHANGED,
+    'a historical line vs the same line now carrying name/spec/totalQuantity is UNCHANGED — one-sided absence must not fabricate a change',
+  )
+  assert.deepEqual(preChangeVsPostChange.diffs[0].changeTypes, [], 'and it raises no change type at all')
+  assert.equal(preChangeVsPostChange.diffs[0].reviewStatus, REVIEW_STATUSES.READY, 'so nothing is held for review')
+  assert.equal(preChangeVsPostChange.valid, true, 'the whole refresh stays applyable')
+
+  // Each field on its own, in BOTH directions (absent-then-present and present-then-absent), so a
+  // rollback is as quiet as a roll-forward.
+  for (const [fieldId, value] of Object.entries(SEVEN_FIELD_ADDITIONS)) {
+    const forward = plan({
+      previousLines: [line()],
+      currentLines: [line({ snapshotBatchId: 'batch_current', [fieldId]: value })],
+    })
+    assert.deepEqual(forward.diffs[0].changeTypes, [], `one-sided ${fieldId} (absent -> present) must not raise any change type`)
+    assert.equal(forward.diffs[0].diffType, DIFF_TYPES.UNCHANGED)
+    const backward = plan({
+      previousLines: [line({ [fieldId]: value })],
+      currentLines: [line({ snapshotBatchId: 'batch_current' })],
+    })
+    assert.deepEqual(backward.diffs[0].changeTypes, [], `one-sided ${fieldId} (present -> absent) must not raise any change type`)
+    assert.equal(backward.diffs[0].diffType, DIFF_TYPES.UNCHANGED)
+  }
+
+  // Not merely "absent on one side": a DIFFERENT value on both sides is still not a change type of
+  // its own. These four are carried for the operator and the material matcher, not adjudicated —
+  // whatever they reflect is already inside the fingerprint dimensions that ARE compared.
+  const bothSidesDiffer = plan({
+    previousLines: [line({ ...SEVEN_FIELD_ADDITIONS })],
+    currentLines: [
+      line({
+        snapshotBatchId: 'batch_current',
+        parentName: '筒体组件B(改)',
+        childName: '标准封头D(改)',
+        spec: 'EHA-DN1200x14',
+        totalQuantity: 14,
+        sourceFingerprint: 'fingerprint_beta',
+      }),
+    ],
+  })
+  assert.deepEqual(
+    bothSidesDiffer.diffs[0].changeTypes,
+    [CHANGE_TYPES.SOURCE_FINGERPRINT_CHANGED],
+    'the four carried fields add NO named change type — the vocabulary is unchanged by this PR',
+  )
+
+  // And they do not disturb the tokens that DO fire: a real material substitution on lines that also
+  // carry the four still reports exactly what it reported before.
+  const substitutionWithNewFields = plan({
+    previousLines: [line({ material: 'Q235B', ...SEVEN_FIELD_ADDITIONS })],
+    currentLines: [
+      line({
+        snapshotBatchId: 'batch_current',
+        material: 'Q345R',
+        ...SEVEN_FIELD_ADDITIONS,
+        sourceFingerprint: 'fingerprint_beta',
+      }),
+    ],
+  })
+  assert.deepEqual(
+    substitutionWithNewFields.diffs[0].changeTypes,
+    materialSwap.diffs[0].changeTypes,
+    'carrying the four fields leaves an existing material substitution byte-identical in its verdict',
+  )
+
   // Vocabulary guard: the two decomposed tokens follow the existing naming style and both BLOCK
   // (the design's tier work comes later; today every change type holds the row).
   assert.equal(CHANGE_TYPES.MATERIAL_CHANGED, 'material_changed')
