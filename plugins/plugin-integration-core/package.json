@@ -42,6 +42,7 @@
     "test:stock-preparation-ext-field-mapping": "node __tests__/stock-preparation-ext-field-mapping.test.cjs && node __tests__/stock-preparation-ext-field-mapping-wiring.test.cjs",
     "test:b2a-trial-registry": "node __tests__/b2a-trial-registry.test.cjs && node __tests__/b2a-trial-registry-wiring.test.cjs",
     "test:capability-reachability": "node __tests__/plugin-capability-reachability.test.cjs",
+    "test:stock-preparation-source-preflight": "node __tests__/stock-preparation-source-preflight.test.cjs",
     "test:source-vendor-presets": "node __tests__/source-vendor-presets.test.cjs",
   "test:stock-preparation-customer-pack": "node __tests__/stock-preparation-customer-pack.test.cjs && node __tests__/stock-preparation-pack-sandbox-target.test.cjs && node __tests__/stock-preparation-customer-pack-installer.test.cjs && node __tests__/stock-preparation-customer-pack-rehearsal.test.cjs && node __tests__/customer-dictionary-leak-guard.test.cjs",
     "test:stock-preparation-mvp-provisioning": "node __tests__/stock-preparation-mvp-provisioning.test.cjs",

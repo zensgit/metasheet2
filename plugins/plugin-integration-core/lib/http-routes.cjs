@@ -88,6 +88,29 @@ const ROUTES = [
   // whole point is that the operator who has to fix the deployment can see what is wrong, and the
   // response is values-free evidence — ids, counts, env KEY names — with no provisioning power.
   ['GET', '/api/integration/stock-preparation/preflight', 'stockPreparationPreflight'],
+  // 源就绪预检 + 拓扑自测 — SOURCE PREFLIGHT. The deployment preflight above answers "is OUR side
+  // ready"; this one answers the half that had no answer at all: is the CUSTOMER'S source reachable,
+  // does it hold real BOM data, and WHICH schema shape is it — measured, not assumed. It ends with
+  // the self-validating check: the measured bridge against the bridge the configured read plan
+  // assumes, so "configured for the order module against a DesignBom-shaped source" is a loud
+  // refusal instead of a run that expands zero rows and calls it success.
+  //
+  // Read-only, and read-TIER (`requireAccess(req, 'read')` — integration:read/write, or platform
+  // admin). That tier is a deliberate choice between two live precedents, so it is stated here
+  // rather than left to be inferred:
+  //   - `externalSystemObjects` / `externalSystemSchema` construct an adapter and reach the source
+  //     AT THE READ TIER already; this is the same class of act.
+  //   - `externalSystemReadSmoke` / `externalSystemReadSourceProbe` sit at WRITE, on the rule that an
+  //     active credentialed outbound probe is never end-user reachable.
+  // What puts this one on the read side of that line is that it is fully non-steerable and produces
+  // no data plane: the object roster is derived from the SERVER-held read plan (a request cannot name
+  // an object), the page size is a module constant (a request cannot widen it), no filter, key or
+  // page input exists, nothing is persisted, no B2a claim is consumed, and the response is shapes,
+  // counts and closed-vocabulary codes checked by a values-free self-check before it is returned.
+  // It is also NOT `stock-prep:read`: stock-preparation-workbench-access.cjs holds that triggering a
+  // source read against the customer's system is an owner-level act and not a queue-operator one, and
+  // that ruling is respected here — the stock-prep namespace does not open this route.
+  ['GET', '/api/integration/stock-preparation/source-preflight', 'stockPreparationSourcePreflight'],
   ['GET', '/api/integration/stock-preparation/target/readiness', 'stockPreparationTargetReadiness'],
   ['POST', '/api/integration/stock-preparation/target/ensure', 'stockPreparationTargetEnsure'],
   ['GET', '/api/integration/stock-preparation/sandbox-target/readiness', 'stockPreparationSandboxTargetReadiness'],
@@ -371,6 +394,17 @@ const {
 const {
   computeStockPreparationPreflight,
 } = require('./stock-preparation-preflight.cjs')
+// SOURCE PREFLIGHT + TOPOLOGY SELF-TEST: the other half of "is this ready" — the CUSTOMER'S source
+// rather than this deployment. It measures reachability, business-data presence, WHICH bridge the
+// source uses (order module vs DesignBom) and WHICH generic slot carries the BOM quantity, then
+// checks all of that against the configured read plan. Read-only; values-free by self-check.
+// (The route path itself is a literal in ROUTES above, which is built before this require runs; the
+// suite cross-checks that literal against SOURCE_PREFLIGHT_ROUTE_PATH so the two cannot drift.)
+const {
+  DECLARABLE_BRIDGES,
+  SourcePreflightError,
+  runStockPreparationSourcePreflight,
+} = require('./stock-preparation-source-preflight.cjs')
 const {
   assertAuthoritativeLargeBomExpansion,
   cancelLargeBomBackgroundExpansionJob,
@@ -1038,6 +1072,20 @@ const VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_READINESS_QUERY_KEYS = new S
 // declared target comes from the PACK, and letting a request name one would recreate incident 2 at
 // the API instead of in a chat window.
 const VALID_STOCK_PREPARATION_PREFLIGHT_QUERY_KEYS = new Set(['tenantId', 'workspaceId'])
+// SOURCE preflight. `externalSystemId` is the ONE addition, and it is a REGISTERED-SYSTEM SELECTOR,
+// not a connection: it names a row the caller's tenant already owns, and everything about how to
+// reach that row — host, credentials, driver — stays server-held exactly as it is for every other
+// route. Deliberately absent: any object/table name, any filter, any limit, any read plan. A request
+// that could name the object to read would be a bulk-read surface wearing a preflight's name, and a
+// request that could supply a read plan would be able to make the alignment check agree with itself.
+// `declaredBridge` is the SECOND addition, and it is a DECLARATION, not a widening. When both bridge
+// candidates fill the bounded sample the probe cannot rank them, and the honest answer is a refusal;
+// this lets a human who knows the deployment answer the question the sample could not, and the report
+// then says the bridge was declared rather than measured. It cannot overrule a measurement that DID
+// come out decisive (that is its own blocker), it cannot conjure a bridge into an empty catalog, and
+// the module validates it against a two-value closed vocabulary — so it is not a free-text channel.
+// Still deliberately absent: any object/table name, any filter, any limit, any read plan.
+const VALID_STOCK_PREPARATION_SOURCE_PREFLIGHT_QUERY_KEYS = new Set(['tenantId', 'workspaceId', 'externalSystemId', 'declaredBridge'])
 const VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_ENSURE_BODY_KEYS = new Set()
 const VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_LIST_QUERY_KEYS = new Set(['tenantId', 'workspaceId', 'projectNo', 'status'])
 const VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_VALUE_ENTRY_QUERY_KEYS = new Set(['tenantId', 'workspaceId', 'decisionId'])
@@ -5190,6 +5238,102 @@ function createHandlers(services, options = {}) {
         b2aTrialRegistry,
         env: process.env,
       }))
+    },
+
+    // 源就绪预检 + 拓扑自测 — SOURCE PREFLIGHT.
+    //
+    // The deployment preflight above and this one are the two halves of "can we run": that one
+    // inspects OUR managed tables, packs and env allowlists; this one MEASURES the customer's source.
+    // It exists because the first live customer session lost a day to two failures nothing detected:
+    // a read plan that ASSUMED the order-module bridge against a catalog whose real BOM lived
+    // elsewhere (so the expansion returned zero rows and reported success), and a test catalog with
+    // no business rows in it at all that nobody noticed for many steps.
+    //
+    // WHAT THIS HANDLER DOES, AND DELIBERATELY DOES NOT DO. It resolves two server-held things — the
+    // configured read plan and a registered external system — hands the probe ONE capability
+    // (`adapter.read`, the same seam the BOM expansion itself reads through), and returns what the
+    // probe measured. It builds no SQL, opens no second connection path, persists nothing, and holds
+    // nothing it could write with. The `externalSystemId` query key SELECTS a registered row inside
+    // the caller's own tenant scope; it is never a connection, and the row's credentials are resolved
+    // server-side by the same `getExternalSystemForAdapter` every other route uses.
+    //
+    // The read plan is taken from the CONFIGURED table action when there is one, because the whole
+    // point of check 7 is to compare the source against what this deployment will actually run. An
+    // unconfigured deployment falls back to the shipped default plan and still gets a useful answer —
+    // reachability, data presence and detected shape do not depend on the comparison.
+    async stockPreparationSourcePreflight(req, res) {
+      requireAccess(req, 'read')
+      const input = normalizeStockPreparationConfirmBody(
+        requestQuery(req),
+        VALID_STOCK_PREPARATION_SOURCE_PREFLIGHT_QUERY_KEYS,
+        'STOCK_PREPARATION_SOURCE_PREFLIGHT_REQUEST_INVALID',
+      )
+
+      // Server config, never a request input. An unconfigured deployment throws here — that is the
+      // "not plugged in yet" state, and it must degrade to the default plan rather than 5xx the whole
+      // check, exactly as the hub overview treats the same throw.
+      let action = null
+      try {
+        action = await tableActions.getTableAction({ actionId: PLM_STOCK_PREPARATION_ACTION_ID })
+      } catch {
+        action = null
+      }
+      const configuredSystemId = action && action.source ? firstString(action.source.externalSystemId) : undefined
+      const externalSystemId = firstString(input.externalSystemId) || configuredSystemId
+      if (!externalSystemId) {
+        throw new HttpRouteError(
+          409,
+          'SOURCE_PREFLIGHT_NO_SOURCE',
+          'no data source to check: name one with externalSystemId, or configure the stock-preparation table action',
+        )
+      }
+
+      // Closed vocabulary, refused AT THE EDGE rather than quietly ignored downstream: an operator who
+      // mistypes the bridge must be told, not handed a report that silently measured instead.
+      // `firstString` yields null for an absent OR blank key, so "not supplied" and "supplied as
+      // whitespace" collapse here — both mean no declaration, and neither is an error.
+      const declaredBridge = firstString(input.declaredBridge)
+      const declarationSupplied = Object.prototype.hasOwnProperty.call(input, 'declaredBridge')
+      if (declarationSupplied && !DECLARABLE_BRIDGES.includes(declaredBridge)) {
+        throw new HttpRouteError(
+          400,
+          'STOCK_PREPARATION_SOURCE_PREFLIGHT_REQUEST_INVALID',
+          'declaredBridge must name one of the two bridge candidates',
+          { field: 'declaredBridge', allowed: [...DECLARABLE_BRIDGES] },
+        )
+      }
+
+      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
+        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
+        : externalSystems.getExternalSystem.bind(externalSystems)
+      const system = await loadSystem(scopedInput(req, { id: externalSystemId }))
+      const adapter = adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
+      if (!adapter || typeof adapter.read !== 'function') {
+        throw new HttpRouteError(422, 'SOURCE_PREFLIGHT_KIND_UNSUPPORTED', 'this data source kind cannot be read', {
+          externalSystemId,
+        })
+      }
+
+      try {
+        return sendOk(res, await runStockPreparationSourcePreflight({
+          // The ONE capability the probe is handed. Bounded per call by the probe's own constant.
+          readObject: (request) => adapter.read(request),
+          readPlan: action && action.source ? action.source.readPlan : undefined,
+          externalSystemId,
+          declaredBridge,
+        }))
+      } catch (error) {
+        if (error instanceof SourcePreflightError) {
+          // Coarse and values-free. `error.details` on the values-free self-check carries a path, a
+          // length and a mask by construction — never the value that tripped it — but the refusal is
+          // still reported as a REASON CODE only, so a future detail field cannot become an exfil
+          // channel just by existing.
+          throw new HttpRouteError(500, 'SOURCE_PREFLIGHT_FAILED', 'source preflight could not complete', {
+            reason: error.message,
+          })
+        }
+        throw error
+      }
     },
 
     async stockPreparationTargetReadiness(req, res) {
