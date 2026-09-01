@@ -184,6 +184,73 @@ const DESIGN_BOM_BRIDGE_OBJECTS = Object.freeze([
   'DN_PDM_DesignBomInfo',
 ])
 
+// ---------------------------------------------------------------------------
+// THE TWO BOM STORES, and why "which one is production" is not a volume question.
+//
+// MEASURED ON THE REAL CUSTOMER PLM (read-only, ground truth — not a fixture):
+//
+//   DN_PDM_BomHeadInfo      143 rows
+//   DN_PDM_BomDetailsInfo  1319 rows, Bom_ExAttr1 columnar, 1319/1319 numeric
+//   DN_PDM_DesignBom       2570 rows, NO ExAttr columns at all — its slots live as JSON KEYS inside
+//                          a single nvarchar `data` column ({"pid":…,"material":…,"bom_exattr16":""})
+//   DN_PDM_OrderHeadInfo      1 row  /  DN_PDM_OrderDetailInfo  7 rows (the order module is dead here)
+//
+// A rule that ranked BOM stores by LINE VOLUME would read 2570 > 1319 and hand an implementer
+// `DN_PDM_DesignBom` with confidence. That is WRONG: the customer's own legacy 备料 system
+// (`Bom.xml` mapper) reads BomHeadInfo/BomDetailsInfo and references DesignBom NOWHERE — the 2570
+// rows are design-stage/historical. A confident wrong carrier is worse than a refusal, which is the
+// principle this module applies everywhere else, and volume was quietly violating it.
+//
+// So volume is DEMOTED to a tiebreak, and two stronger signals are read first:
+//
+//   AUTHORITY  what the vendor preset says the family's production BOM line model IS. Not a new
+//              preset field: the preset ALREADY declares `bom-line-quantity` on a column family whose
+//              `onRole` names the carrier (`bomDetail` for dn-pdm), and declares DesignBom nowhere.
+//              Reading that is reading what the catalog already asserts, not inventing an assertion.
+//   SHAPE      a COLUMNAR, densely-numeric quantity slot is strong evidence of the production line
+//              table. Slots buried as JSON keys inside a text blob are not addressable by the
+//              columnar read plan at all, so a store in that shape cannot be the one the deployment
+//              reads — whatever its row count.
+//   VOLUME     the tiebreak, and only that.
+//
+// WHEN THE SIGNALS DISAGREE — exactly the real customer's case, where volume says DesignBom while
+// shape and authority say BomDetails — the answer is a CONFLICT BLOCKER naming both stores and which
+// signal favours which. Deliberately NOT "always prefer BomDetails": that would replace one guess
+// with another. The conflict is made visible and a human (or the preset) resolves it.
+// ---------------------------------------------------------------------------
+
+const BOM_STORES = Object.freeze({
+  BOM_DETAILS: 'bom-details',
+  DESIGN_BOM: 'design-bom',
+  CONFLICTED: 'conflicted',
+  NONE: 'none',
+})
+const SOURCE_PREFLIGHT_BOM_STORES = Object.freeze(Object.values(BOM_STORES))
+
+/** The signals, strongest first. `volume` is last on purpose and is never alone decisive over these. */
+const BOM_STORE_SIGNALS = Object.freeze(['authority', 'shape', 'volume'])
+const STRONG_BOM_STORE_SIGNALS = Object.freeze(['authority', 'shape'])
+
+/** How a store's slots are physically laid out — the SHAPE signal's vocabulary. */
+const CARRIER_SHAPES = Object.freeze({
+  COLUMNAR_NUMERIC: 'columnar-numeric',
+  COLUMNAR_PLAIN: 'columnar-plain',
+  JSON_EMBEDDED: 'json-embedded',
+  NO_SLOTS: 'no-slots',
+})
+const SOURCE_PREFLIGHT_CARRIER_SHAPES = Object.freeze(Object.values(CARRIER_SHAPES))
+
+const BOM_STORE_DECISION_REASONS = Object.freeze([
+  'no-store-carries-lines',
+  'only-one-store-carries-lines',
+  'strong-signals-agree',
+  'strong-signals-disagree',
+  'strong-signals-and-volume-disagree',
+  'volume-undecidable-at-cap',
+  'volume-only-tiebreak',
+  'no-signal-distinguishes-the-stores',
+])
+
 const BRIDGES = Object.freeze({
   ORDER_MODULE: 'order-module',
   DESIGN_BOM: 'design-bom',
@@ -225,6 +292,10 @@ const SOURCE_PREFLIGHT_BLOCKER_CODES = Object.freeze({
   NO_PROJECT_NUMBERS: 'no_project_numbers',
   NO_BOM_ROWS: 'no_bom_rows',
   NO_BOM_BRIDGE: 'no_bom_bridge',
+  // Two populated BOM stores whose signals point different ways — measured for real: volume favours
+  // DesignBom (2570 rows) while shape and the preset's own authority favour BomDetails (1319 rows,
+  // columnar 100%-numeric Bom_ExAttr1). Naming a winner there would be a confident wrong carrier.
+  BOM_STORE_SIGNALS_CONFLICT: 'bom_store_signals_conflict',
   BRIDGE_AMBIGUOUS: 'bridge_ambiguous',
   // Distinct from BRIDGE_AMBIGUOUS on purpose: "both carriers are full past the sample cap, so a
   // bounded read cannot rank them" is a different fact, with a different way out, from "we compared
@@ -244,6 +315,10 @@ const SOURCE_PREFLIGHT_WARNING_CODES = Object.freeze({
   // Two or more slots are equally plausible quantity carriers and no dictionary breaks the tie. The
   // same discipline the bridge decision follows: say so, do not pick.
   QUANTITY_FIELD_AMBIGUOUS: 'quantity_field_ambiguous',
+  // The carrier has no addressable slot columns at all — its slots are JSON keys in a text blob, the
+  // real customer's DesignBom shape. Saying nothing here would render as "no quantity", which is
+  // wrong; this says the slots exist and the columnar read plan cannot reach them.
+  QUANTITY_FIELD_UNDETECTABLE_ON_CARRIER: 'quantity_field_undetectable_on_this_carrier',
   QUANTITY_READINGS_DISAGREE: 'quantity_readings_disagree',
   // The bridge in this report came from a human, not from the data. Said out loud every time, so a
   // declared bridge is never read back later as a measured one.
@@ -261,6 +336,9 @@ const SOURCE_PREFLIGHT_BLOCKER_CODE_ORDER = Object.freeze([
   SOURCE_PREFLIGHT_BLOCKER_CODES.NO_PROJECT_NUMBERS,
   SOURCE_PREFLIGHT_BLOCKER_CODES.NO_BOM_ROWS,
   SOURCE_PREFLIGHT_BLOCKER_CODES.NO_BOM_BRIDGE,
+  // Ranked ABOVE every bridge question: "which store holds the production BOM" is the more basic
+  // fact, and no answer about how a project reaches its lines means anything until it is settled.
+  SOURCE_PREFLIGHT_BLOCKER_CODES.BOM_STORE_SIGNALS_CONFLICT,
   // A contradicted declaration outranks both ambiguity codes: it says the operator's belief and the
   // data disagree, and that has to be settled before any question about ranking carriers matters.
   SOURCE_PREFLIGHT_BLOCKER_CODES.DECLARED_BRIDGE_CONTRADICTS_MEASUREMENT,
@@ -293,10 +371,15 @@ const CLOSED_VOCABULARY_LEAF_FIELDS = Object.freeze(new Set([
   // CLOSED and not server-authored: it is validated against DECLARABLE_BRIDGES here too, so a request
   // cannot use it as a free-text channel into the report.
   'measuredBridge', 'declaredBridge', 'bridgeSource', 'declarableBridges',
+  // The BOM-store decision's vocabulary: which store, which signal favoured which, what shape each
+  // store's slots are in, and where the authority reading came from.
+  'store', 'carrierStore', 'favours', 'signal', 'signals', 'strongSignals',
+  'shape', 'carrierShape', 'authorityBasis',
 ]))
 
 // The bridge-decision reasons `decideBridge` can produce, plus the preset selector's own reasons.
 const BRIDGE_DECISION_REASONS = Object.freeze([
+  'bom-store-conflict',
   'neither-candidate-carries-lines',
   'only-order-module-carries-lines',
   'only-design-bom-carries-lines',
@@ -337,6 +420,9 @@ const IDENTIFIER_LEAF_FIELDS = Object.freeze(new Set([
   // The tied quantity slots the reading refused to choose between, the objects that answered under a
   // collapsed role, and the two bridge line objects the cap standoff names.
   'qualifyingSlots', 'candidates', 'orderLineObject', 'designBomLineObject',
+  // Store-shape identifiers: slot columns, the JSON blob column, and the VENDOR slot keys found in it
+  // (only keys matching the family pattern are ever named; every other key is counted, not named).
+  'familySlotColumns', 'numericSlotColumns', 'jsonSlotColumn', 'jsonFamilySlotKeys',
 ]))
 
 // 4. LIVENESS — matched by exact path, above.
@@ -534,9 +620,20 @@ function buildProbeRoster(plan, presets = []) {
  *     guessing is what put a zero-row run on someone's screen in the first place.
  *   - if neither carries lines, the answer is NONE.
  */
-function decideBridge(orderLines, designLines) {
+function decideBridge(orderLines, designLines, bomStore) {
   const orderCarries = orderLines.rowsObserved >= BRIDGE_MIN_LINES
-  const designCarries = designLines.rowsObserved >= BRIDGE_MIN_LINES
+  // DesignBom is only an entry candidate when the STORE question resolved in its favour. Before this,
+  // a high-volume DesignBom became the answer on row count alone — which, on the real customer
+  // catalog, is a confident wrong answer (see the BOM_STORES banner above).
+  const designEligible = bomStore.store === BOM_STORES.DESIGN_BOM
+  const designCarries = designLines.rowsObserved >= BRIDGE_MIN_LINES && designEligible
+
+  // The store question came out CONFLICTED and DesignBom really does hold lines: we cannot say which
+  // store is production, so we certainly cannot say which one the project enters through. Refuse, and
+  // point at the conflict rather than inventing an entry.
+  if (bomStore.store === BOM_STORES.CONFLICTED && designLines.rowsObserved >= BRIDGE_MIN_LINES && !orderCarries) {
+    return { bridge: BRIDGES.AMBIGUOUS, reason: 'bom-store-conflict', undecidableAtCap: false }
+  }
 
   if (!orderCarries && !designCarries) {
     return { bridge: BRIDGES.NONE, reason: 'neither-candidate-carries-lines', undecidableAtCap: false }
@@ -669,6 +766,226 @@ function decodeQuantitySlotFromDictionary(preset, dictionaryRows) {
     if (!outcome.slot) outcome.slot = slot
   }
   return outcome
+}
+
+/**
+ * The slot family the preset declares the BOM line quantity lives in, plus the ROLE that family sits
+ * on — which is the AUTHORITY signal in one read. For dn-pdm this resolves to the `Bom_ExAttr` family
+ * on role `bomDetail`, i.e. the catalog already says the family's production BOM lines are on
+ * `DN_PDM_BomDetailsInfo`, and says nothing at all about DesignBom.
+ */
+function bomLineQuantityFamily(preset) {
+  if (!preset) return null
+  const expectation = (preset.semanticExpectations || []).find((entry) => entry.semantic === 'bom-line-quantity')
+  if (!expectation || !expectation.columnFamily) return null
+  const family = (preset.genericColumnFamilies || {})[expectation.columnFamily]
+  if (!family) return null
+  return { family, onRole: family.onRole || null, columnFamily: expectation.columnFamily }
+}
+
+/**
+ * JSON-EMBEDDED SLOTS — the shape the real customer's DesignBom turned out to have.
+ *
+ * `DN_PDM_DesignBom` carries no ExAttr columns whatsoever; its dictionary values live as KEYS inside a
+ * single nvarchar `data` column. A slot scan that only looks at COLUMN names finds nothing there and
+ * reports nothing — and "nothing" reads as "no quantity", which is both wrong and misleading.
+ *
+ * So text columns are scanned for JSON objects and their KEYS are matched against the slot family.
+ * VALUES-FREE: only keys that MATCH THE VENDOR'S OWN SLOT PATTERN are ever named (those are vendor
+ * vocabulary, not customer content); every other key is counted and not named, and no JSON VALUE is
+ * read except to ask whether the slot key is populated at all.
+ */
+function detectJsonEmbeddedSlots(family, columns, rows) {
+  const outcome = { column: null, familySlotKeys: [], otherKeyCount: 0, rowsWithObject: 0, populatedFamilySlotRows: 0 }
+  if (!family || rows.length === 0) return outcome
+
+  for (const column of columns) {
+    const familyKeys = new Set()
+    const otherKeys = new Set()
+    let rowsWithObject = 0
+    let populated = 0
+    for (const row of rows) {
+      const raw = optionalString(readCell(row, column))
+      if (!raw || raw[0] !== '{') continue
+      let parsed
+      try {
+        parsed = JSON.parse(raw)
+      } catch {
+        continue
+      }
+      if (!isPlainObject(parsed)) continue
+      rowsWithObject += 1
+      let rowHasPopulatedSlot = false
+      for (const [key, value] of Object.entries(parsed)) {
+        if (isFamilyColumn(family, key)) {
+          familyKeys.add(key)
+          if (isNonEmptyValue(value)) rowHasPopulatedSlot = true
+        } else {
+          otherKeys.add(key)
+        }
+      }
+      if (rowHasPopulatedSlot) populated += 1
+    }
+    if (familyKeys.size === 0) continue
+    // First column that carries family slot keys wins; a table with two such blobs is pathological
+    // and the report shows the column so a human can see which one was read.
+    return {
+      column,
+      familySlotKeys: [...familyKeys].sort(),
+      otherKeyCount: otherKeys.size,
+      rowsWithObject,
+      populatedFamilySlotRows: populated,
+    }
+  }
+  return outcome
+}
+
+/**
+ * Classify ONE store's physical slot layout. This is the SHAPE signal's measurement.
+ *
+ * `columnar-numeric` is the only shape that evidences a production line table: the deployment's read
+ * plan addresses columns, so a store whose slots are JSON keys cannot be the one it reads, however
+ * many rows it holds.
+ */
+function classifyCarrierShape(family, observation, rows) {
+  const base = {
+    object: observation.object,
+    shape: CARRIER_SHAPES.NO_SLOTS,
+    familySlotColumns: [],
+    numericSlotColumns: [],
+    jsonSlotColumn: null,
+    jsonFamilySlotKeys: [],
+    jsonOtherKeyCount: 0,
+    jsonPopulatedSlotRows: 0,
+  }
+  if (!family || !observation.present) return base
+
+  const familyColumns = observation.columns.filter((column) => isFamilyColumn(family, column))
+  base.familySlotColumns = familyColumns
+  if (familyColumns.length > 0) {
+    const numeric = []
+    for (const column of familyColumns) {
+      let populated = 0
+      let numericCount = 0
+      for (const row of rows) {
+        const value = readCell(row, column)
+        if (!isNonEmptyValue(value)) continue
+        populated += 1
+        if (looksNumeric(value)) numericCount += 1
+      }
+      if (populated >= QUANTITY_MIN_OBSERVATIONS && (numericCount / populated) >= QUANTITY_NUMERIC_DENSITY_FLOOR) {
+        numeric.push(column)
+      }
+    }
+    base.numericSlotColumns = numeric
+    base.shape = numeric.length > 0 ? CARRIER_SHAPES.COLUMNAR_NUMERIC : CARRIER_SHAPES.COLUMNAR_PLAIN
+    return base
+  }
+
+  const json = detectJsonEmbeddedSlots(family, observation.columns, rows)
+  if (json.column) {
+    base.shape = CARRIER_SHAPES.JSON_EMBEDDED
+    base.jsonSlotColumn = json.column
+    base.jsonFamilySlotKeys = json.familySlotKeys
+    base.jsonOtherKeyCount = json.otherKeyCount
+    base.jsonPopulatedSlotRows = json.populatedFamilySlotRows
+  }
+  return base
+}
+
+/**
+ * WHICH STORE HOLDS THE PRODUCTION BOM — authority, then shape, then volume as a tiebreak.
+ *
+ * The rule, stated so a reader can audit the verdict rather than trust it:
+ *
+ *   - a store below BRIDGE_MIN_LINES lines carries nothing and is out; if one store is left, it wins.
+ *   - AUTHORITY favours the store the matched preset declares the family's BOM line quantity on —
+ *     but only if that store actually carries lines. A table with no rows asserts nothing.
+ *   - SHAPE favours the unique store with a columnar, densely-numeric slot.
+ *   - if the strong signals (authority, shape) all point one way and VOLUME points the other, that is
+ *     a CONFLICT and the answer is a refusal naming both stores and which signal favours which. This
+ *     is the real customer: volume says DesignBom (2570 > 1319), authority and shape say BomDetails.
+ *   - if the strong signals disagree with EACH OTHER, likewise a conflict.
+ *   - with no strong opinion at all, volume decides — that is the tiebreak role, and the report says
+ *     the decision rested on volume alone.
+ *   - two populated stores that nothing distinguishes is also a refusal, not a coin toss.
+ */
+function decideBomStore({ bomDetail, bomDetailShape, designBom, designBomShape, authorityRole }) {
+  const carriers = [
+    { store: BOM_STORES.BOM_DETAILS, role: 'bomDetail', observation: bomDetail, shape: bomDetailShape },
+    { store: BOM_STORES.DESIGN_BOM, role: 'designBom', observation: designBom, shape: designBomShape },
+  ]
+  const carrying = carriers.filter((entry) => entry.observation.rowsObserved >= BRIDGE_MIN_LINES)
+  const signals = { authority: null, shape: null, volume: null }
+
+  if (carrying.length === 0) {
+    return { store: BOM_STORES.NONE, reason: 'no-store-carries-lines', signals, carrying: [] }
+  }
+  if (carrying.length === 1) {
+    return {
+      store: carrying[0].store,
+      reason: 'only-one-store-carries-lines',
+      signals,
+      carrying: carrying.map((entry) => entry.store),
+    }
+  }
+
+  // AUTHORITY — what the catalog already says, restricted to a store that carries lines.
+  const authorityCarrier = authorityRole
+    ? carrying.find((entry) => entry.role === authorityRole) || null
+    : null
+  if (authorityCarrier) signals.authority = authorityCarrier.store
+
+  // SHAPE — the unique columnar, densely-numeric store.
+  const columnar = carrying.filter((entry) => entry.shape.shape === CARRIER_SHAPES.COLUMNAR_NUMERIC)
+  if (columnar.length === 1) signals.shape = columnar[0].store
+
+  // VOLUME — plain ordering, not dominance. Demoted to "which store holds more of the rows we were
+  // allowed to see", because that is all a bounded sample can honestly say.
+  //
+  // AND THE HONEST CAVEAT THAT MATTERS MOST HERE: when BOTH stores fill the sample cap, the sample
+  // cannot rank them AT ALL. On the real customer the true counts are 2570 and 1319 — a fact this
+  // probe never sees, because it stops at 200 apiece. Treating that as "volume agrees" would let the
+  // cap manufacture agreement, and would quietly hide from the operator that the store we are NOT
+  // pointing at might be the far bigger one. So it is recorded as undecidable, and it is enough on
+  // its own to make the answer a conflict.
+  const [a, b] = carrying
+  const volumeUndecidableAtCap = !a.observation.exact && !b.observation.exact
+  if (!volumeUndecidableAtCap) {
+    if (a.observation.rowsObserved > b.observation.rowsObserved) signals.volume = a.store
+    else if (b.observation.rowsObserved > a.observation.rowsObserved) signals.volume = b.store
+  }
+
+  const strongOpinions = STRONG_BOM_STORE_SIGNALS
+    .map((name) => signals[name])
+    .filter((store) => store !== null)
+  const carryingStores = carrying.map((entry) => entry.store)
+  const base = { signals, carrying: carryingStores, volumeUndecidableAtCap }
+
+  if (strongOpinions.length > 0) {
+    const unanimous = strongOpinions.every((store) => store === strongOpinions[0])
+    if (!unanimous) {
+      return { store: BOM_STORES.CONFLICTED, reason: 'strong-signals-disagree', ...base }
+    }
+    if (signals.volume !== null && signals.volume !== strongOpinions[0]) {
+      // The strong signals point one way and the bigger table is the other one. Refuse, and say which
+      // signal pointed where.
+      return { store: BOM_STORES.CONFLICTED, reason: 'strong-signals-and-volume-disagree', ...base }
+    }
+    if (volumeUndecidableAtCap) {
+      // THE REAL CUSTOMER. Shape and authority both say BomDetails; the sample cannot see that
+      // DesignBom holds twice as many rows, and cannot rule it out either. Concluding BomDetails here
+      // would be "always prefer the preset's pair" wearing a measurement's clothes — so the operator
+      // is shown the standoff and resolves it, exactly as for the bridge cap standoff.
+      return { store: BOM_STORES.CONFLICTED, reason: 'volume-undecidable-at-cap', ...base }
+    }
+    return { store: strongOpinions[0], reason: 'strong-signals-agree', ...base }
+  }
+
+  if (signals.volume !== null) {
+    return { store: signals.volume, reason: 'volume-only-tiebreak', ...base }
+  }
+  return { store: BOM_STORES.CONFLICTED, reason: 'no-signal-distinguishes-the-stores', ...base }
 }
 
 /**
@@ -872,10 +1189,88 @@ async function runStockPreparationSourcePreflight(input = {}) {
     hasBomRows: bomHead.rowsObserved > 0 && bomDetail.rowsObserved > 0,
   }
 
+  // ---- CHECK 3a: preset match, BY TABLE SIGNATURE ----------------------------
+  // Identity comes from the tables the source actually answered for — never from a customer name, a
+  // hostname, or an operator's assertion. `selectVendorPreset` is fail-closed on ambiguity by design.
+  //
+  // Resolved HERE, ahead of the store and topology decisions, because the matched preset is what
+  // carries the AUTHORITY signal those decisions weigh: the family's declared BOM-line-quantity role.
+  const answeredTables = observations.filter((entry) => entry.present).map((entry) => entry.object)
+  let presetSelection
+  try {
+    presetSelection = selectVendorPreset(presets, answeredTables)
+  } catch (error) {
+    presetSelection = { selected: null, reason: 'PRESET_CATALOG_INVALID', evaluations: [] }
+  }
+  const matchedPreset = presetSelection.selected || null
+  const presetEvaluation = matchedPreset
+    ? evaluatePresetMatch(matchedPreset, answeredTables)
+    : null
+  const presetMatch = {
+    matchedBy: 'table-signature',
+    presetId: matchedPreset ? matchedPreset.presetId : null,
+    reason: presetSelection.reason,
+    tablesAnswered: answeredTables.length,
+    matchedSignatureTables: presetEvaluation ? presetEvaluation.matchedCount : 0,
+    requiredSignatureTables: presetEvaluation ? presetEvaluation.requiredCount : null,
+    missingSignatureTables: presetEvaluation ? presetEvaluation.missingTables : [],
+  }
+
+  // ---- CHECK 3b: WHICH BOM STORE IS PRODUCTION -------------------------------
+  // Runs BEFORE the topology decision, because "which store holds the production BOM" is a stronger
+  // and more basic question than "how does a project reach it" — and because answering the second on
+  // row count alone is what produced a confident wrong carrier on the real customer catalog.
+  //
+  // The preset is read here purely as an ASSERTION SOURCE; the shapes are measured from the sampled
+  // rows. Both stores are classified even when only one carries lines, so the report always shows the
+  // shape evidence rather than only the winner's.
+  const quantityFamily = bomLineQuantityFamily(matchedPreset)
+  const bomDetailShape = classifyCarrierShape(quantityFamily && quantityFamily.family, bomDetail, rowsOf('bomDetail'))
+  const designBomShape = classifyCarrierShape(quantityFamily && quantityFamily.family, designBom, rowsOf('designBom'))
+  const storeDecision = decideBomStore({
+    bomDetail,
+    bomDetailShape,
+    designBom,
+    designBomShape,
+    authorityRole: quantityFamily ? quantityFamily.onRole : null,
+  })
+  const bomStore = {
+    store: storeDecision.store,
+    reason: storeDecision.reason,
+    // Which signal favoured which store — the sentence a refusal has to be able to say out loud.
+    signals: BOM_STORE_SIGNALS.map((signal) => ({ signal, favours: storeDecision.signals[signal] })),
+    strongSignals: [...STRONG_BOM_STORE_SIGNALS],
+    // True when both stores filled the sample cap: the sample cannot rank them, and says so rather
+    // than letting the cap manufacture agreement.
+    volumeUndecidableAtCap: Boolean(storeDecision.volumeUndecidableAtCap),
+    rowCap: SOURCE_PREFLIGHT_ROW_CAP,
+    authorityBasis: quantityFamily && quantityFamily.onRole ? 'preset-bom-line-quantity-role' : null,
+    dominanceRatio: BRIDGE_DOMINANCE_RATIO,
+    minLines: BRIDGE_MIN_LINES,
+    candidates: [
+      {
+        store: BOM_STORES.BOM_DETAILS,
+        object: bomDetail.object,
+        lines: bomDetail.rowsObserved,
+        exact: bomDetail.exact,
+        present: bomDetail.present,
+        ...bomDetailShape,
+      },
+      {
+        store: BOM_STORES.DESIGN_BOM,
+        object: designBom.object,
+        lines: designBom.rowsObserved,
+        exact: designBom.exact,
+        present: designBom.present,
+        ...designBomShape,
+      },
+    ],
+  }
+
   // ---- CHECK 4: topology -----------------------------------------------------
   const orderHead = roleOf('orderHead')
   const orderDetail = roleOf('orderDetail')
-  const measured = decideBridge(orderDetail, designBom)
+  const measured = decideBridge(orderDetail, designBom, storeDecision)
   const configuredBridge = planAssumedBridge(plan)
 
   // THE DECLARATION, and the exactly two things it may do.
@@ -941,36 +1336,21 @@ async function runStockPreparationSourcePreflight(input = {}) {
     ],
   }
 
-  // ---- CHECK 5: preset match, BY TABLE SIGNATURE -----------------------------
-  // Identity comes from the tables the source actually answered for — never from a customer name, a
-  // hostname, or an operator's assertion. `selectVendorPreset` is fail-closed on ambiguity by design.
-  const answeredTables = observations.filter((entry) => entry.present).map((entry) => entry.object)
-  let presetSelection
-  try {
-    presetSelection = selectVendorPreset(presets, answeredTables)
-  } catch (error) {
-    presetSelection = { selected: null, reason: 'PRESET_CATALOG_INVALID', evaluations: [] }
-  }
-  const matchedPreset = presetSelection.selected || null
-  const presetEvaluation = matchedPreset
-    ? evaluatePresetMatch(matchedPreset, answeredTables)
-    : null
-  const presetMatch = {
-    matchedBy: 'table-signature',
-    presetId: matchedPreset ? matchedPreset.presetId : null,
-    reason: presetSelection.reason,
-    tablesAnswered: answeredTables.length,
-    matchedSignatureTables: presetEvaluation ? presetEvaluation.matchedCount : 0,
-    requiredSignatureTables: presetEvaluation ? presetEvaluation.requiredCount : null,
-    missingSignatureTables: presetEvaluation ? presetEvaluation.missingTables : [],
-  }
-
   // ---- CHECK 6: quantity slot ------------------------------------------------
-  // The BOM-carrying table is whichever the DETECTED bridge says it is — measuring the configured
-  // table's slots when the source uses another one would report the wrong table's shape and quietly
-  // agree with the very assumption that failed.
-  const quantityCarrier = detectedBridge === BRIDGES.DESIGN_BOM ? designBom : bomDetail
-  const quantityCarrierRows = detectedBridge === BRIDGES.DESIGN_BOM ? rowsOf('designBom') : rowsOf('bomDetail')
+  // The slots measured are the ones on the STORE the previous check resolved to — measuring the
+  // configured table's slots when the source uses another store would report the wrong table's shape
+  // and quietly agree with the very assumption that failed.
+  //
+  // When the store question came out CONFLICTED there is no carrier to measure and no honest quantity
+  // answer to give. The measurement still runs against the preset-authoritative store so the evidence
+  // is on screen, but `carrierUndecided` is set and NO mismatch is claimed from it: naming a
+  // "configured field is wrong" against a table we are not sure is the production one is exactly the
+  // confident-wrong-answer this whole revision exists to remove.
+  const storeIsDesignBom = bomStore.store === BOM_STORES.DESIGN_BOM
+  const carrierUndecided = bomStore.store === BOM_STORES.CONFLICTED
+  const quantityCarrier = storeIsDesignBom ? designBom : bomDetail
+  const quantityCarrierRows = storeIsDesignBom ? rowsOf('designBom') : rowsOf('bomDetail')
+  const quantityCarrierShape = storeIsDesignBom ? designBomShape : bomDetailShape
 
   let dictionaryDecode = { slot: null, keyColumn: null, enabledRows: 0, matchedRows: 0 }
   let dictionaryObject = null
@@ -1026,8 +1406,33 @@ async function runStockPreparationSourcePreflight(input = {}) {
     && qualifyingSlots.some((entry) => entry.column.toLowerCase() === configuredQuantityField.toLowerCase()),
   )
 
+  // THE CARRIER MAY NOT HAVE COLUMNS TO MEASURE AT ALL.
+  //
+  // The real customer's DesignBom has no ExAttr columns whatsoever — its slots are JSON keys inside a
+  // text blob. A column-only scan finds nothing there, and "nothing" renders as "no quantity", which
+  // is wrong and misleading. So an addressable-slot-less carrier is reported as UNDETECTABLE, naming
+  // the blob column and the vendor slot keys found inside it.
+  //
+  // Deliberately reported rather than parsed. Resolving a quantity out of JSON would mean deciding
+  // WHICH key, with the dictionary decode mapping slot names to keys — a real feature, and a
+  // half-built version of it is another confident wrong answer of exactly the kind being removed
+  // here. The shipped read plan addresses columns; a JSON-embedded store is not readable by it, and
+  // saying so plainly is the honest and actionable answer.
+  const slotsUndetectable = quantityCarrier.present
+    && quantityCarrierShape.shape === CARRIER_SHAPES.JSON_EMBEDDED
+
   const quantityField = {
     carrierObject: quantityCarrier.object,
+    carrierStore: bomStore.store,
+    carrierUndecided,
+    carrierShape: quantityCarrierShape.shape,
+    // Present only on a JSON-embedded carrier; identifiers only — the vendor's own slot keys, never a
+    // customer value, with every other key counted and unnamed.
+    jsonSlotColumn: quantityCarrierShape.jsonSlotColumn,
+    jsonFamilySlotKeys: quantityCarrierShape.jsonFamilySlotKeys,
+    jsonOtherKeyCount: quantityCarrierShape.jsonOtherKeyCount,
+    jsonPopulatedSlotRows: quantityCarrierShape.jsonPopulatedSlotRows,
+    slotsUndetectable,
     configuredField: configuredQuantityField,
     dictionaryObject,
     dictionaryReadable,
@@ -1064,10 +1469,32 @@ async function runStockPreparationSourcePreflight(input = {}) {
     } else if (!projectData.hasProjectNumbers) {
       blockers.push({ code: B.NO_PROJECT_NUMBERS, detail: { object: pathExAttr.object, matchField } })
     }
-    if (!bomData.hasBomRows && detectedBridge !== BRIDGES.DESIGN_BOM) {
+    // Suppressed when the resolved STORE is DesignBom: the classic head/detail pair being empty is
+    // then the expected shape, not missing data. Keyed on the store rather than the bridge because
+    // the store is what decides where lines legitimately live.
+    if (!bomData.hasBomRows && bomStore.store !== BOM_STORES.DESIGN_BOM) {
       blockers.push({
         code: B.NO_BOM_ROWS,
         detail: { bomHeadRows: bomData.bomHeadRows, bomDetailRows: bomData.bomDetailRows },
+      })
+    }
+    if (bomStore.store === BOM_STORES.CONFLICTED) {
+      // Name BOTH stores and WHICH SIGNAL FAVOURS WHICH. A refusal that cannot say what disagreed is
+      // just a shrug; this one hands over the whole disagreement.
+      blockers.push({
+        code: B.BOM_STORE_SIGNALS_CONFLICT,
+        detail: {
+          reason: bomStore.reason,
+          signals: bomStore.signals,
+          candidates: bomStore.candidates.map((entry) => ({
+            store: entry.store,
+            object: entry.object,
+            lines: entry.lines,
+            exact: entry.exact,
+            shape: entry.shape,
+          })),
+          declarableBridges: [...DECLARABLE_BRIDGES],
+        },
       })
     }
     if (declarationContradicts) {
@@ -1133,7 +1560,18 @@ async function runStockPreparationSourcePreflight(input = {}) {
     if (dictionaryObject && !dictionaryReadable) {
       warnings.push({ code: W.DICTIONARY_UNREADABLE, detail: { object: dictionaryObject } })
     }
-    if (measuredAmbiguous && !resolvedSlot) {
+    if (slotsUndetectable) {
+      warnings.push({
+        code: W.QUANTITY_FIELD_UNDETECTABLE_ON_CARRIER,
+        detail: {
+          carrierObject: quantityCarrier.object,
+          carrierShape: quantityCarrierShape.shape,
+          jsonSlotColumn: quantityCarrierShape.jsonSlotColumn,
+          jsonFamilySlotKeys: quantityCarrierShape.jsonFamilySlotKeys,
+          jsonPopulatedSlotRows: quantityCarrierShape.jsonPopulatedSlotRows,
+        },
+      })
+    } else if (measuredAmbiguous && !resolvedSlot) {
       // Several plausible carriers and nothing to break the tie. Naming one here is exactly the guess
       // this module refuses everywhere else, so it names the FIELD instead — and deliberately emits no
       // mismatch, because a mismatch claims to know the right answer.
@@ -1148,7 +1586,9 @@ async function runStockPreparationSourcePreflight(input = {}) {
       })
     } else if (!resolvedSlot) {
       warnings.push({ code: W.QUANTITY_FIELD_UNRESOLVED, detail: { carrierObject: quantityCarrier.object } })
-    } else if (!quantityField.matchesConfigured) {
+    } else if (!quantityField.matchesConfigured && !carrierUndecided) {
+      // Suppressed while the STORE is unresolved: "your configured quantity column is wrong" is a
+      // claim about a specific table, and we do not yet know which table the deployment should read.
       warnings.push({
         code: W.QUANTITY_FIELD_MISMATCH,
         detail: { configuredField: configuredQuantityField, detectedField: resolvedSlot },
@@ -1177,6 +1617,7 @@ async function runStockPreparationSourcePreflight(input = {}) {
       reachability,
       projectData,
       bomData,
+      bomStore,
       topology,
       presetMatch,
       quantityField,
@@ -1207,6 +1648,12 @@ async function runStockPreparationSourcePreflight(input = {}) {
   }
   if (matchedPreset) {
     for (const table of (matchedPreset.matches && matchedPreset.matches.signatureTables) || []) identifiers.add(table)
+  }
+  // JSON-embedded slot keys are schema, not content — but they are not COLUMNS of any probed table,
+  // so they would not otherwise earn the identifier exemption. Only keys matching the vendor's own
+  // slot-family pattern ever reach the report, and only those are added here.
+  for (const shape of [bomDetailShape, designBomShape]) {
+    for (const key of shape.jsonFamilySlotKeys) identifiers.add(key)
   }
 
   assertSourcePreflightValuesFree(report, { observedValues, identifiers })
@@ -1283,7 +1730,7 @@ function assertSourcePreflightValuesFree(report, { observedValues = new Set(), i
       ...Object.values(SOURCE_PREFLIGHT_BLOCKER_CODES),
       ...Object.values(SOURCE_PREFLIGHT_WARNING_CODES),
     ])],
-    ['reason', new Set([...BRIDGE_DECISION_REASONS, ...PRESET_SELECTION_REASONS])],
+    ['reason', new Set([...BRIDGE_DECISION_REASONS, ...PRESET_SELECTION_REASONS, ...BOM_STORE_DECISION_REASONS])],
     ['errorCode', new Set(SOURCE_PREFLIGHT_READ_ERROR_CODES)],
     ['failureCode', new Set(SOURCE_PREFLIGHT_READ_ERROR_CODES)],
     ['bridge', new Set(SOURCE_PREFLIGHT_BRIDGES)],
@@ -1297,6 +1744,15 @@ function assertSourcePreflightValuesFree(report, { observedValues = new Set(), i
     ['declarableBridges', new Set(DECLARABLE_BRIDGES)],
     ['bridgeSource', new Set(['measured', 'declared'])],
     ['role', new Set(PROBE_ROLES)],
+    ['store', new Set(SOURCE_PREFLIGHT_BOM_STORES)],
+    ['carrierStore', new Set(SOURCE_PREFLIGHT_BOM_STORES)],
+    ['favours', new Set(SOURCE_PREFLIGHT_BOM_STORES)],
+    ['signal', new Set(BOM_STORE_SIGNALS)],
+    ['signals', new Set(BOM_STORE_SIGNALS)],
+    ['strongSignals', new Set(STRONG_BOM_STORE_SIGNALS)],
+    ['shape', new Set(SOURCE_PREFLIGHT_CARRIER_SHAPES)],
+    ['carrierShape', new Set(SOURCE_PREFLIGHT_CARRIER_SHAPES)],
+    ['authorityBasis', new Set(['preset-bom-line-quantity-role'])],
   ])
 
   const knownIdentifiers = new Set()
@@ -1350,6 +1806,10 @@ module.exports = {
   SOURCE_PREFLIGHT_ROW_CAP,
   IDENTITY_PROBE_MAX,
   SOURCE_PREFLIGHT_BRIDGES,
+  SOURCE_PREFLIGHT_BOM_STORES,
+  SOURCE_PREFLIGHT_CARRIER_SHAPES,
+  BOM_STORE_SIGNALS,
+  STRONG_BOM_STORE_SIGNALS,
   DECLARABLE_BRIDGES,
   SOURCE_PREFLIGHT_BLOCKER_CODES,
   SOURCE_PREFLIGHT_BLOCKER_CODE_ORDER,
@@ -1368,6 +1828,10 @@ module.exports = {
     buildProbeRoster,
     classifyReadError,
     decideBridge,
+    decideBomStore,
+    classifyCarrierShape,
+    detectJsonEmbeddedSlots,
+    bomLineQuantityFamily,
     decodeQuantitySlotFromDictionary,
     measureNumericSlots,
     planAssumedBridge,

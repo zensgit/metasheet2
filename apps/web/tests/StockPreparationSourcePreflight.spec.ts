@@ -114,6 +114,51 @@ function customerShapedPayload(overrides: Partial<StockPrepSourcePreflight> = {}
         bomDetailPresent: true,
         hasBomRows: true,
       },
+      bomStore: {
+        store: 'design-bom',
+        reason: 'only-one-store-carries-lines',
+        signals: [
+          { signal: 'authority', favours: null },
+          { signal: 'shape', favours: null },
+          { signal: 'volume', favours: null },
+        ],
+        strongSignals: ['authority', 'shape'],
+        volumeUndecidableAtCap: false,
+        rowCap: 200,
+        authorityBasis: 'preset-bom-line-quantity-role',
+        dominanceRatio: 4,
+        minLines: 2,
+        candidates: [
+          {
+            store: 'bom-details',
+            object: 'DN_PDM_BomDetailsInfo',
+            lines: 0,
+            exact: true,
+            present: true,
+            shape: 'no-slots',
+            familySlotColumns: [],
+            numericSlotColumns: [],
+            jsonSlotColumn: null,
+            jsonFamilySlotKeys: [],
+            jsonOtherKeyCount: 0,
+            jsonPopulatedSlotRows: 0,
+          },
+          {
+            store: 'design-bom',
+            object: 'DN_PDM_DesignBom',
+            lines: 200,
+            exact: false,
+            present: true,
+            shape: 'columnar-numeric',
+            familySlotColumns: ['bom_exattr1', 'bom_exattr2'],
+            numericSlotColumns: ['bom_exattr1'],
+            jsonSlotColumn: null,
+            jsonFamilySlotKeys: [],
+            jsonOtherKeyCount: 0,
+            jsonPopulatedSlotRows: 0,
+          },
+        ],
+      },
       topology: {
         detectedBridge: 'design-bom',
         reason: 'only-design-bom-carries-lines',
@@ -165,6 +210,14 @@ function customerShapedPayload(overrides: Partial<StockPrepSourcePreflight> = {}
       },
       quantityField: {
         carrierObject: 'DN_PDM_DesignBom',
+        carrierStore: 'design-bom',
+        carrierUndecided: false,
+        carrierShape: 'columnar-numeric',
+        jsonSlotColumn: null,
+        jsonFamilySlotKeys: [],
+        jsonOtherKeyCount: 0,
+        jsonPopulatedSlotRows: 0,
+        slotsUndetectable: false,
         configuredField: 'Bom_ExAttr1',
         dictionaryObject: 'DN_PM_BomExAttrInfo',
         dictionaryReadable: true,
@@ -240,6 +293,85 @@ function emptyPayload(): StockPrepSourcePreflight {
       { code: 'no_bom_rows', detail: { bomHeadRows: 0, bomDetailRows: 0 } },
       { code: 'no_bom_bridge', detail: { reason: 'neither-candidate-carries-lines' } },
     ],
+  }
+}
+
+/**
+ * GROUND TRUTH, as a payload: the real customer PLM, where the biggest BOM table is NOT the
+ * production one and the evidence points two ways.
+ */
+function storeConflictPayload(): StockPrepSourcePreflight {
+  const base = customerShapedPayload()
+  return {
+    ...base,
+    checks: {
+      ...base.checks,
+      bomStore: {
+        ...base.checks.bomStore,
+        store: 'conflicted',
+        reason: 'volume-undecidable-at-cap',
+        volumeUndecidableAtCap: true,
+        signals: [
+          { signal: 'authority', favours: 'bom-details' },
+          { signal: 'shape', favours: 'bom-details' },
+          { signal: 'volume', favours: null },
+        ],
+        candidates: [
+          {
+            ...base.checks.bomStore.candidates[0],
+            lines: 200,
+            exact: false,
+            shape: 'columnar-numeric',
+            familySlotColumns: ['Bom_ExAttr1'],
+            numericSlotColumns: ['Bom_ExAttr1'],
+          },
+          {
+            ...base.checks.bomStore.candidates[1],
+            lines: 200,
+            exact: false,
+            shape: 'json-embedded',
+            familySlotColumns: [],
+            numericSlotColumns: [],
+            jsonSlotColumn: 'data',
+            jsonFamilySlotKeys: ['bom_exattr16'],
+            jsonOtherKeyCount: 3,
+            jsonPopulatedSlotRows: 0,
+          },
+        ],
+      },
+      quantityField: {
+        ...base.checks.quantityField,
+        carrierObject: 'DN_PDM_BomDetailsInfo',
+        carrierStore: 'conflicted',
+        carrierUndecided: true,
+      },
+    },
+    blockers: [{
+      code: 'bom_store_signals_conflict',
+      detail: {
+        reason: 'volume-undecidable-at-cap',
+        signals: [
+          { signal: 'authority', favours: 'bom-details' },
+          { signal: 'shape', favours: 'bom-details' },
+          { signal: 'volume', favours: null },
+        ],
+        candidates: [
+          { store: 'bom-details', object: 'DN_PDM_BomDetailsInfo', lines: 200, exact: false, shape: 'columnar-numeric' },
+          { store: 'design-bom', object: 'DN_PDM_DesignBom', lines: 200, exact: false, shape: 'json-embedded' },
+        ],
+        declarableBridges: ['order-module', 'design-bom'],
+      },
+    }],
+    warnings: [{
+      code: 'quantity_field_undetectable_on_this_carrier',
+      detail: {
+        carrierObject: 'DN_PDM_DesignBom',
+        carrierShape: 'json-embedded',
+        jsonSlotColumn: 'data',
+        jsonFamilySlotKeys: ['bom_exattr16'],
+        jsonPopulatedSlotRows: 0,
+      },
+    }],
   }
 }
 
@@ -450,13 +582,15 @@ describe('源就绪预检 + 拓扑自测 (source readiness panel)', () => {
     expect(sourceCalls[0]).not.toContain('declaredBridge')
 
     const rows = Array.from(root.querySelectorAll('[data-testid="stock-prep-source-preflight-check"]'))
-    expect(rows).toHaveLength(4)
-    // Literal expectations for THIS payload — reachable yes, data yes, topology NO, preset yes.
-    expect(rows.map((row) => row.getAttribute('data-check'))).toEqual(['reachable', 'has-data', 'topology', 'preset'])
-    expect(rows.map((row) => row.getAttribute('data-ok'))).toEqual(['yes', 'yes', 'no', 'yes'])
+    expect(rows).toHaveLength(5)
+    // Literal expectations for THIS payload — reachable yes, data yes, store yes, topology NO, preset yes.
+    expect(rows.map((row) => row.getAttribute('data-check')))
+      .toEqual(['reachable', 'has-data', 'bom-store', 'topology', 'preset'])
+    expect(rows.map((row) => row.getAttribute('data-ok'))).toEqual(['yes', 'yes', 'yes', 'no', 'yes'])
     // And the service's projection agrees with the same literals, so the two cannot drift apart while
     // both stay green.
-    expect(stockPrepSourceCheckRows(customerShapedPayload()).map((row) => row.ok)).toEqual([true, true, false, true])
+    expect(stockPrepSourceCheckRows(customerShapedPayload()).map((row) => row.ok))
+      .toEqual([true, true, true, false, true])
   })
 
   // P-01b ----------------------------------------------------------------
@@ -521,7 +655,7 @@ describe('源就绪预检 + 拓扑自测 (source readiness panel)', () => {
 
     expect(root.querySelector('[data-testid="stock-prep-source-preflight-verdict"]')?.textContent).toContain('可以接')
     const rows = Array.from(root.querySelectorAll('[data-testid="stock-prep-source-preflight-check"]'))
-    expect(rows.map((row) => row.getAttribute('data-ok'))).toEqual(['yes', 'yes', 'yes', 'yes'])
+    expect(rows.map((row) => row.getAttribute('data-ok'))).toEqual(['yes', 'yes', 'yes', 'yes', 'yes'])
     expect(root.querySelectorAll('[data-testid="stock-prep-source-preflight-blocker"]')).toHaveLength(0)
   })
 
@@ -539,8 +673,8 @@ describe('源就绪预检 + 拓扑自测 (source readiness panel)', () => {
 
     // Literal, for this payload: reachable yes, data NO, topology NO, preset yes.
     const rows = Array.from(root.querySelectorAll('[data-testid="stock-prep-source-preflight-check"]'))
-    expect(rows.map((row) => row.getAttribute('data-ok'))).toEqual(['yes', 'no', 'no', 'yes'])
-    expect(stockPrepSourceCheckRows(emptyPayload()).map((row) => row.ok)).toEqual([true, false, false, true])
+    expect(rows.map((row) => row.getAttribute('data-ok'))).toEqual(['yes', 'no', 'yes', 'no', 'yes'])
+    expect(stockPrepSourceCheckRows(emptyPayload()).map((row) => row.ok)).toEqual([true, false, true, false, true])
   })
 
   // P-05 -----------------------------------------------------------------
@@ -576,8 +710,8 @@ describe('源就绪预检 + 拓扑自测 (source readiness panel)', () => {
     expect(root.querySelector('[data-testid="stock-prep-source-preflight-verdict"]')?.textContent).toContain('可以接')
     // Reachable yes, data yes, topology yes, preset NO — the honest fourth line for an unknown vendor.
     const rows = Array.from(root.querySelectorAll('[data-testid="stock-prep-source-preflight-check"]'))
-    expect(rows.map((row) => row.getAttribute('data-ok'))).toEqual(['yes', 'yes', 'yes', 'no'])
-    expect(rows[3].textContent).toContain('NO_PRESET_MATCHED')
+    expect(rows.map((row) => row.getAttribute('data-ok'))).toEqual(['yes', 'yes', 'yes', 'yes', 'no'])
+    expect(rows[4].textContent).toContain('NO_PRESET_MATCHED')
   })
 
   // P-06 -----------------------------------------------------------------
@@ -622,6 +756,59 @@ describe('源就绪预检 + 拓扑自测 (source readiness panel)', () => {
     expect(Array.from(samples).filter((node) => (node.textContent || '').startsWith('PRJ-'))).toHaveLength(2)
   })
 
+  // P-13 — GROUND TRUTH -------------------------------------------------
+  it('renders the store conflict with every signal and the table it points at', async () => {
+    installRoutes({ sourcePayload: storeConflictPayload() })
+    const root = await mountView()
+    await runSourceCheck(root)
+
+    // The store line reads NO, and says which kind of undecided it is.
+    const rows = Array.from(root.querySelectorAll('[data-testid="stock-prep-source-preflight-check"]'))
+    expect(rows[2].getAttribute('data-check')).toBe('bom-store')
+    expect(rows[2].getAttribute('data-ok')).toBe('no')
+    expect(rows[2].textContent).toContain('conflicted(volume-undecidable-at-cap)')
+
+    // The sentence: the biggest table is not necessarily the live one.
+    const blockers = textOf(root, '[data-testid="stock-prep-source-preflight-blocker"]')
+    expect(blockers).toContain('两张表都像是放 BOM 的')
+    expect(blockers).toContain('bom_store_signals_conflict')
+    expect(textOf(root, '[data-testid="stock-prep-source-preflight-blocker-next"]')).toContain('不一定是生产在用的那张')
+
+    // EVERY signal and the store it points at — the disagreement, on screen.
+    const signals = Array.from(root.querySelectorAll('[data-testid="stock-prep-source-preflight-store-signal"]'))
+    expect(signals.map((node) => node.getAttribute('data-signal'))).toEqual(['authority', 'shape', 'volume'])
+    expect(signals.map((node) => node.getAttribute('data-favours')))
+      .toEqual(['bom-details', 'bom-details', 'none'])
+    // The two STRONG signals are marked as such, and volume is not — that ranking is the fix.
+    expect(signals.filter((node) => (node.textContent || '').includes('强'))
+      .map((node) => node.getAttribute('data-signal'))).toEqual(['authority', 'shape'])
+    // and volume says out loud why it abstained, rather than letting the cap look like agreement.
+    expect(root.textContent).toContain('两张表都超过了抽样上限')
+
+    // Both candidate stores, with the shape evidence behind each.
+    const candidates = Array.from(root.querySelectorAll('[data-testid="stock-prep-source-preflight-store-candidate"]'))
+    expect(candidates.map((node) => node.getAttribute('data-store'))).toEqual(['bom-details', 'design-bom'])
+    const candidateText = candidates.map((node) => node.textContent || '').join(' | ')
+    expect(candidateText).toContain('columnar-numeric')
+    expect(candidateText).toContain('json-embedded')
+    expect(candidateText).toContain('bom_exattr16')
+
+    expect(root.querySelector('[data-testid="stock-prep-source-preflight-verdict"]')?.textContent).toContain('接不了')
+  })
+
+  // P-14 -----------------------------------------------------------------
+  it('says the JSON-embedded carrier has no quantity COLUMN, not that it has no quantity', async () => {
+    installRoutes({ sourcePayload: storeConflictPayload() })
+    const root = await mountView()
+    await runSourceCheck(root)
+
+    const warnings = textOf(root, '[data-testid="stock-prep-source-preflight-warning"]')
+    expect(warnings).toContain('根本没有数量列')
+    expect(warnings).toContain('JSON')
+    expect(warnings).toContain('这不是「没有数量」')
+    expect(warnings).toContain('quantity_field_undetectable_on_this_carrier')
+  })
+
   // P-10 -----------------------------------------------------------------
   it('renders a cap standoff as its own state, with the way out beside it', async () => {
     installRoutes({ sourcePayload: undecidableAtCapPayload() })
@@ -630,8 +817,8 @@ describe('源就绪预检 + 拓扑自测 (source readiness panel)', () => {
 
     // Distinguishable AT A GLANCE from a measured tie — the token says which one this is.
     const rows = Array.from(root.querySelectorAll('[data-testid="stock-prep-source-preflight-check"]'))
-    expect(rows[2].getAttribute('data-ok')).toBe('no')
-    expect(rows[2].textContent).toContain('undecidable@cap(200)')
+    expect(rows[3].getAttribute('data-ok')).toBe('no')
+    expect(rows[3].textContent).toContain('undecidable@cap(200)')
 
     const blockers = textOf(root, '[data-testid="stock-prep-source-preflight-blocker"]')
     expect(blockers).toContain('装满了抽样上限')
@@ -671,7 +858,7 @@ describe('源就绪预检 + 拓扑自测 (source readiness panel)', () => {
     expect(root.querySelector('[data-testid="stock-prep-source-preflight-declare"]')).toBeNull()
 
     const rows = Array.from(root.querySelectorAll('[data-testid="stock-prep-source-preflight-check"]'))
-    expect(rows[2].textContent).toContain('(declared)')
+    expect(rows[3].textContent).toContain('(declared)')
   })
 
   // P-12 -----------------------------------------------------------------

@@ -369,6 +369,14 @@ export const STOCK_PREP_SOURCE_BLOCKER_PLAIN: Record<string, StockPrepPlainEntry
     zhNext: '两种已知走法(订单模块 / 设计BOM)都没有数据。需要对方告诉我们他们的 BOM 挂在哪张表上。',
     enNext: 'Neither known route — the order module or the design BOM — carries any lines. We need them to tell us which table their BOM hangs off.',
   }),
+  // The finding that came out of measuring the real customer PLM: the BIGGEST BOM table is not
+  // necessarily the production one. Naming a winner on row count alone handed back the wrong table.
+  bom_store_signals_conflict: Object.freeze({
+    zh: '有两张表都像是放 BOM 的,几条线索指向不同的那一张 —— 系统不替你选',
+    en: 'Two tables both look like the BOM store and the evidence points different ways — the system will not choose',
+    zhNext: '下面列了每条线索各指向哪张表:「字段字典的声明」和「数量列的存放形态」是强线索,「行数多少」只能当参考 —— 行数最多的那张,不一定是生产在用的那张(设计稿、历史数据都会很大)。请对方确认他们的备料实际读哪一张,再按那张配置。',
+    enNext: 'Below, each piece of evidence and the table it points at. The field dictionary’s declaration and the shape of the quantity column are the strong ones; row count is only a hint — the biggest table is often not the live one (design drafts and history are bulky). Ask them which table their own 备料 reads, and configure that one.',
+  }),
   bridge_ambiguous: Object.freeze({
     zh: '两条路都有数据,数量也接近,系统不替你猜',
     en: 'Both routes carry data in comparable amounts, and the system will not guess between them',
@@ -434,6 +442,12 @@ export const STOCK_PREP_SOURCE_WARNING_PLAIN: Record<string, StockPrepPlainEntry
     zhNext: '候选列在下面列着。对方的字段字典读不到时,只能请他们指认哪一列是数量 —— 这里宁可说不知道,也不会挑一列写进去。',
     enNext: 'The candidates are listed below. With their field dictionary unreadable, they have to say which one is the quantity — this check would rather say it does not know than name one.',
   }),
+  quantity_field_undetectable_on_this_carrier: Object.freeze({
+    zh: '这张表根本没有数量列 —— 它的字段是塞在一个文本字段里的 JSON',
+    en: 'This table has no quantity column at all — its fields are packed as JSON inside one text column',
+    zhNext: '字段确实在(下面列了认出来的那几个槽名),只是现在的读取方式只会读「列」,读不到 JSON 里面。要用这张表就得先决定怎么解这个 JSON;这不是「没有数量」。',
+    enNext: 'The fields are there (the slot names recognised are listed below) — but the current read addresses COLUMNS and cannot see inside JSON. Using this table means deciding how to unpack that blob first. This is not the same as "no quantity".',
+  }),
   bridge_declared_not_measured: Object.freeze({
     zh: '这次的「走哪条路」是人指定的,不是测出来的',
     en: 'The route in this report was declared by a person, not measured',
@@ -473,6 +487,10 @@ export const STOCK_PREP_SOURCE_CHECK_PLAIN: Record<string, StockPrepPlainEntry> 
   'has-data': Object.freeze({
     zh: '里面有真实的项目和 BOM 数据',
     en: 'It holds real project and BOM data',
+  }),
+  'bom-store': Object.freeze({
+    zh: '确定了 BOM 存在哪张表(不是「哪张最大」)',
+    en: 'Established which table holds the BOM — not merely which is biggest',
   }),
   topology: Object.freeze({
     zh: '实测的 schema 形状,和配置一致',

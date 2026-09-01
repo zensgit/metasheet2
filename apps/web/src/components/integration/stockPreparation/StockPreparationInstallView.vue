@@ -534,6 +534,57 @@
             </dd>
             <dt>{{ bi('每张表读了几行(上限)', 'Rows read per table (the cap)') }}</dt>
             <dd><code>{{ sourcePreflight.rowCap }}</code></dd>
+            <!-- WHICH SIGNAL FAVOURS WHICH STORE. The refusal above is only useful if the reader can
+                 see the disagreement that produced it. -->
+            <dt>{{ bi('BOM 放在哪张表:每条线索指向', 'Which table holds the BOM: what each signal points at') }}</dt>
+            <dd>
+              <ul>
+                <li
+                  v-for="reading in sourcePreflight.checks.bomStore.signals"
+                  :key="reading.signal"
+                  data-testid="stock-prep-source-preflight-store-signal"
+                  :data-signal="reading.signal"
+                  :data-favours="reading.favours || 'none'"
+                >
+                  <code>{{ reading.signal }}</code>
+                  <template v-if="sourcePreflight.checks.bomStore.strongSignals.includes(reading.signal)">
+                    {{ bi('(强)', ' (strong)') }}
+                  </template>
+                  {{ bi(' → ', ' → ') }}
+                  <code>{{ reading.favours || bi('无判断', 'no opinion') }}</code>
+                </li>
+              </ul>
+              <small v-if="sourcePreflight.checks.bomStore.volumeUndecidableAtCap">
+                {{ bi(
+                  '两张表都超过了抽样上限,所以「行数」这条线索这次给不出方向 —— 也就无法排除「没被选中的那张其实大得多」。',
+                  'Both tables exceed the sample limit, so the row-count signal has no direction here — and cannot rule out that the table not chosen is far the bigger one.',
+                ) }}
+              </small>
+            </dd>
+            <dt>{{ bi('两张候选表的形态与行数', 'Shape and row count of each candidate store') }}</dt>
+            <dd>
+              <ul>
+                <li
+                  v-for="candidate in sourcePreflight.checks.bomStore.candidates"
+                  :key="candidate.store"
+                  data-testid="stock-prep-source-preflight-store-candidate"
+                  :data-store="candidate.store"
+                >
+                  <code>{{ candidate.store }}</code> ·
+                  <code>{{ candidate.object || '—' }}</code> =
+                  <code>{{ candidate.lines }}{{ candidate.exact ? '' : '+' }}</code> ·
+                  <code>{{ candidate.shape }}</code>
+                  <template v-if="candidate.jsonSlotColumn">
+                    · {{ bi('字段藏在 ', 'fields inside ') }}<code>{{ candidate.jsonSlotColumn }}</code>
+                    <code
+                      v-for="key in candidate.jsonFamilySlotKeys"
+                      :key="key"
+                      class="stock-prep-install__token"
+                    >{{ key }}</code>
+                  </template>
+                </li>
+              </ul>
+            </dd>
             <dt>{{ bi('两条候选路的实测行数', 'Measured line counts on each candidate route') }}</dt>
             <dd>
               <ul>

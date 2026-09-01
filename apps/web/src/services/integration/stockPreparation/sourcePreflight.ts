@@ -136,6 +136,46 @@ export interface StockPrepSourceTopology {
   candidates: StockPrepSourceBridgeCandidate[]
 }
 
+/** Which BOM store holds the production lines — the question volume alone must not answer. */
+export type StockPrepBomStore = 'bom-details' | 'design-bom' | 'conflicted' | 'none'
+export type StockPrepCarrierShape = 'columnar-numeric' | 'columnar-plain' | 'json-embedded' | 'no-slots'
+export type StockPrepStoreSignal = 'authority' | 'shape' | 'volume'
+
+export interface StockPrepStoreSignalReading {
+  signal: StockPrepStoreSignal
+  /** The store this signal favours, or null when it has no opinion. */
+  favours: StockPrepBomStore | null
+}
+
+export interface StockPrepBomStoreCandidate {
+  store: StockPrepBomStore
+  object: string | null
+  lines: number
+  exact: boolean
+  present: boolean
+  shape: StockPrepCarrierShape
+  familySlotColumns: string[]
+  numericSlotColumns: string[]
+  jsonSlotColumn: string | null
+  jsonFamilySlotKeys: string[]
+  jsonOtherKeyCount: number
+  jsonPopulatedSlotRows: number
+}
+
+export interface StockPrepBomStoreCheck {
+  store: StockPrepBomStore
+  reason: string
+  signals: StockPrepStoreSignalReading[]
+  strongSignals: StockPrepStoreSignal[]
+  /** Both stores filled the sample cap: the sample cannot rank them, and does not pretend to. */
+  volumeUndecidableAtCap: boolean
+  rowCap: number
+  authorityBasis: string | null
+  dominanceRatio: number
+  minLines: number
+  candidates: StockPrepBomStoreCandidate[]
+}
+
 export interface StockPrepSourcePresetMatch {
   matchedBy: string
   presetId: string | null
@@ -148,6 +188,16 @@ export interface StockPrepSourcePresetMatch {
 
 export interface StockPrepSourceQuantityField {
   carrierObject: string | null
+  carrierStore: StockPrepBomStore
+  /** The store question is unresolved, so no confident claim about the quantity column is made. */
+  carrierUndecided: boolean
+  carrierShape: StockPrepCarrierShape
+  jsonSlotColumn: string | null
+  jsonFamilySlotKeys: string[]
+  jsonOtherKeyCount: number
+  jsonPopulatedSlotRows: number
+  /** The carrier has no addressable slot columns — its slots are JSON keys in a text blob. */
+  slotsUndetectable: boolean
   configuredField: string
   dictionaryObject: string | null
   dictionaryReadable: boolean
@@ -177,6 +227,7 @@ export interface StockPrepSourcePreflight {
     reachability: StockPrepSourceReachability
     projectData: StockPrepSourceProjectData
     bomData: StockPrepSourceBomData
+    bomStore: StockPrepBomStoreCheck
     topology: StockPrepSourceTopology
     presetMatch: StockPrepSourcePresetMatch
     quantityField: StockPrepSourceQuantityField
@@ -250,7 +301,7 @@ export async function readStockPreparationSourcePreflight(
 // already decided, so the page cannot disagree with the verdict it is rendering.
 // ---------------------------------------------------------------------------
 
-export type StockPrepSourceCheckId = 'reachable' | 'has-data' | 'topology' | 'preset'
+export type StockPrepSourceCheckId = 'reachable' | 'has-data' | 'bom-store' | 'topology' | 'preset'
 
 export interface StockPrepSourceCheckRow {
   id: StockPrepSourceCheckId
@@ -260,7 +311,7 @@ export interface StockPrepSourceCheckRow {
 }
 
 export function stockPrepSourceCheckRows(preflight: StockPrepSourcePreflight): StockPrepSourceCheckRow[] {
-  const { reachability, projectData, bomData, topology, presetMatch } = preflight.checks
+  const { reachability, projectData, bomData, bomStore, topology, presetMatch } = preflight.checks
   const bridge = topology.detectedBridge
   return [
     {
@@ -274,6 +325,15 @@ export function stockPrepSourceCheckRows(preflight: StockPrepSourcePreflight): S
       id: 'has-data',
       ok: projectData.hasProjectNumbers && (bomData.hasBomRows || bridge === 'design-bom'),
       token: `${projectData.populatedMatchRows}${projectData.exact ? '' : '+'} · ${bomData.bomDetailRows}${bomData.bomDetailExact ? '' : '+'}`,
+    },
+    {
+      // Which BOM store is production. Ahead of the topology line because it is the more basic fact:
+      // "how does a project reach its lines" means nothing until "which table holds them" is settled.
+      id: 'bom-store',
+      ok: bomStore.store === 'bom-details' || bomStore.store === 'design-bom',
+      token: bomStore.store === 'conflicted'
+        ? `conflicted(${bomStore.reason})`
+        : bomStore.store,
     },
     {
       id: 'topology',

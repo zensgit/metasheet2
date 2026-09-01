@@ -227,8 +227,60 @@ function customerShapedSource({ designBomLines = 250 } = {}) {
   return baseCatalog({
     DN_PDM_OrderHeadInfo: [{ ID: 1, OBJ_ID: 'ORDER-1', path_id: 'PATH-9' }],
     DN_PDM_OrderDetailInfo: [],
+    // The classic head/detail pair is EMPTY here — that is what makes this deployment genuinely
+    // DesignBom-backed rather than merely DesignBom-heavy. With a matched dn-pdm preset, a populated
+    // classic pair always pulls the AUTHORITY signal to `bom-details`, so a source where BOTH stores
+    // carry lines can never resolve to design-bom — it conflicts, and a human decides. That is the
+    // whole point of the revised rule, and `realCustomerShapedSource()` is that case.
+    DN_PDM_BomHeadInfo: [],
+    DN_PDM_BomDetailsInfo: [],
     [DESIGN_BOM_OBJECT]: designBomRows(designBomLines),
   })
+}
+
+/**
+ * GROUND TRUTH — the real customer PLM, measured read-only. Proportions preserved, values synthetic.
+ *
+ *   DN_PDM_OrderHeadInfo      1 row   /  DN_PDM_OrderDetailInfo  7 rows   (order module effectively dead)
+ *   DN_PDM_BomHeadInfo      143 rows  /  DN_PDM_BomDetailsInfo 1319 rows, Bom_ExAttr1 columnar 100% numeric
+ *   DN_PDM_DesignBom       2570 rows, NO ExAttr columns at all — slots are JSON KEYS inside `data`
+ *
+ * VOLUME says DesignBom (2570 > 1319). SHAPE and the preset's own AUTHORITY say BomDetails. The
+ * customer's legacy 备料 system reads BomHeadInfo/BomDetailsInfo and references DesignBom nowhere, so
+ * volume's answer is the WRONG carrier — and a confident wrong carrier is worse than a refusal.
+ */
+function realCustomerShapedSource() {
+  const catalog = baseCatalog({
+    DN_PDM_OrderHeadInfo: [{ ID: 1, OBJ_ID: 'ORDER-1', path_id: 'PATH-9' }],
+    DN_PDM_OrderDetailInfo: Array.from({ length: 7 }, (_, index) => ({
+      ID: index + 1,
+      order_id: 'ORDER-1',
+      part_id: `PART-${(index % 4) + 1}`,
+      sort_id: index,
+      quantity: String(index + 1),
+    })),
+    DN_PDM_BomHeadInfo: bomHeadRows(143),
+    DN_PDM_BomDetailsInfo: bomDetailRows(1319),
+  })
+  // The real DesignBom columns, verbatim in shape: no ExAttr column anywhere, the dictionary values
+  // living as JSON keys inside one nvarchar blob. 2458/2570 rows populated upstream; the same ~96%
+  // ratio here, and `bom_exattr16` is present-but-EMPTY exactly as measured.
+  catalog[DESIGN_BOM_OBJECT] = Array.from({ length: 2570 }, (_, index) => ({
+    ID: index + 1,
+    product_part_id: `PART-${(index % 4) + 1}`,
+    obj_id: `DB-${index + 1}`,
+    sort_id: index,
+    SysVer: 'V1',
+    pid: `DBP-${index + 1}`,
+    data: index % 25 === 0
+      ? ''
+      : JSON.stringify({ pid: `DBP-${index + 1}`, material: 'S31603', specification: '', bom_exattr16: '' }),
+    part_id: `PART-${(index % 4) + 1}`,
+    path_id: 'PATH-1',
+    creator: 'svc',
+    createtime: '2026-01-01',
+  }))
+  return catalog
 }
 
 /** INCIDENT B: every table present, not one business row anywhere. */
@@ -414,6 +466,10 @@ async function countsAreHonestAboutTheCap() {
 
 async function twoPopulatedTopologiesRefuseToGuess() {
   const catalog = orderModuleSource()
+  // Classic pair emptied so the STORE question resolves to design-bom and does not pre-empt the
+  // bridge question — this test is about two ENTRIES of comparable volume, not two stores.
+  catalog.DN_PDM_BomHeadInfo = []
+  catalog.DN_PDM_BomDetailsInfo = []
   catalog[DESIGN_BOM_OBJECT] = designBomRows(14) // comparable to the 12 order lines, BOTH exact
   const { report } = await preflight(catalog)
   const topology = checkOf(report, 'topology')
@@ -427,12 +483,200 @@ async function twoPopulatedTopologiesRefuseToGuess() {
 }
 
 // ---------------------------------------------------------------------------
+// S-17 — GROUND TRUTH: volume alone picks the WRONG carrier, so it must not decide
+// ---------------------------------------------------------------------------
+
+async function volumeAloneMustNotPickTheCarrier() {
+  const { report } = await preflight(realCustomerShapedSource())
+  const store = checkOf(report, 'bomStore')
+
+  // THE DEFECT, as a verdict: a volume-ranked rule reads 2570 > 1319 and says design-bom.
+  assert.notEqual(store.store, 'design-bom',
+    'volume must never hand over the carrier on its own — on this real catalog it is the wrong one')
+  assert.equal(store.store, 'conflicted')
+  // Both stores fill the sample cap, so the probe cannot see that DesignBom holds 2570 rows against
+  // BomDetails' 1319 — and cannot rule it out either. Letting the cap manufacture agreement would be
+  // "always prefer the preset's pair" wearing a measurement's clothes.
+  assert.equal(store.reason, 'volume-undecidable-at-cap')
+  assert.equal(store.volumeUndecidableAtCap, true)
+  assert.equal(store.rowCap, SOURCE_PREFLIGHT_ROW_CAP)
+
+  // The signals, and WHICH ONE FAVOURS WHICH — the sentence a refusal has to be able to say.
+  const favours = Object.fromEntries(store.signals.map((entry) => [entry.signal, entry.favours]))
+  assert.equal(favours.volume, null, 'volume cannot rank two stores that both fill the cap')
+  assert.equal(favours.shape, 'bom-details', 'shape points at the columnar, densely-numeric one')
+  assert.equal(favours.authority, 'bom-details', 'and so does the preset`s own declared BOM-line role')
+  assert.equal(store.authorityBasis, 'preset-bom-line-quantity-role')
+
+  // Both carriers named, with the evidence behind each.
+  const byStore = Object.fromEntries(store.candidates.map((entry) => [entry.store, entry]))
+  assert.equal(byStore['bom-details'].object, PLM_STOCK_PREPARATION_BOM_READ_PLAN.bomDetail.object)
+  assert.equal(byStore['bom-details'].shape, 'columnar-numeric')
+  assert.deepEqual(byStore['bom-details'].numericSlotColumns, ['Bom_ExAttr1'])
+  assert.equal(byStore['design-bom'].object, DESIGN_BOM_OBJECT)
+  assert.equal(byStore['design-bom'].shape, 'json-embedded')
+  assert.deepEqual(byStore['design-bom'].familySlotColumns, [], 'the real DesignBom has NO ExAttr columns')
+  assert.ok(byStore['design-bom'].lines > byStore['bom-details'].lines || !byStore['bom-details'].exact,
+    'and it is the bigger table, which is exactly why volume misleads')
+
+  // The blocker, carrying the whole disagreement.
+  const blocker = blockerNamed(report, B.BOM_STORE_SIGNALS_CONFLICT)
+  assert.equal(blocker.detail.reason, 'volume-undecidable-at-cap')
+  assert.deepEqual(
+    blocker.detail.candidates.map((entry) => entry.store).sort(),
+    ['bom-details', 'design-bom'],
+  )
+  assert.deepEqual(blocker.detail.signals, store.signals)
+  assert.equal(report.verdict, 'no-go')
+
+  // And it is ranked above every bridge question — the more basic fact comes first.
+  assert.equal(report.blockers[0].code, B.BOM_STORE_SIGNALS_CONFLICT)
+
+  // THE VERDICT THE OLD RULE WOULD HAVE GIVEN. DesignBom holds 2570 rows against 7 order lines, so a
+  // volume-ranked bridge decision hands over `design-bom` — the wrong carrier. It is not eligible as
+  // an entry at all while the store question is unresolved.
+  assert.notEqual(checkOf(report, 'topology').detectedBridge, 'design-bom',
+    'an unresolved store must not let the biggest table become the entry')
+  assert.equal(checkOf(report, 'topology').detectedBridge, 'order-module')
+
+  // THE SAME DISAGREEMENT WHERE THE SAMPLE CAN SEE IT. Same proportions, both stores under the cap:
+  // volume now really does point at the bigger DesignBom while shape and authority point at
+  // BomDetails. Still a refusal, and now the volume signal names its store explicitly.
+  const visible = realCustomerShapedSource()
+  visible.DN_PDM_BomDetailsInfo = bomDetailRows(40)
+  visible[DESIGN_BOM_OBJECT] = visible[DESIGN_BOM_OBJECT].slice(0, 150)
+  const { report: seen } = await preflight(visible)
+  const seenStore = checkOf(seen, 'bomStore')
+  assert.equal(seenStore.store, 'conflicted')
+  assert.equal(seenStore.reason, 'strong-signals-and-volume-disagree')
+  const seenFavours = Object.fromEntries(seenStore.signals.map((entry) => [entry.signal, entry.favours]))
+  assert.deepEqual(seenFavours, { authority: 'bom-details', shape: 'bom-details', volume: 'design-bom' })
+  assert.notEqual(seenStore.store, 'design-bom', 'the bigger table does not win on being bigger')
+  blockerNamed(seen, B.BOM_STORE_SIGNALS_CONFLICT)
+}
+
+async function jsonEmbeddedSlotsAreReportedNotSilentlyMissed() {
+  // Force the design-BOM store to be the carrier so the JSON path is the one measured: strip the
+  // classic pair, leaving DesignBom as the only store that carries lines.
+  const catalog = realCustomerShapedSource()
+  catalog.DN_PDM_BomHeadInfo = []
+  catalog.DN_PDM_BomDetailsInfo = []
+  const { report } = await preflight(catalog)
+
+  assert.equal(checkOf(report, 'bomStore').store, 'design-bom', 'only one store carries lines now')
+  const quantity = checkOf(report, 'quantityField')
+  assert.equal(quantity.carrierObject, DESIGN_BOM_OBJECT)
+  assert.equal(quantity.carrierShape, 'json-embedded')
+  assert.equal(quantity.slotsUndetectable, true)
+
+  // The slots ARE there — named, from the vendor's own pattern — they are simply not addressable by a
+  // columnar read plan. Saying nothing here would render as "no quantity", which is wrong.
+  assert.equal(quantity.jsonSlotColumn, 'data')
+  assert.deepEqual(quantity.jsonFamilySlotKeys, ['bom_exattr16'])
+  assert.ok(quantity.jsonOtherKeyCount >= 3, 'other JSON keys are COUNTED, never named')
+
+  const warning = report.warnings.find((entry) => entry.code === W.QUANTITY_FIELD_UNDETECTABLE_ON_CARRIER)
+  assert.ok(warning, `expected ${W.QUANTITY_FIELD_UNDETECTABLE_ON_CARRIER}, got ${JSON.stringify(codesOf(report.warnings))}`)
+  assert.equal(warning.detail.jsonSlotColumn, 'data')
+  // No confident claim about the configured field is made from a carrier we cannot read.
+  assert.equal(report.warnings.some((entry) => entry.code === W.QUANTITY_FIELD_MISMATCH), false)
+  assert.equal(report.warnings.some((entry) => entry.code === W.QUANTITY_FIELD_UNRESOLVED), false)
+
+  // VALUES-FREE: the JSON blob's own values never travel, only the vendor slot key names.
+  const serialized = JSON.stringify(report)
+  assert.equal(serialized.includes('S31603'), false, 'a material value inside the blob must not travel')
+  assert.equal(serialized.includes('specification'), false, 'a non-family JSON key is counted, not named')
+}
+
+async function noConfidentQuantityClaimWhileTheStoreIsUnresolved() {
+  // The plan is configured for a slot the carrier does NOT use, so the mismatch warning would fire on
+  // any resolved store. It must stay silent while the store question is open: "your quantity column is
+  // wrong" names a specific table, and we do not yet know which table should be read.
+  const readPlan = {
+    ...PLM_STOCK_PREPARATION_BOM_READ_PLAN,
+    bomDetail: { ...PLM_STOCK_PREPARATION_BOM_READ_PLAN.bomDetail, quantityField: 'Bom_ExAttr7' },
+  }
+  const { report } = await preflight(realCustomerShapedSource(), { readPlan })
+  const quantity = checkOf(report, 'quantityField')
+  assert.equal(quantity.carrierUndecided, true)
+  assert.equal(quantity.carrierStore, 'conflicted')
+  assert.equal(quantity.resolvedSlot, 'Bom_ExAttr1', 'the reading itself still happens and is reported')
+  assert.equal(quantity.matchesConfigured, false, 'and it does differ from the configured field')
+  assert.equal(report.warnings.some((entry) => entry.code === W.QUANTITY_FIELD_MISMATCH), false,
+    'but no mismatch is CLAIMED while the store is unresolved')
+
+  // Once the store resolves, the same disagreement is reported normally.
+  const settled = realCustomerShapedSource()
+  settled[DESIGN_BOM_OBJECT] = settled[DESIGN_BOM_OBJECT].slice(0, 50)
+  const { report: decided } = await preflight(settled, { readPlan })
+  assert.equal(checkOf(decided, 'bomStore').store, 'bom-details')
+  assert.ok(decided.warnings.some((entry) => entry.code === W.QUANTITY_FIELD_MISMATCH))
+}
+
+async function strongSignalsDisagreeingIsAlsoARefusal() {
+  // authority says bom-details (the preset's declared BOM-line role, and the pair carries lines);
+  // shape says design-bom (only DesignBom is columnar-numeric here). Two STRONG signals pointing
+  // different ways is a refusal in its own right — volume never gets to break that tie.
+  const catalog = realCustomerShapedSource()
+  // BomDetails present and populated, but its slot is text — so it is columnar-PLAIN, not numeric.
+  catalog.DN_PDM_BomDetailsInfo = bomDetailRows(30).map((row) => ({ ...row, Bom_ExAttr1: 'N/A' }))
+  // DesignBom given real columnar numeric slots, and kept small so volume favours bom-details.
+  catalog[DESIGN_BOM_OBJECT] = designBomRows(10)
+
+  const { report } = await preflight(catalog)
+  const store = checkOf(report, 'bomStore')
+  assert.equal(store.store, 'conflicted')
+  assert.equal(store.reason, 'strong-signals-disagree')
+  const favours = Object.fromEntries(store.signals.map((entry) => [entry.signal, entry.favours]))
+  assert.equal(favours.authority, 'bom-details')
+  assert.equal(favours.shape, 'design-bom')
+  assert.equal(favours.volume, 'bom-details', 'volume agrees with authority and STILL does not settle it')
+  blockerNamed(report, B.BOM_STORE_SIGNALS_CONFLICT)
+}
+
+async function agreeingSignalsStillDecide() {
+  // The guard against over-correcting into "always refuse". Same real shape, but DesignBom is small
+  // enough that volume agrees with shape and authority instead of fighting them — all three point at
+  // bom-details, and the store IS decided.
+  const catalog = realCustomerShapedSource()
+  catalog[DESIGN_BOM_OBJECT] = catalog[DESIGN_BOM_OBJECT].slice(0, 50)
+  const { report } = await preflight(catalog)
+  const store = checkOf(report, 'bomStore')
+
+  assert.equal(store.store, 'bom-details')
+  assert.equal(store.reason, 'strong-signals-agree')
+  const favours = Object.fromEntries(store.signals.map((entry) => [entry.signal, entry.favours]))
+  assert.deepEqual(favours, { authority: 'bom-details', shape: 'bom-details', volume: 'bom-details' })
+  assert.equal(report.blockers.some((entry) => entry.code === B.BOM_STORE_SIGNALS_CONFLICT), false)
+  // A decided store yields a real quantity answer again.
+  assert.equal(checkOf(report, 'quantityField').carrierUndecided, false)
+  assert.equal(checkOf(report, 'quantityField').resolvedSlot, 'Bom_ExAttr1')
+}
+
+async function theOriginalIncidentStillLands() {
+  // INCIDENT A, unchanged: an order-module read plan against a source whose BOM really is in
+  // DesignBom (the classic pair empty, so nothing contests the store).
+  const { report } = await preflight(customerShapedSource())
+  const store = checkOf(report, 'bomStore')
+  assert.equal(store.store, 'design-bom')
+  assert.equal(store.reason, 'only-one-store-carries-lines')
+  assert.equal(checkOf(report, 'topology').detectedBridge, 'design-bom')
+  blockerNamed(report, B.TOPOLOGY_MISMATCH)
+  // The empty classic pair is the EXPECTED shape here, not missing data.
+  assert.equal(report.blockers.some((entry) => entry.code === B.NO_BOM_ROWS), false)
+}
+
+// ---------------------------------------------------------------------------
 // S-14 — cap saturation is its own answer, and it has a way out
 // ---------------------------------------------------------------------------
 
 /** Both carriers full past the sample cap — the shape every real, busy deployment has. */
 function bothBridgesSaturatedSource() {
   const catalog = orderModuleSource()
+  // Classic pair emptied for the same reason as above: this fixture is about two ENTRIES saturating
+  // the sample cap, and a populated classic pair would settle the STORE question first.
+  catalog.DN_PDM_BomHeadInfo = []
+  catalog.DN_PDM_BomDetailsInfo = []
   catalog.DN_PDM_OrderDetailInfo = Array.from({ length: SOURCE_PREFLIGHT_ROW_CAP + 900 }, (_, index) => ({
     ID: index + 1,
     order_id: `ORDER-${(index % 2) + 1}`,
@@ -515,6 +759,8 @@ async function aDeclarationCannotOverruleAMeasurement() {
 
   // Nor break a genuine, exactly-counted tie: that tie is a real measurement.
   const tie = orderModuleSource()
+  tie.DN_PDM_BomHeadInfo = []
+  tie.DN_PDM_BomDetailsInfo = []
   tie[DESIGN_BOM_OBJECT] = designBomRows(14)
   const { report: tied } = await preflight(tie, { declaredBridge: 'design-bom' })
   assert.equal(tied.checks.topology.detectedBridge, 'ambiguous')
@@ -1163,6 +1409,13 @@ async function main() {
   console.log('  ✓ S-06 a capped page reports a floor; a short page reports a total')
   await twoPopulatedTopologiesRefuseToGuess()
   console.log('  ✓ S-07 two populated topologies ask a human instead of guessing')
+  await volumeAloneMustNotPickTheCarrier()
+  await jsonEmbeddedSlotsAreReportedNotSilentlyMissed()
+  await noConfidentQuantityClaimWhileTheStoreIsUnresolved()
+  await strongSignalsDisagreeingIsAlsoARefusal()
+  await agreeingSignalsStillDecide()
+  await theOriginalIncidentStillLands()
+  console.log('  ✓ S-17 GROUND TRUTH: volume is evidence, not verdict — conflicting signals refuse and say why')
   await capSaturationIsDistinguishableFromATie()
   await aDeclarationResolvesWhatTheSampleCannotRank()
   await aDeclarationCannotOverruleAMeasurement()
