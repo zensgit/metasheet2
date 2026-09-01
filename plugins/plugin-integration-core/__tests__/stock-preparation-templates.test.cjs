@@ -143,6 +143,12 @@ function main() {
   const bomLineFields = Object.fromEntries(bomLine.fields.map((field) => [field.id, field]))
   assert.notEqual(bomLineFields.designQty.required, true, 'snapshot lines can preserve invalid or missing source quantity')
   assert.notEqual(bomLineFields.designUnit.required, true, 'snapshot lines can preserve missing source unit for exception handling')
+  // Adjudication design 20260901 (fingerprint decomposition): material is a persisted snapshot-line
+  // field so an in-place substitution can diff by name — optional, because historical batches lack it.
+  assert.ok(bomLineFields.material, 'snapshot lines persist material')
+  assert.equal(bomLineFields.material.type, 'string')
+  assert.equal(bomLineFields.material.ownership, 'plm_system')
+  assert.notEqual(bomLineFields.material.required, true, 'historical batches carry no material — never required')
 
   const unitRule = byObjectId.plm_stock_preparation_unit_conversion_rule
   const unitFields = Object.fromEntries(unitRule.fields.map((field) => [field.id, field]))

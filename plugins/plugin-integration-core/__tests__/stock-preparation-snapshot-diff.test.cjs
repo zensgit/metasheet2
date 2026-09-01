@@ -140,6 +140,89 @@ function main() {
   assert.ok(moved.diffs[0].changeTypes.includes(CHANGE_TYPES.PATH_CHANGED), 'path move is detected')
   assert.ok(moved.diffs[0].changeTypes.includes(CHANGE_TYPES.PARENT_CHANGED), 'parent move is detected')
 
+  // #5364-follow-up (adjudication design 20260901): fingerprint decomposition — an in-place MATERIAL
+  // substitution at unchanged path/parent/version/qty must surface BY NAME, not only as the opaque
+  // source_fingerprint_changed. It may ALSO fingerprint-differ; the named token is the point.
+  const materialSwap = plan({
+    previousLines: [line({ material: 'Q235B' })],
+    currentLines: [
+      line({ snapshotBatchId: 'batch_current', material: 'Q345R', sourceFingerprint: 'fingerprint_beta' }),
+    ],
+  })
+  assert.equal(materialSwap.diffs.length, 1)
+  assert.ok(
+    materialSwap.diffs[0].changeTypes.includes(CHANGE_TYPES.MATERIAL_CHANGED),
+    'in-place material substitution surfaces as material_changed by name',
+  )
+  assert.equal(materialSwap.diffs[0].reviewStatus, REVIEW_STATUSES.HELD, 'material substitution blocks')
+  assert.equal(materialSwap.evidence.result.byChangeType.material_changed, 1)
+
+  // Component-code swap at the same position (path/parent/version unchanged): childDrawingNo has been
+  // persisted on snapshot lines all along but was never compared first-class.
+  const componentSwap = plan({
+    previousLines: [line()],
+    currentLines: [
+      line({ snapshotBatchId: 'batch_current', childDrawingNo: 'child_beta', sourceFingerprint: 'fingerprint_beta' }),
+    ],
+  })
+  assert.equal(componentSwap.diffs.length, 1)
+  assert.ok(
+    componentSwap.diffs[0].changeTypes.includes(CHANGE_TYPES.COMPONENT_CODE_CHANGED),
+    'same-position component-code swap surfaces as component_code_changed by name',
+  )
+  assert.equal(componentSwap.diffs[0].reviewStatus, REVIEW_STATUSES.HELD, 'component-code swap blocks')
+
+  // BACKWARD COMPATIBILITY: historical batches persisted before `material` existed carry NO material
+  // field. One-sided material must NOT emit a spurious material_changed — that dimension falls back to
+  // today's fingerprint behaviour (which still holds the row).
+  const oldLineVsNewLine = plan({
+    previousLines: [line()], // pre-change persisted line: no material field
+    currentLines: [
+      line({ snapshotBatchId: 'batch_current', material: 'Q345R', sourceFingerprint: 'fingerprint_beta' }),
+    ],
+  })
+  assert.equal(oldLineVsNewLine.diffs.length, 1)
+  assert.equal(
+    oldLineVsNewLine.diffs[0].changeTypes.includes(CHANGE_TYPES.MATERIAL_CHANGED),
+    false,
+    'old-line (no material) vs new-line (material present) must not fabricate material_changed',
+  )
+  assert.ok(
+    oldLineVsNewLine.diffs[0].changeTypes.includes(CHANGE_TYPES.SOURCE_FINGERPRINT_CHANGED),
+    'the fingerprint fallback stays intact for the one-sided-material case',
+  )
+  const newLineVsOldLine = plan({
+    previousLines: [line({ material: 'Q235B' })],
+    currentLines: [line({ snapshotBatchId: 'batch_current', sourceFingerprint: 'fingerprint_beta' })],
+  })
+  assert.equal(
+    newLineVsOldLine.diffs[0].changeTypes.includes(CHANGE_TYPES.MATERIAL_CHANGED),
+    false,
+    'material present only on the PREVIOUS side must not fabricate material_changed either',
+  )
+
+  // No false positives: a pure unrelated-metadata edit (only the hashed remainder differs; material and
+  // childDrawingNo both present and equal) still yields ONLY source_fingerprint_changed.
+  const metadataOnly = plan({
+    previousLines: [line({ material: 'Q235B' })],
+    currentLines: [
+      line({ snapshotBatchId: 'batch_current', material: 'Q235B', sourceFingerprint: 'fingerprint_beta' }),
+    ],
+  })
+  assert.equal(metadataOnly.diffs.length, 1)
+  assert.deepEqual(
+    metadataOnly.diffs[0].changeTypes,
+    [CHANGE_TYPES.SOURCE_FINGERPRINT_CHANGED],
+    'an unrelated metadata edit stays a lone source_fingerprint_changed — the new comparisons add no false positive',
+  )
+
+  // Vocabulary guard: the two decomposed tokens follow the existing naming style and both BLOCK
+  // (the design's tier work comes later; today every change type holds the row).
+  assert.equal(CHANGE_TYPES.MATERIAL_CHANGED, 'material_changed')
+  assert.equal(CHANGE_TYPES.COMPONENT_CODE_CHANGED, 'component_code_changed')
+  assert.ok(BLOCKING_CHANGE_TYPES.includes(CHANGE_TYPES.MATERIAL_CHANGED), 'material_changed blocks')
+  assert.ok(BLOCKING_CHANGE_TYPES.includes(CHANGE_TYPES.COMPONENT_CODE_CHANGED), 'component_code_changed blocks')
+
   const unresolved = plan({
     currentLines: [
       line({
