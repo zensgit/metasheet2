@@ -499,11 +499,22 @@ function isPlmWorkbenchFocused(): boolean {
   return state.features.mode === 'plm-workbench' && state.features.plm
 }
 
+/**
+ * Post-login / fallback landing path. #5392: the owner's finding was that logging in — and any
+ * unknown or partial deep link — dropped every user onto the attendance clock-in page, with 14
+ * flat nav items and no starting point. `/home` (MyAppsLandingView) is now that starting point
+ * for the ordinary multi-app deployment.
+ *
+ * The two FOCUSED product modes are deliberately UNCHANGED: a tenant explicitly configured as
+ * attendance-only or plm-workbench-only (App.vue's attendanceFocused/plmWorkbenchFocused, which
+ * also drive a different nav chrome — see guardPolicy's focus-mode allowlists) is a distinct,
+ * single-product deployment where that one surface IS the whole product; that nav-chrome
+ * question is out of scope here (full nav IA restructure is a separate, deferred item).
+ */
 function resolveHomePath(): string {
   if (isAttendanceFocused()) return '/attendance'
   if (isPlmWorkbenchFocused()) return '/plm'
-  if (state.features.attendance && !state.features.plm) return '/attendance'
-  return '/multitable'
+  return '/home'
 }
 
 export function useFeatureFlags() {

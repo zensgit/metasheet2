@@ -40,6 +40,16 @@ vi.mock('../src/utils/api', () => ({
   apiGet: (...args: unknown[]) => apiGetMock(...args),
 }))
 
+// 对接总览: the view's FIRST section fires GET /api/integration/hub/overview on mount, so every
+// mock table in this file has to answer it. This is the empty answer — tests that care about the
+// overview's CONTENT live in IntegrationHubOverviewSection.spec.ts, which drives the section
+// directly; here it only has to not be an unexpected URL.
+const EMPTY_HUB_OVERVIEW = {
+  systemCount: 0,
+  systems: [] as unknown[],
+  dataSourceDirectory: { available: false },
+}
+
 function jsonResponse(data: unknown): Response {
   return new Response(JSON.stringify({ ok: true, data }), {
     status: 200,
@@ -129,15 +139,16 @@ describe('IntegrationWorkbenchView', () => {
   // IU-2a quality gate: the rail↔view WIRING is pinned here (the rail component's own spec uses
   // fixture groups, so without this a dropped group — or the whole rail — in the view would pass
   // every existing test). Six IU-2a groups + the BA-UI-1 bridge-agent group (add-only extension,
-  // docs/development/bridge-agent-admin-page-design-lock-20260707.md), each anchoring an existing
-  // section id.
-  it('wires the seven rail groups to real section anchors', async () => {
+  // docs/development/bridge-agent-admin-page-design-lock-20260707.md) + the 对接总览 group, each
+  // anchoring an existing section id.
+  it('wires the eight rail groups to real section anchors, overview FIRST', async () => {
     localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
     apiFetchMock.mockImplementation(async (url: string) => {
       if (url === '/api/integration/adapters') return jsonResponse([])
       if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
       if (url === '/api/integration/staging/descriptors') return jsonResponse([])
       if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/hub/overview?tenantId=default') return jsonResponse(EMPTY_HUB_OVERVIEW)
       throw new Error(`unexpected URL ${url}`)
     })
     container = document.createElement('div')
@@ -149,13 +160,15 @@ describe('IntegrationWorkbenchView', () => {
     await flushUi(8)
     const root = container
     const expected: Array<[string, string]> = [
+      // 对接总览: prepended, and ORDER is load-bearing here — this is the first screen.
+      ['hub-overview', 'int-sec-hub-overview'],
       ['connection', 'int-sec-connection'],
       ['read-source', 'int-sec-read-source'],
       ['combination', 'int-sec-combination-config'],
       ['cleaning-mapping', 'int-sec-object-template'],
       ['run-push', 'int-sec-run-push'],
       ['monitoring', 'int-sec-monitoring'],
-      // BA-UI-1: 7th group (add-only — the six IU-2a pairs above are unchanged).
+      // BA-UI-1: add-only — the six IU-2a pairs above are unchanged.
       ['bridge-agent', 'int-sec-bridge-agent'],
     ]
     for (const [groupId, sectionId] of expected) {
@@ -163,7 +176,15 @@ describe('IntegrationWorkbenchView', () => {
       expect(item, `rail group ${groupId} must render`).not.toBeNull()
       expect(root.querySelector(`#${sectionId}`), `section ${sectionId} must exist for ${groupId}`).not.toBeNull()
     }
-    expect(root.querySelectorAll('[data-testid^="integration-rail-"]').length).toBe(7)
+    expect(root.querySelectorAll('[data-testid^="integration-rail-"]').length).toBe(8)
+    // FIRST, not merely present: both in the rail and in the section column.
+    const railIds = Array.from(root.querySelectorAll('[data-testid^="integration-rail-"]'))
+      .map((el) => el.getAttribute('data-testid'))
+    expect(railIds[0]).toBe('integration-rail-hub-overview')
+    const sectionIds = Array.from(root.querySelectorAll('.integration-workbench__sections > section'))
+      .map((el) => el.id)
+    expect(sectionIds[0]).toBe('int-sec-hub-overview')
+    expect(sectionIds[1]).toBe('int-sec-connection')
   })
 
   it('loads systems, object schemas, and previews a template payload', async () => {
@@ -2687,6 +2708,93 @@ describe('IntegrationWorkbenchView', () => {
     expect(apiFetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/integration/external-systems/ds_bridge_1/objects'))).toBe(true)
     const objectSelect = container.querySelector('[data-testid="source-object"]') as HTMLSelectElement
     expect(Array.from(objectSelect.options).map((option) => option.value)).toContain('public.items')
+  })
+
+  it('C2b: editing an existing bridge sends a PATCH of the picker fields — it never restates (or blanks) the stored config keys it does not render', async () => {
+    // The bridge lossy-save defect: this form rebuilds `config` from the two fields it owns, so a
+    // rename used to arrive at a registry that replaced config wholesale and erased everything
+    // else — most damagingly config.schema, the connection's default SQL schema. The registry now
+    // patches, and the contract this test pins is the form's half of it: the payload names the
+    // picker's own keys and NOTHING else. A `schema: null` (or any other stored key echoed back as
+    // empty) would clear server-side just as surely as the old wholesale replace did.
+    const upsertBodies: Array<Record<string, unknown>> = []
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async (url: string) => {
+      if (url === '/api/data-sources') {
+        return { ok: true, data: { items: [{ id: 'pg-1', name: 'Warehouse PG', type: 'postgres', connected: true }] } }
+      }
+      throw new Error(`unexpected apiGet ${url}`)
+    })
+    // The stored bridge carries keys the picker does not render. `schema` is the one the operator
+    // loses on a rename; `pageSize` proves the rule is not schema-special-cased.
+    const storedBridge = {
+      id: 'ds_bridge_1',
+      tenantId: 'default',
+      name: 'Warehouse bridge',
+      kind: 'data-source:sql-readonly',
+      role: 'source',
+      status: 'active',
+      config: { dataSourceId: 'pg-1', object: 'public.items', schema: 'public', pageSize: 500 },
+      capabilities: {},
+    }
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'data-source:sql-readonly', label: 'Read-only SQL data source', roles: ['source'], supports: ['testConnection', 'listObjects', 'getSchema', 'read'], advanced: true, guardrails: { write: { supported: false } } },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([storedBridge])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/data-sources/pg-1/schema') {
+        return jsonResponse({ tables: [{ name: 'items', schema: 'public', columns: [{ name: 'id' }] }], views: [] })
+      }
+      if (url === '/api/integration/external-systems' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body || '{}')) as Record<string, unknown>
+        upsertBodies.push(body)
+        return jsonResponse({ ...storedBridge, ...body })
+      }
+      if (url.startsWith('/api/integration/external-systems/ds_bridge_1/objects')) {
+        return jsonResponse([{ name: 'public.items', label: 'public.items', operations: ['read'], source: 'data-source:sql-readonly' }])
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('ElCard', ElCard)
+    // eslint-disable-next-line vue/one-component-per-file
+    app.component('RouterLink', { props: { to: { type: [String, Object], required: false, default: '' } }, setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
+    app.mount(container)
+    await flushUi(8)
+
+    ;(container.querySelector('[data-testid="toggle-inventory-overview"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container.querySelector('[data-testid="edit-connection-ds_bridge_1"]') as HTMLButtonElement).click()
+    await flushUi(8)
+
+    // The picker is populated from the stored config, and the raw JSON editor stays hidden for
+    // this kind — so the operator has no surface on which to restate schema/pageSize.
+    expect((container.querySelector('[data-testid="data-source-bridge-id"]') as HTMLSelectElement).value).toBe('pg-1')
+    expect((container.querySelector('[data-testid="data-source-bridge-object"]') as HTMLSelectElement).value).toBe('public.items')
+    expect(container.querySelector('[data-testid="connection-draft-config"]')).toBeNull()
+
+    const nameInput = container.querySelector('[data-testid="connection-draft-name"]') as HTMLInputElement
+    nameInput.value = 'Warehouse bridge (renamed)'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="save-connection-draft"]') as HTMLButtonElement).click()
+    await flushUi(8)
+
+    expect(upsertBodies).toHaveLength(1)
+    const saved = upsertBodies[0]
+    expect(saved.id).toBe('ds_bridge_1')
+    expect(saved.name).toBe('Warehouse bridge (renamed)')
+    // Exactly the picker's own keys: a patch the registry can apply without losing anything.
+    expect(saved.config).toEqual({ dataSourceId: 'pg-1', object: 'public.items' })
+    const savedConfig = saved.config as Record<string, unknown>
+    expect(Object.prototype.hasOwnProperty.call(savedConfig, 'schema')).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(savedConfig, 'pageSize')).toBe(false)
   })
 
   it('C2b: the save gate requires an object (no half-config without a table/view)', async () => {

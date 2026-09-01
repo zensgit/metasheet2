@@ -537,3 +537,201 @@ export function stockPrepEnumPlain(
 ): StockPrepPlainText | null {
   return lookup(map, token)
 }
+
+// ---------------------------------------------------------------------------
+// 项目接入 — the sync entry's four steps
+// ---------------------------------------------------------------------------
+
+/**
+ * The owner's spec for this surface was one sentence — 「PLM系统接通后,在页面哪里可点击项目号,然后
+ * 该项目号里的bom就自动导入到我们的多维表中」 — so the panel's own words have to be that plain. Each
+ * entry below leads with WHAT HAPPENED and, where there is one, WHAT TO DO NEXT. The reason CODE
+ * still renders, subordinate, inside the panel's 技术详情 disclosure, because it is what a person
+ * quotes when they ask us for help.
+ *
+ * The register is the install page's, and the SKIP rule is the one that matters most here: a skipped
+ * step is work still waiting for a person, NOT a broken import, and it is rendered with the same
+ * weight as a successful line.
+ */
+export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  // 1. 试算
+  PLAN_READY: Object.freeze({
+    zh: '算好了,没有需要人拿主意的地方',
+    en: 'Planned — nothing needs a person to decide',
+  }),
+  PLAN_HELD_FOR_CONFIRMATION: Object.freeze({
+    zh: '算好了,但其中有几行系统拿不准',
+    en: 'Planned, but the system is unsure about some rows',
+    zhNext: '这些行会先交给人确认,不会跟着这次一起写进去。',
+    enNext: 'Those rows go to a person first and are not written with this run.',
+  }),
+  PLAN_PROJECT_NOT_FOUND: Object.freeze({
+    zh: 'PLM 里没有找到这个项目号',
+    en: 'PLM has no project with that number',
+    zhNext: '请核对项目号有没有打错;也可能这个项目还没到 PLM 里。什么都没有改动。',
+    enNext: 'Check the number for a typo — or the project may not be in PLM yet. Nothing was changed.',
+  }),
+  PLAN_LARGE_BOM_BOUNDED: Object.freeze({
+    zh: '这个项目的 BOM 太大,没法当场展开',
+    en: 'This project’s BOM is too large to expand on the spot',
+    zhNext: '要走后台展开的通道,请联系我们安排。什么都没有改动。',
+    enNext: 'It needs the background expansion channel — ask us to arrange it. Nothing was changed.',
+  }),
+  PLAN_NOT_APPLYABLE: Object.freeze({
+    zh: '这次试算没能得出可以写入的计划',
+    en: 'This plan cannot be written',
+    zhNext: '源数据里有拦路的问题。什么都没有改动,可以稍后再试一次。',
+    enNext: 'Something in the source data is blocking it. Nothing was changed; you can try again later.',
+  }),
+  PLAN_READ_FAILED: Object.freeze({
+    zh: '没能连上取数,试算没有跑起来',
+    en: 'Could not reach the source, so nothing was planned',
+    zhNext: '稍后再试一次。什么都没有改动。',
+    enNext: 'Try again shortly. Nothing was changed.',
+  }),
+  PLAN_MALFORMED_RESPONSE: Object.freeze({
+    zh: '服务器回了一个看不懂的答复',
+    en: 'The server answered with something we cannot read',
+    zhNext: '通常是中间有一层网关拦了。请联系管理员;什么都没有改动。',
+    enNext: 'Usually a gateway in between. Ask an administrator; nothing was changed.',
+  }),
+
+  // 2. 确认
+  NOTHING_TO_CONFIRM: Object.freeze({
+    zh: '这次没有需要确认的事',
+    en: 'Nothing needed confirming this time',
+  }),
+  CONFIRMATIONS_QUEUED: Object.freeze({
+    zh: '拿不准的行已经放进「确认队列」',
+    en: 'The uncertain rows are now in the confirmation queue',
+    zhNext: '到「确认队列」逐条拿主意,处理完再回来同步一次。',
+    enNext: 'Work through them on the confirmation-queue tab, then sync again.',
+  }),
+  RECONCILE_UNAVAILABLE: Object.freeze({
+    zh: '这次没能刷新「确认队列」',
+    en: 'The confirmation queue was not refreshed this time',
+    zhNext: '队列里原有的待办还在。可以直接去「确认队列」看,或稍后再同步一次。',
+    enNext: 'Anything already in the queue is still there. Open the tab, or sync again later.',
+  }),
+
+  // 3. 写入
+  IMPORTED: Object.freeze({
+    zh: 'BOM 已经写进多维表',
+    en: 'The BOM is in the multitable',
+    zhNext: '可以到多维表里看数据了。',
+    enNext: 'You can open the multitable and look at the data.',
+  }),
+  ALREADY_UP_TO_DATE: Object.freeze({
+    zh: '表里已经是最新的,这次一行都不用改',
+    en: 'The table was already current — not one row needed changing',
+    zhNext: '同一份数据再同步一次不会重复写,这是正常的。',
+    enNext: 'Syncing the same data again writes nothing twice; that is the expected result.',
+  }),
+  WRITE_HELD_FOR_CONFIRMATION: Object.freeze({
+    zh: '先不写入 —— 等您把拿不准的那几行定下来',
+    en: 'Not written yet — waiting for you to decide the uncertain rows',
+    zhNext: '到「确认队列」处理完,再回来点一次同步,这次就会写进去。',
+    enNext: 'Clear them on the confirmation-queue tab, then sync again and it will write.',
+  }),
+  WRITE_NO_PLAN: Object.freeze({
+    zh: '没有可以执行的计划,所以没有写入',
+    en: 'There was no plan to carry out, so nothing was written',
+    zhNext: '请重新试算一次。什么都没有改动。',
+    enNext: 'Run the plan again. Nothing was changed.',
+  }),
+  WRITE_PARTIAL: Object.freeze({
+    zh: '写进去一部分,还有一部分没写成',
+    en: 'Some rows landed and some did not',
+    zhNext: '已经写进去的不会重复写。再同步一次会把剩下的补上。',
+    enNext: 'What landed will not be written twice. Sync again to pick up the rest.',
+  }),
+  WRITE_FAILED: Object.freeze({
+    zh: '这一步没有写成,数据没有变化',
+    en: 'That did not write; nothing was changed',
+    zhNext: '可以再点一次同步;重复同步不会弄乱数据。',
+    enNext: 'You can sync again — re-syncing cannot scramble your data.',
+  }),
+
+  // 4. 批次存档
+  BATCH_ARCHIVED: Object.freeze({
+    zh: '这次的样子已经存了一份',
+    en: 'A copy of what this sync saw has been kept',
+    zhNext: '到「BOM 快照批次与差异」可以拿它和上一份比。',
+    enNext: 'Compare it with the previous one on the snapshot-batch and diff tab.',
+  }),
+  BATCH_ALREADY_ARCHIVED: Object.freeze({
+    zh: '这一批之前已经存过了,没有重复存',
+    en: 'This batch was already kept; nothing was stored twice',
+  }),
+  BATCH_ARCHIVE_OUTCOME_UNKNOWN: Object.freeze({
+    zh: '存档这一步跑完了,但服务器没说清这批是新存的还是原本就有',
+    en: 'The archive step finished, but the server did not say whether this batch is new or was already there',
+    zhNext: '到「BOM 快照批次与差异」看一眼就知道;导入本身不受影响。',
+    enNext: 'The snapshot-batch and diff tab shows which; the import itself is unaffected.',
+  }),
+  BATCH_ARCHIVE_DISABLED: Object.freeze({
+    zh: '这套部署没有开启批次存档',
+    en: 'This deployment does not keep snapshot batches',
+    zhNext: '数据已经写进多维表了,只是不会留历史批次用来做差异对比。这是设置,不是故障。',
+    enNext: 'The data is in the multitable; there is just no historical batch to diff against. That is a setting, not a fault.',
+  }),
+  BATCH_ARCHIVE_NOT_ATTEMPTED: Object.freeze({
+    zh: '这次没有写入数据,所以不用存档',
+    en: 'Nothing was written this time, so there is nothing to keep',
+  }),
+  BATCH_ARCHIVE_FAILED: Object.freeze({
+    zh: '数据已经写进去了,但这次的存档没成功',
+    en: 'The data is in, but keeping a copy of this sync did not work',
+    zhNext: '导入本身不受影响,可以照常用。差异对比会少这一批,再同步一次通常就补上了。',
+    enNext: 'The import itself is fine and usable. The diff view will be missing this batch; syncing again usually adds it.',
+  }),
+})
+
+export function stockPrepSyncReasonPlain(reason: string): StockPrepPlainEntry | null {
+  return lookup(STOCK_PREP_SYNC_REASON_PLAIN, reason)
+}
+
+/**
+ * 「导进去了吗?」 — answered in one sentence before any step is read, the way the install page
+ * answers 「装好了吗?」. `held` is the one that had to be said out loud: it is the system waiting for
+ * a person, and a page that renders it as a red failure teaches operators to ignore red.
+ */
+export const STOCK_PREP_SYNC_VERDICT_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  imported: Object.freeze({
+    zh: '导入完成 —— 这个项目的 BOM 已经在多维表里了。',
+    en: 'Imported — this project’s BOM is now in the multitable.',
+  }),
+  already_up_to_date: Object.freeze({
+    zh: '已经是最新的 —— 表里的数据和 PLM 一致,这次没有需要改的行。',
+    en: 'Already current — the table matches PLM and no row needed changing.',
+  }),
+  /**
+   * A PARTIAL WRITE IS AN IMPORT. Rows are in the sheet. This sentence used to be the `blocked` one —
+   * 「这次没有导入成功,数据没有变化」 — which was simply false, and false in the direction that costs
+   * an operator the most: they go looking for data they are told is not there.
+   */
+  partial: Object.freeze({
+    zh: '写入了一部分 —— 已经写进去的行现在就在多维表里,还有几行没有写成。',
+    en: 'Partly written — the rows that landed are in the multitable now, and some did not write.',
+    zhNext: '已经写进去的不会重复写。再点一次同步会把剩下的补上;还是补不上的话,下面每一步都写了卡在哪里。',
+    enNext: 'What landed will not be written twice. Sync again to pick up the rest; if it still does not, each step below says where it stopped.',
+  }),
+  held: Object.freeze({
+    zh: '还差一步:有几行需要您先拿个主意,定完再同步一次就写进去了。',
+    en: 'One step to go: a few rows need your decision. Decide them, sync again, and it writes.',
+    zhNext: '这不是出错 —— 系统碰到拿不准的地方会停下来问您,而不是自己猜。',
+    enNext: 'This is not an error — where the system is unsure it stops and asks you rather than guessing.',
+  }),
+  blocked: Object.freeze({
+    zh: '这次没有导入成功,数据没有变化。',
+    en: 'Nothing was imported this time, and nothing was changed.',
+  }),
+  not_run: Object.freeze({
+    zh: '还没有同步过。填上项目号,点「同步这个项目」。',
+    en: 'Not synced yet. Type a project number and press sync.',
+  }),
+})
+
+export function stockPrepSyncVerdictPlain(verdict: string): StockPrepPlainEntry | null {
+  return lookup(STOCK_PREP_SYNC_VERDICT_PLAIN, verdict)
+}

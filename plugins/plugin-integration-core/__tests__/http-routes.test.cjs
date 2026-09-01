@@ -812,6 +812,9 @@ async function testExternalSystemRoutes() {
     role: 'target',
     status: 'active',
     credentials: { token: 'secret' },
+    // P2-A: the route attaches the AUTHENTICATED principal (never a body value) so the
+    // registry can validate + attribute a config.dataSourceId binding.
+    principal: 'user_write',
   })
 
   res = await invoke(routes, 'GET', '/api/integration/external-systems/:id', {
