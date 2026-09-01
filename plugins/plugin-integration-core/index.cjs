@@ -21,6 +21,7 @@ const { createDb } = require('./lib/db.cjs')
 const { createExternalSystemRegistry } = require('./lib/external-systems.cjs')
 const { createReadSourceConfigStore } = require('./lib/read-source-config-store.cjs')
 const { createStockPreparationAuditStore } = require('./lib/stock-preparation-audit-store.cjs')
+const { createStockPreparationSourceBindingStore } = require('./lib/stock-preparation-source-binding-store.cjs')
 const { createConfirmationDecisionReconcileLease } = require('./lib/stock-preparation-confirmation-decisions.cjs')
 const { createB2aOperationClaim } = require('./lib/b2a-trial-registry.cjs')
 const {
@@ -81,6 +82,7 @@ let credentialStore = null
 let externalSystemRegistry = null
 let readSourceConfigStore = null
 let stockPreparationAuditStore = null
+let stockPreparationSourceBindingStore = null
 let stockPreparationPackInstallStore = null
 let stockPreparationConfirmationDecisionLease = null
 let b2aOperationClaim = null
@@ -308,6 +310,12 @@ module.exports = {
     readSourceConfigStore = createReadSourceConfigStore({ db })
     // W5b (#3751/#3890): values-free audit trail for the stock-preparation write surface.
     stockPreparationAuditStore = createStockPreparationAuditStore({ db })
+    // 工作台里选源 (migration 079): the persisted per-(tenant,workspace,action) source pointer that
+    // overrides the deploy-time INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON default. Built
+    // here so the route layer can hand the table-action registry a per-REQUEST resolver — which is
+    // the whole mechanism by which changing the source stops needing a backend restart. Absent (no
+    // SQL db) → no resolver is wired → the action resolves the env default exactly as before.
+    stockPreparationSourceBindingStore = createStockPreparationSourceBindingStore({ db })
     // Customer-pack install LEDGER (migration 076). Terminal-state rows only; it is what makes a
     // pack's `ext_` columns enumerable, which is what lets a PLM refresh honour their ownership
     // bands instead of falling back to the frozen-template ones.
@@ -439,9 +447,14 @@ module.exports = {
       context,
       logger,
       services: {
+        // 列映射副驾: the governed AI boundary (packages/core-backend GovernedAiService), injected by
+        // the host for this plugin only. OPTIONAL — absent → the copilot fail-opens to manual mapping.
+        // Duck-typed to { suggest(request, env?) }; the plugin never reaches a provider any other way.
+        governedAi: (context.services && context.services.governedAi) || null,
         externalSystemRegistry,
         readSourceConfigStore,
         stockPreparationAuditStore,
+        stockPreparationSourceBindingStore,
         stockPreparationPackInstallStore,
         stockPreparationConfirmationDecisionLease,
         b2aOperationClaim,
