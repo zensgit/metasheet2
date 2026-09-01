@@ -28,6 +28,12 @@ import {
   type ArchiveWriterBlockSnapshot,
   type ArchiveWriterBlockTransactionRunner,
 } from '../../src/multitable/recovery-archive-writer-block'
+import {
+  attachOwnedPoolTerminationHandler,
+  dropScratchDatabase,
+  formatScratchDropOutcome,
+  type OwnedPoolTerminationHandler,
+} from '../helpers/scratch-database'
 
 const runRealDb = Boolean(process.env.DATABASE_URL) && process.env.METASHEET_REAL_DB_TEST_STEP === '1'
 const describeIfRealDbStep = runRealDb ? describe : describe.skip
@@ -48,7 +54,12 @@ const FUTURE = '2099-01-01T00:00:00.000Z'
 const FUTURE_2 = '2099-06-01T00:00:00.000Z'
 const EXPIRED = '2000-01-01T00:00:00.000Z'
 
-type Scratch = { name: string; pool: Pool; db: Kysely<unknown> }
+type Scratch = {
+  name: string
+  pool: Pool
+  db: Kysely<unknown>
+  terminationHandler: OwnedPoolTerminationHandler
+}
 type DatabaseError = Error & { code?: string; detail?: string; where?: string; hint?: string }
 
 let adminPool: Pool
@@ -67,7 +78,7 @@ async function createScratch(label: string): Promise<Scratch> {
   await adminPool.query(`CREATE DATABASE "${name}"`)
   const pool = new Pool({ connectionString: databaseUrlFor(name), max: 6 })
   const db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
-  const scratch = { name, pool, db }
+  const scratch = { name, pool, db, terminationHandler: attachOwnedPoolTerminationHandler(pool) }
   scratches.push(scratch)
   await pool.query(`
     CREATE TABLE public.meta_sheets (
@@ -85,13 +96,13 @@ async function createScratch(label: string): Promise<Scratch> {
 }
 
 async function dropScratch(scratch: Scratch): Promise<void> {
-  await scratch.db.destroy().catch(() => {})
-  await scratch.pool.end().catch(() => {})
-  await adminPool.query(
-    'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()',
-    [scratch.name],
-  ).catch(() => {})
-  await adminPool.query(`DROP DATABASE IF EXISTS "${scratch.name}"`).catch(() => {})
+  try {
+    await scratch.db.destroy().catch(() => {})
+    const outcome = await dropScratchDatabase(adminPool, scratch.name)
+    console.log(formatScratchDropOutcome('recovery-archive-writer-block', outcome))
+  } finally {
+    scratch.terminationHandler.detach()
+  }
 }
 
 function asQuery(client: PoolClient): FenceQuery {
