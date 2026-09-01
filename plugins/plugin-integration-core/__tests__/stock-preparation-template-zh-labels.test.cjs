@@ -126,7 +126,11 @@ const SANDBOX_SHEET_LABEL_ZH = '备料主表(沙箱)'
 const BASE_BUILT_DIGESTS = Object.freeze({
   mainStructure: '9c53cd88d2958afcabab6d5019f4c8ea2c9c4d9723c1b808d919015da9c45097',
   ledgerStructure: 'afaf79ff5ebefaa7d64d3d75e3e0c46b53f1eb0e11d8d70ae539106f1317c4e2',
-  mvpStructures: '124852655168c65d6a1a34f03a1f85189c731d7b137b7d94f8a17133eb3c2e15',
+  // mvpStructures re-pinned DELIBERATELY (was 1248526551…3c2e15): the bom-snapshot-line.v1 template
+  // gained the persisted `material` field (stock-prep-change-adjudication-20260901 fingerprint
+  // decomposition). Recomputed by running this exact computation against that schema change — the
+  // digest still proves "unset language changes nothing", now over the extended structure.
+  mvpStructures: '477d39ec66a186f1886fed766973d56d761412c1c8dfd4ba14f88aa0cdc8bb29',
   canonicalDescriptor: 'ce33abaf7b3c4352e62893770fe8654ef0075c11fc4c29779f623983d8237430',
   sandboxDescriptor: '93b98ea7e5c8dc9c09d9c4ab3a26efe23f28cbfc7e100d1faa89ec83d72a3d23',
 })

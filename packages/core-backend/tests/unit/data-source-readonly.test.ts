@@ -187,6 +187,32 @@ describe('data-sources PUT deep-merge (A-RO)', () => {
   app.use(dataSourcesRouter())
   const admin = (id: string) => ({ id, role: 'admin' })
 
+  it('G-4 marker durability: PUT cannot clear k3Destination once set (coded 403)', async () => {
+    currentUser = admin('alice')
+    pinned.setApp(app)
+    // Register a source declared to be a K3 destination.
+    await request(pinned.url())
+      .post('/api/data-sources')
+      .send({ ...sqlConfig('k3-durable', false), options: { autoConnect: false, readOnly: false, k3Destination: true } })
+
+    // The #5401 config-edit vector: try to clear the marker via PUT.
+    const cleared = await request(pinned.url())
+      .put('/api/data-sources/k3-durable')
+      .send({ options: { k3Destination: false } })
+    expect(cleared.status).toBe(403)
+    expect(cleared.body.error.code).toBe('K3_DESTINATION_MARKER_IMMUTABLE')
+
+    // The marker is intact — the source is still a K3 destination.
+    const got = await request(pinned.url()).get('/api/data-sources/k3-durable')
+    expect(got.body.data.options).toMatchObject({ k3Destination: true })
+
+    // An unrelated edit that does NOT touch the marker still succeeds and preserves it.
+    const other = await request(pinned.url()).put('/api/data-sources/k3-durable').send({ options: { timeout: 7 } })
+    expect(other.status).toBe(200)
+    const after = await request(pinned.url()).get('/api/data-sources/k3-durable')
+    expect(after.body.data.options).toMatchObject({ k3Destination: true, timeout: 7 })
+  })
+
   it('a partial options update preserves sibling option keys', async () => {
     currentUser = admin('alice')
     pinned.setApp(app)

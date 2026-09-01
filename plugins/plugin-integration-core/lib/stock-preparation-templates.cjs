@@ -813,6 +813,11 @@ const STOCK_PREPARATION_MVP_TABLE_TEMPLATES = Object.freeze([
       field('parentVersion', 'Parent Version', 'string', 'plm_system'),
       field('childDrawingNo', 'Child Drawing No', 'string', 'plm_system'),
       field('childVersion', 'Child Version', 'string', 'plm_system'),
+      // Fingerprint decomposition (stock-prep-change-adjudication-20260901): persisted so the diff can
+      // raise material_changed by name. Optional — historical batches carry no material field, and the
+      // diff engine falls back to the sourceFingerprint for that dimension when either side lacks it.
+      // Existing installs gain the column via the W2 repair verb (repairStockPreparationMvpTargets).
+      field('material', 'Material', 'string', 'plm_system'),
       field('bomLevel', 'BOM Level', 'number', 'plm_system'),
       field('pathKey', 'Path Key', 'string', 'plm_system', { required: true }),
       field('designQty', 'Design Quantity', 'number', 'plm_system'),
