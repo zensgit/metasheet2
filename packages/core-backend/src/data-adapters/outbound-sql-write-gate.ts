@@ -252,8 +252,11 @@ export function isPureReadStatement(sql: string): boolean {
   const cleaned = stripSqlNoise(raw)
   if (cleaned.includes(';')) return false // an explicit separator — a batch could smuggle a write
   if (/\binto\b/i.test(cleaned)) return false // reject SELECT … INTO (a write)
-  if (/^\s*with\b/i.test(cleaned)) return false // a CTE may precede a write — fail-closed
-  if (!/^\s*(select|explain|show)\b/i.test(cleaned)) return false // must LEAD with a read verb
+  // Must LEAD with a read verb. `with` is DELIBERATELY ABSENT from this allowlist: a CTE may precede
+  // a data-modifying statement (`WITH c AS (…) DELETE …`), and proving a given CTE terminates in a
+  // SELECT is the unbounded parsing game this module retires. Adding `with` here re-opens that hole —
+  // which is exactly what the CTE guard-removal drill demonstrates.
+  if (!/^\s*(select|explain|show)\b/i.test(cleaned)) return false
   // …must contain no write verb at all, which is what catches an unterminated batch…
   if (SQL_WRITE_VERB_ANYWHERE.test(cleaned)) return false
   // …and must not use a distributed-execution primitive, whose payload we deliberately cannot see.
