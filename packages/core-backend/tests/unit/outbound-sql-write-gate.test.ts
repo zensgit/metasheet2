@@ -686,6 +686,108 @@ describe('enforcement — MSSQLAdapter.query (the raw-adapter chokepoint)', () =
   })
 })
 
+// FIX B — A STRUCTURED READ IS NEVER MISREAD AS A WRITE (read-path outage, not a security gap).
+//
+// The gate classifies statement TEXT. `MSSQLAdapter.select()` bracket-quotes the projection, table,
+// JOIN target and ORDER BY, but the WHERE clause is built by `BaseDataAdapter.buildWhereConditions`,
+// which emitted a BARE identifier. So an ordinary column named after a reserved word produced
+//
+//     SELECT TOP (2) * FROM [dbo].[t_Item] WHERE key = $1
+//
+// and `isPureReadStatement` — unable to tell the column from the keyword — called that a WRITE. On an
+// unarmed generic sqlserver source (the default posture) the read was REFUSED, surfacing as HTTP 500
+// because the routes' `codedGateRefusal` helper is wired into create/update/credentials, not the data
+// plane. That contradicted this adapter's own claim that reads are byte-identical to a deployment
+// without the gate.
+//
+// These tests drive the REAL adapter end to end (no stubbed SQL): `select()` builds the statement and
+// calls `query()`, which is where the gate sits. "Passed the gate" is proven the same way the sibling
+// chokepoint tests prove it — the call fails LATER, at connect, with `Not connected`, and carries
+// neither refusal code. Revert `MSSQLAdapter.whereIdentifier()` to the base (unquoted) behaviour and
+// every reserved-word case below reds with OUTBOUND_SQL_WRITE_DISABLED.
+const RESERVED_WORD_COLUMNS = [
+  'key', 'plan', 'file', 'public', 'check', 'open', 'close', 'save', 'load', 'use', 'read', 'print',
+  'return', 'column', 'table', 'view', 'schema', 'database', 'function', 'procedure', 'proc', 'rule',
+  'trigger', 'primary', 'foreign', 'unique', 'precision', 'national', 'double', 'if', 'while', 'goto',
+  'exit', 'add', 'to', 'of', 'off', 'set', 'lineno', 'statistics', 'disk', 'dump', 'browse', 'cascade',
+  'compute', 'external', 'send', 'get',
+]
+
+describe('FIX B — structured reads are not misclassified as writes', () => {
+  it('UNARMED: a select() whose WHERE column is a reserved word PASSES the gate (all 48)', async () => {
+    delete process.env[ENV_KEY]
+    const { adapter } = await managerWith(sqlserverConfig('read-reserved'))
+    for (const column of RESERVED_WORD_COLUMNS) {
+      const err = await asyncRefusal(
+        adapter.select('t_Item', { where: { [column]: 'x' }, limit: 2 }),
+      )
+      expect(err.code, `WHERE ${column} = ? must not be read as a write`).not.toBe(OUTBOUND_SQL_WRITE_DISABLED)
+      expect(err.code).not.toBe(OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED)
+      expect(String(err.message)).toMatch(/Not connected/)
+    }
+  })
+
+  it('UNARMED: reserved words survive every WHERE shape the builder emits', async () => {
+    delete process.env[ENV_KEY]
+    const { adapter } = await managerWith(sqlserverConfig('read-shapes'))
+    for (const where of [
+      { key: null }, //                                   IS NULL
+      { key: ['a', 'b'] }, //                             IN (…)
+      { key: { $in: ['a', 'b'] } }, //                    explicit $in
+      { key: { $between: ['a', 'b'] } }, //               BETWEEN
+      { key: { $gt: 1 } }, //                             operator
+      { $or: [{ key: 'a' }, { plan: 'b' }] }, //          nested $or
+      { key: 'a', plan: 'b', file: 'c' }, //              several at once
+    ]) {
+      const err = await asyncRefusal(adapter.select('t_Item', { where, limit: 2 }))
+      expect(err.code, `shape ${JSON.stringify(where)} must not be read as a write`).not.toBe(
+        OUTBOUND_SQL_WRITE_DISABLED,
+      )
+      expect(String(err.message)).toMatch(/Not connected/)
+    }
+  })
+
+  it('the fix quotes rather than loosens: a genuine write on the same lane is STILL refused', async () => {
+    delete process.env[ENV_KEY]
+    const { adapter } = await managerWith(sqlserverConfig('read-still-fenced'))
+    // update()/delete() build their WHERE through the SAME newly-quoting path. Quoting the identifier
+    // must not make the VERB unreadable — these stay writes, and stay refused.
+    expect((await asyncRefusal(adapter.update('t_Item', { qty: 1 }, { key: 'x' }))).code).toBe(
+      OUTBOUND_SQL_WRITE_DISABLED,
+    )
+    expect((await asyncRefusal(adapter.delete('t_Item', { key: 'x' }))).code).toBe(
+      OUTBOUND_SQL_WRITE_DISABLED,
+    )
+    expect((await asyncRefusal(adapter.insert('t_Item', { key: 'x' }))).code).toBe(
+      OUTBOUND_SQL_WRITE_DISABLED,
+    )
+    // and the raw-SQL lane the gate was actually designed for is untouched by the quoting change
+    expect((await asyncRefusal(adapter.query('UPDATE t_Item SET a = 1'))).code).toBe(
+      OUTBOUND_SQL_WRITE_DISABLED,
+    )
+  })
+
+  it('quoting preserves meaning: a qualified WHERE key quotes per segment', async () => {
+    delete process.env[ENV_KEY]
+    const { adapter } = await managerWith(sqlserverConfig('read-qualified'))
+    const err = await asyncRefusal(adapter.select('t_Item', { where: { 't.key': 'x' }, limit: 2 }))
+    expect(err.code).not.toBe(OUTBOUND_SQL_WRITE_DISABLED)
+    expect(String(err.message)).toMatch(/Not connected/)
+  })
+
+  it('validation is unchanged: an illegal WHERE identifier is still rejected, not quoted through', async () => {
+    delete process.env[ENV_KEY]
+    const { adapter } = await managerWith(sqlserverConfig('read-illegal'))
+    // The pre-fix `sanitizeIdentifier` threw on these; `quoteSqlServerIdentifier` enforces the SAME
+    // per-segment charset, so quoting must not have widened what is accepted into a statement.
+    for (const bad of ['a b', 'a-b', 'a;b', 'a)b', "a'b", 'a*b']) {
+      const err = await asyncRefusal(adapter.select('t_Item', { where: { [bad]: 'x' }, limit: 2 }))
+      expect(String(err.message)).toMatch(/Invalid identifier|identifier/i)
+      expect(err.code).not.toBe(OUTBOUND_SQL_WRITE_DISABLED)
+    }
+  })
+})
+
 describe('outbound SQL write gate — env tampering cannot unlock it', () => {
   it('only the one env key arms the gate; neighbours and truthy values do nothing', async () => {
     delete process.env[ENV_KEY]
