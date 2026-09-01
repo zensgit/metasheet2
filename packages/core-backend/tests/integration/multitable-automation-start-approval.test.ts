@@ -579,7 +579,11 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
         actorId: REQUESTER,
         testRunOperationId: operationId,
         confirmSideEffects: true,
-        sampleRecord: { recordId: RECORD, data: { title: 'Real-fire approval bridge' } },
+        sampleRecord: {
+          recordId: RECORD,
+          data: { title: 'Real-fire approval bridge' },
+          actorId: REQUESTER,
+        },
       })
       executionIds.push(execution.id)
       expect(execution.status).toBe('running')
