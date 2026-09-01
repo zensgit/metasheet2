@@ -18,6 +18,7 @@ const FORBIDDEN_RESPONSE_KEYS = new Set([
 
 export type ElearningOfflineAttendanceAction = 'check_in' | 'check_out'
 export type ElearningOfflineAttendanceMode = 'training' | 'session'
+export type ElearningOfflineTrainingStatus = 'active' | 'archived' | 'withdrawn'
 
 export interface ElearningOfflineTargetCommand {
   title: string
@@ -88,6 +89,14 @@ export interface ElearningOfflineAttendanceResult {
   duplicate: boolean
 }
 
+export interface ElearningOfflineTrainingStatusResult {
+  trainingId: string
+  status: ElearningOfflineTrainingStatus
+  reason: string
+  changedAt: string
+  duplicate: boolean
+}
+
 export interface ElearningOfflineRequestIds {
   forPublish(input: Omit<PublishElearningOfflineInput, 'requestId'>): string
   settlePublish(input: Omit<PublishElearningOfflineInput, 'requestId'>): void
@@ -95,6 +104,8 @@ export interface ElearningOfflineRequestIds {
   settleQr(trainingId: string, targetId: string, action: ElearningOfflineAttendanceAction): void
   forAttendance(token: string): string
   settleAttendance(token: string): void
+  forStatus(trainingId: string, status: ElearningOfflineTrainingStatus, reason: string): string
+  settleStatus(trainingId: string, status: ElearningOfflineTrainingStatus, reason: string): void
 }
 
 export interface PublishElearningOfflineInput {
@@ -185,6 +196,11 @@ function mode(value: unknown, status: number): ElearningOfflineAttendanceMode {
 
 function action(value: unknown, status: number): ElearningOfflineAttendanceAction {
   if (value !== 'check_in' && value !== 'check_out') failShape(status)
+  return value
+}
+
+function trainingStatus(value: unknown, status: number): ElearningOfflineTrainingStatus {
+  if (value !== 'active' && value !== 'archived' && value !== 'withdrawn') failShape(status)
   return value
 }
 
@@ -330,6 +346,11 @@ export function createElearningOfflineRequestIds(): ElearningOfflineRequestIds {
     attendanceAction: ElearningOfflineAttendanceAction,
   ): string => JSON.stringify(['qr', trainingId.toLowerCase(), targetId.toLowerCase(), attendanceAction])
   const attendanceIdentity = (token: string): string => JSON.stringify(['attendance', token.trim()])
+  const statusIdentity = (
+    trainingId: string,
+    nextStatus: ElearningOfflineTrainingStatus,
+    reason: string,
+  ): string => JSON.stringify(['status', trainingId.toLowerCase(), nextStatus, reason.trim()])
   const forIdentity = (identity: string): string => {
     const existing = ids.get(identity)
     if (existing) return existing
@@ -348,6 +369,12 @@ export function createElearningOfflineRequestIds(): ElearningOfflineRequestIds {
     },
     forAttendance: (token) => forIdentity(attendanceIdentity(token)),
     settleAttendance: (token) => ids.delete(attendanceIdentity(token)),
+    forStatus: (trainingId, nextStatus, reason) => (
+      forIdentity(statusIdentity(trainingId, nextStatus, reason))
+    ),
+    settleStatus: (trainingId, nextStatus, reason) => {
+      ids.delete(statusIdentity(trainingId, nextStatus, reason))
+    },
   }
 }
 
@@ -427,6 +454,38 @@ export async function issueElearningOfflineQr(input: {
     || result.targetId !== input.targetId.toLowerCase()
     || result.action !== input.action
   ) failShape(status)
+  return result
+}
+
+export async function setElearningOfflineTrainingStatus(input: {
+  requestId: string
+  trainingId: string
+  status: ElearningOfflineTrainingStatus
+  reason: string
+}): Promise<ElearningOfflineTrainingStatusResult> {
+  const { payload, status } = await requestJson(
+    `/api/elearning/admin/offline-trainings/${encodeURIComponent(input.trainingId)}/status`,
+    'POST',
+    [200],
+    { requestId: input.requestId, status: input.status, reason: input.reason },
+  )
+  if (!isObject(payload) || !exactKeys(payload, [
+    'trainingId',
+    'status',
+    'reason',
+    'changedAt',
+    'duplicate',
+  ])) failShape(status)
+  const result: ElearningOfflineTrainingStatusResult = {
+    trainingId: uuid(payload.trainingId, status),
+    status: trainingStatus(payload.status, status),
+    reason: text(payload.reason, status, 500),
+    changedAt: canonicalInstant(payload.changedAt, status),
+    duplicate: bool(payload.duplicate, status),
+  }
+  if (result.trainingId !== input.trainingId.toLowerCase() || result.status !== input.status) {
+    failShape(status)
+  }
   return result
 }
 

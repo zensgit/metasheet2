@@ -20,10 +20,12 @@ const TARGET_KEYS = new Set([
 ])
 const ISSUE_KEYS = new Set(['action', 'requestId', 'targetId', 'trainingId'])
 const ATTEND_KEYS = new Set(['requestId', 'token'])
+const STATUS_KEYS = new Set(['reason', 'requestId', 'status'])
 const OPAQUE_QR_RE = /^[A-Za-z0-9_-]{43}$/
 
 export type ElearningOfflineAttendanceAction = 'check_in' | 'check_out'
 export type ElearningOfflineAttendanceMode = 'training' | 'session'
+export type ElearningOfflineTrainingStatus = 'active' | 'archived' | 'withdrawn'
 export type ElearningOfflineErrorCode =
   | 'check_in_required'
   | 'conflict'
@@ -73,6 +75,12 @@ export interface IssueElearningOfflineQrCommand {
 export interface RecordElearningOfflineAttendanceCommand {
   requestId: string
   token: string
+}
+
+export interface SetElearningOfflineTrainingStatusCommand {
+  requestId: string
+  status: ElearningOfflineTrainingStatus
+  reason: string
 }
 
 function fail(code: ElearningOfflineErrorCode): never {
@@ -195,6 +203,20 @@ export function normalizeRecordElearningOfflineAttendance(
   return {
     requestId: normalizeElearningOfflineUuid(row.requestId),
     token: text(row.token, 8192),
+  }
+}
+
+export function normalizeSetElearningOfflineTrainingStatus(
+  value: unknown,
+): SetElearningOfflineTrainingStatusCommand {
+  const row = object(value, STATUS_KEYS)
+  if (row.status !== 'active' && row.status !== 'archived' && row.status !== 'withdrawn') {
+    fail('invalid_input')
+  }
+  return {
+    requestId: normalizeElearningOfflineUuid(row.requestId),
+    status: row.status,
+    reason: text(row.reason, 500),
   }
 }
 

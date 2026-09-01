@@ -12,6 +12,7 @@ import {
   listMyElearningOfflineTrainings,
   publishElearningOfflineTraining,
   recordElearningOfflineAttendance,
+  setElearningOfflineTrainingStatus,
   type ElearningOfflineDb,
 } from '../../src/services/elearning-offline-training-postgres'
 
@@ -308,6 +309,96 @@ describe('e-learning offline training PostgreSQL authority', () => {
       return true
     })
     expect(store.statements.some((sql) => sql.includes('FROM elearning_offline_publish_requests')))
+      .toBe(false)
+  })
+
+  it('changes lifecycle status through one audited transaction and replays by exact payload', async () => {
+    const command = { requestId: REQUEST, status: 'archived', reason: 'Completed cycle' }
+    const store = db(async (sql) => {
+      if (sql.includes('elearning-offline:active-user')) return [{ ok: 1 }]
+      if (sql.includes('SELECT status FROM elearning_offline_trainings')) return [{ status: 'active' }]
+      if (sql.includes('INSERT INTO elearning_offline_training_status_events')) {
+        return [{ changed_at: new Date('2026-09-01T00:02:00.000Z') }]
+      }
+      if (sql.includes('UPDATE elearning_offline_trainings SET status')) return [{ id: TRAINING }]
+      if (sql.includes('FROM elearning_offline_training_status_events')) return [{
+        training_id: TRAINING,
+        status: 'archived',
+        reason: 'Completed cycle',
+        changed_at: new Date('2026-09-01T00:02:00.000Z'),
+      }]
+      return []
+    })
+    await expect(setElearningOfflineTrainingStatus(store.value, {
+      orgId: ORG,
+      actorId: ACTOR,
+      trainingId: TRAINING,
+      command,
+    })).resolves.toEqual({
+      trainingId: TRAINING,
+      status: 'archived',
+      reason: 'Completed cycle',
+      changedAt: '2026-09-01T00:02:00.000Z',
+      duplicate: false,
+    })
+    const event = store.statements.findIndex((sql) => (
+      sql.includes('INSERT INTO elearning_offline_training_status_events')
+    ))
+    const authority = store.statements.findIndex((sql) => sql.includes("set_config('metasheet.elearning_offline_status_event_id'"))
+    const head = store.statements.findIndex((sql) => sql.includes('UPDATE elearning_offline_trainings SET status'))
+    const request = store.statements.findIndex((sql) => (
+      sql.includes('INSERT INTO elearning_offline_training_status_requests')
+    ))
+    expect([event, authority, head, request].every((index) => index >= 0)).toBe(true)
+    expect(event).toBeLessThan(authority)
+    expect(authority).toBeLessThan(head)
+    expect(head).toBeLessThan(request)
+
+    const requestHash = hashElearningOfflineRequest('status', {
+      reason: 'Completed cycle',
+      status: 'archived',
+      trainingId: TRAINING,
+    })
+    const replayStore = db(async (sql) => {
+      if (sql.includes('elearning-offline:active-user')) return [{ ok: 1 }]
+      if (sql.includes('FROM elearning_offline_training_status_requests')) return [{
+        request_hash: requestHash,
+        request_hash_version: 1,
+        event_id: EVENT,
+      }]
+      if (sql.includes('FROM elearning_offline_training_status_events')) return [{
+        training_id: TRAINING,
+        status: 'archived',
+        reason: 'Completed cycle',
+        changed_at: new Date('2026-09-01T00:02:00.000Z'),
+      }]
+      return []
+    })
+    await expect(setElearningOfflineTrainingStatus(replayStore.value, {
+      orgId: ORG,
+      actorId: ACTOR,
+      trainingId: TRAINING,
+      command,
+    })).resolves.toMatchObject({ status: 'archived', duplicate: true })
+    await expect(setElearningOfflineTrainingStatus(replayStore.value, {
+      orgId: ORG,
+      actorId: ACTOR,
+      trainingId: TRAINING,
+      command: { ...command, reason: 'Changed reason' },
+    })).rejects.toSatisfy((error: unknown) => {
+      expectCode(error, 'conflict')
+      return true
+    })
+    await expect(setElearningOfflineTrainingStatus(replayStore.value, {
+      orgId: ORG,
+      actorId: ACTOR,
+      trainingId: REVISION,
+      command,
+    })).rejects.toSatisfy((error: unknown) => {
+      expectCode(error, 'conflict')
+      return true
+    })
+    expect(replayStore.statements.some((sql) => sql.includes('UPDATE elearning_offline_trainings')))
       .toBe(false)
   })
 

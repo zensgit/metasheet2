@@ -13,6 +13,8 @@ const TABLES = [
   'elearning_offline_qr_requests',
   'elearning_offline_attendance_events',
   'elearning_offline_attendance_requests',
+  'elearning_offline_training_status_events',
+  'elearning_offline_training_status_requests',
 ] as const
 
 const COLUMNS: Record<(typeof TABLES)[number], readonly string[]> = {
@@ -51,6 +53,13 @@ const COLUMNS: Record<(typeof TABLES)[number], readonly string[]> = {
     'org_id', 'user_id', 'request_id', 'request_hash', 'request_hash_version',
     'event_id', 'created_at',
   ],
+  elearning_offline_training_status_events: [
+    'id', 'org_id', 'training_id', 'from_status', 'to_status', 'actor_id', 'reason',
+    'changed_at',
+  ],
+  elearning_offline_training_status_requests: [
+    'org_id', 'request_id', 'request_hash', 'request_hash_version', 'event_id', 'created_at',
+  ],
 }
 
 const NULLABLE = new Set(['elearning_offline_qr_challenges.superseded_at'])
@@ -82,6 +91,10 @@ const UUID_COLUMNS = new Set([
   'elearning_offline_attendance_events.challenge_id',
   'elearning_offline_attendance_requests.request_id',
   'elearning_offline_attendance_requests.event_id',
+  'elearning_offline_training_status_events.id',
+  'elearning_offline_training_status_events.training_id',
+  'elearning_offline_training_status_requests.request_id',
+  'elearning_offline_training_status_requests.event_id',
 ])
 
 const INTEGER_COLUMNS = new Set([
@@ -90,6 +103,7 @@ const INTEGER_COLUMNS = new Set([
   'elearning_offline_publish_requests.request_hash_version',
   'elearning_offline_qr_requests.request_hash_version',
   'elearning_offline_attendance_requests.request_hash_version',
+  'elearning_offline_training_status_requests.request_hash_version',
 ])
 
 const DEFAULTS = new Map<string, string>([
@@ -104,6 +118,8 @@ const DEFAULTS = new Map<string, string>([
   ['elearning_offline_publish_requests.created_at', 'now()'],
   ['elearning_offline_qr_requests.created_at', 'now()'],
   ['elearning_offline_attendance_requests.created_at', 'now()'],
+  ['elearning_offline_training_status_events.changed_at', 'transaction_timestamp()'],
+  ['elearning_offline_training_status_requests.created_at', 'now()'],
 ])
 
 const EXPECTED_CONSTRAINTS = new Map<string, string>([
@@ -124,6 +140,24 @@ const EXPECTED_CONSTRAINTS = new Map<string, string>([
     `CHECK (request_hash ~ '^[0-9a-f]{64}$'::text)`],
   ['elearning_offline_attendance_requests_hash_version_chk', 'CHECK (request_hash_version = 1)'],
   ['elearning_offline_attendance_requests_pkey', 'PRIMARY KEY (org_id, user_id, request_id)'],
+  ['elearning_offline_status_events_actor_fk',
+    'FOREIGN KEY (actor_id, org_id) REFERENCES user_orgs(user_id, org_id) ON DELETE RESTRICT'],
+  ['elearning_offline_status_events_org_id_id_uniq', 'UNIQUE (org_id, id)'],
+  ['elearning_offline_status_events_pkey', 'PRIMARY KEY (id)'],
+  ['elearning_offline_status_events_reason_chk',
+    `CHECK (btrim(reason) <> ''::text AND char_length(reason) <= 500)`],
+  ['elearning_offline_status_events_training_fk',
+    'FOREIGN KEY (org_id, training_id) REFERENCES elearning_offline_trainings(org_id, id) ON DELETE RESTRICT'],
+  ['elearning_offline_status_events_transition_chk',
+    `CHECK (from_status = 'active'::text AND (to_status = ANY (ARRAY['archived'::text, 'withdrawn'::text])) OR from_status = 'archived'::text AND (to_status = ANY (ARRAY['active'::text, 'withdrawn'::text])) OR from_status = 'withdrawn'::text AND to_status = 'active'::text)`],
+  ['elearning_offline_status_events_values_chk',
+    `CHECK ((from_status = ANY (ARRAY['active'::text, 'archived'::text, 'withdrawn'::text])) AND (to_status = ANY (ARRAY['active'::text, 'archived'::text, 'withdrawn'::text])))`],
+  ['elearning_offline_status_requests_event_fk',
+    'FOREIGN KEY (org_id, event_id) REFERENCES elearning_offline_training_status_events(org_id, id) ON DELETE RESTRICT'],
+  ['elearning_offline_status_requests_hash_chk',
+    `CHECK (request_hash ~ '^[0-9a-f]{64}$'::text)`],
+  ['elearning_offline_status_requests_hash_version_chk', 'CHECK (request_hash_version = 1)'],
+  ['elearning_offline_status_requests_pkey', 'PRIMARY KEY (org_id, request_id)'],
   ['elearning_offline_publish_requests_hash_chk',
     `CHECK (request_hash ~ '^[0-9a-f]{64}$'::text)`],
   ['elearning_offline_publish_requests_hash_version_chk', 'CHECK (request_hash_version = 1)'],
@@ -204,6 +238,8 @@ const TRIGGERS = [
   'trg_elearning_offline_qr_requests_immutable',
   'trg_elearning_offline_attendance_events_immutable',
   'trg_elearning_offline_attendance_requests_immutable',
+  'trg_elearning_offline_status_events_immutable',
+  'trg_elearning_offline_status_requests_immutable',
   'trg_elearning_offline_revisions_truncate',
   'trg_elearning_offline_trainings_truncate',
   'trg_elearning_offline_targets_truncate',
@@ -213,6 +249,8 @@ const TRIGGERS = [
   'trg_elearning_offline_qr_requests_truncate',
   'trg_elearning_offline_attendance_events_truncate',
   'trg_elearning_offline_attendance_requests_truncate',
+  'trg_elearning_offline_status_events_truncate',
+  'trg_elearning_offline_status_requests_truncate',
   'trg_elearning_offline_publish_authority',
   'trg_elearning_offline_attendance_authority',
 ] as const
@@ -239,6 +277,35 @@ BEGIN
      OR NEW.expires_at IS DISTINCT FROM OLD.expires_at
      OR NEW.token_digest IS DISTINCT FROM OLD.token_digest THEN
     RAISE EXCEPTION 'elearning offline challenge mutation rejected' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END
+`
+
+const TRAINING_HEAD_AUTHORITY_BODY = `
+DECLARE
+  event_id_text text;
+BEGIN
+  IF TG_OP <> 'UPDATE'
+     OR NEW.id IS DISTINCT FROM OLD.id
+     OR NEW.org_id IS DISTINCT FROM OLD.org_id
+     OR NEW.active_revision_id IS DISTINCT FROM OLD.active_revision_id
+     OR NEW.created_by IS DISTINCT FROM OLD.created_by
+     OR NEW.created_at IS DISTINCT FROM OLD.created_at
+     OR NEW.status IS NOT DISTINCT FROM OLD.status THEN
+    RAISE EXCEPTION 'elearning offline training head mutation rejected' USING ERRCODE = '23514';
+  END IF;
+  event_id_text := current_setting('metasheet.elearning_offline_status_event_id', true);
+  IF NULLIF(event_id_text, '') IS NULL OR NOT EXISTS (
+    SELECT 1 FROM elearning_offline_training_status_events event
+    WHERE event.id = NULLIF(event_id_text, '')::uuid
+      AND event.org_id = OLD.org_id
+      AND event.training_id = OLD.id
+      AND event.from_status = OLD.status
+      AND event.to_status = NEW.status
+      AND event.changed_at = transaction_timestamp()
+  ) THEN
+    RAISE EXCEPTION 'elearning offline training status authority missing' USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
 END
@@ -327,6 +394,7 @@ END
 const FUNCTION_SOURCES = new Map<string, string>([
   ['elearning_offline_reject_change', REJECT_CHANGE_BODY],
   ['elearning_offline_challenge_authority', CHALLENGE_AUTHORITY_BODY],
+  ['elearning_offline_training_head_authority', TRAINING_HEAD_AUTHORITY_BODY],
   ['elearning_offline_publish_authority', PUBLISH_AUTHORITY_BODY],
   ['elearning_offline_attendance_authority', ATTENDANCE_AUTHORITY_BODY],
 ])
@@ -415,7 +483,9 @@ async function assertCanonical(db: Kysely<unknown>): Promise<void> {
     JOIN pg_class index_relation ON index_relation.oid = index_row.indexrelid
     JOIN pg_class table_relation ON table_relation.oid = index_row.indrelid
     JOIN pg_namespace namespace_row ON namespace_row.oid = table_relation.relnamespace
-    LEFT JOIN pg_constraint constraint_row ON constraint_row.conindid = index_row.indexrelid
+    LEFT JOIN pg_constraint constraint_row
+      ON constraint_row.conindid = index_row.indexrelid
+     AND constraint_row.contype IN ('p', 'u')
     WHERE namespace_row.nspname = current_schema()
       AND table_relation.relname = ANY(${sql.val([...TABLES])}::text[])
   `.execute(db)
@@ -505,7 +575,7 @@ async function assertCanonical(db: Kysely<unknown>): Promise<void> {
     initiallyDeferred?: boolean
   }>([
     ['trg_elearning_offline_revisions_immutable', { table: 'elearning_offline_training_revisions', type: 27, fn: 'elearning_offline_reject_change' }],
-    ['trg_elearning_offline_trainings_immutable', { table: 'elearning_offline_trainings', type: 27, fn: 'elearning_offline_reject_change' }],
+    ['trg_elearning_offline_trainings_immutable', { table: 'elearning_offline_trainings', type: 27, fn: 'elearning_offline_training_head_authority' }],
     ['trg_elearning_offline_targets_immutable', { table: 'elearning_offline_training_targets', type: 27, fn: 'elearning_offline_reject_change' }],
     ['trg_elearning_offline_members_immutable', { table: 'elearning_offline_training_members', type: 27, fn: 'elearning_offline_reject_change' }],
     ['trg_elearning_offline_publish_requests_immutable', { table: 'elearning_offline_publish_requests', type: 27, fn: 'elearning_offline_reject_change' }],
@@ -513,6 +583,8 @@ async function assertCanonical(db: Kysely<unknown>): Promise<void> {
     ['trg_elearning_offline_qr_requests_immutable', { table: 'elearning_offline_qr_requests', type: 27, fn: 'elearning_offline_reject_change' }],
     ['trg_elearning_offline_attendance_events_immutable', { table: 'elearning_offline_attendance_events', type: 27, fn: 'elearning_offline_reject_change' }],
     ['trg_elearning_offline_attendance_requests_immutable', { table: 'elearning_offline_attendance_requests', type: 27, fn: 'elearning_offline_reject_change' }],
+    ['trg_elearning_offline_status_events_immutable', { table: 'elearning_offline_training_status_events', type: 27, fn: 'elearning_offline_reject_change' }],
+    ['trg_elearning_offline_status_requests_immutable', { table: 'elearning_offline_training_status_requests', type: 27, fn: 'elearning_offline_reject_change' }],
     ['trg_elearning_offline_revisions_truncate', { table: 'elearning_offline_training_revisions', type: 34, fn: 'elearning_offline_reject_change' }],
     ['trg_elearning_offline_trainings_truncate', { table: 'elearning_offline_trainings', type: 34, fn: 'elearning_offline_reject_change' }],
     ['trg_elearning_offline_targets_truncate', { table: 'elearning_offline_training_targets', type: 34, fn: 'elearning_offline_reject_change' }],
@@ -522,6 +594,8 @@ async function assertCanonical(db: Kysely<unknown>): Promise<void> {
     ['trg_elearning_offline_qr_requests_truncate', { table: 'elearning_offline_qr_requests', type: 34, fn: 'elearning_offline_reject_change' }],
     ['trg_elearning_offline_attendance_events_truncate', { table: 'elearning_offline_attendance_events', type: 34, fn: 'elearning_offline_reject_change' }],
     ['trg_elearning_offline_attendance_requests_truncate', { table: 'elearning_offline_attendance_requests', type: 34, fn: 'elearning_offline_reject_change' }],
+    ['trg_elearning_offline_status_events_truncate', { table: 'elearning_offline_training_status_events', type: 34, fn: 'elearning_offline_reject_change' }],
+    ['trg_elearning_offline_status_requests_truncate', { table: 'elearning_offline_training_status_requests', type: 34, fn: 'elearning_offline_reject_change' }],
     ['trg_elearning_offline_publish_authority', {
       table: 'elearning_offline_trainings',
       type: 5,
@@ -760,6 +834,52 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         REFERENCES elearning_offline_attendance_events(org_id, user_id, id) ON DELETE RESTRICT
     )
   `.execute(db)
+  await sql`
+    CREATE TABLE elearning_offline_training_status_events (
+      id uuid NOT NULL,
+      org_id text NOT NULL,
+      training_id uuid NOT NULL,
+      from_status text NOT NULL,
+      to_status text NOT NULL,
+      actor_id text NOT NULL,
+      reason text NOT NULL,
+      changed_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
+      CONSTRAINT elearning_offline_status_events_pkey PRIMARY KEY (id),
+      CONSTRAINT elearning_offline_status_events_org_id_id_uniq UNIQUE (org_id, id),
+      CONSTRAINT elearning_offline_status_events_training_fk
+        FOREIGN KEY (org_id, training_id)
+        REFERENCES elearning_offline_trainings(org_id, id) ON DELETE RESTRICT,
+      CONSTRAINT elearning_offline_status_events_actor_fk FOREIGN KEY (actor_id, org_id)
+        REFERENCES user_orgs(user_id, org_id) ON DELETE RESTRICT,
+      CONSTRAINT elearning_offline_status_events_values_chk CHECK (
+        from_status IN ('active', 'archived', 'withdrawn')
+        AND to_status IN ('active', 'archived', 'withdrawn')
+      ),
+      CONSTRAINT elearning_offline_status_events_transition_chk CHECK (
+        (from_status = 'active' AND to_status IN ('archived', 'withdrawn'))
+        OR (from_status = 'archived' AND to_status IN ('active', 'withdrawn'))
+        OR (from_status = 'withdrawn' AND to_status = 'active')
+      ),
+      CONSTRAINT elearning_offline_status_events_reason_chk CHECK (
+        btrim(reason) <> '' AND char_length(reason) <= 500
+      )
+    )
+  `.execute(db)
+  await sql`
+    CREATE TABLE elearning_offline_training_status_requests (
+      org_id text NOT NULL,
+      request_id uuid NOT NULL,
+      request_hash text NOT NULL,
+      request_hash_version integer NOT NULL,
+      event_id uuid NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      CONSTRAINT elearning_offline_status_requests_pkey PRIMARY KEY (org_id, request_id),
+      CONSTRAINT elearning_offline_status_requests_hash_version_chk CHECK (request_hash_version = 1),
+      CONSTRAINT elearning_offline_status_requests_hash_chk CHECK (request_hash ~ '^[0-9a-f]{64}$'),
+      CONSTRAINT elearning_offline_status_requests_event_fk FOREIGN KEY (org_id, event_id)
+        REFERENCES elearning_offline_training_status_events(org_id, id) ON DELETE RESTRICT
+    )
+  `.execute(db)
 
   for (const [name, body] of FUNCTION_SOURCES) {
     await sql.raw(`CREATE FUNCTION ${name}() RETURNS trigger
@@ -768,13 +888,14 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 
   for (const [table, trigger] of [
     ['elearning_offline_training_revisions', 'trg_elearning_offline_revisions_immutable'],
-    ['elearning_offline_trainings', 'trg_elearning_offline_trainings_immutable'],
     ['elearning_offline_training_targets', 'trg_elearning_offline_targets_immutable'],
     ['elearning_offline_training_members', 'trg_elearning_offline_members_immutable'],
     ['elearning_offline_publish_requests', 'trg_elearning_offline_publish_requests_immutable'],
     ['elearning_offline_qr_requests', 'trg_elearning_offline_qr_requests_immutable'],
     ['elearning_offline_attendance_events', 'trg_elearning_offline_attendance_events_immutable'],
     ['elearning_offline_attendance_requests', 'trg_elearning_offline_attendance_requests_immutable'],
+    ['elearning_offline_training_status_events', 'trg_elearning_offline_status_events_immutable'],
+    ['elearning_offline_training_status_requests', 'trg_elearning_offline_status_requests_immutable'],
   ] as const) {
     await sql.raw(`CREATE TRIGGER ${trigger} BEFORE UPDATE OR DELETE ON ${table}
       FOR EACH ROW EXECUTE FUNCTION elearning_offline_reject_change()`).execute(db)
@@ -782,6 +903,16 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       BEFORE TRUNCATE ON ${table}
       FOR EACH STATEMENT EXECUTE FUNCTION elearning_offline_reject_change()`).execute(db)
   }
+  await sql`
+    CREATE TRIGGER trg_elearning_offline_trainings_immutable
+    BEFORE UPDATE OR DELETE ON elearning_offline_trainings
+    FOR EACH ROW EXECUTE FUNCTION elearning_offline_training_head_authority()
+  `.execute(db)
+  await sql`
+    CREATE TRIGGER trg_elearning_offline_trainings_truncate
+    BEFORE TRUNCATE ON elearning_offline_trainings
+    FOR EACH STATEMENT EXECUTE FUNCTION elearning_offline_reject_change()
+  `.execute(db)
   await sql`
     CREATE TRIGGER trg_elearning_offline_qr_challenges_authority
     BEFORE UPDATE OR DELETE ON elearning_offline_qr_challenges
@@ -821,6 +952,8 @@ export async function down(db: Kysely<unknown>): Promise<void> {
       UNION ALL SELECT 1 FROM elearning_offline_qr_requests
       UNION ALL SELECT 1 FROM elearning_offline_attendance_events
       UNION ALL SELECT 1 FROM elearning_offline_attendance_requests
+      UNION ALL SELECT 1 FROM elearning_offline_training_status_events
+      UNION ALL SELECT 1 FROM elearning_offline_training_status_requests
     ) AS occupied
   `.execute(db)
   if (counts.rows[0]?.occupied) throw new Error('elearning offline training rollback refused: authoritative rows exist')

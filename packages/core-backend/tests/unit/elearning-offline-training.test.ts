@@ -9,6 +9,7 @@ import {
   normalizeIssueElearningOfflineQr,
   normalizePublishElearningOfflineTraining,
   normalizeRecordElearningOfflineAttendance,
+  normalizeSetElearningOfflineTrainingStatus,
 } from '../../src/services/elearning-offline-training'
 
 const SECRET = 'offline-training-test-secret-with-more-than-32-bytes'
@@ -121,6 +122,29 @@ describe('e-learning offline training domain', () => {
       requestId: REQUEST_ID,
       token: 'opaque-token',
     })).toEqual({ requestId: REQUEST_ID, token: 'opaque-token' })
+  })
+
+  it('normalizes a closed audited training status command', () => {
+    expect(normalizeSetElearningOfflineTrainingStatus({
+      requestId: REQUEST_ID,
+      status: 'withdrawn',
+      reason: ' Safety recall ',
+    })).toEqual({
+      requestId: REQUEST_ID,
+      status: 'withdrawn',
+      reason: 'Safety recall',
+    })
+    expectCode(() => normalizeSetElearningOfflineTrainingStatus({
+      requestId: REQUEST_ID,
+      status: 'retired',
+      reason: 'No longer offered',
+    }), 'invalid_input')
+    expectCode(() => normalizeSetElearningOfflineTrainingStatus({
+      requestId: REQUEST_ID,
+      status: 'archived',
+      reason: 'Archived',
+      actorId: MEMBER_ID,
+    }), 'invalid_input')
   })
 
   it('derives a deterministic opaque bearer token without embedding authority claims', () => {

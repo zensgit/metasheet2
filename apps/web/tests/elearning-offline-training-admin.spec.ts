@@ -5,6 +5,7 @@ import { useLocale } from '../src/composables/useLocale'
 const h = vi.hoisted(() => ({
   publish: vi.fn(),
   issue: vi.fn(),
+  setStatus: vi.fn(),
 }))
 
 vi.mock('../src/services/elearningOfflineTraining', async () => {
@@ -15,6 +16,7 @@ vi.mock('../src/services/elearningOfflineTraining', async () => {
     ...actual,
     publishElearningOfflineTraining: h.publish,
     issueElearningOfflineQr: h.issue,
+    setElearningOfflineTrainingStatus: h.setStatus,
   }
 })
 
@@ -93,6 +95,7 @@ describe('ElearningOfflineTrainingAdminSection', () => {
     useLocale().setLocale('en')
     h.publish.mockReset()
     h.issue.mockReset()
+    h.setStatus.mockReset()
     h.publish.mockResolvedValue(result())
     h.issue.mockResolvedValue({
       trainingId: TRAINING,
@@ -102,6 +105,13 @@ describe('ElearningOfflineTrainingAdminSection', () => {
       token: TOKEN_A,
       issuedAt: '2026-09-01T00:00:00.000Z',
       expiresAt: '2026-09-01T00:01:00.000Z',
+      duplicate: false,
+    })
+    h.setStatus.mockResolvedValue({
+      trainingId: TRAINING,
+      status: 'archived',
+      reason: 'Completed cycle',
+      changedAt: '2026-09-01T00:02:00.000Z',
       duplicate: false,
     })
     uuid = vi.spyOn(globalThis.crypto, 'randomUUID')
@@ -196,6 +206,37 @@ describe('ElearningOfflineTrainingAdminSection', () => {
     })
     expect((view.querySelector('[data-testid="elearning-offline-qr-token"]') as HTMLTextAreaElement).value)
       .toBe(TOKEN_B)
+  })
+
+  it('archives with a retry-stable request id and clears active QR material', async () => {
+    const view = mount()
+    fill(view)
+    ;(view.querySelector('[data-testid="elearning-offline-publish"]') as HTMLButtonElement).click()
+    await flush()
+    ;(view.querySelector('[data-testid="elearning-offline-issue-check-in"]') as HTMLButtonElement).click()
+    await flush()
+    expect(view.querySelector('[data-testid="elearning-offline-qr-symbol"]')).not.toBeNull()
+
+    h.setStatus.mockRejectedValueOnce(new ElearningApiError('network_error', 0))
+    input(view, 'elearning-offline-lifecycle-reason', 'Completed cycle')
+    const archive = view.querySelector('[data-testid="elearning-offline-archive"]') as HTMLButtonElement
+    archive.click()
+    await flush()
+    archive.click()
+    await flush()
+    expect(h.setStatus).toHaveBeenCalledTimes(2)
+    expect(h.setStatus.mock.calls[0]?.[0]).toEqual({
+      requestId: REQUEST_C,
+      trainingId: TRAINING,
+      status: 'archived',
+      reason: 'Completed cycle',
+    })
+    expect(h.setStatus.mock.calls[1]?.[0].requestId).toBe(REQUEST_C)
+    expect(view.querySelector('[data-testid="elearning-offline-training-status"]')?.textContent)
+      .toContain('archived')
+    expect(view.querySelector('[data-testid="elearning-offline-qr-symbol"]')).toBeNull()
+    expect((view.querySelector('[data-testid="elearning-offline-issue-check-in"]') as HTMLButtonElement).disabled)
+      .toBe(true)
   })
 
   it('reuses an id after failure, rotates for changed payload, and rotates after success', async () => {

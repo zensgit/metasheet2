@@ -7,12 +7,14 @@ import {
   listMyElearningOfflineTrainings,
   publishElearningOfflineTraining,
   recordElearningOfflineAttendance,
+  setElearningOfflineTrainingStatus,
   type ElearningOfflineDb,
 } from '../services/elearning-offline-training-postgres'
 
 const jsonParser = json({ limit: 64 * 1024 })
 const publishJsonParser = json({ limit: 512 * 1024 })
 const QR_BODY_KEYS = new Set(['action', 'requestId'])
+const STATUS_BODY_KEYS = new Set(['reason', 'requestId', 'status'])
 
 const STATUS: Record<ElearningOfflineError['code'], number> = {
   check_in_required: 409,
@@ -38,6 +40,7 @@ export interface ElearningOfflineTrainingRouteDeps {
   isGlobalAdmin(req: Request): boolean
   publishElearningOfflineTraining?: typeof publishElearningOfflineTraining
   issueElearningOfflineQr?: typeof issueElearningOfflineQr
+  setElearningOfflineTrainingStatus?: typeof setElearningOfflineTrainingStatus
   recordElearningOfflineAttendance?: typeof recordElearningOfflineAttendance
   listMyElearningOfflineTrainings?: typeof listMyElearningOfflineTrainings
 }
@@ -92,6 +95,7 @@ export function createElearningOfflineTrainingRouter(
   const router = Router()
   const publish = deps.publishElearningOfflineTraining ?? publishElearningOfflineTraining
   const issueQr = deps.issueElearningOfflineQr ?? issueElearningOfflineQr
+  const setStatus = deps.setElearningOfflineTrainingStatus ?? setElearningOfflineTrainingStatus
   const record = deps.recordElearningOfflineAttendance ?? recordElearningOfflineAttendance
   const listMine = deps.listMyElearningOfflineTrainings ?? listMyElearningOfflineTrainings
 
@@ -146,6 +150,30 @@ export function createElearningOfflineTrainingRouter(
         command: req.body,
       })
       res.status(result.duplicate ? 200 : 201).json(result)
+    }),
+  )
+
+  router.post(
+    '/api/elearning/admin/offline-trainings/:trainingId/status',
+    requireFlag,
+    requireContext,
+    deps.adminGuard,
+    requireGlobalAdmin,
+    parseJson,
+    run(async (req, res, ctx) => {
+      const trainingId = uuidParam(req, 'trainingId')
+      const body = readObject(req.body)
+      if (!trainingId || !body || !exactKeys(body, STATUS_BODY_KEYS)) {
+        res.status(400).json({ error: 'invalid_input' })
+        return
+      }
+      const result = await setStatus(deps.db, {
+        orgId: ctx.orgId,
+        actorId: ctx.actorId,
+        trainingId,
+        command: body,
+      })
+      res.status(200).json(result)
     }),
   )
 

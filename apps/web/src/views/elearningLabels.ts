@@ -143,6 +143,13 @@ export type ElearningLabelKey =
   | 'offlineAdmin.qrToken'
   | 'offlineAdmin.qrExpires'
   | 'offlineAdmin.qrIssued'
+  | 'offlineAdmin.lifecycleStatus'
+  | 'offlineAdmin.lifecycleReason'
+  | 'offlineAdmin.lifecycleReasonRequired'
+  | 'offlineAdmin.lifecycleChanged'
+  | 'offlineAdmin.archive'
+  | 'offlineAdmin.withdraw'
+  | 'offlineAdmin.restore'
   | 'offlineAdmin.validation'
   | 'offlineLearner.title'
   | 'offlineLearner.subtitle'
@@ -420,6 +427,16 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   'offlineAdmin.qrToken': { en: 'Token for the learner', zh: '学员使用的凭证' },
   'offlineAdmin.qrExpires': { en: 'Expires at', zh: '有效期至' },
   'offlineAdmin.qrIssued': { en: 'Attendance token issued.', zh: '考勤凭证已签发。' },
+  'offlineAdmin.lifecycleStatus': { en: 'Training status', zh: '培训状态' },
+  'offlineAdmin.lifecycleReason': { en: 'Reason for status change', zh: '状态变更原因' },
+  'offlineAdmin.lifecycleReasonRequired': {
+    en: 'Enter a reason for the status change.',
+    zh: '请输入状态变更原因。',
+  },
+  'offlineAdmin.lifecycleChanged': { en: 'Training status updated.', zh: '培训状态已更新。' },
+  'offlineAdmin.archive': { en: 'Archive', zh: '归档' },
+  'offlineAdmin.withdraw': { en: 'Emergency withdraw', zh: '紧急下架' },
+  'offlineAdmin.restore': { en: 'Restore active', zh: '恢复启用' },
   'offlineAdmin.validation': {
     en: 'Complete every field and provide unique valid learner IDs.',
     zh: '请填写全部字段，并提供不重复的有效学员 ID。',

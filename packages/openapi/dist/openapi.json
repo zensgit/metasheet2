@@ -12390,6 +12390,14 @@
           "check_out"
         ]
       },
+      "ElearningOfflineTrainingStatus": {
+        "type": "string",
+        "enum": [
+          "active",
+          "archived",
+          "withdrawn"
+        ]
+      },
       "ElearningOfflineTargetCommand": {
         "type": "object",
         "additionalProperties": false,
@@ -12634,6 +12642,59 @@
             "maximum": 10000
           },
           "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "duplicate": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ElearningOfflineTrainingStatusRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "requestId",
+          "status",
+          "reason"
+        ],
+        "properties": {
+          "requestId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ElearningOfflineTrainingStatus"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        }
+      },
+      "ElearningOfflineTrainingStatusResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "trainingId",
+          "status",
+          "reason",
+          "changedAt",
+          "duplicate"
+        ],
+        "properties": {
+          "trainingId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ElearningOfflineTrainingStatus"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "changedAt": {
             "type": "string",
             "format": "date-time"
           },
@@ -31449,6 +31510,68 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ElearningOfflineTrainingPublishResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/admin/offline-trainings/{trainingId}/status": {
+      "post": {
+        "operationId": "setElearningOfflineTrainingStatus",
+        "summary": "Archive, emergency-withdraw, or restore an offline training",
+        "description": "Requires authenticated server-derived organization and actor context, global administrator\nauthority, `elearning:admin`, and exact `ELEARNING_ENABLED=true` plus\n`ELEARNING_OFFLINE_TRAINING_ENABLED=true`. The path training id is authoritative. The closed\nbody contains only requestId, status, and a required audit reason. Status transitions are\nappend-only audited and idempotent; archived training remains visible to assigned learners\nbut cannot issue or consume QR challenges, while withdrawn training is immediately hidden\nand blocked until an administrator explicitly restores it.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "trainingId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningOfflineTrainingStatusRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Status transition or exact idempotent replay result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningOfflineTrainingStatusResult"
                 }
               }
             }

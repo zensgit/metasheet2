@@ -14,6 +14,7 @@ import {
   listMyElearningOfflineTrainings,
   publishElearningOfflineTraining,
   recordElearningOfflineAttendance,
+  setElearningOfflineTrainingStatus,
   type ElearningOfflineDb,
   type ElearningOfflineQueryable,
 } from '../../src/services/elearning-offline-training-postgres'
@@ -234,7 +235,7 @@ describe.sequential('e-learning offline training PostgreSQL authority', () => {
        JOIN pg_class rel ON rel.oid = tg.tgrelid
        WHERE rel.relname LIKE 'elearning_offline_%' AND NOT tg.tgisinternal`,
     )
-    expect(triggerCount.rows[0]?.count).toBe(20)
+    expect(triggerCount.rows[0]?.count).toBe(24)
     await migrate(offlineDown)
     await migrate(offlineDown)
     await migrate(offlineUp)
@@ -380,6 +381,138 @@ describe.sequential('e-learning offline training PostgreSQL authority', () => {
     )).rejects.toMatchObject({ code: '23514' })
     await expect(firstPool.query('TRUNCATE elearning_offline_attendance_requests')).rejects
       .toMatchObject({ code: '23514' })
+  })
+
+  it('serializes audited lifecycle transitions and enforces archived/withdrawn access semantics', async () => {
+    const training = await publishElearningOfflineTraining(runtimeDb(firstPool), {
+      orgId: ORG,
+      actorId: ADMIN,
+      command: publishCommand(),
+    })
+    const targetId = training.targets[0]!.targetId
+    const activeQr = await issueElearningOfflineQr(runtimeDb(firstPool), {
+      orgId: ORG,
+      actorId: ADMIN,
+      command: {
+        requestId: randomUUID(),
+        trainingId: training.trainingId,
+        targetId,
+        action: 'check_in',
+      },
+    }, ENV)
+
+    const archiveCommand = {
+      requestId: randomUUID(),
+      status: 'archived',
+      reason: 'Completed delivery cycle',
+    }
+    const archived = await setElearningOfflineTrainingStatus(runtimeDb(firstPool), {
+      orgId: ORG,
+      actorId: ADMIN,
+      trainingId: training.trainingId,
+      command: archiveCommand,
+    })
+    expect(archived).toMatchObject({
+      trainingId: training.trainingId,
+      status: 'archived',
+      duplicate: false,
+    })
+    await expect(setElearningOfflineTrainingStatus(runtimeDb(firstPool), {
+      orgId: ORG,
+      actorId: ADMIN,
+      trainingId: training.trainingId,
+      command: archiveCommand,
+    })).resolves.toEqual({ ...archived, duplicate: true })
+    await expect(setElearningOfflineTrainingStatus(runtimeDb(firstPool), {
+      orgId: ORG,
+      actorId: ADMIN,
+      trainingId: training.trainingId,
+      command: { ...archiveCommand, reason: 'Changed reason' },
+    })).rejects.toSatisfy((error: unknown) => {
+      expectCode(error, 'conflict')
+      return true
+    })
+    await expect(setElearningOfflineTrainingStatus(runtimeDb(firstPool), {
+      orgId: ORG,
+      actorId: ADMIN,
+      trainingId: randomUUID(),
+      command: archiveCommand,
+    })).rejects.toSatisfy((error: unknown) => {
+      expectCode(error, 'conflict')
+      return true
+    })
+    await expect(issueElearningOfflineQr(runtimeDb(firstPool), {
+      orgId: ORG,
+      actorId: ADMIN,
+      command: {
+        requestId: randomUUID(),
+        trainingId: training.trainingId,
+        targetId,
+        action: 'check_in',
+      },
+    }, ENV)).rejects.toSatisfy((error: unknown) => {
+      expectCode(error, 'not_found')
+      return true
+    })
+    await expect(recordElearningOfflineAttendance(runtimeDb(firstPool), {
+      orgId: ORG,
+      userId: MEMBER,
+      command: { requestId: randomUUID(), token: activeQr.token },
+    }, ENV)).rejects.toSatisfy((error: unknown) => {
+      expectCode(error, 'invalid_token')
+      return true
+    })
+    expect((await listMyElearningOfflineTrainings(runtimeDb(firstPool), {
+      orgId: ORG,
+      userId: MEMBER,
+    })).find((entry) => entry.trainingId === training.trainingId)?.status).toBe('archived')
+
+    await setElearningOfflineTrainingStatus(runtimeDb(firstPool), {
+      orgId: ORG,
+      actorId: ADMIN,
+      trainingId: training.trainingId,
+      command: { requestId: randomUUID(), status: 'active', reason: 'Reopened by administrator' },
+    })
+    await expect(issueElearningOfflineQr(runtimeDb(firstPool), {
+      orgId: ORG,
+      actorId: ADMIN,
+      command: {
+        requestId: randomUUID(),
+        trainingId: training.trainingId,
+        targetId,
+        action: 'check_in',
+      },
+    }, ENV)).resolves.toMatchObject({ trainingId: training.trainingId })
+
+    await setElearningOfflineTrainingStatus(runtimeDb(firstPool), {
+      orgId: ORG,
+      actorId: ADMIN,
+      trainingId: training.trainingId,
+      command: { requestId: randomUUID(), status: 'withdrawn', reason: 'Emergency withdrawal' },
+    })
+    expect((await listMyElearningOfflineTrainings(runtimeDb(firstPool), {
+      orgId: ORG,
+      userId: MEMBER,
+    })).some((entry) => entry.trainingId === training.trainingId)).toBe(false)
+
+    await expect(firstPool.query(
+      `UPDATE elearning_offline_trainings SET status = 'active'
+       WHERE org_id = $1 AND id = $2::uuid`,
+      [ORG, training.trainingId],
+    )).rejects.toMatchObject({ code: '23514' })
+    await expect(firstPool.query(
+      'UPDATE elearning_offline_training_status_events SET reason = reason || $1 WHERE org_id = $2',
+      [' changed', ORG],
+    )).rejects.toMatchObject({ code: '23514' })
+    await expect(firstPool.query('TRUNCATE elearning_offline_training_status_requests')).rejects
+      .toMatchObject({ code: '23514' })
+
+    await expect(setElearningOfflineTrainingStatus(runtimeDb(firstPool), {
+      orgId: ORG,
+      actorId: ADMIN,
+      trainingId: training.trainingId,
+      command: { requestId: randomUUID(), status: 'active', reason: 'Emergency cleared' },
+    })).resolves.toMatchObject({ status: 'active', duplicate: false })
   })
 
   it('rotates dynamic QR challenges and replays the same token by request identity', async () => {

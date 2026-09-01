@@ -14,6 +14,7 @@ import {
   publishElearningOfflineTraining,
   recordElearningOfflineAttendance,
   readElearningOfflineAttendanceToken,
+  setElearningOfflineTrainingStatus,
 } from '../src/services/elearningOfflineTraining'
 
 const TRAINING = '11111111-1111-4111-8111-111111111111'
@@ -145,6 +146,51 @@ describe('e-learning offline training client', () => {
       requestId: REQUEST_B,
       action: 'check_in',
     })
+  })
+
+  it('sends a closed lifecycle command and rejects mismatched or widened results', async () => {
+    apiFetchMock.mockResolvedValueOnce(response(200, {
+      trainingId: TRAINING,
+      status: 'archived',
+      reason: 'Completed cycle',
+      changedAt: CREATED,
+      duplicate: false,
+    }))
+    await expect(setElearningOfflineTrainingStatus({
+      requestId: REQUEST_A,
+      trainingId: TRAINING,
+      status: 'archived',
+      reason: 'Completed cycle',
+    })).resolves.toEqual({
+      trainingId: TRAINING,
+      status: 'archived',
+      reason: 'Completed cycle',
+      changedAt: CREATED,
+      duplicate: false,
+    })
+    expect(apiFetchMock.mock.calls[0]?.[0]).toBe(
+      `/api/elearning/admin/offline-trainings/${TRAINING}/status`,
+    )
+    expect(JSON.parse(String(apiFetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      requestId: REQUEST_A,
+      status: 'archived',
+      reason: 'Completed cycle',
+    })
+
+    for (const bad of [
+      { trainingId: REVISION, status: 'archived', reason: 'Completed cycle', changedAt: CREATED, duplicate: false },
+      { trainingId: TRAINING, status: 'withdrawn', reason: 'Completed cycle', changedAt: CREATED, duplicate: false },
+      { trainingId: TRAINING, status: 'archived', reason: 'Completed cycle', changedAt: CREATED, duplicate: false, actorId: MEMBER },
+      { trainingId: TRAINING, status: 'archived', reason: 'Completed cycle', changedAt: '2026-02-31T00:00:00.000Z', duplicate: false },
+    ]) {
+      apiFetchMock.mockResolvedValueOnce(response(200, bad))
+      await expect(setElearningOfflineTrainingStatus({
+        requestId: REQUEST_A,
+        trainingId: TRAINING,
+        status: 'archived',
+        reason: 'Completed cycle',
+      })).rejects.toMatchObject({ code: 'invalid_response', status: 200 })
+    }
   })
 
   it('parses learner rows and attendance without exposing authority material', async () => {
@@ -319,6 +365,20 @@ describe('e-learning offline training client', () => {
     expect(ids.forAttendance('token')).toBe(TARGET)
     ids.settleAttendance('token')
     expect(ids.forAttendance('token')).toBe(EVENT)
+    uuid.mockRestore()
+  })
+
+  it('binds lifecycle retry identity to course, status and normalized reason', () => {
+    const uuid = vi.spyOn(globalThis.crypto, 'randomUUID')
+      .mockReturnValueOnce(REQUEST_A)
+      .mockReturnValueOnce(REQUEST_B)
+      .mockReturnValue(REQUEST_C)
+    const ids = createElearningOfflineRequestIds()
+    expect(ids.forStatus(TRAINING, 'archived', ' Completed cycle ')).toBe(REQUEST_A)
+    expect(ids.forStatus(TRAINING, 'archived', 'Completed cycle')).toBe(REQUEST_A)
+    expect(ids.forStatus(TRAINING, 'withdrawn', 'Completed cycle')).toBe(REQUEST_B)
+    ids.settleStatus(TRAINING, 'archived', 'Completed cycle')
+    expect(ids.forStatus(TRAINING, 'archived', 'Completed cycle')).toBe(REQUEST_C)
     uuid.mockRestore()
   })
 })

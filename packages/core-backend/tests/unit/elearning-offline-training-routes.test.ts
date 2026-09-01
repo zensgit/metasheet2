@@ -64,6 +64,16 @@ function app(overrides: Record<string, unknown> = {}) {
         duplicate: false,
       }
     },
+    setElearningOfflineTrainingStatus: async (_db, input) => {
+      calls.push({ kind: 'status', input })
+      return {
+        trainingId: TRAINING_ID,
+        status: 'archived',
+        reason: 'Completed cycle',
+        changedAt: '2026-09-01T00:02:00.000Z',
+        duplicate: false,
+      }
+    },
     recordElearningOfflineAttendance: async (_db, input) => {
       calls.push({ kind: 'record', input })
       return {
@@ -169,6 +179,37 @@ describe('e-learning offline training routes', () => {
         command: { requestId: REQUEST_ID, action: 'check_in', trainingId: TRAINING_ID, targetId: TARGET_ID },
       },
     })
+  })
+
+  it('changes lifecycle status only through the closed global-admin route', async () => {
+    const state = app()
+    const body = { requestId: REQUEST_ID, status: 'archived', reason: 'Completed cycle' }
+    const response = await state.api!
+      .post(`/api/elearning/admin/offline-trainings/${TRAINING_ID}/status`)
+      .send(body)
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({
+      trainingId: TRAINING_ID,
+      status: 'archived',
+      reason: 'Completed cycle',
+      changedAt: '2026-09-01T00:02:00.000Z',
+      duplicate: false,
+    })
+    expect(state.calls).toEqual([{
+      kind: 'status',
+      input: {
+        orgId: 'org-one',
+        actorId: 'user-one',
+        trainingId: TRAINING_ID,
+        command: body,
+      },
+    }])
+
+    const invalid = await state.api!
+      .post(`/api/elearning/admin/offline-trainings/${TRAINING_ID}/status`)
+      .send({ ...body, actorId: 'client-controlled' })
+    expect(invalid.status).toBe(400)
+    expect(invalid.body).toEqual({ error: 'invalid_input' })
   })
 
   it('records attendance and lists only the authenticated learner context', async () => {

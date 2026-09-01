@@ -178,6 +178,7 @@ import type {
   listMyElearningOfflineTrainings,
   publishElearningOfflineTraining,
   recordElearningOfflineAttendance,
+  setElearningOfflineTrainingStatus,
 } from './elearning-offline-training-postgres'
 import {
   assignElearningTrainingPlanAuthorized,
@@ -338,6 +339,7 @@ export interface ElearningPilotRuntimeOptions {
   listElearningWrongQuestions?: typeof listElearningWrongQuestions
   publishElearningOfflineTraining?: typeof publishElearningOfflineTraining
   issueElearningOfflineQr?: typeof issueElearningOfflineQr
+  setElearningOfflineTrainingStatus?: typeof setElearningOfflineTrainingStatus
   recordElearningOfflineAttendance?: typeof recordElearningOfflineAttendance
   listMyElearningOfflineTrainings?: typeof listMyElearningOfflineTrainings
 }
@@ -446,6 +448,7 @@ export function createElearningPilotRuntime(
       ?? rbacGuardAny(['elearning:read', 'elearning:write', 'elearning:admin']),
     publishElearningOfflineTraining: opts.publishElearningOfflineTraining,
     issueElearningOfflineQr: opts.issueElearningOfflineQr,
+    setElearningOfflineTrainingStatus: opts.setElearningOfflineTrainingStatus,
     recordElearningOfflineAttendance: opts.recordElearningOfflineAttendance,
     listMyElearningOfflineTrainings: opts.listMyElearningOfflineTrainings,
   }) : null

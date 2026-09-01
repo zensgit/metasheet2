@@ -9767,6 +9767,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/admin/offline-trainings/{trainingId}/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Archive, emergency-withdraw, or restore an offline training
+         * @description Requires authenticated server-derived organization and actor context, global administrator
+         *     authority, `elearning:admin`, and exact `ELEARNING_ENABLED=true` plus
+         *     `ELEARNING_OFFLINE_TRAINING_ENABLED=true`. The path training id is authoritative. The closed
+         *     body contains only requestId, status, and a required audit reason. Status transitions are
+         *     append-only audited and idempotent; archived training remains visible to assigned learners
+         *     but cannot issue or consume QR challenges, while withdrawn training is immediately hidden
+         *     and blocked until an administrator explicitly restores it.
+         */
+        post: operations["setElearningOfflineTrainingStatus"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/admin/offline-trainings/{trainingId}/targets/{targetId}/qr": {
         parameters: {
             query?: never;
@@ -19784,6 +19810,8 @@ export interface components {
         ElearningOfflineAttendanceMode: "training" | "session";
         /** @enum {string} */
         ElearningOfflineAttendanceAction: "check_in" | "check_out";
+        /** @enum {string} */
+        ElearningOfflineTrainingStatus: "active" | "archived" | "withdrawn";
         ElearningOfflineTargetCommand: {
             title: string;
             /** Format: date-time */
@@ -19842,6 +19870,19 @@ export interface components {
             memberCount: number;
             /** Format: date-time */
             createdAt: string;
+            duplicate: boolean;
+        };
+        ElearningOfflineTrainingStatusRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            status: components["schemas"]["ElearningOfflineTrainingStatus"];
+            reason: string;
+        };
+        ElearningOfflineTrainingStatusResult: {
+            trainingId: components["schemas"]["ElearningUuid"];
+            status: components["schemas"]["ElearningOfflineTrainingStatus"];
+            reason: string;
+            /** Format: date-time */
+            changedAt: string;
             duplicate: boolean;
         };
         ElearningOfflineQrIssueRequest: {
@@ -23354,6 +23395,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ElearningOfflineTrainingPublishResult"];
+                };
+            };
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            403: components["responses"]["ElearningError"];
+            404: components["responses"]["ElearningError"];
+            409: components["responses"]["ElearningError"];
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    setElearningOfflineTrainingStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                trainingId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningOfflineTrainingStatusRequest"];
+            };
+        };
+        responses: {
+            /** @description Status transition or exact idempotent replay result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningOfflineTrainingStatusResult"];
                 };
             };
             400: components["responses"]["ElearningError"];

@@ -10,8 +10,10 @@ import {
   normalizeIssueElearningOfflineQr,
   normalizePublishElearningOfflineTraining,
   normalizeRecordElearningOfflineAttendance,
+  normalizeSetElearningOfflineTrainingStatus,
   type ElearningOfflineAttendanceAction,
   type ElearningOfflineAttendanceMode,
+  type ElearningOfflineTrainingStatus,
 } from './elearning-offline-training'
 
 export const ELEARNING_OFFLINE_QR_SECRET_ENV = 'ELEARNING_OFFLINE_QR_SIGNING_SECRET' as const
@@ -42,6 +44,13 @@ export interface IssueElearningOfflineQrInput {
 export interface RecordElearningOfflineAttendanceInput {
   orgId: string
   userId: string
+  command: unknown
+}
+
+export interface SetElearningOfflineTrainingStatusInput {
+  orgId: string
+  actorId: string
+  trainingId: string
   command: unknown
 }
 
@@ -91,6 +100,14 @@ export interface ElearningOfflineAttendanceResult {
   completionStatus: 'completed' | 'in_progress'
   completedTargetCount: number
   totalTargetCount: number
+  duplicate: boolean
+}
+
+export interface ElearningOfflineTrainingStatusResult {
+  trainingId: string
+  status: ElearningOfflineTrainingStatus
+  reason: string
+  changedAt: string
   duplicate: boolean
 }
 
@@ -146,6 +163,12 @@ function mode(row: Record<string, unknown>): ElearningOfflineAttendanceMode {
 function attendanceAction(row: Record<string, unknown>): ElearningOfflineAttendanceAction {
   const raw = value(row, 'action')
   if (raw !== 'check_in' && raw !== 'check_out') fail('unavailable')
+  return raw
+}
+
+function trainingStatus(row: Record<string, unknown>, key = 'status'): ElearningOfflineTrainingStatus {
+  const raw = value(row, key)
+  if (raw !== 'active' && raw !== 'archived' && raw !== 'withdrawn') fail('unavailable')
   return raw
 }
 
@@ -328,6 +351,96 @@ export async function publishElearningOfflineTraining(
         trainingId, revisionId],
     )
     return loadPublishResult(tx, input.orgId, trainingId, revisionId, false)
+  })
+}
+
+async function loadStatusResult(
+  tx: ElearningOfflineQueryable,
+  orgId: string,
+  eventId: string,
+  duplicate: boolean,
+): Promise<ElearningOfflineTrainingStatusResult> {
+  const result = await tx.query(
+    `SELECT training_id::text, to_status AS status, reason, changed_at
+     FROM elearning_offline_training_status_events
+     WHERE org_id = $1 AND id = $2::uuid`,
+    [orgId, eventId],
+  )
+  if (result.rows.length !== 1) fail('unavailable')
+  const row = result.rows[0]!
+  return {
+    trainingId: value(row, 'training_id'),
+    status: trainingStatus(row),
+    reason: value(row, 'reason'),
+    changedAt: instant(row, 'changed_at'),
+    duplicate,
+  }
+}
+
+export async function setElearningOfflineTrainingStatus(
+  db: ElearningOfflineDb,
+  input: SetElearningOfflineTrainingStatusInput,
+): Promise<ElearningOfflineTrainingStatusResult> {
+  const command = normalizeSetElearningOfflineTrainingStatus(input.command)
+  const { requestId: _requestId, ...payload } = command
+  const requestHash = hashElearningOfflineRequest('status', {
+    trainingId: input.trainingId,
+    ...payload,
+  })
+  return db.transaction(async (tx) => {
+    await lockRequest(tx, 'elearning-offline-status', `${input.orgId}:${command.requestId}`)
+    await requireActiveOrgUser(tx, input.orgId, input.actorId)
+    const replay = await tx.query(
+      `SELECT request_hash, request_hash_version, event_id::text
+       FROM elearning_offline_training_status_requests
+       WHERE org_id = $1 AND request_id = $2::uuid`,
+      [input.orgId, command.requestId],
+    )
+    if (replay.rows.length > 0) {
+      const row = replay.rows[0]!
+      if (value(row, 'request_hash') !== requestHash
+        || integer(row, 'request_hash_version') !== ELEARNING_OFFLINE_REQUEST_HASH_VERSION) fail('conflict')
+      return loadStatusResult(tx, input.orgId, value(row, 'event_id'), true)
+    }
+    const head = await tx.query(
+      `SELECT status FROM elearning_offline_trainings
+       WHERE org_id = $1 AND id = $2::uuid
+       FOR UPDATE`,
+      [input.orgId, input.trainingId],
+    )
+    if (head.rows.length !== 1) fail('not_found')
+    const fromStatus = trainingStatus(head.rows[0]!)
+    const allowed = (fromStatus === 'active' && (command.status === 'archived' || command.status === 'withdrawn'))
+      || (fromStatus === 'archived' && (command.status === 'active' || command.status === 'withdrawn'))
+      || (fromStatus === 'withdrawn' && command.status === 'active')
+    if (!allowed) fail('conflict')
+    const eventId = randomUUID()
+    const event = await tx.query(
+      `INSERT INTO elearning_offline_training_status_events
+         (id, org_id, training_id, from_status, to_status, actor_id, reason)
+       VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7)
+       RETURNING changed_at`,
+      [eventId, input.orgId, input.trainingId, fromStatus, command.status, input.actorId, command.reason],
+    )
+    if (event.rows.length !== 1) fail('unavailable')
+    await tx.query(
+      `SELECT set_config('metasheet.elearning_offline_status_event_id', $1, true)`,
+      [eventId],
+    )
+    const updated = await tx.query(
+      `UPDATE elearning_offline_trainings SET status = $3
+       WHERE org_id = $1 AND id = $2::uuid AND status = $4
+       RETURNING id::text`,
+      [input.orgId, input.trainingId, command.status, fromStatus],
+    )
+    if (updated.rows.length !== 1) fail('conflict')
+    await tx.query(
+      `INSERT INTO elearning_offline_training_status_requests
+         (org_id, request_id, request_hash, request_hash_version, event_id)
+       VALUES ($1, $2::uuid, $3, $4, $5::uuid)`,
+      [input.orgId, command.requestId, requestHash, ELEARNING_OFFLINE_REQUEST_HASH_VERSION, eventId],
+    )
+    return loadStatusResult(tx, input.orgId, eventId, false)
   })
 }
 
