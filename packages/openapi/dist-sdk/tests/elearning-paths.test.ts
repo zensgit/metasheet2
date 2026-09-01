@@ -96,6 +96,13 @@ type PracticeAnswerResult = components['schemas']['ElearningPracticeAnswerResult
 type PracticeWrongQuestionList = components['schemas']['ElearningPracticeWrongQuestionList']
 type AnalyticsExportCreateRequest = components['schemas']['ElearningAnalyticsExportCreateRequest']
 type AnalyticsExportResult = components['schemas']['ElearningAnalyticsExportResult']
+type OfflineTrainingPublishRequest = components['schemas']['ElearningOfflineTrainingPublishRequest']
+type OfflineTrainingPublishResult = components['schemas']['ElearningOfflineTrainingPublishResult']
+type OfflineQrIssueRequest = components['schemas']['ElearningOfflineQrIssueRequest']
+type OfflineQrResult = components['schemas']['ElearningOfflineQrResult']
+type OfflineAttendanceRequest = components['schemas']['ElearningOfflineAttendanceRequest']
+type OfflineAttendanceResult = components['schemas']['ElearningOfflineAttendanceResult']
+type OfflineLearnerTrainingList = components['schemas']['ElearningOfflineLearnerTrainingList']
 
 const FORBIDDEN_LEARNER_KEYS = new Set([
   'answerKey',
@@ -128,6 +135,7 @@ const LEARNER_OUTPUT_ROOTS = [
   'ElearningAssignmentRevocationResult',
   'ElearningPracticeSessionStartResult',
   'ElearningPracticeWrongQuestionList',
+  'ElearningOfflineLearnerTrainingList',
 ] as const
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -1796,6 +1804,176 @@ describe('elearning V0.1 OpenAPI paths', () => {
       new Set<string>(),
       new Set(['correct']),
     )).toEqual([])
+  })
+
+  it('documents closed L6 offline-training publish, QR, attendance, and learner-list contracts', () => {
+    expectTypeOf<paths['/api/elearning/admin/offline-trainings']['post']>().not.toBeNever()
+    expectTypeOf<
+      paths['/api/elearning/admin/offline-trainings/{trainingId}/targets/{targetId}/qr']['post']
+    >().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/me/offline-attendance']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/me/offline-trainings']['get']>().not.toBeNever()
+    expectTypeOf<OfflineTrainingPublishRequest>().toEqualTypeOf<{
+      requestId: string
+      title: string
+      location: string
+      attendanceMode: 'training' | 'session'
+      targets: Array<{
+        title: string
+        startsAt: string
+        endsAt: string
+        checkInOpensAt: string
+        checkInClosesAt: string
+        checkOutOpensAt: string
+        checkOutClosesAt: string
+      }>
+      memberUserIds: string[]
+    }>()
+    expectTypeOf<OfflineTrainingPublishResult>().toEqualTypeOf<{
+      trainingId: string
+      revisionId: string
+      title: string
+      location: string
+      attendanceMode: 'training' | 'session'
+      targets: Array<{
+        targetId: string
+        position: number
+        title: string
+        startsAt: string
+        endsAt: string
+        checkInOpensAt: string
+        checkInClosesAt: string
+        checkOutOpensAt: string
+        checkOutClosesAt: string
+      }>
+      memberCount: number
+      createdAt: string
+      duplicate: boolean
+    }>()
+    expectTypeOf<OfflineQrIssueRequest>().toEqualTypeOf<{
+      requestId: string
+      action: 'check_in' | 'check_out'
+    }>()
+    expectTypeOf<OfflineQrResult>().toEqualTypeOf<{
+      trainingId: string
+      revisionId: string
+      targetId: string
+      action: 'check_in' | 'check_out'
+      token: string
+      issuedAt: string
+      expiresAt: string
+      duplicate: boolean
+    }>()
+    expectTypeOf<OfflineAttendanceRequest>().toEqualTypeOf<{
+      requestId: string
+      token: string
+    }>()
+    expectTypeOf<OfflineAttendanceResult>().toEqualTypeOf<{
+      eventId: string
+      trainingId: string
+      revisionId: string
+      targetId: string
+      action: 'check_in' | 'check_out'
+      occurredAt: string
+      targetStatus: 'checked_in' | 'checked_out'
+      completionStatus: 'completed' | 'in_progress'
+      completedTargetCount: number
+      totalTargetCount: number
+      duplicate: boolean
+    }>()
+    expectTypeOf<OfflineLearnerTrainingList>().toEqualTypeOf<{
+      trainings: Array<{
+        trainingId: string
+        revisionId: string
+        title: string
+        location: string
+        attendanceMode: 'training' | 'session'
+        status: 'active' | 'archived'
+        targets: Array<{
+          targetId: string
+          position: number
+          title: string
+          startsAt: string
+          endsAt: string
+          checkInOpensAt: string
+          checkInClosesAt: string
+          checkOutOpensAt: string
+          checkOutClosesAt: string
+          attendanceStatus: 'not_checked_in' | 'checked_in' | 'checked_out'
+          checkedInAt: string | null
+          checkedOutAt: string | null
+        }>
+        completionStatus: 'completed' | 'in_progress'
+      }>
+    }>()
+
+    const doc = JSON.parse(readFileSync(join(here, '..', '..', 'dist', 'openapi.json'), 'utf8')) as {
+      paths?: Record<string, any>
+      components?: { schemas?: Record<string, JsonSchema> }
+    }
+    const schemas = doc.components?.schemas ?? {}
+    const operations = [
+      ['/api/elearning/admin/offline-trainings', 'post'],
+      ['/api/elearning/admin/offline-trainings/{trainingId}/targets/{targetId}/qr', 'post'],
+      ['/api/elearning/me/offline-attendance', 'post'],
+      ['/api/elearning/me/offline-trainings', 'get'],
+    ] as const
+    for (const [path, method] of operations) {
+      const operation = doc.paths?.[path]?.[method]
+      expect(operation?.security).toEqual([{ bearerAuth: [] }])
+      expect(operation?.description).toMatch(/server-derived|server verifies|assigned training/)
+      expect(JSON.stringify(operation?.responses ?? {})).not.toContain('detail')
+    }
+    expect(doc.paths?.['/api/elearning/admin/offline-trainings']?.post?.description)
+      .toContain('ELEARNING_OFFLINE_TRAINING_ENABLED=true')
+    expect(doc.paths?.['/api/elearning/admin/offline-trainings']?.post?.description)
+      .toContain('elearning:admin')
+    expect(doc.paths?.['/api/elearning/admin/offline-trainings']?.post?.requestBody?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningOfflineTrainingPublishRequest' })
+    expect(doc.paths?.['/api/elearning/me/offline-attendance']?.post?.responses?.['200']?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningOfflineAttendanceResult' })
+    expect(doc.paths?.['/api/elearning/me/offline-trainings']?.get?.responses?.['200']?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningOfflineLearnerTrainingList' })
+
+    for (const name of [
+      'ElearningOfflineTargetCommand',
+      'ElearningOfflineTrainingPublishRequest',
+      'ElearningOfflineTarget',
+      'ElearningOfflineTrainingPublishResult',
+      'ElearningOfflineQrIssueRequest',
+      'ElearningOfflineQrResult',
+      'ElearningOfflineAttendanceRequest',
+      'ElearningOfflineAttendanceResult',
+      'ElearningOfflineLearnerTarget',
+      'ElearningOfflineLearnerTraining',
+      'ElearningOfflineLearnerTrainingList',
+    ]) expect(schemas[name]?.additionalProperties).toBe(false)
+    expect(Object.keys(schemas.ElearningOfflineTrainingPublishRequest?.properties ?? {}).sort())
+      .toEqual(['attendanceMode', 'location', 'memberUserIds', 'requestId', 'targets', 'title'])
+    expect(Object.keys(schemas.ElearningOfflineQrIssueRequest?.properties ?? {}).sort())
+      .toEqual(['action', 'requestId'])
+    expect(Object.keys(schemas.ElearningOfflineAttendanceRequest?.properties ?? {}).sort())
+      .toEqual(['requestId', 'token'])
+    expect(schemas.ElearningOfflineTrainingPublishRequest?.properties?.memberUserIds)
+      .toMatchObject({ minItems: 1, maxItems: 10000, uniqueItems: true })
+    expect(schemas.ElearningOfflineTrainingPublishRequest?.oneOf).toHaveLength(2)
+    expect(schemas.ElearningOfflineTrainingPublishRequest?.oneOf?.map((variant) => ({
+      mode: variant.properties?.attendanceMode?.enum,
+      minItems: variant.properties?.targets?.minItems,
+      maxItems: variant.properties?.targets?.maxItems,
+    }))).toEqual([
+      { mode: ['training'], minItems: 1, maxItems: 1 },
+      { mode: ['session'], minItems: 1, maxItems: 100 },
+    ])
+    expect(schemas.ElearningOfflineAttendanceMode?.enum).toEqual(['training', 'session'])
+    expect(schemas.ElearningOfflineAttendanceAction?.enum).toEqual(['check_in', 'check_out'])
+    expect(collectForbiddenKeys(
+      schemas,
+      jsonSchemaAt(doc, '/api/elearning/me/offline-trainings', 'get', '200'),
+    )).toEqual([])
+    expect(JSON.stringify(schemas.ElearningOfflineLearnerTrainingList)).not.toMatch(
+      /orgId|actorId|challengeId|decisionHash|requestHash|signingSecret|signingKey/,
+    )
   })
 
   it('keeps write and heartbeat request objects closed', () => {

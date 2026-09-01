@@ -9175,6 +9175,424 @@ components:
             - type: 'null'
         duplicate:
           type: boolean
+    ElearningOfflineAttendanceMode:
+      type: string
+      enum:
+        - training
+        - session
+    ElearningOfflineAttendanceAction:
+      type: string
+      enum:
+        - check_in
+        - check_out
+    ElearningOfflineTargetCommand:
+      type: object
+      additionalProperties: false
+      required:
+        - title
+        - startsAt
+        - endsAt
+        - checkInOpensAt
+        - checkInClosesAt
+        - checkOutOpensAt
+        - checkOutClosesAt
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        startsAt:
+          type: string
+          format: date-time
+        endsAt:
+          type: string
+          format: date-time
+        checkInOpensAt:
+          type: string
+          format: date-time
+        checkInClosesAt:
+          type: string
+          format: date-time
+        checkOutOpensAt:
+          type: string
+          format: date-time
+        checkOutClosesAt:
+          type: string
+          format: date-time
+    ElearningOfflineTrainingPublishRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - requestId
+        - title
+        - location
+        - attendanceMode
+        - targets
+        - memberUserIds
+      properties:
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        location:
+          type: string
+          minLength: 1
+          maxLength: 500
+        attendanceMode:
+          $ref: '#/components/schemas/ElearningOfflineAttendanceMode'
+        targets:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ElearningOfflineTargetCommand'
+        memberUserIds:
+          type: array
+          minItems: 1
+          maxItems: 10000
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/ElearningUuid'
+      oneOf:
+        - title: Single-target training completion
+          required:
+            - attendanceMode
+            - targets
+          properties:
+            attendanceMode:
+              type: string
+              enum:
+                - training
+            targets:
+              type: array
+              minItems: 1
+              maxItems: 1
+              items:
+                $ref: '#/components/schemas/ElearningOfflineTargetCommand'
+        - title: Per-session completion
+          required:
+            - attendanceMode
+            - targets
+          properties:
+            attendanceMode:
+              type: string
+              enum:
+                - session
+            targets:
+              type: array
+              minItems: 1
+              maxItems: 100
+              items:
+                $ref: '#/components/schemas/ElearningOfflineTargetCommand'
+      discriminator:
+        propertyName: attendanceMode
+    ElearningOfflineTarget:
+      type: object
+      additionalProperties: false
+      required:
+        - targetId
+        - position
+        - title
+        - startsAt
+        - endsAt
+        - checkInOpensAt
+        - checkInClosesAt
+        - checkOutOpensAt
+        - checkOutClosesAt
+      properties:
+        targetId:
+          $ref: '#/components/schemas/ElearningUuid'
+        position:
+          type: integer
+          minimum: 1
+          maximum: 100
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        startsAt:
+          type: string
+          format: date-time
+        endsAt:
+          type: string
+          format: date-time
+        checkInOpensAt:
+          type: string
+          format: date-time
+        checkInClosesAt:
+          type: string
+          format: date-time
+        checkOutOpensAt:
+          type: string
+          format: date-time
+        checkOutClosesAt:
+          type: string
+          format: date-time
+    ElearningOfflineTrainingPublishResult:
+      type: object
+      additionalProperties: false
+      required:
+        - trainingId
+        - revisionId
+        - title
+        - location
+        - attendanceMode
+        - targets
+        - memberCount
+        - createdAt
+        - duplicate
+      properties:
+        trainingId:
+          $ref: '#/components/schemas/ElearningUuid'
+        revisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        location:
+          type: string
+          minLength: 1
+          maxLength: 500
+        attendanceMode:
+          $ref: '#/components/schemas/ElearningOfflineAttendanceMode'
+        targets:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ElearningOfflineTarget'
+        memberCount:
+          type: integer
+          minimum: 1
+          maximum: 10000
+        createdAt:
+          type: string
+          format: date-time
+        duplicate:
+          type: boolean
+    ElearningOfflineQrIssueRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - requestId
+        - action
+      properties:
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+        action:
+          $ref: '#/components/schemas/ElearningOfflineAttendanceAction'
+    ElearningOfflineQrResult:
+      type: object
+      additionalProperties: false
+      required:
+        - trainingId
+        - revisionId
+        - targetId
+        - action
+        - token
+        - issuedAt
+        - expiresAt
+        - duplicate
+      properties:
+        trainingId:
+          $ref: '#/components/schemas/ElearningUuid'
+        revisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        targetId:
+          $ref: '#/components/schemas/ElearningUuid'
+        action:
+          $ref: '#/components/schemas/ElearningOfflineAttendanceAction'
+        token:
+          type: string
+          minLength: 1
+          maxLength: 8192
+        issuedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        duplicate:
+          type: boolean
+    ElearningOfflineAttendanceRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - requestId
+        - token
+      properties:
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+        token:
+          type: string
+          minLength: 1
+          maxLength: 8192
+    ElearningOfflineAttendanceResult:
+      type: object
+      additionalProperties: false
+      required:
+        - eventId
+        - trainingId
+        - revisionId
+        - targetId
+        - action
+        - occurredAt
+        - targetStatus
+        - completionStatus
+        - completedTargetCount
+        - totalTargetCount
+        - duplicate
+      properties:
+        eventId:
+          $ref: '#/components/schemas/ElearningUuid'
+        trainingId:
+          $ref: '#/components/schemas/ElearningUuid'
+        revisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        targetId:
+          $ref: '#/components/schemas/ElearningUuid'
+        action:
+          $ref: '#/components/schemas/ElearningOfflineAttendanceAction'
+        occurredAt:
+          type: string
+          format: date-time
+        targetStatus:
+          type: string
+          enum:
+            - checked_in
+            - checked_out
+        completionStatus:
+          type: string
+          enum:
+            - completed
+            - in_progress
+        completedTargetCount:
+          type: integer
+          minimum: 0
+          maximum: 100
+        totalTargetCount:
+          type: integer
+          minimum: 1
+          maximum: 100
+        duplicate:
+          type: boolean
+    ElearningOfflineLearnerTarget:
+      type: object
+      additionalProperties: false
+      required:
+        - targetId
+        - position
+        - title
+        - startsAt
+        - endsAt
+        - checkInOpensAt
+        - checkInClosesAt
+        - checkOutOpensAt
+        - checkOutClosesAt
+        - attendanceStatus
+        - checkedInAt
+        - checkedOutAt
+      properties:
+        targetId:
+          $ref: '#/components/schemas/ElearningUuid'
+        position:
+          type: integer
+          minimum: 1
+          maximum: 100
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        startsAt:
+          type: string
+          format: date-time
+        endsAt:
+          type: string
+          format: date-time
+        checkInOpensAt:
+          type: string
+          format: date-time
+        checkInClosesAt:
+          type: string
+          format: date-time
+        checkOutOpensAt:
+          type: string
+          format: date-time
+        checkOutClosesAt:
+          type: string
+          format: date-time
+        attendanceStatus:
+          type: string
+          enum:
+            - not_checked_in
+            - checked_in
+            - checked_out
+        checkedInAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
+        checkedOutAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
+    ElearningOfflineLearnerTraining:
+      type: object
+      additionalProperties: false
+      required:
+        - trainingId
+        - revisionId
+        - title
+        - location
+        - attendanceMode
+        - status
+        - targets
+        - completionStatus
+      properties:
+        trainingId:
+          $ref: '#/components/schemas/ElearningUuid'
+        revisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        location:
+          type: string
+          minLength: 1
+          maxLength: 500
+        attendanceMode:
+          $ref: '#/components/schemas/ElearningOfflineAttendanceMode'
+        status:
+          type: string
+          enum:
+            - active
+            - archived
+        targets:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ElearningOfflineLearnerTarget'
+        completionStatus:
+          type: string
+          enum:
+            - completed
+            - in_progress
+    ElearningOfflineLearnerTrainingList:
+      type: object
+      additionalProperties: false
+      required:
+        - trainings
+      properties:
+        trainings:
+          type: array
+          items:
+            $ref: '#/components/schemas/ElearningOfflineLearnerTraining'
   responses:
     ElearningError:
       description: 'Values-free e-learning error `{ error: "<code>" }`'
@@ -21694,6 +22112,192 @@ paths:
         '409':
           $ref: '#/components/responses/ElearningError'
         '410':
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          $ref: '#/components/responses/ElearningError'
+  /api/elearning/admin/offline-trainings:
+    post:
+      operationId: publishElearningOfflineTraining
+      summary: Publish one immutable offline training revision and its member roster
+      description: >
+        Requires authenticated server-derived organization and actor context,
+        global administrator
+
+        authority, `elearning:admin`, and exact `ELEARNING_ENABLED=true` plus
+
+        `ELEARNING_OFFLINE_TRAINING_ENABLED=true`. The closed command never
+        accepts organization or
+
+        actor identifiers. A same-request replay returns the original result; a
+        different payload
+
+        under the same request id returns a values-free conflict.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningOfflineTrainingPublishRequest'
+      responses:
+        '200':
+          description: Idempotent replay of the original publish result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningOfflineTrainingPublishResult'
+        '201':
+          description: Offline training published.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningOfflineTrainingPublishResult'
+        '400':
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          $ref: '#/components/responses/ElearningError'
+  /api/elearning/admin/offline-trainings/{trainingId}/targets/{targetId}/qr:
+    post:
+      operationId: issueElearningOfflineTrainingQr
+      summary: Issue one short-lived QR challenge for a training target
+      description: >
+        Rechecks the same server-derived organization, actor, global-admin,
+        `elearning:admin`, and
+
+        exact feature gates as publish. Path identifiers are authoritative; the
+        closed body contains
+
+        only requestId and action. The signed token is opaque to clients and
+        expires after the
+
+        server-defined short window.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: trainingId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+        - in: path
+          name: targetId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningOfflineQrIssueRequest'
+      responses:
+        '200':
+          description: Idempotent replay of the original QR result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningOfflineQrResult'
+        '201':
+          description: QR challenge issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningOfflineQrResult'
+        '400':
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          $ref: '#/components/responses/ElearningError'
+  /api/elearning/me/offline-attendance:
+    post:
+      operationId: recordElearningOfflineAttendance
+      summary: >-
+        Record one authenticated learner check-in or check-out from an opaque QR
+        token
+      description: >
+        Requires server-derived organization and learner identity, learner read
+        authority, and exact
+
+        master plus offline-training gates. The server verifies token signature,
+        expiry, active
+
+        membership, target window, and check-in-before-check-out ordering.
+        Responses and errors never
+
+        expose signing material, token claims, request hashes, or organization
+        identifiers.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningOfflineAttendanceRequest'
+      responses:
+        '200':
+          description: Attendance effect or idempotent replay result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningOfflineAttendanceResult'
+        '400':
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          $ref: '#/components/responses/ElearningError'
+  /api/elearning/me/offline-trainings:
+    get:
+      operationId: listMyElearningOfflineTrainings
+      summary: List offline trainings assigned to the authenticated learner
+      description: >
+        Requires server-derived organization and learner identity, learner read
+        authority, and exact
+
+        master plus offline-training gates. Returns only active or archived
+        assigned training
+
+        revisions with ordered targets and the learner's own attendance state;
+        withdrawn trainings
+
+        and authority material are never returned.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Closed learner offline-training list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningOfflineLearnerTrainingList'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          $ref: '#/components/responses/ElearningError'
+        '404':
           $ref: '#/components/responses/ElearningError'
         '503':
           $ref: '#/components/responses/ElearningError'
