@@ -823,19 +823,39 @@ describe('outbound SQL write gate — env tampering cannot unlock it', () => {
 // ─────────────────── PART 4 — ARM-BINDING (P1): identity is not forgeable/redirectable ──────────
 
 describe('SQL write arm-binding — the fingerprint', () => {
-  it('depends on destination fields only, and is blind to options/credentials', () => {
+  it('covers every non-credential field, and is blind ONLY to credentials', () => {
     const a = { server: 'sql.local', port: 1433, database: 'AIS' }
     expect(sqlConnectionFingerprint(a)).toBe(sqlConnectionFingerprint({ ...a }))
     // case / whitespace normalized
     expect(sqlConnectionFingerprint(a)).toBe(sqlConnectionFingerprint({ server: 'SQL.LOCAL ', port: 1433, database: 'ais' }))
-    // options / credentials do not change it
-    expect(sqlConnectionFingerprint(a)).toBe(sqlConnectionFingerprint({ ...a, encrypt: true } as never))
     // a destination change DOES change it
     expect(sqlConnectionFingerprint(a)).not.toBe(sqlConnectionFingerprint({ ...a, database: 'K3' }))
     expect(sqlConnectionFingerprint(a)).not.toBe(sqlConnectionFingerprint({ ...a, server: 'k3.local' }))
     // no leakage: a fingerprint is a hex digest, not a host
     expect(sqlConnectionFingerprint(a)).toMatch(/^[0-9a-f]{64}$/)
     expect(sqlConnectionFingerprint(a)).not.toContain('sql.local')
+  })
+
+  it('a NOVEL extra field changes it — an unlisted destination-bearing field cannot ride an armed pin', () => {
+    const a = { server: 'sql.local', port: 1433, database: 'AIS' }
+    // The closed inclusion list this replaces hashed these three pairs IDENTICALLY (fail-open for any
+    // field it had never heard of). Same server + same database, novel key ⇒ DIFFERENT fingerprint.
+    expect(sqlConnectionFingerprint(a)).not.toBe(sqlConnectionFingerprint({ ...a, applicationIntent: 'ReadWrite' }))
+    expect(sqlConnectionFingerprint(a)).not.toBe(sqlConnectionFingerprint({ ...a, proxyHost: 'k3.local' }))
+    expect(sqlConnectionFingerprint(a)).not.toBe(sqlConnectionFingerprint({ ...a, encrypt: true }))
+    // and a nested object is canonicalized by content, not collapsed to "[object Object]"
+    expect(sqlConnectionFingerprint({ ...a, options: { failoverPartner: 'x' } }))
+      .not.toBe(sqlConnectionFingerprint({ ...a, options: { failoverPartner: 'y' } }))
+    // absent ≡ explicit null (unchanged from the closed-list behavior)
+    expect(sqlConnectionFingerprint(a)).toBe(sqlConnectionFingerprint({ ...a, instanceName: null } as never))
+  })
+
+  it('a credential-only difference does NOT change it — the credential-blind residual stays, as documented', () => {
+    const a = { server: 'sql.local', port: 1433, database: 'AIS' }
+    expect(sqlConnectionFingerprint(a)).toBe(sqlConnectionFingerprint({ ...a, user: 'sa', password: 'hunter2' }))
+    expect(sqlConnectionFingerprint(a)).toBe(sqlConnectionFingerprint({ ...a, username: 'k3writer', token: 't', secret: 's' }))
+    // spelling variants of the same credential identity are excluded too
+    expect(sqlConnectionFingerprint(a)).toBe(sqlConnectionFingerprint({ ...a, api_key: 'k', 'access-token': 'x' }))
   })
 })
 
@@ -866,6 +886,18 @@ describe('SQL write arm-binding — enforcement (P1)', () => {
     await m.updateDataSource('redir', config('redir', k3Conn), { ownerId: 'owner-1' })
     const a = m.getDataSource('redir')
     // armed in the file, but its connection no longer matches the pin → refused.
+    const err = await asyncRefusal(a.query("INSERT INTO t_ICItem (FItemID) VALUES (1)"))
+    expect(err.code).toBe(OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED)
+    expect((err as { details?: { reason?: string } }).details?.reason).toBe('arm_binding_connection_mismatch')
+  })
+
+  it('(ii novel-field redirect) a redirect through a field the fingerprint never listed still drops authorization', async () => {
+    armFor('novel-redir')
+    const { m } = await managerWithProvisioned(config('novel-redir', armedConn)) // pins staging.local at load
+    // SAME server, SAME database — the redirect rides ONLY a key the old closed inclusion list did not
+    // know, which used to hash identically to the pin (fail-open). Now it is a mismatch ⇒ refusal.
+    await m.updateDataSource('novel-redir', config('novel-redir', { ...armedConn, proxyHost: 'k3.local' }), { ownerId: 'owner-1' })
+    const a = m.getDataSource('novel-redir')
     const err = await asyncRefusal(a.query("INSERT INTO t_ICItem (FItemID) VALUES (1)"))
     expect(err.code).toBe(OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED)
     expect((err as { details?: { reason?: string } }).details?.reason).toBe('arm_binding_connection_mismatch')

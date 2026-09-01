@@ -42,6 +42,11 @@ const {
   __internals: { buildParentIndex },
 } = require(path.join(LIB, 'stock-preparation-expansion-snapshot-mapper.cjs'))
 const {
+  BATCH_IDENTITY_MODES,
+  mintStockPreparationBatchIdentity,
+  readStockPreparationBatchIdentityMode,
+} = require(path.join(LIB, 'stock-preparation-batch-identity.cjs'))
+const {
   planStockPreparationConflicts,
   derivePackAwarePlmWritableFields,
 } = require(path.join(LIB, 'stock-preparation-conflict-planner.cjs'))
@@ -86,7 +91,15 @@ const REBIND_READ_PLAN = normalizeStockPreparationBomReadPlan({
     nameField: 'TargetName',
     materialField: 'Material',
     versionField: 'SysVer',
+    // 规格 and the material creation hour are DECLARED here, which is the whole point: the shipped
+    // read plan defaults both to ABSENT (no guessed column) and a deployment that has them says so.
+    // This is what turns `Specification` into a canonical `spec` on the snapshot line and what
+    // carries `Createtime` far enough for the batch rule to bucket it.
+    specField: 'Specification',
+    createTimeField: 'Createtime',
   },
+  // 备料 batch rule, DECLARED: 物料创建日期(精确到小时)区分同一项目不同批次的物料.
+  batchIdentity: { mode: 'material_create_hour' },
   bomHead: {
     object: 'DN_BomHead_View',
     parentPartField: 'part_id',
@@ -291,19 +304,24 @@ function rowByPath(rows, tokens) {
   return m[0]
 }
 
-// The customer's batch rule (物料创建日期精确到小时): bucket a pull by its
-// materials' creation hour. NOT IN SHIPPED CODE — this is the caller-side
-// batch-minting step that belongs upstream of the mapper (see report gap #3).
-// Grounded here on the real Createtime the source carries, and fed as the
-// (opaque, caller-supplied) snapshotBatchId the shipped mapper requires.
-function hourBucket(createtime) {
-  return String(createtime).slice(0, 13) // 'YYYY-MM-DDTHH'
-}
-function batchIdFromMaterials(state, projectNo, rows) {
-  const parts = state.get('dn_partlibrary_view')
-  const byId = new Map(parts.map((p) => [p.part_id, p]))
-  const hours = rows.map((r) => hourBucket(byId.get(r.componentSourceId).createtime)).sort()
-  return `${projectNo}|${hours[hours.length - 1]}` // as-of the newest material hour
+// The customer's batch rule (物料创建日期精确到小时): bucket a pull by its materials' creation hour.
+//
+// THIS IS NOW SHIPPED CODE. The rehearsal used to carry its own `hourBucket` /
+// `batchIdFromMaterials` and reach around the expansion into the fixture's part table, because the
+// expansion did not carry `Createtime` and the mapper only ever accepted an opaque caller-supplied
+// snapshotBatchId. Both halves are closed: the read plan DECLARES createTimeField, so the hour rides
+// on the expansion row itself, and the derivation lives in stock-preparation-batch-identity.cjs.
+// The rehearsal calls that module — one implementation, no drift-prone second copy.
+function batchIdFromMaterials(projectNo, rows) {
+  const minted = mintStockPreparationBatchIdentity({
+    mode: BATCH_IDENTITY_MODES.MATERIAL_CREATE_HOUR,
+    projectNo,
+    rows,
+    legacyBatchId: `legacy_${projectNo}`,
+  })
+  assert.equal(minted.degraded, false, 'the fixture declares Createtime — the hour rule must not degrade')
+  assert.equal(minted.mode, BATCH_IDENTITY_MODES.MATERIAL_CREATE_HOUR)
+  return minted.batchId
 }
 
 const CANONICAL_HUMAN = [...HUMAN_PRESERVED_FIELD_IDS]
@@ -392,21 +410,41 @@ async function step2(schema, expansionA, state) {
 
   // (2b) snapshot lines carry 父组件图号 (parentDrawingNo) and 当前组件图号
   // (childDrawingNo), resolved by the shipped mapper's in-batch parent join.
-  const snapshotBatchId = batchIdFromMaterials(state, PROJECT_A, rows)
+  const snapshotBatchId = batchIdFromMaterials(PROJECT_A, rows)
   const snap = mapExpansionRowsToSnapshotLines(expansionA, { snapshotBatchId, readPlan: REBIND_READ_PLAN })
   assert.equal(snap.status, 'mapped')
   assert.equal(snap.lines.length, 7)
   const parentIndex = buildParentIndex(rows) // the same join the mapper uses
   const leafDLine = snap.lines.find((l) => l.childDrawingNo === 'TZ-D-3000' && l.bomLevel === 2)
   assert.equal(leafDLine.parentDrawingNo, 'TZ-B-2000', '父组件图号 <- parent componentCode via in-batch join')
-  // 父组件名称 is resolvable from the SAME parent index (name is available even
-  // though the frozen snapshot-line template stores only the drawing no).
   const leafDParent = parentIndex.get(leafD.parentSourceId)
-  assert.equal(leafDParent.componentName, '筒体组件B', '父组件名称 <- parent componentName via in-batch join')
+  assert.equal(leafDParent.componentName, '筒体组件B', 'fixture control: the parent row carries the name')
   const withParent = snap.evidence.result.withParentDrawingNo
   assert.equal(withParent, 6, '6 of 7 lines have a parent drawing no (the root has none)')
 
+  // ALL SEVEN FIELDS ON THE PERSISTED LINE. The audit's finding was that only drawing numbers,
+  // versions and per-level qty survived onto the snapshot line: 材料 lived only inside the
+  // fingerprint hash, 当前组件名称 was read then dropped, 总数量 was traded for the per-level qty,
+  // 父组件名称 was never emitted at all, and 规格 was never read from the source. Assert each one
+  // on the LINE the persist layer writes, not on the expansion row it came from.
+  assert.equal(leafDLine.parentName, '筒体组件B', '父组件名称 on the snapshot line')
+  assert.equal(leafDLine.childName, '标准封头D', '当前组件名称 on the snapshot line')
+  assert.equal(leafDLine.material, 'S30408', '材料 on the snapshot line')
+  assert.equal(leafDLine.spec, 'EHA-DN1200x12', '规格 on the snapshot line (readPlan.part.specField)')
+  assert.equal(leafDLine.designQty, 2, '逐层数量 unchanged')
+  assert.equal(leafDLine.totalQuantity, 12, '总数量 on the snapshot line, alongside the per-level qty')
+  const rootLine = snap.lines.find((l) => l.childDrawingNo === 'TZ-A-1000')
+  assert.equal(rootLine.childName, '总装配体A', '当前组件名称 on the root line')
+  assert.equal(rootLine.parentName, undefined, 'the root has no parent — absence, not an empty string')
+
   // (2c) TWO same-project batches distinguished by CREATION-HOUR.
+  // The mode is DECLARED on the read plan and survives normalization — a deployment configures the
+  // rule, it is not a hardcoded behaviour of the pull.
+  assert.equal(
+    readStockPreparationBatchIdentityMode(REBIND_READ_PLAN),
+    BATCH_IDENTITY_MODES.MATERIAL_CREATE_HOUR,
+    'the batch rule is read off the deployment read plan',
+  )
   // batch #1 (hour 09) and batch #2 (hour 10) of SYN-XM-0001 mint DISTINCT batch
   // ids -> DISTINCT snapshot line ids. Same hour re-derives the SAME id (idempotent).
   assert.equal(snapshotBatchId, `${PROJECT_A}|2026-08-30T09`, 'batch #1 buckets to hour 09')
@@ -414,7 +452,7 @@ async function step2(schema, expansionA, state) {
   const state2 = loadState(schema, ['03-seed-batch-2.sql'])
   const expansionA2 = await expand(state2, PROJECT_A)
   assert.equal(expansionA2.rows.length, 6, 'batch #2 re-pull drops the removed leaf')
-  const batch2Id = batchIdFromMaterials(state2, PROJECT_A, expansionA2.rows)
+  const batch2Id = batchIdFromMaterials(PROJECT_A, expansionA2.rows)
   assert.equal(batch2Id, `${PROJECT_A}|2026-08-30T10`, 'batch #2 buckets to hour 10')
   assert.notEqual(snapshotBatchId, batch2Id, 'two same-project batches are DISTINCT by creation-hour')
 
@@ -425,7 +463,7 @@ async function step2(schema, expansionA, state) {
   assert.deepEqual(overlap, [], 'no snapshot line id is shared across the two hour-distinct batches')
 
   // idempotence control: same materials, same hour -> byte-identical batch id.
-  assert.equal(batchIdFromMaterials(state, PROJECT_A, rows), snapshotBatchId, 'same-hour re-derivation is idempotent')
+  assert.equal(batchIdFromMaterials(PROJECT_A, rows), snapshotBatchId, 'same-hour re-derivation is idempotent')
 
   console.log(`  STEP 2 GREEN — 图号/名称/规格/材料/总数量 mapped onto rows; 父组件图号 via in-batch join;`
     + ` batch #1=${snapshotBatchId} vs batch #2=${batch2Id} (distinct by hour, 0 shared line ids)`)

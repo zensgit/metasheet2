@@ -742,6 +742,17 @@ export function buildQueryString(input: Record<string, unknown>): string {
   return params.toString()
 }
 
+// buildQueryString returns a BARE `a=1&b=2` — no leading `?` — so every call site must remember to
+// guard it in with `query ? `?${query}` : ''` before appending it to a path (get this wrong and the
+// query string merges straight into the path with no separator, e.g.
+// `/api/foo${query}` → `/api/fooa=1&b=2`, a guaranteed 404; see confirmationQueue.ts's O1 fix).
+// buildQuerySuffix makes that guard the caller's ONLY option: it always returns either `''` or a
+// leading-`?` string, so there is no bare form left to misuse.
+export function buildQuerySuffix(input: Record<string, unknown>): string {
+  const query = buildQueryString(input)
+  return query ? `?${query}` : ''
+}
+
 function buildObservationQueryString(query: IntegrationPipelineObservationQuery): string {
   return buildQueryString({
     tenantId: query.tenantId,

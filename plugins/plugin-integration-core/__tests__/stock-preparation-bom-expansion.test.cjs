@@ -534,7 +534,93 @@ function testReadPlanValidation() {
   )
 }
 
+// 规格 and the material creation time: DECLARED on the read plan, DEFAULTED TO ABSENT.
+//
+// Neither is a core role of this vendor family (source-vendor-presets/dn-pdm-family.preset.json
+// declares exactly rowId/id/code/name/material/version on the part table). Where they live is a
+// per-deployment reading — a native view column on the measured customer catalog, a dictionary-
+// assigned generic slot on a stock one — so the shipped plan pins NEITHER. A deployment that has
+// them says so; one that does not gets absence, never a guessed column.
+async function testSpecAndCreateTimeAreDeclaredNotGuessed() {
+  // (1) UNDECLARED — the shipped default. The row must be byte-identical to the pre-change one:
+  //     no `spec` key, no `createTime` key, not even an empty one.
+  const undeclared = await expandPlmProjectBom({
+    sourceAdapter: createAdapter(baseData({
+      DN_PDM_PartLibraryInfo: [
+        { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1', Specification: 'DN1200', Createtime: '2026-08-30T09:15:00' },
+        { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1', Specification: 'M20', Createtime: '2026-08-30T09:40:00' },
+      ],
+    })).adapter,
+    projectNo: 'P-001',
+  })
+  assert.equal(undeclared.valid, true)
+  for (const row of undeclared.rows) {
+    assert.ok(!('spec' in row), 'an undeclared spec slot must not be guessed off a same-named column')
+    assert.ok(!('createTime' in row), 'an undeclared createTime slot must not be guessed either')
+  }
+
+  // (2) DECLARED — the same source rows, now with the deployment naming its own columns.
+  const plan = clone(PLM_STOCK_PREPARATION_BOM_READ_PLAN)
+  plan.part.specField = 'Specification'
+  plan.part.createTimeField = 'Createtime'
+  const declared = await expandPlmProjectBom({
+    sourceAdapter: createAdapter(baseData({
+      DN_PDM_PartLibraryInfo: [
+        { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1', Specification: 'DN1200', Createtime: '2026-08-30T09:15:00' },
+        { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1', Specification: 'M20', Createtime: '2026-08-30T09:40:00' },
+      ],
+    })).adapter,
+    projectNo: 'P-001',
+    readPlan: plan,
+  })
+  assert.equal(declared.valid, true)
+  assert.equal(declared.rows[0].spec, 'DN1200', '规格 rides the expansion row once declared')
+  assert.equal(declared.rows[0].createTime, '2026-08-30T09:15:00', 'the material creation time rides it too')
+  assert.equal(declared.rows[1].spec, 'M20')
+
+  // (3) DECLARED but EMPTY on the source row — absence, never an empty string on the row.
+  const declaredButBlank = await expandPlmProjectBom({
+    sourceAdapter: createAdapter(baseData({
+      DN_PDM_PartLibraryInfo: [
+        { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1', Specification: '   ', Createtime: null },
+        { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1' },
+      ],
+    })).adapter,
+    projectNo: 'P-001',
+    readPlan: plan,
+  })
+  assert.equal(declaredButBlank.valid, true, 'a declared column the source leaves empty is not an error')
+  for (const row of declaredButBlank.rows) {
+    assert.ok(!('spec' in row), 'a blank declared spec is absent, not an empty string')
+    assert.ok(!('createTime' in row), 'a null declared createTime is absent')
+  }
+
+  // (4) The evidence must not start leaking the new values.
+  const evidenceJson = JSON.stringify(summarizeBomExpansionForEvidence(declared))
+  assert.ok(!evidenceJson.includes('DN1200'), 'evidence hides 规格')
+  assert.ok(!evidenceJson.includes('2026-08-30'), 'evidence hides the creation time')
+
+  // (5) The DECLARED batch rule survives plan normalization — it is the deployment's one
+  //     configuration surface, so dropping it here would make the rule unreachable.
+  assert.equal(normalizeStockPreparationBomReadPlan(plan).batchIdentity, undefined, 'absent stays absent')
+  assert.deepEqual(
+    normalizeStockPreparationBomReadPlan({ ...plan, batchIdentity: { mode: 'material_create_hour' } }).batchIdentity,
+    { mode: 'material_create_hour' },
+  )
+  assert.deepEqual(
+    normalizeStockPreparationBomReadPlan(plan).part,
+    { object: 'DN_PDM_PartLibraryInfo', idField: 'OBJ_ID', codeField: 'IdentityNo', nameField: 'IdentityName', materialField: 'Material', versionField: 'SysVer', specField: 'Specification', createTimeField: 'Createtime' },
+    'both declared slots survive normalization as safe identifiers',
+  )
+  assert.throws(
+    () => normalizeStockPreparationBomReadPlan({ ...plan, part: { ...plan.part, specField: 'Specification;DROP' } }),
+    StockPreparationBomExpansionError,
+    'a declared spec slot is still held to the safe-identifier rule',
+  )
+}
+
 async function main() {
+  await testSpecAndCreateTimeAreDeclaredNotGuessed()
   await testSuccessfulExpansion()
   await testReadFailureDiagnosticsAreValuesFree()
   await testNoHit()

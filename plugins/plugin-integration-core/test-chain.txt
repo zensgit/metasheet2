@@ -89,6 +89,10 @@ node __tests__/stock-preparation-customer-pack-routes.test.cjs
 node __tests__/customer-dictionary-leak-guard.test.cjs
 node __tests__/source-vendor-presets.test.cjs
 node __tests__/stock-preparation-carry-policy.test.cjs
+node __tests__/stock-preparation-carry-plan-wiring.test.cjs
+node __tests__/stock-preparation-carry-ledger.test.cjs
+node __tests__/stock-preparation-carry-confirm.test.cjs
+node __tests__/stock-preparation-carry-hardening.test.cjs
 node __tests__/stock-preparation-suggestion-operators.test.cjs
 node __tests__/stock-preparation-apply-writer.test.cjs
 node __tests__/stock-preparation-table-actions.test.cjs
@@ -96,6 +100,7 @@ node __tests__/stock-preparation-synthetic-sql-fixture.test.cjs
 node __tests__/stock-preparation-mvp-generation.test.cjs
 node __tests__/stock-preparation-snapshot-diff.test.cjs
 node __tests__/stock-preparation-expansion-snapshot-mapper.test.cjs
+node __tests__/stock-preparation-batch-identity.test.cjs
 node __tests__/stock-preparation-readonly-intake.test.cjs
 node __tests__/stock-preparation-material-match.test.cjs
 node __tests__/stock-preparation-unit-rule-match.test.cjs

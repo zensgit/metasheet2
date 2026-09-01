@@ -156,6 +156,12 @@ const ROUTES = [
   ['POST', '/api/integration/stock-preparation/material-mappings/retire', 'stockPreparationMaterialMappingRetire'],
   ['POST', '/api/integration/stock-preparation/unit-conversions/confirm', 'stockPreparationUnitConversionConfirm'],
   ['POST', '/api/integration/stock-preparation/unit-conversions/retire', 'stockPreparationUnitConversionRetire'],
+  // W4b (execution-plan general-prep-execution-plan-20260722.md:125): the K2 carry confirm — the
+  // human confirms a CARRY_VIA_CONFIRM proposal and the server carries the inactive predecessor's
+  // human fields onto the re-keyed row (applyCarryViaConfirm: admin-gated, closed body allowlist,
+  // server-stamped carriedBy/carriedAt, no-overwrite, values-free audit). Optionally closes the
+  // matching carry ledger row (decisionId + inputFingerprint together).
+  ['POST', '/api/integration/stock-preparation/carry/confirm', 'stockPreparationCarryConfirm'],
   // #3751 MVP W4 (generation runtime): run the landed generation engine over CONFIRMED inputs and
   // persist draft prep lines + blocking exceptions + a run record (multitable-internal only); human
   // exception resolution single + bulk (same-reason gate). ready is computed SERVER-SIDE: engine
@@ -372,6 +378,13 @@ const {
   resolveStockPrepApplyProductionPolicy,
   resolveStockPrepApplySandboxPolicy,
 } = require('./stock-preparation-table-actions.cjs')
+// 备料 batch identity — "物料创建日期(精确到小时)区分同一项目不同批次的物料". Pure and opt-in; see
+// stock-preparation-batch-identity.cjs for why the content-revision digest stays the default.
+const {
+  StockPreparationBatchIdentityError,
+  mintStockPreparationBatchIdentity,
+  readStockPreparationBatchIdentityMode,
+} = require('./stock-preparation-batch-identity.cjs')
 // 工作台里选源 — the eligibility contract for the pull action's source, and the durable pointer that
 // overrides the deploy-time env default. See stock-preparation-source-binding.cjs for why the
 // allowlist is the BOM read kinds and why this line deliberately does NOT reuse the K3 fence token.
@@ -391,6 +404,8 @@ const {
   reconcileConfirmationDecisions,
   listConfirmationDecisions,
   confirmConfirmationDecision,
+  confirmCarryConfirmationDecision,
+  assertCarryConfirmDecisionBinding,
   readConfirmationDecisionValueEntry,
   loadConfirmedDuplicatePolicyReview,
 } = require('./stock-preparation-confirmation-decisions.cjs')
@@ -572,6 +587,9 @@ const {
   retireMaterialMapping,
   confirmUnitConversionRule,
   retireUnitConversionRule,
+  // W4a: the ONE consumer of a CARRY_VIA_CONFIRM decision — the K2 carry write
+  // onto the canonical sheet's human band (server-stamped, no-overwrite).
+  applyCarryViaConfirm,
 } = require('./stock-preparation-confirm-writes.cjs')
 // #3751 MVP W3: READONLY confirmation-state reads for FE views 3/4 (summaries + review queues;
 // queryRecords-only; unit candidates computed per read; values-free rows).
@@ -1292,6 +1310,18 @@ const VALID_STOCK_PREPARATION_UNIT_CONFIRM_REQUEST_KEYS = new Set([
   'contextFingerprint',
   'snapshotBatchId',
   'rule',
+])
+// W4b: closed carry-confirm allowlist. The stamps (carriedBy / carriedAt — and the confirm stamps
+// too) are DELIBERATELY absent: carriedBy is the route user identity and carriedAt is stamped in
+// the carry executor, so a body that supplies either is rejected as an unknown field. decisionId /
+// inputFingerprint are the OPTIONAL ledger-close pair (both or neither).
+const VALID_STOCK_PREPARATION_CARRY_CONFIRM_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'decision',
+  'decisionId',
+  'inputFingerprint',
 ])
 const VALID_STOCK_PREPARATION_UNIT_RETIRE_REQUEST_KEYS = new Set([
   'tenantId',
@@ -4885,6 +4915,43 @@ function createHandlers(services, options = {}) {
       const projectId = `stockprep_${crypto.createHash('sha256').update(stableScope).digest('hex').slice(0, 32)}`
       const batchScope = `${stableScope}\n${prepared.revision}`
       const batchDigest = crypto.createHash('sha256').update(batchScope).digest('hex').slice(0, 32)
+      // 备料 BATCH IDENTITY. The owner's rule is that the material CREATION HOUR separates a
+      // project's batches; shipped code separated them by this content-revision digest plus the
+      // persist-time monotonic `snapshotVersion`. The rule is now implemented, and DECLARED per
+      // deployment on the read plan (batchIdentity.mode) rather than switched on for everyone —
+      // the batch id is the persist idempotency key, so changing which pulls count as one batch is
+      // a behaviour change a running install must opt into. Absent => `snapshot_<digest>`, exactly
+      // as before. A deployment that asks for the hour rule but whose source carries no usable
+      // creation time falls back to the same id and SAYS SO in the evidence below.
+      //
+      // `syncRunId` stays revision-derived on purpose: under the hour rule a second pull in the same
+      // hour with CHANGED content then lands on the same batch id with a different run, which the
+      // persist replay check refuses with a coded idempotency conflict — fail closed, never a silent
+      // overwrite of a batch the operator believes is that hour's.
+      //
+      // An UNKNOWN declared mode is a deploy-time typo. It refuses with a coded 422 rather than
+      // quietly meaning "legacy", because a deployment that believes it turned the rule on and did
+      // not would batch by the wrong rule with nothing on the response to show for it.
+      let batchIdentityMode
+      try {
+        batchIdentityMode = readStockPreparationBatchIdentityMode(action.source.readPlan)
+      } catch (error) {
+        if (error instanceof StockPreparationBatchIdentityError) {
+          throw new HttpRouteError(
+            422,
+            'STOCK_PREPARATION_BATCH_IDENTITY_MODE_INVALID',
+            'source.readPlan.batchIdentity.mode is not a known batch-identity mode',
+            { field: error.details && error.details.field },
+          )
+        }
+        throw error
+      }
+      const batchIdentity = mintStockPreparationBatchIdentity({
+        mode: batchIdentityMode,
+        projectNo: prepared.parameters.projectNo,
+        rows: prepared.expansionResult,
+        legacyBatchId: `snapshot_${batchDigest}`,
+      })
       const result = await persistStockPreparationSyncRun({
         context,
         permission: 'admin',
@@ -4894,7 +4961,7 @@ function createHandlers(services, options = {}) {
         lockTenantId: tenantId,
         projectId,
         syncRunId: `sync_${batchDigest}`,
-        snapshotBatchId: `snapshot_${batchDigest}`,
+        snapshotBatchId: batchIdentity.batchId,
         allocateSnapshotVersion: true,
         sourceSystem: action.source.kind,
         sourceProjectNo: prepared.parameters.projectNo,
@@ -4906,6 +4973,9 @@ function createHandlers(services, options = {}) {
         persisted: result.persisted === true,
         created: result.created,
         source: prepared.evidence,
+        // Values-free: counts, the effective mode and a coded reason. A deployment that asked for
+        // the hour rule and silently got the legacy id would be exactly the failure this reports.
+        batchIdentity: batchIdentity.evidence,
         evidence: result.evidence,
       }, result.persisted ? 201 : 200)
     },
@@ -6173,6 +6243,103 @@ function createHandlers(services, options = {}) {
         detail: { persisted: result.persisted },
       })
       return sendOk(res, result)
+    },
+
+    // W4b (execution-plan W4a/W4b; adjudication Layer 3): the K2 carry confirm — mirror of
+    // stockPreparationMaterialMappingConfirm. The human confirms a CARRY_VIA_CONFIRM proposal;
+    // the carry EXECUTOR (confirm-writes.applyCarryViaConfirm) copies the inactive predecessor's
+    // human fields onto the re-keyed canonical row: admin-gated, closed body allowlist (the body
+    // can carry NO stamp — carriedBy is the route identity, carriedAt is module-stamped),
+    // no-overwrite, values-free audit. When the body names the matching carry LEDGER row
+    // (decisionId + inputFingerprint, both or neither), the row is closed with the reserved
+    // carry token AFTER the apply; a ledger-close refusal is reported honestly beside the
+    // applied carry instead of faking either a clean success or a failed carry.
+    async stockPreparationCarryConfirm(req, res) {
+      const user = requireAccess(req, 'admin')
+      const audit = requireStockPreparationAudit()
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_CARRY_CONFIRM_REQUEST_KEYS, 'STOCK_PREPARATION_CARRY_CONFIRM_REQUEST_INVALID')
+      const decisionId = firstString(input.decisionId)
+      const inputFingerprint = firstString(input.inputFingerprint)
+      if (Boolean(decisionId) !== Boolean(inputFingerprint)) {
+        throw new HttpRouteError(400, 'STOCK_PREPARATION_CARRY_CONFIRM_REQUEST_INVALID', 'decisionId and inputFingerprint must be provided together', { fields: ['decisionId', 'inputFingerprint'] })
+      }
+      const tenantId = resolveAuthUserTenantId(req)
+      const targetProjectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+      // PRE-FLIGHT BIND, BEFORE the canonical write (the P1 fix). `decision`, `decisionId` and
+      // `inputFingerprint` arrive as three independent client fields; until they are proven to be
+      // ONE approved pair, nothing may be written. Refusing only at the ledger close would leave the
+      // carried row written with no approval record — the same defect wearing a different mask.
+      if (decisionId) {
+        await assertCarryConfirmDecisionBinding({
+          recordsApi: getMultitableRecordsApi(),
+          provisioning: getMultitableProvisioning(),
+          targetProjectId,
+          permission: 'admin',
+          decisionId,
+          inputFingerprint,
+          decision: input.decision,
+        })
+      }
+      const result = await applyCarryViaConfirm({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId,
+        decision: input.decision,
+        confirmedBy: user.id || user.email,
+      })
+      // Ledger close, AFTER the apply: the carry is the substantive act; the ledger row is its
+      // bookkeeping. A typed ledger refusal (e.g. the row was superseded by a newer reconcile)
+      // travels beside the applied result as a closed code — never silently swallowed, never
+      // allowed to misreport the carry itself as failed.
+      const CARRY_APPLIED_MODES = ['carried', 'skipped_already_carried']
+      let ledger
+      if (decisionId) {
+        if (!CARRY_APPLIED_MODES.includes(result.mode)) {
+          // Defence in depth: only an actually-applied (or already-applied) carry may close a hold.
+          // The executor throws on every other path today, so this is unreachable — which is the
+          // point: if a future mode is added, it closes nothing until someone decides it should.
+          ledger = { ok: false, code: 'CARRY_NOT_APPLIED' }
+        } else {
+          try {
+            ledger = await confirmCarryConfirmationDecision({
+              recordsApi: getMultitableRecordsApi(),
+              provisioning: getMultitableProvisioning(),
+              targetProjectId,
+              permission: 'admin',
+              decisionId,
+              inputFingerprint,
+              // The bind is re-asserted inside the close, over the SAME decision that was applied.
+              decision: input.decision,
+              confirmedBy: user.id || user.email,
+            })
+          } catch (error) {
+            if (!(error instanceof StockPreparationConfirmationDecisionError)) throw error
+            ledger = { ok: false, code: error.code }
+          }
+        }
+      }
+      // The audit vocabulary is migration-frozen; a carry confirm resolves a planner exception, so
+      // it rides exception_resolve with a fixed operation subtype — the same precedent the
+      // confirmation-decision confirm route set. Values-free: counts, mode tokens, booleans.
+      await audit.append({
+        tenantId,
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        action: 'exception_resolve',
+        subjectId: decisionId || undefined,
+        mode: result.mode,
+        actor: user.id || user.email,
+        detail: {
+          operation: 'stock_preparation_carry_confirm',
+          persisted: result.persisted,
+          carriedFieldCount: result.carriedFields.length,
+          alreadyCarriedFieldCount: result.alreadyCarriedFields.length,
+          ...(ledger ? { ledgerConfirmed: ledger.ok === true } : {}),
+        },
+      })
+      return sendOk(res, { ...result, ...(ledger ? { ledger } : {}) })
     },
 
     // #3751 MVP W4: generation run — engine over confirmed inputs; draft prep lines UPSERT; blocking

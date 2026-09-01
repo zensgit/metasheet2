@@ -32,8 +32,8 @@
 // itself. "Re-arm at the deploy tier" is a process restart (a deploy-controlled event), which
 // re-observes whatever source is present then — the documented boundary below.
 //
-// A fingerprint is a one-way hash of the source's declared connection config (server/host/port/
-// database/instance/connectionString). It is NOT a network probe and NOT readable as a destination:
+// A fingerprint is a one-way hash of the source's ENTIRE declared connection config minus credential
+// fields (see the exclusion set below). It is NOT a network probe and NOT readable as a destination:
 // it only answers "is this the SAME connection the deployer armed?", by equality. That is exactly the
 // integrity binding the doctrine's rejection of URL-matching leaves room for.
 //
@@ -60,9 +60,9 @@
 // to). It did NOT — and this binding cannot — close a PRIVILEGE change on an UNCHANGED destination:
 // a swap of `connection.user`/`password` to a WRITE-CAPABLE login on the SAME server and the SAME
 // explicit database keeps every fingerprinted field identical, so the pin still matches and the armed
-// write proceeds. That is inherent, not an oversight: the fingerprint deliberately hashes the declared
-// DESTINATION fields only (server/host/port/database/instance/connectionString) and is values-free, so
-// it can answer "is this the same destination the deployer armed?" but never "does this login still
+// write proceeds. That is inherent, not an oversight: the fingerprint deliberately hashes every
+// declared connection field EXCEPT credential fields — it is credential-blind by design — so it can
+// answer "is this the same connection the deployer armed?" but never "does this login still
 // lack write rights?". Answering the second question is the READ-ONLY DATABASE ACCOUNT's job — the
 // layer the owner ruled is the PROVABLE one (option A, the boundary ruling): a login with no INSERT/
 // UPDATE/DELETE grant refuses the write at the server regardless of what any in-process gate decided.
@@ -85,14 +85,36 @@ import {
   loadOutboundSqlWriteAllowlist,
 } from './outbound-sql-write-gate'
 
-// The connection fields that define a DESTINATION. A change to any of them is a redirect. Kept as a
-// closed list so a new connection field cannot silently escape the fingerprint — but note the
-// fingerprint is a BINDING (same-or-different), not a parser, so an unknown extra field only ever
-// makes two connections compare unequal, which fails closed.
-const FINGERPRINTED_CONNECTION_KEYS = [
-  'server', 'host', 'hostname', 'address', 'port', 'instanceName', 'instance',
-  'database', 'catalog', 'connectionString', 'dsn', 'url',
-] as const
+// THE FINGERPRINT HASHES EVERY CONNECTION FIELD EXCEPT CREDENTIALS. An earlier revision hashed a
+// CLOSED list of destination-bearing keys (server/host/port/database/…) and claimed an unknown extra
+// field "fails closed" — the opposite of what a closed INCLUSION list does: two connections differing
+// ONLY in an unlisted destination-bearing field (a proxy host, an applicationIntent, any field a
+// future adapter routes by) hashed IDENTICALLY, so a redirect through such a field kept the pin —
+// fail-OPEN for every field not on the list. Inverting the list closes that class: every key is
+// hashed unless it is a CREDENTIAL key, so the unknown-field failure mode is now a fingerprint
+// MISMATCH (a refusal, until the deploy tier restarts and re-pins) — fail-closed in the only
+// direction that matters. Spurious refusals cannot arise from the inversion itself: the arm-time pin
+// (`pinSqlSourceConnection`, load path) and every use-time check hash the SAME in-memory
+// `config.connection` object, which only `updateDataSource` replaces — and a connection edit on an
+// armed source is exactly the event the binding exists to revoke.
+//
+// The EXCLUSION list is credential-identity keys only, so the fingerprint stays CREDENTIAL-BLIND (the
+// documented residual above — a login swap on an unchanged destination is the read-only account's
+// problem, not this binding's). Credentials normally live in `config.credentials` (never hashed), but
+// a connection record MAY inline them; excluding them here keeps a credential rotation from breaking
+// the pin. The exclusion list is closed, so a novel credential key spelled unusually is HASHED — a
+// rotation through it would break the pin and refuse until re-arm: an availability nuisance, never an
+// authorization widening. Matching is by normalized key name (lowercase, `-`/`_` stripped).
+const CREDENTIAL_CONNECTION_KEYS = new Set([
+  'user', 'username', 'uid', 'userid', 'login', 'loginname',
+  'password', 'pwd', 'pass', 'passphrase',
+  'token', 'accesstoken', 'refreshtoken', 'secret', 'clientsecret', 'apikey',
+  'credential', 'credentials', 'auth', 'authentication', 'authorization', 'privatekey',
+])
+
+function isCredentialConnectionKey(key: string): boolean {
+  return CREDENTIAL_CONNECTION_KEYS.has(key.toLowerCase().replace(/[-_]/g, ''))
+}
 
 function normalizeConnectionValue(value: unknown): string | number | null {
   if (value === null || value === undefined) return null
@@ -101,15 +123,37 @@ function normalizeConnectionValue(value: unknown): string | number | null {
   return String(value).trim().toLowerCase()
 }
 
+// Deterministic canonical form for a connection value. Route-tier connections are flat scalars, but a
+// deploy-seeded config may nest (e.g. an options object) — canonicalize recursively with sorted keys
+// so JSON.stringify cannot depend on insertion order, and so two nested objects that differ hash
+// differently (String(obj) would collapse them all to "[object Object]" — a fail-open equality).
+function canonicalizeConnectionValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeConnectionValue)
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    const out: Record<string, unknown> = {}
+    for (const key of Object.keys(record).sort()) {
+      out[key] = canonicalizeConnectionValue(record[key])
+    }
+    return out
+  }
+  return normalizeConnectionValue(value)
+}
+
 /**
- * A stable, one-way fingerprint of a source's declared connection destination. Deterministic in the
- * connection's destination fields and blind to everything else (options, credentials, pool config).
+ * A stable, one-way fingerprint of a source's declared connection. Deterministic in EVERY connection
+ * field except credential fields (see {@link CREDENTIAL_CONNECTION_KEYS}) — blind to credentials by
+ * design (the documented residual), and to nothing else. Absent keys and explicit-null keys hash
+ * identically.
  */
 export function sqlConnectionFingerprint(connection: Record<string, unknown> | undefined | null): string {
   const conn = connection && typeof connection === 'object' ? (connection as Record<string, unknown>) : {}
-  const canonical: Record<string, string | number | null> = {}
-  for (const key of FINGERPRINTED_CONNECTION_KEYS) {
-    canonical[key] = normalizeConnectionValue(conn[key])
+  const canonical: Record<string, unknown> = {}
+  for (const key of Object.keys(conn).sort()) {
+    if (isCredentialConnectionKey(key)) continue
+    const value = canonicalizeConnectionValue(conn[key])
+    if (value === null) continue // absent ≡ null, as before the inversion
+    canonical[key] = value
   }
   return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex')
 }

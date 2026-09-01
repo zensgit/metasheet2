@@ -133,6 +133,18 @@
       </li>
     </ol>
 
+    <!-- The large-BOM background channel. `:key="submittedProjectNo"` remounts it per run rather
+         than reusing one instance across two different large projects. -->
+    <StockPreparationLargeBomPullPanel
+      v-if="showsLargeBomPull"
+      :key="submittedProjectNo"
+      :project-no="submittedProjectNo"
+      :scope="scope"
+      :api="largeBomApi"
+      :wait="largeBomPollWait"
+      @open-multitable="emit('open-multitable')"
+    />
+
     <StockPrepTechnicalDetails v-if="report" testid="stock-prep-project-sync-tech">
       <dl>
         <dt>{{ bi('每一步走的路由、结果码与计数', 'The route, outcome code and counts of each step') }}</dt>
@@ -188,6 +200,7 @@ import { useLocale } from '../../../composables/useLocale'
 import { useAuth } from '../../../composables/useAuth'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
+import StockPreparationLargeBomPullPanel from './StockPreparationLargeBomPullPanel.vue'
 import {
   STOCK_PREPARATION_PROJECT_SYNC_STEPS,
   createStockPreparationProjectSyncApi,
@@ -197,6 +210,7 @@ import {
   type StockPreparationProjectSyncStepResult,
   type StockPreparationProjectSyncStepStatus,
 } from '../../../services/integration/stockPreparation/projectSync'
+import type { StockPreparationLargeBomJobApi } from '../../../services/integration/stockPreparation/largeBomPull'
 import { canRunStockPrepProjectSync } from '../../../services/integration/stockPreparation/workbenchAccess'
 import {
   stockPrepStepOutcomeText,
@@ -217,8 +231,12 @@ const props = withDefaults(
      * component mounted without this prop cannot be pointed at a different endpoint.
      */
     api?: StockPreparationProjectSyncApi | null
+    /** Test seam ONLY — forwarded to StockPreparationLargeBomPullPanel. */
+    largeBomApi?: StockPreparationLargeBomJobApi | null
+    /** Test seam ONLY — forwarded to StockPreparationLargeBomPullPanel so specs never wait on a real timer. */
+    largeBomPollWait?: ((ms: number) => Promise<void>) | null
   }>(),
-  { scope: () => ({}), armedAt: 0, api: null },
+  { scope: () => ({}), armedAt: 0, api: null, largeBomApi: null, largeBomPollWait: null },
 )
 
 const emit = defineEmits<{
@@ -245,6 +263,13 @@ const armedNote = ref(false)
 const results = ref<StockPreparationProjectSyncStepResult[]>([])
 const report = ref<StockPreparationProjectSyncReport | null>(null)
 const projectNoEl = ref<HTMLInputElement | null>(null)
+/**
+ * The project number a run actually submitted — frozen at the moment 试算 fires, decoupled from the
+ * live `projectNo` input. The large-BOM sub-panel below can run for a while, and the operator is
+ * free to keep editing the field for their NEXT sync while it does; feeding it the live ref would
+ * point the background channel at whatever they typed most recently instead of what this run planned.
+ */
+const submittedProjectNo = ref('')
 
 const canSubmit = computed(() => canRun.value && !busy.value && projectNo.value.trim().length > 0)
 
@@ -261,6 +286,7 @@ watch(() => props.armedAt, async (next, previous) => {
 async function onRun(): Promise<void> {
   if (!canSubmit.value) return
   const target = projectNo.value.trim()
+  submittedProjectNo.value = target
   results.value = []
   report.value = null
   busy.value = true
@@ -332,6 +358,16 @@ const verdictCount = computed<string>(() => {
 const showsSheetLink = computed<boolean>(() => {
   const verdict = report.value?.verdict
   return verdict === 'imported' || verdict === 'already_up_to_date' || verdict === 'partial'
+})
+
+/**
+ * The audit's second dead-end: a `large_bom_bounded` SKIP used to be the end of the story — no link,
+ * no progress, no completion signal. Mounted ONLY on that exact reason, so the sub-panel's own
+ * `onMounted` (which starts the background channel immediately) never fires for any other SKIP.
+ */
+const showsLargeBomPull = computed<boolean>(() => {
+  const planStep = report.value?.steps.find((step) => step.id === 'dry-run')
+  return planStep?.reason === 'PLAN_LARGE_BOM_BOUNDED'
 })
 
 /**

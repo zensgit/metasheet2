@@ -437,7 +437,11 @@ async function main() {
     assert.equal(second.exceptionCount, 2)
     for (const row of result.rows) {
       for (const key of Object.keys(row)) {
-        assert.ok(!['childDrawingNo', 'designQty', 'designUnit', 'issueQtyFinal', 'issueQtyRaw', 'issueUnit', 'conversionFactor', 'lossRate', 'erpMaterialCode', 'erpMaterialInternalId'].includes(key), `value-bearing key ${key} must never cross (owner-gated)`)
+        // The seven-field pull put 父组件名称 / 当前组件名称 / 规格 / 材料 / 总数量 onto the SNAPSHOT
+        // line. They are business values, so the prep-line read boundary must keep refusing them
+        // exactly as it refuses childDrawingNo — a new snapshot column is not a licence to widen
+        // this projection.
+        assert.ok(!['childDrawingNo', 'designQty', 'designUnit', 'issueQtyFinal', 'issueQtyRaw', 'issueUnit', 'conversionFactor', 'lossRate', 'erpMaterialCode', 'erpMaterialInternalId', 'parentName', 'childName', 'material', 'spec', 'totalQuantity'].includes(key), `value-bearing key ${key} must never cross (owner-gated)`)
       }
     }
     assert.equal(JSON.stringify(result).includes(SECRET), false)
