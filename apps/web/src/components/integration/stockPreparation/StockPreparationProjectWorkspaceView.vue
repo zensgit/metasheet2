@@ -1,5 +1,18 @@
 <template>
   <div class="sp-project" data-testid="stock-prep-project-workspace">
+    <!-- 项目接入 — the owner's entry, at the TOP of this tab.
+         「PLM系统接通后,在页面哪里可点击项目号,然后该项目号里的bom就自动导入到我们的多维表中」
+         It sits above the already-synced table on purpose: 接入 and 已接入 belong on one screen, and
+         it is what the per-row 刷新 below points at. The panel adds NO write authority — it drives the
+         four table-action routes that already exist, each with the gate it already had. -->
+    <StockPreparationProjectSyncPanel
+      :scope="scope"
+      :armed-at="syncArmedAt"
+      @navigate-stage="(viewKey: string) => emit('navigate-stage', viewKey)"
+      @open-multitable="emit('open-multitable')"
+      @synced="load"
+    />
+
     <!-- Loading: values-free spinner copy only. -->
     <p
       v-if="loading"
@@ -110,6 +123,23 @@
                 >
                   {{ bi('看这个项目同步了什么', 'See what this project synced') }}
                 </button>
+                <!-- 刷新 — re-run the same four-step import for a project that is already in.
+                     It ARMS the 项目接入 panel above (focus + the one-sentence explanation) rather
+                     than running immediately, and that is not a shortcut: this projection is
+                     values-free by contract, so the row carries an internal handle and no project
+                     NUMBER. Re-syncing needs the number, the server never hands it out, and a panel
+                     that guessed would pull the wrong project's BOM. Serving the number here is the
+                     follow-up named in the PR body; until then the honest control is one that says
+                     what it needs. -->
+                <button
+                  type="button"
+                  class="sp-project__select"
+                  data-testid="stock-prep-project-refresh"
+                  :aria-label="bi('重新同步这个项目', 'Re-sync this project')"
+                  @click="onRefreshProject(project.projectId)"
+                >
+                  {{ bi('刷新', 'Refresh') }}
+                </button>
               </td>
             </tr>
           </tbody>
@@ -152,6 +182,7 @@ import {
   type StockPreparationWorkspaceOverview,
 } from '../../../services/integration/stockPreparation/projectWorkspace'
 import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
+import StockPreparationProjectSyncPanel from './StockPreparationProjectSyncPanel.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -167,6 +198,13 @@ const emit = defineEmits<{
    * when the operator picks a project row. The handle is emitted, never rendered (values-free).
    */
   (e: 'select-project', projectId: string): void
+  /**
+   * Forwarded from the 项目接入 panel. It reuses the shell's ONE tab-nav surface (the same event the
+   * dashboard's stepper emits) rather than growing a second navigation of its own.
+   */
+  (e: 'navigate-stage', viewKey: string): void
+  /** Forwarded from the panel: "open the multitable". The shell owns routing. */
+  (e: 'open-multitable'): void
 }>()
 
 const { locale } = useLocale()
@@ -179,6 +217,21 @@ function bi(zh: string, en: string): string {
 const loading = ref(true)
 const errored = ref(false)
 const overview = ref<StockPreparationWorkspaceOverview | null>(null)
+
+/**
+ * A monotonic counter the 刷新 buttons bump to ARM the 项目接入 panel above (see the button's comment
+ * for why arming rather than running). A counter, not a boolean: pressing 刷新 on two rows in a row
+ * must re-focus the input both times.
+ *
+ * The projectId is deliberately NOT carried into the panel. It is an internal handle with no bearing
+ * on the sync — the four routes are keyed by the project NUMBER — so passing it would only invite a
+ * later change to treat it as one.
+ */
+const syncArmedAt = ref(0)
+
+function onRefreshProject(_projectId: string): void {
+  syncArmedAt.value += 1
+}
 
 const isEmpty = computed(() => overview.value !== null && overview.value.projectCount === 0)
 

@@ -298,6 +298,11 @@ module.exports = {
     externalSystemRegistry = createExternalSystemRegistry({
       db,
       credentialStore,
+      // P2-A: bind-time validation of config.dataSourceId — the host read-only facade's
+      // assertReferenceable proves the authenticated principal OWNS the referenced core data
+      // source before the binding persists (and the registry stamps the owner server-side for
+      // the core delete guard's attributed count). Absent facade → dataSourceId binds fail closed.
+      dataSourceBinder: (context.api && context.api.dataSources) || undefined,
     })
     // S2-c (#1709): content-keyed read-source config versions + values-free audit.
     readSourceConfigStore = createReadSourceConfigStore({ db })

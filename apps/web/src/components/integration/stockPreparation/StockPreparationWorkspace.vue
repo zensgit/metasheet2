@@ -104,6 +104,8 @@
         v-else-if="effectiveKey === 'project-workspace'"
         :scope="scope"
         @select-project="handleProjectSelect"
+        @navigate-stage="handleNavigateStage"
+        @open-multitable="handleOpenMultitable"
       />
       <StockPreparationSnapshotDiffView
         v-else-if="effectiveKey === 'bom-snapshot-diff'"
@@ -397,6 +399,16 @@ function handleDashboardProjectSelect(projectId: string): void {
 // hold is one of this file's own StockPreparationViewKey literals.
 function handleNavigateStage(viewKey: string): void {
   activeKey.value = viewKey as StockPreparationViewKey
+}
+
+/**
+ * 项目接入's 「到多维表看数据」. The shell owns routing, and it routes to the multitable HOME rather
+ * than to the sheet the import just wrote: the sheetId is a physical handle the values-free read
+ * surfaces deliberately never hand to the browser, so there is nothing here to compose a deep link
+ * from — and inventing one is how a link ends up pointing at another customer's table.
+ */
+function handleOpenMultitable(): void {
+  void router.push({ path: '/multitable' })
 }
 
 /** What the panel's endpoint badge claims. One expression, so no tab can claim the wrong shape. */
