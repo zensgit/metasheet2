@@ -218,33 +218,102 @@ function stripSqlNoise(sql: string): string {
     .replace(SQL_QUOTED_IDENT, ' x ')
 }
 
-// Any token that mutates. Presence ANYWHERE (after noise-stripping) disqualifies a statement from
-// being a pure read — see the batch note on `isPureReadStatement`.
-const SQL_WRITE_VERB_ANYWHERE =
-  /\b(INSERT|UPDATE|DELETE|MERGE|EXEC|EXECUTE|TRUNCATE|DROP|ALTER|CREATE|GRANT|REVOKE|DENY|BULK)\b/i
+// ─── THE READ GRAMMAR IS AN ALLOWLIST, NOT A WRITE BLOCKLIST ──────────────────
+//
+// An earlier version asked "does the statement contain a write verb from a list?" — a BLOCKLIST, and
+// an incomplete one: WRITETEXT / UPDATETEXT / BACKUP / RESTORE / DBCC / RECONFIGURE / CHECKPOINT /
+// KILL / RECEIVE / WAITFOR were not on it, so `SELECT 1\nWRITETEXT t.c @p 0x41` classified as a READ
+// and skipped the gate. The module CLAIMS "anything not provably a single pure read is a write", so
+// it must be an ALLOWLIST: a statement is a read only if EVERY keyword in it is a SELECT-grammar
+// keyword. Any keyword outside the read grammar — including one nobody enumerated — makes it a write.
+//
+// HOW A "KEYWORD" IS TOLD FROM AN IDENTIFIER, without a parser: after stripping comments, string
+// literals and BRACKETED / "quoted" identifiers, any bare word that is a T-SQL RESERVED KEYWORD is a
+// real keyword — because SQL Server REQUIRES a reserved word used as an identifier to be bracketed
+// (`SELECT [backup] FROM t`), and brackets are stripped to a placeholder. So a bare `BACKUP` is the
+// command, never a column. A bare word that is NOT reserved is an identifier/function and is fine.
+// The verdict is therefore: a bare word that is RESERVED and NOT in the read-grammar allowlist ⇒ the
+// statement is a WRITE. RESERVED is the full, stable T-SQL reserved-word universe below, so an
+// unrecognised reserved command (WRITETEXT, DBCC, …) fails closed by construction.
 
-// DISTRIBUTED-EXECUTION PRIMITIVES carry an OPAQUE payload: `OPENQUERY(SRV,'DELETE FROM t')` hides a
-// remote write inside a string literal — and literals are stripped before classification (which is
-// what keeps a read mentioning 'DELETE' in a literal from being misread as a write). So the payload
-// is unknowable here BY CONSTRUCTION, and a statement that uses one is never PROVABLY a pure read.
-// Fail-closed: it is a write and needs an armed target. This is a statement-FORM rule, not a
-// destination check — it does not care which server the primitive names.
-const SQL_DISTRIBUTED_EXECUTION =
-  /\b(openquery|openrowset|opendatasource|openxml)\s*\(|\b(?:exec|execute)\b[\s\S]*?\bat\b\s+(?:\[[^\]]+\]|[A-Za-z_@#][\w$#]*)/i
+// The SELECT read grammar. WIDENING this to cover a real read is always safe; it may never gain a
+// keyword that can execute or mutate. Lower-cased for a case-insensitive lookup.
+const SQL_READ_GRAMMAR = new Set<string>([
+  // statement heads that are reads
+  'select', 'with', 'explain', 'show',
+  // projection / set quantifiers
+  'all', 'distinct', 'top', 'percent', 'ties', 'as',
+  // sources & joins
+  'from', 'join', 'inner', 'left', 'right', 'full', 'outer', 'cross', 'apply', 'on', 'pivot', 'unpivot',
+  'tablesample', 'nolock', 'readpast', 'rowlock', 'holdlock', 'readcommitted', 'readuncommitted',
+  'repeatableread', 'serializable', 'snapshot', 'index', 'forceseek', 'forcescan', 'spatial_window_max_cells',
+  // predicates & boolean
+  'where', 'and', 'or', 'not', 'in', 'exists', 'between', 'like', 'is', 'null', 'some', 'any', 'escape',
+  'contains', 'freetext', 'containstable', 'freetexttable',
+  // grouping / ordering / paging
+  'group', 'by', 'having', 'order', 'asc', 'desc', 'grouping', 'sets', 'rollup', 'cube',
+  'offset', 'fetch', 'first', 'next', 'row', 'rows', 'only',
+  // set ops
+  'union', 'intersect', 'except',
+  // expressions / windowing / conditionals
+  'case', 'when', 'then', 'else', 'end', 'over', 'partition', 'range', 'unbounded', 'preceding', 'following',
+  'current', 'cast', 'convert', 'try_convert', 'try_cast', 'coalesce', 'nullif', 'iif', 'choose', 'collate',
+  'within', 'filter', 'at', 'time', 'zone',
+  // read-only helpers / hints / output shaping that never mutate
+  'option', 'recompile', 'optimize', 'for', 'xml', 'json', 'path', 'auto', 'raw', 'elements',
+  'values', 'default', 'user', 'session_user', 'system_user', 'current_user', 'current_timestamp',
+  'current_date', 'current_time', 'datefirst', 'language',
+])
+
+// The full T-SQL RESERVED keyword universe. A bare word here that is NOT in SQL_READ_GRAMMAR proves
+// the statement is not a pure read. Includes every write/DDL/DCL/admin/cursor/control-flow keyword,
+// so the classifier fails closed on any of them — the P0 bypass verbs among them.
+const SQL_RESERVED_KEYWORDS = new Set<string>([
+  'add', 'all', 'alter', 'and', 'any', 'as', 'asc', 'authorization', 'backup', 'begin', 'between',
+  'break', 'browse', 'bulk', 'by', 'cascade', 'case', 'check', 'checkpoint', 'close', 'clustered',
+  'coalesce', 'collate', 'column', 'commit', 'compute', 'constraint', 'contains', 'containstable',
+  'continue', 'convert', 'create', 'cross', 'current', 'current_date', 'current_time',
+  'current_timestamp', 'current_user', 'cursor', 'database', 'dbcc', 'deallocate', 'declare',
+  'default', 'delete', 'deny', 'desc', 'disk', 'distinct', 'distributed', 'double', 'drop', 'dump',
+  'else', 'end', 'errlvl', 'escape', 'except', 'exec', 'execute', 'exists', 'exit', 'external',
+  'fetch', 'file', 'fillfactor', 'for', 'foreign', 'freetext', 'freetexttable', 'from', 'full',
+  'function', 'goto', 'grant', 'group', 'having', 'holdlock', 'identity', 'identity_insert',
+  'identitycol', 'if', 'in', 'index', 'inner', 'insert', 'intersect', 'into', 'is', 'join', 'key',
+  'kill', 'left', 'like', 'lineno', 'load', 'merge', 'national', 'nocheck', 'nonclustered', 'not',
+  'null', 'nullif', 'of', 'off', 'offsets', 'on', 'open', 'opendatasource', 'openquery', 'openrowset',
+  'openxml', 'option', 'or', 'order', 'outer', 'over', 'percent', 'pivot', 'plan', 'precision',
+  'primary', 'print', 'proc', 'procedure', 'public', 'raiserror', 'read', 'readtext', 'reconfigure',
+  'references', 'replication', 'restore', 'restrict', 'return', 'revert', 'revoke', 'right',
+  'rollback', 'rowcount', 'rowguidcol', 'rule', 'save', 'schema', 'securityaudit', 'select',
+  'semantickeyphrasetable', 'semanticsimilaritydetailstable', 'semanticsimilaritytable',
+  'session_user', 'set', 'setuser', 'shutdown', 'some', 'statistics', 'system_user', 'table',
+  'tablesample', 'textsize', 'then', 'to', 'top', 'tran', 'transaction', 'trigger', 'truncate',
+  'try_convert', 'tsequal', 'union', 'unique', 'unpivot', 'update', 'updatetext', 'use', 'user',
+  'values', 'varying', 'view', 'waitfor', 'when', 'where', 'while', 'with', 'writetext',
+  // Service Broker / newer reserved commands the P0 list names explicitly:
+  'receive', 'send', 'get', 'conversation', 'begin_dialog',
+])
+
+const SQL_WORD_TOKEN = /[A-Za-z_][A-Za-z0-9_]*/g
 
 /**
- * PROVABLY a pure read? ALL of: a SINGLE statement, no INTO, a leading SELECT/EXPLAIN/SHOW, and NO
- * write-verb token anywhere in the statement.
+ * PROVABLY a pure read? ALL of, after stripping comments / string literals / bracketed & quoted
+ * identifiers:
+ *   (a) a SINGLE statement (no `;` separator);
+ *   (b) no `INTO` (a `SELECT … INTO` writes a table);
+ *   (c) it LEADS with SELECT / WITH / EXPLAIN / SHOW; and
+ *   (d) every RESERVED keyword it contains is in the SELECT read grammar.
  *
- * A leading WITH is NOT a pure read (see the header): a CTE may precede a data-modifying statement,
- * and proving otherwise is the parsing game this module retires. Fail-closed.
+ * (d) is the whole point. It is an ALLOWLIST: any reserved keyword outside the read grammar — a write
+ * verb, a DDL/DCL/admin command, WRITETEXT/UPDATETEXT/BACKUP/DBCC/RECONFIGURE/CHECKPOINT/KILL/RECEIVE/
+ * WAITFOR, or one nobody enumerated — makes the statement a write. This also subsumes the old special
+ * cases: OPENQUERY/OPENROWSET/OPENDATASOURCE are reserved and not read-grammar, and an unterminated
+ * `SELECT 1\nDELETE …` batch carries a reserved write verb. A write verb that appears ONLY inside a
+ * string literal or a bracketed identifier is stripped before this runs, so it stays a read.
  *
- * MULTI-STATEMENT BATCHES ARE WRITES, and a `;` check alone does not catch them: T-SQL needs no
- * terminator, so `SELECT 1\nDELETE FROM t` , `SELECT 1\nINSERT t(c) VALUES('x')` (INSERT without
- * INTO), `SELECT 1\nTRUNCATE TABLE t` and `SELECT 1\nEXEC dbo.usp_x` all LEAD with SELECT and carry
- * no `;`. Rather than try to split a batch nobody delimited, the rule is inverted to the fail-closed
- * form the gate needs: if the whole string cannot be shown to be ONE read, it is a write. A trailing
- * write verb anywhere is exactly that proof failing.
+ * A leading WITH is now ADMITTED, because (d) verifies the CTE terminates in a read: a CTE that hides
+ * a write (`WITH c AS (…) DELETE …`) carries DELETE (reserved, non-read) and fails (d). Proving the
+ * terminal verb is no longer a bespoke parse — it falls out of the allowlist.
  */
 export function isPureReadStatement(sql: string): boolean {
   const raw = String(sql ?? '').trim().replace(/;\s*$/, '') // drop a single trailing semicolon
@@ -252,16 +321,15 @@ export function isPureReadStatement(sql: string): boolean {
   const cleaned = stripSqlNoise(raw)
   if (cleaned.includes(';')) return false // an explicit separator — a batch could smuggle a write
   if (/\binto\b/i.test(cleaned)) return false // reject SELECT … INTO (a write)
-  // Must LEAD with a read verb. `with` is DELIBERATELY ABSENT from this allowlist: a CTE may precede
-  // a data-modifying statement (`WITH c AS (…) DELETE …`), and proving a given CTE terminates in a
-  // SELECT is the unbounded parsing game this module retires. Adding `with` here re-opens that hole —
-  // which is exactly what the CTE guard-removal drill demonstrates.
-  if (!/^\s*(select|explain|show)\b/i.test(cleaned)) return false
-  // …must contain no write verb at all, which is what catches an unterminated batch…
-  if (SQL_WRITE_VERB_ANYWHERE.test(cleaned)) return false
-  // …and must not use a distributed-execution primitive, whose payload we deliberately cannot see.
-  // Checked against the RAW string: the payload lives in a literal that `stripSqlNoise` removes.
-  if (SQL_DISTRIBUTED_EXECUTION.test(raw)) return false
+  if (!/^\s*(select|with|explain|show)\b/i.test(cleaned)) return false // must LEAD with a read verb
+  // (d) FAIL-CLOSED ALLOWLIST: every reserved keyword must belong to the read grammar.
+  const tokens = cleaned.match(SQL_WORD_TOKEN)
+  if (tokens) {
+    for (const token of tokens) {
+      const word = token.toLowerCase()
+      if (SQL_RESERVED_KEYWORDS.has(word) && !SQL_READ_GRAMMAR.has(word)) return false
+    }
+  }
   return true
 }
 

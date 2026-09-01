@@ -6,6 +6,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DataSourceManager } from '../../src/data-adapters/DataSourceManager'
 import type { DataSourceConfig } from '../../src/data-adapters/BaseAdapter'
 import {
+  __resetSqlArmBindingsForTests,
+  sqlConnectionFingerprint,
+  sqlSourceConnectionMatchesPin,
+} from '../../src/data-adapters/sql-write-arm-binding'
+import {
   OUTBOUND_SQL_WRITE_ALLOWLIST_INVALID,
   OUTBOUND_SQL_WRITE_ALLOWLIST_INVALID_STATUS,
   OUTBOUND_SQL_WRITE_DISABLED,
@@ -17,6 +22,7 @@ import {
   OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED,
   OutboundSqlWriteGateError,
   assertOutboundSqlWriteAuthorized,
+  assertSqlStatementWriteAuthorized,
   evaluateOutboundSqlWrite,
   isPureReadStatement,
   isSqlWriteStatement,
@@ -55,6 +61,7 @@ afterEach(() => {
   if (savedEnv === undefined) delete process.env[ENV_KEY]
   else process.env[ENV_KEY] = savedEnv
   vi.restoreAllMocks()
+  __resetSqlArmBindingsForTests() // the arm-binding registry is a process singleton
   for (const file of tempFiles.splice(0)) {
     try { fs.unlinkSync(file) } catch { /* best effort */ }
   }
@@ -295,6 +302,27 @@ const NO_SEMICOLON_BATCHES = [
   'SELECT 1\nEXEC dbo.usp_x',
 ]
 
+// P0: the verbs that DEFEATED the write-verb BLOCKLIST — none was on the old list, so
+// `SELECT 1\n<verb>` classified as a READ and skipped the gate. UPDATETEXT/WRITETEXT mutate table
+// data; BACKUP/RESTORE exfiltrate or DoS; the rest are DDL/DCL/admin. Each is a RESERVED keyword
+// outside the read grammar, so the allowlist now catches it — both bare and as a batch tail.
+const BLOCKLIST_ESCAPERS = [
+  'WRITETEXT t.c @p 0x41',
+  'UPDATETEXT t.c @p 0 0 0x41',
+  'BACKUP DATABASE AIS TO DISK = @p',
+  'RESTORE DATABASE AIS FROM DISK = @p',
+  'DBCC WRITEPAGE (1, 1, 1, 0, 1, 0x00)',
+  'RECONFIGURE',
+  'CHECKPOINT',
+  'KILL 53',
+  'RECEIVE TOP (1) * FROM my_queue',
+  "WAITFOR DELAY '00:00:05'",
+  'READTEXT t.c @p 0 1',
+  'USE master',
+  'SET NOCOUNT ON',
+  'DECLARE @x INT',
+]
+
 const PLAIN_WRITES = [
   "INSERT INTO staging (a) VALUES (1)",
   "UPDATE staging SET a=1",
@@ -312,7 +340,23 @@ const PURE_READS = [
   'EXPLAIN SELECT 1',
   'show tables',
   "SELECT a FROM t WHERE note = 'DELETE FROM t_ICItem'", // a write verb only inside a literal
-  'SELECT [delete] FROM t',                              // …or only inside a quoted identifier
+  'SELECT [delete] FROM t',                              // …or only inside a bracketed identifier
+  'SELECT "update" FROM t',                              // …or a quoted identifier
+  // The SHAPES MSSQLAdapter itself builds and runs — these must stay reads or every K3/PLM read breaks.
+  'SELECT 1 AS ok',                                                    // testConnection
+  'SELECT TOP (5) [FItemID], [FNumber], [FName] FROM [dbo].[t_ICItem]',// select() TOP form
+  "SELECT TOP (10) [a] FROM [dbo].[t] INNER JOIN [dbo].[u] ON [t].[id] = [u].[id] WHERE [x] = @p0 ORDER BY [a] ASC OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY", // select() offset/fetch + join
+  "SELECT TABLE_NAME AS table_name, TABLE_SCHEMA AS table_schema FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = @p0 AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME", // getSchema
+  'SELECT i.name AS index_name, i.is_unique AS is_unique, c.name AS column_name FROM sys.indexes i JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id JOIN sys.columns c ON c.object_id = i.object_id AND c.column_id = ic.column_id JOIN sys.tables t ON t.object_id = i.object_id', // getTableInfo indexes
+  'SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = @p0 AND TABLE_NAME = @p1', // exists probe
+  // Common read grammar a federated/customer read might use.
+  'SELECT a, ROW_NUMBER() OVER (PARTITION BY b ORDER BY c DESC) AS rn FROM t',
+  'SELECT CASE WHEN a IS NULL THEN 0 ELSE 1 END, COALESCE(b, 0), CAST(c AS INT) FROM t',
+  'SELECT a FROM t WHERE a IN (1,2,3) AND b BETWEEN 1 AND 9 AND c LIKE @p0',
+  'SELECT a FROM t UNION SELECT a FROM u',
+  'SELECT a FROM t GROUP BY a HAVING COUNT(*) > 1',
+  'SELECT * FROM (VALUES (1),(2)) AS v(x)',
+  'WITH c AS (SELECT * FROM t WHERE a > @p0) SELECT * FROM c JOIN u ON c.id = u.id', // CTE read
 ]
 
 describe('outbound SQL write gate — the write/read split is the ONLY classification', () => {
@@ -326,6 +370,21 @@ describe('outbound SQL write gate — the write/read split is the ONLY classific
   it('an unterminated multi-statement batch is a WRITE (no `;` to split on)', () => {
     for (const sql of NO_SEMICOLON_BATCHES) {
       expect(isPureReadStatement(sql)).toBe(false)
+    }
+  })
+
+  it('EXECUTED P0: every verb that escaped the blocklist is a WRITE — bare and as a SELECT-batch tail', () => {
+    for (const sql of BLOCKLIST_ESCAPERS) {
+      expect(isPureReadStatement(sql)).toBe(false)                 // bare
+      expect(isPureReadStatement(`SELECT 1\n${sql}`)).toBe(false)  // hidden behind a leading SELECT
+    }
+  })
+
+  it('EXECUTED P0 (end to end): the escaper verbs are refused as unarmed writes', () => {
+    delete process.env[ENV_KEY]
+    for (const sql of BLOCKLIST_ESCAPERS) {
+      const err = refusalOf(() => assertSqlStatementWriteAuthorized(buildError, `SELECT 1\n${sql}`, { id: 's1', name: 's1', type: 'sqlserver' }))
+      expect(err.code).toBe(OUTBOUND_SQL_WRITE_DISABLED)
     }
   })
 
@@ -346,18 +405,20 @@ describe('outbound SQL write gate — the write/read split is the ONLY classific
     for (const sql of ['', '   ', ';']) expect(isPureReadStatement(sql)).toBe(false)
   })
 
-  it('a CTE is a WRITE even when it terminates in a SELECT — the documented fail-closed cost', () => {
-    // `with` is deliberately absent from the read-verb allowlist. CTE *writes* are already caught by
-    // the write-verb-anywhere rule, so this READ-shaped CTE is the ONLY case the exclusion decides —
-    // and pinning it is what makes the choice load-bearing rather than decorative. Proving a given
-    // CTE terminates in a SELECT is the unbounded parsing game this gate exists to retire, so a K3
-    // read connection simply does not get CTEs. The cost is visible and accepted.
-    expect(isPureReadStatement('WITH x AS (SELECT 1) SELECT * FROM x')).toBe(false)
-    expect(isSqlWriteStatement('WITH x AS (SELECT 1) SELECT * FROM x')).toBe(true)
-    // …and it is refused as an unarmed write end to end, not merely misclassified.
-    delete process.env[ENV_KEY]
-    const err = refusalOf(() => assertOutboundSqlWriteAuthorized(buildError, { systemId: 's1', operation: 'statement' }))
-    expect(err.code).toBe(OUTBOUND_SQL_WRITE_DISABLED)
+  it('a CTE that terminates in a SELECT is a READ; a CTE that hides a write is a WRITE', () => {
+    // The read-grammar allowlist verifies the CTE terminates in a read, so a genuine CTE-read is now
+    // correctly a READ (no bespoke parse). A CTE hiding a write carries a reserved write verb and
+    // fails the allowlist.
+    expect(isPureReadStatement('WITH x AS (SELECT 1) SELECT * FROM x')).toBe(true)
+    expect(isPureReadStatement('WITH a AS (SELECT 1 n), b AS (SELECT n*2 m FROM a) SELECT m FROM b')).toBe(true)
+    for (const write of [
+      'WITH c AS (SELECT 1 AS n) DELETE FROM t_ICItem',
+      'WITH c AS (SELECT 1 AS n) UPDATE t_ICItem SET a=1',
+      'WITH c AS (SELECT 1 AS n) INSERT INTO t SELECT n FROM c',
+      'WITH c AS (SELECT 1) MERGE INTO t USING c ON 1=1 WHEN MATCHED THEN UPDATE SET a=1',
+    ]) {
+      expect(isPureReadStatement(write)).toBe(false)
+    }
   })
 })
 
@@ -508,5 +569,102 @@ describe('outbound SQL write gate — env tampering cannot unlock it', () => {
   it('pointing the env at a file that arms nothing still denies', () => {
     process.env[ENV_KEY] = writeAllowlistFile({ allowlistId: 'a', allowlistVersion: 1, targets: [] })
     expect(evaluateOutboundSqlWrite({ systemId: 's1', operation: 'statement' }).authorized).toBe(false)
+  })
+})
+
+// ─────────────────── PART 4 — ARM-BINDING (P1): identity is not forgeable/redirectable ──────────
+
+describe('SQL write arm-binding — the fingerprint', () => {
+  it('depends on destination fields only, and is blind to options/credentials', () => {
+    const a = { server: 'sql.local', port: 1433, database: 'AIS' }
+    expect(sqlConnectionFingerprint(a)).toBe(sqlConnectionFingerprint({ ...a }))
+    // case / whitespace normalized
+    expect(sqlConnectionFingerprint(a)).toBe(sqlConnectionFingerprint({ server: 'SQL.LOCAL ', port: 1433, database: 'ais' }))
+    // options / credentials do not change it
+    expect(sqlConnectionFingerprint(a)).toBe(sqlConnectionFingerprint({ ...a, encrypt: true } as never))
+    // a destination change DOES change it
+    expect(sqlConnectionFingerprint(a)).not.toBe(sqlConnectionFingerprint({ ...a, database: 'K3' }))
+    expect(sqlConnectionFingerprint(a)).not.toBe(sqlConnectionFingerprint({ ...a, server: 'k3.local' }))
+    // no leakage: a fingerprint is a hex digest, not a host
+    expect(sqlConnectionFingerprint(a)).toMatch(/^[0-9a-f]{64}$/)
+    expect(sqlConnectionFingerprint(a)).not.toContain('sql.local')
+  })
+})
+
+describe('SQL write arm-binding — enforcement (P1)', () => {
+  const armedConn = { server: 'staging.local', port: 1433, database: 'STAGE' }
+  const k3Conn = { server: 'k3.local', port: 1433, database: 'AIS' }
+
+  function config(id: string, connection: Record<string, unknown>): DataSourceConfig {
+    return { id, name: id, type: 'sqlserver', connection, options: { autoConnect: false, readOnly: false } }
+  }
+
+  it('(honest) an armed source at its pinned connection still writes', async () => {
+    armFor('honest')
+    const m = new DataSourceManager()
+    await m.addDataSource(config('honest', armedConn), { ownerId: 'o' }) // pins staging.local
+    const a = m.getDataSource('honest')
+    // passes gate + binding, then fails only at connect (no DB) — not with a gate/binding code.
+    const err = await asyncRefusal(a.query("INSERT INTO staging (a) VALUES (1)"))
+    expect(err.code).not.toBe(OUTBOUND_SQL_WRITE_DISABLED)
+    expect(err.code).not.toBe(OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED)
+    expect(String(err.message)).toMatch(/Not connected/)
+  })
+
+  it('(ii redirect) redirecting an armed source drops its authorization', async () => {
+    armFor('redir')
+    const m = new DataSourceManager()
+    await m.addDataSource(config('redir', armedConn), { ownerId: 'o' }) // pins staging.local
+    // the operator PUT-redirects the connection to K3 (deep-merge mutable).
+    await m.updateDataSource('redir', config('redir', k3Conn), { ownerId: 'o' })
+    const a = m.getDataSource('redir')
+    // armed in the file, but its connection no longer matches the pin → refused.
+    const err = await asyncRefusal(a.query("INSERT INTO t_ICItem (FItemID) VALUES (1)"))
+    expect(err.code).toBe(OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED)
+    expect((err as { details?: { reason?: string } }).details?.reason).toBe('arm_binding_connection_mismatch')
+  })
+
+  it('(i id-reuse/revival) recreating an armed id at a new connection cannot inherit authorization', async () => {
+    armFor('reuse')
+    const m = new DataSourceManager()
+    await m.addDataSource(config('reuse', armedConn), { ownerId: 'o' }) // legit source pins staging.local
+    // attacker soft-deletes and revives the SAME id pointing at K3.
+    await m.removeDataSource('reuse')
+    await m.addDataSource(config('reuse', k3Conn), { ownerId: 'o' })
+    const a = m.getDataSource('reuse')
+    const err = await asyncRefusal(a.query("INSERT INTO t_ICItem (FItemID) VALUES (1)"))
+    expect(err.code).toBe(OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED) // pin (staging) ≠ current (K3)
+    // and a revival to the SAME connection is not a privilege gain — it matches, but it is the legit destination.
+    await m.removeDataSource('reuse')
+    await m.addDataSource(config('reuse', armedConn), { ownerId: 'o' })
+    const b = m.getDataSource('reuse')
+    const ok = await asyncRefusal(b.query("INSERT INTO staging VALUES (1)"))
+    expect(ok.code).not.toBe(OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED)
+    expect(String(ok.message)).toMatch(/Not connected/)
+  })
+
+  it('the binding NEVER widens authorization: an unarmed source is still refused by the gate', async () => {
+    delete process.env[ENV_KEY]
+    const m = new DataSourceManager()
+    await m.addDataSource(config('unarmed', armedConn), { ownerId: 'o' })
+    const a = m.getDataSource('unarmed')
+    expect((await asyncRefusal(a.query('INSERT INTO staging VALUES (1)'))).code).toBe(OUTBOUND_SQL_WRITE_DISABLED)
+  })
+
+  it('sqlSourceConnectionMatchesPin fails closed when a source was never observed', () => {
+    __resetSqlArmBindingsForTests()
+    expect(sqlSourceConnectionMatchesPin('never-seen', armedConn)).toBe(false)
+  })
+
+  it('a redirect drops write authorization but READS still pass on the redirected source', async () => {
+    armFor('redir-read')
+    const m = new DataSourceManager()
+    await m.addDataSource(config('redir-read', armedConn), { ownerId: 'o' })
+    await m.updateDataSource('redir-read', config('redir-read', k3Conn), { ownerId: 'o' })
+    const a = m.getDataSource('redir-read')
+    // reads are never gated — they pass to the connect attempt regardless of the binding.
+    const err = await asyncRefusal(a.query('SELECT TOP 1 * FROM t_ICItem'))
+    expect(err.code).not.toBe(OUTBOUND_SQL_WRITE_TARGET_NOT_AUTHORIZED)
+    expect(String(err.message)).toMatch(/Not connected/)
   })
 })
