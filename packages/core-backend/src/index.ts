@@ -38,6 +38,10 @@ import type { User } from './auth/AuthService'
 import { poolManager } from './integration/db/connection-pool'
 import { reconcileOrphanedBulkJobs } from './services/ai-bulk-job-service'
 import type { AiUsageQueryFn } from './services/ai-usage-ledger'
+// 列映射副驾 (schema-mapping copilot): the ONE governed AI boundary. Injected into
+// plugin-integration-core so its copilot routes can ask the boundary to PROPOSE column meanings with
+// business data routed local-only. The plugin never reaches a provider any other way.
+import { GovernedAiService } from './services/governed-ai-service'
 import { eventBus } from './integration/events/event-bus'
 import { initializeEventBusService } from './integration/events/event-bus-service'
 import { messageBus } from './integration/messaging/message-bus'
@@ -2807,6 +2811,10 @@ export class MetaSheetServer {
         automationRegistry,
         rbacProvisioning,
         platformAppInstances,
+        // 列映射副驾: the governed AI boundary for plugin-integration-core ONLY. The plugin's
+        // schema-mapping copilot calls `governedAi.suggest({ dataClass: 'business', ... })`; the
+        // boundary enforces local-only routing for business data. Absent for every other plugin.
+        governedAi: manifest.name === 'plugin-integration-core' ? new GovernedAiService() : undefined,
         security: this.pluginRuntimeSecurityService,
       } as unknown as import('./types/plugin').PluginServices,
       storage,

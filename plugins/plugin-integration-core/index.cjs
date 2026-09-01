@@ -447,6 +447,10 @@ module.exports = {
       context,
       logger,
       services: {
+        // 列映射副驾: the governed AI boundary (packages/core-backend GovernedAiService), injected by
+        // the host for this plugin only. OPTIONAL — absent → the copilot fail-opens to manual mapping.
+        // Duck-typed to { suggest(request, env?) }; the plugin never reaches a provider any other way.
+        governedAi: (context.services && context.services.governedAi) || null,
         externalSystemRegistry,
         readSourceConfigStore,
         stockPreparationAuditStore,
