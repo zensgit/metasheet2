@@ -224,6 +224,12 @@ export interface ElearningWatchChallenge {
   deadlineAt: string
   ordinal: number
   status: 'challenged' | 'paused'
+  promptVersion: 'symbol-number-v1'
+  targets: [string, string]
+  options: Array<{
+    optionId: string
+    label: string
+  }>
 }
 
 export interface ElearningHeartbeatRequest {
@@ -587,15 +593,44 @@ function parseWatchState(value: unknown, status: number): ElearningWatchState {
         'deadlineAt',
         'ordinal',
         'status',
+        'promptVersion',
+        'targets',
+        'options',
       ])) failShape(status)
       if (value.challenge.status !== 'challenged' && value.challenge.status !== 'paused') {
         failShape(status)
       }
+      if (
+        value.challenge.promptVersion !== 'symbol-number-v1'
+        || !Array.isArray(value.challenge.targets)
+        || value.challenge.targets.length !== 2
+        || !Array.isArray(value.challenge.options)
+        || value.challenge.options.length !== 6
+      ) failShape(status)
+      const targets = value.challenge.targets.map((target) => requireNonEmptyString(target, status))
+      const options = value.challenge.options.map((option) => {
+        if (!isPlainObject(option) || !exactKeys(option, ['optionId', 'label'])) failShape(status)
+        return {
+          optionId: requireUuid(option.optionId, status),
+          label: requireNonEmptyString(option.label, status),
+        }
+      })
+      const optionIds = options.map((option) => option.optionId)
+      const optionLabels = options.map((option) => option.label)
+      if (
+        targets[0] === targets[1]
+        || new Set(optionIds).size !== 6
+        || new Set(optionLabels).size !== 6
+        || targets.some((target) => !optionLabels.includes(target))
+      ) failShape(status)
       result.challenge = {
         challengeId: requireUuid(value.challenge.challengeId, status),
         deadlineAt: requireCanonicalIsoInstant(value.challenge.deadlineAt, status),
         ordinal: requireSafeInt(value.challenge.ordinal, status, 1),
         status: value.challenge.status,
+        promptVersion: value.challenge.promptVersion,
+        targets: targets as [string, string],
+        options,
       }
     }
   }
@@ -996,12 +1031,13 @@ export async function acknowledgeElearningWatchChallenge(
   sessionId: string,
   challengeId: string,
   requestId: string,
+  selections: readonly [string, string],
 ): Promise<ElearningWatchState> {
   const payload = await postJson(
     `/api/elearning/watch/sessions/${encodeURIComponent(sessionId)}`
       + `/challenges/${encodeURIComponent(challengeId)}/ack`,
     200,
-    { requestId },
+    { requestId, selections },
   )
   return parseWatchState(payload, 200)
 }

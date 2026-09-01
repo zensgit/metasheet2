@@ -7020,7 +7020,7 @@ components:
     ElearningWatchChallenge:
       type: object
       additionalProperties: false
-      required: [challengeId, deadlineAt, ordinal, status]
+      required: [challengeId, deadlineAt, ordinal, status, promptVersion, targets, options]
       properties:
         challengeId:
           $ref: '#/components/schemas/ElearningUuid'
@@ -7033,13 +7033,48 @@ components:
         status:
           type: string
           enum: [challenged, paused]
+        promptVersion:
+          type: string
+          enum: [symbol-number-v1]
+        targets:
+          type: array
+          minItems: 2
+          maxItems: 2
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+        options:
+          type: array
+          minItems: 6
+          maxItems: 6
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/ElearningWatchChallengeOption'
+    ElearningWatchChallengeOption:
+      type: object
+      additionalProperties: false
+      required: [optionId, label]
+      properties:
+        optionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        label:
+          type: string
+          minLength: 1
     ElearningWatchChallengeAckRequest:
       type: object
       additionalProperties: false
-      required: [requestId]
+      required: [requestId, selections]
       properties:
         requestId:
           $ref: '#/components/schemas/ElearningUuid'
+        selections:
+          type: array
+          minItems: 2
+          maxItems: 2
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/ElearningUuid'
     ElearningHeartbeatRequest:
       type: object
       additionalProperties: false

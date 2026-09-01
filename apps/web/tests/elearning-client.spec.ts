@@ -48,6 +48,18 @@ const ASSIGNMENT = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const MEMBER = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 const REQUEST = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
 const CHALLENGE = 'abababab-abab-4bab-8bab-abababababab'
+const CHALLENGE_OPTIONS = [
+  { optionId: '10101010-1010-4010-8010-101010101010', label: '●1' },
+  { optionId: '20202020-2020-4020-8020-202020202020', label: '▲2' },
+  { optionId: '30303030-3030-4030-8030-303030303030', label: '■3' },
+  { optionId: '40404040-4040-4040-8040-404040404040', label: '◆4' },
+  { optionId: '50505050-5050-4050-8050-505050505050', label: '★5' },
+  { optionId: '60606060-6060-4060-8060-606060606060', label: '♥6' },
+] as const
+const CHALLENGE_SELECTIONS = [
+  CHALLENGE_OPTIONS[1].optionId,
+  CHALLENGE_OPTIONS[4].optionId,
+] as const
 const BANK = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
 const PAPER_ID = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
 const SHA256 = 'ab'.repeat(32)
@@ -88,6 +100,19 @@ function watchState(over: Record<string, unknown> = {}) {
     durationMs: 5000,
     creditedMs: 0,
     duplicate: false,
+    ...over,
+  }
+}
+
+function watchChallenge(over: Record<string, unknown> = {}) {
+  return {
+    challengeId: CHALLENGE,
+    deadlineAt: CREATED_AT,
+    ordinal: 2,
+    status: 'challenged',
+    promptVersion: 'symbol-number-v1',
+    targets: [CHALLENGE_OPTIONS[1].label, CHALLENGE_OPTIONS[4].label],
+    options: CHALLENGE_OPTIONS,
     ...over,
   }
 }
@@ -477,13 +502,8 @@ describe('elearning client transport', () => {
     assertNoIdentityOverrides(lastJson())
   })
 
-  it('parses the closed challenge union and acks with requestId only', async () => {
-    const challenge = {
-      challengeId: CHALLENGE,
-      deadlineAt: CREATED_AT,
-      ordinal: 2,
-      status: 'challenged',
-    }
+  it('parses the closed challenge prompt and acks with ordered selections', async () => {
+    const challenge = watchChallenge()
     apiFetchMock
       .mockResolvedValueOnce(jsonResponse(200, watchState({ challenge })))
       .mockResolvedValueOnce(jsonResponse(200, watchState({
@@ -499,20 +519,24 @@ describe('elearning client transport', () => {
       SESSION,
       CHALLENGE,
       REQUEST,
+      CHALLENGE_SELECTIONS,
     )).resolves.toMatchObject({ challenge: null })
     expect(lastCall().path).toBe(
       `/api/elearning/watch/sessions/${SESSION}/challenges/${CHALLENGE}/ack`,
     )
-    expect(lastJson()).toEqual({ requestId: REQUEST })
+    expect(lastJson()).toEqual({ requestId: REQUEST, selections: CHALLENGE_SELECTIONS })
     assertNoIdentityOverrides(lastJson())
   })
 
   it.each([
-    ['extra challenge key', { challenge: { challengeId: CHALLENGE, deadlineAt: CREATED_AT, ordinal: 1, status: 'challenged', extra: true } }],
-    ['invalid challenge timestamp', { challenge: { challengeId: CHALLENGE, deadlineAt: IMPOSSIBLE_AT, ordinal: 1, status: 'challenged' } }],
-    ['invalid challenge ordinal', { challenge: { challengeId: CHALLENGE, deadlineAt: CREATED_AT, ordinal: 0, status: 'challenged' } }],
-    ['invalid challenge status', { challenge: { challengeId: CHALLENGE, deadlineAt: CREATED_AT, ordinal: 1, status: 'unknown' } }],
-    ['challenge on completed watch', { status: 'completed', challenge: { challengeId: CHALLENGE, deadlineAt: CREATED_AT, ordinal: 1, status: 'challenged' } }],
+    ['extra challenge key', { challenge: watchChallenge({ extra: true }) }],
+    ['invalid challenge timestamp', { challenge: watchChallenge({ deadlineAt: IMPOSSIBLE_AT }) }],
+    ['invalid challenge ordinal', { challenge: watchChallenge({ ordinal: 0 }) }],
+    ['invalid challenge status', { challenge: watchChallenge({ status: 'unknown' }) }],
+    ['unknown prompt version', { challenge: watchChallenge({ promptVersion: 'unknown' }) }],
+    ['duplicate option id', { challenge: watchChallenge({ options: CHALLENGE_OPTIONS.map((option, index) => index === 5 ? { ...option, optionId: CHALLENGE_OPTIONS[0].optionId } : option) }) }],
+    ['missing target option', { challenge: watchChallenge({ targets: ['☂9', CHALLENGE_OPTIONS[4].label] }) }],
+    ['challenge on completed watch', { status: 'completed', challenge: watchChallenge() }],
   ])('rejects %s in a watch response', async (_label, over) => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse(200, watchState(over)))
     await expect(startElearningWatch(VIDEO)).rejects.toMatchObject({

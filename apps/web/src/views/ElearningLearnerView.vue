@@ -17,7 +17,7 @@
       v-if="activeChallenge"
       :challenge="activeChallenge"
       :busy="challengeAckPending"
-      @confirm="void confirmWatchChallenge()"
+      @confirm="confirmWatchChallenge"
     />
 
     <p
@@ -465,8 +465,12 @@ function applyWatchChallenge(challenge: ElearningWatchChallenge | null | undefin
   }
 }
 
-function watchChallengeRequestId(session: string, challengeId: string): string {
-  const key = `${session}\n${challengeId}`
+function watchChallengeRequestId(
+  session: string,
+  challengeId: string,
+  selections: readonly [string, string],
+): string {
+  const key = `${session}\n${challengeId}\n${selections[0]}\n${selections[1]}`
   if (challengeAckIdentity?.key === key) return challengeAckIdentity.requestId
   if (typeof crypto === 'undefined' || typeof crypto.randomUUID !== 'function') {
     throw new Error('crypto.randomUUID unavailable')
@@ -524,7 +528,7 @@ async function resumePlaybackAfterWatchChallenge(
   }
 }
 
-async function confirmWatchChallenge(): Promise<void> {
+async function confirmWatchChallenge(selections: [string, string]): Promise<void> {
   const challenge = activeChallenge.value
   const currentSession = sessionId
   if (!challenge || !currentSession || challengeAckPending.value || watchStopped) return
@@ -534,7 +538,8 @@ async function confirmWatchChallenge(): Promise<void> {
     const result = await acknowledgeElearningWatchChallenge(
       currentSession,
       challenge.challengeId,
-      watchChallengeRequestId(currentSession, challenge.challengeId),
+      watchChallengeRequestId(currentSession, challenge.challengeId, selections),
+      selections,
     )
     if (watchStopped || epoch !== watchEpoch || sessionId !== currentSession) return
     challengeAckIdentity = null

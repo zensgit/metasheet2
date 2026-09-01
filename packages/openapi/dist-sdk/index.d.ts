@@ -9476,7 +9476,8 @@ export interface paths {
          * Confirm an active or timed-out watch challenge
          * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires the master, content, media,
          *     and watch-challenge flags to equal the exact literal `true`. The server derives organization and actor.
-         *     An on-time acknowledgement commits only the provisional eligible watch interval; a late acknowledgement
+         *     The server issues an immutable six-option prompt and two ordered target labels. The client submits exactly
+         *     two distinct opaque option identifiers. An on-time correct acknowledgement commits only the provisional eligible watch interval; a late acknowledgement
          *     discards that interval and resumes the existing watch session. Same requestId and logical payload replay
          *     the stored result; a different payload with the same requestId returns a values-free conflict.
          */
@@ -19498,9 +19499,18 @@ export interface components {
             ordinal: number;
             /** @enum {string} */
             status: "challenged" | "paused";
+            /** @enum {string} */
+            promptVersion: "symbol-number-v1";
+            targets: string[];
+            options: components["schemas"]["ElearningWatchChallengeOption"][];
+        };
+        ElearningWatchChallengeOption: {
+            optionId: components["schemas"]["ElearningUuid"];
+            label: string;
         };
         ElearningWatchChallengeAckRequest: {
             requestId: components["schemas"]["ElearningUuid"];
+            selections: components["schemas"]["ElearningUuid"][];
         };
         ElearningHeartbeatRequest: {
             sequence: number;
@@ -22726,7 +22736,7 @@ export interface operations {
             403: components["responses"]["ElearningError"];
             /** @description not_found or watch-challenge flags off */
             404: components["responses"]["ElearningError"];
-            /** @description challenge_mismatch, challenge_stale, conflict, course_withdrawn, or session_inactive */
+            /** @description challenge_incorrect, challenge_mismatch, challenge_stale, conflict, course_withdrawn, or session_inactive */
             409: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];

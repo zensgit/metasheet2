@@ -24,7 +24,10 @@ describe('elearning watch challenge migration contract', () => {
     expect(source).toContain('BEFORE UPDATE OR DELETE ON elearning_watch_challenge_schedules')
     expect(source).toContain('BEFORE UPDATE OR DELETE ON ${table}')
     expect(source).toContain('BEFORE TRUNCATE ON ${table}')
-    expect(source).toContain('request_hash_version = 1')
+    expect(source).toContain('request_hash_version = 2')
+    expect(source).toContain("prompt_version = 'symbol-number-v1'")
+    expect(source).toContain('expected_selection <@ prompt_option_ids')
+    expect(source).toContain('UNIQUE (org_id, schedule_id, challenge_id, kind)')
   })
 
   it('fails replay on partial tables, columns/defaults, constraints, functions, or trigger rebinding', async () => {

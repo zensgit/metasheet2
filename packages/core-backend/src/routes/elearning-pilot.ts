@@ -145,7 +145,7 @@ const BATCH_ASSIGN_KEYS = new Set([
   'rules',
 ])
 const HEARTBEAT_KEYS = new Set(['sequence', 'positionMs', 'playing'])
-const WATCH_CHALLENGE_ACK_KEYS = new Set(['requestId'])
+const WATCH_CHALLENGE_ACK_KEYS = new Set(['requestId', 'selections'])
 const SUBMIT_KEYS = new Set(['answers'])
 const PUBLISH_KEYS = new Set([
   'requestId',
@@ -193,6 +193,7 @@ const WATCH_STATUS: Record<ElearningWatchErrorCode, number> = {
   sequence_gap: 409,
   session_inactive: 409,
   challenge_mismatch: 409,
+  challenge_incorrect: 409,
   challenge_stale: 409,
   unavailable: 503,
 }
@@ -1220,7 +1221,16 @@ export function createElearningPilotRouter(
         return
       }
       const requestId = readUuid(body.requestId)
-      if (!requestId) {
+      const selections = Array.isArray(body.selections) && body.selections.length === 2
+        ? body.selections.map(readUuid)
+        : []
+      if (
+        !requestId
+        || selections.length !== 2
+        || !selections[0]
+        || !selections[1]
+        || selections[0] === selections[1]
+      ) {
         invalid(res)
         return
       }
@@ -1231,6 +1241,7 @@ export function createElearningPilotRouter(
           sessionId,
           challengeId,
           requestId,
+          selections: [selections[0], selections[1]],
         })
         res.status(200).json(result)
       } catch (error) {

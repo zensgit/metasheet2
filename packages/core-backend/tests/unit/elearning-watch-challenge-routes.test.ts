@@ -2,6 +2,7 @@ import express from 'express'
 import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'
 import { createElearningPilotRouter } from '../../src/routes/elearning-pilot'
+import { ElearningWatchError } from '../../src/services/elearning-watch-progress'
 import type {
   AcknowledgeElearningWatchChallengeInput,
   ElearningWatchDb,
@@ -17,6 +18,9 @@ const ITEM = '11111111-1111-4111-8111-111111111111'
 const SESSION = '22222222-2222-4222-8222-222222222222'
 const CHALLENGE = '33333333-3333-4333-8333-333333333333'
 const REQUEST = '44444444-4444-4444-8444-444444444444'
+const OPTION_A = '55555555-5555-4555-8555-555555555555'
+const OPTION_B = '66666666-6666-4666-8666-666666666666'
+const SELECTIONS = [OPTION_A, OPTION_B] as const
 
 const FLAGS = {
   ELEARNING_ENABLED: 'true',
@@ -116,7 +120,7 @@ describe('elearning watch challenge routes', () => {
     const ack = vi.fn(async () => STATE)
     const response = await api({ ack })
       .post(`/api/elearning/watch/sessions/${SESSION}/challenges/${CHALLENGE}/ack`)
-      .send({ requestId: REQUEST })
+      .send({ requestId: REQUEST, selections: SELECTIONS })
       .expect(200)
     expect(response.body).toEqual(STATE)
     expect(ack).toHaveBeenCalledWith({
@@ -125,11 +129,18 @@ describe('elearning watch challenge routes', () => {
       sessionId: SESSION,
       challengeId: CHALLENGE,
       requestId: REQUEST,
+      selections: SELECTIONS,
     })
     await api({ ack })
       .post(`/api/elearning/watch/sessions/${SESSION}/challenges/${CHALLENGE}/ack`)
-      .send({ requestId: REQUEST, answer: 'secret' })
+      .send({ requestId: REQUEST, selections: SELECTIONS, answer: 'secret' })
       .expect(400, { error: 'invalid_input' })
+    for (const selections of [undefined, [OPTION_A], [OPTION_A, OPTION_A], [OPTION_A, 'bad']]) {
+      await api({ ack })
+        .post(`/api/elearning/watch/sessions/${SESSION}/challenges/${CHALLENGE}/ack`)
+        .send({ requestId: REQUEST, ...(selections === undefined ? {} : { selections }) })
+        .expect(400, { error: 'invalid_input' })
+    }
     expect(ack).toHaveBeenCalledTimes(1)
   })
 
@@ -145,5 +156,14 @@ describe('elearning watch challenge routes', () => {
         .send({ requestId: REQUEST })
         .expect(404, { error: 'not_found' })
     }
+  })
+
+  it('maps an incorrect ordered selection to a values-free conflict', async () => {
+    await api({
+      ack: async () => { throw new ElearningWatchError('challenge_incorrect') },
+    })
+      .post(`/api/elearning/watch/sessions/${SESSION}/challenges/${CHALLENGE}/ack`)
+      .send({ requestId: REQUEST, selections: SELECTIONS })
+      .expect(409, { error: 'challenge_incorrect' })
   })
 })

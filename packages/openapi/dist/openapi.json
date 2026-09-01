@@ -11480,7 +11480,10 @@
           "challengeId",
           "deadlineAt",
           "ordinal",
-          "status"
+          "status",
+          "promptVersion",
+          "targets",
+          "options"
         ],
         "properties": {
           "challengeId": {
@@ -11500,6 +11503,48 @@
               "challenged",
               "paused"
             ]
+          },
+          "promptVersion": {
+            "type": "string",
+            "enum": [
+              "symbol-number-v1"
+            ]
+          },
+          "targets": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "options": {
+            "type": "array",
+            "minItems": 6,
+            "maxItems": 6,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/ElearningWatchChallengeOption"
+            }
+          }
+        }
+      },
+      "ElearningWatchChallengeOption": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "optionId",
+          "label"
+        ],
+        "properties": {
+          "optionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1
           }
         }
       },
@@ -11507,11 +11552,21 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "requestId"
+          "requestId",
+          "selections"
         ],
         "properties": {
           "requestId": {
             "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "selections": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
           }
         }
       },
@@ -30048,7 +30103,7 @@
       "post": {
         "operationId": "acknowledgeElearningWatchChallenge",
         "summary": "Confirm an active or timed-out watch challenge",
-        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires the master, content, media,\nand watch-challenge flags to equal the exact literal `true`. The server derives organization and actor.\nAn on-time acknowledgement commits only the provisional eligible watch interval; a late acknowledgement\ndiscards that interval and resumes the existing watch session. Same requestId and logical payload replay\nthe stored result; a different payload with the same requestId returns a values-free conflict.\n",
+        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires the master, content, media,\nand watch-challenge flags to equal the exact literal `true`. The server derives organization and actor.\nThe server issues an immutable six-option prompt and two ordered target labels. The client submits exactly\ntwo distinct opaque option identifiers. An on-time correct acknowledgement commits only the provisional eligible watch interval; a late acknowledgement\ndiscards that interval and resumes the existing watch session. Same requestId and logical payload replay\nthe stored result; a different payload with the same requestId returns a values-free conflict.\n",
         "security": [
           {
             "bearerAuth": []
@@ -30110,7 +30165,7 @@
             "$ref": "#/components/responses/ElearningError"
           },
           "409": {
-            "description": "challenge_mismatch, challenge_stale, conflict, course_withdrawn, or session_inactive",
+            "description": "challenge_incorrect, challenge_mismatch, challenge_stale, conflict, course_withdrawn, or session_inactive",
             "$ref": "#/components/responses/ElearningError"
           },
           "500": {

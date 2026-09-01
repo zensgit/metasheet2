@@ -37,6 +37,7 @@ export type ElearningLabelKey =
   | 'learner.challengePrompt'
   | 'learner.challengePaused'
   | 'learner.challengeConfirm'
+  | 'learner.challengeReset'
   | 'learner.challengeResume'
   | 'learner.challengeConfirming'
   | 'learner.challengeAcknowledged'
@@ -254,14 +255,15 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   },
   'learner.challengeTitle': { en: 'Learning check', zh: '学习验证' },
   'learner.challengePrompt': {
-    en: 'Confirm that you are still watching before the countdown ends.',
-    zh: '请在倒计时结束前确认您仍在观看。',
+    en: 'Select the two requested symbols in order before the countdown ends.',
+    zh: '请在倒计时结束前，按顺序选择指定的两个符号。',
   },
   'learner.challengePaused': {
-    en: 'The check timed out. Unverified watch time was discarded; confirm to resume learning.',
-    zh: '本次验证已超时，未验证的观看时长不会计入；确认后可继续学习。',
+    en: 'The check timed out. Unverified watch time was discarded; complete the check to resume.',
+    zh: '本次验证已超时，未验证的观看时长不会计入；完成验证后可继续学习。',
   },
-  'learner.challengeConfirm': { en: 'I am watching', zh: '我正在观看' },
+  'learner.challengeConfirm': { en: 'Submit check', zh: '提交验证' },
+  'learner.challengeReset': { en: 'Clear selection', zh: '清除选择' },
   'learner.challengeResume': { en: 'Confirm and resume', zh: '确认并继续' },
   'learner.challengeConfirming': { en: 'Confirming...', zh: '正在确认…' },
   'learner.challengeAcknowledged': {

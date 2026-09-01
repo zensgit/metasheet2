@@ -40,7 +40,9 @@ const EXPECTED_COLUMNS = new Map<string, Map<string, string>>([
     ['course_version_item_id', 'uuid:NO'], ['user_id', 'text:NO'],
     ['challenge_id', 'uuid:NO'], ['ordinal', 'smallint:NO'], ['kind', 'text:NO'],
     ['policy_revision', 'text:NO'], ['credited_ms', 'bigint:NO'],
-    ['discarded_ms', 'bigint:NO'], ['occurred_at', 'timestamp with time zone:NO'],
+    ['discarded_ms', 'bigint:NO'], ['prompt_version', 'text:YES'],
+    ['prompt_option_ids', 'ARRAY:YES'], ['prompt_option_labels', 'ARRAY:YES'],
+    ['expected_selection', 'ARRAY:YES'], ['occurred_at', 'timestamp with time zone:NO'],
   ])],
   [ELEARNING_WATCH_CHALLENGE_REQUESTS_TABLE, new Map([
     ['id', 'uuid:NO'], ['org_id', 'text:NO'], ['user_id', 'text:NO'],
@@ -62,6 +64,14 @@ const EXPECTED_CONSTRAINTS = new Map<string, { table: string; definition: string
     table: ELEARNING_WATCH_CHALLENGE_EVENTS_TABLE,
     definition: "CHECK ((kind = ANY (ARRAY['issue'::text, 'ack'::text, 'timeout'::text])) AND ordinal >= 1 AND ordinal <= 10 AND credited_ms >= 0 AND discarded_ms >= 0)",
   }],
+  ['elearning_watch_challenge_events_prompt_chk', {
+    table: ELEARNING_WATCH_CHALLENGE_EVENTS_TABLE,
+    definition: "CHECK (kind = 'issue'::text AND prompt_version = 'symbol-number-v1'::text AND prompt_option_ids IS NOT NULL AND cardinality(prompt_option_ids) = 6 AND array_position(prompt_option_ids, NULL::uuid) IS NULL AND (prompt_option_ids[1] <> ALL (prompt_option_ids[2:6])) AND (prompt_option_ids[2] <> ALL (prompt_option_ids[3:6])) AND (prompt_option_ids[3] <> ALL (prompt_option_ids[4:6])) AND (prompt_option_ids[4] <> ALL (prompt_option_ids[5:6])) AND prompt_option_ids[5] <> prompt_option_ids[6] AND prompt_option_labels IS NOT NULL AND cardinality(prompt_option_labels) = 6 AND array_position(prompt_option_labels, NULL::text) IS NULL AND btrim(prompt_option_labels[1]) <> ''::text AND btrim(prompt_option_labels[2]) <> ''::text AND btrim(prompt_option_labels[3]) <> ''::text AND btrim(prompt_option_labels[4]) <> ''::text AND btrim(prompt_option_labels[5]) <> ''::text AND btrim(prompt_option_labels[6]) <> ''::text AND (prompt_option_labels[1] <> ALL (prompt_option_labels[2:6])) AND (prompt_option_labels[2] <> ALL (prompt_option_labels[3:6])) AND (prompt_option_labels[3] <> ALL (prompt_option_labels[4:6])) AND (prompt_option_labels[4] <> ALL (prompt_option_labels[5:6])) AND prompt_option_labels[5] <> prompt_option_labels[6] AND expected_selection IS NOT NULL AND cardinality(expected_selection) = 2 AND array_position(expected_selection, NULL::uuid) IS NULL AND expected_selection[1] <> expected_selection[2] AND expected_selection <@ prompt_option_ids OR kind <> 'issue'::text AND prompt_version IS NULL AND prompt_option_ids IS NULL AND prompt_option_labels IS NULL AND expected_selection IS NULL)",
+  }],
+  ['elearning_watch_challenge_events_kind_uniq', {
+    table: ELEARNING_WATCH_CHALLENGE_EVENTS_TABLE,
+    definition: 'UNIQUE (org_id, schedule_id, challenge_id, kind)',
+  }],
   ['elearning_watch_challenge_events_pkey', {
     table: ELEARNING_WATCH_CHALLENGE_EVENTS_TABLE,
     definition: 'PRIMARY KEY (id)',
@@ -72,7 +82,7 @@ const EXPECTED_CONSTRAINTS = new Map<string, { table: string; definition: string
   }],
   ['elearning_watch_challenge_requests_hash_chk', {
     table: ELEARNING_WATCH_CHALLENGE_REQUESTS_TABLE,
-    definition: "CHECK (request_hash ~ '^[0-9a-f]{64}$'::text AND request_hash_version = 1 AND (result IS NULL OR jsonb_typeof(result) = 'object'::text))",
+    definition: "CHECK (request_hash ~ '^[0-9a-f]{64}$'::text AND request_hash_version = 2 AND (result IS NULL OR jsonb_typeof(result) = 'object'::text))",
   }],
   ['elearning_watch_challenge_requests_pkey', {
     table: ELEARNING_WATCH_CHALLENGE_REQUESTS_TABLE,
@@ -442,11 +452,54 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       policy_revision text NOT NULL,
       credited_ms bigint NOT NULL,
       discarded_ms bigint NOT NULL,
+      prompt_version text,
+      prompt_option_ids uuid[],
+      prompt_option_labels text[],
+      expected_selection uuid[],
       occurred_at timestamptz NOT NULL DEFAULT now(),
+      CONSTRAINT elearning_watch_challenge_events_kind_uniq
+        UNIQUE (org_id, schedule_id, challenge_id, kind),
       CONSTRAINT elearning_watch_challenge_events_kind_chk CHECK (
         kind IN ('issue', 'ack', 'timeout')
         AND ordinal BETWEEN 1 AND 10
         AND credited_ms >= 0 AND discarded_ms >= 0
+      ),
+      CONSTRAINT elearning_watch_challenge_events_prompt_chk CHECK (
+        (
+          kind = 'issue'
+          AND prompt_version = 'symbol-number-v1'
+          AND prompt_option_ids IS NOT NULL AND cardinality(prompt_option_ids) = 6
+          AND array_position(prompt_option_ids, NULL) IS NULL
+          AND prompt_option_ids[1] <> ALL(prompt_option_ids[2:6])
+          AND prompt_option_ids[2] <> ALL(prompt_option_ids[3:6])
+          AND prompt_option_ids[3] <> ALL(prompt_option_ids[4:6])
+          AND prompt_option_ids[4] <> ALL(prompt_option_ids[5:6])
+          AND prompt_option_ids[5] <> prompt_option_ids[6]
+          AND prompt_option_labels IS NOT NULL AND cardinality(prompt_option_labels) = 6
+          AND array_position(prompt_option_labels, NULL) IS NULL
+          AND btrim(prompt_option_labels[1]) <> ''
+          AND btrim(prompt_option_labels[2]) <> ''
+          AND btrim(prompt_option_labels[3]) <> ''
+          AND btrim(prompt_option_labels[4]) <> ''
+          AND btrim(prompt_option_labels[5]) <> ''
+          AND btrim(prompt_option_labels[6]) <> ''
+          AND prompt_option_labels[1] <> ALL(prompt_option_labels[2:6])
+          AND prompt_option_labels[2] <> ALL(prompt_option_labels[3:6])
+          AND prompt_option_labels[3] <> ALL(prompt_option_labels[4:6])
+          AND prompt_option_labels[4] <> ALL(prompt_option_labels[5:6])
+          AND prompt_option_labels[5] <> prompt_option_labels[6]
+          AND expected_selection IS NOT NULL AND cardinality(expected_selection) = 2
+          AND array_position(expected_selection, NULL) IS NULL
+          AND expected_selection[1] <> expected_selection[2]
+          AND expected_selection <@ prompt_option_ids
+        )
+        OR (
+          kind <> 'issue'
+          AND prompt_version IS NULL
+          AND prompt_option_ids IS NULL
+          AND prompt_option_labels IS NULL
+          AND expected_selection IS NULL
+        )
       ),
       CONSTRAINT elearning_watch_challenge_events_schedule_fk
         FOREIGN KEY (
@@ -474,7 +527,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       CONSTRAINT elearning_watch_challenge_requests_request_uniq
         UNIQUE (org_id, user_id, request_id),
       CONSTRAINT elearning_watch_challenge_requests_hash_chk CHECK (
-        request_hash ~ '^[0-9a-f]{64}$' AND request_hash_version = 1
+        request_hash ~ '^[0-9a-f]{64}$' AND request_hash_version = 2
         AND (result IS NULL OR jsonb_typeof(result) = 'object')
       ),
       CONSTRAINT elearning_watch_challenge_requests_schedule_fk

@@ -40,6 +40,7 @@ export type ElearningWatchErrorCode =
   | 'sequence_gap'
   | 'session_inactive'
   | 'challenge_mismatch'
+  | 'challenge_incorrect'
   | 'challenge_stale'
   | 'unavailable'
 
@@ -84,6 +85,7 @@ export interface AcknowledgeElearningWatchChallengeInput {
   userId: string
   challengeId: string
   requestId: string
+  selections: readonly [string, string]
 }
 
 export interface ElearningWatchState {
@@ -171,6 +173,7 @@ function fail(code: ElearningWatchErrorCode): never {
 function rethrowChallenge(error: unknown): never {
   if (!(error instanceof ElearningWatchChallengePostgresError)) throw error
   if (error.code === 'challenge_mismatch') fail('challenge_mismatch')
+  if (error.code === 'challenge_incorrect') fail('challenge_incorrect')
   if (error.code === 'challenge_stale') fail('challenge_stale')
   if (error.code === 'conflict') fail('conflict')
   fail('unavailable')
@@ -186,6 +189,14 @@ function requireActor(value: unknown): string {
 function requireUuid(value: unknown): string {
   if (typeof value !== 'string' || !UUID_RE.test(value)) fail('invalid_input')
   return value
+}
+
+function requireChallengeSelections(value: unknown): [string, string] {
+  if (!Array.isArray(value) || value.length !== 2) fail('invalid_input')
+  const first = requireUuid(value[0])
+  const second = requireUuid(value[1])
+  if (first === second) fail('invalid_input')
+  return [first, second]
 }
 
 function requireSafeInt(value: unknown, min: number): number {
@@ -1102,6 +1113,7 @@ export async function acknowledgeElearningWatchChallenge(
   const sessionId = requireUuid(input.sessionId)
   const challengeId = requireUuid(input.challengeId)
   const requestId = requireUuid(input.requestId)
+  const selections = requireChallengeSelections(input.selections)
 
   return db.transaction(async (tx) => {
     const itemId = await peekSessionItem(tx, orgId, sessionId, userId)
@@ -1129,6 +1141,7 @@ export async function acknowledgeElearningWatchChallenge(
         requestId,
         sessionId,
         challengeId,
+        selections,
       }, async (transition) => {
         if (session.status !== 'active' || progress.status !== 'in_progress') {
           fail('session_inactive')
@@ -1139,6 +1152,8 @@ export async function acknowledgeElearningWatchChallenge(
           'elearning.watch.challenge.ack.digest.v1',
           session.rollingEventDigest,
           challengeId,
+          selections[0],
+          selections[1],
           String(transition.creditedMs),
           String(transition.discardedMs),
         ].join('\n'), 'utf8').digest('hex')

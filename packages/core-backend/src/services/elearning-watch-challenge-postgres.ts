@@ -5,9 +5,27 @@ import {
   type ElearningWatchChallengeSchedule,
 } from './elearning-watch-challenge-schedule.js'
 
-export const ELEARNING_WATCH_CHALLENGE_REQUEST_HASH_VERSION = 1 as const
+export const ELEARNING_WATCH_CHALLENGE_REQUEST_HASH_VERSION = 2 as const
 export const ELEARNING_WATCH_CHALLENGE_REQUEST_DOMAIN =
-  'elearning.watch.challenge.ack.v1' as const
+  'elearning.watch.challenge.ack.v2' as const
+export const ELEARNING_WATCH_CHALLENGE_PROMPT_VERSION = 'symbol-number-v1' as const
+
+const PROMPT_SYMBOLS = ['●', '▲', '■', '◆', '★', '♥'] as const
+
+export interface ElearningWatchChallengeOption {
+  optionId: string
+  label: string
+}
+
+export interface ElearningWatchChallengePrompt {
+  promptVersion: typeof ELEARNING_WATCH_CHALLENGE_PROMPT_VERSION
+  targets: [string, string]
+  options: ElearningWatchChallengeOption[]
+}
+
+interface ElearningWatchChallengePromptSnapshot extends ElearningWatchChallengePrompt {
+  expectedSelections: [string, string]
+}
 
 export interface ElearningWatchChallengeQueryable {
   query(
@@ -21,6 +39,9 @@ export interface ElearningWatchChallengeView {
   deadlineAt: string
   ordinal: number
   status: 'challenged' | 'paused'
+  promptVersion: typeof ELEARNING_WATCH_CHALLENGE_PROMPT_VERSION
+  targets: [string, string]
+  options: ElearningWatchChallengeOption[]
 }
 
 export interface ElearningWatchChallengeHeartbeatResult {
@@ -33,6 +54,7 @@ export interface ElearningWatchChallengeHeartbeatResult {
 
 export type ElearningWatchChallengePostgresErrorCode =
   | 'challenge_mismatch'
+  | 'challenge_incorrect'
   | 'challenge_stale'
   | 'conflict'
   | 'unavailable'
@@ -59,6 +81,7 @@ interface ScheduleRow {
   activeDeadlineAt: Date | null
   challengeBaseMaxPositionMs: number | null
   provisionalMs: number
+  prompt: ElearningWatchChallengePromptSnapshot | null
   now: Date
 }
 
@@ -91,6 +114,64 @@ function requireInt(value: unknown): number {
   const parsed = asInt(value)
   if (parsed === null) fail('unavailable')
   return parsed
+}
+
+function shuffle<T>(values: T[]): T[] {
+  for (let index = values.length - 1; index > 0; index -= 1) {
+    const other = randomInt(index + 1)
+    ;[values[index], values[other]] = [values[other]!, values[index]!]
+  }
+  return values
+}
+
+export function createElearningWatchChallengePrompt(): ElearningWatchChallengePromptSnapshot {
+  const options = shuffle(PROMPT_SYMBOLS.map((symbol) => ({
+    optionId: randomUUID(),
+    label: `${symbol}${randomInt(1, 10)}`,
+  })))
+  const first = randomInt(options.length)
+  const secondOffset = randomInt(options.length - 1)
+  const second = secondOffset >= first ? secondOffset + 1 : secondOffset
+  return {
+    promptVersion: ELEARNING_WATCH_CHALLENGE_PROMPT_VERSION,
+    targets: [options[first]!.label, options[second]!.label],
+    options,
+    expectedSelections: [options[first]!.optionId, options[second]!.optionId],
+  }
+}
+
+function parseUuidArray(value: unknown, length: number): string[] | null {
+  if (!Array.isArray(value) || value.length !== length) return null
+  const parsed = value.map(asText)
+  return parsed.every((item): item is string => item !== null) ? parsed : null
+}
+
+function parsePrompt(row: Record<string, unknown>): ElearningWatchChallengePromptSnapshot | null {
+  if (
+    row.prompt_version === null
+    && row.prompt_option_ids === null
+    && row.prompt_option_labels === null
+    && row.expected_selection === null
+  ) return null
+  if (row.prompt_version !== ELEARNING_WATCH_CHALLENGE_PROMPT_VERSION) fail('unavailable')
+  const optionIds = parseUuidArray(row.prompt_option_ids, 6)
+  const labels = parseUuidArray(row.prompt_option_labels, 6)
+  const expectedSelections = parseUuidArray(row.expected_selection, 2)
+  if (!optionIds || !labels || !expectedSelections) fail('unavailable')
+  if (
+    new Set(optionIds).size !== 6
+    || new Set(labels).size !== 6
+    || new Set(expectedSelections).size !== 2
+    || expectedSelections.some((selection) => !optionIds.includes(selection))
+  ) fail('unavailable')
+  const options = optionIds.map((optionId, index) => ({ optionId, label: labels[index]! }))
+  const labelById = new Map(options.map((option) => [option.optionId, option.label]))
+  return {
+    promptVersion: ELEARNING_WATCH_CHALLENGE_PROMPT_VERSION,
+    targets: [labelById.get(expectedSelections[0]!)!, labelById.get(expectedSelections[1]!)!],
+    options,
+    expectedSelections: expectedSelections as [string, string],
+  }
 }
 
 function parseScheduleSnapshot(value: {
@@ -142,6 +223,10 @@ function parseScheduleRow(row: Record<string, unknown>): ScheduleRow {
     || (row.active_deadline_at !== null && !activeDeadlineAt)
     || (row.challenge_base_max_position_ms !== null && challengeBaseMaxPositionMs === null)
   ) fail('unavailable')
+  const prompt = parsePrompt(row)
+  if (
+    (status === 'challenged' || status === 'paused') !== (prompt !== null)
+  ) fail('unavailable')
   return {
     id,
     orgId,
@@ -163,6 +248,7 @@ function parseScheduleRow(row: Record<string, unknown>): ScheduleRow {
     activeDeadlineAt,
     challengeBaseMaxPositionMs,
     provisionalMs: requireInt(row.provisional_ms),
+    prompt,
     now,
   }
 }
@@ -179,12 +265,16 @@ function view(row: ScheduleRow): ElearningWatchChallengeView | null {
     || !row.activeChallengeId
     || row.activeOrdinal === null
     || !row.activeDeadlineAt
+    || !row.prompt
   ) return null
   return {
     challengeId: row.activeChallengeId,
     deadlineAt: row.activeDeadlineAt.toISOString(),
     ordinal: row.activeOrdinal,
     status: row.status,
+    promptVersion: row.prompt.promptVersion,
+    targets: row.prompt.targets,
+    options: row.prompt.options,
   }
 }
 
@@ -196,12 +286,19 @@ async function lockSchedule(
 ): Promise<ScheduleRow | null> {
   const result = await tx.query(
     `/* elearning-watch-challenge:lock-schedule */
-     SELECT schedule.*, clock_timestamp() AS now_at
+     SELECT schedule.*, clock_timestamp() AS now_at,
+            issue.prompt_version, issue.prompt_option_ids,
+            issue.prompt_option_labels, issue.expected_selection
        FROM elearning_watch_challenge_schedules schedule
+       LEFT JOIN elearning_watch_challenge_events issue
+         ON issue.org_id = schedule.org_id
+        AND issue.schedule_id = schedule.id
+        AND issue.challenge_id = schedule.active_challenge_id
+        AND issue.kind = 'issue'
       WHERE schedule.org_id = $1
         AND schedule.session_id = $2
         AND schedule.user_id = $3
-      FOR UPDATE`,
+      FOR UPDATE OF schedule`,
     [orgId, sessionId, userId],
   )
   return result.rows[0] ? parseScheduleRow(result.rows[0]) : null
@@ -212,6 +309,7 @@ export function deriveElearningWatchChallengeRequestHash(input: {
   userId: string
   sessionId: string
   challengeId: string
+  selections: readonly [string, string]
 }): string {
   return createHash('sha256').update([
     ELEARNING_WATCH_CHALLENGE_REQUEST_DOMAIN,
@@ -219,6 +317,8 @@ export function deriveElearningWatchChallengeRequestHash(input: {
     input.userId,
     input.sessionId,
     input.challengeId,
+    input.selections[0],
+    input.selections[1],
   ].join('\n'), 'utf8').digest('hex')
 }
 
@@ -372,6 +472,7 @@ export async function applyElearningWatchChallengeHeartbeat(
     }
   }
   const challengeId = randomUUID()
+  const prompt = createElearningWatchChallengePrompt()
   const issue = await tx.query(
     `/* elearning-watch-challenge:issue */
      UPDATE elearning_watch_challenge_schedules
@@ -402,13 +503,16 @@ export async function applyElearningWatchChallengeHeartbeat(
     ...row,
     activeChallengeId: challengeId,
     activeOrdinal: due.ordinal,
-  }, 'issue', 0, 0)
+  }, 'issue', 0, 0, prompt)
   return {
     challenge: {
       challengeId,
       deadlineAt: deadlineAt.toISOString(),
       ordinal: due.ordinal,
       status: 'challenged',
+      promptVersion: prompt.promptVersion,
+      targets: prompt.targets,
+      options: prompt.options,
     },
     completionReady: false,
     creditedMs: 0,
@@ -423,18 +527,27 @@ async function insertEvent(
   kind: 'issue' | 'ack' | 'timeout',
   creditedMs: number,
   discardedMs: number,
+  prompt: ElearningWatchChallengePromptSnapshot | null = null,
 ): Promise<void> {
   if (!row.activeChallengeId || row.activeOrdinal === null) fail('unavailable')
   await tx.query(
     `/* elearning-watch-challenge:insert-event */
      INSERT INTO elearning_watch_challenge_events (
        id, org_id, schedule_id, session_id, course_version_id, course_version_item_id, user_id,
-       challenge_id, ordinal, kind, policy_revision, credited_ms, discarded_ms
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+       challenge_id, ordinal, kind, policy_revision, credited_ms, discarded_ms,
+       prompt_version, prompt_option_ids, prompt_option_labels, expected_selection
+     ) VALUES (
+       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+       $14, $15::uuid[], $16::text[], $17::uuid[]
+     )`,
     [
       randomUUID(), row.orgId, row.id, row.sessionId, row.versionId, row.itemId, row.userId,
       row.activeChallengeId, row.activeOrdinal, kind, row.schedule.policyRevision,
       creditedMs, discardedMs,
+      prompt?.promptVersion ?? null,
+      prompt?.options.map((option) => option.optionId) ?? null,
+      prompt?.options.map((option) => option.label) ?? null,
+      prompt?.expectedSelections ?? null,
     ],
   )
 }
@@ -447,6 +560,7 @@ export async function acknowledgeElearningWatchChallengeState<T extends object>(
     requestId: string
     sessionId: string
     challengeId: string
+    selections: readonly [string, string]
   },
   finalize: (transition: {
     completionReady: boolean
@@ -478,6 +592,11 @@ export async function acknowledgeElearningWatchChallengeState<T extends object>(
   }
   if (!row.activeChallengeId) fail('challenge_stale')
   if (row.activeChallengeId !== input.challengeId) fail('challenge_mismatch')
+  if (
+    !row.prompt
+    || input.selections[0] !== row.prompt.expectedSelections[0]
+    || input.selections[1] !== row.prompt.expectedSelections[1]
+  ) fail('challenge_incorrect')
   const onTime = row.status === 'challenged'
     && row.activeDeadlineAt !== null
     && row.now <= row.activeDeadlineAt

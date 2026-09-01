@@ -1820,14 +1820,29 @@ describe('elearning V0.1 OpenAPI paths', () => {
       .toBe('#/components/schemas/ElearningWatchState')
     expect(schemas.ElearningWatchChallengeAckRequest).toMatchObject({
       additionalProperties: false,
-      required: ['requestId'],
+      required: ['requestId', 'selections'],
     })
     expect(schemas.ElearningWatchChallenge).toMatchObject({
       additionalProperties: false,
-      required: ['challengeId', 'deadlineAt', 'ordinal', 'status'],
+      required: [
+        'challengeId', 'deadlineAt', 'ordinal', 'status',
+        'promptVersion', 'targets', 'options',
+      ],
     })
     expect(schemas.ElearningWatchChallenge?.properties?.status?.enum)
       .toEqual(['challenged', 'paused'])
+    expect(schemas.ElearningWatchChallenge?.properties?.promptVersion?.enum)
+      .toEqual(['symbol-number-v1'])
+    expect(schemas.ElearningWatchChallenge?.properties?.targets).toMatchObject({
+      minItems: 2,
+      maxItems: 2,
+      uniqueItems: true,
+    })
+    expect(schemas.ElearningWatchChallenge?.properties?.options).toMatchObject({
+      minItems: 6,
+      maxItems: 6,
+      uniqueItems: true,
+    })
     expect(schemas.ElearningWatchState?.required).not.toContain('challenge')
   })
 
@@ -1843,13 +1858,19 @@ describe('elearning V0.1 OpenAPI paths', () => {
       positionMs: number
       playing: boolean
     }>()
-    expectTypeOf<WatchChallengeAck>().toEqualTypeOf<{ requestId: string }>()
+    expectTypeOf<WatchChallengeAck>().toEqualTypeOf<{
+      requestId: string
+      selections: [string, string]
+    }>()
     expectTypeOf<WatchState['challenge']>().toEqualTypeOf<WatchChallenge | null | undefined>()
     expectTypeOf<WatchChallenge>().toEqualTypeOf<{
       challengeId: string
       deadlineAt: string
       ordinal: number
       status: 'challenged' | 'paused'
+      promptVersion: 'symbol-number-v1'
+      targets: [string, string]
+      options: Array<{ optionId: string; label: string }>
     }>()
     expectTypeOf<ExamAnswers>().toEqualTypeOf<{
       answers: {
