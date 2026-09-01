@@ -391,7 +391,12 @@ function getMvpRepairApi(context) {
 //      validator — a `human_preserved` new column is rejected (REPAIR_HUMAN_FIELD_FORBIDDEN):
 //      the human whitelist (templates.cjs) is the load-bearing vocab of the apply-writer
 //      ownership wall + carry-policy; growing it is a separate design gate, never a repair
-//      back door;
+//      back door. That gate's locked design HAS since been executed for carry-policy itself
+//      (execution-plan general-prep-execution-plan-20260722.md W4a/W4b; adjudication Layer 3,
+//      stock-prep-change-adjudication-20260901.md §3.1): planCarry is wired into the conflict
+//      planner behind the deploy-config carryPolicy opt-in, and its ONE write path is the K2
+//      applyCarryViaConfirm executor in confirm-writes — the whitelist ITSELF is unchanged and
+//      this repair rule stands exactly as written;
 //   4. existing columns are constructively untouched by ensureMissingObjectFields
 //      (ON CONFLICT DO NOTHING; proven at the primitive layer by the W2 realdb test).
 async function repairStockPreparationMvpTargets({ context, projectId, permission, objectIds } = {}) {

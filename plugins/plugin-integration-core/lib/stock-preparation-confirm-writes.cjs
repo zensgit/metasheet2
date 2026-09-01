@@ -25,14 +25,36 @@
 //   - idempotent: replays of confirm / create / retire resolve to skipped_* modes with ZERO writes.
 //   - values-free evidence: counts / statuses / modes / field-key NAMES / public objectId constants /
 //     booleans / sha16 handles only — never a drawing number, unit symbol, or row payload.
+//
+// W4a EXTENSION (carry wiring — execution-plan W4a, adjudication Layer 3): applyCarryViaConfirm is
+// the ONE additional write face, and the ONE place this module addresses the CANONICAL
+// stock-preparation sheet — via a scoped API pinned to exactly that single objectId, resolved
+// through provisioning under the same staging project. It patches ONLY human-preserved fields whose
+// target cells are blank, copying them from an INACTIVE predecessor row the human confirmed — the
+// K2-style server-signed carry the carry-policy module was built for. carriedBy is the route-derived
+// operator identity and carriedAt is stamped HERE; neither is ever body- or decision-sourced. It
+// never overwrites a non-blank cell, never creates or deactivates a row, and never goes anywhere
+// near the plan apply path (which refuses carry decisions outright as unsupported).
 // (Every boundary token named above appears ONLY in this prose header — never as code.)
 
 const crypto = require('node:crypto')
 
 const {
+  HUMAN_PRESERVED_FIELD_IDS,
+  STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
   STOCK_PREPARATION_MVP_REQUIRED_OBJECT_IDS,
 } = require('./stock-preparation-templates.cjs')
+// W4a (execution-plan general-prep-execution-plan-20260722.md:111-127): the ONE
+// sanctioned consumer of a CARRY_VIA_CONFIRM decision. The shape assert and the
+// k2_confirm marker come from the carry module itself, so this executor and the
+// policy that produced the decision can never disagree about what one means.
+const {
+  CARRY_DECISIONS,
+  CARRY_WRITE_VIA,
+  StockPreparationCarryPolicyError,
+  __internals: { assertCarryViaConfirmShape },
+} = require('./stock-preparation-carry-policy.cjs')
 const { createTargetScopedRecordsApi } = require('./stock-preparation-table-actions.cjs')
 const {
   generateMaterialMappingCandidates,
@@ -727,6 +749,249 @@ async function retireUnitConversionRule(input = {}) {
   return { persisted: true, mode: 'retired', conversionRuleId, evidence: buildConfirmEvidence('unit_rule', 'retired') }
 }
 
+// ── W4a: applyCarryViaConfirm ─────────────────────────────────────────────────────────────────────
+// The locked 6-step consumer of a CARRY_VIA_CONFIRM decision (execution-plan W4a):
+//   1. assertAdminPermission BEFORE any provisioning/records access;
+//   2. assertCarryViaConfirmShape (the carry module's own fail-closed shape wall);
+//   3. carryFields ⊆ HUMAN_PRESERVED whitelist + writeVia === k2_confirm (re-asserted HERE so a
+//      mutated shape assert upstream still cannot widen this executor);
+//   4. source row by sourceIdempotencyKey MUST be active === false (a live row is never a carry
+//      source); target row by idempotencyKey (findByKeyField: 404 absent / 500 ambiguous);
+//   5. ONE recordsApi patch of exactly the carried fields; carriedBy = route identity,
+//      carriedAt = module clock — the decision/body cannot carry either (closed key allowlist);
+//   6. no-overwrite idempotency: a non-blank target cell is NEVER clobbered — equal ⇒ counted
+//      already-carried (full replay ⇒ skipped_already_carried no-op), different ⇒ closed 409
+//      refusal naming field NAMES only, and then NOTHING is written (not even the clean fields:
+//      a half-carried row would misreport as done).
+
+const CANONICAL_TEMPLATE = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE
+const CANONICAL_OBJECT_ID = CANONICAL_TEMPLATE.objectId
+const CANONICAL_KEY_FIELD = CANONICAL_TEMPLATE.keyFields[0] // 'idempotencyKey'
+
+// The FULL closed key set of a carry decision — exactly what the carry module's builder emits.
+// Anything else (a smuggled carriedBy/confirmedAt, a human-field value, a record) is refused by
+// NAME before any IO.
+const CARRY_DECISION_ALLOWED_KEYS = Object.freeze([
+  'decision', 'idempotencyKey', 'sourceIdempotencyKey', 'componentSourceId',
+  'carryKey', 'manualRowReattach', 'carryFields', 'writeVia', 'requiresConfirm', 'carry',
+])
+
+function isBlankCell(value) {
+  return value === undefined || value === null || (typeof value === 'string' && value.trim() === '')
+}
+
+// The records service's optimistic-concurrency refusal (multitable/record-errors.ts
+// MultitableRecordVersionConflictError: `code = 'VERSION_CONFLICT'`, name set in its constructor).
+// Matched on BOTH handles so neither a code rename nor a name rename silently turns a refused write
+// into an unhandled 500 — and so that a host which surfaces only one of them is still recognised.
+function isRecordVersionConflict(error) {
+  if (!error) return false
+  return error.code === 'VERSION_CONFLICT' || error.name === 'MultitableRecordVersionConflictError'
+}
+
+function assertCarryDecision(decision) {
+  if (!isPlainObject(decision)) {
+    throw new StockPreparationConfirmWriteError(422, 'CONFIRM_CARRY_DECISION_INVALID', 'decision must be a carry_via_confirm decision object', { field: 'decision' })
+  }
+  for (const key of Object.keys(decision)) {
+    if (!CARRY_DECISION_ALLOWED_KEYS.includes(key)) {
+      throw new StockPreparationConfirmWriteError(422, 'CONFIRM_CARRY_DECISION_INVALID', `unsupported decision field: ${key}`, { field: key })
+    }
+  }
+  // Step 2: the carry module's own shape wall (closed vocabulary, no ADD-shaped record, no
+  // human-field values, carryFields ⊆ whitelist). Its typed error is wrapped into this module's
+  // closed code with the REASON token only — never a value.
+  try {
+    assertCarryViaConfirmShape(decision)
+  } catch (error) {
+    if (error instanceof StockPreparationCarryPolicyError) {
+      throw new StockPreparationConfirmWriteError(422, 'CONFIRM_CARRY_DECISION_INVALID', 'decision failed the carry_via_confirm shape wall', {
+        field: 'decision',
+        carryPolicyReason: error.reason,
+      })
+    }
+    throw error
+  }
+  // Step 3, re-asserted locally (defense in depth — see the header of this block).
+  if (decision.decision !== CARRY_DECISIONS.CARRY_VIA_CONFIRM || decision.writeVia !== CARRY_WRITE_VIA) {
+    throw new StockPreparationConfirmWriteError(422, 'CONFIRM_CARRY_DECISION_INVALID', 'decision must be a k2_confirm carry_via_confirm decision', { field: 'decision' })
+  }
+  if (!Array.isArray(decision.carryFields) || decision.carryFields.length === 0
+    || decision.carryFields.some((field) => !HUMAN_PRESERVED_FIELD_IDS.includes(field))) {
+    throw new StockPreparationConfirmWriteError(422, 'CONFIRM_CARRY_DECISION_INVALID', 'carryFields must be a non-empty subset of the human-preserved whitelist', { field: 'carryFields' })
+  }
+  return decision
+}
+
+// Resolve the CANONICAL sheet — pinned to the single canonical objectId, never a caller-chosen one.
+async function resolveScopedCanonicalTarget(recordsApi, provisioning, targetProjectId) {
+  const sheet = await provisioning.findObjectSheet({ projectId: targetProjectId, objectId: CANONICAL_OBJECT_ID })
+  const sheetId = optionalString(sheet && sheet.id)
+  if (!sheetId) {
+    throw new StockPreparationConfirmWriteError(
+      409,
+      'CONFIRM_CARRY_TARGET_NOT_PROVISIONED',
+      'the canonical stock-preparation table is not provisioned under this project; carry requires the provisioning-managed canonical target',
+      { objectId: CANONICAL_OBJECT_ID },
+    )
+  }
+  const scoped = await createTargetScopedRecordsApi(recordsApi, { sheetId, objectId: CANONICAL_OBJECT_ID }, { provisioning, projectId: targetProjectId })
+  return { objectId: CANONICAL_OBJECT_ID, sheetId, scoped }
+}
+
+async function applyCarryViaConfirm(input = {}) {
+  if (!isPlainObject(input)) {
+    throw new StockPreparationConfirmWriteError(422, 'CONFIRM_CONFIG_INVALID', 'input must be an object')
+  }
+  const { permission, recordsApi, provisioning: provisioningInput, context } = input
+  // Step 1 — before ANY provisioning / records access.
+  assertAdminPermission(permission)
+  // Steps 2+3 — pure decision validation, still before any IO.
+  const decision = assertCarryDecision(input.decision)
+  const prov = ensureProvisioning(
+    provisioningInput || (context && context.api && context.api.multitable && context.api.multitable.provisioning),
+  )
+  const api = ensureRecordsApi(recordsApi)
+  const targetProjectId = requiredString(input.targetProjectId, 'targetProjectId')
+  const confirmedBy = requiredString(input.confirmedBy, 'confirmedBy')
+
+  const target = await resolveScopedCanonicalTarget(api, prov, targetProjectId)
+
+  // Step 4 — the source row must exist and be INACTIVE (carry-policy's precondition, re-checked at
+  // write time so a row that came back to life between plan and confirm refuses).
+  const sourceRecord = await findByKeyField(target.scoped, CANONICAL_KEY_FIELD, decision.sourceIdempotencyKey, 'CONFIRM_CARRY_SOURCE_NOT_FOUND', 'carry source row')
+  const sourceData = recordData(sourceRecord)
+  if (sourceData.active !== false) {
+    throw new StockPreparationConfirmWriteError(409, 'CONFIRM_CARRY_SOURCE_ACTIVE', 'the carry source row is active; only an inactive predecessor can be a carry source', {})
+  }
+  const targetRecord = await findByKeyField(target.scoped, CANONICAL_KEY_FIELD, decision.idempotencyKey, 'CONFIRM_CARRY_TARGET_NOT_FOUND', 'carry target row')
+  const targetData = recordData(targetRecord)
+  if (targetData.active === false) {
+    throw new StockPreparationConfirmWriteError(409, 'CONFIRM_CARRY_TARGET_INACTIVE', 'the carry target row is inactive; a carry onto a removed row is refused', {})
+  }
+  // Anti-forgery, axis 1 — COMPONENT: the decision claims both rows share ONE componentSourceId —
+  // verify against BOTH stored rows, so a hand-crafted decision cannot reattach across unrelated
+  // components.
+  const claimed = optionalString(String(decision.componentSourceId))
+  if (optionalString(isBlankCell(sourceData.componentSourceId) ? null : String(sourceData.componentSourceId)) !== claimed
+    || optionalString(isBlankCell(targetData.componentSourceId) ? null : String(targetData.componentSourceId)) !== claimed) {
+    throw new StockPreparationConfirmWriteError(409, 'CONFIRM_CARRY_COMPONENT_SOURCE_MISMATCH', 'decision, source row and target row must agree on the component source id', { field: 'componentSourceId' })
+  }
+  // Anti-forgery, axis 2 — PROJECT. The component check alone is NOT a scope: two different projects
+  // routinely share one PLM component, and such a pair satisfies it, which would let one project's
+  // human band be copied onto another project's row. The planner's carry source pool is drawn from
+  // ONE project's existing rows, so this re-asserts at write time the scope the plan already assumed.
+  const sourceProject = optionalString(isBlankCell(sourceData.projectNo) ? null : String(sourceData.projectNo))
+  const targetProject = optionalString(isBlankCell(targetData.projectNo) ? null : String(targetData.projectNo))
+  if (!sourceProject || !targetProject || sourceProject !== targetProject) {
+    throw new StockPreparationConfirmWriteError(409, 'CONFIRM_CARRY_PROJECT_MISMATCH', 'source row and target row must belong to the same project', { field: 'projectNo' })
+  }
+  // ...and since a real idempotencyKey EMBEDS its projectNo (bom-expansion makeIdempotencyKey), both
+  // keys must agree with the rows they addressed. A key that does not parse as that shape skips this
+  // leg — the stored-row check above is the load-bearing one and already stands.
+  for (const [key, field] of [[decision.idempotencyKey, 'idempotencyKey'], [decision.sourceIdempotencyKey, 'sourceIdempotencyKey']]) {
+    let parsed = null
+    try {
+      parsed = JSON.parse(key)
+    } catch (error) {
+      parsed = null
+    }
+    if (!isPlainObject(parsed) || parsed.projectNo === undefined) continue
+    if (optionalString(String(parsed.projectNo)) !== targetProject) {
+      throw new StockPreparationConfirmWriteError(409, 'CONFIRM_CARRY_PROJECT_MISMATCH', 'a carry key names a different project than the rows it addresses', { field })
+    }
+  }
+
+  // Steps 5+6 — classify per carried field. Field NAMES only in every refusal.
+  const changes = {}
+  const carriedFields = []
+  const alreadyCarriedFields = []
+  const conflictedFields = []
+  const missingSourceFields = []
+  for (const field of decision.carryFields) {
+    const sourceValue = sourceData[field]
+    if (isBlankCell(sourceValue)) {
+      missingSourceFields.push(field)
+      continue
+    }
+    const targetValue = targetData[field]
+    if (isBlankCell(targetValue)) {
+      changes[field] = sourceValue
+      carriedFields.push(field)
+      continue
+    }
+    if (String(targetValue) === String(sourceValue)) {
+      alreadyCarriedFields.push(field)
+      continue
+    }
+    conflictedFields.push(field)
+  }
+  if (missingSourceFields.length > 0) {
+    // The proposal is stale: the source no longer holds the human context it named at plan time.
+    throw new StockPreparationConfirmWriteError(409, 'CONFIRM_CARRY_SOURCE_CONTEXT_MISSING', 'the carry source row no longer carries a value for every proposed field', { fields: missingSourceFields })
+  }
+  if (conflictedFields.length > 0) {
+    // NEVER overwrite (P4 frozen semantics). And never half-carry around the conflict either.
+    throw new StockPreparationConfirmWriteError(409, 'CONFIRM_CARRY_TARGET_ALREADY_SET', 'a carry target human field already holds a different value; carry never overwrites', { fields: conflictedFields })
+  }
+
+  // Step 5 stamps — module-side, NEVER decision/body-sourced (the allowlist above refused those).
+  const carriedAt = new Date().toISOString()
+  const evidenceBase = {
+    subject: 'carry',
+    target: { objectId: CANONICAL_OBJECT_ID, keyField: CANONICAL_KEY_FIELD },
+    carriedFields: carriedFields.slice(),
+    alreadyCarriedFields: alreadyCarriedFields.slice(),
+    carriedByPresent: true,
+    carriedAtPresent: true,
+    valuesFree: true,
+  }
+  if (carriedFields.length === 0) {
+    // Step 6: full replay (every field already carried with the same content) — no-op, no patch.
+    return {
+      persisted: false,
+      mode: 'skipped_already_carried',
+      idempotencyKey: decision.idempotencyKey,
+      sourceIdempotencyKey: decision.sourceIdempotencyKey,
+      carriedBy: confirmedBy,
+      carriedAt,
+      carriedFields: [],
+      alreadyCarriedFields: alreadyCarriedFields.slice(),
+      evidence: { ...evidenceBase, mode: 'skipped_already_carried' },
+    }
+  }
+  // Step 6, ENFORCED rather than merely decided. The no-overwrite verdict above was computed from a
+  // `targetData` READ; without optimistic concurrency the promise would only be as strong as the
+  // read-write window, and a human edit landing inside it would be silently clobbered — exactly what
+  // step 6 says can never happen. `expectedVersion` closes the window at the substrate: the records
+  // service checks it in code AND pins it in the UPDATE's SQL predicate, so a row that moved since
+  // the read fails the write instead of overwriting it.
+  try {
+    await target.scoped.patchRecord({ recordId: targetRecord.id, changes, expectedVersion: targetRecord.version })
+  } catch (error) {
+    if (isRecordVersionConflict(error)) {
+      throw new StockPreparationConfirmWriteError(
+        409,
+        'CONFIRM_CARRY_TARGET_VERSION_CONFLICT',
+        'the carry target row changed while this carry was being decided; re-read and confirm again',
+        { fields: carriedFields.slice() },
+      )
+    }
+    throw error
+  }
+  return {
+    persisted: true,
+    mode: 'carried',
+    idempotencyKey: decision.idempotencyKey,
+    sourceIdempotencyKey: decision.sourceIdempotencyKey,
+    carriedBy: confirmedBy,
+    carriedAt,
+    carriedFields: carriedFields.slice(),
+    alreadyCarriedFields: alreadyCarriedFields.slice(),
+    evidence: { ...evidenceBase, mode: 'carried' },
+  }
+}
+
 // Values-free per-op evidence: subject kind + mode + target identity (objectId / key-field NAME).
 function buildConfirmEvidence(subject, mode) {
   const target = subject === 'mapping'
@@ -751,6 +1016,7 @@ module.exports = {
   retireMaterialMapping,
   confirmUnitConversionRule,
   retireUnitConversionRule,
+  applyCarryViaConfirm,
   __internals: {
     assertAdminPermission,
     ensureProvisioning,

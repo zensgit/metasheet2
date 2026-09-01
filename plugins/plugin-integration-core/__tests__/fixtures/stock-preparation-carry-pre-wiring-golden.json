@@ -1,0 +1,145 @@
+{
+  "valid": true,
+  "runId": "carry-golden-run",
+  "plannedAt": "2026-09-01T00:00:00.000Z",
+  "decisions": [
+    {
+      "decision": "add",
+      "idempotencyKey": "{\"projectNo\":\"P-001\",\"componentSourceId\":\"PART-ADD\",\"parentSourceId\":null,\"path\":[\"PART-ADD\"]}",
+      "record": {
+        "projectNo": "P-001",
+        "idempotencyKey": "{\"projectNo\":\"P-001\",\"componentSourceId\":\"PART-ADD\",\"parentSourceId\":null,\"path\":[\"PART-ADD\"]}",
+        "componentSourceId": "PART-ADD",
+        "parentSourceId": null,
+        "path": "[\"PART-ADD\"]",
+        "depth": 0,
+        "componentCode": "PART-ADD-CODE",
+        "componentName": "PART-ADD Name",
+        "material": "Steel",
+        "sourceVersion": "V1",
+        "rawQuantity": 2,
+        "totalQuantity": 2,
+        "active": true,
+        "lastPlmRefreshRunId": "carry-golden-run",
+        "lastPlmRefreshAt": "2026-09-01T00:00:00.000Z",
+        "lastPlmRefreshDecision": "add",
+        "lastPlmConflictSummary": ""
+      },
+      "conflictSummary": {
+        "type": "add_missing"
+      }
+    },
+    {
+      "decision": "update",
+      "idempotencyKey": "{\"projectNo\":\"P-001\",\"componentSourceId\":\"PART-UPD\",\"parentSourceId\":null,\"path\":[\"PART-UPD\"]}",
+      "patch": {
+        "projectNo": "P-001",
+        "idempotencyKey": "{\"projectNo\":\"P-001\",\"componentSourceId\":\"PART-UPD\",\"parentSourceId\":null,\"path\":[\"PART-UPD\"]}",
+        "componentSourceId": "PART-UPD",
+        "parentSourceId": null,
+        "path": "[\"PART-UPD\"]",
+        "depth": 0,
+        "componentCode": "PART-UPD-CODE",
+        "componentName": "PART-UPD Name",
+        "material": "Steel",
+        "sourceVersion": "V1",
+        "rawQuantity": 5,
+        "totalQuantity": 5,
+        "active": true,
+        "lastPlmRefreshRunId": "carry-golden-run",
+        "lastPlmRefreshAt": "2026-09-01T00:00:00.000Z",
+        "lastPlmRefreshDecision": "update",
+        "lastPlmConflictSummary": "{\"type\":\"plm_system_refresh\",\"changedFields\":[\"rawQuantity\",\"totalQuantity\"]}"
+      },
+      "changedFields": [
+        "rawQuantity",
+        "totalQuantity"
+      ],
+      "conflictSummary": {
+        "type": "plm_system_refresh",
+        "changedFieldCount": 2
+      }
+    },
+    {
+      "decision": "skip",
+      "idempotencyKey": "{\"projectNo\":\"P-001\",\"componentSourceId\":\"PART-SKIP\",\"parentSourceId\":null,\"path\":[\"PART-SKIP\"]}",
+      "conflictSummary": {
+        "type": "unchanged"
+      }
+    },
+    {
+      "decision": "inactive",
+      "idempotencyKey": "{\"projectNo\":\"P-001\",\"componentSourceId\":\"PART-GONE\",\"parentSourceId\":null,\"path\":[\"PART-GONE\"]}",
+      "patch": {
+        "active": false,
+        "lastPlmRefreshRunId": "carry-golden-run",
+        "lastPlmRefreshAt": "2026-09-01T00:00:00.000Z",
+        "lastPlmRefreshDecision": "inactive",
+        "lastPlmConflictSummary": "{\"type\":\"missing_from_plm\"}"
+      },
+      "conflictSummary": {
+        "type": "missing_from_plm"
+      }
+    },
+    {
+      "decision": "skip",
+      "idempotencyKey": "{\"projectNo\":\"P-001\",\"componentSourceId\":\"PART-OFF\",\"parentSourceId\":null,\"path\":[\"PART-OFF\"]}",
+      "conflictSummary": {
+        "type": "already_inactive"
+      }
+    }
+  ],
+  "counts": {
+    "add": 1,
+    "update": 1,
+    "skip": 2,
+    "inactive": 1,
+    "manual_confirm": 0
+  },
+  "summary": {
+    "runIdPresent": true,
+    "plannedAtPresent": true,
+    "counts": {
+      "add": 1,
+      "update": 1,
+      "skip": 2,
+      "inactive": 1,
+      "manual_confirm": 0
+    },
+    "expandedRows": 3,
+    "existingRows": 4,
+    "rowErrors": 0,
+    "humanPreservedFields": [
+      "materialType",
+      "blankType",
+      "stockPreparationStatus",
+      "demandDate",
+      "leadTimeDays",
+      "notes",
+      "procurementReply",
+      "warehouseConfirmation"
+    ],
+    "plmSystemFields": [
+      "projectNo",
+      "idempotencyKey",
+      "componentSourceId",
+      "parentSourceId",
+      "path",
+      "depth",
+      "componentCode",
+      "componentName",
+      "material",
+      "sourceVersion",
+      "rawQuantity",
+      "totalQuantity",
+      "active"
+    ],
+    "conflictTypes": [
+      "add_missing",
+      "already_inactive",
+      "missing_from_plm",
+      "plm_system_refresh",
+      "unchanged"
+    ]
+  }
+}
