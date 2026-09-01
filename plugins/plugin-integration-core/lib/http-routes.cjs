@@ -385,6 +385,7 @@ const {
 // (The route path itself is a literal in ROUTES above, which is built before this require runs; the
 // suite cross-checks that literal against SOURCE_PREFLIGHT_ROUTE_PATH so the two cannot drift.)
 const {
+  DECLARABLE_BRIDGES,
   SourcePreflightError,
   runStockPreparationSourcePreflight,
 } = require('./stock-preparation-source-preflight.cjs')
@@ -1046,7 +1047,14 @@ const VALID_STOCK_PREPARATION_PREFLIGHT_QUERY_KEYS = new Set(['tenantId', 'works
 // route. Deliberately absent: any object/table name, any filter, any limit, any read plan. A request
 // that could name the object to read would be a bulk-read surface wearing a preflight's name, and a
 // request that could supply a read plan would be able to make the alignment check agree with itself.
-const VALID_STOCK_PREPARATION_SOURCE_PREFLIGHT_QUERY_KEYS = new Set(['tenantId', 'workspaceId', 'externalSystemId'])
+// `declaredBridge` is the SECOND addition, and it is a DECLARATION, not a widening. When both bridge
+// candidates fill the bounded sample the probe cannot rank them, and the honest answer is a refusal;
+// this lets a human who knows the deployment answer the question the sample could not, and the report
+// then says the bridge was declared rather than measured. It cannot overrule a measurement that DID
+// come out decisive (that is its own blocker), it cannot conjure a bridge into an empty catalog, and
+// the module validates it against a two-value closed vocabulary — so it is not a free-text channel.
+// Still deliberately absent: any object/table name, any filter, any limit, any read plan.
+const VALID_STOCK_PREPARATION_SOURCE_PREFLIGHT_QUERY_KEYS = new Set(['tenantId', 'workspaceId', 'externalSystemId', 'declaredBridge'])
 const VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_ENSURE_BODY_KEYS = new Set()
 const VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_LIST_QUERY_KEYS = new Set(['tenantId', 'workspaceId', 'projectNo', 'status'])
 const VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_VALUE_ENTRY_QUERY_KEYS = new Set(['tenantId', 'workspaceId', 'decisionId'])
@@ -5165,6 +5173,21 @@ function createHandlers(services, options = {}) {
         )
       }
 
+      // Closed vocabulary, refused AT THE EDGE rather than quietly ignored downstream: an operator who
+      // mistypes the bridge must be told, not handed a report that silently measured instead.
+      // `firstString` yields null for an absent OR blank key, so "not supplied" and "supplied as
+      // whitespace" collapse here — both mean no declaration, and neither is an error.
+      const declaredBridge = firstString(input.declaredBridge)
+      const declarationSupplied = Object.prototype.hasOwnProperty.call(input, 'declaredBridge')
+      if (declarationSupplied && !DECLARABLE_BRIDGES.includes(declaredBridge)) {
+        throw new HttpRouteError(
+          400,
+          'STOCK_PREPARATION_SOURCE_PREFLIGHT_REQUEST_INVALID',
+          'declaredBridge must name one of the two bridge candidates',
+          { field: 'declaredBridge', allowed: [...DECLARABLE_BRIDGES] },
+        )
+      }
+
       const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
@@ -5182,6 +5205,7 @@ function createHandlers(services, options = {}) {
           readObject: (request) => adapter.read(request),
           readPlan: action && action.source ? action.source.readPlan : undefined,
           externalSystemId,
+          declaredBridge,
         }))
       } catch (error) {
         if (error instanceof SourcePreflightError) {

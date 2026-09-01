@@ -93,6 +93,12 @@ export interface StockPrepSourceBomData {
   hasBomRows: boolean
 }
 
+export interface StockPrepSourceRoleContributor {
+  object: string | null
+  rowsObserved: number
+  exact: boolean
+}
+
 export interface StockPrepSourceBridgeCandidate {
   bridge: StockPrepSourceBridge
   headObject: string | null
@@ -103,11 +109,26 @@ export interface StockPrepSourceBridgeCandidate {
   lineRows: number
   lineExact: boolean
   linePresent: boolean
+  /** Every object that answered under this role — the audit trail behind collapsing them to one. */
+  contributingObjects: StockPrepSourceRoleContributor[]
 }
+
+/** The two bridges a human may declare when the bounded sample cannot rank them. */
+export type StockPrepDeclarableBridge = 'order-module' | 'design-bom'
+export const STOCK_PREP_DECLARABLE_BRIDGES: readonly StockPrepDeclarableBridge[] =
+  Object.freeze(['order-module', 'design-bom'])
 
 export interface StockPrepSourceTopology {
   detectedBridge: StockPrepSourceBridge
   reason: string
+  /** Whether `detectedBridge` came from the data or from a person. Never inferred here. */
+  bridgeSource: 'measured' | 'declared'
+  declaredBridge: StockPrepDeclarableBridge | null
+  declarationContradictsMeasurement: boolean
+  measuredBridge: StockPrepSourceBridge
+  /** Both carriers filled the sample cap: a bounded read cannot rank them. Not the same as a tie. */
+  undecidableAtCap: boolean
+  rowCap: number
   configuredBridge: StockPrepSourceBridge
   matchesConfigured: boolean
   dominanceRatio: number
@@ -136,6 +157,10 @@ export interface StockPrepSourceQuantityField {
   measuredSlot: string | null
   measuredNumericRatio: number | null
   measuredCandidates: { column: string; populated: number; numericRatio: number }[]
+  /** Slots that cleared the density floor — the field the reading refused to choose from, when it did. */
+  qualifyingSlots: string[]
+  measuredAmbiguous: boolean
+  configuredAmongCandidates: boolean
   resolvedSlot: string | null
   readingsAgree: boolean
   matchesConfigured: boolean
@@ -200,11 +225,13 @@ async function readJson(response: Response | null | undefined): Promise<unknown>
 export async function readStockPreparationSourcePreflight(
   scope: IntegrationScope,
   externalSystemId?: string,
+  declaredBridge?: StockPrepDeclarableBridge,
 ): Promise<StockPrepSourcePreflight> {
   const query = buildQueryString({
     tenantId: scope.tenantId,
     workspaceId: scope.workspaceId,
     externalSystemId,
+    declaredBridge,
   })
   const route = STOCK_PREPARATION_SOURCE_PREFLIGHT_ROUTE
   const response = await apiFetch(`${route}${query ? `?${query}` : ''}`)
@@ -250,8 +277,12 @@ export function stockPrepSourceCheckRows(preflight: StockPrepSourcePreflight): S
     },
     {
       id: 'topology',
+      // `matchesConfigured` is false for BOTH an undecidable standoff and a real mismatch — correctly,
+      // since neither is a source you can run against. The token is what tells them apart at a glance.
       ok: topology.matchesConfigured,
-      token: `${bridge} vs ${topology.configuredBridge}`,
+      token: topology.undecidableAtCap && topology.bridgeSource === 'measured'
+        ? `undecidable@cap(${topology.rowCap})`
+        : `${bridge}${topology.bridgeSource === 'declared' ? '(declared)' : ''} vs ${topology.configuredBridge}`,
     },
     {
       id: 'preset',

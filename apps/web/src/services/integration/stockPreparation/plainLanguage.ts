@@ -370,10 +370,25 @@ export const STOCK_PREP_SOURCE_BLOCKER_PLAIN: Record<string, StockPrepPlainEntry
     enNext: 'Neither known route — the order module or the design BOM — carries any lines. We need them to tell us which table their BOM hangs off.',
   }),
   bridge_ambiguous: Object.freeze({
-    zh: '两条路都有数据,系统不替你猜',
-    en: 'Both routes carry data, and the system will not guess between them',
+    zh: '两条路都有数据,数量也接近,系统不替你猜',
+    en: 'Both routes carry data in comparable amounts, and the system will not guess between them',
     zhNext: '请对方确认业务上以哪一条为准,再按那条配置。',
     enNext: 'Ask them which one the business treats as authoritative, then configure that one.',
+  }),
+  // Deliberately a SEPARATE sentence from bridge_ambiguous. "We compared them and they came out
+  // close" and "both are bigger than we looked" are different facts with different ways out, and an
+  // operator who cannot tell them apart is stuck at a permanent blocker with no next step.
+  bridge_undecidable_at_cap: Object.freeze({
+    zh: '两条路都装满了抽样上限,光看抽样分不出哪条是主的',
+    en: 'Both routes are full past the sample limit, so a sample cannot tell which one is the main one',
+    zhNext: '预检每张表只抽读一小页(不会去全表扫描对方的库)。请对方确认业务上以哪一条为准,然后在下面直接指定 —— 指定之后本页会照那条继续检查,并且会一直标明「这条是人指定的,不是测出来的」。',
+    enNext: 'The check reads only one small page per table — it will not scan their database. Ask them which route the business treats as authoritative and declare it below; the check then continues against that one, and the report keeps saying it was declared rather than measured.',
+  }),
+  declared_bridge_contradicts_measurement: Object.freeze({
+    zh: '你指定的那条路,和实测出来的对不上',
+    en: 'The route you declared is not the one the data shows',
+    zhNext: '实测是有数据支撑的,所以这里以实测为准、不采纳指定。要么指定改成实测那条,要么先跟对方核对 —— 很可能是连错了库。',
+    enNext: 'The measurement has data behind it, so it stands and the declaration is not applied. Either declare the measured route instead, or check with them first — this is often a sign of the wrong database.',
   }),
   topology_mismatch: Object.freeze({
     zh: '配置走的路,和这家实际的形状对不上 —— 照现在配置跑,会拉到 0 行',
@@ -412,6 +427,18 @@ export const STOCK_PREP_SOURCE_WARNING_PLAIN: Record<string, StockPrepPlainEntry
     en: 'Could not determine which column holds the quantity',
     zhNext: '需要对方指认。拉数据本身还能跑,但数量列大概率是空的。',
     enNext: 'They need to point it out. The pull still runs, but the quantity column will most likely be empty.',
+  }),
+  quantity_field_ambiguous: Object.freeze({
+    zh: '有好几列都像数量(比如数量和重量都是数字),系统不替你选',
+    en: 'Several columns all look like the quantity (quantity and weight are both numeric), and the system will not choose',
+    zhNext: '候选列在下面列着。对方的字段字典读不到时,只能请他们指认哪一列是数量 —— 这里宁可说不知道,也不会挑一列写进去。',
+    enNext: 'The candidates are listed below. With their field dictionary unreadable, they have to say which one is the quantity — this check would rather say it does not know than name one.',
+  }),
+  bridge_declared_not_measured: Object.freeze({
+    zh: '这次的「走哪条路」是人指定的,不是测出来的',
+    en: 'The route in this report was declared by a person, not measured',
+    zhNext: '抽样分不出来时这是正常做法。但请记住:下面所有基于这条路的判断,都建立在这个指定正确的前提上。',
+    enNext: 'That is the right move when the sample cannot decide. Just remember every finding below that depends on the route rests on the declaration being right.',
   }),
   quantity_readings_disagree: Object.freeze({
     zh: '两种判法给出了不同的数量列',

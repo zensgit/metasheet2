@@ -214,6 +214,11 @@ const CONNECTIVITY_ERROR_CODES = Object.freeze([
   READ_ERROR_CODES.TIMEOUT,
 ])
 
+// The bridges a HUMAN may declare when the bounded sample cannot decide. Deliberately only the two
+// real carriers: `ambiguous` / `none` / `unknown` are readings, not topologies, and nobody can declare
+// their source into one.
+const DECLARABLE_BRIDGES = Object.freeze([BRIDGES.ORDER_MODULE, BRIDGES.DESIGN_BOM])
+
 const SOURCE_PREFLIGHT_BLOCKER_CODES = Object.freeze({
   SOURCE_UNREACHABLE: 'source_unreachable',
   ENTRY_TABLE_MISSING: 'entry_table_missing',
@@ -221,6 +226,13 @@ const SOURCE_PREFLIGHT_BLOCKER_CODES = Object.freeze({
   NO_BOM_ROWS: 'no_bom_rows',
   NO_BOM_BRIDGE: 'no_bom_bridge',
   BRIDGE_AMBIGUOUS: 'bridge_ambiguous',
+  // Distinct from BRIDGE_AMBIGUOUS on purpose: "both carriers are full past the sample cap, so a
+  // bounded read cannot rank them" is a different fact, with a different way out, from "we compared
+  // them and they came out close".
+  BRIDGE_UNDECIDABLE_AT_CAP: 'bridge_undecidable_at_cap',
+  // A declaration may resolve what the sample could not. It may NEVER overrule what the sample did
+  // decide — that would turn the one measurement this whole module exists to make into a formality.
+  DECLARED_BRIDGE_CONTRADICTS_MEASUREMENT: 'declared_bridge_contradicts_measurement',
   TOPOLOGY_MISMATCH: 'topology_mismatch',
 })
 
@@ -229,7 +241,13 @@ const SOURCE_PREFLIGHT_WARNING_CODES = Object.freeze({
   PRESET_AMBIGUOUS: 'preset_ambiguous',
   QUANTITY_FIELD_MISMATCH: 'quantity_field_mismatch',
   QUANTITY_FIELD_UNRESOLVED: 'quantity_field_unresolved',
+  // Two or more slots are equally plausible quantity carriers and no dictionary breaks the tie. The
+  // same discipline the bridge decision follows: say so, do not pick.
+  QUANTITY_FIELD_AMBIGUOUS: 'quantity_field_ambiguous',
   QUANTITY_READINGS_DISAGREE: 'quantity_readings_disagree',
+  // The bridge in this report came from a human, not from the data. Said out loud every time, so a
+  // declared bridge is never read back later as a measured one.
+  BRIDGE_DECLARED_NOT_MEASURED: 'bridge_declared_not_measured',
   NODE_TYPE_COLUMN_ABSENT: 'node_type_column_absent',
   DICTIONARY_UNREADABLE: 'dictionary_unreadable',
 })
@@ -243,7 +261,11 @@ const SOURCE_PREFLIGHT_BLOCKER_CODE_ORDER = Object.freeze([
   SOURCE_PREFLIGHT_BLOCKER_CODES.NO_PROJECT_NUMBERS,
   SOURCE_PREFLIGHT_BLOCKER_CODES.NO_BOM_ROWS,
   SOURCE_PREFLIGHT_BLOCKER_CODES.NO_BOM_BRIDGE,
+  // A contradicted declaration outranks both ambiguity codes: it says the operator's belief and the
+  // data disagree, and that has to be settled before any question about ranking carriers matters.
+  SOURCE_PREFLIGHT_BLOCKER_CODES.DECLARED_BRIDGE_CONTRADICTS_MEASUREMENT,
   SOURCE_PREFLIGHT_BLOCKER_CODES.BRIDGE_AMBIGUOUS,
+  SOURCE_PREFLIGHT_BLOCKER_CODES.BRIDGE_UNDECIDABLE_AT_CAP,
   SOURCE_PREFLIGHT_BLOCKER_CODES.TOPOLOGY_MISMATCH,
 ])
 
@@ -267,6 +289,10 @@ const LIVENESS_VALUE_PATH = /^checks\.projectData\.livenessSamples\[[0-9]+\]$/
 const CLOSED_VOCABULARY_LEAF_FIELDS = Object.freeze(new Set([
   'verdict', 'code', 'reason', 'errorCode', 'failureCode',
   'bridge', 'detectedBridge', 'configuredBridge', 'role',
+  // The bridge-provenance fields. `declaredBridge` is request-supplied, which is exactly why it is
+  // CLOSED and not server-authored: it is validated against DECLARABLE_BRIDGES here too, so a request
+  // cannot use it as a free-text channel into the report.
+  'measuredBridge', 'declaredBridge', 'bridgeSource', 'declarableBridges',
 ]))
 
 // The bridge-decision reasons `decideBridge` can produce, plus the preset selector's own reasons.
@@ -277,6 +303,7 @@ const BRIDGE_DECISION_REASONS = Object.freeze([
   'design-bom-line-volume-dominates',
   'order-module-line-volume-dominates',
   'both-candidates-carry-comparable-line-volume',
+  'both-candidates-saturate-the-sample-cap',
 ])
 const PRESET_SELECTION_REASONS = Object.freeze([
   'MATCHED', 'NO_PRESET_MATCHED', 'AMBIGUOUS_PRESET_MATCH', 'PRESET_CATALOG_INVALID',
@@ -307,6 +334,9 @@ const IDENTIFIER_LEAF_FIELDS = Object.freeze(new Set([
   'matchField', 'nodeTypeColumn', 'dictionaryKeyColumn', 'dictionarySlot', 'measuredSlot',
   'resolvedSlot', 'configuredField', 'detectedField', 'column', 'columns',
   'missingSignatureTables',
+  // The tied quantity slots the reading refused to choose between, the objects that answered under a
+  // collapsed role, and the two bridge line objects the cap standoff names.
+  'qualifyingSlots', 'candidates', 'orderLineObject', 'designBomLineObject',
 ]))
 
 // 4. LIVENESS — matched by exact path, above.
@@ -509,23 +539,52 @@ function decideBridge(orderLines, designLines) {
   const designCarries = designLines.rowsObserved >= BRIDGE_MIN_LINES
 
   if (!orderCarries && !designCarries) {
-    return { bridge: BRIDGES.NONE, reason: 'neither-candidate-carries-lines' }
+    return { bridge: BRIDGES.NONE, reason: 'neither-candidate-carries-lines', undecidableAtCap: false }
   }
   if (orderCarries && !designCarries) {
-    return { bridge: BRIDGES.ORDER_MODULE, reason: 'only-order-module-carries-lines' }
+    return { bridge: BRIDGES.ORDER_MODULE, reason: 'only-order-module-carries-lines', undecidableAtCap: false }
   }
   if (designCarries && !orderCarries) {
-    return { bridge: BRIDGES.DESIGN_BOM, reason: 'only-design-bom-carries-lines' }
+    return { bridge: BRIDGES.DESIGN_BOM, reason: 'only-design-bom-carries-lines', undecidableAtCap: false }
   }
+
+  // BOTH SATURATED THE CAP — and this is NOT a tie.
+  //
+  // A bounded sample stops counting at SOURCE_PREFLIGHT_ROW_CAP, so two carriers that both fill it
+  // read as "cap vs cap" whether the truth is 201-vs-205 or 100,000-vs-201. Running the dominance
+  // ratio on those two equal floors would report `both-candidates-carry-comparable-line-volume`, which
+  // is a claim about the DATA that the sample cannot support — and, since real deployments have real
+  // volume on at least one side, it would make AMBIGUOUS the permanent answer for exactly the
+  // catalogs this check exists to serve: a hard block with no way out and no way to tell it apart
+  // from a genuine tie.
+  //
+  // So it gets its own reason and its own blocker. The refusal stands — we still do not guess — but
+  // it is DISTINGUISHABLE ("the sample cannot decide") and ACTIONABLE (a human may declare the
+  // bridge; see `declaredBridge`, which is a declaration to check against, never a read-widening).
+  if (!orderLines.exact && !designLines.exact) {
+    return {
+      bridge: BRIDGES.AMBIGUOUS,
+      reason: 'both-candidates-saturate-the-sample-cap',
+      undecidableAtCap: true,
+    }
+  }
+
   const order = orderLines.rowsObserved
   const design = designLines.rowsObserved
+  // A saturated candidate against an exact one IS decidable in the saturated candidate's favour when
+  // it clears the ratio: its count is a FLOOR, so the true margin can only be larger.
   if (design >= order * BRIDGE_DOMINANCE_RATIO) {
-    return { bridge: BRIDGES.DESIGN_BOM, reason: 'design-bom-line-volume-dominates' }
+    return { bridge: BRIDGES.DESIGN_BOM, reason: 'design-bom-line-volume-dominates', undecidableAtCap: false }
   }
   if (order >= design * BRIDGE_DOMINANCE_RATIO) {
-    return { bridge: BRIDGES.ORDER_MODULE, reason: 'order-module-line-volume-dominates' }
+    return { bridge: BRIDGES.ORDER_MODULE, reason: 'order-module-line-volume-dominates', undecidableAtCap: false }
   }
-  return { bridge: BRIDGES.AMBIGUOUS, reason: 'both-candidates-carry-comparable-line-volume' }
+  // One side is exact and neither dominates: a real comparison that came out close. That IS a tie.
+  return {
+    bridge: BRIDGES.AMBIGUOUS,
+    reason: 'both-candidates-carry-comparable-line-volume',
+    undecidableAtCap: false,
+  }
 }
 
 /** The bridge the CONFIGURED plan assumes. The shipped plan reaches components through the order module. */
@@ -680,8 +739,8 @@ async function runStockPreparationSourcePreflight(input = {}) {
 
   const roster = buildProbeRoster(plan, presets)
   const observations = []
-  const rowsByRole = new Map()
-  const observationByRole = new Map()
+  // role -> every {record, rows} that answered under it, in roster order.
+  const attemptsByRole = new Map()
   // Every string value seen in every sampled row. Never serialized; it ARMS the values-free
   // self-check, exactly as the discovery probe's leak guard does.
   const observedValues = new Set()
@@ -690,10 +749,8 @@ async function runStockPreparationSourcePreflight(input = {}) {
     const { observation, rows } = await probeObject(readObject, entry.object)
     const record = { role: entry.role, ...observation }
     observations.push(record)
-    if (!observationByRole.has(entry.role) || (!observationByRole.get(entry.role).present && observation.present)) {
-      observationByRole.set(entry.role, record)
-      rowsByRole.set(entry.role, rows)
-    }
+    if (!attemptsByRole.has(entry.role)) attemptsByRole.set(entry.role, [])
+    attemptsByRole.get(entry.role).push({ record, rows })
     for (const row of rows) {
       for (const value of Object.values(row)) {
         if (typeof value === 'string' && value.trim() !== '') observedValues.add(value)
@@ -701,10 +758,46 @@ async function runStockPreparationSourcePreflight(input = {}) {
     }
   }
 
-  const roleOf = (role) => observationByRole.get(role) || {
+  // ROLE COLLAPSE — the STRONGEST carrier, never merely the first to answer.
+  //
+  // A role can address more than one object: `designBom` probes every spelling in
+  // DESIGN_BOM_BRIDGE_OBJECTS, because which one a catalog uses is exactly the thing we do not know.
+  // Taking the first PRESENT one collapses that on arrival order, and arrival order is the roster's,
+  // not the data's — so a deployment carrying a five-row legacy `DN_PDM_DesignBom` beside a populated
+  // `DN_PDM_DesignBomInfo` would have its design-BOM volume read as five. That undercount tilts the
+  // bridge decision toward the order module, or into AMBIGUOUS, on nothing but a naming accident.
+  //
+  // So the winner is the object with the LARGEST observed row count (ties resolved by roster order, so
+  // the choice is deterministic). MAX rather than SUM on purpose: these are alternative spellings of
+  // one carrier, not shards of it, and the sampled rows that feed column inspection and slot-density
+  // measurement must come from ONE table — summing counts while inspecting one table's columns would
+  // describe a table that does not exist. Every object that answered is still reported, so an operator
+  // can see that two candidates were present and which one the verdict rests on.
+  const winnerByRole = new Map()
+  for (const [role, attempts] of attemptsByRole) {
+    const present = attempts.filter((attempt) => attempt.record.present)
+    if (present.length === 0) {
+      winnerByRole.set(role, attempts[0])
+      continue
+    }
+    winnerByRole.set(role, present.reduce(
+      (best, attempt) => (attempt.record.rowsObserved > best.record.rowsObserved ? attempt : best),
+      present[0],
+    ))
+  }
+
+  const roleOf = (role) => (winnerByRole.get(role) || {}).record || {
     role, object: null, present: false, rowsObserved: 0, exact: true, columns: [], errorCode: null,
   }
-  const rowsOf = (role) => rowsByRole.get(role) || []
+  const rowsOf = (role) => (winnerByRole.get(role) || {}).rows || []
+  /** Every object that ANSWERED under a role — the audit trail behind the collapse above. */
+  const contributorsOf = (role) => (attemptsByRole.get(role) || [])
+    .filter((attempt) => attempt.record.present)
+    .map((attempt) => ({
+      object: attempt.record.object,
+      rowsObserved: attempt.record.rowsObserved,
+      exact: attempt.record.exact,
+    }))
 
   // ---- CHECK 1: reachability -------------------------------------------------
   // Reached = at least one probe got an answer. Unreached = every probe failed AND at least one failed
@@ -782,13 +875,41 @@ async function runStockPreparationSourcePreflight(input = {}) {
   // ---- CHECK 4: topology -----------------------------------------------------
   const orderHead = roleOf('orderHead')
   const orderDetail = roleOf('orderDetail')
-  const decision = decideBridge(orderDetail, designBom)
+  const measured = decideBridge(orderDetail, designBom)
   const configuredBridge = planAssumedBridge(plan)
+
+  // THE DECLARATION, and the exactly two things it may do.
+  //
+  // It RESOLVES what the bounded sample could not rank (`undecidableAtCap`), and it CONTRADICTS a
+  // measurement that came out decisive. It can do nothing else: it cannot conjure a bridge where
+  // neither carrier holds lines (NONE stands — declaring a bridge into an empty catalog is how a
+  // zero-row run gets blessed), and it cannot break a genuine close tie between two exactly-counted
+  // carriers, because that tie is a real measurement and a human's belief is not evidence against it.
+  const declaredBridge = DECLARABLE_BRIDGES.includes(optionalString(input.declaredBridge))
+    ? optionalString(input.declaredBridge)
+    : null
+  const declarationContradicts = Boolean(
+    declaredBridge
+    && (measured.bridge === BRIDGES.ORDER_MODULE || measured.bridge === BRIDGES.DESIGN_BOM)
+    && measured.bridge !== declaredBridge,
+  )
+  const declarationResolves = Boolean(declaredBridge && measured.undecidableAtCap)
+  const detectedBridge = declarationResolves ? declaredBridge : measured.bridge
+  const bridgeSource = declarationResolves ? 'declared' : 'measured'
+
   const topology = {
-    detectedBridge: decision.bridge,
-    reason: decision.reason,
+    detectedBridge,
+    reason: measured.reason,
+    // Where this answer CAME FROM. A declared bridge is a human's answer to a question the data could
+    // not settle, and every consumer of this report gets to see that rather than infer it.
+    bridgeSource,
+    declaredBridge,
+    declarationContradictsMeasurement: declarationContradicts,
+    measuredBridge: measured.bridge,
+    undecidableAtCap: measured.undecidableAtCap,
+    rowCap: SOURCE_PREFLIGHT_ROW_CAP,
     configuredBridge,
-    matchesConfigured: decision.bridge === configuredBridge,
+    matchesConfigured: detectedBridge === configuredBridge,
     dominanceRatio: BRIDGE_DOMINANCE_RATIO,
     minLines: BRIDGE_MIN_LINES,
     candidates: [
@@ -802,6 +923,8 @@ async function runStockPreparationSourcePreflight(input = {}) {
         lineRows: orderDetail.rowsObserved,
         lineExact: orderDetail.exact,
         linePresent: orderDetail.present,
+        // Every object that answered under this role, so the collapse to one carrier is auditable.
+        contributingObjects: contributorsOf('orderDetail'),
       },
       {
         bridge: BRIDGES.DESIGN_BOM,
@@ -813,6 +936,7 @@ async function runStockPreparationSourcePreflight(input = {}) {
         lineRows: designBom.rowsObserved,
         lineExact: designBom.exact,
         linePresent: designBom.present,
+        contributingObjects: contributorsOf('designBom'),
       },
     ],
   }
@@ -845,8 +969,8 @@ async function runStockPreparationSourcePreflight(input = {}) {
   // The BOM-carrying table is whichever the DETECTED bridge says it is — measuring the configured
   // table's slots when the source uses another one would report the wrong table's shape and quietly
   // agree with the very assumption that failed.
-  const quantityCarrier = decision.bridge === BRIDGES.DESIGN_BOM ? designBom : bomDetail
-  const quantityCarrierRows = decision.bridge === BRIDGES.DESIGN_BOM ? rowsOf('designBom') : rowsOf('bomDetail')
+  const quantityCarrier = detectedBridge === BRIDGES.DESIGN_BOM ? designBom : bomDetail
+  const quantityCarrierRows = detectedBridge === BRIDGES.DESIGN_BOM ? rowsOf('designBom') : rowsOf('bomDetail')
 
   let dictionaryDecode = { slot: null, keyColumn: null, enabledRows: 0, matchedRows: 0 }
   let dictionaryObject = null
@@ -869,12 +993,37 @@ async function runStockPreparationSourcePreflight(input = {}) {
   }
 
   const measuredSlots = measureNumericSlots(matchedPreset, quantityCarrier.columns, quantityCarrierRows)
-  const measuredSlot = measuredSlots.find((entry) => entry.numericRatio >= QUANTITY_NUMERIC_DENSITY_FLOOR) || null
+  // THE DENSITY READING NEVER PICKS A WINNER OUT OF A FIELD.
+  //
+  // A BOM line's slots are not "one numeric column among text" — quantity, weight, length and price
+  // are all numeric, and all of them clear the density floor. Taking `find()`'s first hit meant taking
+  // whatever the sort happened to put on top, which is a GUESS wearing a measurement's name: with no
+  // readable dictionary it could hand `quantity_field_mismatch` a confident, wrong column name and
+  // send an implementer to change a correct configuration.
+  //
+  // So the same discipline the bridge decision follows applies here. Every slot clearing the floor is
+  // a CANDIDATE; the reading resolves only when there is exactly one, or when the customer's own
+  // dictionary names one of them — a dictionary is the customer's declaration about their own schema,
+  // which is evidence, unlike a sort order. Otherwise the answer is "these are the candidates; we
+  // cannot tell", and no mismatch is claimed.
+  const qualifyingSlots = measuredSlots.filter((entry) => entry.numericRatio >= QUANTITY_NUMERIC_DENSITY_FLOOR)
+  const dictionaryNamed = dictionaryDecode.slot
+    ? qualifyingSlots.find((entry) => entry.column.toLowerCase() === dictionaryDecode.slot.toLowerCase()) || null
+    : null
+  const measuredSlot = qualifyingSlots.length === 1
+    ? qualifyingSlots[0]
+    : dictionaryNamed
+  const measuredAmbiguous = qualifyingSlots.length > 1 && !dictionaryNamed
+
   const configuredQuantityField = plan.bomDetail.quantityField
   const resolvedSlot = dictionaryDecode.slot || (measuredSlot ? measuredSlot.column : null)
   const readingsDisagree = Boolean(
     dictionaryDecode.slot && measuredSlot
     && dictionaryDecode.slot.toLowerCase() !== measuredSlot.column.toLowerCase(),
+  )
+  const configuredAmongCandidates = Boolean(
+    configuredQuantityField
+    && qualifyingSlots.some((entry) => entry.column.toLowerCase() === configuredQuantityField.toLowerCase()),
   )
 
   const quantityField = {
@@ -888,6 +1037,10 @@ async function runStockPreparationSourcePreflight(input = {}) {
     measuredSlot: measuredSlot ? measuredSlot.column : null,
     measuredNumericRatio: measuredSlot ? measuredSlot.numericRatio : null,
     measuredCandidates: measuredSlots,
+    // The slots that cleared the floor — the field the reading refused to choose from, when it did.
+    qualifyingSlots: qualifyingSlots.map((entry) => entry.column),
+    measuredAmbiguous,
+    configuredAmongCandidates,
     resolvedSlot,
     readingsAgree: Boolean(dictionaryDecode.slot && measuredSlot && !readingsDisagree),
     matchesConfigured: Boolean(
@@ -911,15 +1064,42 @@ async function runStockPreparationSourcePreflight(input = {}) {
     } else if (!projectData.hasProjectNumbers) {
       blockers.push({ code: B.NO_PROJECT_NUMBERS, detail: { object: pathExAttr.object, matchField } })
     }
-    if (!bomData.hasBomRows && decision.bridge !== BRIDGES.DESIGN_BOM) {
+    if (!bomData.hasBomRows && detectedBridge !== BRIDGES.DESIGN_BOM) {
       blockers.push({
         code: B.NO_BOM_ROWS,
         detail: { bomHeadRows: bomData.bomHeadRows, bomDetailRows: bomData.bomDetailRows },
       })
     }
-    if (decision.bridge === BRIDGES.NONE) {
-      blockers.push({ code: B.NO_BOM_BRIDGE, detail: { reason: decision.reason } })
-    } else if (decision.bridge === BRIDGES.AMBIGUOUS) {
+    if (declarationContradicts) {
+      // Settled first, and settled by a human: the data says one thing and the operator declared
+      // another, and no later question about this source means anything until that is reconciled.
+      blockers.push({
+        code: B.DECLARED_BRIDGE_CONTRADICTS_MEASUREMENT,
+        detail: {
+          declaredBridge,
+          measuredBridge: measured.bridge,
+          reason: measured.reason,
+          orderLines: orderDetail.rowsObserved,
+          designBomLines: designBom.rowsObserved,
+        },
+      })
+    } else if (measured.bridge === BRIDGES.NONE) {
+      blockers.push({ code: B.NO_BOM_BRIDGE, detail: { reason: measured.reason } })
+    } else if (measured.undecidableAtCap && !declarationResolves) {
+      // DISTINGUISHABLE from a genuine tie, and ACTIONABLE: the detail carries the cap that produced
+      // the standoff and the declaration that would resolve it.
+      blockers.push({
+        code: B.BRIDGE_UNDECIDABLE_AT_CAP,
+        detail: {
+          rowCap: SOURCE_PREFLIGHT_ROW_CAP,
+          orderLines: orderDetail.rowsObserved,
+          orderLineObject: orderDetail.object,
+          designBomLines: designBom.rowsObserved,
+          designBomLineObject: designBom.object,
+          declarableBridges: [...DECLARABLE_BRIDGES],
+        },
+      })
+    } else if (detectedBridge === BRIDGES.AMBIGUOUS) {
       blockers.push({
         code: B.BRIDGE_AMBIGUOUS,
         detail: { orderLines: orderDetail.rowsObserved, designBomLines: designBom.rowsObserved },
@@ -930,10 +1110,17 @@ async function runStockPreparationSourcePreflight(input = {}) {
         code: B.TOPOLOGY_MISMATCH,
         detail: {
           configuredBridge,
-          detectedBridge: decision.bridge,
+          detectedBridge,
           configuredLineObject: plan.orderDetail.object,
-          detectedLineObject: decision.bridge === BRIDGES.DESIGN_BOM ? designBom.object : orderDetail.object,
+          detectedLineObject: detectedBridge === BRIDGES.DESIGN_BOM ? designBom.object : orderDetail.object,
         },
+      })
+    }
+
+    if (declarationResolves) {
+      warnings.push({
+        code: W.BRIDGE_DECLARED_NOT_MEASURED,
+        detail: { declaredBridge, rowCap: SOURCE_PREFLIGHT_ROW_CAP },
       })
     }
 
@@ -946,7 +1133,20 @@ async function runStockPreparationSourcePreflight(input = {}) {
     if (dictionaryObject && !dictionaryReadable) {
       warnings.push({ code: W.DICTIONARY_UNREADABLE, detail: { object: dictionaryObject } })
     }
-    if (!resolvedSlot) {
+    if (measuredAmbiguous && !resolvedSlot) {
+      // Several plausible carriers and nothing to break the tie. Naming one here is exactly the guess
+      // this module refuses everywhere else, so it names the FIELD instead — and deliberately emits no
+      // mismatch, because a mismatch claims to know the right answer.
+      warnings.push({
+        code: W.QUANTITY_FIELD_AMBIGUOUS,
+        detail: {
+          carrierObject: quantityCarrier.object,
+          candidates: quantityField.qualifyingSlots,
+          configuredField: configuredQuantityField,
+          configuredAmongCandidates,
+        },
+      })
+    } else if (!resolvedSlot) {
       warnings.push({ code: W.QUANTITY_FIELD_UNRESOLVED, detail: { carrierObject: quantityCarrier.object } })
     } else if (!quantityField.matchesConfigured) {
       warnings.push({
@@ -1089,6 +1289,13 @@ function assertSourcePreflightValuesFree(report, { observedValues = new Set(), i
     ['bridge', new Set(SOURCE_PREFLIGHT_BRIDGES)],
     ['detectedBridge', new Set(SOURCE_PREFLIGHT_BRIDGES)],
     ['configuredBridge', new Set(SOURCE_PREFLIGHT_BRIDGES)],
+    ['measuredBridge', new Set(SOURCE_PREFLIGHT_BRIDGES)],
+    // Re-validated here, at the boundary, even though the runner already filtered it: this is the one
+    // closed-vocabulary leaf whose value originates in a REQUEST, and the self-check is the last thing
+    // that runs before the report leaves.
+    ['declaredBridge', new Set(DECLARABLE_BRIDGES)],
+    ['declarableBridges', new Set(DECLARABLE_BRIDGES)],
+    ['bridgeSource', new Set(['measured', 'declared'])],
     ['role', new Set(PROBE_ROLES)],
   ])
 
@@ -1143,6 +1350,7 @@ module.exports = {
   SOURCE_PREFLIGHT_ROW_CAP,
   IDENTITY_PROBE_MAX,
   SOURCE_PREFLIGHT_BRIDGES,
+  DECLARABLE_BRIDGES,
   SOURCE_PREFLIGHT_BLOCKER_CODES,
   SOURCE_PREFLIGHT_BLOCKER_CODE_ORDER,
   SOURCE_PREFLIGHT_WARNING_CODES,

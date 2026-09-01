@@ -75,6 +75,10 @@ function probe(role: string, object: string, rows: number, exact = true) {
   return { role, object, present: true, rowsObserved: rows, exact, columns: ['ID', 'part_id'], errorCode: null }
 }
 
+function contributors(entries: [string, number, boolean][]) {
+  return entries.map(([object, rowsObserved, exact]) => ({ object, rowsObserved, exact }))
+}
+
 /** The live customer's shape: order module all but empty, design BOM full. */
 function customerShapedPayload(overrides: Partial<StockPrepSourcePreflight> = {}): StockPrepSourcePreflight {
   return {
@@ -113,6 +117,12 @@ function customerShapedPayload(overrides: Partial<StockPrepSourcePreflight> = {}
       topology: {
         detectedBridge: 'design-bom',
         reason: 'only-design-bom-carries-lines',
+        bridgeSource: 'measured',
+        declaredBridge: null,
+        declarationContradictsMeasurement: false,
+        measuredBridge: 'design-bom',
+        undecidableAtCap: false,
+        rowCap: 200,
         configuredBridge: 'order-module',
         matchesConfigured: false,
         dominanceRatio: 4,
@@ -128,6 +138,7 @@ function customerShapedPayload(overrides: Partial<StockPrepSourcePreflight> = {}
             lineRows: 0,
             lineExact: true,
             linePresent: true,
+            contributingObjects: contributors([['DN_PDM_OrderDetailInfo', 0, true]]),
           },
           {
             bridge: 'design-bom',
@@ -139,6 +150,7 @@ function customerShapedPayload(overrides: Partial<StockPrepSourcePreflight> = {}
             lineRows: 200,
             lineExact: false,
             linePresent: true,
+            contributingObjects: contributors([['DN_PDM_DesignBom', 200, false]]),
           },
         ],
       },
@@ -162,6 +174,9 @@ function customerShapedPayload(overrides: Partial<StockPrepSourcePreflight> = {}
         measuredSlot: 'bom_exattr1',
         measuredNumericRatio: 1,
         measuredCandidates: [{ column: 'bom_exattr1', populated: 184, numericRatio: 1 }],
+        qualifyingSlots: ['bom_exattr1'],
+        measuredAmbiguous: false,
+        configuredAmongCandidates: true,
         resolvedSlot: 'Bom_ExAttr1',
         readingsAgree: true,
         matchesConfigured: true,
@@ -225,6 +240,63 @@ function emptyPayload(): StockPrepSourcePreflight {
       { code: 'no_bom_rows', detail: { bomHeadRows: 0, bomDetailRows: 0 } },
       { code: 'no_bom_bridge', detail: { reason: 'neither-candidate-carries-lines' } },
     ],
+  }
+}
+
+/** Both carriers past the sample cap: the shape every busy real deployment has. */
+function undecidableAtCapPayload(): StockPrepSourcePreflight {
+  const base = customerShapedPayload()
+  const candidates = base.checks.topology.candidates.map((candidate) => (
+    candidate.bridge === 'order-module'
+      ? { ...candidate, lineRows: 200, lineExact: false }
+      : candidate
+  ))
+  return {
+    ...base,
+    checks: {
+      ...base.checks,
+      topology: {
+        ...base.checks.topology,
+        detectedBridge: 'ambiguous',
+        measuredBridge: 'ambiguous',
+        reason: 'both-candidates-saturate-the-sample-cap',
+        undecidableAtCap: true,
+        candidates,
+      },
+    },
+    blockers: [{
+      code: 'bridge_undecidable_at_cap',
+      detail: {
+        rowCap: 200,
+        orderLines: 200,
+        orderLineObject: 'DN_PDM_OrderDetailInfo',
+        designBomLines: 200,
+        designBomLineObject: 'DN_PDM_DesignBom',
+        declarableBridges: ['order-module', 'design-bom'],
+      },
+    }],
+  }
+}
+
+/** The same source after a human declared the bridge the sample could not rank. */
+function declaredBridgePayload(): StockPrepSourcePreflight {
+  const base = undecidableAtCapPayload()
+  return {
+    ...base,
+    ok: true,
+    verdict: 'go',
+    checks: {
+      ...base.checks,
+      topology: {
+        ...base.checks.topology,
+        detectedBridge: 'order-module',
+        bridgeSource: 'declared',
+        declaredBridge: 'order-module',
+        matchesConfigured: true,
+      },
+    },
+    blockers: [],
+    warnings: [{ code: 'bridge_declared_not_measured', detail: { declaredBridge: 'order-module', rowCap: 200 } }],
   }
 }
 
@@ -369,8 +441,13 @@ describe('源就绪预检 + 拓扑自测 (source readiness panel)', () => {
     // The path is asserted LITERALLY, not against the constant the code under test also uses: an
     // assertion written in terms of the thing it is checking cannot catch that thing changing.
     const called = h.apiFetch.mock.calls.map(([url]) => String(url))
-    expect(called.some((url) => url.startsWith('/api/integration/stock-preparation/source-preflight'))).toBe(true)
+    const sourceCalls = called.filter((url) => url.startsWith('/api/integration/stock-preparation/source-preflight'))
+    expect(sourceCalls.length).toBe(1)
     expect(STOCK_PREPARATION_SOURCE_PREFLIGHT_ROUTE).toBe('/api/integration/stock-preparation/source-preflight')
+    // The ORDINARY run declares nothing. Binding the handler straight to @click would hand it the
+    // click event as its first argument, and a PointerEvent would ride out as `declaredBridge` — the
+    // plain run must measure, never declare.
+    expect(sourceCalls[0]).not.toContain('declaredBridge')
 
     const rows = Array.from(root.querySelectorAll('[data-testid="stock-prep-source-preflight-check"]'))
     expect(rows).toHaveLength(4)
@@ -543,6 +620,116 @@ describe('源就绪预检 + 拓扑自测 (source readiness panel)', () => {
     expect(rendered).toContain(LIVENESS_B)
     const samples = root.querySelectorAll('[data-testid="stock-prep-source-preflight-tech"] code')
     expect(Array.from(samples).filter((node) => (node.textContent || '').startsWith('PRJ-'))).toHaveLength(2)
+  })
+
+  // P-10 -----------------------------------------------------------------
+  it('renders a cap standoff as its own state, with the way out beside it', async () => {
+    installRoutes({ sourcePayload: undecidableAtCapPayload() })
+    const root = await mountView()
+    await runSourceCheck(root)
+
+    // Distinguishable AT A GLANCE from a measured tie — the token says which one this is.
+    const rows = Array.from(root.querySelectorAll('[data-testid="stock-prep-source-preflight-check"]'))
+    expect(rows[2].getAttribute('data-ok')).toBe('no')
+    expect(rows[2].textContent).toContain('undecidable@cap(200)')
+
+    const blockers = textOf(root, '[data-testid="stock-prep-source-preflight-blocker"]')
+    expect(blockers).toContain('装满了抽样上限')
+    expect(blockers).toContain('bridge_undecidable_at_cap')
+    // and it promises what it does NOT do, which is the reason the cap exists.
+    expect(textOf(root, '[data-testid="stock-prep-source-preflight-blocker-next"]')).toContain('不会去全表扫描')
+
+    // ACTIONABLE: exactly the two declarable bridges, and nothing else.
+    const declare = root.querySelector('[data-testid="stock-prep-source-preflight-declare"]')
+    expect(declare).toBeTruthy()
+    const options = Array.from(root.querySelectorAll('[data-testid="stock-prep-source-preflight-declare-option"]'))
+    expect(options.map((node) => node.getAttribute('data-bridge'))).toEqual(['order-module', 'design-bom'])
+
+    // Pressing one sends the declaration on the wire.
+    ;(options[0] as HTMLButtonElement).click()
+    await flush()
+    const declaredCall = h.apiFetch.mock.calls
+      .map(([url]) => String(url))
+      .filter((url) => url.includes('/source-preflight'))
+      .pop()
+    expect(declaredCall).toContain('declaredBridge=order-module')
+  })
+
+  // P-11 -----------------------------------------------------------------
+  it('never lets a declared bridge read back as a measured one', async () => {
+    installRoutes({ sourcePayload: declaredBridgePayload() })
+    const root = await mountView()
+    await runSourceCheck(root)
+
+    const shape = root.querySelector('[data-testid="stock-prep-source-preflight-shape"]')?.textContent || ''
+    expect(shape).toContain('按你指定')
+    expect(shape).not.toContain('实测:')
+    expect(root.querySelector('[data-testid="stock-prep-source-preflight-verdict"]')?.textContent).toContain('可以接')
+    // Even on a go verdict the provenance is said out loud.
+    expect(textOf(root, '[data-testid="stock-prep-source-preflight-warning"]')).toContain('人指定的,不是测出来的')
+    // The declare control is gone: it resolves a standoff, it is not a general override.
+    expect(root.querySelector('[data-testid="stock-prep-source-preflight-declare"]')).toBeNull()
+
+    const rows = Array.from(root.querySelectorAll('[data-testid="stock-prep-source-preflight-check"]'))
+    expect(rows[2].textContent).toContain('(declared)')
+  })
+
+  // P-12 -----------------------------------------------------------------
+  it('shows every object that answered under a collapsed role, and names the tied quantity slots', async () => {
+    const base = customerShapedPayload()
+    installRoutes({
+      sourcePayload: {
+        ...base,
+        checks: {
+          ...base.checks,
+          topology: {
+            ...base.checks.topology,
+            candidates: base.checks.topology.candidates.map((candidate) => (
+              candidate.bridge === 'design-bom'
+                ? {
+                  ...candidate,
+                  lineObject: 'DN_PDM_DesignBomInfo',
+                  contributingObjects: contributors([
+                    ['DN_PDM_DesignBom', 5, true],
+                    ['DN_PDM_DesignBomInfo', 200, false],
+                  ]),
+                }
+                : candidate
+            )),
+          },
+          quantityField: {
+            ...base.checks.quantityField,
+            dictionaryReadable: false,
+            dictionarySlot: null,
+            measuredSlot: null,
+            measuredAmbiguous: true,
+            qualifyingSlots: ['bom_exattr1', 'bom_exattr4'],
+            resolvedSlot: null,
+          },
+        },
+        warnings: [{
+          code: 'quantity_field_ambiguous',
+          detail: {
+            carrierObject: 'DN_PDM_DesignBomInfo',
+            candidates: ['bom_exattr1', 'bom_exattr4'],
+            configuredField: 'Bom_ExAttr1',
+            configuredAmongCandidates: true,
+          },
+        }],
+      },
+    })
+    const root = await mountView()
+    await runSourceCheck(root)
+
+    // The collapse is auditable: both spellings are shown, with the row counts behind the choice.
+    const audit = textOf(root, '[data-testid="stock-prep-source-preflight-contributors"]')
+    expect(audit).toContain('DN_PDM_DesignBom=5')
+    expect(audit).toContain('DN_PDM_DesignBomInfo=200+')
+
+    // The tied quantity slots are named as a FIELD, not resolved to one.
+    const slots = Array.from(root.querySelectorAll('[data-testid="stock-prep-source-preflight-quantity-candidate"]'))
+    expect(slots.map((node) => node.textContent)).toEqual(['bom_exattr1', 'bom_exattr4'])
+    expect(textOf(root, '[data-testid="stock-prep-source-preflight-warning"]')).toContain('系统不替你选')
   })
 
   // P-08 -----------------------------------------------------------------

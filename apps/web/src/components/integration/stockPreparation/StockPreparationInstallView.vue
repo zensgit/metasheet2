@@ -375,7 +375,7 @@
         type="button"
         data-testid="stock-prep-source-preflight-run"
         :disabled="busy"
-        @click="loadSourcePreflight"
+        @click="loadSourcePreflight()"
       >
         {{ bi('检查这个源', 'Check this source') }}
       </button>
@@ -420,9 +420,13 @@
         </ul>
 
         <!-- The measured shape, in words. This sentence is the whole feature: an implementer used to
-             have to read someone else's schema for an afternoon to learn it. -->
+             have to read someone else's schema for an afternoon to learn it.
+             The lead-in changes with PROVENANCE — 实测 vs 按指定 — so a declared bridge is never read
+             back as a measured one. -->
         <p class="stock-prep-install__hint" data-testid="stock-prep-source-preflight-shape">
-          {{ bi('实测:这家的 BOM ', 'Measured: this customer’s BOM hangs ') }}
+          {{ sourcePreflight.checks.topology.bridgeSource === 'declared'
+            ? bi('按你指定:这家的 BOM ', 'As you declared: this customer’s BOM hangs ')
+            : bi('实测:这家的 BOM ', 'Measured: this customer’s BOM hangs ') }}
           <strong>{{ sourceBridgeText(sourcePreflight.checks.topology.detectedBridge) }}</strong>
           {{ bi(';当前配置按 ', '; the current configuration assumes it hangs ') }}
           <strong>{{ sourceBridgeText(sourcePreflight.checks.topology.configuredBridge) }}</strong>
@@ -432,7 +436,43 @@
             <code class="stock-prep-install__token">{{ sourcePreflight.checks.quantityField.resolvedSlot }}</code>
             {{ bi('。', '.') }}
           </template>
+          <template v-else-if="sourcePreflight.checks.quantityField.measuredAmbiguous">
+            {{ bi('数量有多列都像,没敢挑:', 'Several columns look like the quantity, so none was picked: ') }}
+            <code
+              v-for="slot in sourcePreflight.checks.quantityField.qualifyingSlots"
+              :key="slot"
+              class="stock-prep-install__token"
+              data-testid="stock-prep-source-preflight-quantity-candidate"
+            >{{ slot }}</code>
+          </template>
         </p>
+
+        <!-- THE WAY OUT of a cap standoff. Rendered ONLY for that state: this is not a general
+             override, and offering it next to a decisive measurement would invite someone to wave
+             that measurement away. -->
+        <div
+          v-if="sourceUndecidableAtCap"
+          class="stock-prep-install__hint"
+          data-testid="stock-prep-source-preflight-declare"
+        >
+          <p>
+            {{ bi(
+              '两条路都超过了抽样上限,抽样分不出主次。如果对方已经确认过以哪条为准,在这里指定,本页会照那条继续检查:',
+              'Both routes exceed the sample limit, so the sample cannot rank them. If they have already confirmed which one is authoritative, declare it here and the check continues against that one:',
+            ) }}
+          </p>
+          <button
+            v-for="option in declarableBridges"
+            :key="option"
+            type="button"
+            data-testid="stock-prep-source-preflight-declare-option"
+            :data-bridge="option"
+            :disabled="busy"
+            @click="loadSourcePreflight(option)"
+          >
+            {{ bi('按「', 'Declare “') }}{{ sourceBridgeText(option) }}{{ bi('」继续', '”') }}
+          </button>
+        </div>
 
         <ul class="stock-prep-install__list stock-prep-install__list--plain">
           <li
@@ -490,6 +530,18 @@
                   <code>{{ candidate.bridge }}</code> ·
                   <code>{{ candidate.lineObject || '—' }}</code> =
                   <code>{{ candidate.lineRows }}{{ candidate.lineExact ? '' : '+' }}</code>
+                  <!-- When a role addressed more than one object, say which ones answered: the
+                       verdict rests on the largest, and that choice must be visible. -->
+                  <template v-if="candidate.contributingObjects && candidate.contributingObjects.length > 1">
+                    <br>
+                    <small data-testid="stock-prep-source-preflight-contributors">
+                      {{ bi('同名候选都在,取行数最多的那张:', 'Several objects answered here; the largest is used: ') }}
+                      <code
+                        v-for="contributor in candidate.contributingObjects"
+                        :key="contributor.object || ''"
+                      >{{ contributor.object }}={{ contributor.rowsObserved }}{{ contributor.exact ? '' : '+' }} </code>
+                    </small>
+                  </template>
                 </li>
               </ul>
             </dd>
@@ -697,10 +749,12 @@ import { canRunStockPrepInstall } from '../../../services/integration/stockPrepa
 // act), and putting a non-namespace code into that manifest would misrepresent the ladder it pins.
 import {
   STOCK_PREPARATION_SOURCE_PREFLIGHT_ROUTE,
+  STOCK_PREP_DECLARABLE_BRIDGES,
   StockPrepSourcePreflightError,
   canRunStockPrepSourcePreflight,
   readStockPreparationSourcePreflight,
   stockPrepSourceCheckRows,
+  type StockPrepDeclarableBridge,
   type StockPrepSourcePreflight,
 } from '../../../services/integration/stockPreparation/sourcePreflight'
 import {
@@ -774,6 +828,14 @@ const sourceWarningPlain = stockPrepSourceWarningPlain
 const sourceCheckPlain = stockPrepSourceCheckPlain
 
 const sourceCheckRows = computed(() => (sourcePreflight.value ? stockPrepSourceCheckRows(sourcePreflight.value) : []))
+const declarableBridges = STOCK_PREP_DECLARABLE_BRIDGES
+// The declare control appears for the cap standoff ONLY — never beside a decisive measurement, which
+// no declaration may overrule anyway (the server refuses that outright).
+const sourceUndecidableAtCap = computed(() => Boolean(
+  sourcePreflight.value
+  && sourcePreflight.value.checks.topology.undecidableAtCap
+  && sourcePreflight.value.checks.topology.bridgeSource === 'measured',
+))
 
 const sourceVerdictText = computed(() => {
   if (!sourcePreflight.value) return ''
@@ -788,11 +850,14 @@ function sourceBridgeText(bridge: string): string {
   return plain ? bi(plain.zh, plain.en) : bridge
 }
 
-async function loadSourcePreflight(): Promise<void> {
+async function loadSourcePreflight(declaredBridge?: StockPrepDeclarableBridge): Promise<void> {
   busy.value = true
   sourcePreflightErrorStatus.value = null
   try {
-    sourcePreflight.value = await readStockPreparationSourcePreflight(props.scope)
+    // The declaration rides as an argument, never as component state: each run says explicitly
+    // whether a bridge was declared for THAT run, so a stale declaration cannot silently colour a
+    // later check of a different source.
+    sourcePreflight.value = await readStockPreparationSourcePreflight(props.scope, undefined, declaredBridge)
   } catch (error) {
     // Only a status reaches state. A server message could carry a value, and this page's whole
     // contract with the customer's data is that none of it lands here.

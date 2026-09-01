@@ -297,6 +297,7 @@ async function preflight(catalog, options = {}) {
     readObject: reader.readObject,
     readPlan: options.readPlan,
     externalSystemId: options.externalSystemId || SYSTEM_ID,
+    declaredBridge: options.declaredBridge,
   })
   return { report, calls: reader.calls }
 }
@@ -413,11 +414,143 @@ async function countsAreHonestAboutTheCap() {
 
 async function twoPopulatedTopologiesRefuseToGuess() {
   const catalog = orderModuleSource()
-  catalog[DESIGN_BOM_OBJECT] = designBomRows(14) // comparable to the 12 order lines
+  catalog[DESIGN_BOM_OBJECT] = designBomRows(14) // comparable to the 12 order lines, BOTH exact
   const { report } = await preflight(catalog)
-  assert.equal(checkOf(report, 'topology').detectedBridge, 'ambiguous')
+  const topology = checkOf(report, 'topology')
+  assert.equal(topology.detectedBridge, 'ambiguous')
+  assert.equal(topology.reason, 'both-candidates-carry-comparable-line-volume')
+  // A GENUINE tie: both counts are exact, so the comparison really was made and really came out close.
+  assert.equal(topology.undecidableAtCap, false)
   blockerNamed(report, B.BRIDGE_AMBIGUOUS)
+  assert.equal(report.blockers.some((entry) => entry.code === B.BRIDGE_UNDECIDABLE_AT_CAP), false)
   assert.equal(report.verdict, 'no-go')
+}
+
+// ---------------------------------------------------------------------------
+// S-14 — cap saturation is its own answer, and it has a way out
+// ---------------------------------------------------------------------------
+
+/** Both carriers full past the sample cap — the shape every real, busy deployment has. */
+function bothBridgesSaturatedSource() {
+  const catalog = orderModuleSource()
+  catalog.DN_PDM_OrderDetailInfo = Array.from({ length: SOURCE_PREFLIGHT_ROW_CAP + 900 }, (_, index) => ({
+    ID: index + 1,
+    order_id: `ORDER-${(index % 2) + 1}`,
+    part_id: `PART-${(index % 4) + 1}`,
+    sort_id: index,
+    quantity: String(index + 1),
+  }))
+  catalog[DESIGN_BOM_OBJECT] = designBomRows(SOURCE_PREFLIGHT_ROW_CAP + 2400)
+  return catalog
+}
+
+async function capSaturationIsDistinguishableFromATie() {
+  const { report } = await preflight(bothBridgesSaturatedSource())
+  const topology = checkOf(report, 'topology')
+
+  // The verdict is still a refusal — we do not guess — but it is a DIFFERENT refusal, and it says why.
+  assert.equal(topology.detectedBridge, 'ambiguous')
+  assert.equal(topology.undecidableAtCap, true)
+  assert.equal(topology.reason, 'both-candidates-saturate-the-sample-cap')
+  assert.notEqual(topology.reason, 'both-candidates-carry-comparable-line-volume',
+    'a standoff at the cap must never be reported as a measured tie')
+
+  const blocker = blockerNamed(report, B.BRIDGE_UNDECIDABLE_AT_CAP)
+  assert.equal(report.blockers.some((entry) => entry.code === B.BRIDGE_AMBIGUOUS), false,
+    'the two ambiguity codes are mutually exclusive: an operator must be able to tell them apart')
+
+  // ACTIONABLE: the refusal carries the cap that produced it and the way out.
+  assert.equal(blocker.detail.rowCap, SOURCE_PREFLIGHT_ROW_CAP)
+  assert.deepEqual(blocker.detail.declarableBridges, ['order-module', 'design-bom'])
+  assert.equal(blocker.detail.orderLineObject, PLM_STOCK_PREPARATION_BOM_READ_PLAN.orderDetail.object)
+  assert.equal(blocker.detail.designBomLineObject, DESIGN_BOM_OBJECT)
+  assert.equal(report.verdict, 'no-go')
+}
+
+async function aDeclarationResolvesWhatTheSampleCannotRank() {
+  const { report } = await preflight(bothBridgesSaturatedSource(), { declaredBridge: 'design-bom' })
+  const topology = checkOf(report, 'topology')
+
+  assert.equal(topology.detectedBridge, 'design-bom')
+  // PROVENANCE: the report never lets a human's answer be read back as a measurement.
+  assert.equal(topology.bridgeSource, 'declared')
+  assert.equal(topology.declaredBridge, 'design-bom')
+  assert.equal(topology.measuredBridge, 'ambiguous')
+  assert.ok(report.warnings.some((entry) => entry.code === W.BRIDGE_DECLARED_NOT_MEASURED))
+  assert.equal(report.blockers.some((entry) => entry.code === B.BRIDGE_UNDECIDABLE_AT_CAP), false)
+
+  // And the alignment check then runs against the declared bridge — the whole point of resolving it.
+  assert.equal(topology.matchesConfigured, false)
+  blockerNamed(report, B.TOPOLOGY_MISMATCH)
+
+  // Declaring the CONFIGURED bridge clears every bridge blocker: a runnable deployment.
+  const { report: aligned } = await preflight(bothBridgesSaturatedSource(), { declaredBridge: 'order-module' })
+  assert.equal(aligned.checks.topology.detectedBridge, 'order-module')
+  assert.equal(aligned.checks.topology.matchesConfigured, true)
+  assert.deepEqual(codesOf(aligned.blockers), [])
+  assert.equal(aligned.verdict, 'go')
+  assert.ok(aligned.warnings.some((entry) => entry.code === W.BRIDGE_DECLARED_NOT_MEASURED),
+    'even a go verdict says the bridge was declared, not measured')
+}
+
+async function aDeclarationCannotOverruleAMeasurement() {
+  // The live customer's shape measures DECISIVELY as design-bom. An operator declaring order-module
+  // must be refused, not obeyed — otherwise the one measurement this module exists to make becomes a
+  // formality anyone can wave away.
+  const { report } = await preflight(customerShapedSource(), { declaredBridge: 'order-module' })
+  const blocker = blockerNamed(report, B.DECLARED_BRIDGE_CONTRADICTS_MEASUREMENT)
+  assert.equal(blocker.detail.declaredBridge, 'order-module')
+  assert.equal(blocker.detail.measuredBridge, 'design-bom')
+  assert.equal(checkOf(report, 'topology').detectedBridge, 'design-bom',
+    'the MEASUREMENT stands; the declaration is reported as contradicted, never applied')
+  assert.equal(checkOf(report, 'topology').bridgeSource, 'measured')
+  assert.equal(report.verdict, 'no-go')
+
+  // Nor can a declaration conjure a bridge into an empty catalog — that is how a zero-row run gets
+  // blessed, which is the failure this whole module was written for.
+  const { report: empty } = await preflight(emptySource(), { declaredBridge: 'design-bom' })
+  assert.equal(empty.checks.topology.detectedBridge, 'none')
+  blockerNamed(empty, B.NO_BOM_BRIDGE)
+  assert.equal(empty.verdict, 'no-go')
+
+  // Nor break a genuine, exactly-counted tie: that tie is a real measurement.
+  const tie = orderModuleSource()
+  tie[DESIGN_BOM_OBJECT] = designBomRows(14)
+  const { report: tied } = await preflight(tie, { declaredBridge: 'design-bom' })
+  assert.equal(tied.checks.topology.detectedBridge, 'ambiguous')
+  assert.equal(tied.checks.topology.bridgeSource, 'measured')
+}
+
+// ---------------------------------------------------------------------------
+// S-15 — a role addressing several objects collapses to the STRONGEST, not the first
+// ---------------------------------------------------------------------------
+
+async function roleCollapseTakesTheStrongestCarrier() {
+  // Both design-BOM spellings exist: a five-row legacy leftover FIRST in roster order, and the real
+  // one second. First-wins would read design-bom volume as five and tilt the verdict.
+  const catalog = customerShapedSource({ designBomLines: 250 })
+  catalog[DESIGN_BOM_BRIDGE_OBJECTS[0]] = designBomRows(5)
+  catalog[DESIGN_BOM_BRIDGE_OBJECTS[1]] = designBomRows(250)
+
+  const { report } = await preflight(catalog)
+  const candidate = checkOf(report, 'topology').candidates.find((entry) => entry.bridge === 'design-bom')
+
+  assert.equal(candidate.lineObject, DESIGN_BOM_BRIDGE_OBJECTS[1], 'the STRONGEST carrier wins, not the first')
+  assert.ok(candidate.lineRows >= SOURCE_PREFLIGHT_ROW_CAP)
+  // Both are still reported, so the collapse is auditable rather than invisible.
+  assert.deepEqual(
+    candidate.contributingObjects.map((entry) => entry.object).sort(),
+    [...DESIGN_BOM_BRIDGE_OBJECTS].sort(),
+  )
+  assert.equal(candidate.contributingObjects.find((e) => e.object === DESIGN_BOM_BRIDGE_OBJECTS[0]).rowsObserved, 5)
+
+  // And the verdict follows the real carrier.
+  assert.equal(checkOf(report, 'topology').detectedBridge, 'design-bom')
+  blockerNamed(report, B.TOPOLOGY_MISMATCH)
+
+  // The SAMPLED ROWS follow the winner too — the slot measurement must describe the table the verdict
+  // rests on, not a different one that happened to answer first.
+  assert.equal(checkOf(report, 'quantityField').carrierObject, DESIGN_BOM_BRIDGE_OBJECTS[1])
 }
 
 // ---------------------------------------------------------------------------
@@ -462,6 +595,55 @@ async function aPlanOnTheWrongSlotWarns() {
   const warning = report.warnings.find((entry) => entry.code === W.QUANTITY_FIELD_MISMATCH)
   assert.ok(warning, `expected ${W.QUANTITY_FIELD_MISMATCH}, got ${JSON.stringify(codesOf(report.warnings))}`)
   assert.equal(warning.detail.detectedField, 'Bom_ExAttr1')
+}
+
+// ---------------------------------------------------------------------------
+// S-16 — the quantity reading refuses to pick a winner out of a field
+// ---------------------------------------------------------------------------
+
+/** A BOM line whose slots carry quantity AND weight — both numeric, both plausible. */
+function twoNumericSlotsSource() {
+  const catalog = customerShapedSource()
+  catalog[DESIGN_BOM_OBJECT] = catalog[DESIGN_BOM_OBJECT].map((row, index) => ({
+    ...row,
+    bom_exattr4: String((index % 13) + 0.5), // a weight column: just as numeric as the quantity
+  }))
+  return catalog
+}
+
+async function twoPlausibleQuantitySlotsAreNotGuessedBetween() {
+  // With the dictionary UNREADABLE there is nothing to break the tie, so the reading must refuse.
+  const { report } = await preflight(twoNumericSlotsSource(), { missingObjects: ['DN_PM_BomExAttrInfo'] })
+  const quantity = checkOf(report, 'quantityField')
+
+  assert.deepEqual(quantity.qualifyingSlots.slice().sort(), ['bom_exattr1', 'bom_exattr4'])
+  assert.equal(quantity.measuredAmbiguous, true)
+  assert.equal(quantity.measuredSlot, null, 'the sort order is not evidence; nothing is picked')
+  assert.equal(quantity.resolvedSlot, null)
+
+  const warning = report.warnings.find((entry) => entry.code === W.QUANTITY_FIELD_AMBIGUOUS)
+  assert.ok(warning, `expected ${W.QUANTITY_FIELD_AMBIGUOUS}, got ${JSON.stringify(codesOf(report.warnings))}`)
+  assert.deepEqual(warning.detail.candidates.slice().sort(), ['bom_exattr1', 'bom_exattr4'])
+  assert.equal(warning.detail.configuredAmongCandidates, true)
+
+  // THE POINT: no confident mismatch is claimed. Before this rule, the sort winner could have named a
+  // wrong column and sent an implementer to change a correct configuration.
+  assert.equal(report.warnings.some((entry) => entry.code === W.QUANTITY_FIELD_MISMATCH), false)
+  assert.equal(report.warnings.some((entry) => entry.code === W.QUANTITY_FIELD_UNRESOLVED), false)
+}
+
+async function theCustomersOwnDictionaryBreaksTheTie() {
+  // Same two-numeric-slot catalog, dictionary READABLE. A dictionary is the customer's declaration
+  // about their own schema — evidence, unlike a sort order — so it resolves the field.
+  const { report } = await preflight(twoNumericSlotsSource())
+  const quantity = checkOf(report, 'quantityField')
+
+  assert.deepEqual(quantity.qualifyingSlots.slice().sort(), ['bom_exattr1', 'bom_exattr4'])
+  assert.equal(quantity.measuredAmbiguous, false, 'the dictionary named one of the candidates')
+  assert.equal(quantity.dictionarySlot, 'Bom_ExAttr1')
+  assert.equal(quantity.measuredSlot, 'bom_exattr1')
+  assert.equal(quantity.resolvedSlot, 'Bom_ExAttr1')
+  assert.equal(report.warnings.some((entry) => entry.code === W.QUANTITY_FIELD_AMBIGUOUS), false)
 }
 
 async function anUnreadableDictionaryFallsBackToTheData() {
@@ -917,6 +1099,41 @@ async function theRequestSurfaceIsClosed() {
     assert.equal(res.statusCode, 400, `query key ${Object.keys(query)[0]} must be refused`)
     assert.equal(res.body.error.code, 'STOCK_PREPARATION_SOURCE_PREFLIGHT_REQUEST_INVALID')
   }
+
+  // `declaredBridge` IS accepted — and only as one of two words. It is a declaration, not a text
+  // channel, and a mistyped one is refused AT THE EDGE rather than quietly ignored (which would hand
+  // back a measured report to someone who believes they declared something).
+  for (const value of ['designbom', 'DESIGN-BOM', 'ambiguous', 'none', 'unknown', '', 'order module']) {
+    const res = await callRoute(routes, { user: INTEGRATION_READER, query: { declaredBridge: value } })
+    assert.equal(res.statusCode, 400, `declaredBridge=${JSON.stringify(value)} must be refused`)
+    assert.equal(res.body.error.code, 'STOCK_PREPARATION_SOURCE_PREFLIGHT_REQUEST_INVALID')
+  }
+  for (const value of ['order-module', 'design-bom']) {
+    const res = await callRoute(routes, { user: INTEGRATION_READER, query: { declaredBridge: value } })
+    assert.equal(res.statusCode, 200, `declaredBridge=${value} is one of the two candidates`)
+    assert.equal(res.body.data.checks.topology.declaredBridge, value)
+  }
+}
+
+async function aDeclarationTravelsThroughTheRoute() {
+  const { routes } = mountRoute({ catalog: bothBridgesSaturatedSource() })
+
+  // Without it: the distinguishable, actionable standoff.
+  const undeclared = await callRoute(routes, { user: INTEGRATION_READER })
+  assert.equal(undeclared.statusCode, 200)
+  assert.equal(undeclared.body.data.checks.topology.undecidableAtCap, true)
+  assert.ok(undeclared.body.data.blockers.some((entry) => entry.code === B.BRIDGE_UNDECIDABLE_AT_CAP))
+
+  // With it: resolved, and labelled as declared all the way out to the wire.
+  const declared = await callRoute(routes, {
+    user: INTEGRATION_READER,
+    query: { declaredBridge: 'order-module' },
+  })
+  assert.equal(declared.statusCode, 200)
+  assert.equal(declared.body.data.checks.topology.detectedBridge, 'order-module')
+  assert.equal(declared.body.data.checks.topology.bridgeSource, 'declared')
+  assert.equal(declared.body.data.verdict, 'go')
+  assert.ok(declared.body.data.warnings.some((entry) => entry.code === W.BRIDGE_DECLARED_NOT_MEASURED))
 }
 
 async function theHttpBoundaryIsValuesFreeToo() {
@@ -946,10 +1163,19 @@ async function main() {
   console.log('  ✓ S-06 a capped page reports a floor; a short page reports a total')
   await twoPopulatedTopologiesRefuseToGuess()
   console.log('  ✓ S-07 two populated topologies ask a human instead of guessing')
+  await capSaturationIsDistinguishableFromATie()
+  await aDeclarationResolvesWhatTheSampleCannotRank()
+  await aDeclarationCannotOverruleAMeasurement()
+  console.log('  ✓ S-14 a standoff at the sample cap is its own answer, with a way out that cannot overrule data')
+  await roleCollapseTakesTheStrongestCarrier()
+  console.log('  ✓ S-15 a role addressing two objects collapses to the strongest, and says which answered')
   await quantitySlotIsMeasuredTwoWays()
   await aPlanOnTheWrongSlotWarns()
   await anUnreadableDictionaryFallsBackToTheData()
   console.log('  ✓ S-08 the quantity slot is read from the customer`s dictionary AND from the data')
+  await twoPlausibleQuantitySlotsAreNotGuessedBetween()
+  await theCustomersOwnDictionaryBreaksTheTie()
+  console.log('  ✓ S-16 two plausible quantity slots are reported as a field, never guessed between')
   await presetIdentityIsBySignatureNotByName()
   await anUnknownCatalogMatchesNothing()
   console.log('  ✓ S-09 vendor identity is by table signature, never by who the customer is')
@@ -976,6 +1202,8 @@ async function main() {
   console.log('  ✓ R-03 nothing to check, and nothing readable, are both clear refusals')
   await theRequestSurfaceIsClosed()
   console.log('  ✓ R-04 the request cannot name an object, a page size or a read plan')
+  await aDeclarationTravelsThroughTheRoute()
+  console.log('  ✓ R-06 a declared bridge crosses the route and stays labelled as declared')
   await theHttpBoundaryIsValuesFreeToo()
   console.log('  ✓ R-05 the HTTP boundary is values-free too')
 
