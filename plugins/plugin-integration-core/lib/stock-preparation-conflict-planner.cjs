@@ -1086,6 +1086,64 @@ function makeSkipDecision(row) {
   }
 }
 
+// ── W4 carry wiring (execution-plan W4a; adjudication Layer 3) ───────────────
+//
+// The carry-policy module is required LAZILY, inside the plan pass, because it
+// imports THIS module for the frozen DECISIONS vocabulary — a top-level require
+// here would be a load-order cycle. By first call both modules are fully loaded.
+let lazyCarryPolicyModule = null
+function carryPolicyModule() {
+  if (!lazyCarryPolicyModule) lazyCarryPolicyModule = require('./stock-preparation-carry-policy.cjs')
+  return lazyCarryPolicyModule
+}
+
+// Map ONE planCarry outcome for an ADD row into plan artifacts. The write
+// semantics are deliberately layered, never rewritten (adjudication §3.1: 接线
+// + 存在性判定, not new decision logic):
+//   * NO_CARRY            → nothing rides the plan; counted in the summary.
+//   * CARRY_VIA_CONFIRM   → the ADD stays (human-free — the wall still asserts)
+//       and a manual_confirm HOLD rides beside it under the closed
+//       carry_reattach_requires_confirm type, CARRYING the proposal object.
+//       manual_confirm is DELIBERATELY the planner literal so the apply-writer
+//       routes the hold to `held` unchanged, while the proposal itself (decision
+//       'carry_via_confirm') can NEVER enter the apply path — the writer's
+//       unsupported_decision throw stands between it and any write. The carried
+//       write happens ONLY via the K2 applyCarryViaConfirm executor.
+//   * MANUAL_CONFIRM      → the carry module's own hold object rides verbatim
+//       (carry_ambiguous_component_source / carry_reattach_requires_confirm /
+//       carry_conflicting_source_content), again beside the human-free ADD:
+//       holding row CREATION would wedge the later K2 carry (its target row
+//       must exist), and the thing the hold protects — the human context —
+//       cannot leak through an ADD the wall already strips.
+function emitCarryOutcome({ decisions, counts, carryDecision, carryStats }) {
+  const carry = carryPolicyModule()
+  if (carryDecision.decision === carry.CARRY_DECISIONS.NO_CARRY) {
+    carryStats.counts.noCarry += 1
+    carryStats.noCarryByReason[carryDecision.reason] = (carryStats.noCarryByReason[carryDecision.reason] || 0) + 1
+    return
+  }
+  if (carryDecision.decision === carry.CARRY_DECISIONS.CARRY_VIA_CONFIRM) {
+    carryStats.counts.carryViaConfirm += 1
+    carryStats.holdsByConflictType.carry_reattach_requires_confirm =
+      (carryStats.holdsByConflictType.carry_reattach_requires_confirm || 0) + 1
+    addDecision(decisions, counts, {
+      decision: DECISIONS.MANUAL_CONFIRM,
+      idempotencyKey: carryDecision.idempotencyKey,
+      conflictSummary: makeConflictSummary('carry_reattach_requires_confirm', { proposed: true }),
+      changedFields: [],
+      source: 'carry_policy',
+      carryProposal: carryDecision,
+    })
+    return
+  }
+  // planCarry's closed vocabulary leaves exactly MANUAL_CONFIRM; its builder
+  // already validated the conflictType against the frozen carry set.
+  carryStats.counts.manualConfirm += 1
+  const holdType = carryDecision.conflictSummary && carryDecision.conflictSummary.type
+  if (holdType) carryStats.holdsByConflictType[holdType] = (carryStats.holdsByConflictType[holdType] || 0) + 1
+  addDecision(decisions, counts, carryDecision)
+}
+
 function makeInactiveDecision(existing, runId, plannedAt, humanFields) {
   const patch = {
     active: false,
@@ -1108,6 +1166,12 @@ function planStockPreparationConflicts(input = {}) {
   const expandedRows = normalizeRows(input.expandedRows, 'expandedRows')
   const existingRows = normalizeRows(input.existingRows, 'existingRows')
   const rowErrors = normalizeRows(input.rowErrors, 'rowErrors')
+  // W4 carry opt-in. Absent/null => null => the plan below is BYTE-IDENTICAL to
+  // the pre-wiring planner (invariant (i)); present => validated through the
+  // carry module's own closed vocabulary (fail-closed on any unknown key/value).
+  const carryPolicy = input.carryPolicy === undefined || input.carryPolicy === null
+    ? null
+    : carryPolicyModule().normalizeCarryPolicy(input.carryPolicy)
 
   const templateHumanFields = fieldIdsByOwnership(template, 'human_preserved')
   if (!sameStringSet(HUMAN_PRESERVED_FIELD_IDS.slice(), templateHumanFields)) {
@@ -1199,6 +1263,29 @@ function planStockPreparationConflicts(input = {}) {
     }
   }
 
+  // W4 carry: the pool of carry SOURCES is exactly the prior-batch rows this
+  // plan's missing-from-PLM sweep treats as inactive — the already-inactive ones
+  // (SKIP already_inactive below) as they stand, and the ones the sweep is ABOUT
+  // to mark, annotated active:false so planCarry's precondition reads the state
+  // the plan itself establishes. The membership condition mirrors the sweep's
+  // own, byte for byte. Built only under opt-in — a no-config plan never touches
+  // this path.
+  let carrySources = null
+  let carryStats = null
+  if (carryPolicy) {
+    carrySources = []
+    carryStats = {
+      counts: { noCarry: 0, carryViaConfirm: 0, manualConfirm: 0 },
+      noCarryByReason: {},
+      holdsByConflictType: {},
+    }
+    for (const [key, rows] of existing.keyed.entries()) {
+      if (expanded.keyed.has(key) || resolvedExpanded.keyed.has(key) || duplicateExistingKeys.has(key)) continue
+      const existingRow = rows[0]
+      carrySources.push(existingRow.active === false ? existingRow : { ...existingRow, active: false })
+    }
+  }
+
   for (const [key, rows] of resolvedExpanded.keyed.entries()) {
     if (duplicateExpandedKeys.has(key) || duplicateExistingKeys.has(key)) continue
     const row = rows[0]
@@ -1207,6 +1294,18 @@ function planStockPreparationConflicts(input = {}) {
     if (!existingRow) {
       if (strategy.addMissing) {
         addDecision(decisions, counts, makeAddDecision(row, runId, plannedAt, plmFields, humanFields))
+        if (carryPolicy) {
+          // planCarry BEFORE anything can write (adjudication §3.1): one closed
+          // decision per candidate ADD, mapped to plan artifacts — never a
+          // silent field write. Its errors (e.g. a sourceless row under a
+          // cross-key policy) propagate fail-closed rather than degrade.
+          emitCarryOutcome({
+            decisions,
+            counts,
+            carryDecision: carryPolicyModule().planCarry(carrySources, row, carryPolicy, { template }),
+            carryStats,
+          })
+        }
       } else {
         manualConfirm(decisions, counts, {
           idempotencyKey: key,
@@ -1267,6 +1366,18 @@ function planStockPreparationConflicts(input = {}) {
   // legacy (pack-unaware) call still produces a byte-identical plan object.
   const packAwareOwnership = ownership.packAware ? packAwareOwnershipEvidence(ownership) : undefined
 
+  // W4 carry summary stanza — values-free (policy tokens, counts, closed reason
+  // and conflict-type vocabularies), and ADDED ONLY under opt-in so a no-config
+  // plan stays byte-identical (invariant (i)).
+  const carrySummary = carryPolicy
+    ? {
+        carryPolicy: { ...carryPolicy },
+        counts: { ...carryStats.counts },
+        noCarryByReason: { ...carryStats.noCarryByReason },
+        holdsByConflictType: { ...carryStats.holdsByConflictType },
+      }
+    : undefined
+
   return {
     valid: counts[DECISIONS.MANUAL_CONFIRM] === 0,
     runId,
@@ -1286,6 +1397,7 @@ function planStockPreparationConflicts(input = {}) {
       duplicateExpandedKeyDiagnostics: duplicateExpandedKeyDiagnostics(expanded.keyed),
       duplicateExpandedKeyResolution: resolvedExpanded.resolution,
       ...(packAwareOwnership ? { packAwareOwnership } : {}),
+      ...(carrySummary ? { carry: carrySummary } : {}),
     },
   }
 }
@@ -1312,6 +1424,9 @@ function summarizeConflictPlanForEvidence(plan = {}) {
     packAwareOwnership: isPlainObject(summary.packAwareOwnership)
       ? JSON.parse(JSON.stringify(summary.packAwareOwnership))
       : undefined,
+    // W4 carry: values-free stanza, passed through ONLY when present so
+    // no-config evidence stays byte-identical.
+    ...(isPlainObject(summary.carry) ? { carry: JSON.parse(JSON.stringify(summary.carry)) } : {}),
   }
 }
 
