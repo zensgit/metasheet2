@@ -9,7 +9,7 @@ import { MySQLAdapter } from './MySQLAdapter'
 import { PLMAdapter } from './PLMAdapter'
 import { encryptStoredSecretValue, decryptStoredSecretValue, isEncryptedSecretValue } from '../security/encrypted-secrets'
 import { assertNotK3Destination, preserveK3Marker } from './k3-destination-write-fence'
-import { assertSqlStatementWriteAuthorized } from './outbound-sql-write-gate'
+import { assertSqlWriteAllowed, pinSqlSourceConnection } from './sql-write-arm-binding'
 import type { IConfigService, ILogger } from '../di/identifiers'
 
 // PostgreSQL SQLSTATE for undefined_table. The referential delete guard trusts
@@ -551,6 +551,13 @@ export class DataSourceManager extends EventEmitter {
 
     this.adapters.set(config.id, adapter)
 
+    // SQL WRITE ARM-BINDING (P1): pin this source's connection fingerprint the FIRST time it is
+    // observed (add / load). FIRST-SEEN-WINS, so a later redirect (updateDataSource re-enters here
+    // with a new connection) does NOT move the pin — the write authorization then fails the binding.
+    // A revival after removeDataSource likewise re-enters here but the pin persists, so an id-reuse to
+    // a different connection cannot inherit an armed source's authorization.
+    pinSqlSourceConnection(config.id, config.connection as Record<string, unknown> | undefined)
+
     // Auto-connect if specified
     if (autoConnect && config.options?.autoConnect !== false) {
       await this.connectDataSource(config.id)
@@ -828,11 +835,12 @@ export class DataSourceManager extends EventEmitter {
     // W-1(c) DEFAULT-DENY SQL WRITE GATE, fail-early before connect. A pure read passes free; anything
     // else requires this data source to be an ARMED target. The adapter's own query() re-checks at the
     // true chokepoint, so a caller who skips this wrapper is still refused; this layer only saves a
-    // connect. The gate never inspects what the statement writes TO.
-    assertSqlStatementWriteAuthorized(
+    // connect. The gate never inspects what the statement writes TO. The arm-binding additionally
+    // revokes an armed source whose connection has been redirected since it was pinned.
+    assertSqlWriteAllowed(
       (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
       sql,
-      { id: adapter.getConfig().id, name: adapter.getConfig().name, type: adapter.getType() },
+      { id: adapter.getConfig().id, name: adapter.getConfig().name, type: adapter.getType(), connection: adapter.getConfig().connection },
     )
 
     if (!adapter.isConnected()) {
@@ -1005,11 +1013,11 @@ export class DataSourceManager extends EventEmitter {
         throw new Error(c6WriteTargetQueryDisabledMessage(dataSourceId))
       }
       // W-1(c) DEFAULT-DENY SQL WRITE GATE. A federated leg runs raw SQL: a pure read passes, a write
-      // needs an armed target.
-      assertSqlStatementWriteAuthorized(
+      // needs an armed target (and its connection must still match the pinned one).
+      assertSqlWriteAllowed(
         (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
         sql,
-        { id: adapter.getConfig().id, name: adapter.getConfig().name, type: adapter.getType() },
+        { id: adapter.getConfig().id, name: adapter.getConfig().name, type: adapter.getType(), connection: adapter.getConfig().connection },
       )
 
       if (!adapter.isConnected()) {
