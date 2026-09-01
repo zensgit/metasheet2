@@ -157,6 +157,13 @@ const BRIDGE_DOMINANCE_RATIO = 4
 // incident's order module had exactly one head row and no usable lines; a floor of 1 would have called
 // that a bridge.
 const BRIDGE_MIN_LINES = 2
+// IDENTITY PROBES. The read plan names seven objects; a vendor preset's signature names more (the
+// slot-dictionary tables among them). Asking only about the plan's seven would report every
+// dictionary table as "missing from the signature" when nobody ever asked about it — a report that
+// reads like drift and is really an artifact of the question. So the roster is topped up with any
+// signature table the catalog names that the plan does not, bounded by this cap so a large catalog
+// cannot turn one preflight into a hundred reads.
+const IDENTITY_PROBE_MAX = 16
 // A slot column counts as the quantity carrier only if this share of its non-empty sampled values
 // parse as finite non-negative numbers.
 const QUANTITY_NUMERIC_DENSITY_FLOOR = 0.8
@@ -278,7 +285,7 @@ const PRESET_SELECTION_REASONS = Object.freeze([
 // The roles the roster assigns, plus the one role added after a preset matches.
 const PROBE_ROLES = Object.freeze([
   'pathExAttr', 'pathInfo', 'orderHead', 'orderDetail', 'bomHead', 'bomDetail', 'part',
-  'designBom', 'quantityDictionary',
+  'designBom', 'signature', 'quantityDictionary',
 ])
 
 // 2. SERVER-AUTHORED — ids that come from server config, the request's own selector, or the shipped
@@ -435,15 +442,18 @@ async function probeObject(readObject, object) {
  * overrode the plan is probed against what it actually runs — plus the declared bridge candidates and,
  * once a preset has matched, that preset's dictionary tables. A caller cannot add to it.
  */
-function buildProbeRoster(plan) {
+function buildProbeRoster(plan, presets = []) {
   const roster = []
-  const seen = new Set()
+  const seenByRole = new Set()
+  const seenTables = new Set()
   const add = (role, object) => {
     const name = optionalString(object)
     if (!name) return
-    const key = `${role}::${normalizeTableName(name)}`
-    if (seen.has(key)) return
-    seen.add(key)
+    const normalized = normalizeTableName(name)
+    const key = `${role}::${normalized}`
+    if (seenByRole.has(key)) return
+    seenByRole.add(key)
+    seenTables.add(normalized)
     roster.push({ role, object: name })
   }
   add('pathExAttr', plan.pathExAttr.object)
@@ -454,6 +464,23 @@ function buildProbeRoster(plan) {
   add('bomDetail', plan.bomDetail.object)
   add('part', plan.part.object)
   for (const candidate of DESIGN_BOM_BRIDGE_OBJECTS) add('designBom', candidate)
+
+  // Identity top-up: the catalog's signature tables the plan does not already name. Ordered by the
+  // catalog's own declaration order (stable across runs) and capped, so this stays a handful of small
+  // reads rather than a function of how many presets ship.
+  let added = 0
+  for (const preset of presets) {
+    const signature = (preset && preset.matches && preset.matches.signatureTables) || []
+    for (const table of signature) {
+      if (added >= IDENTITY_PROBE_MAX) return roster
+      const normalized = normalizeTableName(table)
+      if (seenTables.has(normalized)) continue
+      seenTables.add(normalized)
+      seenByRole.add(`signature::${normalized}`)
+      roster.push({ role: 'signature', object: table })
+      added += 1
+    }
+  }
   return roster
 }
 
@@ -651,7 +678,7 @@ async function runStockPreparationSourcePreflight(input = {}) {
     ? input.presets
     : loadVendorPresetsFromDir(VENDOR_PRESETS_DIR).map((entry) => entry.preset)
 
-  const roster = buildProbeRoster(plan)
+  const roster = buildProbeRoster(plan, presets)
   const observations = []
   const rowsByRole = new Map()
   const observationByRole = new Map()
@@ -1114,6 +1141,7 @@ function assertSourcePreflightValuesFree(report, { observedValues = new Set(), i
 module.exports = {
   SOURCE_PREFLIGHT_ROUTE_PATH,
   SOURCE_PREFLIGHT_ROW_CAP,
+  IDENTITY_PROBE_MAX,
   SOURCE_PREFLIGHT_BRIDGES,
   SOURCE_PREFLIGHT_BLOCKER_CODES,
   SOURCE_PREFLIGHT_BLOCKER_CODE_ORDER,

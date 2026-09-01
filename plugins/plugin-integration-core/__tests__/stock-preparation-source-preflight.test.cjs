@@ -55,6 +55,7 @@ const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
 const {
   SOURCE_PREFLIGHT_ROUTE_PATH,
   SOURCE_PREFLIGHT_ROW_CAP,
+  IDENTITY_PROBE_MAX,
   SOURCE_PREFLIGHT_BLOCKER_CODES,
   SOURCE_PREFLIGHT_BLOCKER_CODE_ORDER,
   SOURCE_PREFLIGHT_WARNING_CODES,
@@ -80,6 +81,14 @@ const {
 
 const B = SOURCE_PREFLIGHT_BLOCKER_CODES
 const W = SOURCE_PREFLIGHT_WARNING_CODES
+
+// The shipped catalog, read the way the module reads it — so the roster assertion below is written
+// against what actually ships rather than against a copy that could drift from it.
+const SHIPPED_PRESETS = require(path.join(LIB, 'source-vendor-presets', 'preset-schema.cjs'))
+  .loadVendorPresetsFromDir(path.join(LIB, 'source-vendor-presets'))
+  .map((entry) => entry.preset)
+const SHIPPED_SIGNATURE_TABLES = SHIPPED_PRESETS
+  .flatMap((preset) => preset.matches.signatureTables)
 
 const TENANT_ID = 'tenant-a'
 const SYSTEM_ID = 'plm_sql_source'
@@ -478,6 +487,21 @@ async function presetIdentityIsBySignatureNotByName() {
   assert.deepEqual(a.checks.presetMatch, b.checks.presetMatch,
     'the system id is not an input to identity: same tables, same answer')
   assert.ok(a.checks.presetMatch.matchedSignatureTables >= a.checks.presetMatch.requiredSignatureTables)
+
+  // The signature is measured in FULL. A catalog carrying every signature table reports none missing —
+  // which is only true because the roster asks about the tables the plan does not name. Reporting a
+  // dictionary table as "missing" because nobody asked would read like drift and be an artifact.
+  assert.deepEqual(a.checks.presetMatch.missingSignatureTables, [])
+  assert.equal(a.checks.presetMatch.matchedSignatureTables, SHIPPED_SIGNATURE_TABLES.length)
+
+  // And a genuinely absent signature table is reported as absent — the same field, telling the truth
+  // in the other direction.
+  const { report: drifted } = await preflight(customerShapedSource(), {
+    missingObjects: ['DN_PM_OrderExAttrInfo'],
+  })
+  assert.deepEqual(drifted.checks.presetMatch.missingSignatureTables, ['DN_PM_OrderExAttrInfo'])
+  assert.equal(drifted.checks.presetMatch.presetId, 'dn-pdm-family',
+    'one absent dictionary table is drift, not a different vendor — the floor still clears')
 }
 
 async function anUnknownCatalogMatchesNothing() {
@@ -526,20 +550,25 @@ async function everyReadIsUnfilteredAndCapped() {
     assert.equal(Object.prototype.hasOwnProperty.call(call, 'cursor'), false, 'and never pages past the cap')
     assert.deepEqual(Object.keys(call).sort(), ['limit', 'object'])
   }
-  // The roster is finite and derived from the plan + the declared bridge candidates. No probe of an
-  // object nobody named.
+  // The roster is finite and DERIVED: the plan's own objects, the declared bridge candidates, and the
+  // shipped catalog's signature tables (so "missing from the signature" means measured-absent rather
+  // than never-asked). Nothing else may be read.
   const probed = new Set(calls.map((call) => call.object))
   const expected = new Set([
     ...Object.values(PLM_STOCK_PREPARATION_BOM_READ_PLAN)
       .filter((entry) => entry && typeof entry === 'object' && entry.object)
       .map((entry) => entry.object),
     ...DESIGN_BOM_BRIDGE_OBJECTS,
-    'DN_PM_BomExAttrInfo',
+    ...SHIPPED_SIGNATURE_TABLES,
   ])
   for (const object of probed) {
     assert.ok(expected.has(object), `probed an object outside the roster: ${object}`)
   }
   assert.equal(report.probes.length, calls.length)
+  // Bounded: the identity top-up cannot grow the roster without limit as the catalog grows.
+  const identityProbes = report.probes.filter((entry) => entry.role === 'signature')
+  assert.ok(identityProbes.length <= IDENTITY_PROBE_MAX)
+  assert.ok(identityProbes.length > 0, 'the catalog names signature tables the plan does not')
 }
 
 async function theProbeHoldsNothingButRead() {
