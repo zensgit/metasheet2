@@ -1585,6 +1585,11 @@ export default defineConfig({
       // management-scope rechecks. Excluded from no-DB collection and wired whole-file
       // post-migrate in plugin-tests.yml.
       'tests/integration/elearning-analytics-export.db.test.ts',
+      // E-learning L6 offline training authority requires real PostgreSQL for
+      // immutable revisions/rosters, QR effect identity, attendance ordering,
+      // migration drift, and concurrent replay. Excluded from no-DB collection
+      // and wired whole-file post-migrate in plugin-tests.yml.
+      'tests/integration/elearning-offline-training.db.test.ts',
       // E-learning L3.5 objective practice authority requires real PostgreSQL
       // for immutable sessions/answers, request replay, and wrong-book projection.
       // Excluded from no-DB collection and wired whole-file post-migrate.
