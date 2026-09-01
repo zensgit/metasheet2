@@ -38,6 +38,7 @@ function assessmentCourse(over: Record<string, unknown> = {}) {
     title: 'Assessment course',
     access: { kind: 'assignment', required: true },
     assignment: { deadline: null, assignedAt: CREATED },
+    enrollment: null,
     video: {
       itemId: VIDEO,
       durationMs: 5000,
@@ -59,6 +60,7 @@ function contentCourse(over: Record<string, unknown> = {}) {
     title: 'Content course',
     access: { kind: 'visibility', required: false },
     assignment: null,
+    enrollment: null,
     items: [
       {
         itemId: ARTICLE_ITEM,

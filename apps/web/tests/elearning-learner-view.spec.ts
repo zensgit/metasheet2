@@ -5,6 +5,7 @@ import { useLocale } from '../src/composables/useLocale'
 const h = vi.hoisted(() => ({
   capabilities: vi.fn(),
   list: vi.fn(),
+  enroll: vi.fn(),
   startWatch: vi.fn(),
   ticket: vi.fn(),
   heartbeat: vi.fn(),
@@ -27,6 +28,7 @@ vi.mock('../src/services/elearning', async () => {
     ...actual,
     getElearningCapabilities: h.capabilities,
     listMyElearningCourses: h.list,
+    enrollElearningCourse: h.enroll,
     startElearningWatch: h.startWatch,
     issueElearningPlaybackTicket: h.ticket,
     sendElearningHeartbeat: h.heartbeat,
@@ -114,6 +116,7 @@ const CHALLENGE_SELECTIONS = [
   CHALLENGE_OPTIONS[4].optionId,
 ] as const
 const ATTEMPT = '88888888-8888-4888-8888-888888888888'
+const ENROLLMENT = '89898989-8989-4989-8989-898989898989'
 const ATTEMPT_B = '86868686-8686-4868-8868-868686868686'
 const Q1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const Q2 = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
@@ -255,6 +258,7 @@ function course(over: Record<string, unknown> = {}) {
     title: '示范课',
     access: { kind: 'assignment', required: true },
     assignment: { deadline: null, assignedAt: '2026-01-02T03:04:05.000Z' },
+    enrollment: null,
     video: vid(),
     exam: { itemId: EXAM_ITEM, latestAttempt: null },
     completed: false,
@@ -269,6 +273,7 @@ function contentCourse(completed = false) {
     title: '阅读课程',
     access: { kind: 'visibility', required: false },
     assignment: null,
+    enrollment: null,
     items: [{
       itemId: ARTICLE_ITEM,
       itemType: 'article',
@@ -358,6 +363,7 @@ function v01Capabilities(over: Record<string, unknown> = {}, flags: Record<strin
       incentive: false,
       analytics: false,
       media: true,
+      enrollment: false,
       ...flags,
     },
     ...over,
@@ -380,6 +386,7 @@ describe('ElearningLearnerView', () => {
     useLocale().setLocale('zh-CN')
     h.capabilities.mockReset()
     h.list.mockReset()
+    h.enroll.mockReset()
     h.startWatch.mockReset()
     h.ticket.mockReset()
     h.heartbeat.mockReset()
@@ -397,6 +404,13 @@ describe('ElearningLearnerView', () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout', 'Date'] })
     h.capabilities.mockResolvedValue(v01Capabilities())
     h.list.mockResolvedValue({ courses: [course()] })
+    h.enroll.mockResolvedValue({
+      enrollmentId: ENROLLMENT,
+      courseId: COURSE,
+      courseVersionId: VERSION,
+      status: 'enrolled',
+      enrolledAt: '2026-09-01T00:00:00.000Z',
+    })
     h.listCertificates.mockResolvedValue([])
     h.listPractice.mockResolvedValue({ practiceSets: [] })
     h.wrongPractice.mockResolvedValue({ practiceSetId: COURSE, questions: [] })
@@ -457,6 +471,88 @@ describe('ElearningLearnerView', () => {
     expect(h.getProfile).not.toHaveBeenCalled()
     const examBtn = root.querySelector('[data-testid="elearning-start-exam"]') as HTMLButtonElement
     expect(examBtn.disabled).toBe(true)
+  })
+
+  it('requires visible self-study registration and starts assessment learning after success', async () => {
+    const before = course({
+      access: { kind: 'visibility', required: false },
+      assignment: null,
+      enrollment: null,
+    })
+    const after = course({
+      access: { kind: 'visibility', required: false },
+      assignment: null,
+      enrollment: { status: 'enrolled', enrolledAt: '2026-09-01T00:00:00.000Z' },
+    })
+    h.capabilities.mockResolvedValue(v01Capabilities({}, { enrollment: true }))
+    h.list
+      .mockResolvedValueOnce({ courses: [before] })
+      .mockResolvedValueOnce({ courses: [after] })
+
+    const root = mountView()
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-start-watch"]')).toBeNull()
+    const enroll = root.querySelector('[data-testid="elearning-enroll-course"]') as HTMLButtonElement
+    expect(enroll.textContent).toContain('报名并开始学习')
+    enroll.click()
+    await flushUi(20)
+
+    expect(h.enroll).toHaveBeenCalledTimes(1)
+    expect(h.enroll.mock.calls[0]?.[0]).toBe(COURSE)
+    expect(h.enroll.mock.calls[0]?.[1]).toMatch(/^[0-9a-f-]{36}$/i)
+    expect(h.startWatch).toHaveBeenCalledTimes(1)
+    expect(root.textContent).toContain('已报名')
+  })
+
+  it('reuses registration request identity across failures and rotates it after success', async () => {
+    const visible = course({
+      access: { kind: 'visibility', required: false },
+      assignment: null,
+      enrollment: null,
+    })
+    h.capabilities.mockResolvedValue(v01Capabilities({}, { enrollment: true }))
+    h.list
+      .mockResolvedValueOnce({ courses: [visible] })
+      .mockRejectedValueOnce(new ElearningApiError('unavailable', 503))
+    h.enroll
+      .mockRejectedValueOnce(new ElearningApiError('unavailable', 503))
+      .mockResolvedValueOnce({
+        enrollmentId: ENROLLMENT,
+        courseId: COURSE,
+        courseVersionId: VERSION,
+        status: 'enrolled',
+        enrolledAt: '2026-09-01T00:00:00.000Z',
+      })
+      .mockRejectedValueOnce(new ElearningApiError('unavailable', 503))
+
+    const root = mountView()
+    await flushUi()
+    const clickEnroll = async () => {
+      ;(root.querySelector('[data-testid="elearning-enroll-course"]') as HTMLButtonElement).click()
+      await flushUi(15)
+    }
+    await clickEnroll()
+    await clickEnroll()
+    await clickEnroll()
+
+    const requestIds = h.enroll.mock.calls.map((call) => call[1])
+    expect(requestIds[1]).toBe(requestIds[0])
+    expect(requestIds[2]).not.toBe(requestIds[1])
+  })
+
+  it('keeps legacy self-study controls unchanged when registration capability is off', async () => {
+    h.list.mockResolvedValue({
+      courses: [course({
+        access: { kind: 'visibility', required: false },
+        assignment: null,
+        enrollment: null,
+      })],
+    })
+    const root = mountView()
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-enroll-course"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-start-watch"]')).not.toBeNull()
+    expect(h.enroll).not.toHaveBeenCalled()
   })
 
   it('renders English learner chrome when locale is en and keeps course titles as data', async () => {

@@ -10,6 +10,7 @@ import {
   assignElearningDirect,
   elearningPlaybackSourceUrl,
   ElearningApiError,
+  enrollElearningCourse,
   getElearningCapabilities,
   isElearningV01Ready,
   isElearningLearnerReady,
@@ -124,6 +125,7 @@ function learnerCourse(over: Record<string, unknown> = {}) {
     title: '示范课',
     access: { kind: 'assignment', required: true },
     assignment: { deadline: null, assignedAt: '2026-01-02T03:04:05.000Z' },
+    enrollment: null,
     video: {
       itemId: VIDEO,
       durationMs: 5000,
@@ -223,6 +225,7 @@ function capabilitiesDto(over: Record<string, unknown> = {}, flags: Record<strin
       incentive: false,
       analytics: false,
       media: true,
+      enrollment: false,
       ...flags,
     },
     ...over,
@@ -343,6 +346,49 @@ describe('elearning client transport', () => {
     const result = await listMyElearningCourses()
     expect(result.courses[0]?.access).toEqual({ kind: 'visibility', required: false })
     expect(result.courses[0]?.assignment).toBeNull()
+  })
+
+  it('registers a visible course with the caller request id and parses the closed result', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(201, {
+      enrollmentId: MEMBER,
+      courseId: COURSE,
+      courseVersionId: VERSION,
+      status: 'enrolled',
+      enrolledAt: CREATED_AT,
+    }))
+    await expect(enrollElearningCourse(COURSE, REQUEST)).resolves.toEqual({
+      enrollmentId: MEMBER,
+      courseId: COURSE,
+      courseVersionId: VERSION,
+      status: 'enrolled',
+      enrolledAt: CREATED_AT,
+    })
+    expect(lastCall().path).toBe(`/api/elearning/me/courses/${COURSE}/enrollments`)
+    expect(lastJson()).toEqual({ requestId: REQUEST })
+    assertNoIdentityOverrides(lastJson())
+  })
+
+  it('rejects enrollment response drift, course mismatch, and noncanonical timestamps', async () => {
+    const result = (over: Record<string, unknown> = {}) => ({
+      enrollmentId: MEMBER,
+      courseId: COURSE,
+      courseVersionId: VERSION,
+      status: 'enrolled',
+      enrolledAt: CREATED_AT,
+      ...over,
+    })
+    for (const body of [
+      result({ actorId: 'forbidden' }),
+      result({ courseId: VERSION }),
+      result({ status: 'pending' }),
+      result({ enrolledAt: IMPOSSIBLE_AT }),
+    ]) {
+      apiFetchMock.mockResolvedValueOnce(jsonResponse(201, body))
+      await expect(enrollElearningCourse(COURSE, REQUEST)).rejects.toMatchObject({
+        code: 'invalid_response',
+        status: 201,
+      })
+    }
   })
 
   it('accepts an awaiting-manual latest attempt without fabricating a final score', async () => {
@@ -1196,6 +1242,7 @@ describe('elearning capabilities client', () => {
         incentive: false,
         analytics: false,
         media: true,
+        enrollment: false,
       },
     })
     assertNoIdentityOverrides(lastCall())
@@ -1230,6 +1277,7 @@ describe('elearning capabilities client', () => {
         incentive: boolean
         analytics: boolean
         media: boolean
+        enrollment: boolean
       }
     }
     expect(isElearningV01Ready(parkedOff)).toBe(true)

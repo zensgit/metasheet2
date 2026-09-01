@@ -61,15 +61,32 @@
           <dt>{{ elearningLabel('learner.courseCompletion', isZh) }}</dt>
           <dd>{{ course.completed ? elearningLabel('status.completed', isZh) : elearningLabel('status.incomplete', isZh) }}</dd>
         </div>
+        <div v-if="enrollmentEnabled && course.access.kind === 'visibility'">
+          <dt>{{ elearningLabel('learner.enrollment', isZh) }}</dt>
+          <dd data-testid="elearning-enrollment-status">{{ course.enrollment
+            ? elearningLabel('learner.enrolledContinue', isZh)
+            : elearningLabel('learner.notEnrolled', isZh) }}</dd>
+        </div>
       </dl>
 
+      <button
+        v-if="courseNeedsEnrollment(course)"
+        type="button"
+        class="elearning-btn elearning-btn--primary"
+        data-testid="elearning-enroll-course"
+        :disabled="busy"
+        @click="void enrollAndStart(course)"
+      >
+        {{ elearningLabel('learner.enrollAndStart', isZh) }}
+      </button>
+
       <ElearningContentLearnerCourse
-        v-if="!isElearningAssessmentCourse(course)"
+        v-if="!isElearningAssessmentCourse(course) && canUseCourse(course)"
         :course="course"
         @completed="void onContentCompleted()"
       />
 
-      <div v-if="isElearningAssessmentCourse(course)" class="elearning-course__actions">
+      <div v-if="isElearningAssessmentCourse(course) && canUseCourse(course)" class="elearning-course__actions">
         <button
           type="button"
           class="elearning-btn elearning-btn--primary"
@@ -77,7 +94,9 @@
           :disabled="busy"
           @click="void startWatch(course)"
         >
-          {{ elearningLabel('learner.startWatch', isZh) }}
+          {{ course.enrollment
+            ? elearningLabel('learner.continueLearning', isZh)
+            : elearningLabel('learner.startWatch', isZh) }}
         </button>
         <button
           type="button"
@@ -219,6 +238,7 @@ import {
   ElearningApiError,
   acknowledgeElearningWatchChallenge,
   elearningPlaybackSourceUrl,
+  enrollElearningCourse,
   getElearningCapabilities,
   isElearningAssessmentCourse,
   isElearningContentReady,
@@ -267,6 +287,7 @@ const busy = ref(false)
 const ready = ref(false)
 const assessmentReady = ref(false)
 const contentEnabled = ref(false)
+const enrollmentEnabled = ref(false)
 const incentiveEnabled = ref(false)
 const practiceEnabled = ref(false)
 const status = ref('')
@@ -343,6 +364,7 @@ let examEpoch = 0
 let statusSource: 'draft' | null = null
 let examCountdownTimer: number | null = null
 let challengeAckIdentity: { key: string; requestId: string } | null = null
+let enrollmentRequestIdentity: { courseId: string; requestId: string } | null = null
 let resumePlaybackAfterChallenge = false
 let challengeResumeAttempt: ChallengeResumeAttempt | null = null
 
@@ -763,6 +785,9 @@ async function ensureV01Ready(): Promise<void> {
   const capabilities = await getElearningCapabilities()
   assessmentReady.value = isElearningLearnerReady(capabilities)
   contentEnabled.value = isElearningContentReady(capabilities)
+  enrollmentEnabled.value = capabilities.enabled === true
+    && capabilities.capabilities.content === true
+    && capabilities.capabilities.enrollment === true
   incentiveEnabled.value = capabilities.enabled === true
     && capabilities.capabilities.incentive === true
   practiceEnabled.value = isElearningPracticeReady(capabilities)
@@ -775,6 +800,52 @@ async function ensureV01Ready(): Promise<void> {
     throw new ElearningApiError('feature_disabled', 404)
   }
   ready.value = assessmentReady.value || contentEnabled.value
+}
+
+function courseNeedsEnrollment(course: ElearningLearnerCourse): boolean {
+  return enrollmentEnabled.value
+    && course.access.kind === 'visibility'
+    && course.enrollment === null
+}
+
+function canUseCourse(course: ElearningLearnerCourse): boolean {
+  return !courseNeedsEnrollment(course)
+}
+
+function enrollmentRequestId(courseId: string): string {
+  if (enrollmentRequestIdentity?.courseId === courseId) {
+    return enrollmentRequestIdentity.requestId
+  }
+  if (typeof crypto === 'undefined' || typeof crypto.randomUUID !== 'function') {
+    throw new Error('crypto.randomUUID unavailable')
+  }
+  const requestId = crypto.randomUUID()
+  enrollmentRequestIdentity = { courseId, requestId }
+  return requestId
+}
+
+async function enrollAndStart(course: ElearningLearnerCourse): Promise<void> {
+  if (!ready.value || !viewMounted || busy.value || !courseNeedsEnrollment(course)) return
+  busy.value = true
+  clearStatus()
+  let assessmentToStart: ElearningLearnerAssessmentCourse | null = null
+  try {
+    const requestId = enrollmentRequestId(course.courseId)
+    await enrollElearningCourse(course.courseId, requestId)
+    enrollmentRequestIdentity = null
+    await refreshCourses()
+    const refreshed = courses.value.find((candidate) => (
+      candidate.courseId === course.courseId
+      && candidate.courseVersionId === course.courseVersionId
+    ))
+    if (refreshed && isElearningAssessmentCourse(refreshed)) assessmentToStart = refreshed
+    writeStatus(elearningLabel('learner.enrolledContinue', isZh.value), 'info')
+  } catch (error) {
+    writeStatus(formatError(error), 'error')
+  } finally {
+    busy.value = false
+  }
+  if (assessmentToStart) await startWatch(assessmentToStart)
 }
 
 async function refreshCourses(): Promise<void> {

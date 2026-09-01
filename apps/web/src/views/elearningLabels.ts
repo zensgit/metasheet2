@@ -29,6 +29,11 @@ export type ElearningLabelKey =
   | 'learner.deadlineNone'
   | 'learner.videoProgress'
   | 'learner.courseCompletion'
+  | 'learner.enrollment'
+  | 'learner.notEnrolled'
+  | 'learner.enrollAndStart'
+  | 'learner.enrolledContinue'
+  | 'learner.continueLearning'
   | 'learner.startWatch'
   | 'learner.startExam'
   | 'learner.continueExam'
@@ -246,6 +251,11 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   'learner.deadlineNone': { en: 'None', zh: '无' },
   'learner.videoProgress': { en: 'Video progress', zh: '视频进度' },
   'learner.courseCompletion': { en: 'Course completion', zh: '课程完成' },
+  'learner.enrollment': { en: 'Registration', zh: '课程报名' },
+  'learner.notEnrolled': { en: 'Not registered', zh: '未报名' },
+  'learner.enrollAndStart': { en: 'Register and start', zh: '报名并开始学习' },
+  'learner.enrolledContinue': { en: 'Registered · continue learning', zh: '已报名 · 继续学习' },
+  'learner.continueLearning': { en: 'Continue learning', zh: '继续学习' },
   'learner.startWatch': { en: 'Start learning', zh: '开始学习' },
   'learner.startExam': { en: 'Start exam', zh: '开始考试' },
   'learner.continueExam': { en: 'Continue exam', zh: '继续考试' },

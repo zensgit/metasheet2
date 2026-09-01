@@ -29,7 +29,15 @@ const ATTEMPT_STATUSES = [
   'graded',
   'expired',
 ] as const
-const CAPABILITY_KEYS = ['content', 'assignment', 'assessment', 'incentive', 'analytics', 'media'] as const
+const CAPABILITY_KEYS = [
+  'content',
+  'assignment',
+  'assessment',
+  'incentive',
+  'analytics',
+  'media',
+  'enrollment',
+] as const
 const STABLE_ERROR_CODE_RE = /^[a-z][a-z0-9_]{0,62}$/
 const CANONICAL_ISO_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 
@@ -49,6 +57,7 @@ export interface ElearningCapabilityFlags {
   incentive: boolean
   analytics: boolean
   media: boolean
+  enrollment: boolean
 }
 
 export interface ElearningCapabilities {
@@ -137,6 +146,19 @@ export interface ElearningLearnerAssignment {
   assignedAt: string
 }
 
+export interface ElearningLearnerEnrollment {
+  status: 'enrolled'
+  enrolledAt: string
+}
+
+export interface ElearningCourseEnrollmentResult {
+  enrollmentId: string
+  courseId: string
+  courseVersionId: string
+  status: 'enrolled'
+  enrolledAt: string
+}
+
 export interface ElearningLearnerVideo {
   itemId: string
   durationMs: number
@@ -172,6 +194,7 @@ export interface ElearningLearnerAssessmentCourse {
     required: boolean
   }
   assignment: ElearningLearnerAssignment | null
+  enrollment: ElearningLearnerEnrollment | null
   video: ElearningLearnerVideo
   exam: ElearningLearnerExam
   completed: boolean
@@ -194,6 +217,7 @@ export interface ElearningLearnerContentCourse {
     required: boolean
   }
   assignment: ElearningLearnerAssignment | null
+  enrollment: ElearningLearnerEnrollment | null
   items: ElearningLearnerContentItem[]
   completed: boolean
 }
@@ -731,6 +755,7 @@ function parseCapabilities(value: unknown, status: number): ElearningCapabilitie
       incentive: requireBoolean(value.capabilities.incentive, status),
       analytics: requireBoolean(value.capabilities.analytics, status),
       media: requireBoolean(value.capabilities.media, status),
+      enrollment: requireBoolean(value.capabilities.enrollment, status),
     },
   }
 }
@@ -768,7 +793,7 @@ function parseLearnerCourseBase(
   status: number,
 ): Pick<
   ElearningLearnerAssessmentCourse,
-  'courseId' | 'courseVersionId' | 'title' | 'access' | 'assignment'
+  'courseId' | 'courseVersionId' | 'title' | 'access' | 'assignment' | 'enrollment'
 > {
   if (!isPlainObject(value.access) || !exactKeys(value.access, ['kind', 'required'])) {
     failShape(status)
@@ -782,6 +807,11 @@ function parseLearnerCourseBase(
     || !exactKeys(value.assignment, ['deadline', 'assignedAt'])
   )) failShape(status)
   if ((accessKind === 'assignment') !== (value.assignment !== null)) failShape(status)
+  if (value.enrollment !== null && (
+    !isPlainObject(value.enrollment)
+    || !exactKeys(value.enrollment, ['status', 'enrolledAt'])
+    || value.enrollment.status !== 'enrolled'
+  )) failShape(status)
   const deadline = value.assignment?.deadline
   return {
     courseId: requireUuid(value.courseId, status),
@@ -793,6 +823,12 @@ function parseLearnerCourseBase(
       : {
           deadline: requireNullableCanonicalIsoInstant(deadline, status),
           assignedAt: requireCanonicalIsoInstant(value.assignment.assignedAt, status),
+        },
+    enrollment: value.enrollment === null
+      ? null
+      : {
+          status: 'enrolled',
+          enrolledAt: requireCanonicalIsoInstant(value.enrollment.enrolledAt, status),
         },
   }
 }
@@ -861,6 +897,7 @@ function parseLearnerCourse(value: unknown, status: number): ElearningLearnerCou
     'title',
     'access',
     'assignment',
+    'enrollment',
     'video',
     'exam',
     'completed',
@@ -871,6 +908,7 @@ function parseLearnerCourse(value: unknown, status: number): ElearningLearnerCou
     'title',
     'access',
     'assignment',
+    'enrollment',
     'items',
     'completed',
   ] as const
@@ -985,6 +1023,35 @@ export async function listMyElearningCourses(): Promise<ElearningLearnerCourseLi
   }
   return {
     courses: payload.courses.map((course) => parseLearnerCourse(course, 200)),
+  }
+}
+
+export async function enrollElearningCourse(
+  courseId: string,
+  requestId: string,
+): Promise<ElearningCourseEnrollmentResult> {
+  const expectedCourseId = requireUuid(courseId, 0)
+  const payload = await postJson(
+    `/api/elearning/me/courses/${encodeURIComponent(expectedCourseId)}/enrollments`,
+    201,
+    { requestId },
+  )
+  if (!isPlainObject(payload) || !exactKeys(payload, [
+    'enrollmentId',
+    'courseId',
+    'courseVersionId',
+    'status',
+    'enrolledAt',
+  ])) failShape(201)
+  if (payload.status !== 'enrolled') failShape(201)
+  const canonicalCourseId = requireUuid(payload.courseId, 201)
+  if (canonicalCourseId !== expectedCourseId) failShape(201)
+  return {
+    enrollmentId: requireUuid(payload.enrollmentId, 201),
+    courseId: canonicalCourseId,
+    courseVersionId: requireUuid(payload.courseVersionId, 201),
+    status: 'enrolled',
+    enrolledAt: requireCanonicalIsoInstant(payload.enrolledAt, 201),
   }
 }
 
