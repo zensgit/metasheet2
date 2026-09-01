@@ -14,6 +14,7 @@ import { Pool } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import { createAttendanceGroupEffectivePolicyAggregateService } from '../../src/attendance/w6-group-effective-policy-aggregate'
+import { dropScratchDatabase, formatScratchDropOutcome } from '../helpers/scratch-database'
 
 const serverUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = serverUrl ? describe : describe.skip
@@ -314,13 +315,14 @@ describeIfDatabase('W6-1 aggregate fixture matrix (seeded real PostgreSQL)', () 
   })
 
   afterAll(async () => {
-    await pool?.end()
-    await adminPool.query(
-      'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()',
-      [databaseName],
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS ${databaseName}`)
-    await adminPool.end()
+    try {
+      await pool?.end()
+      pool = undefined
+      const outcome = await dropScratchDatabase(adminPool, databaseName)
+      console.info(formatScratchDropOutcome('attendance-w6-fixture-matrix', outcome))
+    } finally {
+      await adminPool.end()
+    }
   })
 
   for (const name of FIXTURE_NAMES) {
