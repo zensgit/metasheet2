@@ -208,6 +208,15 @@ const ROUTES = [
   // Dry run: ZERO writes. Reuses the installer's own pre-scan so what it reports is what install does.
   ['POST', '/api/integration/stock-preparation/customer-packs/:packId/dry-run', 'stockPreparationCustomerPackDryRun'],
   ['POST', '/api/integration/stock-preparation/customer-packs/:packId/install', 'stockPreparationCustomerPackInstall'],
+  // 列映射副驾 (schema-mapping copilot) — the first AI feature on the governed AI boundary. PROPOSE
+  // gathers the schema signals a human would stare at (opaque columns + dictionary labels + sample
+  // shapes), asks the governed boundary (dataClass:'business' → local-only) to PROPOSE per-column
+  // meaning with reasoning, and cross-checks each proposal against the deterministic preset discovery.
+  // The AI output is ADVISORY, never applied. CONFIRM takes the HUMAN-confirmed semantics and writes a
+  // DETERMINISTIC vendor preset (the #5385 schema) — the authoritative artifact. Both integration:admin
+  // (configuring a source's mapping). Fail-open: an absent/unavailable boundary degrades to manual.
+  ['POST', '/api/integration/stock-preparation/schema-mapping-copilot/propose', 'schemaMappingCopilotPropose'],
+  ['POST', '/api/integration/stock-preparation/schema-mapping-copilot/confirm', 'schemaMappingCopilotConfirm'],
   // FOS-2: generic field-option-sync (preset-driven). Stock-prep route above is a compat alias.
   ['POST', '/api/integration/field-options/sync', 'fieldOptionsSync'],
   ['GET', '/api/integration/templates', 'templatesList'],
@@ -232,6 +241,11 @@ const STOCK_PREPARATION_SQLSERVER_RUNTIME_ROUTE = Object.freeze([
   'stockPreparationSqlServerSealedSnapshotRun',
 ])
 const EXTERNAL_SYSTEM_OBJECTS_MAX_ITEMS = 1000
+// 列映射副驾 (schema-mapping copilot): reuse the deterministic preset-discovery machinery to gather +
+// ground the AI's per-column proposals, and the boundary-consuming copilot core. The AI PROPOSES;
+// a human CONFIRMS; only confirm produces a deterministic vendor preset (the authoritative artifact).
+const schemaMappingCopilot = require('./schema-mapping-copilot.cjs')
+const { loadVendorPresetsFromDir } = require('./source-vendor-presets/preset-schema.cjs')
 const { sanitizeIntegrationPayload, scrubSecretStringValue } = require('./payload-redaction.cjs')
 const { hasPrivateConfigMutation } = require('./external-systems.cjs')
 const { createRunLogger } = require('./run-log.cjs')
@@ -3026,6 +3040,27 @@ function createHandlers(services, options = {}) {
   // reaches it without one (`operation_claim_unavailable`) rather than degrading to the kv-only
   // read-then-write path. A DORMANT deployment never gets that far, so its behaviour is unchanged.
   const b2aOperationClaim = (services && services.b2aOperationClaim) || null
+
+  // 列映射副驾: the governed AI boundary is INJECTED (packages/core-backend GovernedAiService), OPTIONAL
+  // at registration — an environment that never wired it still registers the routes and the copilot
+  // fail-opens to manual mapping. It is duck-typed to { suggest(request, env?) }; nothing else here
+  // reaches a provider. The server-held vendor preset catalog (committed, values-free structure) is
+  // loaded once and reused for family detection + as the confirm skeleton — NEVER request-supplied.
+  const governedAi = (services && services.governedAi) || null
+  let vendorPresetCatalogCache = null
+  function loadVendorPresetCatalog() {
+    if (vendorPresetCatalogCache) return vendorPresetCatalogCache
+    try {
+      vendorPresetCatalogCache = loadVendorPresetsFromDir().map((entry) => entry.preset)
+    } catch (err) {
+      // A broken catalog must not take the routes down; the copilot degrades to family-agnostic.
+      if (routeLogger && typeof routeLogger.warn === 'function') {
+        routeLogger.warn('[plugin-integration-core] vendor preset catalog failed to load; copilot runs family-agnostic')
+      }
+      vendorPresetCatalogCache = []
+    }
+    return vendorPresetCatalogCache
+  }
 
   function getMultitableRecordsApi() {
     const records = context && context.api && context.api.multitable && context.api.multitable.records
@@ -6670,6 +6705,83 @@ function createHandlers(services, options = {}) {
     // FOS-1 catalog; validates operator option sets against the preset's source keys; patches each
     // mapped field's options + generic `fieldOptionSync` metadata through the SAME kernel stock-prep
     // uses. Metadata-only (no business-row write, no external system, no K3); values-free evidence.
+    // 列映射副驾 PROPOSE — gather the schema signals, ask the governed boundary (dataClass:'business',
+    // local-only) to PROPOSE per-column meaning, cross-check against the deterministic discovery. The
+    // result is ADVISORY (`authoritativePreset` is always null) and fail-open: an absent / unavailable
+    // boundary degrades to manual mapping (aiAvailable:false, manualFallback:true) rather than erroring.
+    async schemaMappingCopilotPropose(req, res) {
+      requireAccess(req, 'admin')
+      const body = requestBody(req)
+      const rawSignals = body && typeof body.signals === 'object' && body.signals !== null ? body.signals : body
+      let signals
+      try {
+        signals = schemaMappingCopilot.gatherSchemaSignals({
+          tableNames: rawSignals && rawSignals.tableNames,
+          columns: rawSignals && rawSignals.columns,
+          dictionaryRows: rawSignals && rawSignals.dictionaryRows,
+          // Server-held catalog only — the request never supplies preset structure.
+          presetCatalog: loadVendorPresetCatalog(),
+        })
+      } catch (error) {
+        if (error instanceof schemaMappingCopilot.SchemaMappingCopilotError) {
+          throw new HttpRouteError(400, error.code, error.message, error.details || {})
+        }
+        throw error
+      }
+      const tenantId = resolveTenantId(req, body)
+      const proposal = await schemaMappingCopilot.proposeColumnMappings({
+        governedAi,
+        signals,
+        env: process.env,
+        ...(tenantId ? { meterKey: `tenant:${tenantId}` } : {}),
+      })
+      return sendOk(res, proposal)
+    },
+
+    // 列映射副驾 CONFIRM — take the HUMAN-confirmed semantics and write a DETERMINISTIC vendor preset
+    // (the #5385 schema), validated by validateVendorPreset. THIS is the authoritative artifact, NOT the
+    // AI text. confirmedBy is SERVER-STAMPED (never request-supplied); the base skeleton is loaded from
+    // the server catalog by presetId (never trusted from the request). A confirmed mapping that fails
+    // deterministic validation is refused (422) — a confirmation can never write an invalid preset.
+    async schemaMappingCopilotConfirm(req, res) {
+      const user = requireAccess(req, 'admin')
+      const body = requestBody(req)
+      // Provenance is server-stamped: reject any request-supplied identity/artifact fields.
+      for (const forbidden of ['confirmedBy', 'confirmedAt', 'preset', 'basePreset']) {
+        if (body && body[forbidden] !== undefined) {
+          throw new HttpRouteError(400, 'SCHEMA_MAPPING_COPILOT_FORBIDDEN_FIELD', `${forbidden} is server-controlled and must not be supplied`, { field: forbidden })
+        }
+      }
+      const presetId = firstString(body && body.presetId)
+      if (!presetId) {
+        throw new HttpRouteError(400, 'SCHEMA_MAPPING_COPILOT_PRESET_ID_REQUIRED', 'presetId (the detected vendor family) is required', { field: 'presetId' })
+      }
+      const basePreset = loadVendorPresetCatalog().find((preset) => preset && preset.presetId === presetId)
+      if (!basePreset) {
+        throw new HttpRouteError(422, 'SCHEMA_MAPPING_COPILOT_PRESET_UNKNOWN', 'presetId is not a known vendor family in the catalog', { presetId })
+      }
+      const actor = firstString(user.id, user.email)
+      if (!actor) {
+        throw new HttpRouteError(403, 'SCHEMA_MAPPING_COPILOT_ACTOR_REQUIRED', 'an authenticated actor identity is required to confirm')
+      }
+      let confirmed
+      try {
+        confirmed = schemaMappingCopilot.confirmColumnMappingPreset({
+          basePreset,
+          confirmedSemantics: body && body.confirmedSemantics,
+          confirmedBy: actor,
+          now: new Date().toISOString(),
+        })
+      } catch (error) {
+        if (error instanceof schemaMappingCopilot.SchemaMappingCopilotError) {
+          const status = error.code === schemaMappingCopilot.COPILOT_ERROR_CODES.CONFIRM_PRESET_INVALID ? 422 : 400
+          throw new HttpRouteError(status, error.code, error.message, error.details || {})
+        }
+        throw error
+      }
+      return sendOk(res, confirmed, 201)
+    },
+
     async fieldOptionsSync(req, res) {
       requireAccess(req, 'admin')
       const input = fieldOptionSyncInput(req, requestBody(req))
