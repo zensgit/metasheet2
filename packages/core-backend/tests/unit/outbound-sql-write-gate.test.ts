@@ -461,6 +461,53 @@ describe('outbound SQL write gate — the write/read split is the ONLY classific
     expect(isPureReadStatement('SELECT 1 /* outer /* inner */ DELETE FROM t */')).toBe(true)
   })
 
+  // FIX 5 (fail-open corner in the lexer): an UNTERMINATED span. The single-pass tokenizer consumes a
+  // string literal / block comment / bracketed or quoted identifier to END-OF-INPUT when its closer
+  // never arrives, and the old code then handed the classifier a CLEAN, SHORTENED statement — so
+  // `SELECT N'unterminated /* ` stripped to `SELECT N  ''` and classified a PURE READ. The module's
+  // contract is "anything not provably a single pure read is a WRITE", and an unclosed span means the
+  // scanner never proved where the statement ends: whatever follows the opener was swallowed as
+  // literal content, INCLUDING a write verb. Real-world impact is low (an unterminated string/comment
+  // is a T-SQL syntax error the driver rejects), but a classifier that returns TRUE on input it could
+  // not tokenize is fail-OPEN by construction, so this corner must fail closed.
+  const UNTERMINATED_SPANS = [
+    "SELECT N'unterminated /* ",                  // unterminated string (the reported corner)
+    'SELECT 1 /* unclosed comment',               // unterminated block comment
+    "SELECT '''",                                 // odd/unbalanced quote: '' is an ESCAPE, so the 3rd opens
+    "SELECT 'x\nDELETE FROM t_ICItem",            // …and the swallow it enables: a write eaten as string body
+    'SELECT 1 /* c\nDELETE FROM t_ICItem',        // …the same swallow via an unclosed comment
+    'SELECT * FROM [t\nDELETE FROM t_ICItem',     // …via an unclosed bracketed identifier
+    'SELECT * FROM "t\nDELETE FROM t_ICItem',     // …via an unclosed quoted identifier
+    'SELECT 1 /* outer /* inner */',              // nested comment closed ONCE: the outer is still open
+  ]
+
+  it('FIX 5: a statement that ends INSIDE an unterminated string/comment/identifier is a WRITE', () => {
+    for (const sql of UNTERMINATED_SPANS) {
+      expect(isPureReadStatement(sql)).toBe(false)
+      expect(isSqlWriteStatement(sql)).toBe(true)
+    }
+  })
+
+  it('FIX 5 (end to end): the unterminated-span statements are refused as unarmed writes', () => {
+    delete process.env[ENV_KEY]
+    for (const sql of UNTERMINATED_SPANS) {
+      const err = refusalOf(() => assertSqlStatementWriteAuthorized(buildError, sql, { id: 's1', name: 's1', type: 'sqlserver' }))
+      expect(err.code).toBe(OUTBOUND_SQL_WRITE_DISABLED)
+    }
+  })
+
+  it('FIX 5 CONTROL: a BALANCED string / comment / identifier still strips to a READ', () => {
+    // The fix may only reject spans that never close. Everything that closes is untouched.
+    expect(isPureReadStatement("SELECT * FROM t WHERE a='ok'")).toBe(true)
+    expect(isPureReadStatement('SELECT 1 /* closed */ FROM t')).toBe(true)
+    expect(isPureReadStatement("SELECT 'it''s closed' AS s FROM t")).toBe(true) // '' escape, then a real close
+    expect(isPureReadStatement('SELECT [a]]b] FROM t')).toBe(true)              // ]] escape, then a real close
+    expect(isPureReadStatement('SELECT "a""b" FROM t')).toBe(true)              // "" escape, then a real close
+    expect(isPureReadStatement('SELECT 1 /* outer /* inner */ still comment */')).toBe(true) // nesting closes
+    // A LINE comment legitimately ends at end-of-input — it has no closer to be missing.
+    expect(isPureReadStatement('SELECT 1 -- trailing comment with no newline')).toBe(true)
+  })
+
   // FIX 4 (P2 over-block): `@@ROWCOUNT` / `@@IDENTITY` are read-only global variables that cannot
   // mutate. The bare word `rowcount` / `identity` is reserved, so before this fix a SELECT of them was
   // classified a WRITE. Widening the read grammar to admit them is safe: the only mutating uses of
