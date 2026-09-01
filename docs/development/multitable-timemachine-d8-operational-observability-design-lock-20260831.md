@@ -6,6 +6,14 @@ staging, dispatch, deployment, production, or real customer data.
 
 **Baseline:** `origin/main@25635e67db5145a5998499c4adc8f030e156daf7`.
 
+**Final Draft/HOLD publication binding:** replay base
+`81960ae650d974dbd9a96c922ffb4a917292ac24`, code-bearing head
+`16e3c1d4a79b0c009c12eb37ead4c9e695a07976`, tree
+`3ae7541eac1e91a2b582cedf192fb1c6b2daa095`, PR `#5393`. That exact head
+completed `25 SUCCESS / 1 intentional SKIPPED / 0 failure / 0 pending`.
+This binding does not change the ratification baseline or authorize Ready,
+merge, flags, dispatch, staging, deployment, production, or tenant UAT.
+
 ## 1. Objective
 
 Make the existing recovery archive restore worker and its bounded shutdown drain

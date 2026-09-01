@@ -7,20 +7,21 @@ verified code-bearing head and changes no implementation or CI configuration.
 
 ## 1. Exact binding
 
-- Base: `25635e67db5145a5998499c4adc8f030e156daf7`
+- Ratification baseline: `25635e67db5145a5998499c4adc8f030e156daf7`
+- Final replay base: `81960ae650d974dbd9a96c922ffb4a917292ac24`
 - Product/design checkpoint: `9c093f9b88636faf917b909f419ea652825fc8c5`
 - Product/design tree: `ec45c33c4ff5d35b6e04c1c4e713aa5c99396e5d`
 - Outcome-exhaustiveness fix-forward: `af90e770a21ee28bc97b2cead42560092fc6c484`
-- Current implementation tree: `509e493238f66e38ed1599a679be0e0525cfee27`
+- Pre-replay implementation tree: `509e493238f66e38ed1599a679be0e0525cfee27`
 - Cache-CI config fix-forward: `e85616da1007eca3664f686d8e19563814970d82`
-- Code-bearing remote head: `c0762ee4d79950ec3625311a1cabb39b1b2012ce`
-- Code-bearing tree: `7b10d0d5a35093babb72d6cf5a0c31480725a4d6`
+- Code-bearing remote head: `16e3c1d4a79b0c009c12eb37ead4c9e695a07976`
+- Code-bearing tree: `3ae7541eac1e91a2b582cedf192fb1c6b2daa095`
 - Branch: `codex/tm-d8-operational-observability-20260831`
 - Scope including this development report and its verification report: 12 files,
-  705 insertions, 2 deletions at the code-bearing remote head
+  716 insertions, 2 deletions at the code-bearing remote head
 - Remote PR: `#5393`
 - Remote exact-head CI: `25 SUCCESS / 1 intentional SKIPPED / 0 failure /
-  0 pending` at `c0762ee4d799...`
+  0 pending` at `16e3c1d4a79b...`
 
 The contract is
 `multitable-timemachine-d8-operational-observability-design-lock-20260831.md`.
@@ -116,7 +117,10 @@ additional P2/P3 finding. This is a CI compilation fix only; it changes no
 runtime request behavior. The replacement code-bearing head passed
 `core-backend-cache`, Node 18, Node 20, Web Tests, migration/recovery guards,
 and every other reported context; the only skipped context was the intentional
-Strict E2E gate.
+Strict E2E gate. The final current-main replay preserved the same 12-file D8
+delta without a path conflict. Its code-bearing head `16e3c1d4a79b...` repeated
+the complete remote result: `25 SUCCESS / 1 intentional SKIPPED / 0 failure /
+0 pending`, including Node 18, Node 20, Web Tests, and `core-backend-cache`.
 
 ## 7. Honest completion boundary
 
