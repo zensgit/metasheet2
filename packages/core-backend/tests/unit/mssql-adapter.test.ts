@@ -3,6 +3,20 @@ import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('../../src/audit/audit', () => ({ auditLog: vi.fn(async () => {}) }))
+// The non-owner-404 pin below now needs a NON-ADMIN denied user (platform admins
+// legitimately see every source — data-source-visibility-authority-matrix.test.ts).
+// Stub rbacGuard's DB-backed fallbacks so a member with req.user.permissions is
+// deterministic without a pool.
+vi.mock('../../src/rbac/service', () => ({
+  isAdmin: vi.fn(async () => false),
+  userHasPermission: vi.fn(async () => false),
+  listUserPermissions: vi.fn(async () => []),
+  invalidateUserPerms: vi.fn(),
+  getPermCacheStatus: vi.fn(),
+}))
+vi.mock('../../src/rbac/namespace-admission', () => ({
+  isPermissionAllowedByNamespaceAdmission: vi.fn(async () => true),
+}))
 
 import { MSSQLAdapter } from '../../src/data-adapters/MSSQLAdapter'
 import { dataSourcesRouter } from '../../src/routes/data-sources'
@@ -512,11 +526,14 @@ describe('data-sources route — sqlserver type', () => {
     expect(res.body.error.code).toBe('READ_ONLY')
   })
 
-  it('a non-owner gets 404 on a sqlserver source (A0.1)', async () => {
+  it('a non-admin non-owner gets 404 on a sqlserver source (A0.1)', async () => {
     currentUser = admin('alice')
     pinned.setApp(app)
     await request(pinned.url()).post('/api/data-sources').send(body('sql-own'))
-    currentUser = admin('bob')
+    // bob is a NON-ADMIN holding the global read code: rbacGuard passes, the
+    // manager's ownership scope must still refuse with the uniform 404.
+    // (Platform admins now legitimately see every source by design.)
+    currentUser = { id: 'bob', roles: ['member'], permissions: ['data_sources:read'] } as never
     expect((await request(pinned.url()).get('/api/data-sources/sql-own')).status).toBe(404)
   })
 })

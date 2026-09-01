@@ -19,6 +19,7 @@ import {
   MultitableRecordLockedError,
   MultitableRecordNotFoundError,
   MultitableRecordValidationError,
+  MultitableRecordVersionConflictError,
 } from './record-errors'
 import { ensureRecordNotLocked, mapRecordLockState } from './record-lock'
 import { isFieldAlwaysReadOnly } from './permission-derivation'
@@ -56,6 +57,7 @@ export {
   MultitableRecordDeleteCapExceededError,
   MultitableRecordNotFoundError,
   MultitableRecordValidationError,
+  MultitableRecordVersionConflictError,
 } from './record-errors'
 export { MultitableSideDoorDeleteNonTransactionalError } from './side-door-delete-trash'
 export {
@@ -97,6 +99,7 @@ export type PatchMultitableRecordInput = {
   sheetId: string
   recordId: string
   changes: Record<string, unknown>
+  expectedVersion?: number
 }
 
 export type CreatedMultitableRecord = {
@@ -513,6 +516,12 @@ async function guardRecordNotLockedForPlugin(
 export async function patchRecord(
   input: PatchMultitableRecordInput,
 ): Promise<LoadedMultitableRecord> {
+  if (
+    input.expectedVersion !== undefined
+    && (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1)
+  ) {
+    throw new MultitableRecordValidationError('expectedVersion must be a positive safe integer')
+  }
   const query = input.query
   const linkWriterFencePlan = await prepareLinkWriterFencePlan(
     query,
@@ -544,6 +553,9 @@ export async function patchRecord(
     sheetId: input.sheetId,
     recordId: input.recordId,
   })
+  if (input.expectedVersion !== undefined && existing.version !== input.expectedVersion) {
+    throw new MultitableRecordVersionConflictError()
+  }
   // Record-lock guard (rank-8 review M1; decision d/e). The plugin SDK carries no per-record actor
   // identity → `ensureRecordNotLocked(null, …)` makes a locked record hard read-only to plugins.
   await guardRecordNotLockedForPlugin(query, input.sheetId, input.recordId)
@@ -558,14 +570,17 @@ export async function patchRecord(
     ...patch,
   }
 
-  // lock-guarded: plugin-SDK patchRecord (M1) — guardRecordNotLockedForPlugin(actor=null) rejected above.
-  // revision-emitted: D-1c slice ② (A2) — recordRecordRevision(action:'update', source:'plugin') @559.
+  const updateParams: unknown[] = [JSON.stringify(nextData), input.recordId, input.sheetId]
+  const versionPredicate = input.expectedVersion === undefined ? '' : ' AND version = $4'
+  if (input.expectedVersion !== undefined) updateParams.push(input.expectedVersion)
   const updated = await query(
+    // lock-guarded: plugin-SDK patchRecord (M1) — guardRecordNotLockedForPlugin(actor=null) rejected above.
+    // revision-emitted: D-1c slice ② (A2) — recordRecordRevision(action:'update', source:'plugin') below.
     `UPDATE meta_records
      SET data = $1::jsonb, version = version + 1, updated_at = now()
-     WHERE id = $2 AND sheet_id = $3
+     WHERE id = $2 AND sheet_id = $3${versionPredicate}
      RETURNING version`,
-    [JSON.stringify(nextData), input.recordId, input.sheetId],
+    updateParams,
   )
 
   // W0 slice ② required fix (concurrent-delete fail-closed — recycled from Draft #4216's P1 review):
@@ -584,6 +599,9 @@ export async function patchRecord(
   // `nextVersion` can be synthesized. Proven under genuine two-connection lock contention (not a sleep
   // heuristic) by the concurrent-delete golden in the real-DB suite.
   if ((updated.rows as unknown[]).length === 0) {
+    if (input.expectedVersion !== undefined) {
+      throw new MultitableRecordVersionConflictError()
+    }
     throw new MultitableRecordNotFoundError(`Record not found: ${input.recordId}`)
   }
 

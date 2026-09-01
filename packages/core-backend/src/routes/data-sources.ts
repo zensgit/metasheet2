@@ -19,10 +19,13 @@ import { auditLog } from '../audit/audit'
 import {
   c6WriteTargetQueryDisabledMessage,
   DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED_CODE,
+  DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY_CODE,
+  DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
   DataSourceManager,
   isGenericQueryDisabledConfig,
   SUPPORTED_DATA_SOURCE_TYPES
 } from '../data-adapters/DataSourceManager'
+import type { DataSourceActorContext } from '../data-adapters/DataSourceManager'
 import type { DataSourceConfig, QueryOptions } from '../data-adapters/BaseAdapter'
 import { DATA_SOURCE_DEFAULT_LIMIT, DATA_SOURCE_MAX_ROWS } from '../data-adapters/BaseAdapter'
 
@@ -178,6 +181,58 @@ function resolveUserId(req: Request): string | undefined {
 }
 
 /**
+ * Resolve the MANAGEMENT actor for this request (the authority model).
+ *
+ * `platformAdmin` mirrors the rbac global-admin bypass's request-user check
+ * (rbac.ts requestUserIsAdmin: role === 'admin' or roles includes 'admin') —
+ * the exact tier that already passes every `data_sources:*` rbacGuard on
+ * these routes without a table lookup. jwtAuthMiddleware refreshes role data
+ * per request, so req.user is the authoritative in-request source. A DB-role
+ * admin whose token lacks the admin claim does NOT get the management bypass
+ * here (conservative direction: no extra grants beyond the request's claims).
+ *
+ * Used on MANAGEMENT surfaces only (list/get/test/connect/disconnect/update/
+ * rotate/delete). Data-plane routes (/query /select /schema /tables) keep
+ * passing the bare user id, which the manager scopes owner-only: management
+ * of a connection is not silent access to the customer data behind it.
+ */
+function resolveActor(req: Request): DataSourceActorContext {
+  const u = req.user
+  const roles = Array.isArray(u?.roles) ? u.roles.map((r) => String(r ?? '').trim()) : []
+  return {
+    userId: resolveUserId(req),
+    platformAdmin: !!u && (u.role === 'admin' || roles.includes('admin'))
+  }
+}
+
+/** True when a platform admin is acting on a source owned by someone else. */
+function isCrossOwnerAdminAction(actor: DataSourceActorContext, ownerId: string | undefined): boolean {
+  return actor.platformAdmin === true && ownerId !== undefined && ownerId !== actor.userId
+}
+
+/**
+ * Audit a platform admin's action on ANOTHER owner's source (actor + owner,
+ * values-free). Owner self-service paths intentionally emit nothing extra
+ * here — their audit behavior is unchanged.
+ */
+async function auditCrossOwnerAdminAction(
+  req: Request,
+  action: string,
+  resourceId: string,
+  ownerId: string | undefined,
+  extraMeta?: Record<string, unknown>
+): Promise<void> {
+  await auditLog({
+    actorId: req.user?.id?.toString(),
+    actorType: 'user',
+    action,
+    resourceType: 'data_source',
+    resourceId,
+    meta: { ownerId, crossOwnerAdmin: true, ...extraMeta }
+  })
+}
+
+/**
  * Conservative read-only SQL classifier for the raw /query path on read-only
  * SQL sources. Allows a single statement starting with SELECT / WITH / EXPLAIN
  * / SHOW; rejects multiple statements and SELECT ... INTO.
@@ -220,7 +275,9 @@ export function dataSourcesRouter(): Router {
         })
       }
       const manager = getManager()
-      const sources = manager.listDataSources({ ownerId: userId })
+      // Authority model: owners see their own sources; platform admins see
+      // every source (management metadata only — never credentials).
+      const sources = manager.listDataSources({ actor: resolveActor(req) })
       return res.json({
         ok: true,
         data: {
@@ -257,7 +314,8 @@ export function dataSourcesRouter(): Router {
       }
 
       const manager = getManager()
-      const healthMap = await manager.healthCheck({ ownerId: userId })
+      // Same actor scoping as the listing: owners see their own, admins see all.
+      const healthMap = await manager.healthCheck({ actor: resolveActor(req) })
 
       const health: Array<{
         id: string
@@ -295,14 +353,21 @@ export function dataSourcesRouter(): Router {
   router.get('/api/data-sources/:id', rbacGuard('data_sources', 'read'), async (req: Request, res: Response) => {
     try {
       const manager = getManager()
-      manager.assertAccess(req.params.id, resolveUserId(req))
+      const actor = resolveActor(req)
+      manager.assertAccess(req.params.id, actor)
       const adapter = manager.getDataSource(req.params.id)
       const config = adapter.getConfig()
+      const ownerId = manager.getScope(req.params.id)?.ownerId
+
+      if (isCrossOwnerAdminAction(actor, ownerId)) {
+        await auditCrossOwnerAdminAction(req, 'read', req.params.id, ownerId)
+      }
 
       return res.json({
         ok: true,
         data: {
           ...sanitizeConfig(config),
+          ownerId,
           connected: adapter.isConnected()
         }
       })
@@ -478,7 +543,8 @@ export function dataSourcesRouter(): Router {
     try {
       const manager = getManager()
       const id = req.params.id
-      manager.assertAccess(id, resolveUserId(req))
+      const actor = resolveActor(req)
+      manager.assertAccess(id, actor)
 
       const existing = manager.getDataSource(id)
       const oldConfig = existing.getConfig()
@@ -499,7 +565,8 @@ export function dataSourcesRouter(): Router {
       }
 
       // Atomic update: persists first, swaps the adapter only on success, and
-      // preserves ownership. A failed update leaves the original source intact.
+      // preserves ownership — an admin editing another owner's source must
+      // NOT become its owner. A failed update leaves the original intact.
       const adapter = await manager.updateDataSource(id, newConfig, {
         ownerId: scope?.ownerId ?? resolveUserId(req)!,
         workspaceId: scope?.workspaceId ?? undefined
@@ -512,6 +579,8 @@ export function dataSourcesRouter(): Router {
         resourceType: 'data_source',
         resourceId: id,
         meta: {
+          ownerId: scope?.ownerId,
+          ...(isCrossOwnerAdminAction(actor, scope?.ownerId) ? { crossOwnerAdmin: true } : {}),
           before: sanitizeConfig(oldConfig),
           after: sanitizeConfig(newConfig)
         }
@@ -570,7 +639,8 @@ export function dataSourcesRouter(): Router {
     try {
       const manager = getManager()
       const id = req.params.id
-      manager.assertAccess(id, resolveUserId(req))
+      const actor = resolveActor(req)
+      manager.assertAccess(id, actor)
 
       const existing = manager.getDataSource(id)
       const oldConfig = existing.getConfig()
@@ -585,6 +655,8 @@ export function dataSourcesRouter(): Router {
         id
       }
 
+      // Rotation stays WRITE-ONLY for every tier: an admin can set new
+      // credentials but no response surface ever returns credential values.
       const adapter = await manager.updateDataSource(id, newConfig, {
         ownerId: scope?.ownerId ?? resolveUserId(req)!,
         workspaceId: scope?.workspaceId ?? undefined
@@ -597,6 +669,8 @@ export function dataSourcesRouter(): Router {
         resourceType: 'data_source',
         resourceId: id,
         meta: {
+          ownerId: scope?.ownerId,
+          ...(isCrossOwnerAdminAction(actor, scope?.ownerId) ? { crossOwnerAdmin: true } : {}),
           changedCredentialKeys,
           before: sanitizeConfig(oldConfig),
           after: sanitizeConfig(newConfig)
@@ -629,17 +703,53 @@ export function dataSourcesRouter(): Router {
 
   /**
    * DELETE /api/data-sources/:id
-   * Remove a data source configuration
+   * Remove a data source configuration.
+   *
+   * Referential guard: a source referenced by any
+   * integration_external_systems.config->>'dataSourceId' refuses deletion
+   * with a coded 409 naming the reference COUNT (never the referencing
+   * config), so an external system's binding cannot be silently dangled.
+   * `?force=true` (platform-admin only) breaks the reference deliberately
+   * and is audited as such. The check is server-side, before removal.
    */
   router.delete('/api/data-sources/:id', rbacGuard('data_sources', 'write'), async (req: Request, res: Response) => {
     try {
       const manager = getManager()
       const id = req.params.id
-      manager.assertAccess(id, resolveUserId(req))
+      const actor = resolveActor(req)
+      // Access first: a non-owner non-admin gets the uniform 404 before any
+      // referential detail (force=true included) can leak existence.
+      manager.assertAccess(id, actor)
 
       // Get config before removal for audit
       const adapter = manager.getDataSource(id)
       const config = adapter.getConfig()
+      const ownerId = manager.getScope(id)?.ownerId
+
+      const referenceCount = await manager.countExternalSystemReferences(id)
+      const forceRequested = String(req.query.force ?? '') === 'true'
+      const forcedReferenceBreak = referenceCount > 0 && forceRequested
+      if (referenceCount > 0) {
+        if (forceRequested && actor.platformAdmin !== true) {
+          return res.status(403).json({
+            ok: false,
+            error: {
+              code: DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY_CODE,
+              message: `force=true is restricted to platform admins; data source '${id}' remains referenced by ${referenceCount} external system(s)`
+            }
+          })
+        }
+        if (!forceRequested) {
+          return res.status(409).json({
+            ok: false,
+            error: {
+              code: DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
+              message: `Data source '${id}' is referenced by ${referenceCount} external system(s) (integration_external_systems.config.dataSourceId) and deleting it would leave dangling references. A platform admin may repeat the request with force=true to break the reference deliberately.`,
+              details: { referenceCount }
+            }
+          })
+        }
+      }
 
       await manager.removeDataSource(id)
 
@@ -649,7 +759,12 @@ export function dataSourcesRouter(): Router {
         action: 'delete',
         resourceType: 'data_source',
         resourceId: id,
-        meta: sanitizeConfig(config)
+        meta: {
+          ...sanitizeConfig(config),
+          ownerId,
+          ...(isCrossOwnerAdminAction(actor, ownerId) ? { crossOwnerAdmin: true } : {}),
+          ...(forcedReferenceBreak ? { forcedReferenceBreak: true, referenceCount } : {})
+        }
       })
 
       return res.json({
@@ -681,7 +796,13 @@ export function dataSourcesRouter(): Router {
     try {
       const manager = getManager()
       const id = req.params.id
-      manager.assertAccess(id, resolveUserId(req))
+      const actor = resolveActor(req)
+      manager.assertAccess(id, actor)
+
+      const connectOwnerId = manager.getScope(id)?.ownerId
+      if (isCrossOwnerAdminAction(actor, connectOwnerId)) {
+        await auditCrossOwnerAdminAction(req, 'connect', id, connectOwnerId)
+      }
 
       await manager.connectDataSource(id)
       const adapter = manager.getDataSource(id)
@@ -718,7 +839,13 @@ export function dataSourcesRouter(): Router {
     try {
       const manager = getManager()
       const id = req.params.id
-      manager.assertAccess(id, resolveUserId(req))
+      const actor = resolveActor(req)
+      manager.assertAccess(id, actor)
+
+      const disconnectOwnerId = manager.getScope(id)?.ownerId
+      if (isCrossOwnerAdminAction(actor, disconnectOwnerId)) {
+        await auditCrossOwnerAdminAction(req, 'disconnect', id, disconnectOwnerId)
+      }
 
       await manager.disconnectDataSource(id)
 
@@ -751,11 +878,17 @@ export function dataSourcesRouter(): Router {
     try {
       const manager = getManager()
       const id = req.params.id
-      manager.assertAccess(id, resolveUserId(req))
+      const actor = resolveActor(req)
+      manager.assertAccess(id, actor)
       const startTime = Date.now()
 
       const result = await manager.testConnection(id)
       const latency = Date.now() - startTime
+
+      const testOwnerId = manager.getScope(id)?.ownerId
+      if (isCrossOwnerAdminAction(actor, testOwnerId)) {
+        await auditCrossOwnerAdminAction(req, 'test', id, testOwnerId, { success: result.success })
+      }
 
       // A3: keep request-layer ok:true (a completed test is a successful request); the connection
       // outcome is data.success, with a redacted cause in data.error.message on failure.
@@ -803,6 +936,10 @@ export function dataSourcesRouter(): Router {
 
     try {
       const manager = getManager()
+      // DATA PLANE: deliberately the bare-user-id (owner-only) actor shape.
+      // Managing a connection (test/fix/rotate/delete) is an admin capability;
+      // reading the customer data BEHIND it is not — an admin gets the same
+      // uniform 404 as any non-owner on /query, /select, /schema and /tables.
       manager.assertAccess(req.params.id, resolveUserId(req))
       const { sql, params } = parse.data
 
@@ -897,6 +1034,7 @@ export function dataSourcesRouter(): Router {
 
     try {
       const manager = getManager()
+      // DATA PLANE: owner-only on purpose (see /query above).
       manager.assertAccess(req.params.id, resolveUserId(req))
       const { table, ...options } = parse.data
 
@@ -939,6 +1077,7 @@ export function dataSourcesRouter(): Router {
   router.get('/api/data-sources/:id/schema', rbacGuard('data_sources', 'read'), async (req: Request, res: Response) => {
     try {
       const manager = getManager()
+      // DATA PLANE: owner-only on purpose (see /query above).
       manager.assertAccess(req.params.id, resolveUserId(req))
       const adapter = manager.getDataSource(req.params.id)
 
@@ -976,6 +1115,7 @@ export function dataSourcesRouter(): Router {
   router.get('/api/data-sources/:id/tables/:table', rbacGuard('data_sources', 'read'), async (req: Request, res: Response) => {
     try {
       const manager = getManager()
+      // DATA PLANE: owner-only on purpose (see /query above).
       manager.assertAccess(req.params.id, resolveUserId(req))
       const adapter = manager.getDataSource(req.params.id)
 

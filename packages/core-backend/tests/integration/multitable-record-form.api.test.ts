@@ -31,6 +31,31 @@ function createMockPool(queryHandler: QueryHandler) {
     if (sql.includes('FROM formula_dependencies')) {
       return { rows: [], rowCount: 0 }
     }
+    // SHEET LIVENESS (soft delete). `resolveSheetCapabilities` reads `meta_sheets.deleted_at` before
+    // any sheet-addressed work; this fixture predates that query. Translate it into the existence read
+    // each handler already answers, so every test keeps its OWN notion of which sheets exist rather
+    // than being handed an enumerated list that could drift from its handler.
+    //
+    // NOTE: this file is red on `origin/main` too (10 of 20, on unrelated unhandled meta_fields /
+    // meta_records SQL) and the count is IDENTICAL with and without this branch — verified by running
+    // it against pristine sources. This is here to stop the liveness read adding 16 more spurious
+    // error logs on top, not to change the verdict.
+    if (sql.includes('SELECT deleted_at FROM meta_sheets WHERE id = $1')) {
+      for (const probe of [
+        'SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
+        'SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
+      ]) {
+        try {
+          const existing = await queryHandler(probe, params)
+          const found = (existing?.rows ?? []).length > 0
+          return { rows: found ? [{ deleted_at: null }] : [], rowCount: found ? 1 : 0 }
+        } catch {
+          // this handler does not know this form — try the next
+        }
+      }
+      // Neither form known: treat as live, which is exactly the pre-change behaviour.
+      return { rows: [{ deleted_at: null }], rowCount: 1 }
+    }
     return queryHandler(sql, params)
   })
   const transaction = vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }))

@@ -167,6 +167,7 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   // WRITES a calculation itself (only an out-of-band audit row).
   'plugins/plugin-attendance/lib/attendance-org-resolution-shadow.cjs',
   'plugins/plugin-attendance/lib/attendance-punch-org-resolution.cjs',
+  'plugins/plugin-attendance/lib/attendance-report-managed-content-drift.cjs',
   'plugins/plugin-attendance/lib/attendance-shift-service.cjs',
   'plugins/plugin-attendance/lib/attendance-work-date-adapters.cjs',
   'plugins/plugin-attendance/lib/attendance-work-date-resolver.cjs',

@@ -1975,7 +1975,11 @@ export function buildK3WiseSetupPayloads(form: K3WiseSetupForm): K3WiseSetupPayl
       tokenPath: trim(form.tokenPath),
       tokenQueryParam: 'Token',
       loginPath: trim(form.loginPath),
-      ...(optionalString(form.healthPath) ? { healthPath: trim(form.healthPath) } : {}),
+      // Emitted even when blank. The registry applies a supplied config as a top-level PATCH, so
+      // an omitted key now means "keep the stored value" — clearing the field in the wizard has to
+      // say so explicitly or the old healthPath would survive a save that meant to remove it.
+      // (The adapter's guard and endpoint resolution both treat null exactly like absent.)
+      healthPath: optionalString(form.healthPath) ? trim(form.healthPath) : null,
       lcid: parseRequiredPositiveInteger(form.lcid, 'lcid'),
       timeoutMs: parseRequiredPositiveInteger(form.timeoutMs, 'timeoutMs'),
       autoSubmit: form.autoSubmit,
@@ -2048,7 +2052,9 @@ export function buildK3WiseSetupPayloads(form: K3WiseSetupForm): K3WiseSetupPayl
     config: {
       mode: form.sqlMode,
       server: sqlEndpoint.server,
-      ...(sqlPort ? { port: sqlPort } : {}),
+      // Explicit null for the same reason as healthPath above: config is patched, so clearing the
+      // port has to be stated. normalizePort() reads null as "no explicit port", same as absent.
+      port: sqlPort ?? null,
       database: trim(form.sqlDatabase),
       allowedTables,
       middleTables,

@@ -54,6 +54,9 @@ export type WorkbenchLabelKey =
   | 'toast.baseLoadFailed' | 'toast.contextSyncFailed'
   | 'toast.externalContextBusy' | 'toast.externalContextUnsaved'
   | 'toast.baseCreateBlocked' | 'toast.baseCreateFailed'
+  // feat/multitable-rename: sheet/base rename failure toasts (server e.message takes priority —
+  // these are only the generic fallback when the response carried no message).
+  | 'toast.sheetRenameFailed' | 'toast.baseRenameFailed'
   | 'toast.importCancelled' | 'toast.importFailed'
   | 'toast.excelExportFailed' | 'toast.csvExportFailed' | 'toast.bulkDeleteFailed'
   | 'toast.workbenchInitFailed'
@@ -203,6 +206,8 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
     zh: '创建工作区需要多维表写入权限。',
   },
   'toast.baseCreateFailed': { en: 'Failed to create base', zh: '创建工作区失败' },
+  'toast.sheetRenameFailed': { en: 'Failed to rename sheet', zh: '重命名数据表失败' },
+  'toast.baseRenameFailed': { en: 'Failed to rename base', zh: '重命名工作区失败' },
   'toast.importCancelled': { en: 'Import cancelled', zh: '导入已取消' },
   'toast.importFailed': { en: 'Import failed', zh: '导入失败' },
   'toast.excelExportFailed': { en: 'Excel export failed', zh: 'Excel 导出失败' },

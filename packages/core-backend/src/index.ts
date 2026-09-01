@@ -71,6 +71,7 @@ import {
   type MultitableRecordsQueryFn,
 } from './multitable/records'
 import { resolveSheetCapabilitiesForUser } from './multitable/sheet-capabilities'
+import { SheetNotLiveError, assertSheetLive } from './multitable/sheet-liveness'
 import { isRecordReadDeniedForUser, loadRowLevelReadDenyEnabled } from './multitable/permission-service'
 import {
   assertPluginOwnsObject,
@@ -935,7 +936,7 @@ export class MetaSheetServer {
               recordId,
             })
           },
-          patchRecord: async ({ sheetId, recordId, changes }) => {
+          patchRecord: async ({ sheetId, recordId, changes, expectedVersion }) => {
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
                 const result = await query(sql, params)
@@ -953,6 +954,7 @@ export class MetaSheetServer {
                 sheetId,
                 recordId,
                 changes,
+                expectedVersion,
               })
             })
           },
@@ -2076,12 +2078,13 @@ export class MetaSheetServer {
                     }),
                   createRecord: ({ sheetId, data }) =>
                     createMultitableRecord({ query: txQuery, sheetId, data }),
-                  patchRecord: ({ sheetId, recordId, changes }) =>
+                  patchRecord: ({ sheetId, recordId, changes, expectedVersion }) =>
                     patchMultitableRecord({
                       query: txQuery,
                       sheetId,
                       recordId,
                       changes,
+                      expectedVersion,
                     }),
                 })
               })
@@ -3960,6 +3963,16 @@ export class MetaSheetServer {
               if (recResult.rows.length === 0) return null
               const sheetId = String((recResult.rows[0] as any).sheet_id)
 
+              // SHEET LIVENESS (soft delete). The subscribe-time auth check runs ONCE, so a session
+              // already open when the sheet is deleted underneath it would keep flushing writes into a
+              // "deleted" sheet — and those writes fire its automations. This closure runs on EVERY
+              // debounced flush, so it is the point that actually stops an open session.
+              //
+              // THROWN, not null-returned: `return null` is the quiet "context unavailable" path, which
+              // would make the refusal metric-invisible. This follows the FieldWritePermissionDeniedError
+              // precedent below — rethrown past the generic catch so it reaches flushNow's failure counter.
+              await assertSheetLive(pool.query.bind(pool), sheetId)
+
               const fieldResult = await pool.query(
                 'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC',
                 [sheetId],
@@ -4054,6 +4067,9 @@ export class MetaSheetServer {
               // (DB unavailable, record deleted mid-build, etc.) keeps the existing coarse-log + null-return
               // behavior.
               if (err instanceof FieldWritePermissionDeniedError) throw err
+              // Same posture for a sheet deleted underneath an open session: a LOUD, coded refusal, not
+              // a silent drop that would look identical to "record went away".
+              if (err instanceof SheetNotLiveError) throw err
               console.error(`[yjs-bridge] Failed to build write input for ${recordId}:`, err)
               return null
             }
@@ -4326,3 +4342,4 @@ export type {
  */
 export { MultitableRecordDeleteCapExceededError } from './multitable/record-errors'
 export { MultitableSideDoorDeleteNonTransactionalError } from './multitable/side-door-delete-trash'
+export { MultitableRecordVersionConflictError } from './multitable/record-errors'

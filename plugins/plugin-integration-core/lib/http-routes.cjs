@@ -14,6 +14,13 @@ const ROUTES = [
   ['GET', '/api/integration/status', 'status'],
   ['GET', '/api/integration/internal/k3-wise/call-audit', 'k3WiseCallAudit'],
   ['GET', '/api/integration/adapters', 'adaptersList'],
+  // 对接总览 — ONE read that answers "对接了哪些系统、各用哪个连接、谁在用、状态如何". Read-tier,
+  // read-only, values-free: it joins the external-system registry to the data_sources DISPLAY
+  // descriptor (name/type/status only), to the server-held stock-prep table-action binding, to
+  // pipelines, and to approved read-source configs/compositions. It mutates nothing and grants no
+  // authority the read tier did not already have — every input is a read this same principal can
+  // already perform one endpoint at a time.
+  ['GET', '/api/integration/hub/overview', 'integrationHubOverview'],
   ['GET', '/api/integration/external-systems', 'externalSystemsList'],
   ['POST', '/api/integration/external-systems', 'externalSystemsUpsert'],
   ['GET', '/api/integration/external-systems/:id', 'externalSystemsGet'],
@@ -295,6 +302,13 @@ const {
 // the ROUTE so the refusal happens before the request can cost anything: no credential reload, no
 // dry-run token consumption, no source read, no adapter construction, no wire call.
 const { assertK3ExternalWriteRefused } = require('./k3-external-write-permanent-fence.cjs')
+// 对接总览 — the pure projection behind GET /api/integration/hub/overview. It performs no I/O; this
+// route layer gathers the five already-authorized reads and hands them over. See that module's
+// header for the values-free boundary it enforces structurally.
+const {
+  buildIntegrationHubOverview,
+  collectDataSourcePointers,
+} = require('./integration-hub-overview.cjs')
 const {
   PLM_STOCK_PREPARATION_ACTION_ID,
   StockPreparationTableActionError,
@@ -899,6 +913,14 @@ function requestParams(req) {
 const MAX_LIST_LIMIT = 500
 const MAX_LIST_OFFSET = 10000
 const MAX_SAMPLE_LIMIT = 10000
+
+// 对接总览 page sizes. SERVER-HELD, not request-tunable: the overview is a fixed first screen, so
+// accepting a caller-supplied limit would only add a steering vector for no product gain. The
+// system cap is deliberately smaller than the consumer cap — a tenant with 200 registered external
+// systems has a governance problem this screen cannot fix, whereas one system can legitimately be
+// referenced by many pipelines and approved read configs.
+const HUB_OVERVIEW_SYSTEM_LIMIT = 200
+const HUB_OVERVIEW_CONSUMER_LIMIT = MAX_LIST_LIMIT
 
 function asPositiveInt(value) {
   if (value === undefined || value === null || value === '') return undefined
@@ -3400,6 +3422,87 @@ function createHandlers(services, options = {}) {
       return sendOk(res, adapterRegistry.listAdapterKinds().map(describe))
     },
 
+    // ---------------------------------------------------------------------
+    // 对接总览 (GET /api/integration/hub/overview)
+    //
+    // GATE: `requireAccess(req, 'read')` — the integration READ tier, which `hasPermission`
+    // defines as `integration:read` OR `integration:write` OR (`role:admin` / `integration:admin`).
+    // Note the tier is a UNION, not a ladder: a write-only principal is INSIDE it, so there is no
+    // "writer below read" to refuse here. What is refused is a principal holding NONE of those four
+    // codes — including a stock-prep principal, whose vocabulary owns its own namespace and never
+    // falls through to integration:* (see the R-11 comment on `hasPermission`).
+    //
+    // Every underlying read is one this principal can already do individually at the read tier
+    // (external-systems / pipelines / read-source-configs / read-source-compositions). This route
+    // adds no authority; it adds the JOIN. It writes nothing, and it never constructs an adapter,
+    // opens a connection, consumes a token or reloads a credential.
+    // ---------------------------------------------------------------------
+    async integrationHubOverview(req, res) {
+      requireAccess(req, 'read')
+      const scope = scopedInput(req, {})
+      const listScope = { tenantId: scope.tenantId, workspaceId: scope.workspaceId }
+
+      const [systems, pipelines, approvedReadSourceConfigs, approvedCompositions] = await Promise.all([
+        externalSystems.listExternalSystems({ ...listScope, limit: HUB_OVERVIEW_SYSTEM_LIMIT }),
+        pipelineRegistry.listPipelines({ ...listScope, limit: HUB_OVERVIEW_CONSUMER_LIMIT }),
+        readSourceConfigs.list({ ...listScope, status: 'approved', limit: HUB_OVERVIEW_CONSUMER_LIMIT }),
+        readSourceCompositions.list({ ...listScope, status: 'approved', limit: HUB_OVERVIEW_CONSUMER_LIMIT }),
+      ])
+
+      // The stock-prep table-action binding is SERVER config (context.config), never a request
+      // input, so it is read through the registry that was built once at registration. An
+      // unconfigured deployment throws TABLE_ACTION_NOT_CONFIGURED — that is the "unplugged" state,
+      // and it must render as "no consumer", not as a 5xx on the whole overview.
+      const tableActionBindings = []
+      try {
+        const action = await tableActions.getTableAction({ actionId: PLM_STOCK_PREPARATION_ACTION_ID })
+        const externalSystemId = action && action.source ? action.source.externalSystemId : null
+        if (typeof externalSystemId === 'string' && externalSystemId.trim()) {
+          tableActionBindings.push({ actionId: action.actionId, externalSystemId: externalSystemId.trim() })
+        }
+      } catch {
+        // Not configured / not resolvable -> the 备料 action simply does not appear as a consumer.
+      }
+
+      // The data_sources DISPLAY join. `context.api.dataSources.describe` is the host's narrow,
+      // principal-gated descriptor seam: it returns {id,name,type,status} and NOTHING else, and it
+      // neither connects nor decrypts. A deployment whose host predates the seam resolves nothing
+      // and the screen says so honestly (directory_unavailable) instead of implying ownership.
+      const dataSourceDirectory = context && context.api && context.api.dataSources
+      const dataSourceDirectoryAvailable = Boolean(dataSourceDirectory && typeof dataSourceDirectory.describe === 'function')
+      const dataSourceDescriptors = new Map()
+      if (dataSourceDirectoryAvailable) {
+        const principal = requestPrincipal(req)
+        const pointers = collectDataSourcePointers(systems)
+        await Promise.all(pointers.map(async (dataSourceId) => {
+          try {
+            const described = await dataSourceDirectory.describe(dataSourceId, principal)
+            if (!described || typeof described !== 'object') return
+            dataSourceDescriptors.set(dataSourceId, {
+              resolved: true,
+              name: described.name,
+              type: described.type,
+              status: described.status,
+            })
+          } catch {
+            // Owner mismatch, deleted row, or any facade fault: indistinguishable ON PURPOSE (the
+            // host's assertAccess refuses both with the same wording, so no existence leaks here
+            // either). The card renders 连接:已配置(他人管理).
+          }
+        }))
+      }
+
+      return sendOk(res, buildIntegrationHubOverview({
+        systems,
+        pipelines,
+        readSourceConfigs: approvedReadSourceConfigs,
+        compositions: approvedCompositions,
+        tableActionBindings,
+        dataSourceDescriptors,
+        dataSourceDirectoryAvailable,
+      }))
+    },
+
     async externalSystemsList(req, res) {
       requireAccess(req, 'read')
       const query = requestQuery(req)
@@ -3414,11 +3517,15 @@ function createHandlers(services, options = {}) {
     async externalSystemsUpsert(req, res) {
       requireAccess(req, 'write')
       const body = requestBody(req)
+      // P2-A: the registry validates a config.dataSourceId binding against the AUTHENTICATED
+      // principal (owner-only, same as every facade read) and stamps attribution server-side —
+      // so the principal comes from the request user, never the body (spread order overrides).
+      const withPrincipal = { ...body, principal: requestPrincipal(req) }
       if (hasPrivateConfigMutation(body.kind, body.config)) {
         requireAccess(req, 'admin')
-        return sendOk(res, await externalSystems.upsertExternalSystem(scopedAuthenticatedWriteInput(req, body)), 201)
+        return sendOk(res, await externalSystems.upsertExternalSystem(scopedAuthenticatedWriteInput(req, withPrincipal)), 201)
       }
-      return sendOk(res, await externalSystems.upsertExternalSystem(scopedInput(req, body)), 201)
+      return sendOk(res, await externalSystems.upsertExternalSystem(scopedInput(req, withPrincipal)), 201)
     },
 
     async externalSystemsGet(req, res) {

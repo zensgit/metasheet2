@@ -409,7 +409,136 @@ test('R5 normalizePrepLineRouteTemplate: strips the query string and normalizes 
   )
 })
 
-test('R5 route roster: 30 always + 3 optional = 33, no duplicates, and every entry is a REAL registered route (or the auth status route)', () => {
+// ── The registered stock-preparation route surface, PINNED BY NAME ───────────────────────────────
+//
+// This roster is a security-adjacent TRIPWIRE: it exists to notice when the stock-preparation route
+// surface changes. It used to cross-check a bare COUNT (`registeredStockPrepPaths.size === 32`), and
+// it sat red on main as `42 !== 32` — a message that names no route. A count-only tripwire cannot
+// distinguish a deliberate feature landing from an accidental exposure or a copy-pasted double
+// registration, so the cheapest way to make it green is to bump the number without reading anything,
+// and a tripwire that gets blind-bumped has stopped being a tripwire. Pinned by NAME (method + path),
+// an added or removed route reds with that route spelled out in the failure.
+//
+// Each of the 42 below was confirmed intended when this pin was written: no method+path is registered
+// twice (42 entries, 42 distinct paths, 42 distinct handlers), and every one sits behind a
+// requireAccess() gate. The 10 that landed after the original 32 are the `preflight` readiness probe
+// (stock-prep:read), the five `confirmation-decisions/*` workbench routes (O2/R-11 — read/operate/
+// admin, enforced by stock-preparation-permission-matrix.test.cjs) and the four `customer-packs/*`
+// pack routes (platform 'admin', enforced by stock-preparation-customer-pack-routes.test.cjs).
+//
+// Adding a route here is meant to be a deliberate act: confirm it is gated, tenant-scoped and not a
+// debug leftover BEFORE you paste it in.
+const SP = '/api/integration/stock-preparation'
+const REGISTERED_STOCK_PREP_ROUTES = Object.freeze([
+  `GET ${SP}/preflight`,
+  `GET ${SP}/target/readiness`,
+  `POST ${SP}/target/ensure`,
+  `GET ${SP}/sandbox-target/readiness`,
+  `POST ${SP}/sandbox-target/ensure`,
+  `POST ${SP}/options/sync`,
+  `GET ${SP}/mvp/readiness`,
+  `POST ${SP}/mvp/ensure`,
+  `POST ${SP}/mvp/options/sync`,
+  `POST ${SP}/mvp/sync/plan`,
+  `POST ${SP}/mvp/sync/persist`,
+  `POST ${SP}/mvp/source-runs/plm-bom`,
+  `POST ${SP}/mvp/source-runs/erp-materials`,
+  `POST ${SP}/mvp/erp-materials/sync`,
+  `GET ${SP}/projects`,
+  `GET ${SP}/snapshot-batches`,
+  `GET ${SP}/snapshot-batches/:snapshotBatchId/diff`,
+  `GET ${SP}/snapshot-batches/:snapshotBatchId/diff/rows`,
+  `GET ${SP}/material-mappings/summary`,
+  `GET ${SP}/material-mappings/candidates`,
+  `GET ${SP}/unit-conversions/summary`,
+  `GET ${SP}/unit-conversions/candidates`,
+  `POST ${SP}/material-mappings/candidates/sync`,
+  `POST ${SP}/material-mappings/confirm`,
+  `POST ${SP}/material-mappings/retire`,
+  `POST ${SP}/unit-conversions/confirm`,
+  `POST ${SP}/unit-conversions/retire`,
+  `POST ${SP}/generation/run`,
+  `POST ${SP}/exceptions/resolve`,
+  `POST ${SP}/exceptions/bulk-resolve`,
+  `GET ${SP}/exceptions`,
+  `GET ${SP}/prep-lines`,
+  `GET ${SP}/audit`,
+  `GET ${SP}/confirmation-decisions/readiness`,
+  `POST ${SP}/confirmation-decisions/ensure`,
+  `POST ${SP}/confirmation-decisions/confirm`,
+  `GET ${SP}/confirmation-decisions/value-entry`,
+  `GET ${SP}/confirmation-decisions`,
+  `GET ${SP}/customer-packs`,
+  `GET ${SP}/customer-packs/installs`,
+  `POST ${SP}/customer-packs/:packId/dry-run`,
+  `POST ${SP}/customer-packs/:packId/install`,
+])
+
+// The registered routes this smoke deliberately does NOT exercise, pinned by name alongside where
+// each IS covered. Derived-minus-pinned, so a NEW route cannot quietly land with no coverage anywhere:
+// its author must either give it a leg in the smoke roster or consciously record it here.
+const SMOKE_UNCOVERED_STOCK_PREP_ROUTES = Object.freeze([
+  // stock-preparation-preflight.test.cjs
+  `GET ${SP}/preflight`,
+  // stock-preparation-permission-matrix.test.cjs (O2/R-11 actor x route matrix)
+  `GET ${SP}/confirmation-decisions/readiness`,
+  `POST ${SP}/confirmation-decisions/ensure`,
+  `POST ${SP}/confirmation-decisions/confirm`,
+  `GET ${SP}/confirmation-decisions/value-entry`,
+  `GET ${SP}/confirmation-decisions`,
+  // stock-preparation-customer-pack-routes.test.cjs
+  `GET ${SP}/customer-packs`,
+  `GET ${SP}/customer-packs/installs`,
+  `POST ${SP}/customer-packs/:packId/dry-run`,
+  `POST ${SP}/customer-packs/:packId/install`,
+])
+
+function registeredStockPrepRoutes() {
+  const { ROUTES } = require('../../plugins/plugin-integration-core/lib/http-routes.cjs')
+  return ROUTES.filter(([, path]) => path.startsWith(`${SP}/`)).map(([method, path]) => `${method} ${path}`)
+}
+
+test('R5 route roster: the registered stock-preparation surface matches the by-name pin, and nothing is registered twice', () => {
+  const registered = registeredStockPrepRoutes()
+
+  // Count duplicates BEFORE collapsing to a Set — a Set would silently swallow the accidental
+  // double-registration this tripwire exists to catch, and name it as nothing at all.
+  const occurrences = new Map()
+  for (const entry of registered) occurrences.set(entry, (occurrences.get(entry) ?? 0) + 1)
+  assert.deepEqual(
+    [...occurrences].filter(([, n]) => n > 1).map(([entry]) => entry), [],
+    'the same method+path is registered more than once in ROUTES — a double registration, not a new route',
+  )
+
+  // The two halves are asserted separately so the failure says which DIRECTION moved and names the route.
+  const pinned = new Set(REGISTERED_STOCK_PREP_ROUTES)
+  const live = new Set(registered)
+  assert.deepEqual(
+    registered.filter((route) => !pinned.has(route)), [],
+    'stock-preparation route(s) ADDED but not blessed into the roster. Confirm EACH is intended — gated by requireAccess(), tenant-scoped, not a debug/dev leftover, not a duplicate — and only then add it to REGISTERED_STOCK_PREP_ROUTES',
+  )
+  assert.deepEqual(
+    REGISTERED_STOCK_PREP_ROUTES.filter((route) => !live.has(route)), [],
+    'roster route(s) no longer registered in ROUTES — remove them from the pin only if the removal is intended',
+  )
+  assert.deepEqual([...registered].sort(), [...REGISTERED_STOCK_PREP_ROUTES].sort())
+})
+
+test('R5 route roster: every registered route is either exercised by this smoke or pinned as covered elsewhere', () => {
+  const smokePaths = new Set(
+    [...ALWAYS_PREP_LINE_ROUTES, ...OPTIONAL_PREP_LINE_ROUTES]
+      .filter((route) => route !== '/api/integration/status')
+      // Path-param routes are registered with ':snapshotBatchId', not our ':id' — normalize before compare.
+      .map((route) => route.replace('/snapshot-batches/:id/', '/snapshot-batches/:snapshotBatchId/')),
+  )
+  const uncovered = registeredStockPrepRoutes().filter((route) => !smokePaths.has(route.split(' ')[1]))
+  assert.deepEqual(
+    [...uncovered].sort(), [...SMOKE_UNCOVERED_STOCK_PREP_ROUTES].sort(),
+    'a registered stock-preparation route is neither exercised by this smoke nor recorded as covered elsewhere',
+  )
+})
+
+test('R5 smoke roster: 30 always + 3 optional = 33, no duplicates, and every entry is a REAL registered route (or the auth status route)', () => {
   assert.equal(ALWAYS_PREP_LINE_ROUTES.length, 30)
   assert.equal(OPTIONAL_PREP_LINE_ROUTES.length, 3)
   assert.equal(PREP_LINE_ROUTE_UNIVERSE.size, 33)
@@ -417,11 +546,7 @@ test('R5 route roster: 30 always + 3 optional = 33, no duplicates, and every ent
   assert.equal(new Set(all).size, all.length, 'no duplicate route template in the roster')
 
   // Cross-check against the ACTUAL registered route table — the roster is not a free-standing guess.
-  const { ROUTES } = require('../../plugins/plugin-integration-core/lib/http-routes.cjs')
-  const registeredStockPrepPaths = new Set(
-    ROUTES.filter(([, path]) => path.startsWith('/api/integration/stock-preparation/')).map(([, path]) => path),
-  )
-  assert.equal(registeredStockPrepPaths.size, 32, 'the registered stock-preparation route count moved — update the R5 roster deliberately')
+  const registeredStockPrepPaths = new Set(registeredStockPrepRoutes().map((route) => route.split(' ')[1]))
   for (const route of all) {
     if (route === '/api/integration/status') continue
     // Path-param routes are registered with ':snapshotBatchId', not our ':id' — normalize before compare.
