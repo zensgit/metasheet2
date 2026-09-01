@@ -1,0 +1,424 @@
+# 222 部署窗口 Runbook —— 一次升级让备料线在 222 上真正活(2026-09-01)
+
+> **地位**:操作员执行脚本,不是设计文档。逐条编号,每条给动作 + 验证 + 失败处理。
+> **值域纪律**:本文**不含任何凭据 / 真实主机名 / 真实 IP**——一律用占位符
+> `<222-HOST>` / `<PLM-HOST>`。项目号 `230920006`、其名称、行数等是客户已知悉的
+> 项目级事实(非凭据、非敏感业务值),按现有姊妹文档(`onsite-connection-test-runbook-20260901.md`
+> 等)同等纪律保留。
+> **前置阅读**:客户侧现场连接测试与 30 秒数据体检的 SQL 见
+> `onsite-connection-test-runbook-20260901.md`——**本文不重复它**,只引用。
+> **窗口前提**:owner 在场(生产级机器,考勤/审批数据是真实在跑的业务数据)。
+
+---
+
+## 0. 为什么是这个窗口(先说清楚,再动手)
+
+222 现在跑的是一个**旧构建**。下面逐项核实"这次升级到底带来什么"——**核实结果和最初的设想有出入,以下是核实后的准确状态,不是设想**。
+
+### 0.1 已经在 `origin/main` 上、这次升级就能拿到的
+
+| 内容 | PR / commit | 状态 |
+|---|---|---|
+| 厂商 preset 目录(dn-pdm family 首个 preset) | #5385 (`25635e67d`) | **已合入 main** |
+| UI 选源(工作台里换源,免重启) | #5415 (`0fb0834f2` → 挤压合并) | **已合入 main** |
+| 生产写入正式主表的能力(FOS-4b-3-prod P1 策略契约 + P2 受控运行时) | #3195 / #3199(`931c018e2` / `aedc7dbf6`) | **早已在 main 上**,但**默认休眠**(见 §0.4) |
+
+### 0.2 截至本文写作时(2026-09-01)仍是 OPEN、需要在窗口前合入的
+
+| 内容 | PR / branch | 状态(已核实:CI 全绿) |
+|---|---|---|
+| 源就绪预检 + 拓扑自测 | #5416,`feat/stock-prep-source-preflight-topology`(`424804fb4`) | **OPEN**,`mergeStateStatus` 未知但 PR 正文自称 MERGEABLE,全部 checks pass |
+| K3 fence 覆盖两种 K3 kind(SQL 出站写默认拒能力门) | #5402,`sec/k3-sqlserver-fence-parity` | **OPEN**,PR 正文首行自称 `STATUS: UNMERGED`,全部 checks pass |
+
+核实命令(任何人可重跑):
+```
+gh pr view 5416 --json state,mergeStateStatus
+gh pr view 5402 --json state,mergeStateStatus
+git merge-base --is-ancestor 424804fb4 origin/main   # NO
+git merge-base --is-ancestor <5402 头提交> origin/main # NO
+```
+
+### 0.3 "纠正后的 DesignBom 读取拓扑"——核实结论与最初设想不同,这是本窗口真正的第一道门
+
+最初的说法是"纠正后的 DesignBom 读取拓扑已经在 main 上,是被 squash merge 误判成未合并"。**逐项核实后,这个说法不成立**,证据:
+
+- 携带该修正的提交(`32dd7f173` "dn-pdm topology backfill from the first live run")只存在于**本地分支** `feat/stock-prep-vendor-presets`,**从未 push 到 `origin`**(`git ls-remote origin refs/heads/feat/stock-prep-vendor-presets` 空返回),**没有对应的 PR**,`git merge-base --is-ancestor 32dd7f173 origin/main` → `NO`。这不是 squash-merge 误报(那种误报是"内容已在,提交对象不在");这里是**内容本身也不在** `origin/main` 上。
+- 已经合入 main 的 #5385(`25635e67d`)只带来了 preset **目录机制**(字典怎么读、join 拓扑怎么走);它的 `dn-pdm-family.preset.json` **不含** `DesignBom`(`git show origin/main:.../dn-pdm-family.preset.json | grep -i designbom` 零命中)。
+- 已经合入 main 的 `stock-preparation-bom-expansion.cjs`(部署读取计划的实现)**仍然只实现订单模块桥接**(`pathExAttr → pathInfo → orderHead → orderDetail`),完全没有 DesignBom 分支。
+- 本仓库自己的设计文档已经把这件事讲清楚了:`docs/development/platform-overall-design/stock-prep-onboarding-acceleration-20260901.md` §2.A 证据 2——"该分支尚未合入 `origin/main`(`git merge-base --is-ancestor` 核实为 `NO`)……**提交里用的表名仍是 `DN_PDM_BomHeadInfo`/`BomDetailsInfo` 而非现场诊断口中的"`DN_PDM_DesignBom`"——合并该分支时需要把现场诊断的表名 / `product_part_id` 发现与分支内容互相核对,不能假定二者已经是同一件事**"。
+
+**结论**:DesignBom 读取拓扑今天**既不在 main 上,也不是"合并一下就好"**——`32dd7f173` 需要先被推送、审阅,并且审阅时必须核对它用的表名/字段是否与 2026-09-01 现场实读到的真实形状(`DN_PDM_DesignBom`、`product_part_id`、数量在 `Bom_ExAttr` 族第 1 槽)一致,不一致就要改代码,不是简单合并。这件事排进 §1(Step 0)清单,是本窗口成立与否的**第一道真实的门**,比"合并 #5416/#5402"更不确定,必须最先安排时间。
+
+### 0.4 "生产写入正式主表"——另一个必须搞清楚的机制,否则 Step 8 的验收标准无法达成
+
+`plm_stock_preparation_main`(canonical,"备料主表(正式·未启用)")今天为 0 行,**不是因为没人拉取过数据**。核实代码后确认:
+
+- 表动作的 `apply`/`mvp-persist` 写入路径(`stock-preparation-table-actions.cjs:assertStockPrepApplySandboxAllowed`)对 canonical objectId **无条件 403**(`STOCK_PREP_APPLY_SANDBOX_ONLY`,`reason: prod_canonical`)——这是**故意的 P0 门**,写在代码注释里:"apply is sandbox-only … **production apply is a separate owner gate**"。它只会把真实数据写进**沙箱/落地表**,从不写 canonical。
+- "生成"(`POST .../generation/run`)读的是沙箱落地快照,写的是**独立的**"备料行"表 `plm_stock_preparation_line` + 异常队列——代码里(`stock-preparation-generation-runtime.cjs`)从头到尾不引用 `plm_stock_preparation_main`。这条路径**结构上到不了 canonical**。
+- 唯一能写 canonical 的机制是 **FOS-4b-3-prod**:P1(策略契约,#3195)+ P2(受控生产运行时,#3199)**都早已在 main 上**,但 P2 commit 原文写明"canonical writable only under an explicit server-config policy authorized by **a future owner gate (P4)**""dormant by default"。P4 不是代码,是**当场的 owner 授权动作**——本仓库已有完整的、values-free 的执行程序:`docs/development/data-factory-fos-4b-3-prod-apply-runbook-20260625.md`。
+
+**结论**:Step 8 要看到 `plm_stock_preparation_main` 里有真实项目行,**必须在本窗口内执行一次 FOS-4b-3-prod 生产写入程序**(owner 现场授权 + 有时限的服务端策略 + 全新 dry-run token),这不是"顺带发生"的事,是 Step 7 里明确的一个子步骤。见 §7.2。
+
+### 0.5 这次窗口实际交付的是什么(修正后的版本)
+
+一次升级 + 一次现场授权动作,合起来交付:
+
+1. K3 出站写默认拒能力门覆盖两种 K3 kind(#5402,纵深防御,见护栏一节)——**需要窗口前合入**;
+2. 纠正后的 DesignBom 读取拓扑(需要窗口前**审阅并合入** `feat/stock-prep-vendor-presets` 分支尖端,核对表名后);preset 目录本身已在 main;
+3. UI 选源(#5415,**已在 main**)——接入换 PLM 不再改 env 重启;
+4. 源就绪预检 + 拓扑自测(#5416,**需要窗口前合入**)——30 秒 go/no-go;
+5. 一次 owner 现场授权的、有时限有行数上限的生产写入(FOS-4b-3-prod P4),把第一个真实项目的行写进 canonical 主表。
+
+第 5 项不是"代码升级自动带来的",是 Step 7 里**当场做的一个决定 + 一个操作**。本文把它排进流程,而不是假装它会自动发生。
+
+---
+
+## Step 0 — 窗口开始前的准备(不在 222 上做,在开发机上做)
+
+**0-1. 合入 #5416(源就绪预检 + 拓扑自测)**
+- 动作:`gh pr merge 5416 --squash`(或走仓库现行的合并方式)。
+- 验证:`git fetch origin && git merge-base --is-ancestor <合并后 SHA> origin/main` → 应为 `origin/main` 本身包含它;`origin/main` 上 `plugins/plugin-integration-core/lib/stock-preparation-source-preflight.cjs` 存在。
+- 失败处理:CI 已全绿,若合并冲突,按 PR 正文"与 main 的合并"一节的记录处理(该 PR 上次核对的合并基线是 `bcd5c300e`,之后 main 又往前走,需要重新合并、重新跑一次全链)。
+
+**0-2. 合入 #5402(K3 fence 覆盖两种 K3 kind / SQL 出站写默认拒能力门)**
+- 动作:`gh pr merge 5402 --squash`。
+- 验证:同上,查 `packages/core-backend/src/data-adapters/outbound-sql-write-gate.ts` 落在 `origin/main`。
+- 失败处理:同上,CI 全绿,冲突按标准合并流程处理。
+
+**0-3. 审阅并合入纠正后的 DesignBom 读取拓扑(不是机械合并,见 §0.3)**
+- 动作:
+  1. 从本地分支 `feat/stock-prep-vendor-presets` 尖端(`32dd7f173`)push 出一个新分支到 `origin`,开 PR。
+  2. 审阅时**必须**核对提交里的表名(`DN_PDM_BomHeadInfo`/`BomDetailsInfo`)是否与 2026-09-01 现场实读的真实桥接表名(`DN_PDM_DesignBom`)、连接字段(`product_part_id`)、数量槽(`Bom_ExAttr` 族第 1 槽)一致——不一致就要在这个 PR 里改代码,不能假定"提交标题说是这个,那就是这个"。
+  3. 用 `node __tests__/source-vendor-presets.test.cjs` 之类的既有回归先本地验证,再开 PR。
+- 验证:PR 合入后,`origin/main` 上的 `dn-pdm-family.preset.json` 或读取拓扑判定逻辑里能看到 `DesignBom`(或等效的、与现场实读一致的桥接标识)。
+- 失败处理:如果核对发现代码与现场形状不一致,**先修代码再合并,不要带着已知不一致合入**——这正是 §0.3 引用的设计文档明确写下的风险提示。这一步没有捷径,预留独立的开发时间,不要挤进部署窗口当天。
+
+**0-4. 刷新过期的 `PACKAGE_PROVENANCE_MANIFEST_DIGEST_PIN`(机械操作,owner 已批准)**
+- 背景先核实清楚:`.github/workflows/stock-prep-s6a-postgres17-validation.yml` 里这枚 pin(连同 `PACKAGE_SHA256_PIN`、`SERVICE_RUNTIME_SHA_PIN`)绑定的是一个**已冻结的历史 release**(`RELEASE_TAG: stock-prep-onprem-s6a-20260731-a45a2fe3f`),文件自己的注释写着"**LAW — never recomputed, only verified against**"。也就是说,这枚 pin **原本不应该随 `main` 的日常提交漂移**——它验证的是那个历史冻结包自身携带的 provenance 脚本算出来的摘要,不依赖 `main` 当前版本的代码。
+- 动作(**先核实是否真的过期,再动**):
+  1. `gh workflow run stock-prep-s6a-postgres17-validation.yml`(手动 dispatch,该 workflow 只能手动触发)。
+  2. 看 `Sealed-export frozenManifestDigest must equal packageProvenanceManifestDigest pin` 这一步:PASS → **这枚 pin 没有过期,§0-4 到此为止,不要动它**;FAIL 且失败原因确实是 digest 不匹配 → 继续第 3 步。
+  3. 只有在第 2 步实测确认失配时,才用失败步骤打印出的 `frozenManifestDigest` 更新 workflow 文件里的 `PACKAGE_PROVENANCE_MANIFEST_DIGEST_PIN`,并在提交信息里写清楚**为什么这枚"LAW"常量在这次例外地被改了**(例如:冻结 release 资产本身被重新生成过,或 provenance 算法有一次得到 owner 认可的追溯性变更)——不要在没有实测失配、也没有写清楚理由的情况下静默改一枚自称"LAW"的常量。
+- 验证:重跑一次 `gh workflow run`,该步骤变绿。
+- 失败处理:如果 `PACKAGE_SHA256_PIN`(而不是 provenance digest)也对不上,说明冻结 release 资产本身变了,这是比"一枚 pin 过期"大得多的事,先停下来找 owner 确认,不要连锁改三枚 pin。
+
+**0-5. 从当前 main 构建部署制品**
+- 动作:`OUTPUT_DIR=... INSTALL_DEPS=1 BUILD_WEB=1 BUILD_BACKEND=1 scripts/ops/multitable-onprem-package-build.sh`(参数按仓库既有约定;该脚本自带 `REQUIRED_PATHS` 清单,缺失会自己报错)。
+- 验证 artifact 文件数(**这正是 F22 本该被挡住的地方**,见 `first-deployment-lessons-20260831.md` F22):
+  ```
+  unzip -l <PACKAGE_NAME>.zip | wc -l
+  ```
+  与上一次已知良好的包(或 `REQUIRED_PATHS` 清单条目数)比对量级——不要求逐一核对,但如果这次文件数明显比上次少一大截(例如少了几十上百个文件),先别往下走,查是不是又发生了"目录被跳过"。
+  再跑一次五项检查器:`scripts/ops/multitable-onprem-package-verify.sh <PACKAGE_NAME>.zip`。
+- 失败处理:`multitable-onprem-package-verify.sh` 任一检查失败,按它给出的原因修,不要跳过检查直接上机器——真正的 F22 网(逐文件哈希比对)会在 Step 2 的升级脚本里再兜底一次,但这里的粗筛能省一次上机器才发现的往返。
+
+**0-6. owner 预先起草(不是签发)本窗口的生产写入授权记录**
+- 动作:owner 按 `data-factory-fos-4b-3-prod-apply-runbook-20260625.md` §2 的模板,先把这次授权要填的字段过一遍脑子(项目 `230920006`、action `plm.stock-preparation.pull-bom.v1`、route 建议先定 `both`——143 个 BOM 头/1319 行明细的规模不确定是否触发大 BOM 异步路径,`both` 免得现场纠结、`maxCleanRows` 留到 Step 7 拿到真实 dry-run 计划数字后再定、`expiresWithin` ≤ 7 天)。
+- 这一步不产生任何配置改动,纯粹是让 owner 到场时不用现读一遍陌生文档。
+
+---
+
+## Step 1 — 备份 / 回滚点(定义一次,后面每一步引用它)
+
+**在 222 上,SSH 进去之后(交互式会话内,不需要转义 `$`;如果是一次性 `ssh host "..."` 单条命令,把 `$` 转义成 `\$`)。**
+
+**1-1. 取出 `DATABASE_URL`(既有教训:`pm2 jlist | ConvertFrom-Json` 会因为重复 JSON key 失败,一律用下面这种形式)**
+```powershell
+$l = (pm2 env 0 | Select-String '^DATABASE_URL:').Line
+$env:DATABASE_URL = $l -replace '^DATABASE_URL:\s*',''
+```
+
+**1-2. 数据库快照(migrations 跑之前,一次性)**
+```powershell
+$ts = Get-Date -Format 'yyyyMMdd-HHmmss'
+$backupDir = "C:\metasheet\output\backups\upgrade-backup-$ts"
+New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
+pg_dump $env:DATABASE_URL -Fc -f "$backupDir\pre-upgrade-db.dump"
+```
+记下 `$backupDir`(和它的时间戳)——升级脚本(Step 2)会**另起一个自己的** `upgrade-backup-<它自己的时间戳>` 目录做代码/插件备份,两个目录时间戳相近但不是同一个,操作报告里两个都要记。
+
+**1-3. 代码 / 插件 / dist 备份**——不用手动做,Step 2 的升级脚本第 3/8 步会自动备份 `docker/`、`config/`、`packages/core-backend/dist`、`apps/web/dist`、`plugins/` 到它自己的 `upgrade-backup-<timestamp>` 目录,并把路径打印为 `BACKUP_PATH=...`。**记下这个路径。**
+
+**回滚程序(定义一次,Step 9 引用)**
+
+- **优先(代码/插件级回滚,覆盖绝大多数失败模式——构建坏了、健康检查不过、F22 类文件丢失)**:
+  ```powershell
+  # 对升级脚本备份下的每个路径:
+  Remove-Item -LiteralPath <live-path> -Recurse -Force -ErrorAction SilentlyContinue
+  Copy-Item -LiteralPath (Join-Path $BACKUP_PATH <rel-path>) -Destination <live-path> -Recurse -Force
+  pm2 restart metasheet-backend --update-env
+  ```
+  这段命令**升级脚本失败时会自动打印**(逐路径给出,复制粘贴即可),不需要自己拼。
+  **不涉及数据库**——因为 076-080 这批迁移都是纯新增(建表/加列),按既有约定是单事务、失败即整体回滚,不会残留半迁移状态,所以绝大多数失败(构建问题、健康检查不过)只需要代码级回滚。
+
+- **最后手段(数据库级回滚,范围更大,慎用)**:只有在"迁移本身跑成功了但之后发现数据被破坏"这种极小概率场景才用——且**这个盒子是半生产环境,考勤/审批数据是真实业务数据**,`pg_restore --clean` 类操作会把 1-2 快照之后**所有模块**(不只是备料)的新数据一并抹掉。用之前必须 owner 确认,且只在代码级回滚不够用时才考虑:
+  ```powershell
+  pg_restore --clean --if-exists -d $env:DATABASE_URL "$backupDir\pre-upgrade-db.dump"
+  ```
+
+---
+
+## Step 2 — 升级
+
+**2-1. 把 Step 0-5 构建出的包(`.zip` + `.sha256`)传到 222 上。**
+
+**2-2. 执行既有的原地升级脚本**(它已经把停服/备份/替换/F22 防护/迁移/重启/健康检查/失败即回滚提示全部编排好了,不要用手工步骤替代它——手工步骤正是 F22 的成因):
+```powershell
+.\scripts\ops\multitable-onprem-package-upgrade-inplace.ps1 `
+  -PackageArchive <path-to-package>.zip `
+  -Pm2AppName metasheet-backend
+```
+它会依次做(8 步,全部打印到终端):
+1. 校验包的 SHA-256(对着 `.sha256` sidecar,不匹配直接拒绝);
+2. 停 pm2;
+3. 备份(见 Step 1-3,打印 `BACKUP_PATH=...`);
+4. 解包 + 替换(**逐文件遍历,不用 `-Exclude`**——这正是 F22 教训的固化,见脚本头注释);
+5. F22 断言(必存在文件清单)+ 逐文件哈希核对(比"文件数对得上"更强的检查)+ node_modules 未泄漏检查;
+6. 跑迁移(从 `docker\app.env` 加载 env 到本进程,`pm2` 不会自动重新读 env);
+7. `pm2 restart --update-env` + 轮询健康检查(默认 `http://127.0.0.1/api/health`,12 次 × 5 秒);
+8. 打印最终报告(包名 / 备份路径 / 迁移退出码 / 健康状态)。
+
+**验证**
+- 终端最后一段"final report"里 `health: OK`。
+- `pm2 list` 显示 `metasheet-backend` 为 `online`。
+- `Invoke-RestMethod http://127.0.0.1/api/health` 返回健康。
+
+**失败处理**
+- **脚本本身在第 4-7 步之间的任何异常**(校验失败、迁移失败、重启失败、健康检查超时),脚本会**自动**:停 pm2 → 打印一段"RESTORE REQUIRED"框(备份路径 + 每个被替换路径的精确恢复命令)→ 重新抛出异常。**照着它打印的命令做,不用自己回忆 Step 1 的回滚程序**。
+- 若脚本尚未开始执行就失败(比如包的 SHA-256 校验不过),说明 Step 0-5 传输过程中包损坏,重新传一次,不要跳过校验强行继续。
+
+---
+
+## Step 3 — 升级后体检(semi-production 盒子,范围要说清楚)
+
+> **本节的检查范围仅限"这次升级动过的东西":备料表动作、preset 目录、K3 出站写门、源预检模块。考勤/审批数据是这台盒子上真实在跑的业务,本节只做存在性/未变化的抽查,不做全量审计。**
+
+**3-1. 版本 / build 存在**
+- 动作:`node -e "console.log(require('C:/metasheet/packages/core-backend/dist/src/version.js'))"`(或该次打包生成的 `BUILD_PROVENANCE.json`,若随包携带)。
+- 验证:版本号/commit 对应这次打包时记的 SHA,不是升级前的旧值。
+- 失败处理:版本号没变 → 升级没有真的生效(可能是 pm2 缓存了旧 dist),重新走一遍 Step 2,升级前先确认停服真的发生。
+
+**3-2. preset 目录 + DesignBom 读取拓扑真的在这台机器上**
+- 动作:检查线上文件(`Get-Content C:\metasheet\plugins\plugin-integration-core\lib\source-vendor-presets\dn-pdm-family.preset.json`)含 Step 0-3 合入的 DesignBom 相关内容;
+- 验证:不是升级前那份旧文件(可以用文件哈希与本地构建产物比对)。
+
+**3-3. 部署预检(既有能力,先用它把"我方这一侧"配对)**
+```
+GET /api/integration/stock-preparation/preflight
+```
+按 `blockers[].fix.run` 逐条修到 `ready: true`。已知 code(照抄 fix,不要自己另起 objectId 或猜 env 名):
+
+| code | 含义 |
+|---|---|
+| `STOCK_PREP_CONFIRMATION_LEDGER_NOT_READY` | 确认裁决账本表不在(按需建,不在迁移链里) |
+| `STOCK_PREP_CUSTOMER_PACK_NOT_CONFIGURED` | 没配 pack |
+| `STOCK_PREP_PACK_TARGET_MISSING` | pack 声明的 `targetObjectId` 那张表不存在 |
+| `STOCK_PREP_PACK_TARGET_INCOMPLETE` | 表在,但 `ext_` 列没装 |
+| `STOCK_PREP_EXT_FIELD_MAPPING_NOT_CONFIGURED` | 没配源列 → `ext_` 映射 |
+| `STOCK_PREP_SANDBOX_MODE_NOT_ENABLED` | 写行授权没开(装列和写行是两道独立授权) |
+| `STOCK_PREP_SANDBOX_ALLOWLIST_MISSING_TARGET` | 允许清单里没有 pack 声明的目标 |
+
+四条"围栏姿态"(production Apply 关闭 / K3 永久禁写 / B2a 登记休眠 / 通用出站写门不设)只报状态、不给 `fix`——**不设就是当前正确姿态**,预检不会推你去开它们(production Apply 的开启在 Step 7,是当场的、有时限的动作,不是这里的常驻状态)。
+
+**3-4. F20 陷阱预防性检查(受管表建成后必须自带默认视图,否则整个 base 打不开)**
+- 背景:`first-deployment-lessons-20260831.md` F20——`ensureObject` 只建 sheet/字段,不建 `meta_views` 行;多维表打开 base 时要渲染每张表的默认视图,零视图的表会拖累**整个 base** 打不开。
+- 动作:打开备料所在的 base(工作台里点开"备料"),确认能正常打开,四张受管表(确认裁决账本 / 沙箱目标 / canonical 主表 / 其他卫星表)都能点开。
+- 失败处理:某张表打不开 → 按 F20 已知修复(数据侧手工补 `meta_views` 行,或确认代码修复是否已包含在这次升级里)处理,**不要跳过这一步直接往下走**——Step 6-8 都要打开表来看行数据。
+
+**3-5. 考勤 / 审批数据未受影响(抽查,不是全量)**
+- 动作:挑 1-2 张考勤/审批表,记一下升级前后的行数(`SELECT count(*) FROM ...`)。
+- 验证:行数一致(这批迁移是纯新增,不改动其他模块的表)。
+- 失败处理:行数变化 → 立即停止,启动 Step 9 的数据库级回滚评估,通知 owner。
+
+---
+
+## Step 4 — 源就绪预检(go/no-go 门,用新能力)
+
+**这是 30 秒内知道"能不能演"的关口,不是走完全套流程之后才发现的意外。**
+
+**动作**
+```
+GET /api/integration/stock-preparation/source-preflight?externalSystemId=104e9bad-3400-42bb-b427-e7a1d9cf9174
+```
+(`104e9bad-3400-42bb-b427-e7a1d9cf9174` = 已注册的只读 external system,kind `data-source:sql-readonly`,`config.dataSourceId='customer-plm-test'`,指向客户 PLM 的只读账号。)
+
+**期望的返回(`verdict: 'go'`,`blockers: []`)**
+
+| `checks.*` | 期望 |
+|---|---|
+| `reachability` | 能连上 |
+| `projectData` | 项目号入口表非空,`NodeType=2` 采样行存在 |
+| `bomData` | BOM 头 / 明细非空(143 头量级) |
+| `topology` | 实测桥接 = DesignBom,且 `matchesConfigured=true`(配置的读取计划已经指向 DesignBom——这就是为什么 §0.3 的合并必须先做完) |
+| `presetMatch` | 命中 dn-pdm family preset |
+| `quantityField` | 解出的槽位与配置一致(`Bom_ExAttr` 族第 1 槽) |
+
+**已知 blocker code(任一出现,verdict 就是 `no-go`)**:`source_unreachable`、`entry_table_missing`、`no_project_numbers`、`no_bom_rows`、`no_bom_bridge`、`bridge_ambiguous`、`topology_mismatch`。
+
+> **`topology_mismatch` 是这个功能存在的理由**:它的提示原文是"配置走的路,和这家实际的形状对不上——照现在配置跑,会拉到 0 行"。**看到它,或看到无数据类 blocker,STOP,不要往 Step 6 走**——先回到 §0.3,确认 DesignBom 读取拓扑真的合并、真的生效(读取计划 `matchesConfigured` 才会是 `true`)。
+
+**警告级(`warnings`,不阻断,但要看一眼)**:`no_preset_match` / `preset_ambiguous`(认不出厂商不阻断接入,只是没有现成字段字典)、`quantity_field_mismatch`、`quantity_field_unresolved`、`quantity_readings_disagree`、`dictionary_unreadable`、`node_type_column_absent`。
+
+**失败处理**:`no-go` → 不要现场排查表结构(那是上一代靠人工冷读多表定位问题的方式);先看 `blockers[].detail`,它给的是**实测**的桥接/槽位/计数,对照 §0.3 已合入的读取计划配置,找出两者哪里对不上,改配置(不是改探测器)。
+
+---
+
+## Step 5 — UI 选源(把源绑定切到客户 PLM,验证免重启)
+
+**动作**(工作台点法:安装/体检页顶部"选源"面板;等价 API):
+```
+POST /api/integration/stock-preparation/source-binding
+{ "externalSystemId": "104e9bad-3400-42bb-b427-e7a1d9cf9174" }
+```
+需要 `integration:admin`(比普通连接编辑权限更高——这条绑定改变的是**全体租户**这条备料表动作读哪个外部系统)。
+
+**验证**
+1. 响应体 `takesEffectWithoutRestart: true`,且**不需要 `pm2 restart`**——立刻用 `GET /api/integration/stock-preparation/source-binding` 再读一次,确认已经是新值(不用等、不用重启)。
+2. 审计行记录了 actor + 新旧值:`GET /api/integration/stock-preparation/audit`,找 `action: 'source_binding_set'`,`mode: 'bound'`(首次绑定;若之前已经指过一次别的源则是 `'rebound'`),`detail.previousExternalSystemId` 带着旧值(env JSON 里那个合成源的 external system id)。
+3. 重新跑一次 Step 4 的源就绪预检——现在不传 `externalSystemId` 查询参数,它应该自动读到刚绑定的源,`verdict` 仍是 `go`。
+
+**失败处理**
+- 400 `SOURCE_BINDING_REQUEST_INVALID` → body 只能带 `externalSystemId`,不能带 `kind`/`readPlan`/`target` 等字段(这是刻意的窄接口:选源只能换"读哪个源",不能顺带改"怎么读"/"读到哪")。
+- 绑定目标必须是**已存在、测试通过**的 external system,且其 `kind` 落在只读集合(`data-source:sql-readonly` / `bridge:legacy-sql-readonly`)——否则会被拒,这不是 bug,是防止"选源"变成一条意外打开 K3 写的路径(见护栏一节)。
+
+---
+
+## Step 6 — 首次真实拉取
+
+**6-1. Dry-run**
+```
+POST /api/integration/table-actions/plm.stock-preparation.pull-bom.v1/dry-run
+{ "parameters": { "projectNo": "230920006" } }
+```
+**验证**:`status=expanded`,`rowsExpanded` 是真实数量级(现场诊断记录约 1319 行明细 / 143 个 BOM 头量级),**不是 0**;样本行的图号(`IdentityNo`)/名称/材料/数量(`Bom_ExAttr` 族第 1 槽)都是真实值,不是占位符或 GUID。记下 `dryRunToken`。
+
+**失败处理**:`rowsExpanded=0` → 回到 Step 4,源预检的 `topology`/`quantityField` 一定有问题,**不要在这一步现场排查**,先重新跑预检。`status=not_found` → 项目号打错,或 `DN_PDM_PathExAttrInfo.FileCode`(`NodeType=2`)那条锚定链路没配对,核对 §0 的字段映射。
+
+**6-2. mvp-persist(把这次拉取落成一个真实快照批次)**
+```
+POST /api/integration/table-actions/plm.stock-preparation.pull-bom.v1/mvp-persist
+{ "parameters": { "projectNo": "230920006" }, "confirm": { "dryRunToken": "<上一步的 token>" } }
+```
+(`token` 放在 `confirm.dryRunToken`,放顶层会 400——这是既有教训,见 `onsite-connection-test-runbook-20260901.md` §3。)
+
+**验证**:响应给出真实的 `snapshotBatchId`;这一步写入的是**沙箱落地对象**(不是 canonical——见 §0.4,`apply`/`mvp-persist` 结构上到不了 canonical),打开工作台确认落地表里出现了项目 `230920006` 的真实行。
+
+**失败处理**:409 `TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH` → dry-run 和 apply 的 body 配置不一致(比如中间有人改了读取计划),重新走一次 dry-run 拿新 token。
+
+---
+
+## Step 7 — 确认 → 生产写入正式主表(owner 现场授权的一次动作)
+
+### 7.1 把批次里的 `MANUAL_CONFIRM` 清到 0
+
+计划级门槛是"批次内 `MANUAL_CONFIRM` 计数必须为 0"才能进入下一步的生产 apply(FOS-4b-3-prod 的 stop rule 之一:"manual_confirm rows present? they MUST stay held"——留着不写,不是不管)。
+
+```
+GET  /api/integration/stock-preparation/confirmation-decisions
+POST /api/integration/stock-preparation/confirmation-decisions/confirm
+```
+- **接受 preset 驱动的、高置信度的行**(字典命中、数量候选唯一、槽位已知——preset 已经在 §0.1 合入,这类行直接确认为 `accept_current`/`keep_multiple_rows`)。
+- **不要替代客户编造 ERP 码或数量归属**——真正有歧义的行(preset 认不出、多个数量候选、字典冲突)保持 `manual_hold`,留给客户事后确认,**这条门槛本身不放宽**(与 `docs/development/platform-overall-design/stock-prep-onboarding-acceleration-20260901.md` §4⑥ 的原则一致:收窄的是落进 `MANUAL_CONFIRM` 的集合大小,不是绕开这道门)。
+
+**验证**:再跑一次 Step 6-1 的 dry-run(同一批),`counts[MANUAL_CONFIRM] === 0`(或明确记下还剩多少行held,决定是否推迟这批到客户确认之后)。
+
+### 7.2 生产写入(FOS-4b-3-prod,owner 现场授权,当场执行,执行完立刻关闭)
+
+**这是把数据真正写进 `plm_stock_preparation_main` 的唯一代码路径。** 完整程序见
+`docs/development/data-factory-fos-4b-3-prod-apply-runbook-20260625.md`——**本文引用它,不重复它的全部细节**,这里只列本窗口要执行的顺序:
+
+1. **owner 当场记录授权**(values-free 模板,§2 of that doc):
+   ```
+   productionApplyAuthorized=true
+   authorizationId=<opaque id>
+   target=prod_canonical_stock_preparation
+   allowedRoute=both
+   allowedActionId=plm.stock-preparation.pull-bom.v1
+   maxCleanRows=<Step 7.1 之后这批 dry-run 的 clean 计数(add+update)>
+   expiresWithin=<≤ 7 天>
+   manualConfirmRowsMustStayHeld=true
+   k3SaveAuthorized=false  k3SubmitAuthorized=false  k3AuditAuthorized=false  k3BomWriteAuthorized=false
+   externalWriteAuthorized=false
+   ```
+2. **服务端配置**(不是请求参数,不是 env——按该文档 §3 原样配置到 `context.config.stockPrepApplyProduction`,`authorizedTargetObjectId` 必须是 `plm_stock_preparation_main`,`requireFreshDryRun: true`)。
+3. **验证门确实生效**:非匹配的 apply(错 route/action/target)仍然被拒(`STOCK_PREP_PRODUCTION_APPLY_DENIED`);去掉配置后 canonical 恢复"拒",证明"开关"是真开关。
+4. **全新 dry-run**(不能用 Step 6 的旧 token——`requireFreshDryRun` 会拒绝陈旧/沙箱 token):对项目 `230920006` 重新 dry-run 一次,确认 `cleanCount(add+update) <= maxCleanRows`,`manual_confirm` 行数 = 0(或明确等于本次授权范围之外、保持 held 的那部分)。
+5. **Apply**(带全新 token,走 §7.2-1 授权的 route):`canonicalWriteExecuted` 只应在这个策略下发生;`manualConfirmRowsWritten` 必须是 `0`;`failed` 应为 `0`。
+6. **立刻退出**:执行完成后,移除 `context.config.stockPrepApplyProduction`(或让它过期)——P2 恢复休眠,canonical 恢复默认拒绝。**不要把这个策略留在配置里过夜。**
+
+**失败处理**:任一 stop rule 触发(策略缺失/过期/不匹配、token 陈旧、`cleanCount > maxCleanRows`、`manualConfirmRowsWritten > 0`、任何 K3/外部写发生)→ **立即停止**,不要重试性地放宽授权范围,回到 owner 重新评估。这条路径本身设计为**默认拒绝、explicit 才开**,失败时的正确反应是"这次先不写",不是"调大 maxCleanRows 再试一次"。
+
+### 7.3(可选,若这次窗口还要产出 ERP 对接用的备料行)
+
+若该客户当次窗口还需要 ERP 物料码映射 / 单位换算(与 §7.1-7.2 的 canonical 写入路径彼此独立、非必需):
+```
+POST /api/integration/stock-preparation/material-mappings/confirm
+POST /api/integration/stock-preparation/unit-conversions/confirm
+POST /api/integration/stock-preparation/generation/run   { "projectId": ..., "snapshotBatchId": "<Step 6-2 的批次>" }
+```
+这条路径写的是**独立的**"备料行"表 `plm_stock_preparation_line` + 异常队列,供 ERP 对接消费——**不是**写 canonical 主表的路径(见 §0.4),两条路径互不替代。本窗口的核心验收标准(Step 8)只要求 §7.2 完成。
+
+---
+
+## Step 8 — 验证收获(整个窗口的成功标准)
+
+**动作**:打开工作台里的"备料主表(正式·未启用)"(`plm_stock_preparation_main`),或:
+```
+GET /api/multitable/... (该 sheet 的记录列表)
+```
+
+**验证(具体检查)**
+1. **行数**:项目 `230920006` 对应的行数 > 0,量级接近 Step 7.2 步骤 5 里 apply 返回的 `cleanDecisionCountsWritten`。
+2. **抽样一行**,确认四个字段都是真实值而非占位符:
+   - 项目号:`230920006`
+   - 图号:来自 `IdentityNo`
+   - 材料:非空、非 GUID
+   - 数量:来自 `Bom_ExAttr` 族第 1 槽,数字合理(不是 0、不是 NULL 转出来的怪值)
+
+**这就是整个窗口的成功标准。** 达成即表示:源已切到客户真实 PLM(Step 5)、真实 BOM 已过预检(Step 4)、真实数据已落地(Step 6)、经人工确认 + owner 授权的生产写入已执行(Step 7),canonical 表第一次装着一个真实项目的真实数据。
+
+**失败处理**:行数为 0 或抽样值看着像占位符 → 回查 Step 7.2 步骤 5 的响应,`canonicalWriteExecuted` 是否真的发生;若发生但行数对不上,检查是不是 Step 7.1 把大部分行留在了 `manual_hold`(那是**正确行为**,不是故障——held 的行本该不写)。
+
+---
+
+## Step 9 — 如果任何一步失败
+
+**回滚**:用 Step 1 定义的程序——优先代码/插件级(升级脚本失败时自动打印,照抄命令);数据库级是最后手段,且必须先经 owner 确认(会影响考勤/审批的后续数据)。
+
+**排障表**
+
+| 症状 | 可能原因 | 怎么查 |
+|---|---|---|
+| 升级脚本在第 5 步(F22 断言)失败 | 打包时又发生了目录被跳过 | 对比 Step 0-5 的文件计数与本次解包后的计数;检查打包脚本是否又用了 `-Exclude` 之类不递归过滤目录的写法 |
+| Step 3-3 部署预检卡在 `STOCK_PREP_PACK_TARGET_MISSING` 之类 | pack/沙箱配置没跟着这次升级一起配 | 照 `fix.run` 执行,不要另起 objectId |
+| Step 4 源预检返回 `topology_mismatch` | §0.3 的读取拓扑修正没有真正合并生效,或合并后配置没同步更新 | 重新核对 `origin/main` 上的读取计划是否真的指向 DesignBom(不是只有 preset 目录合了) |
+| Step 4 源预检 `no_project_numbers` / `no_bom_rows` | 绑的源还是旧的合成源,或客户源确实是空的 | 先确认 Step 5 的选源真的生效(`GET source-binding` 读到新值);再用 `onsite-connection-test-runbook-20260901.md` §2 的 SQL 亲自体检一遍 |
+| Step 5 选源后预检没变 | 表动作在插件激活时缓存了旧配置,选源的"免重启"没生效 | 确认响应体确实是 `takesEffectWithoutRestart: true`;若为 false 或选源接口本身报错,按错误码处理,不要假设它一定生效就跳过复核 |
+| Step 6 dry-run 返回 0 行但预检是 `go` | 项目号打错,或 `FileCode`/`NodeType=2` 锚定字段没配对 | 核对 §0 给出的字段映射表,尤其项目号锚定那一段 |
+| Step 7.2 生产写入被拒(任一 stop rule) | 见 §7.2 失败处理 | 不放宽授权重试,回到 owner 重新评估这批数据是否真的"clean" |
+| Step 8 行数为 0 但 apply 显示成功 | 所有行都进了 `manual_hold` 被正确地没写 | 检查 Step 7.1 是否把太多行留在了 hold;这不是故障,是数据本身歧义多,需要客户先确认映射 |
+| 考勤/审批行数在 Step 3-5 变化了 | 迁移或升级动到了不该动的表 | 立即停止,评估 Step 1 的数据库级回滚,通知 owner |
+
+---
+
+## 护栏(整个窗口期间遵守)
+
+- **owner 在场**——这是一台半生产机器,考勤/审批数据是真实业务数据,不是试验田。
+- **只碰备料这条线和 `customer-plm-test` 这一个数据源**——不touch考勤、审批、用户账户等其他任何数据。
+- **K3 外部写是纵深防御,不是唯一保证**:可证明的保证是**只读账号**——`customer-plm-test` 对应的外部系统本身就是只读数据源(`kind: data-source:sql-readonly`),这一点在 §5 反复校验(选源只能绑到只读 kind 集合)。K3 出站写默认拒能力门(#5402)、四层永久焊死的 K3 fence(`k3-external-write-permanent-fence.cjs`)是在这之上的第二层——参见 owner 2026-09-01 裁决 `[[k3-external-write-boundary-ruling]]`:"K3 外部写走'只读账号可证明保证 + `#5402` 默认拒能力门纵深防御'两层"。
+- **不允许人工伪造行**——canonical 表(`plm_stock_preparation_main`)的每一行必须来自 Step 7.2 真实的生成 + 生产写入流程;不允许为了让 Step 8 看起来通过而手工插入行。
+- **Step 7.2 的生产写入配置执行完立刻移除**——不留过夜,P2 必须恢复默认休眠姿态。
+
+---
+
+## 附:相关文件
+
+- 现场连接测试 + 30 秒数据体检 + 给客户的精确数据要求:`onsite-connection-test-runbook-20260901.md`
+- 首次真机部署教训审计(F1-F22,含 F20/F22 两个本文直接引用的陷阱):`first-deployment-lessons-20260831.md`
+- 接入提速统一路线图(§0.3/§0.4 引用的诊断证据出处):`docs/development/platform-overall-design/stock-prep-onboarding-acceleration-20260901.md`
+- 生产写入正式主表的完整程序(P4 owner 授权,§7.2 引用):`docs/development/data-factory-fos-4b-3-prod-apply-runbook-20260625.md`
+- 生产写入的设计锁(策略契约的规范定义):`docs/development/data-factory-fos-4b-3-prod-apply-gate-design-lock-20260625.md`
+- 原地升级脚本(Step 2 主体):`scripts/ops/multitable-onprem-package-upgrade-inplace.ps1`
+- 打包脚本 / 包校验脚本(Step 0):`scripts/ops/multitable-onprem-package-build.sh`、`scripts/ops/multitable-onprem-package-verify.sh`
+- 既有部署预检 / 验收脚本(Step 3):`plugins/plugin-integration-core/lib/stock-preparation-preflight.cjs`、`scripts/ops/stock-prep-acceptance-bootstrap.mjs`
+- r6/r7 既有升级执行单(本文延续同一批约定):`r6-upgrade-222-runbook.md`、`r7-build-manifest.md`
