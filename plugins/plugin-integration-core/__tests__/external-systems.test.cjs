@@ -538,7 +538,9 @@ async function main() {
     status: 'active',
   })
 
-  // 7a: config-only update — omitted status/role must be preserved on update.
+  // 7a: config-only update — omitted status/role must be preserved on update, and the supplied
+  // config is a PATCH: the two keys it names are updated, `orgId` (which it never mentions) rides
+  // through. Before the bridge lossy-save fix this dropped orgId.
   await preserveRegistry.upsertExternalSystem({
     tenantId: 'tenant_1',
     id: 'sys_preserve',
@@ -551,8 +553,8 @@ async function main() {
   assert.equal(afterConfigOnlyUpdate.role, 'target', 'omitted role preserves existing target role')
   assert.equal(afterConfigOnlyUpdate.status, 'active', 'omitted status preserves existing active status')
   assert.deepEqual(afterConfigOnlyUpdate.config,
-    { baseUrl: 'https://k3-config-only.internal', acctId: 'ACCT-CONFIG' },
-    'provided config is still updated')
+    { baseUrl: 'https://k3-config-only.internal', acctId: 'ACCT-CONFIG', orgId: 'ORG1' },
+    'named config keys are updated and unnamed stored keys are preserved')
 
   // 7b: status-only update — config and capabilities must be preserved
   const statusOnlyUpdate = await preserveRegistry.upsertExternalSystem({
@@ -565,13 +567,17 @@ async function main() {
     // config and capabilities intentionally omitted
   })
   const storedRow = preserveDb.rows.find((row) => row.id === 'sys_preserve')
-  assert.deepEqual(storedRow.config, { baseUrl: 'https://k3-config-only.internal', acctId: 'ACCT-CONFIG' },
+  assert.deepEqual(storedRow.config,
+    { baseUrl: 'https://k3-config-only.internal', acctId: 'ACCT-CONFIG', orgId: 'ORG1' },
     'config preserved when not provided on update')
   assert.deepEqual(storedRow.capabilities, { read: true, write: true, bom: true },
     'capabilities preserved when not provided on update')
   assert.equal(statusOnlyUpdate.status, 'inactive', 'status was updated as requested')
 
-  // 7c: explicit config: {} replaces (caller opted in to clearing)
+  // 7c: explicit config: {} is an EMPTY PATCH, not a wipe. An edit form that serializes fewer keys
+  // than the record stores (the data-source bridge picker is exactly that) must not be able to
+  // destroy stored config by omission — including the degenerate omit-everything case. Clearing one
+  // key stays possible, and stays explicit: `{ key: null }`.
   await preserveRegistry.upsertExternalSystem({
     tenantId: 'tenant_1',
     id: 'sys_preserve',
@@ -583,11 +589,28 @@ async function main() {
     // capabilities omitted — should still be preserved
   })
   const afterExplicitEmpty = preserveDb.rows.find((row) => row.id === 'sys_preserve')
-  assert.deepEqual(afterExplicitEmpty.config, {}, 'explicit config: {} replaces existing config')
+  assert.deepEqual(afterExplicitEmpty.config,
+    { baseUrl: 'https://k3-config-only.internal', acctId: 'ACCT-CONFIG', orgId: 'ORG1' },
+    'explicit config: {} names no key, so it clears none')
   assert.deepEqual(afterExplicitEmpty.capabilities, { read: true, write: true, bom: true },
-    'capabilities still preserved when only config was explicitly cleared')
+    'capabilities still preserved when config carried no keys')
 
-  // 7d: full config replacement works normally
+  // 7c-bis: an explicit null is the one way to clear a config key through this path.
+  await preserveRegistry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    id: 'sys_preserve',
+    name: 'K3 WISE full',
+    kind: 'erp:k3-wise-webapi',
+    role: 'target',
+    config: { orgId: null },
+    status: 'inactive',
+  })
+  const afterExplicitNull = preserveDb.rows.find((row) => row.id === 'sys_preserve')
+  assert.equal(afterExplicitNull.config.orgId, null, 'an explicit null clears the key it names')
+  assert.equal(afterExplicitNull.config.baseUrl, 'https://k3-config-only.internal',
+    'and clears nothing it does not name')
+
+  // 7d: named keys are replaced normally
   await preserveRegistry.upsertExternalSystem({
     tenantId: 'tenant_1',
     id: 'sys_preserve',
@@ -599,8 +622,8 @@ async function main() {
     status: 'active',
   })
   const afterFullUpdate = preserveDb.rows.find((row) => row.id === 'sys_preserve')
-  assert.deepEqual(afterFullUpdate.config, { baseUrl: 'https://k3-new.internal', acctId: 'ACCT002' },
-    'explicit config replacement works')
+  assert.equal(afterFullUpdate.config.baseUrl, 'https://k3-new.internal', 'explicit config value replaces')
+  assert.equal(afterFullUpdate.config.acctId, 'ACCT002', 'explicit config value replaces')
   assert.deepEqual(afterFullUpdate.capabilities, { read: true, write: false },
     'explicit capabilities replacement works')
 
@@ -770,6 +793,7 @@ async function main() {
 
   await testInstanceDigestIsProductionBehaviour()
   await testDataSourceBindingValidation()
+  await testBridgeEditPreservesFullConfig()
 
   console.log('✓ external-systems: registry + credential boundary tests passed')
 }
@@ -1090,4 +1114,156 @@ async function testDataSourceBindingValidation() {
   assert.equal(preserved.config.dataSourceOwnerId, 'owner_1', 'preserved config keeps the stamp')
 
   console.log('  external-systems: dataSourceId bind-time validation OK')
+}
+
+// ---------------------------------------------------------------------------------------------
+// BRIDGE LOSSY SAVE — editing a data-source bridge connection dropped stored config keys.
+//
+// The bridge edit form does not render the whole config: it rebuilds `config` from the two fields
+// it owns (`dataSourceId` + `object`) and PUTs that. The registry replaced config wholesale, so
+// every stored key the form does not render was destroyed by a rename — most damagingly
+// `config.schema`, the connection's default SQL schema, which the readonly source adapter reads to
+// list objects and to qualify a bare object name. The connection kept working just differently:
+// reads silently retargeted to the server's default schema.
+//
+// These tests drive the REAL registry. Reverting patchConfig back to a wholesale replace reds them.
+// ---------------------------------------------------------------------------------------------
+async function testBridgeEditPreservesFullConfig() {
+  const credentialStore = createMockCredentialStore()
+  const binderCalls = []
+  const db = createMockDb()
+  const registry = createExternalSystemRegistry({
+    db,
+    credentialStore,
+    idGenerator: () => 'sys_bridge',
+    dataSourceBinder: {
+      async assertReferenceable(dataSourceId, principal) {
+        binderCalls.push([dataSourceId, principal])
+        if (principal !== 'owner_1') throw new Error(`Data source with id '${dataSourceId}' not found`)
+      },
+    },
+  })
+
+  const lookupProjection = { table: 'dbo.t_Unit', keyColumn: 'FItemID', valueColumn: 'FName' }
+  await registry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    name: 'SQL bridge',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    status: 'active',
+    principal: 'owner_1',
+    config: { dataSourceId: 'ds-1', object: 'dbo.t_ICItem', schema: 'dbo', pageSize: 500, lookupProjection },
+  })
+  const created = db.rows.find((row) => row.id === 'sys_bridge')
+  assert.equal(created.config.schema, 'dbo', 'precondition: the created bridge stores a schema')
+  assert.equal(created.config.dataSourceOwnerId, 'owner_1', 'precondition: the binding is stamped')
+
+  // 1. The exact payload the bridge picker serializes on a rename: pointer + object, nothing else.
+  await registry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    id: 'sys_bridge',
+    name: 'SQL bridge renamed',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    status: 'active',
+    principal: 'owner_1',
+    config: { dataSourceId: 'ds-1', object: 'dbo.t_ICItem' },
+  })
+  const renamed = db.rows.find((row) => row.id === 'sys_bridge')
+  assert.equal(renamed.name, 'SQL bridge renamed', 'the rename landed')
+  assert.equal(renamed.config.schema, 'dbo',
+    'a bridge edit that does not render config.schema must not drop it')
+  assert.equal(renamed.config.pageSize, 500, 'nor any other stored key the form does not render')
+  assert.deepEqual(renamed.config.lookupProjection, lookupProjection, 'nor the private projection')
+  assert.equal(renamed.config.dataSourceOwnerId, 'owner_1', 'the stamp is still the validated owner')
+
+  // 2. A payload that does not re-assert the pointer keeps BOTH the pointer and its stamp — and
+  //    consults no binder, exactly like an update that omits `config` entirely.
+  const binderCallsBefore = binderCalls.length
+  await registry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    id: 'sys_bridge',
+    name: 'SQL bridge renamed twice',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    status: 'active',
+    principal: 'owner_1',
+    config: { object: 'dbo.t_ICItemCore' },
+  })
+  const pointerless = db.rows.find((row) => row.id === 'sys_bridge')
+  assert.equal(pointerless.config.object, 'dbo.t_ICItemCore', 'the key the payload names is updated')
+  assert.equal(pointerless.config.dataSourceId, 'ds-1',
+    'an edit that omits the pointer must not silently unbind the connection')
+  assert.equal(pointerless.config.dataSourceOwnerId, 'owner_1',
+    'and must not drop the server stamp the core delete guard counts')
+  assert.equal(binderCalls.length, binderCallsBefore,
+    'a payload that asserts no binding re-validates nothing')
+
+  // 3. dataSourceOwnerId stays server-owned. A stranger patching one unrelated key cannot
+  //    re-attribute the stored pin to themselves by smuggling a stamp into the payload.
+  await registry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    id: 'sys_bridge',
+    name: 'SQL bridge renamed twice',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    status: 'active',
+    principal: 'stranger_9',
+    config: { pageSize: 250, dataSourceOwnerId: 'stranger_9' },
+  })
+  const forged = db.rows.find((row) => row.id === 'sys_bridge')
+  assert.equal(forged.config.pageSize, 250, 'the legitimate part of the patch landed')
+  assert.equal(forged.config.dataSourceOwnerId, 'owner_1',
+    'a client-sent stamp cannot overwrite the stored server-stamped attribution')
+
+  // 4. Changing the pointer STILL validates against the authenticated principal.
+  await assert.rejects(
+    () => registry.upsertExternalSystem({
+      tenantId: 'tenant_1',
+      id: 'sys_bridge',
+      name: 'SQL bridge repointed',
+      kind: 'data-source:sql-readonly',
+      role: 'source',
+      status: 'active',
+      principal: 'stranger_9',
+      config: { dataSourceId: 'ds-2' },
+    }),
+    (err) => err instanceof ExternalSystemValidationError && /not found/.test(err.message),
+    'a payload that DOES assert a pointer is validated against the principal, as before',
+  )
+  const unchanged = db.rows.find((row) => row.id === 'sys_bridge')
+  assert.equal(unchanged.config.dataSourceId, 'ds-1', 'the refused repoint left the stored pointer alone')
+
+  const repointed = await registry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    id: 'sys_bridge',
+    name: 'SQL bridge repointed',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    status: 'active',
+    principal: 'owner_1',
+    config: { dataSourceId: 'ds-2' },
+  })
+  assert.equal(repointed.config.dataSourceId, 'ds-2', 'an owner may repoint the binding')
+  assert.equal(repointed.config.dataSourceOwnerId, 'owner_1', 're-stamped by the validated principal')
+  assert.equal(repointed.config.schema, 'dbo', 'and a repoint still preserves the rest of the config')
+
+  // 5. Clearing stays possible and stays explicit: an explicit null releases the pin, and the
+  //    orphaned stamp goes with it rather than leaving an un-attributable reference behind.
+  const unbound = await registry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    id: 'sys_bridge',
+    name: 'SQL bridge unbound',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    status: 'active',
+    principal: 'owner_1',
+    config: { dataSourceId: null },
+  })
+  assert.equal(unbound.config.dataSourceId, null, 'an explicit null clears the pointer')
+  assert.equal(unbound.config.dataSourceOwnerId, undefined,
+    'and the stamp does not outlive the pointer it attributed')
+  assert.equal(unbound.config.schema, 'dbo', 'clearing one key clears only that key')
+
+  console.log('  external-systems: bridge edit preserves the full config OK')
 }

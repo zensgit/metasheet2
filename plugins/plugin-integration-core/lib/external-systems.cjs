@@ -26,6 +26,11 @@ const PRIVATE_CONFIG_KEYS_BY_KIND = new Map([
 ])
 const VALID_ROLES = new Set(['source', 'target', 'bidirectional'])
 const VALID_STATUSES = new Set(['active', 'inactive', 'error'])
+// Config keys the REGISTRY owns and a payload may never assert. `dataSourceOwnerId` is stamped
+// server-side after the binder validates config.dataSourceId (P2-A); since the update path now
+// MERGES a payload over the stored config, an accepted client value would overwrite the stored
+// stamp and re-attribute somebody else's pin. Stripped at the single normalize choke point.
+const SERVER_OWNED_CONFIG_KEYS = new Set(['dataSourceOwnerId'])
 
 class ExternalSystemValidationError extends Error {
   constructor(message, details = {}) {
@@ -74,6 +79,17 @@ function jsonObject(value, field, fallback = {}) {
   return { ...value }
 }
 
+function stripServerOwnedConfigKeys(config) {
+  if (!isPlainObject(config)) return config
+  let cleaned = null
+  for (const key of SERVER_OWNED_CONFIG_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(config, key)) continue
+    if (!cleaned) cleaned = { ...config }
+    delete cleaned[key]
+  }
+  return cleaned || config
+}
+
 function normalizeWorkspaceId(value) {
   const normalized = optionalString(value, 'workspaceId')
   return normalized === '' ? null : normalized
@@ -102,7 +118,7 @@ function normalizeExternalSystemInput(input) {
     name: requiredString(input.name, 'name'),
     kind: requiredString(input.kind, 'kind'),
     role,
-    config: jsonObject(input.config, 'config'),
+    config: stripServerOwnedConfigKeys(jsonObject(input.config, 'config')),
     credentials: input.credentials,
     capabilities: jsonObject(input.capabilities, 'capabilities'),
     status,
@@ -216,18 +232,27 @@ function hasPrivateConfigMutation(kind, config) {
   return Array.from(privateKeys).some((key) => Object.prototype.hasOwnProperty.call(config, key))
 }
 
-function preservePrivateConfigOnPublicUpdate(kind, existingConfig, nextConfig) {
-  const privateKeys = PRIVATE_CONFIG_KEYS_BY_KIND.get(kind)
-  if (!privateKeys || !isPlainObject(existingConfig) || !isPlainObject(nextConfig)) {
-    return nextConfig
-  }
-  const merged = { ...nextConfig }
-  for (const key of privateKeys) {
-    if (!Object.prototype.hasOwnProperty.call(nextConfig, key) && Object.prototype.hasOwnProperty.call(existingConfig, key)) {
-      merged[key] = existingConfig[key]
-    }
-  }
-  return merged
+// PATCH semantics for `config` on update — the fix for the bridge lossy save.
+//
+// This used to be `preservePrivateConfigOnPublicUpdate`, which re-attached only the per-kind
+// PRIVATE keys (lookupProjection / c6AcceptancePolicy) and let every other absent key be dropped
+// by a wholesale replace. That was silently destructive for the data-source bridge kinds, whose
+// edit form rebuilds `config` from the two picker fields it owns: saving a rename erased
+// `config.schema` (the connection's default SQL schema — the readonly source adapter reads it for
+// listObjects and to qualify a bare object name), and an API caller that did not re-send the
+// pointer erased `config.dataSourceId` together with its server stamp.
+//
+// The rule is now uniform for every key and every kind: an ABSENT key is inherited from the stored
+// config, a PRESENT key replaces it. The private-key convention is unchanged, it is just no longer
+// special — an explicit `{ key: null }` still clears one, and that stays the ONLY way any config
+// key gets cleared through this path. Omission can no longer destroy anything.
+//
+// Top level only, deliberately. A nested value is replaced whole, so an admin narrowing
+// `lookupProjection` or `objects.material.schema` gets exactly the object they sent instead of a
+// union with stale sub-keys that no editor could ever remove.
+function patchConfig(existingConfig, nextConfig) {
+  if (!isPlainObject(existingConfig) || !isPlainObject(nextConfig)) return nextConfig
+  return { ...existingConfig, ...nextConfig }
 }
 
 async function maybeEncryptCredentials(credentialStore, credentials) {
@@ -330,6 +355,35 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     return { ...config, dataSourceOwnerId: principal }
   }
 
+  // The effective config for an update that DID supply one: the payload patched over the stored
+  // config (see patchConfig), then the P2-A binding rules applied to the result.
+  //
+  // Binding re-validation keys off the PAYLOAD, not the merged result. A payload that asserts
+  // `dataSourceId` is claiming the binding, so it is validated against the authenticated principal
+  // and re-stamped exactly as before. A payload that is silent about it inherits the stored pointer
+  // and the stored stamp verbatim — the same trust level as an update that omits `config`
+  // altogether (which has always preserved the stored binding without re-validating). Anything else
+  // would mean a co-worker renaming a colleague's bridge either gets refused or silently steals the
+  // attribution the core delete guard counts.
+  async function resolveUpdatedConfig(existing, nextConfig, rawInput) {
+    const merged = patchConfig(existing.config, nextConfig)
+    if (!isPlainObject(merged)) return merged
+    // `nextConfig` is normalized input, so a client-sent dataSourceOwnerId is already gone; what
+    // remains here is the stored stamp.
+    if (isPlainObject(nextConfig) && Object.prototype.hasOwnProperty.call(nextConfig, 'dataSourceId')) {
+      return withValidatedDataSourceBinding(merged, rawInput)
+    }
+    const inheritedPointer = typeof merged.dataSourceId === 'string' ? merged.dataSourceId.trim() : ''
+    if (inheritedPointer) return merged
+    // A stored stamp with no pointer left to attribute is not inheritable.
+    if (Object.prototype.hasOwnProperty.call(merged, 'dataSourceOwnerId')) {
+      const cleaned = { ...merged }
+      delete cleaned.dataSourceOwnerId
+      return cleaned
+    }
+    return merged
+  }
+
   async function upsertExternalSystem(input) {
     const normalized = normalizeExternalSystemInput(input)
     const existing = await findExisting(normalized)
@@ -365,14 +419,11 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
       // Preserve stored config/capabilities when the caller did not explicitly
       // provide them. A status-only or name-only update must not wipe stored
       // connection config (baseUrl, orgId, etc.) or capability flags.
-      // Explicit null/empty-object still replaces public config. Per-kind private config keys are
-      // the exception: public reads omit them, so their absence on update means preserve; a
-      // trusted-admin caller clears one explicitly with a matching `{ privateKey: null }`.
+      // A supplied `config` is a PATCH over the stored one, not a replacement (see patchConfig):
+      // absent keys are inherited, so no edit form can silently drop a key it does not render,
+      // and `{ key: null }` remains the one explicit way to clear one.
       if (input.config === undefined) updateRow.config = existing.config
-      else updateRow.config = await withValidatedDataSourceBinding(
-        preservePrivateConfigOnPublicUpdate(existing.kind, existing.config, updateRow.config),
-        input,
-      )
+      else updateRow.config = await resolveUpdatedConfig(existing, updateRow.config, input)
       if (input.capabilities === undefined) updateRow.capabilities = existing.capabilities
       if (credentialsEncrypted !== undefined) {
         updateRow.credentials_encrypted = credentialsEncrypted

@@ -1045,9 +1045,16 @@ function onBridgeDataSourceChange(): void {
 function buildDataSourceBridgeConfig(): Record<string, unknown> {
   const object = connectionDraft.dataSourceObject.trim()
   // Only the data_sources reference + object — NO credentials are ever entered for this kind.
+  //
+  // This picker renders TWO of the connection's config keys; a stored bridge can carry more
+  // (config.schema, a lookupProjection, paging hints). The registry treats a supplied config as a
+  // PATCH, so the keys absent here are preserved rather than erased — which is what stops a rename
+  // from silently dropping config.schema. The corollary is that this object must NAME every key it
+  // means to control: `object` is emitted even when empty, because omitting it would now read as
+  // "keep the stored one" instead of "there is no object selected".
   return {
     dataSourceId: connectionDraft.dataSourceId.trim(),
-    ...(object ? { object } : {}),
+    object: object || null,
   }
 }
 

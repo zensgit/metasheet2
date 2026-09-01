@@ -204,6 +204,12 @@
             {{ bi('前往 K3 WISE 设置向导', 'Open the K3 WISE setup wizard') }}
           </router-link>
         </p>
+        <p class="integration-workbench__hint" data-testid="connection-draft-config-patch-hint">
+          {{ bi(
+            '保存时 config 按“补丁”合并：这里没写的键会保留原值,写了的键覆盖原值,要清除某个键请显式写成 null。',
+            'On save, config is merged as a PATCH: keys you leave out keep their stored value, keys you write replace it, and clearing one means writing it as null.',
+          ) }}
+        </p>
         <div class="integration-workbench__grid integration-workbench__grid--compact">
           <label>
             <span>config JSON</span>
