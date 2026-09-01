@@ -11,6 +11,12 @@ import {
   auditAttendanceLegacyMembershipOverlaps,
 } from '../../src/services/AttendanceLegacyMembershipOverlapAudit'
 import { up as membershipMigrationUp } from '../../src/db/migrations/zzzz20260723140000_create_attendance_calculation_group_memberships'
+import {
+  attachOwnedPoolTerminationHandler,
+  dropScratchDatabase,
+  formatScratchDropOutcome,
+  type OwnedPoolTerminationHandler,
+} from '../helpers/scratch-database'
 
 const serverUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = serverUrl ? describe : describe.skip
@@ -26,6 +32,7 @@ describeIfDatabase('legacy attendance membership overlap audit (isolated real DB
   scratchUrl.pathname = `/${databaseName}`
   const adminPool = new Pool({ connectionString: adminUrl.toString() })
   let pool: Pool
+  let terminationHandler: OwnedPoolTerminationHandler
 
   function runAuditCli(orgId: string) {
     return spawnSync(process.execPath, [tsxCli, auditCli, '--org', orgId], {
@@ -51,17 +58,17 @@ describeIfDatabase('legacy attendance membership overlap audit (isolated real DB
   beforeAll(async () => {
     await adminPool.query(`CREATE DATABASE ${databaseName}`)
     pool = new Pool({ connectionString: scratchUrl.toString(), max: 6 })
+    terminationHandler = attachOwnedPoolTerminationHandler(pool)
   })
 
   afterAll(async () => {
-    await pool?.end()
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid)
-         FROM pg_stat_activity
-        WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [databaseName],
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS ${databaseName}`)
+    try {
+      await pool?.end().catch(() => {})
+      const outcome = await dropScratchDatabase(adminPool, databaseName)
+      console.log(formatScratchDropOutcome('attendance-legacy-membership-overlap-audit', outcome))
+    } finally {
+      terminationHandler?.detach()
+    }
     await adminPool.end()
   })
 

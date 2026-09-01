@@ -39,6 +39,19 @@
       {{ bi(originText.zh, originText.en) }}
     </p>
 
+    <!-- The source the action reads TODAY cannot actually be read. Named here rather than left for
+         the admin to discover on the next failed refresh — an env default pointing at a deleted or
+         deactivated system, or a cross-kind row persisted before the server enforced the action's
+         kind, both land here. -->
+    <p
+      v-if="view && problemText"
+      class="stock-prep-source__problem"
+      data-testid="stock-prep-source-problem"
+    >
+      {{ bi('当前来源现在读不了:', 'The current source cannot be read right now: ') }}
+      {{ bi(problemText.zh, problemText.en) }}
+    </p>
+
     <!-- R-11: the picker and Save render ONLY for a principal the server would accept. A
          `stock-prep:admin` holder who can open this tab still sees the current source and is told,
          in words, who changes it — rather than a control that 403s. -->
@@ -199,6 +212,9 @@ const candidates = computed(() => view.value?.eligibleSources ?? [])
 
 const refusalText = computed(() => stockPrepSourceRefusalText(refusalReason.value))
 
+/** Why the CURRENTLY effective source cannot be read, in words. Same closed vocabulary as a refusal. */
+const problemText = computed(() => stockPrepSourceRefusalText(view.value?.effectiveSourceProblem ?? null))
+
 // Degrade rather than blank: a server that grows a fourth origin token, or an envelope that omits
 // the field, renders the "nothing chosen" line instead of throwing on an undefined lookup.
 const originText = computed(() => (
@@ -326,6 +342,13 @@ defineExpose({ load })
   margin: 0 0 var(--ms-space-2);
   color: var(--el-color-danger, #c45656);
   font-size: 13px;
+}
+
+.stock-prep-source__problem {
+  margin: 0 0 var(--ms-space-2);
+  color: var(--el-color-warning, #b88230);
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .stock-prep-source__token {

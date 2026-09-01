@@ -305,6 +305,28 @@ function delay(ms: number): Promise<void> {
   })
 }
 
+async function waitForImportUploadCleanup(
+  paths: readonly string[],
+  { attempts = 80, intervalMs = 25 }: { attempts?: number; intervalMs?: number } = {},
+): Promise<void> {
+  let remainingCount = paths.length
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const present = await Promise.all(paths.map(async (filePath) => {
+      try {
+        await fs.stat(filePath)
+        return true
+      } catch (error) {
+        if ((error as { code?: unknown }).code === 'ENOENT') return false
+        throw error
+      }
+    }))
+    remainingCount = present.filter(Boolean).length
+    if (remainingCount === 0) return
+    await delay(intervalMs)
+  }
+  throw new Error(`ATTENDANCE_IMPORT_UPLOAD_CLEANUP_NOT_OBSERVED:${remainingCount}`)
+}
+
 async function fetchImportJob(baseUrl: string, token: string, jobId: string): Promise<any> {
   const jobRes = await requestJson(`${baseUrl}/api/attendance/import/jobs/${jobId}`, {
     method: 'GET',
@@ -15843,8 +15865,7 @@ attendanceIntegrationDescribe(
 
     const csvPath = path.join(importUploadDir, orgId, `${fileId}.csv`)
     const metaPath = path.join(importUploadDir, orgId, `${fileId}.json`)
-    await expect(fs.stat(csvPath)).rejects.toBeTruthy()
-    await expect(fs.stat(metaPath)).rejects.toBeTruthy()
+    await waitForImportUploadCleanup([csvPath, metaPath])
 
     const { commitToken: _commitToken, ...retryPayload } = commitPayload
     const retryRes = await requestJson(`${baseUrl}/api/attendance/import/commit-async`, {

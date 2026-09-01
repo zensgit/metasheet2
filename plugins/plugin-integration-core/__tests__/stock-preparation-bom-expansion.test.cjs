@@ -293,6 +293,132 @@ async function testFailClosedGuards() {
   }
 }
 
+// Hold-not-zero: a SQL NULL or blank Bom_ExAttr1 / order-detail quantity must
+// never silently coerce to 0 (Number(null) === 0 and Number('') === 0 are both
+// finite). Before this fix that zero multiplied down through every descendant
+// (totalQuantity = parent x 0), silently zeroing an entire subtree's demand —
+// the customer's legacy system's exact hazard. A row whose SOURCE quantity is
+// genuinely blank/null must be held as invalid_quantity, never planned as a
+// writable 0. A row whose source quantity is a STATED numeric 0 is a real
+// measured zero and must keep expanding exactly as before.
+async function testBlankOrNullQuantityHeldNotZeroed() {
+  function threeLevelData(bomExAttr1AtMidTree, orderDetailQuantity = '2') {
+    return baseData({
+      DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: orderDetailQuantity }],
+      DN_PDM_PartLibraryInfo: [
+        { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1' },
+        { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Sub-assembly', Material: 'Iron', SysVer: 'V1' },
+        { OBJ_ID: 'PART-C', IdentityNo: 'C-001', IdentityName: 'Fastener', Material: 'Copper', SysVer: 'V1' },
+      ],
+      DN_PDM_BomHeadInfo: [
+        { part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V1', bom_able: true },
+        { part_id: 'PART-B', bom_id: 'BOM-B', SysVer: 'V1', bom_able: true },
+      ],
+      DN_PDM_BomDetailsInfo: [
+        { bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: bomExAttr1AtMidTree, sort_id: 1 },
+        { bom_pid: 'BOM-B', part_id: 'PART-C', Bom_ExAttr1: '4', sort_id: 1 },
+      ],
+    })
+  }
+
+  // (1) NULL quantity on a mid-tree node (PART-B, depth 1, with its own child
+  // PART-C beneath it): the row errors as invalid_quantity and the subtree
+  // (PART-C) must never be read or expanded with a silently zeroed total.
+  {
+    const { adapter, calls } = createAdapter(threeLevelData(null))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+    assert.equal(result.valid, false)
+    assert.ok(
+      result.rowErrors.some((error) => error.type === 'invalid_quantity' && error.relation === 'child' && error.depth === 1),
+      'a null mid-tree Bom_ExAttr1 is held as invalid_quantity, not coerced to 0',
+    )
+    assert.ok(!result.rows.some((row) => row.componentSourceId === 'PART-B'), 'the zero-quantity mid-tree row itself is never pushed')
+    assert.ok(!result.rows.some((row) => row.componentSourceId === 'PART-C'), 'PART-C subtree is never read once its parent quantity is held')
+    assert.ok(!calls.some((call) => call.object === 'DN_PDM_BomHeadInfo' && call.filters.part_id === 'PART-B'), 'expansion never descends into the held node to read its subtree')
+    assert.ok(!result.rows.some((row) => row.totalQuantity === 0), 'no row anywhere in this run carries a silently-zeroed totalQuantity')
+  }
+
+  // (2) Blank-string quantity on the same mid-tree node: identical hold.
+  {
+    const { adapter } = createAdapter(threeLevelData(''))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+    assert.equal(result.valid, false)
+    assert.ok(
+      result.rowErrors.some((error) => error.type === 'invalid_quantity' && error.relation === 'child' && error.depth === 1),
+      'a blank-string mid-tree Bom_ExAttr1 is held as invalid_quantity, not coerced to 0',
+    )
+    assert.ok(!result.rows.some((row) => row.componentSourceId === 'PART-B'))
+    assert.ok(!result.rows.some((row) => row.componentSourceId === 'PART-C'))
+    assert.ok(!result.rows.some((row) => row.totalQuantity === 0))
+  }
+
+  // Whitespace-only counts as blank too (isBlank trims before checking).
+  {
+    const { adapter } = createAdapter(threeLevelData('   '))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+    assert.equal(result.valid, false)
+    assert.ok(result.rowErrors.some((error) => error.type === 'invalid_quantity' && error.relation === 'child'))
+  }
+
+  // (3) A STATED numeric 0 mid-tree quantity is a real measured zero: it must
+  // keep expanding exactly as before, multiplying down as 0 (not held).
+  {
+    const { adapter } = createAdapter(threeLevelData(0))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+    assert.equal(result.valid, true, 'a stated numeric 0 is a valid measured quantity, not an error')
+    assert.equal(result.status, 'expanded')
+    assert.ok(!result.rowErrors.some((error) => error.type === 'invalid_quantity'))
+    const partB = result.rows.find((row) => row.componentSourceId === 'PART-B')
+    const partC = result.rows.find((row) => row.componentSourceId === 'PART-C')
+    assert.ok(partB, 'PART-B still expands on a stated zero')
+    assert.equal(partB.rawQuantity, 0)
+    assert.equal(partB.totalQuantity, 0, 'stated zero multiplies down exactly as before')
+    assert.ok(partC, 'PART-C subtree still expands beneath a stated zero')
+    assert.equal(partC.totalQuantity, 0)
+  }
+
+  // Root order-detail quantity is the same parseQuantity() call site (relation
+  // 'root'): null/blank must hold there too, and a stated 0 must still expand.
+  {
+    const { adapter } = createAdapter(threeLevelData('4', null))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+    assert.equal(result.valid, false)
+    assert.ok(result.rowErrors.some((error) => error.type === 'invalid_quantity' && error.relation === 'root'))
+    assert.equal(result.rows.length, 0, 'a null root order-detail quantity holds before any row is pushed')
+  }
+
+  {
+    const { adapter } = createAdapter(threeLevelData('4', ''))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+    assert.equal(result.valid, false)
+    assert.ok(result.rowErrors.some((error) => error.type === 'invalid_quantity' && error.relation === 'root'))
+    assert.equal(result.rows.length, 0)
+  }
+
+  {
+    const { adapter } = createAdapter(threeLevelData('4', 0))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+    assert.equal(result.valid, true, 'a stated numeric 0 root quantity is valid, not an error')
+    assert.equal(result.rows[0].rawQuantity, 0)
+    assert.equal(result.rows[0].totalQuantity, 0)
+  }
+
+  // (4) The existing not-a-number case is a different failure (garbled value,
+  // not absent) and must keep failing exactly as before — untouched by this
+  // fix. (Locked already in testFailClosedGuards; reasserted here for locality.)
+  {
+    const { adapter } = createAdapter(threeLevelData('4', 'not-a-number'))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+    assert.equal(result.valid, false)
+    assert.ok(result.rowErrors.some((error) => error.type === 'invalid_quantity' && error.relation === 'root'))
+    assert.equal(result.rows.length, 0)
+  }
+}
+
 async function testScaleLimitsRemainDiagnosableAndValuesFree() {
   {
     const { adapter } = createAdapter(baseData({
@@ -408,13 +534,100 @@ function testReadPlanValidation() {
   )
 }
 
+// 规格 and the material creation time: DECLARED on the read plan, DEFAULTED TO ABSENT.
+//
+// Neither is a core role of this vendor family (source-vendor-presets/dn-pdm-family.preset.json
+// declares exactly rowId/id/code/name/material/version on the part table). Where they live is a
+// per-deployment reading — a native view column on the measured customer catalog, a dictionary-
+// assigned generic slot on a stock one — so the shipped plan pins NEITHER. A deployment that has
+// them says so; one that does not gets absence, never a guessed column.
+async function testSpecAndCreateTimeAreDeclaredNotGuessed() {
+  // (1) UNDECLARED — the shipped default. The row must be byte-identical to the pre-change one:
+  //     no `spec` key, no `createTime` key, not even an empty one.
+  const undeclared = await expandPlmProjectBom({
+    sourceAdapter: createAdapter(baseData({
+      DN_PDM_PartLibraryInfo: [
+        { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1', Specification: 'DN1200', Createtime: '2026-08-30T09:15:00' },
+        { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1', Specification: 'M20', Createtime: '2026-08-30T09:40:00' },
+      ],
+    })).adapter,
+    projectNo: 'P-001',
+  })
+  assert.equal(undeclared.valid, true)
+  for (const row of undeclared.rows) {
+    assert.ok(!('spec' in row), 'an undeclared spec slot must not be guessed off a same-named column')
+    assert.ok(!('createTime' in row), 'an undeclared createTime slot must not be guessed either')
+  }
+
+  // (2) DECLARED — the same source rows, now with the deployment naming its own columns.
+  const plan = clone(PLM_STOCK_PREPARATION_BOM_READ_PLAN)
+  plan.part.specField = 'Specification'
+  plan.part.createTimeField = 'Createtime'
+  const declared = await expandPlmProjectBom({
+    sourceAdapter: createAdapter(baseData({
+      DN_PDM_PartLibraryInfo: [
+        { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1', Specification: 'DN1200', Createtime: '2026-08-30T09:15:00' },
+        { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1', Specification: 'M20', Createtime: '2026-08-30T09:40:00' },
+      ],
+    })).adapter,
+    projectNo: 'P-001',
+    readPlan: plan,
+  })
+  assert.equal(declared.valid, true)
+  assert.equal(declared.rows[0].spec, 'DN1200', '规格 rides the expansion row once declared')
+  assert.equal(declared.rows[0].createTime, '2026-08-30T09:15:00', 'the material creation time rides it too')
+  assert.equal(declared.rows[1].spec, 'M20')
+
+  // (3) DECLARED but EMPTY on the source row — absence, never an empty string on the row.
+  const declaredButBlank = await expandPlmProjectBom({
+    sourceAdapter: createAdapter(baseData({
+      DN_PDM_PartLibraryInfo: [
+        { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1', Specification: '   ', Createtime: null },
+        { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1' },
+      ],
+    })).adapter,
+    projectNo: 'P-001',
+    readPlan: plan,
+  })
+  assert.equal(declaredButBlank.valid, true, 'a declared column the source leaves empty is not an error')
+  for (const row of declaredButBlank.rows) {
+    assert.ok(!('spec' in row), 'a blank declared spec is absent, not an empty string')
+    assert.ok(!('createTime' in row), 'a null declared createTime is absent')
+  }
+
+  // (4) The evidence must not start leaking the new values.
+  const evidenceJson = JSON.stringify(summarizeBomExpansionForEvidence(declared))
+  assert.ok(!evidenceJson.includes('DN1200'), 'evidence hides 规格')
+  assert.ok(!evidenceJson.includes('2026-08-30'), 'evidence hides the creation time')
+
+  // (5) The DECLARED batch rule survives plan normalization — it is the deployment's one
+  //     configuration surface, so dropping it here would make the rule unreachable.
+  assert.equal(normalizeStockPreparationBomReadPlan(plan).batchIdentity, undefined, 'absent stays absent')
+  assert.deepEqual(
+    normalizeStockPreparationBomReadPlan({ ...plan, batchIdentity: { mode: 'material_create_hour' } }).batchIdentity,
+    { mode: 'material_create_hour' },
+  )
+  assert.deepEqual(
+    normalizeStockPreparationBomReadPlan(plan).part,
+    { object: 'DN_PDM_PartLibraryInfo', idField: 'OBJ_ID', codeField: 'IdentityNo', nameField: 'IdentityName', materialField: 'Material', versionField: 'SysVer', specField: 'Specification', createTimeField: 'Createtime' },
+    'both declared slots survive normalization as safe identifiers',
+  )
+  assert.throws(
+    () => normalizeStockPreparationBomReadPlan({ ...plan, part: { ...plan.part, specField: 'Specification;DROP' } }),
+    StockPreparationBomExpansionError,
+    'a declared spec slot is still held to the safe-identifier rule',
+  )
+}
+
 async function main() {
+  await testSpecAndCreateTimeAreDeclaredNotGuessed()
   await testSuccessfulExpansion()
   await testReadFailureDiagnosticsAreValuesFree()
   await testNoHit()
   await testSourceRowsResolveCaseVariantFieldKeys()
   await testSameComponentUnderDifferentParentsStaysDistinct()
   await testFailClosedGuards()
+  await testBlankOrNullQuantityHeldNotZeroed()
   await testScaleLimitsRemainDiagnosableAndValuesFree()
   testReadPlanValidation()
 

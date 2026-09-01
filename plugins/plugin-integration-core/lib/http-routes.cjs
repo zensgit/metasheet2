@@ -156,6 +156,12 @@ const ROUTES = [
   ['POST', '/api/integration/stock-preparation/material-mappings/retire', 'stockPreparationMaterialMappingRetire'],
   ['POST', '/api/integration/stock-preparation/unit-conversions/confirm', 'stockPreparationUnitConversionConfirm'],
   ['POST', '/api/integration/stock-preparation/unit-conversions/retire', 'stockPreparationUnitConversionRetire'],
+  // W4b (execution-plan general-prep-execution-plan-20260722.md:125): the K2 carry confirm — the
+  // human confirms a CARRY_VIA_CONFIRM proposal and the server carries the inactive predecessor's
+  // human fields onto the re-keyed row (applyCarryViaConfirm: admin-gated, closed body allowlist,
+  // server-stamped carriedBy/carriedAt, no-overwrite, values-free audit). Optionally closes the
+  // matching carry ledger row (decisionId + inputFingerprint together).
+  ['POST', '/api/integration/stock-preparation/carry/confirm', 'stockPreparationCarryConfirm'],
   // #3751 MVP W4 (generation runtime): run the landed generation engine over CONFIRMED inputs and
   // persist draft prep lines + blocking exceptions + a run record (multitable-internal only); human
   // exception resolution single + bulk (same-reason gate). ready is computed SERVER-SIDE: engine
@@ -208,6 +214,15 @@ const ROUTES = [
   // Dry run: ZERO writes. Reuses the installer's own pre-scan so what it reports is what install does.
   ['POST', '/api/integration/stock-preparation/customer-packs/:packId/dry-run', 'stockPreparationCustomerPackDryRun'],
   ['POST', '/api/integration/stock-preparation/customer-packs/:packId/install', 'stockPreparationCustomerPackInstall'],
+  // 列映射副驾 (schema-mapping copilot) — the first AI feature on the governed AI boundary. PROPOSE
+  // gathers the schema signals a human would stare at (opaque columns + dictionary labels + sample
+  // shapes), asks the governed boundary (dataClass:'business' → local-only) to PROPOSE per-column
+  // meaning with reasoning, and cross-checks each proposal against the deterministic preset discovery.
+  // The AI output is ADVISORY, never applied. CONFIRM takes the HUMAN-confirmed semantics and writes a
+  // DETERMINISTIC vendor preset (the #5385 schema) — the authoritative artifact. Both integration:admin
+  // (configuring a source's mapping). Fail-open: an absent/unavailable boundary degrades to manual.
+  ['POST', '/api/integration/stock-preparation/schema-mapping-copilot/propose', 'schemaMappingCopilotPropose'],
+  ['POST', '/api/integration/stock-preparation/schema-mapping-copilot/confirm', 'schemaMappingCopilotConfirm'],
   // FOS-2: generic field-option-sync (preset-driven). Stock-prep route above is a compat alias.
   ['POST', '/api/integration/field-options/sync', 'fieldOptionsSync'],
   ['GET', '/api/integration/templates', 'templatesList'],
@@ -232,6 +247,11 @@ const STOCK_PREPARATION_SQLSERVER_RUNTIME_ROUTE = Object.freeze([
   'stockPreparationSqlServerSealedSnapshotRun',
 ])
 const EXTERNAL_SYSTEM_OBJECTS_MAX_ITEMS = 1000
+// 列映射副驾 (schema-mapping copilot): reuse the deterministic preset-discovery machinery to gather +
+// ground the AI's per-column proposals, and the boundary-consuming copilot core. The AI PROPOSES;
+// a human CONFIRMS; only confirm produces a deterministic vendor preset (the authoritative artifact).
+const schemaMappingCopilot = require('./schema-mapping-copilot.cjs')
+const { loadVendorPresetsFromDir } = require('./source-vendor-presets/preset-schema.cjs')
 const { sanitizeIntegrationPayload, scrubSecretStringValue } = require('./payload-redaction.cjs')
 const { hasPrivateConfigMutation } = require('./external-systems.cjs')
 const { createRunLogger } = require('./run-log.cjs')
@@ -358,6 +378,13 @@ const {
   resolveStockPrepApplyProductionPolicy,
   resolveStockPrepApplySandboxPolicy,
 } = require('./stock-preparation-table-actions.cjs')
+// 备料 batch identity — "物料创建日期(精确到小时)区分同一项目不同批次的物料". Pure and opt-in; see
+// stock-preparation-batch-identity.cjs for why the content-revision digest stays the default.
+const {
+  StockPreparationBatchIdentityError,
+  mintStockPreparationBatchIdentity,
+  readStockPreparationBatchIdentityMode,
+} = require('./stock-preparation-batch-identity.cjs')
 // 工作台里选源 — the eligibility contract for the pull action's source, and the durable pointer that
 // overrides the deploy-time env default. See stock-preparation-source-binding.cjs for why the
 // allowlist is the BOM read kinds and why this line deliberately does NOT reuse the K3 fence token.
@@ -365,6 +392,7 @@ const {
   StockPreparationSourceBindingError,
   assertBindableSource,
   listEligibleSources,
+  sourceBindingRefusalReason,
 } = require('./stock-preparation-source-binding.cjs')
 // B-stage confirmation-decision LEDGER (O1' semantics: duplicate_expanded_key; full frozen action
 // vocabulary + Q2-A value entry). One managed supporting table; never a canonical-sheet write
@@ -376,6 +404,8 @@ const {
   reconcileConfirmationDecisions,
   listConfirmationDecisions,
   confirmConfirmationDecision,
+  confirmCarryConfirmationDecision,
+  assertCarryConfirmDecisionBinding,
   readConfirmationDecisionValueEntry,
   loadConfirmedDuplicatePolicyReview,
 } = require('./stock-preparation-confirmation-decisions.cjs')
@@ -557,6 +587,9 @@ const {
   retireMaterialMapping,
   confirmUnitConversionRule,
   retireUnitConversionRule,
+  // W4a: the ONE consumer of a CARRY_VIA_CONFIRM decision — the K2 carry write
+  // onto the canonical sheet's human band (server-stamped, no-overwrite).
+  applyCarryViaConfirm,
 } = require('./stock-preparation-confirm-writes.cjs')
 // #3751 MVP W3: READONLY confirmation-state reads for FE views 3/4 (summaries + review queues;
 // queryRecords-only; unit candidates computed per read; values-free rows).
@@ -1277,6 +1310,18 @@ const VALID_STOCK_PREPARATION_UNIT_CONFIRM_REQUEST_KEYS = new Set([
   'contextFingerprint',
   'snapshotBatchId',
   'rule',
+])
+// W4b: closed carry-confirm allowlist. The stamps (carriedBy / carriedAt — and the confirm stamps
+// too) are DELIBERATELY absent: carriedBy is the route user identity and carriedAt is stamped in
+// the carry executor, so a body that supplies either is rejected as an unknown field. decisionId /
+// inputFingerprint are the OPTIONAL ledger-close pair (both or neither).
+const VALID_STOCK_PREPARATION_CARRY_CONFIRM_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'decision',
+  'decisionId',
+  'inputFingerprint',
 ])
 const VALID_STOCK_PREPARATION_UNIT_RETIRE_REQUEST_KEYS = new Set([
   'tenantId',
@@ -3025,6 +3070,27 @@ function createHandlers(services, options = {}) {
   // reaches it without one (`operation_claim_unavailable`) rather than degrading to the kv-only
   // read-then-write path. A DORMANT deployment never gets that far, so its behaviour is unchanged.
   const b2aOperationClaim = (services && services.b2aOperationClaim) || null
+
+  // 列映射副驾: the governed AI boundary is INJECTED (packages/core-backend GovernedAiService), OPTIONAL
+  // at registration — an environment that never wired it still registers the routes and the copilot
+  // fail-opens to manual mapping. It is duck-typed to { suggest(request, env?) }; nothing else here
+  // reaches a provider. The server-held vendor preset catalog (committed, values-free structure) is
+  // loaded once and reused for family detection + as the confirm skeleton — NEVER request-supplied.
+  const governedAi = (services && services.governedAi) || null
+  let vendorPresetCatalogCache = null
+  function loadVendorPresetCatalog() {
+    if (vendorPresetCatalogCache) return vendorPresetCatalogCache
+    try {
+      vendorPresetCatalogCache = loadVendorPresetsFromDir().map((entry) => entry.preset)
+    } catch (err) {
+      // A broken catalog must not take the routes down; the copilot degrades to family-agnostic.
+      if (routeLogger && typeof routeLogger.warn === 'function') {
+        routeLogger.warn('[plugin-integration-core] vendor preset catalog failed to load; copilot runs family-agnostic')
+      }
+      vendorPresetCatalogCache = []
+    }
+    return vendorPresetCatalogCache
+  }
 
   function getMultitableRecordsApi() {
     const records = context && context.api && context.api.multitable && context.api.multitable.records
@@ -4849,6 +4915,43 @@ function createHandlers(services, options = {}) {
       const projectId = `stockprep_${crypto.createHash('sha256').update(stableScope).digest('hex').slice(0, 32)}`
       const batchScope = `${stableScope}\n${prepared.revision}`
       const batchDigest = crypto.createHash('sha256').update(batchScope).digest('hex').slice(0, 32)
+      // 备料 BATCH IDENTITY. The owner's rule is that the material CREATION HOUR separates a
+      // project's batches; shipped code separated them by this content-revision digest plus the
+      // persist-time monotonic `snapshotVersion`. The rule is now implemented, and DECLARED per
+      // deployment on the read plan (batchIdentity.mode) rather than switched on for everyone —
+      // the batch id is the persist idempotency key, so changing which pulls count as one batch is
+      // a behaviour change a running install must opt into. Absent => `snapshot_<digest>`, exactly
+      // as before. A deployment that asks for the hour rule but whose source carries no usable
+      // creation time falls back to the same id and SAYS SO in the evidence below.
+      //
+      // `syncRunId` stays revision-derived on purpose: under the hour rule a second pull in the same
+      // hour with CHANGED content then lands on the same batch id with a different run, which the
+      // persist replay check refuses with a coded idempotency conflict — fail closed, never a silent
+      // overwrite of a batch the operator believes is that hour's.
+      //
+      // An UNKNOWN declared mode is a deploy-time typo. It refuses with a coded 422 rather than
+      // quietly meaning "legacy", because a deployment that believes it turned the rule on and did
+      // not would batch by the wrong rule with nothing on the response to show for it.
+      let batchIdentityMode
+      try {
+        batchIdentityMode = readStockPreparationBatchIdentityMode(action.source.readPlan)
+      } catch (error) {
+        if (error instanceof StockPreparationBatchIdentityError) {
+          throw new HttpRouteError(
+            422,
+            'STOCK_PREPARATION_BATCH_IDENTITY_MODE_INVALID',
+            'source.readPlan.batchIdentity.mode is not a known batch-identity mode',
+            { field: error.details && error.details.field },
+          )
+        }
+        throw error
+      }
+      const batchIdentity = mintStockPreparationBatchIdentity({
+        mode: batchIdentityMode,
+        projectNo: prepared.parameters.projectNo,
+        rows: prepared.expansionResult,
+        legacyBatchId: `snapshot_${batchDigest}`,
+      })
       const result = await persistStockPreparationSyncRun({
         context,
         permission: 'admin',
@@ -4858,7 +4961,7 @@ function createHandlers(services, options = {}) {
         lockTenantId: tenantId,
         projectId,
         syncRunId: `sync_${batchDigest}`,
-        snapshotBatchId: `snapshot_${batchDigest}`,
+        snapshotBatchId: batchIdentity.batchId,
         allocateSnapshotVersion: true,
         sourceSystem: action.source.kind,
         sourceProjectNo: prepared.parameters.projectNo,
@@ -4870,6 +4973,9 @@ function createHandlers(services, options = {}) {
         persisted: result.persisted === true,
         created: result.created,
         source: prepared.evidence,
+        // Values-free: counts, the effective mode and a coded reason. A deployment that asked for
+        // the hour rule and silently got the legacy id would be exactly the failure this reports.
+        batchIdentity: batchIdentity.evidence,
         evidence: result.evidence,
       }, result.persisted ? 201 : 200)
     },
@@ -6139,6 +6245,103 @@ function createHandlers(services, options = {}) {
       return sendOk(res, result)
     },
 
+    // W4b (execution-plan W4a/W4b; adjudication Layer 3): the K2 carry confirm — mirror of
+    // stockPreparationMaterialMappingConfirm. The human confirms a CARRY_VIA_CONFIRM proposal;
+    // the carry EXECUTOR (confirm-writes.applyCarryViaConfirm) copies the inactive predecessor's
+    // human fields onto the re-keyed canonical row: admin-gated, closed body allowlist (the body
+    // can carry NO stamp — carriedBy is the route identity, carriedAt is module-stamped),
+    // no-overwrite, values-free audit. When the body names the matching carry LEDGER row
+    // (decisionId + inputFingerprint, both or neither), the row is closed with the reserved
+    // carry token AFTER the apply; a ledger-close refusal is reported honestly beside the
+    // applied carry instead of faking either a clean success or a failed carry.
+    async stockPreparationCarryConfirm(req, res) {
+      const user = requireAccess(req, 'admin')
+      const audit = requireStockPreparationAudit()
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_CARRY_CONFIRM_REQUEST_KEYS, 'STOCK_PREPARATION_CARRY_CONFIRM_REQUEST_INVALID')
+      const decisionId = firstString(input.decisionId)
+      const inputFingerprint = firstString(input.inputFingerprint)
+      if (Boolean(decisionId) !== Boolean(inputFingerprint)) {
+        throw new HttpRouteError(400, 'STOCK_PREPARATION_CARRY_CONFIRM_REQUEST_INVALID', 'decisionId and inputFingerprint must be provided together', { fields: ['decisionId', 'inputFingerprint'] })
+      }
+      const tenantId = resolveAuthUserTenantId(req)
+      const targetProjectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+      // PRE-FLIGHT BIND, BEFORE the canonical write (the P1 fix). `decision`, `decisionId` and
+      // `inputFingerprint` arrive as three independent client fields; until they are proven to be
+      // ONE approved pair, nothing may be written. Refusing only at the ledger close would leave the
+      // carried row written with no approval record — the same defect wearing a different mask.
+      if (decisionId) {
+        await assertCarryConfirmDecisionBinding({
+          recordsApi: getMultitableRecordsApi(),
+          provisioning: getMultitableProvisioning(),
+          targetProjectId,
+          permission: 'admin',
+          decisionId,
+          inputFingerprint,
+          decision: input.decision,
+        })
+      }
+      const result = await applyCarryViaConfirm({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId,
+        decision: input.decision,
+        confirmedBy: user.id || user.email,
+      })
+      // Ledger close, AFTER the apply: the carry is the substantive act; the ledger row is its
+      // bookkeeping. A typed ledger refusal (e.g. the row was superseded by a newer reconcile)
+      // travels beside the applied result as a closed code — never silently swallowed, never
+      // allowed to misreport the carry itself as failed.
+      const CARRY_APPLIED_MODES = ['carried', 'skipped_already_carried']
+      let ledger
+      if (decisionId) {
+        if (!CARRY_APPLIED_MODES.includes(result.mode)) {
+          // Defence in depth: only an actually-applied (or already-applied) carry may close a hold.
+          // The executor throws on every other path today, so this is unreachable — which is the
+          // point: if a future mode is added, it closes nothing until someone decides it should.
+          ledger = { ok: false, code: 'CARRY_NOT_APPLIED' }
+        } else {
+          try {
+            ledger = await confirmCarryConfirmationDecision({
+              recordsApi: getMultitableRecordsApi(),
+              provisioning: getMultitableProvisioning(),
+              targetProjectId,
+              permission: 'admin',
+              decisionId,
+              inputFingerprint,
+              // The bind is re-asserted inside the close, over the SAME decision that was applied.
+              decision: input.decision,
+              confirmedBy: user.id || user.email,
+            })
+          } catch (error) {
+            if (!(error instanceof StockPreparationConfirmationDecisionError)) throw error
+            ledger = { ok: false, code: error.code }
+          }
+        }
+      }
+      // The audit vocabulary is migration-frozen; a carry confirm resolves a planner exception, so
+      // it rides exception_resolve with a fixed operation subtype — the same precedent the
+      // confirmation-decision confirm route set. Values-free: counts, mode tokens, booleans.
+      await audit.append({
+        tenantId,
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        action: 'exception_resolve',
+        subjectId: decisionId || undefined,
+        mode: result.mode,
+        actor: user.id || user.email,
+        detail: {
+          operation: 'stock_preparation_carry_confirm',
+          persisted: result.persisted,
+          carriedFieldCount: result.carriedFields.length,
+          alreadyCarriedFieldCount: result.alreadyCarriedFields.length,
+          ...(ledger ? { ledgerConfirmed: ledger.ok === true } : {}),
+        },
+      })
+      return sendOk(res, { ...result, ...(ledger ? { ledger } : {}) })
+    },
+
     // #3751 MVP W4: generation run — engine over confirmed inputs; draft prep lines UPSERT; blocking
     // exceptions create-only (human resolution preserved); run record create-only. `ready` is the
     // server-computed invariant verdict (engine ready AND zero unresolved blocking exceptions).
@@ -6367,6 +6570,37 @@ function createHandlers(services, options = {}) {
         .getTableAction({ ...listScope, actionId: PLM_STOCK_PREPARATION_ACTION_ID })
         .then((action) => action.source, () => null)
 
+      // THE ACTION'S OWN KIND IS THE PICKER'S FILTER, and this is the fix for the
+      // accepted-yet-unreadable cross-kind bind. `source.kind` is frozen deploy-time config that the
+      // binding deliberately does not move, and `loadTableActionSourceAdapter` refuses any system
+      // whose kind differs. So a candidate of the other BOM read kind would save fine and then break
+      // every read. Narrowing the list here means such a candidate is never offered at all; the POST
+      // re-checks it anyway, because the picker is a convenience and the POST is the authority.
+      //
+      // No action resolvable -> no kind to require -> nothing is offered. That is honest: an
+      // unconfigured action has no target, template or read plan either, so binding a source to it
+      // could not make it work.
+      const requiredKind = effective ? effective.kind : null
+      const eligibleSources = requiredKind
+        ? listEligibleSources(systems, { dataSourceAccessibility, requiredKind })
+        : []
+
+      // Is what the action reads TODAY actually usable? A deployment can arrive here with a broken
+      // effective source in two ways this screen did not cause: an env default naming a system that
+      // was deleted or deactivated, or a cross-kind row persisted before this check existed. Saying
+      // "takes effect without a restart" over either would be a promise the next refresh breaks.
+      const effectiveSystem = effective
+        ? systems.find((system) => isPlainObject(system) && system.id === effective.externalSystemId) || null
+        : null
+      const effectiveSourceProblem = effective
+        ? sourceBindingRefusalReason(effectiveSystem, {
+            requiredKind,
+            dataSourceAccessible: dataSourceAccessibility
+              ? dataSourceAccessibility.get(effective.externalSystemId)
+              : undefined,
+          })
+        : 'not_found'
+
       return sendOk(res, {
         actionId: PLM_STOCK_PREPARATION_ACTION_ID,
         // WHAT THE ACTION WILL ACTUALLY READ on the next request, resolved through the very same
@@ -6377,10 +6611,15 @@ function createHandlers(services, options = {}) {
         effectiveSourceKind: effective ? effective.kind : null,
         origin: binding ? 'persisted' : (effective ? 'deploy_default' : 'unconfigured'),
         persistedBinding: binding,
-        // Fixed, not computed: the property this whole design exists to deliver, stated to the
-        // screen so the affordance cannot drift from the mechanism.
-        takesEffectWithoutRestart: true,
-        eligibleSources: listEligibleSources(systems, { dataSourceAccessibility }),
+        // `null` when the current source is readable; otherwise the closed reason token saying why it
+        // is not, so the screen can name the problem instead of leaving the admin to discover it on
+        // the next failed refresh.
+        effectiveSourceProblem,
+        // COMPUTED, not fixed. The mechanism never needs a restart, but this flag is what the UI
+        // renders as "saved and already live", so it must mean "a change made here will actually
+        // work" — which is false while the current source cannot be read.
+        takesEffectWithoutRestart: effectiveSourceProblem === null,
+        eligibleSources,
       })
     },
 
@@ -6412,12 +6651,38 @@ function createHandlers(services, options = {}) {
       const store = requireStockPreparationSourceBinding()
       const audit = requireStockPreparationAudit()
 
+      // THE ACTION'S FROZEN KIND — resolved BEFORE the candidate is judged, because it is part of
+      // what "eligible" means. The binding moves `externalSystemId` only, so `source.kind` stays at
+      // its deploy-time value and `loadTableActionSourceAdapter` will refuse any system that does not
+      // match it. Accepting a cross-kind bind here would persist a source that is unreadable by
+      // construction: Save succeeds, the screen says "live", and every refresh afterwards fails with
+      // an opaque TABLE_ACTION_SOURCE_INVALID the admin cannot connect to anything they did.
+      //
+      // An unresolvable action is REFUSED rather than bound blind: without a kind there is nothing to
+      // check against, and binding into that gap is precisely how the footgun above is loaded.
+      let requiredKind = null
+      try {
+        const action = await tableActions.getTableAction({ ...listScope, actionId: PLM_STOCK_PREPARATION_ACTION_ID })
+        requiredKind = action.source.kind
+      } catch (error) {
+        if (error instanceof StockPreparationTableActionError) {
+          throw new HttpRouteError(
+            409,
+            'SOURCE_BINDING_ACTION_UNRESOLVED',
+            'the stock-preparation table action is not configured on this deployment, so a source cannot be bound to it',
+            { actionId: PLM_STOCK_PREPARATION_ACTION_ID, reason: error.code },
+          )
+        }
+        throw error
+      }
+
       // Load through the caller's own tenant scope: an id in another tenant simply is not found, and
       // `assertBindableSource` reports that as a 404 identical to a typo's.
       const candidate = await externalSystems.getExternalSystem({ ...listScope, id: externalSystemId })
       const accessibility = await resolveDataSourceAccessibility(req, candidate ? [candidate] : [])
       assertBindableSource(candidate, {
         dataSourceAccessible: accessibility ? accessibility.get(externalSystemId) : undefined,
+        requiredKind,
       })
 
       const { binding, previousExternalSystemId, changed } = await store.set({
@@ -6607,6 +6872,83 @@ function createHandlers(services, options = {}) {
     // FOS-1 catalog; validates operator option sets against the preset's source keys; patches each
     // mapped field's options + generic `fieldOptionSync` metadata through the SAME kernel stock-prep
     // uses. Metadata-only (no business-row write, no external system, no K3); values-free evidence.
+    // 列映射副驾 PROPOSE — gather the schema signals, ask the governed boundary (dataClass:'business',
+    // local-only) to PROPOSE per-column meaning, cross-check against the deterministic discovery. The
+    // result is ADVISORY (`authoritativePreset` is always null) and fail-open: an absent / unavailable
+    // boundary degrades to manual mapping (aiAvailable:false, manualFallback:true) rather than erroring.
+    async schemaMappingCopilotPropose(req, res) {
+      requireAccess(req, 'admin')
+      const body = requestBody(req)
+      const rawSignals = body && typeof body.signals === 'object' && body.signals !== null ? body.signals : body
+      let signals
+      try {
+        signals = schemaMappingCopilot.gatherSchemaSignals({
+          tableNames: rawSignals && rawSignals.tableNames,
+          columns: rawSignals && rawSignals.columns,
+          dictionaryRows: rawSignals && rawSignals.dictionaryRows,
+          // Server-held catalog only — the request never supplies preset structure.
+          presetCatalog: loadVendorPresetCatalog(),
+        })
+      } catch (error) {
+        if (error instanceof schemaMappingCopilot.SchemaMappingCopilotError) {
+          throw new HttpRouteError(400, error.code, error.message, error.details || {})
+        }
+        throw error
+      }
+      const tenantId = resolveTenantId(req, body)
+      const proposal = await schemaMappingCopilot.proposeColumnMappings({
+        governedAi,
+        signals,
+        env: process.env,
+        ...(tenantId ? { meterKey: `tenant:${tenantId}` } : {}),
+      })
+      return sendOk(res, proposal)
+    },
+
+    // 列映射副驾 CONFIRM — take the HUMAN-confirmed semantics and write a DETERMINISTIC vendor preset
+    // (the #5385 schema), validated by validateVendorPreset. THIS is the authoritative artifact, NOT the
+    // AI text. confirmedBy is SERVER-STAMPED (never request-supplied); the base skeleton is loaded from
+    // the server catalog by presetId (never trusted from the request). A confirmed mapping that fails
+    // deterministic validation is refused (422) — a confirmation can never write an invalid preset.
+    async schemaMappingCopilotConfirm(req, res) {
+      const user = requireAccess(req, 'admin')
+      const body = requestBody(req)
+      // Provenance is server-stamped: reject any request-supplied identity/artifact fields.
+      for (const forbidden of ['confirmedBy', 'confirmedAt', 'preset', 'basePreset']) {
+        if (body && body[forbidden] !== undefined) {
+          throw new HttpRouteError(400, 'SCHEMA_MAPPING_COPILOT_FORBIDDEN_FIELD', `${forbidden} is server-controlled and must not be supplied`, { field: forbidden })
+        }
+      }
+      const presetId = firstString(body && body.presetId)
+      if (!presetId) {
+        throw new HttpRouteError(400, 'SCHEMA_MAPPING_COPILOT_PRESET_ID_REQUIRED', 'presetId (the detected vendor family) is required', { field: 'presetId' })
+      }
+      const basePreset = loadVendorPresetCatalog().find((preset) => preset && preset.presetId === presetId)
+      if (!basePreset) {
+        throw new HttpRouteError(422, 'SCHEMA_MAPPING_COPILOT_PRESET_UNKNOWN', 'presetId is not a known vendor family in the catalog', { presetId })
+      }
+      const actor = firstString(user.id, user.email)
+      if (!actor) {
+        throw new HttpRouteError(403, 'SCHEMA_MAPPING_COPILOT_ACTOR_REQUIRED', 'an authenticated actor identity is required to confirm')
+      }
+      let confirmed
+      try {
+        confirmed = schemaMappingCopilot.confirmColumnMappingPreset({
+          basePreset,
+          confirmedSemantics: body && body.confirmedSemantics,
+          confirmedBy: actor,
+          now: new Date().toISOString(),
+        })
+      } catch (error) {
+        if (error instanceof schemaMappingCopilot.SchemaMappingCopilotError) {
+          const status = error.code === schemaMappingCopilot.COPILOT_ERROR_CODES.CONFIRM_PRESET_INVALID ? 422 : 400
+          throw new HttpRouteError(status, error.code, error.message, error.details || {})
+        }
+        throw error
+      }
+      return sendOk(res, confirmed, 201)
+    },
+
     async fieldOptionsSync(req, res) {
       requireAccess(req, 'admin')
       const input = fieldOptionSyncInput(req, requestBody(req))
