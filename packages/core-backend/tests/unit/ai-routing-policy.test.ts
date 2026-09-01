@@ -28,7 +28,12 @@ import {
   resolveActiveProviderTier,
   type AiDataClass,
 } from '../../src/services/ai-routing-policy'
-import { AI_BASE_URL_ENV, AI_PROVIDER_ALLOWLIST } from '../../src/services/ai-provider-readiness'
+import {
+  AI_BASE_URL_ENV,
+  AI_CLOUD_PROVIDER_ALLOWLIST,
+  AI_LOCAL_PROVIDER,
+  AI_PROVIDER_ALLOWLIST,
+} from '../../src/services/ai-provider-readiness'
 
 const scratch = mkdtempSync(join(tmpdir(), 'ai-routing-'))
 afterAll(() => rmSync(scratch, { recursive: true, force: true }))
@@ -108,11 +113,52 @@ describe('normalizeDataClass — unknown is the most-restrictive class', () => {
 })
 
 describe('resolveActiveProviderTier — declared tier + fail-closed URL downgrade', () => {
-  it('no policy → the provider BUILT-IN tier (cloud for every allowlisted provider)', () => {
+  // Minimal update for the local lane: the loop below used to iterate
+  // AI_PROVIDER_ALLOWLIST, which now includes `local-openai-compat`. That
+  // provider CLAIMS local by selection, so with no base URL it is a fail-closed
+  // DOWNGRADE (cloud, downgraded:true), not a builtin resolution — covered by
+  // its own cases further down. The builtin-tier property is a CLOUD-provider
+  // property, so the loop now iterates the cloud allowlist; the builtin table
+  // itself stays all-cloud (pinned for every provider, local lane included).
+  it('no policy → the provider BUILT-IN tier (cloud for every CLOUD provider); the builtin table never grants local', () => {
     for (const provider of AI_PROVIDER_ALLOWLIST) {
-      expect(AI_BUILTIN_PROVIDER_TIERS[provider]).toBe('cloud')
+      expect(AI_BUILTIN_PROVIDER_TIERS[provider], provider).toBe('cloud')
+    }
+    for (const provider of AI_CLOUD_PROVIDER_ALLOWLIST) {
       expect(resolveActiveProviderTier(provider, null, {})).toEqual({ tier: 'cloud', downgraded: false })
     }
+  })
+
+  it('RED (local lane): local-openai-compat + provably-local base URL → local, NO policy file needed', () => {
+    for (const url of ['http://127.0.0.1:11434', 'http://10.1.2.3:8000', 'https://vllm.internal:8000']) {
+      expect(resolveActiveProviderTier(AI_LOCAL_PROVIDER, null, { [AI_BASE_URL_ENV]: url }), url).toEqual({
+        tier: 'local',
+        downgraded: false,
+      })
+    }
+  })
+
+  it('RED (local lane): local-openai-compat on a PUBLIC host (or with no URL) is DOWNGRADED to cloud — the name is a claim, not evidence', () => {
+    for (const env of [
+      {},
+      { [AI_BASE_URL_ENV]: 'https://api.deepseek.com/v1' },
+      { [AI_BASE_URL_ENV]: 'https://api.example.com' },
+      { [AI_BASE_URL_ENV]: 'https://qwen.internal.corp:8443' }, // looks internal, is NOT (.internal.corp ≠ .internal)
+    ]) {
+      expect(resolveActiveProviderTier(AI_LOCAL_PROVIDER, null, env), JSON.stringify(env)).toEqual({
+        tier: 'cloud',
+        downgraded: true,
+      })
+    }
+  })
+
+  it('RED (local lane): authorizeAiRoute serves BUSINESS on a proven-local local-openai-compat and refuses it on a public one', () => {
+    const ok = authorizeAiRoute(AI_LOCAL_PROVIDER, 'business', { [AI_BASE_URL_ENV]: 'http://127.0.0.1:11434' })
+    expect(ok.allowed).toBe(true)
+    if (ok.allowed) expect(ok.tier).toBe('local')
+    const refused = authorizeAiRoute(AI_LOCAL_PROVIDER, 'business', { [AI_BASE_URL_ENV]: 'https://api.example.com' })
+    expect(refused.allowed).toBe(false)
+    if (!refused.allowed) expect(refused.reason).toBe('business_data_cloud_forbidden')
   })
 
   it('policy declares CLOUD → cloud', () => {

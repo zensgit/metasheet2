@@ -152,6 +152,50 @@ describe('business data NEVER reaches a cloud provider (end-to-end RED)', () => 
     if (!res.available) expect(res.reason).toBe('business_data_cloud_forbidden')
     expect(fetchSpy).not.toHaveBeenCalled()
   })
+
+  it('RED (local lane, end-to-end): provider=local-openai-compat + local URL + keyless + operator model serves BUSINESS — no policy file, no alias, no dummy key', async () => {
+    // Before the local lane existed the ONLY way to run this deployment was to
+    // lie (alias the local server as gpt-4o-mini + a dummy key). This is the
+    // honest configuration, end to end through the boundary.
+    const fetchSpy = vi.fn(async () => openaiOk('LOCAL QWEN SUGGESTION'))
+    const svc = serviceWith(fetchSpy)
+    const res = await svc.suggest(businessReq, {
+      MULTITABLE_AI_ENABLED: '1',
+      MULTITABLE_AI_PROVIDER: 'local-openai-compat',
+      MULTITABLE_AI_BASE_URL: 'http://127.0.0.1:11434',
+      MULTITABLE_AI_MODEL: 'qwen2.5:14b-instruct',
+      MULTITABLE_AI_CONFIRM_LIVE_REQUESTS: '1',
+      // no MULTITABLE_AI_API_KEY, no MULTITABLE_AI_ROUTING_POLICY
+    })
+    expect(res.available).toBe(true)
+    if (res.available) {
+      expect(res.suggestion).toBe('LOCAL QWEN SUGGESTION')
+      expect(res.provenance.providerTier).toBe('local')
+      expect(res.provenance.provider).toBe('local-openai-compat')
+      expect(res.provenance.model).toBe('qwen2.5:14b-instruct')
+    }
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    const [url] = fetchSpy.mock.calls[0] as unknown as [string]
+    expect(String(url)).toBe('http://127.0.0.1:11434/v1/chat/completions')
+  })
+
+  it('RED (local lane): local-openai-compat pointed at a PUBLIC host never serves business — blocked at readiness, fetch NOT called', async () => {
+    const fetchSpy = vi.fn(async () => openaiOk('LEAKED'))
+    const svc = serviceWith(fetchSpy)
+    const res = await svc.suggest(businessReq, {
+      MULTITABLE_AI_ENABLED: '1',
+      MULTITABLE_AI_PROVIDER: 'local-openai-compat',
+      MULTITABLE_AI_BASE_URL: 'https://api.example.com',
+      MULTITABLE_AI_MODEL: 'qwen2.5:14b-instruct',
+      MULTITABLE_AI_CONFIRM_LIVE_REQUESTS: '1',
+    })
+    expect(res.available).toBe(false)
+    // Readiness refuses the unprovable host first (provider_not_ready); even if
+    // it were bypassed, the routing tier downgrade would refuse business next —
+    // two independent layers, both keyed on the SAME isProvablyLocalHost proof.
+    if (!res.available) expect(res.reason).toBe('provider_not_ready')
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
 })
 
 describe('non-sensitive routing', () => {
