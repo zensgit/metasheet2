@@ -102,6 +102,7 @@ function bindingPayload(overrides: Record<string, unknown> = {}): Record<string,
     effectiveSourceKind: 'data-source:sql-readonly',
     origin: 'deploy_default',
     persistedBinding: null,
+    effectiveSourceProblem: null,
     takesEffectWithoutRestart: true,
     eligibleSources: [
       candidate({ externalSystemId: DEMO_SOURCE, name: '内置演示源' }),
@@ -407,6 +408,60 @@ describe('BOM备料 数据来源 (工作台里选源)', () => {
     const opaque = await mountPanel()
     expect(text(opaque, 'stock-prep-source-error')).toContain('HTTP 500')
     expect(opaque.textContent).not.toContain(PLANTED_DSN)
+  })
+
+  // -------------------------------------------------------------------------
+  // S-08 — the cross-kind refusal, and the unusable-current-source warning.
+  //
+  // The server refuses a cross-kind bind (its `source.kind` is frozen deploy config and the read
+  // path re-checks it), and it only claims 生效无需重启 when the current source actually works. The
+  // page has to render BOTH honestly, or the admin is back to discovering the problem on a failed
+  // refresh — the exact cost this feature removes.
+  // -------------------------------------------------------------------------
+
+  it('S-08: a kind_mismatch refusal is explained in plain words, and an unusable current source is named', async () => {
+    installRoutes({ post: () => refusal(422, 'SOURCE_BINDING_SOURCE_INELIGIBLE', 'kind_mismatch') })
+    const root = await mountPanel()
+    const select = node(root, 'stock-prep-source-select') as HTMLSelectElement
+    select.value = CUSTOMER_PLM
+    select.dispatchEvent(new Event('change'))
+    await flush(2)
+    ;(node(root, 'stock-prep-source-save') as HTMLButtonElement).click()
+    await flush(2)
+    ;(node(root, 'stock-prep-source-confirm-save') as HTMLButtonElement).click()
+    await flush()
+
+    const error = text(root, 'stock-prep-source-error')
+    // Not "wrong kind" but WHY it cannot be used here, and who can change it.
+    expect(error).toContain('按另一种连接方式装的')
+    expect(error).toContain('实施同事')
+    expect(error).toContain('HTTP 422')
+    expect(root.textContent).not.toContain(PLANTED_DSN)
+    expect(node(root, 'stock-prep-source-saved')).toBeNull()
+
+    // A deployment whose CURRENT source is unreadable: the problem is named, and the no-restart
+    // promise is withheld because the server withheld it.
+    if (app) app.unmount()
+    installRoutes({
+      get: () => envelope(bindingPayload({
+        effectiveSourceProblem: 'not_active',
+        takesEffectWithoutRestart: false,
+      })),
+    })
+    const broken = await mountPanel()
+    expect(node(broken, 'stock-prep-source-problem')).not.toBeNull()
+    expect(text(broken, 'stock-prep-source-problem')).toContain('当前来源现在读不了')
+    expect(text(broken, 'stock-prep-source-problem')).toContain('还没有启用')
+    expect(node(broken, 'stock-prep-source-no-restart')).toBeNull()
+    // The picker still renders — this state is repairable, and this screen is the repair.
+    expect(node(broken, 'stock-prep-source-select')).not.toBeNull()
+
+    // A healthy payload shows no problem line.
+    if (app) app.unmount()
+    installRoutes()
+    const healthy = await mountPanel()
+    expect(node(healthy, 'stock-prep-source-problem')).toBeNull()
+    expect(node(healthy, 'stock-prep-source-no-restart')).not.toBeNull()
   })
 
   // -------------------------------------------------------------------------
