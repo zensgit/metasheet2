@@ -339,14 +339,13 @@ describeIfDatabase('W6-1 aggregate fixture matrix (seeded real PostgreSQL)', () 
   afterAll(async () => {
     const ownedPool = pool
     const termination = ownedPool ? attachOwnedPoolTerminationHandler(ownedPool) : null
-    let closeError: unknown
-    let dropError: unknown
+    const cleanupFailures: Array<'fixture_pool_close' | 'database_drop' | 'admin_pool_close'> = []
     try {
       if (ownedPool) {
         try {
           await closePoolWithinDeadline(ownedPool)
-        } catch (error) {
-          closeError = error
+        } catch {
+          cleanupFailures.push('fixture_pool_close')
         }
       }
       pool = undefined
@@ -354,19 +353,20 @@ describeIfDatabase('W6-1 aggregate fixture matrix (seeded real PostgreSQL)', () 
         const outcome = await dropScratchDatabase(adminPool, databaseName)
         console.info(formatScratchDropOutcome('attendance-w6-fixture-matrix', outcome))
       } catch (error) {
-        dropError = error
+        cleanupFailures.push('database_drop')
         console.error(formatScratchDropFailure('attendance-w6-fixture-matrix', error))
       }
     } finally {
       termination?.detach()
       try {
         await adminPool.end()
-      } catch (error) {
-        closeError ??= error
+      } catch {
+        cleanupFailures.push('admin_pool_close')
       }
     }
-    if (closeError) throw closeError
-    if (dropError) throw dropError
+    if (cleanupFailures.length > 0) {
+      throw new Error(`attendance W6 scratch cleanup failed: ${cleanupFailures.join(',')}`)
+    }
   }, 60_000)
 
   for (const name of FIXTURE_NAMES) {
