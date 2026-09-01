@@ -11,7 +11,12 @@
  * provider. The harness skips automatically when the stack is unreachable. Bring up:
  *   - backend :7778 with MULTITABLE_AI_ENABLED=1, MULTITABLE_AI_BASE_URL=<mock>,
  *     MULTITABLE_AI_CONFIRM_LIVE_REQUESTS=1, MULTITABLE_AI_BULK_MAX_ROWS=1 (force job mode),
- *     RBAC_BYPASS=true
+ *     RBAC_BYPASS=true, and
+ *     MULTITABLE_AI_ROUTING_POLICY=./tests/e2e/fixtures/local-ai-routing-policy.json
+ *     — bulk-fill carries BUSINESS-class record data, so the data-class routing gate
+ *     refuses it unless the deployment resolves to a LOCAL provider. The shipped fixture
+ *     declares `local` and allowlists 127.0.0.1/localhost, which is where the mock AI
+ *     server runs. WITHOUT it the run is (correctly) blocked and this spec fails.
  *   - the mock AI server (./fixtures/mock-ai-server.mjs) — for the CANCEL test, start it
  *     with MOCK_AI_DELAY_MS>=1000 so the polling phase lasts long enough to click cancel.
  *   - frontend :8899
