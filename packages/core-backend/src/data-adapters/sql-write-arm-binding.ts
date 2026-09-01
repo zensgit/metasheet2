@@ -55,6 +55,21 @@
 //     (see the `hasExplicitDatabase` gate in {@link assertSqlWriteAllowed}); an explicit database folds
 //     the destination catalog into the pin.
 //
+// RESIDUAL, stated plainly (the credential-blind residual, and it is NOT closed): FIX 3 closed the
+// case where the DESTINATION could move (a blank database resolving to whatever the login defaults
+// to). It did NOT — and this binding cannot — close a PRIVILEGE change on an UNCHANGED destination:
+// a swap of `connection.user`/`password` to a WRITE-CAPABLE login on the SAME server and the SAME
+// explicit database keeps every fingerprinted field identical, so the pin still matches and the armed
+// write proceeds. That is inherent, not an oversight: the fingerprint deliberately hashes the declared
+// DESTINATION fields only (server/host/port/database/instance/connectionString) and is values-free, so
+// it can answer "is this the same destination the deployer armed?" but never "does this login still
+// lack write rights?". Answering the second question is the READ-ONLY DATABASE ACCOUNT's job — the
+// layer the owner ruled is the PROVABLE one (option A, the boundary ruling): a login with no INSERT/
+// UPDATE/DELETE grant refuses the write at the server regardless of what any in-process gate decided.
+// This module, and the gate above it, are DEFENSE IN DEPTH beneath that account. An operator who can
+// rewrite a source's credentials to a write-capable login has already defeated the provable layer, and
+// no in-process binding can restore it.
+//
 // VALUES-FREE: a fingerprint is a SHA-256 hex digest; nothing here logs or returns a host, database,
 // connection string or credential. The pin map is keyed by `systemId` (a config-authored id).
 

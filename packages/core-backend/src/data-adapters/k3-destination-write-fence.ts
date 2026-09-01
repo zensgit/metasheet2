@@ -24,9 +24,17 @@
 //   * the DECLARED marker `options.k3Destination === true` — an operator's positive attestation that a
 //     data source points at the customer K3; and
 //   * its SET-ONCE durability: once true it cannot be cleared by any later config edit.
-// A marked source refuses structured writes as defense in depth. This is NOT the guarantee — the
-// guarantee is that generic SQL write is default-deny and no K3-reaching source is ever armed. The
-// marker is a declaration, and a declaration is only as truthful as the operator who wrote it.
+// A marked source refuses structured writes as defense in depth. This is NOT the guarantee. The
+// PROVABLE guarantee lives one layer down, at the DATABASE ACCOUNT: the owner's boundary ruling
+// (option A, 2026-08-29) placed it there — a K3-reaching login granted no INSERT/UPDATE/DELETE
+// refuses the write AT THE SERVER, whatever any in-process code decided, and that is the only layer
+// that holds against an in-process defect, a missed call path, or an operator editing config. Beneath
+// it, in descending order of strength: generic SQL write is default-deny (`outbound-sql-write-gate.ts`,
+// the load-bearing in-process control), armed sources are pinned to the connection they were armed on
+// (`sql-write-arm-binding.ts`), and finally this marker. Operator discipline — "no K3-reaching source
+// is ever armed" — is a PROCEDURE, not a proof, and is named here as such rather than counted as the
+// guarantee. The marker is a declaration, and a declaration is only as truthful as the operator who
+// wrote it.
 //
 // The by-kind K3 fences (`erp:k3-wise-webapi` permanent four-layer, and the `erp:k3-wise-sqlserver`
 // sibling) are untouched and remain their own control.
