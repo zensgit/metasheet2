@@ -33,9 +33,11 @@ const {
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
 } = require(path.join(__dirname, '..', '..', 'lib', 'stock-preparation-templates.cjs'))
 
-// The canonical MAIN template rides too (W4 carry): applyCarryViaConfirm's scoped
-// records API resolves the canonical sheet's logical field ids exactly like the
-// MVP tables' — mirroring the production MVP_TEMPLATE_BY_OBJECT_ID registry.
+// The canonical MAIN template rides too: W4 carry's applyCarryViaConfirm AND the 按项目导出物料
+// Excel export both need their scoped records API to resolve the canonical sheet's logical field
+// ids exactly like the MVP tables' — mirroring the production MVP_TEMPLATE_BY_OBJECT_ID registry.
+// Purely ADDITIVE relative to the original MVP-only map: does not change resolution for any objectId
+// already registered.
 const TEMPLATE_BY_OBJECT_ID = new Map(
   [...STOCK_PREPARATION_MVP_TABLE_TEMPLATES, STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE]
     .map((template) => [template.objectId, template]),
