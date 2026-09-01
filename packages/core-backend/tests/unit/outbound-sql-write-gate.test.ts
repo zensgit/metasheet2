@@ -345,6 +345,20 @@ describe('outbound SQL write gate — the write/read split is the ONLY classific
   it('empty / whitespace is NOT a pure read (fail-closed)', () => {
     for (const sql of ['', '   ', ';']) expect(isPureReadStatement(sql)).toBe(false)
   })
+
+  it('a CTE is a WRITE even when it terminates in a SELECT — the documented fail-closed cost', () => {
+    // `with` is deliberately absent from the read-verb allowlist. CTE *writes* are already caught by
+    // the write-verb-anywhere rule, so this READ-shaped CTE is the ONLY case the exclusion decides —
+    // and pinning it is what makes the choice load-bearing rather than decorative. Proving a given
+    // CTE terminates in a SELECT is the unbounded parsing game this gate exists to retire, so a K3
+    // read connection simply does not get CTEs. The cost is visible and accepted.
+    expect(isPureReadStatement('WITH x AS (SELECT 1) SELECT * FROM x')).toBe(false)
+    expect(isSqlWriteStatement('WITH x AS (SELECT 1) SELECT * FROM x')).toBe(true)
+    // …and it is refused as an unarmed write end to end, not merely misclassified.
+    delete process.env[ENV_KEY]
+    const err = refusalOf(() => assertOutboundSqlWriteAuthorized(buildError, { systemId: 's1', operation: 'statement' }))
+    expect(err.code).toBe(OUTBOUND_SQL_WRITE_DISABLED)
+  })
 })
 
 // ─────────────────── PART 3 — THE ENFORCEMENT POINTS ───────────────────
