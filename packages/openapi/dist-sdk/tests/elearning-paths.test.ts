@@ -40,6 +40,8 @@ type ObjectAclReplaceRequest = components['schemas']['ElearningObjectAclReplaceR
 type ObjectAclReplaceResult = components['schemas']['ElearningObjectAclReplaceResult']
 type LearnerList = components['schemas']['ElearningLearnerCourseList']
 type WatchState = components['schemas']['ElearningWatchState']
+type WatchChallenge = components['schemas']['ElearningWatchChallenge']
+type WatchChallengeAck = components['schemas']['ElearningWatchChallengeAckRequest']
 type Heartbeat = components['schemas']['ElearningHeartbeatRequest']
 type Ticket = components['schemas']['ElearningPlaybackTicket']
 type PublicPaper = components['schemas']['ElearningPublicPaper']
@@ -252,6 +254,7 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<paths['/api/elearning/me/courses']['get']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/watch/items/{itemId}/start']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/watch/sessions/{sessionId}/heartbeat']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/watch/sessions/{sessionId}/challenges/{challengeId}/ack']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/watch/items/{itemId}/playback-ticket']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/media/playback']['get']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/exams/items/{itemId}/start']['post']>().not.toBeNever()
@@ -383,6 +386,9 @@ describe('elearning V0.1 OpenAPI paths', () => {
     >().toEqualTypeOf<WatchState>()
     expectTypeOf<
       paths['/api/elearning/watch/sessions/{sessionId}/heartbeat']['post']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<WatchState>()
+    expectTypeOf<
+      paths['/api/elearning/watch/sessions/{sessionId}/challenges/{challengeId}/ack']['post']['responses']['200']['content']['application/json']
     >().toEqualTypeOf<WatchState>()
     expectTypeOf<
       paths['/api/elearning/watch/items/{itemId}/playback-ticket']['post']['responses']['200']['content']['application/json']
@@ -1798,6 +1804,48 @@ describe('elearning V0.1 OpenAPI paths', () => {
     )).toEqual([])
   })
 
+  it('keeps the watch challenge route and schemas closed', () => {
+    const doc = JSON.parse(readFileSync(join(here, '..', '..', 'dist', 'openapi.json'), 'utf8')) as {
+      paths?: Record<string, any>
+      components?: { schemas?: Record<string, JsonSchema> }
+    }
+    const path = '/api/elearning/watch/sessions/{sessionId}/challenges/{challengeId}/ack'
+    const operation = doc.paths?.[path]?.post
+    const schemas = doc.components?.schemas ?? {}
+    expect(operation?.security).toEqual([{ bearerAuth: [] }])
+    expect(operation?.description).toMatch(/master, content, media/)
+    expect(operation?.requestBody?.content?.['application/json']?.schema?.$ref)
+      .toBe('#/components/schemas/ElearningWatchChallengeAckRequest')
+    expect(operation?.responses?.['200']?.content?.['application/json']?.schema?.$ref)
+      .toBe('#/components/schemas/ElearningWatchState')
+    expect(schemas.ElearningWatchChallengeAckRequest).toMatchObject({
+      additionalProperties: false,
+      required: ['requestId', 'selections'],
+    })
+    expect(schemas.ElearningWatchChallenge).toMatchObject({
+      additionalProperties: false,
+      required: [
+        'challengeId', 'deadlineAt', 'ordinal', 'status',
+        'promptVersion', 'targets', 'options',
+      ],
+    })
+    expect(schemas.ElearningWatchChallenge?.properties?.status?.enum)
+      .toEqual(['challenged', 'paused'])
+    expect(schemas.ElearningWatchChallenge?.properties?.promptVersion?.enum)
+      .toEqual(['symbol-number-v1'])
+    expect(schemas.ElearningWatchChallenge?.properties?.targets).toMatchObject({
+      minItems: 2,
+      maxItems: 2,
+      uniqueItems: true,
+    })
+    expect(schemas.ElearningWatchChallenge?.properties?.options).toMatchObject({
+      minItems: 6,
+      maxItems: 6,
+      uniqueItems: true,
+    })
+    expect(schemas.ElearningWatchState?.required).not.toContain('challenge')
+  })
+
   it('keeps write and heartbeat request objects closed', () => {
     expectTypeOf<AssignRequest>().toMatchTypeOf<{
       targetUserId: string
@@ -1809,6 +1857,20 @@ describe('elearning V0.1 OpenAPI paths', () => {
       sequence: number
       positionMs: number
       playing: boolean
+    }>()
+    expectTypeOf<WatchChallengeAck>().toEqualTypeOf<{
+      requestId: string
+      selections: [string, string]
+    }>()
+    expectTypeOf<WatchState['challenge']>().toEqualTypeOf<WatchChallenge | null | undefined>()
+    expectTypeOf<WatchChallenge>().toEqualTypeOf<{
+      challengeId: string
+      deadlineAt: string
+      ordinal: number
+      status: 'challenged' | 'paused'
+      promptVersion: 'symbol-number-v1'
+      targets: [string, string]
+      options: Array<{ optionId: string; label: string }>
     }>()
     expectTypeOf<ExamAnswers>().toEqualTypeOf<{
       answers: {

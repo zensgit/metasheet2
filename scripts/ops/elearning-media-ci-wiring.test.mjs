@@ -91,6 +91,7 @@ const WEB_GUARD_PATHS = [
   'apps/web/src/views/ElearningCertificateAdminSection.vue',
   'apps/web/src/views/ElearningCertificateWalletSection.vue',
   'apps/web/src/views/ElearningLearnerView.vue',
+  'apps/web/src/views/ElearningWatchChallengePrompt.vue',
   'apps/web/src/views/ElearningManualGradingView.vue',
   'apps/web/src/views/ElearningManualGradingAttempt.vue',
   'apps/web/src/views/ElearningLearningProfileSection.vue',
@@ -138,6 +139,7 @@ const SCHEMA_DB_FILES = [
   'tests/integration/elearning-v01-content-assessment-schema.db.test.ts',
   'tests/integration/elearning-v01-watch-progress-schema.db.test.ts',
   'tests/integration/elearning-watch-progress-service.db.test.ts',
+  'tests/integration/elearning-watch-challenge.db.test.ts',
   'tests/integration/elearning-direct-assignment.db.test.ts',
   'tests/integration/elearning-course-publish.db.test.ts',
   'tests/integration/elearning-title-runtime.db.test.ts',
@@ -184,6 +186,10 @@ const V01_REQUIRED_FLAGS = [
 const V01_PARKED_FLAGS = [
   'ELEARNING_INCENTIVE_ENABLED',
   'ELEARNING_ANALYTICS_ENABLED',
+]
+
+const L6_EXTENSION_FLAGS = [
+  'ELEARNING_WATCH_CHALLENGE_ENABLED',
 ]
 
 const MEDIA_CLAIM_UNIT_FILES = [
@@ -550,6 +556,18 @@ test('env example documents the seven canonical flags default false and V0.1 req
       env,
       new RegExp(`^#\\s*${key}=false\\s*$`, 'm'),
       `.env.example must keep the canonical ${key}=false line`,
+    )
+  }
+  for (const key of L6_EXTENSION_FLAGS) {
+    assert.match(
+      env,
+      new RegExp(`^#\\s*${key}=false\\s*$`, 'm'),
+      `.env.example must keep the L6 extension ${key}=false line`,
+    )
+    assert.equal(
+      CANONICAL_ELEARNING_FLAGS.includes(key),
+      false,
+      `${key} is an extension gate, not an eighth canonical capability`,
     )
   }
   const requiredBlock = commentBlockStarting(env, /V0\.1 required flags/, 'V0.1 required flags')
