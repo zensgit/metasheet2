@@ -8,7 +8,8 @@ import { MSSQLAdapter } from './MSSQLAdapter'
 import { MySQLAdapter } from './MySQLAdapter'
 import { PLMAdapter } from './PLMAdapter'
 import { encryptStoredSecretValue, decryptStoredSecretValue, isEncryptedSecretValue } from '../security/encrypted-secrets'
-import { assertNotK3Destination, assertNotK3ConnectionWrite, assertNoCrossServerWrite, preserveK3Marker } from './k3-destination-write-fence'
+import { assertNotK3Destination, preserveK3Marker } from './k3-destination-write-fence'
+import { assertSqlStatementWriteAuthorized } from './outbound-sql-write-gate'
 import type { IConfigService, ILogger } from '../di/identifiers'
 
 // PostgreSQL SQLSTATE for undefined_table. The referential delete guard trusts
@@ -818,18 +819,21 @@ export class DataSourceManager extends EventEmitter {
     params?: DbValue[]
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
-    // G-4 CONNECTION READ-ONLY GATE (query), fail-early before connect. On a K3-reaching connection
-    // (the durable marker; connect-time detection is re-checked at the adapter) only a PURE READ is
-    // allowed — every write, whatever T-SQL shape, is refused as a write on a read-only K3 connection,
-    // without parsing a table. On a non-K3 connection a best-effort statement signature is the
-    // defense-in-depth backstop. Reads pass, so a raw SELECT (including from a K3 table) works. The
-    // adapter's own query() re-checks with its detected flag, so a caller who skips this wrapper
-    // (getDataSource(id).query(...)) is still refused; this layer only saves a connect.
-    if (adapter.getType() === 'sqlserver') assertNoCrossServerWrite(sql)
-    assertNotK3ConnectionWrite(adapter.getConfig(), sql)
+    // The C6 write-gated marker refuses the RAW query path outright and predates this gate; it keeps
+    // precedence because it is the more specific diagnosis for that source (and it refuses reads too,
+    // which the capability gate deliberately does not).
     if (isGenericQueryDisabledConfig(adapter.getConfig())) {
       throw new Error(c6WriteTargetQueryDisabledMessage(dataSourceId))
     }
+    // W-1(c) DEFAULT-DENY SQL WRITE GATE, fail-early before connect. A pure read passes free; anything
+    // else requires this data source to be an ARMED target. The adapter's own query() re-checks at the
+    // true chokepoint, so a caller who skips this wrapper is still refused; this layer only saves a
+    // connect. The gate never inspects what the statement writes TO.
+    assertSqlStatementWriteAuthorized(
+      (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
+      sql,
+      { id: adapter.getConfig().id, name: adapter.getConfig().name, type: adapter.getType() },
+    )
 
     if (!adapter.isConnected()) {
       await this.connectDataSource(dataSourceId)
@@ -862,7 +866,7 @@ export class DataSourceManager extends EventEmitter {
     // G-4 DESTINATION FENCE (insert). Refuse a K3 destination — declared (marker) or betrayed by a
     // K3 business-table target — before connecting or touching the driver. This is the chokepoint the
     // by-kind fences leak past: a sql-write-gated source pointed at K3 arrives here as a generic write.
-    assertNotK3Destination(adapter.getConfig(), table)
+    assertNotK3Destination(adapter.getConfig())
 
     if (!adapter.isConnected()) {
       await this.connectDataSource(dataSourceId)
@@ -881,7 +885,7 @@ export class DataSourceManager extends EventEmitter {
     adapter.assertWritable() // defense-in-depth: reject mutations on a read-only source
     // G-4 DESTINATION FENCE (update). Same refusal as insert — a K3 destination is a K3 destination
     // whichever mutation verb reaches it.
-    assertNotK3Destination(adapter.getConfig(), table)
+    assertNotK3Destination(adapter.getConfig())
 
     if (!adapter.isConnected()) {
       await this.connectDataSource(dataSourceId)
@@ -898,7 +902,7 @@ export class DataSourceManager extends EventEmitter {
     const adapter = this.getDataSource(dataSourceId)
     adapter.assertWritable() // defense-in-depth: reject mutations on a read-only source
     // G-4 DESTINATION FENCE (delete). A delete against a K3 destination is an external write-back too.
-    assertNotK3Destination(adapter.getConfig(), table)
+    assertNotK3Destination(adapter.getConfig())
     if (isC6WriteTargetConfig(adapter.getConfig())) {
       throw new Error(c6WriteTargetDeleteUnsupportedMessage(dataSourceId))
     }
@@ -929,7 +933,7 @@ export class DataSourceManager extends EventEmitter {
     // so the target side is a write into `targetTable`. Refuse a K3 destination here, before the
     // first source read — a copy TO K3 is a K3 external write-back regardless of where the rows come
     // from. The source side is a READ and is deliberately not fenced.
-    assertNotK3Destination(targetAdapter.getConfig(), targetTable)
+    assertNotK3Destination(targetAdapter.getConfig())
     if (isGenericQueryDisabledConfig(sourceAdapter.getConfig())) {
       throw new Error(c6WriteTargetQueryDisabledMessage(sourceId))
     }
@@ -996,14 +1000,17 @@ export class DataSourceManager extends EventEmitter {
     // Execute queries in parallel
     const promises = queries.map(async ({ dataSourceId, sql, params, alias }) => {
       const adapter = this.getDataSource(dataSourceId)
-      // G-4 CONNECTION READ-ONLY GATE (federated query). A federated leg runs raw SQL: on a
-      // K3-reaching connection only a pure read is allowed; on a non-K3 connection the statement
-      // signature is the backstop. Reads pass.
-      if (adapter.getType() === 'sqlserver') assertNoCrossServerWrite(sql)
-      assertNotK3ConnectionWrite(adapter.getConfig(), sql)
+      // The C6 write-gated marker keeps precedence on the raw path, as in `query()` above.
       if (isGenericQueryDisabledConfig(adapter.getConfig())) {
         throw new Error(c6WriteTargetQueryDisabledMessage(dataSourceId))
       }
+      // W-1(c) DEFAULT-DENY SQL WRITE GATE. A federated leg runs raw SQL: a pure read passes, a write
+      // needs an armed target.
+      assertSqlStatementWriteAuthorized(
+        (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
+        sql,
+        { id: adapter.getConfig().id, name: adapter.getConfig().name, type: adapter.getType() },
+      )
 
       if (!adapter.isConnected()) {
         await this.connectDataSource(dataSourceId)

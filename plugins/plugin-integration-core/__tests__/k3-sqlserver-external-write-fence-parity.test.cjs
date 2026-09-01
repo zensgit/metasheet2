@@ -140,6 +140,26 @@ test('E4S-00 (control): the subject set is frozen and reserves no runtime unlock
   }
   assert.equal(fence.k3ExternalWritePermanentRefusal(build, SQL_KIND).details.targetKind, SQL_KIND)
   assert.throws(() => fence.refuseK3ExternalWritePermanently(build, SQL_KIND), /permanently disabled/)
+
+  // THE THROW PATH, pinned against a CRAFTED label. The loop above only exercises arbitrary labels on
+  // the RETURNING builder; without this, a mutant that let a crafted `targetKind` suppress the throw
+  // survived. Not production-reachable (no real call site passes an attacker string), but the claim
+  // "the label can never suppress the refusal" must hold on the path that actually refuses.
+  for (const crafted of ['K3_UNLOCK', 'allow', '', 'erp:k3-wise-webapi-DISABLED', 0, false, [], () => {}]) {
+    const thrown = (() => {
+      try {
+        fence.refuseK3ExternalWritePermanently(build, crafted)
+        return null
+      } catch (error) {
+        return error
+      }
+    })()
+    assert.ok(thrown, `refuseK3ExternalWritePermanently must THROW for label ${String(crafted)}`)
+    assert.equal(thrown.code, FIXED_CODE, 'the fixed code survives any crafted label on the throw path')
+    assert.equal(thrown.status, 403)
+    // An unrecognised label falls back to the WebAPI kind; it is never passed through into details.
+    assert.equal(thrown.details.targetKind, WEBAPI_KIND)
+  }
 })
 
 test('E4S-00 (control): both kinds are INDISTINGUISHABLE in a refusal body', () => {
