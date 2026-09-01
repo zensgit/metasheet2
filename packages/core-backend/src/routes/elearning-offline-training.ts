@@ -3,7 +3,9 @@ import { json, Router, type NextFunction, type Request, type RequestHandler, typ
 import { isElearningOfflineTrainingSurfaceEnabled } from '../elearning/feature-flags'
 import { ElearningOfflineError } from '../services/elearning-offline-training'
 import {
+  changeElearningOfflineRegistration,
   issueElearningOfflineQr,
+  listElearningOfflineRegistrations,
   listMyElearningOfflineTrainings,
   publishElearningOfflineTraining,
   recordElearningOfflineAttendance,
@@ -15,6 +17,7 @@ const jsonParser = json({ limit: 64 * 1024 })
 const publishJsonParser = json({ limit: 512 * 1024 })
 const QR_BODY_KEYS = new Set(['action', 'requestId'])
 const STATUS_BODY_KEYS = new Set(['reason', 'requestId', 'status'])
+const REGISTRATION_BODY_KEYS = new Set(['action', 'requestId'])
 
 const STATUS: Record<ElearningOfflineError['code'], number> = {
   check_in_required: 409,
@@ -41,6 +44,8 @@ export interface ElearningOfflineTrainingRouteDeps {
   publishElearningOfflineTraining?: typeof publishElearningOfflineTraining
   issueElearningOfflineQr?: typeof issueElearningOfflineQr
   setElearningOfflineTrainingStatus?: typeof setElearningOfflineTrainingStatus
+  changeElearningOfflineRegistration?: typeof changeElearningOfflineRegistration
+  listElearningOfflineRegistrations?: typeof listElearningOfflineRegistrations
   recordElearningOfflineAttendance?: typeof recordElearningOfflineAttendance
   listMyElearningOfflineTrainings?: typeof listMyElearningOfflineTrainings
 }
@@ -96,6 +101,10 @@ export function createElearningOfflineTrainingRouter(
   const publish = deps.publishElearningOfflineTraining ?? publishElearningOfflineTraining
   const issueQr = deps.issueElearningOfflineQr ?? issueElearningOfflineQr
   const setStatus = deps.setElearningOfflineTrainingStatus ?? setElearningOfflineTrainingStatus
+  const changeRegistration = deps.changeElearningOfflineRegistration
+    ?? changeElearningOfflineRegistration
+  const listRegistrations = deps.listElearningOfflineRegistrations
+    ?? listElearningOfflineRegistrations
   const record = deps.recordElearningOfflineAttendance ?? recordElearningOfflineAttendance
   const listMine = deps.listMyElearningOfflineTrainings ?? listMyElearningOfflineTrainings
 
@@ -197,6 +206,58 @@ export function createElearningOfflineTrainingRouter(
         actorId: ctx.actorId,
         command: { ...body, trainingId, targetId },
       }, env)
+      res.status(result.duplicate ? 200 : 201).json(result)
+    }),
+  )
+
+  router.get(
+    '/api/elearning/admin/offline-trainings/:trainingId/registrations',
+    requireFlag,
+    requireContext,
+    deps.adminGuard,
+    requireGlobalAdmin,
+    run(async (req, res, ctx) => {
+      const trainingId = uuidParam(req, 'trainingId')
+      const after = req.query.after
+      const rawLimit = req.query.limit
+      const limit = rawLimit === undefined
+        ? 50
+        : typeof rawLimit === 'string' && /^(?:[1-9]|[1-9][0-9]|100)$/.test(rawLimit)
+          ? Number(rawLimit)
+          : null
+      if (!trainingId || (after !== undefined && typeof after !== 'string') || limit === null) {
+        res.status(400).json({ error: 'invalid_input' })
+        return
+      }
+      const afterUserId = typeof after === 'string' ? after : undefined
+      res.status(200).json(await listRegistrations(deps.db, {
+        orgId: ctx.orgId,
+        trainingId,
+        afterUserId,
+        limit,
+      }))
+    }),
+  )
+
+  router.post(
+    '/api/elearning/me/offline-trainings/:trainingId/registration',
+    requireFlag,
+    requireContext,
+    deps.readGuard,
+    parseJson,
+    run(async (req, res, ctx) => {
+      const trainingId = uuidParam(req, 'trainingId')
+      const body = readObject(req.body)
+      if (!trainingId || !body || !exactKeys(body, REGISTRATION_BODY_KEYS)) {
+        res.status(400).json({ error: 'invalid_input' })
+        return
+      }
+      const result = await changeRegistration(deps.db, {
+        orgId: ctx.orgId,
+        userId: ctx.actorId,
+        trainingId,
+        command: body,
+      })
       res.status(result.duplicate ? 200 : 201).json(result)
     }),
   )

@@ -122,6 +122,18 @@ const DEFAULTS = new Map<string, string>([
   ['elearning_offline_training_status_requests.created_at', 'now()'],
 ])
 
+const LATER_OWNED_COLUMNS = new Map<string, {
+  dataType: string
+  isNullable: 'YES' | 'NO'
+  defaultValue: string | null
+}>([
+  ['elearning_offline_training_revisions.registration_enabled', {
+    dataType: 'boolean',
+    isNullable: 'NO',
+    defaultValue: 'false',
+  }],
+])
+
 const EXPECTED_CONSTRAINTS = new Map<string, string>([
   ['elearning_offline_attendance_events_action_chk',
     `CHECK (action = ANY (ARRAY['check_in'::text, 'check_out'::text]))`],
@@ -421,17 +433,26 @@ async function assertCanonical(db: Kysely<unknown>): Promise<void> {
       AND table_name = ANY(${sql.val([...TABLES])}::text[])
   `.execute(db)
   for (const table of TABLES) {
-    const actual = columns.rows
+    const actualRows = columns.rows
       .filter((row) => row.table_name === table)
-      .map((row) => row.column_name)
-      .sort()
+    const actual = actualRows.map((row) => row.column_name).sort()
     const expected = [...COLUMNS[table]].sort()
-    if (actual.length !== expected.length || actual.some((name, index) => name !== expected[index])) {
+    const allowedLater = actualRows
+      .filter((row) => LATER_OWNED_COLUMNS.has(`${table}.${row.column_name}`))
+      .map((row) => row.column_name)
+    const allowed = [...expected, ...allowedLater].sort()
+    if (actual.length !== allowed.length || actual.some((name, index) => name !== allowed[index])) {
       throw new Error('elearning offline training migration drift: column set')
     }
   }
   if (columns.rows.some((row) => {
     const key = `${row.table_name}.${row.column_name}`
+    const laterOwned = LATER_OWNED_COLUMNS.get(key)
+    if (laterOwned) {
+      return row.data_type !== laterOwned.dataType
+        || row.is_nullable !== laterOwned.isNullable
+        || row.column_default !== laterOwned.defaultValue
+    }
     return row.data_type !== expectedColumnType(row.table_name, row.column_name)
       || row.is_nullable !== (NULLABLE.has(key) ? 'YES' : 'NO')
       || row.column_default !== (DEFAULTS.get(key) ?? null)

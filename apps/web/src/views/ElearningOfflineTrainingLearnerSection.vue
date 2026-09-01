@@ -27,6 +27,29 @@
           isZh,
         ) }}
       </p>
+      <p v-if="training.registrationEnabled">
+        {{ elearningLabel('offlineLearner.registration', isZh) }}:
+        {{ elearningLabel(
+          training.registrationStatus === 'registered'
+            ? 'offlineLearner.registered'
+            : 'offlineLearner.notRegistered',
+          isZh,
+        ) }}
+      </p>
+      <button
+        v-if="training.status === 'active' && training.registrationEnabled"
+        type="button"
+        :data-testid="`elearning-offline-registration-${training.trainingId}`"
+        :disabled="busy"
+        @click="void changeRegistration(training)"
+      >
+        {{ elearningLabel(
+          training.registrationStatus === 'registered'
+            ? 'offlineLearner.cancelRegistration'
+            : 'offlineLearner.register',
+          isZh,
+        ) }}
+      </button>
       <ol>
         <li v-for="target in training.targets" :key="target.targetId">
           <strong>{{ target.title }}</strong>
@@ -69,6 +92,7 @@ import { onMounted, ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
 import { ElearningApiError } from '../services/elearning'
 import {
+  changeElearningOfflineRegistration,
   createElearningOfflineRequestIds,
   listMyElearningOfflineTrainings,
   readElearningOfflineAttendanceToken,
@@ -136,6 +160,32 @@ async function attend(): Promise<void> {
   }
 }
 
+async function changeRegistration(training: ElearningOfflineLearnerTraining): Promise<void> {
+  if (busy.value || training.status !== 'active' || !training.registrationEnabled) return
+  const action = training.registrationStatus === 'registered' ? 'cancel' : 'register'
+  busy.value = true
+  status.value = ''
+  try {
+    await changeElearningOfflineRegistration({
+      requestId: requestIds.forRegistration(training.trainingId, action),
+      trainingId: training.trainingId,
+      action,
+    })
+    await refresh()
+    requestIds.settleRegistration(training.trainingId, action)
+    statusTone.value = 'info'
+    status.value = elearningLabel(
+      action === 'register' ? 'offlineLearner.registered' : 'offlineLearner.registrationCancelled',
+      isZh.value,
+    )
+  } catch (error) {
+    statusTone.value = 'error'
+    status.value = errorText(error)
+  } finally {
+    busy.value = false
+  }
+}
+
 function consumeScannedToken(): string | null {
   const scanned = readElearningOfflineAttendanceToken(window.location.hash)
   if (!scanned) return null
@@ -177,6 +227,7 @@ onMounted(() => {
 .offline-learner__attendance,
 .offline-learner__attendance label { display: grid; gap: 6px; }
 .offline-learner__training ol { display: grid; gap: 8px; }
+.offline-learner__training button { min-height: 36px; justify-self: start; }
 .offline-learner__attendance textarea,
 .offline-learner__attendance button { min-height: 36px; }
 .offline-learner__error { color: #b42318; }

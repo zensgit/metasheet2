@@ -7566,6 +7566,9 @@ components:
     ElearningOfflineTrainingStatus:
       type: string
       enum: [active, archived, withdrawn]
+    ElearningOfflineRegistrationAction:
+      type: string
+      enum: [cancel, register]
     ElearningOfflineTargetCommand:
       type: object
       additionalProperties: false
@@ -7603,7 +7606,7 @@ components:
     ElearningOfflineTrainingPublishRequest:
       type: object
       additionalProperties: false
-      required: [requestId, title, location, attendanceMode, targets, memberUserIds]
+      required: [requestId, title, location, attendanceMode, registrationEnabled, targets, memberUserIds]
       properties:
         requestId:
           $ref: '#/components/schemas/ElearningUuid'
@@ -7617,6 +7620,8 @@ components:
           maxLength: 500
         attendanceMode:
           $ref: '#/components/schemas/ElearningOfflineAttendanceMode'
+        registrationEnabled:
+          type: boolean
         targets:
           type: array
           minItems: 1
@@ -7710,6 +7715,7 @@ components:
         - attendanceMode
         - targets
         - memberCount
+        - registrationEnabled
         - createdAt
         - duplicate
       properties:
@@ -7737,6 +7743,8 @@ components:
           type: integer
           minimum: 1
           maximum: 10000
+        registrationEnabled:
+          type: boolean
         createdAt:
           type: string
           format: date-time
@@ -7773,6 +7781,63 @@ components:
           format: date-time
         duplicate:
           type: boolean
+    ElearningOfflineRegistrationRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, action]
+      properties:
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+        action:
+          $ref: '#/components/schemas/ElearningOfflineRegistrationAction'
+    ElearningOfflineRegistrationResult:
+      type: object
+      additionalProperties: false
+      required: [trainingId, revisionId, action, status, changedAt, duplicate]
+      properties:
+        trainingId:
+          $ref: '#/components/schemas/ElearningUuid'
+        revisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        action:
+          $ref: '#/components/schemas/ElearningOfflineRegistrationAction'
+        status:
+          type: string
+          enum: [cancelled, registered]
+        changedAt:
+          type: string
+          format: date-time
+        duplicate:
+          type: boolean
+    ElearningOfflineRegistrationListItem:
+      type: object
+      additionalProperties: false
+      required: [userId, status, changedAt]
+      properties:
+        userId:
+          $ref: '#/components/schemas/ElearningUuid'
+        status:
+          type: string
+          enum: [cancelled, not_registered, registered]
+        changedAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
+    ElearningOfflineRegistrationList:
+      type: object
+      additionalProperties: false
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ElearningOfflineRegistrationListItem'
+        nextCursor:
+          oneOf:
+            - $ref: '#/components/schemas/ElearningUuid'
+            - type: 'null'
     ElearningOfflineQrIssueRequest:
       type: object
       additionalProperties: false
@@ -7931,6 +7996,8 @@ components:
         - location
         - attendanceMode
         - status
+        - registrationEnabled
+        - registrationStatus
         - targets
         - completionStatus
       properties:
@@ -7951,6 +8018,11 @@ components:
         status:
           type: string
           enum: [active, archived]
+        registrationEnabled:
+          type: boolean
+        registrationStatus:
+          type: string
+          enum: [not_registered, registered]
         targets:
           type: array
           minItems: 1

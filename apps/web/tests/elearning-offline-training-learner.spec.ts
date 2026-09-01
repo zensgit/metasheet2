@@ -5,6 +5,7 @@ import { useLocale } from '../src/composables/useLocale'
 const h = vi.hoisted(() => ({
   list: vi.fn(),
   record: vi.fn(),
+  changeRegistration: vi.fn(),
 }))
 
 vi.mock('../src/services/elearningOfflineTraining', async () => {
@@ -15,6 +16,7 @@ vi.mock('../src/services/elearningOfflineTraining', async () => {
     ...actual,
     listMyElearningOfflineTrainings: h.list,
     recordElearningOfflineAttendance: h.record,
+    changeElearningOfflineRegistration: h.changeRegistration,
   }
 })
 
@@ -52,6 +54,8 @@ function training(attendanceStatus: 'not_checked_in' | 'checked_in' | 'checked_o
     location: 'Room A',
     attendanceMode: 'training',
     status: 'active',
+    registrationEnabled: true,
+    registrationStatus: 'not_registered',
     targets: [{
       targetId: TARGET,
       position: 1,
@@ -80,6 +84,7 @@ describe('ElearningOfflineTrainingLearnerSection', () => {
     useLocale().setLocale('en')
     h.list.mockReset()
     h.record.mockReset()
+    h.changeRegistration.mockReset()
     h.list.mockResolvedValue({ trainings: [training()] })
     h.record.mockResolvedValue({
       eventId: EVENT,
@@ -92,6 +97,14 @@ describe('ElearningOfflineTrainingLearnerSection', () => {
       completionStatus: 'in_progress',
       completedTargetCount: 0,
       totalTargetCount: 1,
+      duplicate: false,
+    })
+    h.changeRegistration.mockResolvedValue({
+      trainingId: TRAINING,
+      revisionId: REVISION,
+      action: 'register',
+      status: 'registered',
+      changedAt: '2026-09-01T02:00:00.000Z',
       duplicate: false,
     })
     uuid = vi.spyOn(globalThis.crypto, 'randomUUID')
@@ -146,6 +159,53 @@ describe('ElearningOfflineTrainingLearnerSection', () => {
     button.click()
     await flush()
     expect(h.record.mock.calls[2]?.[0].requestId).toBe(REQUEST_B)
+  })
+
+  it('registers from an active invitation, reuses retry identity and refreshes authoritative state', async () => {
+    const view = await mount()
+    const button = view.querySelector(
+      `[data-testid="elearning-offline-registration-${TRAINING}"]`,
+    ) as HTMLButtonElement
+    expect(view.textContent).toContain('Not registered')
+    h.changeRegistration.mockRejectedValueOnce(new ElearningApiError('network_error', 0))
+    button.click()
+    await flush()
+    h.list.mockResolvedValueOnce({
+      trainings: [{ ...training(), registrationStatus: 'registered' }],
+    })
+    button.click()
+    await flush()
+
+    expect(h.changeRegistration).toHaveBeenCalledTimes(2)
+    expect(h.changeRegistration.mock.calls[0]?.[0]).toEqual({
+      requestId: REQUEST_A,
+      trainingId: TRAINING,
+      action: 'register',
+    })
+    expect(h.changeRegistration.mock.calls[1]?.[0].requestId).toBe(REQUEST_A)
+    expect(h.list).toHaveBeenCalledTimes(2)
+    expect(view.textContent).toContain('Registered')
+  })
+
+  it('reuses the successful registration identity until authoritative refresh converges', async () => {
+    const view = await mount()
+    const button = view.querySelector(
+      `[data-testid="elearning-offline-registration-${TRAINING}"]`,
+    ) as HTMLButtonElement
+    h.list.mockRejectedValueOnce(new ElearningApiError('network_error', 0))
+    button.click()
+    await flush()
+
+    h.list.mockResolvedValueOnce({
+      trainings: [{ ...training(), registrationStatus: 'registered' }],
+    })
+    button.click()
+    await flush()
+
+    expect(h.changeRegistration).toHaveBeenCalledTimes(2)
+    expect(h.changeRegistration.mock.calls[0]?.[0].requestId).toBe(REQUEST_A)
+    expect(h.changeRegistration.mock.calls[1]?.[0].requestId).toBe(REQUEST_A)
+    expect(view.textContent).toContain('Registered')
   })
 
   it('consumes a scanned fragment token once and records attendance automatically', async () => {

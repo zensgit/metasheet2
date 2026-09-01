@@ -18,6 +18,7 @@ const FORBIDDEN_RESPONSE_KEYS = new Set([
 
 export type ElearningOfflineAttendanceAction = 'check_in' | 'check_out'
 export type ElearningOfflineAttendanceMode = 'training' | 'session'
+export type ElearningOfflineRegistrationAction = 'cancel' | 'register'
 export type ElearningOfflineTrainingStatus = 'active' | 'archived' | 'withdrawn'
 
 export interface ElearningOfflineTargetCommand {
@@ -43,6 +44,7 @@ export interface ElearningOfflinePublishResult {
   attendanceMode: ElearningOfflineAttendanceMode
   targets: ElearningOfflineTarget[]
   memberCount: number
+  registrationEnabled: boolean
   createdAt: string
   duplicate: boolean
 }
@@ -71,8 +73,25 @@ export interface ElearningOfflineLearnerTraining {
   location: string
   attendanceMode: ElearningOfflineAttendanceMode
   status: 'active' | 'archived'
+  registrationEnabled: boolean
+  registrationStatus: 'not_registered' | 'registered'
   targets: ElearningOfflineLearnerTarget[]
   completionStatus: 'completed' | 'in_progress'
+}
+
+export interface ElearningOfflineRegistrationResult {
+  trainingId: string
+  revisionId: string
+  action: ElearningOfflineRegistrationAction
+  status: 'cancelled' | 'registered'
+  changedAt: string
+  duplicate: boolean
+}
+
+export interface ElearningOfflineRegistrationListItem {
+  userId: string
+  status: 'cancelled' | 'not_registered' | 'registered'
+  changedAt: string | null
 }
 
 export interface ElearningOfflineAttendanceResult {
@@ -106,6 +125,8 @@ export interface ElearningOfflineRequestIds {
   settleAttendance(token: string): void
   forStatus(trainingId: string, status: ElearningOfflineTrainingStatus, reason: string): string
   settleStatus(trainingId: string, status: ElearningOfflineTrainingStatus, reason: string): void
+  forRegistration(trainingId: string, action: ElearningOfflineRegistrationAction): string
+  settleRegistration(trainingId: string, action: ElearningOfflineRegistrationAction): void
 }
 
 export interface PublishElearningOfflineInput {
@@ -113,6 +134,7 @@ export interface PublishElearningOfflineInput {
   title: string
   location: string
   attendanceMode: ElearningOfflineAttendanceMode
+  registrationEnabled: boolean
   targets: ElearningOfflineTargetCommand[]
   memberUserIds: string[]
 }
@@ -322,6 +344,7 @@ function normalizedPublishIdentity(input: Omit<PublishElearningOfflineInput, 're
     input.title.trim(),
     input.location.trim(),
     input.attendanceMode,
+    input.registrationEnabled,
     input.targets.map((target) => [
       target.title.trim(),
       target.startsAt,
@@ -351,6 +374,10 @@ export function createElearningOfflineRequestIds(): ElearningOfflineRequestIds {
     nextStatus: ElearningOfflineTrainingStatus,
     reason: string,
   ): string => JSON.stringify(['status', trainingId.toLowerCase(), nextStatus, reason.trim()])
+  const registrationIdentity = (
+    trainingId: string,
+    registrationAction: ElearningOfflineRegistrationAction,
+  ): string => JSON.stringify(['registration', trainingId.toLowerCase(), registrationAction])
   const forIdentity = (identity: string): string => {
     const existing = ids.get(identity)
     if (existing) return existing
@@ -375,6 +402,12 @@ export function createElearningOfflineRequestIds(): ElearningOfflineRequestIds {
     settleStatus: (trainingId, nextStatus, reason) => {
       ids.delete(statusIdentity(trainingId, nextStatus, reason))
     },
+    forRegistration: (trainingId, registrationAction) => (
+      forIdentity(registrationIdentity(trainingId, registrationAction))
+    ),
+    settleRegistration: (trainingId, registrationAction) => {
+      ids.delete(registrationIdentity(trainingId, registrationAction))
+    },
   }
 }
 
@@ -395,6 +428,7 @@ export async function publishElearningOfflineTraining(
     'attendanceMode',
     'targets',
     'memberCount',
+    'registrationEnabled',
     'createdAt',
     'duplicate',
   ])) failShape(status)
@@ -409,6 +443,7 @@ export async function publishElearningOfflineTraining(
     attendanceMode,
     targets,
     memberCount: integer(payload.memberCount, status, 1, 10_000),
+    registrationEnabled: bool(payload.registrationEnabled, status),
     createdAt: canonicalInstant(payload.createdAt, status),
     duplicate: bool(payload.duplicate, status),
   }
@@ -504,12 +539,20 @@ export async function listMyElearningOfflineTrainings(): Promise<{
       'location',
       'attendanceMode',
       'status',
+      'registrationEnabled',
+      'registrationStatus',
       'targets',
       'completionStatus',
     ]) || (entry.status !== 'active' && entry.status !== 'archived')) failShape(status)
     if (entry.completionStatus !== 'completed' && entry.completionStatus !== 'in_progress') {
       failShape(status)
     }
+    const registrationEnabled = bool(entry.registrationEnabled, status)
+    if (
+      entry.registrationStatus !== 'not_registered'
+      && entry.registrationStatus !== 'registered'
+    ) failShape(status)
+    if (!registrationEnabled && entry.registrationStatus !== 'not_registered') failShape(status)
     if (!Array.isArray(entry.targets) || entry.targets.length === 0 || entry.targets.length > 100) {
       failShape(status)
     }
@@ -570,6 +613,8 @@ export async function listMyElearningOfflineTrainings(): Promise<{
       location: text(entry.location, status, 500),
       attendanceMode: mode(entry.attendanceMode, status),
       status: entry.status,
+      registrationEnabled,
+      registrationStatus: entry.registrationStatus,
       targets,
       completionStatus: entry.completionStatus,
     }
@@ -578,6 +623,86 @@ export async function listMyElearningOfflineTrainings(): Promise<{
     failShape(status)
   }
   return { trainings }
+}
+
+export async function changeElearningOfflineRegistration(input: {
+  requestId: string
+  trainingId: string
+  action: ElearningOfflineRegistrationAction
+}): Promise<ElearningOfflineRegistrationResult> {
+  const { payload, status } = await requestJson(
+    `/api/elearning/me/offline-trainings/${encodeURIComponent(input.trainingId)}/registration`,
+    'POST',
+    [200, 201],
+    { requestId: input.requestId, action: input.action },
+  )
+  if (!isObject(payload) || !exactKeys(payload, [
+    'trainingId',
+    'revisionId',
+    'action',
+    'status',
+    'changedAt',
+    'duplicate',
+  ])) failShape(status)
+  if (payload.action !== 'register' && payload.action !== 'cancel') failShape(status)
+  if (payload.status !== 'registered' && payload.status !== 'cancelled') failShape(status)
+  const result: ElearningOfflineRegistrationResult = {
+    trainingId: uuid(payload.trainingId, status),
+    revisionId: uuid(payload.revisionId, status),
+    action: payload.action,
+    status: payload.status,
+    changedAt: canonicalInstant(payload.changedAt, status),
+    duplicate: bool(payload.duplicate, status),
+  }
+  if (
+    result.trainingId !== input.trainingId.toLowerCase()
+    || result.action !== input.action
+    || (result.action === 'register') !== (result.status === 'registered')
+  ) failShape(status)
+  return result
+}
+
+export async function listElearningOfflineRegistrations(input: {
+  trainingId: string
+  after?: string
+  limit?: number
+}): Promise<{ items: ElearningOfflineRegistrationListItem[]; nextCursor: string | null }> {
+  const query = new URLSearchParams()
+  if (input.after !== undefined) query.set('after', input.after)
+  query.set('limit', String(input.limit ?? 50))
+  const { payload, status } = await requestJson(
+    `/api/elearning/admin/offline-trainings/${encodeURIComponent(input.trainingId)}/registrations?${query}`,
+    'GET',
+    [200],
+  )
+  if (!isObject(payload) || !exactKeys(payload, ['items', 'nextCursor']) || !Array.isArray(payload.items)) {
+    failShape(status)
+  }
+  const requestedAfter = input.after === undefined ? null : uuid(input.after, status)
+  const seen = new Set<string>()
+  let previous = ''
+  const items = payload.items.map((entry): ElearningOfflineRegistrationListItem => {
+    if (!isObject(entry) || !exactKeys(entry, ['userId', 'status', 'changedAt'])) failShape(status)
+    const userId = uuid(entry.userId, status)
+    if (
+      (entry.status !== 'cancelled'
+        && entry.status !== 'not_registered'
+        && entry.status !== 'registered')
+      || seen.has(userId)
+      || (requestedAfter !== null && userId <= requestedAfter)
+      || (previous !== '' && userId <= previous)
+    ) failShape(status)
+    const changedAt = nullableInstant(entry.changedAt, status)
+    if ((entry.status === 'not_registered') !== (changedAt === null)) failShape(status)
+    seen.add(userId)
+    previous = userId
+    return { userId, status: entry.status, changedAt }
+  })
+  const nextCursor = payload.nextCursor === null ? null : uuid(payload.nextCursor, status)
+  if (nextCursor !== null && (items.length === 0 || nextCursor !== items[items.length - 1]?.userId)) {
+    failShape(status)
+  }
+  return { items, nextCursor }
 }
 
 export async function probeElearningOfflineTraining(): Promise<boolean> {

@@ -9793,6 +9793,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/admin/offline-trainings/{trainingId}/registrations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the invited roster and current registration state
+         * @description Requires authenticated server-derived organization and actor context, global administrator
+         *     authority, `elearning:admin`, and exact master plus offline-training gates. The stable
+         *     user-id cursor reads only the active revision member snapshot and its latest append-only
+         *     registration event; request hashes, organization identifiers, and event ledger internals
+         *     are never returned.
+         */
+        get: operations["listElearningOfflineRegistrations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/admin/offline-trainings/{trainingId}/targets/{targetId}/qr": {
         parameters: {
             query?: never;
@@ -9839,6 +9863,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/me/offline-trainings/{trainingId}/registration": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Register or cancel registration for one invited offline training
+         * @description Requires server-derived organization and learner identity, learner read authority, and exact
+         *     master plus offline-training gates. The server rechecks active organization membership, the
+         *     immutable invited member snapshot, active training lifecycle, and the published registration
+         *     setting. The closed body contains only requestId and action; exact replay returns the original
+         *     append-only event result and changed payload under the same request id fails values-free.
+         */
+        post: operations["changeElearningOfflineRegistration"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/me/offline-trainings": {
         parameters: {
             query?: never;
@@ -9850,8 +9898,8 @@ export interface paths {
          * List offline trainings assigned to the authenticated learner
          * @description Requires server-derived organization and learner identity, learner read authority, and exact
          *     master plus offline-training gates. Returns only active or archived assigned training
-         *     revisions with ordered targets and the learner's own attendance state; withdrawn trainings
-         *     and authority material are never returned.
+         *     revisions with ordered targets and the learner's own registration and attendance state;
+         *     withdrawn trainings and authority material are never returned.
          */
         get: operations["listMyElearningOfflineTrainings"];
         put?: never;
@@ -19812,6 +19860,8 @@ export interface components {
         ElearningOfflineAttendanceAction: "check_in" | "check_out";
         /** @enum {string} */
         ElearningOfflineTrainingStatus: "active" | "archived" | "withdrawn";
+        /** @enum {string} */
+        ElearningOfflineRegistrationAction: "cancel" | "register";
         ElearningOfflineTargetCommand: {
             title: string;
             /** Format: date-time */
@@ -19832,6 +19882,7 @@ export interface components {
             title: string;
             location: string;
             attendanceMode: components["schemas"]["ElearningOfflineAttendanceMode"];
+            registrationEnabled: boolean;
             targets: components["schemas"]["ElearningOfflineTargetCommand"][];
             memberUserIds: components["schemas"]["ElearningUuid"][];
         } & ({
@@ -19868,6 +19919,7 @@ export interface components {
             attendanceMode: components["schemas"]["ElearningOfflineAttendanceMode"];
             targets: components["schemas"]["ElearningOfflineTarget"][];
             memberCount: number;
+            registrationEnabled: boolean;
             /** Format: date-time */
             createdAt: string;
             duplicate: boolean;
@@ -19884,6 +19936,30 @@ export interface components {
             /** Format: date-time */
             changedAt: string;
             duplicate: boolean;
+        };
+        ElearningOfflineRegistrationRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            action: components["schemas"]["ElearningOfflineRegistrationAction"];
+        };
+        ElearningOfflineRegistrationResult: {
+            trainingId: components["schemas"]["ElearningUuid"];
+            revisionId: components["schemas"]["ElearningUuid"];
+            action: components["schemas"]["ElearningOfflineRegistrationAction"];
+            /** @enum {string} */
+            status: "cancelled" | "registered";
+            /** Format: date-time */
+            changedAt: string;
+            duplicate: boolean;
+        };
+        ElearningOfflineRegistrationListItem: {
+            userId: components["schemas"]["ElearningUuid"];
+            /** @enum {string} */
+            status: "cancelled" | "not_registered" | "registered";
+            changedAt: string | null;
+        };
+        ElearningOfflineRegistrationList: {
+            items: components["schemas"]["ElearningOfflineRegistrationListItem"][];
+            nextCursor: components["schemas"]["ElearningUuid"] | null;
         };
         ElearningOfflineQrIssueRequest: {
             requestId: components["schemas"]["ElearningUuid"];
@@ -19950,6 +20026,9 @@ export interface components {
             attendanceMode: components["schemas"]["ElearningOfflineAttendanceMode"];
             /** @enum {string} */
             status: "active" | "archived";
+            registrationEnabled: boolean;
+            /** @enum {string} */
+            registrationStatus: "not_registered" | "registered";
             targets: components["schemas"]["ElearningOfflineLearnerTarget"][];
             /** @enum {string} */
             completionStatus: "completed" | "in_progress";
@@ -23437,6 +23516,36 @@ export interface operations {
             503: components["responses"]["ElearningError"];
         };
     };
+    listElearningOfflineRegistrations: {
+        parameters: {
+            query?: {
+                after?: components["schemas"]["ElearningUuid"];
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                trainingId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Closed registration roster page. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningOfflineRegistrationList"];
+                };
+            };
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            403: components["responses"]["ElearningError"];
+            404: components["responses"]["ElearningError"];
+            503: components["responses"]["ElearningError"];
+        };
+    };
     issueElearningOfflineTrainingQr: {
         parameters: {
             query?: never;
@@ -23499,6 +23608,47 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ElearningOfflineAttendanceResult"];
+                };
+            };
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            403: components["responses"]["ElearningError"];
+            404: components["responses"]["ElearningError"];
+            409: components["responses"]["ElearningError"];
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    changeElearningOfflineRegistration: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                trainingId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningOfflineRegistrationRequest"];
+            };
+        };
+        responses: {
+            /** @description Idempotent replay of the original registration event. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningOfflineRegistrationResult"];
+                };
+            };
+            /** @description Registration state changed. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningOfflineRegistrationResult"];
                 };
             };
             400: components["responses"]["ElearningError"];

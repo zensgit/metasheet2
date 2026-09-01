@@ -47,6 +47,7 @@ function app(overrides: Record<string, unknown> = {}) {
         attendanceMode: 'training',
         targets: [],
         memberCount: 1,
+        registrationEnabled: false,
         createdAt: '2026-09-01T00:00:00.000Z',
         duplicate: false,
       }
@@ -73,6 +74,21 @@ function app(overrides: Record<string, unknown> = {}) {
         changedAt: '2026-09-01T00:02:00.000Z',
         duplicate: false,
       }
+    },
+    changeElearningOfflineRegistration: async (_db, input) => {
+      calls.push({ kind: 'registration', input })
+      return {
+        trainingId: TRAINING_ID,
+        revisionId: REVISION_ID,
+        action: 'register',
+        status: 'registered',
+        changedAt: '2026-09-01T00:03:00.000Z',
+        duplicate: false,
+      }
+    },
+    listElearningOfflineRegistrations: async (_db, input) => {
+      calls.push({ kind: 'registrations', input })
+      return { items: [], nextCursor: null }
     },
     recordElearningOfflineAttendance: async (_db, input) => {
       calls.push({ kind: 'record', input })
@@ -113,6 +129,7 @@ describe('e-learning offline training routes', () => {
       attendanceMode: 'training',
       targets: [],
       memberUserIds: [],
+      registrationEnabled: false,
     }
     const response = await state.api!.post('/api/elearning/admin/offline-trainings').send(body)
     expect(response.status).toBe(201)
@@ -139,6 +156,7 @@ describe('e-learning offline training routes', () => {
       attendanceMode: 'training',
       targets: [],
       memberUserIds,
+      registrationEnabled: true,
     }
     expect(Buffer.byteLength(JSON.stringify(body))).toBeGreaterThan(64 * 1024)
     const response = await state.api!.post('/api/elearning/admin/offline-trainings').send(body)
@@ -231,6 +249,46 @@ describe('e-learning offline training routes', () => {
       kind: 'list',
       input: { orgId: 'org-one', userId: 'user-one' },
     })
+  })
+
+  it('registers only the authenticated learner and lists registrations only for global admins', async () => {
+    const state = app()
+    const body = { requestId: REQUEST_ID, action: 'register' }
+    const changed = await state.api!
+      .post(`/api/elearning/me/offline-trainings/${TRAINING_ID}/registration`)
+      .send(body)
+    expect(changed.status).toBe(201)
+    expect(changed.body).toEqual(expect.objectContaining({
+      trainingId: TRAINING_ID,
+      status: 'registered',
+    }))
+    const listed = await state.api!
+      .get(`/api/elearning/admin/offline-trainings/${TRAINING_ID}/registrations?limit=25`)
+    expect(listed.status).toBe(200)
+    expect(listed.body).toEqual({ items: [], nextCursor: null })
+    expect(state.calls).toEqual([{
+      kind: 'registration',
+      input: {
+        orgId: 'org-one',
+        userId: 'user-one',
+        trainingId: TRAINING_ID,
+        command: body,
+      },
+    }, {
+      kind: 'registrations',
+      input: {
+        orgId: 'org-one',
+        trainingId: TRAINING_ID,
+        afterUserId: undefined,
+        limit: 25,
+      },
+    }])
+
+    const forbidden = app({ isGlobalAdmin: () => false })
+    const response = await forbidden.api!
+      .get(`/api/elearning/admin/offline-trainings/${TRAINING_ID}/registrations`)
+    expect(response.status).toBe(403)
+    expect(forbidden.calls).toEqual([])
   })
 
   it('returns values-free domain errors', async () => {

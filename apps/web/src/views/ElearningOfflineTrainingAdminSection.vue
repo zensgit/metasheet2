@@ -27,6 +27,15 @@
           :disabled="busy"
         />
       </label>
+      <label class="offline-admin__checkbox">
+        <input
+          v-model="registrationEnabled"
+          data-testid="elearning-offline-registration-enabled"
+          type="checkbox"
+          :disabled="busy"
+        >
+        <span>{{ elearningLabel('offlineAdmin.registrationEnabled', isZh) }}</span>
+      </label>
 
       <fieldset>
         <legend>{{ elearningLabel('offlineAdmin.target', isZh) }}</legend>
@@ -117,6 +126,36 @@
           {{ elearningLabel('offlineAdmin.issueCheckOut', isZh) }}
         </button>
       </div>
+      <section v-if="published.registrationEnabled" class="offline-admin__registrations">
+        <div class="offline-admin__qr-actions">
+          <h3>{{ elearningLabel('offlineAdmin.registrations', isZh) }}</h3>
+          <button
+            type="button"
+            data-testid="elearning-offline-load-registrations"
+            :disabled="busy"
+            @click="void loadRegistrations()"
+          >
+            {{ elearningLabel('offlineAdmin.loadRegistrations', isZh) }}
+          </button>
+        </div>
+        <p v-if="registrations.length === 0" data-testid="elearning-offline-registration-empty">
+          {{ elearningLabel('offlineAdmin.noRegistrations', isZh) }}
+        </p>
+        <ul v-else data-testid="elearning-offline-registration-list">
+          <li v-for="entry in registrations" :key="entry.userId">
+            {{ entry.userId }} · {{ registrationText(entry.status) }}
+          </li>
+        </ul>
+        <button
+          v-if="registrationCursor"
+          type="button"
+          data-testid="elearning-offline-load-more-registrations"
+          :disabled="busy"
+          @click="void loadRegistrations(true)"
+        >
+          {{ elearningLabel('offlineAdmin.loadMoreRegistrations', isZh) }}
+        </button>
+      </section>
       <img
         v-if="qrImageUrl"
         class="offline-admin__qr-symbol"
@@ -159,11 +198,13 @@ import {
   createElearningOfflineAttendanceLink,
   createElearningOfflineRequestIds,
   issueElearningOfflineQr,
+  listElearningOfflineRegistrations,
   publishElearningOfflineTraining,
   setElearningOfflineTrainingStatus,
   type ElearningOfflineAttendanceAction,
   type ElearningOfflinePublishResult,
   type ElearningOfflineQrResult,
+  type ElearningOfflineRegistrationListItem,
   type ElearningOfflineTrainingStatus,
   type PublishElearningOfflineInput,
 } from '../services/elearningOfflineTraining'
@@ -178,6 +219,7 @@ const requestIds = createElearningOfflineRequestIds()
 const title = ref('')
 const location = ref('')
 const memberUserIds = ref('')
+const registrationEnabled = ref(false)
 const targetTitle = ref('')
 const times = reactive<Record<TimeKey, string>>({
   startsAt: '',
@@ -199,6 +241,8 @@ const published = ref<ElearningOfflinePublishResult | null>(null)
 const qr = ref<ElearningOfflineQrResult | null>(null)
 const trainingStatus = ref<ElearningOfflineTrainingStatus>('active')
 const lifecycleReason = ref('')
+const registrations = ref<ElearningOfflineRegistrationListItem[]>([])
+const registrationCursor = ref<string | null>(null)
 const busy = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
@@ -250,6 +294,16 @@ function errorText(error: unknown): string {
   return elearningFailure('request_failed', 0, isZh.value)
 }
 
+function registrationText(status: ElearningOfflineRegistrationListItem['status']): string {
+  if (status === 'registered') {
+    return elearningLabel('offlineAdmin.registrationRegistered', isZh.value)
+  }
+  if (status === 'cancelled') {
+    return elearningLabel('offlineAdmin.registrationCancelled', isZh.value)
+  }
+  return elearningLabel('offlineAdmin.registrationNotRegistered', isZh.value)
+}
+
 function instant(value: string): string | null {
   if (value === '') return null
   const parsed = new Date(value)
@@ -277,6 +331,7 @@ function payload(): Omit<PublishElearningOfflineInput, 'requestId'> | null {
     title: title.value.trim(),
     location: location.value.trim(),
     attendanceMode: 'training',
+    registrationEnabled: registrationEnabled.value,
     targets: [{
       title: targetTitle.value.trim(),
       startsAt: parsedTimes.startsAt!,
@@ -311,8 +366,35 @@ async function publish(): Promise<void> {
     clearQrTimers()
     qrAction.value = null
     qr.value = null
+    registrations.value = []
+    registrationCursor.value = null
     statusTone.value = 'info'
     status.value = elearningLabel('offlineAdmin.published', isZh.value)
+  } catch (error) {
+    statusTone.value = 'error'
+    status.value = errorText(error)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function loadRegistrations(nextPage = false): Promise<void> {
+  const current = published.value
+  if (!current || busy.value) return
+  if (nextPage && !registrationCursor.value) return
+  busy.value = true
+  status.value = ''
+  try {
+    const result = await listElearningOfflineRegistrations({
+      trainingId: current.trainingId,
+      after: nextPage ? registrationCursor.value ?? undefined : undefined,
+    })
+    registrations.value = nextPage
+      ? [...registrations.value, ...result.items]
+      : result.items
+    registrationCursor.value = result.nextCursor
+    statusTone.value = 'info'
+    status.value = elearningLabel('offlineAdmin.registrationsLoaded', isZh.value)
   } catch (error) {
     statusTone.value = 'error'
     status.value = errorText(error)
@@ -409,6 +491,7 @@ onBeforeUnmount(clearQrTimers)
 .offline-admin__form,
 .offline-admin__form label,
 .offline-admin__qr,
+.offline-admin__registrations,
 .offline-admin__qr label,
 .offline-admin__lifecycle { display: grid; gap: 8px; }
 .offline-admin__form fieldset { display: grid; gap: 8px; border: 1px solid #d6e2ef; }
@@ -418,6 +501,7 @@ onBeforeUnmount(clearQrTimers)
 .offline-admin__qr button,
 .offline-admin__qr textarea { min-height: 36px; }
 .offline-admin__qr-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.offline-admin__checkbox { display: flex !important; align-items: center; }
 .offline-admin__qr-symbol { width: 240px; max-width: 100%; background: #fff; }
 .offline-admin__error { color: #b42318; }
 </style>

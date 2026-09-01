@@ -9191,6 +9191,11 @@ components:
         - active
         - archived
         - withdrawn
+    ElearningOfflineRegistrationAction:
+      type: string
+      enum:
+        - cancel
+        - register
     ElearningOfflineTargetCommand:
       type: object
       additionalProperties: false
@@ -9233,6 +9238,7 @@ components:
         - title
         - location
         - attendanceMode
+        - registrationEnabled
         - targets
         - memberUserIds
       properties:
@@ -9248,6 +9254,8 @@ components:
           maxLength: 500
         attendanceMode:
           $ref: '#/components/schemas/ElearningOfflineAttendanceMode'
+        registrationEnabled:
+          type: boolean
         targets:
           type: array
           minItems: 1
@@ -9347,6 +9355,7 @@ components:
         - attendanceMode
         - targets
         - memberCount
+        - registrationEnabled
         - createdAt
         - duplicate
       properties:
@@ -9374,6 +9383,8 @@ components:
           type: integer
           minimum: 1
           maximum: 10000
+        registrationEnabled:
+          type: boolean
         createdAt:
           type: string
           format: date-time
@@ -9418,6 +9429,81 @@ components:
           format: date-time
         duplicate:
           type: boolean
+    ElearningOfflineRegistrationRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - requestId
+        - action
+      properties:
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+        action:
+          $ref: '#/components/schemas/ElearningOfflineRegistrationAction'
+    ElearningOfflineRegistrationResult:
+      type: object
+      additionalProperties: false
+      required:
+        - trainingId
+        - revisionId
+        - action
+        - status
+        - changedAt
+        - duplicate
+      properties:
+        trainingId:
+          $ref: '#/components/schemas/ElearningUuid'
+        revisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        action:
+          $ref: '#/components/schemas/ElearningOfflineRegistrationAction'
+        status:
+          type: string
+          enum:
+            - cancelled
+            - registered
+        changedAt:
+          type: string
+          format: date-time
+        duplicate:
+          type: boolean
+    ElearningOfflineRegistrationListItem:
+      type: object
+      additionalProperties: false
+      required:
+        - userId
+        - status
+        - changedAt
+      properties:
+        userId:
+          $ref: '#/components/schemas/ElearningUuid'
+        status:
+          type: string
+          enum:
+            - cancelled
+            - not_registered
+            - registered
+        changedAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
+    ElearningOfflineRegistrationList:
+      type: object
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ElearningOfflineRegistrationListItem'
+        nextCursor:
+          oneOf:
+            - $ref: '#/components/schemas/ElearningUuid'
+            - type: 'null'
     ElearningOfflineQrIssueRequest:
       type: object
       additionalProperties: false
@@ -9595,6 +9681,8 @@ components:
         - location
         - attendanceMode
         - status
+        - registrationEnabled
+        - registrationStatus
         - targets
         - completionStatus
       properties:
@@ -9617,6 +9705,13 @@ components:
           enum:
             - active
             - archived
+        registrationEnabled:
+          type: boolean
+        registrationStatus:
+          type: string
+          enum:
+            - not_registered
+            - registered
         targets:
           type: array
           minItems: 1
@@ -22266,6 +22361,62 @@ paths:
           $ref: '#/components/responses/ElearningError'
         '503':
           $ref: '#/components/responses/ElearningError'
+  /api/elearning/admin/offline-trainings/{trainingId}/registrations:
+    get:
+      operationId: listElearningOfflineRegistrations
+      summary: List the invited roster and current registration state
+      description: >
+        Requires authenticated server-derived organization and actor context,
+        global administrator
+
+        authority, `elearning:admin`, and exact master plus offline-training
+        gates. The stable
+
+        user-id cursor reads only the active revision member snapshot and its
+        latest append-only
+
+        registration event; request hashes, organization identifiers, and event
+        ledger internals
+
+        are never returned.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: trainingId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+        - in: query
+          name: after
+          required: false
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: Closed registration roster page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningOfflineRegistrationList'
+        '400':
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          $ref: '#/components/responses/ElearningError'
   /api/elearning/admin/offline-trainings/{trainingId}/targets/{targetId}/qr:
     post:
       operationId: issueElearningOfflineTrainingQr
@@ -22370,6 +22521,64 @@ paths:
           $ref: '#/components/responses/ElearningError'
         '503':
           $ref: '#/components/responses/ElearningError'
+  /api/elearning/me/offline-trainings/{trainingId}/registration:
+    post:
+      operationId: changeElearningOfflineRegistration
+      summary: Register or cancel registration for one invited offline training
+      description: >
+        Requires server-derived organization and learner identity, learner read
+        authority, and exact
+
+        master plus offline-training gates. The server rechecks active
+        organization membership, the
+
+        immutable invited member snapshot, active training lifecycle, and the
+        published registration
+
+        setting. The closed body contains only requestId and action; exact
+        replay returns the original
+
+        append-only event result and changed payload under the same request id
+        fails values-free.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: trainingId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningOfflineRegistrationRequest'
+      responses:
+        '200':
+          description: Idempotent replay of the original registration event.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningOfflineRegistrationResult'
+        '201':
+          description: Registration state changed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningOfflineRegistrationResult'
+        '400':
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          $ref: '#/components/responses/ElearningError'
   /api/elearning/me/offline-trainings:
     get:
       operationId: listMyElearningOfflineTrainings
@@ -22381,10 +22590,10 @@ paths:
         master plus offline-training gates. Returns only active or archived
         assigned training
 
-        revisions with ordered targets and the learner's own attendance state;
-        withdrawn trainings
+        revisions with ordered targets and the learner's own registration and
+        attendance state;
 
-        and authority material are never returned.
+        withdrawn trainings and authority material are never returned.
       security:
         - bearerAuth: []
       responses:

@@ -126,6 +126,7 @@ export type ElearningLabelKey =
   | 'offlineAdmin.trainingTitle'
   | 'offlineAdmin.location'
   | 'offlineAdmin.members'
+  | 'offlineAdmin.registrationEnabled'
   | 'offlineAdmin.target'
   | 'offlineAdmin.targetTitle'
   | 'offlineAdmin.startsAt'
@@ -150,12 +151,26 @@ export type ElearningLabelKey =
   | 'offlineAdmin.archive'
   | 'offlineAdmin.withdraw'
   | 'offlineAdmin.restore'
+  | 'offlineAdmin.registrations'
+  | 'offlineAdmin.loadRegistrations'
+  | 'offlineAdmin.loadMoreRegistrations'
+  | 'offlineAdmin.noRegistrations'
+  | 'offlineAdmin.registrationsLoaded'
+  | 'offlineAdmin.registrationRegistered'
+  | 'offlineAdmin.registrationCancelled'
+  | 'offlineAdmin.registrationNotRegistered'
   | 'offlineAdmin.validation'
   | 'offlineLearner.title'
   | 'offlineLearner.subtitle'
   | 'offlineLearner.loading'
   | 'offlineLearner.empty'
   | 'offlineLearner.completion'
+  | 'offlineLearner.registration'
+  | 'offlineLearner.register'
+  | 'offlineLearner.cancelRegistration'
+  | 'offlineLearner.registered'
+  | 'offlineLearner.notRegistered'
+  | 'offlineLearner.registrationCancelled'
   | 'offlineLearner.notCheckedIn'
   | 'offlineLearner.checkedIn'
   | 'offlineLearner.checkedOut'
@@ -410,6 +425,7 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
     en: 'Learner user IDs (one per line)',
     zh: '学员用户 ID（每行一个）',
   },
+  'offlineAdmin.registrationEnabled': { en: 'Allow learner registration', zh: '允许学员报名' },
   'offlineAdmin.target': { en: 'Training session', zh: '培训场次' },
   'offlineAdmin.targetTitle': { en: 'Session title', zh: '场次名称' },
   'offlineAdmin.startsAt': { en: 'Starts at', zh: '开始时间' },
@@ -437,6 +453,14 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   'offlineAdmin.archive': { en: 'Archive', zh: '归档' },
   'offlineAdmin.withdraw': { en: 'Emergency withdraw', zh: '紧急下架' },
   'offlineAdmin.restore': { en: 'Restore active', zh: '恢复启用' },
+  'offlineAdmin.registrations': { en: 'Registration roster', zh: '报名名单' },
+  'offlineAdmin.loadRegistrations': { en: 'Refresh roster', zh: '刷新名单' },
+  'offlineAdmin.loadMoreRegistrations': { en: 'Load more', zh: '加载更多' },
+  'offlineAdmin.noRegistrations': { en: 'No learner has registered.', zh: '暂无学员报名。' },
+  'offlineAdmin.registrationsLoaded': { en: 'Registration roster refreshed.', zh: '报名名单已刷新。' },
+  'offlineAdmin.registrationRegistered': { en: 'Registered', zh: '已报名' },
+  'offlineAdmin.registrationCancelled': { en: 'Cancelled', zh: '已取消' },
+  'offlineAdmin.registrationNotRegistered': { en: 'Not registered', zh: '未报名' },
   'offlineAdmin.validation': {
     en: 'Complete every field and provide unique valid learner IDs.',
     zh: '请填写全部字段，并提供不重复的有效学员 ID。',
@@ -449,6 +473,12 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   'offlineLearner.loading': { en: 'Loading offline trainings...', zh: '正在加载线下培训…' },
   'offlineLearner.empty': { en: 'No offline trainings are assigned.', zh: '暂无已指派的线下培训。' },
   'offlineLearner.completion': { en: 'Completion', zh: '完成状态' },
+  'offlineLearner.registration': { en: 'Registration', zh: '报名状态' },
+  'offlineLearner.register': { en: 'Register', zh: '报名' },
+  'offlineLearner.cancelRegistration': { en: 'Cancel registration', zh: '取消报名' },
+  'offlineLearner.registered': { en: 'Registered', zh: '已报名' },
+  'offlineLearner.notRegistered': { en: 'Not registered', zh: '未报名' },
+  'offlineLearner.registrationCancelled': { en: 'Registration cancelled.', zh: '已取消报名。' },
   'offlineLearner.notCheckedIn': { en: 'Not checked in', zh: '未签到' },
   'offlineLearner.checkedIn': { en: 'Checked in', zh: '已签到' },
   'offlineLearner.checkedOut': { en: 'Checked out', zh: '已签退' },

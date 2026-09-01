@@ -8,7 +8,15 @@ const MAX_TARGETS = 100
 const MAX_MEMBERS = 10_000
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
-const PUBLISH_KEYS = new Set(['attendanceMode', 'location', 'memberUserIds', 'requestId', 'targets', 'title'])
+const PUBLISH_KEYS = new Set([
+  'attendanceMode',
+  'location',
+  'memberUserIds',
+  'registrationEnabled',
+  'requestId',
+  'targets',
+  'title',
+])
 const TARGET_KEYS = new Set([
   'checkInClosesAt',
   'checkInOpensAt',
@@ -21,11 +29,13 @@ const TARGET_KEYS = new Set([
 const ISSUE_KEYS = new Set(['action', 'requestId', 'targetId', 'trainingId'])
 const ATTEND_KEYS = new Set(['requestId', 'token'])
 const STATUS_KEYS = new Set(['reason', 'requestId', 'status'])
+const REGISTRATION_KEYS = new Set(['action', 'requestId'])
 const OPAQUE_QR_RE = /^[A-Za-z0-9_-]{43}$/
 
 export type ElearningOfflineAttendanceAction = 'check_in' | 'check_out'
 export type ElearningOfflineAttendanceMode = 'training' | 'session'
 export type ElearningOfflineTrainingStatus = 'active' | 'archived' | 'withdrawn'
+export type ElearningOfflineRegistrationAction = 'cancel' | 'register'
 export type ElearningOfflineErrorCode =
   | 'check_in_required'
   | 'conflict'
@@ -63,6 +73,12 @@ export interface PublishElearningOfflineTrainingCommand {
   attendanceMode: ElearningOfflineAttendanceMode
   targets: ElearningOfflineTargetCommand[]
   memberUserIds: string[]
+  registrationEnabled: boolean
+}
+
+export interface ChangeElearningOfflineRegistrationCommand {
+  requestId: string
+  action: ElearningOfflineRegistrationAction
 }
 
 export interface IssueElearningOfflineQrCommand {
@@ -176,6 +192,7 @@ export function normalizePublishElearningOfflineTraining(
     .map(normalizeElearningOfflineUuid)
     .sort()
   if (new Set(memberUserIds).size !== memberUserIds.length) fail('invalid_input')
+  if (typeof row.registrationEnabled !== 'boolean') fail('invalid_input')
   return {
     requestId: normalizeElearningOfflineUuid(row.requestId),
     title: text(row.title, 200),
@@ -183,6 +200,18 @@ export function normalizePublishElearningOfflineTraining(
     attendanceMode: row.attendanceMode,
     targets,
     memberUserIds,
+    registrationEnabled: row.registrationEnabled,
+  }
+}
+
+export function normalizeChangeElearningOfflineRegistration(
+  value: unknown,
+): ChangeElearningOfflineRegistrationCommand {
+  const row = object(value, REGISTRATION_KEYS)
+  if (row.action !== 'register' && row.action !== 'cancel') fail('invalid_input')
+  return {
+    requestId: normalizeElearningOfflineUuid(row.requestId),
+    action: row.action,
   }
 }
 

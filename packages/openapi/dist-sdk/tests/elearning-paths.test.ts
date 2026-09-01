@@ -100,6 +100,9 @@ type OfflineTrainingPublishRequest = components['schemas']['ElearningOfflineTrai
 type OfflineTrainingPublishResult = components['schemas']['ElearningOfflineTrainingPublishResult']
 type OfflineTrainingStatusRequest = components['schemas']['ElearningOfflineTrainingStatusRequest']
 type OfflineTrainingStatusResult = components['schemas']['ElearningOfflineTrainingStatusResult']
+type OfflineRegistrationRequest = components['schemas']['ElearningOfflineRegistrationRequest']
+type OfflineRegistrationResult = components['schemas']['ElearningOfflineRegistrationResult']
+type OfflineRegistrationList = components['schemas']['ElearningOfflineRegistrationList']
 type OfflineQrIssueRequest = components['schemas']['ElearningOfflineQrIssueRequest']
 type OfflineQrResult = components['schemas']['ElearningOfflineQrResult']
 type OfflineAttendanceRequest = components['schemas']['ElearningOfflineAttendanceRequest']
@@ -1816,6 +1819,12 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<
       paths['/api/elearning/admin/offline-trainings/{trainingId}/targets/{targetId}/qr']['post']
     >().not.toBeNever()
+    expectTypeOf<
+      paths['/api/elearning/admin/offline-trainings/{trainingId}/registrations']['get']
+    >().not.toBeNever()
+    expectTypeOf<
+      paths['/api/elearning/me/offline-trainings/{trainingId}/registration']['post']
+    >().not.toBeNever()
     expectTypeOf<paths['/api/elearning/me/offline-attendance']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/me/offline-trainings']['get']>().not.toBeNever()
     expectTypeOf<OfflineTrainingPublishRequest>().toEqualTypeOf<{
@@ -1823,6 +1832,7 @@ describe('elearning V0.1 OpenAPI paths', () => {
       title: string
       location: string
       attendanceMode: 'training' | 'session'
+      registrationEnabled: boolean
       targets: Array<{
         title: string
         startsAt: string
@@ -1852,6 +1862,7 @@ describe('elearning V0.1 OpenAPI paths', () => {
         checkOutClosesAt: string
       }>
       memberCount: number
+      registrationEnabled: boolean
       createdAt: string
       duplicate: boolean
     }>()
@@ -1870,6 +1881,26 @@ describe('elearning V0.1 OpenAPI paths', () => {
       reason: string
       changedAt: string
       duplicate: boolean
+    }>()
+    expectTypeOf<OfflineRegistrationRequest>().toEqualTypeOf<{
+      requestId: string
+      action: 'cancel' | 'register'
+    }>()
+    expectTypeOf<OfflineRegistrationResult>().toEqualTypeOf<{
+      trainingId: string
+      revisionId: string
+      action: 'cancel' | 'register'
+      status: 'cancelled' | 'registered'
+      changedAt: string
+      duplicate: boolean
+    }>()
+    expectTypeOf<OfflineRegistrationList>().toEqualTypeOf<{
+      items: Array<{
+        userId: string
+        status: 'cancelled' | 'not_registered' | 'registered'
+        changedAt: string | null
+      }>
+      nextCursor: string | null
     }>()
     expectTypeOf<OfflineQrResult>().toEqualTypeOf<{
       trainingId: string
@@ -1906,6 +1937,8 @@ describe('elearning V0.1 OpenAPI paths', () => {
         location: string
         attendanceMode: 'training' | 'session'
         status: 'active' | 'archived'
+        registrationEnabled: boolean
+        registrationStatus: 'not_registered' | 'registered'
         targets: Array<{
           targetId: string
           position: number
@@ -1933,7 +1966,9 @@ describe('elearning V0.1 OpenAPI paths', () => {
       ['/api/elearning/admin/offline-trainings', 'post'],
       ['/api/elearning/admin/offline-trainings/{trainingId}/status', 'post'],
       ['/api/elearning/admin/offline-trainings/{trainingId}/targets/{targetId}/qr', 'post'],
+      ['/api/elearning/admin/offline-trainings/{trainingId}/registrations', 'get'],
       ['/api/elearning/me/offline-attendance', 'post'],
+      ['/api/elearning/me/offline-trainings/{trainingId}/registration', 'post'],
       ['/api/elearning/me/offline-trainings', 'get'],
     ] as const
     for (const [path, method] of operations) {
@@ -1952,6 +1987,10 @@ describe('elearning V0.1 OpenAPI paths', () => {
       .toEqual({ $ref: '#/components/schemas/ElearningOfflineAttendanceResult' })
     expect(doc.paths?.['/api/elearning/me/offline-trainings']?.get?.responses?.['200']?.content?.['application/json']?.schema)
       .toEqual({ $ref: '#/components/schemas/ElearningOfflineLearnerTrainingList' })
+    expect(doc.paths?.['/api/elearning/me/offline-trainings/{trainingId}/registration']?.post?.requestBody?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningOfflineRegistrationRequest' })
+    expect(doc.paths?.['/api/elearning/admin/offline-trainings/{trainingId}/registrations']?.get?.responses?.['200']?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningOfflineRegistrationList' })
 
     for (const name of [
       'ElearningOfflineTargetCommand',
@@ -1960,6 +1999,10 @@ describe('elearning V0.1 OpenAPI paths', () => {
       'ElearningOfflineTrainingPublishResult',
       'ElearningOfflineTrainingStatusRequest',
       'ElearningOfflineTrainingStatusResult',
+      'ElearningOfflineRegistrationRequest',
+      'ElearningOfflineRegistrationResult',
+      'ElearningOfflineRegistrationListItem',
+      'ElearningOfflineRegistrationList',
       'ElearningOfflineQrIssueRequest',
       'ElearningOfflineQrResult',
       'ElearningOfflineAttendanceRequest',
@@ -1969,13 +2012,16 @@ describe('elearning V0.1 OpenAPI paths', () => {
       'ElearningOfflineLearnerTrainingList',
     ]) expect(schemas[name]?.additionalProperties).toBe(false)
     expect(Object.keys(schemas.ElearningOfflineTrainingPublishRequest?.properties ?? {}).sort())
-      .toEqual(['attendanceMode', 'location', 'memberUserIds', 'requestId', 'targets', 'title'])
+      .toEqual(['attendanceMode', 'location', 'memberUserIds', 'registrationEnabled', 'requestId', 'targets', 'title'])
     expect(Object.keys(schemas.ElearningOfflineQrIssueRequest?.properties ?? {}).sort())
       .toEqual(['action', 'requestId'])
     expect(Object.keys(schemas.ElearningOfflineTrainingStatusRequest?.properties ?? {}).sort())
       .toEqual(['reason', 'requestId', 'status'])
     expect(schemas.ElearningOfflineTrainingStatus?.enum)
       .toEqual(['active', 'archived', 'withdrawn'])
+    expect(schemas.ElearningOfflineRegistrationAction?.enum).toEqual(['cancel', 'register'])
+    expect(Object.keys(schemas.ElearningOfflineRegistrationRequest?.properties ?? {}).sort())
+      .toEqual(['action', 'requestId'])
     expect(Object.keys(schemas.ElearningOfflineAttendanceRequest?.properties ?? {}).sort())
       .toEqual(['requestId', 'token'])
     expect(schemas.ElearningOfflineTrainingPublishRequest?.properties?.memberUserIds)

@@ -6,6 +6,7 @@ const h = vi.hoisted(() => ({
   publish: vi.fn(),
   issue: vi.fn(),
   setStatus: vi.fn(),
+  listRegistrations: vi.fn(),
 }))
 
 vi.mock('../src/services/elearningOfflineTraining', async () => {
@@ -16,6 +17,7 @@ vi.mock('../src/services/elearningOfflineTraining', async () => {
     ...actual,
     publishElearningOfflineTraining: h.publish,
     issueElearningOfflineQr: h.issue,
+    listElearningOfflineRegistrations: h.listRegistrations,
     setElearningOfflineTrainingStatus: h.setStatus,
   }
 })
@@ -65,6 +67,7 @@ function result(over: Record<string, unknown> = {}) {
       checkOutClosesAt: '2026-09-01T04:30:00.000Z',
     }],
     memberCount: 1,
+    registrationEnabled: false,
     createdAt: '2026-09-01T00:00:00.000Z',
     duplicate: false,
     ...over,
@@ -96,6 +99,7 @@ describe('ElearningOfflineTrainingAdminSection', () => {
     h.publish.mockReset()
     h.issue.mockReset()
     h.setStatus.mockReset()
+    h.listRegistrations.mockReset()
     h.publish.mockResolvedValue(result())
     h.issue.mockResolvedValue({
       trainingId: TRAINING,
@@ -113,6 +117,10 @@ describe('ElearningOfflineTrainingAdminSection', () => {
       reason: 'Completed cycle',
       changedAt: '2026-09-01T00:02:00.000Z',
       duplicate: false,
+    })
+    h.listRegistrations.mockResolvedValue({
+      items: [{ userId: MEMBER, status: 'registered', changedAt: '2026-09-01T00:03:00.000Z' }],
+      nextCursor: null,
     })
     uuid = vi.spyOn(globalThis.crypto, 'randomUUID')
       .mockReturnValueOnce(REQUEST_A)
@@ -146,6 +154,7 @@ describe('ElearningOfflineTrainingAdminSection', () => {
       title: 'Safety training',
       location: 'Room A',
       attendanceMode: 'training',
+      registrationEnabled: false,
       memberUserIds: [MEMBER],
       targets: [expect.objectContaining({ title: 'Morning session' })],
     }))
@@ -163,6 +172,48 @@ describe('ElearningOfflineTrainingAdminSection', () => {
       .toBe(TOKEN_A)
     expect((view.querySelector('[data-testid="elearning-offline-qr-symbol"]') as HTMLImageElement).src)
       .toContain('data:image/svg+xml')
+  })
+
+  it('freezes registration availability at publish and loads a closed read-only roster', async () => {
+    h.publish.mockResolvedValueOnce(result({ registrationEnabled: true }))
+    h.listRegistrations
+      .mockResolvedValueOnce({
+        items: [{ userId: MEMBER, status: 'registered', changedAt: '2026-09-01T00:03:00.000Z' }],
+        nextCursor: MEMBER,
+      })
+      .mockResolvedValueOnce({
+        items: [{ userId: REQUEST_A, status: 'not_registered', changedAt: null }],
+        nextCursor: null,
+      })
+    const view = mount()
+    fill(view)
+    ;(view.querySelector('[data-testid="elearning-offline-registration-enabled"]') as HTMLInputElement).click()
+    ;(view.querySelector('[data-testid="elearning-offline-publish"]') as HTMLButtonElement).click()
+    await flush()
+
+    expect(h.publish).toHaveBeenCalledWith(expect.objectContaining({ registrationEnabled: true }))
+    ;(view.querySelector('[data-testid="elearning-offline-load-registrations"]') as HTMLButtonElement).click()
+    await flush()
+    expect(h.listRegistrations).toHaveBeenCalledWith({
+      trainingId: TRAINING,
+      after: undefined,
+    })
+    expect(view.querySelector('[data-testid="elearning-offline-registration-list"]')?.textContent)
+      .toContain(MEMBER)
+    expect(view.textContent).toContain('Registered')
+
+    ;(view.querySelector(
+      '[data-testid="elearning-offline-load-more-registrations"]',
+    ) as HTMLButtonElement).click()
+    await flush()
+    expect(h.listRegistrations).toHaveBeenLastCalledWith({
+      trainingId: TRAINING,
+      after: MEMBER,
+    })
+    expect(view.querySelector('[data-testid="elearning-offline-registration-list"]')?.textContent)
+      .toContain(REQUEST_A)
+    expect(view.textContent).toContain('Not registered')
+    expect(view.querySelector('[data-testid="elearning-offline-load-more-registrations"]')).toBeNull()
   })
 
   it('automatically rotates the rendered QR at the half-open expiry boundary', async () => {

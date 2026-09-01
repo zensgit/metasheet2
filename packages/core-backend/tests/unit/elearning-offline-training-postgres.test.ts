@@ -8,7 +8,9 @@ import {
   hashElearningOfflineRequest,
 } from '../../src/services/elearning-offline-training'
 import {
+  changeElearningOfflineRegistration,
   issueElearningOfflineQr,
+  listElearningOfflineRegistrations,
   listMyElearningOfflineTrainings,
   publishElearningOfflineTraining,
   recordElearningOfflineAttendance,
@@ -42,6 +44,7 @@ function publishCommand(overrides: Record<string, unknown> = {}) {
       checkOutClosesAt: '2026-09-01T10:15:00.000Z',
     }],
     memberUserIds: [MEMBER],
+    registrationEnabled: true,
     ...overrides,
   }
 }
@@ -53,6 +56,8 @@ function row(overrides: Record<string, unknown> = {}) {
     attendance_mode: 'training',
     created_at: new Date('2026-09-01T00:00:00.000Z'),
     member_count: 1,
+    registration_enabled: true,
+    registration_action: null,
     target_id: TARGET,
     position: 1,
     starts_at: new Date('2026-09-01T09:00:00.000Z'),
@@ -107,6 +112,7 @@ describe('e-learning offline training PostgreSQL authority', () => {
       attendanceMode: 'training',
       targets: [expect.objectContaining({ targetId: TARGET, position: 1, title: 'Session' })],
       memberCount: 1,
+      registrationEnabled: true,
       createdAt: '2026-09-01T00:00:00.000Z',
       duplicate: false,
     })
@@ -402,6 +408,62 @@ describe('e-learning offline training PostgreSQL authority', () => {
       .toBe(false)
   })
 
+  it('registers only an invited active learner and exposes a closed admin roster', async () => {
+    const store = db(async (sql) => {
+      if (sql.includes('elearning-offline:active-user')) return [{ ok: 1 }]
+      if (sql.includes('revision.registration_enabled')) return [{
+        revision_id: REVISION,
+        status: 'active',
+        registration_enabled: true,
+      }]
+      if (sql.includes('ORDER BY sequence DESC')) return []
+      if (sql.includes('INSERT INTO elearning_offline_registration_events')) {
+        return [{ changed_at: new Date('2026-09-01T00:03:00.000Z') }]
+      }
+      if (sql.includes('FROM elearning_offline_registration_events')) return [{
+        training_id: TRAINING,
+        revision_id: REVISION,
+        action: 'register',
+        changed_at: new Date('2026-09-01T00:03:00.000Z'),
+      }]
+      return []
+    })
+    await expect(changeElearningOfflineRegistration(store.value, {
+      orgId: ORG,
+      userId: MEMBER,
+      trainingId: TRAINING,
+      command: { requestId: REQUEST, action: 'register' },
+    })).resolves.toEqual({
+      trainingId: TRAINING,
+      revisionId: REVISION,
+      action: 'register',
+      status: 'registered',
+      changedAt: '2026-09-01T00:03:00.000Z',
+      duplicate: false,
+    })
+    expect(store.statements.some((sql) => (
+      sql.includes('INSERT INTO elearning_offline_registration_requests')
+    ))).toBe(true)
+
+    const roster = db(async () => [{
+      user_id: MEMBER,
+      action: 'register',
+      changed_at: new Date('2026-09-01T00:03:00.000Z'),
+    }])
+    await expect(listElearningOfflineRegistrations(roster.value, {
+      orgId: ORG,
+      trainingId: TRAINING,
+      limit: 50,
+    })).resolves.toEqual({
+      items: [{
+        userId: MEMBER,
+        status: 'registered',
+        changedAt: '2026-09-01T00:03:00.000Z',
+      }],
+      nextCursor: null,
+    })
+  })
+
   it('parses ordered learner targets without leaking challenge or token fields', async () => {
     const store = db(async () => [row({
       training_id: TRAINING,
@@ -419,6 +481,8 @@ describe('e-learning offline training PostgreSQL authority', () => {
       location: 'Room',
       attendanceMode: 'training',
       status: 'active',
+      registrationEnabled: true,
+      registrationStatus: 'not_registered',
       completionStatus: 'in_progress',
       targets: [expect.objectContaining({
         targetId: TARGET,

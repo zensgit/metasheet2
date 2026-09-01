@@ -8,6 +8,7 @@ import {
   down as offlineDown,
   up as offlineUp,
 } from '../../src/db/migrations/zzzz20260901100000_create_elearning_offline_training'
+import { up as registrationUp } from '../../src/db/migrations/zzzz20260901150000_create_elearning_offline_registration'
 import { ElearningOfflineError } from '../../src/services/elearning-offline-training'
 import {
   issueElearningOfflineQr,
@@ -134,6 +135,7 @@ function publishCommand(requestId = randomUUID()) {
       checkOutClosesAt: at(90_000),
     }],
     memberUserIds: [MEMBER],
+    registrationEnabled: true,
   }
 }
 
@@ -348,6 +350,7 @@ describe.sequential('e-learning offline training PostgreSQL authority', () => {
       FOR EACH ROW EXECUTE FUNCTION elearning_offline_publish_authority()
     `)
     await migrate(offlineUp)
+    await migrate(registrationUp)
   })
 
   it('publishes an immutable member snapshot with exact replay/conflict semantics', async () => {

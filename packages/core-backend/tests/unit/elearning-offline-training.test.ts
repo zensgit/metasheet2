@@ -6,6 +6,7 @@ import {
   createElearningOfflineQrToken,
   digestElearningOfflineQrToken,
   hashElearningOfflineRequest,
+  normalizeChangeElearningOfflineRegistration,
   normalizeIssueElearningOfflineQr,
   normalizePublishElearningOfflineTraining,
   normalizeRecordElearningOfflineAttendance,
@@ -40,6 +41,7 @@ function publish(overrides: Record<string, unknown> = {}) {
     attendanceMode: 'training',
     targets: [target()],
     memberUserIds: [MEMBER_ID],
+    registrationEnabled: true,
     ...overrides,
   }
 }
@@ -122,6 +124,22 @@ describe('e-learning offline training domain', () => {
       requestId: REQUEST_ID,
       token: 'opaque-token',
     })).toEqual({ requestId: REQUEST_ID, token: 'opaque-token' })
+  })
+
+  it('normalizes a closed self-registration command and explicit publish setting', () => {
+    expect(normalizeChangeElearningOfflineRegistration({
+      requestId: REQUEST_ID,
+      action: 'register',
+    })).toEqual({ requestId: REQUEST_ID, action: 'register' })
+    expect(normalizePublishElearningOfflineTraining(publish({ registrationEnabled: false })))
+      .toMatchObject({ registrationEnabled: false })
+    expectCode(() => normalizeChangeElearningOfflineRegistration({
+      requestId: REQUEST_ID,
+      action: 'waitlist',
+    }), 'invalid_input')
+    expectCode(() => normalizePublishElearningOfflineTraining(publish({
+      registrationEnabled: 'true',
+    })), 'invalid_input')
   })
 
   it('normalizes a closed audited training status command', () => {

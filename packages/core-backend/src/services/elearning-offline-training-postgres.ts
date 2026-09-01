@@ -7,12 +7,15 @@ import {
   createElearningOfflineQrToken,
   digestElearningOfflineQrToken,
   hashElearningOfflineRequest,
+  normalizeChangeElearningOfflineRegistration,
+  normalizeElearningOfflineUuid,
   normalizeIssueElearningOfflineQr,
   normalizePublishElearningOfflineTraining,
   normalizeRecordElearningOfflineAttendance,
   normalizeSetElearningOfflineTrainingStatus,
   type ElearningOfflineAttendanceAction,
   type ElearningOfflineAttendanceMode,
+  type ElearningOfflineRegistrationAction,
   type ElearningOfflineTrainingStatus,
 } from './elearning-offline-training'
 
@@ -54,6 +57,20 @@ export interface SetElearningOfflineTrainingStatusInput {
   command: unknown
 }
 
+export interface ChangeElearningOfflineRegistrationInput {
+  orgId: string
+  userId: string
+  trainingId: string
+  command: unknown
+}
+
+export interface ListElearningOfflineRegistrationsInput {
+  orgId: string
+  trainingId: string
+  afterUserId?: string
+  limit: number
+}
+
 export interface ElearningOfflineTargetResult {
   targetId: string
   position: number
@@ -74,8 +91,29 @@ export interface ElearningOfflinePublishResult {
   attendanceMode: ElearningOfflineAttendanceMode
   targets: ElearningOfflineTargetResult[]
   memberCount: number
+  registrationEnabled: boolean
   createdAt: string
   duplicate: boolean
+}
+
+export interface ElearningOfflineRegistrationResult {
+  trainingId: string
+  revisionId: string
+  action: ElearningOfflineRegistrationAction
+  status: 'cancelled' | 'registered'
+  changedAt: string
+  duplicate: boolean
+}
+
+export interface ElearningOfflineRegistrationListItem {
+  userId: string
+  status: 'cancelled' | 'not_registered' | 'registered'
+  changedAt: string | null
+}
+
+export interface ElearningOfflineRegistrationListResult {
+  items: ElearningOfflineRegistrationListItem[]
+  nextCursor: string | null
 }
 
 export interface ElearningOfflineQrResult {
@@ -118,6 +156,8 @@ export interface ElearningOfflineLearnerTraining {
   location: string
   attendanceMode: ElearningOfflineAttendanceMode
   status: 'active' | 'archived'
+  registrationEnabled: boolean
+  registrationStatus: 'not_registered' | 'registered'
   targets: Array<ElearningOfflineTargetResult & {
     attendanceStatus: 'checked_in' | 'checked_out' | 'not_checked_in'
     checkedInAt: string | null
@@ -143,6 +183,12 @@ function integer(row: Record<string, unknown>, key: string): number {
   return result
 }
 
+function boolean(row: Record<string, unknown>, key: string): boolean {
+  const result = row[key]
+  if (typeof result !== 'boolean') fail('unavailable')
+  return result
+}
+
 function instant(row: Record<string, unknown>, key: string): string {
   const raw = row[key]
   const date = raw instanceof Date ? raw : typeof raw === 'string' ? new Date(raw) : null
@@ -163,6 +209,12 @@ function mode(row: Record<string, unknown>): ElearningOfflineAttendanceMode {
 function attendanceAction(row: Record<string, unknown>): ElearningOfflineAttendanceAction {
   const raw = value(row, 'action')
   if (raw !== 'check_in' && raw !== 'check_out') fail('unavailable')
+  return raw
+}
+
+function registrationAction(row: Record<string, unknown>): ElearningOfflineRegistrationAction {
+  const raw = value(row, 'action')
+  if (raw !== 'register' && raw !== 'cancel') fail('unavailable')
   return raw
 }
 
@@ -233,6 +285,7 @@ async function loadPublishResult(
   const head = await tx.query(
     `/* elearning-offline:publish-result */
      SELECT revision.title, revision.location, revision.attendance_mode,
+            revision.registration_enabled,
             revision.created_at,
             (SELECT count(*)::integer FROM elearning_offline_training_members member
              WHERE member.org_id = revision.org_id AND member.revision_id = revision.id) AS member_count
@@ -263,6 +316,7 @@ async function loadPublishResult(
     attendanceMode: mode(row),
     targets: targets.rows.map(targetResult),
     memberCount: integer(row, 'member_count'),
+    registrationEnabled: boolean(row, 'registration_enabled'),
     createdAt: instant(row, 'created_at'),
     duplicate,
   }
@@ -312,10 +366,11 @@ export async function publishElearningOfflineTraining(
     const revisionId = randomUUID()
     await tx.query(
       `INSERT INTO elearning_offline_training_revisions
-         (id, org_id, training_id, revision, title, location, attendance_mode, created_by)
-       VALUES ($1::uuid, $2, $3::uuid, 1, $4, $5, $6, $7)`,
+         (id, org_id, training_id, revision, title, location, attendance_mode,
+          registration_enabled, created_by)
+       VALUES ($1::uuid, $2, $3::uuid, 1, $4, $5, $6, $7, $8)`,
       [revisionId, input.orgId, trainingId, command.title, command.location,
-        command.attendanceMode, input.actorId],
+        command.attendanceMode, command.registrationEnabled, input.actorId],
     )
     for (const [index, target] of command.targets.entries()) {
       await tx.query(
@@ -442,6 +497,175 @@ export async function setElearningOfflineTrainingStatus(
     )
     return loadStatusResult(tx, input.orgId, eventId, false)
   })
+}
+
+async function loadRegistrationResult(
+  tx: ElearningOfflineQueryable,
+  orgId: string,
+  userId: string,
+  eventId: string,
+  duplicate: boolean,
+): Promise<ElearningOfflineRegistrationResult> {
+  const result = await tx.query(
+    `SELECT training_id::text, revision_id::text, action, changed_at
+     FROM elearning_offline_registration_events
+     WHERE org_id = $1 AND user_id = $2 AND id = $3::uuid`,
+    [orgId, userId, eventId],
+  )
+  if (result.rows.length !== 1) fail('unavailable')
+  const row = result.rows[0]!
+  const action = registrationAction(row)
+  return {
+    trainingId: value(row, 'training_id'),
+    revisionId: value(row, 'revision_id'),
+    action,
+    status: action === 'register' ? 'registered' : 'cancelled',
+    changedAt: instant(row, 'changed_at'),
+    duplicate,
+  }
+}
+
+export async function changeElearningOfflineRegistration(
+  db: ElearningOfflineDb,
+  input: ChangeElearningOfflineRegistrationInput,
+): Promise<ElearningOfflineRegistrationResult> {
+  const command = normalizeChangeElearningOfflineRegistration(input.command)
+  const trainingId = normalizeElearningOfflineUuid(input.trainingId)
+  const requestHash = hashElearningOfflineRequest('registration', {
+    action: command.action,
+    trainingId,
+  })
+  return db.transaction(async (tx) => {
+    await lockRequest(
+      tx,
+      'elearning-offline-registration-request',
+      `${input.orgId}:${input.userId}:${command.requestId}`,
+    )
+    await requireActiveOrgUser(tx, input.orgId, input.userId)
+    const replay = await tx.query(
+      `SELECT request_hash, request_hash_version, event_id::text
+       FROM elearning_offline_registration_requests
+       WHERE org_id = $1 AND user_id = $2 AND request_id = $3::uuid`,
+      [input.orgId, input.userId, command.requestId],
+    )
+    if (replay.rows.length > 0) {
+      const row = replay.rows[0]!
+      if (value(row, 'request_hash') !== requestHash
+        || integer(row, 'request_hash_version') !== ELEARNING_OFFLINE_REQUEST_HASH_VERSION) fail('conflict')
+      return loadRegistrationResult(tx, input.orgId, input.userId, value(row, 'event_id'), true)
+    }
+    const context = await tx.query(
+      `SELECT training.active_revision_id::text AS revision_id,
+              training.status, revision.registration_enabled
+       FROM elearning_offline_trainings training
+       JOIN elearning_offline_training_revisions revision
+         ON revision.org_id = training.org_id
+        AND revision.id = training.active_revision_id
+       JOIN elearning_offline_training_members member
+         ON member.org_id = training.org_id
+        AND member.training_id = training.id
+        AND member.revision_id = training.active_revision_id
+        AND member.user_id = $3
+       WHERE training.org_id = $1 AND training.id = $2::uuid
+       FOR SHARE OF training, revision, member`,
+      [input.orgId, trainingId, input.userId],
+    )
+    if (context.rows.length !== 1) fail('forbidden')
+    const contextRow = context.rows[0]!
+    if (trainingStatus(contextRow) !== 'active') fail('conflict')
+    if (!boolean(contextRow, 'registration_enabled')) fail('disabled')
+    const revisionId = value(contextRow, 'revision_id')
+    await lockRequest(
+      tx,
+      'elearning-offline-registration-effect',
+      `${input.orgId}:${revisionId}:${input.userId}`,
+    )
+    const current = await tx.query(
+      `SELECT sequence, action
+       FROM elearning_offline_registration_events
+       WHERE org_id = $1 AND revision_id = $2::uuid AND user_id = $3
+       ORDER BY sequence DESC
+       LIMIT 1
+       FOR SHARE`,
+      [input.orgId, revisionId, input.userId],
+    )
+    const latest = current.rows[0]
+    const currentRegistered = latest ? registrationAction(latest) === 'register' : false
+    if ((command.action === 'register') === currentRegistered) fail('conflict')
+    const sequence = latest ? integer(latest, 'sequence') + 1 : 1
+    const eventId = randomUUID()
+    const inserted = await tx.query(
+      `INSERT INTO elearning_offline_registration_events
+         (id, org_id, training_id, revision_id, user_id, actor_id, sequence, action)
+       VALUES ($1::uuid, $2, $3::uuid, $4::uuid, $5, $5, $6, $7)
+       RETURNING changed_at`,
+      [eventId, input.orgId, trainingId, revisionId, input.userId, sequence, command.action],
+    )
+    if (inserted.rows.length !== 1) fail('unavailable')
+    await tx.query(
+      `INSERT INTO elearning_offline_registration_requests
+         (org_id, user_id, request_id, request_hash, request_hash_version, event_id)
+       VALUES ($1, $2, $3::uuid, $4, $5, $6::uuid)`,
+      [input.orgId, input.userId, command.requestId, requestHash,
+        ELEARNING_OFFLINE_REQUEST_HASH_VERSION, eventId],
+    )
+    return loadRegistrationResult(tx, input.orgId, input.userId, eventId, false)
+  })
+}
+
+export async function listElearningOfflineRegistrations(
+  db: ElearningOfflineQueryable,
+  input: ListElearningOfflineRegistrationsInput,
+): Promise<ElearningOfflineRegistrationListResult> {
+  const trainingId = normalizeElearningOfflineUuid(input.trainingId)
+  const afterUserId = input.afterUserId === undefined
+    ? null
+    : normalizeElearningOfflineUuid(input.afterUserId)
+  if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
+    fail('invalid_input')
+  }
+  const result = await db.query(
+    `SELECT member.user_id, latest.action, latest.changed_at
+     FROM elearning_offline_trainings training
+     JOIN elearning_offline_training_members member
+       ON member.org_id = training.org_id
+      AND member.training_id = training.id
+      AND member.revision_id = training.active_revision_id
+     LEFT JOIN LATERAL (
+       SELECT event.action, event.changed_at
+       FROM elearning_offline_registration_events event
+       WHERE event.org_id = member.org_id
+         AND event.revision_id = member.revision_id
+         AND event.user_id = member.user_id
+       ORDER BY event.sequence DESC
+       LIMIT 1
+     ) latest ON true
+     WHERE training.org_id = $1 AND training.id = $2::uuid
+       AND ($3::text IS NULL OR member.user_id > $3)
+     ORDER BY member.user_id ASC
+     LIMIT $4`,
+    [input.orgId, trainingId, afterUserId, input.limit + 1],
+  )
+  const rows = result.rows.slice(0, input.limit)
+  const items = rows.map((row): ElearningOfflineRegistrationListItem => {
+    const rawAction = row.action
+    if (rawAction !== null && rawAction !== 'register' && rawAction !== 'cancel') fail('unavailable')
+    return {
+      userId: value(row, 'user_id'),
+      status: rawAction === 'register'
+        ? 'registered'
+        : rawAction === 'cancel'
+          ? 'cancelled'
+          : 'not_registered',
+      changedAt: rawAction === null ? null : instant(row, 'changed_at'),
+    }
+  })
+  return {
+    items,
+    nextCursor: result.rows.length > input.limit
+      ? items[items.length - 1]?.userId ?? null
+      : null,
+  }
 }
 
 function qrSecret(env: NodeJS.ProcessEnv): string {
@@ -728,6 +952,7 @@ async function loadMyElearningOfflineTrainings(
   const rows = await db.query(
     `SELECT training.id::text AS training_id, revision.id::text AS revision_id,
             revision.title AS training_title, revision.location, revision.attendance_mode,
+            revision.registration_enabled, registration.action AS registration_action,
             training.status, target.id::text AS target_id, target.position,
             target.title, target.starts_at, target.ends_at,
             target.check_in_opens_at, target.check_in_closes_at,
@@ -741,6 +966,15 @@ async function loadMyElearningOfflineTrainings(
        ON revision.org_id = member.org_id AND revision.id = member.revision_id
      JOIN elearning_offline_training_targets target
        ON target.org_id = member.org_id AND target.revision_id = member.revision_id
+     LEFT JOIN LATERAL (
+       SELECT event.action
+       FROM elearning_offline_registration_events event
+       WHERE event.org_id = member.org_id
+         AND event.revision_id = member.revision_id
+         AND event.user_id = member.user_id
+       ORDER BY event.sequence DESC
+       LIMIT 1
+     ) registration ON true
      LEFT JOIN elearning_offline_attendance_events checkin
        ON checkin.org_id = member.org_id AND checkin.revision_id = member.revision_id
       AND checkin.target_id = target.id AND checkin.user_id = member.user_id
@@ -767,6 +1001,12 @@ async function loadMyElearningOfflineTrainings(
         location: value(row, 'location'),
         attendanceMode: mode(row),
         status,
+        registrationEnabled: boolean(row, 'registration_enabled'),
+        registrationStatus: row.registration_action === 'register'
+          ? 'registered'
+          : row.registration_action === null || row.registration_action === 'cancel'
+            ? 'not_registered'
+            : fail('unavailable'),
         targets: [],
         completionStatus: 'in_progress',
       }

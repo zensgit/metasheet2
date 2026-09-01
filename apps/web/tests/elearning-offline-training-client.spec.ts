@@ -6,9 +6,11 @@ vi.mock('../src/utils/api', () => ({
 }))
 
 import {
+  changeElearningOfflineRegistration,
   createElearningOfflineRequestIds,
   createElearningOfflineAttendanceLink,
   issueElearningOfflineQr,
+  listElearningOfflineRegistrations,
   listMyElearningOfflineTrainings,
   probeElearningOfflineTraining,
   publishElearningOfflineTraining,
@@ -74,6 +76,8 @@ function learnerTraining(over: Record<string, unknown> = {}) {
     location: 'Room A',
     attendanceMode: 'training',
     status: 'active',
+    registrationEnabled: true,
+    registrationStatus: 'not_registered',
     targets: [learnerTarget()],
     completionStatus: 'in_progress',
     ...over,
@@ -86,6 +90,7 @@ function publishInput(over: Record<string, unknown> = {}) {
     title: 'Safety training',
     location: 'Room A',
     attendanceMode: 'training' as const,
+    registrationEnabled: true,
     targets: [{
       title: 'Morning session',
       startsAt: STARTS,
@@ -114,6 +119,7 @@ describe('e-learning offline training client', () => {
       attendanceMode: 'training',
       targets: [target()],
       memberCount: 1,
+      registrationEnabled: true,
       createdAt: CREATED,
       duplicate: false,
     }))
@@ -259,6 +265,7 @@ describe('e-learning offline training client', () => {
       attendanceMode: 'training',
       targets: [target({ position: 2 })],
       memberCount: 1,
+      registrationEnabled: true,
       createdAt: CREATED,
       duplicate: false,
     }))
@@ -379,6 +386,110 @@ describe('e-learning offline training client', () => {
     expect(ids.forStatus(TRAINING, 'withdrawn', 'Completed cycle')).toBe(REQUEST_B)
     ids.settleStatus(TRAINING, 'archived', 'Completed cycle')
     expect(ids.forStatus(TRAINING, 'archived', 'Completed cycle')).toBe(REQUEST_C)
+    uuid.mockRestore()
+  })
+
+  it('changes registration and parses the closed stable admin roster', async () => {
+    apiFetchMock.mockResolvedValueOnce(response(201, {
+      trainingId: TRAINING,
+      revisionId: REVISION,
+      action: 'register',
+      status: 'registered',
+      changedAt: CREATED,
+      duplicate: false,
+    }))
+    await expect(changeElearningOfflineRegistration({
+      requestId: REQUEST_A,
+      trainingId: TRAINING,
+      action: 'register',
+    })).resolves.toEqual({
+      trainingId: TRAINING,
+      revisionId: REVISION,
+      action: 'register',
+      status: 'registered',
+      changedAt: CREATED,
+      duplicate: false,
+    })
+    expect(apiFetchMock.mock.calls[0]?.[0]).toBe(
+      `/api/elearning/me/offline-trainings/${TRAINING}/registration`,
+    )
+    expect(JSON.parse(String(apiFetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      requestId: REQUEST_A,
+      action: 'register',
+    })
+
+    apiFetchMock.mockResolvedValueOnce(response(200, {
+      items: [{ userId: MEMBER, status: 'registered', changedAt: CREATED }],
+      nextCursor: MEMBER,
+    }))
+    await expect(listElearningOfflineRegistrations({ trainingId: TRAINING, limit: 1 }))
+      .resolves.toEqual({
+        items: [{ userId: MEMBER, status: 'registered', changedAt: CREATED }],
+        nextCursor: MEMBER,
+      })
+    expect(apiFetchMock.mock.calls[1]?.[0]).toBe(
+      `/api/elearning/admin/offline-trainings/${TRAINING}/registrations?limit=1`,
+    )
+  })
+
+  it('rejects widened, mismatched or internally inconsistent registration results', async () => {
+    for (const bad of [
+      { trainingId: REVISION, revisionId: REVISION, action: 'register', status: 'registered', changedAt: CREATED, duplicate: false },
+      { trainingId: TRAINING, revisionId: REVISION, action: 'register', status: 'cancelled', changedAt: CREATED, duplicate: false },
+      { trainingId: TRAINING, revisionId: REVISION, action: 'cancel', status: 'cancelled', changedAt: CREATED, duplicate: false },
+      { trainingId: TRAINING, revisionId: REVISION, action: 'register', status: 'registered', changedAt: CREATED, duplicate: false, actorId: MEMBER },
+    ]) {
+      apiFetchMock.mockResolvedValueOnce(response(200, bad))
+      await expect(changeElearningOfflineRegistration({
+        requestId: REQUEST_A,
+        trainingId: TRAINING,
+        action: 'register',
+      })).rejects.toMatchObject({ code: 'invalid_response' })
+    }
+
+    for (const bad of [
+      { items: [{ userId: MEMBER, status: 'not_registered', changedAt: CREATED }], nextCursor: null },
+      { items: [{ userId: MEMBER, status: 'registered', changedAt: null }], nextCursor: null },
+      { items: [{ userId: MEMBER, status: 'registered', changedAt: CREATED, orgId: 'hidden' }], nextCursor: null },
+      { items: [{ userId: MEMBER, status: 'registered', changedAt: CREATED }], nextCursor: TRAINING },
+    ]) {
+      apiFetchMock.mockResolvedValueOnce(response(200, bad))
+      await expect(listElearningOfflineRegistrations({ trainingId: TRAINING }))
+        .rejects.toMatchObject({ code: 'invalid_response' })
+    }
+
+    apiFetchMock.mockResolvedValueOnce(response(200, {
+      items: [{ userId: MEMBER, status: 'registered', changedAt: CREATED }],
+      nextCursor: null,
+    }))
+    await expect(listElearningOfflineRegistrations({
+      trainingId: TRAINING,
+      after: MEMBER,
+    })).rejects.toMatchObject({ code: 'invalid_response' })
+  })
+
+  it('keeps registration retry identity stable until success and separates the opposite action', () => {
+    const uuid = vi.spyOn(globalThis.crypto, 'randomUUID')
+      .mockReturnValueOnce(REQUEST_A)
+      .mockReturnValueOnce(REQUEST_B)
+      .mockReturnValue(REQUEST_C)
+    const ids = createElearningOfflineRequestIds()
+    expect(ids.forRegistration(TRAINING, 'register')).toBe(REQUEST_A)
+    expect(ids.forRegistration(TRAINING.toUpperCase(), 'register')).toBe(REQUEST_A)
+    expect(ids.forRegistration(TRAINING, 'cancel')).toBe(REQUEST_B)
+    ids.settleRegistration(TRAINING, 'register')
+    expect(ids.forRegistration(TRAINING, 'register')).toBe(REQUEST_C)
+    uuid.mockRestore()
+  })
+
+  it('binds publish retry identity to the frozen registration setting', () => {
+    const uuid = vi.spyOn(globalThis.crypto, 'randomUUID')
+      .mockReturnValueOnce(REQUEST_A)
+      .mockReturnValue(REQUEST_B)
+    const ids = createElearningOfflineRequestIds()
+    const { requestId: _requestId, ...payload } = publishInput()
+    expect(ids.forPublish(payload)).toBe(REQUEST_A)
+    expect(ids.forPublish({ ...payload, registrationEnabled: false })).toBe(REQUEST_B)
     uuid.mockRestore()
   })
 })

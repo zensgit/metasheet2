@@ -174,7 +174,9 @@ import type {
 } from './elearning-question-practice-postgres'
 import type {
   ElearningOfflineDb,
+  changeElearningOfflineRegistration,
   issueElearningOfflineQr,
+  listElearningOfflineRegistrations,
   listMyElearningOfflineTrainings,
   publishElearningOfflineTraining,
   recordElearningOfflineAttendance,
@@ -340,6 +342,8 @@ export interface ElearningPilotRuntimeOptions {
   publishElearningOfflineTraining?: typeof publishElearningOfflineTraining
   issueElearningOfflineQr?: typeof issueElearningOfflineQr
   setElearningOfflineTrainingStatus?: typeof setElearningOfflineTrainingStatus
+  changeElearningOfflineRegistration?: typeof changeElearningOfflineRegistration
+  listElearningOfflineRegistrations?: typeof listElearningOfflineRegistrations
   recordElearningOfflineAttendance?: typeof recordElearningOfflineAttendance
   listMyElearningOfflineTrainings?: typeof listMyElearningOfflineTrainings
 }
@@ -449,6 +453,8 @@ export function createElearningPilotRuntime(
     publishElearningOfflineTraining: opts.publishElearningOfflineTraining,
     issueElearningOfflineQr: opts.issueElearningOfflineQr,
     setElearningOfflineTrainingStatus: opts.setElearningOfflineTrainingStatus,
+    changeElearningOfflineRegistration: opts.changeElearningOfflineRegistration,
+    listElearningOfflineRegistrations: opts.listElearningOfflineRegistrations,
     recordElearningOfflineAttendance: opts.recordElearningOfflineAttendance,
     listMyElearningOfflineTrainings: opts.listMyElearningOfflineTrainings,
   }) : null
