@@ -83,9 +83,14 @@ function system(overrides = {}) {
   }
 }
 
+const SECOND_PLM = 'sys_customer_plm_2'
+
 const DEFAULT_SYSTEMS = Object.freeze([
   system({ id: ENV_DEFAULT_SOURCE, name: '内置演示源', config: { dataSourceId: 'ds_demo' } }),
   system(),
+  // A SECOND source of the action's own kind, so a rebind can be exercised without crossing kinds
+  // (which R-20 proves is refused).
+  system({ id: SECOND_PLM, name: '客户 PLM 备用库', config: { dataSourceId: 'ds_customer_2' } }),
   system({ id: 'sys_bridge', name: '旧库桥接', kind: 'bridge:legacy-sql-readonly', config: {} }),
   system({ id: 'sys_k3_write', name: 'K3 写接口', kind: 'erp:k3-wise-webapi', role: 'target', config: {} }),
   system({ id: 'sys_inactive', name: '未启用源', status: 'inactive' }),
@@ -453,17 +458,18 @@ async function main() {
     assert.equal(audits[0].detail.previousExternalSystemId, undefined, 'there was no previous binding')
     assert.equal(audits[0].detail.sourceKind, 'data-source:sql-readonly')
 
-    // A REBIND records the id it replaced — the old/new pair a reviewer needs.
-    await call(mounted.routes, 'POST', SET_ROUTE, { user: WRITER_ADMIN, body: { externalSystemId: 'sys_bridge' } })
+    // A REBIND records the id it replaced — the old/new pair a reviewer needs. Rebinding to a
+    // SECOND source of the action's own kind, because crossing kinds is refused outright (R-20).
+    await call(mounted.routes, 'POST', SET_ROUTE, { user: WRITER_ADMIN, body: { externalSystemId: SECOND_PLM } })
     const rebind = mounted.db.rows.filter((row) => row.__table === 'integration_stock_prep_audit')[1]
     assert.equal(rebind.mode, 'rebound')
     assert.equal(rebind.actor, WRITER_ADMIN.id)
-    assert.equal(rebind.subject_id, 'sys_bridge')
+    assert.equal(rebind.subject_id, SECOND_PLM)
     assert.equal(rebind.detail.previousExternalSystemId, CUSTOMER_PLM)
     assert.equal(rebind.detail.changed, true)
 
     // Re-confirming the SAME source is still recorded, as changed:false.
-    await call(mounted.routes, 'POST', SET_ROUTE, { user: ADMIN, body: { externalSystemId: 'sys_bridge' } })
+    await call(mounted.routes, 'POST', SET_ROUTE, { user: ADMIN, body: { externalSystemId: SECOND_PLM } })
     const resave = mounted.db.rows.filter((row) => row.__table === 'integration_stock_prep_audit')[2]
     assert.equal(resave.detail.changed, false)
     assert.equal(resave.mode, 'rebound')
@@ -496,10 +502,11 @@ async function main() {
     assert.equal(data.takesEffectWithoutRestart, true)
 
     const offered = data.eligibleSources.map((row) => row.externalSystemId).sort()
-    assert.deepEqual(offered, [CUSTOMER_PLM, ENV_DEFAULT_SOURCE, 'sys_bridge'].sort())
-    // The K3 write connector, the inactive source and the colleague's connection are ABSENT, not
-    // greyed out — R-11: what is not permitted must not be visible.
-    for (const excluded of ['sys_k3_write', 'sys_inactive', 'sys_not_mine']) {
+    assert.deepEqual(offered, [CUSTOMER_PLM, ENV_DEFAULT_SOURCE, SECOND_PLM].sort())
+    // The K3 write connector, the inactive source, the colleague's connection and the CROSS-KIND
+    // bridge source are ABSENT, not greyed out — R-11: what is not permitted must not be visible,
+    // and (R-20) a choice whose Save leads to a broken read is never offered.
+    for (const excluded of ['sys_k3_write', 'sys_inactive', 'sys_not_mine', 'sys_bridge']) {
       assert.ok(!offered.includes(excluded), `${excluded} must not be offered`)
     }
 
@@ -514,12 +521,13 @@ async function main() {
     assert.ok(!JSON.stringify(data).includes('ds_demo'))
 
     // A host WITHOUT the descriptor seam must not silently empty the picker — undecided is not
-    // disqualifying, so the two data-source-backed systems stay offered.
+    // disqualifying, so the data-source-backed systems stay offered. The cross-kind bridge source
+    // stays out regardless: the kind filter is structural, not a permissions question.
     const noDirectory = mount({ withDataSourceDirectory: false })
     const fallback = await call(noDirectory.routes, 'GET', GET_ROUTE, { user: ADMIN })
     assert.deepEqual(
       fallback.body.data.eligibleSources.map((row) => row.externalSystemId).sort(),
-      [CUSTOMER_PLM, ENV_DEFAULT_SOURCE, 'sys_bridge', 'sys_not_mine'].sort(),
+      [CUSTOMER_PLM, ENV_DEFAULT_SOURCE, SECOND_PLM, 'sys_not_mine'].sort(),
     )
   })
 
@@ -558,6 +566,92 @@ async function main() {
       !JSON.stringify(defaultCard).includes(ACTION_ID),
       'the 备料 consumer no longer hangs off the deploy-time default',
     )
+  })
+
+  // -------------------------------------------------------------------------
+  // R-20 — THE CROSS-KIND FOOTGUN, END TO END.
+  //
+  // Both BOM read kinds are bindable in the abstract, but the binding does NOT move `source.kind`
+  // (frozen deploy-time config) and `loadTableActionSourceAdapter` refuses any system whose kind
+  // differs. Before this check, an admin whose deploy default is `data-source:sql-readonly` but
+  // whose PLM is registered as `bridge:legacy-sql-readonly` could pick it, Save would succeed, the
+  // GET would report `origin: persisted` / `takesEffectWithoutRestart: true`, and EVERY subsequent
+  // read would fail with an opaque TABLE_ACTION_SOURCE_INVALID.
+  //
+  // Fail-closed, yes — but undiscoverable, which is the onboarding cost this feature removes. Both
+  // layers are asserted: the picker never offers it, and the POST refuses it anyway.
+  // -------------------------------------------------------------------------
+  await run('R-20 a cross-kind source is never offered and is refused at POST, so no unreadable binding can persist', async () => {
+    const mounted = mount()
+
+    // The picker is scoped to the ACTION's own kind: the bridge source is absent, even though it is
+    // an active, non-target, perfectly good BOM read source in the abstract.
+    const view = await call(mounted.routes, 'GET', GET_ROUTE, { user: ADMIN })
+    const offered = view.body.data.eligibleSources.map((row) => row.externalSystemId)
+    assert.ok(!offered.includes('sys_bridge'), 'a cross-kind candidate is not offered')
+    assert.deepEqual(offered.sort(), [CUSTOMER_PLM, ENV_DEFAULT_SOURCE, SECOND_PLM].sort(), 'only the action\'s own kind is offered')
+    assert.equal(view.body.data.effectiveSourceKind, 'data-source:sql-readonly')
+
+    // And the POST refuses it anyway — the picker is a convenience, the POST is the authority.
+    const refused = await call(mounted.routes, 'POST', SET_ROUTE, { user: ADMIN, body: { externalSystemId: 'sys_bridge' } })
+    assert.equal(refused.statusCode, 422)
+    assert.equal(refused.body.error.code, 'SOURCE_BINDING_SOURCE_INELIGIBLE')
+    assert.equal(refused.body.error.details.reason, 'kind_mismatch')
+    assert.equal(refused.body.error.details.requiredKind, 'data-source:sql-readonly', 'the refusal names the kind the action wants')
+    assert.deepEqual(mounted.db.rows, [], 'nothing persisted and nothing audited')
+    // The action still reads what it read before — no half-applied bind.
+    assert.equal(await sourceUsedByNextDryRun(mounted), ENV_DEFAULT_SOURCE)
+
+    // THE MIRROR IMAGE: an action deployed against the BRIDGE kind offers and accepts the bridge
+    // source and refuses the data-source one. So the filter is the ACTION's kind, not a preference.
+    const bridgeMounted = mount({ actions: [{
+      actionId: ACTION_ID,
+      source: { externalSystemId: 'sys_bridge', kind: 'bridge:legacy-sql-readonly' },
+      target: { sheetId: 'sheet_stock_prep', objectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId },
+    }] })
+    const bridgeView = await call(bridgeMounted.routes, 'GET', GET_ROUTE, { user: ADMIN })
+    assert.deepEqual(
+      bridgeView.body.data.eligibleSources.map((row) => row.externalSystemId),
+      ['sys_bridge'],
+      'a bridge-wired action offers only bridge sources',
+    )
+    const bridgeRefused = await call(bridgeMounted.routes, 'POST', SET_ROUTE, { user: ADMIN, body: { externalSystemId: CUSTOMER_PLM } })
+    assert.equal(bridgeRefused.statusCode, 422)
+    assert.equal(bridgeRefused.body.error.details.reason, 'kind_mismatch')
+    assert.equal(bridgeRefused.body.error.details.requiredKind, 'bridge:legacy-sql-readonly')
+
+    // A SAME-KIND bind still works end to end, so the fix narrowed nothing it should not have.
+    const ok = await call(bridgeMounted.routes, 'POST', SET_ROUTE, { user: ADMIN, body: { externalSystemId: 'sys_bridge' } })
+    assert.equal(ok.statusCode, 200)
+    assert.equal(ok.body.data.binding.externalSystemId, 'sys_bridge')
+  })
+
+  // -------------------------------------------------------------------------
+  // R-21 — the GET's no-restart claim must not outlive the thing it promises.
+  // -------------------------------------------------------------------------
+  await run('R-21 takesEffectWithoutRestart is false, with a named reason, while the current source is unreadable', async () => {
+    // The env default names a system that was since DEACTIVATED. Nothing on this screen caused it,
+    // and "takes effect without a restart" over it would be a promise the next refresh breaks.
+    const broken = mount({
+      systems: [...DEFAULT_SYSTEMS, system({ id: 'sys_stale', status: 'inactive', config: {} })],
+      actions: [{
+        actionId: ACTION_ID,
+        source: { externalSystemId: 'sys_stale' },
+        target: { sheetId: 'sheet_stock_prep', objectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId },
+      }],
+    })
+    const res = await call(broken.routes, 'GET', GET_ROUTE, { user: ADMIN })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.effectiveSourceProblem, 'not_active', 'the problem is named, not left to be discovered')
+    assert.equal(res.body.data.takesEffectWithoutRestart, false, 'no promise while the current source cannot be read')
+    // The picker still works — this is a repairable state, and the repair is exactly this screen.
+    assert.ok(res.body.data.eligibleSources.length > 0, 'the admin can still pick a working source')
+
+    // A healthy deployment keeps the claim.
+    const healthy = mount()
+    const ok = await call(healthy.routes, 'GET', GET_ROUTE, { user: ADMIN })
+    assert.equal(ok.body.data.effectiveSourceProblem, null)
+    assert.equal(ok.body.data.takesEffectWithoutRestart, true)
   })
 
   const total = passed + failed

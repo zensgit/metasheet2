@@ -72,6 +72,11 @@ const INELIGIBLE_ROLES = Object.freeze(['target'])
 const SOURCE_BINDING_REFUSAL_REASONS = Object.freeze([
   'not_found',
   'kind_ineligible',
+  // The action is wired for ONE of the two BOM read kinds and a candidate of the OTHER one was
+  // offered. Distinct from `kind_ineligible` (which means "not a BOM source kind at all") because
+  // the two need different words: one says "that connector cannot be a 备料 source", the other says
+  // "that connector is fine, but not for THIS action as it is deployed".
+  'kind_mismatch',
   'role_ineligible',
   'not_active',
   'data_source_not_accessible',
@@ -107,16 +112,42 @@ function isEligibleSourceKind(kind) {
  * already deleted. `dataSourceAccessible` is the caller's already-resolved answer to "may THIS
  * principal use the core data source behind it" (#5401 owner-only, via the host's narrow
  * `dataSources.describe` seam); `undefined` means the question does not apply to this kind.
+ *
+ * `requiredKind` IS THE ACTION'S OWN FROZEN `source.kind`, AND IT IS LOAD-BEARING.
+ *
+ * The binding moves `externalSystemId` and deliberately nothing else, so `source.kind` stays at its
+ * deploy-time value for every request. The read path then re-checks it: `loadTableActionSourceAdapter`
+ * refuses unless `system.kind === action.source.kind` (TABLE_ACTION_SOURCE_INVALID). So a candidate of
+ * the OTHER BOM read kind is not merely sub-optimal — it is ACCEPTED-YET-UNREADABLE: the Save
+ * succeeds, the binding persists, and every subsequent read fails opaquely.
+ *
+ * That is a fail-CLOSED outcome (a wrong-kind source is never actually read), but it is exactly the
+ * onboarding footgun this whole feature exists to remove, so `requiredKind` is checked HERE — at the
+ * one place both the picker and the POST consult — rather than being left to surface later as a
+ * refusal an admin cannot connect to anything they did.
+ *
+ * Passing `requiredKind` is therefore how a caller says "for THIS action, as deployed". Omitting it
+ * keeps the old, wider question ("is this a bindable 备料 source at all") for callers that genuinely
+ * have no action context.
  */
-function sourceBindingRefusalReason(system, { dataSourceAccessible } = {}) {
+function sourceBindingRefusalReason(system, { dataSourceAccessible, requiredKind } = {}) {
   if (!isPlainObject(system)) return 'not_found'
   if (!isEligibleSourceKind(system.kind)) return 'kind_ineligible'
+  const wanted = optionalString(requiredKind)
+  if (wanted && optionalString(system.kind) !== wanted) return 'kind_mismatch'
   if (INELIGIBLE_ROLES.includes(optionalString(system.role))) return 'role_ineligible'
   if (optionalString(system.status) !== ELIGIBLE_STATUS) return 'not_active'
   // The #5401 join. A `data-source:*` system carries only a REFERENCE to a core data source, and the
   // right to use that source is the owner's, not the integration admin's — `assertAccess` has no
   // admin bypass on the data plane. `false` here is the host facade's uniform refusal (owner
   // mismatch and deleted row are indistinguishable on purpose, so this leaks no existence either).
+  //
+  // WHAT THIS CHECK IS AND IS NOT. It asks whether the ADMIN DOING THE BINDING may use the source,
+  // which keeps the picker honest for them and refuses a bind they could not themselves exercise. It
+  // is NOT a promise about every later reader: other tenant principals invoke the action under their
+  // own authority, and enforcing ownership at READ time is the adapter's job (the data-source facade
+  // authorizes each read with the requesting principal), not this function's. Removing this check
+  // would not open a read path; it would only let an admin bind something opaque to them.
   if (dataSourceAccessible === false) return 'data_source_not_accessible'
   return null
 }
@@ -147,6 +178,10 @@ function assertBindableSource(system, options = {}) {
     // connector by mistake.
     kind: optionalString(system.kind),
     eligibleKinds: ELIGIBLE_SOURCE_KINDS,
+    // On a mismatch, name the kind the ACTION is wired for. Without it the refusal says "wrong
+    // kind" and leaves the admin to guess which one is right — and the answer is not something they
+    // can see anywhere else on the screen, because it comes off deploy-time config.
+    ...(reason === 'kind_mismatch' ? { requiredKind: optionalString(options.requiredKind) } : {}),
   })
 }
 
@@ -155,7 +190,7 @@ function assertBindableSource(system, options = {}) {
  * beside it. `describeConnectorKind` is the 对接总览's own register, reused rather than re-tabled so
  * "只读数据库桥接" means the same thing on both screens and a new connector cannot acquire two names.
  */
-function projectEligibleSource(system, { dataSourceAccessible } = {}) {
+function projectEligibleSource(system, { dataSourceAccessible, requiredKind } = {}) {
   const kind = optionalString(system && system.kind)
   const kindInfo = describeConnectorKind(kind)
   return {
@@ -165,8 +200,8 @@ function projectEligibleSource(system, { dataSourceAccessible } = {}) {
     kindLabel: kindInfo && kindInfo.label ? kindInfo.label : null,
     status: optionalString(system && system.status),
     role: optionalString(system && system.role),
-    eligible: isBindableSource(system, { dataSourceAccessible }),
-    ineligibleReason: sourceBindingRefusalReason(system, { dataSourceAccessible }),
+    eligible: isBindableSource(system, { dataSourceAccessible, requiredKind }),
+    ineligibleReason: sourceBindingRefusalReason(system, { dataSourceAccessible, requiredKind }),
   }
 }
 
@@ -177,8 +212,15 @@ function projectEligibleSource(system, { dataSourceAccessible } = {}) {
  * the caller once per request. INELIGIBLE CANDIDATES ARE DROPPED, not rendered greyed-out: R-11 says
  * what is not permitted must not be visible, and a picker offering a row that would 422 on Save is
  * exactly the "visible but not actionable" failure.
+ *
+ * `requiredKind` narrows the list to the action's OWN kind, and it is the difference between an
+ * honest picker and a trap. Without it the list offers both BOM read kinds while only one of them can
+ * ever be read (see `sourceBindingRefusalReason`) — so an admin whose deploy default is
+ * `data-source:sql-readonly` could pick their `bridge:legacy-sql-readonly` PLM, be told it saved, and
+ * then have every refresh fail. THE RULE THIS ENCODES: never offer a choice whose Save leads to a
+ * broken read.
  */
-function listEligibleSources(systems, { dataSourceAccessibility } = {}) {
+function listEligibleSources(systems, { dataSourceAccessibility, requiredKind } = {}) {
   const accessible = (id) => {
     if (!dataSourceAccessibility) return undefined
     if (typeof dataSourceAccessibility.get === 'function') return dataSourceAccessibility.get(id)
@@ -186,7 +228,10 @@ function listEligibleSources(systems, { dataSourceAccessibility } = {}) {
   }
   return (Array.isArray(systems) ? systems : [])
     .filter(isPlainObject)
-    .map((system) => projectEligibleSource(system, { dataSourceAccessible: accessible(system.id) }))
+    .map((system) => projectEligibleSource(system, {
+      dataSourceAccessible: accessible(system.id),
+      requiredKind,
+    }))
     .filter((row) => row.eligible === true && row.externalSystemId !== null)
     .map(({ eligible: _eligible, ineligibleReason: _reason, ...row }) => row)
 }

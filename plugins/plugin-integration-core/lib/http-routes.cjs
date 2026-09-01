@@ -365,6 +365,7 @@ const {
   StockPreparationSourceBindingError,
   assertBindableSource,
   listEligibleSources,
+  sourceBindingRefusalReason,
 } = require('./stock-preparation-source-binding.cjs')
 // B-stage confirmation-decision LEDGER (O1' semantics: duplicate_expanded_key; full frozen action
 // vocabulary + Q2-A value entry). One managed supporting table; never a canonical-sheet write
@@ -6367,6 +6368,37 @@ function createHandlers(services, options = {}) {
         .getTableAction({ ...listScope, actionId: PLM_STOCK_PREPARATION_ACTION_ID })
         .then((action) => action.source, () => null)
 
+      // THE ACTION'S OWN KIND IS THE PICKER'S FILTER, and this is the fix for the
+      // accepted-yet-unreadable cross-kind bind. `source.kind` is frozen deploy-time config that the
+      // binding deliberately does not move, and `loadTableActionSourceAdapter` refuses any system
+      // whose kind differs. So a candidate of the other BOM read kind would save fine and then break
+      // every read. Narrowing the list here means such a candidate is never offered at all; the POST
+      // re-checks it anyway, because the picker is a convenience and the POST is the authority.
+      //
+      // No action resolvable -> no kind to require -> nothing is offered. That is honest: an
+      // unconfigured action has no target, template or read plan either, so binding a source to it
+      // could not make it work.
+      const requiredKind = effective ? effective.kind : null
+      const eligibleSources = requiredKind
+        ? listEligibleSources(systems, { dataSourceAccessibility, requiredKind })
+        : []
+
+      // Is what the action reads TODAY actually usable? A deployment can arrive here with a broken
+      // effective source in two ways this screen did not cause: an env default naming a system that
+      // was deleted or deactivated, or a cross-kind row persisted before this check existed. Saying
+      // "takes effect without a restart" over either would be a promise the next refresh breaks.
+      const effectiveSystem = effective
+        ? systems.find((system) => isPlainObject(system) && system.id === effective.externalSystemId) || null
+        : null
+      const effectiveSourceProblem = effective
+        ? sourceBindingRefusalReason(effectiveSystem, {
+            requiredKind,
+            dataSourceAccessible: dataSourceAccessibility
+              ? dataSourceAccessibility.get(effective.externalSystemId)
+              : undefined,
+          })
+        : 'not_found'
+
       return sendOk(res, {
         actionId: PLM_STOCK_PREPARATION_ACTION_ID,
         // WHAT THE ACTION WILL ACTUALLY READ on the next request, resolved through the very same
@@ -6377,10 +6409,15 @@ function createHandlers(services, options = {}) {
         effectiveSourceKind: effective ? effective.kind : null,
         origin: binding ? 'persisted' : (effective ? 'deploy_default' : 'unconfigured'),
         persistedBinding: binding,
-        // Fixed, not computed: the property this whole design exists to deliver, stated to the
-        // screen so the affordance cannot drift from the mechanism.
-        takesEffectWithoutRestart: true,
-        eligibleSources: listEligibleSources(systems, { dataSourceAccessibility }),
+        // `null` when the current source is readable; otherwise the closed reason token saying why it
+        // is not, so the screen can name the problem instead of leaving the admin to discover it on
+        // the next failed refresh.
+        effectiveSourceProblem,
+        // COMPUTED, not fixed. The mechanism never needs a restart, but this flag is what the UI
+        // renders as "saved and already live", so it must mean "a change made here will actually
+        // work" — which is false while the current source cannot be read.
+        takesEffectWithoutRestart: effectiveSourceProblem === null,
+        eligibleSources,
       })
     },
 
@@ -6412,12 +6449,38 @@ function createHandlers(services, options = {}) {
       const store = requireStockPreparationSourceBinding()
       const audit = requireStockPreparationAudit()
 
+      // THE ACTION'S FROZEN KIND — resolved BEFORE the candidate is judged, because it is part of
+      // what "eligible" means. The binding moves `externalSystemId` only, so `source.kind` stays at
+      // its deploy-time value and `loadTableActionSourceAdapter` will refuse any system that does not
+      // match it. Accepting a cross-kind bind here would persist a source that is unreadable by
+      // construction: Save succeeds, the screen says "live", and every refresh afterwards fails with
+      // an opaque TABLE_ACTION_SOURCE_INVALID the admin cannot connect to anything they did.
+      //
+      // An unresolvable action is REFUSED rather than bound blind: without a kind there is nothing to
+      // check against, and binding into that gap is precisely how the footgun above is loaded.
+      let requiredKind = null
+      try {
+        const action = await tableActions.getTableAction({ ...listScope, actionId: PLM_STOCK_PREPARATION_ACTION_ID })
+        requiredKind = action.source.kind
+      } catch (error) {
+        if (error instanceof StockPreparationTableActionError) {
+          throw new HttpRouteError(
+            409,
+            'SOURCE_BINDING_ACTION_UNRESOLVED',
+            'the stock-preparation table action is not configured on this deployment, so a source cannot be bound to it',
+            { actionId: PLM_STOCK_PREPARATION_ACTION_ID, reason: error.code },
+          )
+        }
+        throw error
+      }
+
       // Load through the caller's own tenant scope: an id in another tenant simply is not found, and
       // `assertBindableSource` reports that as a 404 identical to a typo's.
       const candidate = await externalSystems.getExternalSystem({ ...listScope, id: externalSystemId })
       const accessibility = await resolveDataSourceAccessibility(req, candidate ? [candidate] : [])
       assertBindableSource(candidate, {
         dataSourceAccessible: accessibility ? accessibility.get(externalSystemId) : undefined,
+        requiredKind,
       })
 
       const { binding, previousExternalSystemId, changed } = await store.set({
