@@ -325,6 +325,171 @@ export function stockPrepBlockerPlain(code: string): StockPrepPlainEntry | null 
 }
 
 // ---------------------------------------------------------------------------
+// 源就绪预检 — the SOURCE side
+//
+// A separate register from the deployment blockers above, because the reader's next action is a
+// different KIND of action. A deployment blocker is fixed on our machine, by us, usually by pressing
+// the install button. A source blocker is a fact about the customer's system: the next line has to
+// tell an implementer what to check over there, or who to ask, and must never pretend a button here
+// will fix it.
+//
+// The sentence that earns this whole feature is `topology_mismatch`. Before it existed, that
+// condition was invisible: the run "succeeded" and produced zero rows, and finding out why took a day
+// of reading someone else's schema. It now says the thing out loud, in the words a person uses.
+// ---------------------------------------------------------------------------
+
+export const STOCK_PREP_SOURCE_BLOCKER_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  source_unreachable: Object.freeze({
+    zh: '连不上对方的系统',
+    en: 'The customer system cannot be reached',
+    zhNext: '先确认网络、地址和账号能通 —— 这一步之前的所有判断都不作数。',
+    enNext: 'Check the network, the address and the account first — nothing below this line means anything until it answers.',
+  }),
+  entry_table_missing: Object.freeze({
+    zh: '找项目编号的那张表不在对方库里',
+    en: 'The table project numbers are looked up in is not in that database',
+    zhNext: '要么连错了库,要么这家的表名不一样。把下面「技术详情」里的表名拿给对方确认。',
+    enNext: 'Either this is the wrong database, or this customer names that table differently. Take the table name from the technical details below and confirm it with them.',
+  }),
+  no_project_numbers: Object.freeze({
+    zh: '表在,但里面一个项目编号都没有',
+    en: 'The table is there, but it holds no project numbers at all',
+    zhNext: '多半是连到了空的测试库。换成有数据的那套再试 —— 继续往下做只会白做。',
+    enNext: 'This is usually an empty test database. Point at the populated one and re-run; going further would waste the afternoon.',
+  }),
+  no_bom_rows: Object.freeze({
+    zh: 'BOM 表是空的',
+    en: 'The BOM tables are empty',
+    zhNext: '同上:确认连的是不是那套真正在用的库。',
+    enNext: 'Same as above: confirm this is the database they actually work in.',
+  }),
+  no_bom_bridge: Object.freeze({
+    zh: '没找到从项目到 BOM 的那条路',
+    en: 'No path from a project to its BOM was found',
+    zhNext: '两种已知走法(订单模块 / 设计BOM)都没有数据。需要对方告诉我们他们的 BOM 挂在哪张表上。',
+    enNext: 'Neither known route — the order module or the design BOM — carries any lines. We need them to tell us which table their BOM hangs off.',
+  }),
+  bridge_ambiguous: Object.freeze({
+    zh: '两条路都有数据,系统不替你猜',
+    en: 'Both routes carry data, and the system will not guess between them',
+    zhNext: '请对方确认业务上以哪一条为准,再按那条配置。',
+    enNext: 'Ask them which one the business treats as authoritative, then configure that one.',
+  }),
+  topology_mismatch: Object.freeze({
+    zh: '配置走的路,和这家实际的形状对不上 —— 照现在配置跑,会拉到 0 行',
+    en: 'The configured route does not match this source’s actual shape — as configured, the run will return 0 rows',
+    zhNext: '下面写了配置走哪条、实测是哪条。把读取配置改到实测那条上,再预检一次。',
+    enNext: 'Below it says which route is configured and which one was measured. Point the read configuration at the measured one and check again.',
+  }),
+})
+
+export function stockPrepSourceBlockerPlain(code: string): StockPrepPlainEntry | null {
+  return lookup(STOCK_PREP_SOURCE_BLOCKER_PLAIN, code)
+}
+
+/** Warnings: worth saying, never a reason to stop. */
+export const STOCK_PREP_SOURCE_WARNING_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  no_preset_match: Object.freeze({
+    zh: '这套库的表名不像我们已知的任何一家',
+    en: 'These table names do not look like any vendor we already know',
+    zhNext: '不影响继续 —— 只是没有现成的字段字典可以套,配置要多问几句。',
+    enNext: 'Not a blocker — it only means there is no ready-made field dictionary to lean on, so configuration takes a few more questions.',
+  }),
+  preset_ambiguous: Object.freeze({
+    zh: '这套库同时像好几家,系统不替你选',
+    en: 'This database resembles more than one known vendor, and the system will not choose',
+    zhNext: '按实际情况人工指定用哪一份字段字典。',
+    enNext: 'Name the field dictionary to use, by hand.',
+  }),
+  quantity_field_mismatch: Object.freeze({
+    zh: '数量列配错了位置',
+    en: 'The quantity column is configured in the wrong slot',
+    zhNext: '实测出来的那一列写在下面。照着改,否则数量会整列是空的。',
+    enNext: 'The measured column is named below. Change it to that, or the quantity column comes through empty.',
+  }),
+  quantity_field_unresolved: Object.freeze({
+    zh: '没能确定数量存在哪一列',
+    en: 'Could not determine which column holds the quantity',
+    zhNext: '需要对方指认。拉数据本身还能跑,但数量列大概率是空的。',
+    enNext: 'They need to point it out. The pull still runs, but the quantity column will most likely be empty.',
+  }),
+  quantity_readings_disagree: Object.freeze({
+    zh: '两种判法给出了不同的数量列',
+    en: 'The two readings disagree about which column holds the quantity',
+    zhNext: '一种是读对方自己的字段字典,一种是看哪一列全是数字。两者不一致时以对方确认为准。',
+    enNext: 'One reads their own field dictionary; the other looks for the column that is numeric throughout. When they disagree, their answer wins.',
+  }),
+  node_type_column_absent: Object.freeze({
+    zh: '这套库没有「节点类型」这一列',
+    en: 'This database has no node-type column',
+    zhNext: '不影响判断 —— 只是「有几个是项目节点」这句话这次算不出来。',
+    enNext: 'Harmless — it only means "how many of these are project nodes" could not be counted this time.',
+  }),
+  dictionary_unreadable: Object.freeze({
+    zh: '对方的字段字典表读不到',
+    en: 'Their field-dictionary table could not be read',
+    zhNext: '可能是没授权。系统改用「看哪一列全是数字」来判断,准确度略低。',
+    enNext: 'Possibly not granted. The system falls back to finding the column that is numeric throughout, which is slightly less certain.',
+  }),
+})
+
+export function stockPrepSourceWarningPlain(code: string): StockPrepPlainEntry | null {
+  return lookup(STOCK_PREP_SOURCE_WARNING_PLAIN, code)
+}
+
+/** The four lines the panel leads with, and the words for each verdict. */
+export const STOCK_PREP_SOURCE_CHECK_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  reachable: Object.freeze({
+    zh: '能连上、能读到表',
+    en: 'Reachable, and the tables answer',
+  }),
+  'has-data': Object.freeze({
+    zh: '里面有真实的项目和 BOM 数据',
+    en: 'It holds real project and BOM data',
+  }),
+  topology: Object.freeze({
+    zh: '实测的 schema 形状,和配置一致',
+    en: 'The measured schema shape matches the configuration',
+  }),
+  preset: Object.freeze({
+    zh: '认出了这是哪一家的 schema(按表名指纹,不是按公司名)',
+    en: 'Recognised whose schema this is — by table-name fingerprint, not by company name',
+  }),
+})
+
+export function stockPrepSourceCheckPlain(id: string): StockPrepPlainEntry | null {
+  return lookup(STOCK_PREP_SOURCE_CHECK_PLAIN, id)
+}
+
+/** The bridges, in words. An implementer should not have to know what "order-module" means. */
+export const STOCK_PREP_SOURCE_BRIDGE_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  'order-module': Object.freeze({ zh: '走订单模块', en: 'through the order module' }),
+  'design-bom': Object.freeze({ zh: '走设计BOM表', en: 'through the design-BOM table' }),
+  ambiguous: Object.freeze({ zh: '两条都有数据,未定', en: 'both routes carry data — undecided' }),
+  none: Object.freeze({ zh: '两条都没有数据', en: 'neither route carries data' }),
+  unknown: Object.freeze({ zh: '未知', en: 'unknown' }),
+})
+
+export function stockPrepSourceBridgePlain(bridge: string): StockPrepPlainText | null {
+  return lookup(STOCK_PREP_SOURCE_BRIDGE_PLAIN, bridge)
+}
+
+export const STOCK_PREP_SOURCE_VERDICT_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  go: Object.freeze({
+    zh: '这个源可以接。',
+    en: 'This source is ready to connect.',
+  }),
+  'no-go': Object.freeze({
+    zh: '这个源现在还接不了。下面逐条写了卡在哪、该找谁。',
+    en: 'This source is not ready yet. Each line below says what is in the way and who can clear it.',
+  }),
+})
+
+export function stockPrepSourceVerdictPlain(verdict: string): StockPrepPlainText | null {
+  return lookup(STOCK_PREP_SOURCE_VERDICT_PLAIN, verdict)
+}
+
+// ---------------------------------------------------------------------------
 // Error codes reaching an operator surface
 // ---------------------------------------------------------------------------
 
