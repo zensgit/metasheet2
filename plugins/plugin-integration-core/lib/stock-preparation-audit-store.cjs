@@ -33,6 +33,11 @@ const STOCK_PREP_AUDIT_ACTIONS = Object.freeze([
   'exception_resolve',
   'exception_bulk_resolve',
   'persist_repair_once',
+  // 工作台里选源 (migration 080): an admin repointed the stock-preparation pull action at a different
+  // source external system. The only action here that records a decision about WHERE data comes
+  // from rather than about the data itself — and the one that was previously unauditable by
+  // construction, because the source lived in a server env file.
+  'source_binding_set',
 ])
 const ACTION_SET = new Set(STOCK_PREP_AUDIT_ACTIONS)
 

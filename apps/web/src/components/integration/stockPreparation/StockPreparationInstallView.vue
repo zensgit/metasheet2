@@ -19,6 +19,21 @@
     </p>
 
     <!-- ===================================================================
+         数据来源 — WHICH database 备料 reads, chosen here instead of in a
+         server env file.
+
+         It leads the page deliberately. Everything below is "confirm the
+         defaults we ship"; this is the ONE decision that is genuinely the
+         customer's, it is the thing an implementer previously needed a shell
+         and a `pm2 restart` to change, and every table and column the rest of
+         this page creates is worthless pointed at the wrong database. It
+         renders its own gate (platform admin to change, read-only for a
+         `stock-prep:admin` holder) and its own reads, so it neither depends on
+         nor blocks the manifest/preflight panels beneath it.
+         =================================================================== -->
+    <StockPreparationSourceBindingPanel :scope="scope" />
+
+    <!-- ===================================================================
          §14 DEFAULTS FOR CONFIRMATION — rendered FROM the served manifest.
          Nothing below is typed here: an id this page restated would be an id
          a deployment could disagree with, which is the incident the manifest
@@ -490,6 +505,7 @@ import { useLocale } from '../../../composables/useLocale'
 import { useAuth } from '../../../composables/useAuth'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
+import StockPreparationSourceBindingPanel from './StockPreparationSourceBindingPanel.vue'
 import {
   buildStockPreparationInstallDefaults,
   readStockPreparationAppManifest,
