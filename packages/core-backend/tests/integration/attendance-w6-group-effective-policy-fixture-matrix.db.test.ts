@@ -14,7 +14,12 @@ import { Pool } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import { createAttendanceGroupEffectivePolicyAggregateService } from '../../src/attendance/w6-group-effective-policy-aggregate'
-import { dropScratchDatabase, formatScratchDropOutcome } from '../helpers/scratch-database'
+import {
+  attachOwnedPoolTerminationHandler,
+  dropScratchDatabase,
+  formatScratchDropFailure,
+  formatScratchDropOutcome,
+} from '../helpers/scratch-database'
 
 const serverUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = serverUrl ? describe : describe.skip
@@ -70,6 +75,23 @@ type FixtureData = {
 
 function readFixture(name: FixtureName): { data: FixtureData } {
   return JSON.parse(readFileSync(join(FIXTURE_DIR, `${name}.json`), 'utf8')) as { data: FixtureData }
+}
+
+async function closePoolWithinDeadline(pool: Pool, timeoutMs = 5_000): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      pool.end(),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error('attendance W6 scratch pool close timed out')),
+          timeoutMs,
+        )
+      }),
+    ])
+  } finally {
+    if (timeout) clearTimeout(timeout)
+  }
 }
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
@@ -315,15 +337,37 @@ describeIfDatabase('W6-1 aggregate fixture matrix (seeded real PostgreSQL)', () 
   })
 
   afterAll(async () => {
+    const ownedPool = pool
+    const termination = ownedPool ? attachOwnedPoolTerminationHandler(ownedPool) : null
+    let closeError: unknown
+    let dropError: unknown
     try {
-      await pool?.end()
+      if (ownedPool) {
+        try {
+          await closePoolWithinDeadline(ownedPool)
+        } catch (error) {
+          closeError = error
+        }
+      }
       pool = undefined
-      const outcome = await dropScratchDatabase(adminPool, databaseName)
-      console.info(formatScratchDropOutcome('attendance-w6-fixture-matrix', outcome))
+      try {
+        const outcome = await dropScratchDatabase(adminPool, databaseName)
+        console.info(formatScratchDropOutcome('attendance-w6-fixture-matrix', outcome))
+      } catch (error) {
+        dropError = error
+        console.error(formatScratchDropFailure('attendance-w6-fixture-matrix', error))
+      }
     } finally {
-      await adminPool.end()
+      termination?.detach()
+      try {
+        await adminPool.end()
+      } catch (error) {
+        closeError ??= error
+      }
     }
-  })
+    if (closeError) throw closeError
+    if (dropError) throw dropError
+  }, 60_000)
 
   for (const name of FIXTURE_NAMES) {
     it(`reproduces ${name}.json from seeded rows`, async () => {
