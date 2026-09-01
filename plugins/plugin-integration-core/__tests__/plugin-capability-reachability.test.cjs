@@ -155,6 +155,17 @@ const CAPABILITY_ENTRY_POINTS = Object.freeze([
     exportName: 'loadPackInstalledFieldProperties',
     why: 'turns the install ledger into the planner`s pack-aware bands; unreferenced, every refresh silently stays on the legacy bands',
   },
+  {
+    module: 'lib/stock-preparation-source-preflight.cjs',
+    exportName: 'runStockPreparationSourcePreflight',
+    why: 'the whole source preflight: measures the customer source`s reachability, data and TOPOLOGY. With no caller, a deployment configured for the wrong bridge goes on expanding zero rows and calling it success — the failure the module was written for',
+  },
+  // NOT declared here, deliberately: `assertSourcePreflightValuesFree`. This guard asks whether some
+  // OTHER production file names a capability, and that self-check has exactly one production caller —
+  // the preflight itself, in the same module, on every run before it returns. Declaring it would make
+  // this guard red for a symbol that is anything but dead; its liveness is asserted where it can
+  // actually be asserted (stock-preparation-source-preflight.test.cjs, S-12: the check refuses a
+  // planted secret, an unclassified leaf and a code-field violation).
 ])
 
 /**

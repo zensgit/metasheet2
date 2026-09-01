@@ -367,6 +367,288 @@
     </section>
 
     <!-- ===================================================================
+         源就绪预检 + 拓扑自测 — the OTHER half of 体检.
+         The section above asks what THIS deployment is missing. This one asks
+         what the CUSTOMER'S source is, and measures the answer: reachable /
+         has real data / which schema shape / whose schema. Read-only.
+         It exists because two live failures were invisible without it — a plan
+         configured for one topology against a source shaped like another (the
+         run "succeeded" with zero rows), and an empty test database discovered
+         many steps too late.
+         =================================================================== -->
+    <section class="stock-prep-install__card" data-testid="stock-prep-source-preflight">
+      <h3 class="stock-prep-install__h3">{{ bi('源就绪预检:这家的库能不能接', 'Source readiness: can we connect to this customer’s database') }}</h3>
+      <p class="stock-prep-install__hint">
+        {{ bi(
+          '这一步只读不写:去对方库里各读一小页,数一数、看一看形状,然后告诉你行不行。不会改对方任何东西。',
+          'Read-only: it reads one small page from each table, counts what is there, looks at the shape, and tells you whether this will work. It changes nothing on their side.',
+        ) }}
+      </p>
+
+      <button
+        v-if="canCheckSource"
+        type="button"
+        data-testid="stock-prep-source-preflight-run"
+        :disabled="busy"
+        @click="loadSourcePreflight()"
+      >
+        {{ bi('检查这个源', 'Check this source') }}
+      </button>
+      <p v-else class="stock-prep-install__hint" data-testid="stock-prep-source-preflight-denied">
+        {{ bi(
+          '这一步要读对方的库,所以只有对接权限的人能点。装配置的人看得到结果,点不了按钮。',
+          'This reads the customer’s database, so only an integration role may run it. Everyone here can read the result; not everyone can press the button.',
+        ) }}
+      </p>
+
+      <p
+        v-if="sourcePreflightErrorStatus !== null"
+        class="stock-prep-install__hint"
+        data-testid="stock-prep-source-preflight-error"
+      >
+        {{ bi(readFailed.zh, readFailed.en) }}
+        <code class="stock-prep-install__token">{{ sourcePreflightErrorStatus }}</code>
+      </p>
+
+      <template v-if="sourcePreflight">
+        <p class="stock-prep-install__ready" data-testid="stock-prep-source-preflight-verdict">
+          <strong>{{ sourceVerdictText }}</strong>
+        </p>
+
+        <!-- The four lines, each a SERVER measurement rendered — never a judgement made here. -->
+        <ul class="stock-prep-install__list stock-prep-install__list--plain">
+          <li
+            v-for="row in sourceCheckRows"
+            :key="row.id"
+            data-testid="stock-prep-source-preflight-check"
+            :data-check="row.id"
+            :data-ok="row.ok ? 'yes' : 'no'"
+          >
+            <span
+              class="stock-prep-install__status"
+              :class="row.ok ? 'stock-prep-install__status--ok' : 'stock-prep-install__status--fail'"
+            >{{ row.ok ? bi('是', 'yes') : bi('否', 'no') }}</span>
+            <span v-if="sourceCheckPlain(row.id)">{{ bi(sourceCheckPlain(row.id)!.zh, sourceCheckPlain(row.id)!.en) }}</span>
+            <span v-else><code>{{ row.id }}</code></span>
+            <code class="stock-prep-install__token">{{ row.token }}</code>
+          </li>
+        </ul>
+
+        <!-- The measured shape, in words. This sentence is the whole feature: an implementer used to
+             have to read someone else's schema for an afternoon to learn it.
+             The lead-in changes with PROVENANCE — 实测 vs 按指定 — so a declared bridge is never read
+             back as a measured one. -->
+        <p class="stock-prep-install__hint" data-testid="stock-prep-source-preflight-shape">
+          {{ sourcePreflight.checks.topology.bridgeSource === 'declared'
+            ? bi('按你指定:这家的 BOM ', 'As you declared: this customer’s BOM hangs ')
+            : bi('实测:这家的 BOM ', 'Measured: this customer’s BOM hangs ') }}
+          <strong>{{ sourceBridgeText(sourcePreflight.checks.topology.detectedBridge) }}</strong>
+          {{ bi(';当前配置按 ', '; the current configuration assumes it hangs ') }}
+          <strong>{{ sourceBridgeText(sourcePreflight.checks.topology.configuredBridge) }}</strong>
+          {{ bi(' 走。', '.') }}
+          <template v-if="sourcePreflight.checks.quantityField.resolvedSlot">
+            {{ bi('数量实测在 ', 'The quantity was measured in ') }}
+            <code class="stock-prep-install__token">{{ sourcePreflight.checks.quantityField.resolvedSlot }}</code>
+            {{ bi('。', '.') }}
+          </template>
+          <template v-else-if="sourcePreflight.checks.quantityField.measuredAmbiguous">
+            {{ bi('数量有多列都像,没敢挑:', 'Several columns look like the quantity, so none was picked: ') }}
+            <code
+              v-for="slot in sourcePreflight.checks.quantityField.qualifyingSlots"
+              :key="slot"
+              class="stock-prep-install__token"
+              data-testid="stock-prep-source-preflight-quantity-candidate"
+            >{{ slot }}</code>
+          </template>
+        </p>
+
+        <!-- THE WAY OUT of a cap standoff. Rendered ONLY for that state: this is not a general
+             override, and offering it next to a decisive measurement would invite someone to wave
+             that measurement away. -->
+        <div
+          v-if="sourceUndecidableAtCap"
+          class="stock-prep-install__hint"
+          data-testid="stock-prep-source-preflight-declare"
+        >
+          <p>
+            {{ bi(
+              '两条路都超过了抽样上限,抽样分不出主次。如果对方已经确认过以哪条为准,在这里指定,本页会照那条继续检查:',
+              'Both routes exceed the sample limit, so the sample cannot rank them. If they have already confirmed which one is authoritative, declare it here and the check continues against that one:',
+            ) }}
+          </p>
+          <button
+            v-for="option in declarableBridges"
+            :key="option"
+            type="button"
+            data-testid="stock-prep-source-preflight-declare-option"
+            :data-bridge="option"
+            :disabled="busy"
+            @click="loadSourcePreflight(option)"
+          >
+            {{ bi('按「', 'Declare “') }}{{ sourceBridgeText(option) }}{{ bi('」继续', '”') }}
+          </button>
+        </div>
+
+        <ul class="stock-prep-install__list stock-prep-install__list--plain">
+          <li
+            v-for="blocker in sourcePreflight.blockers"
+            :key="blocker.code"
+            data-testid="stock-prep-source-preflight-blocker"
+          >
+            <strong v-if="sourceBlockerPlain(blocker.code)">
+              {{ bi(sourceBlockerPlain(blocker.code)!.zh, sourceBlockerPlain(blocker.code)!.en) }}
+            </strong>
+            <strong v-else><code>{{ blocker.code }}</code></strong>
+            <small
+              v-if="sourceBlockerPlain(blocker.code)"
+              class="stock-prep-install__hint"
+              data-testid="stock-prep-source-preflight-blocker-next"
+            >{{ bi(sourceBlockerPlain(blocker.code)!.zhNext || '', sourceBlockerPlain(blocker.code)!.enNext || '') }}</small>
+            <code class="stock-prep-install__token">{{ blocker.code }}</code>
+          </li>
+          <li
+            v-for="warning in sourcePreflight.warnings"
+            :key="warning.code"
+            data-testid="stock-prep-source-preflight-warning"
+          >
+            <span v-if="sourceWarningPlain(warning.code)">
+              {{ bi(sourceWarningPlain(warning.code)!.zh, sourceWarningPlain(warning.code)!.en) }}
+            </span>
+            <span v-else><code>{{ warning.code }}</code></span>
+            <small
+              v-if="sourceWarningPlain(warning.code)"
+              class="stock-prep-install__hint"
+            >{{ bi(sourceWarningPlain(warning.code)!.zhNext || '', sourceWarningPlain(warning.code)!.enNext || '') }}</small>
+            <code class="stock-prep-install__token">{{ warning.code }}</code>
+          </li>
+        </ul>
+
+        <StockPrepTechnicalDetails testid="stock-prep-source-preflight-tech">
+          <dl>
+            <dt>{{ bi('预检路由', 'Preflight route') }}</dt>
+            <dd><code>{{ sourcePreflightRoute }}</code></dd>
+            <dt>{{ bi('被检查的数据源 / 读取配置', 'Data source checked / read plan') }}</dt>
+            <dd>
+              <code>{{ sourcePreflight.externalSystemId }}</code> ·
+              <code>{{ sourcePreflight.readPlanId }}</code>
+            </dd>
+            <dt>{{ bi('每张表读了几行(上限)', 'Rows read per table (the cap)') }}</dt>
+            <dd><code>{{ sourcePreflight.rowCap }}</code></dd>
+            <!-- WHICH SIGNAL FAVOURS WHICH STORE. The refusal above is only useful if the reader can
+                 see the disagreement that produced it. -->
+            <dt>{{ bi('BOM 放在哪张表:每条线索指向', 'Which table holds the BOM: what each signal points at') }}</dt>
+            <dd>
+              <ul>
+                <li
+                  v-for="reading in sourcePreflight.checks.bomStore.signals"
+                  :key="reading.signal"
+                  data-testid="stock-prep-source-preflight-store-signal"
+                  :data-signal="reading.signal"
+                  :data-favours="reading.favours || 'none'"
+                >
+                  <code>{{ reading.signal }}</code>
+                  <template v-if="sourcePreflight.checks.bomStore.strongSignals.includes(reading.signal)">
+                    {{ bi('(强)', ' (strong)') }}
+                  </template>
+                  {{ bi(' → ', ' → ') }}
+                  <code>{{ reading.favours || bi('无判断', 'no opinion') }}</code>
+                </li>
+              </ul>
+              <small v-if="sourcePreflight.checks.bomStore.volumeUndecidableAtCap">
+                {{ bi(
+                  '两张表都超过了抽样上限,所以「行数」这条线索这次给不出方向 —— 也就无法排除「没被选中的那张其实大得多」。',
+                  'Both tables exceed the sample limit, so the row-count signal has no direction here — and cannot rule out that the table not chosen is far the bigger one.',
+                ) }}
+              </small>
+            </dd>
+            <dt>{{ bi('两张候选表的形态与行数', 'Shape and row count of each candidate store') }}</dt>
+            <dd>
+              <ul>
+                <li
+                  v-for="candidate in sourcePreflight.checks.bomStore.candidates"
+                  :key="candidate.store"
+                  data-testid="stock-prep-source-preflight-store-candidate"
+                  :data-store="candidate.store"
+                >
+                  <code>{{ candidate.store }}</code> ·
+                  <code>{{ candidate.object || '—' }}</code> =
+                  <code>{{ candidate.lines }}{{ candidate.exact ? '' : '+' }}</code> ·
+                  <code>{{ candidate.shape }}</code>
+                  <template v-if="candidate.jsonSlotColumn">
+                    · {{ bi('字段藏在 ', 'fields inside ') }}<code>{{ candidate.jsonSlotColumn }}</code>
+                    <code
+                      v-for="key in candidate.jsonFamilySlotKeys"
+                      :key="key"
+                      class="stock-prep-install__token"
+                    >{{ key }}</code>
+                  </template>
+                </li>
+              </ul>
+            </dd>
+            <dt>{{ bi('两条候选路的实测行数', 'Measured line counts on each candidate route') }}</dt>
+            <dd>
+              <ul>
+                <li
+                  v-for="candidate in sourcePreflight.checks.topology.candidates"
+                  :key="candidate.bridge"
+                  data-testid="stock-prep-source-preflight-candidate"
+                >
+                  <code>{{ candidate.bridge }}</code> ·
+                  <code>{{ candidate.lineObject || '—' }}</code> =
+                  <code>{{ candidate.lineRows }}{{ candidate.lineExact ? '' : '+' }}</code>
+                  <!-- When a role addressed more than one object, say which ones answered: the
+                       verdict rests on the largest, and that choice must be visible. -->
+                  <template v-if="candidate.contributingObjects && candidate.contributingObjects.length > 1">
+                    <br>
+                    <small data-testid="stock-prep-source-preflight-contributors">
+                      {{ bi('同名候选都在,取行数最多的那张:', 'Several objects answered here; the largest is used: ') }}
+                      <code
+                        v-for="contributor in candidate.contributingObjects"
+                        :key="contributor.object || ''"
+                      >{{ contributor.object }}={{ contributor.rowsObserved }}{{ contributor.exact ? '' : '+' }} </code>
+                    </small>
+                  </template>
+                </li>
+              </ul>
+            </dd>
+            <dt>{{ bi('数量列的两种读法', 'The two readings of the quantity column') }}</dt>
+            <dd>
+              {{ bi('对方字段字典:', 'Their field dictionary: ') }}
+              <code>{{ sourcePreflight.checks.quantityField.dictionarySlot || '—' }}</code> ·
+              {{ bi('数字密度实测:', 'measured numeric density: ') }}
+              <code>{{ sourcePreflight.checks.quantityField.measuredSlot || '—' }}</code> ·
+              {{ bi('当前配置:', 'configured: ') }}
+              <code>{{ sourcePreflight.checks.quantityField.configuredField }}</code>
+            </dd>
+            <dt v-if="sourcePreflight.checks.projectData.livenessSamples.length > 0">
+              {{ bi('取到的项目编号(最多两个,仅证明确实有数据)', 'Project numbers seen (at most two — only to prove the data is real)') }}
+            </dt>
+            <dd v-if="sourcePreflight.checks.projectData.livenessSamples.length > 0">
+              <code
+                v-for="sample in sourcePreflight.checks.projectData.livenessSamples"
+                :key="sample"
+                class="stock-prep-install__token"
+              >{{ sample }}</code>
+            </dd>
+            <dt>{{ bi('逐表读数', 'Per-table readings') }}</dt>
+            <dd>
+              <ul>
+                <li
+                  v-for="probe in sourcePreflight.probes"
+                  :key="`${probe.role}:${probe.object}`"
+                  data-testid="stock-prep-source-preflight-probe"
+                >
+                  <code>{{ probe.object }}</code> ·
+                  <code>{{ probe.present ? `${probe.rowsObserved}${probe.exact ? '' : '+'}` : (probe.errorCode || 'absent') }}</code>
+                </li>
+              </ul>
+            </dd>
+          </dl>
+        </StockPrepTechnicalDetails>
+      </template>
+    </section>
+
+    <!-- ===================================================================
          INSTALL RUN — 补. Existing routes, existing gates, bootstrap order.
          The panel now answers 「装好了吗?」 in one line before it shows a
          single step, and every step's outcome is a word (成功 / 跳过 / 失败)
@@ -528,6 +810,20 @@ import {
   type StockPreparationInstallStepStatus,
 } from '../../../services/integration/stockPreparation/installRun'
 import { canRunStockPrepInstall } from '../../../services/integration/stockPreparation/workbenchAccess'
+// 源就绪预检 — the source half of 体检. Its permission predicate lives in ITS OWN service and not in
+// workbenchAccess.ts on purpose: the tier it needs is the integration read tier, deliberately outside
+// the R-11 stock-prep namespace (a source read against the customer's system is not a queue-operator
+// act), and putting a non-namespace code into that manifest would misrepresent the ladder it pins.
+import {
+  STOCK_PREPARATION_SOURCE_PREFLIGHT_ROUTE,
+  STOCK_PREP_DECLARABLE_BRIDGES,
+  StockPrepSourcePreflightError,
+  canRunStockPrepSourcePreflight,
+  readStockPreparationSourcePreflight,
+  stockPrepSourceCheckRows,
+  type StockPrepDeclarableBridge,
+  type StockPrepSourcePreflight,
+} from '../../../services/integration/stockPreparation/sourcePreflight'
 import {
   STOCK_PREP_DEPLOYMENT_DATA_TAG,
   STOCK_PREP_INSTALLER_MAY_MODIFY_WARNING,
@@ -540,6 +836,11 @@ import {
   stockPrepObjectPlain,
   stockPrepPermissionPlain,
   stockPrepPosturePlain,
+  stockPrepSourceBlockerPlain,
+  stockPrepSourceBridgePlain,
+  stockPrepSourceCheckPlain,
+  stockPrepSourceVerdictPlain,
+  stockPrepSourceWarningPlain,
   stockPrepStepOutcomeText,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 
@@ -577,6 +878,61 @@ const installerMayModifyWarning = STOCK_PREP_INSTALLER_MAY_MODIFY_WARNING
 const readFailed = STOCK_PREP_READ_FAILED
 const manifestRoute = STOCK_PREPARATION_MANIFEST_ROUTE
 const preflightRoute = STOCK_PREPARATION_PREFLIGHT_ROUTE
+
+// ---------------------------------------------------------------------------
+// 源就绪预检 — its own state, its own error slot, its own permission.
+//
+// Deliberately NOT folded into the shared `busy` / `errorStatus` pair beyond the busy flag: a source
+// check that fails must not blank the deployment preflight an operator is reading, and vice versa.
+// The two answer different questions about different machines.
+// ---------------------------------------------------------------------------
+const sourcePreflight = ref<StockPrepSourcePreflight | null>(null)
+const sourcePreflightErrorStatus = ref<number | null>(null)
+const sourcePreflightRoute = STOCK_PREPARATION_SOURCE_PREFLIGHT_ROUTE
+const canCheckSource = computed(() => canRunStockPrepSourcePreflight((permission) => auth.hasPermission(permission)))
+const sourceBlockerPlain = stockPrepSourceBlockerPlain
+const sourceWarningPlain = stockPrepSourceWarningPlain
+const sourceCheckPlain = stockPrepSourceCheckPlain
+
+const sourceCheckRows = computed(() => (sourcePreflight.value ? stockPrepSourceCheckRows(sourcePreflight.value) : []))
+const declarableBridges = STOCK_PREP_DECLARABLE_BRIDGES
+// The declare control appears for the cap standoff ONLY — never beside a decisive measurement, which
+// no declaration may overrule anyway (the server refuses that outright).
+const sourceUndecidableAtCap = computed(() => Boolean(
+  sourcePreflight.value
+  && sourcePreflight.value.checks.topology.undecidableAtCap
+  && sourcePreflight.value.checks.topology.bridgeSource === 'measured',
+))
+
+const sourceVerdictText = computed(() => {
+  if (!sourcePreflight.value) return ''
+  const plain = stockPrepSourceVerdictPlain(sourcePreflight.value.verdict)
+  // Fail soft, exactly like every other lookup on this page: an unrecognised verdict renders the
+  // token rather than a blank line.
+  return plain ? bi(plain.zh, plain.en) : sourcePreflight.value.verdict
+})
+
+function sourceBridgeText(bridge: string): string {
+  const plain = stockPrepSourceBridgePlain(bridge)
+  return plain ? bi(plain.zh, plain.en) : bridge
+}
+
+async function loadSourcePreflight(declaredBridge?: StockPrepDeclarableBridge): Promise<void> {
+  busy.value = true
+  sourcePreflightErrorStatus.value = null
+  try {
+    // The declaration rides as an argument, never as component state: each run says explicitly
+    // whether a bridge was declared for THAT run, so a stale declaration cannot silently colour a
+    // later check of a different source.
+    sourcePreflight.value = await readStockPreparationSourcePreflight(props.scope, undefined, declaredBridge)
+  } catch (error) {
+    // Only a status reaches state. A server message could carry a value, and this page's whole
+    // contract with the customer's data is that none of it lands here.
+    sourcePreflightErrorStatus.value = error instanceof StockPrepSourcePreflightError ? error.status : 0
+  } finally {
+    busy.value = false
+  }
+}
 
 /** Only an HTTP status reaches state — a server message could carry a value. */
 function recordError(error: unknown): void {
@@ -784,7 +1140,7 @@ function reasonText(row: { descriptor: StockPreparationInstallStepDescriptor; re
   return bi(zh, en)
 }
 
-defineExpose({ loadDefaults, loadPreflight, startInstall })
+defineExpose({ loadDefaults, loadPreflight, loadSourcePreflight, startInstall })
 </script>
 
 <style scoped>
