@@ -1089,3 +1089,392 @@ describe('6. the scoped reconcile — a revision that moves a column between dep
     expect(result.removed).toEqual([])
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// 7. ADVERSARIAL REGRESSIONS (#5455 verification round)
+//
+// Every witness below reds on the code as it stood when the adversarial pass ran. They are grouped
+// by ROOT CAUSE, not by symptom, because several attack lanes found the same defect from different
+// directions and one fix has to answer all of them at once.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A table pool whose DELETE is decoded POSITIONALLY from the statement text, exactly the way
+ * Postgres decodes it — `$1` means "the first bound parameter", wherever it appears, and the
+ * `unnest(...) AS desired(a, b)` alias order decides which array is compared against which column.
+ *
+ * The previous model destructured `params` by hand and re-implemented the semantics, so it was
+ * structurally blind to a statement that renamed an alias, swapped a placeholder or dropped a whole
+ * axis. This one parses those decisions out of the SQL, which is what makes the executable model an
+ * actual tie to the statement rather than a parallel description of it.
+ */
+function createDecodingTablePool(seed: TableRow[] = []): {
+  pool: StockPreparationFieldPermissionsPool
+  rows: TableRow[]
+  deletes: Captured[]
+} {
+  const rows: TableRow[] = seed.map((row) => ({ ...row }))
+  const deletes: Captured[] = []
+
+  const query = async (sql: string, params: unknown[] = []) => {
+    if (sql.includes('FROM meta_sheets')) return { rows: [{ id: String(params[0]) }] }
+    if (sql.includes('FROM meta_fields')) {
+      return { rows: ((params[1] as string[]) ?? []).map((id) => ({ id })) }
+    }
+    if (sql.includes('FROM roles')) {
+      return { rows: ((params[0] as string[]) ?? []).map((id) => ({ id })) }
+    }
+    if (sql.includes('INSERT INTO field_permissions')) {
+      const [sheetId, fieldId, subjectId, createdBy] = params as string[]
+      const existing = rows.find((row) => row.sheet_id === sheetId
+        && row.field_id === fieldId && row.subject_type === 'role' && row.subject_id === subjectId)
+      if (existing) {
+        existing.visible = true
+        existing.read_only = true
+        // THE CONFLICT ARM, decoded from the statement rather than assumed: provenance is only
+        // re-stamped when the DO UPDATE actually says so for this row's current owner.
+        existing.created_by = resolveUpsertCreatedBy(sql, existing.created_by, createdBy)
+      } else {
+        rows.push({
+          sheet_id: sheetId,
+          field_id: fieldId,
+          subject_type: 'role',
+          subject_id: subjectId,
+          visible: true,
+          read_only: true,
+          created_by: createdBy,
+        })
+      }
+      return { rows: [], rowCount: 1 }
+    }
+    if (sql.includes('DELETE FROM field_permissions')) {
+      deletes.push({ sql, params })
+      const bind = (token: string): unknown => params[Number(token.slice(1)) - 1]
+      const at = (pattern: RegExp): string | null => {
+        const m = sql.match(pattern)
+        return m ? m[1] : null
+      }
+      // Each axis is read out of the statement TEXT. A clause that is not there decodes to null and
+      // the corresponding filter is simply not applied — which is precisely how the real database
+      // would behave, and therefore how a dropped axis becomes visible to these assertions.
+      const sheetToken = at(/sheet_id\s*=\s*(\$\d+)/)
+      const createdByToken = at(/created_by\s*=\s*ANY\((\$\d+)::text\[\]\)/)
+        ?? at(/created_by\s*=\s*(\$\d+)/)
+      const readOnlyPinned = /read_only\s*=\s*true/.test(sql)
+      const subjectTypePinned = /subject_type\s*=\s*'role'/.test(sql)
+      const fieldToken = at(/field_id\s*=\s*ANY\((\$\d+)::text\[\]\)/)
+      const subjectToken = at(/subject_id\s*=\s*ANY\((\$\d+)::text\[\]\)/)
+      const unnest = sql.match(/unnest\((\$\d+)::text\[\],\s*(\$\d+)::text\[\]\)\s*AS\s+desired\((\w+),\s*(\w+)\)/)
+      const hasNotExists = /NOT\s+EXISTS\s*\(/.test(sql)
+      const returning = (sql.match(/RETURNING\s+([\w,\s]+)/) ?? [, ''])[1]
+        .split(',').map((token) => token.trim()).filter(Boolean)
+
+      // The desired set, keyed the way the statement's own alias names key it.
+      const desired = new Set<string>()
+      if (unnest && hasNotExists) {
+        const [, tokenA, tokenB, nameA, nameB] = unnest
+        const byName: Record<string, string[]> = {
+          [nameA]: (bind(tokenA) as string[]) ?? [],
+          [nameB]: (bind(tokenB) as string[]) ?? [],
+        }
+        const fields = byName.field_id ?? []
+        const subjects = byName.subject_id ?? []
+        for (let i = 0; i < Math.max(fields.length, subjects.length); i += 1) {
+          desired.add(`${fields[i]} ${subjects[i]}`)
+        }
+      }
+
+      const createdByBound = createdByToken ? bind(createdByToken) : null
+      const markers = Array.isArray(createdByBound)
+        ? (createdByBound as string[])
+        : (createdByBound === null ? null : [String(createdByBound)])
+      const regionFields = fieldToken ? (bind(fieldToken) as string[]) : null
+      const regionRoles = subjectToken ? (bind(subjectToken) as string[]) : null
+      const sheetBound = sheetToken ? String(bind(sheetToken)) : null
+
+      const removed: TableRow[] = []
+      for (let i = rows.length - 1; i >= 0; i -= 1) {
+        const row = rows[i]
+        if (sheetBound !== null && row.sheet_id !== sheetBound) continue
+        if (subjectTypePinned && row.subject_type !== 'role') continue
+        if (markers !== null && !markers.includes(row.created_by)) continue
+        if (readOnlyPinned && row.read_only !== true) continue
+        if (regionFields !== null && !regionFields.includes(row.field_id)) continue
+        if (regionRoles !== null && !regionRoles.includes(row.subject_id)) continue
+        if (hasNotExists && desired.has(`${row.field_id} ${row.subject_id}`)) continue
+        removed.push(row)
+        rows.splice(i, 1)
+      }
+      // Only the columns the statement actually RETURNS come back.
+      return {
+        rows: removed.map((row) => {
+          const projected: Record<string, unknown> = {}
+          const source = row as unknown as Record<string, unknown>
+          for (const column of returning) projected[column] = source[column]
+          return projected
+        }),
+      }
+    }
+    if (sql.includes('FROM field_permissions')) {
+      const sheetId = String(params[0])
+      return {
+        rows: rows
+          .filter((row) => row.sheet_id === sheetId && row.subject_type === 'role' && row.read_only === true)
+          .map((row) => ({
+            field_id: row.field_id,
+            subject_id: row.subject_id,
+            created_by: row.created_by,
+          })),
+      }
+    }
+    throw new Error(`decoding pool: unexpected SQL ${sql}`)
+  }
+
+  return { pool: { async transaction(handler) { return handler({ query }) } }, rows, deletes }
+}
+
+/**
+ * Decode the DO UPDATE's provenance arm out of the statement text.
+ *
+ * An unconditional `created_by = EXCLUDED.created_by` is takeover of whatever was there — the
+ * laundering defect. A CASE-guarded arm adopts only a row whose provenance this port could also
+ * delete (its own pack marker, or the legacy pack-less marker).
+ */
+function resolveUpsertCreatedBy(sql: string, currentCreatedBy: string, incoming: string): string {
+  const doUpdate = sql.slice(sql.search(/DO UPDATE SET/i))
+  if (!/created_by/i.test(doUpdate)) return currentCreatedBy
+  if (!/CASE/i.test(doUpdate)) return incoming
+  const adoptable = [incoming, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY]
+  return adoptable.includes(currentCreatedBy) ? incoming : currentCreatedBy
+}
+
+const PACK_A = 'pack-alpha'
+const PACK_B = 'pack-beta'
+const markerFor = (packId: string) => `${STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY}#${packId}`
+
+const packRow = (fieldId: string, roleId: string, createdBy: string): TableRow => ({
+  sheet_id: SHEET,
+  field_id: fieldId,
+  subject_type: 'role',
+  subject_id: roleId,
+  visible: true,
+  read_only: true,
+  created_by: createdBy,
+})
+
+describe('7-RC1. a declaration with a region but NO entries still reconciles', () => {
+  const REGION = { fieldIds: [F_WAREHOUSE_DATE, F_PURCHASE_REPLY], roleIds: [ROLE_PURCHASING, ROLE_WAREHOUSE] }
+
+  it('empty entries + a region RETIRES everything this port holds in the rectangle', async () => {
+    // The shared-custody revision: v2 says every declared role owns every governed column, so it
+    // derives ZERO denials. Upsert-only that is a no-op; with a region it must be a full retirement,
+    // or v1's denials keep the columns locked for the very roles v2 hands them to.
+    const fake = createDecodingTablePool([
+      packRow(F_WAREHOUSE_DATE, ROLE_PURCHASING, markerFor(PACK_A)),
+      packRow(F_PURCHASE_REPLY, ROLE_WAREHOUSE, markerFor(PACK_A)),
+    ])
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    const result = await service.applyRoleWriteScopes({
+      sheetId: SHEET, entries: [], packId: PACK_A, reconcile: REGION,
+    })
+
+    expect(result.applied).toBe(0)
+    expect(result.removed).toEqual([
+      { fieldId: F_PURCHASE_REPLY, roleId: ROLE_WAREHOUSE },
+      { fieldId: F_WAREHOUSE_DATE, roleId: ROLE_PURCHASING },
+    ])
+    expect(fake.rows).toHaveLength(0)
+    expect(fake.deletes).toHaveLength(1)
+  })
+
+  it('empty entries and NO region stays the documented total no-op — zero statements', async () => {
+    const fake = createDecodingTablePool([packRow(F_WAREHOUSE_DATE, ROLE_PURCHASING, markerFor(PACK_A))])
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    const result = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: [] })
+
+    expect(result).toEqual({ applied: 0, entries: [], removed: [] })
+    expect(fake.deletes).toHaveLength(0)
+    expect(fake.rows).toHaveLength(1)
+  })
+})
+
+describe('7-RC2. provenance is per PACK, not per plugin', () => {
+  const REGION = { fieldIds: [F_WAREHOUSE_DATE, F_PURCHASE_REPLY], roleIds: [ROLE_PURCHASING, ROLE_WAREHOUSE] }
+
+  it('a row written by ANOTHER pack is not deleted, even wholly inside the rectangle', async () => {
+    const fake = createDecodingTablePool([
+      packRow(F_WAREHOUSE_DATE, ROLE_PURCHASING, markerFor(PACK_B)), // another pack's denial
+      packRow(F_PURCHASE_REPLY, ROLE_PURCHASING, markerFor(PACK_A)), // ours, no longer declared
+    ])
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    const result = await service.applyRoleWriteScopes({
+      sheetId: SHEET,
+      entries: [{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_WAREHOUSE }],
+      packId: PACK_A,
+      reconcile: REGION,
+    })
+
+    expect(result.removed).toEqual([{ fieldId: F_PURCHASE_REPLY, roleId: ROLE_PURCHASING }])
+    expect(fake.rows.find((row) => row.created_by === markerFor(PACK_B))).toBeDefined()
+  })
+
+  it('a LEGACY row with no pack id IS adopted and retired (upgrade continuity)', async () => {
+    // Rows written before the marker carried a pack id have no other owner to attribute them to.
+    // They stay reachable, and this is the ONLY non-own marker the delete may touch.
+    const fake = createDecodingTablePool([
+      packRow(F_WAREHOUSE_DATE, ROLE_PURCHASING, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY),
+    ])
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    const result = await service.applyRoleWriteScopes({
+      sheetId: SHEET,
+      entries: [{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_WAREHOUSE }],
+      packId: PACK_A,
+      reconcile: REGION,
+    })
+
+    expect(result.removed).toEqual([{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_PURCHASING }])
+  })
+
+  it('rows this port writes carry the PACK marker, and the census attributes every row', async () => {
+    const fake = createDecodingTablePool([
+      packRow(F_PURCHASE_REPLY, ROLE_PURCHASING, markerFor(PACK_B)),
+      packRow(F_WAREHOUSE_STATUS, ROLE_WAREHOUSE, 'operator:univer-meta-authoring-route'),
+    ])
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+    await service.applyRoleWriteScopes({
+      sheetId: SHEET,
+      entries: [{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_WAREHOUSE }],
+      packId: PACK_A,
+    })
+    expect(fake.rows.find((row) => row.field_id === F_WAREHOUSE_DATE)?.created_by).toBe(markerFor(PACK_A))
+
+    const census = await service.listRoleWriteScopes({ sheetId: SHEET })
+    // Plugin-family rows come back attributed by pack; a legacy row reports packId null.
+    expect(census.entries).toEqual([
+      { fieldId: F_PURCHASE_REPLY, roleId: ROLE_PURCHASING, createdBy: markerFor(PACK_B), packId: PACK_B },
+      { fieldId: F_WAREHOUSE_DATE, roleId: ROLE_WAREHOUSE, createdBy: markerFor(PACK_A), packId: PACK_A },
+    ])
+    // A row this plugin did NOT write is never silently absorbed into the census — it is reported
+    // separately so a caller can neither claim it nor mistake it for its own debris.
+    expect(census.foreignEntries).toEqual([
+      { fieldId: F_WAREHOUSE_STATUS, roleId: ROLE_WAREHOUSE, createdBy: 'operator:univer-meta-authoring-route' },
+    ])
+  })
+
+  it('an omitted packId keeps writing the LEGACY marker — every existing caller unchanged', async () => {
+    const fake = createDecodingTablePool()
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+    await service.applyRoleWriteScopes({
+      sheetId: SHEET, entries: [{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_WAREHOUSE }],
+    })
+    expect(fake.rows[0].created_by).toBe(STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY)
+  })
+})
+
+describe('7-RC3. the statement is pinned where the model cannot see', () => {
+  it('SOURCE GUARD: the sheet axis, the desired-alias order and the RETURNING list are pinned', () => {
+    const src = readFileSync(SERVICE_SOURCE_PATH, 'utf8')
+    const statement = src.slice(src.search(/DELETE\s+FROM\s+field_permissions/i))
+    const where = statement.slice(0, statement.indexOf('RETURNING'))
+
+    // THE SHEET AXIS. `field_permissions` carries no tenant or project column, so this single
+    // clause is the whole of the project/sheet/tenant bound. It was asserted by nothing.
+    expect(where).toMatch(/WHERE\s+sheet_id\s*=\s*\$1/)
+    // THE ALIAS ORDER. Swapping these two names makes `desired.field_id` compare role ids against
+    // column ids, NOT EXISTS becomes always-true, and the statement deletes the rows it just wrote.
+    expect(where).toMatch(/AS\s+desired\(field_id,\s*subject_id\)/)
+    // THE PROJECTION. `removed` is decoded from these two columns by name.
+    expect(statement).toMatch(/RETURNING\s+field_id,\s*subject_id/)
+  })
+
+  it('the delete is bound to THIS sheet — decoded positionally, not modelled by hand', async () => {
+    const twin: TableRow = {
+      ...packRow(F_WAREHOUSE_DATE, ROLE_PURCHASING, markerFor(PACK_A)),
+      sheet_id: 'sheet_other',
+    }
+    const fake = createDecodingTablePool([twin, packRow(F_WAREHOUSE_DATE, ROLE_PURCHASING, markerFor(PACK_A))])
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    await service.applyRoleWriteScopes({
+      sheetId: SHEET,
+      entries: [{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_WAREHOUSE }],
+      packId: PACK_A,
+      reconcile: { fieldIds: [F_WAREHOUSE_DATE], roleIds: [ROLE_PURCHASING, ROLE_WAREHOUSE] },
+    })
+
+    // Identical (field, role) on another sheet. Only `sheet_id = $1` keeps it alive.
+    expect(fake.rows.filter((row) => row.sheet_id === 'sheet_other')).toHaveLength(1)
+  })
+})
+
+describe('7-RC4. an operator row is never laundered into a plugin row', () => {
+  const REGION = { fieldIds: [F_WAREHOUSE_DATE, F_PURCHASE_REPLY], roleIds: [ROLE_PURCHASING, ROLE_WAREHOUSE] }
+
+  it('re-declaring a pair an operator owns does NOT take over its provenance, so v2 cannot delete it', async () => {
+    const fake = createDecodingTablePool([
+      packRow(F_WAREHOUSE_DATE, ROLE_PURCHASING, 'operator:univer-meta-authoring-route'),
+    ])
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    // v1 declares the very same denial the operator already authored.
+    await service.applyRoleWriteScopes({
+      sheetId: SHEET,
+      entries: [{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_PURCHASING }],
+      packId: PACK_A,
+      reconcile: REGION,
+    })
+    expect(fake.rows[0].created_by).toBe('operator:univer-meta-authoring-route')
+
+    // v2 drops it. The operator's decision must still stand.
+    const v2 = await service.applyRoleWriteScopes({
+      sheetId: SHEET,
+      entries: [{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_WAREHOUSE }],
+      packId: PACK_A,
+      reconcile: REGION,
+    })
+    expect(v2.removed).toEqual([])
+    expect(fake.rows.find((row) => row.subject_id === ROLE_PURCHASING)?.created_by)
+      .toBe('operator:univer-meta-authoring-route')
+  })
+
+  it('SOURCE GUARD: the DO UPDATE never re-stamps provenance unconditionally', () => {
+    const src = readFileSync(SERVICE_SOURCE_PATH, 'utf8')
+    const upsertAt = src.search(/INSERT\s+INTO\s+field_permissions/i)
+    const upsert = src.slice(upsertAt)
+    const doUpdateAt = upsert.search(/DO UPDATE SET/i)
+    const doUpdate = upsert.slice(doUpdateAt, upsert.indexOf('`', doUpdateAt))
+    expect(doUpdate).toMatch(/created_by\s*=\s*CASE/i)
+    expect(doUpdate).not.toMatch(/created_by\s*=\s*EXCLUDED\.created_by/)
+  })
+})
+
+describe('7-RC5. the port declares whether it can reconcile at all', () => {
+  it('exposes supportsWriteScopeReconcile === true so a caller can feature-detect it', () => {
+    const service = new StockPreparationFieldPermissionsService({ pool: createFakePool().pool })
+    expect(service.supportsWriteScopeReconcile).toBe(true)
+  })
+})
+
+describe('7-RC7. falsy reconcile is absent, not malformed', () => {
+  it('reconcile:false / null / undefined are all the additive path, byte-identical', async () => {
+    for (const value of [undefined, null, false]) {
+      const fake = createFakePool()
+      const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+      const result = await service.applyRoleWriteScopes({
+        sheetId: SHEET,
+        entries: [{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_PURCHASING }],
+        reconcile: value as undefined,
+      })
+      expect(result).toEqual({
+        applied: 1,
+        entries: [{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_PURCHASING }],
+        removed: [],
+      })
+      expect(fake.calls.filter((call) => /DELETE/i.test(call.sql))).toHaveLength(0)
+    }
+  })
+})
