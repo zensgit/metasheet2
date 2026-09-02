@@ -909,13 +909,19 @@ async function main() {
     assert.equal(env.records.patchCalls.length, 0)
   })
 
-  await run('T8g: an unbound CARRIED human column fails the DEPLOY-TIME gate, not the click', async () => {
-    // WHERE A DEPLOYER LEARNS THIS. The completeness gate used to require only the plm_system band
-    // plus declared ext_ ids, so a config binding exactly what the gate asked for passed at deploy
-    // time and then hard-409'd the first time a human tried to carry — and the gate's own 422 is the
-    // list a deployer copies from (the 222 runbook says as much: 列出缺的列照抄即可). The human band
-    // is now part of that list, so the same omission is caught once, at config time, with the id
-    // named — instead of per request, at the moment someone is trying to save their own work.
+  await run('T8g: an unbound CARRIED human column is a per-decision refusal, not a shared-gate outage', async () => {
+    // WHERE THIS IS ENFORCED, AND WHY NOT IN THE SHARED GATE.
+    //
+    // An earlier revision of this PR widened assertTargetFieldMapCompleteness to require the whole
+    // human band. That gate is shared by fifteen handlers, so it turned a config apply, dry-run,
+    // mvp-persist, reconcile, the large-BOM jobs and the export all accept into a deployment-wide
+    // 422 — six working paths taken down to pre-empt a refusal on a seventh. The gate is back to
+    // main's exact text.
+    //
+    // Deploy-time discovery lives in the preflight instead (STOCK_PREP_CARRY_TARGET_HUMAN_FIELDS_
+    // UNBOUND, swept across all 13 ids by stock-preparation-preflight.test.cjs), and click-time the
+    // carry route refuses ONLY the columns THIS decision carries — which is what keeps T6b-pos
+    // reachable and the executor's own comment true.
     const { routes, env } = mountCarryRoute({
       boundSheet: SANDBOX_SHEET,
       targetOverride(target) {
@@ -929,12 +935,10 @@ async function main() {
       authenticatedTenantId: TENANT_ID,
       body: { decision: decisionFixture() },
     })
-    assert.equal(res.statusCode, 422, JSON.stringify(res.body))
-    assert.equal(res.body.error.code, 'TARGET_SCHEMA_INCOMPLETE')
-    assert.ok(res.body.error.details.missingFields.includes('notes'),
-      'T8g: the refusal names the id the deployer must bind')
-    assert.deepEqual(res.body.error.details.missingHumanFields, ['notes'],
-      'T8g: and says WHICH KIND of column it is, so a deployer need not diff two lists')
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'CONFIRM_CARRY_FIELD_NOT_BOUND')
+    assert.deepEqual(res.body.error.details.fields, ['notes'],
+      'T8g: the refusal names the carried column that is unbound, and only it')
     assert.equal(env.records.patchCalls.length, 0)
   })
 

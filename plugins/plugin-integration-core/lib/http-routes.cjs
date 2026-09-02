@@ -5704,6 +5704,12 @@ function createHandlers(services, options = {}) {
         extFieldMapping: stockPreparationExtFieldMapping,
         config: context && context.config,
         b2aTrialRegistry,
+        // The SAME registry the carry/apply/dry-run routes resolve their bound target through, so
+        // the binding this reports on and the binding those routes actually write through are one
+        // object, not two readings of a config file.
+        tableActions,
+        tenantId,
+        actionId: PLM_STOCK_PREPARATION_ACTION_ID,
         env: process.env,
       }))
     },

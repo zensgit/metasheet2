@@ -898,12 +898,22 @@ function carryFieldIdMapHasExplicitBindings(fieldIdMap) {
 // here: an unresolved id is a refusal, and both refusals name field NAMES only.
 //
 // The two refusals are deliberately different facts:
-//   * a SCOPE column (plm_system) is required by the deploy-time completeness gate, so an unbound
-//     one means the config is broken in a way that gate should already have caught -> 500;
-//   * a CARRIED human column is NOT required by that gate (apply never writes human columns, so a
-//     legal config may leave it unbound), and a deployment whose working sheet does not expose the
-//     column the human wrote in simply cannot have this carry performed on it -> 409, a state an
-//     admin fixes by binding the column, not a server fault.
+//   * a SCOPE column (plm_system) is required by the deploy-time completeness gate
+//     (assertTargetFieldMapCompleteness), so an unbound one means the config is broken in a way that
+//     gate should already have caught -> 500;
+//   * a CARRIED human column is NOT required by that gate, and deliberately still is not. The gate
+//     is shared by fifteen route handlers, and apply / dry-run / mvp-persist / reconcile / the
+//     large-BOM jobs / the export never touch a human column — requiring one there would refuse a
+//     config every one of those paths accepts, taking down six working surfaces to pre-empt a
+//     refusal on a seventh. So a legal config may leave a human column unbound, and a deployment
+//     whose working sheet does not expose the column the human wrote in simply cannot have THIS
+//     carry performed on it -> 409, a state an admin fixes by binding the column, not a server fault.
+//
+// ONLY THE FIELDS THIS DECISION CARRIES are required — never the whole whitelist. A decision that
+// carries `notes` must not be refused because some unrelated column the operator never filled in is
+// unbound. Deploy-time DISCOVERY of the whole band is a different job at a different time, and it
+// lives in the preflight (STOCK_PREP_CARRY_TARGET_HUMAN_FIELDS_UNBOUND,
+// stock-preparation-preflight.cjs) where it costs a deployer one line instead of an outage.
 function resolveCarryFieldBindings(target, carryFields) {
   const explicit = carryFieldIdMapHasExplicitBindings(target.fieldIdMap)
   const map = {}

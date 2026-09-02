@@ -298,16 +298,6 @@ function targetFieldMapHasExplicitBindings(fieldIdMap = {}) {
   return Object.keys(fieldIdMap || {}).some((field) => optionalString(fieldIdMap[field]))
 }
 
-// The human band AS THIS TEMPLATE DECLARES IT — read off the template's own ownership marks rather
-// than the frozen HUMAN_PRESERVED_FIELD_IDS list, so a target bound to a template that legitimately
-// carries a different set (the sandbox twin, a customer-restamped one) is measured against its own
-// columns and never against ids it does not have.
-function humanPreservedTemplateFieldIds(template) {
-  return template.fields
-    .filter((field) => field.ownership === 'human_preserved')
-    .map((field) => field.id)
-}
-
 function plmSystemFieldIds(template) {
   return template.fields
     .filter((field) => field.ownership === 'plm_system')
@@ -324,29 +314,7 @@ function assertTargetFieldMapCompleteness(action) {
   // fallback. Covering them HERE turns that late, per-row failure into an
   // up-front, whole-config one — which is the only place a deployer can fix it.
   const extensionFieldIds = Array.isArray(action.extensionFieldIds) ? action.extensionFieldIds : []
-  // ...and the HUMAN band, for the same reason one step later in time.
-  //
-  // The gate used to stop at the plm_system columns plus the declared `ext_` ones, on the reading
-  // that apply never writes a human column so a target need not bind one. Apply does not — but the
-  // K2 CARRY confirm does (stock-preparation-confirm-writes.cjs applyCarryViaConfirm), and it
-  // reaches those columns through this very `fieldIdMap`. So a config binding exactly what this gate
-  // asked for passed at deploy time and then refused the first real carry, per request, with a 409
-  // the deployer had no way to anticipate — the human band is precisely the band whose whole purpose
-  // is to survive a re-key, and the operator met the refusal while trying to save their own work.
-  //
-  // THIS GATE IS THE ONLY PLACE A DEPLOYER LEARNS WHICH COLUMNS MUST BE BOUND — its 422 is the list
-  // they copy from (docs/development/takeover-beiliao-20260821/r6-upgrade-222-runbook.md §4:
-  // "列出缺的列照抄即可"). Naming the human band here turns a late, per-click refusal into one
-  // up-front, fixable failure, and it costs nothing an in-flow config does not already have: every
-  // sanctioned producer emits the whole template today — the offline generator
-  // (scripts/ops/stock-preparation-derive-target-binding.mjs, 33/33 ids), the canonical and sandbox
-  // ensure verbs (both resolve `templateFieldIds(template)`), and the sandbox twin restamp (the same
-  // 33-field template under a new objectId). Only a hand-built map that stopped at this gate's old
-  // answer is affected, and for that map this is the message it should have had.
-  const humanFieldIds = humanPreservedTemplateFieldIds(action.template)
-  const requiredFields = plmSystemFieldIds(action.template)
-    .concat(humanFieldIds)
-    .concat(extensionFieldIds)
+  const requiredFields = plmSystemFieldIds(action.template).concat(extensionFieldIds)
   const missingFields = requiredFields.filter((field) => !optionalString(action.target.fieldIdMap[field]))
   if (missingFields.length === 0) return
   throw new StockPreparationTableActionError(
@@ -362,12 +330,6 @@ function assertTargetFieldMapCompleteness(action) {
       // from "a pack column is not bound yet" without diffing two lists.
       ...(missingFields.some((field) => isTenantExtensionField(field))
         ? { missingExtensionFields: missingFields.filter((field) => isTenantExtensionField(field)) }
-        : {}),
-      // ...and the third kind, added with the human band: "the columns the operator writes in are
-      // not bound". Conditional for the same reason as the stanza above — a config missing none of
-      // them produces a byte-identical refusal to the one it produced before the band was required.
-      ...(missingFields.some((field) => humanFieldIds.includes(field))
-        ? { missingHumanFields: missingFields.filter((field) => humanFieldIds.includes(field)) }
         : {}),
     },
   )

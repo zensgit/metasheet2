@@ -50,6 +50,7 @@
 // placeholder for the path, because a deployment's filesystem layout is topology, not config.
 
 const {
+  HUMAN_PRESERVED_FIELD_IDS,
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
 } = require('./stock-preparation-templates.cjs')
 const {
@@ -98,6 +99,13 @@ const SANDBOX_OBJECT_ID_NAMESPACE_PREFIX = SANDBOX_OBJECT_ID_NAMESPACE
 const CANONICAL_TARGET_OBJECT_ID = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
 
 /**
+ * The DEPLOY-TIME warning for a binding whose `sheetId` is not the id derived from
+ * (project, target.objectId). Posture, never a blocker and never a per-click refusal - see
+ * inspectCarryTargetBinding for why a hand-bound sheet is a legitimate, sanctioned state.
+ */
+const CARRY_TARGET_BINDING_NOT_DERIVED = 'STOCK_PREP_CARRY_TARGET_BINDING_NOT_DERIVED'
+
+/**
  * The blocker vocabulary. Frozen and exported: a caller (a runbook, a dashboard, a follow-up suite)
  * branches on these, so they are part of the contract, not incidental strings.
  */
@@ -109,6 +117,14 @@ const PREFLIGHT_BLOCKER_CODES = Object.freeze({
   EXT_FIELD_MAPPING_NOT_CONFIGURED: 'STOCK_PREP_EXT_FIELD_MAPPING_NOT_CONFIGURED',
   SANDBOX_MODE_NOT_ENABLED: 'STOCK_PREP_SANDBOX_MODE_NOT_ENABLED',
   SANDBOX_ALLOWLIST_MISSING_TARGET: 'STOCK_PREP_SANDBOX_ALLOWLIST_MISSING_TARGET',
+  // THE COLUMNS THE OPERATOR WRITES IN. The K2 carry confirm patches human_preserved columns
+  // through the bound action's own `fieldIdMap`; the deploy-time schema gate
+  // (assertTargetFieldMapCompleteness) deliberately does NOT require them, because apply never
+  // writes one and making them mandatory there would take down apply/dry-run/export/reconcile for a
+  // config those paths are perfectly happy with. So the discovery belongs HERE, where it costs a
+  // deployer one preflight line instead of an outage — and where it lands before the first operator
+  // ever clicks 结转 and meets a per-request refusal they had no way to anticipate.
+  CARRY_TARGET_HUMAN_FIELDS_UNBOUND: 'STOCK_PREP_CARRY_TARGET_HUMAN_FIELDS_UNBOUND',
 })
 
 const PREFLIGHT_BLOCKER_CODE_ORDER = Object.freeze([
@@ -119,6 +135,7 @@ const PREFLIGHT_BLOCKER_CODE_ORDER = Object.freeze([
   PREFLIGHT_BLOCKER_CODES.EXT_FIELD_MAPPING_NOT_CONFIGURED,
   PREFLIGHT_BLOCKER_CODES.SANDBOX_MODE_NOT_ENABLED,
   PREFLIGHT_BLOCKER_CODES.SANDBOX_ALLOWLIST_MISSING_TARGET,
+  PREFLIGHT_BLOCKER_CODES.CARRY_TARGET_HUMAN_FIELDS_UNBOUND,
 ])
 
 // The route the preflight itself is served on, stated once and reused by the runbook suite.
@@ -142,6 +159,23 @@ function httpFix({ method, path, body }) {
     path,
     body: Object.freeze({ ...payload }),
     run: `${method} ${path} ${JSON.stringify(payload)}`,
+  })
+}
+
+/**
+ * A SHELL fix - an offline command the operator runs from a repo checkout. The third kind, added for
+ * the one blocker whose repair is neither an HTTP call nor an env line: recomputing a target binding
+ * is done by a script that needs no database and no API, so quoting the call is the whole fix.
+ *
+ * `placeholder` marks that `run` contains <angle-bracket> slots the operator must fill in, for the
+ * same reason envFix marks its own: a caller can tell "paste this" from "fill this in" without
+ * pattern-matching the string.
+ */
+function shellFix(run) {
+  return Object.freeze({
+    kind: 'shell',
+    run,
+    placeholder: /<[^>]+>/.test(run),
   })
 }
 
@@ -253,7 +287,7 @@ function ensureFixForTarget(target) {
  *
  * Nothing here carries a `fix`, and `assertNoPostureFix` in the suite proves it stays that way.
  */
-function buildPosture({ config, b2aTrialRegistry, env }) {
+function buildPosture({ config, b2aTrialRegistry, env, carryTargetBindingDerived = null }) {
   const productionPolicy = resolveStockPrepApplyProductionPolicy(config)
   const outboundConfigured = typeof (env && env[OUTBOUND_HTTP_WRITE_TARGETS_ENV]) === 'string'
     && String(env[OUTBOUND_HTTP_WRITE_TARGETS_ENV]).trim().length > 0
@@ -277,6 +311,15 @@ function buildPosture({ config, b2aTrialRegistry, env }) {
         ? 'the B2a trial registry is armed: every gated stock-prep source read must match a live registration.'
         : 'the B2a trial registry is dormant, which is the correct posture here. Arming it is an owner decision; the preflight deliberately offers nothing to run.',
     }),
+    carryTargetBinding: Object.freeze({
+      state: carryTargetBindingDerived === false
+        ? 'not_derived'
+        : (carryTargetBindingDerived === true ? 'derived' : 'unknown'),
+      code: CARRY_TARGET_BINDING_NOT_DERIVED,
+      note: carryTargetBindingDerived === false
+        ? 'the bound target sheetId is not the id derived from (this project, target.objectId). That is LEGAL and nothing refuses it: sheetId and objectId are independent fields everywhere in this line, and the 222 window runbook prescribes editing objectId while keeping the existing sheetId. It is reported because a binding whose two halves name different tables is usually an editing slip - if objectId was changed without recomputing the binding, apply keeps writing rows into the sheet the OLD objectId named while the sandbox gate reads the NEW one.'
+        : 'nothing to report: the bound sheetId either is the derived one, or this host exposes no derivation to check it against.',
+    }),
     outboundHttpWrite: Object.freeze({
       state: outboundConfigured ? 'set' : 'unset',
       envVar: OUTBOUND_HTTP_WRITE_TARGETS_ENV,
@@ -285,6 +328,76 @@ function buildPosture({ config, b2aTrialRegistry, env }) {
         : 'the outbound HTTP write gate is unset, which means deny — the correct posture. The preflight deliberately offers nothing to run.',
     }),
   })
+}
+
+/**
+ * The BOUND table action's target, read the way every stock-prep route reads it, or null when the
+ * deployment has not configured one. Never throws: an unconfigured or malformed action is simply
+ * "nothing to report here" - the routes that need it raise their own typed refusals, and a preflight
+ * that threw would take down the one page an operator uses to find out what is wrong.
+ */
+async function resolveBoundActionTarget({ tableActions, tenantId, actionId }) {
+  if (!tableActions || typeof tableActions.getTableAction !== 'function' || !actionId) return null
+  try {
+    const action = await tableActions.getTableAction({ tenantId, actionId })
+    const target = action && action.target
+    return isPlainObject(target) ? target : null
+  } catch (error) {
+    return null
+  }
+}
+
+/**
+ * "Does this target bind logical ids to physical ids AT ALL?" - the writer's own predicate
+ * (apply-writer.cjs fieldIdMapHasExplicitBindings). An EMPTY map is a legitimate mode in which every
+ * logical id addresses its column untranslated, so nothing can be unbound and there is nothing to
+ * report.
+ */
+function targetHasExplicitBindings(fieldIdMap) {
+  return isPlainObject(fieldIdMap)
+    && Object.keys(fieldIdMap).some((key) => typeof fieldIdMap[key] === 'string' && fieldIdMap[key].trim())
+}
+
+/**
+ * THE CARRY-TARGET BINDING CHECK. Two independent facts about one binding, deliberately reported at
+ * two different strengths:
+ *
+ *   1. UNBOUND HUMAN COLUMNS -> a BLOCKER. The carry confirm writes those columns through this map;
+ *      an unbound one means the first operator to click carry gets a per-request refusal. That is
+ *      fixable once, here, with the ids named. It is NOT enforced in the shared schema gate
+ *      (assertTargetFieldMapCompleteness): apply never writes a human column, and requiring them
+ *      there would refuse a config that apply, dry-run, mvp-persist, reconcile, the large-BOM jobs
+ *      and the export are all perfectly happy with - taking down six working paths to pre-empt a
+ *      refusal on a seventh.
+ *   2. A BINDING WHOSE sheetId IS NOT THE DERIVED ONE -> POSTURE, never a blocker. `sheetId` and
+ *      `objectId` are independent fields everywhere else in this line: normalizeTarget accepts any
+ *      sheetId, the sandbox apply gate reads only objectId, and the writer/export/conflict policies
+ *      take sheetId verbatim. A hand-bound sheet is a legitimate, deployable state - the 222 window
+ *      runbook prescribes editing objectId while keeping the existing sheetId - so refusing it would
+ *      break a sanctioned config. It is still worth SAYING, because a binding whose two halves name
+ *      different tables is nearly always an editing slip.
+ */
+async function inspectCarryTargetBinding({ context, projectId, target }) {
+  if (!isPlainObject(target)) {
+    return { configured: false, missingHumanFields: [], derived: null, fieldMapMode: null }
+  }
+  const fieldIdMap = isPlainObject(target.fieldIdMap) ? target.fieldIdMap : {}
+  const explicit = targetHasExplicitBindings(fieldIdMap)
+  const missingHumanFields = explicit
+    ? HUMAN_PRESERVED_FIELD_IDS.filter((fieldId) => !(typeof fieldIdMap[fieldId] === 'string' && fieldIdMap[fieldId].trim()))
+    : []
+  let derived = null
+  const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+  const boundSheetId = typeof target.sheetId === 'string' ? target.sheetId.trim() : ''
+  const objectId = typeof target.objectId === 'string' ? target.objectId.trim() : ''
+  if (provisioning && typeof provisioning.getObjectSheetId === 'function' && boundSheetId && objectId) {
+    try {
+      derived = provisioning.getObjectSheetId(projectId, objectId) === boundSheetId
+    } catch (error) {
+      derived = null
+    }
+  }
+  return { configured: true, missingHumanFields, derived, fieldMapMode: explicit ? 'explicit' : 'logical' }
 }
 
 /**
@@ -306,6 +419,12 @@ async function computeStockPreparationPreflight({
   extFieldMapping,
   config,
   b2aTrialRegistry,
+  // The SAME registry the routes resolve their bound target through, so what this reports and what
+  // the carry route actually writes cannot drift. Optional: a caller that does not pass it simply
+  // gets no carry-binding check rather than a crash.
+  tableActions,
+  tenantId,
+  actionId,
   env = process.env,
 } = {}) {
   const blockers = []
@@ -505,6 +624,26 @@ async function computeStockPreparationPreflight({
     }))
   }
 
+  // ---- 6. THE CARRY TARGET BINDING ----------------------------------------------------------
+  const boundTarget = await resolveBoundActionTarget({ tableActions, tenantId, actionId })
+  const carryBinding = await inspectCarryTargetBinding({ context, projectId, target: boundTarget })
+  checks.carryTargetBinding = Object.freeze({
+    configured: carryBinding.configured === true,
+    fieldMapMode: carryBinding.fieldMapMode,
+    humanFieldsBound: carryBinding.configured === true && carryBinding.missingHumanFields.length === 0,
+    missingHumanFields: Object.freeze([...carryBinding.missingHumanFields]),
+    // null = undecidable on this host (no derivation exposed); true/false = decided.
+    sheetIdDerivedFromObjectId: carryBinding.derived,
+  })
+  if (carryBinding.missingHumanFields.length > 0) {
+    blockers.push(blocker({
+      code: PREFLIGHT_BLOCKER_CODES.CARRY_TARGET_HUMAN_FIELDS_UNBOUND,
+      what: `the bound table action target does not bind ${carryBinding.missingHumanFields.length} human_preserved column(s): ${carryBinding.missingHumanFields.join(', ')}. Apply, dry-run and the export never touch those columns, so all of them work - but the K2 carry confirm writes them through this same fieldIdMap, so the first operator to carry a re-keyed row is refused per request. Bind the whole template, not only the columns the schema gate asks for`,
+      fix: shellFix(`node scripts/ops/stock-preparation-derive-target-binding.mjs --tenant-id <tenantId> --object-id ${(boundTarget && boundTarget.objectId) || '<target objectId>'} --action-fragment`),
+      detail: { missingHumanFields: [...carryBinding.missingHumanFields] },
+    }))
+  }
+
   // Ordered, most-blocking first: the vocabulary order IS the order to fix them in.
   blockers.sort((left, right) => PREFLIGHT_BLOCKER_CODE_ORDER.indexOf(left.code) - PREFLIGHT_BLOCKER_CODE_ORDER.indexOf(right.code))
 
@@ -513,7 +652,7 @@ async function computeStockPreparationPreflight({
     blockerCount: blockers.length,
     blockers: Object.freeze(blockers),
     checks: Object.freeze(checks),
-    posture: buildPosture({ config, b2aTrialRegistry, env }),
+    posture: buildPosture({ config, b2aTrialRegistry, env, carryTargetBindingDerived: carryBinding.derived }),
   })
 }
 
@@ -529,8 +668,12 @@ module.exports = {
   SANDBOX_OBJECT_ID_NAMESPACE_PREFIX,
   SANDBOX_TARGET_OBJECT_IDS_ENV,
   computeStockPreparationPreflight,
+  CARRY_TARGET_BINDING_NOT_DERIVED,
   __internals: {
     buildPosture,
+    inspectCarryTargetBinding,
+    resolveBoundActionTarget,
+    shellFix,
     declaredPackTargets,
     ensureFixForTarget,
     envFix,

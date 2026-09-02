@@ -53,8 +53,10 @@ const {
   PREFLIGHT_BLOCKER_CODES,
   PREFLIGHT_BLOCKER_CODE_ORDER,
   PREFLIGHT_ROUTE_PATH,
+  CARRY_TARGET_BINDING_NOT_DERIVED,
 } = require(path.join(LIB, 'stock-preparation-preflight.cjs'))
 const {
+  HUMAN_PRESERVED_FIELD_IDS,
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
 } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
@@ -120,6 +122,11 @@ const PLATFORM_ADMIN = Object.freeze({ id: 'u_admin', tenantId: TENANT_ID, roles
 // ---------------------------------------------------------------------------
 
 // Byte-for-byte the platform derivation (multitable/provisioning.ts getObjectFieldId).
+function derivedSheetId(projectId, objectId) {
+  const digest = createHash('sha1').update([projectId, objectId].join(':')).digest('hex').slice(0, 24)
+  return `sheet_${digest}`.slice(0, 50)
+}
+
 function physicalFieldId(projectId, objectId, fieldId) {
   const digest = createHash('sha1').update([projectId, objectId, fieldId].join(':')).digest('hex').slice(0, 24)
   return `fld_${digest}`.slice(0, 50)
@@ -133,7 +140,7 @@ function physicalFieldId(projectId, objectId, fieldId) {
  * `objects` is `{ [objectId]: { fields: 'all' | string[] } }`. An absent objectId is a missing sheet;
  * a partial `fields` list is the "exists but incomplete" shape.
  */
-const PROVISIONING_READ_METHODS = Object.freeze(['findObjectSheet', 'resolveFieldIds', 'getFieldId', 'readObjectFieldsContent'])
+const PROVISIONING_READ_METHODS = Object.freeze(['findObjectSheet', 'resolveFieldIds', 'getFieldId', 'getObjectSheetId', 'readObjectFieldsContent'])
 const PROVISIONING_WRITE_METHODS = Object.freeze(['ensureObject', 'ensureMissingObjectFields', 'patchObjectFieldProperty', 'ensureView'])
 
 function createFakeProvisioning({ objects = {} } = {}) {
@@ -161,6 +168,12 @@ function createFakeProvisioning({ objects = {} } = {}) {
     getFieldId(projectId, objectId, fieldId) {
       calls.push('getFieldId')
       return physicalFieldId(projectId, objectId, fieldId)
+    },
+    // The platform's own pure derivation (provisioning.ts getObjectSheetId). A READ in every sense
+    // — no IO at all — so it joins the read set rather than the write set.
+    getObjectSheetId(projectId, objectId) {
+      calls.push('getObjectSheetId')
+      return derivedSheetId(projectId, objectId)
     },
     async readObjectFieldsContent() {
       calls.push('readObjectFieldsContent')
@@ -955,11 +968,13 @@ const APPROVED_WHAT_INTERPOLATIONS = Object.freeze([
   'SANDBOX_OBJECT_ID_NAMESPACE_PREFIX',
   // Managed object ids and logical field ids — the shared vocabulary remote support uses.
   'checks.confirmationLedger.objectId',
+  "carryBinding.missingHumanFields.join(', ')",
   "missingFields.join(', ')",
   "missingTemplateFields.join(', ')",
   'packId',
   'target.objectId',
   // Counts.
+  'carryBinding.missingHumanFields.length',
   'checks.confirmationLedger.missingFieldCount',
   'droppedNonNamespaceEntries',
   'missingExtensionFields.length',
@@ -1021,7 +1036,7 @@ function whatTemplatesCarryIdentifiersOnly() {
   const { sites, leaves } = whatInterpolationLeaves(source)
 
   // Anti-vacuity: the scanner really walked every blocker's message.
-  assert.equal(sites, 7, 'P-16: the scanner found every `what:` site (update this count when a blocker is added)')
+  assert.equal(sites, 8, 'P-16: the scanner found every `what:` site (update this count when a blocker is added)')
   assert.ok(leaves.length > 0, 'P-16: ...and really extracted interpolations from them')
 
   assert.deepEqual(
@@ -1035,6 +1050,108 @@ function whatTemplatesCarryIdentifiersOnly() {
   // The scanner is not fooled by a `what` that is not a plain template: prove it walks the ternary
   // form (the ledger blocker uses one) by checking a leaf only that form contributes.
   assert.ok(leaves.includes('checks.confirmationLedger.objectId'), 'P-16: the ternary-form `what` was walked')
+}
+
+
+// ---------------------------------------------------------------------------
+// THE CARRY TARGET BINDING (E3/E5). The columns an operator writes in are NOT required by the shared
+// schema gate — requiring them there would refuse a config that apply, dry-run, mvp-persist,
+// reconcile, the large-BOM jobs and the export all accept, i.e. six working paths taken down to
+// pre-empt a refusal on a seventh. So the discovery lives here, where it costs one preflight line.
+// ---------------------------------------------------------------------------
+
+const CARRY_TEMPLATE_FIELD_IDS = Object.freeze(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id))
+
+/** A table-action config bound to `objectId`, binding every template column except `without`. */
+function tableActionConfig({ objectId = DECLARED_SANDBOX_OBJECT_ID, without = [], sheetId } = {}) {
+  const fieldIdMap = {}
+  for (const fieldId of CARRY_TEMPLATE_FIELD_IDS) {
+    if (without.includes(fieldId)) continue
+    fieldIdMap[fieldId] = physicalFieldId(STAGING_PROJECT_ID, objectId, fieldId)
+  }
+  return {
+    stockPreparationTableActions: [{
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { externalSystemId: 'plm_sql_source', kind: 'data-source:sql-readonly' },
+      target: { sheetId: sheetId || derivedSheetId(STAGING_PROJECT_ID, objectId), objectId, fieldIdMap },
+    }],
+  }
+}
+
+function greenDeploymentWithAction(configExtras) {
+  return {
+    harness: mount({
+      packs: { [PACK_ID]: packDeclaring(DECLARED_SANDBOX_OBJECT_ID) },
+      extFieldMapping: EXT_FIELD_MAPPING_CONFIG,
+      objects: readyObjects(DECLARED_SANDBOX_OBJECT_ID),
+      config: configExtras,
+    }),
+    env: sandboxEnv([DECLARED_SANDBOX_OBJECT_ID]),
+  }
+}
+
+/**
+ * EVERY human column, one at a time. Not one of thirteen: the departmental band added by #5447
+ * (makeOrBuy / procurementDone / procurementReplyDate / warehouseDone / actualArrivalDate) is
+ * exactly the kind of late addition a single-id witness would silently stop covering.
+ */
+async function carryBindingChecksEveryHumanColumn() {
+  assert.equal(HUMAN_PRESERVED_FIELD_IDS.length, 13, 'E5: the human band is the 13 this case sweeps')
+
+  // Positive control FIRST: the same deployment with the whole template bound is green, so a RED
+  // below is the missing id and never the harness.
+  {
+    const { harness, env } = greenDeploymentWithAction(tableActionConfig())
+    const res = await preflight(harness, { env })
+    assert.equal(res.body.data.ready, true, 'E5: a fully-bound target raises no carry-binding blocker')
+    assert.equal(res.body.data.checks.carryTargetBinding.configured, true)
+    assert.equal(res.body.data.checks.carryTargetBinding.humanFieldsBound, true)
+    assert.deepEqual(res.body.data.checks.carryTargetBinding.missingHumanFields, [])
+  }
+
+  for (const fieldId of HUMAN_PRESERVED_FIELD_IDS) {
+    const { harness, env } = greenDeploymentWithAction(tableActionConfig({ without: [fieldId] }))
+    const res = await preflight(harness, { env })
+    const found = blockerByCode(res.body, PREFLIGHT_BLOCKER_CODES.CARRY_TARGET_HUMAN_FIELDS_UNBOUND)
+    assert.ok(found, `E5: an unbound ${fieldId} raises the carry-binding blocker`)
+    assert.deepEqual(found.detail.missingHumanFields, [fieldId], `E5: and names ${fieldId}`)
+    assert.ok(found.what.includes(fieldId), `E5: ...in the operator-facing text too (${fieldId})`)
+    assert.deepEqual(res.body.data.checks.carryTargetBinding.missingHumanFields, [fieldId])
+    assert.equal(res.body.data.checks.carryTargetBinding.humanFieldsBound, false)
+    assert.equal(res.body.data.ready, false)
+  }
+
+  // ...and the whole band at once still reports the whole band, not just the first.
+  const { harness, env } = greenDeploymentWithAction(tableActionConfig({ without: [...HUMAN_PRESERVED_FIELD_IDS] }))
+  const res = await preflight(harness, { env })
+  const found = blockerByCode(res.body, PREFLIGHT_BLOCKER_CODES.CARRY_TARGET_HUMAN_FIELDS_UNBOUND)
+  assert.deepEqual(found.detail.missingHumanFields, [...HUMAN_PRESERVED_FIELD_IDS])
+}
+
+/**
+ * A hand-bound sheetId is LEGAL and must never be a blocker — the 222 window runbook prescribes
+ * editing objectId while keeping the existing sheetId, and every other consumer takes sheetId
+ * verbatim. It is reported as POSTURE so the slip is visible without being fatal.
+ */
+async function nonDerivedBindingIsPostureNeverABlocker() {
+  const handBound = 'sheet_a_hand_bound_id_from_an_earlier_object'
+  const { harness, env } = greenDeploymentWithAction(tableActionConfig({ sheetId: handBound }))
+  const res = await preflight(harness, { env })
+  assert.equal(res.body.data.ready, true, 'E1: a non-derived binding does not block a deployment')
+  assert.equal(res.body.data.checks.carryTargetBinding.sheetIdDerivedFromObjectId, false)
+  assert.equal(res.body.data.posture.carryTargetBinding.state, 'not_derived')
+  assert.equal(res.body.data.posture.carryTargetBinding.code, CARRY_TARGET_BINDING_NOT_DERIVED)
+  assert.equal(
+    res.body.data.blockers.some((entry) => String(entry.code).includes('BINDING_NOT_DERIVED')),
+    false,
+    'E1: ...and never appears as a blocker',
+  )
+
+  // The derived shape reports the other way.
+  const derived = greenDeploymentWithAction(tableActionConfig())
+  const derivedRes = await preflight(derived.harness, { env: derived.env })
+  assert.equal(derivedRes.body.data.checks.carryTargetBinding.sheetIdDerivedFromObjectId, true)
+  assert.equal(derivedRes.body.data.posture.carryTargetBinding.state, 'derived')
 }
 
 // ---------------------------------------------------------------------------
@@ -1055,6 +1172,8 @@ async function main() {
   envVarNamesMatchTheirOwners()
   await requestCannotSteerTheTarget()
   await pollutedAllowlistEnvIsWithheldNotEchoed()
+  await carryBindingChecksEveryHumanColumn()
+  await nonDerivedBindingIsPostureNeverABlocker()
   whatTemplatesCarryIdentifiersOnly()
   console.log('stock-preparation-preflight: OK')
 }
