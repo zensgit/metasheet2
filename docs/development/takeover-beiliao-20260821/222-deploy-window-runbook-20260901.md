@@ -53,11 +53,11 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
 
 `plm_stock_preparation_main`(canonical,"备料主表(正式·未启用)")今天为 0 行,**不是因为没人拉取过数据**。核实代码后确认:
 
-- 表动作的 `apply`/`mvp-persist` 写入路径(`stock-preparation-table-actions.cjs:assertStockPrepApplySandboxAllowed`)对 canonical objectId **无条件 403**(`STOCK_PREP_APPLY_SANDBOX_ONLY`,`reason: prod_canonical`)——这是**故意的 P0 门**,写在代码注释里:"apply is sandbox-only … **production apply is a separate owner gate**"。它只会把真实数据写进**沙箱/落地表**,从不写 canonical。
+- 表动作的 `apply` 写入路径(`stock-preparation-table-actions.cjs:assertStockPrepApplySandboxAllowed`)对 canonical objectId **无条件 403**(`STOCK_PREP_APPLY_SANDBOX_ONLY`,`reason: prod_canonical`)——这是**故意的 P0 门**,写在代码注释里:"apply is sandbox-only … **production apply is a separate owner gate**"。它只会把真实数据写进**沙箱表**,从不写 canonical。(`mvp-persist` 不走这道门,也不走 `apply` 那条写入——它写的是另一组固定的内部快照表,详见 §0.6 与 Step 6-2 的订正,这里先不展开,避免把两条路径混成一条。)
 - "生成"(`POST .../generation/run`)读的是沙箱落地快照,写的是**独立的**"备料行"表 `plm_stock_preparation_line` + 异常队列——代码里(`stock-preparation-generation-runtime.cjs`)从头到尾不引用 `plm_stock_preparation_main`。这条路径**结构上到不了 canonical**。
 - 唯一能写 canonical 的机制是 **FOS-4b-3-prod**:P1(策略契约,#3195)+ P2(受控生产运行时,#3199)**都早已在 main 上**,但 P2 commit 原文写明"canonical writable only under an explicit server-config policy authorized by **a future owner gate (P4)**""dormant by default"。P4 不是代码,是**当场的 owner 授权动作**——本仓库已有完整的、values-free 的执行程序:`docs/development/data-factory-fos-4b-3-prod-apply-runbook-20260625.md`。
 
-**结论**:Step 8 要看到 `plm_stock_preparation_main` 里有真实项目行,**必须在本窗口内执行一次 FOS-4b-3-prod 生产写入程序**(owner 现场授权 + 有时限的服务端策略 + 全新 dry-run token),这不是"顺带发生"的事,是 Step 7 里明确的一个子步骤。见 §7.2。
+**结论(2026-09-01 补充核实后已被 §0.6 的 D1 裁决取代,原结论保留仅作机制说明)**:Step 8 要看到 `plm_stock_preparation_main` 里有真实项目行,理论上必须在本窗口内执行一次 FOS-4b-3-prod 生产写入程序(owner 现场授权 + 有时限的服务端策略 + 全新 dry-run token),这不是"顺带发生"的事,是 Step 7 里明确的一个子步骤,机制见 §7.2。**但**核实"有时限的服务端策略"这句话具体怎么落地时发现:承接它的配置键 `context.config.stockPrepApplyProduction` 在 `packages/core-backend/src/plugin-runtime-config.ts` 里**没有任何加载器**(见 §0.6)——也就是说这个子步骤在今天的 `origin/main` 上**做不到**。owner 已就此裁决(D1=B,见 §0.6):本窗口的落地目标改为沙箱表,不是 canonical 主表;Step 8 的验收标准相应改写。
 
 ### 0.5 这次窗口实际交付的是什么(修正后的版本)
 
@@ -67,9 +67,29 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
 2. 纠正后的 DesignBom 读取拓扑(需要窗口前**审阅并合入** `feat/stock-prep-vendor-presets` 分支尖端,核对表名后);preset 目录本身已在 main;
 3. UI 选源(#5415,**已在 main**)——接入换 PLM 不再改 env 重启;
 4. 源就绪预检 + 拓扑自测(#5416,**需要窗口前合入**)——30 秒 go/no-go;
-5. 一次 owner 现场授权的、有时限有行数上限的生产写入(FOS-4b-3-prod P4),把第一个真实项目的行写进 canonical 主表。
+5. ~~一次 owner 现场授权的、有时限有行数上限的生产写入(FOS-4b-3-prod P4),把第一个真实项目的行写进 canonical 主表~~——**已被 §0.6 的 D1 裁决取代**:承接它的服务端配置键在今天的 `origin/main` 上无处可挂(见 §0.6),这一项本窗口**不执行**,标记「设计,未实现」。本窗口真正的第 5 项交付是:一次**沙箱 apply**(§7.2b,同一个 `apply` 写入网关,走的是早已实现、不需要 owner 授权仪式的沙箱分支),把第一个真实项目的行写进 Step 0-7 配置的沙箱表——不是 Step 6-2 的 `mvp-persist`(那一步写的是另一组内部快照/待确认表,结构上不经过 `action.target`,详见 §0.6 与 Step 6-2 的订正)。
 
-第 5 项不是"代码升级自动带来的",是 Step 7 里**当场做的一个决定 + 一个操作**。本文把它排进流程,而不是假装它会自动发生。
+第 5 项不是"代码升级自动带来的",是 Step 0 里**当场做的一次配置决定**(见 §0.6 与 Step 0-7),不是运行时开关。
+
+### 0.6 D1 裁决(owner,2026-09-01):本窗口的备料落地表是沙箱表,不是 canonical 主表
+
+**这是本窗口成立与否的配置前提,必须在 Step 0 完成,晚于 Step 6 才发现就是返工。**
+
+- **裁决内容(D1 = 选项 B)**:222 演示窗口(以及第一个现场窗口)期间,备料线的落地 worksheet 是 `plm_stock_preparation_sandbox*` 命名空间下的一张沙箱表,**不是** `plm_stock_preparation_main`(canonical)。真正把行写进这张表的是 §7.2b(沙箱 apply),Step 8 验收的也是它——Step 6 本身不写这张表(6-1 是只读 dry-run,6-2 的 `mvp-persist` 写的是另一组固定内部快照表,不受这条裁决影响,见下面"哪些路径真的读这份绑定"一条)。
+- **为什么只能是这样,不是"选择"是"事实"**:`plugins/plugin-integration-core/lib/stock-preparation-table-actions.cjs` 的 `assertStockPrepApplySandboxAllowed`(约 1513-1529 行)对 `apply`/`mvp-persist` 走的沙箱路径**无条件**拒绝 canonical objectId(`STOCK_PREP_APPLY_SANDBOX_ONLY`,`reason: prod_canonical`,1517-1520 行),只有满足以下两条,写入才会落到某个**非 canonical**目标:
+  - `STOCK_PREP_SANDBOX_MODE=true`(`resolveStockPrepApplySandboxPolicy`,同文件 1534-1548 行,读 `env.STOCK_PREP_SANDBOX_MODE === 'true'`);
+  - `STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS=<逗号分隔的允许清单>`(同一函数,1541 行,把它拆分成 `allowedTargetObjectIds`)。
+- **生产写入(唯一能碰 canonical 的路径)今天在真实部署里打不开**:P2 的 `resolveStockPrepApplyProductionPolicy`(同文件 1550-1559 行)只认服务端配置 `config.stockPrepApplyProduction`,**故意不设 env 开关**(注释原文:"There is deliberately no env switch: production must require explicit server config, never an environment variable")。而承接 `context.config` 的**唯一**函数——`packages/core-backend/src/plugin-runtime-config.ts` 的 `resolvePluginRuntimeConfig`(98-169 行,`packages/core-backend/src/index.ts:2882` 是它唯一的调用点,`config: resolvePluginRuntimeConfig(manifest.name)`)——**没有任何一行读取或转发 `stockPrepApplyProduction` 这个键**(通读 98-169 行,只有 `tableActions`/`stockPreparationTableActions`/`stockPreparationCustomerPacks`/`stockPreparationExtFieldMapping`/`b2aTrialRegistry`/`c6TestFailureInjection` 六个键)。也就是说,`data-factory-fos-4b-3-prod-apply-runbook-20260625.md` §3 那句"按该文档 §3 原样配置到 `context.config.stockPrepApplyProduction`"在今天的 `origin/main` 上**没有任何代码路径可以执行**——这个键没有加载器,配置了也到不了 `context.config`。**这不是本窗口的操作失误,是这个功能本身"设计,未实现"**:策略契约(P1,#3195)和受控运行时(P2,#3199)都已在 main 上且工作正常,缺的是把一份服务端配置文件读进 `context.config` 的那一小段代码(P4 file loader,跟踪为后续工作项,不在本窗口范围)。
+  - **不要把这件事和"env 开关"混淆**:P2 comment 明确写了"故意不给 env 开关",所以就算给 `STOCK_PREP_APPLY_PRODUCTION_JSON`(或类似名字)之类的 env 变量赋值也不会生效——`resolveStockPrepApplyProductionPolicy` 根本不读 env,而 `resolvePluginRuntimeConfig` 也没有为它生成任何 `context.config` 键。唯一的修复是给 `plugin-runtime-config.ts` 加一个新的 `readDeployJsonObjectFile` 调用(仿照 `stockPreparationCustomerPacks`/`stockPreparationExtFieldMapping` 已有的模式),这是 P4 loader 的实现工作,**未开始**。
+- **本窗口的配置**(D1=B 的机械部分,详细步骤见 Step 0-7):
+  1. `STOCK_PREP_SANDBOX_MODE=true`
+  2. `STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS=<本窗口沙箱 objectId>`(必须匹配下面的 action 绑定,且落在 `plm_stock_preparation_sandbox` 命名空间——`stock-preparation-target-provisioning.cjs` 的 `SANDBOX_OBJECT_ID_NAMESPACE_PATTERN`,82 行:`/^plm_stock_preparation_sandbox(?:$|[_-])/`,由 `assertSandboxObjectId`,102 行强制)
+  3. action 绑定:`INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON`(或等价的 `INTEGRATION_CORE_TABLE_ACTIONS_JSON`)里,`plm.stock-preparation.pull-bom.v1` 这条 action 的 `target.objectId` 必须**显式**写成同一个沙箱 objectId——留空/不写时 `normalizeTarget` 会默认成 canonical(`stock-preparation-table-actions.cjs:147-157`,`objectId: optionalString(input.objectId) || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId`,canonical 字面量 `plm_stock_preparation_main` 定义在 `stock-preparation-templates.cjs:652`)。这个 JSON 由 `resolvePluginRuntimeConfig` 读入 `context.config.stockPreparationTableActions`,再由 `http-routes.cjs:3082-3096` 的 `configuredTableActions` 喂给 `createStockPreparationTableActionRegistry({ actions: ... })`——纯部署时配置,不需要改代码。
+  4. 若这次窗口装了 customer pack:pack 的 `targetObjectId` 也要指向**同一个**沙箱 objectId——`stock-preparation-customer-pack.cjs` 的 `normalizePackTargetObjectId`(269-285 行)本来就只允许 `plm_stock_preparation_sandbox*` 命名空间(通过 `stock-preparation-target-provisioning.cjs` 的 `assertSandboxObjectId`),这条路径**已经**只认沙箱,不需要为 D1=B 额外改。
+- **代价,说清楚,不夸大**:D1=B 唯一的成本是 objectId 的名字里带着"sandbox"字样,以及 `STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS` 这份 env 允许清单本身**没有过期机制**——写进 env 之后不会自动失效,需要人工在窗口结束后清理(不像 P4 生产策略那样有 `expiresAt` 强制)。
+- **对下游步骤的影响**:export(`stockPreparationPrepLineExport`)、pack 安装、"pull all" 都跟着这条 action 绑定的目标走,**不需要**为 D1=B 单独改代码或改这几条路径的调用方式——它们本来就读 action 里配置的 `target`,只是这次那个 `target` 是沙箱 objectId 而不是 canonical。
+- **哪些路径真的读这份 action 绑定,哪些不读——不要混为一谈**:上面这条 export/pack/pull-all 都跟着走的"target",具体说是 `/apply`(`tableActionApply`,`http-routes.cjs:5077-5134`)和大 BOM 的 apply-start 路径调用的 `assertStockPrepApplyAllowed`/`assertStockPrepApplySandboxAllowed`,把行写进 `action.target.objectId` 那张表——这是这份绑定唯一控制的写入。**`mvp-persist`(Step 6-2)不读这份绑定**:它调用的 `prepareStockPreparationMvpSnapshot` 明确写着"this handoff never writes the canonical sheet"(`stock-preparation-table-actions.cjs:1460` 注释),写入的是固定的 MetaSheet 内部快照表(`plm_stock_preparation_project` / `_bom_snapshot_batch` / `_bom_snapshot_line`),跟 `action.target` 无关,不因这份绑定改变。两条路径不是同一件事:`mvp-persist` 是"把这次拉取的内容存一份快照供确认",`/apply` 才是"把确认后的行真正写进目标表"——本窗口新增的落地写入是后者,见 §7.2b。
+- **对 Step 7/Step 8 的影响**:见下方 Step 7 顶部的裁决说明、新增的 §7.2b(沙箱 apply,本窗口真正执行的写入)与 Step 8 的改写。
 
 ---
 
@@ -112,9 +132,27 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
   再跑一次五项检查器:`scripts/ops/multitable-onprem-package-verify.sh <PACKAGE_NAME>.zip`。
 - 失败处理:`multitable-onprem-package-verify.sh` 任一检查失败,按它给出的原因修,不要跳过检查直接上机器——真正的 F22 网(逐文件哈希比对)会在 Step 2 的升级脚本里再兜底一次,但这里的粗筛能省一次上机器才发现的往返。
 
-**0-6. owner 预先起草(不是签发)本窗口的生产写入授权记录**
-- 动作:owner 按 `data-factory-fos-4b-3-prod-apply-runbook-20260625.md` §2 的模板,先把这次授权要填的字段过一遍脑子(项目 `230920006`、action `plm.stock-preparation.pull-bom.v1`、route 建议先定 `both`——143 个 BOM 头/1319 行明细的规模不确定是否触发大 BOM 异步路径,`both` 免得现场纠结、`maxCleanRows` 留到 Step 7 拿到真实 dry-run 计划数字后再定、`expiresWithin` ≤ 7 天)。
-- 这一步不产生任何配置改动,纯粹是让 owner 到场时不用现读一遍陌生文档。
+**0-6. owner 预先了解(不是本窗口要执行的操作)FOS-4b-3-prod 生产写入的授权模板**
+- 背景(见 §0.6 D1 裁决):承接生产写入策略的配置键 `context.config.stockPrepApplyProduction` 在今天的 `plugin-runtime-config.ts` 上**没有加载器**,本窗口**不执行**这条路径,标记「设计,未实现」——本条从"预先起草授权记录"降级为"owner 预先读一遍模板,心里有数即可",不产生任何本窗口的配置改动。
+- 动作(可选,不阻塞窗口):owner 按 `data-factory-fos-4b-3-prod-apply-runbook-20260625.md` §2 的模板过一遍眼,了解字段形状(项目 `230920006`、action `plm.stock-preparation.pull-bom.v1`、route、`maxCleanRows`、`expiresWithin` ≤ 7 天),为**未来**(P4 file loader 落地之后的某个窗口)做准备,不是这次窗口的交付物。
+
+**0-7. 配置沙箱落地目标(D1=B 裁决的机械部分,必须在窗口前、在开发机上完成)**
+- 背景:见 §0.6。本窗口的备料落地表是沙箱表,由三个部署时配置项共同决定,**都不需要改代码**。
+- 动作:
+  1. 打包前把下面两个 env 键写进部署包的 `docker\app.env`(或该部署既有的 env 配置文件):
+     ```
+     STOCK_PREP_SANDBOX_MODE=true
+     STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS=<本窗口沙箱 objectId,例如 plm_stock_preparation_sandbox_222>
+     ```
+     （objectId 必须匹配 `plugins/plugin-integration-core/lib/stock-preparation-target-provisioning.cjs:82` 的 `SANDBOX_OBJECT_ID_NAMESPACE_PATTERN`——`plm_stock_preparation_sandbox` 开头,后面接 `_`/`-` 或结尾。)
+  2. 在 `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON`(部署既有的 action 配置,通常也在 `docker\app.env` 或它指向的文件里)中,给 `plm.stock-preparation.pull-bom.v1` 这条 action 显式写上同一个 objectId:
+     ```json
+     { "plm.stock-preparation.pull-bom.v1": { "target": { "objectId": "<同上 STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS 里那个值>", "sheetId": "<既有 sheetId,不变>" } } }
+     ```
+     不写 `target.objectId`(或写错)会默认成 canonical(`stock-preparation-table-actions.cjs:147-157`),导致 Step 6-2 在 `assertStockPrepApplySandboxAllowed` 那一步被无条件拒绝(`reason: prod_canonical`)。
+  3. 若这次窗口装了 customer pack,确认 pack 配置(`INTEGRATION_CORE_STOCK_PREPARATION_CUSTOMER_PACKS_PATH` 指向的文件)里的 `targetObjectId` 是**同一个**沙箱 objectId——这条本来就只允许沙箱命名空间(`stock-preparation-customer-pack.cjs:269-285` 的 `normalizePackTargetObjectId`),不需要为 D1=B 额外改,只需要核对三处(env 允许清单、action 绑定、pack 目标)用的是同一个字符串,不是三个不同的沙箱 objectId。
+- 验证:三处配置里的沙箱 objectId 字符串完全一致(diff 一下三份配置文件里的这个值,不要靠肉眼扫);Step 3-3 部署预检不再报 `STOCK_PREP_SANDBOX_MODE_NOT_ENABLED` / `STOCK_PREP_SANDBOX_ALLOWLIST_MISSING_TARGET`。
+- 失败处理:三处不一致 → 以 action 绑定里的 `target.objectId` 为准改另外两处(action 绑定是唯一决定"apply 写到哪"的配置,allowlist 和 pack 目标都要跟着它,不是反过来)。
 
 ---
 
@@ -290,28 +328,40 @@ POST /api/integration/stock-preparation/source-binding
 POST /api/integration/table-actions/plm.stock-preparation.pull-bom.v1/dry-run
 { "parameters": { "projectNo": "230920006" } }
 ```
-**验证**:`status=expanded`,`rowsExpanded` 是真实数量级(现场诊断记录约 1319 行明细 / 143 个 BOM 头量级),**不是 0**;样本行的图号(`IdentityNo`)/名称/材料/数量(`Bom_ExAttr` 族第 1 槽)都是真实值,不是占位符或 GUID。记下 `dryRunToken`。
+**验证(已核对响应实际形状,`status=expanded` 是之前版本的笔误——顶层 `status` 从来没有 `expanded` 这个值,见下)**:
 
-**失败处理**:`rowsExpanded=0` → 回到 Step 4,源预检的 `topology`/`quantityField` 一定有问题,**不要在这一步现场排查**,先重新跑预检。`status=not_found` → 项目号打错,或 `DN_PDM_PathExAttrInfo.FileCode`(`NodeType=2`)那条锚定链路没配对,核对 §0 的字段映射。
+顶层响应有两个不同层级的"状态",不要混为一谈(`plugins/plugin-integration-core/lib/stock-preparation-table-actions.cjs` `dryRunStatus`,1288-1293 行;`evidenceForDryRun`,1261-1280 行):
+- 顶层 `status`(`dryRunStatus()` 算出来的,词表就这五个):`not_found` | `large_bom_bounded` | `ready` | `manual_confirm_required` | `failed`。**没有 `expanded`**。这次是首次拉取、Step 7.1 的确认还没做,预期落在 `ready`(计划完全干净)或 `manual_confirm_required`(有行需要人工确认,这是**正常**的,Step 7.1 会处理)——两者都意味着 `canApply: true`、`dryRunToken` 非空;只有 `not_found` / `failed` / `large_bom_bounded` 才是问题。
+- 嵌套的 `evidence.expansion.status`(`stock-preparation-bom-expansion.cjs:977` 赋值,`summarizeBomExpansionForEvidence`,同文件 1002 行投影到 evidence):这一层的取值是 `expanded` | `not_found` | `failed`——**`expanded` 这个词只出现在这里**,不是顶层 `status`。真正要看的行数在 `evidence.expansion.rowsExpanded`(不是顶层 `rowsExpanded`——顶层没有这个字段),是真实数量级(现场诊断记录约 1319 行明细 / 143 个 BOM 头量级),**不是 0**。
+
+样本行的图号(`IdentityNo`)/名称/材料/数量(`Bom_ExAttr` 族第 1 槽)都是真实值,不是占位符或 GUID。记下顶层的 `dryRunToken`(仅在 `canApply: true` 时非空)。
+
+**失败处理**:`evidence.expansion.rowsExpanded=0` → 回到 Step 4,源预检的 `topology`/`quantityField` 一定有问题,**不要在这一步现场排查**,先重新跑预检。顶层 `status=not_found` → 项目号打错,或 `DN_PDM_PathExAttrInfo.FileCode`(`NodeType=2`)那条锚定链路没配对,核对 §0 的字段映射。顶层 `status=failed` → 看 `evidence.expansion.errorTypes`/`rowErrors`,不是重跑就能过。
 
 **6-2. mvp-persist(把这次拉取落成一个真实快照批次)**
+
+**这次请求体之前的版本写成了带 `confirm`/`dryRunToken` 的形式,是错的——已核对 `mvp-persist` 路由自己的字段白名单并订正。** `mvp-persist` 不是 `apply`:它在服务端**重新跑一遍**只读的 table-action 计划(见路由注释:"Re-run the approved readonly table action and commit its expansion directly into the MetaSheet-internal MVP snapshot tables"),不消费 dry-run token,所以请求体**只**接受 `parameters`:
+
 ```
 POST /api/integration/table-actions/plm.stock-preparation.pull-bom.v1/mvp-persist
-{ "parameters": { "projectNo": "230920006" }, "confirm": { "dryRunToken": "<上一步的 token>" } }
+{ "parameters": { "projectNo": "230920006" } }
 ```
-(`token` 放在 `confirm.dryRunToken`,放顶层会 400——这是既有教训,见 `onsite-connection-test-runbook-20260901.md` §3。)
 
-**验证**:响应给出真实的 `snapshotBatchId`;这一步写入的是**沙箱落地对象**(不是 canonical——见 §0.4,`apply`/`mvp-persist` 结构上到不了 canonical),打开工作台确认落地表里出现了项目 `230920006` 的真实行。
+字段白名单在 `plugins/plugin-integration-core/lib/http-routes.cjs:1137`:`VALID_TABLE_ACTION_MVP_PERSIST_BODY_KEYS = new Set(['parameters'])`,由该路由(`tableActionMvpPersist`,同文件 4974 行)的 `normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_MVP_PERSIST_BODY_KEYS)` 校验;多出的 `confirm` 键会命中 `normalizeTableActionBody` 里"unsupported request field"的分支(同文件约 1458-1464 行),400 `TABLE_ACTION_REQUEST_INVALID`。`confirm`(带 `dryRunToken`)只是**另一个**路由——`/apply`——的字段(`VALID_TABLE_ACTION_APPLY_BODY_KEYS = new Set(['parameters', 'confirm'])`,同文件 1138 行,路由在 5079 行),`mvp-persist` 和 `apply` 是两条不同的写路径,字段形状不能混用。(`onsite-connection-test-runbook-20260901.md` §3 那条"token 放 `confirm.dryRunToken`,放顶层会 400"的教训说的是 `/apply` 路由,不是这里的 `mvp-persist`——两条路由都不接受顶层 `dryRunToken`,但 `mvp-persist` 连 `confirm` 这个外层键都不接受。)
 
-**失败处理**:409 `TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH` → dry-run 和 apply 的 body 配置不一致(比如中间有人改了读取计划),重新走一次 dry-run 拿新 token。
+**验证**:响应给出真实的 `snapshotBatchId`;**这一步写入的不是 Step 0-7 配置的那张沙箱主表**,而是 MetaSheet 内部固定的快照表(`plm_stock_preparation_project` / `_bom_snapshot_batch` / `_bom_snapshot_line`,`stock-preparation-sync-run-persist.cjs` 头注释称为"the frozen 9-table set"),不经过 `action.target`,不因 Step 0-7 的 action 绑定改变落点(见 §0.6)。打开工作台确认这批快照里出现了项目 `230920006` 的真实行。真正把行写进 Step 0-7 配置的沙箱表,是 §7.2b 的 `/apply` 调用,不是这一步。
+
+**失败处理**:400 `TABLE_ACTION_REQUEST_INVALID`(`unsupported request field: confirm` 或类似)→ body 里多带了 `confirm`/`dryRunToken`,去掉,只留 `parameters`。
 
 ---
 
-## Step 7 — 确认 → 生产写入正式主表(owner 现场授权的一次动作)
+## Step 7 — 确认 → 写入本窗口的落地表(§7.2b;生产写正式主表见 §7.2,本窗口不执行)
+
+> **D1=B 裁决执行到这里的具体后果(详见 §0.6)**:§7.2 描述的 FOS-4b-3-prod 生产写入,承接它的配置键 `context.config.stockPrepApplyProduction` 在今天的 `origin/main` 上**没有加载器**(`packages/core-backend/src/plugin-runtime-config.ts` 的 `resolvePluginRuntimeConfig`,98-169 行,通读全函数没有这个键),**本窗口不执行 §7.2**,标记「设计,未实现」——保留下面的描述只是为了记录这条路径的真实机制,给未来 P4 loader 落地之后的窗口用。**本窗口实际执行、且今天就能跑通的写入是 §7.2b(沙箱 apply)**,用的是同一个 `apply` 网关,走的是早已实现、不需要 owner 现场授权仪式的沙箱分支(`assertStockPrepApplySandboxAllowed`)。Step 8 的验收标准相应地看 §7.2b 的落地表,不是 canonical 主表。
 
 ### 7.1 把批次里的 `MANUAL_CONFIRM` 清到 0
 
-计划级门槛是"批次内 `MANUAL_CONFIRM` 计数必须为 0"才能进入下一步的生产 apply(FOS-4b-3-prod 的 stop rule 之一:"manual_confirm rows present? they MUST stay held"——留着不写,不是不管)。
+计划级门槛是"批次内 `MANUAL_CONFIRM` 计数必须为 0"才能进入下一步的 apply——**不论是本窗口的沙箱 apply(§7.2b)还是未来窗口的生产 apply(§7.2)**,两者共享同一段服务端强制(`stock-preparation-table-actions.cjs:1673`:`dryRun.plan.counts[DECISIONS.MANUAL_CONFIRM] > 0 && input.acceptManualConfirmHold !== true` → 409),这条门槛不因 D1=B 的裁决而放松(FOS-4b-3-prod 的 stop rule 原话是"manual_confirm rows present? they MUST stay held"——留着不写,不是不管)。
 
 ```
 GET  /api/integration/stock-preparation/confirmation-decisions
@@ -322,10 +372,12 @@ POST /api/integration/stock-preparation/confirmation-decisions/confirm
 
 **验证**:再跑一次 Step 6-1 的 dry-run(同一批),`counts[MANUAL_CONFIRM] === 0`(或明确记下还剩多少行held,决定是否推迟这批到客户确认之后)。
 
-### 7.2 生产写入(FOS-4b-3-prod,owner 现场授权,当场执行,执行完立刻关闭)
+### 7.2 生产写入正式主表(FOS-4b-3-prod,owner 现场授权,当场执行,执行完立刻关闭)——**「设计,未实现」,本窗口不执行,见 §0.6**
 
-**这是把数据真正写进 `plm_stock_preparation_main` 的唯一代码路径。** 完整程序见
-`docs/development/data-factory-fos-4b-3-prod-apply-runbook-20260625.md`——**本文引用它,不重复它的全部细节**,这里只列本窗口要执行的顺序:
+> **先说清楚为什么不执行,再往下看机制**:下面第 2 步"服务端配置……按该文档 §3 原样配置到 `context.config.stockPrepApplyProduction`"这句话,在今天的 `origin/main` 上**没有任何代码会把这份配置读进 `context.config`**——`packages/core-backend/src/index.ts:2882` 是插件激活时唯一给 `context.config` 赋值的地方(`config: resolvePluginRuntimeConfig(manifest.name)`),而 `resolvePluginRuntimeConfig`(`packages/core-backend/src/plugin-runtime-config.ts:98-169`)通读全函数,只组装 `tableActions`/`stockPreparationTableActions`/`stockPreparationCustomerPacks`/`stockPreparationExtFieldMapping`/`b2aTrialRegistry`/`c6TestFailureInjection` 六个键,**没有 `stockPrepApplyProduction`**。策略契约(P1,#3195)和受控运行时本身(P2,#3199,`resolveStockPrepApplyProductionPolicy`,`stock-preparation-table-actions.cjs:1550-1559`,故意不给 env 开关)都已在 main 上且工作正常——缺的只是把一份服务端配置文件读进 `context.config` 这一小段代码(P4 file loader,后续工作项,未开始)。**结论:canonical 主表 `plm_stock_preparation_main` 不是本窗口的落地目标**,以下第 1-6 步是这条路径的真实机制(留作未来窗口参考),本窗口不执行,不要现场尝试"变通"配置这个键(没有变通,是加载器缺失,不是配置写错地方)。
+
+**这是把数据真正写进 `plm_stock_preparation_main` 的唯一代码路径(结构上不受 D1=B 影响,只是今天在真实部署里打不开)。** 完整程序见
+`docs/development/data-factory-fos-4b-3-prod-apply-runbook-20260625.md`——**本文引用它,不重复它的全部细节**,这里只列(未来窗口)要执行的顺序:
 
 1. **owner 当场记录授权**(values-free 模板,§2 of that doc):
    ```
@@ -340,13 +392,40 @@ POST /api/integration/stock-preparation/confirmation-decisions/confirm
    k3SaveAuthorized=false  k3SubmitAuthorized=false  k3AuditAuthorized=false  k3BomWriteAuthorized=false
    externalWriteAuthorized=false
    ```
-2. **服务端配置**(不是请求参数,不是 env——按该文档 §3 原样配置到 `context.config.stockPrepApplyProduction`,`authorizedTargetObjectId` 必须是 `plm_stock_preparation_main`,`requireFreshDryRun: true`)。
+2. **服务端配置**(不是请求参数,不是 env——按该文档 §3 原样配置到 `context.config.stockPrepApplyProduction`,`authorizedTargetObjectId` 必须是 `plm_stock_preparation_main`,`requireFreshDryRun: true`)。**⚠ 本窗口这一步做不到——见本节顶部的说明,`plugin-runtime-config.ts` 没有为这个键写加载器。**
 3. **验证门确实生效**:非匹配的 apply(错 route/action/target)仍然被拒(`STOCK_PREP_PRODUCTION_APPLY_DENIED`);去掉配置后 canonical 恢复"拒",证明"开关"是真开关。
 4. **全新 dry-run**(不能用 Step 6 的旧 token——`requireFreshDryRun` 会拒绝陈旧/沙箱 token):对项目 `230920006` 重新 dry-run 一次,确认 `cleanCount(add+update) <= maxCleanRows`,`manual_confirm` 行数 = 0(或明确等于本次授权范围之外、保持 held 的那部分)。
 5. **Apply**(带全新 token,走 §7.2-1 授权的 route):`canonicalWriteExecuted` 只应在这个策略下发生;`manualConfirmRowsWritten` 必须是 `0`;`failed` 应为 `0`。
 6. **立刻退出**:执行完成后,移除 `context.config.stockPrepApplyProduction`(或让它过期)——P2 恢复休眠,canonical 恢复默认拒绝。**不要把这个策略留在配置里过夜。**
 
 **失败处理**:任一 stop rule 触发(策略缺失/过期/不匹配、token 陈旧、`cleanCount > maxCleanRows`、`manualConfirmRowsWritten > 0`、任何 K3/外部写发生)→ **立即停止**,不要重试性地放宽授权范围,回到 owner 重新评估。这条路径本身设计为**默认拒绝、explicit 才开**,失败时的正确反应是"这次先不写",不是"调大 maxCleanRows 再试一次"。
+
+### 7.2b 本窗口实际执行的写入:沙箱 apply(D1=B 的落地动作)
+
+**这才是本窗口 Step 8 要验收的写入。** 用的是和 §7.2 同一个 `apply` 网关(`assertStockPrepApplyAllowed`,`stock-preparation-table-actions.cjs:1568-1589`),但因为没有配置生产策略(§7.2 做不到,见上),网关自动落到沙箱分支(`assertStockPrepApplySandboxAllowed`,同文件 1513-1529 行)——这条分支早已实现、早已在 main 上,不需要 owner 现场授权仪式,配置只是 Step 0-7 已经做好的三项 env/action 绑定。
+
+**动作**:
+1. 需要这批数据**最新**一次 dry-run 的 `dryRunToken`(`canApply: true`)——如果 Step 7.1 确认过 `MANUAL_CONFIRM` 行,内容变了,要在确认后重新跑一次 Step 6-1,拿新 token,否则下一步会 409 `TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH`。
+2. ```
+   POST /api/integration/table-actions/plm.stock-preparation.pull-bom.v1/apply
+   {
+     "parameters": { "projectNo": "230920006" },
+     "confirm": {
+       "dryRunToken": "<Step 6-1/7.1 之后最新一次 dry-run 的 token>",
+       "acceptManualConfirmHold": true
+     }
+   }
+   ```
+   （请求体的字段白名单是 `parameters`/`confirm`,`VALID_TABLE_ACTION_APPLY_BODY_KEYS`,`http-routes.cjs:1138`,路由在同文件 5077-5134 行——和 Step 6-2 的 `mvp-persist` 不是同一条白名单,不要把两条路由的 body 形状搞混,见 Step 6-2 的订正说明。`acceptManualConfirmHold: true` 在这批仍有行留在 `manual_hold` 时是必须的(`stock-preparation-table-actions.cjs:1673`);若这批同时存在被解决的重复 key 分组,还要传 `acceptDuplicateResolution: true`,否则 409 `TABLE_ACTION_DUPLICATE_RESOLUTION_REVIEW_REQUIRED`。）
+
+**验证**:响应体顶层 `status` 与 `apply.status`(`summarizeApplyResultForEvidence`,`stock-preparation-apply-writer.cjs:614-627`;取值词表见 `applyStatus`,同文件 501-505 行:`succeeded` | `partial` | `failed` | `held`)应为 `succeeded`(若这批仍有 held 行,预期是 `partial`,不是失败);`apply.written > 0`;`apply.target.objectId` 等于 Step 0-7 配置的沙箱 objectId(用它确认真的写进了预期的那张表,不是别的表——`apply.target` 是写入函数原样回显的目标,同文件 602-606 行);`apply.counts` 里 `created`/`updated` 之和的量级与 dry-run 的 clean 计数(`ADD`+`UPDATE`)一致。打开工作台确认这张沙箱表里出现了项目 `230920006` 的真实行。
+
+**失败处理**:
+- 403 `STOCK_PREP_APPLY_SANDBOX_ONLY`,`reason: prod_canonical` → Step 0-7 的 action 绑定没生效,`target.objectId` 还是默认的 canonical(`normalizeTarget` 的默认值,`stock-preparation-table-actions.cjs:147-157`),回去核对 action 配置里的 `target.objectId` 是不是真的写了沙箱 objectId。
+- 403 同错误码,`reason: sandbox_disabled` → env 里没读到 `STOCK_PREP_SANDBOX_MODE=true`,检查这个 env 是否真的加载进了这个 pm2 进程(是否 `pm2 restart --update-env` 过)。
+- 403 同错误码,`reason: target_not_allowlisted` → `STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS` 里没有这个 objectId,或者三处配置(env 允许清单 / action 绑定 / pack 目标)用的沙箱 objectId 字符串不一致,回 Step 0-7 核对。
+- 409 `TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH` → token 过期或这批内容在 dry-run 之后又变了(比如刚做完 Step 7.1 的确认),回 Step 6-1 重新 dry-run 拿新 token。
+- 409 `TABLE_ACTION_MANUAL_CONFIRM_REQUIRED` → 没传 `acceptManualConfirmHold: true` 且这批仍有 `MANUAL_CONFIRM` 行,补上这个字段,或者先完成 Step 7.1 把它们清到 0。
 
 ### 7.3(可选,若这次窗口还要产出 ERP 对接用的备料行)
 
@@ -356,28 +435,31 @@ POST /api/integration/stock-preparation/material-mappings/confirm
 POST /api/integration/stock-preparation/unit-conversions/confirm
 POST /api/integration/stock-preparation/generation/run   { "projectId": ..., "snapshotBatchId": "<Step 6-2 的批次>" }
 ```
-这条路径写的是**独立的**"备料行"表 `plm_stock_preparation_line` + 异常队列,供 ERP 对接消费——**不是**写 canonical 主表的路径(见 §0.4),两条路径互不替代。本窗口的核心验收标准(Step 8)只要求 §7.2 完成。
+这条路径写的是**独立的**"备料行"表 `plm_stock_preparation_line` + 异常队列,供 ERP 对接消费——**不是**写沙箱/canonical 主表的路径(见 §0.4),三条路径(§7.2b 的沙箱 apply、§7.2 的生产 apply、§7.3 的 ERP 生成)互不替代。本窗口的核心验收标准(Step 8)只要求 §7.2b 完成;§7.2 本窗口不执行(见上)。
 
 ---
 
-## Step 8 — 验证收获(整个窗口的成功标准)
+## Step 8 — 验证收获(整个窗口的成功标准;D1=B 之后看沙箱表,不是 canonical 主表)
 
-**动作**:打开工作台里的"备料主表(正式·未启用)"(`plm_stock_preparation_main`),或:
+> **本节已按 §0.6 的 D1 裁决改写**:原文本节要求打开 `plm_stock_preparation_main`(canonical),这个要求今天在真实部署里无法达成(§7.2 做不到,见上)。本窗口的验收目标改为 Step 0-7 配置、§7.2b 实际写入的那张沙箱表(`plm_stock_preparation_sandbox*` 命名空间下的具体 objectId,窗口前在 Step 0-7 定下来的那一个)。
+
+**动作**:打开工作台里 Step 0-7 配置的那张沙箱落地表,或:
 ```
-GET /api/multitable/... (该 sheet 的记录列表)
+GET /api/multitable/... (该 sheet 的记录列表,sheetId 取自 Step 0-7 action 绑定里的 target.sheetId)
 ```
 
 **验证(具体检查)**
-1. **行数**:项目 `230920006` 对应的行数 > 0,量级接近 Step 7.2 步骤 5 里 apply 返回的 `cleanDecisionCountsWritten`。
+1. **行数**:项目 `230920006` 对应的行数 > 0,量级接近 §7.2b 那次 `apply` 响应里 `apply.written`(或 `apply.counts` 的 `created`+`updated`)。
 2. **抽样一行**,确认四个字段都是真实值而非占位符:
    - 项目号:`230920006`
    - 图号:来自 `IdentityNo`
    - 材料:非空、非 GUID
    - 数量:来自 `Bom_ExAttr` 族第 1 槽,数字合理(不是 0、不是 NULL 转出来的怪值)
+3. **canonical 主表 `plm_stock_preparation_main` 本窗口保持原状(升级前是什么行数,现在还是什么行数)**——这是**预期状态**,不是故障:generation runtime(§7.3)、apply 的沙箱分支(§7.2b)都结构上到不了它(见 §0.4),production apply(§7.2)本窗口没有加载器可用、不执行。
 
-**这就是整个窗口的成功标准。** 达成即表示:源已切到客户真实 PLM(Step 5)、真实 BOM 已过预检(Step 4)、真实数据已落地(Step 6)、经人工确认 + owner 授权的生产写入已执行(Step 7),canonical 表第一次装着一个真实项目的真实数据。
+**这就是整个窗口的成功标准。** 达成即表示:源已切到客户真实 PLM(Step 5)、真实 BOM 已过预检(Step 4)、真实数据已落地(Step 6)、经人工确认(Step 7.1)+ 沙箱 apply 已执行(§7.2b),Step 0-7 配置的沙箱表第一次装着一个真实项目的真实数据。canonical 主表第一次装真实数据,推迟到 P4 file loader(§0.6)落地之后的未来窗口。
 
-**失败处理**:行数为 0 或抽样值看着像占位符 → 回查 Step 7.2 步骤 5 的响应,`canonicalWriteExecuted` 是否真的发生;若发生但行数对不上,检查是不是 Step 7.1 把大部分行留在了 `manual_hold`(那是**正确行为**,不是故障——held 的行本该不写)。
+**失败处理**:行数为 0 或抽样值看着像占位符 → 回查 §7.2b 那次 `apply` 响应,`apply.status`(应为 `succeeded`/`partial`)与 `apply.target.objectId`(应等于 Step 0-7 配置的沙箱 objectId,不是别的表)是否对得上;若响应正常但行数对不上,检查是不是 Step 7.1 把大部分行留在了 `manual_hold`(那是**正确行为**,不是故障——held 的行本该不写,`apply.status` 这时预期是 `partial`)。
 
 ---
 
@@ -395,8 +477,9 @@ GET /api/multitable/... (该 sheet 的记录列表)
 | Step 4 源预检 `no_project_numbers` / `no_bom_rows` | 绑的源还是旧的合成源,或客户源确实是空的 | 先确认 Step 5 的选源真的生效(`GET source-binding` 读到新值);再用 `onsite-connection-test-runbook-20260901.md` §2 的 SQL 亲自体检一遍 |
 | Step 5 选源后预检没变 | 表动作在插件激活时缓存了旧配置,选源的"免重启"没生效 | 确认响应体确实是 `takesEffectWithoutRestart: true`;若为 false 或选源接口本身报错,按错误码处理,不要假设它一定生效就跳过复核 |
 | Step 6 dry-run 返回 0 行但预检是 `go` | 项目号打错,或 `FileCode`/`NodeType=2` 锚定字段没配对 | 核对 §0 给出的字段映射表,尤其项目号锚定那一段 |
-| Step 7.2 生产写入被拒(任一 stop rule) | 见 §7.2 失败处理 | 不放宽授权重试,回到 owner 重新评估这批数据是否真的"clean" |
-| Step 8 行数为 0 但 apply 显示成功 | 所有行都进了 `manual_hold` 被正确地没写 | 检查 Step 7.1 是否把太多行留在了 hold;这不是故障,是数据本身歧义多,需要客户先确认映射 |
+| §7.2b 沙箱 apply 被拒(403 `STOCK_PREP_APPLY_SANDBOX_ONLY`) | Step 0-7 的三项配置(env 允许清单 / action 绑定 / pack 目标)没生效或不一致 | 见 §7.2b 失败处理,按 `reason` 分支查(`prod_canonical`/`sandbox_disabled`/`target_not_allowlisted`) |
+| （未来窗口)Step 7.2 生产写入被拒(任一 stop rule) | 见 §7.2 失败处理 | 不放宽授权重试,回到 owner 重新评估这批数据是否真的"clean"——本窗口不适用,§7.2 本窗口不执行 |
+| Step 8 行数为 0 但 apply 显示成功 | 所有行都进了 `manual_hold` 被正确地没写 | 检查 Step 7.1 是否把太多行留在了 hold;这不是故障,是数据本身歧义多,需要客户先确认映射;这时 §7.2b 的 `apply.status` 预期是 `partial` |
 | 考勤/审批行数在 Step 3-5 变化了 | 迁移或升级动到了不该动的表 | 立即停止,评估 Step 1 的数据库级回滚,通知 owner |
 
 ---
@@ -406,8 +489,8 @@ GET /api/multitable/... (该 sheet 的记录列表)
 - **owner 在场**——这是一台半生产机器,考勤/审批数据是真实业务数据,不是试验田。
 - **只碰备料这条线和 `customer-plm-test` 这一个数据源**——不touch考勤、审批、用户账户等其他任何数据。
 - **K3 外部写是纵深防御,不是唯一保证**:可证明的保证是**只读账号**——`customer-plm-test` 对应的外部系统本身就是只读数据源(`kind: data-source:sql-readonly`),这一点在 §5 反复校验(选源只能绑到只读 kind 集合)。K3 出站写默认拒能力门(#5402)、四层永久焊死的 K3 fence(`k3-external-write-permanent-fence.cjs`)是在这之上的第二层——参见 owner 2026-09-01 裁决 `[[k3-external-write-boundary-ruling]]`:"K3 外部写走'只读账号可证明保证 + `#5402` 默认拒能力门纵深防御'两层"。
-- **不允许人工伪造行**——canonical 表(`plm_stock_preparation_main`)的每一行必须来自 Step 7.2 真实的生成 + 生产写入流程;不允许为了让 Step 8 看起来通过而手工插入行。
-- **Step 7.2 的生产写入配置执行完立刻移除**——不留过夜,P2 必须恢复默认休眠姿态。
+- **不允许人工伪造行**——本窗口的落地表(Step 0-7 配置的 `plm_stock_preparation_sandbox*` 目标)的每一行必须来自 Step 6 真实的拉取 + §7.2b 真实的沙箱 apply;不允许为了让 Step 8 看起来通过而手工插入行。canonical 主表(`plm_stock_preparation_main`)本窗口保持不变(见 §0.6 D1 裁决)——不允许绕过这条裁决手工写它。
+- **§7.2 的生产写入配置(未来窗口执行时)执行完立刻移除**——不留过夜,P2 必须恢复默认休眠姿态。本窗口不执行 §7.2,这条护栏暂不适用,留给未来窗口。
 
 ---
 
@@ -416,8 +499,8 @@ GET /api/multitable/... (该 sheet 的记录列表)
 - 现场连接测试 + 30 秒数据体检 + 给客户的精确数据要求:`onsite-connection-test-runbook-20260901.md`
 - 首次真机部署教训审计(F1-F22,含 F20/F22 两个本文直接引用的陷阱):`first-deployment-lessons-20260831.md`
 - 接入提速统一路线图(§0.3/§0.4 引用的诊断证据出处):`docs/development/platform-overall-design/stock-prep-onboarding-acceleration-20260901.md`
-- 生产写入正式主表的完整程序(P4 owner 授权,§7.2 引用):`docs/development/data-factory-fos-4b-3-prod-apply-runbook-20260625.md`
-- 生产写入的设计锁(策略契约的规范定义):`docs/development/data-factory-fos-4b-3-prod-apply-gate-design-lock-20260625.md`
+- 生产写入正式主表的完整程序(P4 owner 授权,§7.2 引用;本窗口不执行,见 §0.6——加载器缺失,不是这份文档本身有问题):`docs/development/data-factory-fos-4b-3-prod-apply-runbook-20260625.md`
+- 生产写入的设计锁(策略契约的规范定义,机制仍然准确,只是 §0.6 说的加载器还没写):`docs/development/data-factory-fos-4b-3-prod-apply-gate-design-lock-20260625.md`
 - 原地升级脚本(Step 2 主体):`scripts/ops/multitable-onprem-package-upgrade-inplace.ps1`
 - 打包脚本 / 包校验脚本(Step 0):`scripts/ops/multitable-onprem-package-build.sh`、`scripts/ops/multitable-onprem-package-verify.sh`
 - 既有部署预检 / 验收脚本(Step 3):`plugins/plugin-integration-core/lib/stock-preparation-preflight.cjs`、`scripts/ops/stock-prep-acceptance-bootstrap.mjs`

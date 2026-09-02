@@ -49,6 +49,17 @@ import { GovernedAiService } from './services/governed-ai-service'
 // implementation. See packages/core-backend/src/routes/univer-meta.ts for the generic-export sibling
 // that already calls buildXlsxBuffer this same way (xlsx module lazily imported, never top-level).
 import { buildXlsxBuffer, type XlsxModule } from './multitable/xlsx-service'
+// 一线看得见自己工厂的项目: the tenant PRINCIPAL DIRECTORY port, injected into plugin-integration-core
+// ONLY — same per-plugin-injected-service shape as the two above. It exists because a plugin cannot
+// establish tenancy from `req.user.tenantId` alone (the auth middleware copies the `x-tenant-id`
+// header onto that field when the token carried no claim), and the plugin's first value-bearing
+// tenant-scoped read must not be built on a caller-supplied string.
+import { createTenantPrincipalDirectoryBoundaryV1 } from './services/tenant-principal-directory-boundary'
+// 备料按部门列写权限: the per-column WRITE-scope port, injected into plugin-integration-core ONLY,
+// same per-plugin-injected-service shape as GovernedAiService above. It writes `field_permissions`
+// — the ONE table the grid's write gate reads — and is structurally write-only (it cannot hide a
+// column). See the service file header for the load-bearing property and the removal path.
+import { StockPreparationFieldPermissionsService } from './services/stock-preparation-field-permissions'
 import { eventBus } from './integration/events/event-bus'
 import { initializeEventBusService } from './integration/events/event-bus-service'
 import { messageBus } from './integration/messaging/message-bus'
@@ -2840,6 +2851,30 @@ export class MetaSheetServer {
         // absent for every other plugin.
         stockPreparationXlsxExport: manifest.name === 'plugin-integration-core'
           ? { buildWorkbookBuffer: buildStockPreparationExportWorkbookBuffer }
+          : undefined,
+        // 一线看得见自己工厂的项目: the tenant PRINCIPAL DIRECTORY for plugin-integration-core ONLY.
+        // The plugin's first tenant-scoped VALUE-BEARING read (the operator project directory, which
+        // carries the caller's own project numbers and names) must not accept `req.user.tenantId` as
+        // proof of tenancy — hydrateAuthenticatedUser copies the `x-tenant-id` HEADER onto that field
+        // when the verified token carried no claim. This narrow port lets the plugin ask the host to
+        // vouch for the (user, tenant) pairing instead, submitting two identity strings and receiving
+        // one boolean; the host keeps the table, the SQL and the pool. Absent for every other plugin,
+        // and REQUIRED (not fail-open) by the one read that uses it.
+        tenantPrincipalDirectory: manifest.name === 'plugin-integration-core'
+          ? createTenantPrincipalDirectoryBoundaryV1({
+              query: (sql: string, params?: unknown[]) =>
+                poolManager.get().query(sql, params) as unknown as Promise<{ rows: unknown[] }>,
+            })
+          : undefined,
+        // 备料按部门列写权限: the per-column WRITE-scope port for plugin-integration-core ONLY. The
+        // plugin declares "this ROLE may NOT WRITE this column" and the host writes the ONE table the
+        // grid's write gate actually reads (`field_permissions`). WRITE-only by construction — it
+        // cannot restrict READ, because 采购 and 仓库 must keep seeing the production band and each
+        // other's responses (see the service file's load-bearing property). Purely additive: removal
+        // is an operator action on PUT /sheets/:sheetId/field-permissions. Absent for every other
+        // plugin.
+        stockPreparationFieldPermissions: manifest.name === 'plugin-integration-core'
+          ? new StockPreparationFieldPermissionsService()
           : undefined,
         security: this.pluginRuntimeSecurityService,
       } as unknown as import('./types/plugin').PluginServices,

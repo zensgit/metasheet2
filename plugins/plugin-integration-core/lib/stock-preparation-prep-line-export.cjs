@@ -99,6 +99,25 @@ const MAX_EXPORT_ROWS = 20000
 //   WHEN THE FALLBACK RETIRES. It is dead weight the moment a deployment has re-pulled every
 //   project and dropped the pack columns; it is not load-bearing for correctness, only for
 //   continuity, and it can be deleted by a later change that says so.
+// THE FIVE DEPARTMENTAL COMPLETION COLUMNS (#5447 / W2-3), appended AFTER the twelve above —
+// nothing above moves. #5447 added five human_preserved columns to the main template
+// (stock-preparation-templates.cjs HUMAN_PRESERVED_FIELD_IDS: makeOrBuy, procurementDone,
+// procurementReplyDate, warehouseDone, actualArrivalDate) but this projection was not updated, so
+// the warehouse/purchasing workbook was missing exactly the completion markers just shipped for
+// them.
+//
+// ORDER CHOSEN: the template's own declaration order (makeOrBuy, then the procurement pair, then
+// the warehouse pair) rather than grouping by department first. The template's own comment explains
+// why makeOrBuy leads the band: it is "the fork that makes 采购跟进 and 仓库跟进 separable," so
+// putting it first in the export mirrors the one place this order is already an agreement, and a
+// reader who diffs the template against this file sees the same sequence rather than two
+// independently-invented ones.
+//
+// `type: 'boolean'` marks the two completion flags for exportCellValue: they render as 是/否 text
+// (the customer-facing convention for a checkbox column in this workbook) rather than a native
+// boolean cell. The two dates carry no `type` and therefore no special formatting — exactly how the
+// existing `demandDate` column above behaves today (its stored value passes through unchanged), so a
+// pre-existing date column and these two new ones render identically.
 const EXPORT_COLUMNS = Object.freeze([
   Object.freeze({ id: 'parentComponentCode', label: '父组件图号', fallbackId: 'ext_parentDrawingNo' }),
   Object.freeze({ id: 'parentComponentName', label: '父组件名称', fallbackId: 'ext_parentName' }),
@@ -112,6 +131,11 @@ const EXPORT_COLUMNS = Object.freeze([
   Object.freeze({ id: 'ext_pickingNode', label: '领料节点' }),
   Object.freeze({ id: 'ext_stockPrepDate', label: '备料日期' }),
   Object.freeze({ id: 'ext_blankLength', label: '毛胚长度' }),
+  Object.freeze({ id: 'makeOrBuy', label: '自制/外购' }),
+  Object.freeze({ id: 'procurementDone', label: '采购完成', type: 'boolean' }),
+  Object.freeze({ id: 'procurementReplyDate', label: '采购回复日期' }),
+  Object.freeze({ id: 'warehouseDone', label: '仓库完成', type: 'boolean' }),
+  Object.freeze({ id: 'actualArrivalDate', label: '实际到货日期' }),
 ])
 const EXPORT_COLUMN_IDS = Object.freeze(EXPORT_COLUMNS.map((column) => column.id))
 // Every logical id the projection reads, including the fallback sources (which are never headers).
@@ -227,6 +251,22 @@ function exportCellValue(value) {
   return String(value)
 }
 
+// A column-aware wrapper around exportCellValue. Only `type: 'boolean'` columns (采购完成 /
+// 仓库完成) get special treatment: they render the customer-facing 是/否 text a checkbox column
+// uses in this workbook, rather than a native TRUE/FALSE cell. A blank cell (undefined/null — an
+// unbound column, or a row that predates #5447 and never got a value) stays blank, exactly like
+// every other column; it must never render as 否, which would assert "not done" about a row nobody
+// has touched. Any non-boolean stray value falls through to the default formatting rather than
+// being coerced, since the field's declared type already guarantees booleans in practice.
+function formatCellForColumn(column, value) {
+  if (column.type === 'boolean') {
+    if (value === undefined || value === null) return null
+    if (value === true) return '是'
+    if (value === false) return '否'
+  }
+  return exportCellValue(value)
+}
+
 // PER-ROW source selection for a column that declares a `fallbackId` (today: 规格 only). The native
 // column wins wherever it carries a value; a row that has none falls back to the pack column. Blank
 // means undefined / null / empty-or-whitespace string — a legitimately 0 or `false` cell is a value
@@ -336,7 +376,7 @@ async function exportStockPreparationPrepLines({ recordsApi, target, projectNo, 
     throw new StockPreparationPrepLineExportError(422, 'PREP_LINE_EXPORT_ROWS_TOO_LARGE', 'stock-preparation export exceeded the row bound', { maxRows: MAX_EXPORT_ROWS })
   }
   const headers = EXPORT_COLUMNS.map((column) => column.label)
-  const rows = activeRows.map((data) => EXPORT_COLUMNS.map((column) => exportCellValue(columnSourceValue(data, column))))
+  const rows = activeRows.map((data) => EXPORT_COLUMNS.map((column) => formatCellForColumn(column, columnSourceValue(data, column))))
   return {
     projectNo: scopedProjectNo,
     totalRowCount: allRows.length,
@@ -363,6 +403,7 @@ module.exports = {
     columnSourceValue,
     ensureReadOnlyRecordsApi,
     exportCellValue,
+    formatCellForColumn,
     fieldIdMapHasExplicitBindings,
     isBlankCell,
     normalizeExportTarget,
