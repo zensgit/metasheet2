@@ -19,6 +19,7 @@ const COMMUNICATION_NAMESPACE = 'integration-core'
 const { createCredentialStore } = require('./lib/credential-store.cjs')
 const { createDb } = require('./lib/db.cjs')
 const { createExternalSystemRegistry } = require('./lib/external-systems.cjs')
+const { createConnectionResolver } = require('./lib/connection-resolver.cjs')
 const { createReadSourceConfigStore } = require('./lib/read-source-config-store.cjs')
 const { createStockPreparationAuditStore } = require('./lib/stock-preparation-audit-store.cjs')
 const { createStockPreparationSourceBindingStore } = require('./lib/stock-preparation-source-binding-store.cjs')
@@ -208,7 +209,9 @@ function buildCommunicationApi() {
     },
     async upsertExternalSystem(input) {
       return requireInitialized(externalSystemRegistry, 'external system registry is not initialized')
-        .upsertExternalSystem(input)
+        // Cross-plugin calls carry no host-authenticated user context. Do not
+        // let a self-reported principal authorize a canonical Connection bind.
+        .upsertExternalSystem({ ...input, principal: undefined, runAs: 'service' })
     },
     async getExternalSystem(input) {
       return requireInitialized(externalSystemRegistry, 'external system registry is not initialized')
@@ -250,7 +253,7 @@ function buildCommunicationApi() {
       // intended posture, stated plainly: cross-plugin DRY RUNS work; cross-plugin WRITES do not —
       // a plugin that needs to write drives the governed HTTP surface, which owns the lifecycle.
       return requireInitialized(pipelineRunner, 'pipeline runner is not initialized')
-        .runPipeline(withoutServerOnlyRunMarkers(input))
+        .runPipeline({ ...withoutServerOnlyRunMarkers(input), runAs: 'service' })
     },
     async listDeadLetters(input) {
       const rows = await requireInitialized(deadLetterStore, 'dead-letter store is not initialized')
@@ -274,7 +277,7 @@ function buildCommunicationApi() {
       // `dryRun` — so on an armed deployment this door is refused outright without the governed
       // route's write-lifecycle context, which the stripper below guarantees it cannot forge.
       return redactReplayResultForCommunication(
-        await runner.replayDeadLetter(withoutServerOnlyRunMarkers(input)),
+        await runner.replayDeadLetter({ ...withoutServerOnlyRunMarkers(input), runAs: 'service' }),
       )
     },
     async listStagingDescriptors() {
@@ -299,6 +302,16 @@ module.exports = {
       logger,
     })
     const sqlServerQueryExecutor = createK3WiseSqlServerReadOnlyExecutor({ logger })
+    const dataSourceFacade = (context.api && context.api.dataSources) || undefined
+    const sealedSnapshotFacade = context.services
+      && context.services.dataSourceSealedSnapshotConnections
+    const connectionResolver = createConnectionResolver({
+      facade: dataSourceFacade,
+      // Secret-bearing and deliberately separate from context.api.dataSources.
+      // The host injects it only for this plugin; ordinary Connection resolution
+      // remains values-free and never receives this capability's projection.
+      sealedSnapshotFacade,
+    })
     externalSystemRegistry = createExternalSystemRegistry({
       db,
       credentialStore,
@@ -306,7 +319,8 @@ module.exports = {
       // assertReferenceable proves the authenticated principal OWNS the referenced core data
       // source before the binding persists (and the registry stamps the owner server-side for
       // the core delete guard's attributed count). Absent facade → dataSourceId binds fail closed.
-      dataSourceBinder: (context.api && context.api.dataSources) || undefined,
+      dataSourceBinder: dataSourceFacade,
+      connectionResolver,
     })
     // S2-c (#1709): content-keyed read-source config versions + values-free audit.
     readSourceConfigStore = createReadSourceConfigStore({ db })

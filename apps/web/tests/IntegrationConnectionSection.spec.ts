@@ -56,7 +56,7 @@ describe('IntegrationConnectionSection (unit)', () => {
     status: 'active',
     configText: '{}',
     capabilitiesText: '{}',
-    dataSourceId: '',
+    connectionId: '',
     dataSourceObject: '',
   }
 

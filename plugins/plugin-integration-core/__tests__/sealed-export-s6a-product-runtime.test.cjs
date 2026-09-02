@@ -35,7 +35,7 @@ async function main() {
       artifactRoot: path.join(os.tmpdir(), 's6a-product-runtime-test'),
       evidenceKey: Buffer.alloc(32, 1),
       externalSystemRegistry: {
-        async getExternalSystemForAdapter() {
+        async getExternalSystemForSealedSnapshot() {
           throw new Error('source must not load before runtime role verification')
         },
       },
