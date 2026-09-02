@@ -109,6 +109,17 @@ function classifyRows({ packId, entries, region, legacyAdoptable, rows }) {
  *
  *   rows              — a Map keyed `"<fieldId> <roleId>"`; values are
  *                       `{ fieldId, roleId, sheetId, visible, readOnly, createdBy }`.
+ *
+ *                       THE KEY CARRIES NO SHEET, so this fake models ONE sheet at a time. Every
+ *                       read filters by `sheetId` and would behave correctly, but two rows with the
+ *                       same (field, role) on different sheets would collide in the Map and the
+ *                       second would overwrite the first — silently, and in the safe-looking
+ *                       direction. The real table's key is (sheet_id, field_id, subject_type,
+ *                       subject_id); the SHEET AXIS is therefore proven where it can be proven for
+ *                       real, in
+ *                       `tests/integration/stock-preparation-fieldperm-write-gate-realdb.test.ts`
+ *                       (a twin sheet carrying an identical pair) and by the unit suite's
+ *                       positional SQL decoder. Do not add a second sheet here; add it there.
  *   supportsReconcile — false models an OLDER host: it accepts `reconcile`, IGNORES it, returns no
  *                       `removed`, and (correctly) does not declare the capability marker. The
  *                       installer must refuse such a host rather than degrade against it.
