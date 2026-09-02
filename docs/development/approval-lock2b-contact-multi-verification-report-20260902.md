@@ -19,6 +19,7 @@ Final local verdict for the implementation diff: **0 P1 / 0 P2**. The implementa
 | Backend resolver/executor/product-service neighbors, 3 files | 295/295 PASS |
 | Restored executor exact file | 69/69 PASS |
 | PostgreSQL 15.17 isolated integration | 15/15 PASS, 0 skipped |
+| Lock-7 field-edit real-DB neighbor after required-pin fixture migration | 19/19 PASS, 0 skipped |
 | Curated Required Web | 411 files, 5300/5300 PASS |
 | Core backend TypeScript | PASS |
 | Web TypeScript and approval verification TypeScript | PASS |
@@ -26,6 +27,8 @@ Final local verdict for the implementation diff: **0 P1 / 0 P2**. The implementa
 | `git diff --check` | PASS |
 
 The PostgreSQL run exercised save/publish/create/freeze/dispatch against a freshly migrated isolated database. It covered direct multi UNION, contact-manager UNION, cap overflow, server-side `allowSelf`, inactive contacts, empty-anchor precedence, manager/head pointer distinction, temporal freeze, policy failure, and handler-node dispatch.
+
+The first exact-head CI run exposed a stale Lock-7 fixture whose `form_field_user` driver was optional. That is no longer a legal authoring shape under ratified OD-L2-4. The fixture was migrated to `required:true` and its generic create helper now supplies a seeded active contact; its own 19 Lock-7 assertions then passed unchanged.
 
 Plugin-loader messages for optional local plugins missing frontend/telemetry packages were non-fatal baseline diagnostics; the named integration suite completed 15/15 and its database sentinel ran.
 

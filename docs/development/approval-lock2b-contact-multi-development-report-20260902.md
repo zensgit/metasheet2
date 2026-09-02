@@ -70,7 +70,7 @@ Production backend:
 - `packages/core-backend/src/services/ApprovalGraphExecutor.ts`
 - `packages/core-backend/src/services/ApprovalProductService.ts`
 
-Eleven existing focused test files were updated. No workflow, shared test manifest, package manifest, migration, OpenAPI file, or feature-flag registry changed.
+Twelve existing focused test files were updated. The twelfth is the Lock-7 field-edit real-DB fixture: its `form_field_user` driver now carries the ratified required pin and its generic create helper supplies an already-seeded default contact. No workflow, shared test manifest, package manifest, migration, OpenAPI file, or feature-flag registry changed.
 
 ## 5. Release Boundary
 
