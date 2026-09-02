@@ -97,9 +97,9 @@ const emit = defineEmits<{
    * button, no row count, an empty state still telling the operator to ask an administrator to sync
    * a project they had just synced themselves.
    *
-   * Emitted once, when the channel reaches a phase in which rows are actually in the sheet ('done',
-   * and 'partial' — a partial write still put rows there, which is the same test the parent panel's
-   * own sheet link uses).
+   * Emitted once, when the channel reaches 'done' — the phase a landed apply produces, which
+   * includes a PARTIAL write (`runStockPreparationLargeBomPull` folds 'succeeded' and 'partial' into
+   * it), because a partial write still put rows in the sheet.
    */
   (e: 'synced'): void
 }>()
@@ -166,7 +166,11 @@ onMounted(async () => {
       // ROWS ARE IN THE SHEET -> tell the parent, so the board re-reads. Guarded by `cancelled` for
       // the same reason the poll loop is: a component that is gone must not drive its parent.
       if (cancelled || announcedCompletion) return
-      if (state.phase === 'done' || state.phase === 'partial') {
+      // 'done' IS the landing phase for a partial write too: `runStockPreparationLargeBomPull` folds
+      // both 'succeeded' and 'partial' apply statuses into it (APPLY_LANDED), because a partial write
+      // still put rows in the sheet — the same test the parent panel's own sheet link uses. There is
+      // no separate 'partial' phase to check for, and checking for one was a type error CI caught.
+      if (state.phase === 'done') {
         announcedCompletion = true
         emit('synced')
       }
