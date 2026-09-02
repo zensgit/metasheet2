@@ -809,14 +809,36 @@ const STOCK_PREPARATION_MVP_TABLE_TEMPLATES = Object.freeze([
     fields: [
       field('snapshotLineId', 'Snapshot Line ID', 'string', 'plm_system', { required: true, key: true }),
       field('snapshotBatchId', 'Snapshot Batch ID', 'string', 'plm_system', { required: true }),
+      // THE SEVEN FIELDS A 备料 PULL MUST CARRY (owner spec): 父组件图号 / 父组件名称 / 当前组件图号 /
+      // 当前组件名称 / 规格 / 材料 / 总数量. Drawing numbers, versions and per-level quantity landed with
+      // the MVP; `material` landed with the fingerprint decomposition; `parentName` / `childName` /
+      // `spec` / `totalQuantity` land here. Every one of them is OPTIONAL and plm_system-owned, on the
+      // same terms `material` was added: batches persisted before this change simply carry no such
+      // column, nothing downstream may require one, and EXISTING INSTALLS heal via the W2 repair verb
+      // (repairStockPreparationMvpTargets) rather than a migration.
       field('parentDrawingNo', 'Parent Drawing No', 'string', 'plm_system'),
       field('parentVersion', 'Parent Version', 'string', 'plm_system'),
+      field('parentName', 'Parent Name', 'string', 'plm_system'),
       field('childDrawingNo', 'Child Drawing No', 'string', 'plm_system'),
       field('childVersion', 'Child Version', 'string', 'plm_system'),
+      field('childName', 'Child Name', 'string', 'plm_system'),
+      // Fingerprint decomposition (stock-prep-change-adjudication-20260901): persisted so the diff can
+      // raise material_changed by name. Optional — historical batches carry no material field, and the
+      // diff engine falls back to the sourceFingerprint for that dimension when either side lacks it.
+      // Existing installs gain the column via the W2 repair verb (repairStockPreparationMvpTargets).
+      field('material', 'Material', 'string', 'plm_system'),
+      // 规格. Only present when the deployment DECLARED a spec column on its read plan
+      // (readPlan.part.specField, defaulted to absent — see stock-preparation-bom-expansion.cjs);
+      // a deployment without one persists no spec, which is absence, not emptiness.
+      field('spec', 'Specification', 'string', 'plm_system'),
       field('bomLevel', 'BOM Level', 'number', 'plm_system'),
       field('pathKey', 'Path Key', 'string', 'plm_system', { required: true }),
       field('designQty', 'Design Quantity', 'number', 'plm_system'),
       field('designUnit', 'Design Unit', 'string', 'plm_system'),
+      // 总数量 — the per-level `designQty` multiplied down the path. The MVP kept ONLY the per-level
+      // quantity, so the rollup the warehouse actually orders against was computed by the expansion
+      // and then dropped at persist. Both are kept now; neither replaces the other.
+      field('totalQuantity', 'Total Quantity', 'number', 'plm_system'),
       field('lineStatus', 'Line Status', 'select', 'plm_system', {
         optionSource: { type: 'contract', key: 'stock_preparation_bom_line_status_v1' },
       }),

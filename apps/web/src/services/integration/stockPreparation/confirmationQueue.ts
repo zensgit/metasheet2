@@ -6,14 +6,15 @@
 // pane Q2-A unlocked. This module is the client for exactly the four operator-facing routes of that
 // loop; reconcile and ensure stay platform-admin and are not called from here.
 //
-// VALUES-FREE except for ONE surface. The queue list carries decision ids, conflict/status/action
-// enums, fingerprints and PRESENCE booleans only — never a source cell value. The single
-// content-bearing read is `readStockPreparationValueEntry`, the author's own readback of what they
-// entered, which the server gates one notch tighter (stock-prep:operate) for that reason. Nothing in
-// this module may route value content into a log, an error message, or an aggregate.
+// VALUES-FREE except for TWO surfaces. The queue list carries decision ids, conflict/status/action
+// enums, fingerprints and PRESENCE booleans only — never a source cell value. The first content-
+// bearing read is `readStockPreparationValueEntry`, the author's own readback of what they entered;
+// the second is `exportStockPreparationPrepLines`, the 按项目导出物料 Excel download — both are gated
+// one notch tighter (stock-prep:operate) for that reason. Nothing in this module may route value
+// content into a log, an error message, or an aggregate.
 import { apiFetch } from '../../../utils/api'
-import { buildQueryString, type IntegrationScope } from '../workbench'
-import { parseStockPreparationConfirmResponse } from './confirmApi'
+import { buildQuerySuffix, type IntegrationApiEnvelope, type IntegrationScope } from '../workbench'
+import { StockPreparationConfirmApiError, parseStockPreparationConfirmResponse } from './confirmApi'
 
 /** Frozen server status vocabulary (stock-preparation-confirmation-decisions.cjs STATUSES). */
 export type StockPreparationDecisionStatus = 'pending' | 'confirmed' | 'superseded'
@@ -89,13 +90,85 @@ export interface StockPreparationConfirmResult {
 }
 
 /**
+ * 按项目导出物料 Excel — the SECOND content-bearing surface in this module (the queue/list/readiness
+ * calls above stay values-free). `activeRowCount` is a COUNT, not content — it lets the caller tell a
+ * populated download apart from a headers-only one without opening the file, matching the server's
+ * `X-Stock-Prep-Export-Row-Count` response header.
+ */
+export interface StockPreparationExportResult {
+  blob: Blob
+  filename: string
+  activeRowCount: number
+}
+
+const EXPORT_ERROR_CODE_PATTERN = /^[A-Z0-9_]{1,80}$/
+
+/** Same filename-parsing idiom as the generic Multitable export client (multitable/api/client.ts). */
+function parseExportFilename(header: string | null): string {
+  if (header) {
+    const star = header.match(/filename\*=(?:UTF-8'')?([^;]+)/i)
+    if (star?.[1]) {
+      try {
+        return decodeURIComponent(star[1].trim().replace(/^["']|["']$/g, ''))
+      } catch {
+        // fall through to the plain form
+      }
+    }
+    const plain = header.match(/filename="?([^";]+)"?/i)
+    if (plain?.[1]) return plain[1].trim()
+  }
+  return 'stock-preparation-export.xlsx'
+}
+
+function parseExportRowCount(header: string | null): number {
+  const parsed = header ? Number.parseInt(header, 10) : NaN
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0
+}
+
+/**
+ * THE project-scoped materials export the warehouse/purchasing button downloads — an authenticated
+ * binary GET (apiFetch attaches Authorization/x-tenant-id the same as every other call in this
+ * module; a plain `<a href>`/`<a download>` to the API URL would carry none of that), so the caller
+ * gets back a Blob + filename to trigger the download from, not a URL to link to.
+ * GET /api/integration/stock-preparation/prep-lines/export
+ */
+export async function exportStockPreparationPrepLines(
+  scope: IntegrationScope & { projectNo: string },
+): Promise<StockPreparationExportResult> {
+  const query = buildQuerySuffix({
+    tenantId: scope.tenantId,
+    workspaceId: scope.workspaceId,
+    projectNo: scope.projectNo,
+  })
+  const response = await apiFetch(`/api/integration/stock-preparation/prep-lines/export${query}`)
+  if (!response.ok) {
+    let payload: IntegrationApiEnvelope<unknown> | null = null
+    try {
+      payload = await response.json() as IntegrationApiEnvelope<unknown>
+    } catch {
+      payload = null
+    }
+    const code = typeof payload?.error?.code === 'string' && EXPORT_ERROR_CODE_PATTERN.test(payload.error.code)
+      ? payload.error.code
+      : 'STOCK_PREPARATION_EXPORT_REQUEST_FAILED'
+    throw new StockPreparationConfirmApiError(response.status, code, null)
+  }
+  const blob = await response.blob()
+  return {
+    blob,
+    filename: parseExportFilename(response.headers.get('Content-Disposition')),
+    activeRowCount: parseExportRowCount(response.headers.get('X-Stock-Prep-Export-Row-Count')),
+  }
+}
+
+/**
  * Provisioning state of the ledger target. Values-free.
  * GET /api/integration/stock-preparation/confirmation-decisions/readiness
  */
 export async function readStockPreparationDecisionReadiness(
   scope: IntegrationScope,
 ): Promise<StockPreparationDecisionReadiness> {
-  const query = buildQueryString({ tenantId: scope.tenantId, workspaceId: scope.workspaceId })
+  const query = buildQuerySuffix({ tenantId: scope.tenantId, workspaceId: scope.workspaceId })
   const response = await apiFetch(`/api/integration/stock-preparation/confirmation-decisions/readiness${query}`)
   return parseStockPreparationConfirmResponse<StockPreparationDecisionReadiness>(response)
 }
@@ -107,7 +180,7 @@ export async function readStockPreparationDecisionReadiness(
 export async function listStockPreparationDecisions(
   scope: IntegrationScope & { projectNo: string; status?: StockPreparationDecisionStatus | null },
 ): Promise<StockPreparationDecisionQueue> {
-  const query = buildQueryString({
+  const query = buildQuerySuffix({
     tenantId: scope.tenantId,
     workspaceId: scope.workspaceId,
     projectNo: scope.projectNo,
@@ -125,7 +198,7 @@ export async function listStockPreparationDecisions(
 export async function readStockPreparationValueEntry(
   scope: IntegrationScope & { decisionId: string },
 ): Promise<StockPreparationDecisionValueEntry> {
-  const query = buildQueryString({
+  const query = buildQuerySuffix({
     tenantId: scope.tenantId,
     workspaceId: scope.workspaceId,
     decisionId: scope.decisionId,

@@ -69,6 +69,7 @@ node __tests__/stock-preparation-conflict-planner.test.cjs
 node __tests__/stock-preparation-conflict-policies.test.cjs
 node __tests__/stock-preparation-confirmation-decisions.test.cjs
 node __tests__/stock-preparation-permission-matrix.test.cjs
+node __tests__/stock-preparation-prep-line-export.test.cjs
 node __tests__/stock-preparation-preflight.test.cjs
 node __tests__/stock-preparation-source-preflight.test.cjs
 node __tests__/stock-preparation-production-policy.test.cjs
@@ -89,6 +90,10 @@ node __tests__/stock-preparation-customer-pack-routes.test.cjs
 node __tests__/customer-dictionary-leak-guard.test.cjs
 node __tests__/source-vendor-presets.test.cjs
 node __tests__/stock-preparation-carry-policy.test.cjs
+node __tests__/stock-preparation-carry-plan-wiring.test.cjs
+node __tests__/stock-preparation-carry-ledger.test.cjs
+node __tests__/stock-preparation-carry-confirm.test.cjs
+node __tests__/stock-preparation-carry-hardening.test.cjs
 node __tests__/stock-preparation-suggestion-operators.test.cjs
 node __tests__/stock-preparation-apply-writer.test.cjs
 node __tests__/stock-preparation-table-actions.test.cjs
@@ -96,6 +101,7 @@ node __tests__/stock-preparation-synthetic-sql-fixture.test.cjs
 node __tests__/stock-preparation-mvp-generation.test.cjs
 node __tests__/stock-preparation-snapshot-diff.test.cjs
 node __tests__/stock-preparation-expansion-snapshot-mapper.test.cjs
+node __tests__/stock-preparation-batch-identity.test.cjs
 node __tests__/stock-preparation-readonly-intake.test.cjs
 node __tests__/stock-preparation-material-match.test.cjs
 node __tests__/stock-preparation-unit-rule-match.test.cjs
@@ -198,6 +204,8 @@ node __tests__/stock-preparation-structure-exact-rehearsal.test.cjs
 node __tests__/test-chain-runner.test.cjs
 node __tests__/stock-preparation-source-binding.test.cjs
 node __tests__/stock-preparation-source-binding-routes.test.cjs
+node __tests__/schema-mapping-copilot-routes.test.cjs
+node __tests__/k3-sqlserver-external-write-fence-parity.test.cjs
 
 # --- sealed-export stage tail: S4 -> S5 -> S6-A, in stage order, must remain LAST ---
 # (pinned by __tests__/sealed-export-s4-generation-migration.test.cjs)

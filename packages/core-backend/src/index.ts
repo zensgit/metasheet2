@@ -38,6 +38,17 @@ import type { User } from './auth/AuthService'
 import { poolManager } from './integration/db/connection-pool'
 import { reconcileOrphanedBulkJobs } from './services/ai-bulk-job-service'
 import type { AiUsageQueryFn } from './services/ai-usage-ledger'
+// 列映射副驾 (schema-mapping copilot): the ONE governed AI boundary. Injected into
+// plugin-integration-core so its copilot routes can ask the boundary to PROPOSE column meanings with
+// business data routed local-only. The plugin never reaches a provider any other way.
+import { GovernedAiService } from './services/governed-ai-service'
+// 按项目导出物料 Excel: the xlsx BUFFER BUILDER, injected into plugin-integration-core ONLY, same
+// per-plugin-injected-service shape as GovernedAiService above and for the same reason — the plugin
+// has no `xlsx` dependency of its own (not resolvable from its node_modules under the workspace's
+// strict pnpm layout) and must not add one; this reuses the ONE existing builder instead of a second
+// implementation. See packages/core-backend/src/routes/univer-meta.ts for the generic-export sibling
+// that already calls buildXlsxBuffer this same way (xlsx module lazily imported, never top-level).
+import { buildXlsxBuffer, type XlsxModule } from './multitable/xlsx-service'
 import { eventBus } from './integration/events/event-bus'
 import { initializeEventBusService } from './integration/events/event-bus-service'
 import { messageBus } from './integration/messaging/message-bus'
@@ -397,6 +408,19 @@ export interface MetaSheetServerOptions {
   readonly host?: string
   readonly pluginDirs?: string[]
   readonly createRecoveryArchiveComposition?: RecoveryArchiveApplicationCompositionFactory
+}
+
+// 按项目导出物料 Excel: lazily imports `xlsx` (same lazy-import discipline as routes/univer-meta.ts's
+// own loadXlsxModule — never a top-level import, so a deployment that never touches an xlsx route
+// never pays for it) and wraps the existing buildXlsxBuffer behind the small duck-typed interface
+// plugin-integration-core's http-routes.cjs expects from services.stockPreparationXlsxExport.
+async function buildStockPreparationExportWorkbookBuffer(params: {
+  sheetName?: string
+  headers: string[]
+  rows: Array<Array<string | number | boolean | null | undefined>>
+}): Promise<Buffer> {
+  const xlsx = (await import('xlsx')) as unknown as XlsxModule
+  return buildXlsxBuffer(xlsx, params)
 }
 
 function resolveRecoveryArchiveMainPoolRuntime(): RecoveryArchiveApplicationDatabaseRuntime {
@@ -2807,6 +2831,16 @@ export class MetaSheetServer {
         automationRegistry,
         rbacProvisioning,
         platformAppInstances,
+        // 列映射副驾: the governed AI boundary for plugin-integration-core ONLY. The plugin's
+        // schema-mapping copilot calls `governedAi.suggest({ dataClass: 'business', ... })`; the
+        // boundary enforces local-only routing for business data. Absent for every other plugin.
+        governedAi: manifest.name === 'plugin-integration-core' ? new GovernedAiService() : undefined,
+        // 按项目导出物料 Excel: the xlsx buffer builder for plugin-integration-core ONLY. The plugin's
+        // new prep-lines/export route calls `stockPreparationXlsxExport.buildWorkbookBuffer(...)`;
+        // absent for every other plugin.
+        stockPreparationXlsxExport: manifest.name === 'plugin-integration-core'
+          ? { buildWorkbookBuffer: buildStockPreparationExportWorkbookBuffer }
+          : undefined,
         security: this.pluginRuntimeSecurityService,
       } as unknown as import('./types/plugin').PluginServices,
       storage,

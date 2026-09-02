@@ -9,6 +9,7 @@ const path = require('node:path')
 const {
   LINE_STATUSES,
   MISSING_CHILD_BOM_ROW_ERROR,
+  SPEC_KEYS,
   StockPreparationExpansionSnapshotMapperError,
   mapExpansionRowsToSnapshotLines,
   summarizeExpansionSnapshotMappingForEvidence,
@@ -87,6 +88,116 @@ run('maps expansion field vocabulary to snapshot-line vocabulary', () => {
   assert.ok(childLine.sourceFingerprint, 'sourceFingerprint stamped')
   // plan declares no unit field -> designUnit absent unless caller supplies a default
   assert.ok(!('designUnit' in childLine))
+  // material is persisted as a first-class snapshot-line field (adjudication design 20260901:
+  // fingerprint decomposition) — no longer only baked into the sourceFingerprint hash.
+  assert.equal(childLine.material, 'steel')
+})
+
+run('material is persisted when present and omitted when the expansion row lacks it', () => {
+  const withMaterial = mapExpansionRowsToSnapshotLines([expansionRow()], { snapshotBatchId: 'batch-m1' })
+  assert.equal(withMaterial.lines[0].material, 'steel')
+  const withoutMaterial = mapExpansionRowsToSnapshotLines(
+    [expansionRow({ material: null })],
+    { snapshotBatchId: 'batch-m2' },
+  )
+  assert.ok(!('material' in withoutMaterial.lines[0]), 'absent material stays absent (no invented field)')
+})
+
+run('persisting material does not change the sourceFingerprint computation (old batches stay comparable)', () => {
+  // sourceIdentity already hashed material before it became a persisted field; the fingerprint for the
+  // SAME source row must be byte-identical, so pre-change batches do not all fingerprint-differ.
+  const a = mapExpansionRowsToSnapshotLines([expansionRow({ idempotencyKey: 'fp-fixed' })], { snapshotBatchId: 'bfp' })
+  const b = mapExpansionRowsToSnapshotLines([expansionRow({ idempotencyKey: 'fp-fixed' })], { snapshotBatchId: 'bfp' })
+  assert.equal(a.lines[0].sourceFingerprint, b.lines[0].sourceFingerprint)
+})
+
+// ---------------------------------------------------------------------------
+// THE SEVEN FIELDS A 备料 PULL MUST CARRY (owner spec):
+//   父组件图号 / 父组件名称 / 当前组件图号 / 当前组件名称 / 规格 / 材料 / 总数量.
+// The audit found only the drawing numbers, versions and per-level quantity reached the PERSISTED
+// line: 材料 survived only inside the fingerprint hash, 当前组件名称 was read by the expansion and
+// dropped here, 总数量 was traded for the per-level quantity, 父组件名称 was never emitted, and 规格
+// was never read from the source at all. Each assertion below fails on the pre-change mapper.
+// ---------------------------------------------------------------------------
+run('the seven fields all reach the persisted snapshot line', () => {
+  const parent = expansionRow({
+    componentSourceId: 'obj-parent',
+    parentSourceId: null,
+    path: '["obj-parent"]',
+    depth: 0,
+    componentCode: 'DRW-PARENT',
+    componentName: 'parent assembly',
+    sourceVersion: 'A',
+    rawQuantity: 1,
+    totalQuantity: 1,
+  })
+  const child = expansionRow({ spec: 'DN1200x12' })
+  const line = mapExpansionRowsToSnapshotLines([parent, child], { snapshotBatchId: 'batch-7' })
+    .lines.find((entry) => entry.childDrawingNo === 'DRW-CHILD')
+
+  assert.equal(line.parentDrawingNo, 'DRW-PARENT', '父组件图号')
+  // 父组件名称: the expansion emits NO parentName key — the parent is only an OBJ_ID on the child
+  // row — so it resolves through the same in-batch parentIndex join the drawing no already used.
+  assert.equal(line.parentName, 'parent assembly', '父组件名称')
+  assert.equal(line.childDrawingNo, 'DRW-CHILD', '当前组件图号')
+  assert.equal(line.childName, 'child part', '当前组件名称')
+  assert.equal(line.spec, 'DN1200x12', '规格')
+  assert.equal(line.material, 'steel', '材料')
+  assert.equal(line.totalQuantity, 6, '总数量 — the rollup, kept alongside the per-level quantity')
+  assert.equal(line.designQty, 2, '逐层数量 — resolution unchanged')
+})
+
+run('each new field is ABSENT, not empty, when the source did not carry it', () => {
+  // A deployment whose read plan declares no specField, whose parent is outside the batch, and
+  // whose source has no name: every one of the four must simply not be on the line. `clean()` drops
+  // null/undefined, so a downstream reader can tell "not read" from "read as blank".
+  const bare = mapExpansionRowsToSnapshotLines(
+    [expansionRow({ componentName: null, totalQuantity: null, parentSourceId: null })],
+    { snapshotBatchId: 'batch-bare' },
+  )
+  const line = bare.lines[0]
+  for (const fieldId of ['parentName', 'childName', 'spec', 'totalQuantity']) {
+    assert.ok(!(fieldId in line), `absent ${fieldId} stays absent (no invented field, no empty string)`)
+  }
+})
+
+run('the seven fields do NOT change the sourceFingerprint (existing batches are not mass re-diffed)', () => {
+  // THE backward-compatibility property. `sourceIdentity` is deliberately UNTOUCHED: childName and
+  // spec are persisted but never hashed. Had they been added to the hash, the first refresh after
+  // this change would have fingerprint-differed EVERY line of EVERY existing batch and held a whole
+  // BOM for review of a change that never happened.
+  const PINNED = 'sha16:522bdc6c334323bb'
+  const withoutNewFields = mapExpansionRowsToSnapshotLines(
+    [expansionRow({ idempotencyKey: 'fp-fixed' })],
+    { snapshotBatchId: 'bfp' },
+  )
+  assert.equal(
+    withoutNewFields.lines[0].sourceFingerprint,
+    PINNED,
+    'the fingerprint of a row with no spec/createTime is the pre-change value, byte for byte',
+  )
+  const withNewFields = mapExpansionRowsToSnapshotLines(
+    [expansionRow({ idempotencyKey: 'fp-fixed', spec: 'DN1200x12', createTime: '2026-08-30T09:15:00' })],
+    { snapshotBatchId: 'bfp' },
+  )
+  assert.equal(
+    withNewFields.lines[0].sourceFingerprint,
+    PINNED,
+    'adding spec/createTime to the SOURCE row must not move the fingerprint either',
+  )
+  // ...and therefore not the derived snapshotLineId, which seeds off the same identity.
+  assert.equal(withNewFields.lines[0].snapshotLineId, withoutNewFields.lines[0].snapshotLineId)
+  // createTime is consumed by the batch-identity mint, never persisted onto a line.
+  assert.ok(!('createTime' in withNewFields.lines[0]), 'createTime is not a snapshot-line field')
+})
+
+run('spec accepts the readonly-intake spelling so both intake paths agree', () => {
+  const viaSpecification = mapExpansionRowsToSnapshotLines(
+    [expansionRow({ specification: 'DN800' })],
+    { snapshotBatchId: 'batch-spec-alias' },
+  )
+  assert.equal(viaSpecification.lines[0].spec, 'DN800')
+  assert.deepEqual([...SPEC_KEYS], ['spec', 'specification'], 'the spec vocabulary is CLOSED')
 })
 
 run('designQty prefers rawQuantity over the totalQuantity rollup', () => {

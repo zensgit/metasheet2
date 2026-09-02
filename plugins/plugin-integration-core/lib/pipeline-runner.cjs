@@ -20,6 +20,16 @@ const {
   evaluateOutboundHttpWrite,
   isGenericHttpWriteKind,
 } = require('./outbound-http-write-gate.cjs')
+// E4 / G-4 PARITY (20260901). The runner holds the ONE kind-generic `targetAdapter.upsert(...)`
+// call in this package, so it is the seam a K3 write actually travels through on a plain pipeline
+// run. The K3 gate further down named the WebAPI kind by literal; its SIBLING `erp:k3-wise-sqlserver`
+// walked past it. Refusing at target resolution keeps a refused run from costing an adapter, a
+// credential reload or a source read.
+const {
+  K3_EXTERNAL_WRITE_SQLSERVER_TARGET_KIND,
+  isK3ExternalWriteTargetKind,
+  refuseK3ExternalWritePermanently,
+} = require('./k3-external-write-permanent-fence.cjs')
 const {
   B2A_AUTHORIZED_RUN_ID,
   B2A_PURPOSE_PIPELINE_RUNNER_READ,
@@ -429,6 +439,27 @@ function createPipelineRunner(deps = {}) {
         code: 'K3_WISE_PIPELINE_RUN_DISABLED',
         pipelineId: pipeline.id,
       })
+    }
+    // E4 / G-4 PARITY (20260901) — the SIBLING K3 kind, refused at the SAME seam.
+    //
+    // The gate directly above names `erp:k3-wise-webapi` as a literal, so `erp:k3-wise-sqlserver`
+    // passed it and travelled on to `adapterRegistry.createAdapter(targetSystem)` and then to the
+    // kind-generic `targetAdapter.upsert(...)` below — the only generic external-write dispatch in
+    // this runner. What stopped it there was not a fence but the DEFAULT injection of a read-only
+    // query executor, which a deployment can replace. This refusal does not depend on that.
+    //
+    // It carries the PERMANENT token rather than the redirect above, and that difference is
+    // deliberate: the WebAPI message points at the C6 dry-run + apply lifecycle, but no C6 write
+    // profile resolves to the sqlserver kind, so for this kind there is no sanctioned write path
+    // to point at. Naming one would be a lie a future reader would try to follow.
+    //
+    // `dryRun !== true` matches both neighbouring gates for the reason they state: a dry run
+    // performs no write, and refusing it would break a read-only preview (the E4-05 failure mode).
+    if (targetSystem.kind === K3_EXTERNAL_WRITE_SQLSERVER_TARGET_KIND && input.dryRun !== true) {
+      refuseK3ExternalWritePermanently(
+        (status, code, message, details) => new PipelineRunnerError(message, { ...details, code, status }),
+        K3_EXTERNAL_WRITE_SQLSERVER_TARGET_KIND,
+      )
     }
     // W-1(c), owner ruling 20260829: generic outbound HTTP write is default-deny. Same seam and the
     // same `dryRun !== true` shape as the K3 guard directly above, for the same reason — a dry run
@@ -1238,7 +1269,13 @@ function createPipelineRunner(deps = {}) {
         workspaceId: deadLetter.workspaceId,
         id: replayPipeline.targetSystemId,
       })
-      if (replayTarget && replayTarget.kind === 'erp:k3-wise-webapi') {
+      // E4 / G-4 PARITY (20260901): widened from the `erp:k3-wise-webapi` literal to BOTH K3 kinds.
+      // The code and message are unchanged and are accurate for both — replay is disabled for K3
+      // WISE targets, whichever transport they use. The sqlserver kind would also be refused one
+      // level down (replay re-enters `runPipeline`), but refusing HERE is what keeps a doomed
+      // replay from spending the registration's single source-read operation claim on its way to
+      // the refusal, exactly as the ordering note below describes for the WebAPI kind.
+      if (replayTarget && isK3ExternalWriteTargetKind(replayTarget.kind)) {
         throw new PipelineRunnerError('dead-letter replay is disabled for K3 WISE targets', {
           code: 'K3_WISE_REPLAY_DISABLED',
           id: deadLetter.id,

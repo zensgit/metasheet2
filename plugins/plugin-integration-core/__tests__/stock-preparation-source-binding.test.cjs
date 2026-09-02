@@ -39,6 +39,7 @@ const MIGRATIONS_DIR = path.join(REPO_ROOT, 'packages', 'core-backend', 'migrati
 
 const {
   ELIGIBLE_SOURCE_KINDS,
+  SOURCE_BINDING_REFUSAL_REASONS,
   StockPreparationSourceBindingError,
   assertBindableSource,
   isBindableSource,
@@ -541,13 +542,82 @@ async function main() {
     // 080 widens the closed audit vocabulary, and the store constant stays set-equal to it. (The
     // audit-migration suite asserts this too, against the LATEST vocabulary migration it discovers;
     // restating it here keeps this feature's own suite self-contained about the action it adds.)
-    assert.ok(STOCK_PREP_AUDIT_ACTIONS.includes('source_binding_set'), 'the store knows the new action')
+    //
+    // The expected list below is 080's OWN historical vocabulary — frozen, not derived from the live
+    // STOCK_PREP_AUDIT_ACTIONS import. 080 is a point-in-time migration; a LATER PR may legitimately
+    // widen the vocabulary further (081: 按项目导出物料 Excel added `prep_line_export`) without ever
+    // making 080's own CHECK list wrong. Comparing against the live constant here would make this
+    // assertion fail every time a future action is added anywhere in the plugin — which is exactly
+    // the failure mode stock-preparation-audit-migration.test.cjs's "discover the LATEST migration"
+    // design avoids; this restatement stays self-contained by freezing what 080 actually declared.
+    assert.ok(STOCK_PREP_AUDIT_ACTIONS.includes('source_binding_set'), 'the store still knows the action 080 added')
     const vocabulary = fs.readFileSync(path.join(MIGRATIONS_DIR, '080_extend_stock_prep_audit_source_binding_action.sql'), 'utf8')
     assert.doesNotMatch(vocabulary, /\bDROP\s+TABLE\b/i)
     const checkMatch = vocabulary.match(/ADD CONSTRAINT integration_stock_prep_audit_action_check CHECK \(action IN \(([\s\S]*?)\)\)/)
     assert.ok(checkMatch, '080 installs the widened CHECK vocabulary')
     const checkActions = [...checkMatch[1].matchAll(/'([a-z_]+)'/g)].map((entry) => entry[1]).sort()
-    assert.deepEqual(checkActions, [...STOCK_PREP_AUDIT_ACTIONS].sort(), 'CHECK vocabulary stays set-equal to the store constant')
+    const actionsAsOf080 = [
+      'exception_bulk_resolve', 'exception_resolve', 'generation_run',
+      'mapping_candidates_sync', 'mapping_confirm', 'mapping_retire',
+      'persist_repair_once', 'source_binding_set', 'unit_confirm', 'unit_retire',
+    ].sort()
+    assert.deepEqual(checkActions, actionsAsOf080, "080's CHECK vocabulary matches what this feature introduced")
+  })
+
+  // -------------------------------------------------------------------------
+  // R-19 — THE CROSS-KIND FOOTGUN. Both BOM read kinds are bindable in the abstract, but the
+  // binding does NOT move `source.kind`, and `loadTableActionSourceAdapter` refuses any system whose
+  // kind differs from it. So without `requiredKind` a bridge-kind pick against a
+  // data-source-kind action would SAVE, report itself live, and then break every read.
+  //
+  // Fail-closed is not good enough here: it is fail-closed AND undiscoverable, which is exactly the
+  // onboarding cost this feature exists to remove.
+  // -------------------------------------------------------------------------
+  await run('R-19 a candidate of the OTHER BOM read kind is refused for THIS action, and never offered', async () => {
+    const dataSourceKind = 'data-source:sql-readonly'
+    const bridgeKind = 'bridge:legacy-sql-readonly'
+    const bridge = activeSystem({ id: 'sys_bridge', kind: bridgeKind, config: {} })
+
+    // Both kinds remain bindable in the abstract — the allowlist is unchanged...
+    assert.equal(sourceBindingRefusalReason(bridge), null, 'a bridge source is a valid 备料 source in general')
+    // ...but not for an action wired for the OTHER kind.
+    assert.equal(sourceBindingRefusalReason(bridge, { requiredKind: dataSourceKind }), 'kind_mismatch')
+    assert.equal(sourceBindingRefusalReason(activeSystem(), { requiredKind: dataSourceKind }), null, 'the matching kind still passes')
+    assert.equal(sourceBindingRefusalReason(activeSystem(), { requiredKind: bridgeKind }), 'kind_mismatch')
+    // `kind_mismatch` is DISTINCT from `kind_ineligible`: one says "never a 备料 source", the other
+    // says "fine, but not for this deployment". They need different words, so they need different
+    // tokens.
+    assert.equal(sourceBindingRefusalReason(activeSystem({ kind: 'http' }), { requiredKind: dataSourceKind }), 'kind_ineligible')
+    assert.ok(SOURCE_BINDING_REFUSAL_REASONS.includes('kind_mismatch'))
+
+    // The thrown refusal names the kind the ACTION wants — the admin cannot see it anywhere else,
+    // because it comes off deploy-time config.
+    const error = await expectError(
+      Promise.resolve().then(() => assertBindableSource(bridge, { requiredKind: dataSourceKind })),
+      (caught) => {
+        assert.equal(caught.status, 422)
+        assert.equal(caught.code, 'SOURCE_BINDING_SOURCE_INELIGIBLE')
+        assert.equal(caught.details.reason, 'kind_mismatch')
+      },
+      'R-19 assert',
+    )
+    assert.equal(error.details.requiredKind, dataSourceKind, 'the refusal names the kind the action is wired for')
+
+    // THE PICKER STAYS HONEST: a cross-kind candidate is absent, not greyed out.
+    const offered = listEligibleSources([activeSystem(), bridge], {
+      dataSourceAccessibility: new Map([[PICKED_SOURCE, true]]),
+      requiredKind: dataSourceKind,
+    })
+    assert.deepEqual(offered.map((row) => row.externalSystemId), [PICKED_SOURCE], 'only the action\'s own kind is offered')
+    // ...and the reverse, so the filter is the ACTION's kind and not a hardcoded preference.
+    const offeredBridge = listEligibleSources([activeSystem(), bridge], { requiredKind: bridgeKind })
+    assert.deepEqual(offeredBridge.map((row) => row.externalSystemId), ['sys_bridge'])
+
+    // Omitting requiredKind keeps the old, wider question for callers with no action context.
+    const unscoped = listEligibleSources([activeSystem(), bridge], {
+      dataSourceAccessibility: new Map([[PICKED_SOURCE, true]]),
+    })
+    assert.equal(unscoped.length, 2, 'without an action context both kinds remain bindable')
   })
 
   // A tiny projection check kept separate so a failure names the projection, not the picker.

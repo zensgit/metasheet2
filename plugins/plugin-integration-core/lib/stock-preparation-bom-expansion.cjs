@@ -206,6 +206,19 @@ const PLM_STOCK_PREPARATION_BOM_READ_PLAN = Object.freeze({
     nameField: 'IdentityName',
     materialField: 'Material',
     versionField: 'SysVer',
+    // specField / createTimeField are DECLARED-BUT-UNDEFAULTED on purpose.
+    //
+    // 规格 and the material creation time are NOT part of this family's core part roles
+    // (source-vendor-presets/dn-pdm-family.preset.json coreTables.part.roles declares exactly
+    // rowId/id/code/name/material/version). Where they live is a PER-DEPLOYMENT reading: on the
+    // measured customer catalog they surface as native view columns (`Specification`, `Createtime`
+    // on DN_PartLibrary_View — docs/development/takeover-beiliao-20260821/onsite-connection-test-
+    // runbook-20260901.md §0/§4), while on a stock DN_PDM catalog 规格 is a dictionary-assigned
+    // `partExAttr` slot (preset semanticExpectations `part-spec`). Pinning either here would encode
+    // ONE customer's dictionary row — the same refusal the preset applies to bomDetail quantity.
+    //
+    // So the plan DECLARES the two roles and defaults them to ABSENT. Undeclared => the expansion
+    // row simply carries no `spec` / `createTime` key (graceful absence), never a guessed column.
   },
   bomHead: {
     object: 'DN_PDM_BomHeadInfo',
@@ -242,9 +255,18 @@ function normalizeStockPreparationBomReadPlan(input = PLM_STOCK_PREPARATION_BOM_
     pathInfo: normalizeObjectFields(plan.pathInfo, 'readPlan.pathInfo', ['object', 'idField']),
     orderHead: normalizeObjectFields(plan.orderHead, 'readPlan.orderHead', ['object', 'idField', 'pathIdField']),
     orderDetail: normalizeObjectFields(plan.orderDetail, 'readPlan.orderDetail', ['object', 'orderIdField', 'componentIdField', 'quantityField'], ['sortField']),
-    part: normalizeObjectFields(plan.part, 'readPlan.part', ['object', 'idField'], ['codeField', 'nameField', 'materialField', 'versionField']),
+    part: normalizeObjectFields(plan.part, 'readPlan.part', ['object', 'idField'], ['codeField', 'nameField', 'materialField', 'versionField', 'specField', 'createTimeField']),
     bomHead: normalizeObjectFields(plan.bomHead, 'readPlan.bomHead', ['object', 'parentPartField', 'bomIdField'], ['versionField', 'activeField']),
     bomDetail: normalizeObjectFields(plan.bomDetail, 'readPlan.bomDetail', ['object', 'bomParentField', 'componentIdField', 'quantityField'], ['sortField']),
+  }
+  // The DECLARED 备料 batch rule. The expansion itself never reads this — batch identity is minted
+  // upstream of it (stock-preparation-batch-identity.cjs) — but the read plan is the deployment's
+  // one configuration surface, so the declaration must SURVIVE normalization instead of being
+  // silently dropped here. Absent stays absent; a present value is carried through verbatim and
+  // validated by the minting module, which refuses an unknown mode rather than defaulting on a typo.
+  if (isPlainObject(plan.batchIdentity)) {
+    const mode = optionalString(plan.batchIdentity.mode, 'readPlan.batchIdentity.mode', { identifier: false })
+    if (mode !== undefined) out.batchIdentity = { mode }
   }
   if (out.matchField !== out.pathExAttr.matchField) {
     throw new StockPreparationBomExpansionError('readPlan.matchField must match readPlan.pathExAttr.matchField', {
@@ -404,7 +426,14 @@ function matchesByField(rows, field, value) {
 }
 
 function parseQuantity(value, context) {
-  const numeric = Number(value)
+  // Hold-not-zero: a SQL NULL or blank/whitespace-only string is an ABSENT
+  // quantity, not a measured one — Number(null) === 0 and Number('') === 0
+  // are both finite, so without this guard an absent source quantity would
+  // silently become a real 0 and multiply down as 0 through every descendant
+  // (see totalQuantity below). Force it through the same invalid_quantity
+  // path a garbled ('not-a-number') value already takes instead. A STATED
+  // numeric 0 (isBlank(0) is false) is a real measured zero and stays valid.
+  const numeric = isBlank(value) ? NaN : Number(value)
   if (!Number.isFinite(numeric)) {
     return {
       ok: false,
@@ -563,6 +592,14 @@ function createRow({ projectNo, parentSourceId, pathTokens, depth, partRow, rawQ
     totalQuantity,
     active,
   }
+  // DECLARED-OR-ABSENT (see PLM_STOCK_PREPARATION_BOM_READ_PLAN.part): 规格 and the material
+  // creation time are emitted ONLY when the deployment's read plan declared the slot AND the
+  // source row actually carried a value. Same conditional-key discipline as `sortLine`, so a plan
+  // that declares neither produces a byte-identical row to the pre-change one — no empty key.
+  const spec = readField(partRow, 'Spec')
+  if (!isBlank(spec)) row.spec = spec
+  const createTime = readField(partRow, 'Createtime')
+  if (!isBlank(createTime)) row.createTime = createTime
   if (!isBlank(sortLine)) row.sortLine = sortLine
   if (isPlainObject(extValues)) {
     for (const [fieldId, value] of Object.entries(extValues)) {
@@ -585,9 +622,11 @@ function rowFromPart(plan, { projectNo, parentSourceId, pathTokens, depth, partR
     IdentityName: plan.part.nameField ? readField(partRow, plan.part.nameField) : undefined,
     Material: plan.part.materialField ? readField(partRow, plan.part.materialField) : undefined,
     SysVer: plan.part.versionField ? readField(partRow, plan.part.versionField) : undefined,
+    Spec: plan.part.specField ? readField(partRow, plan.part.specField) : undefined,
+    Createtime: plan.part.createTimeField ? readField(partRow, plan.part.createTimeField) : undefined,
   }
   // The mapping reads the RAW source row, not `normalizedPart`: the canonical
-  // five keys are the only ones the frozen read plan knows about, and the whole
+  // declared keys are the only ones the read plan knows about, and the whole
   // point of a tenant mapping is to reach the columns it does not.
   //
   // `readField` is handed over rather than reimplemented, so a mapped source

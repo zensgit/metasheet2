@@ -744,6 +744,13 @@
         </dl>
       </StockPrepTechnicalDetails>
     </section>
+
+    <!-- 列映射副驾: the first AI feature on the governed AI boundary. It PROPOSES what each opaque
+         source column means; a human confirms; the confirmed result becomes a deterministic preset.
+         Advisory-only, fail-open, admin-gated server-side. Signals come from a source discovery. -->
+    <section v-if="canRun" class="stock-prep-install__section" data-testid="stock-prep-install-copilot">
+      <SchemaMappingCopilotPanel :scope="props.scope" :signals="copilotSignals" />
+    </section>
   </div>
 </template>
 
@@ -788,6 +795,8 @@ import { useAuth } from '../../../composables/useAuth'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
 import StockPreparationSourceBindingPanel from './StockPreparationSourceBindingPanel.vue'
+import SchemaMappingCopilotPanel from './SchemaMappingCopilotPanel.vue'
+import type { SchemaMappingSignalsInput } from '../../../services/integration/stockPreparation/schemaMappingCopilot'
 import {
   buildStockPreparationInstallDefaults,
   readStockPreparationAppManifest,
@@ -854,6 +863,10 @@ function bi(zh: string, en: string): string {
 }
 
 const canRun = computed(() => canRunStockPrepInstall((permission) => auth.hasPermission(permission)))
+
+// 列映射副驾 signals come from a source-discovery read (columns + dictionary tables). Held null until a
+// discovery has run — the panel then renders its "run a discovery first" guidance (honest empty state).
+const copilotSignals = ref<SchemaMappingSignalsInput | null>(null)
 
 const busy = ref(false)
 const errorStatus = ref<number | null>(null)

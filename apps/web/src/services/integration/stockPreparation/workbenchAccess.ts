@@ -76,6 +76,16 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     control: 'stock-prep-confirmation-confirm',
   }),
   Object.freeze({
+    // 按项目导出物料 Excel — 仓库/采购's project materials export. VALUE-BEARING (material names,
+    // quantities), so it rides the SAME notch-tighter OPERATE tier as confirmationQueue.valueEntry
+    // above, not the broad READ queue-watcher tier.
+    capability: 'confirmationQueue.export',
+    code: STOCK_PREP_OPERATE,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/prep-lines/export',
+    control: 'stock-prep-confirmation-export',
+  }),
+  Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,
     method: 'POST',

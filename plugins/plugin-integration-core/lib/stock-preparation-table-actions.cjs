@@ -25,6 +25,10 @@ const {
   normalizeRunOnlyConflictPolicyReview,
   POLICY_BOUNDARY_STORED,
 } = require('./stock-preparation-conflict-policies.cjs')
+// W4 carry opt-in: the deploy-time carryPolicy knob is validated through the
+// carry module's OWN closed vocabulary (configuration-not-code: the config can
+// only say what the policy module can mean).
+const { normalizeCarryPolicy } = require('./stock-preparation-carry-policy.cjs')
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
@@ -229,6 +233,29 @@ function normalizeActionExtensionFieldIds(input, template) {
   return out
 }
 
+/**
+ * W4 carry opt-in (execution-plan W4a; adjudication Layer 3). Deploy-time config
+ * (the INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON world), validated
+ * through the carry module's OWN closed vocabulary so config and runtime can
+ * never disagree about what a policy means. Absent => null => the key is not
+ * added to the normalized action at all (conditional spread, like
+ * extensionFieldIds), so every existing config snapshot/hash is byte-identical
+ * and the planner runs exactly the pre-wiring path. The normalized object is
+ * plain JSON, so it survives the cloneJson ride into a large-BOM job's
+ * actionSnapshot unchanged.
+ */
+function normalizeActionCarryPolicy(input) {
+  if (input === undefined || input === null) return null
+  try {
+    return normalizeCarryPolicy(input)
+  } catch (error) {
+    throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'carryPolicy is not a valid carry policy', {
+      field: 'carryPolicy',
+      carryPolicyReason: error && error.reason ? error.reason : 'UNKNOWN',
+    })
+  }
+}
+
 function normalizeStockPreparationActionConfig(input = {}) {
   if (!isPlainObject(input)) {
     throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'action config must be an object', { field: 'action' })
@@ -243,6 +270,7 @@ function normalizeStockPreparationActionConfig(input = {}) {
   }
   const template = normalizeStockPreparationTemplate(input.template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE)
   const extensionFieldIds = normalizeActionExtensionFieldIds(input.extensionFieldIds, template)
+  const carryPolicy = normalizeActionCarryPolicy(input.carryPolicy)
   return {
     actionId,
     kind,
@@ -255,6 +283,7 @@ function normalizeStockPreparationActionConfig(input = {}) {
     // several places, and an unconditional key would move every legacy shape
     // for a feature that config did not ask for.
     ...(extensionFieldIds.length ? { extensionFieldIds } : {}),
+    ...(carryPolicy ? { carryPolicy } : {}),
     conflictStrategy: isPlainObject(input.conflictStrategy) ? cloneJson(input.conflictStrategy) : {},
     pageLimit: positiveInteger(input.pageLimit, 'pageLimit', undefined),
     maxPages: positiveInteger(input.maxPages, 'maxPages', undefined),
@@ -593,7 +622,14 @@ const MVP_TEMPLATE_BY_OBJECT_ID = new Map(
   // The confirmation-decision LEDGER template rides the same registry so its
   // scoped records API translates logical keys exactly like the MVP tables'.
   // It is NOT thereby part of the frozen nine-table MVP surface.
-  [...STOCK_PREPARATION_MVP_TABLE_TEMPLATES, STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE]
+  //
+  // W4 carry: the CANONICAL main-table template rides it too, for exactly one
+  // consumer — confirm-writes' applyCarryViaConfirm, whose K2 confirm write
+  // addresses the provisioning-managed canonical sheet by logical field keys.
+  // Membership here grants TRANSLATION only, never authorization: each module's
+  // own object-id guard (confirm-writes MVP_OBJECT_ID_SET, the ledger's pinned
+  // OBJECT_ID, the carry executor's single canonical id) stays the wall.
+  [...STOCK_PREPARATION_MVP_TABLE_TEMPLATES, STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE]
     .map((template) => [template.objectId, template]),
 )
 
@@ -1173,6 +1209,9 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
       plannedAt: plannedAt || new Date().toISOString(),
       duplicatePolicyReview: review,
       installedFieldProperties,
+      // W4 carry: threaded from the deploy-time action config (undefined when the
+      // config never opted in — the planner is then byte-identical to pre-wiring).
+      carryPolicy: action.carryPolicy,
     })
   }
   let plan = planWithReview(conflictPolicyReview)

@@ -75,6 +75,18 @@ export interface StockPreparationSourceBindingView {
   effectiveSourceKind: string | null
   origin: StockPreparationSourceOrigin
   persistedBinding: StockPreparationPersistedBinding | null
+  /**
+   * `null` when the source the action reads today is actually usable; otherwise the server's closed
+   * reason token saying why it is not. A deployment can land here without anyone doing anything
+   * wrong on this screen — an env default naming a system since deleted or deactivated, or a
+   * cross-kind row persisted before the server enforced the action's kind.
+   */
+  effectiveSourceProblem: string | null
+  /**
+   * COMPUTED by the server, not a constant: it means "a change made here will actually work", and it
+   * is false while the current source cannot be read. The page renders its 生效无需重启 line only
+   * when this is true, so the promise cannot outlive the thing it promises.
+   */
   takesEffectWithoutRestart: boolean
   eligibleSources: StockPreparationSourceCandidate[]
 }
@@ -200,6 +212,13 @@ export const STOCK_PREP_SOURCE_REFUSAL_TEXT: Readonly<Record<string, { zh: strin
   kind_ineligible: Object.freeze({
     zh: '这个连接不是只读数据库类型,备料只能从只读库取数,不能从写入类接口取数。',
     en: 'That connection is not a read-only database. 备料 reads from read-only databases only, never from a write-capable endpoint.',
+  }),
+  // Not "wrong connector" but "wrong connector FOR THIS DEPLOYMENT". The action's source kind is
+  // fixed at install time and the server refuses to read anything else, so binding across kinds
+  // would save and then break every refresh — which is why it is refused up front instead.
+  kind_mismatch: Object.freeze({
+    zh: '这套部署的备料是按另一种连接方式装的,只能绑定同一种方式的连接。要改用这个连接,需要实施同事调整安装配置。',
+    en: 'This deployment installed 备料 against a different connection type, and only connections of that same type can be bound. Switching to this one needs an implementer to adjust the install configuration.',
   }),
   role_ineligible: Object.freeze({
     zh: '这个连接登记的用途是「写入目标」,不能当作取数来源。',

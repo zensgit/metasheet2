@@ -447,6 +447,16 @@ module.exports = {
       context,
       logger,
       services: {
+        // 列映射副驾: the governed AI boundary (packages/core-backend GovernedAiService), injected by
+        // the host for this plugin only. OPTIONAL — absent → the copilot fail-opens to manual mapping.
+        // Duck-typed to { suggest(request, env?) }; the plugin never reaches a provider any other way.
+        governedAi: (context.services && context.services.governedAi) || null,
+        // 按项目导出物料 Excel: the xlsx buffer builder (packages/core-backend xlsx-service.ts
+        // buildXlsxBuffer), injected by the host for this plugin only — same INJECTED-per-plugin shape
+        // as governedAi above, and for the same reason: the plugin has no `xlsx` dependency of its own
+        // and must not add one. OPTIONAL — absent → the export route 501s instead of a 500 crash.
+        // Duck-typed to { buildWorkbookBuffer({ sheetName, headers, rows }) => Promise<Buffer> }.
+        stockPreparationXlsxExport: (context.services && context.services.stockPreparationXlsxExport) || null,
         externalSystemRegistry,
         readSourceConfigStore,
         stockPreparationAuditStore,
