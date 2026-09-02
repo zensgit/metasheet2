@@ -26,6 +26,19 @@
 //      => the platform's own field_permissions rows, addressed by PHYSICAL field id.
 //      Declaration WITHOUT a port => fail closed, never a silent skip.
 //
+//   E. A PACK REVISION THAT MOVES A COLUMN'S OWNER CANNOT SUCCEED SILENTLY. The port is
+//      upsert-only by design (no revoke path), so the denial row v1 wrote for the OLD
+//      owner survives v2 and the column ends up read-only for BOTH declared roles. The
+//      install and the dry-run must both SURFACE that as `staleWriteScopes` rather than
+//      report a clean `applied=N`. A port that cannot be read at all reports
+//      `writeScopeCheck: 'unsupported_port'` and a NULL list -- never an empty one, which
+//      would read as "checked, nothing stale".
+//
+//   F. AN UNKNOWN ROLE IS A CODED 422, REFUSED BEFORE THE FIRST SCHEMA WRITE. The pack's
+//      regex says nothing about whether the role EXISTS; only the host knows. The
+//      pre-flight asks it before any column is created, and a port that rejects later
+//      still surfaces a coded install error instead of an uncoded 500.
+//
 // The server-side ENFORCEMENT of those rows is the platform's, not this plugin's, and is
 // witnessed in packages/core-backend (unit: the real loadFieldPermissionScopeMap ->
 // deriveFieldPermissions -> isFieldWriteForbidden chain; integration: the real
@@ -51,6 +64,7 @@ const {
 
 const {
   installCustomerPack,
+  planCustomerPackInstall,
   StockPreparationCustomerPackInstallError,
   __internals: installerInternals,
 } = require(path.join(LIB, 'stock-preparation-customer-pack-installer.cjs'))
@@ -576,6 +590,327 @@ function applyHelperIsPure() {
   assert.equal(typeof installerInternals.applyFieldWritePolicies, 'function')
 }
 
+
+// ---------------------------------------------------------------------------
+// E. The pack REVISION that moves a column's owner
+// ---------------------------------------------------------------------------
+
+// A port with the READ half the stale check needs. `rows` is the platform's
+// `field_permissions` table as this port sees it: only what THIS plugin ever wrote
+// (created_by = the plugin marker), which is exactly the census the real service's
+// listRoleWriteScopes performs.
+function createStatefulPort({ withRead = true, withRoleCheck = true, knownRoleIds = null } = {}) {
+  const rows = new Map()
+  const port = {
+    rows,
+    applyCalls: [],
+    async applyRoleWriteScopes({ sheetId, entries }) {
+      this.applyCalls.push({ sheetId, entries })
+      // UPSERT-ONLY, exactly like the real port: an entry that is no longer derived is
+      // never removed, which is the whole hazard section E exists to catch.
+      for (const entry of entries) rows.set(`${entry.fieldId} ${entry.roleId}`, { ...entry, sheetId })
+      return { applied: entries.length, entries }
+    },
+  }
+  if (withRead) {
+    port.listRoleWriteScopes = async ({ sheetId }) => ({
+      sheetId,
+      entries: [...rows.values()]
+        .filter((row) => row.sheetId === sheetId)
+        .map(({ fieldId, roleId }) => ({ fieldId, roleId })),
+    })
+  }
+  if (withRoleCheck) {
+    port.findMissingRoleIds = async ({ roleIds }) => ({
+      missing: knownRoleIds === null ? [] : roleIds.filter((roleId) => !knownRoleIds.includes(roleId)),
+    })
+  }
+  return port
+}
+
+const V1_POLICIES = Object.freeze([
+  { roleId: ROLE_PURCHASING, ownsFieldIds: ['procurementReply', 'procurementDone', 'procurementReplyDate'] },
+  { roleId: ROLE_WAREHOUSE, ownsFieldIds: ['warehouseConfirmation', 'warehouseDone', 'actualArrivalDate'] },
+])
+// v2 moves the arrival-date column from the warehouse role to the purchasing role.
+// NOTHING else changes.
+const V2_POLICIES = Object.freeze([
+  { roleId: ROLE_PURCHASING, ownsFieldIds: ['procurementReply', 'procurementDone', 'procurementReplyDate', 'actualArrivalDate'] },
+  { roleId: ROLE_WAREHOUSE, ownsFieldIds: ['warehouseConfirmation', 'warehouseDone'] },
+])
+// 6 columns are claimed by someone in v2; each denies the one role that does not own it.
+const V2_DENIAL_COUNT = 6
+
+function packWith(policies, packVersion) {
+  return { ...BASE_PACK, packVersion, fieldWritePolicies: policies.map((policy) => ({ ...policy })) }
+}
+
+async function installWith(port, policies, packVersion, provisioning) {
+  return installCustomerPack({
+    provisioning: provisioning || createFakeProvisioning(),
+    projectId: PROJECT_ID,
+    pack: packWith(policies, packVersion),
+    packInstallStore: LEDGER,
+    tenantId: 't1',
+    workspaceId: 'w1',
+    logger: { info() {}, warn() {} },
+    fieldPermissions: port,
+  })
+}
+
+const physical = (fieldId) => physicalFieldId(PROJECT_ID, OBJECT_ID, fieldId)
+
+async function ownershipTransferIsNeverASilentSuccess() {
+  const port = createStatefulPort()
+
+  // v1: the warehouse role owns the arrival-date column, so the row written says
+  // "purchasing may not write it".
+  const v1 = await installWith(port, V1_POLICIES, 1)
+  assert.equal(v1.writeScopeCheck, 'checked', 'a readable port is actually read')
+  assert.deepEqual(v1.staleWriteScopes, [], 'a first install has nothing stale behind it')
+  assert.equal(v1.staleWriteScopeCount, 0)
+  assert.ok(
+    port.rows.has(`${physical('actualArrivalDate')} ${ROLE_PURCHASING}`),
+    'v1 denied purchasing the column the warehouse owned',
+  )
+
+  // v2: the SAME column changes hands. The port has no revoke path, so the v1 row for
+  // purchasing survives while a new row for the warehouse lands - the column is now
+  // read-only for BOTH.
+  const v2 = await installWith(port, V2_POLICIES, 2)
+  assert.ok(
+    port.rows.has(`${physical('actualArrivalDate')} ${ROLE_WAREHOUSE}`)
+      && port.rows.has(`${physical('actualArrivalDate')} ${ROLE_PURCHASING}`),
+    'the hazard is real: after v2 the column carries a denial for BOTH declared roles',
+  )
+
+  // THE FIX: the install refuses to report that as a clean success.
+  assert.equal(v2.writeScopeCheck, 'checked')
+  assert.equal(v2.staleWriteScopeCount, 1)
+  assert.deepEqual(v2.staleWriteScopes, [
+    { fieldId: physical('actualArrivalDate'), logicalFieldId: 'actualArrivalDate', roleId: ROLE_PURCHASING },
+  ], 'the orphaned v1 denial is named, by BOTH its physical and its logical id')
+
+  // Values-free: ids and role ids only, no labels and no values.
+  for (const stale of v2.staleWriteScopes) {
+    assert.deepEqual(Object.keys(stale).sort(), ['fieldId', 'logicalFieldId', 'roleId'])
+  }
+
+  // IDEMPOTENT DETECTION, not a growing pile: re-running v2 reports the same one row.
+  const again = await installWith(port, V2_POLICIES, 2)
+  assert.deepEqual(again.staleWriteScopes, v2.staleWriteScopes, 're-running v2 reports the same stale row')
+
+  // POSITIVE CONTROL - the assertion is not vacuous. A converged sheet whose declaration
+  // did NOT move reports an empty list, so `[]` still means something.
+  const clean = createStatefulPort()
+  await installWith(clean, V1_POLICIES, 1)
+  const reinstalled = await installWith(clean, V1_POLICIES, 1)
+  assert.deepEqual(reinstalled.staleWriteScopes, [], 'an unchanged declaration leaves nothing stale')
+}
+
+async function dryRunPreviewsTheDenialPlanAndTheStaleRows() {
+  const port = createStatefulPort()
+  await installWith(port, V1_POLICIES, 1)
+
+  // The dry-run of v2, over the sheet v1 already scoped, must show BOTH what it will
+  // write and what v1 left behind - before anything is written.
+  const plan = await planCustomerPackInstall({
+    provisioning: createFakeProvisioning(),
+    projectId: PROJECT_ID,
+    pack: packWith(V2_POLICIES, 2),
+    fieldPermissions: port,
+  })
+  assert.equal(plan.fieldPermissionsPortAvailable, true)
+  assert.equal(plan.writeScopeCheck, 'checked')
+  assert.deepEqual(plan.staleWriteScopes, [
+    { fieldId: physical('actualArrivalDate'), logicalFieldId: 'actualArrivalDate', roleId: ROLE_PURCHASING },
+  ])
+
+  // THE DERIVED DENIAL PLAN itself - "what install will do" - visible before it happens.
+  assert.equal(plan.counts.fieldWriteDenials, plan.fieldWriteDenials.length)
+  const denied = (roleId) => plan.fieldWriteDenials
+    .filter((row) => row.roleId === roleId)
+    .map((row) => row.logicalFieldId)
+    .sort()
+  assert.deepEqual(denied(ROLE_WAREHOUSE), ['actualArrivalDate', 'procurementDone', 'procurementReply', 'procurementReplyDate'])
+  assert.deepEqual(denied(ROLE_PURCHASING), ['warehouseConfirmation', 'warehouseDone'])
+  for (const row of plan.fieldWriteDenials) {
+    assert.deepEqual(Object.keys(row).sort(), ['fieldId', 'logicalFieldId', 'roleId'])
+    assert.match(row.fieldId, /^fld_proj_dept_/, 'the plan names the PHYSICAL id the install will write')
+  }
+  assert.deepEqual(plan.unknownRoleIds, [], 'both declared roles exist')
+  assert.equal(plan.canInstall, true)
+
+  // ZERO WRITES: a dry-run must not touch the permission table.
+  assert.equal(port.applyCalls.length, 1, 'still only the v1 install call - the dry-run wrote nothing')
+
+  // A pack with NO declaration keeps the dry-run byte-for-byte what it is today.
+  const bare = await planCustomerPackInstall({
+    provisioning: createFakeProvisioning(),
+    projectId: PROJECT_ID,
+    pack: { ...BASE_PACK },
+    fieldPermissions: port,
+  })
+  assert.deepEqual(bare.fieldWriteDenials, [])
+  assert.equal(bare.writeScopeCheck, 'not_declared')
+  assert.equal(bare.staleWriteScopes, null)
+}
+
+async function anUnreadablePortSaysSoRatherThanReportingNothingStale() {
+  // The older-host shape: it can WRITE scopes but exposes no census. Reporting `[]` here
+  // would be a lie ("checked, nothing stale"); the only honest answer is "not checked".
+  const port = createStatefulPort({ withRead: false })
+  const summary = await installWith(port, V2_POLICIES, 2)
+  assert.equal(summary.writeScopeCheck, 'unsupported_port')
+  assert.equal(summary.staleWriteScopes, null, 'NULL, never [] - absence of a check is not absence of stale rows')
+  assert.equal(summary.staleWriteScopeCount, 0)
+  assert.equal(summary.appliedWriteScopes, V2_DENIAL_COUNT, 'and the install still applies what it declared')
+
+  const plan = await planCustomerPackInstall({
+    provisioning: createFakeProvisioning(),
+    projectId: PROJECT_ID,
+    pack: packWith(V2_POLICIES, 2),
+    fieldPermissions: port,
+  })
+  assert.equal(plan.writeScopeCheck, 'unsupported_port')
+  assert.equal(plan.staleWriteScopes, null)
+  assert.equal(plan.fieldPermissionsPortAvailable, true, 'the WRITE half is there; only the census is not')
+
+  // And with no port at all the dry-run says so instead of pretending.
+  const noPort = await planCustomerPackInstall({
+    provisioning: createFakeProvisioning(),
+    projectId: PROJECT_ID,
+    pack: packWith(V2_POLICIES, 2),
+  })
+  assert.equal(noPort.fieldPermissionsPortAvailable, false)
+  assert.equal(noPort.writeScopeCheck, 'port_absent')
+  assert.equal(noPort.staleWriteScopes, null)
+  assert.equal(noPort.canInstall, false, 'a declared policy with no port cannot install - the dry-run says so first')
+}
+
+// ---------------------------------------------------------------------------
+// F. An unknown role
+// ---------------------------------------------------------------------------
+
+// Provisioning that records EVERY call by name, so "zero schema mutations" is stated as
+// "no write primitive was reached", not as "the three we remembered did not run".
+const PROVISIONING_WRITE_METHODS = Object.freeze([
+  'ensureMissingObjectFields', 'patchObjectFieldProperty', 'ensureView', 'ensureObject',
+])
+
+function createRecordingProvisioning() {
+  const base = createFakeProvisioning()
+  const calls = []
+  const wrapped = { calls }
+  for (const key of Object.keys(base)) {
+    wrapped[key] = typeof base[key] === 'function'
+      ? (...args) => { calls.push(key); return base[key](...args) }
+      : base[key]
+  }
+  return wrapped
+}
+
+// The real host port throws this shape (see
+// packages/core-backend/src/services/stock-preparation-field-permissions.ts). The plugin
+// cannot import the TS class, so it must recognise it structurally - which is exactly
+// what this fake asserts is enough.
+function fieldPermissionsError(reason, offending) {
+  const error = new Error(`field-permission port refused: ${offending.join(', ')}`)
+  error.name = 'StockPreparationFieldPermissionsError'
+  error.reason = reason
+  error.offending = offending
+  return error
+}
+
+async function anUnknownRoleIsACoded422BeforeAnySchemaWrite() {
+  const provisioning = createRecordingProvisioning()
+  // The warehouse role does not exist on this host.
+  const port = createStatefulPort({ knownRoleIds: [ROLE_PURCHASING] })
+  port.applyRoleWriteScopes = async () => {
+    throw new Error('pre-flight must refuse before the port is ever called')
+  }
+
+  let err = null
+  try {
+    await installCustomerPack({
+      provisioning,
+      projectId: PROJECT_ID,
+      pack: packWith(V1_POLICIES, 1),
+      packInstallStore: LEDGER,
+      tenantId: 't1',
+      workspaceId: 'w1',
+      logger: { info() {}, warn() {} },
+      fieldPermissions: port,
+    })
+  } catch (error) {
+    err = error
+  }
+  assert.ok(err instanceof StockPreparationCustomerPackInstallError, 'a coded install error, not a bare 500')
+  assert.equal(err.status, 422)
+  assert.equal(err.code, 'CUSTOMER_PACK_FIELD_PERMISSION_ROLE_UNKNOWN')
+  assert.deepEqual(err.details.roleIds, [ROLE_WAREHOUSE], 'the error names the offending role id')
+
+  // ZERO SCHEMA MUTATIONS - the whole point of a PRE-flight.
+  for (const method of PROVISIONING_WRITE_METHODS) {
+    assert.equal(provisioning.calls.includes(method), false, `${method} was never reached`)
+  }
+
+  // The dry-run REPORTS the same thing instead of throwing (its whole posture).
+  const plan = await planCustomerPackInstall({
+    provisioning: createFakeProvisioning(),
+    projectId: PROJECT_ID,
+    pack: packWith(V1_POLICIES, 1),
+    fieldPermissions: port,
+  })
+  assert.deepEqual(plan.unknownRoleIds, [ROLE_WAREHOUSE])
+  assert.equal(plan.canInstall, false, 'an unknown role blocks the install and the dry-run says so')
+}
+
+async function aLateRoleRejectionIsStillCodedNotAnUncoded500() {
+  // The older-host shape again: no pre-flight seam, so the refusal can only come from the
+  // port itself, AFTER the schema writes. It must still be a coded 422 rather than the
+  // uncoded 500 an unmapped throw produces.
+  const port = createStatefulPort({ withRoleCheck: false })
+  port.applyRoleWriteScopes = async () => {
+    throw fieldPermissionsError('ROLE_NOT_FOUND', [ROLE_WAREHOUSE])
+  }
+
+  let err = null
+  try {
+    await installWith(port, V1_POLICIES, 1)
+  } catch (error) {
+    err = error
+  }
+  assert.ok(err instanceof StockPreparationCustomerPackInstallError)
+  assert.equal(err.status, 422)
+  assert.equal(err.code, 'CUSTOMER_PACK_FIELD_PERMISSION_ROLE_UNKNOWN')
+  assert.deepEqual(err.details.roleIds, [ROLE_WAREHOUSE])
+
+  // The other three members of the port's closed failure vocabulary map too - none of
+  // them may reach a caller as an uncoded 500.
+  const mapped = async (reason) => {
+    const late = createStatefulPort({ withRoleCheck: false })
+    late.applyRoleWriteScopes = async () => { throw fieldPermissionsError(reason, ['x']) }
+    try {
+      await installWith(late, V1_POLICIES, 1)
+    } catch (error) {
+      return { status: error.status, code: error.code }
+    }
+    return null
+  }
+  assert.deepEqual(await mapped('FIELD_NOT_ON_SHEET'), { status: 422, code: 'CUSTOMER_PACK_FIELD_PERMISSION_FIELD_UNKNOWN' })
+  assert.deepEqual(await mapped('SHEET_NOT_FOUND'), { status: 409, code: 'CUSTOMER_PACK_FIELD_PERMISSION_SHEET_UNKNOWN' })
+  assert.deepEqual(await mapped('ENTRIES_INVALID'), { status: 422, code: 'CUSTOMER_PACK_FIELD_PERMISSION_ENTRIES_INVALID' })
+
+  // A NON-port error is NOT swallowed into that vocabulary - it propagates as itself, so
+  // the mapping cannot become a catch-all that hides a real bug.
+  const boom = createStatefulPort({ withRoleCheck: false })
+  const marker = new Error('unrelated failure')
+  boom.applyRoleWriteScopes = async () => { throw marker }
+  await assert.rejects(() => installWith(boom, V1_POLICIES, 1), (error) => error === marker)
+}
+
+
 async function main() {
   newColumnsAreHumanOwned()
   plmRefreshCannotWriteTheNewColumns()
@@ -586,6 +921,11 @@ async function main() {
   await installerSkipsThePortWhenNothingIsDeclared()
   await installerWritesPlatformRowsWhenDeclared()
   await installerFailsClosedWhenThePortIsMissing()
+  await ownershipTransferIsNeverASilentSuccess()
+  await dryRunPreviewsTheDenialPlanAndTheStaleRows()
+  await anUnreadablePortSaysSoRatherThanReportingNothingStale()
+  await anUnknownRoleIsACoded422BeforeAnySchemaWrite()
+  await aLateRoleRejectionIsStillCodedNotAnUncoded500()
   applyHelperIsPure()
   console.log('stock-preparation-department-fields-and-write-scoping.test.cjs OK')
 }

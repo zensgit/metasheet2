@@ -882,7 +882,9 @@ async function summaryAndLogsAreValuesFree() {
   // classification: this rehearsal installs all 21 ext_ columns fresh onto a
   // canonical-only sheet, so both are 0 — the takeover case (hand-built columns
   // needing an ownership stamp) is covered by the installer suite.
-  assert.match(fake.logs[0], /pack=factory-a-rehearsal v1 created=21 skipped=0 stamped=0 alreadyStamped=0 optionFields=5 views=3 writeScopes=0/)
+  // `staleWriteScopes=unchecked` is the honest reading for a pack that declared nothing: the census
+  // has nothing to diff against and was never run, which is NOT the same as "0 stale rows found".
+  assert.match(fake.logs[0], /pack=factory-a-rehearsal v1 created=21 skipped=0 stamped=0 alreadyStamped=0 optionFields=5 views=3 writeScopes=0 staleWriteScopes=unchecked/)
   assert.deepEqual(Object.keys(summary).sort(), [
     'alreadyStampedFields',
     // COLUMN WRITE SCOPING. This rehearsal pack declares NO `fieldWritePolicies`, which is
@@ -901,8 +903,15 @@ async function summaryAndLogsAreValuesFree() {
     'packId',
     'packVersion',
     'skippedFields',
+    // THE STALE-SCOPE CENSUS. `staleWriteScopes` is NULL here — never [] — because this pack
+    // declares no policy, so the census never ran; `writeScopeCheck` names which of the three
+    // reasons that was. The distinction is the whole point: an empty array would read as
+    // "checked, nothing orphaned", which is a claim this install never made.
+    'staleWriteScopeCount',
+    'staleWriteScopes',
     'stampedExistingFields',
     'syncedOptionFields',
+    'writeScopeCheck',
     'writeScopeRoleCount',
     'writeScopeSkipped',
   ])
@@ -912,6 +921,9 @@ async function summaryAndLogsAreValuesFree() {
   assert.equal(summary.appliedWriteScopes, 0)
   assert.equal(summary.writeScopeRoleCount, 0)
   assert.equal(summary.writeScopeSkipped, 'not_declared')
+  assert.equal(summary.writeScopeCheck, 'not_declared')
+  assert.equal(summary.staleWriteScopes, null, 'no declaration => no census => NULL, not an empty list')
+  assert.equal(summary.staleWriteScopeCount, 0)
 
   // The join is the point: every installed id carries the band the pack declared, and NOTHING else
   // (no label, no option value, no free text) rides along.

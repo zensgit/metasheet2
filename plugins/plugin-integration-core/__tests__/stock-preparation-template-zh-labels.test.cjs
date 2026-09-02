@@ -142,7 +142,7 @@ const BASE_BUILT_DIGESTS = Object.freeze({
   // prove "unset language changes nothing", now over the extended structure. The human_preserved
   // band is untouched — all three are plm_system.
   // mainStructure re-pinned DELIBERATELY (and again here): the canonical main
-  // template grew from 25 to 30 columns — `makeOrBuy` (自制/外购) plus the departmental
+  // template grew from 28 to 33 columns — `makeOrBuy` (自制/外购) plus the departmental
   // response band `procurementDone` / `procurementReplyDate` / `warehouseDone` /
   // `actualArrivalDate`. All five are human_preserved and APPENDED after
   // `warehouseConfirmation`, so every pre-existing column keeps its id, name, type,

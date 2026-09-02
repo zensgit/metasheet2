@@ -5689,6 +5689,11 @@ function createHandlers(services, options = {}) {
         provisioning: getCustomerPackProvisioning(),
         projectId,
         pack,
+        // The SAME capability the install below is given. Without it a dry-run could say nothing at
+        // all about the permission rows an install would write — the one step with no undo would be
+        // the one step with no rehearsal. The port is used READ-ONLY here (the census + the role
+        // pre-flight question); planCustomerPackInstall never reaches its write half.
+        fieldPermissions: stockPreparationFieldPermissions,
       })
       return sendOk(res, { projectId, ...plan })
     },

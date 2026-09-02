@@ -85,6 +85,8 @@ interface FakePoolOptions {
   sheetIds?: string[]
   fieldIdsBySheet?: Record<string, string[]>
   roleIds?: string[]
+  /** Rows the census SELECT should return, as `field_permissions` rows this port previously wrote. */
+  existingScopeRows?: Array<{ field_id: string; subject_id: string }>
 }
 
 function createFakePool(options: FakePoolOptions = {}): {
@@ -114,6 +116,9 @@ function createFakePool(options: FakePoolOptions = {}): {
     if (sql.includes('FROM roles')) {
       const requested = (params[0] as string[]) ?? []
       return { rows: requested.filter((id) => roleIds.has(id)).map((id) => ({ id })) }
+    }
+    if (sql.includes('FROM field_permissions')) {
+      return { rows: options.existingScopeRows ?? [] }
     }
     if (sql.includes('INSERT INTO field_permissions')) return { rows: [], rowCount: 1 }
     throw new Error(`fake pool: unexpected SQL ${sql}`)
@@ -314,18 +319,40 @@ describe('STRUCTURAL read-safety: this port can never produce a read restriction
     expect(src).not.toMatch(/entry\.visible/)
   })
 
-  it('the public surface is exactly one method (no hide/revoke sibling can be called by mistake)', () => {
+  it('the public surface is one MUTATING method plus two read-only siblings — nothing else', () => {
     const service = new StockPreparationFieldPermissionsService({ pool: createFakePool().pool })
     const methods = Object.getOwnPropertyNames(
       Object.getPrototypeOf(service) as object,
     ).filter((name) => name !== 'constructor' && typeof (service as any)[name] === 'function')
-    expect(methods).toEqual(['applyRoleWriteScopes'])
+    // The roster is asserted EXACTLY (not "contains"), so a hide/revoke sibling cannot be added
+    // without moving this line. `listRoleWriteScopes` / `findMissingRoleIds` are SELECT-only; the
+    // source guard below is what actually holds them to that.
+    expect(methods.slice().sort()).toEqual([
+      'applyRoleWriteScopes',
+      'findMissingRoleIds',
+      'listRoleWriteScopes',
+    ])
   })
 
   it('SOURCE GUARD: purely additive — the port emits no DELETE/revoke statement', () => {
     const src = readFileSync(SERVICE_SOURCE_PATH, 'utf8')
     expect(src).not.toMatch(/DELETE\s+FROM\s+field_permissions/i)
     expect(src).not.toMatch(/UPDATE\s+field_permissions\s+SET/i)
+  })
+
+  it('SOURCE GUARD: exactly ONE mutating statement in the whole file — the read methods only SELECT', () => {
+    const src = readFileSync(SERVICE_SOURCE_PATH, 'utf8')
+    // Adding a read method must never smuggle in a second write. One INSERT, zero of anything else.
+    expect((src.match(/INSERT\s+INTO/gi) ?? []).length).toBe(1)
+    expect(src).not.toMatch(/\bDELETE\s+FROM\b/i)
+    expect(src).not.toMatch(/\bTRUNCATE\b/i)
+    // `DO UPDATE SET` (the ON CONFLICT arm of that single INSERT) is the only `UPDATE` allowed.
+    const updates = [...src.matchAll(/\bUPDATE\b/gi)]
+    const standaloneUpdates = updates.filter((match) => {
+      const before = src.slice(Math.max(0, (match.index ?? 0) - 12), match.index ?? 0)
+      return !/DO\s+$/i.test(before) && !/FOR\s+$/i.test(before)
+    })
+    expect(standaloneUpdates).toHaveLength(0)
   })
 })
 
@@ -548,5 +575,109 @@ describe('ENFORCEMENT CHAIN — port rows → real loadFieldPermissionScopeMap �
       expect(perms[fieldId].visible, `${fieldId} visible`).toBe(true)
       expect(isFieldWriteForbidden(perms[fieldId]), `${fieldId} writable`).toBe(false)
     }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// 5. THE READ SEAM — the census + the role pre-flight question
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describe('listRoleWriteScopes — the provenance census, scoped to what THIS port wrote', () => {
+  it('returns the (column, role) pairs as entries, and reads only — no INSERT anywhere', async () => {
+    const fake = createFakePool({
+      existingScopeRows: [
+        { field_id: F_PURCHASE_ETA, subject_id: ROLE_WAREHOUSE },
+        { field_id: F_WAREHOUSE_DATE, subject_id: ROLE_PURCHASING },
+      ],
+    })
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    const result = await service.listRoleWriteScopes({ sheetId: SHEET })
+
+    expect(result.sheetId).toBe(SHEET)
+    expect(result.entries).toEqual([
+      { fieldId: F_PURCHASE_ETA, roleId: ROLE_WAREHOUSE },
+      { fieldId: F_WAREHOUSE_DATE, roleId: ROLE_PURCHASING },
+    ])
+    expect(fake.inserts).toHaveLength(0)
+  })
+
+  it('the census predicate is sheet + role-subject + read_only + THIS port\'s provenance marker', async () => {
+    const fake = createFakePool()
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+    await service.listRoleWriteScopes({ sheetId: SHEET })
+
+    const select = fake.calls.find((call) => call.sql.includes('FROM field_permissions'))
+    expect(select).toBeDefined()
+    expect(select!.sql).toContain('sheet_id = $1')
+    expect(select!.sql).toContain("subject_type = 'role'")
+    expect(select!.sql).toContain('read_only = true')
+    expect(select!.sql).toContain('created_by = $2')
+    // Operator-authored rows are OUT of scope by construction: the marker is bound, not omitted.
+    expect(select!.params[1]).toBe(STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY)
+    // It must never take the write path's row lock — this is a read.
+    expect(select!.sql).not.toMatch(/FOR\s+UPDATE/i)
+  })
+
+  it('an empty sheet censuses to an empty list (not an error)', async () => {
+    const service = new StockPreparationFieldPermissionsService({ pool: createFakePool().pool })
+    await expect(service.listRoleWriteScopes({ sheetId: SHEET })).resolves.toEqual({
+      sheetId: SHEET,
+      entries: [],
+    })
+  })
+
+  it('rejects a bad sheetId with ENTRIES_INVALID and touches no database', async () => {
+    const fake = createFakePool()
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+    await expect(service.listRoleWriteScopes({ sheetId: '' })).rejects.toMatchObject({
+      name: 'StockPreparationFieldPermissionsError',
+      reason: 'ENTRIES_INVALID',
+    })
+    expect(fake.calls).toHaveLength(0)
+  })
+})
+
+describe('findMissingRoleIds — the pre-flight question a caller asks BEFORE it writes schema', () => {
+  it('names exactly the ids that are not rows in `roles`, sorted', async () => {
+    const fake = createFakePool({ roleIds: [ROLE_PURCHASING] })
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    const result = await service.findMissingRoleIds({
+      roleIds: [ROLE_WAREHOUSE, ROLE_PURCHASING, ROLE_PRODUCTION],
+    })
+
+    expect(result.missing).toEqual([ROLE_PRODUCTION, ROLE_WAREHOUSE].sort())
+    expect(fake.inserts).toHaveLength(0)
+  })
+
+  it('every id existing yields an empty list', async () => {
+    const service = new StockPreparationFieldPermissionsService({ pool: createFakePool().pool })
+    await expect(service.findMissingRoleIds({ roleIds: ALL_ROLES })).resolves.toEqual({ missing: [] })
+  })
+
+  it('de-duplicates its input and short-circuits an empty one without a query', async () => {
+    const fake = createFakePool({ roleIds: [ROLE_PURCHASING] })
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    await service.findMissingRoleIds({ roleIds: [ROLE_WAREHOUSE, ROLE_WAREHOUSE] })
+    const roleQuery = fake.calls.find((call) => call.sql.includes('FROM roles'))
+    expect(roleQuery!.params[0]).toEqual([ROLE_WAREHOUSE])
+
+    const empty = createFakePool()
+    const service2 = new StockPreparationFieldPermissionsService({ pool: empty.pool })
+    await expect(service2.findMissingRoleIds({ roleIds: [] })).resolves.toEqual({ missing: [] })
+    expect(empty.calls).toHaveLength(0)
+  })
+
+  it('rejects a malformed input with ENTRIES_INVALID and touches no database', async () => {
+    const fake = createFakePool()
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+    await expect(
+      service.findMissingRoleIds({ roleIds: ['ok', ''] as string[] }),
+    ).rejects.toMatchObject({ reason: 'ENTRIES_INVALID' })
+    await expect(
+      service.findMissingRoleIds({ roleIds: undefined as unknown as string[] }),
+    ).rejects.toMatchObject({ reason: 'ENTRIES_INVALID' })
+    expect(fake.calls).toHaveLength(0)
   })
 })

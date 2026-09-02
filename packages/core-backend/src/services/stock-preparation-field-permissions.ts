@@ -44,7 +44,7 @@
  * ═══════════════════════════════════════════════════════════════════════════════════════════════
  * PURELY ADDITIVE — NO DELETE / REVOKE PATH
  * ═══════════════════════════════════════════════════════════════════════════════════════════════
- * `applyRoleWriteScopes` is the ONLY public method and it only ever INSERTs / UPSERTs. There is no
+ * `applyRoleWriteScopes` is the ONLY MUTATING method and it only ever INSERTs / UPSERTs. There is no
  * delete, no revoke, no "clear all for this sheet". Removing a scope is an OPERATOR action, done
  * through the same authoring route named above (`{ remove: true }`), which writes the config-history
  * revision that a permission REMOVAL must leave behind. A plugin-facing port that could silently
@@ -56,6 +56,26 @@
  * currently populated by NO other writer, so `SELECT ... WHERE created_by = <that marker>` is an
  * exact, operator-runnable census of what this port ever wrote — which is what makes a later
  * converge/cleanup step (or a manual audit) possible at all.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════
+ * THE TWO READ METHODS — WHY A REVOKE-FREE PORT STILL NEEDS TO BE READABLE
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════
+ * `listRoleWriteScopes` and `findMissingRoleIds` are READ-ONLY (`SELECT` only; a source guard in the
+ * unit suite asserts this file contains exactly ONE mutating statement). They exist because the
+ * upsert-only asymmetry above has a sharp edge the installer cannot see without them:
+ *
+ *   - `listRoleWriteScopes` runs the census the PROVENANCE paragraph describes, in-process. A pack
+ *     revision that MOVES a column's owner leaves v1's denial for the OLD owner behind while adding
+ *     v2's for the new one — the column then denies EVERY declared role. The installer diffs this
+ *     census against its freshly derived plan and reports the orphans (`staleWriteScopes`) instead
+ *     of reporting a clean `applied=N`. It still cannot remove them: that stays an operator action.
+ *   - `findMissingRoleIds` lets a caller ask "does this role exist" BEFORE it starts writing schema.
+ *     `applyRoleWriteScopes` already refuses an unknown role, but it is called LAST, after every
+ *     column has been created and stamped; a pre-flight turns that into a refusal over an untouched
+ *     sheet.
+ *
+ * Neither can hide a column, neither can drop a restriction, and neither takes a `visible`
+ * argument — the load-bearing property above is unaffected by their existence.
  *
  * KNOWN, ACCEPTED CONSEQUENCE of the UPSERT: if an operator had previously used the authoring route
  * to HIDE this (sheet, field, role) triple, re-running this port resets that row's read dimension
@@ -121,6 +141,26 @@ export interface ApplyRoleWriteScopesResult {
   applied: number
   /** The canonical (de-duplicated, order-preserving) entries actually written. */
   entries: Array<StockPreparationRoleWriteScopeEntry>
+}
+
+/** One row of the provenance census: a (column, role) pair THIS port previously denied. */
+export interface ListRoleWriteScopesInput {
+  sheetId: string
+}
+
+export interface ListRoleWriteScopesResult {
+  sheetId: string
+  /** Every scope row on this sheet stamped with this port's provenance marker. Never anyone else's. */
+  entries: Array<StockPreparationRoleWriteScopeEntry>
+}
+
+export interface FindMissingRoleIdsInput {
+  roleIds: readonly string[]
+}
+
+export interface FindMissingRoleIdsResult {
+  /** The subset of `roleIds` that is NOT a row in `roles`. Sorted; empty means all exist. */
+  missing: string[]
 }
 
 /** Minimal query seam — same shape as `multitable/permission-service.ts`'s `QueryFn`. */
@@ -300,6 +340,75 @@ export class StockPreparationFieldPermissionsService {
       }
 
       return { applied: entries.length, entries }
+    })
+  }
+
+  /**
+   * THE PROVENANCE CENSUS, in-process: every (column, role) pair THIS port has ever denied on this
+   * sheet. READ-ONLY — one `SELECT`, no lock, no write.
+   *
+   * Scoped to `created_by = <this port's marker>` on purpose. Rows an OPERATOR authored through
+   * `PUT /api/multitable/sheets/:sheetId/field-permissions` are deliberately invisible here: they
+   * are not this port's to reason about, and reporting them as "stale" would invite a caller to
+   * treat a deliberate operator decision as installer debris.
+   *
+   * `read_only = true` is likewise part of the predicate: a row this port wrote and an operator
+   * later relaxed is no longer a write denial, so it is not part of the census either.
+   */
+  async listRoleWriteScopes(input: ListRoleWriteScopesInput): Promise<ListRoleWriteScopesResult> {
+    if (!input || !isNonEmptyString(input.sheetId)) {
+      throw new StockPreparationFieldPermissionsError(
+        'ENTRIES_INVALID',
+        'sheetId must be a non-empty string',
+      )
+    }
+    const sheetId = input.sheetId
+    const pool = this.injectedPool ?? (poolManager.get() as unknown as StockPreparationFieldPermissionsPool)
+    return pool.transaction(async ({ query }) => {
+      const res = await query(
+        `SELECT field_id, subject_id FROM field_permissions
+          WHERE sheet_id = $1 AND subject_type = 'role' AND read_only = true AND created_by = $2
+          ORDER BY field_id, subject_id`,
+        [sheetId, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY],
+      )
+      const entries = (res.rows as Array<{ field_id?: unknown; subject_id?: unknown }>).map((row) => ({
+        fieldId: String(row.field_id),
+        roleId: String(row.subject_id),
+      }))
+      return { sheetId, entries }
+    })
+  }
+
+  /**
+   * "Which of these role ids does this host NOT have?" READ-ONLY — one `SELECT`, no lock, no write.
+   *
+   * Same question `applyRoleWriteScopes` answers internally (ROLE_NOT_FOUND), exposed so a caller
+   * can ask it BEFORE it starts creating columns rather than discovering it after. An empty input
+   * is a no-op that returns no missing ids.
+   */
+  async findMissingRoleIds(input: FindMissingRoleIdsInput): Promise<FindMissingRoleIdsResult> {
+    if (!input || !Array.isArray(input.roleIds)) {
+      throw new StockPreparationFieldPermissionsError(
+        'ENTRIES_INVALID',
+        'roleIds must be an array',
+      )
+    }
+    const roleIds = [...new Set(input.roleIds)]
+    for (const roleId of roleIds) {
+      if (!isNonEmptyString(roleId)) {
+        throw new StockPreparationFieldPermissionsError(
+          'ENTRIES_INVALID',
+          'every roleId must be a non-empty string',
+        )
+      }
+    }
+    if (roleIds.length === 0) return { missing: [] }
+
+    const pool = this.injectedPool ?? (poolManager.get() as unknown as StockPreparationFieldPermissionsPool)
+    return pool.transaction(async ({ query }) => {
+      const res = await query('SELECT id FROM roles WHERE id = ANY($1::text[])', [roleIds])
+      const known = new Set((res.rows as Array<{ id?: unknown }>).map((row) => String(row.id)))
+      return { missing: roleIds.filter((roleId) => !known.has(roleId)).sort() }
     })
   }
 }
