@@ -405,8 +405,11 @@ async function dryRunPerformsZeroWrites() {
   assert.deepEqual(plan.conflictingFieldIds, [])
   assert.deepEqual(plan.counts, {
     extensionFields: 2, willCreate: 2, willStamp: 0, alreadyStamped: 0, conflicting: 0, optionSets: 0, roleViews: 1,
-    // This pack declares no fieldWritePolicies, so the write-scope preview is empty on both axes.
+    // This pack declares no fieldWritePolicies, so the write-scope preview is empty on every axis:
+    // nothing to deny, nothing found stale, and — since a pack that governs no region can request
+    // no reconcile — nothing this install would retire and nothing left for an operator either.
     fieldWriteDenials: 0, staleWriteScopes: 0,
+    willRemoveWriteScopes: 0, operatorMustClearWriteScopes: 0,
   })
   // The derived hidden ids the role view would ship, in the pack's own logical vocabulary.
   assert.equal(plan.roleViews.length, 1)

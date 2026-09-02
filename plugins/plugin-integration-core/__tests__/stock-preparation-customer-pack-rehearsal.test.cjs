@@ -884,7 +884,10 @@ async function summaryAndLogsAreValuesFree() {
   // needing an ownership stamp) is covered by the installer suite.
   // `staleWriteScopes=unchecked` is the honest reading for a pack that declared nothing: the census
   // has nothing to diff against and was never run, which is NOT the same as "0 stale rows found".
-  assert.match(fake.logs[0], /pack=factory-a-rehearsal v1 created=21 skipped=0 stamped=0 alreadyStamped=0 optionFields=5 views=3 writeScopes=0 staleWriteScopes=unchecked/)
+  // `removedWriteScopes=unreconciled` (not `=0`) is the honest token for a pack that declares no
+  // fieldWritePolicies: no region was governed, so no reconcile was even requested — which is a
+  // different fact from "reconciled and retired nothing".
+  assert.match(fake.logs[0], /pack=factory-a-rehearsal v1 created=21 skipped=0 stamped=0 alreadyStamped=0 optionFields=5 views=3 writeScopes=0 removedWriteScopes=unreconciled staleWriteScopes=unchecked/)
   assert.deepEqual(Object.keys(summary).sort(), [
     'alreadyStampedFields',
     // COLUMN WRITE SCOPING. This rehearsal pack declares NO `fieldWritePolicies`, which is
@@ -902,6 +905,11 @@ async function summaryAndLogsAreValuesFree() {
     'objectId',
     'packId',
     'packVersion',
+    // THE RETIRED DENIALS. NULL here — never [] — for the same reason as the census below: this
+    // pack governs no (column, role) region, so no reconcile was requested at all, which is a
+    // different fact from "reconciled and found nothing to retire".
+    'removedWriteScopeCount',
+    'removedWriteScopes',
     'skippedFields',
     // THE STALE-SCOPE CENSUS. `staleWriteScopes` is NULL here — never [] — because this pack
     // declares no policy, so the census never ran; `writeScopeCheck` names which of the three
@@ -912,6 +920,7 @@ async function summaryAndLogsAreValuesFree() {
     'stampedExistingFields',
     'syncedOptionFields',
     'writeScopeCheck',
+    'writeScopeReconcile',
     'writeScopeRoleCount',
     'writeScopeSkipped',
   ])
@@ -924,6 +933,9 @@ async function summaryAndLogsAreValuesFree() {
   assert.equal(summary.writeScopeCheck, 'not_declared')
   assert.equal(summary.staleWriteScopes, null, 'no declaration => no census => NULL, not an empty list')
   assert.equal(summary.staleWriteScopeCount, 0)
+  assert.equal(summary.writeScopeReconcile, 'not_declared')
+  assert.equal(summary.removedWriteScopes, null, 'no declaration => no reconcile => NULL, not an empty list')
+  assert.equal(summary.removedWriteScopeCount, 0)
 
   // The join is the point: every installed id carries the band the pack declared, and NOTHING else
   // (no label, no option value, no free text) rides along.

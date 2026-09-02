@@ -438,7 +438,15 @@ async function installWritesTheLedgerLast() {
     { fieldId: 'ext_legacyRowId', ownership: 'plm_system', preserveOnRefresh: false, extension: true },
     { fieldId: 'ext_plmObjectId', ownership: 'plm_system', preserveOnRefresh: false, extension: true },
   ])
-  assert.deepEqual(row.summary, { created: 3, skipped: 0, stamped: 0, alreadyStamped: 0, optionFields: 0, views: 1 })
+  // The four write-scope numbers are present even for a pack that declares no fieldWritePolicies —
+  // all zero — so the ledger row's shape does not depend on whether the optional feature was used,
+  // and "this install touched no permission" is readable from the row instead of inferred from an
+  // absent key. They stay FLAT because the store's own values-free guard accepts finite numbers
+  // only and would refuse a nested object outright.
+  assert.deepEqual(row.summary, {
+    created: 3, skipped: 0, stamped: 0, alreadyStamped: 0, optionFields: 0, views: 1,
+    writeScopesApplied: 0, writeScopesRemoved: 0, writeScopeStale: 0, writeScopeRoles: 0,
+  })
   assert.deepEqual(row.warnings, [])
   // The returned summary reports the ledger outcome without re-serializing the row.
   assert.deepEqual(summary.ledger, {

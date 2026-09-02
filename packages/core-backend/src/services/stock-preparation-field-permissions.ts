@@ -42,33 +42,60 @@
  * lock). It is deliberately NOT reachable from here.
  *
  * ═══════════════════════════════════════════════════════════════════════════════════════════════
- * PURELY ADDITIVE — NO DELETE / REVOKE PATH
+ * THE ONE DELETE: A SCOPED RECONCILE OF THIS PORT'S OWN ROWS, NEVER A GENERAL REVOKE CHANNEL
  * ═══════════════════════════════════════════════════════════════════════════════════════════════
- * `applyRoleWriteScopes` is the ONLY MUTATING method and it only ever INSERTs / UPSERTs. There is no
- * delete, no revoke, no "clear all for this sheet". Removing a scope is an OPERATOR action, done
- * through the same authoring route named above (`{ remove: true }`), which writes the config-history
- * revision that a permission REMOVAL must leave behind. A plugin-facing port that could silently
- * drop write restrictions would be a de-escalation channel with no audit trail; that is why the
- * asymmetry is deliberate.
+ * `applyRoleWriteScopes` is the ONLY MUTATING method. By default it only ever INSERTs / UPSERTs and
+ * emits NO delete at all — every caller that passes no `reconcile` scope is byte-for-byte the
+ * additive port this file used to be.
+ *
+ * A caller that owns a WHOLE (columns × roles) region may instead pass `reconcile`, and the same
+ * transaction then also removes the rows in THAT REGION that the new declaration no longer wants.
+ * This exists because upsert-only has one sharp, silent failure: a pack revision that MOVES a
+ * column's owner (v1 says 采购 may not write 实际到货日期; v2 moves that column TO 采购) leaves v1's
+ * denial standing beside v2's, and `loadFieldPermissionScopeMap` ORs `read_only` across a user's
+ * rows — so the column becomes unwritable by EVERY declared role while the install reports success.
+ * Reporting that is not enough: the deployment stays broken until a human notices.
+ *
+ * FOUR INDEPENDENT NARROWINGS make this a reconcile rather than a revoke channel. The DELETE fires
+ * only on a row that satisfies ALL of:
+ *   1. `created_by = <this port's marker>` — a row an OPERATOR authored through the authoring route
+ *      is INVISIBLE to this statement. Operator decisions are never this port's to undo.
+ *   2. `read_only = true` — only an actual write denial. A row this port wrote and an operator later
+ *      relaxed is no longer a denial and is left exactly as the operator left it.
+ *   3. `field_id = ANY(<governed columns>) AND subject_id = ANY(<governed roles>)` — the caller's
+ *      declared region, which `normalizeInput` REQUIRES to be a superset of the entries being
+ *      written. The delete can therefore never reach a column or a role the same call is not
+ *      simultaneously authoritative about; a second pack governing different columns or different
+ *      roles on the same sheet is structurally out of reach.
+ *   4. the row is not in the desired set this very call just wrote.
+ * A row failing any one of the four survives. There is no input by which this becomes
+ * "clear all for this sheet": with `reconcile` absent the statement does not run, and with it
+ * present it is bounded by (3) to a region the caller is re-declaring in full.
+ *
+ * The removals are RETURNED (`removed`), so the caller can report exactly which restrictions were
+ * dropped instead of dropping them silently — the audit-trail concern that motivated the original
+ * no-revoke posture is answered by naming them, not by leaving the sheet wrong.
  *
  * PROVENANCE: every row this port writes carries
  * `created_by = 'plugin:plugin-integration-core/stock-preparation'`. The column exists and is
  * currently populated by NO other writer, so `SELECT ... WHERE created_by = <that marker>` is an
- * exact, operator-runnable census of what this port ever wrote — which is what makes a later
- * converge/cleanup step (or a manual audit) possible at all.
+ * exact, operator-runnable census of what this port ever wrote — which is what makes the reconcile
+ * above (and a manual audit) possible at all.
  *
  * ═══════════════════════════════════════════════════════════════════════════════════════════════
  * THE TWO READ METHODS — WHY A REVOKE-FREE PORT STILL NEEDS TO BE READABLE
  * ═══════════════════════════════════════════════════════════════════════════════════════════════
  * `listRoleWriteScopes` and `findMissingRoleIds` are READ-ONLY (`SELECT` only; a source guard in the
- * unit suite asserts this file contains exactly ONE mutating statement). They exist because the
- * upsert-only asymmetry above has a sharp edge the installer cannot see without them:
+ * unit suite asserts this file contains exactly one INSERT and exactly one — scoped — DELETE, and
+ * that neither read method emits either). They exist because the write path's scoping has edges the
+ * installer cannot see without them:
  *
- *   - `listRoleWriteScopes` runs the census the PROVENANCE paragraph describes, in-process. A pack
- *     revision that MOVES a column's owner leaves v1's denial for the OLD owner behind while adding
- *     v2's for the new one — the column then denies EVERY declared role. The installer diffs this
- *     census against its freshly derived plan and reports the orphans (`staleWriteScopes`) instead
- *     of reporting a clean `applied=N`. It still cannot remove them: that stays an operator action.
+ *   - `listRoleWriteScopes` runs the census the PROVENANCE paragraph describes, in-process. The
+ *     reconcile above heals the orphans INSIDE the caller's governed region; this census is how the
+ *     caller finds the ones OUTSIDE it — a column this port denied under an older, wider pack that
+ *     the current declaration no longer governs at all. Those the installer can only REPORT
+ *     (`staleWriteScopes`): clearing them is an operator action, because nothing in the current
+ *     declaration establishes that they are wrong.
  *   - `findMissingRoleIds` lets a caller ask "does this role exist" BEFORE it starts writing schema.
  *     `applyRoleWriteScopes` already refuses an unknown role, but it is called LAST, after every
  *     column has been created and stamped; a pre-flight turns that into a refusal over an untouched
@@ -131,9 +158,31 @@ export interface StockPreparationRoleWriteScopeEntry {
   roleId: string
 }
 
+/**
+ * The (columns × roles) region a caller declares itself AUTHORITATIVE over for this call — the
+ * bound on the reconcile DELETE, and the only thing that makes it a reconcile rather than a revoke.
+ *
+ * Both lists are REQUIRED and must be non-empty, and every `entries` pair must fall inside them
+ * (`normalizeInput` enforces that, `ENTRIES_INVALID` otherwise). A caller therefore cannot delete
+ * in a region it is not simultaneously re-declaring in full.
+ */
+export interface RoleWriteScopeReconcileRegion {
+  /** Columns this call re-declares in full. Rows on any other column are untouchable. */
+  fieldIds: readonly string[]
+  /** Roles this call re-declares in full. Rows for any other role are untouchable. */
+  roleIds: readonly string[]
+}
+
 export interface ApplyRoleWriteScopesInput {
   sheetId: string
   entries: Array<StockPreparationRoleWriteScopeEntry>
+  /**
+   * OPTIONAL. Absent → purely additive: no DELETE statement is executed at all and `removed` is
+   * empty, which is byte-for-byte the behaviour every caller had before this option existed.
+   * Present → the same transaction also removes this port's OWN, still-denying rows inside the
+   * region that are not in `entries`. See the file header's four narrowings.
+   */
+  reconcile?: RoleWriteScopeReconcileRegion
 }
 
 export interface ApplyRoleWriteScopesResult {
@@ -141,6 +190,11 @@ export interface ApplyRoleWriteScopesResult {
   applied: number
   /** The canonical (de-duplicated, order-preserving) entries actually written. */
   entries: Array<StockPreparationRoleWriteScopeEntry>
+  /**
+   * The denials this call REMOVED — always `[]` without a `reconcile` region. Returned rather than
+   * merely dropped so a caller can name every restriction it retired.
+   */
+  removed: Array<StockPreparationRoleWriteScopeEntry>
 }
 
 /** One row of the provenance census: a (column, role) pair THIS port previously denied. */
@@ -201,6 +255,7 @@ function isNonEmptyString(value: unknown): value is string {
 function normalizeInput(input: ApplyRoleWriteScopesInput): {
   sheetId: string
   entries: StockPreparationRoleWriteScopeEntry[]
+  reconcile: { fieldIds: string[]; roleIds: string[] } | null
 } {
   if (!input || typeof input !== 'object') {
     throw new StockPreparationFieldPermissionsError('ENTRIES_INVALID', 'Input must be an object')
@@ -248,7 +303,64 @@ function normalizeInput(input: ApplyRoleWriteScopesInput): {
     seen.add(key)
     entries.push({ fieldId, roleId })
   }
-  return { sheetId: input.sheetId, entries }
+  return { sheetId: input.sheetId, entries, reconcile: normalizeReconcile(input.reconcile, entries) }
+}
+
+/**
+ * Validate the reconcile region. Absent → `null`, and no DELETE is executed.
+ *
+ * The containment check is the load-bearing half: every entry being written must lie inside the
+ * region, so the region can never be a set of columns/roles the same call is not re-declaring. A
+ * caller that wants to write outside the region must widen the region — which is exactly the
+ * statement "I am authoritative here" made explicit rather than assumed.
+ */
+function normalizeReconcile(
+  reconcile: RoleWriteScopeReconcileRegion | undefined,
+  entries: readonly StockPreparationRoleWriteScopeEntry[],
+): { fieldIds: string[]; roleIds: string[] } | null {
+  if (reconcile === undefined || reconcile === null) return null
+  if (typeof reconcile !== 'object') {
+    throw new StockPreparationFieldPermissionsError('ENTRIES_INVALID', 'reconcile must be an object')
+  }
+  const readIds = (raw: unknown, name: string): string[] => {
+    if (!Array.isArray(raw) || raw.length === 0) {
+      throw new StockPreparationFieldPermissionsError(
+        'ENTRIES_INVALID',
+        `reconcile.${name} must be a non-empty array`,
+      )
+    }
+    for (const value of raw) {
+      if (!isNonEmptyString(value)) {
+        throw new StockPreparationFieldPermissionsError(
+          'ENTRIES_INVALID',
+          `every reconcile.${name} entry must be a non-empty string`,
+        )
+      }
+    }
+    return [...new Set(raw as string[])]
+  }
+  const fieldIds = readIds(reconcile.fieldIds, 'fieldIds')
+  const roleIds = readIds(reconcile.roleIds, 'roleIds')
+
+  const fieldSet = new Set(fieldIds)
+  const roleSet = new Set(roleIds)
+  for (const entry of entries) {
+    if (!fieldSet.has(entry.fieldId)) {
+      throw new StockPreparationFieldPermissionsError(
+        'ENTRIES_INVALID',
+        `entry field ${entry.fieldId} is outside the declared reconcile region`,
+        [entry.fieldId],
+      )
+    }
+    if (!roleSet.has(entry.roleId)) {
+      throw new StockPreparationFieldPermissionsError(
+        'ENTRIES_INVALID',
+        `entry role ${entry.roleId} is outside the declared reconcile region`,
+        [entry.roleId],
+      )
+    }
+  }
+  return { fieldIds, roleIds }
 }
 
 /**
@@ -272,10 +384,14 @@ export class StockPreparationFieldPermissionsService {
    * written. Idempotent: re-running with the same entries upserts the same rows.
    */
   async applyRoleWriteScopes(input: ApplyRoleWriteScopesInput): Promise<ApplyRoleWriteScopesResult> {
-    const { sheetId, entries } = normalizeInput(input)
-    // Empty is an explicit, documented no-op (a caller with nothing to declare must not need a
-    // special case). It adds NO restriction, so it can never be the unsafe direction.
-    if (entries.length === 0) return { applied: 0, entries: [] }
+    const { sheetId, entries, reconcile } = normalizeInput(input)
+    // Empty is an explicit, documented TOTAL no-op — no upsert AND no reconcile delete, even when a
+    // region was supplied (a caller with nothing to declare must not need a special case). It adds
+    // NO restriction and removes none, so it can never be the unsafe direction in either sense.
+    // The consequence is stated rather than hidden: a declaration that drops to zero denials leaves
+    // this port's older rows standing, and they surface through `listRoleWriteScopes` as stale for
+    // an operator to clear.
+    if (entries.length === 0) return { applied: 0, entries: [], removed: [] }
 
     const pool = this.injectedPool ?? (poolManager.get() as unknown as StockPreparationFieldPermissionsPool)
 
@@ -339,7 +455,47 @@ export class StockPreparationFieldPermissionsService {
         )
       }
 
-      return { applied: entries.length, entries }
+      // THE SCOPED RECONCILE. Same transaction as the upserts above, so there is no instant at which
+      // a denial has been dropped but its replacement not yet written. Read the file header's four
+      // narrowings before touching this statement — each `AND` is one of them:
+      //   created_by  → never an operator's row;   read_only → never a row an operator relaxed;
+      //   field_id/subject_id = ANY(region) → never outside what this call re-declares in full;
+      //   NOT EXISTS(desired) → never a row this same call just wrote.
+      // `visible` appears nowhere here either: removing a row can only widen access, never hide.
+      const removed: StockPreparationRoleWriteScopeEntry[] = []
+      if (reconcile) {
+        const removedRes = await query(
+          `DELETE FROM field_permissions
+            WHERE sheet_id = $1
+              AND subject_type = 'role'
+              AND created_by = $2
+              AND read_only = true
+              AND field_id = ANY($3::text[])
+              AND subject_id = ANY($4::text[])
+              AND NOT EXISTS (
+                SELECT 1 FROM unnest($5::text[], $6::text[]) AS desired(field_id, subject_id)
+                 WHERE desired.field_id = field_permissions.field_id
+                   AND desired.subject_id = field_permissions.subject_id
+              )
+            RETURNING field_id, subject_id`,
+          [
+            sheetId,
+            STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY,
+            reconcile.fieldIds,
+            reconcile.roleIds,
+            entries.map((entry) => entry.fieldId),
+            entries.map((entry) => entry.roleId),
+          ],
+        )
+        for (const row of removedRes.rows as Array<{ field_id?: unknown; subject_id?: unknown }>) {
+          removed.push({ fieldId: String(row.field_id), roleId: String(row.subject_id) })
+        }
+        removed.sort((left, right) => (left.fieldId === right.fieldId
+          ? left.roleId.localeCompare(right.roleId)
+          : left.fieldId.localeCompare(right.fieldId)))
+      }
+
+      return { applied: entries.length, entries, removed }
     })
   }
 

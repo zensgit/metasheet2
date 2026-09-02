@@ -17,8 +17,11 @@
  * A port that hid columns would break the flow and be worse than the status quo; this suite is the
  * assertion that would go red if it ever did.
  *
- * Runs only with DATABASE_URL (sentinel fails-not-skips in CI, per the suite convention shared with
- * multitable-fieldperm-write-gate-patch-realdb.test.ts).
+ * Runs only with DATABASE_URL. The fail-not-skip sentinel is TOP-LEVEL (outside describeIfDatabase)
+ * and scoped to the real-DB allowlist step via METASHEET_REAL_DB_TEST_STEP, which is the pattern
+ * that actually holds: a sentinel INSIDE describeIfDatabase skips together with the goldens it is
+ * supposed to be guarding, so a step that lost DATABASE_URL would read green. See
+ * multitable-exact-anchor-recovery-realdb.test.ts for the same wiring.
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
@@ -109,6 +112,19 @@ const cellValue = async (fieldId: string): Promise<unknown> => {
 
 const seedValue = (fieldId: string) => `orig-${fieldId}`
 
+// TOP-LEVEL (deliberately NOT inside describeIfDatabase) so the real-DB allowlist step FAILS — not
+// silently skips — if it ever runs this file without a DB. This is the ONLY assertion in the file
+// that can fire when the goldens are skipped, which is exactly why it cannot live inside the block
+// they are in. Scoped to that step via METASHEET_REAL_DB_TEST_STEP (set by plugin-tests.yml's
+// `multitable-real-db-integration` step alongside DATABASE_URL) so the normal no-DB core-backend
+// job's collection of this file stays green.
+test('sentinel: the real-DB allowlist step must have DATABASE_URL (fail-not-skip, scoped to that step)', () => {
+  if (process.env.METASHEET_REAL_DB_TEST_STEP === '1' && !process.env.DATABASE_URL) {
+    throw new Error('real-DB allowlist step is missing DATABASE_URL — the harness is broken, not legitimately skippable')
+  }
+  expect(true).toBe(true)
+})
+
 describeIfDatabase('备料 per-department column WRITE scope, end to end (real DB)', () => {
   beforeAll(async () => {
     app = express()
@@ -177,7 +193,7 @@ describeIfDatabase('备料 per-department column WRITE scope, end to end (real D
     ])
   })
 
-  test('sentinel: DATABASE_URL set (real DB run, not skipped)', () => {
+  test('DATABASE_URL is set for this run (the goldens below are really executing)', () => {
     expect(process.env.DATABASE_URL).toBeTruthy()
   })
 
@@ -337,5 +353,185 @@ describeIfDatabase('备料 per-department column WRITE scope, end to end (real D
     for (const fieldId of ALL_FIELDS) {
       expect(await cellValue(fieldId)).toBe(`undeclared-wrote-${fieldId}`)
     }
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+// THE SCOPED RECONCILE, AT THE GATE — a pack revision that MOVES a column between departments.
+//
+// The unit suite proves which ROWS survive the reconcile. This proves the thing that actually
+// matters to the business: after the move, the department that now OWNS the column can WRITE it.
+// Without the reconcile, v1's denial for the old owner survives beside v2's for the new one and
+// `deriveFieldPermissions` ORs `read_only` across a user's rows — so BOTH departments get a 403 on
+// a column the current declaration says one of them owns, and the install still reports success.
+//
+// Fully self-contained (its own base / sheet / fields / roles / users / express app) so it cannot
+// disturb the goldens above, which share one seeded permission set across their tests.
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+const RC_BASE = `base_bliao_rc_${TS}`
+const RC_SHEET = `sheet_bliao_rc_${TS}`
+const RC_REC = `rec_bliao_rc_${TS}`
+
+/** The column that changes hands between v1 and v2. */
+const RC_MOVING = `fld_bliao_rc_moving_${TS}` // 实际到货日期
+/** A second governed column that does NOT move — the "unchanged declaration" control. */
+const RC_STABLE = `fld_bliao_rc_stable_${TS}` // 采购回复
+/** Governed by no policy at all — the out-of-region control on the COLUMN axis. */
+const RC_UNGOVERNED = `fld_bliao_rc_ungoverned_${TS}`
+const RC_FIELDS = [RC_MOVING, RC_STABLE, RC_UNGOVERNED]
+
+const RC_PURCHASING = `role_bliao_rc_purchasing_${TS}`
+const RC_WAREHOUSE = `role_bliao_rc_warehouse_${TS}`
+const RC_ROLES = [RC_PURCHASING, RC_WAREHOUSE]
+
+const RC_U_PURCHASING = `u_bliao_rc_purchasing_${TS}`
+const RC_U_WAREHOUSE = `u_bliao_rc_warehouse_${TS}`
+const RC_USERS = [RC_U_PURCHASING, RC_U_WAREHOUSE]
+
+const OPERATOR_CREATED_BY = 'operator:univer-meta-authoring-route'
+
+// The (columns × roles) rectangle the pack re-declares in full. RC_UNGOVERNED is deliberately NOT
+// in it.
+const RC_REGION = { fieldIds: [RC_MOVING, RC_STABLE], roleIds: RC_ROLES }
+// v1: 仓库 owns the moving column, so 采购 is denied it. 采购 owns the stable column.
+const RC_V1 = [
+  { fieldId: RC_MOVING, roleId: RC_PURCHASING },
+  { fieldId: RC_STABLE, roleId: RC_WAREHOUSE },
+]
+// v2: the moving column changes hands to 采购. Nothing else changes.
+const RC_V2 = [
+  { fieldId: RC_MOVING, roleId: RC_WAREHOUSE },
+  { fieldId: RC_STABLE, roleId: RC_WAREHOUSE },
+]
+
+describeIfDatabase('备料 write scope — the scoped reconcile of a revision that moves a column', () => {
+  let rcApp: Express
+  let rcUser = RC_U_PURCHASING
+  let rcRoles: string[] = [RC_PURCHASING]
+
+  const rcPatch = (userId: string, roles: string[], fieldId: string, value: unknown) => {
+    rcUser = userId
+    rcRoles = roles
+    return request(rcApp)
+      .post('/api/multitable/patch')
+      .send({ sheetId: RC_SHEET, changes: [{ recordId: RC_REC, fieldId, value }] })
+  }
+
+  const scopeRows = async () => (
+    await q(
+      `SELECT field_id, subject_id, read_only, created_by FROM field_permissions
+        WHERE sheet_id = $1 ORDER BY field_id, subject_id`,
+      [RC_SHEET],
+    )
+  ).rows as Array<{ field_id: string; subject_id: string; read_only: boolean; created_by: string }>
+
+  const key = (row: { field_id: string; subject_id: string }) => `${row.field_id}|${row.subject_id}`
+
+  beforeAll(async () => {
+    rcApp = express()
+    rcApp.use(express.json())
+    rcApp.use((req, _res, next) => {
+      ;(req as { user?: unknown }).user = {
+        id: rcUser,
+        roles: rcRoles,
+        perms: ['multitable:read', 'multitable:write'],
+      }
+      next()
+    })
+    rcApp.use('/api/multitable', univerMetaRouter())
+
+    await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [RC_BASE, '备料 Reconcile Base'])
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [RC_SHEET, RC_BASE, '备料 Reconcile Sheet'])
+    for (const [index, fieldId] of RC_FIELDS.entries()) {
+      await q(
+        'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+        [fieldId, RC_SHEET, fieldId, 'string', '{}', index + 1],
+      )
+    }
+    for (const roleId of RC_ROLES) {
+      await q('INSERT INTO roles (id, name) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING', [roleId, roleId])
+    }
+    for (const [userId, roleId] of [
+      [RC_U_PURCHASING, RC_PURCHASING],
+      [RC_U_WAREHOUSE, RC_WAREHOUSE],
+    ] as Array<[string, string]>) {
+      await q(
+        `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
+         VALUES ($1,$2,$1,'x','member',$3::jsonb, TRUE, FALSE)
+         ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions`,
+        [userId, `${userId}@t.local`, JSON.stringify(['multitable:read', 'multitable:write'])],
+      )
+      await q('INSERT INTO user_roles (user_id, role_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [userId, roleId])
+    }
+  })
+
+  afterAll(async () => {
+    await q('DELETE FROM field_permissions WHERE sheet_id = $1', [RC_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [RC_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_records WHERE sheet_id = $1', [RC_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_fields WHERE sheet_id = $1', [RC_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = $1', [RC_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = $1', [RC_BASE]).catch(() => {})
+    await q('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [RC_USERS]).catch(() => {})
+    await q('DELETE FROM users WHERE id = ANY($1::text[])', [RC_USERS]).catch(() => {})
+    await q('DELETE FROM roles WHERE id = ANY($1::text[])', [RC_ROLES]).catch(() => {})
+  })
+
+  beforeEach(async () => {
+    await q('DELETE FROM meta_records WHERE sheet_id = $1', [RC_SHEET])
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [
+      RC_REC,
+      RC_SHEET,
+      JSON.stringify(Object.fromEntries(RC_FIELDS.map((fieldId) => [fieldId, seedValue(fieldId)]))),
+    ])
+  })
+
+  test('v1 → v2: the old owner’s denial is deleted, and the new owner can actually WRITE the column', async () => {
+    const service = new StockPreparationFieldPermissionsService()
+
+    // ── v1 ────────────────────────────────────────────────────────────────────────────────────────
+    const v1 = await service.applyRoleWriteScopes({ sheetId: RC_SHEET, entries: RC_V1, reconcile: RC_REGION })
+    expect(v1.applied).toBe(2)
+    expect(v1.removed).toEqual([])
+
+    // Two rows an OPERATOR authored, and one this port wrote for a column outside the region. All
+    // three are positioned to be deleted if any of the four narrowings were missing.
+    await q(
+      `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)
+       VALUES ($1,$2,'role',$3,true,true,$4)`,
+      [RC_SHEET, RC_STABLE, RC_PURCHASING, OPERATOR_CREATED_BY],
+    )
+    await q(
+      `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)
+       VALUES ($1,$2,'role',$3,true,true,$4)`,
+      [RC_SHEET, RC_UNGOVERNED, RC_PURCHASING, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY],
+    )
+
+    // Under v1, 采购 may NOT write the moving column — that is what v2 is about to change.
+    expect((await rcPatch(RC_U_PURCHASING, [RC_PURCHASING], RC_MOVING, 'v1-should-be-refused')).status).toBe(403)
+
+    // ── v2 ────────────────────────────────────────────────────────────────────────────────────────
+    const v2 = await service.applyRoleWriteScopes({ sheetId: RC_SHEET, entries: RC_V2, reconcile: RC_REGION })
+    expect(v2.applied).toBe(2)
+    expect(v2.removed).toEqual([{ fieldId: RC_MOVING, roleId: RC_PURCHASING }])
+
+    // THE TABLE: exactly the rows that should be there, and the two untouchable ones still are.
+    const rows = await scopeRows()
+    expect(rows.map(key).sort()).toEqual([
+      `${RC_MOVING}|${RC_WAREHOUSE}`,
+      `${RC_STABLE}|${RC_PURCHASING}`, // the OPERATOR's row — same sheet, in-region column AND role
+      `${RC_STABLE}|${RC_WAREHOUSE}`,
+      `${RC_UNGOVERNED}|${RC_PURCHASING}`, // this port's row, on a column outside the region
+    ].sort())
+    expect(rows.find((r) => key(r) === `${RC_STABLE}|${RC_PURCHASING}`)!.created_by).toBe(OPERATOR_CREATED_BY)
+
+    // THE GATE — the whole point. 采购 now OWNS the moving column and the write goes through …
+    const allowed = await rcPatch(RC_U_PURCHASING, [RC_PURCHASING], RC_MOVING, 'purchasing-owns-it-now')
+    expect(allowed.status).toBe(200)
+    const after = await q('SELECT data FROM meta_records WHERE id = $1', [RC_REC])
+    expect((after.rows[0] as { data: Record<string, unknown> }).data[RC_MOVING]).toBe('purchasing-owns-it-now')
+
+    // … while 仓库, which no longer owns it, is refused.
+    expect((await rcPatch(RC_U_WAREHOUSE, [RC_WAREHOUSE], RC_MOVING, 'nope')).status).toBe(403)
   })
 })

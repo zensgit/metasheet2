@@ -1193,26 +1193,40 @@ export interface PluginServices {
    * is a hardcoded literal inside the implementation, not a parameter of this method, so no caller
    * can hide a column through this port. That is required by the 备料 flow: 采购 and 仓库 must keep
    * SEEING the production band (材料类型 / 毛胚类型 / 需求日期 / 提前周期 …) and each other's
-   * responses. Read scoping, and REMOVAL of a scope, are operator actions on
-   * `PUT /api/multitable/sheets/:sheetId/field-permissions` — this port is purely additive and has
-   * no revoke path. Fail-closed: unknown sheet / field-not-on-sheet / unknown role rejects the whole
-   * call with nothing written.
+   * responses. Read scoping stays an operator action on
+   * `PUT /api/multitable/sheets/:sheetId/field-permissions`. Fail-closed: unknown sheet /
+   * field-not-on-sheet / unknown role rejects the whole call with nothing written.
    *
-   * The two READ methods are SELECT-only and exist because the additive-only asymmetry is
-   * unobservable without them. `listRoleWriteScopes` is the in-process form of the provenance census
-   * (`WHERE created_by = <this port's marker>`): a pack revision that MOVES a column's owner leaves
-   * the old denial behind, so the consumer diffs this census against its freshly derived plan and
-   * REPORTS the orphans rather than reporting a clean success. `findMissingRoleIds` lets a consumer
-   * ask "does this role exist" BEFORE it starts creating columns, instead of learning it from the
-   * write call after the schema is already half-applied. Neither can hide a column or drop a
-   * restriction. Both are OPTIONAL on this type: a consumer must degrade explicitly (say "not
-   * checked") rather than assume, so an older host stays usable.
+   * WRITES ARE ADDITIVE UNLESS THE CALLER DECLARES A REGION. With no `reconcile` the call only ever
+   * upserts and `removed` is empty. With one, the SAME transaction also drops this port's OWN,
+   * still-denying rows inside that (columns × roles) region which the new declaration does not want
+   * — the fix for the one silent failure upsert-only cannot survive: a pack revision that MOVES a
+   * column's owner leaves the old denial standing next to the new one, and the write gate ORs
+   * `read_only` across a user's rows, so the column becomes unwritable by EVERY declared role while
+   * the install reports success. The delete is bounded four ways — this port's `created_by` only
+   * (never an operator's row), `read_only = true` only, inside the declared region only (which the
+   * implementation REQUIRES to contain every entry being written), and never a row the same call
+   * just wrote — so it can neither reach another consumer's rows nor become "clear this sheet".
+   * Removals are returned, never silent.
+   *
+   * The two READ methods are SELECT-only. `listRoleWriteScopes` is the in-process form of the
+   * provenance census (`WHERE created_by = <this port's marker>`); the reconcile heals orphans
+   * inside the caller's region, and this census is how a consumer finds and REPORTS the ones outside
+   * it. `findMissingRoleIds` lets a consumer ask "does this role exist" BEFORE it starts creating
+   * columns, instead of learning it from the write call after the schema is already half-applied.
+   * Neither can hide a column or drop a restriction. Both are OPTIONAL on this type: a consumer must
+   * degrade explicitly (say "not checked") rather than assume, so an older host stays usable.
    */
   stockPreparationFieldPermissions?: {
     applyRoleWriteScopes(input: {
       sheetId: string
       entries: Array<{ fieldId: string; roleId: string }>
-    }): Promise<{ applied: number; entries: Array<{ fieldId: string; roleId: string }> }>
+      reconcile?: { fieldIds: readonly string[]; roleIds: readonly string[] }
+    }): Promise<{
+      applied: number
+      entries: Array<{ fieldId: string; roleId: string }>
+      removed?: Array<{ fieldId: string; roleId: string }>
+    }>
     listRoleWriteScopes?(input: {
       sheetId: string
     }): Promise<{ sheetId: string; entries: Array<{ fieldId: string; roleId: string }> }>
