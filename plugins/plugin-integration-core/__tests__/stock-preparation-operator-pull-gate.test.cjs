@@ -52,6 +52,9 @@ const {
   STOCK_PREP_READ,
   operatorMayRunStockPrepPull,
 } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
+const {
+  normalizeStockPreparationActionConfig,
+} = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
 
 const TENANT = 'tenant-a'
 const OTHER_ACTION_ID = 'k3.material.pull.v1'
@@ -207,6 +210,21 @@ async function gateVerdict(routes, { method, routePath, user, actionId, body = {
   return 'admitted'
 }
 
+/** Call a route and return the RESPONSE — for assertions past the gate. */
+async function rawCall(routes, { method, routePath, user, actionId, jobId, body = {}, query = {} }) {
+  const handler = routes.get(`${method.toUpperCase()} ${routePath}`)
+  assert.ok(handler, `route ${method} ${routePath} is registered`)
+  const res = createResponse()
+  const req = { user, body, query, params: { ...JOB_PARAMS, actionId, ...(jobId ? { jobId } : {}) } }
+  try {
+    await handler(req, res)
+  } catch (error) {
+    res.statusCode = error && error.status ? error.status : 500
+    res.body = { ok: false, error: { code: error && error.code ? error.code : 'THREW' } }
+  }
+  return res
+}
+
 /** The exact refusal code, for the assertions that care WHICH refusal happened. */
 async function refusalCode(routes, input) {
   const handler = routes.get(`${input.method.toUpperCase()} ${input.routePath}`)
@@ -220,6 +238,240 @@ async function refusalCode(routes, input) {
     return error && error.code ? String(error.code) : 'THREW'
   }
   return res.body && res.body.error && res.body.error.code ? String(res.body.error.code) : `OK_${res.statusCode}`
+}
+
+// ---------------------------------------------------------------------------
+// A HARNESS THAT GOES PAST THE GATE — because P-01..P-07 deliberately do not
+// ---------------------------------------------------------------------------
+//
+// Every case above measures the GATE and stops there: the mount has no configured action and an
+// inert adapter registry, so "admitted" means "reached the action lookup". That was the right shape
+// for a gate test and it is exactly why it could not see P-08's bug — the split moved the HTTP gate
+// and nothing else, so an admitted operator went on to fail in the DATA plane, every time, on the
+// default source kind. This second harness configures the action and records the principal the
+// source read is actually performed as.
+const DATA_SOURCE_OWNER = 'u_source_owner'
+const SOURCE_SYSTEM_ID = 'ext_plm_sql'
+
+function mountWithSource({
+  sourceKind = 'data-source:sql-readonly',
+  dataSourceOwnerId = DATA_SOURCE_OWNER,
+  actionId = STOCK_PREP_OPERATOR_PULL_ACTION_ID,
+} = {}) {
+  const routes = new Map()
+  const adapterPrincipals = []
+  const context = {
+    api: {
+      http: {
+        addRoute(method, routePath, handler) {
+          routes.set(`${method.toUpperCase()} ${routePath}`, handler)
+        },
+      },
+      multitable: {
+        provisioning: {
+          async findObjectSheet() { return null },
+          async resolveFieldIds() { return {} },
+        },
+        records: { async queryRecords() { return [] } },
+      },
+    },
+    // The large-BOM channel refuses a non-durable store outright (it drives a job across requests),
+    // so this harness supplies the same durable key/value shape the plugin's own storage exposes.
+    storage: Object.assign(new Map(), {
+      durable: true,
+      async get(key) { return Map.prototype.get.call(this, key) ?? null },
+      async set(key, value) { Map.prototype.set.call(this, key, value); return value },
+      async delete(key) { return Map.prototype.delete.call(this, key) },
+    }),
+    config: {
+      stockPreparationTableActions: [{
+        actionId,
+        source: { kind: sourceKind, externalSystemId: SOURCE_SYSTEM_ID },
+        target: { sheetId: 'sheet_main', objectId: 'plm_stock_preparation_main', fieldIdMap: {} },
+      }],
+    },
+  }
+  const services = {
+    externalSystemRegistry: {
+      async getExternalSystem() {
+        return {
+          id: SOURCE_SYSTEM_ID,
+          kind: sourceKind,
+          status: 'active',
+          // The SERVER-STAMPED binding owner. external-systems.cjs writes this on every upsert that
+          // asserts a dataSourceId binding, discarding whatever the client sent, so it is the one
+          // trustworthy answer to "who may read through this connection".
+          config: {
+            dataSourceId: 'ds_1',
+            ...(dataSourceOwnerId ? { dataSourceOwnerId } : {}),
+          },
+        }
+      },
+      async upsertExternalSystem() { throw new Error('unexpected') },
+      async deleteExternalSystem() { throw new Error('unexpected') },
+      async listExternalSystems() { return { items: [] } },
+    },
+    // RECORDS the principal each adapter is built for, then refuses the read — this suite is about
+    // WHOSE identity the read runs as, not about what the source returns.
+    adapterRegistry: {
+      async createAdapter(system, deps = {}) {
+        adapterPrincipals.push(deps.principal ?? null)
+        return {
+          kind: system.kind,
+          async readObjects() { throw new Error('source read not exercised here') },
+        }
+      },
+      async listAdapterKinds() { return [] },
+    },
+    pipelineRegistry: inertService(['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns']),
+    pipelineRunner: inertService(['runPipeline']),
+    deadLetterStore: inertService(['listDeadLetters']),
+    stagingInstaller: inertService(['installStaging', 'listStagingDescriptors']),
+    templateRegistry: inertService(['upsertTemplate', 'getTemplate', 'listTemplates', 'deleteTemplate', 'instantiateTemplate']),
+    readSourceConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
+    readSourceCompositionConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
+    bridgeAgentChecklistStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForApply']),
+    stockPreparationAuditStore: { async append() { return { ok: true } } },
+    tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
+  }
+  httpRoutes.registerIntegrationRoutes({
+    context,
+    services,
+    logger: { info() {}, warn() {}, error() {} },
+  })
+  return { routes, adapterPrincipals }
+}
+
+// ---------------------------------------------------------------------------
+// P-09 — THE PULL'S DATA-PLANE IDENTITY
+// ---------------------------------------------------------------------------
+//
+// THE BUG. The split moved the HTTP gate; the source read still ran as the REQUEST principal. On the
+// DEFAULT source kind (`data-source:sql-readonly`) the host facade authorizes by STRICT OWNER
+// EQUALITY with no admin bypass — `DataSourceManager.assertAccess` throws unless `ownerId === userId`
+// — and a floor operator is never the person who bound the connection. So every operator pull
+// returned `status:"failed"`, `canApply:false`, `dryRunToken:null`: the tier was admitted to the
+// route and refused the data, silently, for every operator except the single user who owns the row.
+//
+// THE FIX, and its exact scope: for the ONE frozen action id, the source read is performed as the
+// SERVER-HELD BINDING OWNER (`config.dataSourceOwnerId`, stamped server-side by the external-system
+// registry and never client-settable). It is a delegation, so it is auditable as one — the audit row
+// carries the operator as `actor` and the owner as the read `principal`. No other action id gets it.
+// ---------------------------------------------------------------------------
+// P-10 — A STORED JOB IS RUN BY ITS OWN CREATOR, NOT BY WHOEVER FINDS IT
+// ---------------------------------------------------------------------------
+//
+// `POST …/large-bom/expansion-jobs/:jobId/run` drives a job off a STORED artifact, and every scope
+// it uses comes from that artifact — including, before this fix, the `principal:` it performed the
+// customer-source read under. That was harmless while only `integration:*` holders could reach the
+// route; the operator split made it a way for a newly-admitted tier to drive a source read under
+// SOMEBODY ELSE'S identity, simply by naming a job id they did not create.
+//
+// The job now records two separate facts — the ACTOR who created it and the PRINCIPAL its reads run
+// as (the binding owner, per P-09) — and the run route refuses a caller who is not the actor, before
+// the B2a registration and before the adapter is loaded, so a refusal costs no claim and no
+// credential lookup.
+async function aStoredLargeBomJobIsRunOnlyByItsCreator() {
+  const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
+  const RUN = {
+    method: 'POST',
+    routePath: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run',
+  }
+
+  const { routes } = mountWithSource()
+  // The operator starts a job of their own.
+  const started = await rawCall(routes, {
+    method: 'POST',
+    routePath: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs',
+    user: OPERATOR,
+    actionId: pull,
+    body: { parameters: { projectNo: '230920006' } },
+  })
+  assert.equal(started.statusCode, 202, `P-10: the operator starts their own job (got ${JSON.stringify(started.body)})`)
+  const jobId = started.body && started.body.data && started.body.data.jobId
+  assert.ok(jobId, 'P-10: the job has an id')
+
+  // ANOTHER operator of the same tenant and tier names that job id.
+  const intruder = Object.freeze({ id: 'u_op_other', tenantId: TENANT, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] })
+  const stolen = await rawCall(routes, { ...RUN, user: intruder, actionId: pull, jobId })
+  assert.equal(stolen.statusCode, 403, `P-10: a job's run belongs to its creator (got ${stolen.statusCode})`)
+  assert.equal(
+    stolen.body && stolen.body.error && stolen.body.error.code,
+    'LARGE_BOM_JOB_ACTOR_MISMATCH',
+    'P-10: and it says so with its own code',
+  )
+
+  // The creator themselves is not refused by this guard (it fails later, in the inert source read).
+  const own = await rawCall(routes, { ...RUN, user: OPERATOR, actionId: pull, jobId })
+  assert.notEqual(
+    own.body && own.body.error && own.body.error.code,
+    'LARGE_BOM_JOB_ACTOR_MISMATCH',
+    'P-10: the creator is never refused by the actor guard',
+  )
+}
+
+async function theOperatorPullReadsAsTheBindingOwner() {
+  const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
+
+  // 1. THE OPERATOR'S dry-run reads as the BINDING OWNER, not as themselves.
+  {
+    const { routes, adapterPrincipals } = mountWithSource()
+    await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull })
+    assert.deepEqual(
+      adapterPrincipals,
+      [DATA_SOURCE_OWNER],
+      'P-09: an operator admitted by the split must read through the connection as its server-held '
+      + 'owner — reading as themselves is a guaranteed refusal on the default source kind',
+    )
+  }
+
+  // 2. …and so does APPLY, which re-expands the source in its own right.
+  {
+    const { routes, adapterPrincipals } = mountWithSource()
+    await gateVerdict(routes, { ...APPLY, user: OPERATOR, actionId: pull })
+    assert.deepEqual(adapterPrincipals, [DATA_SOURCE_OWNER], 'P-09: apply too')
+  }
+
+  // 3. THE DELEGATION IS SCOPED TO THE FROZEN ACTION ID, compared for EQUALITY. Two layers say so
+  //    and both are asserted: this registry accepts no other actionId in its config at all
+  //    (TABLE_ACTION_CONFIG_INVALID on anything else), and a request that NAMES another id never
+  //    resolves an action, so no adapter is ever built for it. The equality check inside
+  //    resolveTableActionReadPrincipal is the defence-in-depth layer under those two.
+  {
+    const { routes, adapterPrincipals } = mountWithSource()
+    await gateVerdict(routes, { ...DRY_RUN, user: INTEGRATION_READER, actionId: OTHER_ACTION_ID })
+    assert.deepEqual(
+      adapterPrincipals,
+      [],
+      'P-09: a request naming another action id builds no adapter at all, so no identity is delegated',
+    )
+    assert.throws(
+      () => normalizeStockPreparationActionConfig({ actionId: OTHER_ACTION_ID }),
+      (error) => error && error.code === 'TABLE_ACTION_CONFIG_INVALID',
+      'P-09: and no other action id can even be configured into this registry',
+    )
+  }
+
+  // 4. THE LEGACY TIER ON THE PULL ACTION IS ALSO UNCHANGED in the one case that matters: an
+  //    integration admin who IS the owner reads as themselves either way, and one who is NOT was
+  //    already refused by the facade — the delegation only ever removes a guaranteed failure.
+  {
+    const { routes, adapterPrincipals } = mountWithSource({ dataSourceOwnerId: PLATFORM_ADMIN.id })
+    await gateVerdict(routes, { ...DRY_RUN, user: PLATFORM_ADMIN, actionId: pull })
+    assert.deepEqual(adapterPrincipals, [PLATFORM_ADMIN.id], 'P-09: the owner still reads as themselves')
+  }
+
+  // 5. NO OWNER STAMPED (a self-contained kind, or a binding predating the stamp) -> the request
+  //    principal, i.e. exactly today's behaviour. The delegation never invents an identity.
+  {
+    const { routes, adapterPrincipals } = mountWithSource({ dataSourceOwnerId: null })
+    await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull })
+    assert.deepEqual(
+      adapterPrincipals,
+      [OPERATOR.id],
+      'P-09: with no server-held owner there is nothing to delegate to, so nothing changes',
+    )
+  }
 }
 
 const DRY_RUN = { method: 'POST', routePath: '/api/integration/table-actions/:actionId/dry-run' }
@@ -629,6 +881,8 @@ function everyLargeBomRouteIsInTheSplit() {
 
 async function main() {
   await theOperatorPullsButNeitherReconcilesNorArchives()
+  await theOperatorPullReadsAsTheBindingOwner()
+  await aStoredLargeBomJobIsRunOnlyByItsCreator()
   await theOperatorReachesTheBoundedBackgroundChannel()
   everyLargeBomRouteIsInTheSplit()
   await theOperatorBranchCannotBeSteeredAcrossTenants()

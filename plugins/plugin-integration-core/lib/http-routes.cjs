@@ -445,6 +445,7 @@ const {
 // set and the BE gate set cannot drift.
 const {
   STOCK_PREP_OPERATE,
+  STOCK_PREP_OPERATOR_PULL_ACTION_ID,
   STOCK_PREP_READ,
   isStockPrepPermissionCode,
   operatorMayRunStockPrepPull,
@@ -4069,6 +4070,67 @@ function requireStockPreparationAudit() {
     })
   }
 
+  /**
+   * WHOSE IDENTITY DOES THE SOURCE READ RUN AS — 一线自己拉数据's data-plane half.
+   *
+   * THE PROBLEM THE OPERATOR SPLIT CREATED. Moving the HTTP gate let a stock-prep operator reach
+   * dry-run/apply, but the read underneath still ran as the REQUEST principal. On the DEFAULT source
+   * kind (`data-source:sql-readonly`) the host facade authorizes by STRICT OWNER EQUALITY and has no
+   * admin bypass on the data plane — `DataSourceManager.assertAccess` throws unless the connection's
+   * `ownerId` IS the reading user. A floor operator is never the person who bound the connection, so
+   * every operator pull came back `status:"failed"`, `canApply:false`, `dryRunToken:null`. The tier
+   * was admitted to the route and refused the data, silently, forever. The picker comment further
+   * down this file states the assumption that broke: "binding is upstream of a read that will run as
+   * this same principal" — reader == binder, which the split made false.
+   *
+   * THE DELEGATION, and every bound on it:
+   *   * it applies to ONE frozen action id, compared for EQUALITY — the same id the gate split is
+   *     scoped to. No other table action's read identity changes by a byte.
+   *   * the identity is the SERVER-HELD binding owner: `config.dataSourceOwnerId`, which the
+   *     external-system registry stamps on the server for every dataSourceId-bearing upsert and
+   *     explicitly discards from client payloads (SERVER_OWNED_CONFIG_KEYS). It cannot be steered
+   *     from the request, because it never comes from the request.
+   *   * it only ever REPLACES A GUARANTEED FAILURE. Where the caller already is the owner the value
+   *     is identical; where no owner is stamped there is nothing to delegate to and the request
+   *     principal stands. It cannot widen a read to a source the deployment did not bind to this
+   *     action — the action's `source.externalSystemId` is deploy-time config, not a request input.
+   *   * it is AUDITED AS A DELEGATION: the run's audit row carries the operator as `actor` and the
+   *     owner as the read `principal`, so "who asked" and "whose credentials answered" are two
+   *     recorded facts rather than one conflated one.
+   *
+   * WHAT IT IS NOT. It is not a grant to the operator: they never learn the owner's identity, cannot
+   * name it, and cannot point it at anything else. A first-class share on the data source would be a
+   * better long-term answer and needs a core change; this is the smallest thing that makes the
+   * owner's own ruling — that a floor operator may self-serve the pull — actually true.
+   */
+  function resolveTableActionReadPrincipal(req, action, system, storedPrincipal) {
+    // The fallback, in order of decreasing authority: an explicitly supplied principal (a STORED
+    // job's, which is what keeps a background run from switching data-source scope to whoever
+    // triggered it), then the requester.
+    const fallback = firstString(storedPrincipal) || requestPrincipal(req)
+    const actionId = action && action.actionId ? String(action.actionId) : ''
+    if (actionId !== STOCK_PREP_OPERATOR_PULL_ACTION_ID) return fallback
+    const config = system && isPlainObject(system.config) ? system.config : {}
+    const bindingOwner = firstString(config.dataSourceOwnerId)
+    // The binding owner OVERRIDES even a stored principal, and that is the point: on this one action
+    // the read must run as the identity the host will actually authorize, whoever queued the job.
+    return bindingOwner || fallback
+  }
+
+  /**
+   * WHO MAY RUN A STORED LARGE-BOM JOB: its creator, and nobody else.
+   *
+   * Jobs created before this field existed carry no `actor`; those fall back to the recorded
+   * `principal`, which for every pre-existing job IS the creator (the two were the same value until
+   * they were split apart). So an old job stays runnable by the person who made it and by no one new.
+   */
+  function assertLargeBomJobActor(job, caller) {
+    const owner = firstString(job && job.actor) || firstString(job && job.principal)
+    if (!owner) return
+    if (firstString(caller) === owner) return
+    throw new HttpRouteError(403, 'LARGE_BOM_JOB_ACTOR_MISMATCH', 'this large-BOM job belongs to another user')
+  }
+
   async function loadTableActionSourceAdapter(req, action, options = {}) {
     const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
       ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
@@ -4087,9 +4149,12 @@ function requireStockPreparationAudit() {
         actualKind: system && system.kind,
       })
     }
-    const principal = Object.prototype.hasOwnProperty.call(options, 'principal')
-      ? options.principal
-      : requestPrincipal(req)
+    const principal = resolveTableActionReadPrincipal(
+      req,
+      action,
+      system,
+      Object.prototype.hasOwnProperty.call(options, 'principal') ? options.principal : null,
+    )
     // W-5: forwards the B2a authorization stanza the caller already computed (dormant/unauthorized
     // omits it entirely — no key at all, not even `undefined` — so a factory that doesn't know this
     // dep sees exactly the same `deps` object it always has). Only `data-source:sql-readonly`
@@ -5643,7 +5708,12 @@ function requireStockPreparationAudit() {
         ...routeScope,
         action,
         parameters,
+        // The creator, recorded on both fields. The identity the READ runs under is NOT decided here
+        // — it is resolved at run time from the action's bound source (see the run route), so this
+        // route loads no external system and the durable-store check stays the first thing that can
+        // fail. `actor` is what the run route compares the caller against.
         principal: requestPrincipal(req),
+        actor: requestPrincipal(req),
       })
       return sendOk(res, largeBomJobResponse(publicBackgroundExpansionJob(job)), 202)
     },
@@ -5674,6 +5744,15 @@ function requireStockPreparationAudit() {
         actionId,
         jobId,
       })
+      // A STORED JOB IS RUN BY ITS OWN CREATOR. Every other scope this route uses comes from the
+      // stored artifact — including the identity its source read is performed under — so without
+      // this a caller could drive somebody else's job, under somebody else's data-source ownership,
+      // by naming its id. Harmless while only `integration:*` could reach the route; a real hole the
+      // moment the operator split admitted a new tier to it.
+      //
+      // DECIDED HERE, before the B2a registration and before the adapter load, so a refusal costs
+      // neither an operation claim nor a credential lookup.
+      assertLargeBomJobActor(queuedJob, requestPrincipal(req))
       const action = assertStockPreparationTargetReady(queuedJob.actionSnapshot)
       // B2a — the FOURTH and last call site of `loadTableActionSourceAdapter`, and the only one
       // gated at the route rather than inside a table-action wrapper. It has to be: this path does
@@ -5709,6 +5788,10 @@ function requireStockPreparationAudit() {
         now: Date.now(),
       })
       // W-5: same stanza, forwarded — see the dry-run route above for why.
+      // The STORED job's principal, so a background run never switches data-source scope to whoever
+      // triggered it — and, for the frozen stock-prep pull id, the server-held binding owner
+      // overrides even that (see resolveTableActionReadPrincipal). `assertLargeBomJobActor` above
+      // has already refused any caller who is not this job's creator.
       const sourceAdapter = await loadTableActionSourceAdapter(req, action, {
         principal: queuedJob.principal,
         b2aAuthorization: largeBomB2aAuthorization,

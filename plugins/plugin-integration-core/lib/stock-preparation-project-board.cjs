@@ -470,6 +470,9 @@ async function readOperatorProjectBoard({
     targetProjectId,
     scope,
     projectNo: wanted,
+    // The board projects its own frozen key set, so it may consume the pending INDEX in process; the
+    // directory route, whose response shape is frozen and asserted, does not ask for it.
+    includePendingIndex: true,
   })
 
   const match = directory.projects.find((project) => optionalString(project.projectNo) === wanted) || null

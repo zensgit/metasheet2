@@ -180,7 +180,7 @@ async function pendingDecisionCountsByProjectNo(recordsApi, provisioning, target
  * tenant confinement would have excluded. `projectCount` then means "matching projects" (0 or 1),
  * which is what the board's audit records, and `projects` is the same row shape either way.
  */
-async function listOperatorProjectDirectory({ recordsApi, provisioning, targetProjectId, scope, projectNo } = {}) {
+async function listOperatorProjectDirectory({ recordsApi, provisioning, targetProjectId, scope, projectNo, includePendingIndex = false } = {}) {
   if (!scope || !optionalString(scope.tenantId)) {
     throw new StockPreparationOperatorDirectoryError(500, 'OPERATOR_DIRECTORY_SCOPE_REQUIRED', 'operator project directory requires a resolved operator value scope')
   }
@@ -255,12 +255,19 @@ async function listOperatorProjectDirectory({ recordsApi, provisioning, targetPr
     ledgerReady: pending.ready,
     projectCount: projects.length,
     pendingProjectCount: projects.filter((project) => project.pendingDecisionCount > 0).length,
-    // THE PENDING MAP ITSELF, projectNo -> count. Returned because it is keyed by the BUSINESS
-    // number and is therefore answerable for a project that has NO archive row at all — which is
-    // the normal shape after an operator's own pull, since the MVP project table is written by
-    // mvp-persist and mvp-persist is platform-admin. A caller that reads pending work off a
-    // per-project row silently reports zero for exactly those projects; the board did.
-    pendingByProjectNo: pending.byProjectNo,
+    // THE PENDING MAP ITSELF, projectNo -> count — OPT-IN, and off by default.
+    //
+    // It is keyed by the BUSINESS number, so it is answerable for a project that has NO archive row
+    // at all: the normal shape after an operator's own pull, since the MVP project table is written
+    // by mvp-persist and mvp-persist is platform-admin. A caller reading pending work off a
+    // per-project row silently reports zero for exactly those projects — the board did.
+    //
+    // WHY OPT-IN. The DIRECTORY ROUTE sends this object as its response and its top-level key set is
+    // frozen and asserted (S-02a). An extra key here would be an unreviewed widening of a
+    // value-bearing response projection, and a Map would serialize as `{}` besides. So only a caller
+    // that asks — the board, which consumes it in-process and projects its own frozen key set — gets
+    // it, and the route's shape is unchanged by construction.
+    ...(includePendingIndex ? { pendingByProjectNo: pending.byProjectNo } : {}),
     projects,
   }
 }
