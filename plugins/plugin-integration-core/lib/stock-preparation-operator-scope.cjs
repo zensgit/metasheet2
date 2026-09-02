@@ -46,18 +46,33 @@
 //
 // The effect, stated plainly, is the owner's ruling made mechanical:
 //   * platform/admin-facing surfaces keep `resolveTenantId` and stay values-free — unchanged;
-//   * EVERY tenant-scoped OPERATOR surface that carries values uses THIS, and is unreachable by a
-//     tenantless platform admin (403 OPERATOR_SCOPE_TENANT_REQUIRED) and by any cross-tenant
+//   * EVERY tenant-scoped OPERATOR surface whose tenancy must be PROVEN uses THIS, and is unreachable
+//     by a tenantless platform admin (403 OPERATOR_SCOPE_TENANT_REQUIRED) and by any cross-tenant
 //     steering or header-spoofing attempt (403).
 //
-// "EVERY" is literal, and it is the whole set — there are exactly three value-bearing stock-prep
-// reads and all three resolve their tenant here:
-//   1. GET …/confirmation-decisions/value-entry  the per-decision readback  (O1')
-//   2. GET …/prep-lines/export                   the materials workbook     (按项目导出物料 Excel)
-//   3. GET …/operator/projects                   the project directory      (一线看得见自己工厂的项目)
-// (1) and (2) predate this module and were left on `resolveTenantId` when it landed, which was a
-// live cross-tenant leak on a claimless deployment rather than a stylistic gap — see the routes.
-// A FOURTH value-bearing read must join this list, not invent a fourth way to decide tenancy.
+// "EVERY" is literal, and the list below is the whole set. It has two kinds of member, and the
+// distinction is worth keeping straight because it decides what ELSE a surface owes:
+//
+//   A. VALUE-BEARING READS — the reason this module was written. The response carries customer
+//      values, so the H0 三重门 applies: RBAC + a server-side field whitelist + audit.
+//        1. GET …/confirmation-decisions/value-entry  the per-decision readback  (O1')
+//        2. GET …/prep-lines/export                   the materials workbook     (按项目导出物料 Excel)
+//        3. GET …/operator/projects                   the project directory      (一线看得见自己工厂的项目)
+//      (1) and (2) predate this module and were left on `resolveTenantId` when it landed, which was a
+//      live cross-tenant leak on a claimless deployment rather than a stylistic gap — see the routes.
+//
+//   B. TENANT-PROOF-ONLY SURFACES — values-free, but the tenant still may not come from a header.
+//        4. GET  …/stock-preparation/handoff          `stockPreparationHandoffStatus`
+//           whose turn it is (通知下一步), values-free:
+//           step keys from a closed vocabulary, cursor integers, booleans, handler COUNTS. It rides
+//           the broad READ tier (`requiredTier: STOCK_PREP_READ`) because a supervisor is meant to
+//           see whose turn it is — but WHOSE turn is still a tenant fact.
+//        5. POST …/stock-preparation/handoff/advance  `stockPreparationHandoffAdvance`
+//           the advance itself: a WRITE (see below).
+//
+// A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
+// static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins
+// both handoff entries so this list cannot go stale unnoticed.
 //
 // ---------------------------------------------------------------------------
 // WHAT THIS CAPABILITY DOES **NOT** GRANT
@@ -72,8 +87,15 @@
 //   * It does NOT grant any permission. A caller who fails `stock-prep:operate` is already refused by
 //     `requireAccess` before this module is reached; a caller who passes it still gets nothing here
 //     unless they have a tenant of their own.
-//   * It does NOT authorize a WRITE. It resolves a READ scope only. Writes keep
-//     `resolveAuthenticatedWriteTenantId` and their own audit discipline.
+//   * It does NOT, BY ITSELF, AUTHORIZE A WRITE — but a write may and should use it to decide WHOSE
+//     tenant it is writing to. An earlier version of this line said writes keep
+//     `resolveAuthenticatedWriteTenantId`; that helper reads `user.tenantId`, which the auth
+//     middleware fills from the x-tenant-id HEADER whenever the verified token carries no tenant
+//     claim, so on a claimless deployment it decides nothing at all. `POST …/handoff/advance` (5
+//     above) therefore resolves its tenant HERE and adds, on top, the two things a write owes and a
+//     read does not: its own handler gate (only a configured handler of the step may advance it) and
+//     its own append-only audit row. That is the rule for the next write: this module proves whose
+//     tenant; the route still owes its own authorization and its own trail.
 //   * It does NOT make the resulting response values-free-exempt in the AUDIT. `actorId` is a
 //     principal handle, `tenantId` is a tenant handle; neither is a customer business value, and
 //     nothing else from this module may reach an audit row.

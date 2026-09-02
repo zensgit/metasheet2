@@ -34,7 +34,8 @@ const crypto = require('node:crypto')
 
 const HANDOFF_TABLE = 'integration_stock_prep_handoff'
 
-// The unique index from migration 084 — (tenant_id, COALESCE(workspace_id,''), project_no).
+// The unique index from migration 084 — (tenant_id, project_no). There is no workspace component:
+// see the scope note below for why this one table cannot carry a caller-supplied one.
 const SCOPE_CONSTRAINT = 'uniq_integration_stock_prep_handoff_scope'
 const MAX_ADVANCE_ATTEMPTS = 3
 
@@ -155,7 +156,8 @@ function createStockPreparationHandoffStore({ db, idGenerator = crypto.randomUUI
    * Move the cursor from `expectedStepIndex` to `toStepIndex`, and CLAIM the notification for the
    * step being completed — both inside one transaction.
    *
-   * Returns `{ handoff, changed, notifyClaimed }`.
+   * Returns `{ handoff, changed }` — the notification claim is NOT taken here; see
+   * `claimNotification` below, and the ordering note that follows for why they are separate writes.
    *
    * THE COMPARE-AND-SET IS THE WHOLE POINT, AND IT TAKES BOTH HALVES BELOW. The caller has already
    * planned the advance against a cursor it read a moment ago (planStockPreparationHandoffAdvance);
@@ -202,9 +204,15 @@ function createStockPreparationHandoffStore({ db, idGenerator = crypto.randomUUI
    * Every step is idempotent, and being interrupted before the next one is RECOVERABLE:
    *
    *   * interrupted before the audit — cursor moved, claim unspent, no trail row. The next click
-   *     replays, writes its trail row and CLAIMS, so the notification still goes out. The operator
-   *     recovers it by pressing the button again, which is what they would do anyway.
+   *     replays, writes its trail row and CLAIMS, so the notification still goes out.
    *   * interrupted before the claim — the same, and the trail already has its row.
+   *
+   *     THE SCOPE OF THAT RECOVERY, stated because an earlier version of this note stated it without
+   *     one: it is the SAME handler's next click, and only while the chain has not moved past the
+   *     hop. A co-handler who advances first claims a LATER step, `claimNotification` is monotonic,
+   *     and the owed ping can then never be sent by anyone. That case is not silent — the advance
+   *     that supersedes it writes a `notification_lost` audit row naming the hop, and the status read
+   *     carries `notifiedStepIndex` so the workbench can show the gap — but it is not recoverable.
    *   * interrupted after the claim but before the send — the one irreducible window, and it is the
    *     at-most-once trade this feature made on purpose (below). The route reports it in words.
    *

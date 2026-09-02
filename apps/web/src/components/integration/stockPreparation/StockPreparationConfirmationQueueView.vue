@@ -200,6 +200,19 @@
       </template>
     </p>
 
+    <!-- A hop whose notice can never be sent. Not an error — the work moved on — but the person who
+         should have been told never was, and only a human can close that now. -->
+    <p
+      v-if="handoffNotificationGap"
+      class="stock-prep-confirm__hint"
+      data-testid="stock-prep-handoff-notification-gap"
+    >
+      {{ bi(
+        '前面有一步的群通知没发出去,系统已经不能补发了 —— 请您口头跟相关的人确认一下。',
+        'An earlier step\'s group notice never went out and can no longer be resent — please confirm with the people involved in person.',
+      ) }}
+    </p>
+
     <!-- What just happened to the turn AND to the message — two separate facts, said as two facts.
          The enum stays on screen subordinate to the sentence, like every other token on this page. -->
     <p v-if="handoffNoticeText" class="stock-prep-confirm__hint" data-testid="stock-prep-handoff-notice">
@@ -633,6 +646,7 @@ const HANDOFF_INERT: StockPreparationHandoffStatus = Object.freeze({
   completed: false,
   isCurrentHandler: false,
   notifiedStepIndex: null,
+  notificationsConfigured: false,
 })
 
 const handoff = ref<StockPreparationHandoffStatus>(HANDOFF_INERT)
@@ -640,13 +654,30 @@ const handoff = ref<StockPreparationHandoffStatus>(HANDOFF_INERT)
 const handoffAdvance = ref<StockPreparationHandoffAdvanceResult | null>(null)
 
 /**
- * What to tell the operator after an advance. A REPLAY (`changed === false`) is not an error and
- * must not read like one: nothing moved because it had already moved, and nobody was messaged twice.
+ * What to tell the operator after an advance.
+ *
+ * THE DISCRIMINATOR IS `notifyOutcome`, NOT `changed`, and that correction is the whole of this
+ * comment. `changed` says whether the TURN moved; it says nothing about whether a message went out.
+ * Those two used to be the same question, and the first version of this notice short-circuited on
+ * `changed === false` and printed 「没有重复通知」.
+ *
+ * They came apart when the notification claim became a compare-and-set of its own: a request that is
+ * BOTH a replay and the one that finally sends the owed notice is now ordinary, and so is the same
+ * request FAILING to send it. On the old wording an operator whose resend had just failed — or
+ * half-failed across 仓库 and 采购 — was told in words that nothing needed sending. The claim is spent
+ * by then, so no later click can ever resend it: being told the wrong thing here is terminal, and the
+ * group that missed the notice is never chased.
+ *
+ * So: if something was actually attempted (sent / partial / failed), say what happened to it. Only
+ * `skipped` and `not_configured` on an unchanged turn are genuinely "nothing needed sending".
  */
 const handoffNoticeText = computed<string>(() => {
   const result = handoffAdvance.value
   if (!result) return ''
-  if (result.changed === false) {
+  const attempted = result.notifyOutcome === 'sent'
+    || result.notifyOutcome === 'partial'
+    || result.notifyOutcome === 'failed'
+  if (result.changed === false && !attempted) {
     return bi(
       '这一步之前已经交接过了,没有重复通知。',
       'This step had already been handed on, so nobody was notified a second time.',
@@ -656,11 +687,35 @@ const handoffNoticeText = computed<string>(() => {
   if (!plain) return bi('已经交给下一步了。', 'It has been handed on to the next step.')
   const lead = bi(plain.zh, plain.en)
   const next = bi(plain.zhNext ?? '', plain.enNext ?? '')
-  return next ? `${lead} ${next}` : lead
+  const body = next ? `${lead} ${next}` : lead
+  // A RESUME is not the same event as a first advance and must not be described as one: the turn
+  // moved earlier, and what this click did was send the notice that hop had been owed since.
+  if (result.resumed === true) {
+    return `${bi('这一跳之前没发出去的通知,这次补发了。', 'The notice this step had been owed was sent now.')} ${body}`
+  }
+  return body
 })
 
 /** The enum, kept on screen but subordinate — what a person quotes when they ask us about it. */
 const handoffNoticeToken = computed<string | null>(() => handoffAdvance.value?.notifyOutcome ?? null)
+
+/**
+ * IS THERE A HOP WHOSE NOTICE NEVER WENT OUT? The claim is monotonic, so once a later hop is claimed
+ * an earlier owed one can never be sent by anyone — pressing the button again does not help, and
+ * until this line existed nothing on the screen said so.
+ *
+ * Two guards, both load-bearing. `notificationsConfigured` keeps a deliberate turn-state-only
+ * deployment — whose `notifiedStepIndex` is null forever and correctly so — from being told it has
+ * lost every notice it never meant to send. And the comparison is against `stepIndex - 1` because the
+ * CURRENT hop has not been handed off yet: its notice is not late, it is not due.
+ */
+const handoffNotificationGap = computed<boolean>(() => {
+  const state = handoff.value
+  if (!state.configured || !state.notificationsConfigured) return false
+  if (typeof state.stepIndex !== 'number' || state.stepIndex < 1) return false
+  const notified = state.notifiedStepIndex
+  return notified === null || notified < state.stepIndex - 1
+})
 
 /** What the currently chosen handling actually does, in one line, before the operator commits. */
 const selectedActionHint = computed<string>(() => {

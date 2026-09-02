@@ -311,7 +311,13 @@ export interface StockPreparationHandoffStatus {
   completed: boolean
   /** SERVER-COMPUTED. The client never derives this from a name it holds. */
   isCurrentHandler: boolean
+  /** The highest step whose completion has had a notification dispatched; null = none yet. */
   notifiedStepIndex: number | null
+  /**
+   * Does this chain notify at all? Without it the page cannot tell a hop whose notice was LOST from a
+   * turn-state-only deployment, whose `notifiedStepIndex` is null forever and correctly so.
+   */
+  notificationsConfigured: boolean
 }
 
 /**
@@ -342,6 +348,14 @@ export interface StockPreparationHandoffAdvanceResult {
   terminal: boolean
   notified: boolean
   notifyOutcome: StockPreparationHandoffNotifyOutcome
+  /**
+   * This request found the hop already moved and its notification still OWED, and took the claim.
+   *
+   * It exists because since the claim became a separate compare-and-set, `changed: false` no longer
+   * means "nothing needed sending": a replay is exactly how an interrupted hop gets finished. The
+   * notice reads `notifyOutcome` to decide what happened and this to decide how to say it.
+   */
+  resumed: boolean
 }
 
 /**

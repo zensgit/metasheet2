@@ -318,7 +318,7 @@ module.exports = {
     // the whole mechanism by which changing the source stops needing a backend restart. Absent (no
     // SQL db) → no resolver is wired → the action resolves the env default exactly as before.
     stockPreparationSourceBindingStore = createStockPreparationSourceBindingStore({ db })
-    // 通知下一步 (migration 082): the per-(tenant,workspace,projectNo) cursor saying whose turn it is
+    // 通知下一步 (migration 084): the per-(tenant,projectNo) cursor saying whose turn it is
     // on a 备料 project. Built here so both handoff routes can compare-and-set it in one transaction —
     // which is what makes a double click a detectable replay instead of a second advance. Absent (no
     // SQL db) → the routes fail closed with a named 501, never with a plausible-but-volatile turn.

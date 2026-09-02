@@ -69,8 +69,8 @@
   "runtimeFiles": {
     "pluginPackageJson": "4cd227957910381d06701bdbd95a33b2276c4c735f364ab415efdf8d4d113dc9",
     "pnpmLock": "95f095233951bbe488cb70da25cc3c9a0a25c1354bfd861b4ee999ccc857019b",
-    "pluginIndex": "09b82946cd046ccf6b0f1ebc841835b1fd564a1c975d4d82325916caf979c4eb",
-    "pluginHttpRoutes": "5e5062d389e187f2b3bc4d837f02738fdac63d75c49fad39c3959175ff44941c",
+    "pluginIndex": "f052621b0ac88debebf6dfa1260b848017e91849ead12b71bcbe4648d26c53ad",
+    "pluginHttpRoutes": "4fdbe74625e720673821f8b873058f183668fbdb416239d8915300e94db0762a",
     "testChainRunner": "c6ce4f00b412038b7f4473802f9d0b0df408d693c0b117f5b9dd23e0a7b1b82d",
     "s6aProvisioningCli": "d3320b27da7ab358ca068a3766a375e669fb6922f24ba0186ba0828c3e1d9da8",
     "s6aAcceptanceRunner": "eb58824cba1ab03361a6a4fba409f3f7a120dcda61d4c3d6cad2b82311d62624",

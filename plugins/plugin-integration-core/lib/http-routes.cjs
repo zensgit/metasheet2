@@ -3323,21 +3323,30 @@ function createHandlers(services, options = {}) {
   // whose CHECK constraint stops at 082. Every advance then moved the cursor, failed at the audit
   // insert, and handed the operator a raw constraint-violation message.
   //
-  // Asked ONCE per process (it is a deployment fact, not a per-request one) and only for actions a
-  // route is about to write. The probe fails OPEN on anything it cannot diagnose — see the store —
-  // so a connection blip degrades to "just try the write", exactly as before this existed.
-  const stockPreparationAuditVocabularyProbes = new Map()
+  // ONLY THE POSITIVE VERDICT IS CACHED (G4), and the asymmetry is the whole point. The first cut
+  // memoised whatever came back, so a deployment that ran migration 085 exactly as the 503 told it to
+  // kept being refused until somebody restarted the process — a refusal its own instructions could
+  // not clear, with nothing anywhere saying a restart was needed.
+  //
+  //   supported:true  — a deployment fact that cannot regress (a CHECK constraint is never narrowed
+  //                     by a later migration), so it is cached for the life of the process and the
+  //                     steady state costs nothing.
+  //   supported:false — a TRANSIENT deployment state that the operator is actively being told to fix.
+  //                     Re-probed on every request: one rolled-back INSERT per request while the
+  //                     route is genuinely broken and refusing anyway is cheap, and it means the very
+  //                     next click after `db:migrate` succeeds.
+  //
+  // The probe fails OPEN on anything it cannot diagnose — see the store — so a connection blip
+  // degrades to "just try the write", exactly as before this existed.
+  const stockPreparationAuditVocabularySupported = new Set()
   async function requireStockPreparationAuditVocabulary(audit, action, migration, tenantId) {
     if (!audit || typeof audit.supportsAction !== 'function') return
-    if (!stockPreparationAuditVocabularyProbes.has(action)) {
-      stockPreparationAuditVocabularyProbes.set(action, audit.supportsAction(action, { tenantId }))
-    }
+    if (stockPreparationAuditVocabularySupported.has(action)) return
     let verdict
     try {
-      verdict = await stockPreparationAuditVocabularyProbes.get(action)
+      verdict = await audit.supportsAction(action, { tenantId })
     } catch (error) {
       // A probe that itself blew up tells us nothing; do not convert it into a refusal.
-      stockPreparationAuditVocabularyProbes.delete(action)
       return
     }
     if (verdict && verdict.supported === false) {
@@ -3348,6 +3357,7 @@ function createHandlers(services, options = {}) {
         { migration },
       )
     }
+    stockPreparationAuditVocabularySupported.add(action)
   }
 
   function requireConfiguredStockPreparationHandoffChain() {
@@ -3364,17 +3374,32 @@ function createHandlers(services, options = {}) {
    * Every configured chain names its tenant — the parser refuses one that does not — and it belongs
    * to that tenant alone: the destination ids it carries are deploy config, the host proves only that
    * they are admin-managed, and nothing downstream relates a destination's org to the tenant whose
-   * project is about to be announced into it. So the refusal is here, by name, before any write.
+   * project is about to be announced into it. So the refusal is here, before any write.
+   *
+   * G7 — AND THE REFUSAL IS INDISTINGUISHABLE FROM "THERE IS NO CHAIN HERE". The first cut answered a
+   * distinct 403 CHAIN_NOT_FOR_THIS_TENANT, which meant one POST told a foreign tenant that this
+   * deployment HAS a 备料 chain and it is somebody else's — a one-bit cross-tenant configuration
+   * disclosure that the sibling status route was deliberately written to prevent (it answers
+   * `configured: false` to exactly the same caller). A guard that the neighbouring route undoes is
+   * not a guard, so the wire answer is now the same 501 an unconfigured deployment gives, and the
+   * DISTINCT reason stays where an operator can use it and a stranger cannot: the log.
    *
    * The `chain.tenantId &&` guard is retained for the unconfigured chain object (whose tenantId is
    * null), which callers never reach with a real tenant because they check `configured` first.
    */
   function requireStockPreparationHandoffChainForTenant(chain, tenantId) {
     if (chain.tenantId && chain.tenantId !== tenantId) {
+      if (routeLogger && typeof routeLogger.warn === 'function') {
+        // Tenant ids are handles, not customer values, and this line is the operability half the wire
+        // answer gives up.
+        routeLogger.warn(
+          `[plugin-integration-core] stock-prep handoff chain belongs to tenant ${chain.tenantId}; refusing an advance from ${tenantId} as not-configured`,
+        )
+      }
       throw new HttpRouteError(
-        403,
-        'STOCK_PREPARATION_HANDOFF_CHAIN_NOT_FOR_THIS_TENANT',
-        'the stock-preparation handoff chain configured on this deployment belongs to a different tenant',
+        501,
+        'STOCK_PREPARATION_HANDOFF_NOT_CONFIGURED',
+        'this deployment has no stock-preparation handoff chain configured',
       )
     }
     return chain
@@ -7472,6 +7497,10 @@ function createHandlers(services, options = {}) {
         completed,
         isCurrentHandler: !completed && isHandlerOfStep(chain, stepIndex, scope.actorId),
         notifiedStepIndex: persisted ? persisted.notifiedStepIndex : null,
+        // G6: whether this chain notifies at all. Without it the workbench cannot tell a hop whose
+        // notice was LOST (cursor past an unclaimed hop on a chain that does notify) from a
+        // turn-state-only deployment, whose `notifiedStepIndex` is null forever and correctly so.
+        notificationsConfigured: chainHasDestinationForHop(chain, false) || chainHasDestinationForHop(chain, true),
       })
     },
 
@@ -7669,10 +7698,24 @@ function createHandlers(services, options = {}) {
       // from the plan then said THIS actor advanced a step somebody else advanced, giving a reviewer
       // asking 「谁交接的」 two answers for one cursor move.
       //
-      // `resumed` is the fact that makes an interrupted hop answerable: this request found the cursor
-      // already moved and the notification still owed, and finished it. Values-free like the rest of
-      // `detail` — a boolean.
-      const resuming = !applied.changed && hopHasDestination
+      // G5 — THE ROW RECORDS WHAT THIS REQUEST OBSERVED, NOT WHAT IT HOPES TO DO. The first cut put a
+      // `resumed` boolean here, computed from state read inside the advance transaction and written
+      // twenty lines BEFORE the claim was attempted — the exact intent-vs-verdict bug RC5 had just
+      // fixed for `mode`, in the same detail object. Two concurrent resume clicks wrote two rows both
+      // saying they had completed the owed hop, for one notification.
+      //
+      // The append cannot simply move below the claim: that ordering is what RC1 exists to prevent
+      // (an audit failure after a spent claim loses the ping forever, unrecoverably). So the two
+      // facts are separated by what each can honestly assert at the moment it is written:
+      //
+      //   detail.notificationOwed  — an OBSERVATION, true at append time: the cursor had already
+      //                              moved and this hop's notification was still unclaimed.
+      //   response.resumed         — the committed VERDICT, set from `claim.claimed` below, which is
+      //                              what the workbench renders ("之前没发出去的通知,这次补发了").
+      //
+      // And the case where the owed hop can never be sent at all gets its own row — see the
+      // notification_lost append after this one.
+      const notificationOwed = !applied.changed && hopHasDestination
         && (applied.handoff.notifiedStepIndex === null || applied.handoff.notifiedStepIndex < fromStepIndex)
       await audit.append({
         tenantId,
@@ -7687,9 +7730,40 @@ function createHandlers(services, options = {}) {
           toStepIndex: plan.toStepIndex,
           stepCount: chain.steps.length,
           terminal,
-          resumed: resuming,
+          notificationOwed,
         },
       })
+
+      // G6 — A HOP WHOSE NOTICE CAN NEVER BE SENT LEAVES A RECORD.
+      //
+      // RC1's recovery is real but NARROW, and the prose used to state it without scope: it needs the
+      // SAME handler, before the chain moves on. When a co-handler advances first, their claim moves
+      // `notified_step_index` past the owed hop, the claim is monotonic, and that ping can never be
+      // sent by anyone. Nothing recorded it, so 「谁该被通知却没被通知」 was unanswerable afterwards.
+      //
+      // Detected here because this is the moment it becomes irreversible: this advance is about to
+      // claim `fromStepIndex`, so every hop strictly between the last claimed one and this one is now
+      // permanently unnotifiable. Values-free: a step key from the closed vocabulary plus integers.
+      if (applied.changed && hopHasDestination) {
+        const lastClaimed = applied.handoff.notifiedStepIndex
+        const firstUnclaimed = lastClaimed === null ? 0 : lastClaimed + 1
+        for (let lost = firstUnclaimed; lost < fromStepIndex; lost += 1) {
+          if (!chainHasDestinationForHop(chain, lost === chain.steps.length - 1)) continue
+          await audit.append({
+            tenantId,
+            projectId: projectNo,
+            action: 'handoff_advance',
+            subjectId: chain.steps[lost].key,
+            mode: 'notification_lost',
+            actor,
+            detail: {
+              operation: 'handoff_notification_lost',
+              lostStepIndex: lost,
+              stepCount: chain.steps.length,
+            },
+          })
+        }
+      }
 
       // STEP 7 — THE CLAIM, its own compare-and-set. `claimed: false` means somebody already has it
       // (an earlier click, or a concurrent writer who is sending right now), which is a 'skipped',
@@ -7733,6 +7807,11 @@ function createHandlers(services, options = {}) {
         terminal,
         notified: notifyOutcome === 'sent',
         notifyOutcome,
+        // G1/G5: the COMMITTED verdict — this request found the hop already moved and its notification
+        // still owed, and took the claim. The workbench needs it because `changed:false` alone can no
+        // longer mean "nothing needed sending": since RC1 a replay is exactly how an interrupted hop
+        // gets finished.
+        resumed: !applied.changed && claim.claimed === true,
       })
     },
 

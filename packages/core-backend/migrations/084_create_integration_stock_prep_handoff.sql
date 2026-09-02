@@ -18,10 +18,13 @@
 --                            at a different position in the chain when it was. A cursor equal to the
 --                            step count means the chain is finished.
 --   * notified_step_index —— the highest step whose COMPLETION has had a notification dispatched.
---                            This is the at-most-once claim: it is stamped in the same transaction as
---                            the cursor move, BEFORE the send is attempted, so a double click cannot
---                            produce a second ping and a failed send is not silently retried into a
---                            stream of them. NULL = nothing notified yet.
+--                            This is the at-most-once claim, and it is NOT written in the cursor
+--                            move's transaction: the store takes it in a SEPARATE compare-and-set
+--                            (claimNotification), after the audit row for that hop has landed, so an
+--                            audit failure cannot burn a claim on a hop that then never gets its
+--                            message. It is still stamped BEFORE the send is attempted, so a double
+--                            click cannot produce a second ping and a failed send is not silently
+--                            retried into a stream of them. NULL = nothing notified yet.
 --   * updated_by          —— operator identity (user id / email), same posture as 062 / 066 / 079.
 --
 -- ABSENT CONFIG = NO ROWS, EVER. A deployment that never sets `stockPreparationHandoff` cannot reach

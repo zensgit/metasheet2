@@ -459,7 +459,9 @@ function isHandlerOfStep(chain, stepIndex, actorId) {
  *                                  skip or repeat somebody's step.
  *
  * AT-MOST-ONCE NOTIFICATION, and it is a real trade-off. `notifiedStepIndex` records that a
- * notification was DISPATCHED for a step, and it is stamped in the same transaction as the advance —
+ * notification was DISPATCHED for a step. It is NOT stamped in the advance transaction: it is a
+ * SEPARATE compare-and-set (`claimNotification`), taken after the trail row lands, so that an audit
+ * failure cannot burn a claim on a hop that then never gets its message —
  * so a send that FAILS is not retried by clicking again (the second click is a replay). The
  * alternative, at-least-once, would let a flaky DingTalk turn one handoff into a stream of duplicate
  * pings at the exact moment people are already confused. The failure is instead reported honestly to

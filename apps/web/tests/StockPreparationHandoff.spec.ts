@@ -171,6 +171,8 @@ function advanceResult(overrides: Record<string, unknown> = {}): Record<string, 
     terminal: false,
     notified: true,
     notifyOutcome: 'sent',
+    // G1: the route reports whether THIS request completed a hop whose notification was still owed.
+    resumed: false,
     ...overrides,
   }
 }
@@ -575,4 +577,149 @@ describe('通知下一步 — the multi-person handoff on the confirmation queue
     await render()
     expect(advanceButton()).not.toBeNull()
   })
+
+  // ── G1 (round-2 C0): the RESUME cross product ────────────────────────────────────────────────
+  //
+  // RC1 made a state the API could not produce before: a request that is BOTH a replay
+  // (`changed: false`) AND the one that takes the at-most-once claim and dispatches. The notice used
+  // `changed` as its discriminator and short-circuited on `changed === false`, so an operator whose
+  // resend had just FAILED — or half-failed across 仓库/采购 — was told in words that nothing needed
+  // sending, and the group that missed the notice was never chased. The claim is spent by then, so no
+  // further click can ever resend it: being told the wrong thing here is terminal.
+  //
+  // The discriminator is `notifyOutcome`. `changed` only decides whether the turn moved.
+
+  it('H-14 (G1): a resume whose send FAILED says the message did not go out, not "nothing to do"', async () => {
+    asActor([STOCK_PREP_READ, STOCK_PREP_OPERATE])
+    serve({
+      handoff: [() => json({ ok: true, data: handoffStatus() })],
+      advance: () => json({
+        ok: true,
+        data: advanceResult({ changed: false, notified: false, notifyOutcome: 'failed', resumed: false }),
+      }),
+    })
+    await render()
+    advanceButton()!.click()
+    await flush()
+
+    const text = noticeLine()?.textContent ?? ''
+    expect(text).toContain('群里的消息没有发出去')
+    expect(text).toContain('请您自己跟下一位说一声')
+    expect(text, 'a failed send must never read as "nobody needed telling"').not.toContain('没有重复通知')
+    expect(errorLine(), 'the turn did move; this is a notice, not an error').toBeNull()
+  })
+
+  it('H-15 (G1): a resume whose terminal fan-out half-failed says one group was missed', async () => {
+    asActor([STOCK_PREP_READ, STOCK_PREP_OPERATE])
+    serve({
+      handoff: [() => json({ ok: true, data: handoffStatus() })],
+      advance: () => json({
+        ok: true,
+        data: advanceResult({ changed: false, terminal: true, notified: false, notifyOutcome: 'partial', resumed: false }),
+      }),
+    })
+    await render()
+    advanceButton()!.click()
+    await flush()
+
+    const text = noticeLine()?.textContent ?? ''
+    expect(text).toContain(STOCK_PREP_HANDOFF_OUTCOME_PLAIN.partial.zh)
+    expect(text).not.toContain('没有重复通知')
+  })
+
+  it('H-16 (G1): a resume that SUCCEEDED says the owed notice went out now', async () => {
+    asActor([STOCK_PREP_READ, STOCK_PREP_OPERATE])
+    serve({
+      handoff: [() => json({ ok: true, data: handoffStatus() })],
+      advance: () => json({
+        ok: true,
+        // `resumed: true` is the route's committed verdict: this click found the hop already moved,
+        // the notification still owed, and took the claim.
+        data: advanceResult({ changed: false, notified: true, notifyOutcome: 'sent', resumed: true }),
+      }),
+    })
+    await render()
+    advanceButton()!.click()
+    await flush()
+
+    const text = noticeLine()?.textContent ?? ''
+    expect(text, 'the operator must not be told nothing was sent when this click is what sent it').not.toContain('没有重复通知')
+    expect(text).toContain('之前没发出去的通知')
+    expect(noticeLine()!.querySelector('code')?.textContent).toBe('sent')
+  })
+
+  it('H-17 (G1): a plain replay (nothing owed) still reads as a replay', async () => {
+    // The corner H-06 pins, restated here so the new discriminator cannot swallow it: `skipped` and
+    // `not_configured` on a `changed:false` request really are "nothing needed sending".
+    asActor([STOCK_PREP_READ, STOCK_PREP_OPERATE])
+    for (const outcome of ['skipped', 'not_configured']) {
+      serve({
+        handoff: [() => json({ ok: true, data: handoffStatus() })],
+        advance: () => json({
+          ok: true,
+          data: advanceResult({ changed: false, notified: false, notifyOutcome: outcome, resumed: false }),
+        }),
+      })
+      await render()
+      advanceButton()!.click()
+      await flush()
+      expect(noticeLine()?.textContent ?? '', `outcome ${outcome}`).toContain('这一步之前已经交接过了')
+    }
+  })
+
+  // ── G6 (round-2 C4): the workbench can SEE a hop whose notice was lost ───────────────────────
+  //
+  // The claim is monotonic, so once a later hop is claimed an earlier owed one can never be sent.
+  // RC1's recovery ("press the button again") is real but narrow: it needs the SAME handler, before
+  // the chain moves on. When it does move on, the ping is simply gone — and until now nothing on the
+  // screen said so. The status read already carries `notifiedStepIndex`; the page now reads it.
+
+  it('H-18 (G6): a gap between the cursor and the last notified hop is shown, not hidden', async () => {
+    asActor([STOCK_PREP_READ, STOCK_PREP_OPERATE])
+    serve({
+      handoff: [() => json({
+        ok: true,
+        data: handoffStatus({
+          stepIndex: 2,
+          currentStepKey: 'final_review',
+          isCurrentHandler: false,
+          // hop 1 was never announced: the claim jumped from "nothing" to hop 0 and then the chain
+          // moved twice.
+          notifiedStepIndex: 0,
+          notificationsConfigured: true,
+        }),
+      })],
+    })
+    await render()
+    const gap = document.querySelector('[data-testid="stock-prep-handoff-notification-gap"]')
+    expect(gap, 'a hop whose notice never went out must be visible on the page').not.toBeNull()
+    expect(gap!.textContent).toContain('没发出去')
+  })
+
+  it('H-19 (G6): no gap notice when every hop so far has been notified', async () => {
+    asActor([STOCK_PREP_READ, STOCK_PREP_OPERATE])
+    serve({
+      handoff: [() => json({
+        ok: true,
+        data: handoffStatus({ stepIndex: 1, currentStepKey: 'process', isCurrentHandler: false, notifiedStepIndex: 0, notificationsConfigured: true }),
+      })],
+    })
+    await render()
+    expect(document.querySelector('[data-testid="stock-prep-handoff-notification-gap"]')).toBeNull()
+  })
+
+  it('H-20 (G6): a turn-state-only deployment never shows a gap it could not have filled', async () => {
+    // No destinations configured at all: `notifiedStepIndex` stays null forever and that is correct,
+    // not a lost notice. Reading the gap without this flag would alarm every such deployment.
+    asActor([STOCK_PREP_READ, STOCK_PREP_OPERATE])
+    serve({
+      handoff: [() => json({
+        ok: true,
+        data: handoffStatus({ stepIndex: 2, currentStepKey: 'final_review', isCurrentHandler: false, notifiedStepIndex: null, notificationsConfigured: false }),
+      })],
+    })
+    await render()
+    expect(document.querySelector('[data-testid="stock-prep-handoff-notification-gap"]')).toBeNull()
+  })
+
 })
