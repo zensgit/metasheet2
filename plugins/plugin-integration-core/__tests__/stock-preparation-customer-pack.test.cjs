@@ -138,12 +138,14 @@ function validSamplePasses() {
   const forged = { ...pack, packId: 'forged-pack' }
   assert.equal(isNormalizedCustomerPack(forged), false, 'a spread copy must lose the brand')
   // The DERIVED keys normalization adds are what make a spread copy fail re-validation,
-  // and there are two of them at different depths. This used to trip the TOP-LEVEL gate on
-  // `targetObjectId`; that key is now authorable (optional, sandbox-only), so the copy gets
-  // one gate further and is caught by the field-level derived key `preserveOnRefresh`.
+  // and there are several of them at different depths. It has tripped a different gate as
+  // the shape grew: first the top-level `targetObjectId` (now authorable, so no longer),
+  // then the field-level `preserveOnRefresh`, and now the top-level `fieldWriteDenials` —
+  // the derived complement of `fieldWritePolicies`, which is DELIBERATELY not in PACK_KEYS
+  // (it is computed, never authored), so a forged copy is caught one gate EARLIER again.
   // The property under test is unchanged and is asserted directly below: a spread copy is
   // re-validated from scratch, never trusted.
-  assertThrowsReason(() => normalizeCustomerPack(forged), 'EXTENSION_FIELD_UNKNOWN_KEY', 'spread copy re-validated')
+  assertThrowsReason(() => normalizeCustomerPack(forged), 'PACK_UNKNOWN_KEY', 'spread copy re-validated')
   // And the top-level gate still fires on its own, so widening PACK_KEYS by one key did not
   // open the door to arbitrary top-level keys.
   assertThrowsReason(

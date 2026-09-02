@@ -457,6 +457,15 @@ module.exports = {
         // and must not add one. OPTIONAL — absent → the export route 501s instead of a 500 crash.
         // Duck-typed to { buildWorkbookBuffer({ sheetName, headers, rows }) => Promise<Buffer> }.
         stockPreparationXlsxExport: (context.services && context.services.stockPreparationXlsxExport) || null,
+        // 列级写权限: the narrow port that writes the PLATFORM's own `field_permissions` rows
+        // (packages/core-backend StockPreparationFieldPermissionsService), injected by the host for
+        // this plugin only — same INJECTED-per-plugin shape as the two above. It scopes WRITE ONLY:
+        // it takes no visibility argument, so it cannot hide a column from a department that needs to
+        // read it. OPTIONAL — absent → a pack with no fieldWritePolicies installs exactly as today,
+        // and a pack WITH them fails closed rather than silently skipping enforcement.
+        // Duck-typed to { applyRoleWriteScopes({ sheetId, entries }) => Promise<{ applied }> }.
+        stockPreparationFieldPermissions:
+          (context.services && context.services.stockPreparationFieldPermissions) || null,
         externalSystemRegistry,
         readSourceConfigStore,
         stockPreparationAuditStore,

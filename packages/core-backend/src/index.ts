@@ -49,6 +49,11 @@ import { GovernedAiService } from './services/governed-ai-service'
 // implementation. See packages/core-backend/src/routes/univer-meta.ts for the generic-export sibling
 // that already calls buildXlsxBuffer this same way (xlsx module lazily imported, never top-level).
 import { buildXlsxBuffer, type XlsxModule } from './multitable/xlsx-service'
+// 备料按部门列写权限: the per-column WRITE-scope port, injected into plugin-integration-core ONLY,
+// same per-plugin-injected-service shape as GovernedAiService above. It writes `field_permissions`
+// — the ONE table the grid's write gate reads — and is structurally write-only (it cannot hide a
+// column). See the service file header for the load-bearing property and the removal path.
+import { StockPreparationFieldPermissionsService } from './services/stock-preparation-field-permissions'
 import { eventBus } from './integration/events/event-bus'
 import { initializeEventBusService } from './integration/events/event-bus-service'
 import { messageBus } from './integration/messaging/message-bus'
@@ -2840,6 +2845,16 @@ export class MetaSheetServer {
         // absent for every other plugin.
         stockPreparationXlsxExport: manifest.name === 'plugin-integration-core'
           ? { buildWorkbookBuffer: buildStockPreparationExportWorkbookBuffer }
+          : undefined,
+        // 备料按部门列写权限: the per-column WRITE-scope port for plugin-integration-core ONLY. The
+        // plugin declares "this ROLE may NOT WRITE this column" and the host writes the ONE table the
+        // grid's write gate actually reads (`field_permissions`). WRITE-only by construction — it
+        // cannot restrict READ, because 采购 and 仓库 must keep seeing the production band and each
+        // other's responses (see the service file's load-bearing property). Purely additive: removal
+        // is an operator action on PUT /sheets/:sheetId/field-permissions. Absent for every other
+        // plugin.
+        stockPreparationFieldPermissions: manifest.name === 'plugin-integration-core'
+          ? new StockPreparationFieldPermissionsService()
           : undefined,
         security: this.pluginRuntimeSecurityService,
       } as unknown as import('./types/plugin').PluginServices,

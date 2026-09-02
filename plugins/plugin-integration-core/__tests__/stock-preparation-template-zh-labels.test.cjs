@@ -92,6 +92,13 @@ const MAIN_LABELS_ZH = Object.freeze({
   notes: '备注',
   procurementReply: '采购回复',
   warehouseConfirmation: '仓库确认',
+  // 自制/外购 + the departmental response band. Appended, so every column above keeps
+  // the order value it already has in a deployed grid.
+  makeOrBuy: '自制/外购',
+  procurementDone: '采购完成',
+  procurementReplyDate: '采购回复日期',
+  warehouseDone: '仓库完成',
+  actualArrivalDate: '实际到货日期',
 })
 
 const LEDGER_LABELS_ZH = Object.freeze({
@@ -124,7 +131,18 @@ const SANDBOX_SHEET_LABEL_ZH = '备料主表(沙箱)'
  * every id, name, type, order, property and the sheet label -- serialised and hashed.
  */
 const BASE_BUILT_DIGESTS = Object.freeze({
-  mainStructure: '9c53cd88d2958afcabab6d5019f4c8ea2c9c4d9723c1b808d919015da9c45097',
+  // mainStructure re-pinned DELIBERATELY (was 9c53cd88…c45097): the canonical main
+  // template grew from 25 to 30 columns — `makeOrBuy` (自制/外购) plus the departmental
+  // response band `procurementDone` / `procurementReplyDate` / `warehouseDone` /
+  // `actualArrivalDate`. All five are human_preserved and APPENDED after
+  // `warehouseConfirmation`, so every pre-existing column keeps its id, name, type,
+  // property and ORDER value; the digest moves only because the structure is five
+  // entries longer. Recomputed by running this exact computation (locale env genuinely
+  // unset, plain JSON.stringify, sha256) against the changed template — it still proves
+  // "unset language changes nothing", now over the extended structure.
+  mainStructure: 'b4491d452bc617e43b4c1c0ee5f77c140a23756f2d9242731fa368f8747cce87',
+  // UNCHANGED by that edit, and that is itself evidence: the confirmation-decision
+  // ledger and the nine MVP tables were not touched.
   ledgerStructure: 'afaf79ff5ebefaa7d64d3d75e3e0c46b53f1eb0e11d8d70ae539106f1317c4e2',
   // mvpStructures re-pinned DELIBERATELY (was 1248526551…3c2e15, then 477d39ec…c8bb29): the
   // bom-snapshot-line.v1 template gained the persisted `material` field (stock-prep-change-
@@ -133,8 +151,12 @@ const BASE_BUILT_DIGESTS = Object.freeze({
   // computation against that schema change — the digest still proves "unset language changes
   // nothing", now over the extended structure.
   mvpStructures: '269913dcca045127820a28719550fa4fcf22083b089c2f147edbbc4dfddf869d',
-  canonicalDescriptor: 'ce33abaf7b3c4352e62893770fe8654ef0075c11fc4c29779f623983d8237430',
-  sandboxDescriptor: '93b98ea7e5c8dc9c09d9c4ab3a26efe23f28cbfc7e100d1faa89ec83d72a3d23',
+  // Both provisioning descriptors are BUILT FROM the main template, so both move with it
+  // and for the same single reason (five appended human_preserved columns). Recomputed the
+  // same way; the zh negative control below still fails against them, so they remain
+  // capable of failing rather than being a rubber stamp.
+  canonicalDescriptor: 'c625fde68a2fc774fb46137e11cf239ccc6618d17338b39c7f46b4f9f1751240',
+  sandboxDescriptor: '89caef6307d3e7fafe989d865cfa9d01ed6f74e6fb20634ef2865c345dd36501',
 })
 
 const SANDBOX_OBJECT_ID = 'plm_stock_preparation_sandbox_demo'
@@ -192,9 +214,12 @@ function assertCompletenessAndFrozenIds() {
   assert.deepEqual(
     STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((f) => f.id),
     MAIN_IDS,
-    'main table field ids are frozen (25), in order',
+    'main table field ids are frozen (30), in order',
   )
-  assert.equal(MAIN_IDS.length, 25, 'main table has exactly 25 fields')
+  // 25 -> 30: 自制/外购 plus the four departmental response columns (采购完成 /
+  // 采购回复日期 / 仓库完成 / 实际到货日期). All five are human_preserved and APPENDED,
+  // so no pre-existing column changed id, type, label or order.
+  assert.equal(MAIN_IDS.length, 30, 'main table has exactly 30 fields')
   assert.deepEqual(
     STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE.fields.map((f) => f.id),
     LEDGER_IDS,
