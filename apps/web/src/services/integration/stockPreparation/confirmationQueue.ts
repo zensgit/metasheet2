@@ -101,6 +101,47 @@ export interface StockPreparationExportResult {
   activeRowCount: number
 }
 
+/**
+ * 一线看得见自己工厂的项目 — THE THIRD content-bearing shape in this module.
+ *
+ * One row of the operator's OWN-TENANT project directory. `projectNo` and `projectName` are customer
+ * business values and cross only this route and the value-entry/export reads; every other call in
+ * this module stays values-free. The server refuses this read to any principal without a tenant of
+ * its own, so a values-free platform/admin surface can never receive this shape.
+ */
+export interface StockPreparationOperatorProject {
+  projectId: string
+  /** 番号 — the number an operator would otherwise have to memorise. Null if the row carries none. */
+  projectNo: string | null
+  /** …and the name that makes memorising it unnecessary. */
+  projectName: string | null
+  projectStatus: string
+  lastSyncRunId: string | null
+  snapshotBatchCount: number
+  openExceptionCount: number
+  heldLineCount: number
+  readyLineCount: number
+  /** Rows in the confirmation ledger still waiting on a human, for THIS project. */
+  pendingDecisionCount: number
+}
+
+/**
+ * The directory response. The two `*Ready` booleans are what make an honest empty state possible:
+ * without them "nothing has been synced into this deployment yet", "the confirmation ledger has not
+ * been created yet" and "your project is fine and has nothing pending" are the same blank screen.
+ */
+export interface StockPreparationOperatorDirectory {
+  /** Echo of the tenant the server actually scoped to — a handle, never a business value. */
+  tenantId: string
+  /** False when the project table itself is not provisioned: nothing has ever been synced here. */
+  directoryReady: boolean
+  /** False when the confirmation-decision ledger is not provisioned: pending counts are all zero. */
+  ledgerReady: boolean
+  projectCount: number
+  pendingProjectCount: number
+  projects: StockPreparationOperatorProject[]
+}
+
 const EXPORT_ERROR_CODE_PATTERN = /^[A-Z0-9_]{1,80}$/
 
 /** Same filename-parsing idiom as the generic Multitable export client (multitable/api/client.ts). */
@@ -159,6 +200,27 @@ export async function exportStockPreparationPrepLines(
     filename: parseExportFilename(response.headers.get('Content-Disposition')),
     activeRowCount: parseExportRowCount(response.headers.get('X-Stock-Prep-Export-Row-Count')),
   }
+}
+
+/**
+ * 一线看得见自己工厂的项目 — THE OPERATOR'S OWN-TENANT PROJECT DIRECTORY / WORKLIST.
+ *
+ * The whole directory comes back, not only the projects with pending work, because the front end has
+ * to be able to tell "that number is not in this system" from "that project is real and has nothing
+ * pending" — and only the full list can distinguish them. Filtering to pending-only is a view over
+ * this response, never a narrowing of the request.
+ *
+ * `tenantId` is sent for shape-compatibility with every other call here and is NOT a selector: the
+ * server derives the scope from the authenticated principal and refuses any value that is not the
+ * caller's own tenant.
+ * GET /api/integration/stock-preparation/operator/projects
+ */
+export async function readStockPreparationOperatorDirectory(
+  scope: IntegrationScope,
+): Promise<StockPreparationOperatorDirectory> {
+  const query = buildQuerySuffix({ tenantId: scope.tenantId, workspaceId: scope.workspaceId })
+  const response = await apiFetch(`/api/integration/stock-preparation/operator/projects${query}`)
+  return parseStockPreparationConfirmResponse<StockPreparationOperatorDirectory>(response)
 }
 
 /**
