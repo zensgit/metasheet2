@@ -76,6 +76,7 @@ import {
   findObjectSheet as findProvisionedObjectSheet,
   getObjectSheetId as getProvisionedObjectSheetId,
   getObjectFieldId as getProvisionedObjectFieldId,
+  getObjectViewId as getProvisionedObjectViewId,
   resolveObjectFieldIds as resolveProvisionedObjectFieldIds,
   ensureObject as ensureMultitableObject,
   ensureMissingObjectFields as ensureMissingMultitableObjectFields,
@@ -766,6 +767,10 @@ export class MetaSheetServer {
             }
             return isSheetOwnedByProject(txQuery, sheetId, projectId)
           },
+          // Pure deterministic id derivation — no IO, no view touched, no access granted. The
+          // read-only sibling of the two accessors above. 项目备料页 composes its multitable deep
+          // link from this, AFTER proving the sheet itself exists through findObjectSheet.
+          getObjectViewId: (projectId, objectId, viewId) => getProvisionedObjectViewId(projectId, objectId, viewId),
           findObjectSheet: async ({ projectId, objectId }) => {
             const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
               const result = await poolManager.get().query(sql, params)

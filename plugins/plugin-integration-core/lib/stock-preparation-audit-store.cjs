@@ -74,6 +74,13 @@ const STOCK_PREP_AUDIT_ACTIONS = Object.freeze([
   // `subject_id` is a step key from the closed handoff vocabulary, `detail` carries cursor integers
   // and booleans only (see stock-preparation-handoff.cjs and the route, its only caller).
   'handoff_advance',
+  // 项目备料页 (migration 086): an operator opened ONE project's board — the page that strings the
+  // pull, the queue, the export and the handoff together. It is the fourth value-bearing read on
+  // this trail (it carries a projectNo and a projectName to the caller), so it is audited for the
+  // same reason project_directory_read is. The audited ROW stays values-free in the same sense:
+  // project_id is NULL, mode is the operator_project_board|operator_project_board_miss enum, and
+  // detail is counts and booleans only — never the projectNo that was asked for, found or not.
+  'project_board_read',
 ])
 const ACTION_SET = new Set(STOCK_PREP_AUDIT_ACTIONS)
 

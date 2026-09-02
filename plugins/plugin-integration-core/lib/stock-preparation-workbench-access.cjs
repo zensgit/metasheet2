@@ -191,6 +191,80 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
 /** The route meta gate for `/stock-prep`: reachability is exactly the queue READ code. */
 const STOCK_PREP_ROUTE_PERMISSION = STOCK_PREP_READ
 
+// ---------------------------------------------------------------------------
+// 一线自己拉数据 — THE OPERATOR PULL GATE SPLIT
+// ---------------------------------------------------------------------------
+//
+// The owner ruled that a floor operator may self-serve the PLM pull. Two things about that ruling
+// have to be encoded rather than remembered, and this block is where they live.
+//
+// FIRST: THE ROUTES IT TOUCHES ARE GENERIC. `/api/integration/table-actions/:actionId/dry-run` and
+// `.../apply` serve EVERY table action on the deployment, present and future. So the split is not
+// "the operator tier now satisfies the dry-run gate" — that would hand a stock-prep operator every
+// other connector's plan and write. It is scoped to ONE frozen action id, compared for EQUALITY (no
+// prefix, no namespace, no wildcard), and that comparison is the whole rule.
+//
+// SECOND: IT IS ADDITIVE, NEVER A REPLACEMENT. The legacy `integration:read` / `integration:write`
+// gates on those two routes are untouched and still admit exactly whom they admitted. The operator
+// tier is checked only AFTER the legacy gate has already refused, so no existing caller's outcome
+// can change — the split can add an admission, never remove one, and never re-route an existing one.
+//
+// WHAT DID NOT MOVE, and why it is named here rather than left implicit:
+//   * confirmation-decisions/reconcile — re-runs the readonly plan, i.e. a SOURCE READ off the
+//     customer's system that consumes a B2a operation claim when armed. Letting a customer operator
+//     trigger source reads is an owner-level decision; the header's PLATFORM_ADMIN_GATE note already
+//     says so and this PR does not move it.
+//   * mvp-persist — writes the snapshot batch; still platform-admin and still flag-gated.
+// The web orchestration degrades over both of those (skip with a reason, never an error), which is
+// what makes an operator's four-step run finish honestly rather than reddening on a 403.
+//
+// These rows are NOT members of STOCK_PREP_WORKBENCH_CAPABILITIES, deliberately and for the same
+// reason `canRunStockPrepInstall` is not: that manifest is the confirmation-queue CONTROL set,
+// asserted control-for-control against the queue view's DOM by the matrix suites on both sides.
+// These are dual-gated routes whose controls live in a different component; adding them there would
+// make the alignment assertion measure the wrong DOM and would break its "visible == actionable"
+// equality for every legacy `integration:*` holder, who reaches them without holding any stock-prep
+// code at all. They get their own suite instead (stock-preparation-operator-pull-gate.test.cjs).
+
+/** The ONE table action an operator may self-serve. Compared for equality — never a prefix. */
+const STOCK_PREP_OPERATOR_PULL_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
+
+/**
+ * The sub-routes that MOVED to the operator tier, each naming the legacy gate it also still keeps.
+ * `legacyGate` is the token the route passes to `hasPermission` first; the operator tier is only
+ * consulted when that has already said no.
+ */
+const STOCK_PREP_OPERATOR_PULL_STEPS = Object.freeze([
+  Object.freeze({
+    step: 'dry-run',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/dry-run',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'apply',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/apply',
+    legacyGate: 'write',
+  }),
+])
+
+/** The sub-routes that STAYED platform-admin. Listed so a suite can prove the split did not drift. */
+const STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS = Object.freeze([
+  Object.freeze({
+    step: 'reconcile',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/confirmation-decisions/reconcile',
+    legacyGate: PLATFORM_ADMIN_GATE,
+  }),
+  Object.freeze({
+    step: 'mvp-persist',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/mvp-persist',
+    legacyGate: PLATFORM_ADMIN_GATE,
+  }),
+])
+
 function isStockPrepPermissionCode(code) {
   return typeof code === 'string' && code.startsWith(`${STOCK_PREP_PERMISSION_NAMESPACE}:`)
 }
@@ -229,6 +303,26 @@ function grantedStockPrepCapabilities(permissions) {
       ? holdsPlatformAdmin(held)
       : satisfiesStockPrepAccess(held, entry.code)))
     .map((entry) => entry.capability)
+}
+
+/**
+ * MAY THIS PRINCIPAL SELF-SERVE THIS TABLE ACTION'S PULL? The whole operator-pull rule, as one pure
+ * function of `(permissions, actionId)` so the route, the suite and the web mirror all read the SAME
+ * decision instead of three restatements of it.
+ *
+ * Both halves are load-bearing:
+ *   * the action id must EQUAL the one frozen id — a different action, a prefix of it, an empty
+ *     string or a null all answer false, so the split can never leak across the table-action
+ *     namespace; and
+ *   * the permission side delegates to `satisfiesStockPrepAccess`, so the operate-AND-read
+ *     conjunction and the platform-admin short-circuit stay defined in exactly one place.
+ *
+ * It GRANTS nothing on its own: the routes call it only after their legacy gate has refused, and a
+ * false answer there is the same refusal the caller already had.
+ */
+function operatorMayRunStockPrepPull(permissions, actionId) {
+  if (typeof actionId !== 'string' || actionId !== STOCK_PREP_OPERATOR_PULL_ACTION_ID) return false
+  return satisfiesStockPrepAccess(permissions, STOCK_PREP_OPERATE)
 }
 
 /**
@@ -275,15 +369,19 @@ module.exports = {
   PLATFORM_ADMIN_PERMISSIONS,
   STOCK_PREP_ADMIN,
   STOCK_PREP_OPERATE,
+  STOCK_PREP_OPERATOR_PULL_ACTION_ID,
+  STOCK_PREP_OPERATOR_PULL_STEPS,
   STOCK_PREP_PERMISSION_CODES,
   STOCK_PREP_PERMISSION_DESCRIPTORS,
   STOCK_PREP_PERMISSION_NAMESPACE,
+  STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS,
   STOCK_PREP_READ,
   STOCK_PREP_ROUTE_PERMISSION,
   STOCK_PREP_WORKBENCH_CAPABILITIES,
   grantedStockPrepCapabilities,
   holdsPlatformAdmin,
   isStockPrepPermissionCode,
+  operatorMayRunStockPrepPull,
   requireAccessGateExpressionsInSource,
   satisfiesStockPrepAccess,
   stockPrepGateTokensInSource,

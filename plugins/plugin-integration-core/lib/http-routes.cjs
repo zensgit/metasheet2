@@ -196,6 +196,14 @@ const ROUTES = [
   // graph, or an impersonation of the last approver).
   ['GET', '/api/integration/stock-preparation/handoff', 'stockPreparationHandoffStatus'],
   ['POST', '/api/integration/stock-preparation/handoff/advance', 'stockPreparationHandoffAdvance'],
+  // 项目备料页 — ONE project's board: the read behind the operator's single page. A SIBLING of the
+  // directory above and gated identically (stock-prep:operate ∧ read, tenant derived from the
+  // AUTHENTICATED principal). It carries the caller's own tenant's project number/name plus counts,
+  // timestamps and a multitable deep-link HANDLE — never a row value. An unknown number and another
+  // tenant's number take the SAME code path to the SAME 404, so this route is not an existence
+  // oracle across tenants. Path-addressed by projectNo because the board IS one project; the number
+  // never reaches an audit row. See stock-preparation-project-board.cjs.
+  ['GET', '/api/integration/stock-preparation/projects/:projectNo/board', 'stockPreparationOperatorProjectBoard'],
   // #3751 MVP W5b (#3890): values-free audit trail over the stock-prep write surface.
   ['GET', '/api/integration/stock-preparation/audit', 'stockPreparationAuditList'],
   // 工作台里选源 — WHICH source the pull action reads, chosen in the workbench instead of in a server
@@ -439,6 +447,7 @@ const {
   STOCK_PREP_OPERATE,
   STOCK_PREP_READ,
   isStockPrepPermissionCode,
+  operatorMayRunStockPrepPull,
   satisfiesStockPrepAccess,
 } = require('./stock-preparation-workbench-access.cjs')
 // DEPLOYMENT PREFLIGHT: the one read that aggregates every "this deployment cannot run stock-prep
@@ -607,6 +616,15 @@ const {
   StockPreparationOperatorDirectoryError,
   listOperatorProjectDirectory,
 } = require('./stock-preparation-operator-project-directory.cjs')
+// 项目备料页 — ONE project's board. The fourth value-bearing stock-prep read; it rides the SAME
+// operator value scope as the directory above and returns a frozen key set (numbers, names, counts,
+// timestamps, handles), never a row value. See the module header.
+const {
+  STOCK_PREPARATION_PROJECT_BOARD_AUDIT_ACTION,
+  STOCK_PREPARATION_PROJECT_BOARD_MODES,
+  StockPreparationProjectBoardError,
+  readOperatorProjectBoard,
+} = require('./stock-preparation-project-board.cjs')
 // ...and THE capability that decides whose data the caller may be shown. It is the one place a
 // value-bearing read establishes "whose data is it", and it refuses a principal with no tenant of
 // its own — which is how the platform/consultant side stays out of this surface.
@@ -905,6 +923,41 @@ function requireAccess(req, action) {
     throw new HttpRouteError(403, 'FORBIDDEN', 'Insufficient integration permissions')
   }
   return user
+}
+
+/**
+ * 一线自己拉数据 — THE TABLE-ACTION GATE, WITH THE OPERATOR SPLIT.
+ *
+ * `requireAccess` answers "does this principal hold this tier". Two table-action sub-routes need a
+ * second question answered after that one says no: "…or is this the ONE stock-prep pull action a
+ * floor operator was ruled able to self-serve?".
+ *
+ * THE ORDER IS THE CONTRACT, and it is what makes this additive rather than a rewrite:
+ *   1. no principal            -> 401, exactly as before;
+ *   2. the LEGACY tier passes  -> admitted, exactly as before, with no operator check performed at
+ *      all. Every caller who reaches these routes today takes this branch and nothing about them
+ *      changes — not the tenant resolution below it, not the audit, not the B2a fence;
+ *   3. otherwise, and ONLY for the one frozen action id, the stock-prep operator tier is consulted;
+ *   4. otherwise 403, with the same code and message `requireAccess` would have produced.
+ *
+ * It is therefore impossible for this helper to REMOVE an admission or to re-route an existing one.
+ * The `actionId` it receives is the one the handler already resolved from the route params (falling
+ * back to the stock-prep action), so the gate and the action lookup can never disagree about which
+ * action is being authorized.
+ *
+ * NOT expressed as a `requireAccess(req, <stock-prep code>)` call on purpose: this is a DISJUNCTION
+ * of two tiers scoped to one action id, and writing it as a gate token would either widen those
+ * generic routes to every table action or make `stockPrepGateTokensInSource`'s typo tripwire read a
+ * conditional gate as an unconditional one.
+ */
+function requireTableActionAccess(req, actionId, legacyGate) {
+  const user = getUser(req)
+  if (!user) {
+    throw new HttpRouteError(401, 'UNAUTHENTICATED', 'Authentication required')
+  }
+  if (hasPermission(user, legacyGate)) return user
+  if (operatorMayRunStockPrepPull(listUserPermissions(user), actionId)) return user
+  throw new HttpRouteError(403, 'FORBIDDEN', 'Insufficient integration permissions')
 }
 
 function firstString(...values) {
@@ -1577,6 +1630,16 @@ const VALID_STOCK_PREPARATION_HANDOFF_ADVANCE_BODY_KEYS = new Set([
   'workspaceId',
   'projectNo',
   'fromStepKey',
+])
+
+// 项目备料页: the board's query allowlist. `projectNo` is deliberately NOT here — it is a PATH
+// param, so a request that also passes it as a query key is a malformed request and is refused
+// rather than silently resolved toward one of the two. `tenantId` is accepted only so the shared
+// `collectExplicitTenantIds` check can refuse a steering attempt with the right code; it never
+// selects anything.
+const VALID_STOCK_PREPARATION_OPERATOR_PROJECT_BOARD_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
 ])
 // FOS-2: generic field-option-sync request — closed allowlist. Operator names a preset (FOS-1
 // catalog) + supplies option sets keyed by the preset's source keys. No sheetId / credentials.
@@ -5185,10 +5248,16 @@ function createHandlers(services, options = {}) {
       })))
     },
 
+    // 一线自己拉数据: the legacy `integration:read` tier is unchanged; a stock-prep operator
+    // (operate ∧ read) is additionally admitted, for the pull-bom action id ONLY. Nothing below this
+    // line differs by which branch admitted the caller — the tenant resolution, the B2a fence and
+    // the plan are identical, so an operator's dry run is the same dry run it always was.
     async tableActionDryRun(req, res) {
-      requireAccess(req, 'read')
-      const body = normalizeTableActionBody(requestBody(req))
+      // The action id is read from the route params FIRST because the gate is scoped to it — but it
+      // is a pure param read, so the 401/403 still precedes every other validation and every IO.
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      requireTableActionAccess(req, actionId, 'read')
+      const body = normalizeTableActionBody(requestBody(req))
       const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
       const dryRunTenantId = resolveTenantId(req, {})
       const dryRunB2aRunId = b2aRunId('table-action-dry-run')
@@ -5434,10 +5503,14 @@ function createHandlers(services, options = {}) {
       }, result.persisted ? 201 : 200)
     },
 
+    // 一线自己拉数据: same split as the dry run above — the legacy `integration:write` tier is
+    // unchanged, and a stock-prep operator is additionally admitted for the pull-bom action ONLY.
+    // The dry-run TOKEN is still the thing that authorizes what gets written, so an operator cannot
+    // apply anything they did not just plan.
     async tableActionApply(req, res) {
-      const user = requireAccess(req, 'write')
-      const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_APPLY_BODY_KEYS)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      const user = requireTableActionAccess(req, actionId, 'write')
+      const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_APPLY_BODY_KEYS)
       const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
       const applyTenantId = resolveTenantId(req, {})
       const applyB2aRunId = b2aRunId('table-action-apply')
@@ -8116,6 +8189,101 @@ function createHandlers(services, options = {}) {
         // gets finished.
         resumed: !applied.changed && claim.claimed === true,
       })
+    },
+
+    // 项目备料页 — ONE PROJECT'S BOARD. The read behind the operator's single page.
+    //
+    // THE SAME GATE AND THE SAME TENANCY AS THE DIRECTORY ABOVE, deliberately and literally: this is
+    // the FOURTH value-bearing stock-prep read, and the operator-scope module's header instructs a
+    // fourth to JOIN the list rather than invent a fourth way to decide tenancy. So the tenant is
+    // derived from the AUTHENTICATED principal via `resolveOperatorValueScope` — never
+    // `resolveTenantId`, which lets a tenantless platform admin steer `tenantId` from the request —
+    // and every refusal that scope can raise is decided before any records/provisioning work.
+    //
+    // WHY THE PROJECT NUMBER IS A PATH PARAM AND WHAT THAT COSTS. The board IS one project, so the
+    // number addresses the resource. It is the caller's own input echoed back in the response (which
+    // is fine — it is theirs) and it reaches NO audit row (which is the point: see below).
+    //
+    // THE 404 IS NOT AN EXISTENCE ORACLE. `readOperatorProjectBoard` looks the number up in the
+    // caller's OWN directory, so "another tenant's project" is not a branch — it is simply absent,
+    // and takes the identical path an unknown number takes to an identical, detail-free 404. There is
+    // no reading of the response, the status or the timing from which a tenant-A operator learns
+    // that a number exists in tenant B.
+    //
+    // MULTITABLE ENFORCES ACCESS ON LANDING. The `fillTarget` in the response is a HANDLE, not a
+    // permission decision. This plugin has no user-aware multitable ACL seam — the read runs on the
+    // service-account records API with the plugin's own authority — so it CANNOT pre-check whether
+    // this operator may open that sheet, and this route makes no such claim. What it does guarantee
+    // is that the handle names a sheet that EXISTS; whether the operator may see it is multitable's
+    // answer, given when they land.
+    async stockPreparationOperatorProjectBoard(req, res) {
+      const user = requireAccess(req, STOCK_PREP_OPERATE)
+      const audit = requireStockPreparationAudit()
+      const input = normalizeStockPreparationConfirmBody(
+        requestQuery(req),
+        VALID_STOCK_PREPARATION_OPERATOR_PROJECT_BOARD_QUERY_KEYS,
+        'STOCK_PREPARATION_PROJECT_BOARD_REQUEST_INVALID',
+      )
+      const projectNo = firstString(requestParams(req).projectNo)
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
+      let outcome
+      try {
+        outcome = await readOperatorProjectBoard({
+          recordsApi: getMultitableRecordsApi(),
+          provisioning: getMultitableProvisioning(),
+          // Derived from the VERIFIED scope, never from the request — there is no reachable input by
+          // which tenant A's caller addresses tenant B's staging project.
+          targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
+          scope,
+          projectNo,
+          audit,
+          workspaceId: input.workspaceId,
+        })
+      } catch (error) {
+        // A MISS IS STILL A READ, and it is audited as one — values-free, so the trail cannot become
+        // the oracle the response refuses to be. Anything that is not the miss is rethrown untouched.
+        if (error instanceof StockPreparationProjectBoardError && error.status === 404) {
+          await audit.append({
+            tenantId: scope.tenantId,
+            workspaceId: input.workspaceId,
+            action: STOCK_PREPARATION_PROJECT_BOARD_AUDIT_ACTION,
+            actor: scope.actorId,
+            mode: STOCK_PREPARATION_PROJECT_BOARD_MODES[1],
+            detail: {
+              operation: 'operator_project_board',
+              found: false,
+              projectCount: Number.isInteger(error.projectCount) ? error.projectCount : 0,
+              tenantClaimVerified: scope.tenantClaimVerified,
+            },
+          })
+        }
+        throw error
+      }
+      // VALUES-FREE AUDIT over a value-bearing response, appended BEFORE the values reach the caller
+      // so a refusing audit store means no board is ever sent (H3-0 ③, fail-closed). project_id stays
+      // NULL and the projectNo appears nowhere: migration 083 says why that matters most here, on the
+      // one route that is ABOUT a single project.
+      await audit.append({
+        tenantId: scope.tenantId,
+        workspaceId: input.workspaceId,
+        action: STOCK_PREPARATION_PROJECT_BOARD_AUDIT_ACTION,
+        actor: scope.actorId,
+        mode: STOCK_PREPARATION_PROJECT_BOARD_MODES[0],
+        detail: {
+          operation: 'operator_project_board',
+          found: true,
+          projectCount: outcome.projectCount,
+          pendingDecisionCount: outcome.board.pendingDecisionCount,
+          fillTargetPresent: outcome.board.fillTarget !== null,
+          tenantClaimVerified: scope.tenantClaimVerified,
+        },
+      })
+      return sendOk(res, outcome.board)
     },
 
     // FOS-2: generic, preset-driven field-option-sync. Admin-gated; resolves a FOS preset from the

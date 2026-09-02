@@ -31,9 +31,11 @@
 //        member of the frozen vocabulary, and every manifest route is really registered
 //   M-09 the value-entry read is on OPERATE, not READ: a read-only actor is refused it, and the
 //        values-free queue stays readable to them (the deliberate split, pinned)
-//   M-10 项目接入: the four table-action routes the project-sync entry drives keep the gates they
-//        already had, and every tier below platform admin — the stock-prep operator included — is
-//        refused at the gate on all four, before any host work
+//   M-10 项目接入 + THE OPERATOR PULL SPLIT: the four table-action routes the project-sync entry
+//        drives keep their LEGACY gates; dry-run and apply additionally admit the stock-prep operator
+//        tier for ONE frozen action id; reconcile and mvp-persist did not move and refuse it; the
+//        split is not a wildcard over the table-action namespace; and every refusal still costs no
+//        host work
 //
 // Hermetic: no DB, no network. Every service the route module requires that these routes must NOT
 // touch is stubbed to throw.
@@ -787,66 +789,114 @@ async function valueEntryIsOperateNotRead() {
 }
 
 // ---------------------------------------------------------------------------
-// M-10 项目接入 — the four routes the project-sync entry drives
+// M-10 项目接入 — the four routes the project-sync entry drives, and the OPERATOR PULL SPLIT
 // ---------------------------------------------------------------------------
 
 /**
  * The 项目接入 panel (apps/web/src/components/integration/stockPreparation/
  * StockPreparationProjectSyncPanel.vue) turns the owner's sentence — 「点一下项目号,该项目号里的 bom
- * 就自动导入到我们的多维表中」 — into four calls. It is a UI over EXISTING routes and adds no write
- * authority, which is a claim this suite is the right place to keep honest:
+ * 就自动导入到我们的多维表中」 — into four calls.
  *
- *   M-10a the four routes are gated where they always were: dry-run on 'read', apply on 'write',
- *         reconcile and mvp-persist on 'admin'. Read out of the SOURCE, so a gate quietly relaxed to
- *         let the new panel through reddens here.
- *   M-10b THE OPERATOR TIER IS REFUSED, at the gate, on every one of them — including the very first
- *         call. R-11's mapping is zero-automatic: `stock-prep:read` + `stock-prep:operate` confers no
- *         `integration:*` code, so a customer operator cannot start a source read. The panel hides
- *         its control for exactly this reason; the refusal below is what actually enforces it.
- *   M-10c and the refusal costs nothing — no provisioning or records call is made on the way to it,
- *         which is what makes "hidden in the UI" a courtesy rather than the enforcement.
+ * WHAT THE OWNER THEN CHANGED, AND WHAT THEY DID NOT. 项目备料页 carries a ruling that a floor
+ * operator may SELF-SERVE the pull: without it the page opens on a project whose BOM nobody on the
+ * floor can bring in, and 「找平台管理员」 is not an answer at 07:00 on a shop floor. Two of the four
+ * routes therefore gained a SECOND admitted tier. Two did not — and the pair that did not is exactly
+ * the pair R-11(b) names as owner-level. So this block pins the SPLIT rather than the old uniform
+ * refusal. Same job, sharper claim:
+ *
+ *   M-10a the four routes keep their LEGACY gates unchanged, read out of the SOURCE. dry-run and
+ *         apply reach them through `requireTableActionAccess`, which consults the operator tier ONLY
+ *         after the legacy gate has already refused — so a gate quietly relaxed the other way (a bare
+ *         `requireAccess(req, STOCK_PREP_OPERATE)`, which would widen these GENERIC routes to every
+ *         table action on the deployment) still reddens here.
+ *   M-10b THE TWO THAT STAYED, STAYED. The operator tier is refused at the gate on reconcile (a
+ *         SOURCE READ that consumes a B2a claim when armed) and on mvp-persist, and neither handler
+ *         may even mention the split helper. Everything below the operator tier is still refused on
+ *         all four — including an operate-WITHOUT-read grant, because the tier is a CONJUNCTION.
+ *   M-10c THE SPLIT IS SCOPED TO ONE ACTION ID. The same operator on any other actionId is refused
+ *         on all four: the widening is not a wildcard over the table-action namespace.
+ *   M-10d and every refusal still costs nothing — no provisioning or records call is made on the way
+ *         to it, which is what makes "hidden in the UI" a courtesy rather than the enforcement.
+ *
+ * The POSITIVE half — that the operator actually reaches dry-run and apply — belongs to
+ * __tests__/stock-preparation-operator-pull-gate.test.cjs, which owns the split end to end.
  */
 const PROJECT_SYNC_ROUTES = Object.freeze([
-  Object.freeze({ handler: 'tableActionDryRun', gate: 'read', path: '/api/integration/table-actions/:actionId/dry-run' }),
-  Object.freeze({ handler: 'tableActionApply', gate: 'write', path: '/api/integration/table-actions/:actionId/apply' }),
+  Object.freeze({
+    handler: 'tableActionDryRun',
+    gate: 'read',
+    path: '/api/integration/table-actions/:actionId/dry-run',
+    operatorMayRun: true,
+  }),
+  Object.freeze({
+    handler: 'tableActionApply',
+    gate: 'write',
+    path: '/api/integration/table-actions/:actionId/apply',
+    operatorMayRun: true,
+  }),
   Object.freeze({
     handler: 'tableActionConfirmationDecisionsReconcile',
     gate: 'admin',
     path: '/api/integration/table-actions/:actionId/confirmation-decisions/reconcile',
+    operatorMayRun: false,
   }),
-  Object.freeze({ handler: 'tableActionMvpPersist', gate: 'admin', path: '/api/integration/table-actions/:actionId/mvp-persist' }),
+  Object.freeze({
+    handler: 'tableActionMvpPersist',
+    gate: 'admin',
+    path: '/api/integration/table-actions/:actionId/mvp-persist',
+    operatorMayRun: false,
+  }),
 ])
+
+const PULL_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
+const NON_STOCK_PREP_ACTION_ID = 'k3.material.pull.v1'
 
 function projectSyncGatesAreUnchanged() {
   for (const route of PROJECT_SYNC_ROUTES) {
-    // The gate is the FIRST requireAccess in the handler body. Matching on the handler name keeps the
-    // assertion attached to the route rather than to a line number.
-    const pattern = new RegExp(`async ${route.handler}\\(req, res\\) \\{[\\s\\S]{0,400}?requireAccess\\(req, '([a-z]+)'\\)`)
+    // The gate is the FIRST gate call in the handler body. Matching on the handler name keeps the
+    // assertion attached to the route rather than to a line number. The two split routes name their
+    // legacy token as the third argument of `requireTableActionAccess`; the two that stayed name it
+    // as the second argument of `requireAccess`. Either way the TOKEN must be the one the route has
+    // always used.
+    const pattern = route.operatorMayRun
+      ? new RegExp(`async ${route.handler}\\(req, res\\) \\{[\\s\\S]{0,400}?requireTableActionAccess\\(req, actionId, '([a-z]+)'\\)`)
+      : new RegExp(`async ${route.handler}\\(req, res\\) \\{[\\s\\S]{0,400}?requireAccess\\(req, '([a-z]+)'\\)`)
     const match = pattern.exec(HTTP_ROUTES_SOURCE)
-    assert.ok(match, `M-10a: ${route.handler} must open with a requireAccess gate`)
+    assert.ok(match, `M-10a: ${route.handler} must open with its gate call`)
     assert.equal(
       match[1],
       route.gate,
-      `M-10a: ${route.handler} is gated on '${route.gate}'. The 项目接入 panel adds no authority — if this ` +
-      'moved, a UI change relaxed a server gate.',
+      `M-10a: ${route.handler} keeps its legacy '${route.gate}' tier. The operator split is ADDITIVE — ` +
+      'if this moved, a UI change relaxed a server gate.',
     )
     assert.ok(
       HTTP_ROUTES_SOURCE.includes(`'${route.path}'`),
       `M-10a: ${route.path} is registered in the route table`,
     )
   }
+  // The two that stayed must not have acquired the split helper at all.
+  for (const route of PROJECT_SYNC_ROUTES.filter((entry) => !entry.operatorMayRun)) {
+    const body = new RegExp(`async ${route.handler}\\(req, res\\) \\{[\\s\\S]{0,400}`).exec(HTTP_ROUTES_SOURCE)
+    assert.ok(body, `M-10b: ${route.handler} body is readable`)
+    assert.ok(
+      !body[0].includes('requireTableActionAccess'),
+      `M-10b: ${route.handler} must NOT use the operator-split gate — it stayed platform-admin`,
+    )
+  }
 }
 
-async function projectSyncRefusesTheOperatorTier() {
+async function projectSyncRefusesTheTiersItAlwaysRefused() {
   const { routes, hostCallCount } = mount()
   const before = hostCallCount()
-  // Every tier BELOW platform admin, including the two the workbench itself grants. The four routes
-  // keep the legacy integration:* vocabulary, and R-11 maps nothing onto it automatically.
-  for (const user of [OPERATOR_READ, OPERATOR_CONFIRM, WORKBENCH_ADMIN, LOGGED_IN, ANONYMOUS]) {
+
+  // Everything BELOW the operator tier, refused on all four routes exactly as before. The orphan
+  // operate grant is in this list on purpose: the tier is a conjunction, so the split confers
+  // nothing on it either.
+  for (const user of [OPERATOR_READ, OPERATOR_ORPHAN_OPERATE, LOGGED_IN, ANONYMOUS]) {
     for (const route of PROJECT_SYNC_ROUTES) {
       const res = await call(routes, 'POST', route.path, {
         user,
-        params: { actionId: 'plm.stock-preparation.pull-bom.v1' },
+        params: { actionId: PULL_ACTION_ID },
         body: { parameters: { projectNo: PROJECT_NO } },
       })
       assert.ok(
@@ -856,8 +906,42 @@ async function projectSyncRefusesTheOperatorTier() {
       )
     }
   }
-  // M-10c: the refusal reached no host service on any of those attempts.
-  assert.equal(hostCallCount(), before, 'M-10c: a refused project-sync request performs no host work')
+
+  // THE TWO THAT STAYED: the operator tier, and the workbench-admin tier above it, are refused on
+  // reconcile and mvp-persist — on the pull action itself, where the split is live.
+  for (const user of [OPERATOR_CONFIRM, WORKBENCH_ADMIN]) {
+    for (const route of PROJECT_SYNC_ROUTES.filter((entry) => !entry.operatorMayRun)) {
+      const res = await call(routes, 'POST', route.path, {
+        user,
+        params: { actionId: PULL_ACTION_ID },
+        body: { parameters: { projectNo: PROJECT_NO } },
+      })
+      assert.ok(
+        refusedByGate(res),
+        `M-10b: ${route.handler} stayed platform-admin and must refuse ${user.id} ` +
+        `(got ${res.statusCode} ${res.body && res.body.error && res.body.error.code})`,
+      )
+    }
+  }
+
+  // M-10c: on any OTHER table action the operator is refused on all four, split included.
+  for (const user of [OPERATOR_CONFIRM, WORKBENCH_ADMIN]) {
+    for (const route of PROJECT_SYNC_ROUTES) {
+      const res = await call(routes, 'POST', route.path, {
+        user,
+        params: { actionId: NON_STOCK_PREP_ACTION_ID },
+        body: { parameters: { projectNo: PROJECT_NO } },
+      })
+      assert.ok(
+        refusedByGate(res),
+        `M-10c: ${route.handler} must refuse ${user.id} on a table action that is not the stock-prep pull ` +
+        `(got ${res.statusCode} ${res.body && res.body.error && res.body.error.code})`,
+      )
+    }
+  }
+
+  // M-10d: every refusal above reached no host service.
+  assert.equal(hostCallCount(), before, 'M-10d: a refused project-sync request performs no host work')
 }
 
 // ---------------------------------------------------------------------------
@@ -876,7 +960,7 @@ async function main() {
   await valueEntryIsOperateNotRead()
   // The RUNTIME refusal first: it is the claim that matters, and the source check below only
   // corroborates it. Running the source check first would let it short-circuit a real relaxation.
-  await projectSyncRefusesTheOperatorTier()
+  await projectSyncRefusesTheTiersItAlwaysRefused()
   projectSyncGatesAreUnchanged()
   console.log('stock-preparation permission matrix (O2/R-11): all assertions passed')
 }

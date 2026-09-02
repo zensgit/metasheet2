@@ -496,13 +496,13 @@ async function theAuditRowIsValuesFreeAndPrecedesTheValues() {
         throw new Error('audit refused')
       },
     })
-    let threw = false
-    try {
-      await callBoard(harness.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
-    } catch (error) {
-      threw = true
-    }
-    assert.ok(threw, 'B-04: a refusing audit store blocks the response rather than being swallowed')
+    const res = await callBoard(harness.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.notEqual(res.body.ok, true, 'B-04: a refusing audit store blocks the response rather than being swallowed')
+    assert.ok(res.statusCode >= 400, `B-04: the refusal surfaces as an error status, got ${res.statusCode}`)
+    assert.ok(
+      !JSON.stringify(res.body).includes(PROJECT_A_NAME),
+      'B-04: and the blocked response carries no value either',
+    )
   }
 
   // B-06: the 404 is audited too, with the same values-free shape and a mode of its own.
