@@ -60,6 +60,62 @@ function main() {
     assert.equal(byId[id].preserveOnRefresh, true, `${id} preserves on PLM refresh`)
   }
 
+  // ── THE SEVEN FIELDS A 备料 PULL MUST CARRY, on the WORKING SHEET ───────────────────────────
+  //
+  // 父组件图号 / 父组件名称 / 当前组件图号 / 当前组件名称 / 规格 / 材料 / 总数量. 备料主表 has
+  // always denormalized the child half (componentCode / componentName / material / totalQuantity);
+  // the parent was only ever an OBJ_ID and 规格 only ever arrived as a customer-pack `ext_spec`.
+  // These three close the gap, on EXACTLY the terms the snapshot line's own columns were added on
+  // (#5436): plm_system-owned, OPTIONAL (rows persisted before this change carry no such column, so
+  // nothing may require one), not part of the row identity, and healed onto existing installs by
+  // the additive repair verb (repairStockPreparationCanonicalTarget) rather than a migration.
+  for (const [fieldId, labelZh] of [
+    ['parentComponentCode', '父组件图号'],
+    ['parentComponentName', '父组件名称'],
+    ['componentSpec', '规格'],
+  ]) {
+    assert.ok(byId[fieldId], `备料主表 persists ${fieldId}`)
+    assert.equal(byId[fieldId].type, 'string', `${fieldId} is a string`)
+    assert.equal(byId[fieldId].ownership, 'plm_system', `${fieldId} is PLM-owned, never human-filled`)
+    assert.notEqual(byId[fieldId].required, true, `rows written before this change carry no ${fieldId} — never required`)
+    assert.notEqual(byId[fieldId].key, true, `${fieldId} is not part of the row identity`)
+    assert.equal(template.keyFields.includes(fieldId), false, `${fieldId} is not a key field`)
+    assert.equal(byId[fieldId].labelZh, labelZh, `${fieldId} carries its agreed Chinese header`)
+    assert.notEqual(byId[fieldId].preserveOnRefresh, true, `${fieldId} is refreshed by the pull, not preserved`)
+  }
+  // THE WALL: the human band did not move. Adding PLM columns must be invisible to it.
+  assert.equal(HUMAN_PRESERVED_FIELD_IDS.length, 8, 'the human-preserved whitelist is still exactly 8 columns')
+  for (const fieldId of ['parentComponentCode', 'parentComponentName', 'componentSpec']) {
+    assert.equal(HUMAN_PRESERVED_FIELD_IDS.includes(fieldId), false, `${fieldId} is not on the human whitelist`)
+  }
+  // All seven, present together on ONE table — the claim the export depends on.
+  for (const fieldId of ['parentComponentCode', 'parentComponentName', 'componentCode', 'componentName', 'componentSpec', 'material', 'totalQuantity']) {
+    assert.ok(byId[fieldId], `the seven-field roster is complete: ${fieldId}`)
+    assert.equal(byId[fieldId].ownership, 'plm_system', `${fieldId} is PLM-owned`)
+  }
+
+  // NAMESPACE DISJOINTNESS, both directions. `ext_` extension ids are governed so their SUFFIX may
+  // never equal a frozen template field id (stock-preparation-extension-namespace.cjs,
+  // FIELD_ID_TEMPLATE_COLLISION) — the rule exists for exactly this case, "a NEW frozen template
+  // field added under the same bare name". The shipped pack owns ext_parentDrawingNo /
+  // ext_parentName / ext_spec, which is why the three ids above are NOT parentDrawing / parentName
+  // / spec: freezing those would make every install carrying that pack fail its own pack
+  // validation. Pinned here so the next frozen column cannot silently take a suffix a pack owns.
+  const shippedPackFieldIds = require(path.join(__dirname, '..', 'lib', 'customer-packs', 'factory-a.rehearsal.cjs'))
+    .FACTORY_A_REHEARSAL_PACK.extensionFields.map((field) => field.id)
+  const templateIdSet = new Set(template.fields.map((field) => field.id.toLowerCase()))
+  for (const packFieldId of shippedPackFieldIds) {
+    const suffix = packFieldId.slice('ext_'.length).toLowerCase()
+    assert.equal(
+      templateIdSet.has(suffix),
+      false,
+      `frozen template id must not collide with shipped pack field ${packFieldId} — the pack would stop installing`,
+    )
+  }
+  for (const field of template.fields) {
+    assert.equal(field.id.startsWith('ext_'), false, `frozen template id ${field.id} must not use the reserved extension prefix`)
+  }
+
   // config_info option sources are schema references only, not option values.
   assert.deepEqual(byId.materialType.optionSource, { type: 'config_info', key: 'material_type' })
   assert.deepEqual(byId.blankType.optionSource, { type: 'config_info', key: 'blank_type' })
