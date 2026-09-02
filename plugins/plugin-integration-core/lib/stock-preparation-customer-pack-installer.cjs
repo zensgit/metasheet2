@@ -574,6 +574,61 @@ async function ensureRoleViews({ provisioning, projectId, sheetId, pack }) {
   return ensured
 }
 
+/**
+ * APPLY THE PACK'S FIELD WRITE POLICIES to the PLATFORM's own per-column permission
+ * model. This is the step that makes the declaration real rather than decorative.
+ *
+ * IT USES THE PLATFORM MODEL; IT DOES NOT FORK ONE. The rows land in the host's
+ * `field_permissions` table, which is what `loadFieldPermissionScopeMap` reads and what
+ * `isFieldWriteForbidden` enforces server-side on the record-write routes. Note there is
+ * a DIFFERENT, parallel table (`plugin_field_policy_registry`, written by
+ * PluginRbacProvisioningService's `fieldPolicies`) that the multitable grid never reads —
+ * writing there would look like a permission and enforce nothing, which is precisely the
+ * trap this avoids.
+ *
+ * WRITE ONLY, READ SHARED. The port takes no visibility argument at all: it marks a
+ * column read-only for a role and can never hide it. That is deliberate and structural —
+ * purchasing and warehouse must keep SEEING the production band they work from.
+ *
+ * OPTIONAL CAPABILITY, and ABSENT DECLARATION CHANGES NOTHING. Two independent
+ * conditions must both hold before a single row is written: the pack must declare
+ * `fieldWritePolicies`, and the host must have injected the narrow
+ * `stockPreparationFieldPermissions` port. A pack with no declaration returns
+ * immediately, so behaviour is byte-for-byte today's. A declaration with NO host port is
+ * a FAIL-CLOSED error rather than a silent skip: a deployer who asked for enforcement
+ * must never be told the install succeeded while the columns stayed writable by everyone.
+ *
+ * ADDITIVE, like the rest of this installer. The port only ever upserts a denial; it has
+ * no revoke path. Removing a scope is an operator action through the platform's existing
+ * field-permission route.
+ */
+async function applyFieldWritePolicies({ provisioning, fieldPermissions, projectId, sheetId, pack }) {
+  if (pack.fieldWriteDenials.length === 0) return { applied: 0, roleCount: 0, skipped: 'not_declared' }
+  if (!fieldPermissions || typeof fieldPermissions.applyRoleWriteScopes !== 'function') {
+    throw new StockPreparationCustomerPackInstallError(
+      503,
+      'CUSTOMER_PACK_FIELD_PERMISSIONS_UNAVAILABLE',
+      'this pack declares fieldWritePolicies, but the host did not inject the '
+        + 'stockPreparationFieldPermissions capability; refusing to report an install as complete '
+        + 'while the declared column write scoping would not be enforced',
+      { objectId: pack.targetObjectId, packId: pack.packId, declaredDenials: pack.fieldWriteDenials.length },
+    )
+  }
+  // LOGICAL -> PHYSICAL. `field_permissions.field_id` references `meta_fields.id`, so the
+  // logical template/pack id must be mapped exactly the way every other write in this
+  // installer maps it — through the host's own pure `getFieldId`, never by string-building.
+  const entries = pack.fieldWriteDenials.map((denial) => ({
+    fieldId: provisioning.getFieldId(projectId, pack.targetObjectId, denial.fieldId),
+    roleId: denial.roleId,
+  }))
+  const result = await fieldPermissions.applyRoleWriteScopes({ sheetId, entries })
+  return {
+    applied: Number(result && result.applied) || 0,
+    roleCount: new Set(pack.fieldWriteDenials.map((denial) => denial.roleId)).size,
+    skipped: null,
+  }
+}
+
 // The canonical target PRECONDITION, shared by the dry-run and the install so the two cannot drift
 // on the one thing a deployer trips over first. The rehearsal report (F5) flags this as the reason a
 // CLI/route needs a two-step flow, so the error names the ensure path rather than the raw absence.
@@ -748,6 +803,10 @@ async function installCustomerPack({
   tenantId,
   workspaceId,
   mode,
+  // The narrow host port that writes the platform's own `field_permissions`. OPTIONAL:
+  // a pack that declares no fieldWritePolicies never touches it, which is why an older
+  // host (or any caller that does not pass it) installs exactly as it does today.
+  fieldPermissions,
 } = {}) {
   const api = assertProvisioningApi(provisioning)
   const resolvedProjectId = requiredProjectId(projectId)
@@ -797,13 +856,23 @@ async function installCustomerPack({
     sheetId: sheet.id,
     pack: normalized,
   })
+  // LAST, and deliberately so: the columns must exist and be classified before any
+  // permission can name one. A pack with no fieldWritePolicies makes no call at all.
+  const appliedWriteScopes = await applyFieldWritePolicies({
+    provisioning: api,
+    fieldPermissions,
+    projectId: resolvedProjectId,
+    sheetId: sheet.id,
+    pack: normalized,
+  })
 
   const log = logger && typeof logger.info === 'function' ? logger : console
   log.info(
     `[plugin-integration-core] customer pack install done. pack=${normalized.packId}`
       + ` v${normalized.packVersion} created=${createdFields.length} skipped=${skippedFields.length}`
       + ` stamped=${stampedExistingFields.length} alreadyStamped=${alreadyStampedFields.length}`
-      + ` optionFields=${syncedOptionFields.length} views=${ensuredViews.length}`,
+      + ` optionFields=${syncedOptionFields.length} views=${ensuredViews.length}`
+      + ` writeScopes=${appliedWriteScopes.applied}`,
   )
 
   // F5: the summary now carries the ownership band per id, so a CLI or a route no longer has to
@@ -829,6 +898,12 @@ async function installCustomerPack({
     installedFields,
     syncedOptionFields,
     ensuredViews,
+    // Counts and role ids only — no option values, no rows. `appliedWriteScopes: 0` with
+    // `skipped: 'not_declared'` is the shape EVERY pack that exists today reports, and it
+    // is how a reader tells "nothing was declared" from "declared and applied".
+    appliedWriteScopes: appliedWriteScopes.applied,
+    writeScopeRoleCount: appliedWriteScopes.roleCount,
+    writeScopeSkipped: appliedWriteScopes.skipped,
   }
 
   // TERMINAL-ONLY LEDGER WRITE — the LAST thing the install does, after every host mutation has
@@ -928,6 +1003,7 @@ module.exports = {
   installCustomerPack,
   planCustomerPackInstall,
   __internals: {
+    applyFieldWritePolicies,
     assertProvisioningApi,
     buildExtensionFieldProperty,
     buildExtensionFieldDescriptors,
