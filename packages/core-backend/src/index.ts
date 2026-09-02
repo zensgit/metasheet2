@@ -287,6 +287,7 @@ import {
   isElearningAnalyticsSurfaceEnabled,
   isElearningContentSurfaceEnabled,
   isElearningExamSurfaceEnabled,
+  isElearningOfflineTrainingSurfaceEnabled,
   isElearningWatchSurfaceEnabled,
   resolveElearningCatalogFeature,
 } from './elearning/feature-flags'
@@ -1487,6 +1488,7 @@ export class MetaSheetServer {
       || isElearningCreditSurfaceEnabled(process.env)
       || isElearningAnalyticsSurfaceEnabled(process.env)
       || isElearningPracticeSurfaceEnabled(process.env)
+      || isElearningOfflineTrainingSurfaceEnabled(process.env)
     )
       ? createElearningPilotRuntime({ db: poolManager.get() })
       : null

@@ -122,6 +122,36 @@ test('completeness (source-derived, non-tautological): manifest covers every Glo
   }
 })
 
+test('L6 offline-training flag is exact-case-sensitive and master-dependent', () => {
+  const offline = GLOBAL_HISTORY_FLAG_BY_KEY.ELEARNING_OFFLINE_TRAINING_ENABLED
+  assert.deepEqual(
+    {
+      key: offline.key,
+      type: offline.type,
+      activationValue: offline.activationValue,
+      caseInsensitive: offline.caseInsensitive,
+      dependsOn: offline.dependsOn,
+      conflictsWith: offline.conflictsWith,
+      danger: offline.danger,
+      source: offline.source,
+    },
+    {
+      key: 'ELEARNING_OFFLINE_TRAINING_ENABLED',
+      type: 'boolean',
+      activationValue: 'true',
+      caseInsensitive: undefined,
+      dependsOn: ['ELEARNING_ENABLED'],
+      conflictsWith: [],
+      danger: 'low',
+      source: 'packages/core-backend/src/elearning/feature-flags.ts#isElearningOfflineTrainingSurfaceEnabled',
+    },
+  )
+  assert.equal(isActivated(offline, 'true'), true)
+  for (const value of [undefined, 'false', 'TRUE', ' true ', 'true ']) {
+    assert.equal(isActivated(offline, value), false)
+  }
+})
+
 // ── R1: lossy double-gate ──────────────────────────────────────────────────────────────────────────
 
 test('R1 lossy-without-base: LOSSY on + base off fires the named violation', () => {

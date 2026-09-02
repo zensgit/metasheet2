@@ -7,6 +7,7 @@ import {
   isElearningEnabled,
   isElearningExamSurfaceEnabled,
   isElearningFlagEnabled,
+  isElearningOfflineTrainingSurfaceEnabled,
   resolveElearningCatalogFeature,
   type ElearningFlagName,
 } from '../../src/elearning/feature-flags'
@@ -35,7 +36,7 @@ describe('elearning V0.1 flags', () => {
     vi.resetModules()
   })
 
-  it('canonical list is exactly the seven contract names and has no TASKS/STATS aliases', () => {
+  it('canonical list contains the seven core names plus the independent L6 offline flag', () => {
     expect([...ELEARNING_FLAG_NAMES]).toEqual([
       'ELEARNING_ENABLED',
       'ELEARNING_CONTENT_ENABLED',
@@ -44,6 +45,7 @@ describe('elearning V0.1 flags', () => {
       'ELEARNING_INCENTIVE_ENABLED',
       'ELEARNING_ANALYTICS_ENABLED',
       'ELEARNING_MEDIA_ENABLED',
+      'ELEARNING_OFFLINE_TRAINING_ENABLED',
     ])
     const joined = ELEARNING_FLAG_NAMES.join(' ')
     expect(joined).not.toMatch(/TASKS|STATS/)
@@ -101,7 +103,22 @@ describe('elearning V0.1 flags', () => {
     } as NodeJS.ProcessEnv)).toBe(false)
   })
 
-  it('FEATURE_FLAGS registers the seven names, default OFF, exact true only', async () => {
+  it('gates offline training independently with master plus exact offline true', () => {
+    expect(isElearningOfflineTrainingSurfaceEnabled({} as NodeJS.ProcessEnv)).toBe(false)
+    expect(isElearningOfflineTrainingSurfaceEnabled({
+      ELEARNING_ENABLED: 'true',
+      ELEARNING_OFFLINE_TRAINING_ENABLED: 'true',
+    } as NodeJS.ProcessEnv)).toBe(true)
+    expect(isElearningOfflineTrainingSurfaceEnabled({
+      ELEARNING_ENABLED: 'true',
+      ELEARNING_OFFLINE_TRAINING_ENABLED: 'TRUE',
+    } as NodeJS.ProcessEnv)).toBe(false)
+    expect(isElearningOfflineTrainingSurfaceEnabled({
+      ELEARNING_OFFLINE_TRAINING_ENABLED: 'true',
+    } as NodeJS.ProcessEnv)).toBe(false)
+  })
+
+  it('FEATURE_FLAGS registers every canonical name, default OFF, exact true only', async () => {
     for (const name of ELEARNING_FLAG_NAMES) {
       delete process.env[name]
     }

@@ -18,6 +18,8 @@ const h = vi.hoisted(() => ({
   startPractice: vi.fn(),
   answerPractice: vi.fn(),
   wrongPractice: vi.fn(),
+  offlineProbe: vi.fn(),
+  offlineList: vi.fn(),
 }))
 
 vi.mock('../src/services/elearning', async () => {
@@ -66,6 +68,17 @@ vi.mock('../src/services/elearningPractice', async () => {
     startElearningPracticeSession: h.startPractice,
     submitElearningPracticeAnswer: h.answerPractice,
     listElearningWrongQuestions: h.wrongPractice,
+  }
+})
+
+vi.mock('../src/services/elearningOfflineTraining', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/elearningOfflineTraining')>(
+    '../src/services/elearningOfflineTraining',
+  )
+  return {
+    ...actual,
+    probeElearningOfflineTraining: h.offlineProbe,
+    listMyElearningOfflineTrainings: h.offlineList,
   }
 })
 
@@ -351,12 +364,16 @@ describe('ElearningLearnerView', () => {
     h.startPractice.mockReset()
     h.answerPractice.mockReset()
     h.wrongPractice.mockReset()
+    h.offlineProbe.mockReset()
+    h.offlineList.mockReset()
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout', 'Date'] })
     h.capabilities.mockResolvedValue(v01Capabilities())
     h.list.mockResolvedValue({ courses: [course()] })
     h.listCertificates.mockResolvedValue([])
     h.listPractice.mockResolvedValue({ practiceSets: [] })
     h.wrongPractice.mockResolvedValue({ practiceSetId: COURSE, questions: [] })
+    h.offlineProbe.mockResolvedValue(false)
+    h.offlineList.mockResolvedValue({ trainings: [] })
     h.getProfile.mockResolvedValue({
       userId: 'learner-1',
       summary: { completedCourses: 0, assessmentCourses: 0, contentCourses: 0 },
@@ -1220,6 +1237,36 @@ describe('ElearningLearnerView', () => {
     expect(h.startWatch).not.toHaveBeenCalled()
     expect(h.startExam).not.toHaveBeenCalled()
     expect(root.querySelector('[data-testid^="elearning-course-"]')).toBeNull()
+  })
+
+  it('mounts offline training when it is the only enabled extension', async () => {
+    h.capabilities.mockResolvedValue(v01Capabilities({}, {
+      content: false,
+      assignment: false,
+      assessment: false,
+      incentive: false,
+      analytics: false,
+      media: false,
+    }))
+    h.offlineProbe.mockResolvedValue(true)
+    const root = mountView()
+    await flushUi()
+
+    expect(root.querySelector('[data-testid="elearning-offline-learner-section"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')).toBeNull()
+    expect(h.list).not.toHaveBeenCalled()
+    expect(h.offlineList).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not let an unavailable offline extension mask ready canonical learner surfaces', async () => {
+    h.offlineProbe.mockRejectedValue(new ElearningApiError('unavailable', 503))
+    const root = mountView()
+    await flushUi()
+
+    expect(root.querySelector('[data-testid="elearning-offline-learner-section"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')).toBeNull()
+    expect(h.list).toHaveBeenCalledTimes(1)
+    expect(root.querySelector(`[data-testid="elearning-course-${COURSE}"]`)).not.toBeNull()
   })
 
   it('mounts objective practice with assessment only without requesting media courses', async () => {

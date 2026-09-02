@@ -1,0 +1,507 @@
+<template>
+  <section
+    class="offline-admin"
+    data-testid="elearning-offline-admin-section"
+    aria-labelledby="elearning-offline-admin-title"
+  >
+    <header>
+      <h2 id="elearning-offline-admin-title">{{ elearningLabel('offlineAdmin.title', isZh) }}</h2>
+      <p>{{ elearningLabel('offlineAdmin.subtitle', isZh) }}</p>
+    </header>
+
+    <form class="offline-admin__form" @submit.prevent="void publish()">
+      <label>
+        <span>{{ elearningLabel('offlineAdmin.trainingTitle', isZh) }}</span>
+        <input v-model="title" data-testid="elearning-offline-title" maxlength="200" :disabled="busy">
+      </label>
+      <label>
+        <span>{{ elearningLabel('offlineAdmin.location', isZh) }}</span>
+        <input v-model="location" data-testid="elearning-offline-location" maxlength="500" :disabled="busy">
+      </label>
+      <label>
+        <span>{{ elearningLabel('offlineAdmin.members', isZh) }}</span>
+        <textarea
+          v-model="memberUserIds"
+          data-testid="elearning-offline-members"
+          rows="3"
+          :disabled="busy"
+        />
+      </label>
+      <label class="offline-admin__checkbox">
+        <input
+          v-model="registrationEnabled"
+          data-testid="elearning-offline-registration-enabled"
+          type="checkbox"
+          :disabled="busy"
+        >
+        <span>{{ elearningLabel('offlineAdmin.registrationEnabled', isZh) }}</span>
+      </label>
+
+      <fieldset>
+        <legend>{{ elearningLabel('offlineAdmin.target', isZh) }}</legend>
+        <label>
+          <span>{{ elearningLabel('offlineAdmin.targetTitle', isZh) }}</span>
+          <input v-model="targetTitle" data-testid="elearning-offline-target-title" maxlength="200" :disabled="busy">
+        </label>
+        <label v-for="field in timeFields" :key="field.key">
+          <span>{{ elearningLabel(field.label, isZh) }}</span>
+          <input
+            v-model="times[field.key]"
+            :data-testid="`elearning-offline-${field.key}`"
+            type="datetime-local"
+            step="1"
+            :disabled="busy"
+          >
+        </label>
+      </fieldset>
+
+      <button type="submit" data-testid="elearning-offline-publish" :disabled="busy">
+        {{ busy
+          ? elearningLabel('offlineAdmin.publishing', isZh)
+          : elearningLabel('offlineAdmin.publish', isZh) }}
+      </button>
+    </form>
+
+    <section v-if="published" class="offline-admin__qr" data-testid="elearning-offline-published">
+      <h3>{{ elearningLabel('offlineAdmin.qrTitle', isZh) }}</h3>
+      <p>{{ published.title }} · {{ published.location }}</p>
+      <div class="offline-admin__lifecycle">
+        <p data-testid="elearning-offline-training-status">
+          {{ elearningLabel('offlineAdmin.lifecycleStatus', isZh) }}: {{ trainingStatus }}
+        </p>
+        <label>
+          <span>{{ elearningLabel('offlineAdmin.lifecycleReason', isZh) }}</span>
+          <input
+            v-model="lifecycleReason"
+            data-testid="elearning-offline-lifecycle-reason"
+            maxlength="500"
+            :disabled="busy"
+          >
+        </label>
+        <div class="offline-admin__qr-actions">
+          <button
+            v-if="trainingStatus === 'active'"
+            type="button"
+            data-testid="elearning-offline-archive"
+            :disabled="busy"
+            @click="void changeStatus('archived')"
+          >
+            {{ elearningLabel('offlineAdmin.archive', isZh) }}
+          </button>
+          <button
+            v-if="trainingStatus !== 'withdrawn'"
+            type="button"
+            data-testid="elearning-offline-withdraw"
+            :disabled="busy"
+            @click="void changeStatus('withdrawn')"
+          >
+            {{ elearningLabel('offlineAdmin.withdraw', isZh) }}
+          </button>
+          <button
+            v-if="trainingStatus !== 'active'"
+            type="button"
+            data-testid="elearning-offline-restore"
+            :disabled="busy"
+            @click="void changeStatus('active')"
+          >
+            {{ elearningLabel('offlineAdmin.restore', isZh) }}
+          </button>
+        </div>
+      </div>
+      <div class="offline-admin__qr-actions">
+        <button
+          type="button"
+          data-testid="elearning-offline-issue-check-in"
+          :disabled="busy || trainingStatus !== 'active'"
+          @click="void issue('check_in')"
+        >
+          {{ elearningLabel('offlineAdmin.issueCheckIn', isZh) }}
+        </button>
+        <button
+          type="button"
+          data-testid="elearning-offline-issue-check-out"
+          :disabled="busy || trainingStatus !== 'active'"
+          @click="void issue('check_out')"
+        >
+          {{ elearningLabel('offlineAdmin.issueCheckOut', isZh) }}
+        </button>
+      </div>
+      <section v-if="published.registrationEnabled" class="offline-admin__registrations">
+        <div class="offline-admin__qr-actions">
+          <h3>{{ elearningLabel('offlineAdmin.registrations', isZh) }}</h3>
+          <button
+            type="button"
+            data-testid="elearning-offline-load-registrations"
+            :disabled="busy"
+            @click="void loadRegistrations()"
+          >
+            {{ elearningLabel('offlineAdmin.loadRegistrations', isZh) }}
+          </button>
+        </div>
+        <p v-if="registrations.length === 0" data-testid="elearning-offline-registration-empty">
+          {{ elearningLabel('offlineAdmin.noRegistrations', isZh) }}
+        </p>
+        <ul v-else data-testid="elearning-offline-registration-list">
+          <li v-for="entry in registrations" :key="entry.userId">
+            {{ entry.userId }} · {{ registrationText(entry.status) }}
+          </li>
+        </ul>
+        <button
+          v-if="registrationCursor"
+          type="button"
+          data-testid="elearning-offline-load-more-registrations"
+          :disabled="busy"
+          @click="void loadRegistrations(true)"
+        >
+          {{ elearningLabel('offlineAdmin.loadMoreRegistrations', isZh) }}
+        </button>
+      </section>
+      <img
+        v-if="qrImageUrl"
+        class="offline-admin__qr-symbol"
+        data-testid="elearning-offline-qr-symbol"
+        :src="qrImageUrl"
+        alt="Attendance QR code"
+      >
+      <label v-if="qr">
+        <span>{{ elearningLabel('offlineAdmin.qrToken', isZh) }}</span>
+        <textarea
+          data-testid="elearning-offline-qr-token"
+          rows="4"
+          readonly
+          :value="qr.token"
+        />
+      </label>
+      <p v-if="qr" data-testid="elearning-offline-qr-expiry">
+        {{ elearningLabel('offlineAdmin.qrExpires', isZh) }}: {{ qr.expiresAt }}
+        · {{ remainingSeconds }}s
+      </p>
+    </section>
+
+    <p
+      v-if="status"
+      data-testid="elearning-offline-admin-status"
+      :class="{ 'offline-admin__error': statusTone === 'error' }"
+      role="status"
+    >
+      {{ status }}
+    </p>
+  </section>
+</template>
+
+<script setup lang="ts">
+import { computed, onBeforeUnmount, reactive, ref } from 'vue'
+import { useLocale } from '../composables/useLocale'
+import { qrSvgFromText } from '../multitable/utils/qr-code'
+import { ElearningApiError } from '../services/elearning'
+import {
+  createElearningOfflineAttendanceLink,
+  createElearningOfflineRequestIds,
+  issueElearningOfflineQr,
+  listElearningOfflineRegistrations,
+  publishElearningOfflineTraining,
+  setElearningOfflineTrainingStatus,
+  type ElearningOfflineAttendanceAction,
+  type ElearningOfflinePublishResult,
+  type ElearningOfflineQrResult,
+  type ElearningOfflineRegistrationListItem,
+  type ElearningOfflineTrainingStatus,
+  type PublishElearningOfflineInput,
+} from '../services/elearningOfflineTraining'
+import { elearningFailure, elearningLabel, type ElearningLabelKey } from './elearningLabels'
+
+type TimeKey = 'startsAt' | 'endsAt' | 'checkInOpensAt' | 'checkInClosesAt'
+  | 'checkOutOpensAt' | 'checkOutClosesAt'
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const { isZh } = useLocale()
+const requestIds = createElearningOfflineRequestIds()
+const title = ref('')
+const location = ref('')
+const memberUserIds = ref('')
+const registrationEnabled = ref(false)
+const targetTitle = ref('')
+const times = reactive<Record<TimeKey, string>>({
+  startsAt: '',
+  endsAt: '',
+  checkInOpensAt: '',
+  checkInClosesAt: '',
+  checkOutOpensAt: '',
+  checkOutClosesAt: '',
+})
+const timeFields: Array<{ key: TimeKey; label: ElearningLabelKey }> = [
+  { key: 'startsAt', label: 'offlineAdmin.startsAt' },
+  { key: 'endsAt', label: 'offlineAdmin.endsAt' },
+  { key: 'checkInOpensAt', label: 'offlineAdmin.checkInOpensAt' },
+  { key: 'checkInClosesAt', label: 'offlineAdmin.checkInClosesAt' },
+  { key: 'checkOutOpensAt', label: 'offlineAdmin.checkOutOpensAt' },
+  { key: 'checkOutClosesAt', label: 'offlineAdmin.checkOutClosesAt' },
+]
+const published = ref<ElearningOfflinePublishResult | null>(null)
+const qr = ref<ElearningOfflineQrResult | null>(null)
+const trainingStatus = ref<ElearningOfflineTrainingStatus>('active')
+const lifecycleReason = ref('')
+const registrations = ref<ElearningOfflineRegistrationListItem[]>([])
+const registrationCursor = ref<string | null>(null)
+const busy = ref(false)
+const status = ref('')
+const statusTone = ref<'info' | 'error'>('info')
+const remainingSeconds = ref(0)
+const qrAction = ref<ElearningOfflineAttendanceAction | null>(null)
+let rotationTimer: ReturnType<typeof setTimeout> | undefined
+let countdownTimer: ReturnType<typeof setInterval> | undefined
+
+const qrLink = computed(() => (
+  qr.value
+    ? createElearningOfflineAttendanceLink(qr.value.token, window.location.origin)
+    : null
+))
+const qrSvg = computed(() => (
+  qrLink.value ? qrSvgFromText(qrLink.value, { ecc: 'quartile', size: 240 }) : null
+))
+const qrImageUrl = computed(() => (
+  qrSvg.value ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(qrSvg.value)}` : null
+))
+
+function clearQrTimers(): void {
+  if (rotationTimer) clearTimeout(rotationTimer)
+  if (countdownTimer) clearInterval(countdownTimer)
+  rotationTimer = undefined
+  countdownTimer = undefined
+  remainingSeconds.value = 0
+}
+
+function updateRemaining(expiresAt: string): void {
+  remainingSeconds.value = Math.max(0, Math.ceil((Date.parse(expiresAt) - Date.now()) / 1000))
+}
+
+function scheduleRotation(result: ElearningOfflineQrResult): void {
+  clearQrTimers()
+  const token = result.token
+  updateRemaining(result.expiresAt)
+  countdownTimer = setInterval(() => updateRemaining(result.expiresAt), 250)
+  rotationTimer = setTimeout(() => {
+    if (qr.value?.token !== token || qrAction.value !== result.action) return
+    qr.value = null
+    void issue(result.action, true)
+  }, Math.max(0, Date.parse(result.expiresAt) - Date.now()))
+}
+
+function errorText(error: unknown): string {
+  if (error instanceof ElearningApiError) {
+    return elearningFailure(error.code, error.status, isZh.value)
+  }
+  return elearningFailure('request_failed', 0, isZh.value)
+}
+
+function registrationText(status: ElearningOfflineRegistrationListItem['status']): string {
+  if (status === 'registered') {
+    return elearningLabel('offlineAdmin.registrationRegistered', isZh.value)
+  }
+  if (status === 'cancelled') {
+    return elearningLabel('offlineAdmin.registrationCancelled', isZh.value)
+  }
+  return elearningLabel('offlineAdmin.registrationNotRegistered', isZh.value)
+}
+
+function instant(value: string): string | null {
+  if (value === '') return null
+  const parsed = new Date(value)
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null
+}
+
+function payload(): Omit<PublishElearningOfflineInput, 'requestId'> | null {
+  const members = memberUserIds.value
+    .split(/[\s,]+/)
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean)
+  const parsedTimes = Object.fromEntries(
+    timeFields.map(({ key }) => [key, instant(times[key])]),
+  ) as Record<TimeKey, string | null>
+  if (
+    title.value.trim() === ''
+    || location.value.trim() === ''
+    || targetTitle.value.trim() === ''
+    || members.length === 0
+    || members.some((id) => !UUID_RE.test(id))
+    || new Set(members).size !== members.length
+    || Object.values(parsedTimes).some((value) => value === null)
+  ) return null
+  return {
+    title: title.value.trim(),
+    location: location.value.trim(),
+    attendanceMode: 'training',
+    registrationEnabled: registrationEnabled.value,
+    targets: [{
+      title: targetTitle.value.trim(),
+      startsAt: parsedTimes.startsAt!,
+      endsAt: parsedTimes.endsAt!,
+      checkInOpensAt: parsedTimes.checkInOpensAt!,
+      checkInClosesAt: parsedTimes.checkInClosesAt!,
+      checkOutOpensAt: parsedTimes.checkOutOpensAt!,
+      checkOutClosesAt: parsedTimes.checkOutClosesAt!,
+    }],
+    memberUserIds: members,
+  }
+}
+
+async function publish(): Promise<void> {
+  if (busy.value) return
+  const command = payload()
+  if (!command) {
+    statusTone.value = 'error'
+    status.value = elearningLabel('offlineAdmin.validation', isZh.value)
+    return
+  }
+  busy.value = true
+  status.value = ''
+  try {
+    published.value = await publishElearningOfflineTraining({
+      ...command,
+      requestId: requestIds.forPublish(command),
+    })
+    requestIds.settlePublish(command)
+    trainingStatus.value = 'active'
+    lifecycleReason.value = ''
+    clearQrTimers()
+    qrAction.value = null
+    qr.value = null
+    registrations.value = []
+    registrationCursor.value = null
+    statusTone.value = 'info'
+    status.value = elearningLabel('offlineAdmin.published', isZh.value)
+  } catch (error) {
+    statusTone.value = 'error'
+    status.value = errorText(error)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function loadRegistrations(nextPage = false): Promise<void> {
+  const current = published.value
+  if (!current || busy.value) return
+  if (nextPage && !registrationCursor.value) return
+  busy.value = true
+  status.value = ''
+  try {
+    const result = await listElearningOfflineRegistrations({
+      trainingId: current.trainingId,
+      after: nextPage ? registrationCursor.value ?? undefined : undefined,
+    })
+    registrations.value = nextPage
+      ? [...registrations.value, ...result.items]
+      : result.items
+    registrationCursor.value = result.nextCursor
+    statusTone.value = 'info'
+    status.value = elearningLabel('offlineAdmin.registrationsLoaded', isZh.value)
+  } catch (error) {
+    statusTone.value = 'error'
+    status.value = errorText(error)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function changeStatus(nextStatus: ElearningOfflineTrainingStatus): Promise<void> {
+  const current = published.value
+  const reason = lifecycleReason.value.trim()
+  if (!current || busy.value) return
+  if (reason === '') {
+    statusTone.value = 'error'
+    status.value = elearningLabel('offlineAdmin.lifecycleReasonRequired', isZh.value)
+    return
+  }
+  busy.value = true
+  status.value = ''
+  try {
+    const result = await setElearningOfflineTrainingStatus({
+      requestId: requestIds.forStatus(current.trainingId, nextStatus, reason),
+      trainingId: current.trainingId,
+      status: nextStatus,
+      reason,
+    })
+    requestIds.settleStatus(current.trainingId, nextStatus, reason)
+    trainingStatus.value = result.status
+    lifecycleReason.value = ''
+    if (result.status !== 'active') {
+      clearQrTimers()
+      qrAction.value = null
+      qr.value = null
+    }
+    statusTone.value = 'info'
+    status.value = elearningLabel('offlineAdmin.lifecycleChanged', isZh.value)
+  } catch (error) {
+    statusTone.value = 'error'
+    status.value = errorText(error)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function issue(action: ElearningOfflineAttendanceAction, automatic = false): Promise<void> {
+  const current = published.value
+  const target = current?.targets[0]
+  if (!current || !target) return
+  if (busy.value) {
+    if (automatic) rotationTimer = setTimeout(() => void issue(action, true), 250)
+    return
+  }
+  busy.value = true
+  status.value = ''
+  try {
+    const result = await issueElearningOfflineQr({
+      requestId: requestIds.forQr(current.trainingId, target.targetId, action),
+      trainingId: current.trainingId,
+      targetId: target.targetId,
+      action,
+    })
+    requestIds.settleQr(current.trainingId, target.targetId, action)
+    qr.value = result
+    qrAction.value = action
+    scheduleRotation(result)
+    statusTone.value = 'info'
+    status.value = elearningLabel('offlineAdmin.qrIssued', isZh.value)
+  } catch (error) {
+    statusTone.value = 'error'
+    status.value = errorText(error)
+    if (automatic && qrAction.value === action) {
+      rotationTimer = setTimeout(() => void issue(action, true), 1_000)
+    }
+  } finally {
+    busy.value = false
+  }
+}
+
+onBeforeUnmount(clearQrTimers)
+</script>
+
+<style scoped>
+.offline-admin {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid #cbd9e8;
+  border-radius: 10px;
+  background: #f8fbff;
+}
+.offline-admin h2,
+.offline-admin h3,
+.offline-admin p { margin: 0; }
+.offline-admin__form,
+.offline-admin__form label,
+.offline-admin__qr,
+.offline-admin__registrations,
+.offline-admin__qr label,
+.offline-admin__lifecycle { display: grid; gap: 8px; }
+.offline-admin__form fieldset { display: grid; gap: 8px; border: 1px solid #d6e2ef; }
+.offline-admin__form input,
+.offline-admin__form textarea,
+.offline-admin__form button,
+.offline-admin__qr button,
+.offline-admin__qr textarea { min-height: 36px; }
+.offline-admin__qr-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.offline-admin__checkbox { display: flex !important; align-items: center; }
+.offline-admin__qr-symbol { width: 240px; max-width: 100%; background: #fff; }
+.offline-admin__error { color: #b42318; }
+</style>

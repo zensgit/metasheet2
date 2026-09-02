@@ -524,6 +524,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
       'E-learning media capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
     source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
   },
+  {
+    key: 'ELEARNING_OFFLINE_TRAINING_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'L6 offline-training capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts#isElearningOfflineTrainingSurfaceEnabled',
+  },
 ])
 
 /** Flat lookup by key, built once. */

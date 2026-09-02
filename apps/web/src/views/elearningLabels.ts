@@ -120,6 +120,64 @@ export type ElearningLabelKey =
   | 'practiceLearner.finished'
   | 'practiceLearner.wrongBook'
   | 'practiceLearner.wrongBookEmpty'
+  // --- Offline training chrome ---
+  | 'offlineAdmin.title'
+  | 'offlineAdmin.subtitle'
+  | 'offlineAdmin.trainingTitle'
+  | 'offlineAdmin.location'
+  | 'offlineAdmin.members'
+  | 'offlineAdmin.registrationEnabled'
+  | 'offlineAdmin.target'
+  | 'offlineAdmin.targetTitle'
+  | 'offlineAdmin.startsAt'
+  | 'offlineAdmin.endsAt'
+  | 'offlineAdmin.checkInOpensAt'
+  | 'offlineAdmin.checkInClosesAt'
+  | 'offlineAdmin.checkOutOpensAt'
+  | 'offlineAdmin.checkOutClosesAt'
+  | 'offlineAdmin.publish'
+  | 'offlineAdmin.publishing'
+  | 'offlineAdmin.published'
+  | 'offlineAdmin.qrTitle'
+  | 'offlineAdmin.issueCheckIn'
+  | 'offlineAdmin.issueCheckOut'
+  | 'offlineAdmin.qrToken'
+  | 'offlineAdmin.qrExpires'
+  | 'offlineAdmin.qrIssued'
+  | 'offlineAdmin.lifecycleStatus'
+  | 'offlineAdmin.lifecycleReason'
+  | 'offlineAdmin.lifecycleReasonRequired'
+  | 'offlineAdmin.lifecycleChanged'
+  | 'offlineAdmin.archive'
+  | 'offlineAdmin.withdraw'
+  | 'offlineAdmin.restore'
+  | 'offlineAdmin.registrations'
+  | 'offlineAdmin.loadRegistrations'
+  | 'offlineAdmin.loadMoreRegistrations'
+  | 'offlineAdmin.noRegistrations'
+  | 'offlineAdmin.registrationsLoaded'
+  | 'offlineAdmin.registrationRegistered'
+  | 'offlineAdmin.registrationCancelled'
+  | 'offlineAdmin.registrationNotRegistered'
+  | 'offlineAdmin.validation'
+  | 'offlineLearner.title'
+  | 'offlineLearner.subtitle'
+  | 'offlineLearner.loading'
+  | 'offlineLearner.empty'
+  | 'offlineLearner.completion'
+  | 'offlineLearner.registration'
+  | 'offlineLearner.register'
+  | 'offlineLearner.cancelRegistration'
+  | 'offlineLearner.registered'
+  | 'offlineLearner.notRegistered'
+  | 'offlineLearner.registrationCancelled'
+  | 'offlineLearner.notCheckedIn'
+  | 'offlineLearner.checkedIn'
+  | 'offlineLearner.checkedOut'
+  | 'offlineLearner.token'
+  | 'offlineLearner.record'
+  | 'offlineLearner.recording'
+  | 'offlineLearner.tokenRequired'
   // --- Assessment resource admin chrome ---
   | 'assessment.title'
   | 'assessment.subtitle'
@@ -355,6 +413,79 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   'practiceLearner.finished': { en: 'Practice complete.', zh: '本次练习已完成。' },
   'practiceLearner.wrongBook': { en: 'Current wrong questions', zh: '当前错题' },
   'practiceLearner.wrongBookEmpty': { en: 'No unresolved wrong questions.', zh: '暂无未解决错题。' },
+
+  'offlineAdmin.title': { en: 'Offline training', zh: '线下培训' },
+  'offlineAdmin.subtitle': {
+    en: 'Publish one in-person training and issue short-lived check-in or check-out tokens.',
+    zh: '发布一场线下培训，并签发短时有效的签到或签退凭证。',
+  },
+  'offlineAdmin.trainingTitle': { en: 'Training title', zh: '培训名称' },
+  'offlineAdmin.location': { en: 'Location', zh: '培训地点' },
+  'offlineAdmin.members': {
+    en: 'Learner user IDs (one per line)',
+    zh: '学员用户 ID（每行一个）',
+  },
+  'offlineAdmin.registrationEnabled': { en: 'Allow learner registration', zh: '允许学员报名' },
+  'offlineAdmin.target': { en: 'Training session', zh: '培训场次' },
+  'offlineAdmin.targetTitle': { en: 'Session title', zh: '场次名称' },
+  'offlineAdmin.startsAt': { en: 'Starts at', zh: '开始时间' },
+  'offlineAdmin.endsAt': { en: 'Ends at', zh: '结束时间' },
+  'offlineAdmin.checkInOpensAt': { en: 'Check-in opens', zh: '签到开放时间' },
+  'offlineAdmin.checkInClosesAt': { en: 'Check-in closes', zh: '签到截止时间' },
+  'offlineAdmin.checkOutOpensAt': { en: 'Check-out opens', zh: '签退开放时间' },
+  'offlineAdmin.checkOutClosesAt': { en: 'Check-out closes', zh: '签退截止时间' },
+  'offlineAdmin.publish': { en: 'Publish training', zh: '发布培训' },
+  'offlineAdmin.publishing': { en: 'Publishing...', zh: '正在发布…' },
+  'offlineAdmin.published': { en: 'Training published.', zh: '培训已发布。' },
+  'offlineAdmin.qrTitle': { en: 'Attendance token', zh: '考勤凭证' },
+  'offlineAdmin.issueCheckIn': { en: 'Issue check-in token', zh: '签发签到凭证' },
+  'offlineAdmin.issueCheckOut': { en: 'Issue check-out token', zh: '签发签退凭证' },
+  'offlineAdmin.qrToken': { en: 'Token for the learner', zh: '学员使用的凭证' },
+  'offlineAdmin.qrExpires': { en: 'Expires at', zh: '有效期至' },
+  'offlineAdmin.qrIssued': { en: 'Attendance token issued.', zh: '考勤凭证已签发。' },
+  'offlineAdmin.lifecycleStatus': { en: 'Training status', zh: '培训状态' },
+  'offlineAdmin.lifecycleReason': { en: 'Reason for status change', zh: '状态变更原因' },
+  'offlineAdmin.lifecycleReasonRequired': {
+    en: 'Enter a reason for the status change.',
+    zh: '请输入状态变更原因。',
+  },
+  'offlineAdmin.lifecycleChanged': { en: 'Training status updated.', zh: '培训状态已更新。' },
+  'offlineAdmin.archive': { en: 'Archive', zh: '归档' },
+  'offlineAdmin.withdraw': { en: 'Emergency withdraw', zh: '紧急下架' },
+  'offlineAdmin.restore': { en: 'Restore active', zh: '恢复启用' },
+  'offlineAdmin.registrations': { en: 'Registration roster', zh: '报名名单' },
+  'offlineAdmin.loadRegistrations': { en: 'Refresh roster', zh: '刷新名单' },
+  'offlineAdmin.loadMoreRegistrations': { en: 'Load more', zh: '加载更多' },
+  'offlineAdmin.noRegistrations': { en: 'No learner has registered.', zh: '暂无学员报名。' },
+  'offlineAdmin.registrationsLoaded': { en: 'Registration roster refreshed.', zh: '报名名单已刷新。' },
+  'offlineAdmin.registrationRegistered': { en: 'Registered', zh: '已报名' },
+  'offlineAdmin.registrationCancelled': { en: 'Cancelled', zh: '已取消' },
+  'offlineAdmin.registrationNotRegistered': { en: 'Not registered', zh: '未报名' },
+  'offlineAdmin.validation': {
+    en: 'Complete every field and provide unique valid learner IDs.',
+    zh: '请填写全部字段，并提供不重复的有效学员 ID。',
+  },
+  'offlineLearner.title': { en: 'Offline training attendance', zh: '线下培训考勤' },
+  'offlineLearner.subtitle': {
+    en: 'Review assigned sessions and submit the short-lived token supplied by the trainer.',
+    zh: '查看已指派场次，并提交讲师提供的短时有效凭证。',
+  },
+  'offlineLearner.loading': { en: 'Loading offline trainings...', zh: '正在加载线下培训…' },
+  'offlineLearner.empty': { en: 'No offline trainings are assigned.', zh: '暂无已指派的线下培训。' },
+  'offlineLearner.completion': { en: 'Completion', zh: '完成状态' },
+  'offlineLearner.registration': { en: 'Registration', zh: '报名状态' },
+  'offlineLearner.register': { en: 'Register', zh: '报名' },
+  'offlineLearner.cancelRegistration': { en: 'Cancel registration', zh: '取消报名' },
+  'offlineLearner.registered': { en: 'Registered', zh: '已报名' },
+  'offlineLearner.notRegistered': { en: 'Not registered', zh: '未报名' },
+  'offlineLearner.registrationCancelled': { en: 'Registration cancelled.', zh: '已取消报名。' },
+  'offlineLearner.notCheckedIn': { en: 'Not checked in', zh: '未签到' },
+  'offlineLearner.checkedIn': { en: 'Checked in', zh: '已签到' },
+  'offlineLearner.checkedOut': { en: 'Checked out', zh: '已签退' },
+  'offlineLearner.token': { en: 'Attendance token', zh: '考勤凭证' },
+  'offlineLearner.record': { en: 'Record attendance', zh: '记录考勤' },
+  'offlineLearner.recording': { en: 'Recording...', zh: '正在记录…' },
+  'offlineLearner.tokenRequired': { en: 'Enter an attendance token.', zh: '请输入考勤凭证。' },
 
   'assessment.title': { en: 'Assessment resources', zh: '题库与考试资源' },
   'assessment.subtitle': {

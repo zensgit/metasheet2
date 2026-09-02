@@ -251,6 +251,8 @@
 
     <ElearningPracticeAdminSection v-if="practiceEnabled" />
 
+    <ElearningOfflineTrainingAdminSection v-if="offlineEnabled" />
+
     <div class="elearning-admin__assessment-toggle">
       <button
         type="button"
@@ -289,6 +291,8 @@ import ElearningPortalAdminSection from './ElearningPortalAdminSection.vue'
 import ElearningCreditAdminSection from './ElearningCreditAdminSection.vue'
 import ElearningPracticeAdminSection from './ElearningPracticeAdminSection.vue'
 import { isElearningPracticeReady } from '../services/elearningPractice'
+import ElearningOfflineTrainingAdminSection from './ElearningOfflineTrainingAdminSection.vue'
+import { probeElearningOfflineTraining } from '../services/elearningOfflineTraining'
 import {
   elearningAssignIncomplete,
   elearningCorrectOptionAria,
@@ -336,6 +340,7 @@ const analyticsEnabled = ref(false)
 const contentEnabled = ref(false)
 const assignmentEnabled = ref(false)
 const practiceEnabled = ref(false)
+const offlineEnabled = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error' | 'partial'>('info')
 const operationStage = ref<OperationStage | null>(null)
@@ -528,6 +533,13 @@ function buildAssignmentPayload(courseVersionId: string): ElearningDirectAssignm
 
 async function ensureV01Ready(): Promise<void> {
   const capabilities = await getElearningCapabilities()
+  let offlineFailure: unknown
+  try {
+    offlineEnabled.value = await probeElearningOfflineTraining()
+  } catch (error) {
+    offlineEnabled.value = false
+    offlineFailure = error
+  }
   contentEnabled.value = isElearningContentReady(capabilities)
   assignmentEnabled.value = capabilities.enabled === true
     && capabilities.capabilities.assignment === true
@@ -543,7 +555,9 @@ async function ensureV01Ready(): Promise<void> {
     && !incentiveEnabled.value
     && !analyticsEnabled.value
     && !practiceEnabled.value
+    && !offlineEnabled.value
   ) {
+    if (offlineFailure) throw offlineFailure
     throw new ElearningApiError('feature_disabled', 404)
   }
 }
