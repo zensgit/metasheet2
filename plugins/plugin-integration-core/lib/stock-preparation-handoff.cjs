@@ -534,6 +534,46 @@ function planStockPreparationHandoffAdvance({ chain, currentStepIndex, fromStepK
   }
 }
 
+/**
+ * J8 — THE CLOSED `notifyOutcome` VOCABULARY, in production code rather than in a test's scrape.
+ *
+ * The guard that pairs every outcome with plain-language copy used to derive the list by reading the
+ * route's source, which meant it could be escaped by one indirection: `const x = 'deferred'` on one
+ * line and `notifyOutcome = x` on the next produced a wire value with no copy and a green suite. A
+ * text scrape is the wrong shape of guarantee for a closed vocabulary; the vocabulary itself is.
+ *
+ *   'sent'           every destination for this hop took the message.
+ *   'partial'        some took it and some did not — only the terminal hop fans out (仓库 + 采购).
+ *   'failed'         the host threw, or every destination refused it.
+ *   'skipped'        this hop HAS a destination and its at-most-once claim was already spent.
+ *   'no_destination' this CONFIGURED chain sends nothing for this hop — either it declares no
+ *                    destinations at all (the legal turn-state-only deployment) or the host wired no
+ *                    notifier. NOT the same as "this deployment has no chain", which is the advance
+ *                    route's 501 and has its own error copy; conflating the two told an operator on a
+ *                    working chain that an admin still had to set it up.
+ */
+const STOCK_PREP_HANDOFF_NOTIFY_OUTCOMES = Object.freeze([
+  'sent',
+  'partial',
+  'failed',
+  'skipped',
+  'no_destination',
+])
+const NOTIFY_OUTCOME_SET = new Set(STOCK_PREP_HANDOFF_NOTIFY_OUTCOMES)
+
+/** Refuse to put an outcome on the wire that the vocabulary — and therefore the copy — does not know. */
+function assertStockPreparationHandoffNotifyOutcome(outcome) {
+  if (!NOTIFY_OUTCOME_SET.has(outcome)) {
+    throw new StockPreparationHandoffError(
+      500,
+      'STOCK_PREPARATION_HANDOFF_OUTCOME_INVALID',
+      'notifyOutcome is outside the closed vocabulary; the workbench would have no words for it',
+      { field: 'notifyOutcome' },
+    )
+  }
+  return outcome
+}
+
 const NOTIFICATION_TITLE = '备料接力'
 
 /**
@@ -593,6 +633,8 @@ function buildStockPreparationHandoffNotification({ chain, projectNo, fromStepIn
 
 module.exports = {
   HANDOFF_CONFIG_KEY,
+  STOCK_PREP_HANDOFF_NOTIFY_OUTCOMES,
+  assertStockPreparationHandoffNotifyOutcome,
   STOCK_PREP_HANDOFF_STEPS,
   STOCK_PREP_HANDOFF_STEP_LABELS,
   StockPreparationHandoffError,

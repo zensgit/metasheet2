@@ -1183,11 +1183,11 @@ export const STOCK_PREP_HANDOFF_OUTCOME_PLAIN: Record<string, StockPrepPlainEntr
     zhNext: '下一位可能还不知道,顺手说一声更稳妥。',
     enNext: 'The next person may not know yet — a word to them does no harm.',
   }),
-  not_configured: Object.freeze({
-    zh: '这个部署还没有配置备料接力的步骤,所以没有发出任何通知。',
-    en: 'This deployment has no handoff chain set up yet, so no notification went out.',
-    zhNext: '需要管理员先把接力步骤配好,这个按钮才会真正起作用。',
-    enNext: 'An admin has to set the chain up before this button does anything real.',
+  no_destination: Object.freeze({
+    zh: '已经交给下一步了;这条接力链没有配群通知,所以没有发出消息。',
+    en: 'Handed on to the next step; this chain has no group destination for it, so no message went out.',
+    zhNext: '这是配置本身的样子,不是出错 —— 下一位不会收到消息,请顺手说一声。',
+    enNext: 'That is how this chain is configured, not a failure — the next person will not be messaged, so pass the word on.',
   }),
 })
 

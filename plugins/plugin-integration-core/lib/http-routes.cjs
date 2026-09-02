@@ -661,6 +661,7 @@ const {
   planStockPreparationHandoffAdvance,
   buildStockPreparationHandoffNotification,
   chainHasDestinationForHop,
+  assertStockPreparationHandoffNotifyOutcome,
   projectHandoffSteps,
   isHandlerOfStep,
 } = require('./stock-preparation-handoff.cjs')
@@ -3276,9 +3277,14 @@ function createHandlers(services, options = {}) {
    * notified. Returning an enum lets the route answer honestly: the turn moved, the message did not
    * go out, go and tell them yourself.
    *
-   *   'not_configured' —— no notifier injected, or the chain names no destination for this hop. The
+   *   'no_destination' —— no notifier injected, or the chain names no destination for this hop. The
    *                       turn still moved; a deployment is allowed to want turn state without
-   *                       notifications.
+   *                       notifications. Since J3 the route no longer reaches this function in either
+   *                       case (both fold into `hopHasDestination`, so no claim is spent), but the
+   *                       guards stay: a dispatcher that can be called with nothing to send to must
+   *                       still answer honestly rather than inventing a delivery.
+   *                       NOT 'not_configured' — that meant "this deployment has no chain", which is
+   *                       the advance route's 501 and has its own error copy.
    *   'sent'           —— every destination took it.
    *   'partial'        —— SOME destinations took it and some did not (RC4). Only the terminal hop
    *                       fans out — 仓库 AND 采购 — and that is exactly the hop where collapsing this
@@ -3290,10 +3296,10 @@ function createHandlers(services, options = {}) {
    */
   async function dispatchStockPreparationHandoffNotification(notification) {
     if (!notification || !Array.isArray(notification.destinationIds) || notification.destinationIds.length === 0) {
-      return 'not_configured'
+      return 'no_destination'
     }
     if (!stockPreparationHandoffNotifier || typeof stockPreparationHandoffNotifier.sendToDestinations !== 'function') {
-      return 'not_configured'
+      return 'no_destination'
     }
     try {
       const result = await stockPreparationHandoffNotifier.sendToDestinations({
@@ -3359,6 +3365,11 @@ function createHandlers(services, options = {}) {
     }
     stockPreparationAuditVocabularySupported.add(action)
   }
+
+  // How far back the status read looks for notification_lost rows. Bounded because this is a display
+  // hint on a hot read: a project whose trail is longer than this has had far bigger problems, and the
+  // banner degrades to showing the recent losses rather than to costing the page.
+  const STOCK_PREPARATION_HANDOFF_LOST_LOOKBACK = 200
 
   function requireConfiguredStockPreparationHandoffChain() {
     const chain = loadStockPreparationHandoffChain()
@@ -7473,6 +7484,13 @@ function createHandlers(services, options = {}) {
           completed: false,
           isCurrentHandler: false,
           notifiedStepIndex: null,
+          // J5: every key the configured branch returns appears here too, at its inert value. The TS
+          // interface declares them required, and a client reading `undefined` where the type promises
+          // `false` is a bug waiting for its first reader — the two branches drifted once already,
+          // which is why the suite pins this literal field-for-field.
+          notificationsConfigured: false,
+          resendableStepKey: null,
+          lostStepKeys: [],
         })
       }
       const store = requireStockPreparationHandoffStore()
@@ -7486,6 +7504,61 @@ function createHandlers(services, options = {}) {
       const stepIndex = persisted ? persisted.stepIndex : 0
       const completed = stepIndex >= chain.steps.length
       const currentStep = completed ? null : chain.steps[stepIndex]
+      const notified = persisted ? persisted.notifiedStepIndex : null
+      const notificationsConfigured = chainHasDestinationForHop(chain, false) || chainHasDestinationForHop(chain, true)
+
+      // J1(a) — IS THE TAIL HOP STILL RESENDABLE, BY THIS CALLER? Four conditions, each load-bearing:
+      //   * there IS a tail hop (`stepIndex >= 1`) — at step 0 nothing has been handed off yet;
+      //   * it is unclaimed. `notified === null` means nothing was ever claimed, which leaves the tail
+      //     resendable only when the tail IS hop 0; otherwise the tail is unclaimed exactly when the
+      //     max sits one below it (`notified === stepIndex - 2`);
+      //   * the chain actually sends something for that hop — otherwise there is nothing to resend;
+      //   * and the caller is its configured handler, because `planStockPreparationHandoffAdvance`
+      //     checks the roster of the step being REPLAYED. Inviting anybody else to click would be
+      //     inviting them into a 403.
+      const tailStepIndex = stepIndex - 1
+      const tailUnclaimed = notified === null ? stepIndex === 1 : notified === stepIndex - 2
+      const resendableStepKey = (
+        tailStepIndex >= 0
+        && tailUnclaimed
+        && chainHasDestinationForHop(chain, tailStepIndex === chain.steps.length - 1)
+        && isHandlerOfStep(chain, tailStepIndex, scope.actorId)
+      )
+        ? chain.steps[tailStepIndex].key
+        : null
+
+      // J1(b) — WHICH HOPS ARE GONE FOR GOOD. Read from the trail, not inferred from the cursor: the
+      // advance route writes one `notification_lost` row per hop at the moment it becomes
+      // irreversible, and that row is the ONLY representation of an interior gap that exists.
+      //
+      // Fail-soft on purpose: this is a display hint on a values-free read, so a missing or unhappy
+      // audit store costs the banner, never the turn signal. Bounded, and scoped to this project.
+      let lostStepKeys = []
+      const auditForLost = (services && services.stockPreparationAuditStore) || null
+      if (notificationsConfigured && auditForLost && typeof auditForLost.list === 'function') {
+        try {
+          const trail = await auditForLost.list({
+            tenantId,
+            projectId: projectNo,
+            action: 'handoff_advance',
+            limit: STOCK_PREPARATION_HANDOFF_LOST_LOOKBACK,
+          })
+          const seen = new Set()
+          for (const entry of (trail && trail.entries) || []) {
+            if (!entry || entry.mode !== 'notification_lost') continue
+            const lost = entry.detail && Number(entry.detail.lostStepIndex)
+            if (!Number.isInteger(lost) || lost < 0 || lost >= chain.steps.length) continue
+            if (seen.has(lost)) continue
+            seen.add(lost)
+            lostStepKeys.push(chain.steps[lost].key)
+          }
+        } catch (error) {
+          if (routeLogger && typeof routeLogger.warn === 'function') {
+            routeLogger.warn('[plugin-integration-core] stock-prep handoff: could not read the lost-notification trail; the turn signal is unaffected')
+          }
+          lostStepKeys = []
+        }
+      }
       return sendOk(res, {
         configured: true,
         projectNo,
@@ -7496,11 +7569,28 @@ function createHandlers(services, options = {}) {
         terminal: !completed && stepIndex === chain.steps.length - 1,
         completed,
         isCurrentHandler: !completed && isHandlerOfStep(chain, stepIndex, scope.actorId),
-        notifiedStepIndex: persisted ? persisted.notifiedStepIndex : null,
+        notifiedStepIndex: notified,
         // G6: whether this chain notifies at all. Without it the workbench cannot tell a hop whose
-        // notice was LOST (cursor past an unclaimed hop on a chain that does notify) from a
-        // turn-state-only deployment, whose `notifiedStepIndex` is null forever and correctly so.
-        notificationsConfigured: chainHasDestinationForHop(chain, false) || chainHasDestinationForHop(chain, true),
+        // notice was LOST from a turn-state-only deployment, whose `notifiedStepIndex` is null
+        // forever and correctly so.
+        notificationsConfigured,
+        // J1 — THE TWO STATES, CARRIED SEPARATELY, BECAUSE THE COLUMN CANNOT TELL THEM APART.
+        //
+        // `notified_step_index` is a monotonic MAX. From it alone exactly one thing is derivable:
+        // whether the TAIL hop (the one just completed, `stepIndex - 1`) has been claimed. An
+        // INTERIOR unclaimed hop — one below the max — is not representable at all, because a later
+        // claim raises the max straight past it.
+        //
+        // G6 read that column and got both answers backwards. Its predicate fired on the tail hop,
+        // which is precisely the hop RC1 makes RECOVERABLE by the same handler's next click, and told
+        // the operator it could never be resent — copy that discourages the one action that fixes it.
+        // And it stayed silent for the superseded hop, which really is gone. So:
+        //
+        //   resendableStepKey — the tail hop, unclaimed, and YOU are its handler: press again.
+        //   lostStepKeys      — read back from the `notification_lost` audit rows the advance route
+        //                       writes, because that trail is the only place an interior gap exists.
+        resendableStepKey,
+        lostStepKeys,
       })
     },
 
@@ -7600,10 +7690,14 @@ function createHandlers(services, options = {}) {
       if (!fromStepKey) {
         throw new HttpRouteError(400, 'STOCK_PREPARATION_HANDOFF_REQUEST_INVALID', 'fromStepKey is required', { field: 'fromStepKey' })
       }
-      // Chain BEFORE store: an unconfigured deployment must refuse without ever reaching the database,
-      // which is what makes "absent config = byte-identical behaviour" true rather than merely likely.
-      const chain = requireConfiguredStockPreparationHandoffChain()
-      const store = requireStockPreparationHandoffStore()
+      // J4 — SCOPE BEFORE CHAIN, SO BOTH ROUTES REFUSE IN THE SAME ORDER.
+      //
+      // The chain check used to run first here while the status route resolved the scope first, and
+      // the two therefore disagreed for every caller whose scope cannot resolve: a tenantless admin
+      // got 501 NOT_CONFIGURED on a deployment with no chain and 403 TENANT_REQUIRED on one that has
+      // one — telling them, by the difference alone, that a 备料 chain exists here. Same one-bit
+      // disclosure G7 closed on the binding, reached by ordering instead. The refusal a caller is not
+      // entitled to pass now comes first on both routes.
       // RC2 — A WRITE DERIVES ITS TENANT FROM THE PRINCIPAL THE HOST VOUCHES FOR.
       //
       // This used to be `resolveAuthUserTenantId(req)`, i.e. `user.tenantId` — which the auth
@@ -7621,6 +7715,10 @@ function createHandlers(services, options = {}) {
       })
       const tenantId = scope.tenantId
       const actor = scope.actorId
+      // Chain BEFORE store: an unconfigured deployment must refuse without ever reaching the database,
+      // which is what makes "absent config = byte-identical behaviour" true rather than merely likely.
+      const chain = requireConfiguredStockPreparationHandoffChain()
+      const store = requireStockPreparationHandoffStore()
       // Refuse to write or announce on behalf of a tenant this deployment's chain is not for.
       requireStockPreparationHandoffChainForTenant(chain, tenantId)
       // F2 — THE VOCABULARY PROBE, NOW THAT WE KNOW WHOSE WRITE THIS IS. Still before every write it
@@ -7688,7 +7786,21 @@ function createHandlers(services, options = {}) {
       // `notify` nor `terminal` declared) — a typo can no longer land here — but the guard stays,
       // because the cost of being wrong is an unnotifiable step and the cost of the guard is a
       // boolean.
-      const hopHasDestination = chainHasDestinationForHop(chain, terminal)
+      // J3 — AND THE SEAM COUNTS AS A DESTINATION. This asked the CHAIN CONFIG only, so on a
+      // deployment whose host wired no notifier — which the seam's own contract calls optional — the
+      // claim CAS fired, the dispatcher answered without attempting anything, and the hop became
+      // permanently unnotifiable with no trace: `applied.changed` is true, so the lost-row loop below
+      // (which only covers hops BEFORE this one) never saw it either. A claim may only be spent on a
+      // hop something could actually have been sent for.
+      const notifierWired = Boolean(
+        stockPreparationHandoffNotifier && typeof stockPreparationHandoffNotifier.sendToDestinations === 'function',
+      )
+      const hopHasDestination = notifierWired && chainHasDestinationForHop(chain, terminal)
+      if (!notifierWired && chainHasDestinationForHop(chain, terminal) && routeLogger && typeof routeLogger.warn === 'function') {
+        routeLogger.warn(
+          '[plugin-integration-core] stock-prep handoff: the chain names a destination but no notifier seam is wired; the hop is left UNCLAIMED so a deployment that wires one later can still announce it',
+        )
+      }
 
       // STEP 6 — RECORD WHAT HAPPENED, now that the store has confirmed it.
       //
@@ -7779,7 +7891,7 @@ function createHandlers(services, options = {}) {
       // that guard existed the claim was always made, `dispatchStockPreparationHandoffNotification`
       // saw an empty destination list and answered 'not_configured', and the turn-state-only chain
       // must keep getting that same honest answer now that it no longer spends a claim to reach it.
-      let notifyOutcome = hopHasDestination ? 'skipped' : 'not_configured'
+      let notifyOutcome = hopHasDestination ? 'skipped' : 'no_destination'
       if (claim.claimed) {
         const notification = buildStockPreparationHandoffNotification({
           chain,
@@ -7806,7 +7918,11 @@ function createHandlers(services, options = {}) {
         changed: applied.changed,
         terminal,
         notified: notifyOutcome === 'sent',
-        notifyOutcome,
+        // J8: a value outside the closed vocabulary is a value the workbench has no words for. The
+        // guard that pairs outcomes with copy used to derive them by reading this file's text, which
+        // one indirection escaped; the vocabulary is a frozen constant now, and this is the wire's
+        // last line of defence against a member that never joined it.
+        notifyOutcome: assertStockPreparationHandoffNotifyOutcome(notifyOutcome),
         // G1/G5: the COMMITTED verdict — this request found the hop already moved and its notification
         // still owed, and took the claim. The workbench needs it because `changed:false` alone can no
         // longer mean "nothing needed sending": since RC1 a replay is exactly how an interrupted hop

@@ -68,6 +68,8 @@ const { STOCK_PREP_OPERATE, STOCK_PREP_READ, STOCK_PREP_WORKBENCH_CAPABILITIES }
 const { STOCK_PREP_AUDIT_ACTIONS, __internals: auditInternals } = require(path.join(LIB, 'stock-preparation-audit-store.cjs'))
 const {
   HANDOFF_CONFIG_KEY,
+  STOCK_PREP_HANDOFF_NOTIFY_OUTCOMES,
+  assertStockPreparationHandoffNotifyOutcome,
   STOCK_PREP_HANDOFF_STEPS,
   StockPreparationHandoffError,
   parseStockPreparationHandoffConfig,
@@ -360,6 +362,15 @@ function mount({
       auditCalls.push({ method: 'supportsAction', action, tenantId: (options && options.tenantId) || null })
       return auditProbe(action, options)
     },
+    // J1(b): the status read reads the notification_lost rows back — the trail is the only place an
+    // interior gap exists, so a fake without `list` would make lostStepKeys vacuously empty.
+    async list({ projectId } = {}) {
+      auditCalls.push({ method: 'list', action: null, tenantId: null })
+      return {
+        rowCount: auditAppends.length,
+        entries: auditAppends.filter((entry) => !projectId || entry.projectId === projectId).slice().reverse(),
+      }
+    },
   }
   services.stockPreparationHandoffStore = handoffStore === null ? null : createStockPreparationHandoffStore({
     db,
@@ -460,6 +471,11 @@ async function g1AbsentConfigLeavesEveryObservableSurfaceUntouched() {
       completed: false,
       isCurrentHandler: false,
       notifiedStepIndex: null,
+      // J5: the inert branch declares every key the configured branch does, at its inert value —
+      // the TS interface calls them required and the two branches had already drifted once.
+      notificationsConfigured: false,
+      resendableStepKey: null,
+      lostStepKeys: [],
     },
   }, 'G1: the inert status payload is pinned field-for-field')
 }
@@ -812,7 +828,7 @@ async function g5NoDestinationConfiguredStillMovesTheTurn() {
   assert.equal(res.statusCode, 200)
   assert.equal(res.body.data.changed, true, 'the turn still moves')
   assert.equal(res.body.data.notified, false)
-  assert.equal(res.body.data.notifyOutcome, 'not_configured')
+  assert.equal(res.body.data.notifyOutcome, 'no_destination')
   assert.equal(notifier.calls.length, 0)
   assert.equal(db.rows[0].step_index, 1)
 }
@@ -840,7 +856,7 @@ async function g5NoNotifierInjectedStillMovesTheTurn() {
     body: { tenantId: TENANT_ID, projectNo: PROJECT, fromStepKey: 'prep_entry' },
   })
   assert.equal(res.statusCode, 200)
-  assert.equal(res.body.data.notifyOutcome, 'not_configured')
+  assert.equal(res.body.data.notifyOutcome, 'no_destination')
   assert.equal(db.rows[0].step_index, 1)
 }
 
@@ -1433,7 +1449,7 @@ const GOOD_TERMINAL = Object.freeze({ groupDestinationIds: [WAREHOUSE_DEST] })
 
 async function f3ATypoIsRefusedRatherThanAcceptedAsNoDestinations() {
   // Every one of these used to parse to `configured: true` with an empty destination set, so the
-  // route burned its at-most-once notification claim and answered `notifyOutcome: 'not_configured'`.
+  // route burned its at-most-once notification claim and answered `notifyOutcome: 'no_destination'`.
   // The deployment believed 通知下一步 was wired up. Nobody was ever told anything.
   const cases = [
     [{ steps: STEPS3, notify: GOOD_NOTIFY, terminal: { groupDestinationId: 'x' } }, 'terminal.groupDestinationId'],
@@ -1507,7 +1523,7 @@ async function f3TheClaimIsNotSpentOnAHopWithNowhereToSend() {
   const { routes } = mount({ config: { [HANDOFF_CONFIG_KEY]: { tenantId: TENANT_ID, steps: STEPS3 } }, notifier, db })
   const res = await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
   assert.equal(res.statusCode, 200)
-  assert.equal(res.body.data.notifyOutcome, 'not_configured')
+  assert.equal(res.body.data.notifyOutcome, 'no_destination')
   assert.equal(db.rows[0].step_index, 1, 'the turn moved')
   assert.equal(db.rows[0].notified_step_index, null, 'F3: and the at-most-once claim was NOT burned')
   assert.equal(notifier.calls.length, 0)
@@ -2099,12 +2115,15 @@ async function rc3WorkspaceIdCannotMultiplyTheCursorOrTheNotification() {
 }
 
 /**
- * G8 — EVERY `notifyOutcome` VALUE THIS FEATURE CAN PUT ON THE WIRE, derived from the source.
+ * J8 — EVERY OUTCOME LITERAL THE ROUTE AND THE DISPATCHER MENTION.
  *
- * Two regions, because the value comes from two places and the first version of this only read one:
- * the dispatcher's RETURN statements, and the advance route's own `notifyOutcome = …` assignments.
- * Reading only the dispatcher meant the guard hand-typed 'skipped' to cover the gap, which is the
- * hand-kept-list failure class this repo has already been bitten by twice.
+ * This used to BE the vocabulary, derived by reading the source, and a text scrape is the wrong shape
+ * of guarantee for a closed set: `const x = 'deferred'` on one line and `notifyOutcome = x` on the
+ * next escaped it completely, shipping a wire value with no plain-language copy and a green suite.
+ *
+ * The vocabulary now lives in production code (`STOCK_PREP_HANDOFF_NOTIFY_OUTCOMES`) and the wire is
+ * checked against it at runtime, so this scrape has a smaller and more honest job: catch a literal
+ * that LOOKS like an outcome but never joined the set, statically, before the runtime check has to.
  */
 function collectHandoffNotifyOutcomes(source) {
   const out = new Set()
@@ -2153,10 +2172,11 @@ async function rc4EveryOutcomeTheRouteCanReturnHasCopy() {
   // rather than typing it here is what makes a future outcome fail this instead of shipping silent.
   const fs = require('node:fs')
   const source = fs.readFileSync(path.join(LIB, 'http-routes.cjs'), 'utf8')
-  // G8: derived from BOTH the dispatcher and the route, by the one shared function — no hand patch.
-  const returned = collectHandoffNotifyOutcomes(source)
-  assert.ok(returned.includes('partial'), 'RC4: the dispatcher can answer partial')
-  assert.ok(returned.includes('sent') && returned.includes('failed'), 'and still answers sent / failed')
+  // J8: the vocabulary is the frozen CONSTANT now, not a scrape — see
+  // j8TheScrapedLiteralsAreAllMembersOfTheClosedVocabulary for what the scrape still guards.
+  const returned = STOCK_PREP_HANDOFF_NOTIFY_OUTCOMES
+  assert.ok(returned.includes('partial'), 'RC4: the vocabulary carries partial')
+  assert.ok(returned.includes('sent') && returned.includes('failed'), 'and sent / failed')
   const plainPath = path.join(
     __dirname, '..', '..', '..',
     'apps', 'web', 'src', 'services', 'integration', 'stockPreparation', 'plainLanguage.ts',
@@ -2785,6 +2805,33 @@ async function g7AForeignTenantGetsTheSameAnswerAsAnUnconfiguredDeployment() {
 
 // --- G8: the outcome/copy guard must see the ROUTE, not only the dispatcher --------------------
 
+async function j8TheScrapedLiteralsAreAllMembersOfTheClosedVocabulary() {
+  // The static half of J8: any outcome-shaped literal reachable into `notifyOutcome` must be a member
+  // of the frozen set. A new one introduced directly reds HERE; one introduced through a variable
+  // reds at the runtime assertion instead (j2TheWireOutcomeIsAlwaysInTheClosedVocabulary). Between
+  // them there is no way to put a wordless outcome on the wire.
+  const fs = require('node:fs')
+  const source = fs.readFileSync(path.join(LIB, 'http-routes.cjs'), 'utf8')
+  const scraped = collectHandoffNotifyOutcomes(source)
+  assert.ok(scraped.length >= 4, 'J8: a scrape that came back empty would make this vacuous')
+  for (const outcome of scraped) {
+    assert.ok(
+      STOCK_PREP_HANDOFF_NOTIFY_OUTCOMES.includes(outcome),
+      `J8: '${outcome}' is assigned to notifyOutcome but is not in the closed vocabulary`,
+    )
+  }
+  // And a direct mutation is still caught statically, which is the cheap half of the guarantee.
+  const mutated = source.replace(
+    "let notifyOutcome = hopHasDestination ? 'skipped' : 'no_destination'",
+    "let notifyOutcome = hopHasDestination ? 'skipped' : 'no_destination'\n      if (terminal) notifyOutcome = 'deferred'",
+  )
+  assert.notEqual(mutated, source, 'J8: the mutation anchor still exists')
+  assert.ok(
+    collectHandoffNotifyOutcomes(mutated).includes('deferred'),
+    'J8: a new route-level literal is seen by the scrape',
+  )
+}
+
 async function g8TheOutcomeGuardScrapesTheRouteToo() {
   // RC4's guard sliced only `dispatchStockPreparationHandoffNotification` and then hand-typed the one
   // route-level value it knew about (`.concat(['skipped'])`). A reachable route-level outcome with no
@@ -2793,7 +2840,7 @@ async function g8TheOutcomeGuardScrapesTheRouteToo() {
   const fs = require('node:fs')
   const source = fs.readFileSync(path.join(LIB, 'http-routes.cjs'), 'utf8')
   const outcomes = collectHandoffNotifyOutcomes(source)
-  for (const expected of ['sent', 'partial', 'failed', 'skipped', 'not_configured']) {
+  for (const expected of STOCK_PREP_HANDOFF_NOTIFY_OUTCOMES) {
     assert.ok(outcomes.includes(expected), `G8: the derivation finds '${expected}'`)
   }
   assert.ok(outcomes.length >= 5, 'G8: a scrape that came back empty would make this vacuous')
@@ -2812,8 +2859,8 @@ async function g8TheOutcomeGuardScrapesTheRouteToo() {
   // The derivation really does read the ROUTE: a route-level literal the dispatcher never returns is
   // still collected. (This is the mutation the recheck used, asserted directly rather than by hand.)
   const mutated = source.replace(
-    "let notifyOutcome = hopHasDestination ? 'skipped' : 'not_configured'",
-    "let notifyOutcome = hopHasDestination ? 'skipped' : 'not_configured'\n      if (terminal) notifyOutcome = 'deferred'",
+    "let notifyOutcome = hopHasDestination ? 'skipped' : 'no_destination'",
+    "let notifyOutcome = hopHasDestination ? 'skipped' : 'no_destination'\n      if (terminal) notifyOutcome = 'deferred'",
   )
   assert.notEqual(mutated, source, 'G8: the mutation anchor still exists')
   assert.ok(
@@ -2866,10 +2913,9 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   const handoff = read('lib', 'stock-preparation-handoff.cjs')
   const index = read('index.cjs')
   const scope = read('lib', 'stock-preparation-operator-scope.cjs')
-  const migration = fs.readFileSync(
-    path.join(__dirname, '..', '..', '..', 'packages', 'core-backend', 'migrations', '084_create_integration_stock_prep_handoff.sql'),
-    'utf8',
-  )
+  const migrationsDir = path.join(__dirname, '..', '..', '..', 'packages', 'core-backend', 'migrations')
+  const migration = fs.readFileSync(path.join(migrationsDir, '084_create_integration_stock_prep_handoff.sql'), 'utf8')
+  const vocabulary = fs.readFileSync(path.join(migrationsDir, '085_extend_stock_prep_audit_handoff_action.sql'), 'utf8')
 
   // (a) the scope key, in the file that routes 23505 on it
   assert.ok(!store.includes("COALESCE(workspace_id,'')"), 'G9: the store no longer documents a column 084 does not create')
@@ -2888,7 +2934,35 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   assert.ok(!index.includes('通知下一步 (migration 082)'), 'G9: index.cjs names the migration that creates the table')
   assert.ok(index.includes('migration 084'), 'G9: which is 084')
   assert.ok(!/per-\(tenant,\s*workspace,\s*projectNo\) cursor/.test(index), 'G9: and the post-RC3 scope')
-  // (e) the operator-scope header's own contract, which every future surface is told to obey
+  // (e) J7 — 085's header is the ONLY place the `mode` vocabulary is written down. `mode` carries no
+  // CHECK constraint (066), so unlike `action` there is no schema to read it off and no migration
+  // test that can set-compare it; a stale sentence there is the whole of the documentation being
+  // wrong. Derived from the ROUTE, the way G8 derives notifyOutcome, so it cannot go stale silently.
+  const routeSrc = read('lib', 'http-routes.cjs')
+  const advanceBody = (() => {
+    const start = routeSrc.indexOf('async stockPreparationHandoffAdvance(req, res) {')
+    return routeSrc.slice(start, routeSrc.indexOf(String.fromCharCode(10) + '    },' + String.fromCharCode(10), start))
+  })()
+  const modes = new Set()
+  for (const line of advanceBody.match(/mode:.*/g) || []) {
+    for (const m of line.matchAll(/'([a-z_]+)'/g)) modes.add(m[1])
+  }
+  // The ternary form `mode: applied.changed ? (terminal ? 'completed' : 'advanced') : 'replayed'`
+  // yields three on one line; `notification_lost` is its own.
+  assert.ok(modes.size >= 4, `J7: the mode derivation found only ${[...modes].join(',')}`)
+  for (const mode of modes) {
+    assert.ok(vocabulary.includes(mode), `J7: migration 085 names the '${mode}' audit mode it documents`)
+  }
+  assert.ok(!vocabulary.includes('advanced|replayed|completed;'), 'J7: and no longer names only three')
+  // The two real detail shapes, keyed off what the route actually writes.
+  for (const key of ['notificationOwed', 'lostStepIndex', 'operation']) {
+    assert.ok(vocabulary.includes(key), `J7: 085 documents the '${key}' detail key the route writes`)
+  }
+  for (const gone of ['/ changed / notified /']) {
+    assert.ok(!vocabulary.includes(gone), `J7: and no longer lists detail keys the route never writes (${gone})`)
+  }
+
+  // (f) the operator-scope header's own contract, which every future surface is told to obey
   assert.ok(!scope.includes('exactly three'), 'G9: the scope header no longer claims a set of three')
   assert.ok(
     !/It does NOT authorize a WRITE\./.test(scope),
@@ -2899,6 +2973,342 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance']) {
     assert.ok(scope.includes(marker), `G9: the header enumerates ${marker}`)
   }
+}
+
+
+// ---------------------------------------------------------------------------
+// J1..J8 — the round-3 closing recheck (10 confirmed, 0 refuted).
+// ---------------------------------------------------------------------------
+
+/**
+ * J1 — DRIVE THE REAL LOSS, NEVER HAND-SEED IT.
+ *
+ * The G6 witnesses seeded `{step_index: 2, notified_step_index: 0}` and called it "the gap". That is
+ * the state where the TAIL hop is unclaimed — i.e. exactly the state RC1 makes recoverable by the
+ * same handler's next click. The state the lost-row loop actually produces is different and the store
+ * has to be walked into it: an advance whose audit failed (cursor moves, claim unspent), and then a
+ * DIFFERENT handler advancing past it.
+ *
+ * Returns the mount plus the two states, so the witnesses below assert on something the store built.
+ */
+async function driveASupersededLostHop() {
+  let auditWorks = true
+  const auditAppends = []
+  const notifier = makeNotifierSpy()
+  const db = makeMemoryDb()
+  const routes = new Map()
+  const context = {
+    api: {
+      http: { addRoute(m, rp, h) { routes.set(`${m.toUpperCase()} ${rp}`, h) } },
+      multitable: { provisioning: inertService(['resolveFieldIds']), records: makeRecordsApi() },
+    },
+    storage: new Map(),
+    config: { ...chainConfig(), stockPreparationTableActions: [tableActionConfig()] },
+  }
+  const services = baseServices()
+  services.stockPreparationAuditStore = {
+    async append(entry) {
+      if (!auditWorks) {
+        const error = new Error('audit ledger unavailable')
+        error.status = 422
+        throw error
+      }
+      auditInternals.assertValuesFreeDetail(entry.detail)
+      auditAppends.push(entry)
+      return { ok: true }
+    },
+    async supportsAction() { return { supported: true, reason: 'check_constraint_accepts' } },
+    // The status read reads the trail back for the lost hops — the append-only rows ARE the record.
+    async list({ projectId }) {
+      return {
+        rowCount: auditAppends.length,
+        entries: auditAppends.filter((e) => e.projectId === projectId).slice().reverse(),
+      }
+    },
+  }
+  services.stockPreparationHandoffStore = createStockPreparationHandoffStore({ db, idGenerator: () => 'handoff-1' })
+  services.stockPreparationHandoffNotifier = notifier
+  services.tenantPrincipalDirectory = vouchingTenantDirectory()
+  httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
+
+  // 1. ZHANG hands off prep_entry; the trail write fails, so the cursor moves and the claim is unspent.
+  auditWorks = false
+  const interrupted = await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
+  assert.equal(interrupted.statusCode, 422)
+  assert.equal(db.rows[0].step_index, 1)
+  assert.equal(db.rows[0].notified_step_index, null)
+  assert.equal(notifier.calls.length, 0)
+
+  // 2. The RESENDABLE state: the tail hop is hop 0 and ZHANG is its handler.
+  auditWorks = true
+  const resendable = await status(routes, OPERATOR_ZHANG)
+
+  // 3. LI — a DIFFERENT handler, who was never told it was his turn — advances anyway. His claim for
+  //    hop 1 moves the monotonic max past hop 0, which is the moment hop 0 becomes irreversible.
+  const superseding = await advance(routes, OPERATOR_LI, { fromStepKey: 'process' })
+  assert.equal(superseding.statusCode, 200)
+  assert.equal(db.rows[0].notified_step_index, 1)
+  const lost = await status(routes, OPERATOR_ZHANG)
+
+  return { routes, db, notifier, auditAppends, resendable, lost }
+}
+
+async function j1TheResendableHopInvitesTheClickAndTheLostOneDoesNot() {
+  const { resendable, lost, auditAppends, notifier, routes, db } = await driveASupersededLostHop()
+
+  // THE RESENDABLE STATE. G6 fired its "can never be resent" banner on exactly this, discouraging the
+  // one click that fixes it.
+  assert.equal(resendable.body.data.stepIndex, 1)
+  assert.equal(resendable.body.data.notifiedStepIndex, null)
+  assert.equal(resendable.body.data.resendableStepKey, 'prep_entry', 'J1: the tail hop is still sendable, and by this caller')
+  assert.deepEqual(resendable.body.data.lostStepKeys, [], 'J1: and nothing is lost yet')
+
+  // THE LOST STATE, produced by the store rather than seeded. This is what the notification_lost row
+  // describes, and G6 was silent for it.
+  assert.equal(lost.body.data.stepIndex, 2)
+  assert.equal(lost.body.data.notifiedStepIndex, 1)
+  assert.deepEqual(lost.body.data.lostStepKeys, ['prep_entry'], 'J1: hop 0 can never be announced now')
+  assert.equal(lost.body.data.resendableStepKey, null, 'J1: and there is nothing left to invite a click for')
+  assert.equal(auditAppends.filter((e) => e.mode === 'notification_lost').length, 1)
+
+  // The invitation is honest: ZHANG pressing again really does send it.
+  const fresh = await driveASupersededLostHop.call(null)
+  void fresh
+  const again = await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
+  assert.equal(again.statusCode, 409, 'J1: once superseded even the handler is refused — which is why it is LOST, not resendable')
+  assert.equal(notifier.calls.length, 1, 'only LI\u2019s own hop was ever announced')
+  assert.equal(db.rows.length, 1)
+}
+
+async function j1PressingAgainInTheResendableStateActuallySendsIt() {
+  // The other half: BEFORE anyone supersedes it, the invitation is actionable and the click works.
+  let auditWorks = true
+  const auditAppends = []
+  const notifier = makeNotifierSpy()
+  const db = makeMemoryDb()
+  const routes = new Map()
+  const context = {
+    api: {
+      http: { addRoute(m, rp, h) { routes.set(`${m.toUpperCase()} ${rp}`, h) } },
+      multitable: { provisioning: inertService(['resolveFieldIds']), records: makeRecordsApi() },
+    },
+    storage: new Map(),
+    config: { ...chainConfig(), stockPreparationTableActions: [tableActionConfig()] },
+  }
+  const services = baseServices()
+  services.stockPreparationAuditStore = {
+    async append(entry) {
+      if (!auditWorks) { const e = new Error('audit down'); e.status = 422; throw e }
+      auditInternals.assertValuesFreeDetail(entry.detail)
+      auditAppends.push(entry)
+      return { ok: true }
+    },
+    async supportsAction() { return { supported: true } },
+    async list() { return { rowCount: 0, entries: [] } },
+  }
+  services.stockPreparationHandoffStore = createStockPreparationHandoffStore({ db, idGenerator: () => 'h-1' })
+  services.stockPreparationHandoffNotifier = notifier
+  services.tenantPrincipalDirectory = vouchingTenantDirectory()
+  httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
+
+  auditWorks = false
+  await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
+  auditWorks = true
+  const invited = await status(routes, OPERATOR_ZHANG)
+  assert.equal(invited.body.data.resendableStepKey, 'prep_entry')
+
+  const resent = await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
+  assert.equal(resent.statusCode, 200)
+  assert.equal(resent.body.data.resumed, true, 'J1: the invitation was true — this click completed the owed hop')
+  assert.equal(resent.body.data.notifyOutcome, 'sent')
+  assert.equal(notifier.calls.length, 1)
+  const after = await status(routes, OPERATOR_ZHANG)
+  assert.equal(after.body.data.resendableStepKey, null, 'J1: and the invitation is withdrawn once it is done')
+  assert.deepEqual(after.body.data.lostStepKeys, [])
+}
+
+async function j1TheInvitationIsOnlyShownToTheHandlerWhoCanAct() {
+  // `planStockPreparationHandoffAdvance` checks the roster of the step being REPLAYED, so inviting
+  // anybody else to press would be inviting them into a 403.
+  let auditWorks = true
+  const db = makeMemoryDb()
+  const routes = new Map()
+  const context = {
+    api: {
+      http: { addRoute(m, rp, h) { routes.set(`${m.toUpperCase()} ${rp}`, h) } },
+      multitable: { provisioning: inertService(['resolveFieldIds']), records: makeRecordsApi() },
+    },
+    storage: new Map(),
+    config: { ...chainConfig(), stockPreparationTableActions: [tableActionConfig()] },
+  }
+  const services = baseServices()
+  services.stockPreparationAuditStore = {
+    async append(entry) {
+      if (!auditWorks) { const e = new Error('audit down'); e.status = 422; throw e }
+      auditInternals.assertValuesFreeDetail(entry.detail)
+      return { ok: true }
+    },
+    async supportsAction() { return { supported: true } },
+    async list() { return { rowCount: 0, entries: [] } },
+  }
+  services.stockPreparationHandoffStore = createStockPreparationHandoffStore({ db, idGenerator: () => 'h-1' })
+  services.stockPreparationHandoffNotifier = makeNotifierSpy()
+  services.tenantPrincipalDirectory = vouchingTenantDirectory()
+  httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
+
+  auditWorks = false
+  await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
+  auditWorks = true
+  assert.equal((await status(routes, OPERATOR_ZHANG)).body.data.resendableStepKey, 'prep_entry')
+  for (const other of [OPERATOR_LI, OPERATOR_WANG, READ_ONLY, PLATFORM_ADMIN]) {
+    const seen = await status(routes, other)
+    assert.equal(seen.body.data.resendableStepKey, null, `J1: ${other.id} cannot resend hop 0, so is not invited to try`)
+  }
+}
+
+async function j1ATurnStateOnlyChainInvitesNothingAndLosesNothing() {
+  const config = { [HANDOFF_CONFIG_KEY]: { tenantId: TENANT_ID, steps: STEPS3 } }
+  const { routes } = mount({ config })
+  await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
+  const seen = await status(routes, OPERATOR_ZHANG)
+  assert.equal(seen.body.data.notificationsConfigured, false)
+  assert.equal(seen.body.data.resendableStepKey, null, 'J1: nothing to resend on a chain that sends nothing')
+  assert.deepEqual(seen.body.data.lostStepKeys, [])
+}
+
+// --- J2: two different facts, two different sentences ------------------------------------------
+
+async function j2AConfiguredChainWithNoDestinationSaysSoWithoutBlamingTheAdmin() {
+  // A multi-step chain declaring neither `notify` nor `terminal` is LEGAL — the turn-state-only
+  // deployment. It used to answer `not_configured` on a SUCCESSFUL advance, whose copy tells the
+  // operator the deployment has no chain and an admin must set one up, on a screen whose button only
+  // renders because the chain IS configured.
+  const config = { [HANDOFF_CONFIG_KEY]: { tenantId: TENANT_ID, steps: STEPS3 } }
+  const { routes, db } = mount({ config })
+  const res = await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.body.data.changed, true, 'the turn really did move')
+  assert.equal(res.body.data.notifyOutcome, 'no_destination', 'J2: and the word for that is not "no chain configured"')
+  assert.equal(db.rows[0].notified_step_index, null, 'J2: no destination means no claim spent')
+}
+
+async function j2TheWireOutcomeIsAlwaysInTheClosedVocabulary() {
+  // J8's runtime half: an outcome outside the frozen set never reaches the caller, however it got
+  // assigned. A text scrape could be escaped by one indirection; this cannot.
+  const { routes } = mount()
+  const res = await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
+  assert.ok(
+    STOCK_PREP_HANDOFF_NOTIFY_OUTCOMES.includes(res.body.data.notifyOutcome),
+    'J8: the wire value is a member of the closed vocabulary',
+  )
+  assert.throws(
+    () => assertStockPreparationHandoffNotifyOutcome('deferred'),
+    (error) => error.status === 500 && error.code === 'STOCK_PREPARATION_HANDOFF_OUTCOME_INVALID',
+    'J8: and a value that never joined the vocabulary is refused rather than shipped',
+  )
+  // Every member has plain-language copy — derived from the CONSTANT, not from a scrape of the route.
+  const fs = require('node:fs')
+  const table = fs.readFileSync(
+    path.join(__dirname, '..', '..', '..', 'apps', 'web', 'src', 'services', 'integration', 'stockPreparation', 'plainLanguage.ts'),
+    'utf8',
+  )
+  const start = table.indexOf('STOCK_PREP_HANDOFF_OUTCOME_PLAIN: Record')
+  const copy = table.slice(start, table.indexOf(String.fromCharCode(10) + 'export ', start))
+  for (const outcome of STOCK_PREP_HANDOFF_NOTIFY_OUTCOMES) {
+    assert.ok(copy.includes(`${outcome}: Object.freeze(`), `J8: outcome '${outcome}' has plain-language copy`)
+  }
+  // And the copy table carries nothing the route can no longer produce.
+  for (const stale of [...copy.matchAll(/\n  ([a-z_]+): Object\.freeze\(/g)].map((m) => m[1])) {
+    assert.ok(
+      STOCK_PREP_HANDOFF_NOTIFY_OUTCOMES.includes(stale),
+      `J8: the copy table carries '${stale}', which the route cannot return — set-equality, both ways`,
+    )
+  }
+}
+
+// --- J3: an absent notifier seam may not spend the claim ---------------------------------------
+
+async function j3AnAbsentNotifierLeavesTheHopClaimableForALaterDeployment() {
+  // The seam is documented OPTIONAL. With destinations configured and no notifier wired, the claim
+  // used to fire anyway and the hop became permanently unnotifiable — and because `applied.changed`
+  // is true the lost-row loop never saw it either, so it left no trace at all.
+  const db = makeMemoryDb()
+  const { routes, auditAppends } = mount({ db, notifier: null })
+  const res = await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.body.data.changed, true, 'the turn still moves — turn state and notification are separate concerns')
+  assert.equal(res.body.data.notifyOutcome, 'no_destination')
+  assert.equal(db.rows[0].notified_step_index, null, 'J3: the claim is NOT spent on a hop nothing could have sent')
+  assert.equal(auditAppends.filter((e) => e.mode === 'notification_lost').length, 0, 'and nothing is lost, because nothing is gone')
+
+  // THE POINT OF LEAVING IT UNCLAIMED: a deployment that wires the seam tomorrow can still announce it.
+  const wired = makeNotifierSpy()
+  const later = mount({ db, notifier: wired })
+  const resent = await advance(later.routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
+  assert.equal(resent.body.data.notifyOutcome, 'sent', 'J3: yesterday\u2019s hop is still announceable today')
+  assert.equal(resent.body.data.resumed, true)
+  assert.equal(wired.calls.length, 1)
+  assert.equal(db.rows[0].notified_step_index, 0)
+}
+
+// --- J4: both routes refuse in the same order --------------------------------------------------
+
+async function j4AScopeFailingCallerCannotTellAConfiguredDeploymentFromAnUnconfiguredOne() {
+  // The advance route checked the chain BEFORE the scope while the status route did the opposite, so
+  // a caller whose scope cannot resolve got 501 on a deployment with no chain and 403 on one that has
+  // one — learning, from the difference alone, that a 备料 chain exists here.
+  const tenantless = { id: 'u_admin', permissions: ['role:admin', 'integration:admin'] }
+  const configured = mount()
+  const unconfigured = mount({ config: {} })
+  for (const [method, routePath, payload] of [
+    ['POST', ADVANCE_PATH, { body: { projectNo: PROJECT, fromStepKey: 'prep_entry' } }],
+    ['GET', STATUS_PATH, { query: { projectNo: PROJECT } }],
+  ]) {
+    const a = await call(configured.routes, method, routePath, { user: tenantless, ...payload })
+    const b = await call(unconfigured.routes, method, routePath, { user: tenantless, ...payload })
+    assert.equal(a.statusCode, 403, `J4: ${method} refuses the principal first`)
+    assert.deepEqual(a.body, b.body, `J4: ${method} answers identically whether or not a chain exists`)
+    assert.equal(a.body.error.code, 'OPERATOR_SCOPE_TENANT_REQUIRED')
+  }
+  assert.deepEqual(configured.db.rows, [])
+  assert.deepEqual(configured.auditCalls, [], 'J4: and the refusal still costs no audit call')
+  assert.equal(configured.records.queries.length, 0)
+}
+
+// --- J5: the inert payload is complete ---------------------------------------------------------
+
+async function j5TheInertStatusPayloadCarriesEveryDeclaredKey() {
+  const unconfigured = mount({ config: {} })
+  const bound = chainConfig()
+  bound[HANDOFF_CONFIG_KEY].tenantId = OTHER_TENANT
+  const foreign = mount({ config: bound })
+  const INERT = Object.freeze({
+    configured: false,
+    projectNo: PROJECT,
+    steps: [],
+    stepCount: 0,
+    stepIndex: null,
+    currentStepKey: null,
+    terminal: false,
+    completed: false,
+    isCurrentHandler: false,
+    notifiedStepIndex: null,
+    notificationsConfigured: false,
+    resendableStepKey: null,
+    lostStepKeys: [],
+  })
+  for (const [label, mounted] of [['unconfigured', unconfigured], ['foreign tenant', foreign]]) {
+    const res = await status(mounted.routes, OPERATOR_ZHANG)
+    assert.equal(res.statusCode, 200)
+    assert.deepEqual(res.body.data, INERT, `J5: the ${label} payload is field-for-field the inert one`)
+  }
+  // And the CONFIGURED branch declares the same key set, so the two cannot drift apart again.
+  const live = await status(mount().routes, OPERATOR_ZHANG)
+  assert.deepEqual(
+    Object.keys(live.body.data).sort(),
+    Object.keys(INERT).sort(),
+    'J5: both branches return the same keys',
+  )
 }
 
 async function main() {
@@ -2987,8 +3397,19 @@ async function main() {
     ['G6 the status read surfaces the gap', g6TheStatusReadSurfacesTheGap],
     ['G7 a foreign tenant gets the same answer as an unconfigured deployment', g7AForeignTenantGetsTheSameAnswerAsAnUnconfiguredDeployment],
     ['G8 the outcome guard scrapes the route too', g8TheOutcomeGuardScrapesTheRouteToo],
+    ['J8 the scraped literals are all members of the closed vocabulary', j8TheScrapedLiteralsAreAllMembersOfTheClosedVocabulary],
     ['G2 the web witnesses are enrolled in the required gate', g2TheWebWitnessesAreEnrolledInTheRequiredGate],
     ['G9 the committed prose matches the code it describes', g9TheCommittedProseMatchesTheCodeItDescribes],
+    // --- round 3: the closing recheck ------------------------------------------------------------
+    ['J1 the resendable hop invites the click and the lost one does not', j1TheResendableHopInvitesTheClickAndTheLostOneDoesNot],
+    ['J1 pressing again in the resendable state actually sends it', j1PressingAgainInTheResendableStateActuallySendsIt],
+    ['J1 the invitation is only shown to the handler who can act', j1TheInvitationIsOnlyShownToTheHandlerWhoCanAct],
+    ['J1 a turn-state-only chain invites nothing and loses nothing', j1ATurnStateOnlyChainInvitesNothingAndLosesNothing],
+    ['J2 a configured chain with no destination says so without blaming the admin', j2AConfiguredChainWithNoDestinationSaysSoWithoutBlamingTheAdmin],
+    ['J2/J8 the wire outcome is always in the closed vocabulary', j2TheWireOutcomeIsAlwaysInTheClosedVocabulary],
+    ['J3 an absent notifier leaves the hop claimable for a later deployment', j3AnAbsentNotifierLeavesTheHopClaimableForALaterDeployment],
+    ['J4 a scope-failing caller cannot tell a configured deployment from an unconfigured one', j4AScopeFailingCallerCannotTellAConfiguredDeploymentFromAnUnconfiguredOne],
+    ['J5 the inert status payload carries every declared key', j5TheInertStatusPayloadCarriesEveryDeclaredKey],
   ]
   for (const [name, fn] of tests) {
     await fn()

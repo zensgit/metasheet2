@@ -314,6 +314,21 @@ export interface StockPreparationHandoffStatus {
   /** The highest step whose completion has had a notification dispatched; null = none yet. */
   notifiedStepIndex: number | null
   /**
+   * The step key whose group notice has NOT gone out yet and STILL CAN — pressing 通知下一步 again
+   * sends it. Non-null only when the caller is that step's configured handler. `null` when there is
+   * nothing owed, or when the owed hop is no longer this caller's to resend.
+   *
+   * Server-computed on purpose: it depends on the monotonic claim column and on the step's roster,
+   * neither of which the client holds.
+   */
+  resendableStepKey: string | null
+  /**
+   * Step keys whose group notice can never be sent again — a later hop's claim moved the monotonic
+   * max past them. Read back from the append-only trail, because an interior gap has no other
+   * representation.
+   */
+  lostStepKeys: string[]
+  /**
    * Does this chain notify at all? Without it the page cannot tell a hop whose notice was LOST from a
    * turn-state-only deployment, whose `notifiedStepIndex` is null forever and correctly so.
    */
@@ -327,13 +342,20 @@ export interface StockPreparationHandoffStatus {
  * going past a failed one. Collapsing that into `sent` told the operator the group had been told when
  * one of the two had not — on the one hop the whole feature exists for, and irreversibly, because the
  * at-most-once claim means clicking again can never re-send it.
+ *
+ * `no_destination` replaced `not_configured`, which conflated two different facts: "this deployment
+ * has no chain" (the advance route's 501, which has its own error copy) and "this CONFIGURED chain
+ * sends nothing for this hop" (a legal turn-state-only deployment, or a host that wired no notifier).
+ * The second was being shown the first's words — telling an operator whose turn had just moved that
+ * an admin still had to set the chain up, on a screen whose button only renders because the chain IS
+ * configured.
  */
 export type StockPreparationHandoffNotifyOutcome =
   | 'sent'
   | 'partial'
   | 'failed'
   | 'skipped'
-  | 'not_configured'
+  | 'no_destination'
 
 export interface StockPreparationHandoffAdvanceResult {
   projectNo: string

@@ -106,17 +106,27 @@
            This pair is why `handoff.read`/`handoff.advance` carry `control: null` in the manifest:
            they are additionally gated on RUNTIME state, so presence ≠ grant and the F-04 matrix
            cannot measure them. StockPreparationHandoff.spec.ts covers their visibility instead. -->
+      <!-- J1: the SECOND condition is the resend. The owed-notice invitation above is only honest if
+           the button it names is on screen, and in that state `isCurrentHandler` is false — the turn
+           has already moved on; what is outstanding is the message for the hop this caller completed.
+           The server decides both (it holds the monotonic claim column and the step rosters); the
+           page only renders what it is told. `completed` is deliberately NOT a bar on this branch: a
+           terminal hop whose claim was interrupted leaves the chain finished and the 仓库/采购 notice
+           still owed, which is the single most important message this feature sends. -->
       <button
-        v-if="can('handoff.advance') && handoff.configured && handoff.isCurrentHandler && !handoff.completed"
+        v-if="can('handoff.advance') && handoff.configured
+          && ((handoff.isCurrentHandler && !handoff.completed) || handoffResendableStepKey)"
         type="button"
         data-testid="stock-prep-handoff-advance"
         :disabled="busy || !projectNo"
         :title="!projectNo ? bi('先填项目号', 'Enter a project number first') : ''"
         @click="advanceHandoff"
       >
-        {{ handoff.terminal
-          ? bi('通知仓库和采购', 'Notify warehouse & purchasing')
-          : bi('通知下一步', 'Notify the next person') }}
+        {{ handoffResendableStepKey
+          ? bi('通知下一步(补发上一步的群消息)', 'Notify the next person (resend the previous step\'s message)')
+          : (handoff.terminal
+            ? bi('通知仓库和采购', 'Notify warehouse & purchasing')
+            : bi('通知下一步', 'Notify the next person')) }}
       </button>
 
       <!-- Platform-admin capabilities. Reconcile performs a SOURCE READ (and consumes a B2a
@@ -200,16 +210,32 @@
       </template>
     </p>
 
-    <!-- A hop whose notice can never be sent. Not an error — the work moved on — but the person who
-         should have been told never was, and only a human can close that now. -->
+    <!-- STILL OWED, STILL SENDABLE. The first version of this banner fired on exactly this state and
+         told the operator it could NOT be resent — copy that discourages the one click that fixes it.
+         It is an invitation now, and it renders only for the handler who can actually act on it. -->
     <p
-      v-if="handoffNotificationGap"
+      v-if="handoffResendableStepKey"
+      class="stock-prep-confirm__hint"
+      data-testid="stock-prep-handoff-notification-resendable"
+    >
+      {{ bi(
+        '上一跳的群通知还没发出去,再点一次「通知下一步」就会补发。',
+        'The group notice for the previous step has not gone out yet — press 通知下一步 again and it will be sent.',
+      ) }}
+      <code class="stock-prep-confirm__token">{{ handoffResendableStepKey }}</code>
+    </p>
+
+    <!-- GONE FOR GOOD. A later hop's claim moved the monotonic max past this one, so nothing the
+         system can do will send it. Named from the append-only trail, because an interior gap has no
+         other representation. -->
+    <p
+      v-if="handoffLostStepKeys.length > 0"
       class="stock-prep-confirm__hint"
       data-testid="stock-prep-handoff-notification-gap"
     >
       {{ bi(
-        '前面有一步的群通知没发出去,系统已经不能补发了 —— 请您口头跟相关的人确认一下。',
-        'An earlier step\'s group notice never went out and can no longer be resent — please confirm with the people involved in person.',
+        `「${handoffLostStepLabels}」这一步的群通知没发出去,系统已经不能补发了 —— 请您口头跟相关的人确认一下。`,
+        `The group notice for "${handoffLostStepLabels}" never went out and can no longer be resent — please confirm with the people involved in person.`,
       ) }}
     </p>
 
@@ -647,6 +673,8 @@ const HANDOFF_INERT: StockPreparationHandoffStatus = Object.freeze({
   isCurrentHandler: false,
   notifiedStepIndex: null,
   notificationsConfigured: false,
+  resendableStepKey: null,
+  lostStepKeys: [],
 })
 
 const handoff = ref<StockPreparationHandoffStatus>(HANDOFF_INERT)
@@ -677,7 +705,11 @@ const handoffNoticeText = computed<string>(() => {
   const attempted = result.notifyOutcome === 'sent'
     || result.notifyOutcome === 'partial'
     || result.notifyOutcome === 'failed'
-  if (result.changed === false && !attempted) {
+  // J2: `resumed` is the COMMITTED verdict that this click took the claim, so a request carrying it
+  // may never render the replay sentence — whatever the outcome. The first cut checked only
+  // `attempted`, which left one outcome ('not_configured', now 'no_destination') reaching the
+  // 「没什么要发」 wording on a click that had just spent the hop's one chance to be announced.
+  if (result.changed === false && !attempted && result.resumed !== true) {
     return bi(
       '这一步之前已经交接过了,没有重复通知。',
       'This step had already been handed on, so nobody was notified a second time.',
@@ -709,13 +741,22 @@ const handoffNoticeToken = computed<string | null>(() => handoffAdvance.value?.n
  * lost every notice it never meant to send. And the comparison is against `stepIndex - 1` because the
  * CURRENT hop has not been handed off yet: its notice is not late, it is not due.
  */
-const handoffNotificationGap = computed<boolean>(() => {
+const handoffLostStepKeys = computed<string[]>(() => {
   const state = handoff.value
-  if (!state.configured || !state.notificationsConfigured) return false
-  if (typeof state.stepIndex !== 'number' || state.stepIndex < 1) return false
-  const notified = state.notifiedStepIndex
-  return notified === null || notified < state.stepIndex - 1
+  if (!state.configured) return []
+  return Array.isArray(state.lostStepKeys) ? state.lostStepKeys : []
 })
+
+/** The step whose notice is still owed AND still sendable by this caller. Server-computed. */
+const handoffResendableStepKey = computed<string | null>(() => {
+  const state = handoff.value
+  if (!state.configured) return null
+  return typeof state.resendableStepKey === 'string' && state.resendableStepKey ? state.resendableStepKey : null
+})
+
+/** The committed labels for the lost hops, so the sentence names them rather than counting them. */
+const handoffLostStepLabels = computed<string>(() =>
+  handoffLostStepKeys.value.map((key) => handoffStepLabel(key)).join('、'))
 
 /** What the currently chosen handling actually does, in one line, before the operator commits. */
 const selectedActionHint = computed<string>(() => {
@@ -823,7 +864,11 @@ async function exportMaterials(): Promise<void> {
  * current handler; the button's `isCurrentHandler` condition is courtesy, not the gate.
  */
 async function advanceHandoff(): Promise<void> {
-  const fromStepKey = handoff.value.currentStepKey
+  // FINISH WHAT IS OWED BEFORE MOVING ON. When a hop's notice is still unsent, replaying THAT hop is
+  // what sends it; advancing the current one instead would claim the next step and push the monotonic
+  // max past the owed hop, losing it for good. So the resend wins when both are possible — which is
+  // also what the invitation on screen promises the click will do.
+  const fromStepKey = handoffResendableStepKey.value ?? handoff.value.currentStepKey
   if (!projectNo.value || !fromStepKey) return
   handoffAdvance.value = null
   await run(async () => {

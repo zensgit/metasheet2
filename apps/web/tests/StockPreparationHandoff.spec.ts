@@ -140,6 +140,10 @@ function handoffStatus(overrides: Record<string, unknown> = {}): Record<string, 
     completed: false,
     isCurrentHandler: true,
     notifiedStepIndex: null,
+    notificationsConfigured: true,
+    // J1: the server decides both of these — it holds the monotonic claim column and the rosters.
+    resendableStepKey: null,
+    lostStepKeys: [],
     ...overrides,
   }
 }
@@ -181,6 +185,24 @@ interface ServeConfig {
   /** Called once per GET /handoff, in order; the LAST entry serves every further call. */
   handoff?: Array<() => Response | Promise<Response>>
   advance?: () => Response | Promise<Response>
+}
+
+/**
+ * J1: what the page actually POSTED. The resend invitation promises that pressing the button sends
+ * the OWED hop's notice, and the only way that promise is checkable is by reading `fromStepKey` off
+ * the wire — a click that advanced the current step instead would push the monotonic claim past the
+ * owed hop and lose it, while looking identical on screen.
+ */
+function lastAdvanceBody(): Record<string, unknown> | null {
+  const calls = (h.apiFetch as unknown as { mock: { calls: unknown[][] } }).mock.calls
+  for (let i = calls.length - 1; i >= 0; i -= 1) {
+    const [url, options] = calls[i] as [string, { body?: unknown } | undefined]
+    if (!String(url).includes(ADVANCE_PATH)) continue
+    const body = options && options.body
+    if (typeof body === 'string') return JSON.parse(body)
+    return (body as Record<string, unknown>) ?? null
+  }
+  return null
 }
 
 function serve(config: ServeConfig): void {
@@ -673,8 +695,12 @@ describe('通知下一步 — the multi-person handoff on the confirmation queue
   // RC1's recovery ("press the button again") is real but narrow: it needs the SAME handler, before
   // the chain moves on. When it does move on, the ping is simply gone — and until now nothing on the
   // screen said so. The status read already carries `notifiedStepIndex`; the page now reads it.
-
-  it('H-18 (G6): a gap between the cursor and the last notified hop is shown, not hidden', async () => {
+  it('H-18 (J1): a hop whose notice can never be sent is named, from the trail', async () => {
+    // RE-SEEDED. The G6 version hand-fed {stepIndex:2, notifiedStepIndex:0} and called it "the gap";
+    // that is the state where the TAIL hop is unclaimed — precisely the one the same handler's next
+    // click still fixes. The state the server actually reports as lost carries the step KEYS, read
+    // back from the notification_lost audit rows, because the monotonic column cannot express an
+    // interior gap at all.
     asActor([STOCK_PREP_READ, STOCK_PREP_OPERATE])
     serve({
       handoff: [() => json({
@@ -683,43 +709,114 @@ describe('通知下一步 — the multi-person handoff on the confirmation queue
           stepIndex: 2,
           currentStepKey: 'final_review',
           isCurrentHandler: false,
-          // hop 1 was never announced: the claim jumped from "nothing" to hop 0 and then the chain
-          // moved twice.
-          notifiedStepIndex: 0,
+          notifiedStepIndex: 1,
           notificationsConfigured: true,
+          lostStepKeys: ['prep_entry'],
         }),
       })],
     })
     await render()
     const gap = document.querySelector('[data-testid="stock-prep-handoff-notification-gap"]')
-    expect(gap, 'a hop whose notice never went out must be visible on the page').not.toBeNull()
+    expect(gap, 'a hop whose notice can never be sent must be visible on the page').not.toBeNull()
     expect(gap!.textContent).toContain('没发出去')
+    expect(gap!.textContent).toContain('不能补发')
+    // Named, not counted — the operator has to know WHICH step to go and confirm in person.
+    expect(gap!.textContent).toContain(STOCK_PREP_HANDOFF_STEP_PLAIN.prep_entry.zh)
+    // And it must not also invite a click that cannot help.
+    expect(document.querySelector('[data-testid="stock-prep-handoff-notification-resendable"]')).toBeNull()
   })
 
-  it('H-19 (G6): no gap notice when every hop so far has been notified', async () => {
+  it('H-19 (J1): the STILL-SENDABLE hop invites the click instead of discouraging it', async () => {
+    // This is the state the old banner fired on, telling the operator it could never be resent —
+    // copy that discourages the one action that fixes it. It is an invitation now, and the button it
+    // names is on screen even though the turn has moved past this caller.
     asActor([STOCK_PREP_READ, STOCK_PREP_OPERATE])
     serve({
       handoff: [() => json({
         ok: true,
-        data: handoffStatus({ stepIndex: 1, currentStepKey: 'process', isCurrentHandler: false, notifiedStepIndex: 0, notificationsConfigured: true }),
+        data: handoffStatus({
+          stepIndex: 1,
+          currentStepKey: 'process',
+          isCurrentHandler: false,
+          notifiedStepIndex: null,
+          notificationsConfigured: true,
+          resendableStepKey: 'prep_entry',
+        }),
       })],
+      advance: () => json({
+        ok: true,
+        data: advanceResult({ changed: false, notified: true, notifyOutcome: 'sent', resumed: true }),
+      }),
     })
     await render()
+    const invite = document.querySelector('[data-testid="stock-prep-handoff-notification-resendable"]')
+    expect(invite, 'the owed notice must be surfaced as something the operator can still fix').not.toBeNull()
+    expect(invite!.textContent).toContain('再点一次')
     expect(document.querySelector('[data-testid="stock-prep-handoff-notification-gap"]')).toBeNull()
+
+    // The invitation names a button, so the button must be there — and pressing it must resend THAT
+    // hop, not advance the current one.
+    const button = advanceButton()
+    expect(button, 'the invitation is only honest if the control it names is rendered').not.toBeNull()
+    button!.click()
+    await flush()
+    expect(lastAdvanceBody()?.fromStepKey).toBe('prep_entry')
+    expect(noticeLine()?.textContent ?? '').toContain('之前没发出去的通知')
   })
 
-  it('H-20 (G6): a turn-state-only deployment never shows a gap it could not have filled', async () => {
-    // No destinations configured at all: `notifiedStepIndex` stays null forever and that is correct,
-    // not a lost notice. Reading the gap without this flag would alarm every such deployment.
+  it('H-20 (J1): a turn-state-only deployment shows neither banner', async () => {
     asActor([STOCK_PREP_READ, STOCK_PREP_OPERATE])
     serve({
       handoff: [() => json({
         ok: true,
-        data: handoffStatus({ stepIndex: 2, currentStepKey: 'final_review', isCurrentHandler: false, notifiedStepIndex: null, notificationsConfigured: false }),
+        data: handoffStatus({
+          stepIndex: 2,
+          currentStepKey: 'final_review',
+          isCurrentHandler: false,
+          notifiedStepIndex: null,
+          notificationsConfigured: false,
+        }),
       })],
     })
     await render()
     expect(document.querySelector('[data-testid="stock-prep-handoff-notification-gap"]')).toBeNull()
+    expect(document.querySelector('[data-testid="stock-prep-handoff-notification-resendable"]')).toBeNull()
+  })
+
+  it('H-21 (J2): a resume that took the claim never reads as "nothing needed sending"', async () => {
+    // The G1 fix keyed off `attempted` (sent/partial/failed) alone, which left one outcome reaching
+    // the replay sentence on a click that had just spent the hop's one chance to be announced.
+    asActor([STOCK_PREP_READ, STOCK_PREP_OPERATE])
+    serve({
+      handoff: [() => json({ ok: true, data: handoffStatus() })],
+      advance: () => json({
+        ok: true,
+        data: advanceResult({ changed: false, notified: false, notifyOutcome: 'no_destination', resumed: true }),
+      }),
+    })
+    await render()
+    advanceButton()!.click()
+    await flush()
+    expect(noticeLine()?.textContent ?? '').not.toContain('没有重复通知')
+  })
+
+  it('H-22 (J2): a configured chain with no destination does not blame the admin', async () => {
+    // A legal turn-state-only chain used to be shown the unconfigured-deployment copy — telling the
+    // operator an admin must set the chain up, on a screen whose button only renders because it IS.
+    asActor([STOCK_PREP_READ, STOCK_PREP_OPERATE])
+    serve({
+      handoff: [() => json({ ok: true, data: handoffStatus({ notificationsConfigured: false }) })],
+      advance: () => json({
+        ok: true,
+        data: advanceResult({ notified: false, notifyOutcome: 'no_destination' }),
+      }),
+    })
+    await render()
+    advanceButton()!.click()
+    await flush()
+    const text = noticeLine()?.textContent ?? ''
+    expect(text).toContain(STOCK_PREP_HANDOFF_OUTCOME_PLAIN.no_destination.zh)
+    expect(text, 'the chain IS configured; only the destination is absent').not.toContain('还没有配置备料接力的步骤')
   })
 
 })

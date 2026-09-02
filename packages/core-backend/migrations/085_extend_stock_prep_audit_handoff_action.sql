@@ -22,12 +22,35 @@
 -- THE AUDITED ROW STAYS VALUES-FREE. `project_id` carries the business projectNo (a navigation
 -- handle, the same class as the mappingId/snapshotBatchId the existing actions carry, NOT a material
 -- name); `subject_id` carries the step key, drawn from the CLOSED handoff vocabulary committed in
--- plugins/plugin-integration-core/lib/stock-preparation-handoff.cjs; `mode` is the enum
--- advanced|replayed|completed; and `detail` carries the two cursor INTEGERS plus booleans
--- (fromStepIndex / toStepIndex / stepCount / changed / notified / terminal). All of them pass the
--- store's structural gate (assertValuesFreeDetail, which admits only enum-shaped ASCII strings,
--- finite numbers and booleans). No drawing number, material name, spec or quantity is reachable from
--- any of them, and the suite proves it against every seeded value rather than spot-checking.
+-- plugins/plugin-integration-core/lib/stock-preparation-handoff.cjs.
+--
+-- `mode` IS THE ENUM advanced | replayed | completed | notification_lost, AND THIS COMMENT IS THE ONLY
+-- PLACE THAT SAYS SO — the `mode` column carries no CHECK constraint (066), unlike `action`, so there
+-- is no schema to read it off and no migration test that can set-compare it. Keep it current.
+--   advanced          the cursor moved to a mid-chain step.
+--   completed         the cursor moved past the LAST step (the 仓库/采购 hop).
+--   replayed          the store wrote nothing: the cursor was already where this request wanted it.
+--                     Recorded because a person did press the button, and that is a fact a reviewer
+--                     asking 「谁交接的」 wants to see.
+--   notification_lost a hop's group notice can never be sent now — a later hop's claim moved the
+--                     monotonic notified_step_index past it. Written by the SUPERSEDING advance, one
+--                     row per lost hop, because that hop's own request is long gone.
+--
+-- TWO `detail` SHAPES, one per mode family, both values-free:
+--   advanced / replayed / completed
+--     { operation: 'handoff_advance', fromStepIndex, toStepIndex, stepCount, terminal,
+--       notificationOwed }
+--     `notificationOwed` is an OBSERVATION made at append time (the cursor had already moved and this
+--     hop's notice was still unclaimed), NOT a claim that this request sent it — the claim is taken
+--     after this row lands, so the committed verdict rides the HTTP response instead.
+--   notification_lost
+--     { operation: 'handoff_notification_lost', lostStepIndex, stepCount }
+--     `subject_id` on that row is the LOST step's key, not the advancing one.
+--
+-- All of them pass the store's structural gate (assertValuesFreeDetail, which admits only enum-shaped
+-- ASCII strings, finite numbers and booleans). No drawing number, material name, spec or quantity is
+-- reachable from any of them, and the suite proves it against every seeded value rather than
+-- spot-checking.
 --
 -- NOTE ON WHAT IS DELIBERATELY *NOT* RECORDED: the handler identities configured for each step. They
 -- are deploy config, they are already in the config file a reviewer can read, and putting a roster
