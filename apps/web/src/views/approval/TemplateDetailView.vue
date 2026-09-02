@@ -1044,6 +1044,7 @@ function fieldTypeLabel(type: FormFieldType) {
     select: '单选',
     'multi-select': '多选',
     user: '用户',
+    department: '部门',
     attachment: '附件',
     detail: '明细',
     'record-link': '关联记录',

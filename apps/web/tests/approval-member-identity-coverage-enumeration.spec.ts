@@ -318,6 +318,9 @@ const ALLOWLIST: AllowlistEntry[] = [
   ...group('VALUES-FREE-FIXED', 'MyDelegationView delegateeDisplay -- resolver-wrapped, never the raw column value directly', [
     ['src/views/approval/MyDelegationView.vue', 'delegateeDisplay(row.delegateeUserId)'],
   ]),
+  ...group('VALUES-FREE-FIXED', 'ApprovalDepartmentPicker tree heading -- directory-validated department name with a static root label fallback, never an id', [
+    ['src/approvals/components/ApprovalDepartmentPicker.vue', "browseStack.at(-1)?.name || '全部部门'"],
+  ]),
 
   // ---- OUT-OF-SCOPE: admin-only raw-id render, matches the pre-existing #5010/hand-list precedent ----
   ...group('OUT-OF-SCOPE', 'admin-only delegation table (approval-templates:manage) -- intentional raw id for the admin audience', [

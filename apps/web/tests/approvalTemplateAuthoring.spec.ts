@@ -3964,6 +3964,48 @@ describe('TemplateAuthoringView', () => {
     expect(optionValues).not.toContain('note')
   })
 
+  it('Lock-2 L2-A: legacy visibility and condition pickers exclude department while scalar fields stay selectable', async () => {
+    setRouteParams({ id: 'tpl_1' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: {
+        fields: [
+          { id: 'amount', type: 'number', label: '金额' },
+          { id: 'department', type: 'department', label: '部门', props: { selection: 'single', display: 'full_path' } },
+          { id: 'reason', type: 'text', label: '事由' },
+        ],
+      } as any,
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          { key: 'cond_1', type: 'condition', name: '判断', config: { branches: [{ edgeKey: 'e-a', rules: [{ fieldId: 'amount', operator: 'gte', value: 100 }] }], defaultEdgeKey: 'e-b' } },
+          { key: 'app_a', type: 'approval', name: 'A', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-c', source: 'start', target: 'cond_1' },
+          { key: 'e-a', source: 'cond_1', target: 'app_a' },
+          { key: 'e-b', source: 'cond_1', target: 'end' },
+          { key: 'e-a-end', source: 'app_a', target: 'end' },
+        ],
+      },
+    }))
+    await mountView()
+    await flushUi()
+
+    const reasonRow = container!.querySelectorAll('[data-testid="approval-template-field-row"]')[2] as HTMLElement
+    const visibilityValues = Array.from(
+      (reasonRow.querySelector('[data-testid="approval-field-visibility-depends"]') as HTMLSelectElement).options,
+    ).map((option) => option.value)
+    expect(visibilityValues).toContain('amount')
+    expect(visibilityValues).not.toContain('department')
+
+    const conditionValues = Array.from(
+      (container!.querySelector('[data-testid="approval-condition-rule-field"]') as HTMLSelectElement).options,
+    ).map((option) => option.value)
+    expect(conditionValues).toContain('amount')
+    expect(conditionValues).not.toContain('department')
+  })
+
   // ── F4 production mount (delta §5 F4 / §10 FB-D8) ──
   describe('F4 production mount: flag-gated Designer 2.0 (approvalCanvasV2)', () => {
     it('flag OFF: only the legacy inline editor renders — Designer 2.0 (palette/builder/inspector) is entirely absent from the DOM, and the legacy click-append path still works (positive control, byte-identical fallback)', async () => {

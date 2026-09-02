@@ -361,6 +361,19 @@
               @update:model-value="formData[field.id] = $event"
             />
 
+            <ApprovalDepartmentPicker
+              v-else-if="field.type === 'department'"
+              :model-value="departmentFieldValue(field.id)"
+              :selection="departmentSelection(field)"
+              :display="departmentDisplay(field)"
+              :max-selections="departmentMaxSelections(field)"
+              :default-mode="departmentDefaultMode(field)"
+              :default-department-ids="departmentDefaultIds(field)"
+              :aria-label="`选择${field.label}`"
+              :placeholder="field.placeholder || `请选择${field.label}`"
+              @update:model-value="formData[field.id] = $event"
+            />
+
             <!-- detail / sub-form (明细): editable rows × leaf-column cells. `formData[field.id]`
                  is an array of row objects keyed by sub-field id; each cell reuses the matching
                  leaf editor. Respects minRows/maxRows (add disabled at maxRows; remove disabled
@@ -648,6 +661,9 @@ import { amountToChineseWords } from '../../approvals/amountInWords'
 import { numberFieldScale } from '../../approvals/amountAutoSum'
 import { clearFormDraft, formDraftKey, formSchemaSignature, loadFormDraft, saveFormDraft } from '../../approvals/formDraft'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
+import ApprovalDepartmentPicker, {
+  type ApprovalDepartmentValue,
+} from '../../approvals/components/ApprovalDepartmentPicker.vue'
 import {
   createEmptyDetailRow,
   isDetailCellVisible,
@@ -709,6 +725,45 @@ const { features: productFeatures } = useFeatureFlags()
 const attachmentUploadEnabled = computed(() => productFeatures.value.approvalAttachments === true)
 const uploadedAttachments = reactive<Record<string, Array<{ id: string; name: string }>>>({})
 const attachmentUploading = ref(false)
+
+function departmentFieldValue(fieldId: string): ApprovalDepartmentValue[] {
+  const value = formData[fieldId]
+  if (!Array.isArray(value)) return []
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return []
+    const record = entry as Record<string, unknown>
+    if (typeof record.id !== 'string' || !record.id) return []
+    return [{
+      id: record.id,
+      ...(typeof record.name === 'string' ? { name: record.name } : {}),
+      ...(typeof record.fullPath === 'string' ? { fullPath: record.fullPath } : {}),
+    }]
+  })
+}
+
+function departmentSelection(field: FormField): 'single' | 'multi' {
+  return field.props?.selection === 'multi' ? 'multi' : 'single'
+}
+
+function departmentDisplay(field: FormField): 'leaf_only' | 'full_path' {
+  return field.props?.display === 'full_path' ? 'full_path' : 'leaf_only'
+}
+
+function departmentMaxSelections(field: FormField): number | undefined {
+  return typeof field.props?.maxSelections === 'number' ? field.props.maxSelections : undefined
+}
+
+function departmentDefaultMode(field: FormField): 'requester_department' | 'designated' | undefined {
+  return field.props?.defaultMode === 'requester_department' || field.props?.defaultMode === 'designated'
+    ? field.props.defaultMode
+    : undefined
+}
+
+function departmentDefaultIds(field: FormField): string[] {
+  return Array.isArray(field.props?.defaultDepartmentIds)
+    ? field.props.defaultDepartmentIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+    : []
+}
 
 function attachmentList(fieldId: string): Array<{ id: string; name: string }> {
   return uploadedAttachments[fieldId] ?? []

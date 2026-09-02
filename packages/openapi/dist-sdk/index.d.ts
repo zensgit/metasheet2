@@ -443,6 +443,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/approvals/directory/departments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List active departments for an approval form picker
+         * @description Lock-2 L2-A participant-facing department directory. The server derives the
+         *     canonical directory integration from the authenticated actor. Callers cannot
+         *     select an organization or integration, and the response exposes no provider or
+         *     integration identifier. Search and tree modes return only active departments.
+         */
+        get: operations["listApprovalDirectoryDepartments"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/approvals/pending": {
         parameters: {
             query?: never;
@@ -18039,6 +18062,16 @@ export interface components {
              */
             sheetId: string;
         };
+        DepartmentFieldProps: {
+            /** @enum {string} */
+            selection: "single" | "multi";
+            /** @enum {string} */
+            display: "leaf_only" | "full_path";
+            /** @enum {string} */
+            defaultMode?: "requester_department" | "designated";
+            defaultDepartmentIds?: string[];
+            maxSelections?: number;
+        };
         FormFieldGeneric: {
             id: string;
             /**
@@ -18058,6 +18091,21 @@ export interface components {
             /** @description Detail-group leaf columns (only when type=detail). Never contains record-link. */
             columns?: components["schemas"]["FormFieldDetailLeaf"][];
         };
+        FormFieldDepartment: {
+            id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "department";
+            label: string;
+            required?: boolean;
+            placeholder?: string;
+            defaultValue?: unknown;
+            options?: components["schemas"]["FormOption"][];
+            props: components["schemas"]["DepartmentFieldProps"];
+            visibilityRule?: components["schemas"]["FormFieldVisibilityRule"];
+        };
         FormFieldRecordLink: {
             id: string;
             /**
@@ -18075,7 +18123,7 @@ export interface components {
             props: components["schemas"]["RecordLinkFieldProps"];
             visibilityRule?: components["schemas"]["FormFieldVisibilityRule"];
         };
-        FormField: components["schemas"]["FormFieldRecordLink"] | components["schemas"]["FormFieldGeneric"];
+        FormField: components["schemas"]["FormFieldRecordLink"] | components["schemas"]["FormFieldDepartment"] | components["schemas"]["FormFieldGeneric"];
         FormSchema: {
             fields: components["schemas"]["FormField"][];
         };
@@ -19925,6 +19973,58 @@ export interface operations {
              *     distinguishes missing from denied).
              */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listApprovalDirectoryDepartments: {
+        parameters: {
+            query?: {
+                /** @description Optional name or full-path search text. */
+                q?: string;
+                limit?: number;
+                mode?: "search" | "tree";
+                /** @description Parent department for tree mode; omitted to list roots. */
+                parentId?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Active departments from the actor's canonical integration. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        departments: {
+                            /** Format: uuid */
+                            id: string;
+                            name: string;
+                            fullPath: string;
+                            /** Format: uuid */
+                            parentId?: string;
+                            hasChildren: boolean;
+                        }[];
+                        /** Format: uuid */
+                        requesterDepartmentId?: string;
+                    };
+                };
+            };
+            400: components["responses"]["ValidationError"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description Canonical approval directory integration could not be derived. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

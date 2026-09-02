@@ -5842,6 +5842,50 @@
           "sheetId"
         ]
       },
+      "DepartmentFieldProps": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "selection": {
+            "type": "string",
+            "enum": [
+              "single",
+              "multi"
+            ]
+          },
+          "display": {
+            "type": "string",
+            "enum": [
+              "leaf_only",
+              "full_path"
+            ]
+          },
+          "defaultMode": {
+            "type": "string",
+            "enum": [
+              "requester_department",
+              "designated"
+            ]
+          },
+          "defaultDepartmentIds": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": ".*\\S.*"
+            }
+          },
+          "maxSelections": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "selection",
+          "display"
+        ]
+      },
       "FormFieldGeneric": {
         "type": "object",
         "properties": {
@@ -5904,6 +5948,51 @@
           "label"
         ]
       },
+      "FormFieldDepartment": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "department"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "placeholder": {
+            "type": "string"
+          },
+          "defaultValue": {
+            "nullable": true
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FormOption"
+            }
+          },
+          "props": {
+            "$ref": "#/components/schemas/DepartmentFieldProps"
+          },
+          "visibilityRule": {
+            "$ref": "#/components/schemas/FormFieldVisibilityRule"
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "label",
+          "props"
+        ]
+      },
       "FormFieldRecordLink": {
         "type": "object",
         "additionalProperties": false,
@@ -5956,6 +6045,9 @@
             "$ref": "#/components/schemas/FormFieldRecordLink"
           },
           {
+            "$ref": "#/components/schemas/FormFieldDepartment"
+          },
+          {
             "$ref": "#/components/schemas/FormFieldGeneric"
           }
         ],
@@ -5971,6 +6063,7 @@
             "select": "#/components/schemas/FormFieldGeneric",
             "multi-select": "#/components/schemas/FormFieldGeneric",
             "user": "#/components/schemas/FormFieldGeneric",
+            "department": "#/components/schemas/FormFieldDepartment",
             "attachment": "#/components/schemas/FormFieldGeneric",
             "detail": "#/components/schemas/FormFieldGeneric",
             "date_range": "#/components/schemas/FormFieldGeneric",
@@ -13426,6 +13519,139 @@
           },
           "404": {
             "description": "Target sheet not found / base mismatch / unreadable (shared no-oracle shape).\nBody is the same approval error envelope as other 4xx routes\n(`ok: false` with nested `error.code` + `error.message`; it never\ndistinguishes missing from denied).\n",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/approvals/directory/departments": {
+      "get": {
+        "operationId": "listApprovalDirectoryDepartments",
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "List active departments for an approval form picker",
+        "description": "Lock-2 L2-A participant-facing department directory. The server derives the\ncanonical directory integration from the authenticated actor. Callers cannot\nselect an organization or integration, and the response exposes no provider or\nintegration identifier. Search and tree modes return only active departments.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Optional name or full-path search text."
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 20
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "search",
+                "tree"
+              ],
+              "default": "search"
+            }
+          },
+          {
+            "in": "query",
+            "name": "parentId",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Parent department for tree mode; omitted to list roots."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active departments from the actor's canonical integration.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "departments"
+                  ],
+                  "properties": {
+                    "departments": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "id",
+                          "name",
+                          "fullPath",
+                          "hasChildren"
+                        ],
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "fullPath": {
+                            "type": "string"
+                          },
+                          "parentId": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "hasChildren": {
+                            "type": "boolean"
+                          }
+                        }
+                      }
+                    },
+                    "requesterDepartmentId": {
+                      "type": "string",
+                      "format": "uuid"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "description": "Canonical approval directory integration could not be derived.",
             "content": {
               "application/json": {
                 "schema": {

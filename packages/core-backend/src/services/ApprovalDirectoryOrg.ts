@@ -44,6 +44,10 @@
 type QueryFn = <Row>(text: string, params?: unknown[]) => Promise<{ rows: Row[] }>
 
 export interface ApprovalRequesterOrgRelations {
+  /** Internal Lock-2 L2-A anchor. Never serialize this directory integration id. */
+  canonicalIntegrationId?: string
+  /** The requester's primary LOCAL department id, used only for same-user form prefills. */
+  primaryDepartmentId?: string
   /** RA-1a: the requester's directory-resolved primary department NAME (directory_departments.name) —
    *  the tamper-resistant source for `requester.department`. Omitted when unresolvable. */
   primaryDepartmentName?: string
@@ -255,6 +259,8 @@ interface RequesterDirectoryRow {
   external_user_id: string
   raw: unknown
   title: string | null
+  primary_department_id: string | null
+  primary_department_active: boolean | null
   primary_external_department_id: string | null
   primary_department_raw: unknown
   primary_department_name: string | null
@@ -306,6 +312,9 @@ export async function resolveApprovalRequesterOrgRelations(
   query: QueryFn,
   options: {
     includeManagerChain?: boolean
+    /** Lock-2 L2-A internal-only form-field context. Keeps the new directory anchor/id out of
+     * every pre-existing caller's result shape unless that caller is resolving a department field. */
+    includeDepartmentFieldContext?: boolean
     /** Lock-1 §K4 — walk the department-head chain (`deptHeadChainIds`) into the result. Opt-in
      *  like `includeManagerChain`: gated on the published graph using `continuous_dept_heads`
      *  (`runtimeGraphUsesDeptHeadChain`), so the extra per-hop queries stay off every other
@@ -443,6 +452,8 @@ export async function resolveApprovalRequesterOrgRelations(
             a.external_user_id           AS external_user_id,
             a.raw                        AS raw,
             a.title                      AS title,
+            d.id::text                   AS primary_department_id,
+            d.is_active                  AS primary_department_active,
             d.external_department_id     AS primary_external_department_id,
             d.raw                        AS primary_department_raw,
             d.name                       AS primary_department_name
@@ -469,6 +480,8 @@ export async function resolveApprovalRequesterOrgRelations(
                 a.external_user_id           AS external_user_id,
                 a.raw                        AS raw,
                 a.title                      AS title,
+                d.id::text                   AS primary_department_id,
+                d.is_active                  AS primary_department_active,
                 d.external_department_id     AS primary_external_department_id,
                 d.raw                        AS primary_department_raw,
                 d.name                       AS primary_department_name
@@ -496,6 +509,8 @@ export async function resolveApprovalRequesterOrgRelations(
             a.external_user_id           AS external_user_id,
             a.raw                        AS raw,
             a.title                      AS title,
+            d.id::text                   AS primary_department_id,
+            d.is_active                  AS primary_department_active,
             d.external_department_id     AS primary_external_department_id,
             d.raw                        AS primary_department_raw,
             d.name                       AS primary_department_name
@@ -553,6 +568,12 @@ export async function resolveApprovalRequesterOrgRelations(
   }
 
   const relations: ApprovalRequesterOrgRelations = {}
+  if (options.includeDepartmentFieldContext) {
+    relations.canonicalIntegrationId = integrationId
+    if (requester.primary_department_active && requester.primary_department_id) {
+      relations.primaryDepartmentId = requester.primary_department_id
+    }
+  }
   if (managerId) relations.managerId = managerId
   if (deptHeadId) relations.deptHeadId = deptHeadId
   const primaryDepartmentName = requester.primary_department_name?.trim()

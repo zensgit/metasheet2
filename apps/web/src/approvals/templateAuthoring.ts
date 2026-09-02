@@ -102,6 +102,7 @@ export const AUTHORABLE_FIELD_TYPES: AuthorableFieldType[] = [
   'select',
   'multi-select',
   'user',
+  'department',
   'detail',
   'record-link',
   // Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2): start+end date pair.
@@ -176,6 +177,11 @@ export interface FieldAuthoringDraft {
    * silently defaults it.
    */
   explanationText: string
+  departmentSelection: 'single' | 'multi'
+  departmentDisplay: 'leaf_only' | 'full_path'
+  departmentDefaultMode: '' | 'requester_department' | 'designated'
+  departmentDefaultIds: string[]
+  departmentMaxSelectionsText: string
   original?: FormField
 }
 
@@ -390,6 +396,11 @@ export function createEmptyFieldDraft(index = 1): FieldAuthoringDraft {
     dateRangeEndLabel: '',
     dateRangeDurationLabel: '',
     explanationText: '',
+    departmentSelection: 'single',
+    departmentDisplay: 'leaf_only',
+    departmentDefaultMode: '',
+    departmentDefaultIds: [],
+    departmentMaxSelectionsText: '',
   }
 }
 
@@ -622,6 +633,23 @@ function fieldDraftFromField(field: FormField): FieldAuthoringDraft | null {
     // non-blank `props.text` at publish, so a freshly-saved template can never reach this hydration
     // path with a malformed value; this stays defensive for out-of-band data.
     explanationText: field.type === 'explanation' && typeof props.text === 'string' ? props.text : '',
+    departmentSelection:
+      field.type === 'department' && props.selection === 'multi' ? 'multi' : 'single',
+    departmentDisplay:
+      field.type === 'department' && props.display === 'full_path' ? 'full_path' : 'leaf_only',
+    departmentDefaultMode:
+      field.type === 'department'
+      && (props.defaultMode === 'requester_department' || props.defaultMode === 'designated')
+        ? props.defaultMode
+        : '',
+    departmentDefaultIds:
+      field.type === 'department' && Array.isArray(props.defaultDepartmentIds)
+        ? props.defaultDepartmentIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+        : [],
+    departmentMaxSelectionsText:
+      field.type === 'department' && typeof props.maxSelections === 'number'
+        ? String(props.maxSelections)
+        : '',
     original: field,
   }
 }
@@ -1582,6 +1610,17 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
         // unwritten draft emits an empty string, and publish's non-blank check rejects it rather
         // than the client silently picking a placeholder body.
         next.props = { text: field.explanationText.trim() }
+      } else if (field.type === 'department') {
+        const maxSelections = field.departmentMaxSelectionsText.trim()
+        next.props = {
+          selection: field.departmentSelection,
+          display: field.departmentDisplay,
+          ...(field.departmentDefaultMode ? { defaultMode: field.departmentDefaultMode } : {}),
+          ...(field.departmentDefaultMode === 'designated' && field.departmentDefaultIds.length > 0
+            ? { defaultDepartmentIds: [...field.departmentDefaultIds] }
+            : {}),
+          ...(maxSelections ? { maxSelections: Number(maxSelections) } : {}),
+        }
       } else if (next.props && typeof next.props === 'object') {
         // Drop record-link pins + L8-C display keys + L8-B date_range keys + L8-A explanation
         // text when type changes away; keep other type-specific props only if still meaningful (do

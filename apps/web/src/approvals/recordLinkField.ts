@@ -91,7 +91,11 @@ export function isRecordLinkType(type: FormFieldType): boolean {
  * nothing to compare, ever), and unlike date_range it gets no endpoint fallback (it has none).
  */
 export function isSelectableConditionOrVisibilityDependencyType(type: FormFieldType | string): boolean {
-  return type !== 'record-link' && type !== 'detail' && type !== 'date_range' && type !== 'explanation'
+  return type !== 'record-link'
+    && type !== 'detail'
+    && type !== 'date_range'
+    && type !== 'explanation'
+    && type !== 'department'
 }
 
 /**

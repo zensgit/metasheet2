@@ -3695,8 +3695,32 @@ components:
             Pinned multitable sheet id (publish-time; filler cannot override).
             Must be non-blank after trim — whitespace-only is invalid.
       required: [baseId, sheetId]
-    # Non-record-link form fields: free-form props. type enum excludes record-link so it cannot
-    # overlap FormFieldRecordLink (invalid oneOf when both members accept the same payload).
+    DepartmentFieldProps:
+      type: object
+      additionalProperties: false
+      properties:
+        selection:
+          type: string
+          enum: [single, multi]
+        display:
+          type: string
+          enum: [leaf_only, full_path]
+        defaultMode:
+          type: string
+          enum: [requester_department, designated]
+        defaultDepartmentIds:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            pattern: '.*\S.*'
+        maxSelections:
+          type: integer
+          minimum: 1
+      required: [selection, display]
+    # Form fields without dedicated strict props. The enum excludes record-link and department so
+    # those payloads cannot overlap their strict oneOf members.
     FormFieldGeneric:
       type: object
       properties:
@@ -3728,6 +3752,32 @@ components:
             $ref: '#/components/schemas/FormFieldDetailLeaf'
           description: Detail-group leaf columns (only when type=detail). Never contains record-link.
       required: [id, type, label]
+    FormFieldDepartment:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [department]
+        label:
+          type: string
+        required:
+          type: boolean
+        placeholder:
+          type: string
+        defaultValue:
+          nullable: true
+        options:
+          type: array
+          items:
+            $ref: '#/components/schemas/FormOption'
+        props:
+          $ref: '#/components/schemas/DepartmentFieldProps'
+        visibilityRule:
+          $ref: '#/components/schemas/FormFieldVisibilityRule'
+      required: [id, type, label, props]
     # record-link only: props MUST be strict RecordLinkFieldProps (baseId + sheetId required).
     # additionalProperties:false — no columns/minRows/maxRows/unknown outer keys (top-level only;
     # runtime rejects detail-only keys on non-detail fields).
@@ -3760,11 +3810,12 @@ components:
         visibilityRule:
           $ref: '#/components/schemas/FormFieldVisibilityRule'
       required: [id, type, label, props]
-    # Discriminated union: record-link requires RecordLinkFieldProps; other types use free-form props.
-    # Avoids invalid overlapping oneOf on a single FormField.props field.
+    # Discriminated union: record-link and department use strict props; remaining types use the
+    # generic carrier. Distinct type enums avoid overlapping oneOf members.
     FormField:
       oneOf:
         - $ref: '#/components/schemas/FormFieldRecordLink'
+        - $ref: '#/components/schemas/FormFieldDepartment'
         - $ref: '#/components/schemas/FormFieldGeneric'
       discriminator:
         propertyName: type
@@ -3778,6 +3829,7 @@ components:
           select: '#/components/schemas/FormFieldGeneric'
           multi-select: '#/components/schemas/FormFieldGeneric'
           user: '#/components/schemas/FormFieldGeneric'
+          department: '#/components/schemas/FormFieldDepartment'
           attachment: '#/components/schemas/FormFieldGeneric'
           detail: '#/components/schemas/FormFieldGeneric'
           date_range: '#/components/schemas/FormFieldGeneric'
