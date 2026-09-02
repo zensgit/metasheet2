@@ -287,6 +287,78 @@ check('stockPreparationHandoffAdvance: checks the configured chain belongs to th
   )
 })
 
+// ── The VALUE-BEARING READS: the same tripwire, pointed the other way ────────────────────────────
+//
+// The four reads below are the ONLY stock-prep GETs that carry customer values to the caller (project
+// numbers and names, material names and quantities, an author's own entered value). They do NOT use
+// `resolveAuthUserTenantId` — they use `resolveOperatorValueScope`, which is stricter still: it
+// prefers a VERIFIED token claim, refuses a request-carried tenant, refuses a header that
+// contradicts the claim, refuses a principal with no tenant of its own, and makes the HOST vouch for
+// the (user, tenant) pairing. `user.tenantId` alone is not enough here, because the host's auth
+// middleware fills that field from the `x-tenant-id` REQUEST HEADER when a token carries no tenant
+// claim — so on a claimless deployment `resolveTenantId` would let a header pick whose values are
+// served.
+//
+// WHY STATIC. Every route-level behaviour test enters through the handler and therefore only ever
+// sees the scope that IS resolved; swapping `scope.tenantId` for `resolveTenantId(req, input)` at
+// the derivation sites kept all nine plugin suites green. Only a source-level assertion says "this
+// class of handler does not reach for the request-steerable resolver at all", and only that form
+// stays true when a fifth value-bearing read arrives.
+const VALUE_BEARING_READ_HANDLERS = [
+  'stockPreparationConfirmationDecisionsValueEntry',
+  'stockPreparationPrepLineExport',
+  'stockPreparationOperatorProjectDirectory',
+  'stockPreparationOperatorProjectBoard',
+]
+
+// The three that derive their staging project inline. (The export does not: its sheet is the bound
+// table action's deploy-time target, which is why its own handler comment spells out what the
+// verified tenant does and does not decide there.)
+const VALUE_BEARING_READS_WITH_INLINE_STAGING = new Set([
+  'stockPreparationConfirmationDecisionsValueEntry',
+  'stockPreparationOperatorProjectDirectory',
+  'stockPreparationOperatorProjectBoard',
+])
+
+for (const name of VALUE_BEARING_READ_HANDLERS) {
+  const body = handlerBody(ROUTES_SRC, name)
+
+  check(`${name}: does NOT derive tenant via the request-steerable resolveTenantId`, () => {
+    assert.equal(
+      /resolveTenantId\(/.test(body),
+      false,
+      `${name} calls resolveTenantId(...) — a VALUE-BEARING read must derive its tenant from resolveOperatorValueScope, which is the sole tenancy authority on this plane`,
+    )
+  })
+
+  check(`${name}: does NOT read user.tenantId directly`, () => {
+    assert.equal(
+      /user\.tenantId/.test(body),
+      false,
+      `${name} reads user.tenantId — that field is filled from the x-tenant-id REQUEST HEADER on a tenant-claimless deployment, so it is not a verified claim`,
+    )
+  })
+
+  check(`${name}: derives WHOSE values through resolveOperatorValueScope`, () => {
+    assert.equal(
+      body.includes('resolveOperatorValueScope('),
+      true,
+      `${name} must resolve the operator value scope`,
+    )
+  })
+
+  if (VALUE_BEARING_READS_WITH_INLINE_STAGING.has(name)) {
+    check(`${name}: the staging project comes from the RESOLVED SCOPE, with no request projectId`, () => {
+      const calls = body.match(/resolveIntegrationStagingProjectId\([^)]*\)/g) || []
+      assert.ok(calls.length > 0, `${name} must derive its staging project`)
+      assert.ok(
+        calls.every((call) => call === 'resolveIntegrationStagingProjectId(scope.tenantId, undefined)'),
+        `${name} must derive the staging project from scope.tenantId with undefined (got ${JSON.stringify(calls)})`,
+      )
+    })
+  }
+}
+
 console.log(`\nstock-preparation-tenant-scoped-write-guard.test.cjs: ${passed} passed, ${failed} failed`)
 if (failed > 0) {
   console.error('stock-preparation-tenant-scoped-write-guard.test.cjs FAILED')

@@ -963,12 +963,22 @@ function requireAccess(req, action) {
  * source binding — so admitting an operator through `resolveTenantId` alone would hand this tier a
  * cross-tenant capability the split was never asked to grant.
  *
- * So the operator branch runs the SAME scope every other operator surface runs
- * (`resolveOperatorValueScope`: prefer the verified claim, refuse a contradicting header, refuse a
+ * So the operator branch runs the SAME scope every other operator surface runs:
+ * `resolveOperatorValueScope` — prefer the verified claim, refuse a contradicting header, refuse a
  * principal with no tenant of its own, refuse request-carried steering, and make the HOST vouch for
- * the (user, tenant) pairing) and then requires the tenant the route is about to use to EQUAL it.
- * On a tenant-claimless deployment the host membership check is what makes that safe; on a
- * claim-bearing one the verified claim already did.
+ * the (user, tenant) pairing. On a tenant-claimless deployment the host membership check is what
+ * makes that safe; on a claim-bearing one the verified claim already did.
+ *
+ * `resolveOperatorValueScope` IS THE SOLE TENANCY AUTHORITY FOR THIS BRANCH, and that is a claim
+ * about this code rather than a hope. An earlier cut also compared `resolveTenantId(req, {})`
+ * against `scope.tenantId` here and called it defence in depth. It was not defence at all: by the
+ * time control reaches this point the scope has ALREADY refused every input that could make the two
+ * differ — a request-carried tenant (OPERATOR_SCOPE_TENANT_MISMATCH), a header contradicting the
+ * verified claim (OPERATOR_SCOPE_TENANT_CONTRADICTED), a principal with no tenant of its own
+ * (OPERATOR_SCOPE_TENANT_REQUIRED), a non-member (OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED) — so the
+ * comparison was unreachable, untestable, and read as if it were the enforcement. A line no test can
+ * turn red is not a guard; it is a claim. It is gone, and the scope's own refusals are pinned by
+ * P-06 below, which is where that assurance actually lives.
  *
  * The legacy branch returns before any of this, so no existing caller pays for it or changes shape.
  */
@@ -981,18 +991,15 @@ async function requireTableActionAccess(req, actionId, legacyGate, tenantPrincip
   if (!operatorMayRunStockPrepPull(listUserPermissions(user), actionId)) {
     throw new HttpRouteError(403, 'FORBIDDEN', 'Insufficient integration permissions')
   }
-  const scope = await resolveOperatorValueScope({
+  // The scope's own refusals ARE the tenancy enforcement for this branch — see the header. Resolved
+  // for its refusals, not for a value this function returns: nothing downstream reads it, because the
+  // routes' own `resolveTenantId` cannot now differ from it for any caller who got this far.
+  await resolveOperatorValueScope({
     user,
     authenticatedTenantId: req.authenticatedTenantId,
     explicitTenantIds: collectExplicitTenantIds(req, {}),
     tenantPrincipalDirectory,
   })
-  // The tenant this route is ABOUT to act on, compared against the one the host just vouched for.
-  // Equality is the whole assertion: it cannot widen `resolveTenantId` (it only ever refuses), and it
-  // makes it impossible for an operator to be admitted for one tenant and served another.
-  if (resolveTenantId(req, {}) !== scope.tenantId) {
-    throw new HttpRouteError(403, 'TENANT_MISMATCH', 'tenant scope mismatch')
-  }
   return user
 }
 
