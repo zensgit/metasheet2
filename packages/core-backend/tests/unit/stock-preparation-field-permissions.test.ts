@@ -33,6 +33,10 @@ import {
   StockPreparationFieldPermissionsService,
   STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY,
   STOCK_PREPARATION_FIELD_PERMISSION_MAX_ENTRIES,
+  FIELD_PERMISSION_OPERATOR_ROUTE_CREATED_BY,
+  classifyRoleWriteScopeRows,
+  operatorFieldPermissionCreatedBy,
+  stockPreparationFieldPermissionCreatedBy,
   type StockPreparationFieldPermissionsPool,
 } from '../../src/services/stock-preparation-field-permissions'
 
@@ -90,7 +94,13 @@ interface FakePoolOptions {
    * census now reads provenance out of the row rather than filtering on it in SQL, so a row without
    * one would (correctly) be reported as somebody else's.
    */
-  existingScopeRows?: Array<{ field_id: string; subject_id: string; created_by?: string | null }>
+  existingScopeRows?: Array<{
+    field_id: string
+    subject_id: string
+    created_by?: string | null
+    visible?: boolean
+    read_only?: boolean
+  }>
 }
 
 function createFakePool(options: FakePoolOptions = {}): {
@@ -122,13 +132,24 @@ function createFakePool(options: FakePoolOptions = {}): {
       return { rows: requested.filter((id) => roleIds.has(id)).map((id) => ({ id })) }
     }
     if (sql.includes('FROM field_permissions')) {
+      // BOTH read shapes come through here: the census (`... AND read_only = true`) and the
+      // classification snapshot (no read_only clause, and it projects both dimensions). The filter
+      // is applied from the STATEMENT rather than assumed, so a snapshot query that silently
+      // regained a `read_only = true` predicate — which would blind the classifier to an operator's
+      // hidden-but-writable row — changes what this fake returns.
+      const filterReadOnly = /read_only\s*=\s*true/.test(sql)
       return {
-        rows: (options.existingScopeRows ?? []).map((row) => ({
-          ...row,
-          created_by: row.created_by === undefined
-            ? STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY
-            : row.created_by,
-        })),
+        rows: (options.existingScopeRows ?? [])
+          .map((row) => ({
+            field_id: row.field_id,
+            subject_id: row.subject_id,
+            created_by: row.created_by === undefined
+              ? STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY
+              : row.created_by,
+            visible: row.visible === undefined ? true : row.visible,
+            read_only: row.read_only === undefined ? true : row.read_only,
+          }))
+          .filter((row) => !filterReadOnly || row.read_only === true),
       }
     }
     if (sql.includes('INSERT INTO field_permissions')) return { rows: [], rowCount: 1 }
@@ -225,7 +246,9 @@ describe('applyRoleWriteScopes — writes one role-scoped, read-only, provenance
     expect(fake.inserts[0].sql).toContain(
       'ON CONFLICT (sheet_id, field_id, subject_type, subject_id)',
     )
-    expect(fake.inserts[0].sql).toContain('DO UPDATE SET visible = true, read_only = true')
+    expect(fake.inserts[0].sql).toContain('DO UPDATE SET')
+    // All three assigned columns are ownership-guarded; see the source guard in section 2.
+    expect(fake.inserts[0].sql).toContain('visible = CASE WHEN field_permissions.created_by IN ($4, $5)')
   })
 
   it('de-duplicates repeated (fieldId, roleId) pairs — applied always equals entries.length', async () => {
@@ -260,7 +283,7 @@ describe('applyRoleWriteScopes — writes one role-scoped, read-only, provenance
     const result = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: [] })
     // `removed: []` and NOT null: the empty-entry path is a TOTAL no-op that runs no delete, which
     // is a different (and stronger) statement than "a reconcile ran and retired nothing".
-    expect(result).toEqual({ applied: 0, entries: [], removed: [] })
+    expect(result).toEqual({ applied: 0, entries: [], removed: [], operatorHeld: [], governedByOtherPacks: [] })
     expect(fake.transactions).toBe(0)
     expect(fake.calls).toHaveLength(0)
   })
@@ -315,38 +338,95 @@ describe('STRUCTURAL read-safety: this port can never produce a read restriction
   it('SOURCE GUARD: the service file never parameterises or negates the read dimension', () => {
     const src = readFileSync(SERVICE_SOURCE_PATH, 'utf8')
 
-    // The literal upsert this port is allowed to emit — both the VALUES literal and the DO UPDATE.
+    // The literal upsert this port is allowed to emit — the VALUES literal, and the three guarded
+    // DO UPDATE columns. The guard is now part of the pin: all three share ONE ownership condition,
+    // so "we never rewrite a row we do not own" is a single fact about a single expression rather
+    // than three independent habits.
     expect(src).toContain("VALUES ($1, $2, 'role', $3, true, true, $4)")
-    expect(src).toContain('DO UPDATE SET visible = true, read_only = true,')
+    expect(src).toContain(
+      'visible = CASE WHEN field_permissions.created_by IN ($4, $5) THEN true ELSE field_permissions.visible END',
+    )
+    expect(src).toContain(
+      'read_only = CASE WHEN field_permissions.created_by IN ($4, $5) THEN true ELSE field_permissions.read_only END',
+    )
+    expect(src).toContain(
+      'created_by = CASE WHEN field_permissions.created_by IN ($4, $5) THEN $4 ELSE field_permissions.created_by END',
+    )
 
-    // Every assignment to the read column in this file must be the literal `true`. This catches
-    // `visible = <the negation>`, `visible = $5`, and `visible = EXCLUDED.visible` alike.
+    // Every assignment to the read column in this file must land on the literal `true`, on the
+    // row's OWN current value, or on the ONE pinned ownership CASE whose only two arms are exactly
+    // those. This catches `visible = <the negation>`, `visible = $5`, and
+    // `visible = EXCLUDED.visible` alike — the escaping-into-a-read-restriction shapes.
     const assignments = [...src.matchAll(/visible\s*=\s*([A-Za-z0-9_.$]+)/g)].map((m) => m[1])
     expect(assignments.length).toBeGreaterThan(0)
-    expect(assignments.every((value) => value === 'true')).toBe(true)
+    expect(assignments.every((value) => value === 'true'
+      || value === 'field_permissions.visible'
+      || value === 'CASE')).toBe(true)
+    // The CASE arms are enumerated so `CASE` cannot become a hiding place: exactly one CASE assigns
+    // `visible`, and it yields the shared-read literal or the row's untouched current value.
+    const visibleCases = [...src.matchAll(
+      /visible = CASE WHEN ([^\n]+?) THEN ([A-Za-z0-9_.$]+) ELSE ([A-Za-z0-9_.$]+) END/g,
+    )]
+    expect(visibleCases).toHaveLength(1)
+    expect(visibleCases[0][2]).toBe('true')
+    expect(visibleCases[0][3]).toBe('field_permissions.visible')
 
-    // The read column is never bound to a placeholder on any line that mentions it.
+    // The read column is never bound to a placeholder EXCEPT through the ownership guard, whose
+    // placeholders are the two provenance markers ($4, $5) and nothing else. Any other `$n` on a
+    // line mentioning `visible` would be a caller-supplied read decision.
     const boundLines = src.split('\n').filter((line) => /visible/.test(line) && /\$\d/.test(line))
-    expect(boundLines).toEqual([])
+    for (const line of boundLines) {
+      expect(line).toContain('created_by IN ($4, $5)')
+      expect([...line.matchAll(/\$\d+/g)].map((m) => m[0]).sort()).toEqual(['$4', '$5'])
+    }
 
     // No `visible` key is ever read off the caller's input.
     expect(src).not.toMatch(/input\.[A-Za-z.]*visible/)
     expect(src).not.toMatch(/entry\.visible/)
   })
 
-  it('the public surface is one MUTATING method plus two read-only siblings — nothing else', () => {
+  it('the public surface is one MUTATING method plus four read-only siblings — nothing else', () => {
     const service = new StockPreparationFieldPermissionsService({ pool: createFakePool().pool })
     const methods = Object.getOwnPropertyNames(
       Object.getPrototypeOf(service) as object,
     ).filter((name) => name !== 'constructor' && typeof (service as any)[name] === 'function')
     // The roster is asserted EXACTLY (not "contains"), so a hide/revoke sibling cannot be added
-    // without moving this line. `listRoleWriteScopes` / `findMissingRoleIds` are SELECT-only; the
-    // source guard below is what actually holds them to that.
+    // without moving this line. The four siblings are SELECT-only; the source guard below is what
+    // actually holds them to that.
     expect(methods.slice().sort()).toEqual([
       'applyRoleWriteScopes',
+      'classifyRoleWriteScopeRegion',
+      'findMissingFieldIds',
       'findMissingRoleIds',
       'listRoleWriteScopes',
     ])
+  })
+
+  /**
+   * ═══ THE HOST↔PLUGIN CAPABILITY HANDSHAKE, WITNESSED ON THE REAL OBJECT. ═══
+   *
+   * The installer refuses (501) any port that does not declare `supportsWriteScopeReconcile === true`
+   * and carry the methods it calls. Every other test in this repo asserts that gate against a FAKE
+   * port, so re-wrapping or proxying the injected service — dropping a method, losing the marker
+   * across a spread — would 501 every real install with the whole battery green (round-2 finding 8).
+   * This asserts the predicate against the object `index.ts` actually constructs.
+   */
+  it('CAPABILITY HANDSHAKE: the real service satisfies the installer gate the plugin applies', () => {
+    const service = new StockPreparationFieldPermissionsService({ pool: createFakePool().pool })
+    expect(service.supportsWriteScopeReconcile).toBe(true)
+    for (const method of [
+      'applyRoleWriteScopes',
+      'classifyRoleWriteScopeRegion',
+      'listRoleWriteScopes',
+      'findMissingRoleIds',
+      'findMissingFieldIds',
+    ]) {
+      expect(typeof (service as unknown as Record<string, unknown>)[method]).toBe('function')
+    }
+    // The marker must survive the shapes a host might hand the plugin through: an own-property
+    // spread is the one that silently drops a class field, and `supportsWriteScopeReconcile` is a
+    // declared instance field precisely so it does not.
+    expect({ ...service }.supportsWriteScopeReconcile).toBe(true)
   })
 
   it('SOURCE GUARD: the ONE delete carries all four narrowings, in the statement itself', () => {
@@ -367,9 +447,21 @@ describe('STRUCTURAL read-safety: this port can never produce a read restriction
     //  3. inside the caller's declared region only, on BOTH axes
     expect(where).toMatch(/AND\s+field_id\s*=\s*ANY\(\$3::text\[\]\)/)
     expect(where).toMatch(/AND\s+subject_id\s*=\s*ANY\(\$4::text\[\]\)/)
-    //  4. never a row this same call just wrote
+    //  4. never a row this same call just wrote — AND THE CORRELATION IS PART OF THE CLAUSE.
+    //     `unnest(...) AS desired(field_id, subject_id)` alone says nothing about which desired
+    //     column is compared to which row column. Cross-wiring the two predicates
+    //     (`desired.field_id = field_permissions.subject_id`) leaves the statement looking right
+    //     while it deletes the rows the same call just wrote, and no test outside real Postgres
+    //     could see it (round-2 finding 4). Both halves are pinned by name here, and the executable
+    //     decoding model above parses them rather than assuming the obvious pairing.
     expect(where).toMatch(/AND\s+NOT\s+EXISTS\s*\(/)
     expect(where).toMatch(/unnest\(\$5::text\[\],\s*\$6::text\[\]\)/)
+    expect(where).toMatch(/desired\.field_id\s*=\s*field_permissions\.field_id/)
+    expect(where).toMatch(/desired\.subject_id\s*=\s*field_permissions\.subject_id/)
+    // …and NOTHING ELSE is correlated: exactly those two predicates, so a third (or a duplicated,
+    // self-cancelling one) cannot be slipped in beside them.
+    expect([...where.matchAll(/desired\.(\w+)\s*=\s*field_permissions\.(\w+)/g)].map((m) => `${m[1]}=${m[2]}`))
+      .toEqual(['field_id=field_id', 'subject_id=subject_id'])
     // and it stays role-scoped like everything else this port writes.
     expect(where).toMatch(/subject_type\s*=\s*'role'/)
 
@@ -751,7 +843,17 @@ describe('findMissingRoleIds — the pre-flight question a caller asks BEFORE it
 // real-Postgres suite tests/integration/stock-preparation-fieldperm-write-gate-realdb.test.ts.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-const OPERATOR_MARKER = 'operator:univer-meta-authoring-route'
+/**
+ * THE TWO REAL OPERATOR SHAPES, and only these two are real.
+ *
+ * `OPERATOR_MARKER` is what `routes/univer-meta.ts` stamps as of this change. `null` is what it
+ * wrote before — and therefore what every operator row on every host in the field carries today.
+ * Every operator fixture in the previous revision used a marker string the route never wrote, so the
+ * classification's NULL arm was rehearsed nowhere (round-2 findings 14 and 16). Both are seeded
+ * below, in every suite that has an operator row.
+ */
+const OPERATOR_MARKER = FIELD_PERMISSION_OPERATOR_ROUTE_CREATED_BY
+const LEGACY_OPERATOR_CREATED_BY = null
 
 interface TableRow {
   sheet_id: string
@@ -760,7 +862,8 @@ interface TableRow {
   subject_id: string
   visible: boolean
   read_only: boolean
-  created_by: string
+  /** NULL is a real, and today the DOMINANT, value: it is what the authoring route used to write. */
+  created_by: string | null
 }
 
 /**
@@ -778,14 +881,27 @@ function createTablePool(seed: TableRow[] = []): {
   return createDecodingTablePool(seed)
 }
 
-const pluginRow = (fieldId: string, roleId: string): TableRow => ({
+/**
+ * A row THIS pack owns — the post-#5455 (and post-backfill) shape, carrying the PER-PACK marker.
+ *
+ * The previous revision seeded the bare plugin marker here, which is a LEGACY row: adoptable only
+ * when the caller can prove its pack is the sheet's only pack. Seeding it as the default quietly
+ * rehearsed the adoption arm on every reconcile assertion in this section, which is how the
+ * cross-pack legacy blind spot stayed invisible. The legacy shape now has its own, explicit fixtures
+ * in section 7-RC2.
+ */
+const pluginRow = (
+  fieldId: string,
+  roleId: string,
+  createdBy: string | null = markerFor(PACK_A),
+): TableRow => ({
   sheet_id: SHEET,
   field_id: fieldId,
   subject_type: 'role',
   subject_id: roleId,
   visible: true,
   read_only: true,
-  created_by: STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY,
+  created_by: createdBy,
 })
 
 const keyOf = (row: { field_id: string; subject_id: string }) => `${row.field_id} ${row.subject_id}`
@@ -810,14 +926,14 @@ describe('6. the scoped reconcile — a revision that moves a column between dep
     const fake = createTablePool()
     const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
 
-    const v1 = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V1_ENTRIES, reconcile: REGION })
+    const v1 = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V1_ENTRIES, reconcile: REGION, packId: PACK_A })
     expect(v1.removed).toEqual([])
     expect(fake.rows.map(keyOf).sort()).toEqual([
       `${F_PURCHASE_REPLY} ${ROLE_WAREHOUSE}`,
       `${F_WAREHOUSE_DATE} ${ROLE_PURCHASING}`,
     ].sort())
 
-    const v2 = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES, reconcile: REGION })
+    const v2 = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES, reconcile: REGION, packId: PACK_A })
 
     // THE HEADLINE: the column that changed hands is denied to exactly ONE role afterwards.
     expect(fake.rows.map(keyOf).sort()).toEqual([
@@ -828,7 +944,7 @@ describe('6. the scoped reconcile — a revision that moves a column between dep
     expect(v2.applied).toBe(2)
 
     // Idempotent: a converged re-run deletes nothing.
-    const again = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES, reconcile: REGION })
+    const again = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES, reconcile: REGION, packId: PACK_A })
     expect(again.removed).toEqual([])
     expect(fake.rows).toHaveLength(2)
   })
@@ -843,7 +959,7 @@ describe('6. the scoped reconcile — a revision that moves a column between dep
     const fake = createTablePool([operatorRow, pluginRow(F_WAREHOUSE_DATE, ROLE_PURCHASING)])
     const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
 
-    const result = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES, reconcile: REGION })
+    const result = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES, reconcile: REGION, packId: PACK_A })
 
     expect(result.removed).toEqual([{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_PURCHASING }])
     const survivor = fake.rows.find((row) => row.created_by === OPERATOR_MARKER)
@@ -861,7 +977,7 @@ describe('6. the scoped reconcile — a revision that moves a column between dep
     ])
     const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
 
-    const result = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES, reconcile: REGION })
+    const result = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES, reconcile: REGION, packId: PACK_A })
 
     expect(result.removed).toEqual([{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_PURCHASING }])
     expect(fake.rows.map(keyOf).sort()).toEqual([
@@ -877,7 +993,7 @@ describe('6. the scoped reconcile — a revision that moves a column between dep
     const fake = createTablePool([relaxed])
     const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
 
-    const result = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES, reconcile: REGION })
+    const result = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES, reconcile: REGION, packId: PACK_A })
 
     // Not deleted — an operator decided it is no longer a denial, and that decision stands.
     expect(result.removed).toEqual([])
@@ -932,7 +1048,7 @@ describe('6. the scoped reconcile — a revision that moves a column between dep
     const fake = createTablePool([otherSheetRow, pluginRow(F_WAREHOUSE_DATE, ROLE_PURCHASING)])
     const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
 
-    await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES, reconcile: REGION })
+    await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES, reconcile: REGION, packId: PACK_A })
 
     expect(fake.rows.filter((row) => row.sheet_id === 'sheet_other')).toHaveLength(1)
   })
@@ -964,14 +1080,14 @@ describe('6. the scoped reconcile — a revision that moves a column between dep
     const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
 
     // v1: 仓库 owns the column (采购 is denied it).
-    await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V1_ENTRIES, reconcile: REGION })
+    await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V1_ENTRIES, reconcile: REGION, packId: PACK_A })
     const v1Purchasing = await writabilityOver(fake.rows, 'user_caigou')
     const v1Warehouse = await writabilityOver(fake.rows, 'user_cangku')
     expect(isFieldWriteForbidden(v1Purchasing[F_WAREHOUSE_DATE])).toBe(true)
     expect(isFieldWriteForbidden(v1Warehouse[F_WAREHOUSE_DATE])).toBe(false)
 
     // v2: the column changes hands — 采购 owns it now, 仓库 is denied it.
-    await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES, reconcile: REGION })
+    await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES, reconcile: REGION, packId: PACK_A })
     const purchasing = await writabilityOver(fake.rows, 'user_caigou')
     const warehouse = await writabilityOver(fake.rows, 'user_cangku')
 
@@ -999,10 +1115,23 @@ describe('6. the scoped reconcile — a revision that moves a column between dep
     expect(fake.deletes).toHaveLength(0)
   })
 
-  it('NO-RECONCILE REGRESSION PIN: the exact statements and result #5447 produced, plus `removed: []`', async () => {
-    // What an existing caller — every caller in the tree before this option existed — must still
-    // see. Transcribed from the pre-reconcile revision rather than derived from the current code,
-    // so an edit that changes the additive path has to change this literal to stay green.
+  /**
+   * ADDITIVE-PATH PIN — and it is a pin of the CURRENT additive path, not a transcription of
+   * #5447's.
+   *
+   * The previous revision called this a "#5447 regression pin" and claimed the statements were
+   * "transcribed from the pre-reconcile revision", which was not true and could not be: #5447's
+   * upsert had an unconditional `DO UPDATE SET visible = true, read_only = true,
+   * created_by = EXCLUDED.created_by` and bound FOUR parameters (round-2 finding 13). What is
+   * actually preserved for a pre-#5455 caller is narrower, and is stated exactly:
+   *   · the STATEMENT SEQUENCE is unchanged — one lock, two existence reads, one upsert per entry;
+   *   · ZERO deletes and zero classification reads are issued;
+   *   · `applied` / `entries` are unchanged.
+   * What DELIBERATELY changed is named in the sibling test below rather than papered over: the DO
+   * UPDATE gained an ownership guard on all three columns, a fifth bound parameter came with it,
+   * and the result gained three keys.
+   */
+  it('ADDITIVE-PATH PIN: the exact statements, parameters and result an entry-only caller gets', async () => {
     const fake = createFakePool()
     const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
 
@@ -1019,17 +1148,17 @@ describe('6. the scoped reconcile — a revision that moves a column between dep
       "INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)"
         + " VALUES ($1, $2, 'role', $3, true, true, $4)"
         + ' ON CONFLICT (sheet_id, field_id, subject_type, subject_id)'
-        + ' DO UPDATE SET visible = true, read_only = true,'
-        + ' created_by = CASE WHEN field_permissions.created_by = $4 THEN $4'
-        + ' WHEN field_permissions.created_by = $5 THEN $4'
-        + ' ELSE field_permissions.created_by END',
+        + ' DO UPDATE SET'
+        + ' visible = CASE WHEN field_permissions.created_by IN ($4, $5) THEN true ELSE field_permissions.visible END,'
+        + ' read_only = CASE WHEN field_permissions.created_by IN ($4, $5) THEN true ELSE field_permissions.read_only END,'
+        + ' created_by = CASE WHEN field_permissions.created_by IN ($4, $5) THEN $4 ELSE field_permissions.created_by END',
       "INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)"
         + " VALUES ($1, $2, 'role', $3, true, true, $4)"
         + ' ON CONFLICT (sheet_id, field_id, subject_type, subject_id)'
-        + ' DO UPDATE SET visible = true, read_only = true,'
-        + ' created_by = CASE WHEN field_permissions.created_by = $4 THEN $4'
-        + ' WHEN field_permissions.created_by = $5 THEN $4'
-        + ' ELSE field_permissions.created_by END',
+        + ' DO UPDATE SET'
+        + ' visible = CASE WHEN field_permissions.created_by IN ($4, $5) THEN true ELSE field_permissions.visible END,'
+        + ' read_only = CASE WHEN field_permissions.created_by IN ($4, $5) THEN true ELSE field_permissions.read_only END,'
+        + ' created_by = CASE WHEN field_permissions.created_by IN ($4, $5) THEN $4 ELSE field_permissions.created_by END',
     ])
     // (2) THE BOUND PARAMETERS, in order.
     expect(fake.calls.map((call) => call.params)).toEqual([
@@ -1047,9 +1176,11 @@ describe('6. the scoped reconcile — a revision that moves a column between dep
     ])
     expect(fake.transactions).toBe(1)
 
-    // (3) THE RESULT. `applied` and `entries` are unchanged, and `removed` is the ONLY new key —
-    //     empty, because absent a region there is nothing to reconcile and no DELETE was issued.
-    expect(Object.keys(result).sort()).toEqual(['applied', 'entries', 'removed'])
+    // (3) THE RESULT. `applied` and `entries` are unchanged; THREE keys are new, all empty, because
+    //     absent a region nothing was classified, no DELETE was issued and no pair was skipped.
+    expect(Object.keys(result).sort()).toEqual([
+      'applied', 'entries', 'governedByOtherPacks', 'operatorHeld', 'removed',
+    ])
     expect({ applied: result.applied, entries: result.entries }).toEqual({
       applied: 2,
       entries: [
@@ -1058,6 +1189,28 @@ describe('6. the scoped reconcile — a revision that moves a column between dep
       ],
     })
     expect(result.removed).toEqual([])
+    expect(result.operatorHeld).toEqual([])
+    expect(result.governedByOtherPacks).toEqual([])
+  })
+
+  /**
+   * THE DELTA AGAINST #5447, ASSERTED RATHER THAN ASSUMED. The pin above says what the additive path
+   * emits today; this says what it no longer emits, so "byte-identical behaviour for every existing
+   * caller" cannot be written again without one of these two tests moving.
+   */
+  it('ADDITIVE-PATH DELTA: the #5447 upsert clause and its 4-parameter bind are GONE', async () => {
+    const fake = createFakePool()
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+    await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V1_ENTRIES })
+
+    for (const insert of fake.inserts) {
+      // #5447's clause, verbatim — an unconditional rewrite of the two permission columns.
+      expect(insert.sql.replace(/\s+/g, ' '))
+        .not.toContain('DO UPDATE SET visible = true, read_only = true')
+      expect(insert.sql).not.toContain('created_by = EXCLUDED.created_by')
+      // #5447 bound four parameters; the ownership guard needs the legacy marker as a fifth.
+      expect(insert.params).toHaveLength(5)
+    }
   })
 })
 
@@ -1100,10 +1253,13 @@ function createDecodingTablePool(seed: TableRow[] = []): {
       const existing = rows.find((row) => row.sheet_id === sheetId
         && row.field_id === fieldId && row.subject_type === 'role' && row.subject_id === subjectId)
       if (existing) {
-        existing.visible = true
-        existing.read_only = true
-        // THE CONFLICT ARM, decoded from the statement rather than assumed: provenance is only
-        // re-stamped when the DO UPDATE actually says so for this row's current owner.
+        // THE CONFLICT ARM, decoded from the statement rather than assumed. ALL THREE columns are
+        // guarded by the same CASE, so all three are decoded the same way: an unconditional
+        // `visible = true` / `read_only = true` on a row this port does not own is the un-hiding and
+        // the permanent-lock defect, and a model that hardcoded `= true` could not see either.
+        const owned = upsertGuardHolds(sql, existing.created_by, createdBy)
+        if (resolveUpsertColumn(sql, 'visible', owned)) existing.visible = true
+        if (resolveUpsertColumn(sql, 'read_only', owned)) existing.read_only = true
         existing.created_by = resolveUpsertCreatedBy(sql, existing.created_by, createdBy)
       } else {
         rows.push({
@@ -1140,19 +1296,34 @@ function createDecodingTablePool(seed: TableRow[] = []): {
       const returning = (sql.match(/RETURNING\s+([\w,\s]+)/) ?? [, ''])[1]
         .split(',').map((token) => token.trim()).filter(Boolean)
 
-      // The desired set, keyed the way the statement's own alias names key it.
+      // The desired set, keyed the way the statement's own alias names key it, AND correlated the
+      // way the statement's own subquery predicate correlates it.
+      //
+      // THE CORRELATION IS THE FIFTH NARROWING and it used to be invisible here: the model paired
+      // `desired.field_id` with the row's `field_id` because that is the obvious pairing, so
+      // cross-wiring the statement to `desired.field_id = field_permissions.subject_id` changed
+      // nothing this suite could see, while in Postgres it makes the reconcile delete the rows the
+      // same call just wrote (round-2 finding 4). Now every `desired.X = field_permissions.Y` pair
+      // is parsed out of the subquery and the key is built from the ROW columns the statement names.
+      const correlations = [...sql.matchAll(
+        /desired\.(\w+)\s*=\s*field_permissions\.(\w+)/g,
+      )].map((match) => ({ desiredColumn: match[1], rowColumn: match[2] }))
       const desired = new Set<string>()
-      if (unnest && hasNotExists) {
+      let correlatedRowKey: ((row: TableRow) => string) | null = null
+      if (unnest && hasNotExists && correlations.length > 0) {
         const [, tokenA, tokenB, nameA, nameB] = unnest
         const byName: Record<string, string[]> = {
           [nameA]: (bind(tokenA) as string[]) ?? [],
           [nameB]: (bind(tokenB) as string[]) ?? [],
         }
-        const fields = byName.field_id ?? []
-        const subjects = byName.subject_id ?? []
-        for (let i = 0; i < Math.max(fields.length, subjects.length); i += 1) {
-          desired.add(`${fields[i]} ${subjects[i]}`)
+        // One tuple per unnest position, projected in the order the correlation predicates appear.
+        const width = Math.max(...Object.values(byName).map((list) => list.length), 0)
+        for (let i = 0; i < width; i += 1) {
+          desired.add(correlations.map((c) => (byName[c.desiredColumn] ?? [])[i]).join(' '))
         }
+        correlatedRowKey = (row) => correlations
+          .map((c) => (row as unknown as Record<string, unknown>)[c.rowColumn])
+          .join(' ')
       }
 
       const createdByBound = createdByToken ? bind(createdByToken) : null
@@ -1172,7 +1343,7 @@ function createDecodingTablePool(seed: TableRow[] = []): {
         if (readOnlyPinned && row.read_only !== true) continue
         if (regionFields !== null && !regionFields.includes(row.field_id)) continue
         if (regionRoles !== null && !regionRoles.includes(row.subject_id)) continue
-        if (hasNotExists && desired.has(`${row.field_id} ${row.subject_id}`)) continue
+        if (hasNotExists && correlatedRowKey && desired.has(correlatedRowKey(row))) continue
         removed.push(row)
         rows.splice(i, 1)
       }
@@ -1187,14 +1358,21 @@ function createDecodingTablePool(seed: TableRow[] = []): {
       }
     }
     if (sql.includes('FROM field_permissions')) {
+      // Both read shapes, decoded from the statement: the census pins `read_only = true`, the
+      // classification snapshot deliberately does not (an operator's hidden-but-writable row must
+      // still be seen, or the upsert skip cannot happen).
       const sheetId = String(params[0])
+      const filterReadOnly = /read_only\s*=\s*true/.test(sql)
       return {
         rows: rows
-          .filter((row) => row.sheet_id === sheetId && row.subject_type === 'role' && row.read_only === true)
+          .filter((row) => row.sheet_id === sheetId && row.subject_type === 'role')
+          .filter((row) => !filterReadOnly || row.read_only === true)
           .map((row) => ({
             field_id: row.field_id,
             subject_id: row.subject_id,
             created_by: row.created_by,
+            visible: row.visible,
+            read_only: row.read_only,
           })),
       }
     }
@@ -1213,10 +1391,36 @@ function createDecodingTablePool(seed: TableRow[] = []): {
  */
 function resolveUpsertCreatedBy(sql: string, currentCreatedBy: string, incoming: string): string {
   const doUpdate = sql.slice(sql.search(/DO UPDATE SET/i))
-  if (!/created_by/i.test(doUpdate)) return currentCreatedBy
-  if (!/CASE/i.test(doUpdate)) return incoming
+  if (!/created_by\s*=/i.test(doUpdate)) return currentCreatedBy
+  if (!/created_by\s*=\s*CASE/i.test(doUpdate)) return incoming
+  return upsertGuardHolds(sql, currentCreatedBy, incoming) ? incoming : currentCreatedBy
+}
+
+/**
+ * Does the DO UPDATE's ownership guard hold for this row? The guard names the two markers this port
+ * may also RETIRE — its own and the pack-less legacy one — so "may I rewrite this row" and "may I
+ * delete this row" are the same question asked of the same two values.
+ *
+ * `created_by` NULL takes the ELSE branch in Postgres (`NULL IN (...)` is NULL, not true), and that
+ * is the only shape the authoring route wrote before it started stamping — so it MUST be modelled,
+ * not assumed away.
+ */
+function upsertGuardHolds(sql: string, currentCreatedBy: string | null, incoming: string): boolean {
+  if (currentCreatedBy === null) return false
   const adoptable = [incoming, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY]
-  return adoptable.includes(currentCreatedBy) ? incoming : currentCreatedBy
+  return adoptable.includes(currentCreatedBy)
+}
+
+/**
+ * Decode one guarded DO UPDATE column. `column = true` (unguarded) always writes; `column = CASE ...`
+ * writes only when the ownership guard holds; an absent column is not written at all.
+ */
+function resolveUpsertColumn(sql: string, column: string, guardHolds: boolean): boolean {
+  const doUpdate = sql.slice(sql.search(/DO UPDATE SET/i))
+  const assignment = doUpdate.match(new RegExp(`${column}\\s*=\\s*(CASE|true|EXCLUDED)`, 'i'))
+  if (!assignment) return false
+  if (/^CASE$/i.test(assignment[1])) return guardHolds
+  return true
 }
 
 const PACK_A = 'pack-alpha'
@@ -1265,7 +1469,7 @@ describe('7-RC1. a declaration with a region but NO entries still reconciles', (
 
     const result = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: [] })
 
-    expect(result).toEqual({ applied: 0, entries: [], removed: [] })
+    expect(result).toEqual({ applied: 0, entries: [], removed: [], operatorHeld: [], governedByOtherPacks: [] })
     expect(fake.deletes).toHaveLength(0)
     expect(fake.rows).toHaveLength(1)
   })
@@ -1292,9 +1496,43 @@ describe('7-RC2. provenance is per PACK, not per plugin', () => {
     expect(fake.rows.find((row) => row.created_by === markerFor(PACK_B))).toBeDefined()
   })
 
-  it('a LEGACY row with no pack id IS adopted and retired (upgrade continuity)', async () => {
-    // Rows written before the marker carried a pack id have no other owner to attribute them to.
-    // They stay reachable, and this is the ONLY non-own marker the delete may touch.
+  /**
+   * ═══ THE P0: A LEGACY ROW IS NOT NOBODY'S. ═══
+   *
+   * Every row every pack ever wrote before this change carries the BARE marker — the pack id lands
+   * in `created_by` only as of #5455 — so "a pack-less row has no other owner to protect it for" was
+   * false for the entire installed base, and it licensed pack B to retire pack A's live denials
+   * (round-2 finding 1). The rule is now a PROOF OBLIGATION on the caller: adoption happens only
+   * when it can show, from the install ledger, that this pack is the sheet's only pack.
+   */
+  it('a LEGACY row is REFUSED, not adopted, when the caller cannot prove sole ownership', async () => {
+    const fake = createDecodingTablePool([
+      packRow(F_WAREHOUSE_DATE, ROLE_PURCHASING, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY),
+    ])
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    await expect(service.applyRoleWriteScopes({
+      sheetId: SHEET,
+      entries: [{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_WAREHOUSE }],
+      packId: PACK_A,
+      reconcile: REGION,
+      // legacyAdoptable omitted — the fail-closed default.
+    })).rejects.toMatchObject({
+      reason: 'LEGACY_UNATTRIBUTED',
+      pairs: [{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_PURCHASING }],
+    })
+
+    // REFUSED BEFORE ANY WRITE: the legacy row is still there and nothing new was inserted.
+    expect(fake.rows).toHaveLength(1)
+    expect(fake.rows[0]).toMatchObject({
+      field_id: F_WAREHOUSE_DATE,
+      subject_id: ROLE_PURCHASING,
+      created_by: STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY,
+    })
+    expect(fake.deletes).toHaveLength(0)
+  })
+
+  it('a LEGACY row IS adopted and retired once the caller proves this pack is the sheet\'s only one', async () => {
     const fake = createDecodingTablePool([
       packRow(F_WAREHOUSE_DATE, ROLE_PURCHASING, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY),
     ])
@@ -1305,9 +1543,64 @@ describe('7-RC2. provenance is per PACK, not per plugin', () => {
       entries: [{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_WAREHOUSE }],
       packId: PACK_A,
       reconcile: REGION,
+      legacyAdoptable: true,
     })
 
     expect(result.removed).toEqual([{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_PURCHASING }])
+  })
+
+  /**
+   * THE MARKER SET IS CONDITIONAL, AND THE CONDITION IS BOUND TO THE PARAMETER — not merely to the
+   * classifier's opinion. Dropping `legacyAdoptable ? ... : [createdBy]` back to an unconditional
+   * two-marker array leaves the DELETE reaching a legacy row the classification did NOT authorise,
+   * and the divergence guard turns that into an abort rather than a silent extra delete.
+   */
+  it('the DELETE\'s marker array carries the legacy marker ONLY when adoption was proven', async () => {
+    const seed = () => [
+      packRow(F_WAREHOUSE_DATE, ROLE_PURCHASING, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY),
+      packRow(F_PURCHASE_REPLY, ROLE_PURCHASING, markerFor(PACK_A)),
+    ]
+    const call = async (legacyAdoptable: boolean) => {
+      const fake = createDecodingTablePool(seed())
+      const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+      await service.applyRoleWriteScopes({
+        sheetId: SHEET,
+        entries: [{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_WAREHOUSE }],
+        packId: PACK_A,
+        reconcile: REGION,
+        legacyAdoptable,
+      })
+      return fake.deletes[0].params[1] as string[]
+    }
+    expect(await call(true)).toEqual([markerFor(PACK_A), STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY])
+    // The unproven case never reaches the DELETE (the legacy row refuses first), so the marker
+    // array is asserted on a sheet whose ONLY legacy row is outside the rectangle.
+    const fake = createDecodingTablePool([
+      packRow(F_MATERIAL_TYPE, ROLE_PRODUCTION, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY),
+      packRow(F_PURCHASE_REPLY, ROLE_PURCHASING, markerFor(PACK_A)),
+    ])
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+    await service.applyRoleWriteScopes({
+      sheetId: SHEET,
+      entries: [{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_WAREHOUSE }],
+      packId: PACK_A,
+      reconcile: REGION,
+    })
+    expect(fake.deletes[0].params[1]).toEqual([markerFor(PACK_A)])
+    // …and the out-of-rectangle legacy row is untouched by either arm.
+    expect(fake.rows.some((row) => row.field_id === F_MATERIAL_TYPE)).toBe(true)
+  })
+
+  it('a reconcile with NO packId is refused: an unattributable delete is not a reconcile', async () => {
+    const fake = createDecodingTablePool([packRow(F_WAREHOUSE_DATE, ROLE_PURCHASING, markerFor(PACK_A))])
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+    await expect(service.applyRoleWriteScopes({
+      sheetId: SHEET,
+      entries: [{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_WAREHOUSE }],
+      reconcile: REGION,
+    })).rejects.toMatchObject({ reason: 'ENTRIES_INVALID' })
+    expect(fake.deletes).toHaveLength(0)
+    expect(fake.rows).toHaveLength(1)
   })
 
   it('rows this port writes carry the PACK marker, and the census attributes every row', async () => {
@@ -1444,8 +1737,15 @@ describe('7-RC7. falsy reconcile is absent, not malformed', () => {
         applied: 1,
         entries: [{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_PURCHASING }],
         removed: [],
+        // No region → no classification, so both classification projections are empty rather than
+        // absent: an additive call decided nothing about anybody's rows, and says so.
+        operatorHeld: [],
+        governedByOtherPacks: [],
       })
       expect(fake.calls.filter((call) => /DELETE/i.test(call.sql))).toHaveLength(0)
+      // …and the additive path issues no classification SELECT either — the header's
+      // "no statement of any kind beyond the upserts" is a count, not a claim.
+      expect(fake.calls.filter((call) => /FROM field_permissions/i.test(call.sql))).toHaveLength(0)
     }
   })
 })
