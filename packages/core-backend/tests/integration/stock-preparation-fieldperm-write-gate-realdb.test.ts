@@ -389,6 +389,11 @@ const RC_U_WAREHOUSE = `u_bliao_rc_warehouse_${TS}`
 const RC_USERS = [RC_U_PURCHASING, RC_U_WAREHOUSE]
 
 const OPERATOR_CREATED_BY = 'operator:univer-meta-authoring-route'
+/** The pack under test, and a SIBLING pack that legitimately shares this canonical sheet. */
+const RC_PACK = 'rc-pack-alpha'
+const RC_OTHER_PACK = 'rc-pack-beta'
+/** A second sheet carrying an IDENTICAL (field, role) pair — the sheet-axis control. */
+const RC_TWIN_SHEET = `sheet_bliao_rc_twin_${TS}`
 
 // The (columns × roles) rectangle the pack re-declares in full. RC_UNGOVERNED is deliberately NOT
 // in it.
@@ -442,6 +447,7 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
 
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [RC_BASE, '备料 Reconcile Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [RC_SHEET, RC_BASE, '备料 Reconcile Sheet'])
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [RC_TWIN_SHEET, RC_BASE, '备料 Reconcile Twin'])
     for (const [index, fieldId] of RC_FIELDS.entries()) {
       await q(
         'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
@@ -466,11 +472,11 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
   })
 
   afterAll(async () => {
-    await q('DELETE FROM field_permissions WHERE sheet_id = $1', [RC_SHEET]).catch(() => {})
+    await q('DELETE FROM field_permissions WHERE sheet_id = ANY($1::text[])', [[RC_SHEET, RC_TWIN_SHEET]]).catch(() => {})
     await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [RC_SHEET]).catch(() => {})
     await q('DELETE FROM meta_records WHERE sheet_id = $1', [RC_SHEET]).catch(() => {})
     await q('DELETE FROM meta_fields WHERE sheet_id = $1', [RC_SHEET]).catch(() => {})
-    await q('DELETE FROM meta_sheets WHERE id = $1', [RC_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [[RC_SHEET, RC_TWIN_SHEET]]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [RC_BASE]).catch(() => {})
     await q('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [RC_USERS]).catch(() => {})
     await q('DELETE FROM users WHERE id = ANY($1::text[])', [RC_USERS]).catch(() => {})
@@ -490,12 +496,20 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
     const service = new StockPreparationFieldPermissionsService()
 
     // ── v1 ────────────────────────────────────────────────────────────────────────────────────────
-    const v1 = await service.applyRoleWriteScopes({ sheetId: RC_SHEET, entries: RC_V1, reconcile: RC_REGION })
+    const v1 = await service.applyRoleWriteScopes({
+      sheetId: RC_SHEET, entries: RC_V1, packId: RC_PACK, reconcile: RC_REGION,
+    })
     expect(v1.applied).toBe(2)
     expect(v1.removed).toEqual([])
 
-    // Two rows an OPERATOR authored, and one this port wrote for a column outside the region. All
-    // three are positioned to be deleted if any of the four narrowings were missing.
+    // FOUR rows positioned to be deleted if any one narrowing were missing. Each fails exactly one:
+    //   (a) an OPERATOR's row — same sheet, in-region column AND role; only `created_by` differs.
+    //   (b) this plugin's row on a column OUTSIDE the region.
+    //   (c) ANOTHER PACK's row — same sheet, in-region column AND role, plugin family; only the
+    //       pack id inside the marker differs. This is the two-packs-one-sheet case.
+    //   (d) an identical (field, role) pair on ANOTHER SHEET. Only `sheet_id = $1` saves it, and
+    //       `field_permissions` has no tenant or project column, so that clause is the entire
+    //       project/tenant bound of the statement.
     await q(
       `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)
        VALUES ($1,$2,'role',$3,true,true,$4)`,
@@ -506,12 +520,24 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
        VALUES ($1,$2,'role',$3,true,true,$4)`,
       [RC_SHEET, RC_UNGOVERNED, RC_PURCHASING, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY],
     )
+    await q(
+      `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)
+       VALUES ($1,$2,'role',$3,true,true,$4)`,
+      [RC_SHEET, RC_MOVING, RC_WAREHOUSE, `${STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY}#${RC_OTHER_PACK}`],
+    )
+    await q(
+      `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)
+       VALUES ($1,$2,'role',$3,true,true,$4)`,
+      [RC_TWIN_SHEET, RC_MOVING, RC_PURCHASING, `${STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY}#${RC_PACK}`],
+    )
 
     // Under v1, 采购 may NOT write the moving column — that is what v2 is about to change.
     expect((await rcPatch(RC_U_PURCHASING, [RC_PURCHASING], RC_MOVING, 'v1-should-be-refused')).status).toBe(403)
 
     // ── v2 ────────────────────────────────────────────────────────────────────────────────────────
-    const v2 = await service.applyRoleWriteScopes({ sheetId: RC_SHEET, entries: RC_V2, reconcile: RC_REGION })
+    const v2 = await service.applyRoleWriteScopes({
+      sheetId: RC_SHEET, entries: RC_V2, packId: RC_PACK, reconcile: RC_REGION,
+    })
     expect(v2.applied).toBe(2)
     expect(v2.removed).toEqual([{ fieldId: RC_MOVING, roleId: RC_PURCHASING }])
 
@@ -524,6 +550,27 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
       `${RC_UNGOVERNED}|${RC_PURCHASING}`, // this port's row, on a column outside the region
     ].sort())
     expect(rows.find((r) => key(r) === `${RC_STABLE}|${RC_PURCHASING}`)!.created_by).toBe(OPERATOR_CREATED_BY)
+    // The re-declared row on the moving column belongs to THIS pack, and the other pack's row was
+    // upserted rather than deleted — its provenance is not this pack's to take, so it kept it.
+    expect(rows.find((r) => key(r) === `${RC_MOVING}|${RC_WAREHOUSE}`)!.created_by)
+      .toBe(`${STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY}#${RC_OTHER_PACK}`)
+    // THE SHEET AXIS: the identical pair on the twin sheet is untouched.
+    const twin = await q(
+      'SELECT field_id, subject_id FROM field_permissions WHERE sheet_id = $1',
+      [RC_TWIN_SHEET],
+    )
+    expect(twin.rows).toHaveLength(1)
+
+    // THE CENSUS attributes every row, and never claims one it did not write.
+    const census = await service.listRoleWriteScopes({ sheetId: RC_SHEET })
+    expect(census.entries.map((entry) => `${entry.fieldId}|${entry.roleId}|${entry.packId}`).sort()).toEqual([
+      `${RC_MOVING}|${RC_WAREHOUSE}|${RC_OTHER_PACK}`,
+      `${RC_STABLE}|${RC_WAREHOUSE}|${RC_PACK}`,
+      `${RC_UNGOVERNED}|${RC_PURCHASING}|null`,
+    ].sort())
+    expect(census.foreignEntries).toEqual([
+      { fieldId: RC_STABLE, roleId: RC_PURCHASING, createdBy: OPERATOR_CREATED_BY },
+    ])
 
     // THE GATE — the whole point. 采购 now OWNS the moving column and the write goes through …
     const allowed = await rcPatch(RC_U_PURCHASING, [RC_PURCHASING], RC_MOVING, 'purchasing-owns-it-now')
