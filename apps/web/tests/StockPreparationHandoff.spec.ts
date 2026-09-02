@@ -520,6 +520,33 @@ describe('通知下一步 — the multi-person handoff on the confirmation queue
     expect(readCall![1]).toBeUndefined()
   })
 
+  /**
+   * P3 pin. H-11 above asserts `fromStepKey === 'prep_entry'` — which is also the FIXTURE DEFAULT,
+   * so a regression that hard-coded the first step (or read `steps[0].key`) would sail past it. The
+   * whole compare-and-set story depends on this being the step the SERVER currently holds: send the
+   * wrong one and the server answers 409 STEP_MISMATCH for a click that was perfectly legitimate,
+   * or — worse, if the chain happened to be there — advances a step the operator was not on.
+   * So: drive the view at a chain that is at `process`, and require the body to say `process`.
+   */
+  it('H-14: the advance sends the CURRENT step key, not a constant that happens to match', async () => {
+    asActor([STOCK_PREP_READ, STOCK_PREP_OPERATE])
+    serve({
+      handoff: [() => json({
+        ok: true,
+        data: handoffStatus({ stepIndex: 1, currentStepKey: 'process', isCurrentHandler: true }),
+      })],
+      advance: () => json({ ok: true, data: advanceResult({ fromStepKey: 'process' }) }),
+    })
+    await render()
+    advanceButton()!.click()
+    await flush()
+
+    const call = h.apiFetch.mock.calls.find(([url]) => String(url).includes(ADVANCE_PATH))
+    expect(call, 'the advance was actually POSTed').toBeDefined()
+    const body = JSON.parse(String((call![1] as { body?: string }).body)) as Record<string, unknown>
+    expect(body.fromStepKey).toBe('process')
+  })
+
   it('H-13: a COMPLETED chain says so in words and offers no further advance', async () => {
     asActor([STOCK_PREP_READ, STOCK_PREP_OPERATE])
     serve({
