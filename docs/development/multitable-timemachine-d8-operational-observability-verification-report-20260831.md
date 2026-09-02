@@ -8,18 +8,18 @@ the verified implementation tree.
 ## 1. Exact evidence binding
 
 - Ratification baseline: `25635e67db5145a5998499c4adc8f030e156daf7`
-- Final replay base: `81960ae650d974dbd9a96c922ffb4a917292ac24`
+- Final replay base: `24942c70fb07133b580250c00aecbc208aa2f8e8`
 - Product/design checkpoint: `9c093f9b88636faf917b909f419ea652825fc8c5`
 - Product/design tree: `ec45c33c4ff5d35b6e04c1c4e713aa5c99396e5d`
 - Outcome-exhaustiveness fix-forward: `af90e770a21ee28bc97b2cead42560092fc6c484`
 - Pre-replay implementation tree: `509e493238f66e38ed1599a679be0e0525cfee27`
 - Cache-CI config fix-forward: `e85616da1007eca3664f686d8e19563814970d82`
-- Code-bearing remote head: `16e3c1d4a79b0c009c12eb37ead4c9e695a07976`
-- Code-bearing tree: `3ae7541eac1e91a2b582cedf192fb1c6b2daa095`
+- Code-bearing remote head: `666e01474980d5e16ff9ebdc49f686c5afb23fb5`
+- Code-bearing tree: `e49d1348ab8cc3602e9c9158fb60196b5e190c05`
 - Worktree: `/private/tmp/codex-tm-d8-operational-observability-20260831`
 - Remote PR: `#5393`
 - Remote exact-head result: `25 SUCCESS / 1 intentional SKIPPED / 0 failure /
-  0 pending` at `16e3c1d4a79b...`
+  0 pending` at `666e01474980...`
 - Merged-main SHA: `NOT AVAILABLE`
 
 ## 2. Local gates
@@ -27,6 +27,7 @@ the verified implementation tree.
 | Gate | Result |
 |---|---|
 | Observability, metrics, application, restore-worker, server-wiring, and metrics-endpoint tests | 6 files / 46 tests PASS |
+| Final current-main replay focused D8 tests | 4 files / 27 tests PASS |
 | `pnpm --filter @metasheet/core-backend type-check` | PASS |
 | Scoped source ESLint | 0 errors; 22 pre-existing `src/index.ts` warnings |
 | Cache build and tests | 3 files / 16 tests PASS |
@@ -75,8 +76,8 @@ because the production observer export was absent.
 |---|---|
 | Source and local focused tests | PASS at product checkpoint |
 | Local typecheck/lint/diff | PASS with recorded baseline warnings |
-| Independent exact-range model review | Terra high `P1=0 / P2=0 / P3=0` after the bounded exhaustiveness fix-forward |
-| Draft PR exact-head CI | First head `a16569ce...` failed only `core-backend-cache`; the earlier replacement `c0762ee4...` and final current-main replay head `16e3c1d4...` each reached `25 SUCCESS / 1 intentional SKIPPED / 0 failure / 0 pending`, including cache, Node 18, Node 20, and Web Tests |
+| Independent exact-range model review | Terra high `P1=0 / P2=0 / P3=0` after the bounded exhaustiveness fix-forward; fresh replay review at `666e01474980...` also returned `0 / 0 / 0` |
+| Draft PR exact-head CI | First head `a16569ce...` failed only `core-backend-cache`; replacement heads closed that gap, and final current-main replay head `666e01474980...` reached `25 SUCCESS / 1 intentional SKIPPED / 0 failure / 0 pending`, including cache, Node 18, Node 20, and Web Tests |
 | Ready / merge | NOT AUTHORIZED by this report |
 | Merged-main rerun | NOT RUN |
 | D7 staging | NOT RUN / OWNER GATE |

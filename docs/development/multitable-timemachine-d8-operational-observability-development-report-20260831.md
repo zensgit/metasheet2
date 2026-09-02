@@ -8,20 +8,20 @@ verified code-bearing head and changes no implementation or CI configuration.
 ## 1. Exact binding
 
 - Ratification baseline: `25635e67db5145a5998499c4adc8f030e156daf7`
-- Final replay base: `81960ae650d974dbd9a96c922ffb4a917292ac24`
+- Final replay base: `24942c70fb07133b580250c00aecbc208aa2f8e8`
 - Product/design checkpoint: `9c093f9b88636faf917b909f419ea652825fc8c5`
 - Product/design tree: `ec45c33c4ff5d35b6e04c1c4e713aa5c99396e5d`
 - Outcome-exhaustiveness fix-forward: `af90e770a21ee28bc97b2cead42560092fc6c484`
 - Pre-replay implementation tree: `509e493238f66e38ed1599a679be0e0525cfee27`
 - Cache-CI config fix-forward: `e85616da1007eca3664f686d8e19563814970d82`
-- Code-bearing remote head: `16e3c1d4a79b0c009c12eb37ead4c9e695a07976`
-- Code-bearing tree: `3ae7541eac1e91a2b582cedf192fb1c6b2daa095`
+- Code-bearing remote head: `666e01474980d5e16ff9ebdc49f686c5afb23fb5`
+- Code-bearing tree: `e49d1348ab8cc3602e9c9158fb60196b5e190c05`
 - Branch: `codex/tm-d8-operational-observability-20260831`
 - Scope including this development report and its verification report: 12 files,
-  716 insertions, 2 deletions at the code-bearing remote head
+  729 insertions, 2 deletions at the code-bearing remote head
 - Remote PR: `#5393`
 - Remote exact-head CI: `25 SUCCESS / 1 intentional SKIPPED / 0 failure /
-  0 pending` at `16e3c1d4a79b...`
+  0 pending` at `666e01474980...`
 
 The contract is
 `multitable-timemachine-d8-operational-observability-design-lock-20260831.md`.
@@ -117,10 +117,14 @@ additional P2/P3 finding. This is a CI compilation fix only; it changes no
 runtime request behavior. The replacement code-bearing head passed
 `core-backend-cache`, Node 18, Node 20, Web Tests, migration/recovery guards,
 and every other reported context; the only skipped context was the intentional
-Strict E2E gate. The final current-main replay preserved the same 12-file D8
-delta without a path conflict. Its code-bearing head `16e3c1d4a79b...` repeated
-the complete remote result: `25 SUCCESS / 1 intentional SKIPPED / 0 failure /
-0 pending`, including Node 18, Node 20, Web Tests, and `core-backend-cache`.
+Strict E2E gate. The final current-main replay head `666e01474980...` has
+ordered parents `a78abf3933da...` and `24942c70fb07...`. Its first-parent
+delta is only `docs/integration-consolidation-minimal-plan-20260901.md`; its
+second-parent delta is the same 12 D8 files, all byte-identical to the prior
+code-bearing candidate. A fresh Terra high replay review returned
+`P1=0 / P2=0 / P3=0`. The exact head repeated the complete remote result:
+`25 SUCCESS / 1 intentional SKIPPED / 0 failure / 0 pending`, including Node
+18, Node 20, Web Tests, and `core-backend-cache`.
 
 ## 7. Honest completion boundary
 
