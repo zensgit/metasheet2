@@ -43,10 +43,21 @@
     </div>
 
     <!-- The clamped enum code stays on screen — it is what a person quotes when they ask for help —
-         subordinate to a sentence that says what actually happened. -->
-    <p v-if="errorCode" class="sp-board__error" data-testid="stock-prep-project-board-error">
-      {{ bi(errorPlain(errorCode).zh, errorPlain(errorCode).en) }}
-      <code class="sp-board__token">{{ errorCode }}</code>
+         subordinate to a sentence that says what actually happened.
+
+         TWO THINGS THIS BANNER NOW GETS RIGHT.
+         (1) READ-SHAPED COPY. This page writes nothing, so a failed board read must not say
+             「这一步没有保存成功」 — that answers a question nobody asked and implies lost work that
+             never existed. The board's own failures resolve through `stockPrepBoardErrorPlain`,
+             which falls back to a READ generic. The two controls here that really do write or
+             download (通知下一步, 导出) keep the write-shaped table, chosen per action rather than
+             per page.
+         (2) IT DOES NOT DOUBLE UP WITH THE EMPTY STATE. A 404 used to render this banner AND the
+             empty state below, saying two different things about one fact. When the empty state is
+             already explaining the miss, the banner stays out of the way. -->
+    <p v-if="visibleErrorCode" class="sp-board__error" data-testid="stock-prep-project-board-error">
+      {{ bi(errorText.zh, errorText.en) }}
+      <code class="sp-board__token">{{ visibleErrorCode }}</code>
     </p>
 
     <!-- THREE-WAY EMPTY STATE, reused verbatim from #5445 rather than re-derived: it is the one
@@ -58,6 +69,30 @@
       </span>
     </p>
 
+    <!-- ── 2'. 从PLM拉取, OUTSIDE the board ────────────────────────────────────────────────────────
+         THE BUG THIS FIXES. The pull panel used to live inside `v-if="board"`, and the board 404s
+         for a project number this tenant has no data for. So the ONE control that creates that data
+         was reachable only after the data existed: an operator could never pull a NEW project from
+         the page built for them to pull projects.
+
+         The panel is now rendered whenever a project number has been opened, board or no board, and
+         it is SEEDED with that number so nobody retypes it. Nothing about the tenant boundary moves:
+         the board still answers a foreign tenant's project number with a 404 byte-identical to the
+         one an unknown number gets (the server decides that, and its suite asserts it) — what
+         changed is only what this tab renders around that refusal. -->
+    <section v-if="openedProjectNo" class="sp-board__pull" data-testid="stock-prep-project-board-pull">
+      <StockPreparationProjectSyncPanel
+        :scope="scope"
+        :project-no="openedProjectNo"
+        :api="syncApi"
+        :large-bom-api="largeBomApi"
+        :large-bom-poll-wait="largeBomPollWait"
+        @navigate-stage="(key: string) => emit('navigate-stage', key)"
+        @open-multitable="openFillTarget"
+        @synced="reloadBoard"
+      />
+    </section>
+
     <template v-if="board">
       <!-- ── 2. 状态条 ──────────────────────────────────────────────────────────────────────────
            Everything an operator needs to know before deciding what to press, in one line each. No
@@ -68,9 +103,9 @@
           <span v-if="board.projectName" class="sp-board__name">{{ board.projectName }}</span>
         </h3>
         <dl class="sp-board__facts">
-          <div class="sp-board__fact" data-testid="stock-prep-project-board-batches">
-            <dt>{{ bi('拉过几次', 'Times pulled in') }}</dt>
-            <dd>{{ batchText }}</dd>
+          <div class="sp-board__fact" data-testid="stock-prep-project-board-rows">
+            <dt>{{ bi('表里有多少行', 'Rows in the table') }}</dt>
+            <dd>{{ rowsText }}</dd>
           </div>
           <div class="sp-board__fact" data-testid="stock-prep-project-board-pull-state">
             <dt>{{ bi('拉取状态', 'Pull status') }}</dt>
@@ -85,6 +120,14 @@
             <dd>{{ lastExportText }}</dd>
           </div>
         </dl>
+        <!-- THE ADMINISTRATOR'S ARCHIVE, said to be exactly that. These numbers come from the MVP
+             snapshot tables, which mvp-persist writes and mvp-persist is platform-admin — so on an
+             operator's own run they are legitimately absent, and a bare 「0 次」 above the fold read
+             as 「还没拉过」 when the rows were sitting in the sheet the whole time. Subordinate,
+             labelled, and never the answer to 「拉过了吗?」. -->
+        <p class="sp-board__archive" data-testid="stock-prep-project-board-archive">
+          {{ bi(archiveText.zh, archiveText.en) }}
+        </p>
         <p v-if="board.pendingDecisionCount > 0" class="sp-board__pending" data-testid="stock-prep-project-board-pending">
           {{ bi(
             `这个项目有 ${board.pendingDecisionCount} 件事等您在「确认队列」里拿主意。`,
@@ -103,20 +146,9 @@
            从PLM拉取 / 通知下一步 / 导出Excel / 推送宜搭. Every control that renders is one the
            server answers for this caller (R-11); the ones that do not render say why in words. -->
       <section class="sp-board__actions" data-testid="stock-prep-project-board-actions">
-        <!-- 从PLM拉取 — the EXISTING 项目接入 panel, composed rather than forked, so the #5435
-             large-BOM progress panel and the four-step report come with it unchanged. It is seeded
-             with the project this board is about, so the operator does not retype the number. -->
-        <StockPreparationProjectSyncPanel
-          :scope="scope"
-          :project-no="board.projectNo ?? ''"
-          :api="syncApi"
-          :large-bom-api="largeBomApi"
-          :large-bom-poll-wait="largeBomPollWait"
-          @navigate-stage="(key: string) => emit('navigate-stage', key)"
-          @open-multitable="openFillTarget"
-          @synced="reloadBoard"
-        />
-
+        <!-- 从PLM拉取 lives ABOVE, outside `v-if="board"` — see the section that renders it. It is
+             ONE instance either way: mounting a second copy here would give the operator two panels
+             that disagree about which run is in flight. -->
         <div class="sp-board__buttons">
           <!-- 通知下一步 — the #5442 contract. ABSENT, not disabled, when the deployment has no
                handoff chain: a disabled button still tells the operator the capability exists here. -->
@@ -189,12 +221,28 @@
             ) }}
           </p>
         </template>
-        <p v-else class="sp-board__fill-hint" data-testid="stock-prep-project-board-no-fill-target">
-          {{ bi(
-            '填写用的备料主表还没建好,所以暂时没有可以打开的地方。请管理员在「安装 / 体检」里把表建出来。',
-            'The stock-preparation table you would fill in has not been created yet, so there is nowhere to open. Ask an administrator to create it on the Install / Health tab.',
-          ) }}
-        </p>
+        <template v-else>
+          <!-- NO HANDLE IS NOT NO DESTINATION. The board only issues a `fillTarget` when the server
+               has proved the bound sheet exists AND is this tenant's own; without one there is still
+               the plain multitable workbench, which is exactly where the legacy tab's own button
+               goes. So the control stays, says plainly that it cannot land on the right sheet, and
+               opens the workbench — never nothing, which is what a no-op button teaches an operator
+               to expect from every other button too. -->
+          <button
+            type="button"
+            class="sp-board__fill-cta sp-board__fill-cta--fallback"
+            data-testid="stock-prep-project-board-open-multitable-fallback"
+            @click="openFillTarget"
+          >
+            {{ bi('打开多维表', 'Open the multitable') }}
+          </button>
+          <p class="sp-board__fill-hint" data-testid="stock-prep-project-board-no-fill-target">
+            {{ bi(
+              '填写用的备料主表还没建好,所以没法直接跳到那张表 —— 这个按钮只会打开多维表首页。请管理员在「安装 / 体检」里把表建出来。',
+              'The stock-preparation table you would fill in has not been created yet, so there is no direct jump to it — this button opens the multitable home instead. Ask an administrator to create it on the Install / Health tab.',
+            ) }}
+          </p>
+        </template>
       </section>
     </template>
   </div>
@@ -242,10 +290,12 @@ import {
 import type { StockPreparationProjectSyncApi } from '../../../services/integration/stockPreparation/projectSync'
 import type { StockPreparationLargeBomJobApi } from '../../../services/integration/stockPreparation/largeBomPull'
 import {
+  stockPrepBoardErrorPlain,
   stockPrepDirectoryEmptyPlain,
   stockPrepDirectoryEmptyState,
   stockPrepErrorPlain,
   type StockPrepPlainEntry,
+  type StockPrepPlainText,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 
 const props = withDefaults(
@@ -266,8 +316,11 @@ const props = withDefaults(
 const emit = defineEmits<{
   /** Reuses the shell's ONE tab-nav surface. */
   (e: 'navigate-stage', viewKey: string): void
-  /** The shell owns routing; this view composes no route. */
-  (e: 'open-multitable', target: { sheetId: string; viewId: string }): void
+  /**
+   * The shell owns routing; this view composes no route. `null` means "no handle — open the plain
+   * multitable workbench", which is what the legacy tab's own button does. It is never "do nothing".
+   */
+  (e: 'open-multitable', target: { sheetId: string; viewId: string } | null): void
   /** Mirrors the opened project into the shell's `?projectNo=` query. */
   (e: 'select-project-no', projectNo: string): void
 }>()
@@ -278,11 +331,21 @@ function bi(zh: string, en: string): string {
   return locale.value === 'zh-CN' ? zh : en
 }
 
-const errorPlain = stockPrepErrorPlain
-
 const projectNoInput = ref<string>(props.projectNo ?? '')
 const busy = ref(false)
+/**
+ * A RE-READ IS NOT A TEARDOWN. `busy` covers a first load, where there is nothing on screen to
+ * protect; `refreshing` covers a re-read of a board the operator is already looking at. Keeping the
+ * two apart is the whole fix for the report that used to vanish the instant a run finished.
+ */
+const refreshing = ref(false)
 const errorCode = ref<string | null>(null)
+/**
+ * WHICH VOCABULARY THE LAST FAILURE BELONGS TO. This page mixes a read (the board) with two actions
+ * that genuinely write or download (通知下一步, 导出), and 「这一步没有保存成功」 is right for one of
+ * those and wrong for the other. The shape is recorded per ACTION rather than assumed per page.
+ */
+const errorShape = ref<'read' | 'write'>('read')
 const board = ref<StockPreparationProjectBoard | null>(null)
 const handoff = ref<StockPreparationHandoffCursor | null>(null)
 const handoffNotice = ref<string>('')
@@ -321,23 +384,91 @@ const emptyPlain = computed<StockPrepPlainEntry | null>(() => {
   return stockPrepDirectoryEmptyPlain(state)
 })
 
-const batchText = computed<string>(() => {
-  const count = board.value?.snapshotBatchCount ?? 0
-  if (count === 0) return bi('还没拉过', 'Not pulled in yet')
-  return bi(`${count} 次`, `${count} time(s)`)
+/**
+ * THE FAILURE SENTENCE, and which table it comes from. A board read that failed says so as a READ;
+ * an export or a handoff that failed keeps the write vocabulary the rest of this workbench uses.
+ */
+const errorText = computed<StockPrepPlainText>(() => {
+  const code = errorCode.value
+  if (!code) return stockPrepBoardErrorPlain('')
+  return errorShape.value === 'write' ? stockPrepErrorPlain(code) : stockPrepBoardErrorPlain(code)
+})
+
+/**
+ * The banner is suppressed when the empty state below is already explaining the SAME fact. A 404 on
+ * a project number is one event, and rendering it twice — once as "that did not save" and once as
+ * "this project has no data yet" — was two answers to one question, one of which was false.
+ */
+const visibleErrorCode = computed<string | null>(() => {
+  const code = errorCode.value
+  if (!code) return null
+  if (emptyPlain.value && code === 'STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND') return null
+  return code
+})
+
+/**
+ * 表里有多少行 — THE OPERATOR'S OWN EVIDENCE. Counted in the sheet `apply` writes, not in the MVP
+ * snapshot tables an administrator archives, because those two answer different questions and only
+ * this one answers 「我刚才拉进来了吗?」.
+ */
+const rowsText = computed<string>(() => {
+  const current = board.value
+  if (!current) return '—'
+  if (!current.pullTargetReady) return bi('备料主表还没建好', 'The stock-preparation table is not set up yet')
+  if (current.pulledRowCount === 0) return bi('还没有行', 'No rows yet')
+  const atLeast = current.pulledRowCountBounded
+  const total = atLeast
+    ? bi(`超过 ${current.pulledRowCount} 行`, `more than ${current.pulledRowCount} row(s)`)
+    : bi(`${current.pulledRowCount} 行`, `${current.pulledRowCount} row(s)`)
+  if (current.activePulledRowCount === current.pulledRowCount) return total
+  return bi(
+    `${total},其中 ${current.activePulledRowCount} 行还有效`,
+    `${total}, ${current.activePulledRowCount} of them still active`,
+  )
 })
 
 const pullStateText = computed<string>(() => {
   const current = board.value
   if (!current) return '—'
-  if (!current.lastSyncRunId) return bi('还没从 PLM 拉过这个项目', 'This project has not been pulled from PLM yet')
-  if (current.heldLineCount > 0) {
+  // THE ROWS DECIDE, not the archive's runId. `lastSyncRunId` is written by mvp-persist, which is
+  // platform-admin — so on an operator's own successful pull it stays null, and reading it here was
+  // what made the bar say 「还没从 PLM 拉过这个项目」 over a table full of rows they had just
+  // imported. If there are rows for this project, it has been pulled. That is not an inference.
+  if (current.pulledRowCount > 0) {
+    if (current.activePulledRowCount < current.pulledRowCount) {
+      return bi(
+        `已拉进来,${current.activePulledRowCount} 行可以用(另有 ${current.pulledRowCount - current.activePulledRowCount} 行已失效)`,
+        `Pulled in — ${current.activePulledRowCount} row(s) usable (${current.pulledRowCount - current.activePulledRowCount} no longer active)`,
+      )
+    }
+    return bi(`已拉进来,${current.activePulledRowCount} 行可以用`, `Pulled in, ${current.activePulledRowCount} row(s) usable`)
+  }
+  if (!current.pullTargetReady) {
     return bi(
-      `已拉进来;有 ${current.heldLineCount} 行还卡着,${current.readyLineCount} 行可以用`,
-      `Pulled in; ${current.heldLineCount} row(s) still stuck, ${current.readyLineCount} usable`,
+      '看不到备料主表,所以说不准拉没拉过',
+      'The stock-preparation table cannot be read, so whether it was pulled is unknown',
     )
   }
-  return bi(`已拉进来,${current.readyLineCount} 行可以用`, `Pulled in, ${current.readyLineCount} row(s) usable`)
+  return bi('还没从 PLM 拉过这个项目', 'This project has not been pulled from PLM yet')
+})
+
+/**
+ * 管理员留存的快照 — subordinate, and labelled as somebody else's numbers. Absent is the NORMAL
+ * shape for an operator's own run (mvp-persist stayed platform-admin), so absence is stated as
+ * "nobody has archived it", never as "nothing was pulled".
+ */
+const archiveText = computed<StockPrepPlainEntry>(() => {
+  const current = board.value
+  if (!current || !current.archivedSnapshotPresent) {
+    return {
+      zh: '管理员还没有为这个项目留存快照 —— 这不影响您上面的数据,只影响「差异对比」。',
+      en: 'An administrator has not archived a snapshot of this project — that does not affect your data above, only the diff view.',
+    }
+  }
+  return {
+    zh: `管理员留存的快照:${current.snapshotBatchCount} 批,${current.heldLineCount} 行卡着、${current.readyLineCount} 行就绪,${current.openExceptionCount} 个未处理的问题。`,
+    en: `Administrator's archived snapshot: ${current.snapshotBatchCount} batch(es), ${current.heldLineCount} row(s) held and ${current.readyLineCount} ready, ${current.openExceptionCount} open issue(s).`,
+  }
 })
 
 /**
@@ -374,14 +505,19 @@ const notifyTitle = computed<string>(() => {
   return ''
 })
 
-async function run(work: () => Promise<void>): Promise<void> {
+async function run(work: () => Promise<void>, shape: 'read' | 'write' = 'read'): Promise<void> {
   busy.value = true
   errorCode.value = null
+  errorShape.value = shape
   try {
     await work()
   } catch (error) {
     const code = (error as { code?: unknown })?.code
-    errorCode.value = typeof code === 'string' ? code : 'STOCK_PREPARATION_CONFIRM_REQUEST_FAILED'
+    // The fallback code differs by shape for the same reason the copy does: an unlabelled read
+    // failure must not borrow the confirm surface's "nothing was saved" identity.
+    errorCode.value = typeof code === 'string'
+      ? code
+      : (shape === 'write' ? 'STOCK_PREPARATION_CONFIRM_REQUEST_FAILED' : 'STOCK_PREPARATION_PROJECT_BOARD_READ_FAILED')
   } finally {
     busy.value = false
   }
@@ -400,14 +536,51 @@ async function loadDirectory(): Promise<void> {
   }
 }
 
-async function loadBoard(projectNo: string): Promise<void> {
+/**
+ * READ ONE PROJECT'S BOARD.
+ *
+ * `mode: 'refresh'` is the load that happens UNDER the operator — after a pull finishes, while they
+ * are reading the four-step report that just appeared. It must not unmount anything.
+ *
+ * THE BUG THIS FIXES. `@synced="reloadBoard"` fires inside the sync panel's emit, and the first
+ * statement of the old loader was `board.value = null`. Vue therefore tore the whole
+ * `v-if="board"` subtree down — the composed sync panel with it — BEFORE it had ever rendered the
+ * finished report, and rebuilt a fresh panel with empty state once the re-read resolved. The
+ * operator watched their own run's result flash out of existence at the moment it succeeded.
+ *
+ * A refresh now keeps the current board on screen, swaps on success, and — critically — leaves it
+ * alone on failure: a background re-read that 500s must not take away numbers that were correct a
+ * second ago. A FIRST load still clears, because there is nothing to protect and stale numbers from
+ * a different project would be worse than none.
+ */
+async function loadBoard(projectNo: string, mode: 'open' | 'refresh' = 'open'): Promise<void> {
   const target = projectNo.trim()
+  const refresh = mode === 'refresh' && board.value !== null && openedProjectNo.value === target
   openedProjectNo.value = target
-  board.value = null
-  handoff.value = null
-  handoffNotice.value = ''
-  exportEmptyNotice.value = false
+  if (!refresh) {
+    board.value = null
+    handoff.value = null
+    handoffNotice.value = ''
+    exportEmptyNotice.value = false
+  }
   if (!target) return
+  if (refresh) {
+    refreshing.value = true
+    errorCode.value = null
+    errorShape.value = 'read'
+    try {
+      const next = await readStockPreparationProjectBoard({ ...props.scope, projectNo: target })
+      const nextHandoff = await readStockPreparationHandoff({ ...props.scope, projectNo: target })
+      board.value = next
+      handoff.value = nextHandoff
+    } catch (error) {
+      const code = (error as { code?: unknown })?.code
+      errorCode.value = typeof code === 'string' ? code : 'STOCK_PREPARATION_PROJECT_BOARD_READ_FAILED'
+    } finally {
+      refreshing.value = false
+    }
+    return
+  }
   await run(async () => {
     board.value = await readStockPreparationProjectBoard({ ...props.scope, projectNo: target })
     // The handoff route may not exist on this deployment. `null` means "render no button", and only
@@ -423,9 +596,13 @@ async function openProject(): Promise<void> {
   await loadBoard(target)
 }
 
+/**
+ * The sync panel's `@synced`. A REFRESH, never a reload: the panel that emitted this is still on
+ * screen showing the run it just finished, and the operator is reading it.
+ */
 async function reloadBoard(): Promise<void> {
   if (!openedProjectNo.value) return
-  await loadBoard(openedProjectNo.value)
+  await loadBoard(openedProjectNo.value, 'refresh')
 }
 
 async function notifyNext(): Promise<void> {
@@ -433,6 +610,7 @@ async function notifyNext(): Promise<void> {
   const cursor = handoff.value
   if (!current || !current.projectNo || !cursor || !cursor.isCurrentHandler || cursor.terminal) return
   handoffNotice.value = ''
+  // A WRITE: 「这一步没有保存成功」 is the right sentence when this one fails.
   await run(async () => {
     const result = await advanceStockPreparationHandoff({ ...props.scope, projectNo: current.projectNo as string })
     handoff.value = await readStockPreparationHandoff({ ...props.scope, projectNo: current.projectNo as string })
@@ -449,18 +627,20 @@ async function notifyNext(): Promise<void> {
     } else {
       handoffNotice.value = bi('这一步已经交出去了,没有重复交。', 'This step had already been handed on; it was not handed on twice.')
     }
-  })
+  }, 'write')
 }
 
 async function exportMaterials(): Promise<void> {
   const projectNo = board.value?.projectNo
   if (!projectNo) return
   exportEmptyNotice.value = false
+  // A DOWNLOAD, which the workbench's write vocabulary already covers correctly ("that did not
+  // save" is wrong, but this table's export entries say what actually happened).
   await run(async () => {
     const result = await exportStockPreparationPrepLines({ ...props.scope, projectNo })
     triggerExportDownload(result.blob, result.filename)
     exportEmptyNotice.value = result.activeRowCount === 0
-  })
+  }, 'write')
 }
 
 /** The same client-side trigger #5437 uses: a Blob object URL + a synthetic `<a download>` click,
@@ -474,11 +654,18 @@ function triggerExportDownload(blob: Blob, filename: string): void {
   URL.revokeObjectURL(url)
 }
 
-/** The shell owns routing — this view only hands it the handle the server proved exists. */
+/**
+ * The shell owns routing — this view hands it the handle the server proved exists, or `null`.
+ *
+ * IT NEVER DOES NOTHING. The old body returned early when there was no `fillTarget`, which made the
+ * composed panel's 「到多维表看数据」 a dead button on this tab: the panel renders that link off its
+ * own run verdict, which knows nothing about whether a deep-link handle was issued. A button that
+ * silently ignores a click is worse than an absent one, because it teaches an operator that clicks
+ * on this page may or may not mean anything. `null` tells the shell to open the plain multitable
+ * workbench, which is exactly where the legacy tab's own button goes.
+ */
 function openFillTarget(): void {
-  const target = board.value?.fillTarget
-  if (!target) return
-  emit('open-multitable', target)
+  emit('open-multitable', board.value?.fillTarget ?? null)
 }
 
 watch(() => props.projectNo, (next) => {
@@ -665,5 +852,24 @@ onMounted(async () => {
   color: var(--ms-text-2);
   font-size: 13px;
   line-height: 1.7;
+}
+
+.sp-board__fill-cta--fallback {
+  font-weight: 400;
+  border-style: dashed;
+}
+
+/* Subordinate by design: the archive is somebody else's numbers, not the answer to 「拉过了吗?」. */
+.sp-board__archive {
+  margin: var(--ms-space-3) 0 0;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.sp-board__pull {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-3);
 }
 </style>

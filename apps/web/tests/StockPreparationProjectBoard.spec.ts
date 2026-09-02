@@ -98,6 +98,12 @@ function boardPayload(overrides: Record<string, unknown> = {}): Record<string, u
     openExceptionCount: 0,
     heldLineCount: 0,
     readyLineCount: 47,
+    archivedSnapshotPresent: true,
+    // The rows the pull itself wrote, in the bound target. This is the family the status bar reads.
+    pullTargetReady: true,
+    pulledRowCount: 47,
+    activePulledRowCount: 47,
+    pulledRowCountBounded: false,
     pendingDecisionCount: 0,
     lastExportAt: '2026-09-01T02:03:04.000Z',
     fillTarget: { sheetId: SHEET_ID, viewId: VIEW_ID },
@@ -131,6 +137,39 @@ function directoryPayload(): Record<string, unknown> {
 
 function ok(data: unknown): Response {
   return new Response(JSON.stringify({ ok: true, data }), { status: 200 })
+}
+
+/**
+ * The four-step sync api the composed panel drives. Injected through the board's own test seam, so
+ * B-09 can run a real pull and then assert on the report that run produced — the emit that used to
+ * destroy it is a component event, not a DOM one, and can only be provoked by the real thing.
+ */
+function syncApiDouble(): Record<string, unknown> {
+  return {
+    plan: vi.fn().mockResolvedValue({
+      canApply: true,
+      dryRunToken: 'tok_abc',
+      counts: { add: 3, update: 2, skip: 7, inactive: 0, manual_confirm: 0 },
+      evidence: {},
+      projectName: PROJECT_NAME,
+    }),
+    reconcile: vi.fn().mockResolvedValue({ counts: { created: 0, existing: 0, pending: 0 } }),
+    apply: vi.fn().mockResolvedValue({
+      status: 'succeeded',
+      apply: { counts: { created: 3, updated: 2, inactive: 0, skipped: 7, held: 0, failed: 0 } },
+    }),
+    archive: vi.fn().mockResolvedValue({ status: 'created', persisted: true, created: { batch: 1, lines: 5, run: 1 } }),
+  }
+}
+
+/** Type the number into the composed pull panel and press 同步. */
+async function runPullPanel(root: HTMLElement, projectNo = PROJECT_NO): Promise<void> {
+  const input = root.querySelector('[data-testid="stock-prep-project-sync-project-no"]') as HTMLInputElement
+  input.value = projectNo
+  input.dispatchEvent(new Event('input'))
+  await nextTick()
+  ;(root.querySelector('[data-testid="stock-prep-project-sync-run"]') as HTMLButtonElement).click()
+  await flush()
 }
 
 function notFound(code: string): Response {
@@ -388,7 +427,7 @@ describe('项目备料页 — the operator project board', () => {
     const status = root.querySelector('[data-testid="stock-prep-project-board-status"]') as HTMLElement
     expect(status.textContent).toContain(PROJECT_NO)
     expect(status.textContent).toContain(PROJECT_NAME)
-    expect((root.querySelector('[data-testid="stock-prep-project-board-batches"]') as HTMLElement).textContent).toContain('2')
+    expect((root.querySelector('[data-testid="stock-prep-project-board-rows"]') as HTMLElement).textContent).toContain('47')
     expect((root.querySelector('[data-testid="stock-prep-project-board-pull-state"]') as HTMLElement).textContent).toContain('47')
     // No internal handle is ever rendered — the projectId and the runId are state, not copy.
     expect(status.textContent).not.toContain('stockprep_project_a1')
@@ -424,5 +463,228 @@ describe('项目备料页 — the operator project board', () => {
     expect(options.length).toBe(1)
     expect((options[0] as HTMLOptionElement).value).toBe(PROJECT_NO)
     expect(options[0].textContent).toBe(PROJECT_NAME)
+  })
+
+  // ---- B-07: THE PULL IS REACHABLE WHEN THERE IS NOTHING TO SHOW ------------------------------
+  //
+  // THE BUG. 从PLM拉取 lived inside `v-if="board"`, and the board 404s for a project number this
+  // tenant has no data for. So the ONE control that CREATES that data was reachable only after the
+  // data existed: an operator could never pull a NEW project from the page built for pulling
+  // projects. The tenant boundary is untouched — the server still answers a foreign tenant's number
+  // with a 404 byte-identical to an unknown one; what changed is only what this tab renders around
+  // that refusal.
+
+  it('B-07: a project with no data still shows the search box and the 从PLM拉取 panel', async () => {
+    routeApi({ board: notFound('STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND') })
+    const root = await mountBoard({ projectNo: 'NO-SUCH-PROJECT' })
+
+    expect(root.querySelector('[data-testid="stock-prep-project-board-status"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-input"]')).not.toBeNull()
+    const pull = root.querySelector('[data-testid="stock-prep-project-board-pull"]')
+    expect(pull, 'the pull panel must be reachable exactly when the board is empty').not.toBeNull()
+    expect(pull.querySelector('[data-testid="stock-prep-project-sync"]')).not.toBeNull()
+    // ...and it is ENABLED for this tier, seeded with the number the operator just typed.
+    const run = root.querySelector('[data-testid="stock-prep-project-sync-run"]') as HTMLButtonElement
+    expect(run).not.toBeNull()
+    expect(run.disabled).toBe(false)
+    expect((root.querySelector('[data-testid="stock-prep-project-sync-project-no"]') as HTMLInputElement).value)
+      .toBe('NO-SUCH-PROJECT')
+    // The empty state still says which of the three situations this is.
+    expect(root.querySelector('[data-testid="stock-prep-project-board-empty"]')).not.toBeNull()
+  })
+
+  it('B-07: exactly ONE pull panel is mounted, board or no board', async () => {
+    const withBoard = await mountBoard()
+    expect(withBoard.querySelectorAll('[data-testid="stock-prep-project-sync"]').length).toBe(1)
+    remount()
+    routeApi({ board: notFound('STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND') })
+    const without = await mountBoard({ projectNo: 'NO-SUCH-PROJECT' })
+    expect(without.querySelectorAll('[data-testid="stock-prep-project-sync"]').length).toBe(1)
+  })
+
+  // ---- B-08: READ-SHAPED FAILURE COPY, AND NO DOUBLE ANSWER ------------------------------------
+
+  it('B-08: a 404 does not ALSO render the write-failure banner', async () => {
+    routeApi({ board: notFound('STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND') })
+    const root = await mountBoard({ projectNo: 'NO-SUCH-PROJECT' })
+    expect(root.querySelector('[data-testid="stock-prep-project-board-empty"]')).not.toBeNull()
+    expect(
+      root.querySelector('[data-testid="stock-prep-project-board-error"]'),
+      'the empty state already explains the 404 - the banner must not answer it a second time',
+    ).toBeNull()
+    expect(root.textContent).not.toContain('没有保存成功')
+  })
+
+  it('B-08: a board READ failure never says "nothing was saved"', async () => {
+    routeApi({
+      board: () => new Response(JSON.stringify({ ok: false, error: { code: 'INTERNAL', message: 'x' } }), { status: 500 }),
+    })
+    const root = await mountBoard()
+    const banner = root.querySelector('[data-testid="stock-prep-project-board-error"]') as HTMLElement
+    expect(banner).not.toBeNull()
+    expect(banner.textContent).toContain('没能读到')
+    expect(banner.textContent).not.toContain('没有保存成功')
+  })
+
+  // ---- B-09: A REFRESH DOES NOT UNMOUNT WHAT THE OPERATOR IS READING ---------------------------
+  //
+  // THE BUG. '@synced="reloadBoard"' fires inside the panel's own emit, and the loader's first
+  // statement was 'board.value = null' - so Vue tore down the 'v-if="board"' subtree, the composed
+  // sync panel with it, BEFORE the finished four-step report had ever rendered. The operator watched
+  // their run's result vanish at the moment it succeeded.
+
+  it('B-09: nothing the operator is reading is unmounted WHILE the refresh is in flight', async () => {
+    // The board's second read is held open, so the in-flight window is observable rather than a
+    // frame nobody can catch. That window is the whole bug: the old loader nulled 'board' as its
+    // first statement, so everything under 'v-if="board"' disappeared for the duration of a network
+    // round trip and came back rebuilt - and the four-step report, which lived there too, came back
+    // empty because its component had been destroyed.
+    let boardReads = 0
+    let releaseSecondRead: (() => void) | null = null
+    const secondRead = new Promise<void>((resolve) => { releaseSecondRead = resolve })
+    routeApi({
+      board: (() => {
+        boardReads += 1
+        if (boardReads === 1) return ok(boardPayload())
+        return secondRead.then(() => ok(boardPayload())) as unknown as Response
+      }) as unknown as () => Response,
+    })
+
+    const root = await mountBoard({ syncApi: syncApiDouble() })
+    expect(boardReads).toBe(1)
+    expect(root.querySelector('[data-testid="stock-prep-project-board-status"]')).not.toBeNull()
+
+    // A REAL run, which is the only thing that emits '@synced'.
+    await runPullPanel(root)
+    expect(boardReads).toBeGreaterThan(1)
+
+    // MID-FLIGHT: the second board read has not resolved yet.
+    expect(
+      root.querySelector('[data-testid="stock-prep-project-board-status"]'),
+      'the board must stay on screen while its own refresh is in flight',
+    ).not.toBeNull()
+    expect(
+      root.querySelector('[data-testid="stock-prep-project-sync-verdict"]'),
+      'and so must the finished four-step report the refresh was triggered by',
+    ).not.toBeNull()
+
+    releaseSecondRead!()
+    await flush()
+
+    // …and after it lands, both are still there.
+    expect(root.querySelector('[data-testid="stock-prep-project-board-status"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-verdict"]')).not.toBeNull()
+    expect(root.querySelectorAll('[data-testid="stock-prep-project-sync-step"]').length).toBeGreaterThan(0)
+  })
+
+  it('B-09: a refresh that FAILS leaves the numbers that were correct a second ago', async () => {
+    let boardReads = 0
+    routeApi({
+      board: () => {
+        boardReads += 1
+        return boardReads === 1
+          ? ok(boardPayload())
+          : new Response(JSON.stringify({ ok: false, error: { code: 'INTERNAL', message: 'x' } }), { status: 500 })
+      },
+    })
+    const root = await mountBoard({ syncApi: syncApiDouble() })
+    await runPullPanel(root)
+    expect(boardReads).toBeGreaterThan(1)
+    expect(
+      root.querySelector('[data-testid="stock-prep-project-board-status"]'),
+      'a background re-read that fails must not take the board away',
+    ).not.toBeNull()
+    expect(
+      root.querySelector('[data-testid="stock-prep-project-sync-verdict"]'),
+      'nor the report of the run that just finished',
+    ).not.toBeNull()
+  })
+
+  // ---- B-10: THE PULL, NOT THE ARCHIVE, ANSWERS THE "has it been pulled?" QUESTION -------------
+
+  it('B-10: rows in the bound table read as PULLED even with no archived snapshot', async () => {
+    routeApi({
+      board: ok(boardPayload({
+        // Exactly the shape an operator's own run produces: apply wrote the rows, mvp-persist (which
+        // is platform-admin) never ran, so the whole archive family is absent.
+        projectId: null,
+        projectName: null,
+        lastSyncRunId: null,
+        snapshotBatchCount: 0,
+        heldLineCount: 0,
+        readyLineCount: 0,
+        archivedSnapshotPresent: false,
+        pullTargetReady: true,
+        pulledRowCount: 47,
+        activePulledRowCount: 47,
+      })),
+    })
+    const root = await mountBoard()
+    const pullState = root.querySelector('[data-testid="stock-prep-project-board-pull-state"]') as HTMLElement
+    expect(pullState.textContent).toContain('已拉进来')
+    expect(pullState.textContent).not.toContain('还没从 PLM 拉过这个项目')
+    expect((root.querySelector('[data-testid="stock-prep-project-board-rows"]') as HTMLElement).textContent).toContain('47')
+    // And the archive is named as the administrator's, not shown as zeros reading like "never pulled".
+    const archive = root.querySelector('[data-testid="stock-prep-project-board-archive"]') as HTMLElement
+    expect(archive.textContent).toContain('管理员')
+  })
+
+  it('B-10: no rows anywhere still says so plainly', async () => {
+    routeApi({
+      board: ok(boardPayload({
+        lastSyncRunId: null,
+        archivedSnapshotPresent: false,
+        pullTargetReady: true,
+        pulledRowCount: 0,
+        activePulledRowCount: 0,
+      })),
+    })
+    const root = await mountBoard()
+    expect((root.querySelector('[data-testid="stock-prep-project-board-pull-state"]') as HTMLElement).textContent)
+      .toContain('还没从 PLM 拉过这个项目')
+  })
+
+  // ---- B-11: THE MULTITABLE CONTROL IS NEVER A SILENT NO-OP ------------------------------------
+
+  it('B-11: with no fill handle the multitable control still goes somewhere', async () => {
+    routeApi({ board: ok(boardPayload({ fillTarget: null })) })
+    const root = await mountBoard()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-open-multitable"]')).toBeNull()
+    const fallback = root.querySelector('[data-testid="stock-prep-project-board-open-multitable-fallback"]') as HTMLButtonElement
+    expect(fallback, 'a board with no handle must still offer the plain workbench').not.toBeNull()
+    expect(fallback.disabled).toBe(false)
+  })
+
+  /** The shell has no '?projectNo=' in these specs, so a board only appears once one is opened. */
+  async function openProjectInShell(root: HTMLElement): Promise<void> {
+    const input = root.querySelector('[data-testid="stock-prep-project-board-input"]') as HTMLInputElement
+    input.value = PROJECT_NO
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    ;(root.querySelector('[data-testid="stock-prep-project-board-open"]') as HTMLButtonElement).click()
+    await flush()
+  }
+
+  it('B-11: the shell routes a null handle to the plain multitable workbench', async () => {
+    routeApi({ board: ok(boardPayload({ fillTarget: null })) })
+    const root = mount(StockPreparationWorkspace)
+    await flush()
+    await openProjectInShell(root)
+    const fallback = root.querySelector('[data-testid="stock-prep-project-board-open-multitable-fallback"]') as HTMLButtonElement
+    expect(fallback).not.toBeNull()
+    fallback.click()
+    await flush()
+    expect(routerPush).toHaveBeenCalledWith({ path: '/multitable' })
+  })
+
+  it('B-11: a real handle still deep-links to the bound sheet and view', async () => {
+    const root = mount(StockPreparationWorkspace)
+    await flush()
+    await openProjectInShell(root)
+    const cta = root.querySelector('[data-testid="stock-prep-project-board-open-multitable"]') as HTMLButtonElement
+    expect(cta).not.toBeNull()
+    cta.click()
+    await flush()
+    expect(routerPush).toHaveBeenCalledWith({ path: `/multitable/${SHEET_ID}/${VIEW_ID}` })
   })
 })

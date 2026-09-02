@@ -37,16 +37,32 @@ export interface StockPreparationFillTarget {
 /** The frozen board projection. Mirrors STOCK_PREPARATION_PROJECT_BOARD_KEYS server-side. */
 export interface StockPreparationProjectBoard {
   tenantId: string
-  /** Internal MetaSheet handle. Kept in state, never rendered. */
-  projectId: string
+  /**
+   * Internal MetaSheet handle. Kept in state, never rendered. NULL when this project has rows but no
+   * archived snapshot — an operator's own pull produces exactly that shape, because the MVP project
+   * ledger is written by mvp-persist and mvp-persist is platform-admin.
+   */
+  projectId: string | null
   projectNo: string | null
   projectName: string | null
   projectStatus: string | null
+  // ── THE ADMINISTRATOR'S ARCHIVE (mvp-persist, platform-admin). Absent is normal for an operator's
+  //    own run, and `archivedSnapshotPresent` is what says so — these must never be read as
+  //    "nothing was pulled".
   lastSyncRunId: string | null
   snapshotBatchCount: number
   openExceptionCount: number
   heldLineCount: number
   readyLineCount: number
+  archivedSnapshotPresent: boolean
+  // ── THE PULL, counted in the bound table-action target: the sheet apply writes and the export
+  //    reads. This is the family that answers 「拉过了吗?」.
+  /** False when nothing is bound, the bound sheet is not this tenant's own, or it is unprovisioned. */
+  pullTargetReady: boolean
+  pulledRowCount: number
+  activePulledRowCount: number
+  /** True when the count stopped at the scan bound — the real number is at least `pulledRowCount`. */
+  pulledRowCountBounded: boolean
   pendingDecisionCount: number
   /** ISO timestamp of the last materials export for this project, from the audit trail. */
   lastExportAt: string | null

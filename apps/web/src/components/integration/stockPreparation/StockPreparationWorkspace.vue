@@ -512,9 +512,17 @@ function handleOpenMultitable(): void {
  * No `?filter=` is composed. A transient per-project filter would need a non-persisting overlay in
  * the multitable view model that does not exist today — see the PR body — and inventing a query
  * param the workbench ignores would be a link that quietly lies about what it does.
+ *
+ * NO HANDLE STILL GOES SOMEWHERE. `null` (or a malformed handle) falls back to the plain multitable
+ * route — the exact destination `handleOpenMultitable` above uses for the legacy tab. The board's
+ * composed sync panel renders its own 「到多维表看数据」 off the run verdict, which knows nothing
+ * about deep-link handles, so without this fallback that button was a silent no-op on this tab.
  */
-function handleOpenFillTarget(target: { sheetId: string; viewId: string }): void {
-  if (!target || !target.sheetId || !target.viewId) return
+function handleOpenFillTarget(target: { sheetId: string; viewId: string } | null): void {
+  if (!target || !target.sheetId || !target.viewId) {
+    void router.push({ path: '/multitable' })
+    return
+  }
   void router.push({
     path: `/multitable/${encodeURIComponent(target.sheetId)}/${encodeURIComponent(target.viewId)}`,
   })
