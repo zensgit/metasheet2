@@ -256,6 +256,11 @@ function mount({ canonicalRows = pairRows(), recordsWrapper } = {}) {
     readSourceCompositionConfigStore: { ...inertService(['saveVersion', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']), async list() { return [] } },
     bridgeAgentChecklistStore: inertService(['saveVersion', 'approve', 'retire', 'getForApply']),
     stockPreparationAuditStore: auditStore,
+    // The host capability the carry route's tenant wall requires (#5445): the plugin submits two
+    // identity strings and receives one boolean. These suites drive the route as the deployment's own
+    // tenant, so the pairing is vouched for and the wall is transparent to them — the wall itself is
+    // witnessed in stock-preparation-carry-target-binding.test.cjs (T9-*).
+    tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
   }
   httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
   return { routes, auditDb, provisioning, records, baseRecords }

@@ -293,8 +293,19 @@ function tableActionConfigFor(target) {
   }
 }
 
-function mountCarryRoute({ boundSheet = SANDBOX_SHEET, configured = true, targetOverride } = {}) {
+function mountCarryRoute({ boundSheet = SANDBOX_SHEET, configured = true, targetOverride, memberVerdict = true } = {}) {
   const env = substrate({ boundSheet })
+  // The host capability #5445 requires of every tenant-scoped operator surface: the plugin submits
+  // two identity strings and receives one boolean. Injected exactly as the host injects it
+  // (packages/core-backend/src/index.ts), so the carry route is exercised through the real seam.
+  const directoryCalls = []
+  env.tenantPrincipalDirectory = {
+    async verifyTenantMembership(pair) {
+      directoryCalls.push({ ...pair })
+      return { member: memberVerdict }
+    },
+  }
+  env.directoryCalls = directoryCalls
   if (targetOverride) env.target = targetOverride(env.target)
   const routes = new Map()
   const auditDb = createFakeAuditDb()
@@ -328,12 +339,19 @@ function mountCarryRoute({ boundSheet = SANDBOX_SHEET, configured = true, target
     readSourceCompositionConfigStore: { ...inertService(['saveVersion', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']), async list() { return [] } },
     bridgeAgentChecklistStore: inertService(['saveVersion', 'approve', 'retire', 'getForApply']),
     stockPreparationAuditStore: auditStore,
+    tenantPrincipalDirectory: env.tenantPrincipalDirectory,
   }
   httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
   return { routes, auditDb, env }
 }
 
 const ADMIN = Object.freeze({ id: OPERATOR, roles: ['admin'], tenantId: TENANT_ID })
+// A real admin OF ANOTHER TENANT. Not unauthenticated and not under-privileged: every permission
+// gate on this route says yes to them, which is exactly what makes the sheet wall the load-bearing
+// one.
+const FOREIGN_TENANT = 'tenant-zzz-attacker'
+const FOREIGN_ADMIN = Object.freeze({ id: 'u_admin_zzz', roles: ['admin'], tenantId: FOREIGN_TENANT })
+const TENANTLESS_ADMIN = Object.freeze({ id: 'u_platform_admin', roles: ['admin'] })
 const CARRY_ROUTE = '/api/integration/stock-preparation/carry/confirm'
 
 function createResponse() {
@@ -349,7 +367,15 @@ async function call(routes, method, routePath, req = {}) {
   const handler = routes.get(`${method.toUpperCase()} ${routePath}`)
   assert.ok(handler, `route ${method} ${routePath} is registered`)
   const res = createResponse()
-  await handler({ user: req.user, body: req.body || {}, query: req.query || {}, params: req.params || {} }, res)
+  await handler({
+    user: req.user,
+    // `req.authenticatedTenantId` is the host's VERIFIED token claim (absent when the token carried
+    // none, in which case the middleware may have filled `user.tenantId` from the x-tenant-id HEADER).
+    authenticatedTenantId: req.authenticatedTenantId,
+    body: req.body || {},
+    query: req.query || {},
+    params: req.params || {},
+  }, res)
   return res
 }
 
@@ -766,6 +792,121 @@ async function main() {
     assert.deepEqual(res.body.error.details.missingFields, ['componentSourceId'])
     assert.equal(env.records.patchCalls.length, 0, 'T8f: nothing was written')
     assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, undefined)
+  })
+
+  // =========================================================================
+  // T9 — THE TENANT WALL. Binding the target to the deploy-time action answers
+  // "which sheet", but `getTableAction` is keyed by actionId ALONE, so on its own
+  // it answers the same sheet to EVERY tenant. Before this wall a foreign-tenant
+  // admin's carry returned 200 and patched the deployment's one bound sheet,
+  // where the canonical-lookup version had refused because the sheet was resolved
+  // under the CALLER's staging project. The binding decides which sheet the
+  // deployment writes; the wall decides whether it is the caller's to write.
+  // =========================================================================
+  await run('T9-a: a FOREIGN-tenant admin is refused, with ZERO records calls and ZERO ledger reads', async () => {
+    const { routes, env, auditDb } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: FOREIGN_ADMIN,
+      authenticatedTenantId: FOREIGN_TENANT,
+      // A ledger pair too: the refusal must land before the pre-flight, so approval bookkeeping in
+      // the caller's project can never be consulted for a write into someone else's sheet.
+      body: { decision: decisionFixture(), decisionId: 'dec_1', inputFingerprint: 'fp_1' },
+    })
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH')
+    assert.equal(env.records.queryCalls.length, 0, 'T9-a: no host read — ledger included')
+    assert.equal(env.records.patchCalls.length, 0, 'T9-a: nothing written')
+    assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, undefined,
+      'T9-a: the bound row of the deployment is untouched by a tenant that does not own it')
+    // The membership check DID pass for this principal — they are a genuine admin of a genuine
+    // tenant. The refusal is the sheet wall, not an identity failure, which is the point.
+    assert.deepEqual(env.directoryCalls, [{ userId: FOREIGN_ADMIN.id, tenantId: FOREIGN_TENANT }])
+    assert.equal(auditDb.rows.filter((row) => row.action === 'exception_resolve').length, 0)
+  })
+
+  await run('T9-a2: the headline — a FOREIGN-tenant admin carrying with NO ledger pair is refused, not served', async () => {
+    // T9-a sends a ledger pair, so on an unwalled build it can trip a ledger refusal first and hide
+    // the hole. This is the bare shape the adversarial repro used: `decisionId` is OPTIONAL, so an
+    // admin may carry with no approval row at all. Unwalled, this returned 200 `carried` and patched
+    // the sheet of a tenant the caller has nothing to do with.
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: FOREIGN_ADMIN,
+      authenticatedTenantId: FOREIGN_TENANT,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH')
+    assert.equal(env.records.patchCalls.length, 0)
+    assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, undefined)
+  })
+
+  await run('T9-b: the OWN tenant of the caller still carries, and the audit records the scoped tenant', async () => {
+    const { routes, env, auditDb } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      authenticatedTenantId: TENANT_ID,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, HUMAN_NOTE)
+    const entry = auditDb.rows.find((row) => row.action === 'exception_resolve')
+    assert.ok(entry, 'the carry was audited')
+    assert.equal(entry.tenant_id || entry.tenantId, TENANT_ID,
+      'T9-b: the audit tenant is the one that owns the sheet the write landed in')
+  })
+
+  await run('T9-c: a header tenant that CONTRADICTS the verified claim is refused 403', async () => {
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      // The host middleware copies x-tenant-id onto `user.tenantId` when the token carries no claim;
+      // here a claim EXISTS and the carried value disagrees with it. There is no reading of that
+      // which is a legitimate caller.
+      user: { id: 'u_spoof', roles: ['admin'], tenantId: TENANT_ID },
+      authenticatedTenantId: FOREIGN_TENANT,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 403, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'OPERATOR_SCOPE_TENANT_CONTRADICTED')
+    assert.equal(env.records.queryCalls.length, 0)
+    assert.equal(env.records.patchCalls.length, 0)
+  })
+
+  await run('T9-d: a principal with NO tenant of its own is refused 403, not served the bound sheet', async () => {
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: TENANTLESS_ADMIN,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 403, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'OPERATOR_SCOPE_TENANT_REQUIRED')
+    assert.equal(env.records.queryCalls.length, 0)
+    assert.equal(env.records.patchCalls.length, 0)
+  })
+
+  await run('T9-e: a body tenantId steering to another tenant is refused 403', async () => {
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      authenticatedTenantId: TENANT_ID,
+      body: { decision: decisionFixture(), tenantId: FOREIGN_TENANT },
+    })
+    assert.equal(res.statusCode, 403, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'OPERATOR_SCOPE_TENANT_MISMATCH')
+    assert.equal(env.records.queryCalls.length, 0)
+  })
+
+  await run('T9-f: the host must VOUCH for the (principal, tenant) pairing — a denial refuses 403', async () => {
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET, memberVerdict: false })
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      authenticatedTenantId: TENANT_ID,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 403, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED')
+    assert.equal(env.records.queryCalls.length, 0)
+    assert.equal(env.records.patchCalls.length, 0)
   })
 
   await run('T8e: the route still audits values-free, and the audit rides the same exception_resolve vocabulary', async () => {

@@ -718,6 +718,30 @@ function sendError(res, error) {
   })
 }
 
+// THE CARRY TENANT WALL. `target` is the deploy-time bound action target; `targetProjectId` is the
+// CALLER's own staging project. The bound sheet is acceptable only if it is the sheet provisioning
+// holds for that project and that objectId — i.e. the caller's own. Absence and disagreement are the
+// same verdict and get the same typed code: in neither case is the bound sheet provably the
+// caller's, and a write that cannot be proven to land in the caller's own tenant must not happen.
+//
+// Values-free: the refusal names the objectId (a public config identifier) and nothing else — never
+// a sheet id, never a row.
+async function assertCarryTargetBelongsToTenant({ provisioning, targetProjectId, target } = {}) {
+  const boundSheetId = target && typeof target.sheetId === 'string' ? target.sheetId.trim() : ''
+  const objectId = target && typeof target.objectId === 'string' ? target.objectId.trim() : ''
+  if (!boundSheetId || !objectId) {
+    throw new HttpRouteError(409, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH', 'the bound stock-preparation target cannot be attributed to a tenant', { objectId: objectId || null })
+  }
+  if (!provisioning || typeof provisioning.findObjectSheet !== 'function') {
+    throw new HttpRouteError(501, 'CONFIRM_CARRY_PROVISIONING_UNAVAILABLE', 'the carry tenant check requires multitable.provisioning.findObjectSheet', { requiredMethods: ['findObjectSheet'] })
+  }
+  const sheet = await provisioning.findObjectSheet({ projectId: targetProjectId, objectId })
+  const ownSheetId = sheet && typeof sheet.id === 'string' ? sheet.id.trim() : ''
+  if (!ownSheetId || ownSheetId !== boundSheetId) {
+    throw new HttpRouteError(409, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH', 'the bound stock-preparation target does not belong to the tenant of this caller', { objectId })
+  }
+}
+
 function inferDataSourceBridgeErrorCode(error) {
   const code = error && error.code ? String(error.code) : ''
   if (/^DATA_SOURCE_/.test(code)) return code
@@ -6608,7 +6632,24 @@ function createHandlers(services, options = {}) {
       if (Boolean(decisionId) !== Boolean(inputFingerprint)) {
         throw new HttpRouteError(400, 'STOCK_PREPARATION_CARRY_CONFIRM_REQUEST_INVALID', 'decisionId and inputFingerprint must be provided together', { fields: ['decisionId', 'inputFingerprint'] })
       }
-      const tenantId = resolveAuthUserTenantId(req)
+      // WHOSE CARRY IS THIS — established before anything else, from the AUTHENTICATED principal.
+      //
+      // Deliberately NOT `resolveAuthUserTenantId`: that helper reads `user.tenantId`, which the host
+      // auth middleware fills from the `x-tenant-id` REQUEST HEADER whenever the token carries no
+      // tenant claim (packages/core-backend/src/auth/jwt-middleware.ts hydrateAuthenticatedUser). For
+      // a write whose destination sheet is decided by the tenant string, a header-fillable tenant is
+      // a steering vector. `resolveOperatorValueScope` (#5445) prefers the VERIFIED claim, refuses a
+      // carried tenant that contradicts it, refuses a principal with no tenant of its own, refuses
+      // any request-carried tenant that tries to steer, and makes the HOST vouch for the (principal,
+      // tenant) pairing. Every refusal it raises is decided from the principal plus the request's own
+      // tenant carriers, so all of them cost ZERO records and ZERO provisioning work.
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
       const targetProjectId = resolveIntegrationStagingProjectId(tenantId, undefined)
       // WRITE THE TABLE APPLY WROTE. Resolved through the SAME seam every other stock-prep route
       // uses to reach its target — getTableAction + assertStockPreparationTargetReady — so the carry
@@ -6628,6 +6669,30 @@ function createHandlers(services, options = {}) {
       const carryAction = assertStockPreparationTargetReady(
         await tableActions.getTableAction({ tenantId, actionId: PLM_STOCK_PREPARATION_ACTION_ID }),
       )
+      // ...AND IT MUST BE THE SHEET OF THE CALLER'S OWN TENANT.
+      //
+      // The binding above answers "which sheet does this DEPLOYMENT write". It cannot answer "is that
+      // sheet the caller's", because `getTableAction` is keyed by actionId ALONE — the config map is
+      // deploy-global (stock-preparation-table-actions.cjs) and `applyPersistedSourceBinding`
+      // overrides only `externalSystemId`, never `target`. So the binding on its own hands EVERY
+      // tenant the same sheet. Before this check a foreign-tenant admin's carry returned 200 and
+      // patched it, where the earlier canonical-objectId version had refused precisely because it
+      // resolved the sheet under the CALLER's staging project.
+      //
+      // This restores that wall without giving the executor a way to resolve a sheet of its own: the
+      // bound sheet must be the one provisioning holds for the caller's `${tenantId}:integration-core`
+      // project under the target's own objectId. That is exactly how a correctly-derived binding is
+      // produced — scripts/ops/stock-preparation-derive-target-binding.mjs computes
+      // sheet_ + sha1(`${tenantId}:integration-core:${objectId}`), canonical and sandbox twin alike —
+      // so a sanctioned config passes and a config pointing anywhere else is refused rather than
+      // written to. One provisioning read, no records IO, and it runs BEFORE the ledger pre-flight so
+      // approval bookkeeping in the caller's project is never consulted for a write into another
+      // tenant's sheet.
+      await assertCarryTargetBelongsToTenant({
+        provisioning: getMultitableProvisioning(),
+        targetProjectId,
+        target: carryAction.target,
+      })
       // PRE-FLIGHT BIND, BEFORE the carry write (the P1 fix). `decision`, `decisionId` and
       // `inputFingerprint` arrive as three independent client fields; until they are proven to be
       // ONE approved pair, nothing may be written. Refusing only at the ledger close would leave the
@@ -6650,7 +6715,9 @@ function createHandlers(services, options = {}) {
         recordsApi: getMultitableRecordsApi(),
         target: carryAction.target,
         decision: input.decision,
-        confirmedBy: user.id || user.email,
+        // The SAME principal handle the scope was resolved under, so the row stamp, the audit actor
+        // and the tenant wall all name one identity rather than three independently-derived ones.
+        confirmedBy: scope.actorId,
       })
       // Ledger close, AFTER the apply: the carry is the substantive act; the ledger row is its
       // bookkeeping. A typed ledger refusal (e.g. the row was superseded by a newer reconcile)
