@@ -283,8 +283,9 @@ function tableActionConfigFor(target) {
   }
 }
 
-function mountCarryRoute({ boundSheet = SANDBOX_SHEET, configured = true } = {}) {
+function mountCarryRoute({ boundSheet = SANDBOX_SHEET, configured = true, targetOverride } = {}) {
   const env = substrate({ boundSheet })
+  if (targetOverride) env.target = targetOverride(env.target)
   const routes = new Map()
   const auditDb = createFakeAuditDb()
   const auditStore = createStockPreparationAuditStore({ db: auditDb, idGenerator: () => `audit_${auditDb.rows.length + 1}` })
@@ -694,6 +695,29 @@ async function main() {
     assert.equal(env.records.patchCalls.length, 0, 'T8d: nothing was written anywhere')
     assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, undefined)
     assert.equal(rowByKey(env, MAIN_SHEET, NEW_KEY).data.notes, undefined)
+  })
+
+  await run('T8f: the route runs the READINESS gate on the bound target, not merely getTableAction', async () => {
+    // `assertStockPreparationTargetReady` is the second half of the seam — without it an
+    // incompletely-bound deployment would reach the executor and surface as its own 500 instead of
+    // the deploy-time 422 an admin can act on. Dropping the assertion from the handler therefore
+    // changes the code this case sees, which is what makes it mutation-sensitive rather than
+    // decorative. A plm_system column is chosen because that is exactly the band the completeness
+    // gate covers.
+    const { routes, env } = mountCarryRoute({
+      boundSheet: SANDBOX_SHEET,
+      targetOverride(target) {
+        const fieldIdMap = { ...target.fieldIdMap }
+        delete fieldIdMap.componentSourceId
+        return { ...target, fieldIdMap }
+      },
+    })
+    const res = await call(routes, 'POST', CARRY_ROUTE, { user: ADMIN, body: { decision: decisionFixture() } })
+    assert.equal(res.statusCode, 422, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'TARGET_SCHEMA_INCOMPLETE')
+    assert.deepEqual(res.body.error.details.missingFields, ['componentSourceId'])
+    assert.equal(env.records.patchCalls.length, 0, 'T8f: nothing was written')
+    assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, undefined)
   })
 
   await run('T8e: the route still audits values-free, and the audit rides the same exception_resolve vocabulary', async () => {
