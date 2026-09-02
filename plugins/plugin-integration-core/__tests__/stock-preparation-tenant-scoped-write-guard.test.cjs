@@ -304,12 +304,51 @@ check('stockPreparationHandoffAdvance: checks the configured chain belongs to th
 // the derivation sites kept all nine plugin suites green. Only a source-level assertion says "this
 // class of handler does not reach for the request-steerable resolver at all", and only that form
 // stays true when a fifth value-bearing read arrives.
-const VALUE_BEARING_READ_HANDLERS = [
+// DERIVED, NOT TYPED. A hand-kept list is a guard that can be disarmed by deleting a line from
+// itself: removing the board from this array left every assertion below still passing, on a
+// smaller set, and said nothing. So the set is SCANNED out of the route source — every handler
+// that calls `resolveOperatorValueScope(` is by definition deciding whose VALUES it may show —
+// and then cross-checked against a pinned literal. A fifth value-bearing read joins the tripwire
+// automatically; deleting one becomes a visible edit to a pinned constant that this file refuses.
+function handlersCallingOperatorValueScope(src) {
+  const found = []
+  const pattern = /\n {4}async ([A-Za-z0-9_$]+)\(req, res\) \{/g
+  let match = pattern.exec(src)
+  while (match) {
+    const body = handlerBody(src, match[1])
+    if (body.includes('resolveOperatorValueScope(')) found.push(match[1])
+    match = pattern.exec(src)
+  }
+  return found.sort()
+}
+
+/** The value-bearing reads as of this commit. A change here is a deliberate, reviewable act. */
+const PINNED_VALUE_BEARING_READ_HANDLERS = [
   'stockPreparationConfirmationDecisionsValueEntry',
-  'stockPreparationPrepLineExport',
-  'stockPreparationOperatorProjectDirectory',
   'stockPreparationOperatorProjectBoard',
-]
+  'stockPreparationOperatorProjectDirectory',
+  'stockPreparationPrepLineExport',
+].sort()
+
+const VALUE_BEARING_READ_HANDLERS = handlersCallingOperatorValueScope(ROUTES_SRC)
+
+check('the value-bearing read set is DERIVED from the source and is not empty', () => {
+  assert.ok(
+    VALUE_BEARING_READ_HANDLERS.length > 0,
+    'the scan found no handler calling resolveOperatorValueScope( — the derivation broke, and every '
+    + 'per-handler assertion below became vacuous',
+  )
+})
+
+check('the derived set equals the pinned set (a new value-bearing read must be pinned here)', () => {
+  assert.deepEqual(
+    VALUE_BEARING_READ_HANDLERS,
+    PINNED_VALUE_BEARING_READ_HANDLERS,
+    'a handler that resolves an operator VALUE scope has been added or removed. If added: it carries '
+    + 'customer values, so pin it here and let the three checks below run over it. If removed: say so '
+    + 'in the pin.',
+  )
+})
 
 // The three that derive their staging project inline. (The export does not: its sheet is the bound
 // table action's deploy-time target, which is why its own handler comment spells out what the

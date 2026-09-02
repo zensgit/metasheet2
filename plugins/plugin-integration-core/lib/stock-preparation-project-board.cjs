@@ -544,10 +544,14 @@ async function readOperatorProjectBoard({
     pulledRowCount: pullTarget.rowCount,
     activePulledRowCount: pullTarget.activeRowCount,
     pulledRowCountBounded: pullTarget.bounded,
-    // The pending-decision ledger is keyed by projectNo, not by the archive's projectId, so it is
-    // answerable with or without an archive row — but `reconcile` (which fills it) also stayed
-    // platform-admin, so zero here means "nothing queued", never "nothing to queue".
-    pendingDecisionCount: match ? match.pendingDecisionCount : 0,
+    // KEYED BY THE BUSINESS NUMBER, so it survives an absent archive row. Reading this off the
+    // archive row made the board answer 「没有要您拿主意的事」 for precisely the flow this page
+    // exists for — an operator's own pull, which queues decisions but writes no MVP project row —
+    // while `ledgerReady: true` asserted the ledger had been consulted and was healthy. The map is
+    // keyed by projectNo, which the ledger itself is keyed by, so it needs no archive at all.
+    pendingDecisionCount: (directory.pendingByProjectNo instanceof Map
+      ? directory.pendingByProjectNo.get(wanted)
+      : undefined) ?? 0,
     lastExportAt,
     fillTarget,
     directoryReady: directory.directoryReady,

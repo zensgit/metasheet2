@@ -255,6 +255,12 @@ async function listOperatorProjectDirectory({ recordsApi, provisioning, targetPr
     ledgerReady: pending.ready,
     projectCount: projects.length,
     pendingProjectCount: projects.filter((project) => project.pendingDecisionCount > 0).length,
+    // THE PENDING MAP ITSELF, projectNo -> count. Returned because it is keyed by the BUSINESS
+    // number and is therefore answerable for a project that has NO archive row at all — which is
+    // the normal shape after an operator's own pull, since the MVP project table is written by
+    // mvp-persist and mvp-persist is platform-admin. A caller that reads pending work off a
+    // per-project row silently reports zero for exactly those projects; the board did.
+    pendingByProjectNo: pending.byProjectNo,
     projects,
   }
 }

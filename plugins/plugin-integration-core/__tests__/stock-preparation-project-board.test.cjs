@@ -381,10 +381,12 @@ function mount({
     },
   })
   let queryCalls = 0
+  const queryLog = []
   const records = counted({
     async queryRecords(input = {}) {
       queryCalls += 1
       const sheetId = input && input.sheetId
+      queryLog.push({ sheetId, filters: { ...(input && input.filters) } })
       if (sheetId === PROJECT_SHEET_B) return recordsB.queryRecords(input)
       return recordsA.queryRecords(input)
     },
@@ -458,6 +460,7 @@ function mount({
     auditListCalls,
     hostCallCount: () => hostCalls,
     queryCallCount: () => queryCalls,
+    queryLog,
   }
 }
 
@@ -833,6 +836,19 @@ async function theBoardReflectsThePullRatherThanTheAdminsArchive() {
     assert.equal(board.snapshotBatchCount, 0)
     assert.equal(board.lastSyncRunId, null)
     assert.equal(board.projectId, null, 'B-11: there is no archive row, so there is no archive handle')
+
+    // THE PENDING QUEUE IS NOT PART OF THE ARCHIVE, and must not vanish with it. The
+    // confirmation-decision ledger is keyed by projectNo — not by the archive's projectId — so it is
+    // answerable with or without an archive row. Reading the count off the archive row made the
+    // board tell an operator 「没有要您拿主意的事」 while their own pull had just queued some, with
+    // ledgerReady:true saying the ledger was consulted and healthy. The fixture seeds ONE pending
+    // decision for this project, so the honest answer here is 1, and it was 0.
+    assert.equal(board.ledgerReady, true, 'B-11: the ledger was consulted')
+    assert.equal(
+      board.pendingDecisionCount,
+      1,
+      'B-11: pending work is keyed by projectNo and survives an absent archive row',
+    )
   }
 
   // 3. NEITHER FAMILY HAS ANYTHING -> the SAME shapeless 404 as always. "Not pulled and not archived"
@@ -1025,6 +1041,40 @@ async function oneProjectsBoardCostsOneProjectsQueries() {
     miss.queryCallCount() <= loneQueries,
     `B-08: a miss costs no more than a hit, got ${miss.queryCallCount()}`,
   )
+
+  // ---------------------------------------------------------------------------
+  // …AND THE READS ARE ACTUALLY NARROWED, not merely few.
+  // ---------------------------------------------------------------------------
+  //
+  // A query COUNT cannot tell a narrowed read from an unnarrowed one: the pending-decision ledger is
+  // ONE query either way, so deleting its `projectNo` filter kept this whole function green while
+  // restoring the bound the narrowing exists for — a tenant whose OTHER projects have enough pending
+  // decisions to pass CONFIRMATION_DECISION_LIST_LIMIT_EXCEEDED would take the board down for every
+  // project, including the one being asked about. So assert the FILTER each read was issued with.
+  {
+    const harness = mount({ extraProjects: 6 })
+    await callBoard(harness.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+
+    const projectReads = harness.queryLog.filter((call) => call.sheetId === PROJECT_SHEET_A)
+    assert.ok(projectReads.length > 0, 'B-08: the project sheet was read')
+    for (const call of projectReads) {
+      assert.deepEqual(
+        Object.values(call.filters),
+        [PROJECT_A_NO],
+        'B-08: the project sheet is read FILTERED by the one project number, never listed whole',
+      )
+    }
+
+    const ledgerReads = harness.queryLog.filter((call) => call.sheetId === LEDGER_SHEET_A)
+    assert.ok(ledgerReads.length > 0, 'B-08: the pending-decision ledger was read')
+    for (const call of ledgerReads) {
+      assert.ok(
+        Object.values(call.filters).includes(PROJECT_A_NO),
+        'B-08: the ledger read carries the project number as a filter — without it the row bound '
+        + 'applies to the whole tenant\'s pending work, which is the bound the narrowing exists for',
+      )
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
