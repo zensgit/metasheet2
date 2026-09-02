@@ -2401,6 +2401,22 @@ function publicStockPreparationSandboxTargetResult(result) {
     ready: result.ready === true,
     mode: result.mode,
     targetBindingAvailable: result.target != null,
+    // THE BINDING THIS ROUTE JUST CREATED OR VERIFIED — the thing a deployer has to paste into
+    // `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON`. This route IS the sanctioned
+    // generator (the 222 window runbook sends operators here), and returning nothing made that
+    // instruction impossible to follow: the response carried no sheetId, no fieldIdMap, not even a
+    // plaintext objectId.
+    //
+    // It is the SAME key and shape the canonical sibling has always returned at this same admin tier
+    // (publicStockPreparationTargetResult), so this removes an asymmetry rather than opening a door.
+    // Nothing here is a disclosure: `objectId` is the caller's own request body, and `sheetId` and
+    // every fieldIdMap entry are pure functions of (projectId, objectId) that
+    // scripts/ops/stock-preparation-derive-target-binding.mjs prints offline with no auth at all.
+    //
+    // `evidence` below is deliberately NOT changed: it still hashes the objectId and carries no
+    // option values or labels, because that half travels into issue reports while this half is an
+    // answer to the admin who just asked.
+    targetBinding: result.target ? cloneJson(result.target) : null,
     evidence: result.evidence,
     ...(result.optionSync ? { optionSync: result.optionSync } : {}),
   }

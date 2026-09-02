@@ -153,26 +153,32 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
 
      两者是**互相独立的字段**。于是"objectId 换成沙箱、sheetId 留着正式表那个"的组合会让沙箱门放行,然后**把行写进正式主表**——挂着沙箱的名,干着正式表的事,正好是 D1=B 要避免的那件事。
 
-     正确做法(二选一,都不需要连库):
-     ```
-     # A. 离线推导(推荐,窗口前在开发机上就能跑完)
-     node scripts/ops/stock-preparation-derive-target-binding.mjs        --tenant-id <本部署 tenantId>        --object-id <本窗口沙箱 objectId>        --action-fragment
-     # 输出里的 sheetId / fieldIdMap 整段贴进 action 配置
+     **正确做法,一条路,别的都别走**:调 ensure,把它**返回的 `targetBinding` 整段**贴进 action 配置。这个接口就是本仓库认可的绑定生成器——它建表(或确认表已在)、写好所有权登记行,然后把该贴的东西原样给你。
 
-     # B. 或者调 ensure 让平台建表并回传绑定
+     ```
      POST /api/integration/stock-preparation/sandbox-target/ensure
+     { "objectId": "<本窗口沙箱 objectId>", "label": "<表名>" }
      ```
+     响应里的 `data.targetBinding` 形如 `{ sheetId, objectId, keyField, fieldIdMap }`,**整段**贴进:
      ```json
-     { "plm.stock-preparation.pull-bom.v1": { "target": { "objectId": "<同上 STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS 里那个值>", "sheetId": "<上面 A 或 B 输出的 sheetId,不是旧的那个>", "fieldIdMap": { "…": "同上输出" } } } }
+     { "plm.stock-preparation.pull-bom.v1": { "target": "<把 data.targetBinding 整段贴在这里>" } }
      ```
-     `fieldIdMap` 也必须跟着重算:物理列 id 是 `fld_+sha1(projectId:objectId:fieldId)`,objectId 一变**整张表的列 id 全变**,沿用旧 map 会让写入落到不存在的列上。
+
+     两件事都必须来自这次输出,不能手改:
+     - `sheetId` —— apply 写哪张表、导出读哪张表都只看它;
+     - `fieldIdMap` —— 物理列 id 是 `fld_+sha1(projectId:objectId:fieldId)`,objectId 一变**整张表的列 id 全变**,沿用旧 map 会让写入落到不存在的列上。而且**必须是完整的一整份**(含 13 个人工列),少一列结转会在部署期被 `STOCK_PREP_CARRY_TARGET_HUMAN_FIELDS_UNBOUND` 拦下。
+
+     （离线场景:没法调接口时,`node scripts/ops/stock-preparation-derive-target-binding.mjs --tenant-id <tenantId> --object-id <objectId> --action-fragment` 能算出**同样**的绑定。但它只算不建——**之后仍要调一次上面的 ensure**,否则表和所有权登记行不存在,结转会被 `CONFIRM_CARRY_TARGET_TENANT_MISMATCH` 拒。)
 
      不写 `target.objectId`(或写错)会默认成 canonical(`stock-preparation-table-actions.cjs:147-157`),导致 Step 6-2 在 `assertStockPrepApplySandboxAllowed` 那一步被无条件拒绝(`reason: prod_canonical`)。
   3. 若这次窗口装了 customer pack,确认 pack 配置(`INTEGRATION_CORE_STOCK_PREPARATION_CUSTOMER_PACKS_PATH` 指向的文件)里的 `targetObjectId` 是**同一个**沙箱 objectId——这条本来就只允许沙箱命名空间(`stock-preparation-customer-pack.cjs:269-285` 的 `normalizePackTargetObjectId`),不需要为 D1=B 额外改,只需要核对三处(env 允许清单、action 绑定、pack 目标)用的是同一个字符串,不是三个不同的沙箱 objectId。
 - 验证:
   - 三处配置里的沙箱 objectId 字符串完全一致(diff 一下三份配置文件里的这个值,不要靠肉眼扫);
-  - **action 绑定里的 `sheetId` 等于上面 A/B 的输出**(把 derive 脚本再跑一次,和配置里的值对一下;两者不一致说明 objectId 换了而绑定没重算);
-  - Step 3-3 部署预检不再报 `STOCK_PREP_SANDBOX_MODE_NOT_ENABLED` / `STOCK_PREP_SANDBOX_ALLOWLIST_MISSING_TARGET` / `STOCK_PREP_CARRY_TARGET_HUMAN_FIELDS_UNBOUND`,且 `posture.carryTargetBinding.state` 不是 `not_derived`(是 `not_derived` 就说明 sheetId 与 objectId 指向两张不同的表——除非你**确知**这张手工绑定的表就是本租户要用的那张,否则按上面重算)。
+  - **action 绑定里的 `sheetId` 等于这次 ensure 返回的那个**(再调一次 ensure,它是幂等的,把 `data.targetBinding.sheetId` 和配置里的值对一下;不一致说明 objectId 换了而绑定没重算);
+  - Step 3-3 部署预检 `ready: true`、`blockers` 为空。**特别确认这两条不在里面**:
+    - `STOCK_PREP_CARRY_TARGET_NOT_OWNED` —— 绑定的表不属于本部署的项目,结转每次点都会被拒;`detail.carryRouteCode` 里写的就是点击会看到的那个 code。修法就是上面的 ensure。
+    - `STOCK_PREP_CARRY_TARGET_HUMAN_FIELDS_UNBOUND` —— 人工列没绑全。
+    (`posture.carryTargetBinding.state` 是 `not_derived` **不是**故障、也不拦任何操作,它只提示绑定两半指向不同的表;结转允不允许看 `checks.carryTargetBinding.ownershipState`。)
 - 失败处理:三处不一致 → 以 action 绑定里的 `target.objectId` 为准改另外两处(action 绑定是唯一决定"apply 写到哪"的配置,allowlist 和 pack 目标都要跟着它,不是反过来)。
 
 ---
