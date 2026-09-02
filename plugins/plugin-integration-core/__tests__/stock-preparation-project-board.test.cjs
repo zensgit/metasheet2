@@ -21,8 +21,11 @@
 //   B-04 the audit — appended BEFORE the values are sent (fail-closed), values-free in the same
 //        sense migration 083 requires: project_id NULL, mode from a closed set, detail counts and
 //        booleans only, and never the projectNo the caller asked about.
-//   B-05 the deep-link handle — present ONLY when the fill table actually exists. A handle composed
-//        from a hash alone would point the operator at a sheet that is not there.
+//   B-05 the deep-link handle — built from the BOUND table-action target (the sheet apply really
+//        writes to), handed out ONLY when that sheet exists AND equals the id the caller's own
+//        provisioning computes. `action.target` is deploy-time config shared by every tenant, so it
+//        is the one input here that could name a sheet outside the caller's staging project; the
+//        equality check is what keeps the fill link inside the tenant boundary.
 //   B-06 the 404 costs the same audit row as a hit, and still leaks nothing.
 
 const assert = require('node:assert/strict')
@@ -67,7 +70,7 @@ const MAIN_OBJECT_ID = 'plm_stock_preparation_main'
 const PROJECT_SHEET_A = 'sheet_project_a'
 const PROJECT_SHEET_B = 'sheet_project_b'
 const LEDGER_SHEET_A = 'sheet_ledger_a'
-const MAIN_SHEET_A = 'sheet_main_a'
+
 
 const PROJECT_A_NO = '230920006'
 const PROJECT_A_NAME = 'RY2注射水缓冲罐部件'
@@ -129,8 +132,20 @@ function decisionRow(stagingProjectId, sheetId, recordId, fields) {
 
 const EXPORT_AT = '2026-09-01T02:03:04.000Z'
 
+/**
+ * The deterministic sheet id the CALLER'S OWN provisioning computes for the fill table. The bound
+ * table-action target must name exactly this for a handle to be handed out — see `resolveFillTarget`.
+ */
+function ownSheetIdFor(stagingProjectId, objectId) {
+  return `sheet__${stagingProjectId}__${objectId}`
+}
+
 function mount({
   mainTableProvisioned = true,
+  // `undefined` = the action is bound to the caller's own canonical fill table (the normal case).
+  // `null` = nothing is bound at all. An object = whatever the deployment configured, verbatim.
+  boundTarget,
+  actionConfigured = true,
   tenantPrincipalDirectory = { async verifyTenantMembership() { return { member: true } } },
   auditAppend,
   auditEntries = [{ action: 'prep_line_export', createdAt: EXPORT_AT }],
@@ -143,7 +158,7 @@ function mount({
     sheetIdByObjectId: {
       [PROJECT_OBJECT_ID]: PROJECT_SHEET_A,
       [DECISION_OBJECT_ID]: LEDGER_SHEET_A,
-      ...(mainTableProvisioned ? { [MAIN_OBJECT_ID]: MAIN_SHEET_A } : {}),
+      ...(mainTableProvisioned ? { [MAIN_OBJECT_ID]: ownSheetIdFor(STAGING_A, MAIN_OBJECT_ID) } : {}),
     },
   })
   const provisioningB = makeFakeProvisioning({
@@ -212,6 +227,11 @@ function mount({
     async resolveFieldIds(input = {}) {
       return provisioningA.resolveFieldIds(input)
     },
+    // The host's two PURE id derivations. `getObjectSheetId` is what the tenant guard on the fill
+    // handle compares the bound target against; `getObjectViewId` is what composes the deep link.
+    getObjectSheetId(projectId, objectId) {
+      return ownSheetIdFor(projectId, objectId)
+    },
     getObjectViewId(projectId, objectId, viewId) {
       return `view_${projectId}_${objectId}_${viewId}`
     },
@@ -248,7 +268,20 @@ function mount({
       multitable: { provisioning, records },
     },
     storage: new Map(),
-    config: {},
+    // The deploy-time table-action config the registry is built from. `target.sheetId` is what the
+    // fill handle is derived from, and the tenant guard compares it against the caller's own
+    // deterministic sheet id.
+    config: actionConfigured
+      ? {
+          stockPreparationTableActions: [{
+            actionId: 'plm.stock-preparation.pull-bom.v1',
+            source: { kind: 'data-source:sql-readonly', externalSystemId: 'ext_demo' },
+            target: boundTarget === undefined
+              ? { sheetId: ownSheetIdFor(STAGING_A, MAIN_OBJECT_ID), objectId: MAIN_OBJECT_ID }
+              : boundTarget,
+          }],
+        }
+      : {},
   }
   const services = baseServices()
   services.stockPreparationAuditStore = {
@@ -526,16 +559,40 @@ async function theDeepLinkHandleAppearsOnlyWhenTheFillTableExists() {
   {
     const res = await callBoard(mount({ mainTableProvisioned: true }).routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
     const target = res.body.data.fillTarget
-    assert.ok(target, 'B-05: a provisioned fill table yields a handle')
+    assert.ok(target, 'B-05: a bound, provisioned fill table yields a handle')
     assert.deepEqual(Object.keys(target).sort(), ['sheetId', 'viewId'], 'B-05: the handle is exactly sheetId + viewId')
-    assert.equal(target.sheetId, MAIN_SHEET_A)
+    assert.equal(target.sheetId, ownSheetIdFor(STAGING_A, MAIN_OBJECT_ID), 'B-05: and it names the BOUND target sheet')
     assert.equal(typeof target.viewId, 'string')
     assert.ok(target.viewId.length > 0)
   }
   {
     const res = await callBoard(mount({ mainTableProvisioned: false }).routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
     assert.equal(res.statusCode, 200, 'B-05: an unprovisioned fill table is not an error — the rest of the board still answers')
-    assert.equal(res.body.data.fillTarget, null, 'B-05: no bound target, no handle — never a hash pointing at nothing')
+    assert.equal(res.body.data.fillTarget, null, 'B-05: the sheet does not exist, so there is no handle')
+  }
+  {
+    const res = await callBoard(mount({ actionConfigured: false }).routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200, 'B-05: an unconfigured table action is a deployment state, not a board failure')
+    assert.equal(res.body.data.fillTarget, null, 'B-05: nothing bound, no handle')
+  }
+  // THE TENANT GUARD ON THE HANDLE. `action.target` is deploy-time config shared by every tenant, so
+  // it is the one input on this route that could name a sheet outside the caller's own staging
+  // project. A bound target that does not equal the id the CALLER'S OWN provisioning computes is
+  // never handed out — this is the assertion that keeps the fill link inside the tenant boundary.
+  {
+    const foreign = { sheetId: ownSheetIdFor(STAGING_B, MAIN_OBJECT_ID), objectId: MAIN_OBJECT_ID }
+    const res = await callBoard(mount({ boundTarget: foreign }).routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.fillTarget, null, 'B-05: a bound target outside the caller\'s own tenant yields NO handle')
+    assert.ok(
+      !JSON.stringify(res.body).includes(STAGING_B),
+      'B-05: and the refusal never echoes the foreign sheet id back',
+    )
+  }
+  {
+    const elsewhere = { sheetId: 'sheet_some_other_deployment_table', objectId: MAIN_OBJECT_ID }
+    const res = await callBoard(mount({ boundTarget: elsewhere }).routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.body.data.fillTarget, null, 'B-05: an unrecognised bound sheet yields no handle either')
   }
 }
 

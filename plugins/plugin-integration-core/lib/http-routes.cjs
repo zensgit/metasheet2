@@ -8267,6 +8267,22 @@ function createHandlers(services, options = {}) {
         explicitTenantIds: collectExplicitTenantIds(req, input),
         tenantPrincipalDirectory,
       })
+      // THE BOUND TABLE-ACTION TARGET — the sheet `apply` actually writes to, which is what the fill
+      // link must point at (on a deployment whose production gate is closed that is the sandbox twin,
+      // not the canonical table). An UNCONFIGURED or unknown action is a deployment state this page
+      // renders as 「表还没建好」, not a failure of the board, so those two refusals become "no bound
+      // target"; anything else is a real fault and propagates.
+      let boundTarget = null
+      try {
+        const boundAction = await tableActions.getTableAction({
+          tenantId: scope.tenantId,
+          actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+        })
+        boundTarget = boundAction && boundAction.target ? boundAction.target : null
+      } catch (error) {
+        const code = error && error.code ? String(error.code) : ''
+        if (code !== 'TABLE_ACTION_NOT_CONFIGURED' && code !== 'TABLE_ACTION_NOT_FOUND') throw error
+      }
       let outcome
       try {
         outcome = await readOperatorProjectBoard({
@@ -8277,6 +8293,7 @@ function createHandlers(services, options = {}) {
           targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
           scope,
           projectNo,
+          boundTarget,
           audit,
           workspaceId: input.workspaceId,
         })

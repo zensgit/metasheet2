@@ -196,25 +196,35 @@ async function lastExportAtFor(audit, { tenantId, workspaceId, projectNo }) {
 /**
  * The deep-link handle, or null. See the header for the claim it does NOT make.
  *
- * `findObjectSheet` is the EXISTENCE proof and the only IO here; `getObjectViewId` is a pure
- * deterministic id derivation on the host side (the sibling of `getObjectSheetId`, which this plugin
- * already uses), treated as an OPTIONAL capability so a plugin newer than its host degrades to
- * "no handle" rather than erroring.
+ * IT IS BUILT FROM THE BOUND TABLE-ACTION TARGET, not from the canonical object id, because the
+ * bound target is the sheet `apply` actually writes to — and on a deployment whose production gate is
+ * closed that is the sandbox twin, not the canonical table. A link composed from the canonical id
+ * would open an empty sheet and tell the operator their pull did nothing.
+ *
+ * AND IT IS TENANT-GUARDED, which is the load-bearing half. `action.target` is DEPLOY-TIME
+ * configuration shared by every tenant on the deployment (see the export route's own note on this),
+ * so the sheet id it names is NOT derived from the caller's tenant. Handing it out unchecked would be
+ * this route's one reachable way to name a sheet outside the caller's own staging project. So it is
+ * only ever handed out when it EQUALS the id the CALLER'S OWN provisioning would compute for that
+ * object — which is also precisely the case in which the matching default view id is derivable at
+ * all. Anything else yields null, and the page says the table is not ready rather than linking into
+ * the dark.
+ *
+ * `findObjectSheet` is then the EXISTENCE proof and the only IO here. `getObjectSheetId` /
+ * `getObjectViewId` are pure deterministic id derivations on the host side, treated as OPTIONAL
+ * capabilities so a plugin newer than its host degrades to "no handle" rather than erroring.
  */
-async function resolveFillTarget(provisioning, stagingProjectId) {
+async function resolveFillTarget(provisioning, stagingProjectId, boundTarget) {
   if (!provisioning || typeof provisioning.findObjectSheet !== 'function') return null
-  const sheet = await provisioning.findObjectSheet({
-    projectId: stagingProjectId,
-    objectId: STOCK_PREPARATION_FILL_OBJECT_ID,
-  })
+  if (typeof provisioning.getObjectSheetId !== 'function' || typeof provisioning.getObjectViewId !== 'function') return null
+  const boundSheetId = optionalString(boundTarget && boundTarget.sheetId)
+  if (!boundSheetId) return null
+  const objectId = optionalString(boundTarget && boundTarget.objectId) || STOCK_PREPARATION_FILL_OBJECT_ID
+  if (provisioning.getObjectSheetId(stagingProjectId, objectId) !== boundSheetId) return null
+  const sheet = await provisioning.findObjectSheet({ projectId: stagingProjectId, objectId })
   const sheetId = sheet && sheet.id ? String(sheet.id) : ''
-  if (!sheetId) return null
-  if (typeof provisioning.getObjectViewId !== 'function') return null
-  const viewId = provisioning.getObjectViewId(
-    stagingProjectId,
-    STOCK_PREPARATION_FILL_OBJECT_ID,
-    STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
-  )
+  if (!sheetId || sheetId !== boundSheetId) return null
+  const viewId = provisioning.getObjectViewId(stagingProjectId, objectId, STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID)
   if (typeof viewId !== 'string' || viewId.length === 0) return null
   return { sheetId, viewId }
 }
@@ -228,6 +238,8 @@ async function resolveFillTarget(provisioning, stagingProjectId) {
  * @param {string} params.targetProjectId   the caller's OWN staging project (derived from the scope)
  * @param {object} params.scope             the resolved operator value scope — required, not optional
  * @param {string} params.projectNo         the project number asked for
+ * @param {object} [params.boundTarget]     the bound table-action target (`action.target`), or null
+ *                                          when nothing is bound — see `resolveFillTarget`
  * @param {object} [params.audit]           the audit store, for the values-free last-export lookup
  * @param {string} [params.workspaceId]
  *
@@ -241,6 +253,7 @@ async function readOperatorProjectBoard({
   targetProjectId,
   scope,
   projectNo,
+  boundTarget,
   audit,
   workspaceId,
 } = {}) {
@@ -280,7 +293,7 @@ async function readOperatorProjectBoard({
     throw error
   }
 
-  const fillTarget = await resolveFillTarget(provisioning, targetProjectId)
+  const fillTarget = await resolveFillTarget(provisioning, targetProjectId, boundTarget)
   const lastExportAt = await lastExportAtFor(audit, {
     tenantId: scope.tenantId,
     workspaceId,
