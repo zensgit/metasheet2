@@ -56,31 +56,43 @@
  * rows — so the column becomes unwritable by EVERY declared role while the install reports success.
  * Reporting that is not enough: the deployment stays broken until a human notices.
  *
- * FOUR INDEPENDENT NARROWINGS make this a reconcile rather than a revoke channel. The DELETE fires
+ * FIVE INDEPENDENT NARROWINGS make this a reconcile rather than a revoke channel. The DELETE fires
  * only on a row that satisfies ALL of:
- *   1. `created_by = <this port's marker>` — a row an OPERATOR authored through the authoring route
- *      is INVISIBLE to this statement. Operator decisions are never this port's to undo.
+ *   0. `sheet_id = <the target sheet>` — `field_permissions` carries NO tenant and NO project
+ *      column, so this single clause is the entire project/tenant bound of the statement. It is
+ *      listed first because it is the one whose absence would be widest, and it is pinned by the
+ *      source guard and by a positional-decoding model, not merely present.
+ *   1. `created_by = ANY(<this pack's marker, the legacy pack-less marker>)` — a row an OPERATOR
+ *      authored is INVISIBLE to this statement, and so is a row written for ANOTHER customer pack.
+ *      Two packs can legitimately govern overlapping (column, role) rectangles on one canonical
+ *      sheet; the pack id inside the marker is what keeps one from retiring the other's denials.
+ *      The pack-less legacy marker is adoptable because no pack can claim it.
  *   2. `read_only = true` — only an actual write denial. A row this port wrote and an operator later
  *      relaxed is no longer a denial and is left exactly as the operator left it.
  *   3. `field_id = ANY(<governed columns>) AND subject_id = ANY(<governed roles>)` — the caller's
  *      declared region, which `normalizeInput` REQUIRES to be a superset of the entries being
  *      written. The delete can therefore never reach a column or a role the same call is not
- *      simultaneously authoritative about; a second pack governing different columns or different
- *      roles on the same sheet is structurally out of reach.
+ *      simultaneously authoritative about.
  *   4. the row is not in the desired set this very call just wrote.
- * A row failing any one of the four survives. There is no input by which this becomes
- * "clear all for this sheet": with `reconcile` absent the statement does not run, and with it
- * present it is bounded by (3) to a region the caller is re-declaring in full.
+ * A row failing any one of the five survives. There is no input by which this becomes
+ * "clear all for this sheet": with `reconcile` absent (or falsy) the statement does not run, and
+ * with it present it is bounded by (3) to a region the caller is re-declaring in full.
+ *
+ * WHAT (1) CANNOT DO ON ITS OWN: `created_by` records who OWNS the row, and it stays that way only
+ * because the UPSERT above refuses to re-stamp a row whose current provenance this statement could
+ * not also delete. An unconditional `created_by = EXCLUDED.created_by` would launder an operator's
+ * row into a plugin row the first time a pack re-declared the same pair, and (1) would then be
+ * satisfied by a row the operator authored. That is why the two statements have to be read together.
  *
  * The removals are RETURNED (`removed`), so the caller can report exactly which restrictions were
  * dropped instead of dropping them silently — the audit-trail concern that motivated the original
  * no-revoke posture is answered by naming them, not by leaving the sheet wrong.
  *
  * PROVENANCE: every row this port writes carries
- * `created_by = 'plugin:plugin-integration-core/stock-preparation'`. The column exists and is
- * currently populated by NO other writer, so `SELECT ... WHERE created_by = <that marker>` is an
- * exact, operator-runnable census of what this port ever wrote — which is what makes the reconcile
- * above (and a manual audit) possible at all.
+ * `created_by = 'plugin:plugin-integration-core/stock-preparation#<packId>'` (or the pack-less base
+ * marker when the caller names no pack). `SELECT ... WHERE created_by LIKE '<base>%'` is therefore
+ * an exact, operator-runnable census of what this plugin ever wrote, AND it attributes each row to
+ * the pack that wrote it — which is what makes the reconcile above safe on a sheet two packs share.
  *
  * ═══════════════════════════════════════════════════════════════════════════════════════════════
  * THE TWO READ METHODS — WHY A REVOKE-FREE PORT STILL NEEDS TO BE READABLE
@@ -113,9 +125,52 @@
 
 import { poolManager } from '../integration/db/connection-pool'
 
-/** Provenance marker stamped on every row this port writes. See PROVENANCE above. */
+/**
+ * BASE provenance marker — the plugin-family prefix, and the exact value written by a caller that
+ * names no pack. See PROVENANCE above.
+ *
+ * A row stamped with exactly this value is a LEGACY row: written before the marker carried a pack
+ * id, so there is no pack it can be attributed to. Such a row is adoptable by whichever pack
+ * re-declares it (there is no other owner to protect it for) — that is the ONLY marker other than
+ * its own that a pack's reconcile may touch, and it is stated here rather than left to inference.
+ */
 export const STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY =
   'plugin:plugin-integration-core/stock-preparation'
+
+/**
+ * The PER-PACK provenance marker: the base above plus `#<packId>`.
+ *
+ * Two customer packs can legitimately land on the same canonical sheet, and the platform row carries
+ * no pack column — so without this the only "whose row is it" predicate available to the DELETE was
+ * a single plugin-wide constant, and pack B's reconcile could retire a denial pack A still declares.
+ * The pack id lives inside `created_by` because that is the one column the enforcement table already
+ * has, and it stays PARSEABLE (single `#`, pack ids never contain one) so a census can attribute
+ * every row without a schema change.
+ */
+export function stockPreparationFieldPermissionCreatedBy(packId?: string | null): string {
+  if (typeof packId !== 'string' || packId.trim().length === 0) {
+    return STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY
+  }
+  return `${STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY}#${packId.trim()}`
+}
+
+/**
+ * Read a `created_by` value back. `isPluginRow` false means the row belongs to somebody else — an
+ * operator, another subsystem, or nobody (NULL) — and nothing in this file may delete it.
+ */
+export function parseStockPreparationFieldPermissionCreatedBy(
+  createdBy: unknown,
+): { isPluginRow: boolean; packId: string | null } {
+  if (typeof createdBy !== 'string') return { isPluginRow: false, packId: null }
+  if (createdBy === STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY) {
+    return { isPluginRow: true, packId: null }
+  }
+  const prefix = `${STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY}#`
+  if (createdBy.startsWith(prefix) && createdBy.length > prefix.length) {
+    return { isPluginRow: true, packId: createdBy.slice(prefix.length) }
+  }
+  return { isPluginRow: false, packId: null }
+}
 
 /** Hard cap on entries per call — a foot-gun guard, not a business limit. */
 export const STOCK_PREPARATION_FIELD_PERMISSION_MAX_ENTRIES = 500
@@ -177,12 +232,19 @@ export interface ApplyRoleWriteScopesInput {
   sheetId: string
   entries: Array<StockPreparationRoleWriteScopeEntry>
   /**
-   * OPTIONAL. Absent → purely additive: no DELETE statement is executed at all and `removed` is
-   * empty, which is byte-for-byte the behaviour every caller had before this option existed.
-   * Present → the same transaction also removes this port's OWN, still-denying rows inside the
-   * region that are not in `entries`. See the file header's four narrowings.
+   * OPTIONAL pack identity. Present → every row written carries `<base>#<packId>` and the reconcile
+   * DELETE is bounded to that marker (plus the pack-less LEGACY marker, which has no other owner).
+   * Absent → the legacy marker is written and matched, exactly as before this option existed.
    */
-  reconcile?: RoleWriteScopeReconcileRegion
+  packId?: string
+  /**
+   * OPTIONAL. Absent (or `null` / `false` — every falsy value means "not asked for") → purely
+   * additive: no DELETE statement is executed at all and `removed` is empty, which is byte-for-byte
+   * the behaviour every caller had before this option existed.
+   * Present → the same transaction also removes this pack's OWN, still-denying rows inside the
+   * region that are not in `entries`. See the file header's narrowings.
+   */
+  reconcile?: RoleWriteScopeReconcileRegion | null | false
 }
 
 export interface ApplyRoleWriteScopesResult {
@@ -202,10 +264,32 @@ export interface ListRoleWriteScopesInput {
   sheetId: string
 }
 
+/** A census row this plugin wrote, attributed to the pack that wrote it (null = legacy, pack-less). */
+export interface RoleWriteScopeCensusEntry extends StockPreparationRoleWriteScopeEntry {
+  createdBy: string
+  packId: string | null
+}
+
+/** A denial on this sheet that this plugin did NOT write. Reported, never claimed, never deleted. */
+export interface RoleWriteScopeForeignEntry extends StockPreparationRoleWriteScopeEntry {
+  createdBy: string | null
+}
+
 export interface ListRoleWriteScopesResult {
   sheetId: string
-  /** Every scope row on this sheet stamped with this port's provenance marker. Never anyone else's. */
-  entries: Array<StockPreparationRoleWriteScopeEntry>
+  /**
+   * Every role-scoped write denial on this sheet stamped with a marker of THIS PLUGIN's family,
+   * each attributed to the pack that wrote it. A caller diffs its own pack's rows against its plan;
+   * another pack's rows are visible here precisely so they can be reported rather than clobbered.
+   */
+  entries: Array<RoleWriteScopeCensusEntry>
+  /**
+   * The same query's other half: role-scoped write denials this plugin did NOT write (an operator's
+   * own rows, or anything else that ever writes this table). Separated rather than dropped because
+   * a caller must be able to say "a human holds this (column, role)" without ever treating it as
+   * installer debris — and must never claim or delete it.
+   */
+  foreignEntries: Array<RoleWriteScopeForeignEntry>
 }
 
 export interface FindMissingRoleIdsInput {
@@ -255,6 +339,7 @@ function isNonEmptyString(value: unknown): value is string {
 function normalizeInput(input: ApplyRoleWriteScopesInput): {
   sheetId: string
   entries: StockPreparationRoleWriteScopeEntry[]
+  packId: string | null
   reconcile: { fieldIds: string[]; roleIds: string[] } | null
 } {
   if (!input || typeof input !== 'object') {
@@ -303,7 +388,24 @@ function normalizeInput(input: ApplyRoleWriteScopesInput): {
     seen.add(key)
     entries.push({ fieldId, roleId })
   }
-  return { sheetId: input.sheetId, entries, reconcile: normalizeReconcile(input.reconcile, entries) }
+  // The pack id is a provenance token, not an addressable key: it must be a clean single segment so
+  // `<base>#<packId>` stays parseable in both directions.
+  let packId: string | null = null
+  if (input.packId !== undefined && input.packId !== null) {
+    if (!isNonEmptyString(input.packId) || input.packId.includes('#')) {
+      throw new StockPreparationFieldPermissionsError(
+        'ENTRIES_INVALID',
+        'packId must be a non-empty string containing no "#"',
+      )
+    }
+    packId = input.packId.trim()
+  }
+  return {
+    sheetId: input.sheetId,
+    entries,
+    packId,
+    reconcile: normalizeReconcile(input.reconcile, entries),
+  }
 }
 
 /**
@@ -315,10 +417,13 @@ function normalizeInput(input: ApplyRoleWriteScopesInput): {
  * statement "I am authoritative here" made explicit rather than assumed.
  */
 function normalizeReconcile(
-  reconcile: RoleWriteScopeReconcileRegion | undefined,
+  reconcile: RoleWriteScopeReconcileRegion | null | false | undefined,
   entries: readonly StockPreparationRoleWriteScopeEntry[],
 ): { fieldIds: string[]; roleIds: string[] } | null {
-  if (reconcile === undefined || reconcile === null) return null
+  // EVERY falsy value means "no region asked for" — `undefined`, `null` and `false` alike. A caller
+  // expressing "additive only" as a boolean must land on the additive path, not on a 422 over a
+  // sheet whose columns were already created.
+  if (!reconcile) return null
   if (typeof reconcile !== 'object') {
     throw new StockPreparationFieldPermissionsError('ENTRIES_INVALID', 'reconcile must be an object')
   }
@@ -370,6 +475,14 @@ function normalizeReconcile(
  * write-only property.
  */
 export class StockPreparationFieldPermissionsService {
+  /**
+   * CAPABILITY MARKER, not a feature flag. A duck-typed consumer cannot otherwise tell a host that
+   * HONOURS `reconcile` from one that silently ignores it — and the difference is a rehearsal that
+   * promises removals from one that promises nothing. Absent on every older host, so a consumer that
+   * checks it degrades explicitly instead of assuming.
+   */
+  readonly supportsWriteScopeReconcile = true as const
+
   private readonly injectedPool?: StockPreparationFieldPermissionsPool
 
   constructor(deps: StockPreparationFieldPermissionsServiceDeps = {}) {
@@ -384,14 +497,19 @@ export class StockPreparationFieldPermissionsService {
    * written. Idempotent: re-running with the same entries upserts the same rows.
    */
   async applyRoleWriteScopes(input: ApplyRoleWriteScopesInput): Promise<ApplyRoleWriteScopesResult> {
-    const { sheetId, entries, reconcile } = normalizeInput(input)
-    // Empty is an explicit, documented TOTAL no-op — no upsert AND no reconcile delete, even when a
-    // region was supplied (a caller with nothing to declare must not need a special case). It adds
-    // NO restriction and removes none, so it can never be the unsafe direction in either sense.
-    // The consequence is stated rather than hidden: a declaration that drops to zero denials leaves
-    // this port's older rows standing, and they surface through `listRoleWriteScopes` as stale for
-    // an operator to clear.
-    if (entries.length === 0) return { applied: 0, entries: [], removed: [] }
+    const { sheetId, entries, packId, reconcile } = normalizeInput(input)
+    // NOTHING TO WRITE AND NO REGION is the one total no-op: no statement of any kind runs. It adds
+    // no restriction and removes none, so it can never be the unsafe direction in either sense.
+    //
+    // NOTHING TO WRITE **WITH** A REGION IS NOT A NO-OP, and treating it as one was a real silent
+    // failure: a pack revision that hands every governed column to every declared role derives ZERO
+    // denials, so an entries-empty call is exactly how "this rectangle should now hold no denial at
+    // all" is expressed. Short-circuiting it left the previous revision's rows in force and locked
+    // those columns for every role the new revision names as their owner.
+    if (entries.length === 0 && !reconcile) return { applied: 0, entries: [], removed: [] }
+
+    /** What this call stamps, and — with the legacy marker — the whole of what it may retire. */
+    const createdBy = stockPreparationFieldPermissionCreatedBy(packId)
 
     const pool = this.injectedPool ?? (poolManager.get() as unknown as StockPreparationFieldPermissionsPool)
 
@@ -442,23 +560,45 @@ export class StockPreparationFieldPermissionsService {
 
       for (const entry of entries) {
         // WRITE-ONLY SCOPE. `visible` is the hardcoded literal `true` in BOTH the VALUES list and the
-        // DO UPDATE SET — it is not a bind parameter and never can be a caller's choice. The four
-        // bind parameters are (sheet_id, field_id, subject_id, created_by); `subject_type`,
-        // `visible` and `read_only` are literals. See the file header's load-bearing property before
-        // touching this statement.
+        // DO UPDATE SET — it is not a bind parameter and never can be a caller's choice. The five
+        // bind parameters are (sheet_id, field_id, subject_id, created_by, legacy_marker);
+        // `subject_type`, `visible` and `read_only` are literals. See the file header's load-bearing
+        // property before touching this statement.
+        //
+        // PROVENANCE IS NOT RE-STAMPED ON A ROW THIS PORT DOES NOT ALREADY OWN. An unconditional
+        // `created_by = EXCLUDED.created_by` laundered an OPERATOR's row into a plugin row the
+        // moment a pack happened to re-declare the same (column, role) — and a later revision's
+        // reconcile then deleted the operator's decision, because `created_by` had become this
+        // port's. The CASE adopts exactly the two markers the reconcile below may also delete
+        // (this pack's own, and the pack-less LEGACY marker that has no other owner); every other
+        // value — an operator's, another pack's, NULL — is left standing, which keeps
+        // "never an operator's row" a property of the data rather than of the caller's luck.
         await query(
           `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)
            VALUES ($1, $2, 'role', $3, true, true, $4)
            ON CONFLICT (sheet_id, field_id, subject_type, subject_id)
-           DO UPDATE SET visible = true, read_only = true, created_by = EXCLUDED.created_by`,
-          [sheetId, entry.fieldId, entry.roleId, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY],
+           DO UPDATE SET visible = true, read_only = true,
+             created_by = CASE
+               WHEN field_permissions.created_by = $4 THEN $4
+               WHEN field_permissions.created_by = $5 THEN $4
+               ELSE field_permissions.created_by
+             END`,
+          [
+            sheetId,
+            entry.fieldId,
+            entry.roleId,
+            createdBy,
+            STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY,
+          ],
         )
       }
 
       // THE SCOPED RECONCILE. Same transaction as the upserts above, so there is no instant at which
-      // a denial has been dropped but its replacement not yet written. Read the file header's four
+      // a denial has been dropped but its replacement not yet written. Read the file header's five
       // narrowings before touching this statement — each `AND` is one of them:
-      //   created_by  → never an operator's row;   read_only → never a row an operator relaxed;
+      //   sheet_id    → never another sheet (the ONLY project/tenant bound this table can carry);
+      //   created_by  → never an operator's row, and never another PACK's row;
+      //   read_only   → never a row an operator relaxed;
       //   field_id/subject_id = ANY(region) → never outside what this call re-declares in full;
       //   NOT EXISTS(desired) → never a row this same call just wrote.
       // `visible` appears nowhere here either: removing a row can only widen access, never hide.
@@ -468,7 +608,7 @@ export class StockPreparationFieldPermissionsService {
           `DELETE FROM field_permissions
             WHERE sheet_id = $1
               AND subject_type = 'role'
-              AND created_by = $2
+              AND created_by = ANY($2::text[])
               AND read_only = true
               AND field_id = ANY($3::text[])
               AND subject_id = ANY($4::text[])
@@ -480,7 +620,12 @@ export class StockPreparationFieldPermissionsService {
             RETURNING field_id, subject_id`,
           [
             sheetId,
-            STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY,
+            // EXACTLY the two markers this call is entitled to retire: its own pack's rows, and
+            // pack-less LEGACY rows (written before the marker carried a pack id, so no other pack
+            // can claim them). A sibling pack's rows carry `<base>#<other>` and are unreachable.
+            // When no packId was supplied both entries are the legacy marker, so the set is exactly
+            // the old single-marker predicate — byte-equivalent for every pre-pack caller.
+            [...new Set([createdBy, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY])],
             reconcile.fieldIds,
             reconcile.roleIds,
             entries.map((entry) => entry.fieldId),
@@ -503,13 +648,16 @@ export class StockPreparationFieldPermissionsService {
    * THE PROVENANCE CENSUS, in-process: every (column, role) pair THIS port has ever denied on this
    * sheet. READ-ONLY — one `SELECT`, no lock, no write.
    *
-   * Scoped to `created_by = <this port's marker>` on purpose. Rows an OPERATOR authored through
-   * `PUT /api/multitable/sheets/:sheetId/field-permissions` are deliberately invisible here: they
-   * are not this port's to reason about, and reporting them as "stale" would invite a caller to
-   * treat a deliberate operator decision as installer debris.
+   * TWO PROJECTIONS, ONE SELECT. `entries` is what THIS PLUGIN wrote, each row attributed to the
+   * pack whose marker it carries (`packId: null` = a legacy, pack-less row). `foreignEntries` is
+   * every other role-scoped denial on the sheet — an operator's own rows above all. They are
+   * separated rather than merged because a caller must be able to say "a human holds this
+   * (column, role)" without ever treating a deliberate operator decision as installer debris, and
+   * must never claim or delete it; and they are separated rather than dropped because a caller that
+   * cannot see them cannot report them either.
    *
-   * `read_only = true` is likewise part of the predicate: a row this port wrote and an operator
-   * later relaxed is no longer a write denial, so it is not part of the census either.
+   * `read_only = true` is part of the predicate: a row this port wrote and an operator later
+   * relaxed is no longer a write denial, so it is in neither list.
    */
   async listRoleWriteScopes(input: ListRoleWriteScopesInput): Promise<ListRoleWriteScopesResult> {
     if (!input || !isNonEmptyString(input.sheetId)) {
@@ -521,17 +669,32 @@ export class StockPreparationFieldPermissionsService {
     const sheetId = input.sheetId
     const pool = this.injectedPool ?? (poolManager.get() as unknown as StockPreparationFieldPermissionsPool)
     return pool.transaction(async ({ query }) => {
+      // ONE SELECT, two projections. Every role-scoped write denial on the sheet is read, then split
+      // by provenance in JS rather than by a second query — so "what this plugin wrote" and "what
+      // somebody else wrote" are answered from the SAME snapshot and cannot disagree.
       const res = await query(
-        `SELECT field_id, subject_id FROM field_permissions
-          WHERE sheet_id = $1 AND subject_type = 'role' AND read_only = true AND created_by = $2
+        `SELECT field_id, subject_id, created_by FROM field_permissions
+          WHERE sheet_id = $1 AND subject_type = 'role' AND read_only = true
           ORDER BY field_id, subject_id`,
-        [sheetId, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY],
+        [sheetId],
       )
-      const entries = (res.rows as Array<{ field_id?: unknown; subject_id?: unknown }>).map((row) => ({
-        fieldId: String(row.field_id),
-        roleId: String(row.subject_id),
-      }))
-      return { sheetId, entries }
+      const entries: RoleWriteScopeCensusEntry[] = []
+      const foreignEntries: RoleWriteScopeForeignEntry[] = []
+      for (const raw of res.rows as Array<{ field_id?: unknown; subject_id?: unknown; created_by?: unknown }>) {
+        const fieldId = String(raw.field_id)
+        const roleId = String(raw.subject_id)
+        const { isPluginRow, packId } = parseStockPreparationFieldPermissionCreatedBy(raw.created_by)
+        if (isPluginRow) {
+          entries.push({ fieldId, roleId, createdBy: String(raw.created_by), packId })
+        } else {
+          foreignEntries.push({
+            fieldId,
+            roleId,
+            createdBy: typeof raw.created_by === 'string' ? raw.created_by : null,
+          })
+        }
+      }
+      return { sheetId, entries, foreignEntries }
     })
   }
 
