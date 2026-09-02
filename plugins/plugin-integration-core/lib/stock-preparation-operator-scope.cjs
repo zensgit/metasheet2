@@ -165,8 +165,8 @@ function listPrincipalPermissions(user) {
  * defined in exactly one place. A platform admin passes this; they are then refused two steps later
  * for having no tenant of their own, which is the correct reason and the correct code.
  */
-function holdsOperatorValueTier(user) {
-  return satisfiesStockPrepAccess(listPrincipalPermissions(user), OPERATOR_VALUE_TIER)
+function holdsOperatorValueTier(user, tier = OPERATOR_VALUE_TIER) {
+  return satisfiesStockPrepAccess(listPrincipalPermissions(user), tier)
 }
 
 /**
@@ -229,6 +229,21 @@ async function resolveOperatorValueScope({
   authenticatedTenantId,
   explicitTenantIds = [],
   tenantPrincipalDirectory,
+  // WHICH TIER THIS PARTICULAR SURFACE REQUIRES. Defaults to the operator VALUE tier, which is what
+  // the three value-bearing reads this module was written for need and what every pre-existing call
+  // site therefore keeps, byte-for-byte.
+  //
+  // It is a parameter because the TENANT PROOF and the PERMISSION TIER are two different questions,
+  // and 通知下一步 is the case that separates them: its status read is VALUES-FREE (step keys, cursor
+  // integers, booleans, handler COUNTS) and so legitimately rides the broad queue-watcher READ tier —
+  // a supervisor is supposed to be able to see whose turn it is — but it still must not let the
+  // x-tenant-id header decide WHOSE turn it reports. Hard-coding the tier here would have forced that
+  // read up to OPERATE and taken the turn signal away from exactly the people it exists to inform.
+  //
+  // The tier is never WIDENED by passing it: `satisfiesStockPrepAccess` still applies the same ladder
+  // (and the same operate-requires-read conjunction) to whatever code is named, and the route's own
+  // `requireAccess` has already made the identical check before this is reached.
+  requiredTier = OPERATOR_VALUE_TIER,
 } = {}) {
   if (!user) {
     throw new StockPreparationOperatorScopeError(401, 'OPERATOR_SCOPE_UNAUTHENTICATED', 'authentication is required for a value-bearing operator read')
@@ -238,9 +253,9 @@ async function resolveOperatorValueScope({
   // not redundancy for its own sake: this module is the thing a future value-bearing read will
   // require, and it must be impossible to reach a value scope by calling it from a route that forgot
   // its gate. The two agree by construction — both delegate to satisfiesStockPrepAccess.
-  if (!holdsOperatorValueTier(user)) {
-    throw new StockPreparationOperatorScopeError(403, 'OPERATOR_SCOPE_TIER_REQUIRED', 'a value-bearing operator read requires the stock-prep operator tier', {
-      requiredPermission: OPERATOR_VALUE_TIER,
+  if (!holdsOperatorValueTier(user, requiredTier)) {
+    throw new StockPreparationOperatorScopeError(403, 'OPERATOR_SCOPE_TIER_REQUIRED', 'this operator surface requires a stock-prep tier the principal does not hold', {
+      requiredPermission: requiredTier,
     })
   }
 
@@ -285,7 +300,7 @@ async function resolveOperatorValueScope({
   // is still served, because the host membership check above — not the claim — is what makes the
   // pairing safe there. It is surfaced so an audit row can record WHICH of the two proofs was
   // available without the route having to re-derive it.
-  return { tenantId, actorId, tier: OPERATOR_VALUE_TIER, tenantClaimVerified: verifiedClaim === tenantId }
+  return { tenantId, actorId, tier: requiredTier, tenantClaimVerified: verifiedClaim === tenantId }
 }
 
 module.exports = {

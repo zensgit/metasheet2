@@ -1,6 +1,6 @@
 'use strict'
 
-// 通知下一步 —— the DURABLE half. One row per (tenant, workspace, projectNo) holding a single
+// 通知下一步 —— the DURABLE half. One row per (tenant, projectNo) holding a single
 // integer: how far along the configured chain this project has got.
 //
 // WHY A COMPANION ROW AND NOT A FIELD ON THE PREP ROWS. The turn is a PROJECT-level fact — "whose
@@ -71,10 +71,20 @@ function requiredIndex(value, field) {
   return value
 }
 
-function scopeWhere({ tenantId, workspaceId, projectNo }) {
+// RC3 — THE SCOPE KEY IS (TENANT, PROJECT), AND `workspaceId` IS NOT IN IT.
+//
+// It used to be. That was inherited from the plugin's pervasive workspace-scoped convention, where a
+// caller-supplied `workspaceId` is a harmless same-tenant scope SELECTOR on a read. It was not
+// harmless here, because this table's key is also the key of the AT-MOST-ONCE NOTIFICATION CLAIM: an
+// authenticated handler could send five requests differing only in an unvalidated string and get five
+// cursor rows and five identical DingTalk pings for one hop — defeating, with no race and no extra
+// privilege, the single guarantee this store exists to provide.
+//
+// The turn is a fact about a PROJECT (migration 084's own rationale: 「ONE cursor per (tenant,
+// project)」), so the fix is not to validate the workspace, it is to stop pretending the turn has one.
+function scopeWhere({ tenantId, projectNo }) {
   return {
     tenant_id: tenantId,
-    workspace_id: workspaceId ?? null,
     project_no: projectNo,
   }
 }
@@ -83,7 +93,6 @@ function rowToPublicHandoff(row) {
   if (!row) return null
   return {
     tenantId: row.tenant_id,
-    workspaceId: row.workspace_id ?? null,
     projectNo: row.project_no,
     stepIndex: Number(row.step_index),
     notifiedStepIndex: row.notified_step_index === null || row.notified_step_index === undefined
@@ -125,7 +134,6 @@ function createStockPreparationHandoffStore({ db, idGenerator = crypto.randomUUI
   function normalizeScope(input = {}) {
     return {
       tenantId: requiredString(input.tenantId, 'tenantId'),
-      workspaceId: optionalString(input.workspaceId),
       projectNo: requiredString(input.projectNo, 'projectNo'),
     }
   }
@@ -161,7 +169,7 @@ function createStockPreparationHandoffStore({ db, idGenerator = crypto.randomUUI
    * So the compare is enforced TWICE, and either half alone would be sufficient at the database:
    *
    *   1. THE ROW LOCK. The in-transaction read is `selectOneForUpdate` (SELECT … FOR UPDATE), so a
-   *      second advance on the same (tenant, workspace, project) BLOCKS until the first commits and
+   *      second advance on the same (tenant, project) BLOCKS until the first commits and
    *      then reads the cursor the first one wrote. Serialization, not hope.
    *   2. THE WRITE PREDICATE. The UPDATE carries `step_index = <the cursor we compared against>`
    *      (and, when a notification is being claimed, the `notified_step_index` we compared against)
@@ -176,18 +184,37 @@ function createStockPreparationHandoffStore({ db, idGenerator = crypto.randomUUI
    * person's second click, or a retried request). No row is touched, so `updated_at` does not move
    * and the trail does not gain a second "someone handed off" moment for one handoff.
    *
-   * NOTIFY IS CLAIMED HERE, DELIBERATELY, AND AT MOST ONCE. `notified_step_index` records the
-   * highest step whose completion has had a notification DISPATCHED, and it is stamped in the SAME
-   * transaction as the cursor move — before the send is attempted, not after. So:
+   * NOTIFY IS **NOT** CLAIMED HERE — SEE `claimNotification` BELOW, AND SEE WHY (RC1).
    *
-   *   * the notification is sent AFTER this transaction commits (state first, notify second). A send
-   *     failure therefore does NOT roll back the turn: 张三 really did finish, and a DingTalk outage
-   *     must not silently un-finish it. The route reports `notifyOutcome: 'failed'` and the UI tells
-   *     the operator to pass the word on themselves.
-   *   * a failed send is NOT retried by clicking again, because the claim already landed and the
-   *     second click is a replay. That is at-most-once, chosen over at-least-once on purpose: a
-   *     flaky webhook turning one handoff into a stream of duplicate pings is worse, for the people
-   *     receiving it, than one missed ping that the operator has been told about.
+   * It used to be, in this very transaction. That looked like the safest possible place for it and
+   * was in fact the worst, because of what the route does immediately afterwards. The route audits
+   * AFTER this call returns (F6, so that a REFUSED compare-and-set cannot leave an append-only row
+   * claiming a handoff that never happened) — and an audit append that then FAILED left a hop whose
+   * cursor had moved and whose at-most-once claim was already spent. The next click is a replay, a
+   * replay could not re-claim, and the one thing this whole feature exists to do — tell the next
+   * person — had silently and permanently not happened. Fixing the false-positive audit row had
+   * opened a false-negative notification.
+   *
+   * So the two writes are separated by the audit, and the claim gets its own compare-and-set:
+   *
+   *     advance()  ->  audit.append()  ->  claimNotification()  ->  dispatch
+   *
+   * Every step is idempotent, and being interrupted before the next one is RECOVERABLE:
+   *
+   *   * interrupted before the audit — cursor moved, claim unspent, no trail row. The next click
+   *     replays, writes its trail row and CLAIMS, so the notification still goes out. The operator
+   *     recovers it by pressing the button again, which is what they would do anyway.
+   *   * interrupted before the claim — the same, and the trail already has its row.
+   *   * interrupted after the claim but before the send — the one irreducible window, and it is the
+   *     at-most-once trade this feature made on purpose (below). The route reports it in words.
+   *
+   * The notification is still sent AFTER the state is committed (state first, notify second), so a
+   * send failure does NOT roll back the turn: 张三 really did finish, and a DingTalk outage must not
+   * silently un-finish it. The route answers `notifyOutcome: 'failed'` / `'partial'` and the UI tells
+   * the operator to pass the word on themselves. A failed SEND is still not retried by clicking
+   * again, because the claim did land: at-most-once, chosen over at-least-once on purpose, because a
+   * flaky webhook turning one handoff into a stream of duplicate pings is worse, for the people
+   * receiving them, than one missed ping the operator has been told about.
    *
    * WHY A RETRY LOOP. Under READ COMMITTED two concurrent FIRST advances on the same project both
    * see "no row" and both try to INSERT; the unique index arbitrates and the loser gets 23505. The
@@ -199,9 +226,6 @@ function createStockPreparationHandoffStore({ db, idGenerator = crypto.randomUUI
     const scope = normalizeScope(input)
     const expectedStepIndex = requiredIndex(input.expectedStepIndex, 'expectedStepIndex')
     const toStepIndex = requiredIndex(input.toStepIndex, 'toStepIndex')
-    const notifyForStepIndex = input.notifyForStepIndex === null || input.notifyForStepIndex === undefined
-      ? null
-      : requiredIndex(input.notifyForStepIndex, 'notifyForStepIndex')
     const actor = optionalString(input.actor)
     const where = scopeWhere(scope)
 
@@ -220,11 +244,12 @@ function createStockPreparationHandoffStore({ db, idGenerator = crypto.randomUUI
 
           if (cursor === toStepIndex) {
             // Already there. Report the replay WITHOUT writing, so a double click cannot move
-            // updated_at or re-claim a notification.
+            // updated_at. Whether this hop still OWES a notification is a SEPARATE question, asked
+            // separately by claimNotification — which is exactly what makes an advance whose audit
+            // or claim was interrupted recoverable by the next click instead of lost.
             return {
               handoff: rowToPublicHandoff(existing) || {
                 tenantId: scope.tenantId,
-                workspaceId: scope.workspaceId,
                 projectNo: scope.projectNo,
                 stepIndex: cursor,
                 notifiedStepIndex: priorNotified,
@@ -233,7 +258,6 @@ function createStockPreparationHandoffStore({ db, idGenerator = crypto.randomUUI
                 updatedAt: null,
               },
               changed: false,
-              notifyClaimed: false,
             }
           }
           if (cursor !== expectedStepIndex) {
@@ -245,14 +269,10 @@ function createStockPreparationHandoffStore({ db, idGenerator = crypto.randomUUI
             )
           }
 
-          // Claim the notification only if this step's completion has never had one dispatched.
-          const notifyClaimed = notifyForStepIndex !== null
-            && (priorNotified === null || priorNotified < notifyForStepIndex)
-          const nextNotified = notifyClaimed ? notifyForStepIndex : priorNotified
-
           // THE WRITE PREDICATE. The scope alone is not a compare-and-set: it identifies the row,
-          // it does not assert what the row still says. Both columns this advance decided against
-          // ride into the WHERE, so an UPDATE that no longer describes reality matches zero rows.
+          // it does not assert what the row still says. Both columns this advance READ ride into the
+          // WHERE — `notified_step_index` included, even though this write no longer changes it,
+          // because a row whose claim moved under us is a row somebody else has advanced.
           const casWhere = {
             ...where,
             step_index: cursor,
@@ -263,7 +283,6 @@ function createStockPreparationHandoffStore({ db, idGenerator = crypto.randomUUI
                 HANDOFF_TABLE,
                 {
                   step_index: toStepIndex,
-                  notified_step_index: nextNotified,
                   updated_by: actor,
                   updated_at: new Date(),
                 },
@@ -272,10 +291,9 @@ function createStockPreparationHandoffStore({ db, idGenerator = crypto.randomUUI
             : firstRow(await trx.insertOne(HANDOFF_TABLE, {
                 id: idGenerator(),
                 tenant_id: scope.tenantId,
-                workspace_id: scope.workspaceId,
                 project_no: scope.projectNo,
                 step_index: toStepIndex,
-                notified_step_index: nextNotified,
+                notified_step_index: null,
                 updated_by: actor,
               }))
           if (!row) {
@@ -292,7 +310,7 @@ function createStockPreparationHandoffStore({ db, idGenerator = crypto.randomUUI
               { field: 'projectNo' },
             )
           }
-          return { handoff: rowToPublicHandoff(row), changed: true, notifyClaimed }
+          return { handoff: rowToPublicHandoff(row), changed: true }
         })
       } catch (error) {
         if (isUniqueViolation(error, SCOPE_CONSTRAINT) && attempt < MAX_ADVANCE_ATTEMPTS) continue
@@ -307,7 +325,63 @@ function createStockPreparationHandoffStore({ db, idGenerator = crypto.randomUUI
     )
   }
 
-  return { get, advance }
+  /**
+   * TAKE THE AT-MOST-ONCE NOTIFICATION CLAIM for the completion of `stepIndex`, or report that
+   * somebody already has it. Returns `{ claimed, notifiedStepIndex }`.
+   *
+   * WHY THIS IS ITS OWN CALL AND ITS OWN TRANSACTION (RC1). See the long note on `advance` above:
+   * the claim used to ride the cursor move, and an audit append failing in between spent a claim on
+   * a hop that was then never notified and could never be notified again. Separating them makes the
+   * sequence RESUMABLE — every step can be repeated by the next click, and the CAS here is what
+   * keeps "repeatable" from meaning "twice".
+   *
+   * IT IS CALLED ON REPLAYS TOO, and that is the point rather than an oversight. A second click on a
+   * hop whose notification already went out finds `notified_step_index >= stepIndex` and is refused
+   * the claim (`claimed: false` -> the route answers `'skipped'`). A second click on a hop whose
+   * notification was OWED — because the first request died between the cursor move and here — finds
+   * the claim unspent, takes it, and the message finally goes out. One hop, at most one message,
+   * whichever of those two happened.
+   *
+   * MONOTONIC, not a toggle: the column records the HIGHEST step whose completion has been
+   * dispatched, so an out-of-order or stale claim for an earlier step cannot un-notify a later one.
+   *
+   * The compare-and-set is the same shape as `advance`'s and for the same reason — row lock for
+   * serialization, write predicate so a binding whose lock disappoints us still fails closed. A lost
+   * race here is NOT an error: it means the other writer is sending the message, so this caller is
+   * told `claimed: false` and stays quiet rather than 409-ing a turn that really did move.
+   */
+  async function claimNotification(input = {}) {
+    const scope = normalizeScope(input)
+    const stepIndex = requiredIndex(input.stepIndex, 'stepIndex')
+    const where = scopeWhere(scope)
+    return db.transaction(async (trx) => {
+      const existing = await trx.selectOneForUpdate(HANDOFF_TABLE, where)
+      if (!existing) {
+        // No cursor row at all means no advance ever landed for this project, so there is no hop
+        // whose completion could be announced. Refusing here rather than inserting keeps this method
+        // incapable of inventing turn state.
+        return { claimed: false, notifiedStepIndex: null }
+      }
+      const priorNotified = existing.notified_step_index === null || existing.notified_step_index === undefined
+        ? null
+        : Number(existing.notified_step_index)
+      if (priorNotified !== null && priorNotified >= stepIndex) {
+        return { claimed: false, notifiedStepIndex: priorNotified }
+      }
+      const row = firstRow(await trx.updateRow(
+        HANDOFF_TABLE,
+        { notified_step_index: stepIndex, updated_at: new Date() },
+        { ...where, notified_step_index: priorNotified },
+      ))
+      if (!row) {
+        // Somebody else claimed it between our read and our write. Not an error — they are sending.
+        return { claimed: false, notifiedStepIndex: priorNotified }
+      }
+      return { claimed: true, notifiedStepIndex: stepIndex }
+    })
+  }
+
+  return { get, advance, claimNotification }
 }
 
 module.exports = {

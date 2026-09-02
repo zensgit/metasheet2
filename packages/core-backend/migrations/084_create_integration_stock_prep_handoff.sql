@@ -47,9 +47,9 @@
 -- integer and no graph — no nodes, no epochs, no delegation, no return path. If the order proves
 -- stable the successor is an approval template, not more columns here.
 --
--- SCOPING 惯例与 057/062/066/079 对齐:tenant_id NOT NULL;workspace_id 可为 NULL,并用 COALESCE 收敛
--- 到唯一索引(PG14 无 NULLS NOT DISTINCT)。integration_ 前缀与 plugin-integration-core/lib/db.cjs 的
--- ALLOWED_PREFIX 对齐。
+-- SCOPING:tenant_id NOT NULL,与 057/062/066/079 一致。唯一索引只到 (tenant_id, project_no) —— 那几张表
+-- 的 workspace_id 是「同租户内选行」的读参数,而这张表的键同时是那条至多一次通知声明的键,详见下面的索引注释。
+-- integration_ 前缀与 plugin-integration-core/lib/db.cjs 的 ALLOWED_PREFIX 对齐。
 --
 -- VALUES-FREE: every column is a handle, a small integer or a server clock. No material name, spec,
 -- drawing number or quantity can land here — there is no column that could hold one.
@@ -58,7 +58,6 @@
 CREATE TABLE IF NOT EXISTS integration_stock_prep_handoff (
   id                   TEXT PRIMARY KEY,
   tenant_id            TEXT NOT NULL,
-  workspace_id         TEXT,
   project_no           TEXT NOT NULL,
   step_index           INTEGER NOT NULL DEFAULT 0,
   notified_step_index  INTEGER,
@@ -71,9 +70,20 @@ CREATE TABLE IF NOT EXISTS integration_stock_prep_handoff (
     CHECK (notified_step_index IS NULL OR notified_step_index >= 0)
 );
 
--- ONE cursor per (tenant, workspace, project): two people clicking 通知下一步 on the same project at
--- the same moment resolve to ONE row at the database, and a first advance that loses the insert race
--- gets 23505 rather than a second row.
+-- ONE cursor per (tenant, project): two people clicking 通知下一步 on the same project at the same
+-- moment resolve to ONE row at the database, and a first advance that loses the insert race gets
+-- 23505 rather than a second row.
+--
+-- NO `workspace_id`, DELIBERATELY, AND THIS IS THE ONE TABLE IN THE FAMILY WHERE THAT MATTERS. The
+-- 057/062/066/079 convention this table otherwise follows carries a nullable, caller-supplied
+-- workspace_id in the scope key, which is harmless where the key only selects rows to READ. Here the
+-- key is also the key of the AT-MOST-ONCE NOTIFICATION CLAIM (notified_step_index), so a
+-- caller-supplied component made the guarantee trivially defeatable: one authenticated handler
+-- sending N requests that differ only in an unvalidated string got N cursor rows and N identical
+-- DingTalk pings for one hop. Validating the workspace would not have fixed it, because the turn
+-- simply is not a per-workspace fact — 「这个项目现在轮到谁」 has exactly one answer per project. So
+-- the column is gone and the uniqueness is (tenant_id, project_no), which makes 「one cursor per
+-- project」 a property of the SCHEMA rather than of the store's discipline.
 --
 -- THIS INDEX IS NOT, BY ITSELF, THE CONCURRENCY STORY, and an earlier version of this comment claimed
 -- it was. Uniqueness stops a duplicate ROW; it does not stop two transactions from both reading
@@ -84,7 +94,7 @@ CREATE TABLE IF NOT EXISTS integration_stock_prep_handoff (
 -- UPDATE carries `step_index` / `notified_step_index` predicates so zero updated rows is a refusal.
 -- Anyone tightening or relaxing this table's concurrency behaviour must change that file, not this one.
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_integration_stock_prep_handoff_scope
-  ON integration_stock_prep_handoff (tenant_id, COALESCE(workspace_id, ''), project_no);
+  ON integration_stock_prep_handoff (tenant_id, project_no);
 
 COMMENT ON TABLE integration_stock_prep_handoff IS
-  'Per-(tenant,workspace,projectNo) cursor into the deployment-configured stock-preparation handoff step list: whose turn it is, and which step completion has already been notified. A VISIBLE TURN SIGNAL, not a permission record and not an approval instance. Absent server-config key stockPreparationHandoff = the advance route refuses before touching this table = no rows.';
+  'Per-(tenant,projectNo) cursor into the deployment-configured stock-preparation handoff step list: whose turn it is, and which step completion has already been notified. A VISIBLE TURN SIGNAL, not a permission record and not an approval instance. Absent server-config key stockPreparationHandoff = the advance route refuses before touching this table = no rows.';
