@@ -247,7 +247,9 @@ describe('applyRoleWriteScopes — writes one role-scoped, read-only, provenance
     const fake = createFakePool()
     const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
     const result = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: [] })
-    expect(result).toEqual({ applied: 0, entries: [] })
+    // `removed: []` and NOT null: the empty-entry path is a TOTAL no-op that runs no delete, which
+    // is a different (and stronger) statement than "a reconcile ran and retired nothing".
+    expect(result).toEqual({ applied: 0, entries: [], removed: [] })
     expect(fake.transactions).toBe(0)
     expect(fake.calls).toHaveLength(0)
   })
@@ -334,17 +336,44 @@ describe('STRUCTURAL read-safety: this port can never produce a read restriction
     ])
   })
 
-  it('SOURCE GUARD: purely additive — the port emits no DELETE/revoke statement', () => {
+  it('SOURCE GUARD: the ONE delete carries all four narrowings, in the statement itself', () => {
     const src = readFileSync(SERVICE_SOURCE_PATH, 'utf8')
-    expect(src).not.toMatch(/DELETE\s+FROM\s+field_permissions/i)
+    // Exactly one delete may exist in this file, and it must be the reconcile.
+    const deletes = src.match(/DELETE\s+FROM\s+field_permissions/gi) ?? []
+    expect(deletes).toHaveLength(1)
+
+    // Its WHERE clause is the safety property, so it is asserted CLAUSE BY CLAUSE rather than by a
+    // whole-statement digest that would have to move for a comment. Dropping any one of these is
+    // what turns a scoped reconcile into a revoke channel:
+    const statement = src.slice(src.search(/DELETE\s+FROM\s+field_permissions/i))
+    const where = statement.slice(0, statement.indexOf('RETURNING'))
+    //  1. this port's own rows only — never an operator's
+    expect(where).toMatch(/AND\s+created_by\s*=\s*\$2/)
+    //  2. actual denials only — never a row an operator relaxed
+    expect(where).toMatch(/AND\s+read_only\s*=\s*true/)
+    //  3. inside the caller's declared region only, on BOTH axes
+    expect(where).toMatch(/AND\s+field_id\s*=\s*ANY\(\$3::text\[\]\)/)
+    expect(where).toMatch(/AND\s+subject_id\s*=\s*ANY\(\$4::text\[\]\)/)
+    //  4. never a row this same call just wrote
+    expect(where).toMatch(/AND\s+NOT\s+EXISTS\s*\(/)
+    expect(where).toMatch(/unnest\(\$5::text\[\],\s*\$6::text\[\]\)/)
+    // and it stays role-scoped like everything else this port writes.
+    expect(where).toMatch(/subject_type\s*=\s*'role'/)
+
+    // The delete can only ever WIDEN access, so it must not mention the read dimension at all.
+    expect(where).not.toMatch(/visible/)
+
+    // A blanket revoke must not be expressible: no delete may exist that is keyed on the sheet
+    // alone. (Guarded by the four clauses above being on the only DELETE in the file.)
     expect(src).not.toMatch(/UPDATE\s+field_permissions\s+SET/i)
   })
 
-  it('SOURCE GUARD: exactly ONE mutating statement in the whole file — the read methods only SELECT', () => {
+  it('SOURCE GUARD: exactly TWO mutating statements in the whole file — the read methods only SELECT', () => {
     const src = readFileSync(SERVICE_SOURCE_PATH, 'utf8')
-    // Adding a read method must never smuggle in a second write. One INSERT, zero of anything else.
+    // Adding a read method must never smuggle in a write. One INSERT, one (scoped) DELETE, and
+    // nothing else that can change a row.
     expect((src.match(/INSERT\s+INTO/gi) ?? []).length).toBe(1)
-    expect(src).not.toMatch(/\bDELETE\s+FROM\b/i)
+    expect((src.match(/\bDELETE\s+FROM\b/gi) ?? []).length).toBe(1)
     expect(src).not.toMatch(/\bTRUNCATE\b/i)
     // `DO UPDATE SET` (the ON CONFLICT arm of that single INSERT) is the only `UPDATE` allowed.
     const updates = [...src.matchAll(/\bUPDATE\b/gi)]
@@ -679,5 +708,273 @@ describe('findMissingRoleIds — the pre-flight question a caller asks BEFORE it
       service.findMissingRoleIds({ roleIds: undefined as unknown as string[] }),
     ).rejects.toMatchObject({ reason: 'ENTRIES_INVALID' })
     expect(fake.calls).toHaveLength(0)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// 5. THE SCOPED RECONCILE — a pack revision that MOVES a column's owner
+//
+// Upsert-only has one silent failure and this section is it. v1 says "采购 may not write 仓库备料
+// 日期"; v2 moves that column TO 仓库's counterpart. Without a reconcile v1's row survives beside
+// v2's, and `loadFieldPermissionScopeMap` ORs `read_only` across a user's rows — so the column
+// becomes unwritable by EVERY declared role while the install reports success.
+//
+// The rows here are modelled as a real table (provenance column included) rather than as canned
+// SELECT results, because the load-bearing claim is about WHICH rows survive. The tie between this
+// executable model and the actual SQL is the clause-by-clause SOURCE GUARD in section 2 plus the
+// real-Postgres suite tests/integration/stock-preparation-fieldperm-write-gate-realdb.test.ts.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+const OPERATOR_MARKER = 'operator:univer-meta-authoring-route'
+
+interface TableRow {
+  sheet_id: string
+  field_id: string
+  subject_type: string
+  subject_id: string
+  visible: boolean
+  read_only: boolean
+  created_by: string
+}
+
+/**
+ * A pool whose `field_permissions` is an actual mutable set of rows. The three statements are
+ * applied SEMANTICALLY from their bound parameters (this is a model of the statement, not a SQL
+ * parser) — but the model implements every clause the source guard pins, so a statement that lost
+ * one would be caught there rather than silently passed here.
+ */
+function createTablePool(seed: TableRow[] = []): {
+  pool: StockPreparationFieldPermissionsPool
+  rows: TableRow[]
+  deletes: Captured[]
+} {
+  const rows: TableRow[] = seed.map((row) => ({ ...row }))
+  const deletes: Captured[] = []
+
+  const query = async (sql: string, params: unknown[] = []) => {
+    if (sql.includes('FROM meta_sheets')) return { rows: [{ id: String(params[0]) }] }
+    if (sql.includes('FROM meta_fields')) {
+      return { rows: ((params[1] as string[]) ?? []).map((id) => ({ id })) }
+    }
+    if (sql.includes('FROM roles')) {
+      return { rows: ((params[0] as string[]) ?? []).map((id) => ({ id })) }
+    }
+    if (sql.includes('INSERT INTO field_permissions')) {
+      const [sheetId, fieldId, subjectId, createdBy] = params as string[]
+      const existing = rows.find((row) => row.sheet_id === sheetId
+        && row.field_id === fieldId && row.subject_type === 'role' && row.subject_id === subjectId)
+      if (existing) {
+        existing.visible = true
+        existing.read_only = true
+        existing.created_by = createdBy
+      } else {
+        rows.push({
+          sheet_id: sheetId,
+          field_id: fieldId,
+          subject_type: 'role',
+          subject_id: subjectId,
+          visible: true,
+          read_only: true,
+          created_by: createdBy,
+        })
+      }
+      return { rows: [], rowCount: 1 }
+    }
+    if (sql.includes('DELETE FROM field_permissions')) {
+      deletes.push({ sql, params })
+      const [sheetId, createdBy, regionFields, regionRoles, desiredFields, desiredRoles] =
+        params as [string, string, string[], string[], string[], string[]]
+      const desired = new Set(desiredFields.map((fieldId, i) => `${fieldId} ${desiredRoles[i]}`))
+      const removed: TableRow[] = []
+      for (let i = rows.length - 1; i >= 0; i -= 1) {
+        const row = rows[i]
+        if (row.sheet_id !== sheetId) continue
+        if (row.subject_type !== 'role') continue
+        if (row.created_by !== createdBy) continue
+        if (row.read_only !== true) continue
+        if (!regionFields.includes(row.field_id)) continue
+        if (!regionRoles.includes(row.subject_id)) continue
+        if (desired.has(`${row.field_id} ${row.subject_id}`)) continue
+        removed.push(row)
+        rows.splice(i, 1)
+      }
+      return { rows: removed.map((row) => ({ field_id: row.field_id, subject_id: row.subject_id })) }
+    }
+    if (sql.includes('FROM field_permissions')) {
+      const [sheetId, createdBy] = params as string[]
+      return {
+        rows: rows
+          .filter((row) => row.sheet_id === sheetId && row.subject_type === 'role'
+            && row.read_only === true && row.created_by === createdBy)
+          .map((row) => ({ field_id: row.field_id, subject_id: row.subject_id })),
+      }
+    }
+    throw new Error(`fake pool: unexpected SQL ${sql}`)
+  }
+
+  return {
+    pool: { async transaction(handler) { return handler({ query }) } },
+    rows,
+    deletes,
+  }
+}
+
+const pluginRow = (fieldId: string, roleId: string): TableRow => ({
+  sheet_id: SHEET,
+  field_id: fieldId,
+  subject_type: 'role',
+  subject_id: roleId,
+  visible: true,
+  read_only: true,
+  created_by: STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY,
+})
+
+const keyOf = (row: { field_id: string; subject_id: string }) => `${row.field_id} ${row.subject_id}`
+
+describe('5. the scoped reconcile — a revision that moves a column between departments', () => {
+  // v1: 仓库 owns its 备料日期 column, so 采购 is denied it.
+  const V1_ENTRIES = [
+    { fieldId: F_WAREHOUSE_DATE, roleId: ROLE_PURCHASING },
+    { fieldId: F_PURCHASE_REPLY, roleId: ROLE_WAREHOUSE },
+  ]
+  // v2: that column changes hands — the denial flips to the other department.
+  const V2_ENTRIES = [
+    { fieldId: F_WAREHOUSE_DATE, roleId: ROLE_WAREHOUSE },
+    { fieldId: F_PURCHASE_REPLY, roleId: ROLE_WAREHOUSE },
+  ]
+  const REGION = {
+    fieldIds: [F_WAREHOUSE_DATE, F_PURCHASE_REPLY],
+    roleIds: [ROLE_PURCHASING, ROLE_WAREHOUSE],
+  }
+
+  it('v1 then v2: the stale v1 row is the ONLY row deleted, and it is reported back', async () => {
+    const fake = createTablePool()
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    const v1 = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V1_ENTRIES, reconcile: REGION })
+    expect(v1.removed).toEqual([])
+    expect(fake.rows.map(keyOf).sort()).toEqual([
+      `${F_PURCHASE_REPLY} ${ROLE_WAREHOUSE}`,
+      `${F_WAREHOUSE_DATE} ${ROLE_PURCHASING}`,
+    ].sort())
+
+    const v2 = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES, reconcile: REGION })
+
+    // THE HEADLINE: the column that changed hands is denied to exactly ONE role afterwards.
+    expect(fake.rows.map(keyOf).sort()).toEqual([
+      `${F_PURCHASE_REPLY} ${ROLE_WAREHOUSE}`,
+      `${F_WAREHOUSE_DATE} ${ROLE_WAREHOUSE}`,
+    ].sort())
+    expect(v2.removed).toEqual([{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_PURCHASING }])
+    expect(v2.applied).toBe(2)
+
+    // Idempotent: a converged re-run deletes nothing.
+    const again = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES, reconcile: REGION })
+    expect(again.removed).toEqual([])
+    expect(fake.rows).toHaveLength(2)
+  })
+
+  it('an OPERATOR row on the very same sheet, column and role is NEVER deleted', async () => {
+    // Positioned to fail every way except provenance: same sheet, a column inside the region, a
+    // role inside the region, read_only, and absent from the desired set. Only `created_by` differs.
+    const operatorRow: TableRow = {
+      ...pluginRow(F_PURCHASE_REPLY, ROLE_PURCHASING),
+      created_by: OPERATOR_MARKER,
+    }
+    const fake = createTablePool([operatorRow, pluginRow(F_WAREHOUSE_DATE, ROLE_PURCHASING)])
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    const result = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES, reconcile: REGION })
+
+    expect(result.removed).toEqual([{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_PURCHASING }])
+    const survivor = fake.rows.find((row) => row.created_by === OPERATOR_MARKER)
+    expect(survivor).toBeDefined()
+    expect(survivor).toMatchObject({ field_id: F_PURCHASE_REPLY, subject_id: ROLE_PURCHASING, read_only: true })
+  })
+
+  it('rows OUTSIDE the declared region survive, on either axis', async () => {
+    const OUTSIDE_ROLE = ROLE_PRODUCTION // this port's own row, for a role the caller does not govern
+    const OUTSIDE_FIELD = F_MATERIAL_TYPE // this port's own row, on a column the caller does not govern
+    const fake = createTablePool([
+      pluginRow(F_WAREHOUSE_DATE, OUTSIDE_ROLE),
+      pluginRow(OUTSIDE_FIELD, ROLE_PURCHASING),
+      pluginRow(F_WAREHOUSE_DATE, ROLE_PURCHASING), // inside on both axes → the one that goes
+    ])
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    const result = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES, reconcile: REGION })
+
+    expect(result.removed).toEqual([{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_PURCHASING }])
+    expect(fake.rows.map(keyOf).sort()).toEqual([
+      `${F_PURCHASE_REPLY} ${ROLE_WAREHOUSE}`,
+      `${F_WAREHOUSE_DATE} ${OUTSIDE_ROLE}`,
+      `${F_WAREHOUSE_DATE} ${ROLE_WAREHOUSE}`,
+      `${OUTSIDE_FIELD} ${ROLE_PURCHASING}`,
+    ].sort())
+  })
+
+  it('a row this port wrote but an operator RELAXED (read_only=false) is left alone', async () => {
+    const relaxed: TableRow = { ...pluginRow(F_WAREHOUSE_DATE, ROLE_PURCHASING), read_only: false }
+    const fake = createTablePool([relaxed])
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    const result = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES, reconcile: REGION })
+
+    // Not deleted — an operator decided it is no longer a denial, and that decision stands.
+    expect(result.removed).toEqual([])
+    expect(fake.rows.find((row) => keyOf(row) === `${F_WAREHOUSE_DATE} ${ROLE_PURCHASING}`))
+      .toMatchObject({ read_only: false })
+  })
+
+  it('WITHOUT a reconcile region no DELETE is executed at all, and `removed` is empty', async () => {
+    const fake = createTablePool([pluginRow(F_WAREHOUSE_DATE, ROLE_PURCHASING)])
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    const result = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES })
+
+    expect(fake.deletes).toHaveLength(0)
+    expect(result.removed).toEqual([])
+    // The old hazard, intact for any caller that does not opt in: BOTH roles now deny the column.
+    expect(fake.rows.map(keyOf)).toContain(`${F_WAREHOUSE_DATE} ${ROLE_PURCHASING}`)
+    expect(fake.rows.map(keyOf)).toContain(`${F_WAREHOUSE_DATE} ${ROLE_WAREHOUSE}`)
+  })
+
+  it('a region that does not contain every written entry is refused, and nothing is written', async () => {
+    // The containment rule is what makes the delete provably no wider than the caller's own
+    // re-declaration. A caller writing outside its region must widen the region, not the delete.
+    const fake = createTablePool()
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    await expect(service.applyRoleWriteScopes({
+      sheetId: SHEET,
+      entries: V2_ENTRIES,
+      reconcile: { fieldIds: [F_PURCHASE_REPLY], roleIds: [ROLE_PURCHASING, ROLE_WAREHOUSE] },
+    })).rejects.toMatchObject({ reason: 'ENTRIES_INVALID' })
+
+    await expect(service.applyRoleWriteScopes({
+      sheetId: SHEET,
+      entries: V2_ENTRIES,
+      reconcile: { fieldIds: REGION.fieldIds, roleIds: [ROLE_PURCHASING] },
+    })).rejects.toMatchObject({ reason: 'ENTRIES_INVALID' })
+
+    // Shape violations are refused the same way, before any connection is taken.
+    for (const bad of [{ fieldIds: [], roleIds: REGION.roleIds }, { fieldIds: REGION.fieldIds, roleIds: [] }]) {
+      await expect(service.applyRoleWriteScopes({
+        sheetId: SHEET, entries: V2_ENTRIES, reconcile: bad,
+      })).rejects.toMatchObject({ reason: 'ENTRIES_INVALID' })
+    }
+
+    expect(fake.rows).toHaveLength(0)
+    expect(fake.deletes).toHaveLength(0)
+  })
+
+  it('the delete is bound to THIS sheet: an identical row on another sheet is untouched', async () => {
+    const otherSheetRow: TableRow = { ...pluginRow(F_WAREHOUSE_DATE, ROLE_PURCHASING), sheet_id: 'sheet_other' }
+    const fake = createTablePool([otherSheetRow, pluginRow(F_WAREHOUSE_DATE, ROLE_PURCHASING)])
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES, reconcile: REGION })
+
+    expect(fake.rows.filter((row) => row.sheet_id === 'sheet_other')).toHaveLength(1)
   })
 })
