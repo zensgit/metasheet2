@@ -874,6 +874,7 @@
                 <el-option label="单人通过" value="single" />
                 <el-option label="全部通过" value="all" />
                 <el-option label="任一通过" value="any" />
+                <el-option label="依次审批" value="sequential" data-testid="approval-step-mode-sequential-option" />
                 <!-- P1-C (T2-4 N-of-M / 门槛会签). Linear graphs are BY CONSTRUCTION never inside a
                      parallel region (the linear editor admits no `parallel` node), so this option is
                      always offered here — the backend's linear-only constraint is satisfied by
@@ -2053,6 +2054,8 @@ function nodeConfigSummary(node: ApprovalNode): string[] {
     const approvalConfig = config as { approvalMode?: ApprovalMode; approvalThreshold?: number; timeout?: NodeTimeoutConfig }
     if (approvalConfig.approvalMode === 'threshold' && Number.isInteger(approvalConfig.approvalThreshold)) {
       lines.push(`审批模式：门槛会签（需 ${approvalConfig.approvalThreshold} 人同意）`)
+    } else if (approvalConfig.approvalMode === 'sequential') {
+      lines.push('审批模式：依次审批')
     }
     if (approvalConfig.timeout) {
       const effectLabel = nodeTimeoutEffectLabel(approvalConfig.timeout.effect)
@@ -2320,7 +2323,7 @@ function setApprovalNodeMode(nodeKey: string, mode: ApprovalMode): void {
   // green for a threshold edit inside a parallel region). Mutation-proven for what it DOES guard:
   // approval-template-authoring-canvas-inspector.spec.ts's "setApprovalNodeMode refuses threshold…"
   // test reds if this line is removed.
-  if (mode === 'threshold' && approvalNodeInParallelRegion(nodeKey)) return
+  if ((mode === 'threshold' || mode === 'sequential') && approvalNodeInParallelRegion(nodeKey)) return
   edit.approvalMode = mode
 }
 // P1-C (T2-4 N-of-M / 门槛会签). Meaningful only when `approvalNodeMode(nodeKey) === 'threshold'`.

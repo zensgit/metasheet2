@@ -8050,6 +8050,30 @@ describe('ApprovalProductService', () => {
       })
     })
 
+    it('rejects a sequential node nested inside a parallel region (linear-only in v1)', async () => {
+      const parallelGraph = {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['edge-fork-a', 'edge-fork-b'], joinNodeKey: 'join', joinMode: 'all' } },
+          { key: 'branch_a', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['p-a1', 'p-a2'], approvalMode: 'sequential' } },
+          { key: 'branch_b', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['p-b1'] } },
+          { key: 'join', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-fork', source: 'start', target: 'fork' },
+          { key: 'edge-fork-a', source: 'fork', target: 'branch_a' },
+          { key: 'edge-fork-b', source: 'fork', target: 'branch_b' },
+          { key: 'edge-a-join', source: 'branch_a', target: 'join' },
+          { key: 'edge-b-join', source: 'branch_b', target: 'join' },
+        ],
+        policy: { allowRevoke: true },
+      }
+      await expect(createTemplate(baseRequest(parallelGraph))).rejects.toMatchObject({
+        code: 'APPROVAL_SEQUENTIAL_IN_PARALLEL',
+        statusCode: 400,
+      })
+    })
+
     it('accepts a valid linear threshold (2-of-3) node and round-trips approvalThreshold', async () => {
       pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
         const s = normalize(sql)

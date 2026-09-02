@@ -799,6 +799,12 @@
             <el-option label="单人通过" value="single" />
             <el-option label="全部通过" value="all" />
             <el-option label="任一通过" value="any" />
+            <el-option
+              label="依次审批"
+              value="sequential"
+              :disabled="approvalNodeInParallelRegion(node.key)"
+              data-testid="approval-node-mode-sequential-option"
+            />
             <!-- P1-C (T2-4 N-of-M / 门槛会签): linear-only in v1 — the backend rejects a 'threshold'
                  node inside a parallel region (APPROVAL_THRESHOLD_IN_PARALLEL). Disabled (not
                  hidden) here so an already-threshold node picked up from outside a parallel region
@@ -816,7 +822,7 @@
             v-if="approvalNodeInParallelRegion(node.key)"
             class="template-authoring__hint"
             data-testid="approval-node-threshold-parallel-hint"
-          >位于并行分支内，暂不支持门槛会签（v1 仅支持线性路径）</p>
+          >位于并行分支内，暂不支持门槛会签或依次审批（v1 仅支持线性路径）</p>
         </el-form-item>
         <!-- P1-C: typed N-of-M control, rendered only under 'threshold' mode. M is resolved from
              this node's assignee-source UNION at runtime (the backend's static N<=M publish bound
