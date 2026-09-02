@@ -596,6 +596,50 @@ export function stockPrepErrorPlain(code: string): StockPrepPlainText {
   return lookup(STOCK_PREP_ERROR_PLAIN, code) ?? STOCK_PREP_ERROR_GENERIC
 }
 
+// ---------------------------------------------------------------------------
+// 项目备料页 — READ-SHAPED FAILURE COPY
+// ---------------------------------------------------------------------------
+//
+// WHY THIS IS A SECOND TABLE AND NOT MORE ROWS IN THE ONE ABOVE. Every entry above, and the generic
+// it falls back to, says a variation of 「这一步没有保存成功,数据没有变化。」 — which is exactly
+// right for the surface that table was built for, the confirmation queue, where every failure IS a
+// failed write. The project board writes NOTHING. Telling an operator whose board read timed out
+// that "nothing was saved" is not merely clumsy: it answers a question they did not ask and implies
+// they lost work they never did.
+//
+// So a read surface gets read-shaped sentences, and the LOOKUP falls back to a read-shaped generic
+// rather than the write one. The codes that genuinely belong to both planes (FORBIDDEN and friends)
+// are still resolved out of the shared table first, so there is one place to change them.
+export const STOCK_PREP_BOARD_ERROR_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  // The board's own 404. Deliberately DOES NOT say "this project does not exist" — the refusal is
+  // shapeless by construction (a project of another tenant and a number nobody has are the same
+  // answer), so the copy must not claim to know which it was. It says what the operator can do.
+  STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND: Object.freeze({
+    zh: '这个项目号在您这里还没有数据。',
+    en: 'There is no data for this project number here yet.',
+  }),
+  STOCK_PREPARATION_PROJECT_BOARD_REQUEST_INVALID: Object.freeze({
+    zh: '请求里的项目号不对,请重新输入一次。',
+    en: 'The project number in that request was not valid — type it again.',
+  }),
+})
+
+/** The board's read-shaped generic: nothing was changed, because nothing was going to be. */
+export const STOCK_PREP_BOARD_ERROR_GENERIC: StockPrepPlainText = Object.freeze({
+  zh: '没能读到这个项目的情况,请稍后再试一次。什么都没有改动。',
+  en: 'Could not read this project’s status — try again shortly. Nothing was changed.',
+})
+
+/**
+ * The board's failure copy. Its OWN codes first, then the shared table (so FORBIDDEN and the other
+ * cross-plane codes keep one definition), then a READ-shaped generic — never the write one.
+ */
+export function stockPrepBoardErrorPlain(code: string): StockPrepPlainText {
+  return lookup(STOCK_PREP_BOARD_ERROR_PLAIN, code)
+    ?? lookup(STOCK_PREP_ERROR_PLAIN, code)
+    ?? STOCK_PREP_BOARD_ERROR_GENERIC
+}
+
 /** The HTTP read failures the install page surfaces. Status stays visible in the disclosure. */
 export const STOCK_PREP_READ_FAILED: StockPrepPlainText = Object.freeze({
   zh: '没能读到这套部署的信息,请稍后再试。',
