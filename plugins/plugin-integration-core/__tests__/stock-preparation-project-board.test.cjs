@@ -199,8 +199,21 @@ function mount({
   // THE ADMINISTRATOR'S ARCHIVE. `false` models the flow this page exists for: a floor operator ran
   // the pull themselves, so no MVP snapshot row exists for their project at all.
   archivePersisted = true,
+  // WHAT THE PROVISIONING REGISTRY SAYS OWNS THE BOUND SHEET. A map of sheetId -> owning projectId,
+  // which is what the host port answers from. `null` models a host too old to have the port at all;
+  // `undefined` derives the honest default — the registry knows a sheet exactly when provisioning
+  // created it, so an UNPROVISIONED main table is unclaimed there too.
+  sheetOwners,
+  // Which sheet id the main table actually LIVES on. Defaults to the deterministic one; a scenario
+  // that models a hand-bound sheet moves it, which is the only way to model a sheet whose id does
+  // not hash from the caller's own project.
+  mainSheetIdOverride = null,
 } = {}) {
   const routes = new Map()
+  const MAIN_SHEET = mainSheetIdOverride || MAIN_SHEET_A
+  const owners = sheetOwners === undefined
+    ? (mainTableProvisioned ? { [MAIN_SHEET]: STAGING_A } : {})
+    : sheetOwners
 
   const provisioningA = makeFakeProvisioning({
     stagingProjectId: STAGING_A,
@@ -210,7 +223,7 @@ function mount({
       [BATCH_OBJECT_ID]: BATCH_SHEET_A,
       [EXCEPTION_OBJECT_ID]: EXCEPTION_SHEET_A,
       [PREP_LINE_OBJECT_ID]: PREP_LINE_SHEET_A,
-      ...(mainTableProvisioned ? { [MAIN_OBJECT_ID]: ownSheetIdFor(STAGING_A, MAIN_OBJECT_ID) } : {}),
+      ...(mainTableProvisioned ? { [MAIN_OBJECT_ID]: MAIN_SHEET } : {}),
     },
   })
   const provisioningB = makeFakeProvisioning({
@@ -225,15 +238,15 @@ function mount({
       [BATCH_SHEET_A]: BATCH_OBJECT_ID,
       [EXCEPTION_SHEET_A]: EXCEPTION_OBJECT_ID,
       [PREP_LINE_SHEET_A]: PREP_LINE_OBJECT_ID,
-      [MAIN_SHEET_A]: MAIN_OBJECT_ID,
+      [MAIN_SHEET]: MAIN_OBJECT_ID,
     },
     rowsBySheet: {
       // WHAT THE PULL ITSELF WROTE. The bound table-action target — the sheet `apply` writes and the
       // export reads. This is the only store an operator's own four-step run touches.
-      [MAIN_SHEET_A]: mainTableRows.map((row, index) => mvpRow(
+      [MAIN_SHEET]: mainTableRows.map((row, index) => mvpRow(
         STAGING_A,
         MAIN_OBJECT_ID,
-        MAIN_SHEET_A,
+        MAIN_SHEET,
         `rec_main_a${index}`,
         {
           projectNo: row.projectNo,
@@ -353,6 +366,13 @@ function mount({
     getObjectViewId(projectId, objectId, viewId) {
       return `view_${projectId}_${objectId}_${viewId}`
     },
+    // The host's OWNERSHIP lookup. plugin-scope has already narrowed it to this plugin's namespace,
+    // so a sheet owned elsewhere reaches this plugin as null, never as another project's id.
+    ...(owners === null ? {} : {
+      async findSheetOwnerProjectId(sheetId) {
+        return owners[sheetId] ?? null
+      },
+    }),
     async ensureObject() {
       throw new Error('unexpected provisioning write: ensureObject')
     },
@@ -872,6 +892,100 @@ async function theBoardReflectsThePullRatherThanTheAdminsArchive() {
 }
 
 // ---------------------------------------------------------------------------
+// B-12 — TENANCY IS PROVED FROM THE SHEET, NOT FROM THE SHAPE OF THE BINDING
+// ---------------------------------------------------------------------------
+//
+// THE BUG THIS PINS. The first cut proved "this bound sheet is ours" by recomputing
+// `getObjectSheetId(ourStagingProject, boundTarget.objectId)` and comparing. That is a
+// BINDING-SHAPE test, not a tenancy proof, and it is wrong in both directions of usefulness:
+//
+//   * it REFUSES a sheet we genuinely own whenever the binding names a different objectId than the
+//     one the sheet was created under. The sanctioned 222 deploy-window step (D1=B) does exactly
+//     that — it rebinds the action to a SANDBOX objectId while KEEPING the existing sheetId — so on
+//     the configuration the runbook tells operators to use, the fill handle would never appear and
+//     the pull-target row counts would read "table not ready" over a table full of their rows; and
+//   * it can only ever admit sheets whose id happens to hash from our own project, so it cannot
+//     speak at all about a sheet an administrator bound by hand.
+//
+// The proof now comes from the SHEET: the host's provisioning registry records which project owns
+// each sheet, plugin-scope narrows that answer to this plugin's namespace, and the handle/counts
+// appear iff the owning project IS the caller's staging project. The hash test is KEPT as a second,
+// independently sufficient proof (it embeds the caller's own project id, so it is sound) for hosts
+// too old to have the port — widening a sound proof, never replacing it with a weaker one.
+async function tenancyIsProvedFromTheSheetNotTheBindingShape() {
+  const CANONICAL_SHEET = ownSheetIdFor(STAGING_A, MAIN_OBJECT_ID)
+
+  // 1. THE 222 WINDOW SHAPE: the action is rebound to a SANDBOX objectId, the sheetId is the one
+  //    the deployment already had. The hash test fails; the registry says the sheet is ours.
+  {
+    const sandboxBinding = {
+      sheetId: CANONICAL_SHEET,
+      objectId: 'plm_stock_preparation_sandbox_main',
+      fieldIdMap: MAIN_FIELD_ID_MAP,
+    }
+    const res = await callBoard(mount({ boundTarget: sandboxBinding }).routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200)
+    assert.ok(
+      res.body.data.fillTarget,
+      'B-12: a sandbox rebinding of a sheet we own must still yield a fill handle — this is the sanctioned deploy-window config',
+    )
+    assert.equal(res.body.data.fillTarget.sheetId, CANONICAL_SHEET)
+    assert.equal(res.body.data.pullTargetReady, true, 'B-12: and its rows must be countable')
+    assert.equal(res.body.data.pulledRowCount, 3)
+  }
+
+  // 2. A HAND-BOUND SHEET IN OUR OWN TENANT — an id that hashes from nothing we would compute, but
+  //    that the registry records as ours. It must show.
+  {
+    const handBound = { sheetId: 'sheet_hand_made_by_an_admin', objectId: MAIN_OBJECT_ID, fieldIdMap: MAIN_FIELD_ID_MAP }
+    const harness = mount({
+      boundTarget: handBound,
+      sheetOwners: { sheet_hand_made_by_an_admin: STAGING_A },
+      mainSheetIdOverride: 'sheet_hand_made_by_an_admin',
+    })
+    const res = await callBoard(harness.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200)
+    assert.ok(res.body.data.fillTarget, 'B-12: a hand-bound sheet the registry says is ours must show')
+    assert.equal(res.body.data.fillTarget.sheetId, 'sheet_hand_made_by_an_admin')
+  }
+
+  // 3. A SHEET OWNED BY ANOTHER TENANT — the registry answers with somebody else's project (or, once
+  //    plugin-scope has narrowed it, with null). No handle, no deep link, no row counts, and the
+  //    foreign id is never echoed.
+  {
+    const foreign = { sheetId: ownSheetIdFor(STAGING_B, MAIN_OBJECT_ID), objectId: MAIN_OBJECT_ID, fieldIdMap: MAIN_FIELD_ID_MAP }
+    const harness = mount({
+      boundTarget: foreign,
+      sheetOwners: { [ownSheetIdFor(STAGING_B, MAIN_OBJECT_ID)]: STAGING_B },
+    })
+    const res = await callBoard(harness.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.fillTarget, null, 'B-12: a sheet another tenant owns yields NO handle')
+    assert.equal(res.body.data.pullTargetReady, false, 'B-12: and is never read for row counts')
+    assert.equal(res.body.data.pulledRowCount, 0)
+    assert.ok(!JSON.stringify(res.body).includes(STAGING_B), 'B-12: and the foreign project is never echoed')
+  }
+
+  // 4. THE SAME SHEET, WITH THE REGISTRY SILENT (an old host, or an unclaimed sheet). The hash proof
+  //    is all that is left, and it correctly refuses a sheet that does not hash from our project.
+  {
+    const foreign = { sheetId: ownSheetIdFor(STAGING_B, MAIN_OBJECT_ID), objectId: MAIN_OBJECT_ID, fieldIdMap: MAIN_FIELD_ID_MAP }
+    const res = await callBoard(mount({ boundTarget: foreign, sheetOwners: null }).routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.fillTarget, null, 'B-12: no port and no hash match means no handle')
+  }
+
+  // 5. …and with the registry silent, the ORDINARY canonical binding still works, because the hash
+  //    proof still holds. A host too old for the port loses nothing it had.
+  {
+    const res = await callBoard(mount({ sheetOwners: null }).routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200)
+    assert.ok(res.body.data.fillTarget, 'B-12: the deterministic proof still stands on a host without the port')
+    assert.equal(res.body.data.pullTargetReady, true)
+  }
+}
+
+// ---------------------------------------------------------------------------
 // B-08 — ONE PROJECT'S BOARD COSTS ONE PROJECT'S QUERIES
 // ---------------------------------------------------------------------------
 //
@@ -984,6 +1098,7 @@ async function main() {
   await theAuditRowIsValuesFreeAndPrecedesTheValues()
   await theDeepLinkHandleAppearsOnlyWhenTheFillTableExists()
   await theBoardReflectsThePullRatherThanTheAdminsArchive()
+  await tenancyIsProvedFromTheSheetNotTheBindingShape()
   await oneProjectsBoardCostsOneProjectsQueries()
   await theModuleRefusesToProjectAValueWithoutAScope()
   theFillViewIdMirrorsTheHostsDefaultViewId()

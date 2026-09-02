@@ -181,6 +181,11 @@ describe('multitable plugin scope helper', () => {
         // assertProjectIdAllowedForPlugin exactly like its sheet-id sibling — and therefore has to
         // be exercised on BOTH sides here, or dropping that guard stays green.
         getObjectViewId: vi.fn(() => 'view_1'),
+        // The sheet-ownership lookup. Answers with the OWNING project id, which plugin-scope then
+        // narrows to the caller's own namespace.
+        findSheetOwnerProjectId: vi.fn(async (sheetId: string) => (
+          sheetId === 'sheet_of_another_plugin' ? 'tenant_42:attendance' : 'tenant_42:after-sales'
+        )),
         getFieldId: vi.fn(() => 'fld_1'),
         isSheetOwnedByProject: vi.fn(async () => true),
         findObjectSheet: vi.fn(async () => ({
@@ -237,6 +242,7 @@ describe('multitable plugin scope helper', () => {
 
     expect(scoped.provisioning.getObjectSheetId('tenant_42:after-sales', 'serviceTicket')).toBe('sheet_1')
     expect(scoped.provisioning.getObjectViewId('tenant_42:after-sales', 'serviceTicket', 'default')).toBe('view_1')
+    await expect(scoped.provisioning.findSheetOwnerProjectId!('sheet_1')).resolves.toBe('tenant_42:after-sales')
     expect(scoped.provisioning.getFieldId('tenant_42:after-sales', 'serviceTicket', 'status')).toBe('fld_1')
     await expect(
       scoped.provisioning.isSheetOwnedByProject('sheet_1', 'tenant_42:after-sales'),
@@ -315,6 +321,13 @@ describe('multitable plugin scope helper', () => {
     expect(() =>
       scoped.provisioning.getObjectViewId('tenant_42:attendance', 'serviceTicket', 'default'),
     ).toThrow(MultitableProjectNamespaceError)
+    // The ownership lookup takes a SHEET id, so the namespace guard lands on the ANSWER: a sheet
+    // owned outside this plugin's namespace yields null and never the real project id. NULL rather
+    // than a throw on purpose - "somebody else's" and "no such sheet" must be one answer, or the
+    // port becomes an ownership oracle over sheet ids.
+    await expect(
+      scoped.provisioning.findSheetOwnerProjectId!('sheet_of_another_plugin'),
+    ).resolves.toBeNull()
     expect(() =>
       scoped.provisioning.getFieldId('tenant_42:attendance', 'serviceTicket', 'status'),
     ).toThrow(MultitableProjectNamespaceError)

@@ -440,6 +440,20 @@ export interface MultitableProvisioningAPI {
    * project board proves the SHEET exists via `findObjectSheet` before it composes a deep link).
    */
   getObjectViewId(projectId: string, objectId: string, viewId: string): string
+  /**
+   * WHICH PROJECT OWNS THIS SHEET, from the provisioning registry — `null` when the sheet is
+   * unclaimed, and `null` (never the real id) when it belongs outside the calling plugin's project
+   * namespace, so the port cannot be used to enumerate other owners.
+   *
+   * It exists because a sheet id ALONE cannot be checked for ownership by recomputing a hash: the
+   * hash is over (projectId, objectId), so a caller must already know the objectId the sheet was
+   * created under. A deployment that rebinds a table action to a different objectId while KEEPING
+   * its existing sheet still owns that sheet, and only a registry lookup says so.
+   *
+   * OPTIONAL: a plugin newer than its host degrades to "cannot prove ownership this way" rather
+   * than erroring.
+   */
+  findSheetOwnerProjectId?(sheetId: string): Promise<string | null>
   findObjectSheet(input: {
     projectId: string
     objectId: string
