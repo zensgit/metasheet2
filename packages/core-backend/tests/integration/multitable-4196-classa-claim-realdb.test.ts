@@ -56,6 +56,12 @@ const BASE_XB = `base_ca_xb_${TS}`
 const SHEET_XB = `sheet_ca_xb_${TS}`
 const FLD_TITLE = `fld_ca_title_${TS}`
 const TEST_RUN_ACTION_CONFIG = { sheetId: SHEET_TEST_RUN, data: { [FLD_TITLE]: 'real-fire' } }
+const TEST_RUN_SAMPLE_RECORD = `rec_ca_test_run_sample_${TS}`
+const TEST_RUN_SAMPLE = {
+  recordId: TEST_RUN_SAMPLE_RECORD,
+  data: { [FLD_TITLE]: 'real-fire sample' },
+  actorId: OWNER,
+}
 const testRunRoots = new Set<string>()
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
@@ -94,6 +100,12 @@ const recordsIn = async (sheetId: string): Promise<string[]> =>
   ((await q('SELECT id FROM meta_records WHERE sheet_id = $1 ORDER BY id', [sheetId])).rows as Array<{ id: string }>).map(
     (r) => r.id,
   )
+
+const testRunOutputRecords = async (): Promise<string[]> =>
+  ((await q(
+    'SELECT id FROM meta_records WHERE sheet_id = $1 AND id <> $2 ORDER BY id',
+    [SHEET_TEST_RUN, TEST_RUN_SAMPLE_RECORD],
+  )).rows as Array<{ id: string }>).map((row) => row.id)
 
 const recordRow = async (recordId: string): Promise<{ version: number; data: Record<string, unknown> } | undefined> =>
   (await q('SELECT version, data FROM meta_records WHERE id = $1', [recordId])).rows[0] as
@@ -177,6 +189,11 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
         [ruleId, SHEET_TEST_RUN, JSON.stringify(TEST_RUN_ACTION_CONFIG), OWNER],
       )
     }
+    await q(
+      `INSERT INTO meta_records (id, sheet_id, data, version, created_by)
+       VALUES ($1, $2, $3::jsonb, 1, $4)`,
+      [TEST_RUN_SAMPLE_RECORD, SHEET_TEST_RUN, JSON.stringify(TEST_RUN_SAMPLE.data), OWNER],
+    )
     await q(
       `INSERT INTO automation_rules
         (id, sheet_id, name, trigger_type, action_type, action_config, actions, enabled, created_by, execution_mode)
@@ -385,6 +402,25 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
     }
   })
 
+  test('V2a real_fire rejects missing and malformed direct sample records before execution', async () => {
+    await expect(svc.testRun(RULE_TEST_RUN, SHEET_TEST_RUN, {
+      mode: 'real_fire',
+      actorId: OWNER,
+      testRunOperationId: `missing_sample_${TS}`,
+      confirmSideEffects: true,
+    })).rejects.toMatchObject({ code: 'TEST_RUN_SAMPLE_RECORD_REQUIRED', status: 400 })
+
+    await expect(svc.testRun(RULE_TEST_RUN, SHEET_TEST_RUN, {
+      mode: 'real_fire',
+      actorId: OWNER,
+      testRunOperationId: `malformed_sample_${TS}`,
+      confirmSideEffects: true,
+      sampleRecord: { recordId: '', data: {}, actorId: OWNER } as never,
+    })).rejects.toMatchObject({ code: 'TEST_RUN_SAMPLE_RECORD_REQUIRED', status: 400 })
+
+    expect(await testRunOutputRecords()).toEqual([])
+  })
+
   test('V2b real_fire: same operation key dedups sequentially and concurrently; a new key reapplies', async () => {
     const run = (testRunOperationId: string) => {
       testRunRoot(RULE_TEST_RUN, testRunOperationId)
@@ -393,6 +429,7 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
         actorId: OWNER,
         testRunOperationId,
         confirmSideEffects: true,
+        sampleRecord: TEST_RUN_SAMPLE,
       })
     }
 
@@ -401,16 +438,16 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
     const duplicate = await run(sequentialKey)
     expect(first.steps[0]?.alreadyApplied).toBeUndefined()
     expect(duplicate.steps[0]?.alreadyApplied).toBe(true)
-    expect(await recordsIn(SHEET_TEST_RUN)).toHaveLength(1)
+    expect(await testRunOutputRecords()).toHaveLength(1)
 
     const concurrentKey = `concurrent_${TS}`
     const concurrent = await Promise.all([run(concurrentKey), run(concurrentKey)])
     expect(concurrent.filter((execution) => execution.steps[0]?.alreadyApplied === true)).toHaveLength(1)
     expect(concurrent.filter((execution) => execution.steps[0]?.alreadyApplied !== true)).toHaveLength(1)
-    expect(await recordsIn(SHEET_TEST_RUN)).toHaveLength(2)
+    expect(await testRunOutputRecords()).toHaveLength(2)
 
     await run(`fresh_${TS}`)
-    expect(await recordsIn(SHEET_TEST_RUN)).toHaveLength(3)
+    expect(await testRunOutputRecords()).toHaveLength(3)
 
     for (const operationId of [sequentialKey, concurrentKey, `fresh_${TS}`]) {
       const root = testRunRoot(RULE_TEST_RUN, operationId)
@@ -426,7 +463,7 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
   })
 
   test('V2c real_fire: rule scope and kind keep caller keys outside the execution namespace', async () => {
-    const countBefore = (await recordsIn(SHEET_TEST_RUN)).length
+    const countBefore = (await testRunOutputRecords()).length
     const sharedOperationId = `same_key_${TS}`
     testRunRoot(RULE_TEST_RUN, sharedOperationId)
     await svc.testRun(RULE_TEST_RUN, SHEET_TEST_RUN, {
@@ -434,6 +471,7 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
       actorId: OWNER,
       testRunOperationId: sharedOperationId,
       confirmSideEffects: true,
+      sampleRecord: TEST_RUN_SAMPLE,
     })
     testRunRoot(RULE_TEST_RUN_2, sharedOperationId)
     await svc.testRun(RULE_TEST_RUN_2, SHEET_TEST_RUN, {
@@ -441,8 +479,9 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
       actorId: OWNER,
       testRunOperationId: sharedOperationId,
       confirmSideEffects: true,
+      sampleRecord: TEST_RUN_SAMPLE,
     })
-    expect(await recordsIn(SHEET_TEST_RUN)).toHaveLength(countBefore + 2)
+    expect(await testRunOutputRecords()).toHaveLength(countBefore + 2)
 
     const firstRoot = testRunRoot(RULE_TEST_RUN, sharedOperationId)
     const secondRoot = testRunRoot(RULE_TEST_RUN_2, sharedOperationId)
@@ -472,8 +511,9 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
       actorId: OWNER,
       testRunOperationId: craftedExecutionRoot,
       confirmSideEffects: true,
+      sampleRecord: TEST_RUN_SAMPLE,
     })
-    expect(await recordsIn(SHEET_TEST_RUN)).toHaveLength(countBefore + 3)
+    expect(await testRunOutputRecords()).toHaveLength(countBefore + 3)
 
     const derivedRoot = testRunRoot(RULE_TEST_RUN, craftedExecutionRoot)
     const claims = await q(
@@ -511,7 +551,7 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
       actorId: OWNER,
       testRunOperationId: operationId,
       confirmSideEffects: true,
-      sampleRecord: { recordId: '', data: {} },
+      sampleRecord: TEST_RUN_SAMPLE,
     })
 
     const first = await run()
@@ -534,7 +574,7 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
       ['wait_for_callback', undefined],
       ['create_record', undefined],
     ])
-    const countAfterFirst = (await recordsIn(SHEET_TEST_RUN)).length
+    const countAfterFirst = (await testRunOutputRecords()).length
 
     const duplicate = await run()
     const duplicateSuspension = await q(
@@ -548,7 +588,7 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
       actionType: 'create_record',
       alreadyApplied: true,
     })
-    expect(await recordsIn(SHEET_TEST_RUN)).toHaveLength(countAfterFirst)
+    expect(await testRunOutputRecords()).toHaveLength(countAfterFirst)
     expect((await q(
       `SELECT kind, root_execution_id, action_type, count(*)::int AS count
          FROM meta_automation_action_applied
