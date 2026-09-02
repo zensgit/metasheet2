@@ -1067,6 +1067,18 @@ async function planCustomerPackInstall({ provisioning, projectId, pack, fieldPer
     // install is about to fix.
     writeScopeCheck,
     staleWriteScopes,
+    // THE RECTANGLE ITSELF, not just its consequences. A deployer reading `willRemoveWriteScopes`
+    // is being told which rows a DELETE will reach; the only way to check that claim without
+    // re-deriving the pack is to see the BOUND the delete is issued under. This is verbatim the
+    // `reconcile` argument installCustomerPack will pass to the port (physical ids, as the platform
+    // table stores them). NULL — never an empty rectangle — when the pack governs nothing, which is
+    // also exactly when the install requests no delete at all.
+    writeScopeRegion: writeScopePlan.region
+      ? {
+        fieldIds: [...writeScopePlan.region.fieldIds].sort(),
+        roleIds: [...writeScopePlan.region.roleIds].sort(),
+      }
+      : null,
     willRemoveWriteScopes: staleWriteScopes
       ? staleWriteScopes.filter((row) => row.inReconcileRegion)
       : null,
@@ -1084,6 +1096,10 @@ async function planCustomerPackInstall({ provisioning, projectId, pack, fieldPer
       optionSets: normalized.optionSets.length,
       roleViews: normalized.roleViews.length,
       fieldWriteDenials: writeScopePlan.rows.length,
+      // The rectangle's two dimensions, so "how wide is the delete allowed to be" is a number a
+      // deployer can read off the report without walking the id lists.
+      writeScopeRegionFields: writeScopePlan.region ? writeScopePlan.region.fieldIds.length : 0,
+      writeScopeRegionRoles: writeScopePlan.region ? writeScopePlan.region.roleIds.length : 0,
       staleWriteScopes: staleWriteScopes ? staleWriteScopes.length : 0,
       willRemoveWriteScopes: staleWriteScopes
         ? staleWriteScopes.filter((row) => row.inReconcileRegion).length
@@ -1197,9 +1213,12 @@ async function installCustomerPack({
     pack: normalized,
     plan: writeScopePlan,
   })
-  // THE STALE CENSUS — read AFTER the upsert on purpose: the port only ever adds rows that ARE in
-  // the derived plan, so the diff is identical either way, and reading last means the summary
-  // describes the sheet as it now stands rather than as it was mid-install.
+  // THE STALE CENSUS — read AFTER the write on purpose, and since the reconcile landed that
+  // ordering is LOAD-BEARING rather than merely tidier. The call above both upserts and (inside the
+  // pack's governed rectangle) deletes, so a census read BEFORE it would list orphans the install
+  // has since retired and hand a deployer a to-do list of work already done. Read last, this
+  // reports the sheet as it now stands: only the orphans OUTSIDE the rectangle, which are exactly
+  // the ones no install can clear.
   const writeScopeCensus = normalized.fieldWriteDenials.length === 0
     ? { check: 'not_declared', stale: null }
     : await detectStaleWriteScopes({

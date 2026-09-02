@@ -410,7 +410,12 @@ async function dryRunPerformsZeroWrites() {
     // no reconcile — nothing this install would retire and nothing left for an operator either.
     fieldWriteDenials: 0, staleWriteScopes: 0,
     willRemoveWriteScopes: 0, operatorMustClearWriteScopes: 0,
+    // No governed rectangle either — which is the same fact that makes the delete unrequestable.
+    writeScopeRegionFields: 0, writeScopeRegionRoles: 0,
   })
+  // NULL, not an empty rectangle: "this pack governs nothing" is a different statement from "this
+  // pack governs an empty region", and only the first one makes a delete structurally impossible.
+  assert.equal(plan.writeScopeRegion, null)
   // The derived hidden ids the role view would ship, in the pack's own logical vocabulary.
   assert.equal(plan.roleViews.length, 1)
   assert.equal(plan.roleViews[0].roleViewId, 'production')

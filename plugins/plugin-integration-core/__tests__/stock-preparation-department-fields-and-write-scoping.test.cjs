@@ -885,6 +885,28 @@ async function dryRunPreviewsTheDenialPlanAndTheStaleRows() {
   assert.equal(plan.counts.operatorMustClearWriteScopes, 0)
   assert.equal(plan.counts.staleWriteScopes, 1)
 
+  // AND THE BOUND ITSELF. `willRemoveWriteScopes` is a claim about which rows a DELETE will reach;
+  // `writeScopeRegion` is the rectangle that delete is issued under, so the claim is checkable
+  // without re-deriving the pack. It must be VERBATIM what the install passes the port.
+  assert.deepEqual(plan.writeScopeRegion, {
+    fieldIds: ['procurementReply', 'procurementDone', 'procurementReplyDate', 'actualArrivalDate', 'warehouseConfirmation', 'warehouseDone']
+      .map(physical).sort(),
+    roleIds: [ROLE_PURCHASING, ROLE_WAREHOUSE].sort(),
+  }, 'the dry-run names the governed rectangle, not just its consequences')
+  assert.equal(plan.counts.writeScopeRegionFields, 6)
+  assert.equal(plan.counts.writeScopeRegionRoles, 2)
+
+  // THE TIE. A dry-run that previewed a DIFFERENT rectangle from the one the install uses would be
+  // a rehearsal of something else, so the two are compared directly rather than trusted to match.
+  const installPort = createStatefulPort()
+  await installWith(installPort, V1_POLICIES, 1)
+  await installWith(installPort, V2_POLICIES, 2)
+  const sentRegion = installPort.applyCalls[installPort.applyCalls.length - 1].reconcile
+  assert.deepEqual({
+    fieldIds: [...sentRegion.fieldIds].sort(),
+    roleIds: [...sentRegion.roleIds].sort(),
+  }, plan.writeScopeRegion, 'the rehearsed rectangle IS the one the install sends the port')
+
   // THE DERIVED DENIAL PLAN itself - "what install will do" - visible before it happens.
   assert.equal(plan.counts.fieldWriteDenials, plan.fieldWriteDenials.length)
   const denied = (roleId) => plan.fieldWriteDenials

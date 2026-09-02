@@ -712,7 +712,7 @@ describe('findMissingRoleIds — the pre-flight question a caller asks BEFORE it
 })
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
-// 5. THE SCOPED RECONCILE — a pack revision that MOVES a column's owner
+// 6. THE SCOPED RECONCILE — a pack revision that MOVES a column's owner
 //
 // Upsert-only has one silent failure and this section is it. v1 says "采购 may not write 仓库备料
 // 日期"; v2 moves that column TO 仓库's counterpart. Without a reconcile v1's row survives beside
@@ -831,7 +831,7 @@ const pluginRow = (fieldId: string, roleId: string): TableRow => ({
 
 const keyOf = (row: { field_id: string; subject_id: string }) => `${row.field_id} ${row.subject_id}`
 
-describe('5. the scoped reconcile — a revision that moves a column between departments', () => {
+describe('6. the scoped reconcile — a revision that moves a column between departments', () => {
   // v1: 仓库 owns its 备料日期 column, so 采购 is denied it.
   const V1_ENTRIES = [
     { fieldId: F_WAREHOUSE_DATE, roleId: ROLE_PURCHASING },
@@ -976,5 +976,116 @@ describe('5. the scoped reconcile — a revision that moves a column between dep
     await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES, reconcile: REGION })
 
     expect(fake.rows.filter((row) => row.sheet_id === 'sheet_other')).toHaveLength(1)
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────────
+  // THE OUTCOME THE BUSINESS ACTUALLY BUYS. Everything above is about which ROWS survive; this is
+  // about who can WRITE the column afterwards, resolved through the REAL derivation chain rather
+  // than by reading the table. Without the reconcile the two denials coexist, the chain ORs
+  // `read_only` across a user's rows, and the moved column is refused to BOTH departments — the
+  // silent breakage this whole section exists to retire.
+  // ───────────────────────────────────────────────────────────────────────────────────────────────
+  const RECONCILE_USER_ROLES: Record<string, string[]> = {
+    user_caigou: [ROLE_PURCHASING],
+    user_cangku: [ROLE_WAREHOUSE],
+  }
+
+  /** Resolve the real permission chain for one principal over the table as it now stands. */
+  async function writabilityOver(rows: TableRow[], userId: string) {
+    const scopeMap: Map<string, FieldPermissionScope> = await loadFieldPermissionScopeMap(
+      fieldPermissionQueryFn(rows, RECONCILE_USER_ROLES),
+      SHEET,
+      userId,
+    )
+    return deriveFieldPermissions(FIELDS, CAPABILITIES, { fieldScopeMap: scopeMap })
+  }
+
+  it('after the move the column is writable by EXACTLY the new owner — real derivation chain', async () => {
+    const fake = createTablePool()
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    // v1: 仓库 owns the column (采购 is denied it).
+    await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V1_ENTRIES, reconcile: REGION })
+    const v1Purchasing = await writabilityOver(fake.rows, 'user_caigou')
+    const v1Warehouse = await writabilityOver(fake.rows, 'user_cangku')
+    expect(isFieldWriteForbidden(v1Purchasing[F_WAREHOUSE_DATE])).toBe(true)
+    expect(isFieldWriteForbidden(v1Warehouse[F_WAREHOUSE_DATE])).toBe(false)
+
+    // v2: the column changes hands — 采购 owns it now, 仓库 is denied it.
+    await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES, reconcile: REGION })
+    const purchasing = await writabilityOver(fake.rows, 'user_caigou')
+    const warehouse = await writabilityOver(fake.rows, 'user_cangku')
+
+    // THE HEADLINE, at the gate: exactly one department writes it, and it is the NEW owner.
+    expect(isFieldWriteForbidden(purchasing[F_WAREHOUSE_DATE]), '采购 now owns it and must write it').toBe(false)
+    expect(isFieldWriteForbidden(warehouse[F_WAREHOUSE_DATE]), '仓库 no longer owns it').toBe(true)
+    // READ is untouched for both, which is the property the whole port is built around.
+    expect(purchasing[F_WAREHOUSE_DATE].visible).not.toBe(false)
+    expect(warehouse[F_WAREHOUSE_DATE].visible).not.toBe(false)
+  })
+
+  it('CONTROL — the SAME move without a reconcile leaves the column unwritable by BOTH', async () => {
+    // The assertion above is not vacuous: this is byte-for-byte the same sequence with the region
+    // omitted, and it reproduces the exact breakage the reconcile exists to fix.
+    const fake = createTablePool()
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V1_ENTRIES })
+    await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V2_ENTRIES })
+
+    const purchasing = await writabilityOver(fake.rows, 'user_caigou')
+    const warehouse = await writabilityOver(fake.rows, 'user_cangku')
+    expect(isFieldWriteForbidden(purchasing[F_WAREHOUSE_DATE])).toBe(true)
+    expect(isFieldWriteForbidden(warehouse[F_WAREHOUSE_DATE])).toBe(true)
+    expect(fake.deletes).toHaveLength(0)
+  })
+
+  it('NO-RECONCILE REGRESSION PIN: the exact statements and result #5447 produced, plus `removed: []`', async () => {
+    // What an existing caller — every caller in the tree before this option existed — must still
+    // see. Transcribed from the pre-reconcile revision rather than derived from the current code,
+    // so an edit that changes the additive path has to change this literal to stay green.
+    const fake = createFakePool()
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    const result = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: V1_ENTRIES })
+
+    // (1) THE STATEMENTS. Whitespace-canonicalised (the upsert is a template literal, so its
+    //     indentation is a formatting choice); every token that reaches the database is compared.
+    //     A DELETE appearing here — or a fourth kind of read — reds this.
+    const canonical = fake.calls.map((call) => call.sql.replace(/\s+/g, ' ').trim())
+    expect(canonical).toEqual([
+      'SELECT id FROM meta_sheets WHERE id = $1 FOR UPDATE',
+      'SELECT id FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])',
+      'SELECT id FROM roles WHERE id = ANY($1::text[])',
+      "INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)"
+        + " VALUES ($1, $2, 'role', $3, true, true, $4)"
+        + ' ON CONFLICT (sheet_id, field_id, subject_type, subject_id)'
+        + ' DO UPDATE SET visible = true, read_only = true, created_by = EXCLUDED.created_by',
+      "INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)"
+        + " VALUES ($1, $2, 'role', $3, true, true, $4)"
+        + ' ON CONFLICT (sheet_id, field_id, subject_type, subject_id)'
+        + ' DO UPDATE SET visible = true, read_only = true, created_by = EXCLUDED.created_by',
+    ])
+    // (2) THE BOUND PARAMETERS, in order.
+    expect(fake.calls.map((call) => call.params)).toEqual([
+      [SHEET],
+      [SHEET, [F_WAREHOUSE_DATE, F_PURCHASE_REPLY]],
+      [[ROLE_PURCHASING, ROLE_WAREHOUSE]],
+      [SHEET, F_WAREHOUSE_DATE, ROLE_PURCHASING, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY],
+      [SHEET, F_PURCHASE_REPLY, ROLE_WAREHOUSE, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY],
+    ])
+    expect(fake.transactions).toBe(1)
+
+    // (3) THE RESULT. `applied` and `entries` are unchanged, and `removed` is the ONLY new key —
+    //     empty, because absent a region there is nothing to reconcile and no DELETE was issued.
+    expect(Object.keys(result).sort()).toEqual(['applied', 'entries', 'removed'])
+    expect({ applied: result.applied, entries: result.entries }).toEqual({
+      applied: 2,
+      entries: [
+        { fieldId: F_WAREHOUSE_DATE, roleId: ROLE_PURCHASING },
+        { fieldId: F_PURCHASE_REPLY, roleId: ROLE_WAREHOUSE },
+      ],
+    })
+    expect(result.removed).toEqual([])
   })
 })
