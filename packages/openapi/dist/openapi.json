@@ -11462,6 +11462,111 @@
           },
           "duplicate": {
             "type": "boolean"
+          },
+          "challenge": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ElearningWatchChallenge"
+              }
+            ],
+            "nullable": true
+          }
+        }
+      },
+      "ElearningWatchChallenge": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "challengeId",
+          "deadlineAt",
+          "ordinal",
+          "status",
+          "promptVersion",
+          "targets",
+          "options"
+        ],
+        "properties": {
+          "challengeId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "deadlineAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "ordinal": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "challenged",
+              "paused"
+            ]
+          },
+          "promptVersion": {
+            "type": "string",
+            "enum": [
+              "symbol-number-v1"
+            ]
+          },
+          "targets": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "options": {
+            "type": "array",
+            "minItems": 6,
+            "maxItems": 6,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/ElearningWatchChallengeOption"
+            }
+          }
+        }
+      },
+      "ElearningWatchChallengeOption": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "optionId",
+          "label"
+        ],
+        "properties": {
+          "optionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "ElearningWatchChallengeAckRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "requestId",
+          "selections"
+        ],
+        "properties": {
+          "requestId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "selections": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
           }
         }
       },
@@ -29981,6 +30086,86 @@
           },
           "409": {
             "description": "course_withdrawn, conflict, sequence_gap, or session_inactive",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/watch/sessions/{sessionId}/challenges/{challengeId}/ack": {
+      "post": {
+        "operationId": "acknowledgeElearningWatchChallenge",
+        "summary": "Confirm an active or timed-out watch challenge",
+        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires the master, content, media,\nand watch-challenge flags to equal the exact literal `true`. The server derives organization and actor.\nThe server issues an immutable six-option prompt and two ordered target labels. The client submits exactly\ntwo distinct opaque option identifiers. An on-time correct acknowledgement commits only the provisional eligible watch interval; a late acknowledgement\ndiscards that interval and resumes the existing watch session. Same requestId and logical payload replay\nthe stored result; a different payload with the same requestId returns a values-free conflict.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sessionId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          },
+          {
+            "in": "path",
+            "name": "challengeId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningWatchChallengeAckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated server-derived watch state; challenge is null after acknowledgement.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningWatchState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input or unsupported policy",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "not_found or watch-challenge flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "challenge_incorrect, challenge_mismatch, challenge_stale, conflict, course_withdrawn, or session_inactive",
             "$ref": "#/components/responses/ElearningError"
           },
           "500": {

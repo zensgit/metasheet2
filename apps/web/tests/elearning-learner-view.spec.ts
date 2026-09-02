@@ -8,6 +8,7 @@ const h = vi.hoisted(() => ({
   startWatch: vi.fn(),
   ticket: vi.fn(),
   heartbeat: vi.fn(),
+  acknowledgeChallenge: vi.fn(),
   startExam: vi.fn(),
   saveExam: vi.fn(),
   submitExam: vi.fn(),
@@ -29,6 +30,7 @@ vi.mock('../src/services/elearning', async () => {
     startElearningWatch: h.startWatch,
     issueElearningPlaybackTicket: h.ticket,
     sendElearningHeartbeat: h.heartbeat,
+    acknowledgeElearningWatchChallenge: h.acknowledgeChallenge,
     startElearningExam: h.startExam,
     saveElearningExamAnswers: h.saveExam,
     submitElearningExam: h.submitExam,
@@ -97,6 +99,20 @@ const TICKET_RENEWAL_LEAD_MS = 30_000
 const TICKET_RENEWAL_MIN_DELAY_MS = 5_000
 const SESSION = '77777777-7777-4777-8777-777777777777'
 const SESSION_B = '99999999-9999-4999-8999-999999999999'
+const CHALLENGE = 'abababab-abab-4bab-8bab-abababababab'
+const CHALLENGE_B = 'acacacac-acac-4cac-8cac-acacacacacac'
+const CHALLENGE_OPTIONS = [
+  { optionId: '10101010-1010-4010-8010-101010101010', label: '●1' },
+  { optionId: '20202020-2020-4020-8020-202020202020', label: '▲2' },
+  { optionId: '30303030-3030-4030-8030-303030303030', label: '■3' },
+  { optionId: '40404040-4040-4040-8040-404040404040', label: '◆4' },
+  { optionId: '50505050-5050-4050-8050-505050505050', label: '★5' },
+  { optionId: '60606060-6060-4060-8060-606060606060', label: '♥6' },
+] as const
+const CHALLENGE_SELECTIONS = [
+  CHALLENGE_OPTIONS[1].optionId,
+  CHALLENGE_OPTIONS[4].optionId,
+] as const
 const ATTEMPT = '88888888-8888-4888-8888-888888888888'
 const ATTEMPT_B = '86868686-8686-4868-8868-868686868686'
 const Q1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
@@ -279,6 +295,32 @@ function watchState(over: Record<string, unknown> = {}) {
   }
 }
 
+function watchChallenge(
+  challengeId = CHALLENGE,
+  over: Record<string, unknown> = {},
+) {
+  return {
+    challengeId,
+    deadlineAt: new Date(Date.now() + 120_000).toISOString(),
+    ordinal: challengeId === CHALLENGE ? 1 : 2,
+    status: 'challenged',
+    promptVersion: 'symbol-number-v1',
+    targets: [CHALLENGE_OPTIONS[1].label, CHALLENGE_OPTIONS[4].label],
+    options: CHALLENGE_OPTIONS,
+    ...over,
+  }
+}
+
+async function selectWatchChallenge(
+  root: HTMLElement,
+  selections: readonly string[] = CHALLENGE_SELECTIONS,
+): Promise<void> {
+  for (const optionId of selections) {
+    ;(root.querySelector(`[data-option-id="${optionId}"]`) as HTMLButtonElement).click()
+    await flushUi()
+  }
+}
+
 function examStartResult(over: Record<string, unknown> = {}) {
   return {
     attemptId: ATTEMPT,
@@ -341,6 +383,7 @@ describe('ElearningLearnerView', () => {
     h.startWatch.mockReset()
     h.ticket.mockReset()
     h.heartbeat.mockReset()
+    h.acknowledgeChallenge.mockReset()
     h.startExam.mockReset()
     h.saveExam.mockReset()
     h.submitExam.mockReset()
@@ -370,6 +413,7 @@ describe('ElearningLearnerView', () => {
       lastClientPositionMs: body.positionMs,
       status: 'in_progress',
     }))
+    h.acknowledgeChallenge.mockResolvedValue(watchState({ challenge: null }))
     h.startExam.mockResolvedValue(examStartResult())
     h.saveExam.mockImplementation(async (_attemptId: string, answers: Record<string, string[]>) => (
       examStartResult({ answers })
@@ -623,6 +667,173 @@ describe('ElearningLearnerView', () => {
     expect(last.positionMs).toBe(5000)
     const sequences = h.heartbeat.mock.calls.map((call) => (call[1] as { sequence: number }).sequence)
     expect(sequences).toEqual([2, 3, 4])
+  })
+
+  it('pauses for a challenge and reuses the ack request id only until success', async () => {
+    const deadlineAt = new Date(Date.now() + 120_000).toISOString()
+    h.heartbeat.mockResolvedValueOnce(watchState({
+      lastSequence: 2,
+      challenge: watchChallenge(CHALLENGE, { deadlineAt }),
+    }))
+    h.acknowledgeChallenge
+      .mockRejectedValueOnce(new ElearningApiError('request_failed', 0))
+      .mockRejectedValueOnce(new ElearningApiError('request_failed', 0))
+      .mockResolvedValueOnce(watchState({ challenge: null }))
+      .mockResolvedValueOnce(watchState({ challenge: null }))
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement).click()
+    await flushUi()
+    const video = root.querySelector('[data-testid="elearning-learner-video"]') as HTMLVideoElement
+    Object.defineProperty(video, 'paused', { configurable: true, writable: true, value: false })
+    const pause = vi.spyOn(video, 'pause').mockImplementation(() => {
+      video.paused = true
+      video.dispatchEvent(new Event('pause'))
+    })
+    const play = vi.spyOn(video, 'play').mockImplementation(async () => {
+      video.paused = false
+      video.dispatchEvent(new Event('play'))
+    })
+    video.dispatchEvent(new Event('play'))
+    await flushUi()
+    expect(pause).toHaveBeenCalledTimes(1)
+    expect(root.querySelector('[data-testid="elearning-watch-challenge"]')).toBeTruthy()
+    expect(root.querySelector('[data-testid="elearning-watch-challenge-countdown"]')?.textContent).toContain('秒')
+    expect(root.querySelectorAll('[data-option-id]')).toHaveLength(6)
+    expect([...root.querySelectorAll<HTMLElement>('[data-option-id]')].map((option) => option.dataset.optionId))
+      .toEqual(CHALLENGE_OPTIONS.map((option) => option.optionId))
+    expect((root.querySelector('[data-testid="elearning-watch-challenge-confirm"]') as HTMLButtonElement).disabled)
+      .toBe(true)
+
+    await selectWatchChallenge(root)
+    const confirm = root.querySelector('[data-testid="elearning-watch-challenge-confirm"]') as HTMLButtonElement
+    expect(confirm.disabled).toBe(false)
+    confirm.click()
+    await flushUi()
+    const firstRequestId = h.acknowledgeChallenge.mock.calls[0]?.[2]
+    expect(firstRequestId).toMatch(/^[0-9a-f-]{36}$/)
+    expect(h.acknowledgeChallenge.mock.calls[0]?.[3]).toEqual(CHALLENGE_SELECTIONS)
+    expect(play).not.toHaveBeenCalled()
+    expect(root.querySelector('[data-testid="elearning-watch-challenge"]')).toBeTruthy()
+    ;(root.querySelector('[data-testid="elearning-watch-challenge-confirm"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.acknowledgeChallenge.mock.calls[1]?.[2]).toBe(firstRequestId)
+    expect(root.querySelector('[data-testid="elearning-watch-challenge"]')).toBeTruthy()
+
+    ;(root.querySelector('[data-testid="elearning-watch-challenge-reset"]') as HTMLButtonElement).click()
+    await flushUi()
+    await selectWatchChallenge(root, [...CHALLENGE_SELECTIONS].reverse())
+    ;(root.querySelector('[data-testid="elearning-watch-challenge-confirm"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.acknowledgeChallenge.mock.calls[2]?.[2]).not.toBe(firstRequestId)
+    expect(h.acknowledgeChallenge.mock.calls[2]?.[3]).toEqual([...CHALLENGE_SELECTIONS].reverse())
+    expect(root.querySelector('[data-testid="elearning-watch-challenge"]')).toBeNull()
+    expect(play).toHaveBeenCalledTimes(1)
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')?.textContent)
+      .toContain('视频已继续播放')
+
+    h.heartbeat.mockResolvedValueOnce(watchState({
+      lastSequence: 3,
+      challenge: watchChallenge(CHALLENGE_B, { deadlineAt }),
+    }))
+    video.paused = false
+    video.dispatchEvent(new Event('play'))
+    await flushUi()
+    await selectWatchChallenge(root)
+    ;(root.querySelector('[data-testid="elearning-watch-challenge-confirm"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.acknowledgeChallenge.mock.calls[3]?.[2]).not.toBe(firstRequestId)
+  })
+
+  it('keeps watch credit paused when challenge playback resume is rejected', async () => {
+    h.heartbeat.mockResolvedValueOnce(watchState({
+      lastSequence: 2,
+      challenge: watchChallenge(),
+    }))
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement).click()
+    await flushUi()
+    const video = root.querySelector('[data-testid="elearning-learner-video"]') as HTMLVideoElement
+    Object.defineProperty(video, 'paused', { configurable: true, writable: true, value: false })
+    vi.spyOn(video, 'pause').mockImplementation(() => {
+      video.paused = true
+      video.dispatchEvent(new Event('pause'))
+    })
+    const play = vi.spyOn(video, 'play').mockRejectedValue(new Error('play rejected'))
+
+    video.dispatchEvent(new Event('play'))
+    await flushUi()
+    await selectWatchChallenge(root)
+    ;(root.querySelector('[data-testid="elearning-watch-challenge-confirm"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(play).toHaveBeenCalledTimes(1)
+    expect(h.heartbeat).toHaveBeenCalledTimes(1)
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')?.textContent)
+      .toContain('请手动继续播放')
+  })
+
+  it('discards a stale challenge playback resume after the watch session is replaced', async () => {
+    h.startWatch
+      .mockResolvedValueOnce(watchState())
+      .mockResolvedValueOnce(watchState({ sessionId: SESSION_B }))
+    h.heartbeat.mockResolvedValueOnce(watchState({
+      lastSequence: 2,
+      challenge: watchChallenge(),
+    }))
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement).click()
+    await flushUi()
+    const video = root.querySelector('[data-testid="elearning-learner-video"]') as HTMLVideoElement
+    let settlePlay: (() => void) | null = null
+    const pendingPlay = new Promise<void>((resolve) => {
+      settlePlay = () => {
+        video.paused = false
+        video.dispatchEvent(new Event('play'))
+        resolve()
+      }
+    })
+    Object.defineProperty(video, 'paused', { configurable: true, writable: true, value: false })
+    vi.spyOn(video, 'pause').mockImplementation(() => {
+      video.paused = true
+      video.dispatchEvent(new Event('pause'))
+    })
+    const play = vi.spyOn(video, 'play').mockImplementation(() => pendingPlay)
+
+    video.dispatchEvent(new Event('play'))
+    await flushUi()
+    await selectWatchChallenge(root)
+    ;(root.querySelector('[data-testid="elearning-watch-challenge-confirm"]') as HTMLButtonElement).click()
+    await flushUntil(() => play.mock.calls.length === 1)
+
+    ;(root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement).click()
+    await flushUntil(() => h.startWatch.mock.calls.length === 2)
+    settlePlay?.()
+    await flushUi()
+
+    expect(h.heartbeat).toHaveBeenCalledTimes(1)
+    expect(h.heartbeat.mock.calls[0]?.[0]).toBe(SESSION)
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')?.textContent ?? '')
+      .not.toContain('视频已继续播放')
+  })
+
+  it('shows a locally expired challenged prompt as timed out and resumable', async () => {
+    h.startWatch.mockResolvedValue(watchState({
+      challenge: watchChallenge(CHALLENGE, {
+        deadlineAt: new Date(Date.now() - 1000).toISOString(),
+      }),
+    }))
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-watch-challenge-message"]')?.textContent)
+      .toContain('未验证的观看时长不会计入')
+    expect(root.querySelector('[data-testid="elearning-watch-challenge-countdown"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-watch-challenge-confirm"]')?.textContent)
+      .toContain('确认并继续')
   })
 
   it('does not enable exam from client ended; enables only after server list says video completed', async () => {

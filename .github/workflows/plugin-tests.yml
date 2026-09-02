@@ -982,6 +982,11 @@ jobs:
             tests/unit/elearning-training-plan-assignment.test.ts \
             tests/unit/elearning-training-plan-revocation.test.ts \
             tests/unit/elearning-v01-content-assessment-migration-contract.test.ts \
+            tests/unit/elearning-watch-challenge-migration-contract.test.ts \
+            tests/unit/elearning-watch-challenge-policy.test.ts \
+            tests/unit/elearning-watch-challenge-postgres.test.ts \
+            tests/unit/elearning-watch-challenge-routes.test.ts \
+            tests/unit/elearning-watch-challenge-schedule.test.ts \
             tests/unit/elearning-watch-progress.test.ts \
             --reporter=dot
           pnpm --dir packages/openapi/dist-sdk exec vitest run \
@@ -1059,6 +1064,7 @@ jobs:
             tests/integration/elearning-exam-attempt-item-migration.db.test.ts \
             tests/integration/elearning-v01-watch-progress-schema.db.test.ts \
             tests/integration/elearning-watch-progress-service.db.test.ts \
+            tests/integration/elearning-watch-challenge.db.test.ts \
             tests/integration/elearning-direct-assignment.db.test.ts \
             tests/integration/elearning-course-publish.db.test.ts \
             tests/integration/elearning-content-runtime.db.test.ts \

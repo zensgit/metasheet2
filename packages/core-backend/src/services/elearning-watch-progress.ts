@@ -9,6 +9,15 @@ import {
   resolveElearningCourseAccess,
   type ElearningCourseAccessBasis,
 } from './elearning-course-access.js'
+import {
+  ElearningWatchChallengePostgresError,
+  acknowledgeElearningWatchChallengeState,
+  applyElearningWatchChallengeHeartbeat,
+  completeElearningWatchChallengeSchedule,
+  getElearningWatchChallengeView,
+  initializeElearningWatchChallenge,
+  type ElearningWatchChallengeView,
+} from './elearning-watch-challenge-postgres.js'
 
 export const ELEARNING_WATCH_POLICY_VERSION = 'video-v1-90pct' as const
 export const ELEARNING_WATCH_THRESHOLD_BPS = 9000 as const
@@ -30,6 +39,9 @@ export type ElearningWatchErrorCode =
   | 'conflict'
   | 'sequence_gap'
   | 'session_inactive'
+  | 'challenge_mismatch'
+  | 'challenge_incorrect'
+  | 'challenge_stale'
   | 'unavailable'
 
 export class ElearningWatchError extends Error {
@@ -54,6 +66,7 @@ export interface StartElearningWatchInput {
   orgId: string
   userId: string
   itemId: string
+  challengeEnabled?: true
 }
 
 export interface RecordElearningHeartbeatInput {
@@ -63,6 +76,16 @@ export interface RecordElearningHeartbeatInput {
   sequence: number
   positionMs: number
   playing: boolean
+  challengeEnabled?: true
+}
+
+export interface AcknowledgeElearningWatchChallengeInput {
+  sessionId: string
+  orgId: string
+  userId: string
+  challengeId: string
+  requestId: string
+  selections: readonly [string, string]
 }
 
 export interface ElearningWatchState {
@@ -75,6 +98,7 @@ export interface ElearningWatchState {
   durationMs: number
   creditedMs: number
   duplicate: boolean
+  challenge?: ElearningWatchChallengeView | null
 }
 
 export function elearningWatchLockKey(orgId: string, userId: string, itemId: string): string {
@@ -146,6 +170,15 @@ function fail(code: ElearningWatchErrorCode): never {
   throw new ElearningWatchError(code)
 }
 
+function rethrowChallenge(error: unknown): never {
+  if (!(error instanceof ElearningWatchChallengePostgresError)) throw error
+  if (error.code === 'challenge_mismatch') fail('challenge_mismatch')
+  if (error.code === 'challenge_incorrect') fail('challenge_incorrect')
+  if (error.code === 'challenge_stale') fail('challenge_stale')
+  if (error.code === 'conflict') fail('conflict')
+  fail('unavailable')
+}
+
 function requireActor(value: unknown): string {
   if (typeof value !== 'string') fail('invalid_input')
   const trimmed = value.trim()
@@ -156,6 +189,14 @@ function requireActor(value: unknown): string {
 function requireUuid(value: unknown): string {
   if (typeof value !== 'string' || !UUID_RE.test(value)) fail('invalid_input')
   return value
+}
+
+function requireChallengeSelections(value: unknown): [string, string] {
+  if (!Array.isArray(value) || value.length !== 2) fail('invalid_input')
+  const first = requireUuid(value[0])
+  const second = requireUuid(value[1])
+  if (first === second) fail('invalid_input')
+  return [first, second]
 }
 
 function requireSafeInt(value: unknown, min: number): number {
@@ -448,8 +489,9 @@ function stateFrom(
   durationMs: number,
   creditedMs: number,
   duplicate: boolean,
+  challenge?: ElearningWatchChallengeView | null,
 ): ElearningWatchState {
-  return {
+  const state: ElearningWatchState = {
     sessionId,
     status,
     lastSequence,
@@ -460,6 +502,28 @@ function stateFrom(
     creditedMs,
     duplicate,
   }
+  if (challenge !== undefined) state.challenge = challenge
+  return state
+}
+
+async function initializeChallengeForState(
+  tx: ElearningWatchQueryable,
+  enabled: boolean,
+  input: {
+    orgId: string
+    userId: string
+    sessionId: string
+    versionId: string
+    itemId: string
+    durationMs: number
+  },
+): Promise<ElearningWatchChallengeView | null | undefined> {
+  if (!enabled) return undefined
+  try {
+    return await initializeElearningWatchChallenge(tx, input)
+  } catch (error) {
+    rethrowChallenge(error)
+  }
 }
 
 export async function startElearningWatch(
@@ -469,6 +533,7 @@ export async function startElearningWatch(
   const orgId = requireActor(input.orgId)
   const userId = requireActor(input.userId)
   const itemId = requireUuid(input.itemId)
+  const challengeEnabled = input.challengeEnabled === true
 
   return db.transaction(async (tx) => {
     await advisoryLock(tx, orgId, userId, itemId)
@@ -488,6 +553,7 @@ export async function startElearningWatch(
         item.durationMs,
         0,
         false,
+        challengeEnabled ? null : undefined,
       )
     }
 
@@ -501,6 +567,14 @@ export async function startElearningWatch(
         sessionId: existing.id,
         access,
       })
+      const challenge = await initializeChallengeForState(tx, challengeEnabled, {
+        orgId,
+        userId,
+        sessionId: existing.id,
+        versionId: item.versionId,
+        itemId: item.itemId,
+        durationMs: item.durationMs,
+      })
       return stateFrom(
         existing.id,
         'in_progress',
@@ -511,6 +585,7 @@ export async function startElearningWatch(
         item.durationMs,
         0,
         false,
+        challenge,
       )
     }
 
@@ -545,7 +620,26 @@ export async function startElearningWatch(
       )
     }
 
-    return stateFrom(sessionId, 'in_progress', 0, 0, 0, 0, item.durationMs, 0, false)
+    const challenge = await initializeChallengeForState(tx, challengeEnabled, {
+      orgId,
+      userId,
+      sessionId,
+      versionId: item.versionId,
+      itemId: item.itemId,
+      durationMs: item.durationMs,
+    })
+    return stateFrom(
+      sessionId,
+      'in_progress',
+      0,
+      0,
+      0,
+      0,
+      item.durationMs,
+      0,
+      false,
+      challenge,
+    )
   })
 }
 
@@ -766,6 +860,7 @@ export async function recordElearningHeartbeat(
   const sequence = requireSafeInt(input.sequence, 1)
   const positionMs = requireSafeInt(input.positionMs, 0)
   const playing = requireBoolean(input.playing)
+  const challengeEnabled = input.challengeEnabled === true
 
   return db.transaction(async (tx) => {
     const itemId = await peekSessionItem(tx, orgId, sessionId, userId)
@@ -793,6 +888,14 @@ export async function recordElearningHeartbeat(
       if (prior.reportedPositionMs !== clamped || prior.playing !== playing) {
         fail('conflict')
       }
+      let challenge: ElearningWatchChallengeView | null | undefined
+      if (challengeEnabled) {
+        try {
+          challenge = await getElearningWatchChallengeView(tx, { orgId, userId, sessionId })
+        } catch (error) {
+          rethrowChallenge(error)
+        }
+      }
       return stateFrom(
         session.id,
         progress.status,
@@ -803,6 +906,7 @@ export async function recordElearningHeartbeat(
         durationMs,
         0,
         true,
+        challenge,
       )
     }
 
@@ -819,17 +923,39 @@ export async function recordElearningHeartbeat(
       priorLastClientPositionMs: session.lastClientPositionMs,
       elapsedMs: session.elapsedMs,
     })
-    const nextEffective = session.effectiveMs + credit.creditedMs
+    let challengeResult = {
+      challenge: undefined as ElearningWatchChallengeView | null | undefined,
+      completionReady: true,
+      creditedMs: credit.creditedMs,
+      discardedMs: 0,
+      maxPositionMs: credit.maxPositionMs,
+    }
+    if (challengeEnabled) {
+      try {
+        challengeResult = await applyElearningWatchChallengeHeartbeat(tx, {
+          orgId,
+          userId,
+          sessionId,
+          rawCreditedMs: credit.creditedMs,
+          rawMaxPositionMs: credit.maxPositionMs,
+          nextEffectiveMs: session.effectiveMs + credit.creditedMs,
+        })
+      } catch (error) {
+        rethrowChallenge(error)
+      }
+    }
+    const nextEffective = session.effectiveMs + challengeResult.creditedMs
     const parts = {
       sequence,
       kind: 'heartbeat' as const,
       reportedPositionMs: credit.clampedPositionMs,
       playing,
-      creditedMs: credit.creditedMs,
+      creditedMs: challengeResult.creditedMs,
     }
     const digest = rollElearningWatchEventDigest(session.rollingEventDigest, parts)
     const completed =
       nextEffective >= elearningWatchCompletionThresholdMs(durationMs, ELEARNING_WATCH_THRESHOLD_BPS)
+      && (!challengeEnabled || challengeResult.completionReady)
 
     await tx.query(
       `/* elearning-watch:insert-event */
@@ -846,7 +972,7 @@ export async function recordElearningHeartbeat(
         sequence,
         credit.clampedPositionMs,
         playing,
-        credit.creditedMs,
+        challengeResult.creditedMs,
         digest,
       ],
     )
@@ -864,7 +990,7 @@ export async function recordElearningHeartbeat(
         sequence,
         credit.clampedPositionMs,
         nextEffective,
-        credit.maxPositionMs,
+        challengeResult.maxPositionMs,
         digest,
         orgId,
         session.id,
@@ -879,7 +1005,7 @@ export async function recordElearningHeartbeat(
           AND user_id = $4
           AND course_version_item_id = $5
           AND status = 'in_progress'`,
-      [nextEffective, credit.maxPositionMs, orgId, userId, session.itemId],
+      [nextEffective, challengeResult.maxPositionMs, orgId, userId, session.itemId],
     )
 
     if (completed) {
@@ -905,7 +1031,7 @@ export async function recordElearningHeartbeat(
           ELEARNING_WATCH_THRESHOLD_BPS,
           durationMs,
           nextEffective,
-          credit.maxPositionMs,
+          challengeResult.maxPositionMs,
           digest,
           ELEARNING_WATCH_EVALUATOR_VERSION,
         ],
@@ -930,6 +1056,13 @@ export async function recordElearningHeartbeat(
           WHERE org_id = $1 AND id = $2 AND status = 'active'`,
         [orgId, session.id],
       )
+      if (challengeEnabled) {
+        try {
+          await completeElearningWatchChallengeSchedule(tx, orgId, session.id)
+        } catch (error) {
+          rethrowChallenge(error)
+        }
+      }
     }
 
     return stateFrom(
@@ -938,10 +1071,170 @@ export async function recordElearningHeartbeat(
       sequence,
       credit.clampedPositionMs,
       nextEffective,
-      credit.maxPositionMs,
+      challengeResult.maxPositionMs,
       durationMs,
-      credit.creditedMs,
+      challengeResult.creditedMs,
       false,
+      challengeResult.challenge,
     )
+  })
+}
+
+function parseStoredChallengeAckState(input: object): ElearningWatchState {
+  const row = input as Record<string, unknown>
+  const keys = Object.keys(row).sort()
+  const expected = [
+    'challenge', 'creditedMs', 'duplicate', 'durationMs', 'effectiveMs',
+    'lastClientPositionMs', 'lastSequence', 'maxPositionMs', 'sessionId', 'status',
+  ].sort()
+  if (
+    keys.length !== expected.length
+    || keys.some((key, index) => key !== expected[index])
+    || row.challenge !== null
+    || row.duplicate !== false
+    || asText(row.sessionId) === null
+    || (row.status !== 'in_progress' && row.status !== 'completed')
+  ) fail('unavailable')
+  for (const key of [
+    'creditedMs', 'durationMs', 'effectiveMs', 'lastClientPositionMs',
+    'lastSequence', 'maxPositionMs',
+  ]) {
+    if (asSafeInt(row[key]) === null) fail('unavailable')
+  }
+  return row as unknown as ElearningWatchState
+}
+
+export async function acknowledgeElearningWatchChallenge(
+  db: ElearningWatchDb,
+  input: AcknowledgeElearningWatchChallengeInput,
+): Promise<ElearningWatchState> {
+  const orgId = requireActor(input.orgId)
+  const userId = requireActor(input.userId)
+  const sessionId = requireUuid(input.sessionId)
+  const challengeId = requireUuid(input.challengeId)
+  const requestId = requireUuid(input.requestId)
+  const selections = requireChallengeSelections(input.selections)
+
+  return db.transaction(async (tx) => {
+    const itemId = await peekSessionItem(tx, orgId, sessionId, userId)
+    await advisoryLock(tx, orgId, userId, itemId)
+    await lockCourseHead(tx, orgId, itemId)
+    const { session, durationMs } = await lockHeartbeatSession(tx, orgId, sessionId, userId)
+    const access = await resolveWatchAccess(tx, orgId, userId, session.versionId)
+    const progress = await lockProgress(tx, orgId, userId, session.itemId)
+    if (!progress) fail('unavailable')
+    if (session.status === 'active' && progress.status === 'in_progress') {
+      await rebindInProgressAccess(tx, {
+        orgId,
+        userId,
+        itemId: session.itemId,
+        sessionId: session.id,
+        access,
+      })
+    }
+
+    let acknowledged: { duplicate: boolean; result: ElearningWatchState }
+    try {
+      acknowledged = await acknowledgeElearningWatchChallengeState(tx, {
+        orgId,
+        userId,
+        requestId,
+        sessionId,
+        challengeId,
+        selections,
+      }, async (transition) => {
+        if (session.status !== 'active' || progress.status !== 'in_progress') {
+          fail('session_inactive')
+        }
+        const nextEffective = session.effectiveMs + transition.creditedMs
+        if (!Number.isSafeInteger(nextEffective)) fail('unavailable')
+        const digest = createHash('sha256').update([
+          'elearning.watch.challenge.ack.digest.v1',
+          session.rollingEventDigest,
+          challengeId,
+          selections[0],
+          selections[1],
+          String(transition.creditedMs),
+          String(transition.discardedMs),
+        ].join('\n'), 'utf8').digest('hex')
+        const completed = transition.completionReady
+          && nextEffective >= elearningWatchCompletionThresholdMs(
+            durationMs,
+            ELEARNING_WATCH_THRESHOLD_BPS,
+          )
+        const sessionUpdate = await tx.query(
+          `/* elearning-watch-challenge:update-session */
+           UPDATE elearning_learning_sessions
+              SET effective_ms = $1, max_position_ms = $2,
+                  rolling_event_digest = $3, last_event_at = clock_timestamp()
+            WHERE org_id = $4 AND id = $5 AND status = 'active'`,
+          [nextEffective, transition.maxPositionMs, digest, orgId, session.id],
+        )
+        if (sessionUpdate.rowCount !== 1) fail('unavailable')
+        const progressUpdate = await tx.query(
+          `/* elearning-watch-challenge:update-progress */
+           UPDATE elearning_progress
+              SET effective_ms = $1, max_position_ms = $2
+            WHERE org_id = $3 AND user_id = $4
+              AND course_version_item_id = $5 AND status = 'in_progress'`,
+          [nextEffective, transition.maxPositionMs, orgId, userId, session.itemId],
+        )
+        if (progressUpdate.rowCount !== 1) fail('unavailable')
+
+        if (completed) {
+          await tx.query(
+            `/* elearning-watch-challenge:insert-evidence */
+             INSERT INTO elearning_completion_evidence (
+               org_id, assignment_member_id, scope_revision_rule_id, course_version_id,
+               course_version_item_id, user_id, item_type, completion_policy_version,
+               completion_threshold_bps, media_duration_ms, effective_ms, max_position_ms,
+               event_digest, evaluator_version, completed_at
+             ) VALUES (
+               $1, $2, $3, $4, $5, $6, 'video', $7, $8, $9, $10, $11, $12, $13,
+               clock_timestamp()
+             )`,
+            [
+              orgId, access.assignmentMemberId, access.scopeRevisionRuleId,
+              session.versionId, session.itemId, userId, ELEARNING_WATCH_POLICY_VERSION,
+              ELEARNING_WATCH_THRESHOLD_BPS, durationMs, nextEffective,
+              transition.maxPositionMs, digest, ELEARNING_WATCH_EVALUATOR_VERSION,
+            ],
+          )
+          await tx.query(
+            `/* elearning-watch-challenge:complete-progress */
+             UPDATE elearning_progress
+                SET status = 'completed', completed_at = clock_timestamp(),
+                    required_at_completion = $1
+              WHERE org_id = $2 AND user_id = $3
+                AND course_version_item_id = $4 AND status = 'in_progress'`,
+            [access.required, orgId, userId, session.itemId],
+          )
+          await tx.query(
+            `/* elearning-watch-challenge:close-session */
+             UPDATE elearning_learning_sessions
+                SET status = 'completed', closed_at = clock_timestamp()
+              WHERE org_id = $1 AND id = $2 AND status = 'active'`,
+            [orgId, session.id],
+          )
+          await completeElearningWatchChallengeSchedule(tx, orgId, session.id)
+        }
+        return stateFrom(
+          session.id,
+          completed ? 'completed' : 'in_progress',
+          session.lastSequence,
+          session.lastClientPositionMs,
+          nextEffective,
+          transition.maxPositionMs,
+          durationMs,
+          transition.creditedMs,
+          false,
+          null,
+        )
+      })
+    } catch (error) {
+      rethrowChallenge(error)
+    }
+    const result = parseStoredChallengeAckState(acknowledged.result)
+    return { ...result, duplicate: acknowledged.duplicate }
   })
 }

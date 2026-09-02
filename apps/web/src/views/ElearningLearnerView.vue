@@ -13,6 +13,13 @@
 
     <ElearningPracticeLearnerSection v-if="practiceEnabled" />
 
+    <ElearningWatchChallengePrompt
+      v-if="activeChallenge"
+      :challenge="activeChallenge"
+      :busy="challengeAckPending"
+      @confirm="confirmWatchChallenge"
+    />
+
     <p
       v-if="status"
       class="elearning-status"
@@ -210,6 +217,7 @@ import {
   ELEARNING_WATCH_HEARTBEAT_INTERVAL_MS,
   ELEARNING_SHORT_ANSWER_MAX_CHARS,
   ElearningApiError,
+  acknowledgeElearningWatchChallenge,
   elearningPlaybackSourceUrl,
   getElearningCapabilities,
   isElearningAssessmentCourse,
@@ -230,6 +238,7 @@ import {
   type ElearningPublicPaper,
   type ElearningExamQuestionType,
   type ElearningWatchState,
+  type ElearningWatchChallenge,
 } from '../services/elearning'
 import ElearningContentLearnerCourse from './ElearningContentLearnerCourse.vue'
 import ElearningCreditWalletSection from './ElearningCreditWalletSection.vue'
@@ -237,6 +246,7 @@ import ElearningCertificateWalletSection from './ElearningCertificateWalletSecti
 import ElearningLearningProfileSection from './ElearningLearningProfileSection.vue'
 import ElearningPortalHero from './ElearningPortalHero.vue'
 import ElearningPracticeLearnerSection from './ElearningPracticeLearnerSection.vue'
+import ElearningWatchChallengePrompt from './ElearningWatchChallengePrompt.vue'
 import { isElearningPracticeReady } from '../services/elearningPractice'
 import {
   elearningExamAnswerProgress,
@@ -271,6 +281,8 @@ const examResult = ref<ElearningExamSubmitResult | null>(null)
 const examLocked = ref(false)
 const examDeadlineAt = ref<string | null>(null)
 const examRemainingMs = ref(0)
+const activeChallenge = ref<ElearningWatchChallenge | null>(null)
+const challengeAckPending = ref(false)
 
 const answeredCount = computed(() => {
   if (!paper.value) return 0
@@ -299,6 +311,12 @@ interface PendingBeat {
   epoch: number
 }
 
+interface ChallengeResumeAttempt {
+  epoch: number
+  sessionId: string
+  video: HTMLVideoElement
+}
+
 const TICKET_RENEWAL_LEAD_MS = 30_000
 const TICKET_RENEWAL_MIN_DELAY_MS = 5_000
 
@@ -324,6 +342,9 @@ let saveWork: Promise<void> = Promise.resolve()
 let examEpoch = 0
 let statusSource: 'draft' | null = null
 let examCountdownTimer: number | null = null
+let challengeAckIdentity: { key: string; requestId: string } | null = null
+let resumePlaybackAfterChallenge = false
+let challengeResumeAttempt: ChallengeResumeAttempt | null = null
 
 function formatError(error: unknown): string {
   if (error instanceof ElearningApiError) {
@@ -409,7 +430,7 @@ function clearTicketRenewalTimer(): void {
 }
 
 function startHeartbeatTimer(): void {
-  if (heartbeatTimer != null || watchStopped || !sessionId) return
+  if (heartbeatTimer != null || watchStopped || !sessionId || activeChallenge.value) return
   heartbeatTimer = window.setInterval(() => {
     enqueueBeat(true)
   }, ELEARNING_WATCH_HEARTBEAT_INTERVAL_MS)
@@ -427,6 +448,137 @@ function stopWatchSession(): void {
   ticketRenewalRestorePlaying = false
   finishingTicketRenewal = false
   activeItemId = null
+  activeChallenge.value = null
+  challengeAckPending.value = false
+  challengeAckIdentity = null
+  resumePlaybackAfterChallenge = false
+}
+
+function applyWatchChallenge(challenge: ElearningWatchChallenge | null | undefined): void {
+  activeChallenge.value = challenge ?? null
+  if (!challenge) return
+  clearHeartbeatTimer()
+  pendingBeats = []
+  if (videoNode && !videoNode.paused) {
+    resumePlaybackAfterChallenge = true
+    videoNode.pause()
+  }
+}
+
+function watchChallengeRequestId(
+  session: string,
+  challengeId: string,
+  selections: readonly [string, string],
+): string {
+  const key = `${session}\n${challengeId}\n${selections[0]}\n${selections[1]}`
+  if (challengeAckIdentity?.key === key) return challengeAckIdentity.requestId
+  if (typeof crypto === 'undefined' || typeof crypto.randomUUID !== 'function') {
+    throw new Error('crypto.randomUUID unavailable')
+  }
+  const requestId = crypto.randomUUID()
+  challengeAckIdentity = { key, requestId }
+  return requestId
+}
+
+async function resumePlaybackAfterWatchChallenge(
+  shouldResume: boolean,
+  expectedEpoch: number,
+  expectedSession: string,
+): Promise<'acknowledged' | 'manual' | 'resumed' | 'stale'> {
+  const video = videoNode
+  if (!shouldResume || !video || video.ended) return 'acknowledged'
+  if (
+    watchStopped
+    || watchEpoch !== expectedEpoch
+    || sessionId !== expectedSession
+  ) return 'stale'
+  const attempt: ChallengeResumeAttempt = {
+    epoch: expectedEpoch,
+    sessionId: expectedSession,
+    video,
+  }
+  challengeResumeAttempt = attempt
+  try {
+    await video.play()
+    if (
+      challengeResumeAttempt !== attempt
+      || watchStopped
+      || watchEpoch !== attempt.epoch
+      || sessionId !== attempt.sessionId
+      || videoNode !== attempt.video
+    ) {
+      if (challengeResumeAttempt === attempt) challengeResumeAttempt = null
+      return 'stale'
+    }
+    challengeResumeAttempt = null
+    if (video.paused) return 'manual'
+    startHeartbeatTimer()
+    enqueueBeat(true)
+    return 'resumed'
+  } catch {
+    const stale = (
+      challengeResumeAttempt !== attempt
+      || watchStopped
+      || watchEpoch !== attempt.epoch
+      || sessionId !== attempt.sessionId
+      || videoNode !== attempt.video
+    )
+    if (challengeResumeAttempt === attempt) challengeResumeAttempt = null
+    return stale ? 'stale' : 'manual'
+  }
+}
+
+async function confirmWatchChallenge(selections: [string, string]): Promise<void> {
+  const challenge = activeChallenge.value
+  const currentSession = sessionId
+  if (!challenge || !currentSession || challengeAckPending.value || watchStopped) return
+  challengeAckPending.value = true
+  const epoch = watchEpoch
+  try {
+    const result = await acknowledgeElearningWatchChallenge(
+      currentSession,
+      challenge.challengeId,
+      watchChallengeRequestId(currentSession, challenge.challengeId, selections),
+      selections,
+    )
+    if (watchStopped || epoch !== watchEpoch || sessionId !== currentSession) return
+    challengeAckIdentity = null
+    const shouldResume = resumePlaybackAfterChallenge
+    resumePlaybackAfterChallenge = false
+    lastSequence = result.lastSequence
+    if (activeCourseVersionId.value) {
+      applyServerWatchProgress(activeCourseVersionId.value, result)
+    }
+    applyWatchChallenge(result.challenge)
+    if (result.status === 'completed') {
+      stopWatchSession()
+      await refreshCourses()
+    } else {
+      const resumeStatus = await resumePlaybackAfterWatchChallenge(
+        shouldResume && result.challenge === null,
+        epoch,
+        currentSession,
+      )
+      if (resumeStatus === 'stale') return
+      writeStatus(
+        elearningLabel(
+          resumeStatus === 'resumed'
+            ? 'learner.challengePlaybackResumed'
+            : resumeStatus === 'manual'
+              ? 'learner.challengeResumeManual'
+              : 'learner.challengeAcknowledged',
+          isZh.value,
+        ),
+        'info',
+      )
+    }
+  } catch (error) {
+    if (!watchStopped && epoch === watchEpoch && sessionId === currentSession) {
+      writeStatus(formatError(error), 'error')
+    }
+  } finally {
+    if (epoch === watchEpoch) challengeAckPending.value = false
+  }
 }
 
 function ticketRenewalDelayMs(expiresAt: string, ttlSeconds: number, nowMs = Date.now()): number {
@@ -677,6 +829,7 @@ async function flushHeartbeatQueue(): Promise<void> {
       if (activeCourseVersionId.value) {
         applyServerWatchProgress(activeCourseVersionId.value, result)
       }
+      applyWatchChallenge(result.challenge)
       if (result.status === 'completed') {
         stopWatchSession()
         await refreshCourses()
@@ -703,8 +856,13 @@ function tryApplyResumeCursor(event: Event): void {
 }
 
 function onPlay(event: Event): void {
-  bindVideo(event)
+  const video = bindVideo(event)
   if (applyingTicketRenewal) return
+  if (challengeResumeAttempt?.video === video) return
+  if (activeChallenge.value) {
+    if (video && !video.paused) video.pause()
+    return
+  }
   releaseResumeSeek()
   if (!sessionId || watchStopped) return
   startHeartbeatTimer()
@@ -716,6 +874,7 @@ function onPause(event: Event): void {
   if (applyingTicketRenewal || applyingResumeSeek) return
   clearHeartbeatTimer()
   if (!sessionId || watchStopped) return
+  if (activeChallenge.value) return
   if (isNaturalVideoEnd(video)) return
   enqueueBeat(false)
 }
@@ -948,6 +1107,7 @@ async function startWatch(course: ElearningLearnerAssessmentCourse): Promise<voi
     watchStopped = false
     activeItemId = itemId
     applyServerWatchProgress(courseVersionId, watch)
+    applyWatchChallenge(watch.challenge)
     resumePositionMs = watch.status === 'in_progress' ? watch.maxPositionMs : null
     playbackSrc.value = elearningPlaybackSourceUrl(ticket.token)
     schedulePlaybackTicketRenewal(ticket.expiresAt, ticket.ttlSeconds)
