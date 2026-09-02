@@ -489,6 +489,10 @@ const {
   inspectStockPreparationSandboxTarget,
   ensureStockPreparationSandboxTarget,
   sandboxStockPreparationTemplate,
+  // The ONE carry-ownership verdict, shared with the deploy-time preflight so the wall and the
+  // warning cannot drift apart.
+  CARRY_TARGET_OWNERSHIP_STATES,
+  decideCarryTargetOwnership,
 } = require('./stock-preparation-target-provisioning.cjs')
 const {
   StockPreparationOptionSyncError,
@@ -725,10 +729,11 @@ function sendError(res, error) {
 // were derived from one tuple. That is a binding-SHAPE rule, not a tenancy proof, and nothing else
 // in this line maintains it: `normalizeTarget` accepts any sheetId and defaults objectId
 // independently, the sandbox apply gate reads ONLY objectId, and the writer / export / conflict
-// policies take sheetId verbatim. Worse, the repo's own 222 deploy-window runbook prescribes exactly
-// the decoupled edit — change objectId into the sandbox namespace, KEEP the existing sheetId — so
-// the rule refused a SANCTIONED config while apply, dry-run and the export all kept working, and it
-// blamed "tenancy" for what was a shape mismatch. An on-site operator would have chased a
+// policies take sheetId verbatim. A binding whose two halves name different tuples is therefore a
+// state this codebase accepts everywhere else — and pre-registry installs, whose sheets were
+// provisioned before the ownership registry existed, are in exactly that state through no fault of
+// their own. The derived-id rule refused all of them while apply, dry-run and the export kept
+// working, and it blamed "tenancy" for what was a shape mismatch, sending an operator after a
 // tenant/membership problem that did not exist.
 //
 // WHAT OWNERSHIP ACTUALLY IS. `meta_sheets` carries no project column; a sheet's project survives
@@ -768,30 +773,26 @@ async function assertCarryTargetBelongsToTenant({ provisioning, targetProjectId,
   if (!provisioning || typeof provisioning.isSheetOwnedByProject !== 'function') {
     throw new HttpRouteError(501, 'CONFIRM_CARRY_PROVISIONING_UNAVAILABLE', 'the carry tenant check requires multitable.provisioning.isSheetOwnedByProject', { requiredMethods: ['isSheetOwnedByProject'] })
   }
-  if (await provisioning.isSheetOwnedByProject(boundSheetId, targetProjectId) === true) return
-  // NOT PROVEN OURS — which is "someone else's" and "not registered at all" at once, because a
-  // boolean cannot separate them. Fall back to the derived id: the only remaining evidence that this
-  // sheet was ever meant to be this project's, and the one that lets a pre-registry legacy install
-  // through.
-  const derive = typeof provisioning.getObjectSheetId === 'function' ? provisioning.getObjectSheetId : null
-  if (!derive) {
-    // Neither question can be answered on this host, so ownership is undecidable rather than denied.
-    throw new HttpRouteError(
-      409,
-      'CONFIRM_CARRY_TARGET_OWNER_UNKNOWN',
-      'the bound sheet is not registered to this project and this host exposes no id derivation to fall back on, so its owner cannot be established',
-      { objectId },
-    )
-  }
-  const derived = String(derive.call(provisioning, targetProjectId, objectId) || '').trim()
-  if (derived && derived === boundSheetId) return
-  throw new HttpRouteError(
-    409,
-    'CONFIRM_CARRY_TARGET_TENANT_MISMATCH',
-    'the sheet this deployment is bound to is not registered to the project of this caller, and its id is not the one derived for that project either',
-    { objectId },
-  )
+  const ownedByProject = await provisioning.isSheetOwnedByProject(boundSheetId, targetProjectId) === true
+  // The derived id is the ONLY fallback evidence, and it is gathered only when ownership was not
+  // proven — a pure hash, no IO. THE VERDICT ITSELF IS NOT DECIDED HERE: it comes from
+  // `decideCarryTargetOwnership`, the same function the deploy-time preflight calls, so what an
+  // operator was warned about and what their click returns cannot drift apart.
+  const derive = !ownedByProject && typeof provisioning.getObjectSheetId === 'function'
+    ? provisioning.getObjectSheetId
+    : null
+  const derivedSheetId = derive ? String(derive.call(provisioning, targetProjectId, objectId) || '') : ''
+  const verdict = decideCarryTargetOwnership({ boundSheetId, objectId, ownedByProject, derivedSheetId })
+  if (verdict.ok) return
+  throw new HttpRouteError(409, verdict.refusalCode, CARRY_TARGET_OWNERSHIP_MESSAGES[verdict.state], { objectId })
 }
+
+// One message per refusing state. Values-free: they name no sheet id and no project id.
+const CARRY_TARGET_OWNERSHIP_MESSAGES = Object.freeze({
+  [CARRY_TARGET_OWNERSHIP_STATES.NOT_OWNED]: 'the sheet this deployment is bound to is not registered to the project of this caller, and its id is not the one derived for that project either',
+  [CARRY_TARGET_OWNERSHIP_STATES.UNDECIDABLE]: 'the bound sheet is not registered to this project and this host exposes no id derivation to fall back on, so its owner cannot be established',
+  [CARRY_TARGET_OWNERSHIP_STATES.UNBOUND]: 'the bound stock-preparation target cannot be attributed to a tenant',
+})
 
 function inferDataSourceBridgeErrorCode(error) {
   const code = error && error.code ? String(error.code) : ''

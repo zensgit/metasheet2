@@ -59,6 +59,9 @@ const {
 } = require(path.join(__dirname, 'fixtures', 'stock-preparation-multitable-fakes.cjs'))
 const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
 const { createStockPreparationAuditStore } = require(path.join(LIB, 'stock-preparation-audit-store.cjs'))
+const {
+  __internals: { inspectCarryTargetBinding },
+} = require(path.join(LIB, 'stock-preparation-preflight.cjs'))
 
 const MAIN_OBJECT_ID = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
 const STAGING = 'tenant-a:integration-core'
@@ -391,7 +394,7 @@ function mountCarryRoute({ boundSheet = SANDBOX_SHEET, configured = true, target
     tenantPrincipalDirectory: env.tenantPrincipalDirectory,
   }
   httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
-  return { routes, auditDb, env }
+  return { routes, auditDb, env, context }
 }
 
 const ADMIN = Object.freeze({ id: OPERATOR, roles: ['admin'], tenantId: TENANT_ID })
@@ -1015,10 +1018,10 @@ async function main() {
   })
 
   await run('T9-h: the 222 window shape - a HAND-BOUND sheetId owned by the caller carries', async () => {
-    // 222-deploy-window-runbook-20260901.md Step 0-7 item 2 prescribes changing ONLY objectId into
-    // the sandbox namespace and KEEPING the existing sheetId. The binding's two halves then name
-    // different tuples and the sheet id is NOT the derived one - and that is a sanctioned,
-    // deployable config. It must carry. The earlier derived-id rule refused exactly this.
+    // A sheet this tenant really provisioned, bound under an objectId whose derived id is a
+    // different string - the shape every pre-registry install is in, and one the writer, the export
+    // and the conflict policies all accept because sheetId and objectId are independent fields.
+    // Ownership is what decides, so it must carry. The earlier derived-id rule refused exactly this.
     const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
     assert.notEqual(SANDBOX_SHEET, DERIVED_SANDBOX_SHEET,
       'T9-h: the bound sheetId really is NOT the derived one - otherwise this case proves nothing')
@@ -1128,6 +1131,61 @@ async function main() {
     assert.equal(flat.includes(HUMAN_NOTE), false, 'T8e: the audit never carries a human value')
     assert.equal(flat.includes(DECOY_NOTE), false)
   })
+
+  // =========================================================================
+  // T10 — THE PREFLIGHT AND THE ROUTE MUST DECIDE THE SAME THING.
+  //
+  // The wall refuses on ONE fact: registry ownership of the bound sheet, with the derived id as the
+  // only fallback. A deploy-time preflight that does not ask that fact cannot predict the refusal —
+  // and the version this PR first shipped did not ask it, reported such a binding as mere `posture`,
+  // and told the operator in as many words that "nothing refuses it" while every carry click 409'd.
+  // These cases drive BOTH surfaces over the SAME fixtures and require them to agree.
+  // =========================================================================
+  async function preflightVerdict(mounted) {
+    // The preflight's OWN gathering + verdict for this binding. Driven directly rather than through
+    // the whole preflight route, so the case measures the agreement under test and not the other
+    // inspections' fixture needs. The blocker is a pure mapping of this verdict, asserted in
+    // stock-preparation-preflight.test.cjs.
+    const action = mounted.context.config.stockPreparationTableActions
+    return inspectCarryTargetBinding({
+      context: mounted.context,
+      projectId: STAGING,
+      target: action ? action[0].target : null,
+    })
+  }
+
+  async function routeVerdict(mounted) {
+    const res = await call(mounted.routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      authenticatedTenantId: TENANT_ID,
+      body: { decision: decisionFixture() },
+    })
+    return { ok: res.statusCode === 200, code: res.statusCode === 200 ? null : res.body.error.code }
+  }
+
+  for (const shape of [
+    { name: 'owned by this project (the ordinary deployment)', mount: {} },
+    { name: 'owned by ANOTHER project', mount: { extraSheetOwners: { [SANDBOX_SHEET]: FOREIGN_TENANT + ':integration-core' } } },
+    { name: 'unregistered AND not derived (the hand-bound legacy shape)', mount: {}, unregister: SANDBOX_SHEET },
+    { name: 'unregistered BUT derived (the pre-registry install)', mount: { seedDerivedSheet: true, targetOverride: (t) => ({ ...t, sheetId: DERIVED_SANDBOX_SHEET }) }, unregister: 'DERIVED' },
+  ]) {
+    await run(`T10 [${shape.name}]: the preflight predicts exactly what the carry route does`, async () => {
+      const mounted = mountCarryRoute({ boundSheet: SANDBOX_SHEET, ...shape.mount })
+      if (shape.unregister === 'DERIVED') mounted.env.provisioning.sheetOwner.delete(DERIVED_SANDBOX_SHEET)
+      else if (shape.unregister) mounted.env.provisioning.sheetOwner.delete(shape.unregister)
+
+      const pre = await preflightVerdict(mounted)
+      const route = await routeVerdict(mounted)
+
+      assert.ok(pre.ownership, `T10 [${shape.name}]: the preflight reached a verdict at all`)
+      assert.equal(pre.ownership.ok, route.ok,
+        `T10 [${shape.name}]: preflight says ok=${pre.ownership.ok}, the route says ok=${route.ok}`)
+      if (!route.ok) {
+        assert.equal(pre.ownership.refusalCode, route.code,
+          `T10 [${shape.name}]: the preflight must name the EXACT code the route returns`)
+      }
+    })
+  }
 
   console.log(`carry-target-binding: ${passed} passed, ${failed} failed`)
   if (failed > 0) {

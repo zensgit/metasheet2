@@ -140,10 +140,10 @@ function physicalFieldId(projectId, objectId, fieldId) {
  * `objects` is `{ [objectId]: { fields: 'all' | string[] } }`. An absent objectId is a missing sheet;
  * a partial `fields` list is the "exists but incomplete" shape.
  */
-const PROVISIONING_READ_METHODS = Object.freeze(['findObjectSheet', 'resolveFieldIds', 'getFieldId', 'getObjectSheetId', 'readObjectFieldsContent'])
+const PROVISIONING_READ_METHODS = Object.freeze(['findObjectSheet', 'resolveFieldIds', 'getFieldId', 'getObjectSheetId', 'isSheetOwnedByProject', 'readObjectFieldsContent'])
 const PROVISIONING_WRITE_METHODS = Object.freeze(['ensureObject', 'ensureMissingObjectFields', 'patchObjectFieldProperty', 'ensureView'])
 
-function createFakeProvisioning({ objects = {} } = {}) {
+function createFakeProvisioning({ objects = {}, ownedSheetIds = null } = {}) {
   const calls = []
   const api = {
     calls,
@@ -174,6 +174,13 @@ function createFakeProvisioning({ objects = {} } = {}) {
     getObjectSheetId(projectId, objectId) {
       calls.push('getObjectSheetId')
       return derivedSheetId(projectId, objectId)
+    },
+    // The ownership port the carry wall decides on. `ownedSheetIds` null = the ordinary deployment
+    // where every sheet under this project is this project's.
+    async isSheetOwnedByProject(sheetId, projectId) {
+      calls.push('isSheetOwnedByProject')
+      if (ownedSheetIds) return ownedSheetIds.includes(sheetId) && projectId === STAGING_PROJECT_ID
+      return projectId === STAGING_PROJECT_ID
     },
     async readObjectFieldsContent() {
       calls.push('readObjectFieldsContent')
@@ -239,9 +246,9 @@ function baseServices() {
  * the duration of the call (the route reads the sandbox gate from the live environment, exactly as
  * the apply gate does).
  */
-function mount({ packs, extFieldMapping, objects, config = {} } = {}) {
+function mount({ packs, extFieldMapping, objects, config = {}, ownedSheetIds } = {}) {
   const routes = new Map()
-  const provisioning = createFakeProvisioning({ objects })
+  const provisioning = createFakeProvisioning({ objects, ownedSheetIds })
   const records = createFakeRecordsApi()
   const context = {
     api: {
@@ -973,6 +980,8 @@ const APPROVED_WHAT_INTERPOLATIONS = Object.freeze([
   "missingTemplateFields.join(', ')",
   'packId',
   'target.objectId',
+  // The refusal code the carry route will return — a closed server constant, not a value.
+  'carryBinding.ownership.refusalCode',
   // Counts.
   'carryBinding.missingHumanFields.length',
   'checks.confirmationLedger.missingFieldCount',
@@ -1036,7 +1045,7 @@ function whatTemplatesCarryIdentifiersOnly() {
   const { sites, leaves } = whatInterpolationLeaves(source)
 
   // Anti-vacuity: the scanner really walked every blocker's message.
-  assert.equal(sites, 8, 'P-16: the scanner found every `what:` site (update this count when a blocker is added)')
+  assert.equal(sites, 9, 'P-16: the scanner found every `what:` site (update this count when a blocker is added)')
   assert.ok(leaves.length > 0, 'P-16: ...and really extracted interpolations from them')
 
   assert.deepEqual(
@@ -1078,13 +1087,14 @@ function tableActionConfig({ objectId = DECLARED_SANDBOX_OBJECT_ID, without = []
   }
 }
 
-function greenDeploymentWithAction(configExtras) {
+function greenDeploymentWithAction(configExtras, ownedSheetIds) {
   return {
     harness: mount({
       packs: { [PACK_ID]: packDeclaring(DECLARED_SANDBOX_OBJECT_ID) },
       extFieldMapping: EXT_FIELD_MAPPING_CONFIG,
       objects: readyObjects(DECLARED_SANDBOX_OBJECT_ID),
       config: configExtras,
+      ownedSheetIds,
     }),
     env: sandboxEnv([DECLARED_SANDBOX_OBJECT_ID]),
   }
@@ -1129,9 +1139,11 @@ async function carryBindingChecksEveryHumanColumn() {
 }
 
 /**
- * A hand-bound sheetId is LEGAL and must never be a blocker — the 222 window runbook prescribes
- * editing objectId while keeping the existing sheetId, and every other consumer takes sheetId
- * verbatim. It is reported as POSTURE so the slip is visible without being fatal.
+ * A non-derived sheetId is not by itself a fault and must never be a blocker on its own: sheetId and
+ * objectId are independent fields for the writer, the export and the conflict policies, and a sheet
+ * provisioned before the ownership registry existed is in this state through no fault of its own. It
+ * is reported as POSTURE so the slip is visible without being fatal. What DOES block is the
+ * ownership verdict, covered separately by carryBindingReportsWhatTheWallWillDo.
  */
 async function nonDerivedBindingIsPostureNeverABlocker() {
   const handBound = 'sheet_a_hand_bound_id_from_an_earlier_object'
@@ -1154,6 +1166,56 @@ async function nonDerivedBindingIsPostureNeverABlocker() {
   assert.equal(derivedRes.body.data.posture.carryTargetBinding.state, 'derived')
 }
 
+
+/**
+ * THE FACT THE CARRY WALL DECIDES ON, asked at deploy time.
+ *
+ * The wall refuses a bound sheet it cannot attribute to this project. Before this blocker existed
+ * the preflight never asked, reported such a binding as posture only, and its operator-facing note
+ * said in as many words that nothing refuses it — while every carry click returned 409.
+ */
+async function carryBindingReportsWhatTheWallWillDo() {
+  // A NON-asserting lookup: blockerByCode() asserts presence, which is wrong for the cases whose
+  // whole point is that no blocker was raised.
+  const findBlocker = (body, code) => (body.data.blockers || []).find((entry) => entry.code === code)
+  // 1. OWNED — the ordinary deployment. No ownership blocker, and the state says so.
+  {
+    const { harness, env } = greenDeploymentWithAction(tableActionConfig())
+    const res = await preflight(harness, { env })
+    assert.equal(res.body.data.ready, true)
+    assert.equal(res.body.data.checks.carryTargetBinding.ownershipState, 'owned_by_this_project')
+    assert.equal(res.body.data.checks.carryTargetBinding.carryWouldRefuseWith, null)
+    assert.equal(findBlocker(res.body, PREFLIGHT_BLOCKER_CODES.CARRY_TARGET_NOT_OWNED), undefined)
+  }
+
+  // 2. NOT OWNED and NOT derived — the hand-bound shape the wall 409s. This is the case the
+  //    preflight used to bless.
+  {
+    const handBound = 'sheet_a_hand_bound_id_from_an_earlier_object'
+    const { harness, env } = greenDeploymentWithAction(tableActionConfig({ sheetId: handBound }), [])
+    const res = await preflight(harness, { env })
+    const found = blockerByCode(res.body, PREFLIGHT_BLOCKER_CODES.CARRY_TARGET_NOT_OWNED)
+    assert.ok(found, 'the binding the carry route refuses must be a deploy-time blocker')
+    assert.equal(found.detail.carryRouteCode, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH',
+      'and must quote the EXACT code the click returns')
+    assert.ok(found.what.includes('CONFIRM_CARRY_TARGET_TENANT_MISMATCH'))
+    assert.equal(res.body.data.ready, false)
+    assert.equal(res.body.data.checks.carryTargetBinding.ownershipState, 'not_owned_by_this_project')
+    // ...and the posture note must no longer tell the operator that nothing refuses it.
+    assert.equal(String(res.body.data.posture.carryTargetBinding.note).includes('nothing refuses it'), false)
+  }
+
+  // 3. NOT owned but DERIVED — the pre-registry install. Allowed by the wall, so no blocker.
+  {
+    const { harness, env } = greenDeploymentWithAction(tableActionConfig(), [])
+    const res = await preflight(harness, { env })
+    assert.equal(res.body.data.checks.carryTargetBinding.ownershipState, 'unregistered_but_derived')
+    assert.equal(findBlocker(res.body, PREFLIGHT_BLOCKER_CODES.CARRY_TARGET_NOT_OWNED), undefined,
+      'a binding the wall lets through must not be reported as a blocker')
+    assert.equal(res.body.data.ready, true)
+  }
+}
+
 // ---------------------------------------------------------------------------
 
 async function main() {
@@ -1173,6 +1235,7 @@ async function main() {
   await requestCannotSteerTheTarget()
   await pollutedAllowlistEnvIsWithheldNotEchoed()
   await carryBindingChecksEveryHumanColumn()
+  await carryBindingReportsWhatTheWallWillDo()
   await nonDerivedBindingIsPostureNeverABlocker()
   whatTemplatesCarryIdentifiersOnly()
   console.log('stock-preparation-preflight: OK')

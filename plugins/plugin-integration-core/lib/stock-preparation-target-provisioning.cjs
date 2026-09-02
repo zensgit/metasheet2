@@ -785,7 +785,73 @@ async function repairStockPreparationCanonicalTarget(input = {}) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// CARRY TARGET OWNERSHIP — the ONE decision, so the runtime wall and the deploy-time preflight
+// cannot disagree about the same binding.
+//
+// The carry route refuses a bound sheet it cannot attribute to the caller's own project. The
+// preflight exists to tell a deployer, before the window, what the route will do. When the two
+// derived that verdict separately the preflight was blind to registry ownership and blessed, in
+// operator-facing text, a binding every carry click then refused. So the verdict is computed HERE,
+// from three facts either caller can gather, and both sides only MAP it — to an HTTP refusal on one
+// side, to a blocker on the other.
+//
+// The three facts are deliberately plain values, not a provisioning handle: this function performs
+// no IO, so it is the same decision under test as in production.
+const CARRY_TARGET_OWNERSHIP_STATES = Object.freeze({
+  // The registry says this sheet belongs to the asking project. Proven; carry proceeds.
+  OWNED: 'owned_by_this_project',
+  // No registry row, but the bound sheetId IS the id derived for (this project, this objectId) —
+  // the pre-registry / legacy install the fallback exists for. Allowed, and worth reporting.
+  DERIVED: 'unregistered_but_derived',
+  // Not the asking project's, and not derived for it either. "Owned elsewhere" and "not registered
+  // at all" are ONE answer here on purpose: the ownership port is a boolean precisely so it cannot
+  // hand one tenant another tenant's project id, and that is the price.
+  NOT_OWNED: 'not_owned_by_this_project',
+  // Ownership is false and there is no derivation available to fall back on, so the question is
+  // undecidable rather than answered "no".
+  UNDECIDABLE: 'owner_undecidable',
+  // The binding names no sheet or no object, so there is nothing to attribute.
+  UNBOUND: 'target_unbound',
+})
+
+// The HTTP code the carry route returns for each refusing state. The preflight quotes these back to
+// the deployer verbatim, so "what the preflight warned about" and "what the click returned" are the
+// same string.
+const CARRY_TARGET_OWNERSHIP_REFUSAL_CODES = Object.freeze({
+  [CARRY_TARGET_OWNERSHIP_STATES.NOT_OWNED]: 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH',
+  [CARRY_TARGET_OWNERSHIP_STATES.UNDECIDABLE]: 'CONFIRM_CARRY_TARGET_OWNER_UNKNOWN',
+  [CARRY_TARGET_OWNERSHIP_STATES.UNBOUND]: 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH',
+})
+
+/**
+ * @param {string}  boundSheetId    the action target's sheetId
+ * @param {string}  objectId        the action target's objectId
+ * @param {boolean} ownedByProject  provisioning.isSheetOwnedByProject(boundSheetId, project)
+ * @param {string}  derivedSheetId  provisioning.getObjectSheetId(project, objectId), or '' when the
+ *                                  host exposes no derivation to fall back on
+ * @returns {{ state: string, ok: boolean, refusalCode: string|null }}
+ */
+function decideCarryTargetOwnership({ boundSheetId, objectId, ownedByProject, derivedSheetId } = {}) {
+  const sheetId = optionalString(boundSheetId)
+  const object = optionalString(objectId)
+  const verdict = (state) => Object.freeze({
+    state,
+    ok: state === CARRY_TARGET_OWNERSHIP_STATES.OWNED || state === CARRY_TARGET_OWNERSHIP_STATES.DERIVED,
+    refusalCode: CARRY_TARGET_OWNERSHIP_REFUSAL_CODES[state] || null,
+  })
+  if (!sheetId || !object) return verdict(CARRY_TARGET_OWNERSHIP_STATES.UNBOUND)
+  if (ownedByProject === true) return verdict(CARRY_TARGET_OWNERSHIP_STATES.OWNED)
+  const derived = optionalString(derivedSheetId)
+  if (!derived) return verdict(CARRY_TARGET_OWNERSHIP_STATES.UNDECIDABLE)
+  if (derived === sheetId) return verdict(CARRY_TARGET_OWNERSHIP_STATES.DERIVED)
+  return verdict(CARRY_TARGET_OWNERSHIP_STATES.NOT_OWNED)
+}
+
 module.exports = {
+  CARRY_TARGET_OWNERSHIP_STATES,
+  CARRY_TARGET_OWNERSHIP_REFUSAL_CODES,
+  decideCarryTargetOwnership,
   CANONICAL_FIELD_MAP_MODE,
   repairStockPreparationCanonicalTarget,
   // Exported for its own direct witnesses: the ownership rule that decides whether the

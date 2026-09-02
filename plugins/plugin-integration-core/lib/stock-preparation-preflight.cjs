@@ -54,6 +54,8 @@ const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
 } = require('./stock-preparation-templates.cjs')
 const {
+  CARRY_TARGET_OWNERSHIP_STATES,
+  decideCarryTargetOwnership,
   SANDBOX_OBJECT_ID_NAMESPACE,
   inspectStockPreparationCanonicalTarget,
   inspectStockPreparationSandboxTarget,
@@ -125,6 +127,12 @@ const PREFLIGHT_BLOCKER_CODES = Object.freeze({
   // deployer one preflight line instead of an outage — and where it lands before the first operator
   // ever clicks 结转 and meets a per-request refusal they had no way to anticipate.
   CARRY_TARGET_HUMAN_FIELDS_UNBOUND: 'STOCK_PREP_CARRY_TARGET_HUMAN_FIELDS_UNBOUND',
+  // THE FACT THE CARRY WALL ACTUALLY DECIDES ON. The wall refuses a bound sheet it cannot attribute
+  // to this project; until this blocker existed the preflight never asked that question, so the one
+  // binding shape the wall refuses was invisible here — and the posture text below actively told the
+  // operator nothing refused it. The verdict is the wall's own (decideCarryTargetOwnership), and the
+  // detail quotes the exact HTTP code the click will return.
+  CARRY_TARGET_NOT_OWNED: 'STOCK_PREP_CARRY_TARGET_NOT_OWNED',
 })
 
 const PREFLIGHT_BLOCKER_CODE_ORDER = Object.freeze([
@@ -135,6 +143,7 @@ const PREFLIGHT_BLOCKER_CODE_ORDER = Object.freeze([
   PREFLIGHT_BLOCKER_CODES.EXT_FIELD_MAPPING_NOT_CONFIGURED,
   PREFLIGHT_BLOCKER_CODES.SANDBOX_MODE_NOT_ENABLED,
   PREFLIGHT_BLOCKER_CODES.SANDBOX_ALLOWLIST_MISSING_TARGET,
+  PREFLIGHT_BLOCKER_CODES.CARRY_TARGET_NOT_OWNED,
   PREFLIGHT_BLOCKER_CODES.CARRY_TARGET_HUMAN_FIELDS_UNBOUND,
 ])
 
@@ -316,8 +325,15 @@ function buildPosture({ config, b2aTrialRegistry, env, carryTargetBindingDerived
         ? 'not_derived'
         : (carryTargetBindingDerived === true ? 'derived' : 'unknown'),
       code: CARRY_TARGET_BINDING_NOT_DERIVED,
+      // WHAT THIS DOES AND DOES NOT SAY. It reports one narrow fact — whether the bound sheetId is
+      // the id derived from (this project, target.objectId) — and NOTHING about whether the carry
+      // will be allowed. An earlier version of this note asserted that a non-derived binding is
+      // "legal and nothing refuses it"; that was false about this repo's own code, because a sheet
+      // with no registry row AND a non-derived id is exactly what the carry wall refuses. Whether
+      // the carry is allowed is reported by `checks.carryTargetBinding.ownershipState` and, when it
+      // will be refused, by the STOCK_PREP_CARRY_TARGET_NOT_OWNED blocker — not here.
       note: carryTargetBindingDerived === false
-        ? 'the bound target sheetId is not the id derived from (this project, target.objectId). That is LEGAL and nothing refuses it: sheetId and objectId are independent fields everywhere in this line, and the 222 window runbook prescribes editing objectId while keeping the existing sheetId. It is reported because a binding whose two halves name different tables is usually an editing slip - if objectId was changed without recomputing the binding, apply keeps writing rows into the sheet the OLD objectId named while the sandbox gate reads the NEW one.'
+        ? 'the bound target sheetId is not the id derived from (this project, target.objectId). By itself that is not a fault: sheetId and objectId are independent fields for the writer, the export and the conflict policies, and a sheet provisioned before the ownership registry existed is in this state through no fault of its own. It is reported because two halves naming different tables is usually an editing slip — if objectId was changed without recomputing the binding, apply keeps writing rows into the sheet the OLD objectId named while the sandbox gate reads the NEW one. Whether carry is permitted is a SEPARATE question answered by checks.carryTargetBinding.ownershipState.'
         : 'nothing to report: the bound sheetId either is the derived one, or this host exposes no derivation to check it against.',
     }),
     outboundHttpWrite: Object.freeze({
@@ -372,32 +388,54 @@ function targetHasExplicitBindings(fieldIdMap) {
  *   2. A BINDING WHOSE sheetId IS NOT THE DERIVED ONE -> POSTURE, never a blocker. `sheetId` and
  *      `objectId` are independent fields everywhere else in this line: normalizeTarget accepts any
  *      sheetId, the sandbox apply gate reads only objectId, and the writer/export/conflict policies
- *      take sheetId verbatim. A hand-bound sheet is a legitimate, deployable state - the 222 window
- *      runbook prescribes editing objectId while keeping the existing sheetId - so refusing it would
- *      break a sanctioned config. It is still worth SAYING, because a binding whose two halves name
- *      different tables is nearly always an editing slip.
+ *      take sheetId verbatim. A sheet provisioned before the ownership registry existed is in this
+ *      state through no fault of its own, so a non-derived binding is not by itself a fault. It is
+ *      still worth SAYING, because two halves naming different tables is usually an editing slip.
+ *      Whether the CARRY is permitted is a separate question, answered by the ownership check above
+ *      and reported as its own blocker - this note never speaks to it.
  */
 async function inspectCarryTargetBinding({ context, projectId, target }) {
   if (!isPlainObject(target)) {
-    return { configured: false, missingHumanFields: [], derived: null, fieldMapMode: null }
+    return { configured: false, missingHumanFields: [], derived: null, fieldMapMode: null, ownership: null }
   }
   const fieldIdMap = isPlainObject(target.fieldIdMap) ? target.fieldIdMap : {}
   const explicit = targetHasExplicitBindings(fieldIdMap)
   const missingHumanFields = explicit
     ? HUMAN_PRESERVED_FIELD_IDS.filter((fieldId) => !(typeof fieldIdMap[fieldId] === 'string' && fieldIdMap[fieldId].trim()))
     : []
-  let derived = null
   const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
   const boundSheetId = typeof target.sheetId === 'string' ? target.sheetId.trim() : ''
   const objectId = typeof target.objectId === 'string' ? target.objectId.trim() : ''
+
+  // THE SAME TWO FACTS THE WALL GATHERS, in the same order, from the same host surface.
+  let ownedByProject = null
+  if (provisioning && typeof provisioning.isSheetOwnedByProject === 'function' && boundSheetId) {
+    try {
+      ownedByProject = await provisioning.isSheetOwnedByProject(boundSheetId, projectId) === true
+    } catch (error) {
+      ownedByProject = null
+    }
+  }
+  let derivedSheetId = ''
+  let derived = null
   if (provisioning && typeof provisioning.getObjectSheetId === 'function' && boundSheetId && objectId) {
     try {
-      derived = provisioning.getObjectSheetId(projectId, objectId) === boundSheetId
+      derivedSheetId = String(provisioning.getObjectSheetId(projectId, objectId) || '')
+      derived = derivedSheetId === boundSheetId
     } catch (error) {
+      derivedSheetId = ''
       derived = null
     }
   }
-  return { configured: true, missingHumanFields, derived, fieldMapMode: explicit ? 'explicit' : 'logical' }
+
+  // A host with no ownership port cannot be predicted from here — the wall answers 501 there, which
+  // is a capability gap rather than anything a deployer can paste. Reported as `unknown`, never as a
+  // blocker offering a fix that would not apply.
+  const ownership = ownedByProject === null
+    ? null
+    : decideCarryTargetOwnership({ boundSheetId, objectId, ownedByProject, derivedSheetId })
+
+  return { configured: true, missingHumanFields, derived, fieldMapMode: explicit ? 'explicit' : 'logical', ownership }
 }
 
 /**
@@ -634,7 +672,30 @@ async function computeStockPreparationPreflight({
     missingHumanFields: Object.freeze([...carryBinding.missingHumanFields]),
     // null = undecidable on this host (no derivation exposed); true/false = decided.
     sheetIdDerivedFromObjectId: carryBinding.derived,
+    // The wall's own verdict for this binding: null when this host exposes no ownership port and the
+    // question therefore cannot be answered here at all.
+    ownershipState: carryBinding.ownership ? carryBinding.ownership.state : null,
+    carryWouldRefuseWith: carryBinding.ownership && !carryBinding.ownership.ok
+      ? carryBinding.ownership.refusalCode
+      : null,
   })
+  if (carryBinding.ownership && !carryBinding.ownership.ok) {
+    blockers.push(blocker({
+      code: PREFLIGHT_BLOCKER_CODES.CARRY_TARGET_NOT_OWNED,
+      what: `the bound table action target cannot be attributed to this deployment's own project, so every 结转 (carry) confirm will be refused with ${carryBinding.ownership.refusalCode}. Apply, dry-run and the export do not ask this question and will keep working, which is exactly why it has to be caught here instead of on the first click. Re-run the sandbox target ensure so the platform provisions the sheet under this project and records the registry row, then paste the target it returns into the action config`,
+      fix: httpFix({
+        method: 'POST',
+        path: '/api/integration/stock-preparation/sandbox-target/ensure',
+        body: { objectId: (boundTarget && boundTarget.objectId) || '<target objectId>' },
+      }),
+      detail: {
+        ownershipState: carryBinding.ownership.state,
+        // The EXACT string the click returns, so "what the preflight warned about" and "what the
+        // operator saw" are the same token rather than two descriptions of one thing.
+        carryRouteCode: carryBinding.ownership.refusalCode,
+      },
+    }))
+  }
   if (carryBinding.missingHumanFields.length > 0) {
     blockers.push(blocker({
       code: PREFLIGHT_BLOCKER_CODES.CARRY_TARGET_HUMAN_FIELDS_UNBOUND,
