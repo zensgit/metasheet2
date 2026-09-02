@@ -253,14 +253,17 @@ function substrate({ boundSheet = SANDBOX_SHEET, mainRows, sandboxRows, ledgerRo
     [FOREIGN_TWIN_SHEET, `${FOREIGN_TENANT}:integration-core`],
   ])
   for (const [sheetId, projectId] of Object.entries(extraSheetOwners)) sheetOwner.set(sheetId, projectId)
-  const provisioningCalls = { findSheetOwnerProjectId: [] }
-  provisioning.findSheetOwnerProjectId = async ({ sheetId } = {}) => {
-    provisioningCalls.findSheetOwnerProjectId.push(sheetId)
-    return sheetOwner.has(sheetId) ? sheetOwner.get(sheetId) : null
+  const provisioningCalls = { isSheetOwnedByProject: [] }
+  // A BOOLEAN port: it answers "is this sheet that project's", never "whose is it". The stub keeps
+  // the full owner map so a case can still assert the attacker really owns something, but the route
+  // only ever learns yes/no about the project it named.
+  provisioning.isSheetOwnedByProject = async (sheetId, projectId) => {
+    provisioningCalls.isSheetOwnedByProject.push({ sheetId, projectId })
+    return sheetOwner.has(sheetId) && sheetOwner.get(sheetId) === projectId
   }
   provisioning.getObjectSheetId = (projectId, objectId) => derivedSheetId(projectId, objectId)
   provisioning.sheetOwner = sheetOwner
-  provisioning.ownerCalls = provisioningCalls.findSheetOwnerProjectId
+  provisioning.ownerCalls = provisioningCalls.isSheetOwnedByProject
   return { records, provisioning, target: targetFor(boundSheet), boundSheet, sheetOwner }
 }
 
@@ -340,7 +343,7 @@ function tableActionConfigFor(target) {
 
 function mountCarryRoute({ boundSheet = SANDBOX_SHEET, configured = true, targetOverride, memberVerdict = true, extraSheetOwners, seedDerivedSheet = false, dropOwnershipPort = false } = {}) {
   const env = substrate({ boundSheet, extraSheetOwners, seedDerivedSheet })
-  if (dropOwnershipPort) delete env.provisioning.findSheetOwnerProjectId
+  if (dropOwnershipPort) delete env.provisioning.isSheetOwnedByProject
   // The host capability #5445 requires of every tenant-scoped operator surface: the plugin submits
   // two identity strings and receives one boolean. Injected exactly as the host injects it
   // (packages/core-backend/src/index.ts), so the carry route is exercised through the real seam.
@@ -1004,8 +1007,8 @@ async function main() {
     })
     assert.equal(res.statusCode, 409, JSON.stringify(res.body))
     assert.equal(res.body.error.code, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH')
-    assert.deepEqual(env.provisioning.ownerCalls, [SANDBOX_SHEET],
-      'T9-g: the wall asked who owns the BOUND sheet, and refused on the answer')
+    assert.deepEqual(env.provisioning.ownerCalls, [{ sheetId: SANDBOX_SHEET, projectId: FOREIGN_TENANT + ':integration-core' }],
+      'T9-g: the wall asked whether the BOUND sheet is the CALLER of this request own, and refused on the answer')
     assert.equal(env.records.queryCalls.length, 0)
     assert.equal(env.records.patchCalls.length, 0)
     assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, undefined)
@@ -1045,10 +1048,15 @@ async function main() {
   })
 
   await run('T9-j: an UNREGISTERED sheet is not a pass - it falls back to the derived id, then refuses', async () => {
-    // A registry miss means "unattributable", never "yours". For a write that lands human work in a
-    // customer table, an unprovable owner must not be permission. The fallback lets a pre-registry
-    // legacy install whose binding IS derived through (T9-k); anything else is refused with its OWN
-    // code, so an operator is sent to the binding rather than to a tenancy problem that is not there.
+    // A registry "no" means "not proven yours", never "yours". For a write that lands human work in
+    // a customer table, an unprovable owner must not be permission. The fallback lets a pre-registry
+    // legacy install whose binding IS derived through (T9-k); anything else is refused.
+    //
+    // WHY THE CODE IS TENANT_MISMATCH AND NOT OWNER_UNKNOWN. The port is a boolean by design (it
+    // must not hand this caller another tenant's project id), so "owned by someone else" and "not
+    // in the registry at all" arrive as the SAME answer. Claiming to tell them apart in the refusal
+    // would be inventing a distinction the server can no longer observe. OWNER_UNKNOWN is kept for
+    // the one case that really is undecidable - see T9-j2.
     const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
     env.provisioning.sheetOwner.delete(SANDBOX_SHEET)
     const res = await call(routes, 'POST', CARRY_ROUTE, {
@@ -1057,8 +1065,24 @@ async function main() {
       body: { decision: decisionFixture() },
     })
     assert.equal(res.statusCode, 409, JSON.stringify(res.body))
-    assert.equal(res.body.error.code, 'CONFIRM_CARRY_TARGET_OWNER_UNKNOWN',
-      'T9-j: its own code - not the tenancy one, which would send the operator to the wrong place')
+    assert.equal(res.body.error.code, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH')
+    assert.equal(env.records.patchCalls.length, 0)
+  })
+
+  await run('T9-j2: a host that can answer NEITHER question refuses as UNDECIDABLE, not as denied', async () => {
+    // The registry says no and there is no id derivation to fall back on. That is genuinely
+    // "ownership cannot be established" rather than "this is not yours", and it keeps
+    // CONFIRM_CARRY_TARGET_OWNER_UNKNOWN a reachable, witnessed code rather than dead vocabulary.
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+    env.provisioning.sheetOwner.delete(SANDBOX_SHEET)
+    delete env.provisioning.getObjectSheetId
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      authenticatedTenantId: TENANT_ID,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'CONFIRM_CARRY_TARGET_OWNER_UNKNOWN')
     assert.equal(env.records.patchCalls.length, 0)
   })
 
@@ -1090,7 +1114,7 @@ async function main() {
     })
     assert.equal(res.statusCode, 501, JSON.stringify(res.body))
     assert.equal(res.body.error.code, 'CONFIRM_CARRY_PROVISIONING_UNAVAILABLE')
-    assert.deepEqual(res.body.error.details.requiredMethods, ['findSheetOwnerProjectId'])
+    assert.deepEqual(res.body.error.details.requiredMethods, ['isSheetOwnedByProject'])
     assert.equal(env.records.patchCalls.length, 0)
   })
 

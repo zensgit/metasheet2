@@ -86,7 +86,7 @@ function assertKnownFieldIds(projectId, objectId, keys) {
 // with any other projectId misses, mirroring the real provisioning scope). `missing` marks objectIds
 // that are not provisioned even under the staging project.
 function makeFakeProvisioning({ sheetIdByObjectId, stagingProjectId, missing = new Set(), sheetOwnerBySheetId = null } = {}) {
-  const calls = { findObjectSheet: [], resolveFieldIds: [], findSheetOwnerProjectId: [], getObjectSheetId: [] }
+  const calls = { findObjectSheet: [], resolveFieldIds: [], isSheetOwnedByProject: [], getObjectSheetId: [] }
   return {
     calls,
     async findObjectSheet({ projectId, objectId } = {}) {
@@ -100,21 +100,22 @@ function makeFakeProvisioning({ sheetIdByObjectId, stagingProjectId, missing = n
       calls.resolveFieldIds.push({ projectId, objectId, fieldIds })
       return resolveFieldIdsFor(projectId, objectId, fieldIds)
     },
-    // WHICH PROJECT OWNS THIS SHEET — the host port backed by `plugin_multitable_object_registry`
-    // (sheet_id -> project_id), the one place a sheet's project is actually recorded.
+    // IS THIS SHEET OWNED BY THIS PROJECT — the host port backed by
+    // `plugin_multitable_object_registry` (sheet_id -> project_id), the one place a sheet's project
+    // is actually recorded. A BOOLEAN, never the owner: returning the owner would hand one tenant's
+    // caller another tenant's project id (see the type's doc).
     //
-    // The default models the ordinary single-tenant deployment: every sheet this fake knows about was
-    // provisioned by THIS staging project, and anything else is unregistered (null). A suite that
-    // needs two tenants overrides `sheetOwnerBySheetId` — the shape the wall is really decided by, and
-    // the shape a single-project fake cannot express.
-    async findSheetOwnerProjectId({ sheetId } = {}) {
-      calls.findSheetOwnerProjectId.push({ sheetId })
+    // The default models the ordinary single-tenant deployment: every sheet this fake knows about
+    // was provisioned by THIS staging project. A suite that needs two tenants overrides
+    // `sheetOwnerBySheetId` — the shape the wall is really decided by, and the shape a
+    // single-project fake cannot express.
+    async isSheetOwnedByProject(sheetId, projectId) {
+      calls.isSheetOwnedByProject.push({ sheetId, projectId })
       if (sheetOwnerBySheetId) {
         return Object.prototype.hasOwnProperty.call(sheetOwnerBySheetId, sheetId)
-          ? sheetOwnerBySheetId[sheetId]
-          : null
+          && sheetOwnerBySheetId[sheetId] === projectId
       }
-      return Object.values(sheetIdByObjectId).includes(sheetId) ? stagingProjectId : null
+      return Object.values(sheetIdByObjectId).includes(sheetId) && projectId === stagingProjectId
     },
     // The platform's own pure derivation (provisioning.ts getObjectSheetId).
     getObjectSheetId(projectId, objectId) {

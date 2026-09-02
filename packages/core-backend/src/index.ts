@@ -104,7 +104,7 @@ import {
   assertPluginOwnsObject,
   assertPluginOwnsSheet,
   claimPluginObjectScope,
-  findSheetOwnerProjectId,
+  isSheetOwnedByProject,
   createPluginScopedMultitableApi,
   MultitableObjectScopeError,
   MultitableSheetScopeError,
@@ -743,10 +743,12 @@ export class MetaSheetServer {
         provisioning: {
           getObjectSheetId: (projectId, objectId) => getProvisionedObjectSheetId(projectId, objectId),
           getFieldId: (projectId, objectId, fieldId) => getProvisionedObjectFieldId(projectId, objectId, fieldId),
-          // WHICH PROJECT OWNS THIS SHEET. Backed by `plugin_multitable_object_registry`, the one
-          // place a sheet's project is actually recorded — `meta_sheets` has no project column, and
-          // the derived id is one-way and is not an invariant any consumer maintains. Read-only.
-          findSheetOwnerProjectId: async ({ sheetId }) => {
+          // IS THIS SHEET OWNED BY THIS PROJECT. Backed by `plugin_multitable_object_registry`,
+          // the one place a sheet's project is actually recorded — `meta_sheets` has no project
+          // column, and the derived id is one-way and is not an invariant any consumer maintains.
+          // A boolean by design: see the type's doc for why returning the owner would leak across
+          // tenants of the same plugin. Read-only.
+          isSheetOwnedByProject: async (sheetId, projectId) => {
             const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
               const result = await poolManager.get().query(sql, params)
               return {
@@ -758,7 +760,7 @@ export class MetaSheetServer {
                   : undefined,
               }
             }
-            return findSheetOwnerProjectId(txQuery, sheetId)
+            return isSheetOwnedByProject(txQuery, sheetId, projectId)
           },
           findObjectSheet: async ({ projectId, objectId }) => {
             const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {

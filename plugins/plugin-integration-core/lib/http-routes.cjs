@@ -735,9 +735,17 @@ function sendError(res, error) {
 // only inside its derived id, which is one-way and — as above — is not an invariant. The one place
 // ownership is RECORDED is `plugin_multitable_object_registry` (sheet_id -> project_id), written by
 // plugin-scoped `provisioning.ensureObject`. So the wall asks the registry, through the host port
-// `findSheetOwnerProjectId`, and compares the owning project with the caller's staging project.
+// `isSheetOwnedByProject`, whether the bound sheet belongs to the CALLER's staging project.
 // A hand-bound sheet that the caller's own tenant really provisioned passes — which is precisely the
 // 222 window shape — and a sheet owned by another tenant is refused however its id was derived.
+//
+// THE PORT IS A BOOLEAN, NOT AN OWNER. Asking "who owns this sheet" would hand the answer to a
+// caller who may not be entitled to it: the plugin-scope guard can only narrow by project
+// NAMESPACE, and every tenant of this plugin shares `integration-core`, so a foreign tenant's
+// project id would pass that guard on its way back out. Asking "is it THIS project's" leaks
+// nothing — the caller already knows the project it named. The cost is that "owned by someone
+// else" and "not registered at all" become one answer, which is why the derived-id fallback below
+// exists and why a false answer is never by itself the final word.
 //
 // THE REGISTRY MISS IS NOT A PASS. A sheet with no registry row is not "yours", it is
 // "unattributable" (a pre-registry legacy install, or an id nothing ever provisioned). For a WRITE
@@ -757,28 +765,30 @@ async function assertCarryTargetBelongsToTenant({ provisioning, targetProjectId,
   // REACHABLE, and deliberately so: the caller hands this the RAW host surface rather than a helper
   // that has already refused on its own terms, so a host without the ownership port fails here, with
   // the code that names what is missing, instead of behind a generic provisioning 503.
-  if (!provisioning || typeof provisioning.findSheetOwnerProjectId !== 'function') {
-    throw new HttpRouteError(501, 'CONFIRM_CARRY_PROVISIONING_UNAVAILABLE', 'the carry tenant check requires multitable.provisioning.findSheetOwnerProjectId', { requiredMethods: ['findSheetOwnerProjectId'] })
+  if (!provisioning || typeof provisioning.isSheetOwnedByProject !== 'function') {
+    throw new HttpRouteError(501, 'CONFIRM_CARRY_PROVISIONING_UNAVAILABLE', 'the carry tenant check requires multitable.provisioning.isSheetOwnedByProject', { requiredMethods: ['isSheetOwnedByProject'] })
   }
-  const ownerProjectId = await provisioning.findSheetOwnerProjectId({ sheetId: boundSheetId })
-  const owner = typeof ownerProjectId === 'string' ? ownerProjectId.trim() : ''
-  if (owner) {
-    if (owner !== targetProjectId) {
-      throw new HttpRouteError(409, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH', 'the sheet this deployment is bound to belongs to another project', { objectId })
-    }
-    return
+  if (await provisioning.isSheetOwnedByProject(boundSheetId, targetProjectId) === true) return
+  // NOT PROVEN OURS — which is "someone else's" and "not registered at all" at once, because a
+  // boolean cannot separate them. Fall back to the derived id: the only remaining evidence that this
+  // sheet was ever meant to be this project's, and the one that lets a pre-registry legacy install
+  // through.
+  const derive = typeof provisioning.getObjectSheetId === 'function' ? provisioning.getObjectSheetId : null
+  if (!derive) {
+    // Neither question can be answered on this host, so ownership is undecidable rather than denied.
+    throw new HttpRouteError(
+      409,
+      'CONFIRM_CARRY_TARGET_OWNER_UNKNOWN',
+      'the bound sheet is not registered to this project and this host exposes no id derivation to fall back on, so its owner cannot be established',
+      { objectId },
+    )
   }
-  // No registry row. Fall back to the derived id — the only remaining evidence that this sheet was
-  // ever meant to be this project's.
-  const derive = provisioning && typeof provisioning.getObjectSheetId === 'function'
-    ? provisioning.getObjectSheetId
-    : null
-  const derived = derive ? String(derive.call(provisioning, targetProjectId, objectId) || '').trim() : ''
+  const derived = String(derive.call(provisioning, targetProjectId, objectId) || '').trim()
   if (derived && derived === boundSheetId) return
   throw new HttpRouteError(
     409,
-    'CONFIRM_CARRY_TARGET_OWNER_UNKNOWN',
-    'the sheet this deployment is bound to is not registered to any project and its id is not the one derived for this caller, so its owner cannot be established',
+    'CONFIRM_CARRY_TARGET_TENANT_MISMATCH',
+    'the sheet this deployment is bound to is not registered to the project of this caller, and its id is not the one derived for that project either',
     { objectId },
   )
 }
