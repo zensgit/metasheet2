@@ -993,6 +993,16 @@ async function planCustomerPackInstall({ provisioning, projectId, pack, fieldPer
     }
   }
 
+  // THE SPLIT A DEPLOYER ACTS ON, derived ONCE. The install RETIRES the in-region orphans itself
+  // (the port's scoped reconcile); the rest it can never touch. Computing this here rather than
+  // twice inside the report is what keeps the lists and their counts from ever disagreeing.
+  const willRemoveWriteScopes = staleWriteScopes
+    ? staleWriteScopes.filter((row) => row.inReconcileRegion)
+    : null
+  const operatorMustClearWriteScopes = staleWriteScopes
+    ? staleWriteScopes.filter((row) => !row.inReconcileRegion)
+    : null
+
   const scan = await scanExistingExtensionFields({
     provisioning: api,
     projectId: resolvedProjectId,
@@ -1079,12 +1089,8 @@ async function planCustomerPackInstall({ provisioning, projectId, pack, fieldPer
         roleIds: [...writeScopePlan.region.roleIds].sort(),
       }
       : null,
-    willRemoveWriteScopes: staleWriteScopes
-      ? staleWriteScopes.filter((row) => row.inReconcileRegion)
-      : null,
-    operatorMustClearWriteScopes: staleWriteScopes
-      ? staleWriteScopes.filter((row) => !row.inReconcileRegion)
-      : null,
+    willRemoveWriteScopes,
+    operatorMustClearWriteScopes,
     // Declared roles this host does not have. NULL when the question could not be asked.
     unknownRoleIds,
     counts: {
@@ -1101,12 +1107,8 @@ async function planCustomerPackInstall({ provisioning, projectId, pack, fieldPer
       writeScopeRegionFields: writeScopePlan.region ? writeScopePlan.region.fieldIds.length : 0,
       writeScopeRegionRoles: writeScopePlan.region ? writeScopePlan.region.roleIds.length : 0,
       staleWriteScopes: staleWriteScopes ? staleWriteScopes.length : 0,
-      willRemoveWriteScopes: staleWriteScopes
-        ? staleWriteScopes.filter((row) => row.inReconcileRegion).length
-        : 0,
-      operatorMustClearWriteScopes: staleWriteScopes
-        ? staleWriteScopes.filter((row) => !row.inReconcileRegion).length
-        : 0,
+      willRemoveWriteScopes: willRemoveWriteScopes ? willRemoveWriteScopes.length : 0,
+      operatorMustClearWriteScopes: operatorMustClearWriteScopes ? operatorMustClearWriteScopes.length : 0,
     },
   }
 }
