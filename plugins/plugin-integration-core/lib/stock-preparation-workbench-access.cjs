@@ -131,6 +131,19 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     control: 'stock-prep-confirmation-export',
   }),
   Object.freeze({
+    // 一线看得见自己工厂的项目 — the operator's OWN-TENANT project directory / worklist. VALUE-BEARING
+    // (project numbers and names), so it rides OPERATE for the same reason valueEntry and export do.
+    // It is a SIBLING of the values-free GET /stock-preparation/projects, which keeps its
+    // `integration:read` gate and its values-free projection untouched and is deliberately NOT a
+    // member of this manifest — that route belongs to the platform/admin workspace, not this
+    // workbench. See stock-preparation-operator-project-directory.cjs for the whole posture.
+    capability: 'confirmationQueue.projectDirectory',
+    code: STOCK_PREP_OPERATE,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/operator/projects',
+    control: 'stock-prep-operator-project-directory',
+  }),
+  Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,
     method: 'POST',

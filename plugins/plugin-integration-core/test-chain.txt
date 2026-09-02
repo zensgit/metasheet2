@@ -206,6 +206,9 @@ node __tests__/stock-preparation-source-binding.test.cjs
 node __tests__/stock-preparation-source-binding-routes.test.cjs
 node __tests__/schema-mapping-copilot-routes.test.cjs
 node __tests__/k3-sqlserver-external-write-fence-parity.test.cjs
+node __tests__/stock-preparation-operator-project-directory.test.cjs
+node __tests__/stock-preparation-operator-value-read-scope.test.cjs
+node __tests__/stock-preparation-operator-scope-tripwires.test.cjs
 
 # --- sealed-export stage tail: S4 -> S5 -> S6-A, in stage order, must remain LAST ---
 # (pinned by __tests__/sealed-export-s4-generation-migration.test.cjs)

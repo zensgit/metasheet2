@@ -1606,6 +1606,30 @@ export interface PluginServices {
         }
     >
   }
+  /**
+   * 一线看得见自己工厂的项目 — the TENANT PRINCIPAL DIRECTORY port. Injected for
+   * `plugin-integration-core` only, and the narrowest port in this interface:
+   * the plugin submits two identity strings and receives one boolean.
+   *
+   * It exists because a plugin cannot establish tenancy from `req.user.tenantId`
+   * alone — `auth/jwt-middleware.ts` copies the `x-tenant-id` REQUEST HEADER onto
+   * that field when the verified token carried no tenant claim — and the plugin's
+   * first tenant-scoped VALUE-BEARING read must not be founded on a
+   * caller-supplied string. Core owns the membership relation, the SQL, the pool
+   * and the liveness predicate; no table name, SQL, connection or callback
+   * crosses this port, and a refusal is indistinguishable from a non-membership.
+   *
+   * Grants NOTHING on its own: it is not a permission, not an ACL check, not a
+   * workspace check (no user-to-workspace relation exists in this schema), and it
+   * neither consults nor weakens multitable's ACL domain. Fail-closed — malformed
+   * input and query errors both yield `member: false`.
+   */
+  tenantPrincipalDirectory?: {
+    verifyTenantMembership(input: {
+      userId: string
+      tenantId: string
+    }): Promise<{ member: boolean }>
+  }
   notification: NotificationService // Notification service instance
   automationRegistry: PluginAutomationRegistryService
   rbacProvisioning: PluginRbacProvisioningService

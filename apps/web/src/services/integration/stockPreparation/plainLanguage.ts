@@ -579,6 +579,119 @@ export const STOCK_PREP_READ_FAILED: StockPrepPlainText = Object.freeze({
 })
 
 // ---------------------------------------------------------------------------
+// 一线看得见自己工厂的项目 — the five HONEST empty states
+// ---------------------------------------------------------------------------
+
+/**
+ * WHY THIS TABLE EXISTS. The confirmation queue had ONE empty state — 「都清了」 — and it was shown
+ * for three completely different situations: the project had never been synced into this deployment,
+ * the operator mistyped the number, and the project was genuinely up to date. Only the third of those
+ * is good news, and telling a person "all clear" when the truth is "we have never heard of that
+ * number" is the kind of wrong answer that costs a shift.
+ *
+ * The server now returns the two facts needed to tell them apart (`directoryReady`, `ledgerReady`)
+ * plus the caller's own project directory, so each state below is DECIDABLE rather than guessed.
+ *
+ * …AND THE FIFTH, which is what happens when there is no directory to decide from at all. Three real
+ * principals never get one: a `stock-prep:read`-only queue watcher (the client correctly never asks
+ * for them), an operate-holder whose load failed, and a tenantless platform admin whom the server
+ * refuses by design. The first version of this table had no state for them, so `emptyState` returned
+ * null and the page rendered NOTHING where the pre-change page had at least said 「都清了」 — a
+ * strictly worse answer than the wrong one it replaced. `directory_unavailable` says both halves of
+ * what is actually known, and claims neither the good news nor the accusation.
+ *
+ * Keys are front-end state ids, not server enums — nothing server-side emits them — so this map is
+ * exhaustive by construction and `stockPrepDirectoryEmptyPlain` has no generic fallback to hide a
+ * missing case behind. A new state must be added here or it does not render.
+ */
+export const STOCK_PREP_DIRECTORY_EMPTY_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  /**
+   * No directory at all: not permitted, not loaded, or not loadable. Deliberately VALUES-FREE and
+   * deliberately NOT `nothing_synced` — we do not know that nothing was synced, and saying so would
+   * send the operator to an administrator who has nothing to fix.
+   */
+  directory_unavailable: Object.freeze({
+    zh: '这个项目号下当前没有待办;项目清单不可用,无法判断是否已同步。',
+    en: 'Nothing is pending for this project number; the project list is unavailable, so we cannot tell you whether it was ever synced.',
+  }),
+  /** The project table is not provisioned, or holds nothing: nothing has ever been synced here. */
+  nothing_synced: Object.freeze({
+    zh: '这台系统里还没有任何项目。',
+    en: 'No project has been brought into this system yet.',
+    zhNext: '不是您的操作有问题 —— 需要管理员先把项目同步进来,同步完这里就会列出来。',
+    enNext: 'Nothing you did is wrong — an administrator has to sync the projects in first; they will be listed here once that is done.',
+  }),
+  /** The directory has projects, but none matches the number the operator typed. */
+  project_not_found: Object.freeze({
+    zh: '这个项目号在系统里查不到。',
+    en: 'That project number is not in this system.',
+    zhNext: '可能是号码打错了,也可能这个项目还没同步进来。可以直接从下面的列表里挑,支持按号码或名称搜。',
+    enNext: 'It may be a typo, or that project may not have been synced in yet. Pick from the list below instead — you can search it by number or by name.',
+  }),
+  /** The ledger table is not provisioned: pending counts are all zero because nothing can be recorded. */
+  ledger_missing: Object.freeze({
+    zh: '记录确认结果的表还没建好,所以现在看不到待办。',
+    en: 'The table that records your decisions has not been created, so no pending work can show yet.',
+    zhNext: '项目本身能看到,但要开始处理,得先请管理员建这张表。',
+    enNext: 'You can still see the projects; an administrator has to create that table before you can start working through them.',
+  }),
+  /** The good news case — and now it only shows when it is actually true. */
+  nothing_pending: Object.freeze({
+    zh: '这个项目下没有需要您处理的事 —— 都清了。',
+    en: 'Nothing on this project needs your attention — it is all clear.',
+  }),
+})
+
+export type StockPrepDirectoryEmptyState = keyof typeof STOCK_PREP_DIRECTORY_EMPTY_PLAIN
+
+/** Fails soft to `null` like every other lookup here; the caller then renders nothing rather than a lie. */
+export function stockPrepDirectoryEmptyPlain(state: string | null | undefined): StockPrepPlainEntry | null {
+  return lookup(STOCK_PREP_DIRECTORY_EMPTY_PLAIN, state ?? null)
+}
+
+/**
+ * THE DECISION, as a pure function so it can be tested without a component and cannot drift between
+ * the copy above and the view below. Order matters and is the point:
+ *
+ *   0. directory_unavailable — checked FIRST, because every diagnosis below reads a directory. With
+ *                         no directory in hand the honest answer is "the queue is empty and we cannot
+ *                         say why", and guessing any of the other four would be a claim we cannot back.
+ *   1. nothing_synced   — the deployment really is empty; every other diagnosis is then noise, and
+ *                         the operator is not the person who can fix it either way.
+ *   2. project_not_found— only meaningful once we know the directory has SOMETHING to not-find in.
+ *   3. ledger_missing   — the project is real, but no pending work could exist to show.
+ *   4. nothing_pending  — everything is provisioned and this project really is clear.
+ *
+ * Returns null when there IS pending work, i.e. when no empty state should render at all.
+ */
+export function stockPrepDirectoryEmptyState(input: {
+  /**
+   * Whether a directory response is in hand at all. Optional and defaulting to TRUE so the four
+   * directory-derived states keep their exact previous behaviour for every existing caller; a caller
+   * that can be without a directory passes it explicitly.
+   */
+  directoryAvailable?: boolean
+  directoryReady: boolean
+  ledgerReady: boolean
+  projectCount: number
+  /** The number currently typed/selected, or '' when the operator has not chosen one. */
+  projectNo: string
+  /** Whether that number matches a project in the caller's own directory. */
+  projectKnown: boolean
+  /** Rows the confirmation queue returned for it. */
+  pendingRowCount: number
+}): StockPrepDirectoryEmptyState | null {
+  // Work waiting is never an empty state, whatever we do or do not know about the directory.
+  if (input.pendingRowCount > 0) return null
+  if (input.directoryAvailable === false) return 'directory_unavailable'
+  if (!input.directoryReady || input.projectCount === 0) return 'nothing_synced'
+  if (input.projectNo !== '' && !input.projectKnown) return 'project_not_found'
+  if (!input.ledgerReady) return 'ledger_missing'
+  if (input.pendingRowCount === 0) return 'nothing_pending'
+  return null
+}
+
+// ---------------------------------------------------------------------------
 // Operator vocabularies — the enums the queues used to render raw
 // ---------------------------------------------------------------------------
 
