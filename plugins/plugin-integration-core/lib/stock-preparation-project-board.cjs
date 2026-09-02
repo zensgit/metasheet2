@@ -113,6 +113,10 @@ const {
 } = require('./stock-preparation-operator-project-directory.cjs')
 const { optionalString } = require('./stock-preparation-common.cjs')
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('./stock-preparation-templates.cjs')
+const {
+  REQUIRED_EXPORT_FIELD_IDS,
+  __internals: EXPORT_INTERNALS,
+} = require('./stock-preparation-prep-line-export.cjs')
 
 /** The sheet the operator FILLS. Frozen here so the handle can never point at a different table. */
 const STOCK_PREPARATION_FILL_OBJECT_ID = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
@@ -135,11 +139,20 @@ const STOCK_PREPARATION_PROJECT_BOARD_KEYS = Object.freeze([
   'projectNo',
   'projectName',
   'projectStatus',
+  // ── THE ARCHIVE. Written by `mvp-persist`, which is platform-admin: on an operator's own run these
+  //    are all zero/null, and `archivedSnapshotPresent` is how a reader knows that is what they mean.
   'lastSyncRunId',
   'snapshotBatchCount',
   'openExceptionCount',
   'heldLineCount',
   'readyLineCount',
+  'archivedSnapshotPresent',
+  // ── THE PULL. Counted in the bound table-action target — the sheet `apply` writes and the export
+  //    reads. This is the operator's own evidence, and the only family that answers 「拉过了吗?」.
+  'pullTargetReady',
+  'pulledRowCount',
+  'activePulledRowCount',
+  'pulledRowCountBounded',
   'pendingDecisionCount',
   'lastExportAt',
   'fillTarget',
@@ -240,9 +253,21 @@ async function lastExportAtFor(audit, { tenantId, projectNo }) {
  * `getObjectViewId` are pure deterministic id derivations on the host side, treated as OPTIONAL
  * capabilities so a plugin newer than its host degrades to "no handle" rather than erroring.
  */
-async function resolveFillTarget(provisioning, stagingProjectId, boundTarget) {
+/**
+ * THE TENANT GATE ON THE BOUND TARGET, factored out because TWO things now ride it — the fill handle
+ * and the pull-target row counts — and they must never be able to disagree about whether the bound
+ * sheet is the caller's own.
+ *
+ * Returns `{ sheetId, objectId }` when the bound target names EXACTLY the sheet the CALLER'S OWN
+ * provisioning computes for their OWN staging project AND that sheet exists; otherwise null.
+ *
+ * `findObjectSheet` is the EXISTENCE proof and the only IO. `getObjectSheetId` is a pure
+ * deterministic id derivation on the host side, treated as an OPTIONAL capability so a plugin newer
+ * than its host degrades to "no target" rather than erroring.
+ */
+async function resolveOwnBoundSheet(provisioning, stagingProjectId, boundTarget) {
   if (!provisioning || typeof provisioning.findObjectSheet !== 'function') return null
-  if (typeof provisioning.getObjectSheetId !== 'function' || typeof provisioning.getObjectViewId !== 'function') return null
+  if (typeof provisioning.getObjectSheetId !== 'function') return null
   const boundSheetId = optionalString(boundTarget && boundTarget.sheetId)
   if (!boundSheetId) return null
   const objectId = optionalString(boundTarget && boundTarget.objectId) || STOCK_PREPARATION_FILL_OBJECT_ID
@@ -250,9 +275,103 @@ async function resolveFillTarget(provisioning, stagingProjectId, boundTarget) {
   const sheet = await provisioning.findObjectSheet({ projectId: stagingProjectId, objectId })
   const sheetId = sheet && sheet.id ? String(sheet.id) : ''
   if (!sheetId || sheetId !== boundSheetId) return null
-  const viewId = provisioning.getObjectViewId(stagingProjectId, objectId, STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID)
+  return { sheetId, objectId }
+}
+
+async function resolveFillTarget(provisioning, ownSheet, stagingProjectId) {
+  if (!ownSheet) return null
+  if (typeof provisioning.getObjectViewId !== 'function') return null
+  const viewId = provisioning.getObjectViewId(stagingProjectId, ownSheet.objectId, STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID)
   if (typeof viewId !== 'string' || viewId.length === 0) return null
-  return { sheetId, viewId }
+  return { sheetId: ownSheet.sheetId, viewId }
+}
+
+/** Paging bounds for the pull-target count. The same shape the export uses, from the same module. */
+const PULL_TARGET_PAGE_LIMIT = EXPORT_INTERNALS.READ_PAGE_LIMIT
+const PULL_TARGET_MAX_PAGES = EXPORT_INTERNALS.READ_MAX_PAGES
+
+const PULL_TARGET_NOT_READY = Object.freeze({
+  ready: false,
+  rowCount: 0,
+  activeRowCount: 0,
+  bounded: false,
+})
+
+/**
+ * HOW MANY ROWS DID THE PULL ACTUALLY PUT THERE — counted in the bound table-action target.
+ *
+ * WHY THIS EXISTS. Every other number on this board comes from the MVP snapshot tables, which are
+ * written by `mvp-persist` — platform-admin, and deliberately left there by the operator pull split.
+ * So on the flow this page exists for, a floor operator importing hundreds of rows saw a status bar
+ * that still read 「还没从 PLM 拉过这个项目」. The rows were in the sheet the whole time; nothing was
+ * reading them.
+ *
+ * IT READS THE SAME OBJECT THE EXPORT READS, through the export module's own target normalization and
+ * its own two-mode field-binding rule (an EMPTY `fieldIdMap` means logical addressing and every id
+ * passes through; a map with bindings is the explicit mode, where an absent id is a HOLE). That is
+ * the coupling that matters: if the export can read this project's rows, the board can count them,
+ * and neither can drift onto a different sheet or a different scoping column from the other.
+ *
+ * IT DEGRADES, NEVER FAILS. A target that is not bound, not the caller's own, not provisioned, or
+ * does not bind the two scope columns yields `ready:false` and the page says the table is not ready —
+ * the same posture the fill handle already takes. A status bar that 500s because a deployment has not
+ * finished configuring itself is a worse status bar.
+ *
+ * THE TENANT GATE IS THE CALLER'S ALREADY-RESOLVED OWN SHEET (see `resolveOwnBoundSheet`), never
+ * `action.target` unchecked. `action.target` is DEPLOY-TIME configuration shared by every tenant on
+ * the deployment, so its sheet id is NOT derived from the caller's tenant; handing it to a records
+ * query unchecked would be this route's one reachable way to count rows outside the caller's own
+ * staging project — and, because the count feeds the existence decision below, to answer a question
+ * about another tenant's project number. Gated, it cannot.
+ */
+async function readPullTargetRowFacts(recordsApi, ownSheet, boundTarget, projectNo) {
+  if (!ownSheet) return PULL_TARGET_NOT_READY
+  if (!recordsApi || typeof recordsApi.queryRecords !== 'function') return PULL_TARGET_NOT_READY
+
+  let bindings
+  try {
+    const target = EXPORT_INTERNALS.normalizeExportTarget(boundTarget)
+    const explicit = EXPORT_INTERNALS.fieldIdMapHasExplicitBindings(target.fieldIdMap)
+    bindings = {}
+    for (const fieldId of REQUIRED_EXPORT_FIELD_IDS) {
+      const physical = target.fieldIdMap[fieldId]
+      if (physical) bindings[fieldId] = physical
+      else if (!explicit) bindings[fieldId] = fieldId
+      // An explicit map that does not bind a SCOPE column is a broken config: the export refuses it
+      // outright (PREP_LINE_EXPORT_FIELD_IDS_UNRESOLVED) rather than scoping by guesswork, and a
+      // count that cannot scope is worth exactly as little. Not ready.
+      else return PULL_TARGET_NOT_READY
+    }
+  } catch {
+    return PULL_TARGET_NOT_READY
+  }
+
+  let rowCount = 0
+  let activeRowCount = 0
+  try {
+    for (let page = 0; page < PULL_TARGET_MAX_PAGES; page += 1) {
+      const pageRows = await recordsApi.queryRecords({
+        sheetId: ownSheet.sheetId,
+        filters: { [bindings.projectNo]: projectNo },
+        limit: PULL_TARGET_PAGE_LIMIT,
+        offset: page * PULL_TARGET_PAGE_LIMIT,
+      })
+      if (!Array.isArray(pageRows)) return PULL_TARGET_NOT_READY
+      for (const row of pageRows) {
+        rowCount += 1
+        const data = row && typeof row === 'object' && row.data && typeof row.data === 'object' ? row.data : (row || {})
+        if (data[bindings.active] !== false) activeRowCount += 1
+      }
+      if (pageRows.length < PULL_TARGET_PAGE_LIMIT) {
+        return { ready: true, rowCount, activeRowCount, bounded: false }
+      }
+    }
+  } catch {
+    return PULL_TARGET_NOT_READY
+  }
+  // Past the scan bound. The numbers so far are a floor, not a total, and `bounded` says so rather
+  // than letting a truncated count read as an exact one.
+  return { ready: true, rowCount, activeRowCount, bounded: true }
 }
 
 /**
@@ -310,35 +429,79 @@ async function readOperatorProjectBoard({
     projectNo: wanted,
   })
 
-  const match = directory.projects.find((project) => optionalString(project.projectNo) === wanted)
-  if (!match) {
+  const match = directory.projects.find((project) => optionalString(project.projectNo) === wanted) || null
+
+  // THE PULL TARGET, resolved through the caller's OWN-sheet gate and counted for this project.
+  // Both the fill handle and these counts hang off the one gate, so they cannot disagree.
+  const ownSheet = await resolveOwnBoundSheet(provisioning, targetProjectId, boundTarget)
+  const pullTarget = await readPullTargetRowFacts(recordsApi, ownSheet, boundTarget, wanted)
+
+  // ---------------------------------------------------------------------------
+  // EXISTENCE: EITHER STORE, AND WHY THAT IS STILL NOT AN ORACLE
+  // ---------------------------------------------------------------------------
+  //
+  // "Is this project one of yours?" now has two admissible answers, because the two stores are
+  // written by two different tiers and the operator can only reach one of them:
+  //
+  //   * the ARCHIVE (`match`) — the MVP project ledger under the caller's own staging project,
+  //     written by `mvp-persist`, which stayed platform-admin; and
+  //   * the PULL TARGET (`pullTarget.rowCount > 0`) — the rows `apply` wrote, which is the ONLY
+  //     store an operator's own four-step run touches.
+  //
+  // Without the second, a project a floor operator pulled themselves was NOT FOUND forever: the page
+  // built for them could not show them the work they had just done.
+  //
+  // NEITHER DISJUNCT REACHES OUTSIDE THE CALLER'S OWN TENANT. The archive is read under the staging
+  // project derived from the verified scope (the directory module refuses any other). The pull target
+  // is read ONLY when `resolveOwnBoundSheet` has proved the bound sheet is the one the CALLER'S OWN
+  // provisioning computes for their OWN staging project — a deploy-time target pointing anywhere else
+  // is never queried at all, so it can neither confirm nor deny a project number. A cross-tenant
+  // projectNo therefore still takes the identical path an unknown number takes, to the identical
+  // detail-free 404, and the suite asserts the two bodies byte-for-byte (B-02) plus the gate itself
+  // from both sides (B-11 case 4).
+  if (!match && pullTarget.rowCount === 0) {
     // Reported so the ROUTE can audit that a miss happened, then rethrown. The refusal itself stays
     // shapeless — the caller learns nothing beyond "not one of yours".
     const error = notFound()
     error.auditMode = STOCK_PREPARATION_PROJECT_BOARD_MODES[1]
     error.projectCount = directory.projectCount
+    error.pullTargetReady = pullTarget.ready
     throw error
   }
 
-  const fillTarget = await resolveFillTarget(provisioning, targetProjectId, boundTarget)
+  const fillTarget = await resolveFillTarget(provisioning, ownSheet, targetProjectId)
   const lastExportAt = await lastExportAtFor(audit, {
     tenantId: scope.tenantId,
     projectNo: wanted,
   })
 
   // BUILT KEY BY KEY. `match` is never spread — see STOCK_PREPARATION_PROJECT_BOARD_KEYS.
+  //
+  // When there is no archive row, the archive fields are null/zero and `archivedSnapshotPresent` is
+  // false — NOT because "nothing was pulled", but because nobody has archived it. Those are different
+  // facts and the projection keeps them apart; conflating them is precisely what made a successful
+  // import read as 「还没拉过」. `projectNo` is the caller's own input echoed back (it is theirs), and
+  // `projectName` stays null rather than inventing one from a sheet that does not carry it.
   const board = {
     tenantId: scope.tenantId,
-    projectId: match.projectId,
-    projectNo: match.projectNo,
-    projectName: match.projectName,
-    projectStatus: match.projectStatus,
-    lastSyncRunId: match.lastSyncRunId,
-    snapshotBatchCount: match.snapshotBatchCount,
-    openExceptionCount: match.openExceptionCount,
-    heldLineCount: match.heldLineCount,
-    readyLineCount: match.readyLineCount,
-    pendingDecisionCount: match.pendingDecisionCount,
+    projectId: match ? match.projectId : null,
+    projectNo: match ? match.projectNo : wanted,
+    projectName: match ? match.projectName : null,
+    projectStatus: match ? match.projectStatus : 'unknown',
+    lastSyncRunId: match ? match.lastSyncRunId : null,
+    snapshotBatchCount: match ? match.snapshotBatchCount : 0,
+    openExceptionCount: match ? match.openExceptionCount : 0,
+    heldLineCount: match ? match.heldLineCount : 0,
+    readyLineCount: match ? match.readyLineCount : 0,
+    archivedSnapshotPresent: match !== null,
+    pullTargetReady: pullTarget.ready,
+    pulledRowCount: pullTarget.rowCount,
+    activePulledRowCount: pullTarget.activeRowCount,
+    pulledRowCountBounded: pullTarget.bounded,
+    // The pending-decision ledger is keyed by projectNo, not by the archive's projectId, so it is
+    // answerable with or without an archive row — but `reconcile` (which fills it) also stayed
+    // platform-admin, so zero here means "nothing queued", never "nothing to queue".
+    pendingDecisionCount: match ? match.pendingDecisionCount : 0,
     lastExportAt,
     fillTarget,
     directoryReady: directory.directoryReady,
@@ -364,6 +527,8 @@ module.exports = {
   __internals: {
     lastExportAtFor,
     notFound,
+    readPullTargetRowFacts,
     resolveFillTarget,
+    resolveOwnBoundSheet,
   },
 }

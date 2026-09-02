@@ -8322,6 +8322,10 @@ function createHandlers(services, options = {}) {
               operation: 'operator_project_board',
               found: false,
               projectCount: Number.isInteger(error.projectCount) ? error.projectCount : 0,
+              // Which of the two stores could even have answered. A miss on a deployment whose pull
+              // target is not ready is a CONFIGURATION fact, not a "no such project" fact, and the
+              // trail is the only place that distinction survives.
+              pullTargetReady: error.pullTargetReady === true,
               tenantClaimVerified: scope.tenantClaimVerified,
             },
           })
@@ -8343,6 +8347,13 @@ function createHandlers(services, options = {}) {
           projectCount: outcome.projectCount,
           pendingDecisionCount: outcome.board.pendingDecisionCount,
           fillTargetPresent: outcome.board.fillTarget !== null,
+          // WHICH STORE ANSWERED. An operator's own pull produces a board with no archive row at all,
+          // and that is the normal shape for this tier rather than a fault — but it is also exactly
+          // the shape an unfinished mvp-persist leaves behind, so the trail records both booleans
+          // and the row count rather than leaving them to be inferred from silence.
+          archivedSnapshotPresent: outcome.board.archivedSnapshotPresent,
+          pullTargetReady: outcome.board.pullTargetReady,
+          pulledRowCount: outcome.board.pulledRowCount,
           tenantClaimVerified: scope.tenantClaimVerified,
         },
       })

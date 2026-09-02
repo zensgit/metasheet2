@@ -63,6 +63,7 @@ const { STOCK_PREP_AUDIT_ACTIONS } = require(path.join(LIB, 'stock-preparation-a
 const {
   makeFakeProvisioning,
   makeStrictRecordsApi,
+  physicalFieldId,
   physicalRow,
 } = require(path.join(__dirname, 'fixtures', 'stock-preparation-multitable-fakes.cjs'))
 
@@ -85,6 +86,19 @@ const LEDGER_SHEET_A = 'sheet_ledger_a'
 const BATCH_SHEET_A = 'sheet_batch_a'
 const EXCEPTION_SHEET_A = 'sheet_exception_a'
 const PREP_LINE_SHEET_A = 'sheet_prep_line_a'
+// The BOUND table-action target's sheet under tenant A's own staging project — the sheet `apply`
+// writes and the export reads. Its id must be the one the CALLER'S OWN provisioning computes, which
+// is the tenant gate both the fill handle and the pull-target row facts ride.
+const MAIN_SHEET_A = `sheet__${STAGING_A}__${MAIN_OBJECT_ID}`
+/**
+ * The bound target's own logical -> physical field map, exactly as a deployment configures it. Only
+ * the two SCOPE columns matter to the board (`projectNo` to filter, `active` to split), which is the
+ * same pair the export declares as REQUIRED_EXPORT_FIELD_IDS — the board deliberately needs no more.
+ */
+const MAIN_FIELD_ID_MAP = Object.freeze({
+  projectNo: physicalFieldId(STAGING_A, MAIN_OBJECT_ID, 'projectNo'),
+  active: physicalFieldId(STAGING_A, MAIN_OBJECT_ID, 'active'),
+})
 
 
 const PROJECT_A_NO = '230920006'
@@ -174,6 +188,17 @@ function mount({
   // How many OTHER projects tenant A's directory holds besides the one under test. The board is
   // about ONE project, so its cost must not move when this does — see B-08.
   extraProjects = 0,
+  // THE ROWS THE PULL ITSELF WROTE, in the bound table-action target — the sheet `apply` writes and
+  // the export reads. `{ projectNo, active }` per row. This is the operator's own evidence and the
+  // ONLY store their pull touches: mvp-persist, which fills the archive below, stayed platform-admin.
+  mainTableRows = [
+    { projectNo: PROJECT_A_NO },
+    { projectNo: PROJECT_A_NO },
+    { projectNo: PROJECT_A_NO, active: false },
+  ],
+  // THE ADMINISTRATOR'S ARCHIVE. `false` models the flow this page exists for: a floor operator ran
+  // the pull themselves, so no MVP snapshot row exists for their project at all.
+  archivePersisted = true,
 } = {}) {
   const routes = new Map()
 
@@ -200,28 +225,45 @@ function mount({
       [BATCH_SHEET_A]: BATCH_OBJECT_ID,
       [EXCEPTION_SHEET_A]: EXCEPTION_OBJECT_ID,
       [PREP_LINE_SHEET_A]: PREP_LINE_OBJECT_ID,
+      [MAIN_SHEET_A]: MAIN_OBJECT_ID,
     },
     rowsBySheet: {
+      // WHAT THE PULL ITSELF WROTE. The bound table-action target — the sheet `apply` writes and the
+      // export reads. This is the only store an operator's own four-step run touches.
+      [MAIN_SHEET_A]: mainTableRows.map((row, index) => mvpRow(
+        STAGING_A,
+        MAIN_OBJECT_ID,
+        MAIN_SHEET_A,
+        `rec_main_a${index}`,
+        {
+          projectNo: row.projectNo,
+          idempotencyKey: `idem_${index}`,
+          componentSourceId: `comp_${index}`,
+          path: `/${index}`,
+          totalQuantity: 1,
+          active: row.active !== false,
+        },
+      )),
       // THE ADMINISTRATOR'S ARCHIVED SNAPSHOT for this project — one persisted batch, one open
       // exception, two prep lines (one held, one ready). These come from the mvp-persist path, which
       // is platform-admin, so on an operator's own pull they stay EMPTY; the fixture keeps them
       // populated precisely so the two number families can be told apart.
-      [BATCH_SHEET_A]: [
+      [BATCH_SHEET_A]: archivePersisted ? [
         mvpRow(STAGING_A, BATCH_OBJECT_ID, BATCH_SHEET_A, 'rec_batch_a1', {
           snapshotBatchId: 'batch_a1',
           projectId: PROJECT_A_ID,
           snapshotStatus: 'active',
         }),
-      ],
-      [EXCEPTION_SHEET_A]: [
+      ] : [],
+      [EXCEPTION_SHEET_A]: archivePersisted ? [
         mvpRow(STAGING_A, EXCEPTION_OBJECT_ID, EXCEPTION_SHEET_A, 'rec_exc_a1', {
           exceptionId: 'exc_a1',
           projectId: PROJECT_A_ID,
           exceptionType: 'missing_mapping',
           status: 'open',
         }),
-      ],
-      [PREP_LINE_SHEET_A]: [
+      ] : [],
+      [PREP_LINE_SHEET_A]: archivePersisted ? [
         mvpRow(STAGING_A, PREP_LINE_OBJECT_ID, PREP_LINE_SHEET_A, 'rec_line_a1', {
           stockPrepLineId: 'line_a1',
           projectId: PROJECT_A_ID,
@@ -232,15 +274,15 @@ function mount({
           projectId: PROJECT_A_ID,
           prepStatus: 'ready',
         }),
-      ],
+      ] : [],
       [PROJECT_SHEET_A]: [
-        projectRow(STAGING_A, PROJECT_SHEET_A, 'rec_a1', {
+        ...(archivePersisted ? [projectRow(STAGING_A, PROJECT_SHEET_A, 'rec_a1', {
           projectId: PROJECT_A_ID,
           sourceProjectNo: PROJECT_A_NO,
           projectName: PROJECT_A_NAME,
           projectStatus: 'active',
           lastSyncRunId: 'run_a1',
-        }),
+        })] : []),
         ...Array.from({ length: extraProjects }, (_unused, index) => projectRow(
           STAGING_A,
           PROJECT_SHEET_A,
@@ -355,7 +397,15 @@ function mount({
             actionId: 'plm.stock-preparation.pull-bom.v1',
             source: { kind: 'data-source:sql-readonly', externalSystemId: 'ext_demo' },
             target: boundTarget === undefined
-              ? { sheetId: ownSheetIdFor(STAGING_A, MAIN_OBJECT_ID), objectId: MAIN_OBJECT_ID }
+              ? {
+                  sheetId: ownSheetIdFor(STAGING_A, MAIN_OBJECT_ID),
+                  objectId: MAIN_OBJECT_ID,
+                  // THE EXPLICIT MODE, which is what a real deployment configures: logical id ->
+                  // the PHYSICAL fieldId provisioning materialized. The strict records fake rejects
+                  // a logical key exactly as the real service does, so a target without this map is
+                  // a target the export cannot read either — see the fixture's own header.
+                  fieldIdMap: MAIN_FIELD_ID_MAP,
+                }
               : boundTarget,
           }],
         }
@@ -713,6 +763,115 @@ async function anAuditStoreWithoutListStillAnswersTheBoard() {
 }
 
 // ---------------------------------------------------------------------------
+// B-11 — THE BOARD REFLECTS THE PULL THE OPERATOR ACTUALLY RAN
+// ---------------------------------------------------------------------------
+//
+// THE BUG THIS PINS. Every number on the first cut's status bar came from the MVP SNAPSHOT tables,
+// which are written by `mvp-persist` — platform-admin, and deliberately left there. So on the flow
+// this whole page exists for, where a floor operator runs the pull themselves, a successful import
+// of hundreds of rows left the bar reading 「还没拉过」 / 「还没从 PLM 拉过这个项目」 and offered no
+// way to tell that from a project nobody had touched. The operator's own evidence — the rows in the
+// sheet `apply` just wrote — was never read.
+//
+// So the board now carries TWO families of numbers and never lets one stand in for the other:
+//   * the PULL TARGET facts (pulledRowCount / activePulledRowCount / pullTargetReady), read from the
+//     bound `action.target` — the same object the export reads through, so if the export can read
+//     it, the board can count it; and
+//   * the ARCHIVE (snapshotBatchCount / heldLineCount / readyLineCount / lastSyncRunId), unchanged,
+//     and now flagged by `archivedSnapshotPresent` so the front end can say whose numbers they are.
+async function theBoardReflectsThePullRatherThanTheAdminsArchive() {
+  // 1. THE ORDINARY CASE: both families present, and they are DIFFERENT numbers — which is the whole
+  //    point. The archive says 2 lines (1 held, 1 ready); the pull target holds 3 rows, 2 active.
+  {
+    const res = await callBoard(mount().routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200)
+    const board = res.body.data
+    assert.equal(board.pullTargetReady, true, 'B-11: the bound target is the caller\'s own and readable')
+    assert.equal(board.pulledRowCount, 3, 'B-11: every row the pull wrote for this project is counted')
+    assert.equal(board.activePulledRowCount, 2, 'B-11: and the active ones are counted apart')
+    assert.equal(board.pulledRowCountBounded, false)
+    assert.equal(board.archivedSnapshotPresent, true, 'B-11: the administrator\'s archive is present here')
+    assert.equal(board.heldLineCount, 1, 'B-11: the archive numbers are unchanged and still reported')
+    assert.equal(board.readyLineCount, 1)
+  }
+
+  // 2. THE OPERATOR'S OWN RUN — the flow the page is for. `apply` wrote the rows; `mvp-persist` was
+  //    refused (platform-admin, as ruled), so NOTHING is in the archive. The board must still answer
+  //    and must still show the rows: this is the assertion the first cut could not pass.
+  {
+    const harness = mount({ archivePersisted: false })
+    const res = await callBoard(harness.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200, `B-11: an operator's own pull must produce a board, got ${JSON.stringify(res.body)}`)
+    const board = res.body.data
+    assert.equal(board.projectNo, PROJECT_A_NO)
+    assert.ok(board.pulledRowCount > 0, 'B-11: the row count the operator just created is > 0')
+    assert.equal(board.activePulledRowCount, 2)
+    assert.equal(board.pullTargetReady, true)
+    // And the archive is honestly reported as ABSENT rather than as zeros that read like "nothing
+    // was ever pulled" — the exact conflation that produced 「还没从 PLM 拉过这个项目」.
+    assert.equal(board.archivedSnapshotPresent, false, 'B-11: the archive is absent, and says so')
+    assert.equal(board.snapshotBatchCount, 0)
+    assert.equal(board.lastSyncRunId, null)
+    assert.equal(board.projectId, null, 'B-11: there is no archive row, so there is no archive handle')
+  }
+
+  // 3. NEITHER FAMILY HAS ANYTHING -> the SAME shapeless 404 as always. "Not pulled and not archived"
+  //    and "not yours" must stay one answer.
+  {
+    const harness = mount({ archivePersisted: false, mainTableRows: [] })
+    const res = await callBoard(harness.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 404, 'B-11: no rows anywhere is still NOT FOUND')
+    assert.equal(errorOf(res).code, 'STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND')
+  }
+
+  // 4. THE TENANT GATE ON THE PULL-TARGET READ — the half that keeps (2) from being an existence
+  //    oracle. `action.target` is DEPLOY-TIME config, so its sheet id is not derived from the
+  //    caller's tenant; the row facts are read ONLY when that sheet is the one the CALLER'S OWN
+  //    provisioning computes for their OWN staging project, which is the identical gate the fill
+  //    handle rides. A bound target outside the caller's own staging project is not read at all, so
+  //    it can neither answer nor deny existence.
+  {
+    const foreign = { sheetId: ownSheetIdFor(STAGING_B, MAIN_OBJECT_ID), objectId: MAIN_OBJECT_ID }
+    const harness = mount({ archivePersisted: false, boundTarget: foreign })
+    const res = await callBoard(harness.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 404, 'B-11: a bound target outside the caller\'s own staging project proves nothing')
+    assert.equal(errorOf(res).code, 'STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND')
+  }
+  // Same gate, viewed from the archive side: the project IS in the archive, so the board answers —
+  // but the pull-target facts degrade to "not ready" rather than reading a sheet that is not ours.
+  {
+    const foreign = { sheetId: ownSheetIdFor(STAGING_B, MAIN_OBJECT_ID), objectId: MAIN_OBJECT_ID }
+    const res = await callBoard(mount({ boundTarget: foreign }).routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.pullTargetReady, false, 'B-11: a foreign bound target is never read')
+    assert.equal(res.body.data.pulledRowCount, 0)
+    assert.equal(res.body.data.fillTarget, null, 'B-11: and the fill handle agrees — one gate, two consumers')
+  }
+  // Nothing bound at all is a deployment state, not a failure.
+  {
+    const res = await callBoard(mount({ actionConfigured: false }).routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.pullTargetReady, false)
+  }
+  // The sheet is bound and ours, but was never provisioned -> not ready, still not an error.
+  {
+    const res = await callBoard(mount({ mainTableProvisioned: false }).routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.pullTargetReady, false)
+  }
+
+  // 5. THE AUDIT STAYS VALUES-FREE over the new branch too — booleans and counts, no projectNo.
+  {
+    const harness = mount({ archivePersisted: false })
+    await callBoard(harness.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    const entry = harness.auditAppends[0]
+    assert.ok(!JSON.stringify(entry).includes(PROJECT_A_NO), 'B-11: still no projectNo on the trail')
+    assert.equal(entry.detail.archivedSnapshotPresent, false)
+    assert.equal(entry.detail.pullTargetReady, true)
+  }
+}
+
+// ---------------------------------------------------------------------------
 // B-08 — ONE PROJECT'S BOARD COSTS ONE PROJECT'S QUERIES
 // ---------------------------------------------------------------------------
 //
@@ -824,6 +983,7 @@ async function main() {
   await theBoardAnswersWithHandlesCountsAndTheProjectsOwnNameOnly()
   await theAuditRowIsValuesFreeAndPrecedesTheValues()
   await theDeepLinkHandleAppearsOnlyWhenTheFillTableExists()
+  await theBoardReflectsThePullRatherThanTheAdminsArchive()
   await oneProjectsBoardCostsOneProjectsQueries()
   await theModuleRefusesToProjectAValueWithoutAScope()
   theFillViewIdMirrorsTheHostsDefaultViewId()
