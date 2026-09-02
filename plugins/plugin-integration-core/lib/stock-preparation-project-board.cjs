@@ -254,23 +254,64 @@ async function lastExportAtFor(audit, { tenantId, projectNo }) {
  * capabilities so a plugin newer than its host degrades to "no handle" rather than erroring.
  */
 /**
- * THE TENANT GATE ON THE BOUND TARGET, factored out because TWO things now ride it — the fill handle
- * and the pull-target row counts — and they must never be able to disagree about whether the bound
- * sheet is the caller's own.
+ * THE TENANT GATE ON THE BOUND TARGET, factored out because TWO things ride it — the fill handle and
+ * the pull-target row counts — and they must never be able to disagree about whether the bound sheet
+ * is the caller's own.
  *
- * Returns `{ sheetId, objectId }` when the bound target names EXACTLY the sheet the CALLER'S OWN
- * provisioning computes for their OWN staging project AND that sheet exists; otherwise null.
+ * Returns `{ sheetId, objectId }` when the bound sheet is PROVED to belong to the caller's own
+ * staging project and to exist; otherwise null.
  *
- * `findObjectSheet` is the EXISTENCE proof and the only IO. `getObjectSheetId` is a pure
- * deterministic id derivation on the host side, treated as an OPTIONAL capability so a plugin newer
- * than its host degrades to "no target" rather than erroring.
+ * ---------------------------------------------------------------------------
+ * WHY THERE ARE TWO PROOFS, AND WHY THE FIRST ONE ALONE WAS WRONG
+ * ---------------------------------------------------------------------------
+ *
+ * The first cut proved ownership by recomputing `getObjectSheetId(ourStagingProject, boundObjectId)`
+ * and comparing it to the bound sheet id. That is sound as far as it goes — the hash is over
+ * (projectId, objectId), so a match embeds our own project id and cannot be forged by a config that
+ * names someone else's sheet. But it is a BINDING-SHAPE test, and it answers "no" to sheets we
+ * genuinely own whenever the binding names a different objectId than the one the sheet was created
+ * under. That is not a hypothetical: the sanctioned 222 deploy-window step (D1=B) rebinds the action
+ * to a SANDBOX objectId while KEEPING the sheet the deployment already had, so on exactly the
+ * configuration the runbook tells operators to use, the fill handle would never appear and the row
+ * counts would report "table not ready" over a table full of their own rows. It also cannot speak at
+ * all about a sheet an administrator bound by hand.
+ *
+ * So ownership is proved from the SHEET as well. `findSheetOwnerProjectId` is the host's
+ * provisioning-registry lookup — `plugin_multitable_object_registry` records which project owns each
+ * sheet at provisioning time — narrowed by plugin-scope to this plugin's own namespace, so a sheet
+ * owned elsewhere arrives here as `null` and never as another tenant's project id.
+ *
+ * The two are a DISJUNCTION of independently sufficient proofs, not a replacement: either the
+ * registry says the sheet is ours, or its id hashes from our own project. Both are sound, so their
+ * disjunction is sound, and a host too old to expose the port keeps exactly the behaviour it had.
+ *
+ * `findObjectSheet` remains the EXISTENCE proof — but it is only usable on the hash path, where we
+ * know the (project, objectId) the sheet was created under. On the registry path the registry row IS
+ * the existence evidence: a sheet id is in it because provisioning put it there.
  */
 async function resolveOwnBoundSheet(provisioning, stagingProjectId, boundTarget) {
-  if (!provisioning || typeof provisioning.findObjectSheet !== 'function') return null
-  if (typeof provisioning.getObjectSheetId !== 'function') return null
+  if (!provisioning) return null
   const boundSheetId = optionalString(boundTarget && boundTarget.sheetId)
   if (!boundSheetId) return null
   const objectId = optionalString(boundTarget && boundTarget.objectId) || STOCK_PREPARATION_FILL_OBJECT_ID
+
+  // PROOF 1 — THE REGISTRY. Optional capability: a plugin newer than its host simply falls through.
+  if (typeof provisioning.findSheetOwnerProjectId === 'function') {
+    let owner = null
+    try {
+      owner = await provisioning.findSheetOwnerProjectId(boundSheetId)
+    } catch {
+      owner = null
+    }
+    // Equality with the caller's OWN staging project, which was derived from the verified scope.
+    // Anything else — another tenant's project, another plugin's, or an unclaimed sheet — is not a
+    // proof and falls through to the second one rather than being treated as a refusal.
+    if (optionalString(owner) === stagingProjectId) return { sheetId: boundSheetId, objectId }
+  }
+
+  // PROOF 2 — THE DETERMINISTIC ID, plus an existence check. Unchanged from the first cut.
+  if (typeof provisioning.getObjectSheetId !== 'function') return null
+  if (typeof provisioning.findObjectSheet !== 'function') return null
   if (provisioning.getObjectSheetId(stagingProjectId, objectId) !== boundSheetId) return null
   const sheet = await provisioning.findObjectSheet({ projectId: stagingProjectId, objectId })
   const sheetId = sheet && sheet.id ? String(sheet.id) : ''

@@ -149,6 +149,37 @@ export async function claimPluginObjectScope(
   }
 }
 
+/**
+ * WHICH PROJECT OWNS THIS SHEET — the registry answer, not a guess about its id.
+ *
+ * WHY A LOOKUP AND NOT A HASH COMPARISON. A sheet id is `stableMetaId('sheet', projectId, objectId)`,
+ * so `getObjectSheetId(myProject, someObjectId) === thatSheetId` proves ownership only when you
+ * already know the objectId the sheet was created under. That is a BINDING-SHAPE test, and it fails
+ * on configurations that are entirely legitimate — a deployment that rebinds a table action to a
+ * SANDBOX objectId while keeping the sheet it already had (the sanctioned 222 deploy-window step)
+ * owns that sheet perfectly well, but no hash of (its project, the new objectId) equals it.
+ *
+ * `plugin_multitable_object_registry` records `(sheet_id, project_id, object_id, plugin_name)` at
+ * provisioning time, so it answers the ownership question directly and stays true however the
+ * binding is later reshaped. Returns null for a sheet nobody has claimed.
+ */
+export async function findSheetOwnerProjectId(
+  query: MultitableScopeQueryFn,
+  sheetId: string,
+): Promise<string | null> {
+  if (typeof sheetId !== 'string' || sheetId.trim().length === 0) return null
+  const result = await query(
+    `SELECT project_id
+     FROM plugin_multitable_object_registry
+     WHERE sheet_id = $1`,
+    [sheetId],
+  )
+  const row = (result.rows as Array<{ project_id?: unknown }>)[0]
+  if (!row) return null
+  const projectId = typeof row.project_id === 'string' ? row.project_id.trim() : ''
+  return projectId.length > 0 ? projectId : null
+}
+
 export async function assertPluginOwnsSheet(
   query: MultitableScopeQueryFn,
   input: AssertPluginSheetScopeInput,
@@ -220,6 +251,29 @@ export function createPluginScopedMultitableApi(
       findObjectSheet: async (input) => {
         assertProjectIdAllowedForPlugin(pluginName, input.projectId)
         return multitable.provisioning.findObjectSheet(input)
+      },
+      /**
+       * The ownership lookup, scoped. Its ARGUMENT is a sheet id rather than a project id, so the
+       * namespace guard applies to the ANSWER: a sheet owned by a project outside this plugin's
+       * namespace must not have that project id handed back, because the id is another tenant's (or
+       * another plugin's) and the asker has no business learning it.
+       *
+       * IT RETURNS NULL RATHER THAN THROWING for that case, unlike its siblings, and the difference
+       * is deliberate. The siblings are refusing an argument the CALLER supplied — a programming
+       * error worth an exception. Here the caller supplied a sheet id and asked "is this one mine?";
+       * "no, it is somebody else's" and "no such sheet" are the same answer to that question and
+       * must stay indistinguishable, or the port becomes an ownership oracle over sheet ids.
+       */
+      findSheetOwnerProjectId: async (sheetId) => {
+        if (typeof multitable.provisioning.findSheetOwnerProjectId !== 'function') return null
+        const owner = await multitable.provisioning.findSheetOwnerProjectId(sheetId)
+        if (typeof owner !== 'string' || owner.trim().length === 0) return null
+        try {
+          assertProjectIdAllowedForPlugin(pluginName, owner)
+        } catch {
+          return null
+        }
+        return owner
       },
       resolveFieldIds: async (input) => {
         assertProjectIdAllowedForPlugin(pluginName, input.projectId)
