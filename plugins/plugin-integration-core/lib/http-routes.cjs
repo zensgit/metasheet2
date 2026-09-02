@@ -1096,6 +1096,43 @@ function scopedAuthenticatedWriteInput(req, input = {}) {
   }
 }
 
+// THE VERIFIED-CLAIM TENANT, for a write that can DELETE. Stricter than
+// `resolveAuthenticatedWriteTenantId` above in the one way that matters here.
+//
+// `auth/jwt-middleware.ts` copies the `x-tenant-id` REQUEST HEADER onto `user.tenantId` when the
+// verified token carries no tenant claim, so `resolveAuthUserTenantId` — which reads `user.tenantId`
+// — can be steered by a header for a claimless platform admin. That is survivable for an additive
+// write (the worst case is a column created in the wrong tenant's staging project, visible and
+// removable). It is NOT survivable for the customer-pack install, which now issues a bounded DELETE
+// against `field_permissions`: the sheet that delete is aimed at is a pure function of the tenant,
+// so a header would be choosing whose enforced write denials get retired.
+//
+// This resolves from `req.authenticatedTenantId`, which the middleware sets ONLY from the verified
+// token, and refuses everything else — a claimless principal (403, not the header's tenant), and any
+// carried tenant that contradicts the claim (403). Same posture as the operator value scope
+// (#5445) for reads, applied to the one write route with a delete behind it.
+function resolveVerifiedClaimTenantId(req, input = {}) {
+  const claimed = typeof req.authenticatedTenantId === 'string' ? req.authenticatedTenantId.trim() : ''
+  if (!claimed) {
+    throw new HttpRouteError(
+      403,
+      'TENANT_CLAIM_REQUIRED',
+      'this route requires a tenant claim in the verified token; a request header cannot supply one',
+    )
+  }
+  const user = getUser(req)
+  const carried = typeof (user && user.tenantId) === 'string' ? user.tenantId.trim() : ''
+  if (carried && carried !== claimed) {
+    throw new HttpRouteError(403, 'TENANT_MISMATCH', 'tenant scope mismatch')
+  }
+  for (const explicit of collectExplicitTenantIds(req, input)) {
+    if (explicit !== claimed) {
+      throw new HttpRouteError(403, 'TENANT_MISMATCH', 'tenant scope mismatch')
+    }
+  }
+  return claimed
+}
+
 function resolveWorkspaceId(req, input = {}) {
   return firstString(input.workspaceId, req.query && req.query.workspaceId, req.params && req.params.workspaceId)
 }
@@ -6224,8 +6261,11 @@ function requireStockPreparationAudit() {
     // CUSTOMER PACK — the executable surface. Four routes, one authorization posture:
     //   admin gate (requireAccess 'admin', mirroring plugin-after-sales' hasInstallAdminAccess)
     // + SERVER-HELD pack allowlist (mirroring ALLOWED_TEMPLATE_IDS; the pack is never in the body).
-    // The tenant project is auth-derived (resolveAuthUserTenantId -> staging project id), so a
-    // request cannot steer the install at another tenant's sheet.
+    // The tenant project is derived from the VERIFIED TOKEN CLAIM
+    // (resolveVerifiedClaimTenantId -> staging project id) on the dry-run and the install, so
+    // neither a request field nor an `x-tenant-id` header can steer them at another tenant's sheet.
+    // The two read routes above keep resolveTenantId: they are values-free and cross-tenant reads
+    // are a deliberate platform-admin capability there.
     // ---------------------------------------------------------------------------------------
 
     // What this server is allowed to install. Values-free evidence summaries (ids, types, ownership
@@ -6279,7 +6319,9 @@ function requireStockPreparationAudit() {
       requireAccess(req, 'admin')
       normalizeCustomerPackBody(requestBody(req))
       const pack = customerPackCatalog.get(firstString(requestParams(req).packId))
-      const tenantId = resolveAuthUserTenantId(req)
+      // The VERIFIED CLAIM, never `user.tenantId` — the dry-run must rehearse the same sheet the
+      // install will act on, and the install's tenant may not be header-steerable.
+      const tenantId = resolveVerifiedClaimTenantId(req, {})
       const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
       const plan = await planCustomerPackInstall({
         provisioning: getCustomerPackProvisioning(),
@@ -6301,9 +6343,11 @@ function requireStockPreparationAudit() {
       const body = normalizeCustomerPackBody(requestBody(req), VALID_CUSTOMER_PACK_INSTALL_BODY_KEYS)
       const pack = customerPackCatalog.get(firstString(requestParams(req).packId))
       const store = requireStockPreparationPackInstalls()
-      // Auth-derived, never request-supplied: a request tenantId/projectId would be a steering
-      // vector on a WRITE route (same discipline as the target-ensure route above).
-      const tenantId = resolveAuthUserTenantId(req)
+      // THE VERIFIED TOKEN CLAIM, never `user.tenantId`. This route issues a bounded DELETE against
+      // `field_permissions`, and the sheet it is aimed at is a pure function of the tenant — so a
+      // claimless admin plus an `x-tenant-id` header must not be able to choose whose enforced write
+      // denials get retired. Refuses a claimless principal (403) rather than falling back to it.
+      const tenantId = resolveVerifiedClaimTenantId(req, {})
       const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
       const result = await installCustomerPack({
         provisioning: getCustomerPackProvisioning(),
@@ -9021,6 +9065,7 @@ module.exports = {
     requireAccess,
     resolveTenantId,
     resolveAuthUserTenantId,
+    resolveVerifiedClaimTenantId,
     resolveAuthenticatedWriteTenantId,
     scopedAuthenticatedWriteInput,
     scopedInput,

@@ -1203,11 +1203,16 @@ export interface PluginServices {
    * — the fix for the one silent failure upsert-only cannot survive: a pack revision that MOVES a
    * column's owner leaves the old denial standing next to the new one, and the write gate ORs
    * `read_only` across a user's rows, so the column becomes unwritable by EVERY declared role while
-   * the install reports success. The delete is bounded four ways — this port's `created_by` only
-   * (never an operator's row), `read_only = true` only, inside the declared region only (which the
-   * implementation REQUIRES to contain every entry being written), and never a row the same call
-   * just wrote — so it can neither reach another consumer's rows nor become "clear this sheet".
-   * Removals are returned, never silent.
+   * the install reports success. The delete is bounded FIVE ways — the target sheet only (the only
+   * project/tenant bound this table can carry); this PACK's `created_by` marker or the pack-less
+   * legacy one only (never an operator's row, never a sibling pack's); `read_only = true` only;
+   * inside the declared region only (which the implementation REQUIRES to contain every entry being
+   * written); and never a row the same call just wrote — so it can neither reach another consumer's
+   * rows nor become "clear this sheet". Removals are returned, never silent.
+   *
+   * An entries-EMPTY call WITH a region is a legitimate "this rectangle should now hold no denial",
+   * not a no-op: that is exactly how a revision that hands every governed column to every declared
+   * role is expressed. Only entries-empty AND region-absent does nothing at all.
    *
    * The two READ methods are SELECT-only. `listRoleWriteScopes` is the in-process form of the
    * provenance census (`WHERE created_by = <this port's marker>`); the reconcile heals orphans
@@ -1218,10 +1223,18 @@ export interface PluginServices {
    * degrade explicitly (say "not checked") rather than assume, so an older host stays usable.
    */
   stockPreparationFieldPermissions?: {
+    /**
+     * TRUE means this host HONOURS a `reconcile` region. A consumer must check it: an older host
+     * accepts the argument and ignores it, and the difference between "reconciled" and "silently
+     * did nothing" is not otherwise observable until the deployment is already wrong.
+     */
+    supportsWriteScopeReconcile?: boolean
     applyRoleWriteScopes(input: {
       sheetId: string
       entries: Array<{ fieldId: string; roleId: string }>
-      reconcile?: { fieldIds: readonly string[]; roleIds: readonly string[] }
+      /** Stamps `<marker>#<packId>` and bounds the reconcile to that pack (plus legacy rows). */
+      packId?: string
+      reconcile?: { fieldIds: readonly string[]; roleIds: readonly string[] } | null | false
     }): Promise<{
       applied: number
       entries: Array<{ fieldId: string; roleId: string }>
@@ -1229,7 +1242,13 @@ export interface PluginServices {
     }>
     listRoleWriteScopes?(input: {
       sheetId: string
-    }): Promise<{ sheetId: string; entries: Array<{ fieldId: string; roleId: string }> }>
+    }): Promise<{
+      sheetId: string
+      /** What THIS PLUGIN wrote, attributed by pack (`packId: null` = a legacy, pack-less row). */
+      entries: Array<{ fieldId: string; roleId: string; createdBy?: string; packId?: string | null }>
+      /** Role-scoped denials this plugin did NOT write. Reportable, never claimable, never deletable. */
+      foreignEntries?: Array<{ fieldId: string; roleId: string; createdBy?: string | null }>
+    }>
     findMissingRoleIds?(input: { roleIds: readonly string[] }): Promise<{ missing: string[] }>
   }
   /**
