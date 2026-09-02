@@ -629,16 +629,24 @@ const { MATCH_STATUSES: STOCK_PREPARATION_MATCH_STATUSES } = require('./stock-pr
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('./stock-preparation-templates.cjs')
 // 按项目导出物料 Excel: reads the ACTIVE plm_stock_preparation_main rows of one business project,
 // projected to the agreed EXPORT_COLUMNS. Structurally read-only; never touches xlsx itself.
-const { exportStockPreparationPrepLines } = require('./stock-preparation-prep-line-export.cjs')
+const {
+  exportStockPreparationPrepLines,
+  stockPreparationProjectHasMainRows,
+} = require('./stock-preparation-prep-line-export.cjs')
 // 通知下一步: the pure half of the 备料 handoff — the closed step vocabulary, the deploy-config parse,
 // the compare-and-set advance decision, and the values-free notification bodies. No I/O of its own.
 const {
   parseStockPreparationHandoffConfig,
   planStockPreparationHandoffAdvance,
   buildStockPreparationHandoffNotification,
+  chainHasDestinationForHop,
   projectHandoffSteps,
   isHandlerOfStep,
 } = require('./stock-preparation-handoff.cjs')
+// The shared shape rule for a 备料 business project number. See stock-preparation-common.cjs for why
+// this is a HANDLE and not free text: the same string reaches a record filter, an append-only audit
+// row, a durable cursor row and a DingTalk markdown body.
+const { isValidStockPrepProjectNo } = require('./stock-preparation-common.cjs')
 // FOS-2: generic field-option-sync route — resolve a FOS preset (FOS-1 catalog), validate operator
 // option sets against the preset's source keys, and patch each mapped field's options + generic
 // `fieldOptionSync` metadata through the SAME kernel stock-prep uses (no parallel write path).
@@ -3164,7 +3172,7 @@ function createHandlers(services, options = {}) {
   // to { buildWorkbookBuffer({ sheetName, headers, rows }) => Promise<Buffer> }.
   const stockPreparationXlsxExport = (services && services.stockPreparationXlsxExport) || null
 
-  // 通知下一步: the durable cursor (migration 082). OPTIONAL at REGISTRATION for the same reason the
+  // 通知下一步: the durable cursor (migration 084). OPTIONAL at REGISTRATION for the same reason the
   // audit store is — an environment without the SQL db must still be able to register routes — and
   // NOT optional where it matters: both handoff routes fail closed without it, because a turn signal
   // nobody can persist is worse than no turn signal (it would show a plausible "current step" that
@@ -7143,6 +7151,18 @@ function createHandlers(services, options = {}) {
       if (!projectNo) {
         throw new HttpRouteError(400, 'STOCK_PREPARATION_HANDOFF_REQUEST_INVALID', 'projectNo is required', { field: 'projectNo' })
       }
+      // Same shape rule as the advance route below — see there for why a projectNo is a HANDLE. The
+      // read has a smaller blast radius (it writes nothing and composes no message body, it only
+      // echoes the handle back), but one route accepting a shape its sibling refuses is how the two
+      // drift apart, and the echo is itself a reflection surface.
+      if (!isValidStockPrepProjectNo(projectNo)) {
+        throw new HttpRouteError(
+          400,
+          'STOCK_PREPARATION_HANDOFF_PROJECT_NO_INVALID',
+          'projectNo must be a business project handle: alphanumeric, then alphanumerics and . _ - / only, at most 80 characters',
+          { field: 'projectNo' },
+        )
+      }
       const tenantId = resolveTenantId(req, input)
       const chain = loadStockPreparationHandoffChain()
       if (!chain.configured) {
@@ -7201,15 +7221,26 @@ function createHandlers(services, options = {}) {
     // say a person handed off when they did not.
     //
     // ORDER OF OPERATIONS, chosen deliberately and pinned by the suite:
-    //   1. gate, parse, load the chain            — nothing observable has happened yet
-    //   2. plan the advance against the persisted cursor
-    //   3. AUDIT the intent                       — "record intent FIRST", the same discipline every
-    //      write route in this family uses: if the audit store is unavailable or refuses the payload,
-    //      no turn moves and no message is sent
+    //   1. gate, parse, VALIDATE the projectNo's shape, load the chain — nothing observable yet
+    //   2. prove the project EXISTS in the bound target                — a 404 before any write
+    //   3. plan the advance against the persisted cursor
     //   4. COMMIT the turn (compare-and-set + notification claim, one transaction)
-    //   5. SEND the notification, best effort
+    //   5. AUDIT what actually happened
+    //   6. SEND the notification, best effort
     //
-    // Step 5 is AFTER step 4 on purpose, and a failure there does NOT roll anything back. The turn is
+    // STEP 5 IS AFTER STEP 4, and that is a correction rather than the original design. The first cut
+    // audited the INTENT first — the same "record intent FIRST" discipline the rest of this family
+    // uses — and it was wrong HERE for a reason specific to this route: the store's compare-and-set
+    // can REFUSE (a concurrent advance won the row), and the pre-written row said `mode: 'advanced'`
+    // for a handoff that never happened. An append-only trail cannot take that back. So the trail
+    // now records outcomes it has SEEN: a refusal from the planner or the store leaves NO row, and
+    // every row on this trail describes a cursor move that really landed.
+    //
+    // What the old ordering bought is kept by other means: `requireStockPreparationAudit()` still
+    // runs FIRST, so an unavailable audit store is a 501 before anything is read or written, and the
+    // notification still cannot fire unless the audit append returned.
+    //
+    // Step 6 is AFTER step 4 on purpose, and a failure there does NOT roll anything back. The turn is
     // the durable business fact — 张三 really did finish — and a DingTalk outage must not silently
     // un-finish it, leaving the workbench claiming it is still his step. The caller is told the truth
     // instead (`notified: false`, `notifyOutcome: 'failed'`) and the UI says so in words, so a human
@@ -7227,6 +7258,20 @@ function createHandlers(services, options = {}) {
       if (!projectNo) {
         throw new HttpRouteError(400, 'STOCK_PREPARATION_HANDOFF_REQUEST_INVALID', 'projectNo is required', { field: 'projectNo' })
       }
+      // THE SHAPE CHECK, and it is not decoration. This string is about to be written verbatim into
+      // an append-only audit row's `project_id`, into a durable cursor row, and — uniquely on this
+      // route — INTERPOLATED INTO A DINGTALK MARKDOWN BODY that a person reads on their phone
+      // (`项目 ${project} …`). Free text there is an injection surface and an unbounded-write
+      // surface at once. The refusal names the field and NEVER echoes the value, so a hostile
+      // projectNo cannot even reach the caller by way of the error it caused.
+      if (!isValidStockPrepProjectNo(projectNo)) {
+        throw new HttpRouteError(
+          400,
+          'STOCK_PREPARATION_HANDOFF_PROJECT_NO_INVALID',
+          'projectNo must be a business project handle: alphanumeric, then alphanumerics and . _ - / only, at most 80 characters',
+          { field: 'projectNo' },
+        )
+      }
       const fromStepKey = firstString(input.fromStepKey)
       if (!fromStepKey) {
         throw new HttpRouteError(400, 'STOCK_PREPARATION_HANDOFF_REQUEST_INVALID', 'fromStepKey is required', { field: 'fromStepKey' })
@@ -7240,6 +7285,30 @@ function createHandlers(services, options = {}) {
       const workspaceId = firstString(input.workspaceId)
       const actor = user.id || user.email
 
+      // THE PROJECT MUST EXIST BEFORE ANYTHING IS WRITTEN. A well-shaped handle for a project nobody
+      // has is still not a project, and starting a handoff chain on a typo would put a permanent row
+      // in the audit trail, a permanent row in the cursor table, and a DingTalk ping about a project
+      // the recipients cannot find. Resolved through the SAME seam the export read uses
+      // (getTableAction + assertStockPreparationTargetReady), so this route cannot come to a
+      // different opinion about where stock-prep rows live than the writer does.
+      const action = assertStockPreparationTargetReady(
+        await tableActions.getTableAction({ tenantId, actionId: PLM_STOCK_PREPARATION_ACTION_ID }),
+      )
+      const projectExists = await stockPreparationProjectHasMainRows({
+        recordsApi: getMultitableRecordsApi(),
+        target: action.target,
+        projectNo,
+        permission: 'admin',
+      })
+      if (!projectExists) {
+        throw new HttpRouteError(
+          404,
+          'STOCK_PREPARATION_HANDOFF_PROJECT_NOT_FOUND',
+          'no stock-preparation rows exist for this project',
+          { field: 'projectNo' },
+        )
+      }
+
       const persisted = await store.get({ tenantId, workspaceId, projectNo })
       const plan = planStockPreparationHandoffAdvance({
         chain,
@@ -7250,9 +7319,30 @@ function createHandlers(services, options = {}) {
       const fromStepIndex = plan.fromStepIndex
       const terminal = fromStepIndex === chain.steps.length - 1
 
-      // Record intent FIRST. Values-free: `subject_id` is a closed-vocabulary step key, `detail` is
-      // cursor integers and booleans. `replayed` is recorded too — someone clicked, and that a person
-      // pressed the button twice is a fact a reviewer asking "who handed this off" wants to see.
+      // DO NOT SPEND THE CLAIM ON A HOP THAT HAS NOWHERE TO SEND. `notified_step_index` is
+      // at-most-once: once claimed for a step, the next click is a replay and that hop can never be
+      // notified again. Claiming it for a chain that names no destination would mean a deployment
+      // that adds one tomorrow finds yesterday's hops permanently silent. With the strict config
+      // parse this is only reachable for the deliberate turn-state-only chain (neither `notify` nor
+      // `terminal` declared) — a typo can no longer land here — but the guard stays, because the
+      // cost of being wrong is an unnotifiable step and the cost of the guard is one boolean.
+      const claimNotification = plan.decision !== 'replay' && chainHasDestinationForHop(chain, terminal)
+
+      const applied = await store.advance({
+        tenantId,
+        workspaceId,
+        projectNo,
+        expectedStepIndex: fromStepIndex,
+        toStepIndex: plan.toStepIndex,
+        // The claim is the at-most-once key. A replay passes null so it cannot re-claim.
+        notifyForStepIndex: claimNotification ? fromStepIndex : null,
+        actor,
+      })
+
+      // Record what HAPPENED, now that the store has confirmed it. Values-free: `subject_id` is a
+      // closed-vocabulary step key, `detail` is cursor integers and booleans. `replayed` is recorded
+      // too — someone clicked, and that a person pressed the button twice is a fact a reviewer
+      // asking "who handed this off" wants to see. A REFUSED advance never reaches this line.
       await audit.append({
         tenantId,
         workspaceId,
@@ -7268,17 +7358,6 @@ function createHandlers(services, options = {}) {
           stepCount: chain.steps.length,
           terminal,
         },
-      })
-
-      const applied = await store.advance({
-        tenantId,
-        workspaceId,
-        projectNo,
-        expectedStepIndex: fromStepIndex,
-        toStepIndex: plan.toStepIndex,
-        // The claim is the at-most-once key. A replay passes null so it cannot re-claim.
-        notifyForStepIndex: plan.decision === 'replay' ? null : fromStepIndex,
-        actor,
       })
 
       let notifyOutcome = 'skipped'

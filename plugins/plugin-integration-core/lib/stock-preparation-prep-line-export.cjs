@@ -349,6 +349,38 @@ async function exportStockPreparationPrepLines({ recordsApi, target, projectNo, 
   }
 }
 
+/**
+ * Does this business project have ANY stock-preparation row in the bound target?
+ *
+ * The cheap half of `exportStockPreparationPrepLines`' own unknown-project rule, split out so a
+ * route that is not exporting anything can still ask the question before it writes. 通知下一步 needs
+ * exactly this: an advance names a `projectNo` that reaches an append-only audit row, a durable
+ * cursor row and a DingTalk body, and "a project number nobody has ever heard of" must be a 404
+ * BEFORE any of those, not a handoff chain quietly started for a typo.
+ *
+ * READ-ONLY and single-page by construction: `limit: 1` because existence is a yes/no and paging
+ * through a real project's material list to answer it would be a waste at best and a timeout at
+ * worst. Same `target` + `fieldIdMap` discipline as the export — the read side cannot pick a
+ * different sheet from the write side.
+ */
+async function stockPreparationProjectHasMainRows({ recordsApi, target, projectNo, permission } = {}) {
+  assertAdminPermission(permission)
+  const api = ensureReadOnlyRecordsApi(recordsApi)
+  const boundTarget = normalizeExportTarget(target)
+  const scopedProjectNo = requiredString(projectNo, 'projectNo')
+  const resolution = resolveExportFieldBindings(boundTarget)
+  const rows = await api.queryRecords({
+    sheetId: boundTarget.sheetId,
+    filters: { [resolution.map.projectNo]: scopedProjectNo },
+    limit: 1,
+    offset: 0,
+  })
+  if (!Array.isArray(rows)) {
+    throw new StockPreparationPrepLineExportError(500, 'PREP_LINE_EXPORT_RECORDS_API_INVALID', 'queryRecords must return an array', { sheetId: boundTarget.sheetId })
+  }
+  return rows.length > 0
+}
+
 module.exports = {
   EXPORT_COLUMNS,
   EXPORT_COLUMN_IDS,
@@ -358,6 +390,7 @@ module.exports = {
   REQUIRED_PERMISSION,
   StockPreparationPrepLineExportError,
   exportStockPreparationPrepLines,
+  stockPreparationProjectHasMainRows,
   __internals: {
     assertAdminPermission,
     columnSourceValue,

@@ -34,7 +34,7 @@ const crypto = require('node:crypto')
 
 const HANDOFF_TABLE = 'integration_stock_prep_handoff'
 
-// The unique index from migration 082 — (tenant_id, COALESCE(workspace_id,''), project_no).
+// The unique index from migration 084 — (tenant_id, COALESCE(workspace_id,''), project_no).
 const SCOPE_CONSTRAINT = 'uniq_integration_stock_prep_handoff_scope'
 const MAX_ADVANCE_ATTEMPTS = 3
 
@@ -105,6 +105,7 @@ function createStockPreparationHandoffStore({ db, idGenerator = crypto.randomUUI
   if (
     !db ||
     typeof db.selectOne !== 'function' ||
+    typeof db.selectOneForUpdate !== 'function' ||
     typeof db.insertOne !== 'function' ||
     typeof db.updateRow !== 'function' ||
     typeof db.transaction !== 'function'
@@ -113,7 +114,12 @@ function createStockPreparationHandoffStore({ db, idGenerator = crypto.randomUUI
     // requires it: this is a read-then-write on one row and the read decides whether the write is
     // allowed at all. Doing the compare in one statement and the set in another would let two people
     // clicking 通知下一步 at the same instant both pass the compare.
-    throw new Error('createStockPreparationHandoffStore: scoped db helper (incl. transaction) is required')
+    //
+    // `selectOneForUpdate` is required for the SAME reason and is checked HERE rather than being
+    // probed at call time: a db binding without it would degrade the compare-and-set below into a
+    // plain read under READ COMMITTED, which is exactly the double-notify bug this store exists to
+    // prevent. A missing lock seam must fail at wiring time, loudly, not silently at 2am.
+    throw new Error('createStockPreparationHandoffStore: scoped db helper (incl. transaction + selectOneForUpdate) is required')
   }
 
   function normalizeScope(input = {}) {
@@ -143,11 +149,28 @@ function createStockPreparationHandoffStore({ db, idGenerator = crypto.randomUUI
    *
    * Returns `{ handoff, changed, notifyClaimed }`.
    *
-   * THE COMPARE-AND-SET IS THE WHOLE POINT. The caller has already planned the advance against a
-   * cursor it read a moment ago (planStockPreparationHandoffAdvance); that read is stale by the time
-   * it gets here. This re-reads the cursor INSIDE the transaction and refuses if it moved, so the
-   * route's "you cannot advance a step that is not current" promise is enforced at the database
-   * rather than in a window between two statements.
+   * THE COMPARE-AND-SET IS THE WHOLE POINT, AND IT TAKES BOTH HALVES BELOW. The caller has already
+   * planned the advance against a cursor it read a moment ago (planStockPreparationHandoffAdvance);
+   * that read is stale by the time it gets here. Re-reading the cursor inside the transaction is
+   * NOT on its own enough — under READ COMMITTED (the host's default, and this store does not set
+   * an isolation level) two transactions can both run their SELECT before either runs its UPDATE,
+   * both see the same cursor, both pass the compare and both commit. That is not a hypothetical:
+   * it is the exact shape of two people clicking 通知下一步 at the same moment, and it produced two
+   * DingTalk pings — including two copies of the terminal 仓库+采购 fan-out.
+   *
+   * So the compare is enforced TWICE, and either half alone would be sufficient at the database:
+   *
+   *   1. THE ROW LOCK. The in-transaction read is `selectOneForUpdate` (SELECT … FOR UPDATE), so a
+   *      second advance on the same (tenant, workspace, project) BLOCKS until the first commits and
+   *      then reads the cursor the first one wrote. Serialization, not hope.
+   *   2. THE WRITE PREDICATE. The UPDATE carries `step_index = <the cursor we compared against>`
+   *      (and, when a notification is being claimed, the `notified_step_index` we compared against)
+   *      in its WHERE, and ZERO updated rows is a REFUSAL, never a success. So even on a binding
+   *      whose lock does not do what this store expects, a lost race fails closed instead of
+   *      clobbering somebody else's advance and re-claiming their notification.
+   *
+   * The route's "you cannot advance a step that is not current" promise is therefore enforced at the
+   * database rather than in a window between two statements.
    *
    * `changed: false` means the cursor was ALREADY at `toStepIndex` — an idempotent replay (the same
    * person's second click, or a retried request). No row is touched, so `updated_at` does not move
@@ -185,7 +208,9 @@ function createStockPreparationHandoffStore({ db, idGenerator = crypto.randomUUI
     for (let attempt = 1; attempt <= MAX_ADVANCE_ATTEMPTS; attempt += 1) {
       try {
         return await db.transaction(async (trx) => {
-          const existing = await trx.selectOne(HANDOFF_TABLE, where)
+          // FOR UPDATE, not a plain read — see the "compare is enforced TWICE" note above. A
+          // concurrent advance on the same project waits here instead of racing past.
+          const existing = await trx.selectOneForUpdate(HANDOFF_TABLE, where)
           // No row yet == the chain has never moved == it is at step 0. Absence and "0" are the same
           // state here, unlike the source binding where "unset" and "bound" resolve differently.
           const cursor = existing ? Number(existing.step_index) : 0
@@ -225,6 +250,14 @@ function createStockPreparationHandoffStore({ db, idGenerator = crypto.randomUUI
             && (priorNotified === null || priorNotified < notifyForStepIndex)
           const nextNotified = notifyClaimed ? notifyForStepIndex : priorNotified
 
+          // THE WRITE PREDICATE. The scope alone is not a compare-and-set: it identifies the row,
+          // it does not assert what the row still says. Both columns this advance decided against
+          // ride into the WHERE, so an UPDATE that no longer describes reality matches zero rows.
+          const casWhere = {
+            ...where,
+            step_index: cursor,
+            notified_step_index: priorNotified,
+          }
           const row = existing
             ? firstRow(await trx.updateRow(
                 HANDOFF_TABLE,
@@ -234,7 +267,7 @@ function createStockPreparationHandoffStore({ db, idGenerator = crypto.randomUUI
                   updated_by: actor,
                   updated_at: new Date(),
                 },
-                where,
+                casWhere,
               ))
             : firstRow(await trx.insertOne(HANDOFF_TABLE, {
                 id: idGenerator(),
@@ -246,9 +279,12 @@ function createStockPreparationHandoffStore({ db, idGenerator = crypto.randomUUI
                 updated_by: actor,
               }))
           if (!row) {
-            // Fail CLOSED rather than reporting an advance we cannot prove landed. Telling someone
-            // "the next person has been notified" when the cursor did not move is the worst outcome
-            // this surface has — they will stop chasing it.
+            // ZERO ROWS UPDATED == THE PREDICATE NO LONGER HELD == somebody else advanced this
+            // project between our read and our write. Fail CLOSED rather than reporting an advance
+            // we cannot prove landed: telling someone "the next person has been notified" when the
+            // cursor did not move is the worst outcome this surface has — they will stop chasing it.
+            // This is a REFUSAL, and it is the reason the route may not audit the handoff before
+            // this call returns.
             throw new StockPreparationHandoffStoreError(
               409,
               'STOCK_PREPARATION_HANDOFF_WRITE_CONFLICT',
