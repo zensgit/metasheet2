@@ -538,6 +538,28 @@ async function theAuditRowIsValuesFreeAndPrecedesTheValues() {
     )
   }
 
+  // B-07: THE CALLER'S OWN QUERY STRING IS NOT A WAY ONTO THE TRAIL.
+  //
+  // `?workspaceId` used to be forwarded verbatim into the audit row's `workspace_id`, which made the
+  // "the row never carries the projectNo" claim depend on the caller not putting it there: send
+  // `?workspaceId=230920006` and the number was on the trail, in a column no gate looked at. The
+  // board route now selects nothing from it at all (the key stays in the allowlist for shape
+  // compatibility with the rest of this family, exactly like `tenantId`, and steers nothing), and
+  // the store gates the column besides. Asserted on BOTH branches, because a miss writes a row too.
+  for (const [label, askedFor] of [['hit', PROJECT_A_NO], ['miss', UNKNOWN_PROJECT_NO]]) {
+    const harness = mount()
+    await callBoard(harness.routes, {
+      user: OPERATOR_A,
+      projectNo: askedFor,
+      query: { workspaceId: PROJECT_A_NO },
+    })
+    assert.equal(harness.auditAppends.length, 1, `B-07 (${label}): one row`)
+    assert.ok(
+      !JSON.stringify(harness.auditAppends[0]).includes(PROJECT_A_NO),
+      `B-07 (${label}): a caller-supplied ?workspaceId must not put a business value on the audit row`,
+    )
+  }
+
   // B-06: the 404 is audited too, with the same values-free shape and a mode of its own.
   {
     const harness = mount()

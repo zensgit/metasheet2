@@ -172,13 +172,17 @@ function notFound() {
  * NOTE the `projectId` filter: the export route stamps the projectNo into the audit row's
  * `project_id` (it is that route's subject), which is what makes a per-project lookup possible here.
  * This module writes nothing there — see the route's own audit call, which keeps project_id NULL.
+ *
+ * NO WORKSPACE FILTER, deliberately. The board route no longer accepts the caller's `?workspaceId`
+ * as a selector at all (it was the one reachable way to put a business value on the audit trail —
+ * see the route's allowlist comment), so there is nothing here to narrow by; "the last time THIS
+ * tenant exported THIS project" is the question the status bar asks, and it is the right one.
  */
-async function lastExportAtFor(audit, { tenantId, workspaceId, projectNo }) {
+async function lastExportAtFor(audit, { tenantId, projectNo }) {
   if (!audit || typeof audit.list !== 'function') return null
   try {
     const result = await audit.list({
       tenantId,
-      workspaceId,
       projectId: projectNo,
       action: 'prep_line_export',
       limit: 1,
@@ -241,7 +245,6 @@ async function resolveFillTarget(provisioning, stagingProjectId, boundTarget) {
  * @param {object} [params.boundTarget]     the bound table-action target (`action.target`), or null
  *                                          when nothing is bound — see `resolveFillTarget`
  * @param {object} [params.audit]           the audit store, for the values-free last-export lookup
- * @param {string} [params.workspaceId]
  *
  * @returns {Promise<{ board: object, mode: string, projectCount: number }>}
  *          `mode` is the audit mode the ROUTE records; `projectCount` is the values-free size of the
@@ -255,7 +258,6 @@ async function readOperatorProjectBoard({
   projectNo,
   boundTarget,
   audit,
-  workspaceId,
 } = {}) {
   if (!scope || !optionalString(scope.tenantId)) {
     throw new StockPreparationProjectBoardError(
@@ -296,7 +298,6 @@ async function readOperatorProjectBoard({
   const fillTarget = await resolveFillTarget(provisioning, targetProjectId, boundTarget)
   const lastExportAt = await lastExportAtFor(audit, {
     tenantId: scope.tenantId,
-    workspaceId,
     projectNo: wanted,
   })
 
