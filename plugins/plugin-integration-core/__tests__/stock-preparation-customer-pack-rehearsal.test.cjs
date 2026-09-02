@@ -13,14 +13,14 @@
 // host multitable provisioning API:
 //
 //   a. normalize the 21-column rehearsal pack
-//   b. install run #1 onto a table that already carries the frozen 28 canonical
-//      columns  ->  49 logical columns, ownership-stamped
+//   b. install run #1 onto a table that already carries the frozen 33 canonical
+//      columns  ->  54 logical columns, ownership-stamped
 //   c. install run #2  ->  nothing created, nothing destroyed, same wire
 //   d. REFRESH-PRESERVATION PROOF: seed a row with BOTH bands filled, project a
 //      PLM refresh through the ownership filter DERIVED FROM THE INSTALLED FIELD
 //      PROPERTIES, and assert every human cell is byte-identical while every PLM
 //      cell moved — then the negative control, the same refresh WITHOUT the
-//      filter, which clobbers all 16 human cells and proves the assertion bites
+//      filter, which clobbers all 21 human cells and proves the assertion bites
 //   e. values-free guard over the whole summary + log stream
 //
 // Hermetic: no DB, no network, no clock, no filesystem writes. Values-free: the
@@ -289,8 +289,11 @@ function rehearsalPackNormalizes() {
   // ext_parentDrawingNo / ext_parentName / ext_spec until now). The pack is unchanged: the frozen
   // ids deliberately avoid those ext_ suffixes, because a frozen id equal to an installed pack's
   // suffix is refused outright (FIELD_ID_TEMPLATE_COLLISION) and would break this very install.
-  assert.equal(CANONICAL_FIELD_COUNT, 28, 'the frozen canonical template carries 28 columns')
-  assert.equal(LANDING_SHEET_FIELD_COUNT, 49)
+    // 28 -> 33: on top of those three PLM columns, the template ALSO gained 自制/外购 plus the
+  // four departmental response columns. All five are human_preserved, so the PLM band is unmoved
+  // by them; the two growths are independent and both land here.
+  assert.equal(CANONICAL_FIELD_COUNT, 33, 'the frozen canonical template carries 33 columns')
+  assert.equal(LANDING_SHEET_FIELD_COUNT, 54)
 
   const byOwnership = { plm_system: [], human_preserved: [] }
   for (const field of pack.extensionFields) {
@@ -309,7 +312,7 @@ function rehearsalPackNormalizes() {
   assert.equal(byOwnership.human_preserved.length, 8, '8 human-preserved extension columns')
 
   // No extension id may shadow a canonical one (the normalizer enforces it; this
-  // asserts the rehearsal pack actually exercises a disjoint 46-column shape).
+  // asserts the rehearsal pack actually exercises a disjoint 51-column shape).
   const canonicalIds = new Set(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id))
   for (const field of pack.extensionFields) {
     assert.equal(canonicalIds.has(field.id), false, `${field.id} must not shadow a canonical column`)
@@ -378,7 +381,7 @@ function rehearsalPackNormalizes() {
 }
 
 // ---------------------------------------------------------------------------
-// (b) install run #1 regenerates the 46-column landing sheet
+// (b) install run #1 regenerates the 51-column landing sheet
 // ---------------------------------------------------------------------------
 
 async function installRunOneRegeneratesTheSheet(pack) {
@@ -606,7 +609,9 @@ async function refreshPreservesHumanCells() {
   const plmFieldIds = allFieldIds.filter((fieldId) => ownershipOf(fieldId) === 'plm_system')
 
   assert.equal(allFieldIds.length, LANDING_SHEET_FIELD_COUNT)
-  assert.equal(humanFieldIds.length, 16, '8 canonical + 8 pack human columns')
+  // 16 -> 21: the five new canonical human columns land on the human side of the
+  // ownership wall, which is the point — a PLM refresh must not be able to write them.
+  assert.equal(humanFieldIds.length, 21, '13 canonical + 8 pack human columns')
   assert.equal(plmFieldIds.length, 33, '20 canonical + 13 pack PLM columns')
   assert.deepEqual([...writable].sort(), [...plmFieldIds].sort(), 'the guard admits exactly the PLM band')
   for (const fieldId of humanFieldIds) {
@@ -702,6 +707,16 @@ async function refreshPreservesHumanCells() {
     notes: '按图纸复核后下单',
     procurementReply: '供应商确认排产',
     warehouseConfirmation: '待到货',
+    // 自制/外购 + the departmental response band: the completion markers and the real
+    // dates the legacy 备料 system carried in its purchase_info / warehouse_info tables.
+    // Seeded here so the clobber proof below covers them BY NAME — a refresh that could
+    // reset 采购完成 to false or wipe 实际到货日期 is exactly the regression this suite
+    // is here to catch.
+    makeOrBuy: '20 - 外购',
+    procurementDone: true,
+    procurementReplyDate: '2026-08-21',
+    warehouseDone: false,
+    actualArrivalDate: '2026-09-05',
     // pack human band
     ext_stockPrepDate: '2026-08-18',
     ext_pickingNode: '10 - 示例节点一',
@@ -715,7 +730,7 @@ async function refreshPreservesHumanCells() {
   assert.deepEqual(
     Object.keys(seededRow).sort(),
     [...allFieldIds].sort(),
-    'the seeded row must cover the whole 49-column sheet, or the proof has blind spots',
+    'the seeded row must cover the whole 54-column sheet, or the proof has blind spots',
   )
 
   // A refresh payload shaped like the SHEET, not like the PLM band — this is
@@ -867,9 +882,17 @@ async function summaryAndLogsAreValuesFree() {
   // classification: this rehearsal installs all 21 ext_ columns fresh onto a
   // canonical-only sheet, so both are 0 — the takeover case (hand-built columns
   // needing an ownership stamp) is covered by the installer suite.
-  assert.match(fake.logs[0], /pack=factory-a-rehearsal v1 created=21 skipped=0 stamped=0 alreadyStamped=0 optionFields=5 views=3/)
+  // `staleWriteScopes=unchecked` is the honest reading for a pack that declared nothing: the census
+  // has nothing to diff against and was never run, which is NOT the same as "0 stale rows found".
+  assert.match(fake.logs[0], /pack=factory-a-rehearsal v1 created=21 skipped=0 stamped=0 alreadyStamped=0 optionFields=5 views=3 writeScopes=0 staleWriteScopes=unchecked/)
   assert.deepEqual(Object.keys(summary).sort(), [
     'alreadyStampedFields',
+    // COLUMN WRITE SCOPING. This rehearsal pack declares NO `fieldWritePolicies`, which is
+    // the state every pack that exists today is in — so the count is 0, the reason is
+    // `not_declared`, and the host permission port was never reached. The keys are present
+    // (and asserted below) precisely so "nothing was declared" is legible in the summary
+    // rather than indistinguishable from "declared and silently skipped".
+    'appliedWriteScopes',
     'createdFields',
     'ensuredViews',
     // F5 closure: the summary now carries the OWNERSHIP BAND per id, so a CLI/route no longer has to
@@ -880,9 +903,27 @@ async function summaryAndLogsAreValuesFree() {
     'packId',
     'packVersion',
     'skippedFields',
+    // THE STALE-SCOPE CENSUS. `staleWriteScopes` is NULL here — never [] — because this pack
+    // declares no policy, so the census never ran; `writeScopeCheck` names which of the three
+    // reasons that was. The distinction is the whole point: an empty array would read as
+    // "checked, nothing orphaned", which is a claim this install never made.
+    'staleWriteScopeCount',
+    'staleWriteScopes',
     'stampedExistingFields',
     'syncedOptionFields',
+    'writeScopeCheck',
+    'writeScopeRoleCount',
+    'writeScopeSkipped',
   ])
+
+  // ABSENT DECLARATION => BEHAVIOUR UNCHANGED. A pack with no fieldWritePolicies writes no
+  // permission row at all, and the summary says so in a way a reader can act on.
+  assert.equal(summary.appliedWriteScopes, 0)
+  assert.equal(summary.writeScopeRoleCount, 0)
+  assert.equal(summary.writeScopeSkipped, 'not_declared')
+  assert.equal(summary.writeScopeCheck, 'not_declared')
+  assert.equal(summary.staleWriteScopes, null, 'no declaration => no census => NULL, not an empty list')
+  assert.equal(summary.staleWriteScopeCount, 0)
 
   // The join is the point: every installed id carries the band the pack declared, and NOTHING else
   // (no label, no option value, no free text) rides along.

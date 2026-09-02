@@ -403,6 +403,19 @@ function mount({ boundSheet = SANDBOX_SHEET } = {}) {
     },
   }
   services.stockPreparationXlsxExport = xlsxExport
+  // The HOST TENANT PRINCIPAL DIRECTORY. This export is VALUE-BEARING (material names, quantities),
+  // so it now derives its tenant from `stock-preparation-operator-scope.cjs` rather than from
+  // `resolveTenantId` — which on a token-without-tenant-claim deployment compared the request's
+  // tenant against a `user.tenantId` the auth middleware had filled from the `x-tenant-id` HEADER.
+  // The scope makes the host vouch for the (user, tenant) pairing and is NOT fail-open, so without
+  // this seam every case below would 501 for a reason unrelated to what it is measuring. The
+  // cross-tenant behaviour itself is asserted in stock-preparation-operator-value-read-scope.test.cjs
+  // against a seam that models a REAL membership relation; here it simply admits.
+  services.tenantPrincipalDirectory = {
+    async verifyTenantMembership() {
+      return { member: true }
+    },
+  }
   httpRoutes.registerIntegrationRoutes({
     context,
     services,

@@ -12,14 +12,27 @@
          is never in the DOM — no disabled-but-present decoy, because a disabled control still tells
          the operator the capability exists here, and the matrix suite asserts on presence. -->
     <div class="stock-prep-confirm__bar">
+      <!-- 项目号 with a NATIVE datalist. The list carries every project in the caller's own tenant,
+           each option's VALUE being the number and its LABEL the name, so the browser's own
+           type-ahead filters on either — which is the whole point: an operator who only remembers
+           「注射水缓冲罐」 can now find 230920006 without being told it. The input stays a plain text
+           field, so the hand-typed path a trained operator already uses is unchanged. -->
       <label class="stock-prep-confirm__field">
-        <span>{{ bi('项目号', 'Project no.') }}</span>
+        <span>{{ bi('项目号(可按号码或名称搜)', 'Project no. (search by number or name)') }}</span>
         <input
           v-model="projectNo"
           type="text"
+          list="stock-prep-project-directory-options"
           data-testid="stock-prep-confirmation-project-input"
-          :placeholder="bi('项目号', 'Project no.')"
+          :placeholder="bi('项目号或名称', 'Project number or name')"
         >
+        <datalist id="stock-prep-project-directory-options" data-testid="stock-prep-operator-project-datalist">
+          <option
+            v-for="project in directoryProjects"
+            :key="project.projectId"
+            :value="project.projectNo ?? ''"
+          >{{ project.projectName ?? '' }}</option>
+        </datalist>
       </label>
 
       <label class="stock-prep-confirm__field">
@@ -40,6 +53,21 @@
         @click="loadQueue"
       >
         {{ bi('刷新列表', 'Refresh the list') }}
+      </button>
+
+      <!-- 一线看得见自己工厂的项目 — THE capability's control. It renders whenever the capability is
+           granted, unconditionally on data: R-11's "what is permitted must be visible" is a statement
+           about the PERMISSION, and a control that appeared only once the worklist happened to be
+           non-empty would make the alignment assertion depend on fixtures. The worklist itself is
+           data-conditional and sits below. -->
+      <button
+        v-if="can('confirmationQueue.projectDirectory')"
+        type="button"
+        data-testid="stock-prep-operator-project-directory"
+        :disabled="directoryBusy"
+        @click="loadDirectory"
+      >
+        {{ bi('刷新我的项目', 'Refresh my projects') }}
       </button>
 
       <button
@@ -105,6 +133,36 @@
       ) }}
     </p>
 
+    <!-- 一线看得见自己工厂的项目 — THE WORKLIST. Rendered on mount, before anything is typed, so the
+         page opens on "here is your work" instead of on an empty box demanding a number the operator
+         was supposed to have memorised. Only projects with pending work appear here; the full
+         directory is still behind the input's datalist above, which is what lets the empty states
+         below tell "unknown number" from "nothing pending". -->
+    <section
+      v-if="can('confirmationQueue.projectDirectory') && worklist.length > 0"
+      class="stock-prep-confirm__worklist"
+      data-testid="stock-prep-operator-project-worklist"
+    >
+      <h3>{{ bi('您这边等着处理的项目', 'Projects waiting on you') }}</h3>
+      <ul>
+        <li v-for="project in worklist" :key="project.projectId">
+          <button
+            type="button"
+            class="stock-prep-confirm__worklist-item"
+            data-testid="stock-prep-operator-project-pick"
+            :disabled="busy || !project.projectNo"
+            @click="pickProject(project)"
+          >
+            <span class="stock-prep-confirm__worklist-no">{{ project.projectNo }}</span>
+            <span class="stock-prep-confirm__worklist-name">{{ project.projectName }}</span>
+            <span class="stock-prep-confirm__worklist-count">
+              {{ bi('等您处理', 'waiting') }}: {{ project.pendingDecisionCount }}
+            </span>
+          </button>
+        </li>
+      </ul>
+    </section>
+
     <p v-if="readiness !== null" class="stock-prep-confirm__readiness" data-testid="stock-prep-confirmation-readiness-result">
       {{ readiness.ready === true
         ? bi('可以开始:记录确认结果的表已经建好了。', 'Ready to go: the table that records your decisions is in place.')
@@ -165,8 +223,21 @@
       </tbody>
     </table>
 
-    <p v-else-if="queue" class="stock-prep-confirm__empty" data-testid="stock-prep-confirmation-empty">
-      {{ bi('这个项目号下没有需要您处理的事 —— 都清了。', 'Nothing here needs your attention for this project number — it is all clear.') }}
+    <!-- EMPTY-STATE HONESTY. This used to be one sentence — 「都清了」 — shown for three unrelated
+         situations: nothing was ever synced here, the number was mistyped, and the project really is
+         clear. Only the last is good news. `stockPrepDirectoryEmptyState` decides which of the four
+         it actually is from facts the server now returns, and each carries the next step (or says
+         plainly that the next step is not the operator's to take). -->
+    <p
+      v-else-if="queue && emptyState"
+      class="stock-prep-confirm__empty"
+      data-testid="stock-prep-confirmation-empty"
+      :data-empty-state="emptyState"
+    >
+      {{ bi(emptyStateText.zh, emptyStateText.en) }}
+      <span v-if="emptyStateText.zhNext" class="stock-prep-confirm__hint" data-testid="stock-prep-confirmation-empty-next">
+        {{ bi(emptyStateText.zhNext, emptyStateText.enNext ?? '') }}
+      </span>
     </p>
 
     <!-- The value-entry pane: the ONE content-bearing surface, gated on the same code as confirm. -->
@@ -267,7 +338,7 @@
 //     value-entry pane renders content, and it renders under the same gate the server puts on that
 //     read. Errors surface as the CLAMPED enum-shaped code from confirmApi.ts — never a server
 //     message, which could carry a value.
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import { useAuth } from '../../../composables/useAuth'
 import type { IntegrationScope } from '../../../services/integration/workbench'
@@ -278,12 +349,15 @@ import {
   exportStockPreparationPrepLines,
   listStockPreparationDecisions,
   readStockPreparationDecisionReadiness,
+  readStockPreparationOperatorDirectory,
   readStockPreparationValueEntry,
   type StockPreparationDecisionQueue,
   type StockPreparationDecisionReadiness,
   type StockPreparationDecisionRow,
   type StockPreparationDecisionStatus,
   type StockPreparationDecisionValueEntry,
+  type StockPreparationOperatorDirectory,
+  type StockPreparationOperatorProject,
   type StockPreparationResolutionAction,
 } from '../../../services/integration/stockPreparation/confirmationQueue'
 import {
@@ -295,8 +369,11 @@ import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
 import {
   STOCK_PREP_DECISION_ACTION_PLAIN,
   STOCK_PREP_DECISION_STATUS_PLAIN,
+  stockPrepDirectoryEmptyPlain,
+  stockPrepDirectoryEmptyState,
   stockPrepEnumPlain,
   stockPrepErrorPlain,
+  type StockPrepPlainEntry,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 
 const props = defineProps<{ scope: IntegrationScope; projectNo?: string }>()
@@ -353,6 +430,134 @@ const notes = ref('')
 /** Set after a successful export whose project had zero ACTIVE material rows — the download still
  *  happened (a valid, headers-only workbook), this is purely the plain-language notice for it. */
 const exportEmptyNotice = ref(false)
+
+// --- 一线看得见自己工厂的项目 ------------------------------------------------------------------
+//
+// The caller's OWN-TENANT project directory. Loaded on mount so the page opens on the operator's work
+// rather than on an empty input; the server refuses this read to any principal without a tenant of
+// its own, so nothing here can show one tenant another tenant's names.
+const directory = ref<StockPreparationOperatorDirectory | null>(null)
+
+const directoryProjects = computed<StockPreparationOperatorProject[]>(() => {
+  // `Array.isArray` rather than a truthiness check on `directory.value`: this page renders whatever
+  // the envelope parser hands back, and a degraded or partial payload (an older server, a truncated
+  // response) must leave the operator with an empty list, never a blank page from a thrown computed.
+  const projects = directory.value && Array.isArray(directory.value.projects) ? directory.value.projects : []
+  // Only rows that actually carry a number can be picked or typed — a nameless/numberless row would
+  // be an unselectable datalist entry, which is worse than absent.
+  return projects.filter((project) => typeof project.projectNo === 'string' && project.projectNo.length > 0)
+})
+
+/** The worklist proper: the projects with something waiting, busiest first, then by number. */
+const worklist = computed<StockPreparationOperatorProject[]>(() =>
+  directoryProjects.value
+    .filter((project) => project.pendingDecisionCount > 0)
+    .slice()
+    .sort((left, right) => (right.pendingDecisionCount - left.pendingDecisionCount)
+      || String(left.projectNo).localeCompare(String(right.projectNo))))
+
+/** Does the number currently in the box name a project in the caller's own directory? */
+const projectKnown = computed<boolean>(() =>
+  directoryProjects.value.some((project) => project.projectNo === projectNo.value))
+
+/**
+ * WHICH empty state, if any. Decided by the pure helper in plainLanguage.ts rather than inline, so
+ * the copy and the condition it belongs to cannot drift apart.
+ *
+ * NO DIRECTORY IS ITSELF A STATE, not silence. Returning null here — which the first version did
+ * whenever `directory.value` was null — rendered NOTHING for the three principals who never get a
+ * directory: a `stock-prep:read`-only queue watcher (no request is issued for them at all), an
+ * operate-holder whose load failed, and the tenantless platform admin the server refuses by design.
+ * All three previously saw 「都清了」; a blank page is a worse answer than a wrong one, because the
+ * operator cannot even tell the page finished loading.
+ */
+const emptyState = computed<string | null>(() => {
+  const loaded = directory.value
+  return stockPrepDirectoryEmptyState({
+    directoryAvailable: loaded !== null,
+    // Coerced defensively for the same reason as above: a partial payload must degrade to the most
+    // conservative diagnosis ("nothing synced"), never crash and never claim "all clear".
+    directoryReady: loaded !== null && loaded.directoryReady === true,
+    ledgerReady: loaded !== null && loaded.ledgerReady === true,
+    projectCount: loaded !== null && typeof loaded.projectCount === 'number'
+      ? loaded.projectCount
+      : directoryProjects.value.length,
+    projectNo: projectNo.value,
+    projectKnown: projectKnown.value,
+    pendingRowCount: queue.value && Array.isArray(queue.value.rows) ? queue.value.rows.length : 0,
+  })
+})
+
+const emptyStateText = computed<StockPrepPlainEntry>(() =>
+  stockPrepDirectoryEmptyPlain(emptyState.value) ?? { zh: '', en: '' })
+
+/**
+ * The directory load has its OWN busy flag rather than sharing `busy` with the queue.
+ *
+ * That is not tidiness. `busy` disables the queue's own controls, and this load starts on mount — so
+ * sharing it would leave 「刷新列表」 and every other control dead for the duration of a request the
+ * operator did not ask for, and would make "can I click refresh yet" depend on a race with a
+ * background fetch. The two concerns are independent and their spinners must be too.
+ */
+const directoryBusy = ref(false)
+
+/**
+ * THE TWO SERVER REFUSALS THAT ARE NOT FAULTS.
+ *
+ * The directory read is scoped to the caller's OWN tenant and requires the host to vouch for the
+ * pairing, so it refuses two whole classes of principal BY DESIGN:
+ *
+ *   OPERATOR_SCOPE_TENANT_REQUIRED     — a tenantless platform admin (us: the consultant, support).
+ *                                        They pass the permission gate and are then refused because
+ *                                        they have no tenant of their own, which is the guard doing
+ *                                        its job, not an outage.
+ *   OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE — the deployment injects no host membership seam, so the
+ *                                        read fails closed. Nothing the person at the screen can do.
+ *
+ * Both arrive on MOUNT, unprompted, which put a red write-flavoured error line on the page for every
+ * platform admin on every single page open. Neither is actionable and neither is news, so neither
+ * becomes an error banner. They are not silent, either: `directory_unavailable` renders in the empty
+ * state and says exactly what is and is not known. The list is a CLOSED set of two codes — any other
+ * failure, a 500 included, still surfaces, because a directory that genuinely broke IS news.
+ */
+const DIRECTORY_NOT_FOR_THIS_PRINCIPAL = Object.freeze([
+  'OPERATOR_SCOPE_TENANT_REQUIRED',
+  'OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE',
+])
+
+async function loadDirectory(): Promise<void> {
+  if (!can('confirmationQueue.projectDirectory')) return
+  directoryBusy.value = true
+  try {
+    directory.value = await readStockPreparationOperatorDirectory(props.scope)
+  } catch (error) {
+    if (error instanceof StockPreparationConfirmApiError
+      && DIRECTORY_NOT_FOR_THIS_PRINCIPAL.includes(error.code)) {
+      // Not an error to report — see above. `directory.value` stays null, which is what the empty
+      // state reads to say "no worklist for you, and we cannot judge this number".
+      return
+    }
+    // Every other failure surfaces on the page's one error line like any other — an operator whose
+    // worklist silently failed to load would read the empty page as "no work", which is the exact
+    // dishonesty this change exists to remove.
+    recordError(error)
+  } finally {
+    directoryBusy.value = false
+  }
+}
+
+/** Pick a project from the worklist: fill the number the typed path already uses, then load it. */
+async function pickProject(project: StockPreparationOperatorProject): Promise<void> {
+  if (!project.projectNo) return
+  projectNo.value = project.projectNo
+  await loadQueue()
+}
+
+// The page opens on the operator's own work. A caller without the capability loads nothing and sees
+// exactly the surface they saw before this change.
+onMounted(() => {
+  void loadDirectory()
+})
 
 /** What the currently chosen handling actually does, in one line, before the operator commits. */
 const selectedActionHint = computed<string>(() => {
@@ -498,6 +703,72 @@ defineExpose({ can })
   margin: 0;
   color: var(--ms-text-3);
   font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 一线看得见自己工厂的项目 — the worklist. Deliberately the widest, plainest thing on the page after
+   the input: it is what an operator opens this page to see. */
+.stock-prep-confirm__worklist {
+  margin-bottom: var(--ms-space-3);
+}
+
+.stock-prep-confirm__worklist h3 {
+  margin: 0 0 var(--ms-space-2);
+  font-size: 13px;
+  color: var(--ms-text-2);
+}
+
+.stock-prep-confirm__worklist ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.stock-prep-confirm__worklist-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--ms-space-2);
+  width: 100%;
+  padding: var(--ms-space-2);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.stock-prep-confirm__worklist-item:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* The number stays monospace and selectable — it is what a person quotes on the phone — but the NAME
+   is the thing that reads first, which is the whole point of this change. */
+.stock-prep-confirm__worklist-no {
+  font-family: var(--ms-font-mono, monospace);
+  color: var(--ms-text-3);
+  font-size: 12px;
+}
+
+.stock-prep-confirm__worklist-name {
+  flex: 1 1 auto;
+  font-weight: 600;
+}
+
+.stock-prep-confirm__worklist-count {
+  color: var(--ms-text-2);
+  font-size: 12px;
+}
+
+.stock-prep-confirm__empty {
+  margin: 0 0 var(--ms-space-3);
+  color: var(--ms-text-2);
+  font-size: 13px;
   line-height: 1.6;
 }
 

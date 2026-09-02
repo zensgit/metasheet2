@@ -179,6 +179,14 @@ const ROUTES = [
   // quantities), unlike the values-free /prep-lines summary above, so it does NOT ride the same
   // stock-prep:read tier — see the handler for the gate choice and its justification.
   ['GET', '/api/integration/stock-preparation/prep-lines/export', 'stockPreparationPrepLineExport'],
+  // 一线看得见自己工厂的项目 — the OPERATOR-scoped project directory/worklist. A SIBLING of the
+  // values-free '/stock-preparation/projects' route above, never a widening of it: that one keeps its
+  // byte-identical values-free projection for the platform/admin workspace, this one carries the
+  // caller's OWN tenant's project NUMBER and NAME so a floor operator can find their project by name
+  // instead of memorising that 230920006 is the RY2 注射水缓冲罐部件. VALUE-BEARING, so it rides
+  // stock-prep:operate (the same tier as value-entry and the Excel export), and its tenant is derived
+  // from the AUTHENTICATED principal with the host vouching for the pairing — see the handler.
+  ['GET', '/api/integration/stock-preparation/operator/projects', 'stockPreparationOperatorProjectDirectory'],
   // #3751 MVP W5b (#3890): values-free audit trail over the stock-prep write surface.
   ['GET', '/api/integration/stock-preparation/audit', 'stockPreparationAuditList'],
   // 工作台里选源 — WHICH source the pull action reads, chosen in the workbench instead of in a server
@@ -580,6 +588,19 @@ const {
 // READ-gated (broader than the rest of this module — see the route); values-free (projectName /
 // sourceProjectNo never cross, OWNER-GATED OD-W3-1, not opened here).
 const { listStockPreparationProjects } = require('./stock-preparation-project-reads.cjs')
+// 一线看得见自己工厂的项目: the OPERATOR-tier sibling of the read above. Carries the caller's OWN
+// tenant's projectNo + projectName; the values-free module it sits beside is not modified.
+const {
+  StockPreparationOperatorDirectoryError,
+  listOperatorProjectDirectory,
+} = require('./stock-preparation-operator-project-directory.cjs')
+// ...and THE capability that decides whose data the caller may be shown. It is the one place a
+// value-bearing read establishes "whose data is it", and it refuses a principal with no tenant of
+// its own — which is how the platform/consultant side stays out of this surface.
+const {
+  StockPreparationOperatorScopeError,
+  resolveOperatorValueScope,
+} = require('./stock-preparation-operator-scope.cjs')
 // #3751 MVP W3 (diff rows): route-level enum gates for the diff-row filters come from the SAME frozen
 // vocabularies the engine exports (never re-typed literals).
 const { DIFF_TYPES: STOCK_PREPARATION_DIFF_TYPES, REVIEW_STATUSES: STOCK_PREPARATION_REVIEW_STATUSES } = require('./stock-preparation-snapshot-diff.cjs')
@@ -1413,6 +1434,15 @@ const VALID_STOCK_PREPARATION_PREP_LINE_EXPORT_QUERY_KEYS = new Set([
   'tenantId',
   'workspaceId',
   'projectNo',
+])
+// 一线看得见自己工厂的项目: the operator project directory takes NO project selector at all — it IS the
+// selector, and it always returns the caller's whole own-tenant directory so the front end can tell
+// "that number is not in this system" from "that project is real and has nothing pending". `tenantId`
+// is accepted for shape-compatibility with every other call in this family and is NEVER a steering
+// vector: the scope resolver refuses any value that is not the caller's own authenticated tenant.
+const VALID_STOCK_PREPARATION_OPERATOR_PROJECT_DIRECTORY_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
 ])
 // FOS-2: generic field-option-sync request — closed allowlist. Operator names a preset (FOS-1
 // catalog) + supplies option sets keyed by the preset's source keys. No sheetId / credentials.
@@ -3118,6 +3148,14 @@ function createHandlers(services, options = {}) {
   // loaded once and reused for family detection + as the confirm skeleton — NEVER request-supplied.
   const governedAi = (services && services.governedAi) || null
 
+  // 列级写权限: the narrow host port that writes the PLATFORM's own `field_permissions`
+  // rows, injected per-plugin exactly like governedAi above. OPTIONAL here on purpose —
+  // a customer pack that declares no `fieldWritePolicies` never reaches for it, so an
+  // environment that has not wired it installs precisely as it does today. A pack that
+  // DOES declare policies and finds no port makes the installer fail closed rather than
+  // report a complete install whose scoping would not be enforced.
+  const stockPreparationFieldPermissions = (services && services.stockPreparationFieldPermissions) || null
+
   // 按项目导出物料 Excel: the xlsx BUFFER BUILDER is INJECTED (packages/core-backend xlsx-service.ts
   // buildXlsxBuffer, wrapped around a lazily-imported `xlsx` module), same INJECTED-per-plugin shape as
   // governedAi above and for the same reason — the plugin has no `xlsx` dependency of its own (it is
@@ -3125,6 +3163,14 @@ function createHandlers(services, options = {}) {
   // not add one; the ONE existing xlsx builder is reused via this host-provided seam instead. Duck-typed
   // to { buildWorkbookBuffer({ sheetName, headers, rows }) => Promise<Buffer> }.
   const stockPreparationXlsxExport = (services && services.stockPreparationXlsxExport) || null
+  // 一线看得见自己工厂的项目: the host TENANT PRINCIPAL DIRECTORY (packages/core-backend
+  // tenant-principal-directory-boundary.ts), same INJECTED-per-plugin shape as governedAi and
+  // stockPreparationXlsxExport above. Unlike both of those it is NOT fail-open — the operator project
+  // directory refuses with a named 501 when it is absent, because a value-bearing tenant-scoped read
+  // that cannot get the host to vouch for the principal must not run on `req.user.tenantId` alone
+  // (the auth middleware fills that field from the `x-tenant-id` header when the token has no claim).
+  // Duck-typed to { verifyTenantMembership({ userId, tenantId }) => Promise<{ member }> }.
+  const tenantPrincipalDirectory = (services && services.tenantPrincipalDirectory) || null
   let vendorPresetCatalogCache = null
   function loadVendorPresetCatalog() {
     if (vendorPresetCatalogCache) return vendorPresetCatalogCache
@@ -5643,6 +5689,11 @@ function createHandlers(services, options = {}) {
         provisioning: getCustomerPackProvisioning(),
         projectId,
         pack,
+        // The SAME capability the install below is given. Without it a dry-run could say nothing at
+        // all about the permission rows an install would write — the one step with no undo would be
+        // the one step with no rehearsal. The port is used READ-ONLY here (the census + the role
+        // pre-flight question); planCustomerPackInstall never reaches its write half.
+        fieldPermissions: stockPreparationFieldPermissions,
       })
       return sendOk(res, { projectId, ...plan })
     },
@@ -5667,6 +5718,7 @@ function createHandlers(services, options = {}) {
         tenantId,
         workspaceId: resolveWorkspaceId(req, {}),
         mode: body.mode === 'reinstall' ? 'reinstall' : 'install',
+        fieldPermissions: stockPreparationFieldPermissions,
       })
       const created = Array.isArray(result.createdFields) ? result.createdFields.length : 0
       return sendOk(res, { projectId, ...result }, created > 0 ? 201 : 200)
@@ -6849,7 +6901,7 @@ function createHandlers(services, options = {}) {
       // around exactly this content: everyone who is not an author keeps seeing counts, fingerprints
       // and status enums, never a value. One notch tighter than the queue, one notch looser than
       // platform admin — which is what makes the workbench usable without widening the value face.
-      requireAccess(req, STOCK_PREP_OPERATE)
+      const user = requireAccess(req, STOCK_PREP_OPERATE)
       const input = normalizeStockPreparationConfirmBody(
         requestQuery(req),
         VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_VALUE_ENTRY_QUERY_KEYS,
@@ -6859,11 +6911,28 @@ function createHandlers(services, options = {}) {
       if (!decisionId) {
         throw new HttpRouteError(400, 'CONFIRMATION_DECISION_VALUE_ENTRY_REQUEST_INVALID', 'decisionId is required', { field: 'decisionId' })
       }
-      const tenantId = resolveTenantId(req, input)
+      // WHOSE VALUES ARE THESE — resolved by the operator value scope, NOT by `resolveTenantId`.
+      //
+      // This route was left on `resolveTenantId` when the operator project directory introduced the
+      // scope module, even though the module's own header names this read as the same tier. That was
+      // a real hole, not a stylistic gap: `auth/jwt-middleware.ts` copies the `x-tenant-id` REQUEST
+      // HEADER onto `user.tenantId` when the verified token carries no tenant claim, and
+      // `resolveTenantId` then compares the request's tenant against that same header-filled field —
+      // header against header. A tenant-A operator sending `x-tenant-id: tenant-b` was served tenant
+      // B's ENTERED VALUES with a 200. The scope below prefers the verified claim, refuses a carried
+      // tenant that contradicts it, refuses a principal with no tenant of its own (the tenantless
+      // platform admin `resolveTenantId` would have let steer), and makes the HOST vouch for the
+      // (user, tenant) pairing — which is the only thing that can decide the claimless case.
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
       const result = await readConfirmationDecisionValueEntry({
         recordsApi: getMultitableRecordsApi(),
         provisioning: getMultitableProvisioning(),
-        targetProjectId: resolveIntegrationStagingProjectId(tenantId, undefined),
+        targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
         permission: 'admin',
         decisionId,
       })
@@ -6942,13 +7011,39 @@ function createHandlers(services, options = {}) {
       if (!projectNo) {
         throw new HttpRouteError(400, 'STOCK_PREPARATION_PREP_LINE_EXPORT_REQUEST_INVALID', 'projectNo is required', { field: 'projectNo' })
       }
-      const tenantId = resolveTenantId(req, input)
+      // WHOSE MATERIALS ARE THESE — the same operator value scope the per-decision readback and the
+      // project directory use, for the same reason and closing the same pre-existing hole: on a
+      // deployment whose tokens carry no tenant claim, `resolveTenantId` compared the request's
+      // tenant against a `user.tenantId` the auth middleware had filled from the `x-tenant-id`
+      // HEADER, so a tenant-A operator sending `x-tenant-id: tenant-b` was served tenant B's
+      // MATERIAL NAMES AND QUANTITIES with a 200. See the scope module's header for the whole
+      // posture; the short version is that a value-bearing read must derive its tenant from the
+      // AUTHENTICATED principal with the host vouching for the pairing, never from anything the
+      // caller can set. Resolved BEFORE the table action below, so an unauthorized or cross-tenant
+      // caller costs no action lookup either.
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
       // READ THE TABLE APPLY WRITES. Resolved through the SAME seam every other stock-prep route
       // uses to reach its target — getTableAction + assertStockPreparationTargetReady — so the read
       // side cannot pick a different sheet from the write side. The first cut hardcoded the
       // canonical objectId and resolved it through provisioning, which is empty on every default
       // install: apply is sandbox-only unless an owner configured a production policy, so the rows
       // are in the sandbox twin and every project answered 404.
+      //
+      // NOTE, PRECISELY, WHAT THE VERIFIED TENANT DECIDES HERE. It keys the ACTION LOOKUP — and so
+      // the persisted per-tenant SOURCE binding — and it keys the audit row, so a header-spoofed
+      // tenant can no longer steer either of those. It does NOT decide the SHEET: `action.target` is
+      // DEPLOY-TIME configuration shared by every tenant on the deployment, and the only row-level
+      // scoping inside it is `projectNo`. That is a property of the table-action target model this
+      // route adopted, not of this scope; it is written down here so nobody reads the scope as a
+      // promise of per-tenant ROW isolation on this route the way it genuinely is on the other two
+      // (value-entry and the directory both derive their sheet from the verified tenant's staging
+      // project). Making this route's target tenant-scoped is a separate change.
       const action = assertStockPreparationTargetReady(
         await tableActions.getTableAction({ tenantId, actionId: PLM_STOCK_PREPARATION_ACTION_ID }),
       )
@@ -6989,6 +7084,88 @@ function createHandlers(services, options = {}) {
       // apart from a normally populated export, without parsing the binary body — see the UI notice.
       res.setHeader('X-Stock-Prep-Export-Row-Count', String(exportResult.activeRowCount))
       return res.send(buffer)
+    },
+
+    // 一线看得见自己工厂的项目 — THE OPERATOR PROJECT DIRECTORY / WORKLIST.
+    //
+    // WHAT CHANGED, AND WHAT DID NOT. The values-free project list
+    // (GET /stock-preparation/projects, `requireAccess(req, 'read')`) is UNTOUCHED — same gate, same
+    // module, same byte-identical projection, still serving the platform/admin workspace with handles,
+    // a closed enum and counts. This is a SIBLING route with its own manifest row, and it is the only
+    // one that carries `projectNo` / `projectName`.
+    //
+    // THE POSTURE, ruled by the owner: the boundary is "WHOSE DATA IS IT", not "which screen is it".
+    // The values-free stance exists to keep the PLATFORM/CONSULTANT side out of customer values — the
+    // original design of this line said so in as many words ("The live UI may show business values to
+    // authorized operators because the operator is working inside the tenant workspace. Issue/customer
+    // evidence must remain values-free", data-factory-plm-project-bom-stock-preparation-design-
+    // 20260604.md:282-284). A factory operator seeing their OWN tenant's project numbers and names is
+    // that live UI, not the evidence channel.
+    //
+    // THE THREE GATES the H0 plane-boundary lock requires of any value-bearing read (三重门,缺一不可),
+    // all present here:
+    //   1. RBAC — `stock-prep:operate`, an independent value-read permission that is NOT
+    //      `integration:read` (R-11's mapping is zero-automatic), and the SAME tier already carrying
+    //      the only two other value-bearing stock-prep reads (value-entry, and the materials export
+    //      which already ships material names and quantities).
+    //   2. SERVER-SIDE FIELD WHITELIST — the projection is fixed in
+    //      stock-preparation-operator-project-directory.cjs. Two value fields, named in code; the row
+    //      is never spread into the response.
+    //   3. AUDIT — appended below, and appended BEFORE the values reach the caller, so an audit store
+    //      that refuses the row means no value-bearing body is ever sent (H3-0 ③, fail-closed).
+    //
+    // AND THE SCOPE, which is what makes gate 1 mean "their own": `resolveOperatorValueScope` derives
+    // the tenant from the AUTHENTICATED principal, prefers the VERIFIED token claim over the
+    // header-fillable `user.tenantId`, refuses any request-carried tenant that disagrees, refuses a
+    // principal with no tenant of its own (which is where a tenantless platform admin lands — us), and
+    // makes the host vouch for the (user, tenant) pairing. Deliberately NOT `resolveTenantId`: that
+    // helper lets a tenantless platform admin steer `tenantId` from the request, which is exactly the
+    // cross-tenant capability a value-bearing read must not inherit.
+    async stockPreparationOperatorProjectDirectory(req, res) {
+      const user = requireAccess(req, STOCK_PREP_OPERATE)
+      const audit = requireStockPreparationAudit()
+      const input = normalizeStockPreparationConfirmBody(
+        requestQuery(req),
+        VALID_STOCK_PREPARATION_OPERATOR_PROJECT_DIRECTORY_QUERY_KEYS,
+        'STOCK_PREPARATION_OPERATOR_PROJECT_DIRECTORY_REQUEST_INVALID',
+      )
+      // Establish WHOSE data may be shown before any IO. Every refusal this can raise is decided from
+      // the principal plus the request's own tenant carriers, so an under-privileged, tenantless or
+      // cross-tenant caller costs zero records/provisioning work.
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
+      const result = await listOperatorProjectDirectory({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        // Derived from the VERIFIED scope, never from the request — there is no reachable input by
+        // which tenant A's caller addresses tenant B's staging project.
+        targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
+        scope,
+      })
+      // VALUES-FREE AUDIT over a value-bearing response. Counts, booleans and handles only: no
+      // projectNo, no projectName, and no `projects` array — the row records THAT a directory read
+      // happened and how big the answer was, never what was in it. Appended before the response so a
+      // refusing audit store blocks the values (H3-0 ③).
+      await audit.append({
+        tenantId: scope.tenantId,
+        workspaceId: input.workspaceId,
+        action: 'project_directory_read',
+        actor: scope.actorId,
+        mode: result.pendingProjectCount > 0 ? 'operator_directory' : 'operator_directory_idle',
+        detail: {
+          operation: 'operator_project_directory',
+          projectCount: result.projectCount,
+          pendingProjectCount: result.pendingProjectCount,
+          directoryReady: result.directoryReady,
+          ledgerReady: result.ledgerReady,
+          tenantClaimVerified: scope.tenantClaimVerified,
+        },
+      })
+      return sendOk(res, result)
     },
 
     // FOS-2: generic, preset-driven field-option-sync. Admin-gated; resolves a FOS preset from the
