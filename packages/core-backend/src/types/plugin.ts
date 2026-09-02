@@ -1232,13 +1232,58 @@ export interface PluginServices {
     applyRoleWriteScopes(input: {
       sheetId: string
       entries: Array<{ fieldId: string; roleId: string }>
-      /** Stamps `<marker>#<packId>` and bounds the reconcile to that pack (plus legacy rows). */
+      /** Stamps `<marker>#<packId>` and is the reconcile's owner predicate. REQUIRED with `reconcile`. */
       packId?: string
       reconcile?: { fieldIds: readonly string[]; roleIds: readonly string[] } | null | false
+      /**
+       * "I can PROVE this pack is the only pack ever installed on this sheet." Only then may the
+       * reconcile adopt or retire the pack-LESS legacy rows in its rectangle. Default false, which
+       * makes such rows unattributed and REFUSES the call.
+       */
+      legacyAdoptable?: boolean
     }): Promise<{
       applied: number
       entries: Array<{ fieldId: string; roleId: string }>
       removed?: Array<{ fieldId: string; roleId: string }>
+      /** Declared pairs an operator holds: the upsert was SKIPPED, the row is untouched. */
+      operatorHeld?: Array<{ fieldId: string; roleId: string; packId?: string | null }>
+      /** Another pack's rows in the region on undeclared pairs: left standing, reported. */
+      governedByOtherPacks?: Array<{ fieldId: string; roleId: string; packId?: string | null }>
+    }>
+    /**
+     * THE REHEARSAL OF THE INVARIANT — the same classification the write path runs under its row
+     * lock, read-only and outside a transaction. A consumer that has this can say exactly what an
+     * install will change, retire, refuse and defer BEFORE it changes anything.
+     */
+    classifyRoleWriteScopeRegion?(input: {
+      sheetId: string
+      entries: Array<{ fieldId: string; roleId: string }>
+      packId: string
+      reconcile: { fieldIds: readonly string[]; roleIds: readonly string[] }
+      legacyAdoptable?: boolean
+    }): Promise<{
+      sheetId: string
+      packId: string
+      legacyAdoptable: boolean
+      /** Rows the reconcile WILL delete: this pack's, in-region, still denying, no longer declared. */
+      willRetire: Array<{ fieldId: string; roleId: string }>
+      /** Declared pairs ANOTHER pack governs. Non-empty = the install refuses. */
+      packConflicts: Array<{ fieldId: string; roleId: string; packId: string }>
+      /** In-region pack-less rows this pack cannot prove are its own. Non-empty = the install refuses. */
+      legacyUnattributed: Array<{ fieldId: string; roleId: string }>
+      /** In-region rows a HUMAN holds. Never changed; the upsert is skipped for the declared ones. */
+      operatorHeldInRegion: Array<{
+        fieldId: string
+        roleId: string
+        createdBy: string | null
+        declared: boolean
+        visible: boolean
+        readOnly: boolean
+      }>
+      /** Another pack's in-region rows on undeclared pairs. Not stale, not the operator's to clear. */
+      governedByOtherPacks: Array<{ fieldId: string; roleId: string; packId: string }>
+      /** This pack's OWN denials OUTSIDE the region — the only genuine operator to-do list. */
+      operatorMustClear: Array<{ fieldId: string; roleId: string; packId: string | null }>
     }>
     listRoleWriteScopes?(input: {
       sheetId: string
@@ -1250,6 +1295,11 @@ export interface PluginServices {
       foreignEntries?: Array<{ fieldId: string; roleId: string; createdBy?: string | null }>
     }>
     findMissingRoleIds?(input: { roleIds: readonly string[] }): Promise<{ missing: string[] }>
+    /** The column twin of `findMissingRoleIds`, asked about the columns an install will NOT create. */
+    findMissingFieldIds?(input: {
+      sheetId: string
+      fieldIds: readonly string[]
+    }): Promise<{ missing: string[] }>
   }
   /**
    * E-learning L2 — host-provided reminder-intent producer. Only

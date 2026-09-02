@@ -446,6 +446,7 @@ async function installWritesTheLedgerLast() {
   assert.deepEqual(row.summary, {
     created: 3, skipped: 0, stamped: 0, alreadyStamped: 0, optionFields: 0, views: 1,
     writeScopesApplied: 0, writeScopesRemoved: 0, writeScopeStale: 0, writeScopeRoles: 0,
+    writeScopeOperatorHeld: 0, writeScopeOtherPacks: 0,
   })
   assert.deepEqual(row.warnings, [])
   // The returned summary reports the ledger outcome without re-serializing the row.

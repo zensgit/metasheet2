@@ -6332,6 +6332,14 @@ function requireStockPreparationAudit() {
         // the one step with no rehearsal. The port is used READ-ONLY here (the census + the role
         // pre-flight question); planCustomerPackInstall never reaches its write half.
         fieldPermissions: stockPreparationFieldPermissions,
+        // THE SAME LEDGER THE INSTALL CONSULTS, read-only. `legacyAdoptable` — may this pack adopt
+        // the pack-less write-scope rows on this sheet — is derived from it, and a rehearsal that
+        // guessed differently from the install would rehearse the wrong verdict. Unlike the install
+        // this does NOT require the store: absent, the dry-run reports basis 'no_ledger' and
+        // `canInstall: false` on a sheet that has such rows, which is the same answer the install
+        // would give.
+        packInstallStore: stockPreparationPackInstalls,
+        tenantId,
       })
       return sendOk(res, { projectId, ...plan })
     },

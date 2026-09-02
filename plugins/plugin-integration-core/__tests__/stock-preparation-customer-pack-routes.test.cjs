@@ -479,11 +479,14 @@ async function dryRunPerformsZeroWrites() {
     // This pack declares no fieldWritePolicies, so the write-scope preview is empty on every axis:
     // nothing to deny, nothing found stale, and — since a pack that governs no region can request
     // no reconcile — nothing this install would retire and nothing left for an operator either.
-    fieldWriteDenials: 0, staleWriteScopes: 0,
+    fieldWriteDenials: 0,
     willRemoveWriteScopes: 0, operatorMustClearWriteScopes: 0,
+    // Nobody else holds anything here either, because nothing was classified at all.
+    operatorHeldInRegion: 0, governedByOtherPacks: 0,
     // No governed rectangle either — which is the same fact that makes the delete unrequestable,
-    // and therefore also the fact that makes a cross-pack conflict impossible here.
-    writeScopeRegionFields: 0, writeScopeRegionRoles: 0, packConflictWriteScopes: 0,
+    // and therefore also the fact that makes both invariant refusals impossible here.
+    writeScopeRegionFields: 0, writeScopeRegionRoles: 0,
+    packConflictWriteScopes: 0, legacyUnattributedWriteScopes: 0,
   })
   // NULL, not an empty rectangle: "this pack governs nothing" is a different statement from "this
   // pack governs an empty region", and only the first one makes a delete structurally impossible.
@@ -654,18 +657,48 @@ const PORT_PACK = Object.freeze({
 function createRecordingFieldPermissionsPort() {
   const applyCalls = []
   const listCalls = []
+  const classifyCalls = []
   const roleCalls = []
+  const fieldCalls = []
+  const emptyClassification = {
+    willRetire: [],
+    packConflicts: [],
+    legacyUnattributed: [],
+    operatorHeldInRegion: [],
+    governedByOtherPacks: [],
+    operatorMustClear: [],
+  }
   return {
     applyCalls,
     listCalls,
+    classifyCalls,
     roleCalls,
+    fieldCalls,
     // The host declares that it HONOURS a reconcile region. Without this the install refuses with a
     // coded 501 rather than writing rows a later revision could never retire — so the flag is part
     // of the wiring this route test is about, not decoration.
     supportsWriteScopeReconcile: true,
     async applyRoleWriteScopes(input) {
       applyCalls.push(input)
-      return { applied: input.entries.length, entries: input.entries, removed: [] }
+      return {
+        applied: input.entries.length,
+        entries: input.entries,
+        removed: [],
+        operatorHeld: [],
+        governedByOtherPacks: [],
+      }
+    },
+    // THE CLASSIFIER the route must reach. An empty sheet classifies to empty everything — which is
+    // a different answer from "this host cannot classify", and the route test's job is to prove the
+    // capability is WIRED, so the method's presence is what matters here.
+    async classifyRoleWriteScopeRegion(input) {
+      classifyCalls.push(input)
+      return {
+        sheetId: input.sheetId,
+        packId: input.packId,
+        legacyAdoptable: input.legacyAdoptable === true,
+        ...emptyClassification,
+      }
     },
     async listRoleWriteScopes(input) {
       listCalls.push(input)
@@ -673,6 +706,10 @@ function createRecordingFieldPermissionsPort() {
     },
     async findMissingRoleIds(input) {
       roleCalls.push(input)
+      return { missing: [] }
+    },
+    async findMissingFieldIds(input) {
+      fieldCalls.push(input)
       return { missing: [] }
     },
   }
@@ -710,14 +747,15 @@ async function theInstallRouteHandsThePackToTheHostPort() {
   assert.deepEqual(deniedFor('routes:warehouse'), ['procurementDone', 'procurementReply'])
   assert.deepEqual(deniedFor('routes:purchasing'), ['warehouseConfirmation', 'warehouseDone'])
 
-  // The pre-flight and the stale census went through the route too. TWO census reads, and the order
-  // is the point: the first is the cross-pack CONFLICT check, which runs BEFORE the first schema
-  // write so a second pack is refused over an untouched sheet; the second is the stale census, which
-  // runs AFTER the write so it describes the sheet as it now stands.
+  // The pre-flight went through the route too. ONE classification read per install, taken BEFORE the
+  // first schema write so the two invariant refusals land over an untouched sheet — and the write
+  // path re-runs the SAME classification inside its own transaction under the row lock, which is
+  // what makes two concurrent installs unable to both pass and then merge.
+  assert.equal(port.classifyCalls.length, 1, 'one classification read per install, in the pre-flight')
+  assert.equal(port.fieldCalls.length, 1, 'and the field-existence pre-flight ran too')
   assert.deepEqual(port.roleCalls, [{ roleIds: ['routes:purchasing', 'routes:warehouse'] }])
-  assert.equal(port.listCalls.length, 2)
   assert.equal(res.body.data.writeScopeCheck, 'checked')
-  assert.deepEqual(res.body.data.staleWriteScopes, [])
+  assert.deepEqual(res.body.data.operatorMustClearWriteScopes, [])
   assert.equal(res.body.data.appliedWriteScopes, 4)
 
   // And the DRY RUN previews the same plan without touching the port's write half.

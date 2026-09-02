@@ -35,7 +35,7 @@
 //      them as `removedWriteScopes`. The three things it must NOT reach are asserted
 //      directly: an OPERATOR-authored row, a plugin row for an undeclared role, and any
 //      row on a column no policy claims -- those stay, and are handed to the operator as
-//      `staleWriteScopes` (each tagged `inReconcileRegion`, which is the line the dry-run
+//      `operatorMustClearWriteScopes` (THIS pack's own out-of-region debris, which is the line the dry-run
 //      splits "about to be fixed" from "a human must clear this" along). A host too old to
 //      accept the rectangle reports `unsupported_port` + a NULL `removedWriteScopes` --
 //      never [], which would read as "reconciled, nothing to retire" -- and degrades to
@@ -88,6 +88,15 @@ const {
 } = require(path.join(LIB, 'stock-preparation-pack-install-store.cjs'))
 
 const applyWriter = require(path.join(LIB, 'stock-preparation-apply-writer.cjs'))
+
+// THE ONE FAKE PORT, shared with stock-preparation-write-scope-reconcile-bounds.test.cjs. One rule,
+// one implementation — see that module's header for why a second one is a liability.
+const {
+  BASE_MARKER,
+  markerFor,
+  createWriteScopePort,
+  operatorRow,
+} = require(path.join(__dirname, 'support', 'stock-preparation-write-scope-port.cjs'))
 
 // The five columns this change adds. Written out rather than derived, so that deleting
 // one from the template is a RED here instead of a silently smaller loop.
@@ -619,96 +628,37 @@ function applyHelperIsPure() {
 // `createdBy` mirrors the real table's provenance column. Only rows carrying the plugin marker are
 // this port's; anything else is an OPERATOR row, which the census hides and the reconcile may never
 // delete. The host-side unit suite proves the real SQL enforces the same thing.
-const PLUGIN_MARKER = 'plugin:plugin-integration-core/stock-preparation'
+const PLUGIN_MARKER = BASE_MARKER
 // …and its PER-PACK form. The delete's owner predicate is this, not the bare prefix: two packs on
 // one canonical sheet must not be able to retire each other's denials.
-const markerForPack = (packId) => `${PLUGIN_MARKER}#${packId}`
+const markerForPack = markerFor
 
+/**
+ * THE SHARED FAKE PORT, adapted to this suite's option names.
+ *
+ * It used to be a second, hand-rolled implementation of the invariant sitting beside the bounds
+ * suite's own — two models of one rule, which is exactly the arrangement round-2 punished. The rule
+ * now lives once per language: `__tests__/support/stock-preparation-write-scope-port.cjs` here, and
+ * the real service in core-backend, tied together by that suite's SQL-decoding model and by the
+ * real-Postgres suite.
+ *
+ *   withRead      — false models a host whose port has no census/classifier at all.
+ *   withReconcile — false models an OLDER host: it accepts `reconcile`, IGNORES it and returns no
+ *                   `removed`, and does not declare the capability marker.
+ */
 function createStatefulPort({
   withRead = true,
   withRoleCheck = true,
   knownRoleIds = null,
-  // An OLDER host: its applyRoleWriteScopes ignores the `reconcile` argument entirely and returns
-  // no `removed` array, which the installer must detect rather than assume.
   withReconcile = true,
 } = {}) {
-  const rows = new Map()
-  const port = {
-    rows,
-    applyCalls: [],
-    // The capability marker the installer feature-detects.  models an OLDER
-    // host: it does not declare it, and the install refuses such a host rather than degrading.
-    ...(withReconcile ? { supportsWriteScopeReconcile: true } : {}),
-    async applyRoleWriteScopes({ sheetId, entries, packId, reconcile }) {
-      this.applyCalls.push({ sheetId, entries, packId, reconcile })
-      const createdBy = typeof packId === 'string' && packId ? markerForPack(packId) : PLUGIN_MARKER
-      // UPSERT, exactly like the real port — including its refusal to re-stamp provenance on a row
-      // this call could not also delete, which is what keeps an operator's row an operator's row.
-      for (const entry of entries) {
-        const key = `${entry.fieldId} ${entry.roleId}`
-        const existing = rows.get(key)
-        const adoptable = !existing || existing.createdBy === createdBy || existing.createdBy === PLUGIN_MARKER
-        rows.set(key, {
-          ...(existing || {}),
-          ...entry,
-          sheetId,
-          createdBy: adoptable ? createdBy : existing.createdBy,
-        })
-      }
-      if (!withReconcile || !reconcile) return { applied: entries.length, entries }
-
-      // THE SCOPED RECONCILE, mirroring the real statement's four narrowings verbatim: this
-      // plugin's rows only, inside the declared (columns × roles) region only, never a row this
-      // same call just wrote. A fake that deleted more broadly would make the safety assertions
-      // below vacuous, so it deliberately does not.
-      const desired = new Set(entries.map((entry) => `${entry.fieldId} ${entry.roleId}`))
-      const fieldIds = new Set(reconcile.fieldIds)
-      const roleIds = new Set(reconcile.roleIds)
-      // EXACTLY the two markers the real statement binds: this pack's own, and the pack-less legacy
-      // one (which no other pack can claim).
-      const mine = new Set([createdBy, PLUGIN_MARKER])
-      const removed = []
-      for (const [key, row] of [...rows.entries()]) {
-        if (row.sheetId !== sheetId) continue
-        if (!mine.has(row.createdBy)) continue
-        if (!fieldIds.has(row.fieldId) || !roleIds.has(row.roleId)) continue
-        if (desired.has(key)) continue
-        rows.delete(key)
-        removed.push({ fieldId: row.fieldId, roleId: row.roleId })
-      }
-      removed.sort((left, right) => (left.fieldId === right.fieldId
-        ? left.roleId.localeCompare(right.roleId)
-        : left.fieldId.localeCompare(right.fieldId)))
-      return { applied: entries.length, entries, removed }
-    },
-  }
-  if (withRead) {
-    port.listRoleWriteScopes = async ({ sheetId }) => {
-      const entries = []
-      const foreignEntries = []
-      for (const row of rows.values()) {
-        if (row.sheetId !== sheetId) continue
-        const isPlugin = row.createdBy === PLUGIN_MARKER
-          || (typeof row.createdBy === 'string' && row.createdBy.startsWith(`${PLUGIN_MARKER}#`))
-        if (isPlugin) {
-          entries.push({
-            fieldId: row.fieldId,
-            roleId: row.roleId,
-            createdBy: row.createdBy,
-            packId: row.createdBy === PLUGIN_MARKER ? null : row.createdBy.slice(PLUGIN_MARKER.length + 1),
-          })
-        } else {
-          foreignEntries.push({ fieldId: row.fieldId, roleId: row.roleId, createdBy: row.createdBy || null })
-        }
-      }
-      return { sheetId, entries, foreignEntries }
-    }
-  }
-  if (withRoleCheck) {
-    port.findMissingRoleIds = async ({ roleIds }) => ({
-      missing: knownRoleIds === null ? [] : roleIds.filter((roleId) => !knownRoleIds.includes(roleId)),
-    })
-  }
+  const port = createWriteScopePort({
+    supportsReconcile: withReconcile,
+    withClassify: withRead,
+    withRoleCheck,
+    knownRoleIds,
+  })
+  if (!withRead) delete port.listRoleWriteScopes
   return port
 }
 
@@ -750,9 +700,9 @@ async function ownershipTransferIsNeverASilentSuccess() {
   // v1: the warehouse role owns the arrival-date column, so the row written says
   // "purchasing may not write it".
   const v1 = await installWith(port, V1_POLICIES, 1)
-  assert.equal(v1.writeScopeCheck, 'checked', 'a readable port is actually read')
-  assert.deepEqual(v1.staleWriteScopes, [], 'a first install has nothing stale behind it')
-  assert.equal(v1.staleWriteScopeCount, 0)
+  assert.equal(v1.writeScopeCheck, 'checked', 'a readable port is actually classified')
+  assert.deepEqual(v1.operatorMustClearWriteScopes, [], 'a first install has nothing stale behind it')
+  assert.equal(v1.operatorMustClearWriteScopeCount, 0)
   assert.ok(
     port.rows.has(`${physical('actualArrivalDate')} ${ROLE_PURCHASING}`),
     'v1 denied purchasing the column the warehouse owned',
@@ -786,8 +736,8 @@ async function ownershipTransferIsNeverASilentSuccess() {
 
   // AND the census that used to carry it now reports nothing left over: the reconcile reached it.
   assert.equal(v2.writeScopeCheck, 'checked')
-  assert.equal(v2.staleWriteScopeCount, 0)
-  assert.deepEqual(v2.staleWriteScopes, [], 'nothing is left for an operator to clear by hand')
+  assert.equal(v2.operatorMustClearWriteScopeCount, 0)
+  assert.deepEqual(v2.operatorMustClearWriteScopes, [], 'nothing is left for an operator to clear by hand')
 
   // THE REGION IS EXACTLY THE PACK'S, NOT THE SHEET. The delete request the installer sent names
   // only the columns this pack's policies claim and only the roles it declares — which is what
@@ -804,7 +754,7 @@ async function ownershipTransferIsNeverASilentSuccess() {
   // IDEMPOTENT: a second v2 has nothing left to retire, and says so with [] rather than null.
   const again = await installWith(port, V2_POLICIES, 2)
   assert.deepEqual(again.removedWriteScopes, [], 're-running a converged v2 retires nothing')
-  assert.equal(again.staleWriteScopeCount, 0)
+  assert.equal(again.operatorMustClearWriteScopeCount, 0)
 
   // POSITIVE CONTROL - the assertion is not vacuous. A declaration that did NOT move retires
   // nothing on the second run either, so `[]` still means something.
@@ -812,7 +762,7 @@ async function ownershipTransferIsNeverASilentSuccess() {
   await installWith(clean, V1_POLICIES, 1)
   const reinstalled = await installWith(clean, V1_POLICIES, 1)
   assert.deepEqual(reinstalled.removedWriteScopes, [], 'an unchanged declaration retires nothing')
-  assert.deepEqual(reinstalled.staleWriteScopes, [], 'and leaves nothing stale')
+  assert.deepEqual(reinstalled.operatorMustClearWriteScopes, [], 'and leaves nothing stale')
 }
 
 // THE OTHER HALF OF THE SAFETY PROPERTY: what the reconcile must NOT reach. Two rows sit on the
@@ -825,19 +775,24 @@ async function reconcileNeverReachesRowsItDoesNotOwn() {
   const OTHER_ROLE = 'plugin-integration-core:bom-prep:quality'
   // (a) An operator's own denial, on a column this pack DOES govern and a role it DOES declare —
   //     inside the rectangle on every axis except the one that matters, provenance.
-  port.rows.set(`${physical('procurementReply')} ${ROLE_WAREHOUSE}`, {
-    fieldId: physical('procurementReply'),
-    roleId: ROLE_WAREHOUSE,
-    sheetId: 'sheet_dept',
-    createdBy: 'operator:univer-meta-authoring-route',
-  })
+  // Seeded with `created_by` NULL — the shape the authoring route actually wrote on every host in
+  // the field before this change, and the shape every previous fixture in this repo missed
+  // (round-2 findings 14 and 16).
+  port.rows.set(
+    `${physical('procurementReply')} ${ROLE_WAREHOUSE}`,
+    operatorRow('sheet_dept', physical('procurementReply'), ROLE_WAREHOUSE),
+  )
   // (b) This plugin's own row for a role OUTSIDE the pack's declared set (a neighbouring pack, or a
   //     wider earlier revision). Same column, same provenance marker — only the role is out of range.
+  // THIS PACK's marker, not the bare legacy one: a bare row is unattributable and would (correctly)
+  // refuse the install rather than be reported as this pack's debris.
   port.rows.set(`${physical('procurementReply')} ${OTHER_ROLE}`, {
     fieldId: physical('procurementReply'),
     roleId: OTHER_ROLE,
     sheetId: 'sheet_dept',
-    createdBy: PLUGIN_MARKER,
+    visible: true,
+    readOnly: true,
+    createdBy: markerForPack('dept-scoping'),
   })
 
   const v2 = await installWith(port, V2_POLICIES, 2)
@@ -857,19 +812,31 @@ async function reconcileNeverReachesRowsItDoesNotOwn() {
   )
   // The out-of-region plugin row is not silently ignored either: it is REPORTED as stale, because
   // only an operator can decide about it.
-  assert.deepEqual(v2.staleWriteScopes, [
+  assert.deepEqual(v2.operatorMustClearWriteScopes, [
     {
       fieldId: physical('procurementReply'),
       logicalFieldId: 'procurementReply',
       roleId: OTHER_ROLE,
-      // ATTRIBUTED. This row was seeded with the pack-LESS legacy marker, so it reports packId null
-      // — and it survives anyway, because it is out of the rectangle on the ROLE axis. Provenance
-      // and position are two independent reasons a row is out of reach, and the report names both.
-      packId: null,
-      inReconcileRegion: false,
+      // ATTRIBUTED to THIS pack — which is the whole reason it is on the operator's list at all.
+      // A row this pack cannot prove is its own is not its debris and is never reported as stale
+      // (round-2 findings 1 and 2); it is out of reach here on the ROLE axis instead.
+      packId: 'dept-scoping',
     },
   ], 'what the reconcile may not touch is handed to the operator by name')
-  assert.equal(v2.staleWriteScopeCount, 1)
+  assert.equal(v2.operatorMustClearWriteScopeCount, 1)
+  // AND THE OPERATOR'S ROW IS NOT ON THAT LIST EITHER. It is not this pack's debris, so there is
+  // nothing to hand a human about it. v2 DOES declare that pair, so the install DEFERRED to the
+  // human instead of overwriting them, and it says so under its own projection.
+  assert.deepEqual(v2.operatorHeldWriteScopes, [
+    { fieldId: physical('procurementReply'), roleId: ROLE_WAREHOUSE },
+  ], 'a declared pair a human holds is deferred to and NAMED, never silently overwritten')
+  assert.equal(v2.operatorHeldWriteScopeCount, 1)
+  // …and the row itself is byte-identical to what the operator left: same provenance (NULL), same
+  // read dimension, same write dimension. The upsert did not run on that pair at all.
+  const operatorHeldRow = port.rows.get(`${physical('procurementReply')} ${ROLE_WAREHOUSE}`)
+  assert.equal(operatorHeldRow.createdBy, null, 'not laundered into a plugin row')
+  assert.equal(operatorHeldRow.visible, true)
+  assert.equal(operatorHeldRow.readOnly, true)
 }
 
 // AN OLDER HOST IS REFUSED, NOT DEGRADED.
@@ -915,24 +882,20 @@ async function dryRunPreviewsTheDenialPlanAndTheStaleRows() {
   })
   assert.equal(plan.fieldPermissionsPortAvailable, true)
   assert.equal(plan.writeScopeCheck, 'checked')
-  assert.deepEqual(plan.staleWriteScopes, [
+  assert.deepEqual(plan.willRemoveWriteScopes, [
     {
       fieldId: physical('actualArrivalDate'),
       logicalFieldId: 'actualArrivalDate',
       roleId: ROLE_PURCHASING,
-      packId: 'dept-scoping',
-      inReconcileRegion: true,
     },
   ])
   // AND THE SPLIT A DEPLOYER ACTS ON. The one orphan is inside the pack's governed rectangle, so
   // the install will retire it — it belongs in the "about to be fixed" list, NOT on the operator's
   // to-do list. Reporting it in both would overstate the manual work by exactly the rows the
   // reconcile handles.
-  assert.deepEqual(plan.willRemoveWriteScopes, plan.staleWriteScopes)
   assert.deepEqual(plan.operatorMustClearWriteScopes, [])
   assert.equal(plan.counts.willRemoveWriteScopes, 1)
   assert.equal(plan.counts.operatorMustClearWriteScopes, 0)
-  assert.equal(plan.counts.staleWriteScopes, 1)
 
   // AND THE BOUND ITSELF. `willRemoveWriteScopes` is a claim about which rows a DELETE will reach;
   // `writeScopeRegion` is the rectangle that delete is issued under, so the claim is checkable
@@ -983,7 +946,8 @@ async function dryRunPreviewsTheDenialPlanAndTheStaleRows() {
   })
   assert.deepEqual(bare.fieldWriteDenials, [])
   assert.equal(bare.writeScopeCheck, 'not_declared')
-  assert.equal(bare.staleWriteScopes, null)
+  assert.equal(bare.willRemoveWriteScopes, null)
+  assert.equal(bare.operatorMustClearWriteScopes, null)
 }
 
 async function anUnreadablePortSaysSoRatherThanReportingNothingStale() {
@@ -992,8 +956,8 @@ async function anUnreadablePortSaysSoRatherThanReportingNothingStale() {
   const port = createStatefulPort({ withRead: false })
   const summary = await installWith(port, V2_POLICIES, 2)
   assert.equal(summary.writeScopeCheck, 'unsupported_port')
-  assert.equal(summary.staleWriteScopes, null, 'NULL, never [] - absence of a check is not absence of stale rows')
-  assert.equal(summary.staleWriteScopeCount, 0)
+  assert.equal(summary.operatorMustClearWriteScopes, null, 'NULL, never [] - absence of a check is not absence of stale rows')
+  assert.equal(summary.operatorMustClearWriteScopeCount, 0)
   assert.equal(summary.appliedWriteScopes, V2_DENIAL_COUNT, 'and the install still applies what it declared')
 
   const plan = await planCustomerPackInstall({
@@ -1003,7 +967,8 @@ async function anUnreadablePortSaysSoRatherThanReportingNothingStale() {
     fieldPermissions: port,
   })
   assert.equal(plan.writeScopeCheck, 'unsupported_port')
-  assert.equal(plan.staleWriteScopes, null)
+  assert.equal(plan.willRemoveWriteScopes, null)
+  assert.equal(plan.operatorMustClearWriteScopes, null)
   assert.equal(plan.fieldPermissionsPortAvailable, true, 'the WRITE half is there; only the census is not')
 
   // And with no port at all the dry-run says so instead of pretending.
@@ -1014,7 +979,8 @@ async function anUnreadablePortSaysSoRatherThanReportingNothingStale() {
   })
   assert.equal(noPort.fieldPermissionsPortAvailable, false)
   assert.equal(noPort.writeScopeCheck, 'port_absent')
-  assert.equal(noPort.staleWriteScopes, null)
+  assert.equal(noPort.willRemoveWriteScopes, null)
+  assert.equal(noPort.operatorMustClearWriteScopes, null)
   assert.equal(noPort.canInstall, false, 'a declared policy with no port cannot install - the dry-run says so first')
 }
 
@@ -1183,14 +1149,21 @@ async function theLedgerSummaryEnumeratesTheWriteScopeOutcome() {
 
   const [v1, v2] = seen
   // v1 declares 6 denials across 2 roles and retires nothing (a first install has no history).
+  //
+  // SIX numbers, not four. `writeScopeOperatorHeld` is the count of DECLARED pairs the install
+  // deferred to a human on — it is exactly the difference between "declared N" and
+  // "writeScopesApplied N", so without it the ledger's own arithmetic silently stops adding up.
+  // `writeScopeOtherPacks` is how many pairs in this pack's region a sibling pack governs.
   assert.deepEqual(v1.summary, {
     created: 0, skipped: 0, stamped: 0, alreadyStamped: 0, optionFields: 0, views: 0,
     writeScopesApplied: V2_DENIAL_COUNT, writeScopesRemoved: 0, writeScopeStale: 0, writeScopeRoles: 2,
+    writeScopeOperatorHeld: 0, writeScopeOtherPacks: 0,
   })
   // v2 moves one column between the two roles: same 6 denials, ONE retired, none left stale.
   assert.deepEqual(v2.summary, {
     created: 0, skipped: 0, stamped: 0, alreadyStamped: 0, optionFields: 0, views: 0,
     writeScopesApplied: V2_DENIAL_COUNT, writeScopesRemoved: 1, writeScopeStale: 0, writeScopeRoles: 2,
+    writeScopeOperatorHeld: 0, writeScopeOtherPacks: 0,
   })
 
   // The REAL store's values-free guard accepts both, so this shape is not merely asserted here —
