@@ -561,6 +561,24 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainText> = Object
     zh: '这条建议已经过期(数据在您查看期间变了),请刷新后重看。',
     en: 'This suggestion is out of date (the data changed while you were looking) — refresh and read it again.',
   }),
+  // 通知下一步. Each one says what happened to the CHAIN, because that is the only thing at stake —
+  // none of these four touched a single prep row.
+  STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER: Object.freeze({
+    zh: '现在不是您这一步,所以不能通知下一步。',
+    en: 'It is not your step right now, so you cannot hand it on.',
+  }),
+  STOCK_PREPARATION_HANDOFF_STEP_MISMATCH: Object.freeze({
+    zh: '这一步已经有人往下交接过了,页面刷新后就是最新的。',
+    en: 'Someone has already handed this step on; refresh the page and you will see where it stands.',
+  }),
+  STOCK_PREPARATION_HANDOFF_NOT_CONFIGURED: Object.freeze({
+    zh: '这个部署还没有配置备料接力的步骤,通知下一步暂时用不了。',
+    en: 'This deployment has no handoff chain set up yet, so notifying the next person is not available.',
+  }),
+  STOCK_PREPARATION_HANDOFF_STORE_UNAVAILABLE: Object.freeze({
+    zh: '记录接力进度的地方现在读不到,交接没有发生,备料数据也没有变化。',
+    en: 'The place that records the handoff could not be reached — the turn did not move, and nothing in your prep data changed.',
+  }),
 })
 
 export const STOCK_PREP_ERROR_GENERIC: StockPrepPlainText = Object.freeze({
@@ -992,4 +1010,68 @@ export const STOCK_PREP_LARGE_BOM_PHASE_PLAIN: Record<string, StockPrepPlainEntr
 
 export function stockPrepLargeBomPhasePlain(phase: string): StockPrepPlainEntry | null {
   return lookup(STOCK_PREP_LARGE_BOM_PHASE_PLAIN, phase)
+}
+
+// ---------------------------------------------------------------------------
+// 通知下一步 — the light multi-person handoff
+//
+// Several people each fill their own fields on a project's prep rows, in order; whoever finishes
+// presses 通知下一步 and the group chat is told who is up. THE CHAIN IS A TURN SIGNAL, NOT A
+// PERMISSION: nothing in this vocabulary decides who may write which column, and none of these
+// sentences may imply that it does. Per-column write enforcement is a separate, deferred decision.
+// ---------------------------------------------------------------------------
+
+/**
+ * The closed step vocabulary, in the words the floor already uses for these desks. Keys are the
+ * server's; a step added server-side falls through `lookup` to null and the caller renders the raw
+ * key exactly as every other vocabulary in this file degrades.
+ */
+export const STOCK_PREP_HANDOFF_STEP_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  prep_entry: Object.freeze({ zh: '备料填写', en: 'Filling in the prep list' }),
+  process: Object.freeze({ zh: '工艺', en: 'Process engineering' }),
+  planning: Object.freeze({ zh: '计划', en: 'Production planning' }),
+  technical: Object.freeze({ zh: '技术', en: 'Engineering' }),
+  production: Object.freeze({ zh: '生产', en: 'Production' }),
+  final_review: Object.freeze({ zh: '终审', en: 'Final review' }),
+})
+
+export function stockPrepHandoffStepPlain(key: string): StockPrepPlainText | null {
+  return lookup(STOCK_PREP_HANDOFF_STEP_PLAIN, key)
+}
+
+/**
+ * What happened to the NOTIFICATION, as distinct from what happened to the turn. Keeping the two
+ * apart is the whole point of this table: the turn and the DingTalk message are separate things that
+ * can succeed separately, and `failed` is the entry that earns the distinction — the next person is
+ * now up whether or not the group ever heard about it, so the sentence says both halves and hands
+ * the reader the one action that closes the gap. Telling them "通知失败" alone would leave them
+ * believing the handoff itself had not happened, and they would press the button again.
+ */
+export const STOCK_PREP_HANDOFF_OUTCOME_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  sent: Object.freeze({
+    zh: '已经交给下一步,群里也通知到了。',
+    en: 'Handed on to the next step, and the group has been told.',
+  }),
+  failed: Object.freeze({
+    zh: '已经交给下一步了,但群里的消息没有发出去 —— 请您自己跟下一位说一声。',
+    en: 'The turn has moved to the next step, but the group message did not go out — please tell the next person yourself.',
+    zhNext: '交接本身是成功的,不用再点一次。',
+    enNext: 'The handoff itself succeeded; there is no need to press it again.',
+  }),
+  skipped: Object.freeze({
+    zh: '已经交给下一步,这次没有发群消息。',
+    en: 'Handed on to the next step; no group message was sent this time.',
+    zhNext: '下一位可能还不知道,顺手说一声更稳妥。',
+    enNext: 'The next person may not know yet — a word to them does no harm.',
+  }),
+  not_configured: Object.freeze({
+    zh: '这个部署还没有配置备料接力的步骤,所以没有发出任何通知。',
+    en: 'This deployment has no handoff chain set up yet, so no notification went out.',
+    zhNext: '需要管理员先把接力步骤配好,这个按钮才会真正起作用。',
+    enNext: 'An admin has to set the chain up before this button does anything real.',
+  }),
+})
+
+export function stockPrepHandoffOutcomePlain(outcome: string): StockPrepPlainEntry | null {
+  return lookup(STOCK_PREP_HANDOFF_OUTCOME_PLAIN, outcome)
 }

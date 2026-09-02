@@ -49,6 +49,11 @@ import { GovernedAiService } from './services/governed-ai-service'
 // implementation. See packages/core-backend/src/routes/univer-meta.ts for the generic-export sibling
 // that already calls buildXlsxBuffer this same way (xlsx module lazily imported, never top-level).
 import { buildXlsxBuffer, type XlsxModule } from './multitable/xlsx-service'
+// 通知下一步 (light 备料 handoff): the DingTalk notification seam, injected into plugin-integration-core
+// ONLY, same per-plugin-injected-service shape as the two above. It wraps the EXISTING group-robot
+// machinery (multitable/dingtalk-group-destination-service.ts) — the plugin gets no DingTalk client
+// and no new dependency. GROUP-ONLY: see the note on sendStockPreparationHandoffNotification below.
+import { sendStockPreparationHandoffNotificationToDestinations } from './multitable/stock-preparation-handoff-notifier'
 import { eventBus } from './integration/events/event-bus'
 import { initializeEventBusService } from './integration/events/event-bus-service'
 import { messageBus } from './integration/messaging/message-bus'
@@ -421,6 +426,55 @@ async function buildStockPreparationExportWorkbookBuffer(params: {
 }): Promise<Buffer> {
   const xlsx = (await import('xlsx')) as unknown as XlsxModule
   return buildXlsxBuffer(xlsx, params)
+}
+
+// 通知下一步: the DingTalk group-destination service used by the handoff notifier, built once and
+// reused. Lazily imported for the same reason `./db/db` is lazily imported everywhere else in this
+// file — importing it constructs a Kysely instance over the pool, which must not happen as a
+// side effect of loading this module.
+let stockPreparationHandoffDingTalkService:
+  | import('./multitable/dingtalk-group-destination-service').DingTalkGroupDestinationService
+  | undefined
+
+async function resolveStockPreparationHandoffDingTalkService(): Promise<
+  import('./multitable/dingtalk-group-destination-service').DingTalkGroupDestinationService
+> {
+  if (!stockPreparationHandoffDingTalkService) {
+    const { db: kyselyDbDingTalkGroups } = await import('./db/db')
+    const { DingTalkGroupDestinationService } = await import('./multitable/dingtalk-group-destination-service')
+    // Same construction the `/api/multitable/dingtalk-groups` routes use (see
+    // src/routes/api-tokens.ts): the shared Kysely handle, default global fetch.
+    stockPreparationHandoffDingTalkService = new DingTalkGroupDestinationService(kyselyDbDingTalkGroups)
+  }
+  return stockPreparationHandoffDingTalkService
+}
+
+// 通知下一步 (light 备料 handoff): fan one composed notification out to the configured DingTalk GROUP
+// destinations, and report how many actually landed.
+//
+// GROUP-ONLY, and that is a limitation rather than a preference. The group robot webhook is the only
+// DingTalk send path in this repository reachable WITHOUT an automation-rule record context: the
+// person-targeted `sendDingTalkWorkNotification` needs directory_account_links rows plus a
+// per-integration corp-app token that a stock-prep route has no access to, and there is no DingTalk
+// 待办/todo API anywhere in this codebase to ride. So a handoff pings the group; it cannot put a task
+// in one person's DingTalk.
+//
+// This function is the WIRING (resolve the one service, hand it to the fan-out); the loop itself,
+// including the "one broken webhook must not silence the others" rule, lives in
+// multitable/stock-preparation-handoff-notifier.ts so a unit test can prove it.
+//
+// The seam takes destination ids, a title and a body, and nothing else. `sendToDestination` also
+// accepts an `initiatedBy` for the delivery ledger, but it is deliberately NOT plumbed through from
+// the plugin: an id arriving over this seam is not one the host authenticated, and a ledger row that
+// names an unverified human as the initiator of a server-originated send is worse than one that
+// honestly records none. Server sends land with `initiated_by: null`.
+async function sendStockPreparationHandoffNotification(params: {
+  destinationIds: string[]
+  title: string
+  body: string
+}): Promise<{ delivered: number; failed: number }> {
+  const service = await resolveStockPreparationHandoffDingTalkService()
+  return sendStockPreparationHandoffNotificationToDestinations(service, params)
 }
 
 function resolveRecoveryArchiveMainPoolRuntime(): RecoveryArchiveApplicationDatabaseRuntime {
@@ -2840,6 +2894,17 @@ export class MetaSheetServer {
         // absent for every other plugin.
         stockPreparationXlsxExport: manifest.name === 'plugin-integration-core'
           ? { buildWorkbookBuffer: buildStockPreparationExportWorkbookBuffer }
+          : undefined,
+        // 通知下一步: the DingTalk notification seam for plugin-integration-core ONLY. The plugin's
+        // handoff advance route calls `stockPreparationHandoffNotifier.sendToDestinations({ destinationIds,
+        // title, body })`; this wraps the EXISTING group-destination machinery
+        // (multitable/dingtalk-group-destination-service.ts) rather than giving the plugin a DingTalk
+        // client or a new dependency of its own. GROUP-ONLY: the group robot webhook is the only send
+        // path here that works without an automation-rule record context, and there is no per-person
+        // 待办 to ride. Absent for every other plugin; absent entirely, the handoff still moves the turn
+        // and reports `not_configured`.
+        stockPreparationHandoffNotifier: manifest.name === 'plugin-integration-core'
+          ? { sendToDestinations: sendStockPreparationHandoffNotification }
           : undefined,
         security: this.pluginRuntimeSecurityService,
       } as unknown as import('./types/plugin').PluginServices,
