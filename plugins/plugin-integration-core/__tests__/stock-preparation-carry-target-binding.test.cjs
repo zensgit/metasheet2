@@ -66,6 +66,12 @@ const TENANT_ID = 'tenant-a'
 const MAIN_SHEET = 'sheet_plm_stock_preparation_main'
 // The sandbox twin a default install's apply actually writes.
 const SANDBOX_SHEET = 'sheet_stock_prep_sandbox_twin'
+// ...and its OWN objectId. The twin is the canonical template RESTAMPED under a sandbox id
+// (stock-preparation-target-provisioning.cjs SANDBOX_OBJECT_ID_NAMESPACE), which is exactly why the
+// canonical-objectId lookup could never find it. Giving the two bindings DIFFERENT objectIds is what
+// lets T7-j witness its own headline: while both said `plm_stock_preparation_main`, an executor that
+// reported a hardcoded canonical id satisfied the assertion identically.
+const SANDBOX_OBJECT_ID = 'plm_stock_preparation_sandbox_m0'
 const LEDGER_SHEET = 'sheet_confirmation_decisions'
 const OPERATOR = 'user_admin_1'
 
@@ -175,7 +181,11 @@ function targetFor(sheetId, { without = [] } = {}) {
     if (without.includes(fieldId)) continue
     fieldIdMap[fieldId] = physicalFieldId(STAGING, MAIN_OBJECT_ID, fieldId)
   }
-  return { sheetId, objectId: MAIN_OBJECT_ID, fieldIdMap }
+  // The objectId is the BINDING's own — canonical for the production sheet, the restamped sandbox id
+  // for the twin. The physical field ids stay derived from MAIN_OBJECT_ID: that is the stated fixture
+  // limitation above (the strict records fake validates against a frozen template looked up by
+  // objectId), and it is inert here because `pre_mapped` mode never consults the objectId at all.
+  return { sheetId, objectId: sheetId === SANDBOX_SHEET ? SANDBOX_OBJECT_ID : MAIN_OBJECT_ID, fieldIdMap }
 }
 
 /**
@@ -204,7 +214,7 @@ function substrate({ boundSheet = SANDBOX_SHEET, mainRows, sandboxRows, ledgerRo
   // reach the bound sheet even though the old lookup is right there and would answer.
   const provisioning = makeFakeProvisioning({
     stagingProjectId: STAGING,
-    sheetIdByObjectId: { [MAIN_OBJECT_ID]: MAIN_SHEET, [LEDGER_OBJECT_ID]: LEDGER_SHEET },
+    sheetIdByObjectId: { [MAIN_OBJECT_ID]: MAIN_SHEET, [SANDBOX_OBJECT_ID]: SANDBOX_SHEET, [LEDGER_OBJECT_ID]: LEDGER_SHEET },
   })
   return { records, provisioning, target: targetFor(boundSheet), boundSheet }
 }
@@ -489,6 +499,24 @@ async function main() {
     assert.equal(env.records.patchCalls.length, 0, 'T6b: nothing was written')
   })
 
+  await run('T6b-pos: an UNCARRIED human column left unbound is NOT a refusal — carry binds only what it writes', async () => {
+    // The POSITIVE CONTROL for T6b. T6b alone cannot witness the narrowing it names: widening the
+    // required-binding set from `decision.carryFields` to every HUMAN_PRESERVED id keeps T6b green
+    // (it removes a CARRIED field) while falsely 409-ing legal deployments on the 11 columns this
+    // decision does not touch. Only a case that leaves an UNCARRIED human column unbound can tell
+    // the two apart.
+    const uncarried = HUMAN_PRESERVED_FIELD_IDS.filter((field) => !['notes', 'procurementReply'].includes(field))
+    assert.ok(uncarried.length >= 2, 'the whitelist has human columns this decision does not carry')
+    const env = substrate({ boundSheet: SANDBOX_SHEET })
+    const result = await applyCarryViaConfirm(callInput(env, {
+      target: targetFor(SANDBOX_SHEET, { without: uncarried }),
+    }))
+    assert.equal(result.mode, 'carried')
+    assert.deepEqual(result.carriedFields.slice().sort(), ['notes', 'procurementReply'])
+    assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, HUMAN_NOTE,
+      'T6b-pos: a deployment that binds only the columns it uses still carries')
+  })
+
   await run('T6c: a target that does not bind a SCOPE column is a broken config, not a best effort', async () => {
     for (const fieldId of ['idempotencyKey', 'active', 'componentSourceId', 'projectNo']) {
       const env = substrate({ boundSheet: SANDBOX_SHEET })
@@ -648,7 +676,9 @@ async function main() {
       assert.equal(JSON.stringify(result.evidence).includes(HUMAN_NOTE), false)
       assert.equal(JSON.stringify(result.evidence).includes(DECOY_NOTE), false)
       assert.equal(result.evidence.target.keyField, 'idempotencyKey')
-      assert.equal(result.evidence.target.objectId, MAIN_OBJECT_ID)
+      // The BOUND binding's own objectId — canonical here, the restamped sandbox id there. An
+      // executor that reported a hardcoded canonical constant fails this on the sandbox binding.
+      assert.equal(result.evidence.target.objectId, env.target.objectId)
       assert.deepEqual(result.evidence.carriedFields.slice().sort(), ['notes', 'procurementReply'])
     }
   })
@@ -695,6 +725,24 @@ async function main() {
     assert.equal(env.records.patchCalls.length, 0, 'T8d: nothing was written anywhere')
     assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, undefined)
     assert.equal(rowByKey(env, MAIN_SHEET, NEW_KEY).data.notes, undefined)
+  })
+
+  await run('T8d-order: unconfigured deployment + a LEDGER pair => refused with ZERO host reads', async () => {
+    // T8d alone cannot witness the handler's "resolve the target BEFORE the ledger pre-flight"
+    // ordering: it sends no decisionId/inputFingerprint, so the pre-flight never runs and moving the
+    // resolution after it stays green. With a ledger pair in the body the ordering becomes
+    // observable — and it is behavioural, not cosmetic: resolving late turns an actionable 422
+    // TABLE_ACTION_NOT_CONFIGURED into a misleading 404 about a ledger row, after a host read on a
+    // deployment that can never carry.
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET, configured: false })
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      body: { decision: decisionFixture(), decisionId: 'dec_1', inputFingerprint: 'fp_1' },
+    })
+    assert.equal(res.statusCode, 422, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'TABLE_ACTION_NOT_CONFIGURED')
+    assert.equal(env.records.queryCalls.length, 0, 'T8d-order: not one host read before the refusal')
+    assert.equal(env.records.patchCalls.length, 0)
   })
 
   await run('T8f: the route runs the READINESS gate on the bound target, not merely getTableAction', async () => {
