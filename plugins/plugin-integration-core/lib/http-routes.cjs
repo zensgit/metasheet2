@@ -187,6 +187,15 @@ const ROUTES = [
   // stock-prep:operate (the same tier as value-entry and the Excel export), and its tenant is derived
   // from the AUTHENTICATED principal with the host vouching for the pairing — see the handler.
   ['GET', '/api/integration/stock-preparation/operator/projects', 'stockPreparationOperatorProjectDirectory'],
+  // 通知下一步 —— 备料多人接力的交接。Several people each fill their OWN fields on a project's prep
+  // rows in an agreed order; this pair is "whose turn is it" and "I'm done, tell the next one". Both
+  // are VALUES-FREE (step keys from a closed vocabulary, cursor integers, booleans, handler COUNTS),
+  // unlike the export above — so the read rides the broad stock-prep:read queue-watcher tier and only
+  // the advance rides the OPERATE write tier. See stock-preparation-handoff.cjs for what this is (a
+  // visible turn signal) and, emphatically, what it is not (a permission mechanism, an approval
+  // graph, or an impersonation of the last approver).
+  ['GET', '/api/integration/stock-preparation/handoff', 'stockPreparationHandoffStatus'],
+  ['POST', '/api/integration/stock-preparation/handoff/advance', 'stockPreparationHandoffAdvance'],
   // #3751 MVP W5b (#3890): values-free audit trail over the stock-prep write surface.
   ['GET', '/api/integration/stock-preparation/audit', 'stockPreparationAuditList'],
   // 工作台里选源 — WHICH source the pull action reads, chosen in the workbench instead of in a server
@@ -642,6 +651,15 @@ const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('./stock-preparation-t
 // 按项目导出物料 Excel: reads the ACTIVE plm_stock_preparation_main rows of one business project,
 // projected to the agreed EXPORT_COLUMNS. Structurally read-only; never touches xlsx itself.
 const { exportStockPreparationPrepLines } = require('./stock-preparation-prep-line-export.cjs')
+// 通知下一步: the pure half of the 备料 handoff — the closed step vocabulary, the deploy-config parse,
+// the compare-and-set advance decision, and the values-free notification bodies. No I/O of its own.
+const {
+  parseStockPreparationHandoffConfig,
+  planStockPreparationHandoffAdvance,
+  buildStockPreparationHandoffNotification,
+  projectHandoffSteps,
+  isHandlerOfStep,
+} = require('./stock-preparation-handoff.cjs')
 // FOS-2: generic field-option-sync route — resolve a FOS preset (FOS-1 catalog), validate operator
 // option sets against the preset's source keys, and patch each mapped field's options + generic
 // `fieldOptionSync` metadata through the SAME kernel stock-prep uses (no parallel write path).
@@ -1443,6 +1461,26 @@ const VALID_STOCK_PREPARATION_PREP_LINE_EXPORT_QUERY_KEYS = new Set([
 const VALID_STOCK_PREPARATION_OPERATOR_PROJECT_DIRECTORY_QUERY_KEYS = new Set([
   'tenantId',
   'workspaceId',
+])
+// 通知下一步: the status READ. `projectNo` for the same reason the export uses it — the business
+// project number, which is what a person means by "this project".
+const VALID_STOCK_PREPARATION_HANDOFF_STATUS_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectNo',
+])
+// 通知下一步: the ADVANCE body. `fromStepKey` — the step the caller believes they are completing — is
+// what turns a blind increment into a compare-and-set, which is the whole idempotency story (a double
+// click is a detectable replay rather than a second advance). Deliberately ABSENT, so that a body
+// supplying one is refused as an unknown field: `actor`/`advancedBy` (the principal is the ROUTE
+// user, never the body), `toStepKey`/`stepIndex` (the destination is derived from the configured
+// chain, never chosen by the caller — otherwise anyone could skip to the terminal step and fire the
+// 仓库/采购 notice), and any destination id (the notification targets are deploy config).
+const VALID_STOCK_PREPARATION_HANDOFF_ADVANCE_BODY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectNo',
+  'fromStepKey',
 ])
 // FOS-2: generic field-option-sync request — closed allowlist. Operator names a preset (FOS-1
 // catalog) + supplies option sets keyed by the preset's source keys. No sheetId / credentials.
@@ -3171,6 +3209,99 @@ function createHandlers(services, options = {}) {
   // (the auth middleware fills that field from the `x-tenant-id` header when the token has no claim).
   // Duck-typed to { verifyTenantMembership({ userId, tenantId }) => Promise<{ member }> }.
   const tenantPrincipalDirectory = (services && services.tenantPrincipalDirectory) || null
+
+  // 通知下一步: the durable cursor (migration 082). OPTIONAL at REGISTRATION for the same reason the
+  // audit store is — an environment without the SQL db must still be able to register routes — and
+  // NOT optional where it matters: both handoff routes fail closed without it, because a turn signal
+  // nobody can persist is worse than no turn signal (it would show a plausible "current step" that
+  // resets on the next request).
+  const stockPreparationHandoffStore = (services && services.stockPreparationHandoffStore) || null
+  function requireStockPreparationHandoffStore() {
+    if (!stockPreparationHandoffStore
+      || typeof stockPreparationHandoffStore.get !== 'function'
+      || typeof stockPreparationHandoffStore.advance !== 'function') {
+      throw new HttpRouteError(501, 'STOCK_PREPARATION_HANDOFF_STORE_UNAVAILABLE', 'stock-preparation handoff store is not available; the handoff cannot be read or advanced here')
+    }
+    return stockPreparationHandoffStore
+  }
+
+  // 通知下一步: the DingTalk seam. INJECTED by the host for this plugin only — the same
+  // INJECTED-per-plugin shape as governedAi and stockPreparationXlsxExport above, and for the same
+  // reason: the plugin has no DingTalk client of its own and must not grow one. The host wraps the
+  // EXISTING group-destination machinery (packages/core-backend dingtalk-group-destination-service.ts),
+  // which is also why the seam speaks in DESTINATION IDs rather than webhooks or people.
+  //
+  // OPTIONAL — absent → every advance reports `notifyOutcome: 'not_configured'` and still moves the
+  // turn. Turn state and notification are separate concerns and a deployment is allowed to want only
+  // the first. Duck-typed to
+  //   { sendToDestinations({ destinationIds, title, body, initiatedBy }) => Promise<{ delivered, failed }> }.
+  const stockPreparationHandoffNotifier = (services && services.stockPreparationHandoffNotifier) || null
+
+  // 通知下一步: the deploy-time chain, parsed ONCE and memoized.
+  //
+  // LAZY, not resolved at registration, and the difference is load-bearing. A MALFORMED chain must
+  // throw rather than degrade (a typo must never be indistinguishable from "nothing configured", or
+  // the deployment silently notifies nobody), but that throw must not take the whole plugin's route
+  // surface down with it. Resolving here means a bad `stockPreparationHandoff` key fails exactly the
+  // two handoff routes, loudly and by name, while every other integration route keeps serving.
+  //
+  // ABSENT key → `{ configured: false }` → the status read answers `configured: false` and the
+  // advance refuses with a named 501 BEFORE touching the store, the notifier or the audit trail. A
+  // deployment that never sets it is byte-identical to one that never heard of this feature.
+  let stockPreparationHandoffChainCache = null
+  function loadStockPreparationHandoffChain() {
+    if (!stockPreparationHandoffChainCache) {
+      stockPreparationHandoffChainCache = parseStockPreparationHandoffConfig(context && context.config)
+    }
+    return stockPreparationHandoffChainCache
+  }
+  /**
+   * 通知下一步: dispatch one composed handoff notification. Returns an OUTCOME ENUM, never throws.
+   *
+   * NOT THROWING IS THE POINT. This runs AFTER the turn has already committed, so a throw here would
+   * turn a successful handoff into a 500 and the operator would reasonably click again — at which
+   * point they would be told "already handed off" and would have no idea whether anyone was ever
+   * notified. Returning an enum lets the route answer honestly: the turn moved, the message did not
+   * go out, go and tell them yourself.
+   *
+   *   'not_configured' —— no notifier injected, or the chain names no destination for this hop. The
+   *                       turn still moved; a deployment is allowed to want turn state without
+   *                       notifications.
+   *   'sent'           —— the host reported at least one delivery.
+   *   'failed'         —— the host threw, or reported zero deliveries.
+   */
+  async function dispatchStockPreparationHandoffNotification(notification) {
+    if (!notification || !Array.isArray(notification.destinationIds) || notification.destinationIds.length === 0) {
+      return 'not_configured'
+    }
+    if (!stockPreparationHandoffNotifier || typeof stockPreparationHandoffNotifier.sendToDestinations !== 'function') {
+      return 'not_configured'
+    }
+    try {
+      const result = await stockPreparationHandoffNotifier.sendToDestinations({
+        destinationIds: notification.destinationIds,
+        title: notification.title,
+        body: notification.body,
+      })
+      const delivered = result && Number.isFinite(Number(result.delivered)) ? Number(result.delivered) : 0
+      return delivered > 0 ? 'sent' : 'failed'
+    } catch (error) {
+      // Values-free by construction: the outcome is an enum and the host's own message is discarded
+      // here rather than echoed, so a webhook error string can never reach the caller or the UI.
+      if (routeLogger && typeof routeLogger.warn === 'function') {
+        routeLogger.warn('[plugin-integration-core] stock-prep handoff notification failed; the turn already advanced')
+      }
+      return 'failed'
+    }
+  }
+
+  function requireConfiguredStockPreparationHandoffChain() {
+    const chain = loadStockPreparationHandoffChain()
+    if (!chain.configured) {
+      throw new HttpRouteError(501, 'STOCK_PREPARATION_HANDOFF_NOT_CONFIGURED', 'this deployment has no stock-preparation handoff chain configured')
+    }
+    return chain
+  }
   let vendorPresetCatalogCache = null
   function loadVendorPresetCatalog() {
     if (vendorPresetCatalogCache) return vendorPresetCatalogCache
@@ -7166,6 +7297,196 @@ function createHandlers(services, options = {}) {
         },
       })
       return sendOk(res, result)
+    },
+
+    // 通知下一步 —— WHOSE TURN IS IT. The read half of the 备料 handoff.
+    //
+    // GATE CHOICE: requireAccess(req, STOCK_PREP_READ) — the broad queue-watcher tier, same as the
+    // confirmation-decision queue beside it, because everything this returns is values-free: step
+    // keys drawn from the closed handoff vocabulary, cursor integers, booleans, and handler COUNTS.
+    // Handler IDENTITIES are deliberately NOT returned (projectHandoffSteps projects them to a
+    // count): a supervisor watching the queue has no need for the personnel roster, and a values-free
+    // surface that leaks a staff list is still a leak. The ONE identity-derived fact that does cross
+    // is `isCurrentHandler` — a boolean about the CALLER's own turn, computed server-side so the
+    // front end never has to hold a roster to decide whether to show the button.
+    async stockPreparationHandoffStatus(req, res) {
+      const user = requireAccess(req, STOCK_PREP_READ)
+      const input = normalizeStockPreparationConfirmBody(
+        requestQuery(req),
+        VALID_STOCK_PREPARATION_HANDOFF_STATUS_QUERY_KEYS,
+        'STOCK_PREPARATION_HANDOFF_REQUEST_INVALID',
+      )
+      const projectNo = firstString(input.projectNo)
+      if (!projectNo) {
+        throw new HttpRouteError(400, 'STOCK_PREPARATION_HANDOFF_REQUEST_INVALID', 'projectNo is required', { field: 'projectNo' })
+      }
+      const tenantId = resolveTenantId(req, input)
+      const chain = loadStockPreparationHandoffChain()
+      if (!chain.configured) {
+        // NOT an error. An unconfigured deployment asking "whose turn is it" gets a truthful "there
+        // is no chain here", 200, so the workbench can render nothing without treating the absence of
+        // an optional feature as a failure of the page it lives on.
+        return sendOk(res, {
+          configured: false,
+          projectNo,
+          steps: [],
+          stepCount: 0,
+          stepIndex: null,
+          currentStepKey: null,
+          terminal: false,
+          completed: false,
+          isCurrentHandler: false,
+          notifiedStepIndex: null,
+        })
+      }
+      const store = requireStockPreparationHandoffStore()
+      const persisted = await store.get({
+        tenantId,
+        workspaceId: firstString(input.workspaceId),
+        projectNo,
+      })
+      // No row == never handed off == the chain is at step 0. Absence and zero are the same state.
+      const stepIndex = persisted ? persisted.stepIndex : 0
+      const completed = stepIndex >= chain.steps.length
+      const currentStep = completed ? null : chain.steps[stepIndex]
+      return sendOk(res, {
+        configured: true,
+        projectNo,
+        steps: projectHandoffSteps(chain),
+        stepCount: chain.steps.length,
+        stepIndex,
+        currentStepKey: currentStep ? currentStep.key : null,
+        terminal: !completed && stepIndex === chain.steps.length - 1,
+        completed,
+        isCurrentHandler: !completed && isHandlerOfStep(chain, stepIndex, user.id || user.email),
+        notifiedStepIndex: persisted ? persisted.notifiedStepIndex : null,
+      })
+    },
+
+    // 通知下一步 —— I'M DONE, TELL THE NEXT ONE. The write half.
+    //
+    // GATE CHOICE: requireAccess(req, STOCK_PREP_OPERATE) — the same notch as
+    // stockPreparationConfirmationDecisionsConfirm, and for the same reason: this mutates durable
+    // state AND has an effect outside the system (a DingTalk message that makes someone's phone
+    // buzz). It must not ride the broad READ tier that the status read above uses, because that tier
+    // is the queue-WATCHER tier (supervisor, auditor, dashboard) and a watcher must not be able to
+    // move somebody else's work along.
+    //
+    // The permission is necessary but NOT sufficient: planStockPreparationHandoffAdvance additionally
+    // requires the caller to be a configured handler of the step being handed off. Platform admins
+    // are NOT exempted from that — an admin advancing someone else's step would make the audit trail
+    // say a person handed off when they did not.
+    //
+    // ORDER OF OPERATIONS, chosen deliberately and pinned by the suite:
+    //   1. gate, parse, load the chain            — nothing observable has happened yet
+    //   2. plan the advance against the persisted cursor
+    //   3. AUDIT the intent                       — "record intent FIRST", the same discipline every
+    //      write route in this family uses: if the audit store is unavailable or refuses the payload,
+    //      no turn moves and no message is sent
+    //   4. COMMIT the turn (compare-and-set + notification claim, one transaction)
+    //   5. SEND the notification, best effort
+    //
+    // Step 5 is AFTER step 4 on purpose, and a failure there does NOT roll anything back. The turn is
+    // the durable business fact — 张三 really did finish — and a DingTalk outage must not silently
+    // un-finish it, leaving the workbench claiming it is still his step. The caller is told the truth
+    // instead (`notified: false`, `notifyOutcome: 'failed'`) and the UI says so in words, so a human
+    // can go and tell the next person. See the store for why this is at-most-once rather than
+    // at-least-once.
+    async stockPreparationHandoffAdvance(req, res) {
+      const user = requireAccess(req, STOCK_PREP_OPERATE)
+      const audit = requireStockPreparationAudit()
+      const input = normalizeStockPreparationConfirmBody(
+        requestBody(req),
+        VALID_STOCK_PREPARATION_HANDOFF_ADVANCE_BODY_KEYS,
+        'STOCK_PREPARATION_HANDOFF_REQUEST_INVALID',
+      )
+      const projectNo = firstString(input.projectNo)
+      if (!projectNo) {
+        throw new HttpRouteError(400, 'STOCK_PREPARATION_HANDOFF_REQUEST_INVALID', 'projectNo is required', { field: 'projectNo' })
+      }
+      const fromStepKey = firstString(input.fromStepKey)
+      if (!fromStepKey) {
+        throw new HttpRouteError(400, 'STOCK_PREPARATION_HANDOFF_REQUEST_INVALID', 'fromStepKey is required', { field: 'fromStepKey' })
+      }
+      // Chain BEFORE store: an unconfigured deployment must refuse without ever reaching the database,
+      // which is what makes "absent config = byte-identical behaviour" true rather than merely likely.
+      const chain = requireConfiguredStockPreparationHandoffChain()
+      const store = requireStockPreparationHandoffStore()
+      // A WRITE derives its tenant from the AUTHENTICATED principal only — never from the request.
+      const tenantId = resolveAuthUserTenantId(req)
+      const workspaceId = firstString(input.workspaceId)
+      const actor = user.id || user.email
+
+      const persisted = await store.get({ tenantId, workspaceId, projectNo })
+      const plan = planStockPreparationHandoffAdvance({
+        chain,
+        currentStepIndex: persisted ? persisted.stepIndex : 0,
+        fromStepKey,
+        actorId: actor,
+      })
+      const fromStepIndex = plan.fromStepIndex
+      const terminal = fromStepIndex === chain.steps.length - 1
+
+      // Record intent FIRST. Values-free: `subject_id` is a closed-vocabulary step key, `detail` is
+      // cursor integers and booleans. `replayed` is recorded too — someone clicked, and that a person
+      // pressed the button twice is a fact a reviewer asking "who handed this off" wants to see.
+      await audit.append({
+        tenantId,
+        workspaceId,
+        projectId: projectNo,
+        action: 'handoff_advance',
+        subjectId: fromStepKey,
+        mode: plan.decision === 'replay' ? 'replayed' : (terminal ? 'completed' : 'advanced'),
+        actor,
+        detail: {
+          operation: 'handoff_advance',
+          fromStepIndex,
+          toStepIndex: plan.toStepIndex,
+          stepCount: chain.steps.length,
+          terminal,
+        },
+      })
+
+      const applied = await store.advance({
+        tenantId,
+        workspaceId,
+        projectNo,
+        expectedStepIndex: fromStepIndex,
+        toStepIndex: plan.toStepIndex,
+        // The claim is the at-most-once key. A replay passes null so it cannot re-claim.
+        notifyForStepIndex: plan.decision === 'replay' ? null : fromStepIndex,
+        actor,
+      })
+
+      let notifyOutcome = 'skipped'
+      if (applied.notifyClaimed) {
+        const notification = buildStockPreparationHandoffNotification({
+          chain,
+          projectNo,
+          fromStepIndex,
+          // The APPROVER IS NAMED IN THE BODY and the message is sent by the SYSTEM. This is the
+          // relaxed form of "issued in the name of the last approver": no impersonation is attempted,
+          // because true send-as-a-person delegation needs DingTalk-side authorization and a security
+          // review that is out of this change's scope.
+          actorLabel: actor,
+          terminal,
+        })
+        notifyOutcome = await dispatchStockPreparationHandoffNotification(notification)
+      }
+
+      const completed = applied.handoff.stepIndex >= chain.steps.length
+      const currentStep = completed ? null : chain.steps[applied.handoff.stepIndex]
+      return sendOk(res, {
+        projectNo,
+        fromStepKey,
+        currentStepKey: currentStep ? currentStep.key : null,
+        stepIndex: completed ? null : applied.handoff.stepIndex,
+        stepCount: chain.steps.length,
+        changed: applied.changed,
+        terminal,
+        notified: notifyOutcome === 'sent',
+        notifyOutcome,
+      })
     },
 
     // FOS-2: generic, preset-driven field-option-sync. Admin-gated; resolves a FOS preset from the

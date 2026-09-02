@@ -60,6 +60,7 @@ node __tests__/stock-preparation-snapshot-reads.test.cjs
 node __tests__/stock-preparation-confirm-writes.test.cjs
 node __tests__/stock-preparation-confirm-reads.test.cjs
 node __tests__/stock-preparation-generation-runtime.test.cjs
+node __tests__/stock-preparation-handoff.test.cjs
 node __tests__/stock-preparation-audit-store.test.cjs
 node __tests__/stock-preparation-audit-migration.test.cjs
 node __tests__/stock-preparation-option-sync.test.cjs

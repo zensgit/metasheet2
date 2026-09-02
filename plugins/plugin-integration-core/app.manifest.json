@@ -123,6 +123,15 @@
       ],
       "committed": false,
       "note": "装列(包)和写行(apply)是两道独立授权,都要开。允许清单里没有包声明的目标时,装列会成功、写行会被拒 —— 这种晚失败最费时间。"
+    },
+    {
+      "id": "stockPrepHandoff",
+      "name": "备料接力步骤(通知下一步)",
+      "kind": "deployment-data-file",
+      "envVar": "INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH",
+      "serverConfigKey": "stockPreparationHandoff",
+      "committed": false,
+      "note": "部署期数据:有序的接力步骤(取自封闭词表)、每步的经办人,以及钉钉群目标 —— env 只给出部署机上那个未提交的 JSON 文件路径。未设 = 接力未配置 = 交接路由按名报 501、不写任何一行、不发任何一条,整套行为与没有这个功能时逐字节相同。设了但写错 = 直接抛错,绝不退化成「没配置」—— 对通知链来说这两者的差别就是「有没有人被通知到」。步骤只表示轮到谁,不是写权限。"
     }
   ],
   "acceptance": {

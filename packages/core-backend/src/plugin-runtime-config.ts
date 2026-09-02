@@ -6,6 +6,7 @@ const C6_TEST_FAILURE_INJECTION_ENABLED_ENV = 'METASHEET_C6_TEST_FAILURE_INJECTI
 const INTEGRATION_CORE_CUSTOMER_PACKS_PATH_ENV = 'INTEGRATION_CORE_STOCK_PREPARATION_CUSTOMER_PACKS_PATH'
 const INTEGRATION_CORE_EXT_FIELD_MAPPING_PATH_ENV = 'INTEGRATION_CORE_STOCK_PREPARATION_EXT_FIELD_MAPPING_PATH'
 const INTEGRATION_CORE_B2A_REGISTRY_PATH_ENV = 'INTEGRATION_CORE_B2A_REGISTRY_PATH'
+const INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH_ENV = 'INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH'
 
 function parsePluginJsonEnv(env: NodeJS.ProcessEnv, key: string): unknown {
   const raw = env[key]
@@ -150,6 +151,33 @@ export function resolvePluginRuntimeConfig(
     INTEGRATION_CORE_B2A_REGISTRY_PATH_ENV,
     'a JSON object with registryId, registryVersion and registrations'
   )
+  // 通知下一步 (light 备料 handoff): the ordered chain of steps, WHO handles each one, and which
+  // DingTalk group destinations get told. Fourth artifact on this reader, and the same posture as
+  // its siblings for the same reason — a chain names a tenant's own people and their group robots,
+  // which is reviewable deployment data, not a setting you can sensibly inline in an environment
+  // variable.
+  //
+  // UNSET -> the key is omitted -> the plugin's chain is unconfigured -> the advance route refuses
+  // with a named 501 before it touches the store, the notifier or the audit trail, and the whole
+  // deployment is byte-identical to one that never heard of this feature. There is no partially-on
+  // state and no default chain: nobody gets an implied approval route.
+  //
+  // SET-but-malformed -> THROW. This matters more here than anywhere else on this reader, because
+  // the failure being prevented is SILENCE. For a catalog, a typo'd path degrades to "no extension
+  // columns" and someone notices the missing columns; for a NOTIFICATION CHAIN, a typo'd path would
+  // degrade to "notify nobody", which looks exactly like a correctly-configured deployment right up
+  // until the day someone asks why the warehouse never heard about a finished 备料. "Typo" and
+  // "nothing configured" must never be indistinguishable when the difference is whether anyone gets
+  // told anything at all. The throw names the ENV KEY and never echoes the path, same as its
+  // siblings.
+  //
+  // This file only reads the artifact and shape-checks that it is a JSON object; the plugin owns
+  // validating the steps array, the handler ids and the destination ids inside it.
+  const stockPreparationHandoff = readDeployJsonObjectFile(
+    env,
+    INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH_ENV,
+    'a JSON object with an ordered steps array'
+  )
 
   return {
     ...(tableActions !== undefined ? { tableActions } : {}),
@@ -157,6 +185,7 @@ export function resolvePluginRuntimeConfig(
     ...(stockPreparationCustomerPacks !== undefined ? { stockPreparationCustomerPacks } : {}),
     ...(stockPreparationExtFieldMapping !== undefined ? { stockPreparationExtFieldMapping } : {}),
     ...(b2aTrialRegistry !== undefined ? { b2aTrialRegistry } : {}),
+    ...(stockPreparationHandoff !== undefined ? { stockPreparationHandoff } : {}),
     ...(c6TestFailureInjection !== undefined || c6TestFailureInjectionDeployEnabled
       ? {
           c6TestFailureInjection: {

@@ -300,6 +300,14 @@ const REQUEST_BY_CAPABILITY = Object.freeze({
   // provisioning only knows the LEDGER object, so the project table misses and directoryReady is
   // false), which is exactly the "gate let it through, something else happened" case M-01 measures.
   'confirmationQueue.projectDirectory': () => ({ query: {} }),
+  // 通知下一步. The shared mount() configures no handoff chain and injects no handoff store, so a
+  // 'pass' actor lands PAST the gate on the feature's inert behaviour: the status read answers 200
+  // with `configured: false`, and the advance answers 501 STOCK_PREPARATION_HANDOFF_NOT_CONFIGURED.
+  // Neither is refusedByGate, which is exactly the "the gate let it through, something else happened"
+  // case M-01 measures — and it doubles as a restatement here that an unconfigured deployment refuses
+  // by CONFIG rather than by permission.
+  'handoff.read': () => ({ query: { projectNo: PROJECT_NO } }),
+  'handoff.advance': () => ({ body: { projectNo: PROJECT_NO, fromStepKey: 'prep_entry' } }),
 })
 
 async function callCapability(routes, capability, user) {
@@ -334,6 +342,8 @@ const MATRIX = Object.freeze({
     'confirmationQueue.confirm': 'gate',
     'confirmationQueue.export': 'gate',
     'confirmationQueue.projectDirectory': 'gate',
+    'handoff.read': 'gate',
+    'handoff.advance': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -344,6 +354,8 @@ const MATRIX = Object.freeze({
     'confirmationQueue.confirm': 'gate',
     'confirmationQueue.export': 'gate',
     'confirmationQueue.projectDirectory': 'gate',
+    'handoff.read': 'gate',
+    'handoff.advance': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -354,6 +366,8 @@ const MATRIX = Object.freeze({
     'confirmationQueue.confirm': 'gate',
     'confirmationQueue.export': 'gate',
     'confirmationQueue.projectDirectory': 'gate',
+    'handoff.read': 'gate',
+    'handoff.advance': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -364,6 +378,8 @@ const MATRIX = Object.freeze({
     'confirmationQueue.confirm': 'gate',
     'confirmationQueue.export': 'gate',
     'confirmationQueue.projectDirectory': 'gate',
+    'handoff.read': 'pass',
+    'handoff.advance': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -374,6 +390,8 @@ const MATRIX = Object.freeze({
     'confirmationQueue.confirm': 'pass',
     'confirmationQueue.export': 'pass',
     'confirmationQueue.projectDirectory': 'pass',
+    'handoff.read': 'pass',
+    'handoff.advance': 'pass',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -384,6 +402,8 @@ const MATRIX = Object.freeze({
     'confirmationQueue.confirm': 'gate',
     'confirmationQueue.export': 'gate',
     'confirmationQueue.projectDirectory': 'gate',
+    'handoff.read': 'gate',
+    'handoff.advance': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -394,6 +414,8 @@ const MATRIX = Object.freeze({
     'confirmationQueue.confirm': 'pass',
     'confirmationQueue.export': 'pass',
     'confirmationQueue.projectDirectory': 'pass',
+    'handoff.read': 'pass',
+    'handoff.advance': 'pass',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -404,6 +426,8 @@ const MATRIX = Object.freeze({
     'confirmationQueue.confirm': 'pass',
     'confirmationQueue.export': 'pass',
     'confirmationQueue.projectDirectory': 'pass',
+    'handoff.read': 'pass',
+    'handoff.advance': 'pass',
     'confirmationQueue.ensure': 'pass',
     'confirmationQueue.reconcile': 'pass',
   }),
@@ -633,6 +657,10 @@ async function orphanOperateGrantConfersNothing() {
       'confirmationQueue.projectDirectory',
       'confirmationQueue.readiness',
       'confirmationQueue.valueEntry',
+      // 通知下一步: the turn signal rides READ, the handoff itself rides the OPERATE conjunction — so
+      // both appear here and neither appears for the orphan-operate grant above.
+      'handoff.advance',
+      'handoff.read',
     ],
     'M-05: operate + read is the full operator tier',
   )
