@@ -1,0 +1,92 @@
+name: Discussion Pilot Status (read-only probe)
+
+# Extremely narrow, READ-ONLY feasibility probe for the Discussion 点灯 pilot.
+# Deliberately isolated from the full provision/light/rollback channel:
+#   * NO workflow inputs at all  -> nothing to interpolate -> no shell-injection surface.
+#   * NO MS2_ADMIN_BEARER or any secret beyond the DEPLOY_* SSH creds.
+#   * The host key is PINNED (DEPLOY_KNOWN_HOSTS + StrictHostKeyChecking=yes + BatchMode) so
+#     a DNS/MITM attacker cannot forge the platform/attendance verdict.
+#   * The probe is piped over stdin (`bash -s`): NOTHING is written to the host filesystem
+#     for the script, so there is no predictable path / symlink / race to exploit. The probe
+#     mutates nothing and exits non-zero on any dimension it cannot positively verify.
+# Answers one question: is this host's metasheet-backend in platform mode with the PLM embed
+# routes mounted (pilot feasible) or attendance mode (not feasible here).
+#
+# NOT scheduled. NOT push/PR triggered.
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: discussion-pilot-status
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (for the read-only probe script)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Read-only status probe on deploy host (pinned host key, stdin script, no inputs)
+        id: probe
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          [ -n "${DEPLOY_HOST:-}" ] || { echo "::error::DEPLOY_HOST secret is required"; exit 1; }
+          [ -n "${DEPLOY_KNOWN_HOSTS:-}" ] || { echo "::error::DEPLOY_KNOWN_HOSTS secret is required (host key must be pinned; do not fall back to StrictHostKeyChecking=no)"; exit 1; }
+
+          umask 077
+          keydir="$(mktemp -d)"
+          trap 'rm -rf "$keydir"' EXIT
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > "$keydir/deploy_key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$keydir/known_hosts"
+          chmod 600 "$keydir/deploy_key" "$keydir/known_hosts"
+
+          ssh_opts=(
+            -o BatchMode=yes
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="$keydir/known_hosts"
+            -o IdentitiesOnly=yes
+            -o ConnectTimeout=20
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=6
+            -i "$keydir/deploy_key"
+          )
+
+          # Pipe the committed read-only probe over stdin. No file is written to the host for
+          # the script; no workflow input reaches the remote command line.
+          set +e
+          ssh "${ssh_opts[@]}" "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' \
+            < scripts/ops/discussion-pilot/status_probe.sh | tee status-output.txt
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "probe_rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "probe exit code: $rc"
+
+      - name: Upload status evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: discussion-pilot-status-${{ github.run_id }}
+          retention-days: 14
+          path: status-output.txt
+
+      - name: Fail if the probe could not verify feasibility
+        if: always()
+        run: |
+          rc="${{ steps.probe.outputs.probe_rc }}"
+          if [ "$rc" != "0" ]; then
+            echo "::error::status probe exited $rc — feasibility UNVERIFIED; do not proceed to provisioning"
+            exit 1
+          fi
+          echo "status probe verified all dimensions; read status-output.txt for the PLM-route verdict"
