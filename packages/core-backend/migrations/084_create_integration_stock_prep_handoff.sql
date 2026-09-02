@@ -1,4 +1,4 @@
--- 082_create_integration_stock_prep_handoff.sql
+-- 084_create_integration_stock_prep_handoff.sql
 -- plugin-integration-core · 通知下一步 —— 备料多人接力的「轮到谁了」。
 --
 -- WHY THIS TABLE EXISTS. On a real 备料 project several people each fill their own fields on the same
@@ -67,10 +67,18 @@ CREATE TABLE IF NOT EXISTS integration_stock_prep_handoff (
     CHECK (notified_step_index IS NULL OR notified_step_index >= 0)
 );
 
--- ONE cursor per (tenant, workspace, project). This index is the whole concurrency story: two people
--- clicking 通知下一步 on the same project at the same moment resolve to one row at the database, and
--- the store's transaction re-reads the cursor inside the same unit of work, so the second one's
--- compare-and-set correctly refuses instead of skipping somebody's step.
+-- ONE cursor per (tenant, workspace, project): two people clicking 通知下一步 on the same project at
+-- the same moment resolve to ONE row at the database, and a first advance that loses the insert race
+-- gets 23505 rather than a second row.
+--
+-- THIS INDEX IS NOT, BY ITSELF, THE CONCURRENCY STORY, and an earlier version of this comment claimed
+-- it was. Uniqueness stops a duplicate ROW; it does not stop two transactions from both reading
+-- step_index = 3 and both writing step_index = 4. Under READ COMMITTED that is exactly what happens,
+-- and the visible symptom is two DingTalk pings for one handoff. What actually arbitrates lives in
+-- plugins/plugin-integration-core/lib/stock-preparation-handoff-store.cjs and is TWO things: the
+-- in-transaction read is SELECT … FOR UPDATE (so the second advance waits and then re-reads), and the
+-- UPDATE carries `step_index` / `notified_step_index` predicates so zero updated rows is a refusal.
+-- Anyone tightening or relaxing this table's concurrency behaviour must change that file, not this one.
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_integration_stock_prep_handoff_scope
   ON integration_stock_prep_handoff (tenant_id, COALESCE(workspace_id, ''), project_no);
 

@@ -165,6 +165,41 @@ function stringList(value) {
   return out
 }
 
+// The CLOSED key sets of the deploy-time config object. Same discipline as the routes' request-body
+// allowlists: a key the parser does not know is a TYPO until proven otherwise, and the whole reason
+// this config exists is that a typo here means nobody gets told anything.
+const HANDOFF_TOP_LEVEL_KEYS = Object.freeze(['steps', 'notify', 'terminal'])
+const STEP_KEYS = Object.freeze(['key', 'handlerUserIds'])
+const NOTIFY_KEYS = Object.freeze(['groupDestinationId'])
+const TERMINAL_KEYS = Object.freeze(['groupDestinationIds', 'exportPath'])
+
+/** Refuse any key outside the closed set, naming the FIELD (never the value it carried). */
+function assertNoUnknownKeys(object, allowed, prefix) {
+  for (const key of Object.keys(object)) {
+    if (allowed.includes(key)) continue
+    const field = prefix ? `${prefix}.${key}` : key
+    throw new StockPreparationHandoffError(
+      500,
+      'STOCK_PREPARATION_HANDOFF_CONFIG_INVALID',
+      'handoff config carries a key this deployment does not understand — most likely a typo, and a typo here silences the whole chain',
+      { field },
+    )
+  }
+}
+
+/** A config string that must be present and non-empty. Names the field; never echoes the value. */
+function requiredConfigString(value, field) {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new StockPreparationHandoffError(
+      500,
+      'STOCK_PREPARATION_HANDOFF_CONFIG_INVALID',
+      `${field} must be a non-empty string`,
+      { field },
+    )
+  }
+  return value.trim()
+}
+
 /**
  * The committed Chinese label for a step key, or the key itself for anything outside the closed
  * vocabulary. Never throws: a label is display text, and a lookup miss must not be able to fail an
@@ -187,6 +222,30 @@ function stockPreparationHandoffStepLabel(stepKey) {
  * degrading (packages/core-backend plugin-runtime-config.ts): a typo must never be indistinguishable
  * from "nothing configured", because for a notification chain those two states differ by exactly
  * whether anyone gets told anything. The thrown error names the FIELD, never a value.
+ *
+ * WHICH MEANS THE PARSE IS STRICT, AND THAT IS THE WHOLE POINT OF THE PARAGRAPH ABOVE. The first cut
+ * of this function read `notify` and `terminal` with `isPlainObject(x) ? x : {}` and then picked the
+ * keys it wanted out of them, which quietly accepted every shape a real deployer actually gets wrong:
+ *
+ *   terminal: { groupDestinationId: 'x' }   (SINGULAR — the plural is the real key)
+ *   terminal: 'x'                           (a bare id where an object belongs)
+ *   notify:   { groupDestinationId: 42 }    (an id that is not a string)
+ *   notifyy:  { … }                         (a misspelt top-level key)
+ *
+ * Every one of them parsed to "configured, but with no destinations", so the route burned its
+ * at-most-once notification claim and answered `notifyOutcome: 'not_configured'` — the deployment
+ * believed it had wired up 通知下一步 and nobody was ever told anything. That is precisely the state
+ * the header paragraph promises cannot exist. So: UNKNOWN KEYS ARE REFUSED at all three levels (the
+ * config object, `notify`, `terminal`), wrong TYPES are refused, and a destination that is present
+ * must be non-empty.
+ *
+ * NOTIFICATIONS ARE ALL-OR-NOTHING, deliberately. Either the chain declares NEITHER `notify` NOR
+ * `terminal` — the turn-state-only deployment, which is legitimate and stays legitimate: turn state
+ * is useful on its own and every advance simply reports `notifyOutcome: 'not_configured'` — or it
+ * declares BOTH, each non-empty. A chain with only one of them is the half-configured case this
+ * module's HANDOFF_CONFIG_KEY note already refuses to tolerate: it would notify at some hops and
+ * silently skip others, and the hop it skips is the one somebody is waiting on. The single exception
+ * is a ONE-STEP chain, which has no mid-chain hop at all and therefore needs no `notify`.
  */
 function parseStockPreparationHandoffConfig(config) {
   const raw = config && isPlainObject(config[HANDOFF_CONFIG_KEY]) ? config[HANDOFF_CONFIG_KEY] : null
@@ -216,6 +275,7 @@ function parseStockPreparationHandoffConfig(config) {
     if (!isPlainObject(entry)) {
       throw new StockPreparationHandoffError(500, 'STOCK_PREPARATION_HANDOFF_CONFIG_INVALID', 'each step must be an object', { field: `steps[${index}]` })
     }
+    assertNoUnknownKeys(entry, STEP_KEYS, `steps[${index}]`)
     const key = optionalString(entry.key)
     if (!key || !STEP_SET.has(key)) {
       // The offending value is a config token, not customer data, but the closed vocabulary is
@@ -240,19 +300,83 @@ function parseStockPreparationHandoffConfig(config) {
     }))
   }
 
-  const notify = isPlainObject(raw.notify) ? raw.notify : {}
-  const terminal = isPlainObject(raw.terminal) ? raw.terminal : {}
+  assertNoUnknownKeys(raw, HANDOFF_TOP_LEVEL_KEYS, null)
+
+  const hasNotify = raw.notify !== undefined && raw.notify !== null
+  const hasTerminal = raw.terminal !== undefined && raw.terminal !== null
+  const singleStep = steps.length === 1
+
+  // ALL-OR-NOTHING (see the doc comment): a chain that names one destination surface and forgets the
+  // other notifies at some hops and silently skips others.
+  if (hasNotify && !hasTerminal) {
+    throw new StockPreparationHandoffError(500, 'STOCK_PREPARATION_HANDOFF_CONFIG_INVALID', 'a chain that configures notify must also configure terminal — a half-notified chain is the failure this key exists to prevent', { field: 'terminal' })
+  }
+  if (hasTerminal && !hasNotify && !singleStep) {
+    throw new StockPreparationHandoffError(500, 'STOCK_PREPARATION_HANDOFF_CONFIG_INVALID', 'a multi-step chain that configures terminal must also configure notify — otherwise the mid-chain hops tell nobody', { field: 'notify' })
+  }
+
+  let notifyGroupDestinationId = null
+  if (hasNotify) {
+    if (!isPlainObject(raw.notify)) {
+      throw new StockPreparationHandoffError(500, 'STOCK_PREPARATION_HANDOFF_CONFIG_INVALID', 'notify must be an object', { field: 'notify' })
+    }
+    assertNoUnknownKeys(raw.notify, NOTIFY_KEYS, 'notify')
+    notifyGroupDestinationId = requiredConfigString(raw.notify.groupDestinationId, 'notify.groupDestinationId')
+  }
+
+  let terminalGroupDestinationIds = []
+  let exportPath = null
+  if (hasTerminal) {
+    if (!isPlainObject(raw.terminal)) {
+      throw new StockPreparationHandoffError(500, 'STOCK_PREPARATION_HANDOFF_CONFIG_INVALID', 'terminal must be an object', { field: 'terminal' })
+    }
+    assertNoUnknownKeys(raw.terminal, TERMINAL_KEYS, 'terminal')
+    if (!Array.isArray(raw.terminal.groupDestinationIds)) {
+      throw new StockPreparationHandoffError(500, 'STOCK_PREPARATION_HANDOFF_CONFIG_INVALID', 'terminal.groupDestinationIds must be an array of destination ids', { field: 'terminal.groupDestinationIds' })
+    }
+    for (const entry of raw.terminal.groupDestinationIds) {
+      if (typeof entry !== 'string' || !entry.trim()) {
+        throw new StockPreparationHandoffError(500, 'STOCK_PREPARATION_HANDOFF_CONFIG_INVALID', 'terminal.groupDestinationIds must contain non-empty strings', { field: 'terminal.groupDestinationIds' })
+      }
+    }
+    terminalGroupDestinationIds = stringList(raw.terminal.groupDestinationIds)
+    if (terminalGroupDestinationIds.length === 0) {
+      // 仓库 and 采购 are the whole reason the terminal hop exists. An empty set here is a chain that
+      // completes into silence at the exact moment the feature is supposed to speak.
+      throw new StockPreparationHandoffError(500, 'STOCK_PREPARATION_HANDOFF_CONFIG_INVALID', 'terminal.groupDestinationIds must name at least one destination', { field: 'terminal.groupDestinationIds' })
+    }
+    if (raw.terminal.exportPath !== undefined && raw.terminal.exportPath !== null) {
+      exportPath = requiredConfigString(raw.terminal.exportPath, 'terminal.exportPath')
+    }
+  }
+
   return Object.freeze({
     configured: true,
     steps: Object.freeze(steps),
-    // OPTIONAL. A chain configured with no destination still tracks whose turn it is — the turn
-    // state is useful on its own — and every advance reports `notifyOutcome: 'not_configured'`
-    // instead of failing. Turn state and notification are separate concerns and a deployment is
-    // allowed to want only the first.
-    notifyGroupDestinationId: optionalString(notify.groupDestinationId),
-    terminalGroupDestinationIds: Object.freeze(stringList(terminal.groupDestinationIds)),
-    exportPath: optionalString(terminal.exportPath),
+    // OPTIONAL, but only in the ALL-OR-NOTHING sense above. A chain that declares neither `notify`
+    // nor `terminal` still tracks whose turn it is — the turn state is useful on its own — and every
+    // advance reports `notifyOutcome: 'not_configured'` instead of failing. What is NOT possible any
+    // more is arriving in that state by TYPO.
+    notifyGroupDestinationId,
+    terminalGroupDestinationIds: Object.freeze(terminalGroupDestinationIds),
+    exportPath,
   })
+}
+
+/**
+ * Does this chain name a destination for the hop that completes `fromStepIndex`?
+ *
+ * The route asks BEFORE it claims the at-most-once notification: claiming a notification that has
+ * no destination to go to would burn the claim and make the next click a replay, so a deployment
+ * that later adds a destination would find that hop permanently unnotifiable. With the strict parse
+ * above, "configured but empty" is only reachable for the turn-state-only chain — this predicate is
+ * what keeps that chain's claim unspent rather than silently consumed.
+ */
+function chainHasDestinationForHop(chain, terminal) {
+  if (!chain || !chain.configured) return false
+  return terminal
+    ? chain.terminalGroupDestinationIds.length > 0
+    : Boolean(chain.notifyGroupDestinationId)
 }
 
 /** The values-free projection the status read returns: keys, order, and COUNTS — never a handler id. */
@@ -327,31 +451,43 @@ function planStockPreparationHandoffAdvance({ chain, currentStepIndex, fromStepK
   }
   const cursor = Number.isInteger(currentStepIndex) ? currentStepIndex : 0
 
+  // THE TURN CHECK, AND IT COMES FIRST — BEFORE THE REPLAY SHORT-CIRCUIT. Note what it is and is
+  // not: it refuses to let someone ADVANCE a step that is not theirs. It does not, and this module
+  // must never be read as if it does, stop them writing the prep-row fields themselves (see the
+  // header). Platform admins are not exempted here on purpose — an admin advancing someone else's
+  // step would make the trail say a person handed off when they did not.
+  //
+  // IT IS THE `fromStepKey`'S ROSTER THAT IS CHECKED, NOT THE CURRENT CURSOR'S, which is exactly why
+  // this can sit above the replay branch without breaking the double click it exists to serve: 张三,
+  // clicking a second time on the step he already handed off, is still a configured handler OF THAT
+  // STEP even though the cursor has moved past it. An earlier version put the replay return above
+  // this check and justified it with "the person who already handed off is no longer the current
+  // handler" — true of the cursor, false of the roster being consulted, and the cost of the mistake
+  // was that ANY stock-prep:operate holder who was nobody's handler got a 200 and an audit row
+  // reading "replayed" under their own identity for a handoff they had no part in.
+  if (!isHandlerOfStep(chain, fromIndex, actorId)) {
+    throw new StockPreparationHandoffError(
+      403,
+      'STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER',
+      'only a configured handler of the current step may hand it off',
+    )
+  }
+
   if (cursor === fromIndex + 1 || (fromIndex === chain.steps.length - 1 && cursor >= chain.steps.length)) {
-    // Replay of the transition this request describes. Deliberately NOT gated on the handler check
-    // below: the person who already handed off is frequently no longer the current handler by the
-    // time their second click lands, and answering their own double click with "you are not the
-    // current handler" would be both confusing and untrue about what happened.
+    // Replay of the transition this request describes: 200, `changed: false`, no notification.
     return { decision: 'replay', fromStepIndex: fromIndex, toStepIndex: fromIndex + 1 }
   }
   if (cursor !== fromIndex) {
+    // THE PLANNER'S OWN COMPARE. It is not redundant with the store's compare-and-set even though
+    // both answer STEP_MISMATCH: this one refuses BEFORE any durable write is attempted, which is
+    // what keeps a stale click out of the audit trail entirely, while the store's is the racing
+    // writer's last line of defence. Deleting either one must red a test — see the suite's
+    // planner-level and store-level mismatch witnesses, which exercise them separately.
     throw new StockPreparationHandoffError(
       409,
       'STOCK_PREPARATION_HANDOFF_STEP_MISMATCH',
       'the handoff chain is no longer at that step',
       { field: 'fromStepKey' },
-    )
-  }
-  if (!isHandlerOfStep(chain, fromIndex, actorId)) {
-    // THE TURN CHECK. Note what it is and is not: it refuses to let someone ADVANCE a step that is
-    // not theirs. It does not, and this module must never be read as if it does, stop them writing
-    // the prep-row fields themselves (see the header). Platform admins are not exempted here on
-    // purpose — an admin advancing someone else's step would make the trail say a person handed off
-    // when they did not.
-    throw new StockPreparationHandoffError(
-      403,
-      'STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER',
-      'only a configured handler of the current step may hand it off',
     )
   }
   return {
@@ -427,6 +563,7 @@ module.exports = {
   parseStockPreparationHandoffConfig,
   planStockPreparationHandoffAdvance,
   buildStockPreparationHandoffNotification,
+  chainHasDestinationForHop,
   projectHandoffSteps,
   findStepIndex,
   isHandlerOfStep,

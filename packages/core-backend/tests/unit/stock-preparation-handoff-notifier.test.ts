@@ -77,6 +77,13 @@ function createMockDb() {
   }
 }
 
+/**
+ * The fixture is ORG-SCOPED by default, and that is the F4 guard showing up in the harness rather
+ * than an arbitrary choice: `sendToDestination` refuses any row whose `org_id` is null, because
+ * private and sheet-scoped rows are writable by ordinary users (see the method's doc comment) and a
+ * server-originated send must not lend core's authority to one. A default of `org_id: null` here
+ * would make every happy-path test below assert the refusal instead of the send.
+ */
 function destinationRow(overrides: Record<string, unknown> = {}) {
   return {
     id: 'dt_1',
@@ -85,7 +92,7 @@ function destinationRow(overrides: Record<string, unknown> = {}) {
     secret: 'SEC123',
     enabled: true,
     sheet_id: null,
-    org_id: null,
+    org_id: 'org_1',
     created_by: 'user_1',
     created_at: '2026-04-19T10:00:00.000Z',
     updated_at: '2026-04-19T10:10:00.000Z',
@@ -200,6 +207,90 @@ describe('DingTalkGroupDestinationService.sendToDestination (server-originated)'
     const calledUrl = fetchFn.mock.calls[0]?.[0] as string
     expect(calledUrl).toContain('access_token=handoff-token')
     expect(calledUrl).toContain('&sign=')
+  })
+
+  // ---------------------------------------------------------------------------
+  // F4 — a server-originated send rides ONLY an admin-managed (org-scoped) destination
+  // ---------------------------------------------------------------------------
+  //
+  // THE HOLE THIS CLOSES. `sendToDestination` has no user, so it cannot call
+  // `loadAuthorizedDestination`. Without a replacement check, the row it loads by id could be a
+  // PRIVATE-scope destination — and POST /api/multitable/dingtalk-groups only demands org-admin when
+  // `scope === 'org'`, while PATCH /:id only reaches `requireOrgAdminAccess` when the request
+  // carries an orgId. So any authenticated user can create a private row and afterwards rewrite its
+  // `webhookUrl` / `secret` / `enabled` through the `created_by === userId` branch. If an operator
+  // pastes such an id into the 通知下一步 config, that user silently owns the terminal 仓库/采购
+  // fan-out: repoint it, or switch it off, and nobody sees anything except the right people no
+  // longer being told.
+  //
+  // An ORG-scoped row is the ONE shape whose create AND update are both admin-gated, which makes
+  // "org_id is not null" a property the server can check with no user in hand. These three cases
+  // pin exactly that: private throws, sheet throws, org sends — and the refusals never reach fetch.
+
+  test('F4: refuses a PRIVATE-scope destination — no fetch, no delivery row', async () => {
+    const { db, roots } = createMockDb()
+    const fetchFn = vi.fn(async () => okResponse())
+    const service = new DingTalkGroupDestinationService(db, fetchFn as typeof fetch)
+
+    executeTakeFirstQueue.push(destinationRow({ org_id: null, sheet_id: null, created_by: 'attacker_1' }))
+    await expect(service.sendToDestination('dt_1', { subject: 'S', content: 'B' }))
+      .rejects.toThrow('not organization-scoped')
+
+    // The refusal must come BEFORE the webhook POST — a guard that fired after the send would have
+    // already handed the message to whatever group the row now points at.
+    expect(fetchFn).not.toHaveBeenCalled()
+    expect(roots.insertInto).not.toHaveBeenCalled()
+    expect(roots.updateTable).not.toHaveBeenCalled()
+  })
+
+  test('F4: refuses a SHEET-scope destination too — sheet membership is not admin management', async () => {
+    const { db, roots } = createMockDb()
+    const fetchFn = vi.fn(async () => okResponse())
+    const service = new DingTalkGroupDestinationService(db, fetchFn as typeof fetch)
+
+    // A sheet row is manageable by ANY non-owner who can reach that sheet
+    // (`loadAuthorizedDestination`'s sheet branch checks only that the sheetId matches), so it is
+    // no more admin-managed than a private one.
+    executeTakeFirstQueue.push(destinationRow({ org_id: null, sheet_id: 'sheet_1' }))
+    await expect(service.sendToDestination('dt_1', { subject: 'S', content: 'B' }))
+      .rejects.toThrow('not organization-scoped')
+
+    expect(fetchFn).not.toHaveBeenCalled()
+    expect(roots.insertInto).not.toHaveBeenCalled()
+  })
+
+  test('F4: an ORG-scoped destination is sent to — the guard is a scope rule, not a blanket refusal', async () => {
+    const { db } = createMockDb()
+    const fetchFn = vi.fn(async () => okResponse())
+    const service = new DingTalkGroupDestinationService(db, fetchFn as typeof fetch)
+
+    executeTakeFirstQueue.push(destinationRow({ org_id: 'org_1', sheet_id: null }))
+    await expect(service.sendToDestination('dt_1', { subject: 'S', content: 'B' }))
+      .resolves.toEqual({ ok: true })
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  test('F4: the fan-out counts a private destination as FAILED and still delivers to the org one', async () => {
+    const { db } = createMockDb()
+    const fetchFn = vi.fn(async () => okResponse())
+    const service = new DingTalkGroupDestinationService(db, fetchFn as typeof fetch)
+
+    // The realistic deployment mistake: an operator pastes one good org id and one id that turns out
+    // to be somebody's private row. The refusal must be a COUNTED failure inside the fan-out — not
+    // an exception that silences the destination beside it, and not a silent success.
+    executeTakeFirstQueue.push(destinationRow({ id: 'dest-private', org_id: null, sheet_id: null }))
+    executeTakeFirstQueue.push(destinationRow({ id: 'dest-warehouse', org_id: 'org_1' }))
+
+    const result = await sendStockPreparationHandoffNotificationToDestinations(service, {
+      destinationIds: ['dest-private', 'dest-warehouse'],
+      title: '备料完成',
+      body: '项目 P-2026-001 备料已完成',
+    })
+
+    expect(result).toEqual({ delivered: 1, failed: 1 })
+    // Exactly ONE webhook POST: the private row never reached fetch, the org row did.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
   })
 
   test('records a failed automation delivery and still leaves the manual-test verdict alone', async () => {
