@@ -909,6 +909,35 @@ async function main() {
     assert.equal(env.records.patchCalls.length, 0)
   })
 
+  await run('T8g: an unbound CARRIED human column fails the DEPLOY-TIME gate, not the click', async () => {
+    // WHERE A DEPLOYER LEARNS THIS. The completeness gate used to require only the plm_system band
+    // plus declared ext_ ids, so a config binding exactly what the gate asked for passed at deploy
+    // time and then hard-409'd the first time a human tried to carry — and the gate's own 422 is the
+    // list a deployer copies from (the 222 runbook says as much: 列出缺的列照抄即可). The human band
+    // is now part of that list, so the same omission is caught once, at config time, with the id
+    // named — instead of per request, at the moment someone is trying to save their own work.
+    const { routes, env } = mountCarryRoute({
+      boundSheet: SANDBOX_SHEET,
+      targetOverride(target) {
+        const fieldIdMap = { ...target.fieldIdMap }
+        delete fieldIdMap.notes
+        return { ...target, fieldIdMap }
+      },
+    })
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      authenticatedTenantId: TENANT_ID,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 422, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'TARGET_SCHEMA_INCOMPLETE')
+    assert.ok(res.body.error.details.missingFields.includes('notes'),
+      'T8g: the refusal names the id the deployer must bind')
+    assert.deepEqual(res.body.error.details.missingHumanFields, ['notes'],
+      'T8g: and says WHICH KIND of column it is, so a deployer need not diff two lists')
+    assert.equal(env.records.patchCalls.length, 0)
+  })
+
   await run('T8e: the route still audits values-free, and the audit rides the same exception_resolve vocabulary', async () => {
     const { routes, auditDb } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
     const res = await call(routes, 'POST', CARRY_ROUTE, { user: ADMIN, body: { decision: decisionFixture() } })
