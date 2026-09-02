@@ -487,7 +487,12 @@ async function readOperatorProjectBoard({
     projectId: match ? match.projectId : null,
     projectNo: match ? match.projectNo : wanted,
     projectName: match ? match.projectName : null,
-    projectStatus: match ? match.projectStatus : 'unknown',
+    // NULL, not a placeholder enum: there is no archive row, so this project HAS no stored status.
+    // ('unknown' would also be a literal outside the seeded stock_preparation_project_status_v1
+    // vocabulary — the option-catalog guard is right that such a value has no fate on a real
+    // deployment, and inventing one here would be exactly the placeholder the directory module
+    // refuses to emit for projectNo/projectName.)
+    projectStatus: match ? match.projectStatus : null,
     lastSyncRunId: match ? match.lastSyncRunId : null,
     snapshotBatchCount: match ? match.snapshotBatchCount : 0,
     openExceptionCount: match ? match.openExceptionCount : 0,
