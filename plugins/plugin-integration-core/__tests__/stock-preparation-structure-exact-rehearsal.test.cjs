@@ -495,6 +495,17 @@ async function step3(expansionA, expansionA2) {
     notes: '按图纸复核后下单',                  // 备注
     procurementReply: '供应商已确认排产',
     warehouseConfirmation: '待到货',
+    // THE DEPARTMENTAL RESPONSE BAND + 自制/外购 (this change). Typed exactly as the
+    // template declares them -- a select LABEL, two booleans and two ISO dates -- so the
+    // fill/refresh/preserve/clobber-control loop below exercises the real value shapes
+    // rather than five look-alike strings. `warehouseDone: false` is deliberate: the
+    // negative control flips booleans, so a `false` that survives is as load-bearing as
+    // a `true` that does.
+    makeOrBuy: '20 - 外购',                    // 自制/外购
+    procurementDone: true,                     // 采购完成
+    procurementReplyDate: '2026-09-05',        // 采购回复日期
+    warehouseDone: false,                      // 仓库完成
+    actualArrivalDate: '2026-09-18',           // 实际到货日期
     ext_stockPrepDate: '2026-09-02',          // 备料日期 (pack)
     ext_pickingNode: '10 - 示例节点一',        // 领料节点 (pack)
     ext_handoverSection: '10 - 示例工段一',    // 交接工段 (pack)
@@ -618,8 +629,8 @@ async function step3(expansionA, expansionA2) {
     assert.equal(r[8], '2026-09-02', 'export row carries the human 备料日期')
   }
 
-  console.log('  STEP 3 GREEN — human fill on 16 columns; canonical+pack human WALL holds'
-    + ' (refresh touches only rawQuantity/totalQuantity; negative control clobbers 16);'
+  console.log(`  STEP 3 GREEN — human fill on ${ALL_HUMAN.length} columns; canonical+pack human WALL holds`
+    + ` (refresh touches only rawQuantity/totalQuantity; negative control clobbers ${ALL_HUMAN.length});`
     + ` export projects ${exportRows.length} material rows x ${headers.length} columns`)
   return { headers, exportRows }
 }

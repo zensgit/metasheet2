@@ -1162,12 +1162,26 @@ export interface PluginServices {
    * `PUT /api/multitable/sheets/:sheetId/field-permissions` — this port is purely additive and has
    * no revoke path. Fail-closed: unknown sheet / field-not-on-sheet / unknown role rejects the whole
    * call with nothing written.
+   *
+   * The two READ methods are SELECT-only and exist because the additive-only asymmetry is
+   * unobservable without them. `listRoleWriteScopes` is the in-process form of the provenance census
+   * (`WHERE created_by = <this port's marker>`): a pack revision that MOVES a column's owner leaves
+   * the old denial behind, so the consumer diffs this census against its freshly derived plan and
+   * REPORTS the orphans rather than reporting a clean success. `findMissingRoleIds` lets a consumer
+   * ask "does this role exist" BEFORE it starts creating columns, instead of learning it from the
+   * write call after the schema is already half-applied. Neither can hide a column or drop a
+   * restriction. Both are OPTIONAL on this type: a consumer must degrade explicitly (say "not
+   * checked") rather than assume, so an older host stays usable.
    */
   stockPreparationFieldPermissions?: {
     applyRoleWriteScopes(input: {
       sheetId: string
       entries: Array<{ fieldId: string; roleId: string }>
     }): Promise<{ applied: number; entries: Array<{ fieldId: string; roleId: string }> }>
+    listRoleWriteScopes?(input: {
+      sheetId: string
+    }): Promise<{ sheetId: string; entries: Array<{ fieldId: string; roleId: string }> }>
+    findMissingRoleIds?(input: { roleIds: readonly string[] }): Promise<{ missing: string[] }>
   }
   /**
    * E-learning L2 — host-provided reminder-intent producer. Only

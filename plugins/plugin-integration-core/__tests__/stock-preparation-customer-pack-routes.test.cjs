@@ -16,6 +16,10 @@
 //   4. DRY RUN = ZERO WRITES, asserted against a fake that records EVERY provisioning call, not
 //      merely the ones we remembered to look for.
 //   5. VALUES-FREE responses.
+//   6. THE HOST FIELD-PERMISSION PORT IS ACTUALLY WIRED. A pack that declares fieldWritePolicies
+//      must reach `services.stockPreparationFieldPermissions` THROUGH the route, with the physical
+//      (fieldId, roleId) rows and nothing else; and a declared policy with NO port must be a coded
+//      503 that leaves the sheet untouched.
 //
 // Hermetic: no DB, no network. The service stubs below are inert on purpose — any route that
 // touched one would fail loudly rather than pass silently.
@@ -203,7 +207,7 @@ function baseServices() {
   }
 }
 
-function mount({ packs, provisioning, packInstallStore } = {}) {
+function mount({ packs, provisioning, packInstallStore, fieldPermissions } = {}) {
   const routes = new Map()
   const context = {
     api: {
@@ -223,6 +227,9 @@ function mount({ packs, provisioning, packInstallStore } = {}) {
   }
   const services = baseServices()
   if (packInstallStore) services.stockPreparationPackInstallStore = packInstallStore
+  // The host capability, injected exactly the way core-backend injects it (index.ts gives it only
+  // to plugin-integration-core). Absent by default, so every existing case here is unchanged.
+  if (fieldPermissions) services.stockPreparationFieldPermissions = fieldPermissions
   httpRoutes.registerIntegrationRoutes({
     context,
     services,
@@ -398,6 +405,8 @@ async function dryRunPerformsZeroWrites() {
   assert.deepEqual(plan.conflictingFieldIds, [])
   assert.deepEqual(plan.counts, {
     extensionFields: 2, willCreate: 2, willStamp: 0, alreadyStamped: 0, conflicting: 0, optionSets: 0, roleViews: 1,
+    // This pack declares no fieldWritePolicies, so the write-scope preview is empty on both axes.
+    fieldWriteDenials: 0, staleWriteScopes: 0,
   })
   // The derived hidden ids the role view would ship, in the pack's own logical vocabulary.
   assert.equal(plan.roleViews.length, 1)
@@ -540,6 +549,135 @@ async function everyResponseIsValuesFree() {
   assert.ok(serialized.includes(EXT_PLM) && serialized.includes(EXT_HUMAN))
 }
 
+
+// ---------------------------------------------------------------------------
+// 5. the field-permission port, END TO END THROUGH THE ROUTE
+// ---------------------------------------------------------------------------
+//
+// F5(a) of the adversarial review: every earlier witness for the write-scoping wiring calls
+// `installCustomerPack` directly. That leaves the ONE line that actually connects the two —
+// `fieldPermissions: stockPreparationFieldPermissions` inside the route handler — proven by nothing
+// but a source read. These two cases exercise the real registerIntegrationRoutes -> handler ->
+// installer -> port path, so deleting that line turns them RED.
+
+const PORT_PACK_ID = 'routes-pack-scoped'
+const PORT_PACK = Object.freeze({
+  ...SUITE_PACK,
+  packId: PORT_PACK_ID,
+  // Both columns are on the frozen main template, so the declaration needs no extra ext_ column.
+  fieldWritePolicies: [
+    { roleId: 'routes:purchasing', ownsFieldIds: ['procurementReply', 'procurementDone'] },
+    { roleId: 'routes:warehouse', ownsFieldIds: ['warehouseConfirmation', 'warehouseDone'] },
+  ],
+})
+
+function createRecordingFieldPermissionsPort() {
+  const applyCalls = []
+  const listCalls = []
+  const roleCalls = []
+  return {
+    applyCalls,
+    listCalls,
+    roleCalls,
+    async applyRoleWriteScopes(input) {
+      applyCalls.push(input)
+      return { applied: input.entries.length, entries: input.entries }
+    },
+    async listRoleWriteScopes(input) {
+      listCalls.push(input)
+      return { sheetId: input.sheetId, entries: [] }
+    },
+    async findMissingRoleIds(input) {
+      roleCalls.push(input)
+      return { missing: [] }
+    },
+  }
+}
+
+async function theInstallRouteHandsThePackToTheHostPort() {
+  const port = createRecordingFieldPermissionsPort()
+  const store = createStockPreparationPackInstallStore({ db: createFakeDb(), idGenerator: () => 'ledger_1' })
+  const { routes } = mount({
+    packs: { [PORT_PACK_ID]: PORT_PACK },
+    provisioning: createFakeProvisioning(),
+    packInstallStore: store,
+    fieldPermissions: port,
+  })
+
+  const res = await call(routes, 'POST', '/api/integration/stock-preparation/customer-packs/:packId/install', {
+    user: ADMIN,
+    params: { packId: PORT_PACK_ID },
+  })
+  assert.ok([200, 201].includes(res.statusCode), `install succeeded (${res.statusCode})`)
+
+  // THE ASSERTION THAT MATTERS: the port was reached, once, through the route.
+  assert.equal(port.applyCalls.length, 1, 'the route wired the host port into the install')
+  const applied = port.applyCalls[0]
+  assert.equal(applied.sheetId, `sheet_${OBJECT_ID}`, 'addressed by the sheet the route resolved')
+  assert.equal(applied.entries.length, 4, 'each of the 4 claimed columns denies the one role that does not own it')
+  for (const entry of applied.entries) {
+    assert.deepEqual(Object.keys(entry).sort(), ['fieldId', 'roleId'], 'nothing but the port shape reaches the port')
+    assert.equal(entry.fieldId, physicalFieldId(PROJECT_ID, OBJECT_ID, entry.fieldId.split(`${OBJECT_ID}_`)[1]))
+  }
+  const deniedFor = (roleId) => applied.entries
+    .filter((entry) => entry.roleId === roleId)
+    .map((entry) => entry.fieldId.replace(`fld_${PROJECT_ID}_${OBJECT_ID}_`, ''))
+    .sort()
+  assert.deepEqual(deniedFor('routes:warehouse'), ['procurementDone', 'procurementReply'])
+  assert.deepEqual(deniedFor('routes:purchasing'), ['warehouseConfirmation', 'warehouseDone'])
+
+  // The pre-flight and the stale census went through the route too.
+  assert.deepEqual(port.roleCalls, [{ roleIds: ['routes:purchasing', 'routes:warehouse'] }])
+  assert.equal(port.listCalls.length, 1)
+  assert.equal(res.body.data.writeScopeCheck, 'checked')
+  assert.deepEqual(res.body.data.staleWriteScopes, [])
+  assert.equal(res.body.data.appliedWriteScopes, 4)
+
+  // And the DRY RUN previews the same plan without touching the port's write half.
+  const dry = await call(routes, 'POST', '/api/integration/stock-preparation/customer-packs/:packId/dry-run', {
+    user: ADMIN,
+    params: { packId: PORT_PACK_ID },
+  })
+  assert.equal(dry.statusCode, 200)
+  assert.equal(dry.body.data.fieldPermissionsPortAvailable, true)
+  assert.equal(dry.body.data.counts.fieldWriteDenials, 4)
+  assert.equal(port.applyCalls.length, 1, 'the dry-run wrote no permission row')
+}
+
+async function aDeclaredPolicyWithNoHostPortIsACoded503() {
+  // The inverse. Mounting WITHOUT the capability must refuse the install rather than report it
+  // complete while the declared scoping would silently not be enforced.
+  const store = createStockPreparationPackInstallStore({ db: createFakeDb(), idGenerator: () => 'ledger_2' })
+  const provisioning = createFakeProvisioning()
+  const { routes } = mount({
+    packs: { [PORT_PACK_ID]: PORT_PACK },
+    provisioning,
+    packInstallStore: store,
+    // no fieldPermissions
+  })
+
+  const res = await call(routes, 'POST', '/api/integration/stock-preparation/customer-packs/:packId/install', {
+    user: ADMIN,
+    params: { packId: PORT_PACK_ID },
+  })
+  assert.equal(res.body.ok, false)
+  assert.equal(res.statusCode, 503)
+  assert.equal(res.body.error.code, 'CUSTOMER_PACK_FIELD_PERMISSIONS_UNAVAILABLE')
+  // FAIL-CLOSED BEFORE THE FIRST SCHEMA WRITE: the refusal must leave the sheet untouched.
+  for (const method of WRITE_METHODS) {
+    assert.equal(provisioning.calls.includes(method), false, `${method} was never reached`)
+  }
+  // The dry-run says the same thing without throwing — that is its whole posture.
+  const dry = await call(routes, 'POST', '/api/integration/stock-preparation/customer-packs/:packId/dry-run', {
+    user: ADMIN,
+    params: { packId: PORT_PACK_ID },
+  })
+  assert.equal(dry.statusCode, 200)
+  assert.equal(dry.body.data.fieldPermissionsPortAvailable, false)
+  assert.equal(dry.body.data.writeScopeCheck, 'port_absent')
+  assert.equal(dry.body.data.canInstall, false)
+}
+
 async function main() {
   await everyRouteIsAdminGated()
   await unlistedPackIdIsRefusedBeforeAnyHostCall()
@@ -549,6 +687,8 @@ async function main() {
   await absentCanonicalTargetIsATwoStepSignal()
   await installWritesTheLedgerAndTheReadRouteShowsIt()
   await everyResponseIsValuesFree()
+  await theInstallRouteHandsThePackToTheHostPort()
+  await aDeclaredPolicyWithNoHostPortIsACoded503()
 }
 
 main().then(
