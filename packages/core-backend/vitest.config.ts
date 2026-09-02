@@ -1585,6 +1585,11 @@ export default defineConfig({
       // management-scope rechecks. Excluded from no-DB collection and wired whole-file
       // post-migrate in plugin-tests.yml.
       'tests/integration/elearning-analytics-export.db.test.ts',
+      // E-learning L5 onboarding authority requires real PostgreSQL for
+      // directory-transaction rollback, assignment-effect serialization,
+      // immutable weekly reports, migration replay, and down/reapply gates.
+      // Excluded from no-DB collection and wired whole-file post-migrate.
+      'tests/integration/elearning-onboarding.db.test.ts',
       // E-learning L3.5 objective practice authority requires real PostgreSQL
       // for immutable sessions/answers, request replay, and wrong-book projection.
       // Excluded from no-DB collection and wired whole-file post-migrate.

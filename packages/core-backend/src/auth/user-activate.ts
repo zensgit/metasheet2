@@ -26,6 +26,7 @@ import {
   lockUsersForAccessGraphWrite,
   supersedeDeprovisionEvidenceForAccessGraphWrite,
 } from '../directory/access-graph-mutex'
+import { enqueueDirectoryElearningOnboarding } from '../directory/elearning-onboarding-lifecycle'
 import { claimLoginAlias } from './login-alias-service'
 import { buildUnusablePasswordHash } from './user-activation'
 
@@ -213,6 +214,13 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
            SET is_active = TRUE`,
         [userId, membershipOrgId],
       )
+
+      await enqueueDirectoryElearningOnboarding({
+        client,
+        orgId: membershipOrgId,
+        users: [{ userId }],
+        eventAt: new Date().toISOString(),
+      })
     }
 
     if (input.enableDingTalkGrant === true) {

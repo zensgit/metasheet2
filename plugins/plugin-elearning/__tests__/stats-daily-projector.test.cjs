@@ -134,6 +134,14 @@ async function main() {
             return { outcome: 'noop', exportId: input.exportId }
           },
         },
+        elearningOnboarding: {
+          async enqueueWeeklyReports() {
+            return { weekStart: '2026-08-24', enqueuedCount: 0 }
+          },
+          async materializeWeeklyReport() {
+            throw new Error('not called')
+          },
+        },
       },
     })
     assert.equal(routes.length, 1)
@@ -141,6 +149,7 @@ async function main() {
       STATS_DAILY_PROJECT_JOB_KIND,
       'analytics_export',
       'analytics_export_cleanup',
+      'onboarding_weekly_report',
     ])
     assert.equal(getJobsWorkerState().running, true)
     await deactivate()

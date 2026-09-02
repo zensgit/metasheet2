@@ -12,6 +12,7 @@ import { Router, type Router as ExpressRouter } from 'express'
 
 import {
   isElearningAnalyticsSurfaceEnabled,
+  isElearningAssignmentSurfaceEnabled,
   isElearningContentSurfaceEnabled,
 } from '../elearning/feature-flags'
 import { authenticate } from '../middleware/auth'
@@ -23,6 +24,7 @@ import { createElearningPilotRouter } from '../routes/elearning-pilot'
 import { createElearningPortalRouter } from '../routes/elearning-portal'
 import { createElearningProfileRouter } from '../routes/elearning-profile'
 import { createElearningQuestionPracticeRouter } from '../routes/elearning-question-practice'
+import { createElearningOnboardingRouter } from '../routes/elearning-onboarding'
 import { isElearningGlobalAdminRequest } from '../routes/elearning-admin-access'
 import type { ElearningAdminAccessDb } from './elearning-admin-access'
 import type { ElearningAssessmentCatalogDb } from './elearning-assessment-catalog'
@@ -74,6 +76,8 @@ import type {
   ElearningDirectAssignmentDb,
   ElearningDirectAssignmentResult,
 } from './elearning-direct-assignment'
+import type { ElearningOnboardingPolicyDb } from './elearning-onboarding-policy'
+import type { ElearningOnboardingWeeklyReportQueryable } from './elearning-onboarding-weekly-report'
 import {
   startElearningExam,
   submitElearningExam,
@@ -212,7 +216,9 @@ export interface ElearningPilotRuntimeOptions {
     ElearningDepartmentStatsDb &
     ElearningAnalyticsExportDb &
     ElearningPortalDb &
-    ElearningPracticeDb
+    ElearningPracticeDb &
+    ElearningOnboardingPolicyDb &
+    ElearningOnboardingWeeklyReportQueryable
   env?: NodeJS.ProcessEnv
   authenticate?: RequestHandler
   adminGuard?: RequestHandler
@@ -348,10 +354,17 @@ export function createElearningPilotRuntime(
 ): ElearningPilotRuntime | null {
   const env = opts.env ?? process.env
   const contentEnabled = isElearningContentSurfaceEnabled(env)
+  const assignmentEnabled = isElearningAssignmentSurfaceEnabled(env)
   const creditEnabled = isElearningCreditSurfaceEnabled(env)
   const analyticsEnabled = isElearningAnalyticsSurfaceEnabled(env)
   const practiceEnabled = isElearningPracticeSurfaceEnabled(env)
-  if (!contentEnabled && !creditEnabled && !analyticsEnabled && !practiceEnabled) return null
+  if (
+    !contentEnabled
+    && !assignmentEnabled
+    && !creditEnabled
+    && !analyticsEnabled
+    && !practiceEnabled
+  ) return null
 
   const issuePlayback =
     opts.issueElearningMediaPlaybackTicket ??
@@ -500,7 +513,20 @@ export function createElearningPilotRuntime(
     getElearningDepartmentStats:
       opts.getElearningDepartmentStats ?? getElearningDepartmentStats,
   }) : null
-  if (!portal && !practice && !inner && !credit && !profile && !analytics) return null
+  const onboarding = assignmentEnabled || analyticsEnabled
+    ? createElearningOnboardingRouter({
+        db: opts.db,
+        env,
+        viewerId: opts.viewerId ?? viewerId,
+        orgId: opts.orgId ?? orgId,
+        adminGuard: opts.adminGuard ?? rbacGuard('elearning', 'admin'),
+        statsGuard: opts.statsGuard
+          ?? rbacGuardAny(['elearning:stats', 'elearning:admin']),
+      })
+    : null
+  if (!portal && !practice && !inner && !credit && !profile && !analytics && !onboarding) {
+    return null
+  }
 
   const router = Router()
   router.use('/api/elearning', opts.authenticate ?? authenticate)
@@ -511,5 +537,6 @@ export function createElearningPilotRuntime(
   if (credit) router.use(credit)
   if (profile) router.use(profile)
   if (analytics) router.use(analytics)
+  if (onboarding) router.use(onboarding)
   return { router }
 }

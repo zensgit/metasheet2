@@ -7,6 +7,17 @@ const pgMocks = vi.hoisted(() => ({
   ),
 }))
 
+const onboardingMocks = vi.hoisted(() => ({
+  enqueue: vi.fn(async () => ({
+    enabled: false,
+    candidateUserCount: 0,
+    eligibleUserCount: 0,
+    skippedUserCount: 0,
+    matchedPolicyCount: 0,
+    enqueuedCount: 0,
+  })),
+}))
+
 vi.mock('../../src/db/pg', () => ({
   query: pgMocks.query,
   transaction: pgMocks.transaction,
@@ -14,6 +25,10 @@ vi.mock('../../src/db/pg', () => ({
 
 vi.mock('../../src/auth/login-alias-service', () => ({
   claimLoginAlias: vi.fn(async () => ({ ok: true, normalized: 'x' })),
+}))
+
+vi.mock('../../src/directory/elearning-onboarding-lifecycle', () => ({
+  enqueueDirectoryElearningOnboarding: onboardingMocks.enqueue,
 }))
 
 import { activatePendingUser, isActivateMode } from '../../src/auth/user-activate'
@@ -48,6 +63,7 @@ describe('activatePendingUser (T3)', () => {
     const { claimLoginAlias } = await import('../../src/auth/login-alias-service')
     vi.mocked(claimLoginAlias).mockReset()
     vi.mocked(claimLoginAlias).mockResolvedValue({ ok: true, normalized: 'x' })
+    onboardingMocks.enqueue.mockClear()
   })
 
   it('keeps the runtime activation mode set closed', () => {
@@ -104,6 +120,12 @@ describe('activatePendingUser (T3)', () => {
     const membershipWrite = pgMocks.query.mock.calls.find((call) =>
       String(call[0]).includes('INSERT INTO user_orgs'))
     expect(membershipWrite?.[1]).toEqual(['u1', 'org-src'])
+    expect(onboardingMocks.enqueue).toHaveBeenCalledWith(expect.objectContaining({
+      client: expect.objectContaining({ query: pgMocks.query }),
+      orgId: 'org-src',
+      users: [{ userId: 'u1' }],
+      eventAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+    }))
     // Alias claims must run inside the transaction client
     expect(claimLoginAlias).toHaveBeenCalled()
     expect(vi.mocked(claimLoginAlias).mock.calls[0]?.[0]).toMatchObject({
@@ -111,6 +133,38 @@ describe('activatePendingUser (T3)', () => {
       kind: 'email',
       client: expect.objectContaining({ query: expect.any(Function) }),
     })
+  })
+
+  it('fails the activation transaction closed when onboarding enqueue authority fails', async () => {
+    const failure = new Error('onboarding authority unavailable')
+    onboardingMocks.enqueue.mockRejectedValueOnce(failure)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'u1',
+          email: 'a@x.com',
+          username: null,
+          mobile: null,
+          activation_status: 'pending_activation',
+          is_active: false,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [LINKED_ACTIVE_SOURCE] })
+      .mockResolvedValueOnce({ rows: [{ id: 'u1' }] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    await expect(activatePendingUser({
+      userId: 'u1',
+      mode: 'temp_password',
+      temporaryPassword: 'TempPass9A!',
+    })).rejects.toBe(failure)
+    expect(onboardingMocks.enqueue).toHaveBeenCalledWith(expect.objectContaining({
+      client: expect.objectContaining({ query: pgMocks.query }),
+      orgId: 'org-src',
+      users: [{ userId: 'u1' }],
+    }))
+    const { claimLoginAlias } = await import('../../src/auth/login-alias-service')
+    expect(claimLoginAlias).not.toHaveBeenCalled()
   })
 
   it('maps alias conflict to ACTIVATE_ALIAS_CONFLICT without echoing claim.message', async () => {

@@ -7498,6 +7498,196 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ElearningExamReviewQuestion'
+    ElearningOnboardingDepartmentMatchRule:
+      type: object
+      additionalProperties: false
+      required: [subjectType, subjectRef, includeChildren]
+      properties:
+        subjectType:
+          type: string
+          enum: [department]
+        subjectRef:
+          $ref: '#/components/schemas/ElearningUuid'
+        includeChildren:
+          type: boolean
+    ElearningOnboardingPositionMatchRule:
+      type: object
+      additionalProperties: false
+      required: [subjectType, subjectRef, includeChildren]
+      properties:
+        subjectType:
+          type: string
+          enum: [position]
+        subjectRef:
+          type: string
+          minLength: 1
+          maxLength: 512
+        includeChildren:
+          type: boolean
+          enum: [false]
+    ElearningOnboardingMatchRule:
+      oneOf:
+        - $ref: '#/components/schemas/ElearningOnboardingDepartmentMatchRule'
+        - $ref: '#/components/schemas/ElearningOnboardingPositionMatchRule'
+      discriminator:
+        propertyName: subjectType
+        mapping:
+          department: '#/components/schemas/ElearningOnboardingDepartmentMatchRule'
+          position: '#/components/schemas/ElearningOnboardingPositionMatchRule'
+    ElearningOnboardingPolicyCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, trainingPlanId, matchRules, hireWindowDays, deadlineDays, weeklyReportEnabled]
+      properties:
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+        trainingPlanId:
+          $ref: '#/components/schemas/ElearningUuid'
+        matchRules:
+          type: array
+          minItems: 1
+          maxItems: 100
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/ElearningOnboardingMatchRule'
+        hireWindowDays:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 365
+        deadlineDays:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 3650
+        weeklyReportEnabled:
+          type: boolean
+    ElearningOnboardingPolicy:
+      type: object
+      additionalProperties: false
+      required: [policyId, trainingPlanId, matchRules, hireWindowDays, deadlineDays, weeklyReportEnabled, status, createdAt, retiredAt, duplicate]
+      properties:
+        policyId:
+          $ref: '#/components/schemas/ElearningUuid'
+        trainingPlanId:
+          $ref: '#/components/schemas/ElearningUuid'
+        matchRules:
+          type: array
+          minItems: 1
+          maxItems: 100
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/ElearningOnboardingMatchRule'
+        hireWindowDays:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 365
+        deadlineDays:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 3650
+        weeklyReportEnabled:
+          type: boolean
+        status:
+          type: string
+          enum: [active, retired]
+        createdAt:
+          type: string
+          format: date-time
+          pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$'
+        retiredAt:
+          oneOf:
+            - type: string
+              format: date-time
+              pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$'
+            - type: 'null'
+        duplicate:
+          type: boolean
+    ElearningOnboardingWeeklyReportSuppressed:
+      type: object
+      additionalProperties: false
+      required: [reportId, policyId, weekStart, weekEnd, suppressed, minGroupSize, enqueuedCount, assignedUserCount, failedCount, deadCount, duplicate]
+      properties:
+        reportId:
+          $ref: '#/components/schemas/ElearningUuid'
+        policyId:
+          $ref: '#/components/schemas/ElearningUuid'
+        weekStart:
+          type: string
+          format: date
+          pattern: '^\d{4}-\d{2}-\d{2}$'
+        weekEnd:
+          type: string
+          format: date
+          pattern: '^\d{4}-\d{2}-\d{2}$'
+        suppressed:
+          type: boolean
+          enum: [true]
+        minGroupSize:
+          type: integer
+          enum: [5]
+        enqueuedCount:
+          type: 'null'
+        assignedUserCount:
+          type: 'null'
+        failedCount:
+          type: 'null'
+        deadCount:
+          type: 'null'
+        duplicate:
+          type: boolean
+    ElearningOnboardingWeeklyReportVisible:
+      type: object
+      additionalProperties: false
+      required: [reportId, policyId, weekStart, weekEnd, suppressed, minGroupSize, enqueuedCount, assignedUserCount, failedCount, deadCount, duplicate]
+      properties:
+        reportId:
+          $ref: '#/components/schemas/ElearningUuid'
+        policyId:
+          $ref: '#/components/schemas/ElearningUuid'
+        weekStart:
+          type: string
+          format: date
+          pattern: '^\d{4}-\d{2}-\d{2}$'
+        weekEnd:
+          type: string
+          format: date
+          pattern: '^\d{4}-\d{2}-\d{2}$'
+        suppressed:
+          type: boolean
+          enum: [false]
+        minGroupSize:
+          type: integer
+          enum: [5]
+        enqueuedCount:
+          type: integer
+          format: int64
+          minimum: 0
+        assignedUserCount:
+          type: integer
+          format: int64
+          minimum: 0
+        failedCount:
+          type: integer
+          format: int64
+          minimum: 0
+        deadCount:
+          type: integer
+          format: int64
+          minimum: 0
+        duplicate:
+          type: boolean
+    ElearningOnboardingWeeklyReport:
+      oneOf:
+        - $ref: '#/components/schemas/ElearningOnboardingWeeklyReportSuppressed'
+        - $ref: '#/components/schemas/ElearningOnboardingWeeklyReportVisible'
+      discriminator:
+        propertyName: suppressed
+        mapping:
+          'true': '#/components/schemas/ElearningOnboardingWeeklyReportSuppressed'
+          'false': '#/components/schemas/ElearningOnboardingWeeklyReportVisible'
     ElearningAnalyticsExportCreateRequest:
       type: object
       additionalProperties: false

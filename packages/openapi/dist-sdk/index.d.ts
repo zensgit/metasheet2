@@ -8389,6 +8389,75 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/admin/onboarding/policies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create an immutable new-hire onboarding policy
+         * @description Global `elearning:admin` only. Requires the master, content, and assignment
+         *     flags to each equal the exact literal `true`. Organization and actor are
+         *     server-derived. The organization-scoped `requestId` replays the original
+         *     closed result for the same normalized payload and returns a values-free
+         *     conflict for a different payload.
+         */
+        post: operations["createElearningOnboardingPolicy"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/onboarding/policies/{policyId}/retire": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Retire one active onboarding policy
+         * @description Global `elearning:admin` only. Organization and actor are server-derived.
+         *     Retirement is one-way and does not mutate the immutable policy payload.
+         *     Requires the master, content, and assignment flags to be exact `true`.
+         */
+        post: operations["retireElearningOnboardingPolicy"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/onboarding/policies/{policyId}/reports/{weekStart}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read one privacy-suppressed onboarding weekly report
+         * @description Requires `elearning:stats` or global `elearning:admin`, plus the master and
+         *     analytics flags set to exact `true`. Organization is server-derived. Groups
+         *     smaller than five return the suppressed variant with every numeric measure
+         *     null; no individual learning data is returned.
+         */
+        get: operations["getElearningOnboardingWeeklyReport"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/admin/credit-rules": {
         parameters: {
             query?: never;
@@ -19663,6 +19732,97 @@ export interface components {
             passed: boolean;
             questions: components["schemas"]["ElearningExamReviewQuestion"][];
         };
+        ElearningOnboardingDepartmentMatchRule: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            subjectType: "department";
+            subjectRef: components["schemas"]["ElearningUuid"];
+            includeChildren: boolean;
+        };
+        ElearningOnboardingPositionMatchRule: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            subjectType: "position";
+            subjectRef: string;
+            /** @enum {boolean} */
+            includeChildren: false;
+        };
+        ElearningOnboardingMatchRule: components["schemas"]["ElearningOnboardingDepartmentMatchRule"] | components["schemas"]["ElearningOnboardingPositionMatchRule"];
+        ElearningOnboardingPolicyCreateRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            trainingPlanId: components["schemas"]["ElearningUuid"];
+            matchRules: components["schemas"]["ElearningOnboardingMatchRule"][];
+            /** Format: int32 */
+            hireWindowDays: number;
+            /** Format: int32 */
+            deadlineDays: number;
+            weeklyReportEnabled: boolean;
+        };
+        ElearningOnboardingPolicy: {
+            policyId: components["schemas"]["ElearningUuid"];
+            trainingPlanId: components["schemas"]["ElearningUuid"];
+            matchRules: components["schemas"]["ElearningOnboardingMatchRule"][];
+            /** Format: int32 */
+            hireWindowDays: number;
+            /** Format: int32 */
+            deadlineDays: number;
+            weeklyReportEnabled: boolean;
+            /** @enum {string} */
+            status: "active" | "retired";
+            /** Format: date-time */
+            createdAt: string;
+            retiredAt: string | null;
+            duplicate: boolean;
+        };
+        ElearningOnboardingWeeklyReportSuppressed: {
+            reportId: components["schemas"]["ElearningUuid"];
+            policyId: components["schemas"]["ElearningUuid"];
+            /** Format: date */
+            weekStart: string;
+            /** Format: date */
+            weekEnd: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            suppressed: "true";
+            /** @enum {integer} */
+            minGroupSize: 5;
+            enqueuedCount: null;
+            assignedUserCount: null;
+            failedCount: null;
+            deadCount: null;
+            duplicate: boolean;
+        };
+        ElearningOnboardingWeeklyReportVisible: {
+            reportId: components["schemas"]["ElearningUuid"];
+            policyId: components["schemas"]["ElearningUuid"];
+            /** Format: date */
+            weekStart: string;
+            /** Format: date */
+            weekEnd: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            suppressed: "false";
+            /** @enum {integer} */
+            minGroupSize: 5;
+            /** Format: int64 */
+            enqueuedCount: number;
+            /** Format: int64 */
+            assignedUserCount: number;
+            /** Format: int64 */
+            failedCount: number;
+            /** Format: int64 */
+            deadCount: number;
+            duplicate: boolean;
+        };
+        ElearningOnboardingWeeklyReport: components["schemas"]["ElearningOnboardingWeeklyReportSuppressed"] | components["schemas"]["ElearningOnboardingWeeklyReportVisible"];
         ElearningAnalyticsExportCreateRequest: {
             requestId: components["schemas"]["ElearningUuid"];
             departmentId: components["schemas"]["ElearningUuid"];
@@ -20858,6 +21018,113 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+        };
+    };
+    createElearningOnboardingPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningOnboardingPolicyCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Exact idempotent replay of the existing policy. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningOnboardingPolicy"];
+                };
+            };
+            /** @description Newly created immutable active policy. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningOnboardingPolicy"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Assignment surface flags off or referenced authority not found */
+            404: components["responses"]["ElearningError"];
+            /** @description requestId reused with a different normalized payload */
+            409: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    retireElearningOnboardingPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                policyId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Retired policy, or the exact already-retired state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningOnboardingPolicy"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Assignment surface flags off or policy not found */
+            404: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getElearningOnboardingWeeklyReport: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                policyId: components["schemas"]["ElearningUuid"];
+                weekStart: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Closed suppressed or visible weekly aggregate. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningOnboardingWeeklyReport"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient statistics permission */
+            403: components["responses"]["ElearningError"];
+            /** @description Analytics surface flags off or report not found */
+            404: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
         };
     };
     listElearningCreditRules: {

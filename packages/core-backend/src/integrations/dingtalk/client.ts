@@ -130,10 +130,39 @@ export interface DingTalkDirectoryUser {
   mobile?: string
   email?: string
   jobNumber?: string
+  /** Canonical calendar date derived from DingTalk's millisecond `hired_date`. */
+  hiredDate?: string
   title?: string
   avatarUrl?: string
   departmentIds: string[]
   source: Record<string, unknown>
+}
+
+export function normalizeDingTalkHiredDate(value: unknown): string | undefined {
+  const milliseconds = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && /^\d{13}$/.test(value)
+      ? Number(value)
+      : Number.NaN
+  if (
+    !Number.isSafeInteger(milliseconds)
+    || milliseconds < 100_000_000_000
+  ) return undefined
+  const parsed = new Date(milliseconds)
+  if (Number.isNaN(parsed.getTime())) return undefined
+  // DingTalk's date-shaped millisecond values are encoded at Asia/Shanghai midnight.
+  // Slicing the UTC instant would persist the previous calendar day for those values.
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(parsed)
+  const values = new Map(parts.map((part) => [part.type, part.value]))
+  const year = values.get('year')
+  const month = values.get('month')
+  const day = values.get('day')
+  return year && month && day ? `${year}-${month}-${day}` : undefined
 }
 
 function readStringEnv(...keys: string[]): string {
@@ -667,6 +696,7 @@ export async function getDingTalkUserDetail(
     mobile: typeof result.mobile === 'string' ? result.mobile : undefined,
     email: typeof result.email === 'string' ? result.email : undefined,
     jobNumber: typeof result.job_number === 'string' ? result.job_number : typeof result.jobNumber === 'string' ? result.jobNumber : undefined,
+    hiredDate: normalizeDingTalkHiredDate(result.hired_date ?? result.hiredDate),
     title: typeof result.title === 'string' ? result.title : undefined,
     avatarUrl:
       typeof result.avatar === 'string'

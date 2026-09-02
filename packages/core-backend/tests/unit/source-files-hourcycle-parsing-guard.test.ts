@@ -246,6 +246,13 @@ const KNOWN_SITES: KnownSite[] = [
     kind: 'display',
   },
   {
+    // dingtalk/client.ts `normalizeDingTalkHireDate()` — formatToParts consumes only
+    // year/month/day to preserve the Asia/Shanghai calendar date. No hour is requested.
+    file: 'packages/core-backend/src/integrations/dingtalk/client.ts',
+    lineText: "const parts = new Intl.DateTimeFormat('en-US', {",
+    kind: 'display',
+  },
+  {
     // automation-timezone.ts `isValidIanaTimeZone()` — `.format(0)` return value discarded,
     // used only to force the RangeError on an unknown zone. No hour option at all.
     file: 'packages/core-backend/src/multitable/automation-timezone.ts',
@@ -661,9 +668,9 @@ describe('repo guard: h24-midnight hourCycle/hour12 parsing hazard (issue #4922)
     expect(files).toContain('plugins/plugin-intelligent-restore/src/IntelligentRestoreView.vue')
     const candidates = findCandidateSites(files)
     expect(candidates.length).toBe(KNOWN_SITES.length)
-    // 25 = the previously audited 23 sites + the two display-class credit-policy sites
-    // above: IANA canonicalization and the hour-free local credit-day key.
-    expect(KNOWN_SITES.length).toBe(25)
+    // 26 = the previously audited 25 sites + the DingTalk hire-date formatter above,
+    // which consumes only year/month/day and never requests an hour component.
+    expect(KNOWN_SITES.length).toBe(26)
   })
 
   it('KNOWN_SITES covers exactly the real Intl.DateTimeFormat sites in the domain (set equality via coverageDiff — a new site reds this until classified)', () => {

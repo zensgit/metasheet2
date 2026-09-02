@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { __directorySyncInternalsForTests } from '../../src/directory/directory-sync'
+import { resolveDirectoryElearningOnboardingHireDate } from '../../src/directory/elearning-onboarding-lifecycle'
 
 const { createDirectoryAdmittedUserInTransaction } = __directorySyncInternalsForTests
 
@@ -99,12 +100,23 @@ describe('T1 directory admit pending-activation flag (default off)', () => {
     expect(insert).toBeTruthy()
     const params = insert!.params ?? []
     // See createDirectoryAdmittedUserInTransaction param order:
-    // [userId, email, username, name, mobile, passwordHash, mustChangePassword, permissionsJson,
-    //  isActive, activationStatus, localPasswordSet]
-    expect(params[8]).toBe(true) // is_active
-    expect(params[9]).toBe('activated')
-    expect(params[10]).toBe(true) // local_password_set
+    // [userId, email, username, name, mobile, hireDate, passwordHash, mustChangePassword,
+    //  permissionsJson, isActive, activationStatus, localPasswordSet]
+    expect(params[9]).toBe(true) // is_active
+    expect(params[10]).toBe('activated')
+    expect(params[11]).toBe(true) // local_password_set
     expect(client.queries.some((q) => /INSERT INTO user_orgs\b/i.test(q.sql))).toBe(true)
+  })
+
+  it('default OFF: a provider hire date is not persisted by directory admission', async () => {
+    const client = fakeClient()
+    await createDirectoryAdmittedUserInTransaction(client, {
+      ...baseOptions,
+      hireDate: resolveDirectoryElearningOnboardingHireDate('2026-08-31', {}),
+    })
+
+    const params = findUsersInsert(client)!.params ?? []
+    expect(params[5]).toBeNull()
   })
 
   it('when ON: INSERT params are pending + is_active false + local_password_set false; no user_orgs', async () => {
@@ -118,9 +130,9 @@ describe('T1 directory admit pending-activation flag (default off)', () => {
     const insert = findUsersInsert(client)
     expect(insert).toBeTruthy()
     const params = insert!.params ?? []
-    expect(params[8]).toBe(false) // is_active
-    expect(params[9]).toBe('pending_activation')
-    expect(params[10]).toBe(false) // local_password_set
+    expect(params[9]).toBe(false) // is_active
+    expect(params[10]).toBe('pending_activation')
+    expect(params[11]).toBe(false) // local_password_set
     expect(client.queries.some((q) => /INSERT INTO user_orgs\b/i.test(q.sql))).toBe(false)
     expect(client.queries.some((q) => /INSERT INTO user_external_auth_grants\b/i.test(q.sql))).toBe(false)
   })
@@ -132,7 +144,7 @@ describe('T1 directory admit pending-activation flag (default off)', () => {
     const client = fakeClient()
     await createDirectoryAdmittedUserInTransaction(client, baseOptions)
     const params = findUsersInsert(client)!.params ?? []
-    expect([params[8], params[9], params[10]]).not.toEqual([true, 'activated', true])
-    expect([params[8], params[9], params[10]]).toEqual([false, 'pending_activation', false])
+    expect([params[9], params[10], params[11]]).not.toEqual([true, 'activated', true])
+    expect([params[9], params[10], params[11]]).toEqual([false, 'pending_activation', false])
   })
 })

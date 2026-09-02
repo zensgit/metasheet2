@@ -8,6 +8,11 @@ const { registerExamExpirySettlement } = require('./lib/exam-expiry.cjs')
 const { registerStatsDailyProjector } = require('./lib/stats-daily-projector.cjs')
 const { registerAnalyticsExportWorker } = require('./lib/analytics-export-worker.cjs')
 const {
+  registerOnboardingWorker,
+  startOnboardingWeeklyReportProducerRuntime,
+  stopOnboardingWeeklyReportProducerRuntime,
+} = require('./lib/onboarding-worker.cjs')
+const {
   startStatsDailyProducerRuntime,
   stopStatsDailyProducerRuntime,
 } = require('./lib/stats-daily-producer-runtime.cjs')
@@ -36,6 +41,7 @@ async function activate(context) {
   stopNotificationRuntime()
   stopStatsDailyProducerRuntime()
   stopJobsWorker()
+  stopOnboardingWeeklyReportProducerRuntime()
   clearJobHandlers()
   if (!isMasterEnabled()) {
     return
@@ -53,6 +59,7 @@ async function activate(context) {
     registerExamExpirySettlement(context)
     registerStatsDailyProjector(context)
     registerAnalyticsExportWorker(context)
+    registerOnboardingWorker(context)
     context.api.http.addRoute(CANONICAL_METHOD, CANONICAL_PATH, async (req, res) => {
       if (!isMasterEnabled()) {
         sendFeatureDisabled(res)
@@ -72,10 +79,12 @@ async function activate(context) {
 
     startJobsWorker(context)
     startStatsDailyProducerRuntime(context)
+    startOnboardingWeeklyReportProducerRuntime(context)
     startNotificationRuntime(context)
   } catch (error) {
     stopNotificationRuntime()
     stopStatsDailyProducerRuntime()
+    stopOnboardingWeeklyReportProducerRuntime()
     stopJobsWorker()
     clearJobHandlers()
     throw error
@@ -86,6 +95,7 @@ async function deactivate() {
   stopNotificationRuntime()
   stopStatsDailyProducerRuntime()
   stopJobsWorker()
+  stopOnboardingWeeklyReportProducerRuntime()
   clearJobHandlers()
 }
 

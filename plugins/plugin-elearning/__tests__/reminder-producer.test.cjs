@@ -139,10 +139,15 @@ async function main() {
             return { outcome: 'ineligible' }
           },
         },
+        elearningOnboarding: {
+          async processAssignment() {
+            throw new Error('not called')
+          },
+        },
       },
     })
     assert.equal(routes.length, 1)
-    assert.deepEqual(registeredKinds(), [ASSIGNMENT_REMINDER_JOB_KIND])
+    assert.deepEqual(registeredKinds(), [ASSIGNMENT_REMINDER_JOB_KIND, 'onboarding_assign'])
     assert.equal(getJobsWorkerState().running, true)
     await deactivate()
     assert.equal(getJobsWorkerState().running, false)

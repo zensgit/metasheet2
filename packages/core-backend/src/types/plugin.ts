@@ -1201,6 +1201,28 @@ export interface PluginServices {
     >
   }
   /**
+   * E-learning L5 onboarding job materialization. Only plugin-elearning
+   * receives this port. Core owns persisted job validation, same-org policy
+   * authority, assignment effects, suppression and immutable weekly reports.
+   */
+  elearningOnboarding?: {
+    enqueueWeeklyReports(
+      input: import('../services/elearning-onboarding-weekly-report').EnqueueElearningOnboardingWeeklyReportsInput,
+    ): Promise<
+      import('../services/elearning-onboarding-weekly-report').EnqueueElearningOnboardingWeeklyReportsResult
+    >
+    processAssignment(
+      input: import('../services/elearning-onboarding-assignment').ProcessElearningOnboardingAssignmentInput,
+    ): Promise<
+      import('../services/elearning-onboarding-assignment').ProcessElearningOnboardingAssignmentResult
+    >
+    materializeWeeklyReport(
+      input: import('../services/elearning-onboarding-weekly-report').MaterializeElearningOnboardingWeeklyReportInput,
+    ): Promise<
+      import('../services/elearning-onboarding-weekly-report').ElearningOnboardingWeeklyReportDto
+    >
+  }
+  /**
    * E-learning L2 pre-dispatch eligibility recheck. Core supplies this only to
    * plugin-elearning; the notification worker must call it immediately before
    * every effect-side dispatch.

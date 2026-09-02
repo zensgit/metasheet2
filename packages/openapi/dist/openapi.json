@@ -12277,6 +12277,342 @@
           }
         }
       },
+      "ElearningOnboardingDepartmentMatchRule": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "subjectType",
+          "subjectRef",
+          "includeChildren"
+        ],
+        "properties": {
+          "subjectType": {
+            "type": "string",
+            "enum": [
+              "department"
+            ]
+          },
+          "subjectRef": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "includeChildren": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ElearningOnboardingPositionMatchRule": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "subjectType",
+          "subjectRef",
+          "includeChildren"
+        ],
+        "properties": {
+          "subjectType": {
+            "type": "string",
+            "enum": [
+              "position"
+            ]
+          },
+          "subjectRef": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "includeChildren": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          }
+        }
+      },
+      "ElearningOnboardingMatchRule": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ElearningOnboardingDepartmentMatchRule"
+          },
+          {
+            "$ref": "#/components/schemas/ElearningOnboardingPositionMatchRule"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "subjectType",
+          "mapping": {
+            "department": "#/components/schemas/ElearningOnboardingDepartmentMatchRule",
+            "position": "#/components/schemas/ElearningOnboardingPositionMatchRule"
+          }
+        }
+      },
+      "ElearningOnboardingPolicyCreateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "requestId",
+          "trainingPlanId",
+          "matchRules",
+          "hireWindowDays",
+          "deadlineDays",
+          "weeklyReportEnabled"
+        ],
+        "properties": {
+          "requestId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "trainingPlanId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "matchRules": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/ElearningOnboardingMatchRule"
+            }
+          },
+          "hireWindowDays": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "maximum": 365
+          },
+          "deadlineDays": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "maximum": 3650
+          },
+          "weeklyReportEnabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ElearningOnboardingPolicy": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "policyId",
+          "trainingPlanId",
+          "matchRules",
+          "hireWindowDays",
+          "deadlineDays",
+          "weeklyReportEnabled",
+          "status",
+          "createdAt",
+          "retiredAt",
+          "duplicate"
+        ],
+        "properties": {
+          "policyId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "trainingPlanId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "matchRules": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/ElearningOnboardingMatchRule"
+            }
+          },
+          "hireWindowDays": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "maximum": 365
+          },
+          "deadlineDays": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "maximum": 3650
+          },
+          "weeklyReportEnabled": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "retired"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+          },
+          "retiredAt": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "duplicate": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ElearningOnboardingWeeklyReportSuppressed": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reportId",
+          "policyId",
+          "weekStart",
+          "weekEnd",
+          "suppressed",
+          "minGroupSize",
+          "enqueuedCount",
+          "assignedUserCount",
+          "failedCount",
+          "deadCount",
+          "duplicate"
+        ],
+        "properties": {
+          "reportId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "policyId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "weekStart": {
+            "type": "string",
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "weekEnd": {
+            "type": "string",
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "suppressed": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "minGroupSize": {
+            "type": "integer",
+            "enum": [
+              5
+            ]
+          },
+          "enqueuedCount": {
+            "type": "null"
+          },
+          "assignedUserCount": {
+            "type": "null"
+          },
+          "failedCount": {
+            "type": "null"
+          },
+          "deadCount": {
+            "type": "null"
+          },
+          "duplicate": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ElearningOnboardingWeeklyReportVisible": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reportId",
+          "policyId",
+          "weekStart",
+          "weekEnd",
+          "suppressed",
+          "minGroupSize",
+          "enqueuedCount",
+          "assignedUserCount",
+          "failedCount",
+          "deadCount",
+          "duplicate"
+        ],
+        "properties": {
+          "reportId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "policyId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "weekStart": {
+            "type": "string",
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "weekEnd": {
+            "type": "string",
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "suppressed": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "minGroupSize": {
+            "type": "integer",
+            "enum": [
+              5
+            ]
+          },
+          "enqueuedCount": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "assignedUserCount": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "failedCount": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "deadCount": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "duplicate": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ElearningOnboardingWeeklyReport": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ElearningOnboardingWeeklyReportSuppressed"
+          },
+          {
+            "$ref": "#/components/schemas/ElearningOnboardingWeeklyReportVisible"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "suppressed",
+          "mapping": {
+            "true": "#/components/schemas/ElearningOnboardingWeeklyReportSuppressed",
+            "false": "#/components/schemas/ElearningOnboardingWeeklyReportVisible"
+          }
+        }
+      },
       "ElearningAnalyticsExportCreateRequest": {
         "type": "object",
         "additionalProperties": false,
@@ -26856,6 +27192,189 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/elearning/admin/onboarding/policies": {
+      "post": {
+        "operationId": "createElearningOnboardingPolicy",
+        "summary": "Create an immutable new-hire onboarding policy",
+        "description": "Global `elearning:admin` only. Requires the master, content, and assignment\nflags to each equal the exact literal `true`. Organization and actor are\nserver-derived. The organization-scoped `requestId` replays the original\nclosed result for the same normalized payload and returns a values-free\nconflict for a different payload.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningOnboardingPolicyCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Exact idempotent replay of the existing policy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningOnboardingPolicy"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Newly created immutable active policy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningOnboardingPolicy"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or insufficient elearning:admin",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Assignment surface flags off or referenced authority not found",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "requestId reused with a different normalized payload",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/admin/onboarding/policies/{policyId}/retire": {
+      "post": {
+        "operationId": "retireElearningOnboardingPolicy",
+        "summary": "Retire one active onboarding policy",
+        "description": "Global `elearning:admin` only. Organization and actor are server-derived.\nRetirement is one-way and does not mutate the immutable policy payload.\nRequires the master, content, and assignment flags to be exact `true`.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "policyId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Retired policy, or the exact already-retired state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningOnboardingPolicy"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or insufficient elearning:admin",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Assignment surface flags off or policy not found",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/admin/onboarding/policies/{policyId}/reports/{weekStart}": {
+      "get": {
+        "operationId": "getElearningOnboardingWeeklyReport",
+        "summary": "Read one privacy-suppressed onboarding weekly report",
+        "description": "Requires `elearning:stats` or global `elearning:admin`, plus the master and\nanalytics flags set to exact `true`. Organization is server-derived. Groups\nsmaller than five return the suppressed variant with every numeric measure\nnull; no individual learning data is returned.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "policyId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          },
+          {
+            "in": "path",
+            "name": "weekStart",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Closed suppressed or visible weekly aggregate.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningOnboardingWeeklyReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or insufficient statistics permission",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Analytics surface flags off or report not found",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
           }
         }
       }

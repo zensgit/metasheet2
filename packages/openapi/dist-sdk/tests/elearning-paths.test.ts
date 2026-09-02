@@ -96,6 +96,9 @@ type PracticeAnswerResult = components['schemas']['ElearningPracticeAnswerResult
 type PracticeWrongQuestionList = components['schemas']['ElearningPracticeWrongQuestionList']
 type AnalyticsExportCreateRequest = components['schemas']['ElearningAnalyticsExportCreateRequest']
 type AnalyticsExportResult = components['schemas']['ElearningAnalyticsExportResult']
+type OnboardingPolicyCreateRequest = components['schemas']['ElearningOnboardingPolicyCreateRequest']
+type OnboardingPolicy = components['schemas']['ElearningOnboardingPolicy']
+type OnboardingWeeklyReport = components['schemas']['ElearningOnboardingWeeklyReport']
 
 const FORBIDDEN_LEARNER_KEYS = new Set([
   'answerKey',
@@ -148,6 +151,7 @@ type JsonSchema = {
   not?: JsonSchema
   properties?: Record<string, JsonSchema>
   items?: JsonSchema | JsonSchema[]
+  minItems?: number
   maxItems?: number
   additionalProperties?: JsonSchema | boolean
   allOf?: JsonSchema[]
@@ -209,6 +213,9 @@ function jsonSchemaAt(
 describe('elearning V0.1 OpenAPI paths', () => {
   it('exposes the live named-pilot routes in generated SDK types', () => {
     expectTypeOf<paths['/api/elearning/capabilities']['get']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/admin/onboarding/policies']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/admin/onboarding/policies/{policyId}/retire']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/admin/onboarding/policies/{policyId}/reports/{weekStart}']['get']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/admin/credit-titles']['get']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/admin/credit-titles']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/admin/certificate-templates']['get']>().not.toBeNever()
@@ -264,6 +271,15 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<
       paths['/api/elearning/capabilities']['get']['responses']['200']['content']['application/json']
     >().toEqualTypeOf<Capabilities>()
+    expectTypeOf<
+      paths['/api/elearning/admin/onboarding/policies']['post']['responses']['201']['content']['application/json']
+    >().toEqualTypeOf<OnboardingPolicy>()
+    expectTypeOf<
+      paths['/api/elearning/admin/onboarding/policies/{policyId}/retire']['post']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<OnboardingPolicy>()
+    expectTypeOf<
+      paths['/api/elearning/admin/onboarding/policies/{policyId}/reports/{weekStart}']['get']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<OnboardingWeeklyReport>()
     expectTypeOf<
       paths['/api/elearning/admin/credit-titles']['get']['responses']['200']['content']['application/json']
     >().toEqualTypeOf<TitleSnapshot>()
@@ -1832,5 +1848,79 @@ describe('elearning V0.1 OpenAPI paths', () => {
       deadline?: string | null
       rules: components['schemas']['ElearningScopeRule'][]
     }>()
+  })
+
+  it('keeps onboarding policy and privacy-suppressed report contracts closed', () => {
+    expectTypeOf<
+      NonNullable<paths['/api/elearning/admin/onboarding/policies']['post']['requestBody']>['content']['application/json']
+    >().toEqualTypeOf<OnboardingPolicyCreateRequest>()
+
+    const doc = JSON.parse(readFileSync(join(here, '..', '..', 'dist', 'openapi.json'), 'utf8')) as {
+      paths?: Record<string, any>
+      components?: { schemas?: Record<string, JsonSchema> }
+    }
+    const schemas = doc.components?.schemas ?? {}
+    const create = doc.paths?.['/api/elearning/admin/onboarding/policies']?.post
+    const retire = doc.paths?.['/api/elearning/admin/onboarding/policies/{policyId}/retire']?.post
+    const report = doc.paths?.['/api/elearning/admin/onboarding/policies/{policyId}/reports/{weekStart}']?.get
+
+    expect(create?.security).toEqual([{ bearerAuth: [] }])
+    expect(retire?.security).toEqual([{ bearerAuth: [] }])
+    expect(report?.security).toEqual([{ bearerAuth: [] }])
+    expect(create?.responses?.['200']?.content?.['application/json']?.schema?.$ref)
+      .toBe('#/components/schemas/ElearningOnboardingPolicy')
+    expect(create?.responses?.['201']?.content?.['application/json']?.schema?.$ref)
+      .toBe('#/components/schemas/ElearningOnboardingPolicy')
+    expect(retire?.responses?.['200']?.content?.['application/json']?.schema?.$ref)
+      .toBe('#/components/schemas/ElearningOnboardingPolicy')
+    expect(report?.responses?.['200']?.content?.['application/json']?.schema?.$ref)
+      .toBe('#/components/schemas/ElearningOnboardingWeeklyReport')
+
+    const request = schemas.ElearningOnboardingPolicyCreateRequest
+    expect(request?.additionalProperties).toBe(false)
+    expect(request?.required).toEqual([
+      'requestId',
+      'trainingPlanId',
+      'matchRules',
+      'hireWindowDays',
+      'deadlineDays',
+      'weeklyReportEnabled',
+    ])
+    expect(request?.properties?.orgId).toBeUndefined()
+    expect(request?.properties?.actorId).toBeUndefined()
+    expect(request?.properties?.matchRules?.minItems).toBe(1)
+    expect(request?.properties?.matchRules?.maxItems).toBe(100)
+    expect(request?.properties?.matchRules?.uniqueItems).toBe(true)
+
+    for (const name of [
+      'ElearningOnboardingDepartmentMatchRule',
+      'ElearningOnboardingPositionMatchRule',
+      'ElearningOnboardingPolicy',
+      'ElearningOnboardingWeeklyReportSuppressed',
+      'ElearningOnboardingWeeklyReportVisible',
+    ]) expect(schemas[name]?.additionalProperties).toBe(false)
+    expect(schemas.ElearningOnboardingMatchRule?.discriminator?.propertyName).toBe('subjectType')
+    expect(schemas.ElearningOnboardingPositionMatchRule?.properties?.includeChildren?.enum)
+      .toEqual([false])
+    expect(schemas.ElearningOnboardingWeeklyReport?.discriminator?.propertyName).toBe('suppressed')
+    expect(schemas.ElearningOnboardingWeeklyReport?.oneOf?.map((item) => item.$ref)).toEqual([
+      '#/components/schemas/ElearningOnboardingWeeklyReportSuppressed',
+      '#/components/schemas/ElearningOnboardingWeeklyReportVisible',
+    ])
+    expect(schemas.ElearningOnboardingWeeklyReportSuppressed?.properties?.suppressed?.enum)
+      .toEqual([true])
+    for (const key of ['enqueuedCount', 'assignedUserCount', 'failedCount', 'deadCount']) {
+      expect(schemas.ElearningOnboardingWeeklyReportSuppressed?.properties?.[key]?.type).toBe('null')
+      expect(schemas.ElearningOnboardingWeeklyReportVisible?.properties?.[key]?.minimum).toBe(0)
+    }
+    expect(collectForbiddenKeys(
+      schemas,
+      jsonSchemaAt(
+        doc,
+        '/api/elearning/admin/onboarding/policies/{policyId}/reports/{weekStart}',
+        'get',
+        '200',
+      ),
+    )).toEqual([])
   })
 })
