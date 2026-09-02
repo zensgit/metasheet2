@@ -310,6 +310,10 @@ const REQUEST_BY_CAPABILITY = Object.freeze({
   // by CONFIG rather than by permission.
   'handoff.read': () => ({ query: { projectNo: PROJECT_NO } }),
   'handoff.advance': () => ({ body: { projectNo: PROJECT_NO, fromStepKey: 'prep_entry' } }),
+  // 项目备料页: the project number is a PATH param. Like the export above, a 'pass' actor reaches the
+  // read and then 404s downstream (the shared mount()'s provisioning knows only the LEDGER object),
+  // which is exactly the "gate let it through, something else happened" case M-01 measures.
+  'confirmationQueue.projectBoard': () => ({ params: { projectNo: PROJECT_NO } }),
 })
 
 async function callCapability(routes, capability, user) {
@@ -346,6 +350,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.projectDirectory': 'gate',
     'handoff.read': 'gate',
     'handoff.advance': 'gate',
+    'confirmationQueue.projectBoard': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -358,6 +363,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.projectDirectory': 'gate',
     'handoff.read': 'gate',
     'handoff.advance': 'gate',
+    'confirmationQueue.projectBoard': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -370,6 +376,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.projectDirectory': 'gate',
     'handoff.read': 'gate',
     'handoff.advance': 'gate',
+    'confirmationQueue.projectBoard': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -382,6 +389,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.projectDirectory': 'gate',
     'handoff.read': 'pass',
     'handoff.advance': 'gate',
+    'confirmationQueue.projectBoard': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -394,6 +402,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.projectDirectory': 'pass',
     'handoff.read': 'pass',
     'handoff.advance': 'pass',
+    'confirmationQueue.projectBoard': 'pass',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -406,6 +415,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.projectDirectory': 'gate',
     'handoff.read': 'gate',
     'handoff.advance': 'gate',
+    'confirmationQueue.projectBoard': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -418,6 +428,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.projectDirectory': 'pass',
     'handoff.read': 'pass',
     'handoff.advance': 'pass',
+    'confirmationQueue.projectBoard': 'pass',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -430,6 +441,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.projectDirectory': 'pass',
     'handoff.read': 'pass',
     'handoff.advance': 'pass',
+    'confirmationQueue.projectBoard': 'pass',
     'confirmationQueue.ensure': 'pass',
     'confirmationQueue.reconcile': 'pass',
   }),
@@ -635,6 +647,82 @@ async function alignmentHoldsForEverySubsetOfTheVocabulary() {
 // M-05 / M-06 / M-07 / M-08 / M-09
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// M-07 — THE MISSING DIRECTION: every stock-prep-gated route IS a manifest member
+// ---------------------------------------------------------------------------
+//
+// The manifest header calls itself "Frozen: a new operator-facing route MUST be added here, or the
+// manifest-vs-route-table assertion in the plugin matrix suite fails." That assertion existed in one
+// direction only — every manifest row resolves to a registered route — which catches a typo'd path
+// and nothing else. The direction the header actually promises, that no stock-prep-gated route is
+// ABSENT from the manifest, was not asserted anywhere, and 项目备料页 shipped outside the manifest
+// for exactly that reason: R-11's alignment principle is decided from this file, so a route missing
+// from it is a capability no permission-subset assertion can see.
+//
+// The set is DERIVED from the route source: every handler whose body opens with a
+// `requireAccess(req, STOCK_PREP_…)` gate is, by construction, an operator-facing stock-prep route.
+function stockPrepGatedHandlersInSource(src) {
+  const gated = []
+  const pattern = /\n {4}async ([A-Za-z0-9_$]+)\(req, res\) \{/g
+  let match = pattern.exec(src)
+  while (match) {
+    const start = src.indexOf(`    async ${match[1]}(req, res) {`)
+    const end = src.indexOf('\n    },', start)
+    const body = src.slice(start, end).replace(/\/\/[^\n]*/g, '')
+    if (/requireAccess\(req,\s*STOCK_PREP_[A-Z_]+\)/.test(body)) gated.push(match[1])
+    match = pattern.exec(src)
+  }
+  return gated.sort()
+}
+
+/**
+ * The ONE deliberate exemption, named with its reason. An entry here is a claim a reviewer can weigh;
+ * the list must never become a way to keep a real capability out of the manifest.
+ *
+ * `stockPreparationPreflight` is the DEPLOYMENT preflight — a values-free readiness probe over the
+ * deployment's own configuration (is the table provisioned, is a source bound, is the sandbox policy
+ * armed). It answers about the INSTALLATION, not about anybody's data, and it has no control on the
+ * confirmation-queue view that R-11's alignment is measured against: its consumer is the 安装/体检
+ * page, whose own gate is `canOpenStockPrepInstallView`. Putting it in this manifest would make the
+ * control-for-control alignment assertion measure a control that is not on that DOM.
+ */
+const MANIFEST_EXEMPT_STOCK_PREP_HANDLERS = Object.freeze(['stockPreparationPreflight'])
+
+function everyStockPrepGatedRouteIsInTheManifest() {
+  const gated = stockPrepGatedHandlersInSource(HTTP_ROUTES_SOURCE)
+  assert.ok(
+    gated.length > 0,
+    'M-07: the scan found no stock-prep-gated handler — the derivation broke and this assertion is vacuous',
+  )
+
+  // The manifest's routes, resolved to the handler NAME the route table registers for them.
+  const handlerByRoute = new Map(
+    httpRoutes.ROUTES.map(([method, routePath, handler]) => [`${method.toUpperCase()} ${routePath}`, handler]),
+  )
+  const manifestHandlers = new Set(
+    STOCK_PREP_WORKBENCH_CAPABILITIES
+      .map((capability) => handlerByRoute.get(`${capability.method.toUpperCase()} ${capability.path}`))
+      .filter(Boolean),
+  )
+
+  // The exemption list may only name handlers that really are gated — otherwise it rots into a
+  // blanket excuse for whatever happens to be missing.
+  for (const exempt of MANIFEST_EXEMPT_STOCK_PREP_HANDLERS) {
+    assert.ok(gated.includes(exempt), `M-07: exempt handler ${exempt} is not stock-prep-gated at all — delete the exemption`)
+  }
+
+  const missing = gated.filter((handler) => (
+    !manifestHandlers.has(handler) && !MANIFEST_EXEMPT_STOCK_PREP_HANDLERS.includes(handler)
+  ))
+  assert.deepEqual(
+    missing,
+    [],
+    'M-07: these handlers are gated on a stock-prep permission code but are NOT in '
+    + 'STOCK_PREP_WORKBENCH_CAPABILITIES. R-11 decides what a tier may render FROM that manifest, so a '
+    + 'gated route outside it is a capability no permission-subset assertion can see. Add it (with a '
+    + 'control id), or move the route off the stock-prep vocabulary.',
+  )
+}
 async function orphanOperateGrantConfersNothing() {
   assert.equal(satisfiesStockPrepAccess([STOCK_PREP_OPERATE], STOCK_PREP_OPERATE), false, 'M-05: operate alone does not satisfy operate')
   assert.equal(satisfiesStockPrepAccess([STOCK_PREP_OPERATE], STOCK_PREP_READ), false, 'M-05: operate alone does not satisfy read')
@@ -652,6 +740,10 @@ async function orphanOperateGrantConfersNothing() {
       'confirmationQueue.confirm',
       'confirmationQueue.export',
       'confirmationQueue.list',
+      // 项目备料页: the operator's landing view, on the same tier and with the same caveat as the
+      // directory below — it carries this project's number and name, so it is OPERATE, and holding
+      // the tier is necessary but not sufficient to be ANSWERED (the route wants a tenant too).
+      'confirmationQueue.projectBoard',
       // 一线看得见自己工厂的项目: the own-tenant project directory joins the operator tier. Note this
       // list is the RENDERABLE set; holding the tier is necessary but not sufficient to be ANSWERED
       // this one — the route additionally requires a principal with a tenant of its own, which is
@@ -953,6 +1045,7 @@ async function main() {
   await nobodyGainsAnything()
   await visibleEqualsActionableForEveryActor()
   await alignmentHoldsForEverySubsetOfTheVocabulary()
+  everyStockPrepGatedRouteIsInTheManifest()
   await orphanOperateGrantConfersNothing()
   await reconcileAndEnsureDidNotMove()
   await refusedRequestsPerformNoHostWork()

@@ -1,5 +1,5 @@
 <template>
-  <div class="sp-board" data-testid="stock-prep-project-board">
+  <div class="sp-board" data-testid="stock-prep-project-board" data-control="stock-prep-operator-project-board">
     <p class="sp-board__lede" data-testid="stock-prep-project-board-lede">
       {{ bi(
         '一个项目,一页做完:先把 BOM 从 PLM 拉过来,再到多维表里填采购和仓库的进度,填完通知下一步,需要给别人时导出成 Excel。',
