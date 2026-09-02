@@ -732,9 +732,9 @@ async function detectStaleWriteScopes({ fieldPermissions, sheetId, plan, logical
   const existing = await fieldPermissions.listRoleWriteScopes({ sheetId })
   const entries = (existing && Array.isArray(existing.entries)) ? existing.entries : []
   const foreign = (existing && Array.isArray(existing.foreignEntries)) ? existing.foreignEntries : []
-  const inRegion = (fieldId, roleId) => (typeof plan.inRegion === 'function'
-    ? plan.inRegion(fieldId, roleId)
-    : false)
+  // `deriveFieldWriteScopePlan` sets `inRegion` unconditionally and is the only producer of a plan,
+  // so this is called directly rather than behind a typeof guard that no input could ever take.
+  const inRegion = plan.inRegion
   // A row is RETIRABLE by this install only if it is in the rectangle AND this pack may own it.
   // `packId === null` is a legacy, pack-less row: no other pack can claim it, so whichever pack
   // governs it adopts it — the same rule the port's DELETE applies, stated once on each side.
@@ -795,7 +795,6 @@ async function detectPackWriteScopeConflicts({ fieldPermissions, sheetId, plan, 
     .filter((entry) => entry
       && typeof entry.packId === 'string'
       && entry.packId !== packId
-      && typeof plan.inRegion === 'function'
       && plan.inRegion(entry.fieldId, entry.roleId))
     .map((entry) => ({ fieldId: entry.fieldId, roleId: entry.roleId, packId: entry.packId }))
   conflicts.sort((left, right) => (left.fieldId === right.fieldId
