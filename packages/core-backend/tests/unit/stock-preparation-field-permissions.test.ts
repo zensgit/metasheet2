@@ -30,6 +30,7 @@ import {
 import { loadFieldPermissionScopeMap, type QueryFn } from '../../src/multitable/permission-service'
 import { getObjectSheetId } from '../../src/multitable/provisioning'
 import {
+  runWriteScopePackIdBackfill,
   selectSoleOwnerSheets,
 } from '../../scripts/backfill-stock-preparation-write-scope-pack-ids'
 import {
@@ -2014,5 +2015,128 @@ describe('9. classifyRoleWriteScopeRows — each projection holds exactly what i
       packId: PACK_A,
       reconcile: REGION,
     })).rejects.toMatchObject({ reason: 'RECONCILE_DIVERGED' })
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// 10. THE BACKFILL'S RUNNER — the loop, not just the inference.
+//
+// `selectSoleOwnerSheets` is the decision; this is what the script DOES with it. It is exercised
+// against a fake pool because the two properties that matter are statement-shaped: a dry run must
+// issue no UPDATE at all, and the UPDATE it does issue must be narrow enough that a second run is a
+// no-op. A runner nobody drives is a runner whose dry-run can lie about the write it rehearses.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describe('10. runWriteScopePackIdBackfill — dry run rehearses the write it would make', () => {
+  const LEDGER_SQL = /FROM integration_stock_prep_pack_installs/
+  const SOLE = { projectId: 'p-sole', objectId: 'obj' }
+  const AMBIGUOUS = { projectId: 'p-many', objectId: 'obj' }
+
+  /**
+   * A pool that answers the ledger query from a fixture and the field_permissions queries from an
+   * in-memory row list, recording every statement so the dry-run/apply difference is a fact about
+   * the SQL rather than about the summary the function chose to return.
+   */
+  const createBackfillPool = (options: {
+    ledger: Array<{ project_id: string; object_id: string; pack_ids: string[] }>
+    bareRowsBySheet: Record<string, number>
+  }) => {
+    const statements: Array<{ sql: string; params: unknown[] }> = []
+    const rows = { ...options.bareRowsBySheet }
+    return {
+      statements,
+      rows,
+      async query(sql: string, params: unknown[] = []) {
+        statements.push({ sql, params })
+        if (LEDGER_SQL.test(sql)) return { rows: options.ledger } as never
+        if (/^\s*UPDATE field_permissions/.test(sql)) {
+          const sheetId = String(params[0])
+          const affected = rows[sheetId] ?? 0
+          // The UPDATE's own predicate: only rows still carrying the BARE marker. Modelling that is
+          // what makes the idempotence assertion below mean something.
+          rows[sheetId] = 0
+          return { rows: [], rowCount: affected } as never
+        }
+        const sheetId = String(params[0])
+        return { rows: [{ count: String(rows[sheetId] ?? 0) }] } as never
+      },
+    }
+  }
+
+  const LEDGER = [
+    { project_id: SOLE.projectId, object_id: SOLE.objectId, pack_ids: ['pack-alpha'] },
+    { project_id: AMBIGUOUS.projectId, object_id: AMBIGUOUS.objectId, pack_ids: ['pack-alpha', 'pack-beta'] },
+  ]
+  const soleSheet = getObjectSheetId(SOLE.projectId, SOLE.objectId)
+  const ambiguousSheet = getObjectSheetId(AMBIGUOUS.projectId, AMBIGUOUS.objectId)
+
+  it('a DRY RUN issues no UPDATE at all, and counts exactly what an apply would change', async () => {
+    const pool = createBackfillPool({
+      ledger: LEDGER,
+      bareRowsBySheet: { [soleSheet]: 3, [ambiguousSheet]: 2 },
+    })
+    const summary = await runWriteScopePackIdBackfill(pool)
+
+    expect(pool.statements.some((s) => /^\s*UPDATE/.test(s.sql))).toBe(false)
+    expect(summary).toEqual({
+      targets: 2,
+      soleOwnerSheets: 1,
+      ambiguousSheets: 1,
+      rowsStamped: 3,
+      rowsLeftUnattributed: 2,
+    })
+    // Nothing moved: the fixture still holds every bare row.
+    expect(pool.rows[soleSheet]).toBe(3)
+  })
+
+  it('an APPLY stamps only the sole-owner sheet, with this pack\'s marker and the BARE predicate', async () => {
+    const pool = createBackfillPool({
+      ledger: LEDGER,
+      bareRowsBySheet: { [soleSheet]: 3, [ambiguousSheet]: 2 },
+    })
+    const summary = await runWriteScopePackIdBackfill(pool, { apply: true })
+
+    const updates = pool.statements.filter((s) => /^\s*UPDATE/.test(s.sql))
+    expect(updates).toHaveLength(1)
+    expect(updates[0].params).toEqual([
+      soleSheet,
+      stockPreparationFieldPermissionCreatedBy('pack-alpha'),
+      STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY,
+    ])
+    // THE PREDICATE IS THE SAFETY PROPERTY: role-scoped rows on ONE sheet whose provenance is still
+    // exactly the bare marker. A row already stamped (this pack's or another's), an operator's row
+    // and a NULL row are all outside it — which is also what makes a second run a no-op.
+    expect(updates[0].sql).toMatch(/WHERE sheet_id = \$1/)
+    expect(updates[0].sql).toMatch(/AND subject_type = 'role'/)
+    expect(updates[0].sql).toMatch(/AND created_by = \$3/)
+    expect(summary.rowsStamped).toBe(3)
+    // The AMBIGUOUS sheet is untouched and reported, never guessed at.
+    expect(summary.rowsLeftUnattributed).toBe(2)
+    expect(pool.rows[ambiguousSheet]).toBe(2)
+  })
+
+  it('IDEMPOTENT: a second apply finds nothing left to stamp', async () => {
+    const pool = createBackfillPool({
+      ledger: LEDGER,
+      bareRowsBySheet: { [soleSheet]: 3, [ambiguousSheet]: 2 },
+    })
+    await runWriteScopePackIdBackfill(pool, { apply: true })
+    const second = await runWriteScopePackIdBackfill(pool, { apply: true })
+    expect(second.rowsStamped).toBe(0)
+    // …and the ambiguous sheet still refuses on every run, which is the point: it is not a transient
+    // state the script works through, it is a decision only a human can make.
+    expect(second.rowsLeftUnattributed).toBe(2)
+  })
+
+  it('an empty ledger touches nothing — there is nothing it can attribute', async () => {
+    const pool = createBackfillPool({ ledger: [], bareRowsBySheet: {} })
+    const summary = await runWriteScopePackIdBackfill(pool, { apply: true })
+    expect(pool.statements.some((s) => /^\s*UPDATE/.test(s.sql))).toBe(false)
+    expect(summary).toEqual({
+      targets: 0,
+      soleOwnerSheets: 0,
+      ambiguousSheets: 0,
+      rowsStamped: 0,
+      rowsLeftUnattributed: 0,
+    })
   })
 })
