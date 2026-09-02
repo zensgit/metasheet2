@@ -37,9 +37,10 @@
 // WHERE THE NUMBERS COME FROM: reuse, not a second pipeline
 // ---------------------------------------------------------------------------
 //
-// The batch count, the last sync run, the held/ready counts and the pending-decision count all come
-// from `listOperatorProjectDirectory` — the SAME function the directory route answers with, called
-// with the SAME scope. That is deliberate and it is the load-bearing reuse decision in this file:
+// The batch count, the last sync run, the archived held/ready counts and the pending-decision count
+// all come from `listOperatorProjectDirectory` — the SAME function the directory route answers with,
+// called with the SAME scope and NARROWED to this one project. That is deliberate and it is the
+// load-bearing reuse decision in this file:
 //
 //   * the tenant confinement is one implementation, not two that could drift apart (the directory
 //     module refuses a staging project outside the scope's tenant, and every count is computed from
@@ -51,8 +52,29 @@
 //     404 is therefore the SAME 404 by construction rather than by two branches agreeing to look
 //     alike, which is what stops this route being an existence oracle across tenants.
 //
-// The cost is honest and stated: one board read walks the caller's own directory. That is the same
-// work the page's own search box already does, and the directory is bounded by MAX_LIST_ROWS.
+// THE COST IS ONE PROJECT'S, NOT THE TENANT'S. The first cut listed the whole directory and then
+// `.find()`-ed in it — 3 record queries per project in the tenant, and a hard 422 above
+// MAX_LIST_ROWS that would have taken the board down for EVERY project on a tenant that grew past
+// the bound. The narrowing is a parameter on the shared function rather than a second module, so the
+// reuse above is unchanged and the read is now a filtered project-sheet query plus that project's
+// own counts.
+//
+// ---------------------------------------------------------------------------
+// TWO FAMILIES OF NUMBERS, AND WHICH ONE ANSWERS 「拉过了吗?」
+// ---------------------------------------------------------------------------
+//
+// The counts above describe the MVP SNAPSHOT tables (project / bom_snapshot_batch /
+// exception_confirmation / stock_preparation_line). Those are written by `mvp-persist`, which is
+// platform-admin and flag-gated — so on the flow this page exists to serve, where a floor operator
+// runs the pull themselves, every one of them stays ZERO and `lastSyncRunId` stays null no matter how
+// many rows the pull just wrote. A status bar that answered 「还没从 PLM 拉过这个项目」 immediately
+// after a successful import is the one answer that cannot be right.
+//
+// So the board carries a SECOND family, read from the sheet the pull actually writes — the bound
+// table action's own `target`, the same object the export reads through (see `readBoundSheetRows`).
+// `pulledRowCount` / `activePulledRowCount` / `pullTargetReady` are the operator's facts; the
+// snapshot numbers stay, clearly named as the administrator's archived snapshot, because the diff
+// view is built on them and they are the right answer to a different question.
 //
 // ---------------------------------------------------------------------------
 // THE DEEP-LINK HANDLE, AND THE CLAIM IT DOES NOT MAKE
@@ -276,13 +298,16 @@ async function readOperatorProjectBoard({
     )
   }
 
-  // The SAME read the directory route answers with, under the SAME scope. A project belonging to
-  // another tenant is simply absent from it, which is why the two 404s below cannot differ.
+  // The SAME read the directory route answers with, under the SAME scope, NARROWED to the one
+  // project this board is about. A project belonging to another tenant is simply absent from it,
+  // which is why the two 404s below cannot differ — the narrowing filters within the caller's own
+  // already-verified staging project, so it can only ever return a subset of the unnarrowed read.
   const directory = await listOperatorProjectDirectory({
     recordsApi,
     provisioning,
     targetProjectId,
     scope,
+    projectNo: wanted,
   })
 
   const match = directory.projects.find((project) => optionalString(project.projectNo) === wanted)
