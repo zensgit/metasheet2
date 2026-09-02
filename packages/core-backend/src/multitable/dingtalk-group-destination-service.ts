@@ -534,12 +534,36 @@ export class DingTalkGroupDestinationService {
    * reach this private/sheet/org-scoped destination", and a host-side notifier has no such user —
    * the caller is core itself, acting on a deploy-time configured destination id that an operator
    * put in a config file. Passing a fabricated userId through the per-user check would be a lie, so
-   * this path skips it deliberately and instead keeps the two guards that still mean something
+   * this path skips it deliberately and instead keeps the three guards that still mean something
    * without a user:
-   *   - a MISSING destination throws (a config typo must be loud, never a silent success), and
+   *   - a MISSING destination throws (a config typo must be loud, never a silent success),
    *   - a DISABLED destination throws (`enabled=false` is an operator saying "stop sending here";
    *     the server has no standing to override that, and unlike `testSend` — where a human is
-   *     deliberately poking a destination they can see — nobody is watching this send).
+   *     deliberately poking a destination they can see — nobody is watching this send), and
+   *   - a destination that is NOT ORGANIZATION-SCOPED throws. That third one is the STRUCTURAL
+   *     SUBSTITUTE for the user check this path cannot make, and it exists because dropping the
+   *     user check without replacing it left a real hole:
+   *
+   *       POST /api/multitable/dingtalk-groups requires org-admin ONLY when `scope === 'org'`, and
+   *       PATCH /:id passes an orgId (and therefore reaches `requireOrgAdminAccess`) only when the
+   *       request carries one. So ANY authenticated user can create a PRIVATE-scope row —
+   *       `org_id: null`, `created_by: themselves` — and later rewrite its `webhookUrl`, `secret`
+   *       or `enabled` through `loadAuthorizedDestination`'s `created_by === userId` branch, with
+   *       no admin anywhere in the loop. If an operator ever pastes such a row's id into the
+   *       `stockPreparationHandoff` config, that ordinary user owns the terminal 仓库/采购 fan-out:
+   *       they can silently repoint it at a DingTalk group of their choosing, or disable it, and
+   *       the only visible symptom is that the right people stop being told.
+   *
+   *     An ORG-scoped row (`org_id !== null`) is the one shape whose CREATE and UPDATE are both
+   *     admin-gated: create goes through `requireOrgAdminAccess` because `scope === 'org'`, and
+   *     `loadAuthorizedDestination` refuses an org row unless a matching `orgId` was supplied —
+   *     which the PATCH route only does after the same admin check. So "the row lives in the
+   *     admin-only scope" is a property this method can verify from the row alone, with no user in
+   *     hand, and it is what keeps a server-originated send on an admin-managed destination.
+   *
+   *     Note the asymmetry with `testSend`, and that it is correct: a human test-sending to their
+   *     own private group is that human choosing to poke their own webhook. A SERVER send to a
+   *     private group is core lending its authority to whoever happens to own the row.
    *
    * The ledger row is `source_type: 'automation'` (the only non-manual value `recordDelivery`
    * accepts), so a server notification is never mistaken for someone's manual test — and, by
@@ -555,6 +579,14 @@ export class DingTalkGroupDestinationService {
       .executeTakeFirst()
     if (!row) throw new Error('Destination not found')
     if (!row.enabled) throw new Error('Destination is disabled')
+    // See the doc comment: private (`org_id`/`sheet_id` both null) and sheet-scoped rows are
+    // writable by non-admins, so a server-originated send must not ride one. Loud, never silent —
+    // a config pointing at the wrong scope has to be fixed, not worked around.
+    if (row.org_id === null) {
+      throw new Error(
+        'Destination is not organization-scoped; server-originated sends ride only admin-managed destinations',
+      )
+    }
 
     const subject = input.subject?.trim() || 'MetaSheet notification'
     const content = input.content?.trim() || subject
