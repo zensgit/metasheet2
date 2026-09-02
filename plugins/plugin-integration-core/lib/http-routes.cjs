@@ -3227,7 +3227,11 @@ function createHandlers(services, options = {}) {
   function requireStockPreparationHandoffStore() {
     if (!stockPreparationHandoffStore
       || typeof stockPreparationHandoffStore.get !== 'function'
-      || typeof stockPreparationHandoffStore.advance !== 'function') {
+      || typeof stockPreparationHandoffStore.advance !== 'function'
+      // RC1: the notification claim is a THIRD store call now. A binding that has advance but not
+      // claimNotification would move turns and never notify anyone, silently — exactly the failure
+      // mode the split exists to remove — so the seam is required at the gate, not discovered later.
+      || typeof stockPreparationHandoffStore.claimNotification !== 'function') {
       throw new HttpRouteError(501, 'STOCK_PREPARATION_HANDOFF_STORE_UNAVAILABLE', 'stock-preparation handoff store is not available; the handoff cannot be read or advanced here')
     }
     return stockPreparationHandoffStore
@@ -3275,8 +3279,14 @@ function createHandlers(services, options = {}) {
    *   'not_configured' —— no notifier injected, or the chain names no destination for this hop. The
    *                       turn still moved; a deployment is allowed to want turn state without
    *                       notifications.
-   *   'sent'           —— the host reported at least one delivery.
-   *   'failed'         —— the host threw, or reported zero deliveries.
+   *   'sent'           —— every destination took it.
+   *   'partial'        —— SOME destinations took it and some did not (RC4). Only the terminal hop
+   *                       fans out — 仓库 AND 采购 — and that is exactly the hop where collapsing this
+   *                       into 'sent' was worst: the department whose robot is broken is never told,
+   *                       the operator is told in words that the group HAS been told, and at-most-once
+   *                       means clicking again can never fix it. The host already keeps going past a
+   *                       failure and returns both counts; the route used to discard `failed`.
+   *   'failed'         —— the host threw, or every destination refused it.
    */
   async function dispatchStockPreparationHandoffNotification(notification) {
     if (!notification || !Array.isArray(notification.destinationIds) || notification.destinationIds.length === 0) {
@@ -3292,7 +3302,9 @@ function createHandlers(services, options = {}) {
         body: notification.body,
       })
       const delivered = result && Number.isFinite(Number(result.delivered)) ? Number(result.delivered) : 0
-      return delivered > 0 ? 'sent' : 'failed'
+      const failed = result && Number.isFinite(Number(result.failed)) ? Number(result.failed) : 0
+      if (delivered === 0) return 'failed'
+      return failed > 0 ? 'partial' : 'sent'
     } catch (error) {
       // Values-free by construction: the outcome is an enum and the host's own message is discarded
       // here rather than echoed, so a webhook error string can never reach the caller or the UI.
@@ -3303,10 +3315,65 @@ function createHandlers(services, options = {}) {
     }
   }
 
+  // RC1 — IS THE DATABASE'S AUDIT VOCABULARY WIDE ENOUGH FOR THIS ACTION YET?
+  //
+  // `requireStockPreparationAudit()` proves the audit SERVICE is wired. It cannot prove the audit
+  // TABLE will accept what we are about to write, and those are different facts: `db:migrate` is a
+  // separate CLI, so a deployment can run code that knows about `handoff_advance` against a schema
+  // whose CHECK constraint stops at 082. Every advance then moved the cursor, failed at the audit
+  // insert, and handed the operator a raw constraint-violation message.
+  //
+  // Asked ONCE per process (it is a deployment fact, not a per-request one) and only for actions a
+  // route is about to write. The probe fails OPEN on anything it cannot diagnose — see the store —
+  // so a connection blip degrades to "just try the write", exactly as before this existed.
+  const stockPreparationAuditVocabularyProbes = new Map()
+  async function requireStockPreparationAuditVocabulary(audit, action, migration, tenantId) {
+    if (!audit || typeof audit.supportsAction !== 'function') return
+    if (!stockPreparationAuditVocabularyProbes.has(action)) {
+      stockPreparationAuditVocabularyProbes.set(action, audit.supportsAction(action, { tenantId }))
+    }
+    let verdict
+    try {
+      verdict = await stockPreparationAuditVocabularyProbes.get(action)
+    } catch (error) {
+      // A probe that itself blew up tells us nothing; do not convert it into a refusal.
+      stockPreparationAuditVocabularyProbes.delete(action)
+      return
+    }
+    if (verdict && verdict.supported === false) {
+      throw new HttpRouteError(
+        503,
+        'STOCK_PREPARATION_AUDIT_VOCABULARY_UNAVAILABLE',
+        `this database does not yet accept the '${action}' audit action; run migration ${migration} before using this route`,
+        { migration },
+      )
+    }
+  }
+
   function requireConfiguredStockPreparationHandoffChain() {
     const chain = loadStockPreparationHandoffChain()
     if (!chain.configured) {
       throw new HttpRouteError(501, 'STOCK_PREPARATION_HANDOFF_NOT_CONFIGURED', 'this deployment has no stock-preparation handoff chain configured')
+    }
+    return chain
+  }
+
+  /**
+   * RC7 — IS THIS CHAIN THIS TENANT'S? Returns the chain when the answer is yes.
+   *
+   * A chain that names no `tenantId` is deploy-global and belongs to everyone the deployment serves,
+   * which the config contract states is exactly one tenant. A chain that DOES name one belongs to
+   * that tenant alone: the destination ids it carries are deploy config, the host proves only that
+   * they are admin-managed, and nothing downstream relates a destination's org to the tenant whose
+   * project is about to be announced into it. So the refusal is here, by name, before any write.
+   */
+  function requireStockPreparationHandoffChainForTenant(chain, tenantId) {
+    if (chain.tenantId && chain.tenantId !== tenantId) {
+      throw new HttpRouteError(
+        403,
+        'STOCK_PREPARATION_HANDOFF_CHAIN_NOT_FOR_THIS_TENANT',
+        'the stock-preparation handoff chain configured on this deployment belongs to a different tenant',
+      )
     }
     return chain
   }
@@ -7340,9 +7407,31 @@ function createHandlers(services, options = {}) {
           { field: 'projectNo' },
         )
       }
-      const tenantId = resolveTenantId(req, input)
+      // RC2 — THE TENANT COMES FROM THE PRINCIPAL THE HOST VOUCHES FOR, NEVER FROM A HEADER.
+      //
+      // This read used to call `resolveTenantId(req, input)`, i.e. `user.tenantId` — and
+      // `hydrateAuthenticatedUser` copies the x-tenant-id REQUEST HEADER onto that field whenever the
+      // verified token carries no tenant claim (a perfectly ordinary state: `resolveSessionTenantId`
+      // omits the claim for any account with zero or two-plus org memberships). One header therefore
+      // decided whose cursor this route reported.
+      //
+      // It now goes through the SAME #5445 resolver the value-bearing reads use, at its OWN tier: the
+      // payload here is values-free (step keys, cursor integers, booleans, handler counts), so it
+      // stays on the broad queue-watcher READ tier — a supervisor is meant to see whose turn it is —
+      // while the tenant is still derived from the verified claim, refused when a carried tenant
+      // contradicts it, refused for a principal with no tenant of its own, and vouched for by the host.
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+        requiredTier: STOCK_PREP_READ,
+      })
+      const tenantId = scope.tenantId
       const chain = loadStockPreparationHandoffChain()
-      if (!chain.configured) {
+      // RC7: a chain bound to ANOTHER tenant is, from here, no chain at all — the workbench renders
+      // nothing rather than a turn signal this tenant may not act on.
+      if (!chain.configured || (chain.tenantId && chain.tenantId !== tenantId)) {
         // NOT an error. An unconfigured deployment asking "whose turn is it" gets a truthful "there
         // is no chain here", 200, so the workbench can render nothing without treating the absence of
         // an optional feature as a failure of the page it lives on.
@@ -7360,11 +7449,12 @@ function createHandlers(services, options = {}) {
         })
       }
       const store = requireStockPreparationHandoffStore()
-      const persisted = await store.get({
-        tenantId,
-        workspaceId: firstString(input.workspaceId),
-        projectNo,
-      })
+      // RC3: no `workspaceId`. The turn is a fact about a PROJECT, and the scope key that used to
+      // carry a caller-supplied workspace is the same key the at-most-once notification claim rides —
+      // see the store and migration 084. `workspaceId` stays in the query allowlist for shape
+      // compatibility with the rest of this family (the workbench spreads one scope object into every
+      // call) and is deliberately NOT read here.
+      const persisted = await store.get({ tenantId, projectNo })
       // No row == never handed off == the chain is at step 0. Absence and zero are the same state.
       const stepIndex = persisted ? persisted.stepIndex : 0
       const completed = stepIndex >= chain.steps.length
@@ -7378,7 +7468,7 @@ function createHandlers(services, options = {}) {
         currentStepKey: currentStep ? currentStep.key : null,
         terminal: !completed && stepIndex === chain.steps.length - 1,
         completed,
-        isCurrentHandler: !completed && isHandlerOfStep(chain, stepIndex, user.id || user.email),
+        isCurrentHandler: !completed && isHandlerOfStep(chain, stepIndex, scope.actorId),
         notifiedStepIndex: persisted ? persisted.notifiedStepIndex : null,
       })
     },
@@ -7399,13 +7489,24 @@ function createHandlers(services, options = {}) {
     //
     // ORDER OF OPERATIONS, chosen deliberately and pinned by the suite:
     //   1. gate, parse, VALIDATE the projectNo's shape, load the chain — nothing observable yet
-    //   2. prove the project EXISTS in the bound target                — a 404 before any write
-    //   3. plan the advance against the persisted cursor
-    //   4. COMMIT the turn (compare-and-set + notification claim, one transaction)
-    //   5. AUDIT what actually happened
-    //   6. SEND the notification, best effort
+    //   2. resolve the tenant from the VERIFIED principal, host-vouched  — RC2
+    //   3. plan the advance against the persisted cursor                 — the handler gate, RC6
+    //   4. prove the project EXISTS in the bound target                  — a 404 before any write
+    //   5. COMMIT the turn (compare-and-set, cursor only)
+    //   6. AUDIT what actually happened
+    //   7. CLAIM the notification (its own compare-and-set)              — RC1
+    //   8. SEND it, best effort
     //
-    // STEP 5 IS AFTER STEP 4, and that is a correction rather than the original design. The first cut
+    // STEP 3 IS BEFORE STEP 4, and that is RC6. The existence probe used to run first, so a caller the
+    // route was about to refuse could still tell 404 (that project number is real) from 403 (it is
+    // not) — a project-number oracle for anyone holding stock-prep:operate, costing a records query
+    // per guess and leaving no audit row behind. Planning first refuses a non-handler with ONE answer
+    // for every project number, real or invented, before any records IO. The handler's own 404 is
+    // unchanged: the check did not go away, it moved behind the gate.
+    //
+    // STEPS 5-7 ARE THREE WRITES, NOT ONE, and that is RC1. See the store's `claimNotification`.
+    //
+    // STEP 6 IS AFTER STEP 5, and that is a correction rather than the original design. The first cut
     // audited the INTENT first — the same "record intent FIRST" discipline the rest of this family
     // uses — and it was wrong HERE for a reason specific to this route: the store's compare-and-set
     // can REFUSE (a concurrent advance won the row), and the pre-written row said `mode: 'advanced'`
@@ -7413,9 +7514,18 @@ function createHandlers(services, options = {}) {
     // now records outcomes it has SEEN: a refusal from the planner or the store leaves NO row, and
     // every row on this trail describes a cursor move that really landed.
     //
+    // THAT FIX HAD A MIRROR IMAGE, AND STEP 7 IS WHERE IT IS ANSWERED (RC1). While the notification
+    // claim was stamped inside step 5's transaction, an audit append that FAILED left a hop whose
+    // cursor had moved and whose claim was already spent — the next click is a replay, a replay could
+    // not re-claim, and nobody was ever told. So the claim is now its own compare-and-set, taken
+    // AFTER the trail row lands. Every one of the three writes is idempotent and the next click
+    // resumes whichever of them did not happen; the CAS is what keeps "resumable" from meaning
+    // "twice".
+    //
     // What the old ordering bought is kept by other means: `requireStockPreparationAudit()` still
-    // runs FIRST, so an unavailable audit store is a 501 before anything is read or written, and the
-    // notification still cannot fire unless the audit append returned.
+    // runs FIRST, so an unavailable audit store is a 501 before anything is read or written — and
+    // `requireStockPreparationAuditVocabulary` additionally refuses, by name and with the migration
+    // number, a database whose CHECK constraint does not yet know this action.
     //
     // Step 6 is AFTER step 4 on purpose, and a failure there does NOT roll anything back. The turn is
     // the durable business fact — 张三 really did finish — and a DingTalk outage must not silently
@@ -7426,6 +7536,7 @@ function createHandlers(services, options = {}) {
     async stockPreparationHandoffAdvance(req, res) {
       const user = requireAccess(req, STOCK_PREP_OPERATE)
       const audit = requireStockPreparationAudit()
+      await requireStockPreparationAuditVocabulary(audit, 'handoff_advance', '085')
       const input = normalizeStockPreparationConfirmBody(
         requestBody(req),
         VALID_STOCK_PREPARATION_HANDOFF_ADVANCE_BODY_KEYS,
@@ -7457,10 +7568,40 @@ function createHandlers(services, options = {}) {
       // which is what makes "absent config = byte-identical behaviour" true rather than merely likely.
       const chain = requireConfiguredStockPreparationHandoffChain()
       const store = requireStockPreparationHandoffStore()
-      // A WRITE derives its tenant from the AUTHENTICATED principal only — never from the request.
-      const tenantId = resolveAuthUserTenantId(req)
-      const workspaceId = firstString(input.workspaceId)
-      const actor = user.id || user.email
+      // RC2 — A WRITE DERIVES ITS TENANT FROM THE PRINCIPAL THE HOST VOUCHES FOR.
+      //
+      // This used to be `resolveAuthUserTenantId(req)`, i.e. `user.tenantId` — which the auth
+      // middleware fills from the x-tenant-id REQUEST HEADER whenever the verified token carries no
+      // tenant claim. One header therefore decided whose cursor was advanced, whose audit row was
+      // written, and which project number went into which DingTalk group. It is the same hole #5445
+      // closed for the value-bearing reads three routes above, and this route — which writes AND
+      // speaks outside the system — has strictly more reason to close it.
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+        requiredTier: STOCK_PREP_OPERATE,
+      })
+      const tenantId = scope.tenantId
+      const actor = scope.actorId
+      // RC7: refuse to write or announce on behalf of a tenant this deployment's chain is not for.
+      requireStockPreparationHandoffChainForTenant(chain, tenantId)
+
+      // RC6 — THE HANDLER GATE COMES FIRST, BEFORE ANY RECORDS IO. `store.get` is a single indexed
+      // read on a tenant-scoped table; the planner then refuses a non-handler with one 403 that is
+      // identical for a real project number and an invented one. Only a caller who has passed that
+      // gate gets to learn whether the project exists.
+      // RC3: no `workspaceId` in the scope — the turn is a project-level fact; see the store.
+      const persisted = await store.get({ tenantId, projectNo })
+      const plan = planStockPreparationHandoffAdvance({
+        chain,
+        currentStepIndex: persisted ? persisted.stepIndex : 0,
+        fromStepKey,
+        actorId: actor,
+      })
+      const fromStepIndex = plan.fromStepIndex
+      const terminal = fromStepIndex === chain.steps.length - 1
 
       // THE PROJECT MUST EXIST BEFORE ANYTHING IS WRITTEN. A well-shaped handle for a project nobody
       // has is still not a project, and starting a handoff chain on a typo would put a permanent row
@@ -7486,47 +7627,48 @@ function createHandlers(services, options = {}) {
         )
       }
 
-      const persisted = await store.get({ tenantId, workspaceId, projectNo })
-      const plan = planStockPreparationHandoffAdvance({
-        chain,
-        currentStepIndex: persisted ? persisted.stepIndex : 0,
-        fromStepKey,
-        actorId: actor,
-      })
-      const fromStepIndex = plan.fromStepIndex
-      const terminal = fromStepIndex === chain.steps.length - 1
-
-      // DO NOT SPEND THE CLAIM ON A HOP THAT HAS NOWHERE TO SEND. `notified_step_index` is
-      // at-most-once: once claimed for a step, the next click is a replay and that hop can never be
-      // notified again. Claiming it for a chain that names no destination would mean a deployment
-      // that adds one tomorrow finds yesterday's hops permanently silent. With the strict config
-      // parse this is only reachable for the deliberate turn-state-only chain (neither `notify` nor
-      // `terminal` declared) — a typo can no longer land here — but the guard stays, because the
-      // cost of being wrong is an unnotifiable step and the cost of the guard is one boolean.
-      const claimNotification = plan.decision !== 'replay' && chainHasDestinationForHop(chain, terminal)
-
+      // STEP 5 — THE TURN. Cursor only: the notification claim is taken separately, after the trail
+      // row lands, so that a failing audit cannot leave a hop permanently unnotifiable (RC1).
       const applied = await store.advance({
         tenantId,
-        workspaceId,
         projectNo,
         expectedStepIndex: fromStepIndex,
         toStepIndex: plan.toStepIndex,
-        // The claim is the at-most-once key. A replay passes null so it cannot re-claim.
-        notifyForStepIndex: claimNotification ? fromStepIndex : null,
         actor,
       })
 
-      // Record what HAPPENED, now that the store has confirmed it. Values-free: `subject_id` is a
-      // closed-vocabulary step key, `detail` is cursor integers and booleans. `replayed` is recorded
-      // too — someone clicked, and that a person pressed the button twice is a fact a reviewer
-      // asking "who handed this off" wants to see. A REFUSED advance never reaches this line.
+      // DOES THIS HOP STILL OWE A NOTIFICATION? Asked of the STORE, not of the plan, because the two
+      // can disagree in exactly the case that matters: a replay whose original request died between
+      // the cursor move and the claim. Such a click finds the claim unspent and completes the hop.
+      //
+      // DO NOT SPEND THE CLAIM ON A HOP THAT HAS NOWHERE TO SEND. Once claimed for a step, that hop
+      // can never be notified again; claiming it for a chain that names no destination would mean a
+      // deployment adding one tomorrow finds yesterday's hops permanently silent. With the strict
+      // config parse this is only reachable for the deliberate turn-state-only chain (neither
+      // `notify` nor `terminal` declared) — a typo can no longer land here — but the guard stays,
+      // because the cost of being wrong is an unnotifiable step and the cost of the guard is a
+      // boolean.
+      const hopHasDestination = chainHasDestinationForHop(chain, terminal)
+
+      // STEP 6 — RECORD WHAT HAPPENED, now that the store has confirmed it.
+      //
+      // RC5: `mode` is the STORE's committed verdict, never the planner's intent. A step may have
+      // more than one configured handler, and when a co-handler commits the same hop between this
+      // request's plan and its commit the store correctly writes nothing — a trail that took its mode
+      // from the plan then said THIS actor advanced a step somebody else advanced, giving a reviewer
+      // asking 「谁交接的」 two answers for one cursor move.
+      //
+      // `resumed` is the fact that makes an interrupted hop answerable: this request found the cursor
+      // already moved and the notification still owed, and finished it. Values-free like the rest of
+      // `detail` — a boolean.
+      const resuming = !applied.changed && hopHasDestination
+        && (applied.handoff.notifiedStepIndex === null || applied.handoff.notifiedStepIndex < fromStepIndex)
       await audit.append({
         tenantId,
-        workspaceId,
         projectId: projectNo,
         action: 'handoff_advance',
         subjectId: fromStepKey,
-        mode: plan.decision === 'replay' ? 'replayed' : (terminal ? 'completed' : 'advanced'),
+        mode: applied.changed ? (terminal ? 'completed' : 'advanced') : 'replayed',
         actor,
         detail: {
           operation: 'handoff_advance',
@@ -7534,8 +7676,16 @@ function createHandlers(services, options = {}) {
           toStepIndex: plan.toStepIndex,
           stepCount: chain.steps.length,
           terminal,
+          resumed: resuming,
         },
       })
+
+      // STEP 7 — THE CLAIM, its own compare-and-set. `claimed: false` means somebody already has it
+      // (an earlier click, or a concurrent writer who is sending right now), which is a 'skipped',
+      // never an error: the turn really did move.
+      const claim = hopHasDestination
+        ? await store.claimNotification({ tenantId, projectNo, stepIndex: fromStepIndex })
+        : { claimed: false }
 
       // 'skipped' and 'not_configured' are DIFFERENT ANSWERS and the workbench renders them in
       // different words — "已经交给下一步,这次没有发群消息" versus "这个部署还没有配置备料接力的步骤".
@@ -7544,8 +7694,8 @@ function createHandlers(services, options = {}) {
       // that guard existed the claim was always made, `dispatchStockPreparationHandoffNotification`
       // saw an empty destination list and answered 'not_configured', and the turn-state-only chain
       // must keep getting that same honest answer now that it no longer spends a claim to reach it.
-      let notifyOutcome = chainHasDestinationForHop(chain, terminal) ? 'skipped' : 'not_configured'
-      if (applied.notifyClaimed) {
+      let notifyOutcome = hopHasDestination ? 'skipped' : 'not_configured'
+      if (claim.claimed) {
         const notification = buildStockPreparationHandoffNotification({
           chain,
           projectNo,

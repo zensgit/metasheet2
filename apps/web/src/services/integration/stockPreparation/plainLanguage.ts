@@ -1165,6 +1165,12 @@ export const STOCK_PREP_HANDOFF_OUTCOME_PLAIN: Record<string, StockPrepPlainEntr
     zh: '已经交给下一步,群里也通知到了。',
     en: 'Handed on to the next step, and the group has been told.',
   }),
+  partial: Object.freeze({
+    zh: '已经交给下一步了,但有一个群没发出去 —— 请您自己跟对方说一声。',
+    en: 'Handed on to the next step, but one of the groups did not get the message — please tell them yourself.',
+    zhNext: '交接本身是成功的,不用再点一次;再点也不会补发。',
+    enNext: 'The handoff itself succeeded; pressing it again will not resend, so a word in person is the fix.',
+  }),
   failed: Object.freeze({
     zh: '已经交给下一步了,但群里的消息没有发出去 —— 请您自己跟下一位说一声。',
     en: 'The turn has moved to the next step, but the group message did not go out — please tell the next person yourself.',

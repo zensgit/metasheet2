@@ -314,8 +314,20 @@ export interface StockPreparationHandoffStatus {
   notifiedStepIndex: number | null
 }
 
-/** Frozen server vocabulary for what happened to the notification itself. */
-export type StockPreparationHandoffNotifyOutcome = 'sent' | 'failed' | 'skipped' | 'not_configured'
+/**
+ * Frozen server vocabulary for what happened to the notification itself.
+ *
+ * `partial` exists because the TERMINAL hop fans out to two groups (仓库 and 采购) and the host keeps
+ * going past a failed one. Collapsing that into `sent` told the operator the group had been told when
+ * one of the two had not — on the one hop the whole feature exists for, and irreversibly, because the
+ * at-most-once claim means clicking again can never re-send it.
+ */
+export type StockPreparationHandoffNotifyOutcome =
+  | 'sent'
+  | 'partial'
+  | 'failed'
+  | 'skipped'
+  | 'not_configured'
 
 export interface StockPreparationHandoffAdvanceResult {
   projectNo: string

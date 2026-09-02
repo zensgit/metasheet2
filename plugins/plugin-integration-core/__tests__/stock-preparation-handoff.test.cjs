@@ -245,6 +245,28 @@ function makeNotifierSpy(mode = 'ok') {
   }
 }
 
+/**
+ * RC2 — the host tenant-principal directory the #5445 scope resolver leans on.
+ *
+ * `verdict` is a function of (userId, tenantId), so a witness can express the case that matters:
+ * "this principal is in ITS OWN tenant but not in the one the x-tenant-id header named".
+ */
+function makeTenantDirectory(verdict) {
+  const calls = []
+  return {
+    calls,
+    async verifyTenantMembership({ userId, tenantId }) {
+      calls.push({ userId, tenantId })
+      return { member: verdict(userId, tenantId) }
+    },
+  }
+}
+
+/** Says yes to everything — the default, so the G/F suites keep testing what they were written for. */
+function vouchingTenantDirectory() {
+  return makeTenantDirectory(() => true)
+}
+
 function inertService(methods) {
   const service = {}
   for (const method of methods) {
@@ -284,6 +306,11 @@ function mount({
   // F2: the advance route resolves the bound target and asks whether this project has ANY
   // stock-prep row before it writes. Default: the suite's PROJECT exists.
   records = makeRecordsApi(),
+  // RC2: the #5445 host membership seam. Both handoff routes now derive their tenant through
+  // resolveOperatorValueScope, which REQUIRES the host to vouch for the (principal, tenant) pairing
+  // — so the default here says "yes, this principal is in the tenant it claims", and the RC2
+  // witnesses below swap in one that refuses.
+  tenantPrincipalDirectory = vouchingTenantDirectory(),
 } = {}) {
   const routes = new Map()
   const auditAppends = []
@@ -320,12 +347,13 @@ function mount({
     })(),
   })
   services.stockPreparationHandoffNotifier = notifier
+  services.tenantPrincipalDirectory = tenantPrincipalDirectory
   httpRoutes.registerIntegrationRoutes({
     context,
     services,
     logger: { info() {}, warn() {}, error() {} },
   })
-  return { routes, auditAppends, notifier, db, records }
+  return { routes, auditAppends, notifier, db, records, tenantPrincipalDirectory }
 }
 
 function createResponse() {
@@ -344,7 +372,15 @@ async function call(routes, method, routePath, req = {}) {
   const handler = routes.get(`${method.toUpperCase()} ${routePath}`)
   assert.ok(handler, `route ${method} ${routePath} is registered`)
   const res = createResponse()
-  await handler({ user: req.user, body: req.body || {}, query: req.query || {}, params: req.params || {} }, res)
+  await handler({
+    user: req.user,
+    body: req.body || {},
+    query: req.query || {},
+    params: req.params || {},
+    // RC2: the host middleware sets this ONLY from a verified token claim. Leaving it undefined is
+    // the claimless-token case, in which `user.tenantId` may be nothing but the x-tenant-id HEADER.
+    authenticatedTenantId: req.authenticatedTenantId,
+  }, res)
   return res
 }
 
@@ -433,6 +469,8 @@ async function g1AbsentConfigRefusesBeforeTouchingTheStore() {
   services.stockPreparationAuditStore = { async append() { throw new Error('the audit store must never be reached without config') } }
   services.stockPreparationHandoffStore = explodingStore
   services.stockPreparationHandoffNotifier = notifier
+  // RC2: both handoff routes now make the HOST vouch for the (principal, tenant) pairing.
+  services.tenantPrincipalDirectory = vouchingTenantDirectory()
   httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
   const res = await call(routes2, 'POST', ADVANCE_PATH, {
     user: OPERATOR_ZHANG,
@@ -567,6 +605,8 @@ async function g4AuditEntryIsValuesFree() {
     toStepIndex: 1,
     stepCount: 3,
     terminal: false,
+    // RC1: this request moved the cursor itself, so it resumed nothing.
+    resumed: false,
   }, 'G4: the detail is pinned field-for-field — integers and booleans only')
 
   const flat = JSON.stringify(auditAppends)
@@ -631,6 +671,8 @@ async function g4AuditFailureStopsTheNotification() {
   }
   services.stockPreparationHandoffStore = createStockPreparationHandoffStore({ db, idGenerator: () => 'handoff-x' })
   services.stockPreparationHandoffNotifier = notifier
+  // RC2: both handoff routes now make the HOST vouch for the (principal, tenant) pairing.
+  services.tenantPrincipalDirectory = vouchingTenantDirectory()
   httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
   const res = await call(routes, 'POST', ADVANCE_PATH, {
     user: OPERATOR_ZHANG,
@@ -655,6 +697,8 @@ async function g4NoAuditStoreIsAFailClosed501() {
   const services = baseServices()
   services.stockPreparationHandoffStore = createStockPreparationHandoffStore({ db, idGenerator: () => 'handoff-x' })
   services.stockPreparationHandoffNotifier = notifier
+  // RC2: both handoff routes now make the HOST vouch for the (principal, tenant) pairing.
+  services.tenantPrincipalDirectory = vouchingTenantDirectory()
   httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
   const res = await call(routes, 'POST', ADVANCE_PATH, {
     user: OPERATOR_ZHANG,
@@ -765,6 +809,8 @@ async function g5NoNotifierInjectedStillMovesTheTurn() {
   services.stockPreparationAuditStore = { async append() { return { ok: true } } }
   services.stockPreparationHandoffStore = createStockPreparationHandoffStore({ db, idGenerator: () => 'handoff-x' })
   // no stockPreparationHandoffNotifier at all — the host never injected one
+  // RC2: both handoff routes now make the HOST vouch for the (principal, tenant) pairing.
+  services.tenantPrincipalDirectory = vouchingTenantDirectory()
   httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
   const res = await call(routes, 'POST', ADVANCE_PATH, {
     user: OPERATOR_ZHANG,
@@ -922,12 +968,19 @@ async function storeCompareAndSetRefusesAStaleAdvance() {
   const db = makeMemoryDb()
   const store = createStockPreparationHandoffStore({ db, idGenerator: () => 'handoff-1' })
   const scope = { tenantId: TENANT_ID, workspaceId: null, projectNo: PROJECT }
-  const first = await store.advance({ ...scope, expectedStepIndex: 0, toStepIndex: 1, notifyForStepIndex: 0, actor: ZHANG })
+  const first = await store.advance({ ...scope, expectedStepIndex: 0, toStepIndex: 1, actor: ZHANG })
   assert.equal(first.changed, true)
-  assert.equal(first.notifyClaimed, true)
+  // RC1: the claim is a SEPARATE compare-and-set, taken after the route's audit row lands. Taking it
+  // here is what the route does next, and it is at-most-once by its own predicate, not by advance's.
+  assert.deepEqual(await store.claimNotification({ ...scope, stepIndex: 0 }), { claimed: true, notifiedStepIndex: 0 })
+  assert.deepEqual(
+    await store.claimNotification({ ...scope, stepIndex: 0 }),
+    { claimed: false, notifiedStepIndex: 0 },
+    'a second claim for the same hop is refused — that IS the at-most-once guarantee',
+  )
   // Someone else already moved it; this caller planned against a cursor of 0.
   await assert.rejects(
-    () => store.advance({ ...scope, expectedStepIndex: 0, toStepIndex: 2, notifyForStepIndex: 0, actor: LI }),
+    () => store.advance({ ...scope, expectedStepIndex: 0, toStepIndex: 2, actor: LI }),
     (error) => {
       assert.equal(error.status, 409)
       assert.equal(error.code, 'STOCK_PREPARATION_HANDOFF_STEP_MISMATCH')
@@ -935,16 +988,16 @@ async function storeCompareAndSetRefusesAStaleAdvance() {
     },
   )
   assert.equal(db.rows[0].step_index, 1, 'the stale advance did not move the cursor')
-  // The idempotent replay path: same destination, no write, no re-claim.
-  const replay = await store.advance({ ...scope, expectedStepIndex: 0, toStepIndex: 1, notifyForStepIndex: null, actor: ZHANG })
+  // The idempotent replay path: same destination, no write.
+  const replay = await store.advance({ ...scope, expectedStepIndex: 0, toStepIndex: 1, actor: ZHANG })
   assert.equal(replay.changed, false)
-  assert.equal(replay.notifyClaimed, false)
+  assert.equal(replay.handoff.notifiedStepIndex, 0, 'and it reports the claim it can see, so the route can resume')
 }
 
 async function storeIsTenantAndProjectScoped() {
   const db = makeMemoryDb()
   const store = createStockPreparationHandoffStore({ db, idGenerator: (() => { let n = 0; return () => `h-${(n += 1)}` })() })
-  await store.advance({ tenantId: TENANT_ID, workspaceId: null, projectNo: PROJECT, expectedStepIndex: 0, toStepIndex: 1, notifyForStepIndex: 0, actor: ZHANG })
+  await store.advance({ tenantId: TENANT_ID, workspaceId: null, projectNo: PROJECT, expectedStepIndex: 0, toStepIndex: 1, actor: ZHANG })
   // Another tenant's cursor for the SAME project number is a different row and starts at zero.
   assert.equal(await store.get({ tenantId: OTHER_TENANT, projectNo: PROJECT }), null)
   // Another project in the same tenant likewise.
@@ -958,25 +1011,36 @@ async function routeIsTenantScoped() {
   const db = makeMemoryDb()
   const { routes } = mount({ notifier, db })
   const intruder = { id: ZHANG, tenantId: OTHER_TENANT, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] }
-  // The write derives its tenant from the PRINCIPAL, so an intruder cannot reach TENANT_ID's cursor
-  // even by naming it in the body.
+  // RC2 CHANGED THIS, AND IN THE STRICTER DIRECTION. A body naming another tenant used to be silently
+  // applied to the caller's OWN — no cross-tenant write, but a request that said one thing and did
+  // another, and an allowlist entry that looked like it meant something. The #5445 resolver refuses a
+  // carried tenant that disagrees with the principal's, so the intruder now gets a named 403 rather
+  // than a 200 for a chain they did not ask about.
   const res = await call(routes, 'POST', ADVANCE_PATH, {
     user: intruder,
     body: { tenantId: TENANT_ID, projectNo: PROJECT, fromStepKey: 'prep_entry' },
   })
-  assert.equal(res.statusCode, 200, 'the intruder advances THEIR OWN tenant\'s chain, not the victim\'s')
+  assert.equal(res.statusCode, 403, 'a body naming another tenant is refused, not quietly rewritten')
+  assert.equal(res.body.error.code, 'OPERATOR_SCOPE_TENANT_MISMATCH')
+  assert.deepEqual(db.rows, [], 'and nothing is written for either tenant')
+  // Without the contradicting key the intruder advances THEIR OWN tenant's chain, as before.
+  const own = await call(routes, 'POST', ADVANCE_PATH, {
+    user: intruder,
+    body: { projectNo: PROJECT, fromStepKey: 'prep_entry' },
+  })
+  assert.equal(own.statusCode, 200)
   assert.equal(db.rows.length, 1)
-  assert.equal(db.rows[0].tenant_id, OTHER_TENANT, 'the row landed in the AUTHENTICATED tenant, never the body-supplied one')
+  assert.equal(db.rows[0].tenant_id, OTHER_TENANT, 'the row landed in the AUTHENTICATED tenant, never a request-supplied one')
   // The victim's chain is untouched.
   const victim = await status(routes, OPERATOR_ZHANG)
   assert.equal(victim.body.data.stepIndex, 0)
-  // A cross-tenant READ is refused outright.
+  // A cross-tenant READ is refused the same way.
   const readRes = await call(routes, 'GET', STATUS_PATH, {
     user: intruder,
     query: { tenantId: TENANT_ID, projectNo: PROJECT },
   })
   assert.equal(readRes.statusCode, 403)
-  assert.equal(readRes.body.error.code, 'TENANT_MISMATCH')
+  assert.equal(readRes.body.error.code, 'OPERATOR_SCOPE_TENANT_MISMATCH')
 }
 
 async function notificationBuilderNeverImpersonates() {
@@ -1104,14 +1168,35 @@ async function f1TwoConcurrentAdvancesFromTheSameStepClaimTheNotificationOnce() 
   const scope = { tenantId: TENANT_ID, workspaceId: null, projectNo: PROJECT }
   db.rows.push({ id: 'h-0', tenant_id: TENANT_ID, workspace_id: null, project_no: PROJECT, step_index: 0, notified_step_index: null, updated_by: null })
   const settled = await Promise.allSettled([
-    store.advance({ ...scope, expectedStepIndex: 0, toStepIndex: 1, notifyForStepIndex: 0, actor: ZHANG }),
-    store.advance({ ...scope, expectedStepIndex: 0, toStepIndex: 1, notifyForStepIndex: 0, actor: LI }),
+    store.advance({ ...scope, expectedStepIndex: 0, toStepIndex: 1, actor: ZHANG }),
+    store.advance({ ...scope, expectedStepIndex: 0, toStepIndex: 1, actor: LI }),
   ])
-  const claimed = settled.filter((r) => r.status === 'fulfilled' && r.value.notifyClaimed === true)
-  assert.equal(claimed.length, 1, `F1: exactly ONE of two concurrent advances may claim the notification (got ${claimed.length})`)
   const changed = settled.filter((r) => r.status === 'fulfilled' && r.value.changed === true)
   assert.equal(changed.length, 1, `F1: exactly ONE of two concurrent advances may report changed:true (got ${changed.length})`)
   assert.equal(db.rows[0].step_index, 1, 'F1: the cursor moved exactly one step')
+}
+
+async function f1TwoConcurrentClaimsTakeTheNotificationOnce() {
+  // THE OTHER HALF OF F1, now that the claim is its own write (RC1). Two people whose advances both
+  // resolved to the same hop — the winner of the cursor race and a replayer resuming an interrupted
+  // one — reach claimNotification at the same instant. Exactly one may come away with it, or the
+  // 仓库+采购 fan-out goes out twice, which is the very thing at-most-once exists to prevent.
+  const db = makeRacingDb(2)
+  const store = createStockPreparationHandoffStore({ db, idGenerator: () => 'h-1' })
+  const scope = { tenantId: TENANT_ID, projectNo: PROJECT }
+  db.rows.push({ id: 'h-0', tenant_id: TENANT_ID, project_no: PROJECT, step_index: 1, notified_step_index: null, updated_by: ZHANG })
+  const settled = await Promise.allSettled([
+    store.claimNotification({ ...scope, stepIndex: 0 }),
+    store.claimNotification({ ...scope, stepIndex: 0 }),
+  ])
+  const claimed = settled.filter((r) => r.status === 'fulfilled' && r.value.claimed === true)
+  assert.equal(claimed.length, 1, `F1: exactly ONE of two concurrent claims may take it (got ${claimed.length})`)
+  assert.equal(db.rows[0].notified_step_index, 0, 'F1: and the claim landed exactly once')
+  // A claim for a project with no cursor row invents nothing.
+  assert.deepEqual(
+    await store.claimNotification({ tenantId: TENANT_ID, projectNo: 'PRJ-NONE', stepIndex: 0 }),
+    { claimed: false, notifiedStepIndex: null },
+  )
 }
 
 async function f1TheUpdateCarriesTheExpectedCursorAsAPredicate() {
@@ -1130,7 +1215,7 @@ async function f1TheUpdateCarriesTheExpectedCursorAsAPredicate() {
   db.rows.push({ id: 'h-0', tenant_id: TENANT_ID, workspace_id: null, project_no: PROJECT, step_index: 2, notified_step_index: 1, updated_by: LI })
   const store = createStockPreparationHandoffStore({ db, idGenerator: () => 'h-1' })
   await assert.rejects(
-    () => store.advance({ tenantId: TENANT_ID, workspaceId: null, projectNo: PROJECT, expectedStepIndex: 0, toStepIndex: 1, notifyForStepIndex: 0, actor: ZHANG }),
+    () => store.advance({ tenantId: TENANT_ID, workspaceId: null, projectNo: PROJECT, expectedStepIndex: 0, toStepIndex: 1, actor: ZHANG }),
     (error) => {
       assert.equal(error.status, 409)
       assert.equal(error.code, 'STOCK_PREPARATION_HANDOFF_WRITE_CONFLICT', `F1: got ${error.code}`)
@@ -1161,11 +1246,11 @@ async function f1TheInTransactionReadTakesTheRowLock() {
   db.selectOneForUpdate = async (table, where) => { counts.forUpdate += 1; return realForUpdate(table, where) }
   const store = createStockPreparationHandoffStore({ db, idGenerator: () => 'h-1' })
   const scope = { tenantId: TENANT_ID, workspaceId: null, projectNo: PROJECT }
-  await store.advance({ ...scope, expectedStepIndex: 0, toStepIndex: 1, notifyForStepIndex: 0, actor: ZHANG })
+  await store.advance({ ...scope, expectedStepIndex: 0, toStepIndex: 1, actor: ZHANG })
   assert.equal(counts.forUpdate, 1, 'F1: the advance read the cursor FOR UPDATE')
   assert.equal(counts.plain, 0, 'F1: and never through the unlocked read')
   // The second hop goes down the UPDATE path rather than the INSERT path — same requirement.
-  await store.advance({ ...scope, expectedStepIndex: 1, toStepIndex: 2, notifyForStepIndex: 1, actor: LI })
+  await store.advance({ ...scope, expectedStepIndex: 1, toStepIndex: 2, actor: LI })
   assert.equal(counts.forUpdate, 2)
   assert.equal(counts.plain, 0)
   // `get` is the READ surface and is deliberately NOT locked: taking a row lock to answer "whose
@@ -1481,6 +1566,8 @@ async function f6TheStoreCommitsBeforeTheAuditAppend() {
     }
     services.stockPreparationHandoffStore = createStockPreparationHandoffStore({ db, idGenerator: () => 'handoff-1' })
     services.stockPreparationHandoffNotifier = notifier
+    // RC2: both handoff routes now make the HOST vouch for the (principal, tenant) pairing.
+    services.tenantPrincipalDirectory = vouchingTenantDirectory()
     httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
     return { routes: routeMap }
   })()
@@ -1489,7 +1576,18 @@ async function f6TheStoreCommitsBeforeTheAuditAppend() {
   assert.equal(seenAtAppend.length, 1)
   assert.equal(seenAtAppend[0].length, 1, 'F6: the cursor row already existed when the audit was appended')
   assert.equal(seenAtAppend[0][0].step_index, 1, 'F6: and it already held the NEW step index')
-  assert.equal(seenAtAppend[0][0].notified_step_index, 0, 'F6: and the notification claim')
+  // RC1 MOVED THE OTHER HALF OF THIS ASSERTION, DELIBERATELY. The claim used to be stamped in the
+  // same transaction as the cursor and so was already visible here; it is now taken AFTER this append
+  // returns, which is the whole point — an audit failure must not be able to spend it. So at append
+  // time the hop is committed and still OWED a notification, and only a trail row that landed lets
+  // the claim be taken at all.
+  assert.equal(
+    seenAtAppend[0][0].notified_step_index,
+    null,
+    'RC1: the notification claim is NOT yet spent when the trail row is written',
+  )
+  assert.equal(db.rows[0].notified_step_index, 0, 'RC1: and it is taken once the append has returned')
+  assert.equal(notifier.calls.length, 1, 'and exactly one message went out for the hop')
 }
 
 async function f6ThePlannerRefusesAStaleCursorOnItsOwn() {
@@ -1524,9 +1622,11 @@ async function p3TheUpdatePathWritesTheNewNotifiedStepIndex() {
   await advance(routes, OPERATOR_LI, { fromStepKey: 'process' })
   assert.equal(db.rows.length, 1, 'still one cursor row')
   assert.equal(db.rows[0].step_index, 2, 'the UPDATE moved the cursor')
-  assert.equal(db.rows[0].notified_step_index, 1, 'P3: the UPDATE wrote the NEW claim, not the old one')
-  assert.equal(db.updateCalls.length, 1, 'exactly one UPDATE (the first hop inserted)')
-  assert.equal(db.updateCalls[0].patch.notified_step_index, 1, 'P3: and it is in the SET clause')
+  assert.equal(db.rows[0].notified_step_index, 1, 'P3: the claim UPDATE wrote the NEW claim, not the old one')
+  const claimWrites = db.updateCalls.filter((c) => 'notified_step_index' in c.patch)
+  assert.equal(claimWrites.length, 2, 'P3: one claim UPDATE per hop, and it is a separate write (RC1)')
+  assert.equal(claimWrites[1].patch.notified_step_index, 1, 'P3: and the new claim is in its SET clause')
+  assert.equal(claimWrites[1].where.notified_step_index, 0, 'P3: predicated on the claim it compared against')
   assert.equal(notifier.calls.length, 2, 'both hops notified exactly once each')
 }
 
@@ -1539,7 +1639,7 @@ async function p3ZeroUpdatedRowsIsARefusalNotASuccess() {
   db.updateRow = async () => []
   const store = createStockPreparationHandoffStore({ db, idGenerator: () => 'h-1' })
   await assert.rejects(
-    () => store.advance({ tenantId: TENANT_ID, workspaceId: null, projectNo: PROJECT, expectedStepIndex: 0, toStepIndex: 1, notifyForStepIndex: 0, actor: ZHANG }),
+    () => store.advance({ tenantId: TENANT_ID, workspaceId: null, projectNo: PROJECT, expectedStepIndex: 0, toStepIndex: 1, actor: ZHANG }),
     (error) => {
       assert.equal(error.status, 409)
       assert.equal(error.code, 'STOCK_PREPARATION_HANDOFF_WRITE_CONFLICT')
@@ -1569,7 +1669,7 @@ async function p3TheUniqueViolationRetryIsBounded() {
   }
   const store = createStockPreparationHandoffStore({ db, idGenerator: () => 'h-1' })
   await assert.rejects(
-    () => store.advance({ tenantId: TENANT_ID, workspaceId: null, projectNo: PROJECT, expectedStepIndex: 0, toStepIndex: 1, notifyForStepIndex: 0, actor: ZHANG }),
+    () => store.advance({ tenantId: TENANT_ID, workspaceId: null, projectNo: PROJECT, expectedStepIndex: 0, toStepIndex: 1, actor: ZHANG }),
     (error) => error.code === '23505',
     'P3: a violation that never resolves eventually propagates rather than spinning',
   )
@@ -1587,7 +1687,7 @@ async function p3TheUniqueViolationRetryIsBounded() {
   }
   const otherStore = createStockPreparationHandoffStore({ db: otherDb, idGenerator: () => 'h-1' })
   await assert.rejects(
-    () => otherStore.advance({ tenantId: TENANT_ID, workspaceId: null, projectNo: PROJECT, expectedStepIndex: 0, toStepIndex: 1, notifyForStepIndex: 0, actor: ZHANG }),
+    () => otherStore.advance({ tenantId: TENANT_ID, workspaceId: null, projectNo: PROJECT, expectedStepIndex: 0, toStepIndex: 1, actor: ZHANG }),
     (error) => error.constraint === 'some_other_index',
   )
   assert.equal(otherAttempts, 1, 'P3: an unrelated 23505 is not retried')
@@ -1610,9 +1710,13 @@ async function p3TheUniqueViolationRetryIsBounded() {
     return realInsert(table, row)
   }
   const raceStore = createStockPreparationHandoffStore({ db: raceDb, idGenerator: () => 'h-loser' })
-  const applied = await raceStore.advance({ tenantId: TENANT_ID, workspaceId: null, projectNo: PROJECT, expectedStepIndex: 0, toStepIndex: 1, notifyForStepIndex: 0, actor: ZHANG })
+  const applied = await raceStore.advance({ tenantId: TENANT_ID, workspaceId: null, projectNo: PROJECT, expectedStepIndex: 0, toStepIndex: 1, actor: ZHANG })
   assert.equal(applied.changed, false, 'P3: the loser sees the winner\'s cursor and reports a replay')
-  assert.equal(applied.notifyClaimed, false, 'P3: and does NOT re-claim the notification')
+  assert.deepEqual(
+    await raceStore.claimNotification({ tenantId: TENANT_ID, projectNo: PROJECT, stepIndex: 0 }),
+    { claimed: false, notifiedStepIndex: 0 },
+    'P3: and cannot re-claim the notification the winner already took',
+  )
   assert.equal(raceDb.rows.length, 1, 'P3: one project, one cursor row')
 }
 
@@ -1652,6 +1756,487 @@ async function p3TheStoreRefusesADbBindingWithoutTheLockSeam() {
   assert.throws(() => createStockPreparationHandoffStore({ db: noTransaction }), /transaction/)
 }
 
+
+// ---------------------------------------------------------------------------
+// RC1..RC7 — the post-rebase adversarial recheck (10 confirmed findings, 0 refuted).
+//
+// Each block below is the witness for ONE root cause, and each was RED on 04b6f0aa0 before the
+// production change that answers it. What they have in common is that the first round's fixes were
+// all real and all NARROW: F6 moved the audit AFTER the store and thereby opened the mirror-image
+// hole (RC1); F2 hardened `projectNo` and left `workspaceId` beside it untouched (RC3); and both
+// routes were written to the pre-#5445 tenant pattern in a file where the remedy already existed
+// three routes above them (RC2).
+// ---------------------------------------------------------------------------
+
+/**
+ * A db whose FIRST out-of-transaction read (the route's `store.get`, which the planner runs on) sees
+ * the world as it was, and whose in-transaction read then sees a co-handler's committed move. That
+ * is the plan/commit race, expressed as a fake rather than as a sleep.
+ */
+function makeCursorRaceDb(injectAfterFirstGet) {
+  const inner = makeMemoryDb()
+  let gets = 0
+  const racing = {
+    get rows() { return inner.rows },
+    get updateCalls() { return inner.updateCalls },
+    async selectOne(table, where) {
+      const result = await inner.selectOne(table, where)
+      gets += 1
+      if (gets === 1) injectAfterFirstGet(inner)
+      return result
+    },
+    selectOneForUpdate: (...args) => inner.selectOneForUpdate(...args),
+    insertOne: (...args) => inner.insertOne(...args),
+    updateRow: (...args) => inner.updateRow(...args),
+    async transaction(fn) { return fn(racing) },
+  }
+  return racing
+}
+
+// --- RC1: an audit failure must not burn the at-most-once notification claim ------------------
+
+async function rc1AnAuditFailureLeavesTheClaimUnspentAndTheHopRecoverable() {
+  // THE MIRROR IMAGE OF F6, and the reason the claim is now a SEPARATE write.
+  //
+  // F6 was right that a refused compare-and-set must leave no audit row, so the store commits before
+  // the trail is written. But the first cut of that reorder stamped the CURSOR and the at-most-once
+  // NOTIFICATION CLAIM in one transaction, so an audit append that failed afterwards left a hop
+  // whose turn had moved and whose notification could never be sent again: the next click is a
+  // replay, a replay could not re-claim, and the one thing this whole feature exists to do had
+  // silently not happened.
+  //
+  // Now the cursor moves alone, the trail is written, and only then is the claim taken — by its own
+  // compare-and-set, which is what makes the interrupted request RESUMABLE rather than lost.
+  let auditWorks = false
+  const auditAppends = []
+  const notifier = makeNotifierSpy()
+  const db = makeMemoryDb()
+  const routes = new Map()
+  const context = {
+    api: {
+      http: { addRoute(m, rp, h) { routes.set(`${m.toUpperCase()} ${rp}`, h) } },
+      multitable: { provisioning: inertService(['resolveFieldIds']), records: makeRecordsApi() },
+    },
+    storage: new Map(),
+    config: { ...chainConfig(), stockPreparationTableActions: [tableActionConfig()] },
+  }
+  const services = baseServices()
+  services.stockPreparationAuditStore = {
+    async append(entry) {
+      if (!auditWorks) {
+        const error = new Error('audit ledger unavailable')
+        error.status = 422
+        error.code = 'AUDIT_DETAIL_INVALID'
+        throw error
+      }
+      auditInternals.assertValuesFreeDetail(entry.detail)
+      auditAppends.push(entry)
+      return { ok: true }
+    },
+  }
+  services.stockPreparationHandoffStore = createStockPreparationHandoffStore({ db, idGenerator: () => 'handoff-x' })
+  services.stockPreparationHandoffNotifier = notifier
+  services.tenantPrincipalDirectory = vouchingTenantDirectory()
+  httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
+
+  const first = await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
+  assert.equal(first.statusCode, 422, 'the caller is told the trail write failed')
+  assert.equal(auditAppends.length, 0)
+  assert.equal(notifier.calls.length, 0, 'nothing is announced for a handoff with no trail entry')
+  assert.equal(db.rows.length, 1)
+  assert.equal(db.rows[0].step_index, 1, 'the cursor move is committed — F6 traded this away on purpose')
+  assert.equal(
+    db.rows[0].notified_step_index,
+    null,
+    'RC1: the at-most-once claim is NOT burned by a failed audit — that is what makes the hop recoverable',
+  )
+
+  // The audit store comes back. The operator clicks the same button again.
+  auditWorks = true
+  const second = await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
+  assert.equal(second.statusCode, 200)
+  assert.equal(second.body.data.changed, false, 'the cursor really had moved, so this IS a replay')
+  assert.equal(second.body.data.notifyOutcome, 'sent', 'RC1: the notification the failed request owed goes out now')
+  assert.equal(notifier.calls.length, 1, 'exactly one notification for one hop, across both clicks')
+  assert.equal(db.rows[0].notified_step_index, 0, 'and the claim is spent exactly once')
+  assert.equal(auditAppends.length, 1)
+  // The mode is the STORE's committed verdict (RC5) — this request moved nothing. What makes the row
+  // answer "who finished this hop" is `resumed`: a fact about what THIS request actually did.
+  assert.equal(auditAppends[0].mode, 'replayed')
+  assert.equal(auditAppends[0].detail.resumed, true, 'RC1: the trail records that this click completed an owed hop')
+
+  // And a third click changes nothing at all.
+  const third = await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
+  assert.equal(third.body.data.notifyOutcome, 'skipped')
+  assert.equal(notifier.calls.length, 1, 'at-most-once survives the recovery path')
+  assert.equal(auditAppends[1].detail.resumed, false)
+}
+
+async function rc1AMissingAuditVocabularyIsANamed503BeforeAnyWrite() {
+  // THE REALISTIC TRIGGER for the failure above, closed at its source. `requireStockPreparationAudit`
+  // only ever checked that the service OBJECT exists; it could not see whether migration 085 had run.
+  // On a deployment where the code is live and 085 is not applied, 082's CHECK constraint rejects
+  // action='handoff_advance', so EVERY first advance landed in the state above — with a raw
+  // constraint-violation message reaching the operator. Now the route probes the vocabulary once and
+  // refuses BY NAME, before the cursor moves.
+  const notifier = makeNotifierSpy()
+  const db = makeMemoryDb()
+  const routes = new Map()
+  const context = {
+    api: {
+      http: { addRoute(m, rp, h) { routes.set(`${m.toUpperCase()} ${rp}`, h) } },
+      multitable: { provisioning: inertService(['resolveFieldIds']), records: makeRecordsApi() },
+    },
+    storage: new Map(),
+    config: { ...chainConfig(), stockPreparationTableActions: [tableActionConfig()] },
+  }
+  const services = baseServices()
+  let probes = 0
+  services.stockPreparationAuditStore = {
+    async append() { throw new Error('must never be reached: the vocabulary probe refuses first') },
+    async supportsAction(action) {
+      probes += 1
+      assert.equal(action, 'handoff_advance')
+      return { supported: false, reason: 'action_not_in_check_constraint' }
+    },
+  }
+  services.stockPreparationHandoffStore = createStockPreparationHandoffStore({ db, idGenerator: () => 'handoff-x' })
+  services.stockPreparationHandoffNotifier = notifier
+  services.tenantPrincipalDirectory = vouchingTenantDirectory()
+  httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
+
+  const res = await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
+  assert.equal(res.statusCode, 503)
+  assert.equal(res.body.error.code, 'STOCK_PREPARATION_AUDIT_VOCABULARY_UNAVAILABLE')
+  assert.match(res.body.error.message, /085/, 'the refusal names the migration an operator has to run')
+  assert.deepEqual(db.rows, [], 'nothing was written')
+  assert.equal(notifier.calls.length, 0)
+
+  // Probed ONCE per process, not per click: it is a deployment fact, not a per-request one.
+  await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
+  assert.equal(probes, 1, 'the probe is memoized')
+}
+
+// --- RC2: the tenant comes from the verified principal, never from x-tenant-id -----------------
+
+async function rc2AHeaderSteeredTenantCannotReachAnotherTenantsChain() {
+  // THE HOLE: `hydrateAuthenticatedUser` copies the x-tenant-id REQUEST HEADER onto `user.tenantId`
+  // whenever the verified token carries no tenant claim. Both handoff routes used to read exactly
+  // that field, so one header decided whose cursor was read, whose was advanced, whose audit row was
+  // written, and which project number went into a DingTalk group.
+  //
+  // Both routes now go through resolveOperatorValueScope, which makes the HOST vouch for the
+  // (principal, tenant) pairing. A claimless token whose header names a tenant the principal is not
+  // in is refused — BEFORE any store, records or notifier call.
+  const directory = makeTenantDirectory((userId, tenantId) => tenantId === OTHER_TENANT)
+  const notifier = makeNotifierSpy()
+  const db = makeMemoryDb()
+  const records = makeRecordsApi()
+  const { routes, auditAppends } = mount({ notifier, db, records, tenantPrincipalDirectory: directory })
+  // The claimless token: no verified claim, and `user.tenantId` is whatever the header said.
+  const steered = { id: ZHANG, tenantId: TENANT_ID, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] }
+
+  const write = await call(routes, 'POST', ADVANCE_PATH, {
+    user: steered,
+    authenticatedTenantId: undefined,
+    body: { projectNo: PROJECT, fromStepKey: 'prep_entry' },
+  })
+  assert.equal(write.statusCode, 403)
+  assert.equal(write.body.error.code, 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED')
+  assert.deepEqual(db.rows, [], 'RC2: no cursor row for a tenant the host will not vouch for')
+  assert.deepEqual(auditAppends, [], 'and no audit row')
+  assert.equal(notifier.calls.length, 0, 'and nothing announced into that tenant\u2019s group')
+  assert.equal(records.queries.length, 0, 'the refusal costs zero records IO')
+
+  const read = await call(routes, 'GET', STATUS_PATH, {
+    user: steered,
+    authenticatedTenantId: undefined,
+    query: { projectNo: PROJECT },
+  })
+  assert.equal(read.statusCode, 403)
+  assert.equal(read.body.error.code, 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED')
+}
+
+async function rc2AHeaderThatContradictsTheVerifiedClaimIsRefusedOnBothRoutes() {
+  const notifier = makeNotifierSpy()
+  const db = makeMemoryDb()
+  const { routes } = mount({ notifier, db })
+  const contradicted = { id: ZHANG, tenantId: OTHER_TENANT, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] }
+  for (const [method, routePath, payload] of [
+    ['POST', ADVANCE_PATH, { body: { projectNo: PROJECT, fromStepKey: 'prep_entry' } }],
+    ['GET', STATUS_PATH, { query: { projectNo: PROJECT } }],
+  ]) {
+    const res = await call(routes, method, routePath, {
+      user: contradicted,
+      // The VERIFIED claim says one tenant; the header-filled user object says another.
+      authenticatedTenantId: TENANT_ID,
+      ...payload,
+    })
+    assert.equal(res.statusCode, 403, `${method} ${routePath} refuses a contradicted tenant`)
+    assert.equal(res.body.error.code, 'OPERATOR_SCOPE_TENANT_CONTRADICTED')
+  }
+  assert.deepEqual(db.rows, [])
+  assert.equal(notifier.calls.length, 0)
+}
+
+async function rc2ATenantlessPrincipalIsRefusedOnBothRoutes() {
+  // The platform side: a tenantless admin has no tenant of its own, so there is no chain that is
+  // theirs to read or to advance. #5445 made this refusal the posture for the value plane; the
+  // handoff joins it, because an advance both writes and speaks outside the system.
+  const notifier = makeNotifierSpy()
+  const db = makeMemoryDb()
+  const records = makeRecordsApi()
+  const { routes } = mount({ notifier, db, records })
+  const tenantless = { id: 'u_admin', permissions: ['role:admin', 'integration:admin'] }
+  for (const [method, routePath, payload] of [
+    ['POST', ADVANCE_PATH, { body: { projectNo: PROJECT, fromStepKey: 'prep_entry' } }],
+    ['GET', STATUS_PATH, { query: { projectNo: PROJECT } }],
+  ]) {
+    const res = await call(routes, method, routePath, { user: tenantless, ...payload })
+    assert.equal(res.statusCode, 403, `${method} ${routePath} refuses a tenantless principal`)
+    assert.equal(res.body.error.code, 'OPERATOR_SCOPE_TENANT_REQUIRED')
+  }
+  assert.deepEqual(db.rows, [])
+  assert.equal(records.queries.length, 0)
+}
+
+async function rc2AnAbsentHostDirectoryFailsClosedOnBothRoutes() {
+  const db = makeMemoryDb()
+  const { routes } = mount({ db, tenantPrincipalDirectory: null })
+  for (const [method, routePath, payload] of [
+    ['POST', ADVANCE_PATH, { body: { projectNo: PROJECT, fromStepKey: 'prep_entry' } }],
+    ['GET', STATUS_PATH, { query: { projectNo: PROJECT } }],
+  ]) {
+    const res = await call(routes, method, routePath, { user: OPERATOR_ZHANG, ...payload })
+    assert.equal(res.statusCode, 501, `${method} ${routePath} fails closed without the host seam`)
+    assert.equal(res.body.error.code, 'OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE')
+  }
+  assert.deepEqual(db.rows, [])
+}
+
+// --- RC3: the turn is a PROJECT-level fact, so workspaceId cannot multiply it ------------------
+
+async function rc3WorkspaceIdCannotMultiplyTheCursorOrTheNotification() {
+  // WHY THIS WAS WORSE THAN THE PLUGIN-WIDE `workspaceId` CONVENTION IT INHERITED. Everywhere else in
+  // this family workspaceId is a same-tenant scope selector on a READ. Here it was part of the key of
+  // the at-most-once NOTIFICATION CLAIM, so five requests differing only in a string nobody validates
+  // produced five cursor rows and five identical pings into the same DingTalk group — defeating the
+  // one guarantee this store is built around, with no race and no extra privilege.
+  //
+  // The turn is a fact about a PROJECT (migration 084's own rationale), so workspaceId is gone from
+  // the scope entirely. It stays in the request allowlist because the workbench spreads its scope
+  // into every call in this family, and it is documented there as carrying no meaning here.
+  const notifier = makeNotifierSpy()
+  const db = makeMemoryDb()
+  const { routes, auditAppends } = mount({ notifier, db })
+  for (const workspaceId of [undefined, 'w1', 'w2', 'w3', 'anything-at-all']) {
+    const res = await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry', workspaceId })
+    assert.equal(res.statusCode, 200, `workspaceId=${String(workspaceId)} is accepted, not refused`)
+  }
+  assert.equal(db.rows.length, 1, 'RC3: one project, one cursor row, whatever the caller calls its workspace')
+  assert.equal(db.rows[0].step_index, 1)
+  assert.equal(notifier.calls.length, 1, 'RC3: one hop, one ping')
+  assert.equal(auditAppends.length, 5, 'every click is still recorded — it is the CURSOR that must not fork')
+  assert.deepEqual(
+    auditAppends.map((entry) => entry.mode),
+    ['advanced', 'replayed', 'replayed', 'replayed', 'replayed'],
+  )
+  const seen = await status(routes, OPERATOR_ZHANG, { workspaceId: 'a-completely-different-one' })
+  assert.equal(seen.body.data.stepIndex, 1, 'and the status read cannot be steered onto a different cursor either')
+}
+
+// --- RC4: a partial terminal fan-out is reported as partial ------------------------------------
+
+async function rc4APartialTerminalFanOutIsNotReportedAsSent() {
+  // 仓库 AND 采购 on the terminal hop. The host deliberately keeps going when one destination fails
+  // and returns {delivered, failed}; the route used to throw `failed` away and map delivered > 0 to
+  // 'sent', so the operator was told in words that the group had been told — and at-most-once meant
+  // clicking again could never fix it. The gap is now named.
+  const partialNotifier = {
+    calls: [],
+    async sendToDestinations(request) {
+      this.calls.push(request)
+      return { delivered: 1, failed: request.destinationIds.length - 1 }
+    },
+  }
+  const db = makeMemoryDb()
+  const { routes } = mount({ notifier: partialNotifier, db })
+  await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
+  await advance(routes, OPERATOR_LI, { fromStepKey: 'process' })
+  const terminal = await advance(routes, OPERATOR_WANG, { fromStepKey: 'final_review' })
+  assert.equal(terminal.statusCode, 200)
+  assert.equal(terminal.body.data.terminal, true)
+  assert.equal(terminal.body.data.notifyOutcome, 'partial', 'RC4: one of the two groups was not told')
+  assert.equal(terminal.body.data.notified, false, '`notified` may not claim a fan-out that half-failed')
+  // The turn still moved — the notice is about the message, not about the work.
+  assert.equal(terminal.body.data.currentStepKey, null)
+}
+
+async function rc4EveryOutcomeTheRouteCanReturnHasCopy() {
+  // The enum and the words the operator reads must not drift apart. Deriving the list from the ROUTE
+  // rather than typing it here is what makes a future outcome fail this instead of shipping silent.
+  const fs = require('node:fs')
+  const source = fs.readFileSync(path.join(LIB, 'http-routes.cjs'), 'utf8')
+  const region = source.slice(source.indexOf('async function dispatchStockPreparationHandoffNotification'))
+  const body = region.slice(0, region.indexOf('\n  }\n'))
+  // Every enum-shaped literal the dispatcher body can hand back. Scraped from its RETURN statements
+  // rather than from bare `return 'x'` occurrences, because a ternary is exactly how 'partial'
+  // entered — and rather than from the whole body, which would also collect `typeof … !== 'function'`.
+  const returned = [...body.matchAll(/return .*/g)]
+    .flatMap((line) => [...line[0].matchAll(/'([a-z_]+)'/g)].map((match) => match[1]))
+  assert.ok(returned.includes('partial'), 'RC4: the dispatcher can answer partial')
+  assert.ok(returned.includes('sent') && returned.includes('failed'), 'and still answers sent / failed')
+  const plainPath = path.join(
+    __dirname, '..', '..', '..',
+    'apps', 'web', 'src', 'services', 'integration', 'stockPreparation', 'plainLanguage.ts',
+  )
+  const table = fs.readFileSync(plainPath, 'utf8')
+  const start = table.indexOf('STOCK_PREP_HANDOFF_OUTCOME_PLAIN: Record')
+  assert.ok(start > 0, 'the outcome copy table is where this expects it')
+  const copy = table.slice(start, table.indexOf(String.fromCharCode(10) + 'export ', start))
+  for (const outcome of new Set(returned.concat(['skipped']))) {
+    assert.ok(copy.includes(`${outcome}: Object.freeze(`), `RC4: outcome '${outcome}' has plain-language copy`)
+  }
+}
+
+// --- RC5: the audit mode is the committed verdict, not the plan --------------------------------
+
+async function rc5TheAuditModeComesFromTheCommittedVerdictNotThePlan() {
+  // A step may have MORE THAN ONE configured handler (`handlerUserIds` is a list). If 赵 commits the
+  // same hop in the window between 张's plan and 张's commit, the store correctly refuses to write —
+  // but the trail used to take its `mode` from the PLAN, and so recorded that 张 advanced a step 赵
+  // advanced. Two answers to "who handed this off", for one cursor move.
+  const config = {
+    [HANDOFF_CONFIG_KEY]: {
+      steps: [
+        { key: 'prep_entry', handlerUserIds: [ZHANG, 'u_zhao'] },
+        { key: 'process', handlerUserIds: [LI] },
+        { key: 'final_review', handlerUserIds: [WANG] },
+      ],
+      notify: { groupDestinationId: NOTIFY_DEST },
+      terminal: { groupDestinationIds: [WAREHOUSE_DEST, PURCHASING_DEST] },
+    },
+  }
+  const db = makeCursorRaceDb((inner) => {
+    inner.rows.push({
+      id: 'handoff-race',
+      tenant_id: TENANT_ID,
+      project_no: PROJECT,
+      step_index: 1,
+      notified_step_index: 0,
+      updated_by: 'u_zhao',
+    })
+  })
+  const notifier = makeNotifierSpy()
+  const { routes, auditAppends } = mount({ config, db, notifier })
+  const res = await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.body.data.changed, false, 'the store refused to write — 赵 had already moved it')
+  assert.equal(auditAppends.length, 1)
+  assert.equal(
+    auditAppends[0].mode,
+    'replayed',
+    'RC5: the trail records what the STORE did, never what the planner intended',
+  )
+  assert.equal(notifier.calls.length, 0, 'and the hop 赵 already claimed is not announced twice')
+}
+
+// --- RC6: the handler gate runs before any records IO ------------------------------------------
+
+async function rc6ANonHandlerCannotTellAnExistingProjectFromAnUnknownOne() {
+  // The existence probe used to run BEFORE the handler check, so a caller the route was about to
+  // refuse could still tell 404 (this project number is real) from 403 (it is not) — a project-number
+  // oracle for anyone holding stock-prep:operate, and one that leaves no audit row behind. The plan
+  // now runs first, off the tenant-scoped cursor, so a non-handler gets ONE answer either way and
+  // costs zero records IO.
+  const records = makeRecordsApi([PROJECT])
+  const db = makeMemoryDb()
+  const { routes, auditAppends } = mount({ db, records })
+  const existing = await call(routes, 'POST', ADVANCE_PATH, {
+    user: OPERATOR_STRANGER,
+    body: { projectNo: PROJECT, fromStepKey: 'prep_entry' },
+  })
+  const unknown = await call(routes, 'POST', ADVANCE_PATH, {
+    user: OPERATOR_STRANGER,
+    body: { projectNo: 'PRJ-NOT-A-REAL-ONE', fromStepKey: 'prep_entry' },
+  })
+  assert.equal(existing.statusCode, 403)
+  assert.equal(unknown.statusCode, 403)
+  assert.equal(existing.body.error.code, 'STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER')
+  assert.deepEqual(
+    unknown.body.error,
+    existing.body.error,
+    'RC6: a non-handler gets one indistinguishable refusal, so the route is no project-number oracle',
+  )
+  assert.equal(records.queries.length, 0, 'RC6: and the refusal costs zero records IO')
+  assert.deepEqual(db.rows, [])
+  assert.deepEqual(auditAppends, [])
+  // The real handler still gets the honest 404 — the existence check did not go away, it moved.
+  const handler = await advance(routes, OPERATOR_ZHANG, { projectNo: 'PRJ-NOT-A-REAL-ONE', fromStepKey: 'prep_entry' })
+  assert.equal(handler.statusCode, 404)
+  assert.equal(handler.body.error.code, 'STOCK_PREPARATION_HANDOFF_PROJECT_NOT_FOUND')
+  assert.deepEqual(db.rows, [], 'and still nothing is written for a project that does not exist')
+}
+
+// --- RC7: a chain may be BOUND to one tenant, and says so when it is not ------------------------
+
+async function rc7ATenantBoundChainRefusesEveryOtherTenant() {
+  // The notifier seam has no tenant dimension: destination ids are deploy-global and
+  // `sendToDestination` proves only that a destination is admin-managed, never that its org is the
+  // org whose project is being announced. Per-tenant chains are a later change; what this one adds is
+  // the ability to SAY which tenant a deploy-global chain belongs to, and to refuse every other one
+  // by name.
+  const bound = chainConfig()
+  bound[HANDOFF_CONFIG_KEY].tenantId = OTHER_TENANT
+  const notifier = makeNotifierSpy()
+  const db = makeMemoryDb()
+  const records = makeRecordsApi()
+  const { routes, auditAppends } = mount({ config: bound, notifier, db, records })
+
+  const res = await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
+  assert.equal(res.statusCode, 403)
+  assert.equal(res.body.error.code, 'STOCK_PREPARATION_HANDOFF_CHAIN_NOT_FOR_THIS_TENANT')
+  assert.deepEqual(db.rows, [])
+  assert.deepEqual(auditAppends, [])
+  assert.equal(notifier.calls.length, 0)
+  assert.equal(records.queries.length, 0)
+
+  // And to a tenant it is not bound to, a bound chain is simply NO chain — the workbench renders
+  // nothing rather than a turn signal it may not act on.
+  const seen = await status(routes, OPERATOR_ZHANG)
+  assert.equal(seen.statusCode, 200)
+  assert.equal(seen.body.data.configured, false)
+  assert.deepEqual(seen.body.data.steps, [])
+
+  // The bound tenant is served exactly as before.
+  const owner = mount({ config: bound })
+  const zhangThere = { id: ZHANG, tenantId: OTHER_TENANT, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] }
+  const ok = await call(owner.routes, 'POST', ADVANCE_PATH, {
+    user: zhangThere,
+    body: { projectNo: PROJECT, fromStepKey: 'prep_entry' },
+  })
+  assert.equal(ok.statusCode, 200)
+  assert.equal(ok.body.data.notifyOutcome, 'sent')
+}
+
+async function rc7AnUnboundChainStaysDeployGlobalAndSaysSo() {
+  // The absent-binding branch, pinned so that "no tenantId means deploy-global, and the deployment
+  // is asserting it is single-tenant" is a decision the config contract states rather than an
+  // accident of parsing.
+  const chain = parseStockPreparationHandoffConfig(chainConfig())
+  assert.equal(chain.tenantId, null, 'an unbound chain is explicitly null, not undefined')
+  const boundConfig = chainConfig()
+  boundConfig[HANDOFF_CONFIG_KEY].tenantId = OTHER_TENANT
+  assert.equal(parseStockPreparationHandoffConfig(boundConfig).tenantId, OTHER_TENANT)
+  // And the binding is typed like every other config string: a non-string is a named refusal.
+  const bad = chainConfig()
+  bad[HANDOFF_CONFIG_KEY].tenantId = 42
+  assert.throws(
+    () => parseStockPreparationHandoffConfig(bad),
+    (error) => error.code === 'STOCK_PREPARATION_HANDOFF_CONFIG_INVALID' && error.details.field === 'tenantId',
+  )
+}
+
 async function main() {
   const tests = [
     ['G1 absent config leaves every observable surface untouched', g1AbsentConfigLeavesEveryObservableSurfaceUntouched],
@@ -1685,6 +2270,7 @@ async function main() {
     ['the capability manifest declares both handoff routes', capabilityManifestDeclaresBothHandoffRoutes],
     // --- second round: the adversarial findings F1..F6 (F4 lives in core-backend) ---------------
     ['F1 two concurrent advances claim the notification exactly once', f1TwoConcurrentAdvancesFromTheSameStepClaimTheNotificationOnce],
+    ['F1 two concurrent claims take the notification exactly once', f1TwoConcurrentClaimsTakeTheNotificationOnce],
     ['F1 the UPDATE carries the compared cursor as a predicate', f1TheUpdateCarriesTheExpectedCursorAsAPredicate],
     ['F1 the in-transaction read takes the row lock', f1TheInTransactionReadTakesTheRowLock],
     ['F1 a lost write race is a 409 that claims nothing', f1RouteAnswers409WriteConflictAndClaimsNothing],
@@ -1706,6 +2292,20 @@ async function main() {
     ['P3 the unique-violation retry is bounded', p3TheUniqueViolationRetryIsBounded],
     ['P3 the status query allowlist is closed', p3TheStatusQueryAllowlistIsClosed],
     ['P3 the store refuses a db binding without the lock seam', p3TheStoreRefusesADbBindingWithoutTheLockSeam],
+    // --- third round: the post-rebase recheck, RC1..RC7 -----------------------------------------
+    ['RC1 an audit failure leaves the claim unspent and the hop recoverable', rc1AnAuditFailureLeavesTheClaimUnspentAndTheHopRecoverable],
+    ['RC1 a missing audit vocabulary is a named 503 before any write', rc1AMissingAuditVocabularyIsANamed503BeforeAnyWrite],
+    ['RC2 a header-steered tenant cannot reach another tenant\'s chain', rc2AHeaderSteeredTenantCannotReachAnotherTenantsChain],
+    ['RC2 a header contradicting the verified claim is refused on both routes', rc2AHeaderThatContradictsTheVerifiedClaimIsRefusedOnBothRoutes],
+    ['RC2 a tenantless principal is refused on both routes', rc2ATenantlessPrincipalIsRefusedOnBothRoutes],
+    ['RC2 an absent host directory fails closed on both routes', rc2AnAbsentHostDirectoryFailsClosedOnBothRoutes],
+    ['RC3 workspaceId cannot multiply the cursor or the notification', rc3WorkspaceIdCannotMultiplyTheCursorOrTheNotification],
+    ['RC4 a partial terminal fan-out is not reported as sent', rc4APartialTerminalFanOutIsNotReportedAsSent],
+    ['RC4 every outcome the route can return has copy', rc4EveryOutcomeTheRouteCanReturnHasCopy],
+    ['RC5 the audit mode comes from the committed verdict, not the plan', rc5TheAuditModeComesFromTheCommittedVerdictNotThePlan],
+    ['RC6 a non-handler cannot tell an existing project from an unknown one', rc6ANonHandlerCannotTellAnExistingProjectFromAnUnknownOne],
+    ['RC7 a tenant-bound chain refuses every other tenant', rc7ATenantBoundChainRefusesEveryOtherTenant],
+    ['RC7 an unbound chain stays deploy-global and says so', rc7AnUnboundChainStaysDeployGlobalAndSaysSo],
   ]
   for (const [name, fn] of tests) {
     await fn()

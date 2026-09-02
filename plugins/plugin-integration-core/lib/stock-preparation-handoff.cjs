@@ -174,7 +174,7 @@ function stringList(value) {
 // The CLOSED key sets of the deploy-time config object. Same discipline as the routes' request-body
 // allowlists: a key the parser does not know is a TYPO until proven otherwise, and the whole reason
 // this config exists is that a typo here means nobody gets told anything.
-const HANDOFF_TOP_LEVEL_KEYS = Object.freeze(['steps', 'notify', 'terminal'])
+const HANDOFF_TOP_LEVEL_KEYS = Object.freeze(['tenantId', 'steps', 'notify', 'terminal'])
 const STEP_KEYS = Object.freeze(['key', 'handlerUserIds'])
 const NOTIFY_KEYS = Object.freeze(['groupDestinationId'])
 const TERMINAL_KEYS = Object.freeze(['groupDestinationIds', 'exportPath'])
@@ -258,6 +258,7 @@ function parseStockPreparationHandoffConfig(config) {
   if (!raw) {
     return Object.freeze({
       configured: false,
+      tenantId: null,
       steps: Object.freeze([]),
       notifyGroupDestinationId: null,
       terminalGroupDestinationIds: Object.freeze([]),
@@ -307,6 +308,26 @@ function parseStockPreparationHandoffConfig(config) {
   }
 
   assertNoUnknownKeys(raw, HANDOFF_TOP_LEVEL_KEYS, null)
+
+  // RC7 — WHICH TENANT THIS CHAIN BELONGS TO, or null for a deployment asserting it has only one.
+  //
+  // The notification seam has no tenant dimension and cannot grow one cheaply: the destination ids
+  // below are deploy-global, and the host's `sendToDestination` proves only that a destination row is
+  // ADMIN-MANAGED (org-scoped), never that its org is the org whose project is being announced. On a
+  // single-tenant deployment — which is what 222 is, and what every deployment of this feature is
+  // today — that is exactly right and costs nothing. On a multi-tenant one it would mean every
+  // tenant's handoff announcing 「项目 …」 into one org's DingTalk group.
+  //
+  // So the chain MAY name its tenant, and the advance route then refuses to write or announce for any
+  // other one, while a tenant the chain is not bound to sees `configured: false` and renders nothing.
+  // ABSENT means deploy-global, and the config contract (app.manifest.json's `stockPrepHandoff`
+  // surface and the 222 runbook) says in as many words that a deployment leaving it out is asserting
+  // it serves ONE tenant. Per-tenant chains — a map of tenant -> chain — are the natural successor and
+  // are deliberately NOT built here: this is the smallest change that makes the single-tenant
+  // assumption checkable rather than implicit.
+  const boundTenantId = raw.tenantId === undefined || raw.tenantId === null
+    ? null
+    : requiredConfigString(raw.tenantId, 'tenantId')
 
   const hasNotify = raw.notify !== undefined && raw.notify !== null
   const hasTerminal = raw.terminal !== undefined && raw.terminal !== null
@@ -358,6 +379,8 @@ function parseStockPreparationHandoffConfig(config) {
 
   return Object.freeze({
     configured: true,
+    // null == deploy-global == "this deployment serves one tenant"; see the note above.
+    tenantId: boundTenantId,
     steps: Object.freeze(steps),
     // OPTIONAL, but only in the ALL-OR-NOTHING sense above. A chain that declares neither `notify`
     // nor `terminal` still tracks whose turn it is — the turn state is useful on its own — and every

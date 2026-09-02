@@ -8,7 +8,7 @@
   "boundedContext": {
     "code": "stock-preparation",
     "owner": "integration",
-    "description": "BOM备料 — the first multitable-backed application: managed multitable objects, a confirmation-queue workbench, three permission codes, two deployment-data config surfaces, and two acceptance criteria. Installing it means tables and configuration, never code."
+    "description": "BOM备料 — the first multitable-backed application: managed multitable objects, a confirmation-queue workbench, three permission codes, three deployment-data config surfaces, and two acceptance criteria. Installing it means tables and configuration, never code."
   },
   "platformDependencies": [
     "auth",
