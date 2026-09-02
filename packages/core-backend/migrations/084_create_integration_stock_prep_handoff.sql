@@ -32,11 +32,15 @@
 -- treating it as an error.
 --
 -- THIS IS NOT A PERMISSION RECORD. `step_index` is a VISIBLE TURN SIGNAL. It does not gate who may
--- write which column on a prep row — there is no per-column write enforcement in stock-prep at all
--- (the three departments exist in code only as customer-pack `roleViews`, which can hide columns and
--- structurally cannot express a write permission). Anyone reading this column as if it were an
--- authorization decision is reading it wrong; see
--- plugins/plugin-integration-core/lib/stock-preparation-handoff.cjs for the full statement.
+-- write which column on a prep row. Per-column write scoping DOES exist in stock-prep as of #5447 —
+-- the customer pack's `fieldWritePolicies` are applied by the host into `field_permissions`, the ONE
+-- table the grid's write gate actually reads (packages/core-backend
+-- src/services/stock-preparation-field-permissions.ts) — but it is a SEPARATE mechanism with a
+-- separate lifetime: it is written once at pack install, keyed by ROLE and COLUMN, and it never
+-- consults this table. Nothing here widens or narrows it, and advancing the cursor grants and
+-- revokes nothing. Anyone reading this column as if it were an authorization decision is reading it
+-- wrong; see plugins/plugin-integration-core/lib/stock-preparation-handoff.cjs for the full
+-- statement.
 --
 -- THIS IS NOT AN APPROVAL INSTANCE. Owner ruling: the light version first, not a binding to the
 -- Approval engine, because the ordered sequence is not yet proven stable in real use. Hence one

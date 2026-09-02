@@ -13,12 +13,15 @@
 //
 //   1. IT IS NOT A PERMISSION MECHANISM. `currentStepKey` is a VISIBLE TURN SIGNAL and nothing more.
 //      It does not, and must not be read as if it does, gate who may WRITE which column on a prep
-//      row. Per-column write enforcement is a separate, deliberately deferred decision; today every
-//      principal holding stock-prep:operate can write every operator-writable field regardless of
-//      whose turn this module says it is. If a future change wants turn-based write enforcement it
-//      must be built as an explicit guard on the write path and tested as one — silently treating
-//      this field as if it already were that guard is the failure mode this paragraph exists to
-//      prevent.
+//      row. Per-column write scoping DOES exist since #5447, and it is a SEPARATE mechanism that
+//      never consults this module: the customer pack's `fieldWritePolicies` are applied at install
+//      into `field_permissions` (packages/core-backend src/services/stock-preparation-field-
+//      permissions.ts), keyed by ROLE and COLUMN, and the grid's write gate reads that table alone.
+//      So the two are orthogonal: whoever a role may write, it may write on every step, and the
+//      cursor moving grants and revokes nothing. If a future change wants TURN-based write
+//      enforcement it must be built as an explicit guard on the write path and tested as one —
+//      silently treating this field as if it already were that guard is the failure mode this
+//      paragraph exists to prevent.
 //
 //   2. IT IS NOT AN APPROVAL GRAPH. Owner ruling: build the LIGHT version first, NOT a binding to
 //      the full Approval engine, because the ordered sequence is not yet proven stable in real use
@@ -50,11 +53,14 @@
 //     destroy what people typed and still could not express an ordered cursor — see the store module
 //     for why the turn lives in its own row instead.
 //
-// AND ONE THING THAT DOES NOT EXIST TO BUILD ON: there is no per-role WRITE enforcement anywhere in
-// stock-prep. The three departments appear in code only as customer-pack `roleViews`, whose schema is
-// fail-closed at four keys (viewId / label / hideOwnerships / hideFieldIds) — column HIDING only,
-// structurally incapable of expressing a row filter or a write permission. That is the second reason
-// the header above insists this module is a signal and not a guard: there is no guard here to join.
+// AND THE ONE NEIGHBOURING GUARD, NAMED SO NOBODY CONFLATES THE TWO: per-role WRITE scoping landed in
+// #5447 as the customer pack's `fieldWritePolicies`, applied by the host into `field_permissions`.
+// It is keyed by ROLE and COLUMN and is evaluated with no reference to the turn, so joining it to
+// this module would be a NEW behaviour, not a tightening of an existing one. The pack's `roleViews`
+// remain what they always were — fail-closed at four keys (viewId / label / hideOwnerships /
+// hideFieldIds), column HIDING only, structurally incapable of expressing a row filter or a write
+// permission — which is why they never were the write guard people sometimes read them as. That is
+// the second reason the header above insists this module is a signal and not a guard.
 //
 // VALUES DISCIPLINE. Nothing this module produces may carry a customer row VALUE. The notification
 // bodies it composes are built from exactly three things: the business `projectNo` (a navigation

@@ -277,8 +277,10 @@ export async function readStockPreparationValueEntry(
 // additionally tells 仓库/采购.
 //
 // THIS IS A VISIBLE TURN SIGNAL, NOT A PERMISSION MECHANISM. Nothing here decides who may write
-// which column — per-column write enforcement is a separate, deliberately deferred decision. What
-// the server does enforce on the advance is that the caller is the CURRENT handler (403
+// which column — per-column write scoping exists since #5447 and is a SEPARATE mechanism
+// (`field_permissions` rows written at pack install, keyed by role and column) that never consults
+// the turn, so the cursor moving grants and revokes nothing. What the server does enforce on the
+// advance is that the caller is the CURRENT handler (403
 // STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER) and that nobody advanced the same step first (409
 // STOCK_PREPARATION_HANDOFF_STEP_MISMATCH) — i.e. it protects the signal's integrity, not the data.
 //
