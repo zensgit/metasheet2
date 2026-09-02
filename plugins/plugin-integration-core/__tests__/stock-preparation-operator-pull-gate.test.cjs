@@ -84,10 +84,14 @@ function inertService(methods) {
 }
 
 /**
- * The mount is deliberately INERT below the gate: `tableActions.getTableAction` throws a sentinel.
- * That is the point — this suite asserts on the GATE, so a caller that passes it must fail with the
- * sentinel (proving admission) and a caller that does not must fail with 401/403 BEFORE the sentinel
- * (proving refusal costs no action lookup).
+ * THE HARNESS IS DELIBERATELY INERT BELOW THE GATE, and that is what makes it a gate test.
+ *
+ * No table action is configured (`context.config` carries none), so the registry answers 422
+ * TABLE_ACTION_NOT_CONFIGURED to anything that reaches it, and the multitable surfaces throw. So:
+ *   * a caller the gate ADMITS fails with one of those, never with a gate code -> 'admitted';
+ *   * a caller the gate REFUSES fails with a gate code and never reaches the action lookup at all
+ *     -> 'refused'.
+ * The classification therefore measures the gate and nothing but the gate, on the real route table.
  */
 const PAST_THE_GATE = 'PAST_THE_GATE'
 
@@ -130,10 +134,6 @@ function mount({ tenantPrincipalDirectory = { async verifyTenantMembership() { r
       async acquire() { return { leaseId: 'lease_1' } },
       async release() { return true },
       async renew() { return true },
-    },
-    tableActionRegistry: {
-      async getTableAction() { throw new Error(PAST_THE_GATE) },
-      async listTableActions() { throw new Error(PAST_THE_GATE) },
     },
   }
   httpRoutes.registerIntegrationRoutes({
