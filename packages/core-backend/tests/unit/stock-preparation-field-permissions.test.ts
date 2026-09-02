@@ -28,6 +28,10 @@ import {
   type FieldPermissionScope,
 } from '../../src/multitable/permission-derivation'
 import { loadFieldPermissionScopeMap, type QueryFn } from '../../src/multitable/permission-service'
+import { getObjectSheetId } from '../../src/multitable/provisioning'
+import {
+  selectSoleOwnerSheets,
+} from '../../scripts/backfill-stock-preparation-write-scope-pack-ids'
 import {
   StockPreparationFieldPermissionsError,
   StockPreparationFieldPermissionsService,
@@ -1747,5 +1751,72 @@ describe('7-RC7. falsy reconcile is absent, not malformed', () => {
       // "no statement of any kind beyond the upserts" is a count, not a claim.
       expect(fake.calls.filter((call) => /FROM field_permissions/i.test(call.sql))).toHaveLength(0)
     }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// 8. THE ONE-TIME BACKFILL — the other half of the P0's fix.
+//
+// The port REFUSES an unattributable pack-less row; this attributes the ones that can be
+// attributed. The inference it makes is the load-bearing part and it is a pure function, so it is
+// exercised here exhaustively rather than only against a database.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describe('8. backfill: only a sheet with exactly ONE pack in the ledger can be attributed', () => {
+  it('a single-pack target is attributed, and the sheet id is the platform\'s own derivation', () => {
+    const { soleOwners, ambiguous } = selectSoleOwnerSheets([
+      { projectId: 'p1', objectId: 'plm_stock_preparation_main', packIds: ['pack-alpha'] },
+    ])
+    expect(ambiguous).toEqual([])
+    expect(soleOwners).toHaveLength(1)
+    expect(soleOwners[0]).toMatchObject({
+      projectId: 'p1',
+      objectId: 'plm_stock_preparation_main',
+      packId: 'pack-alpha',
+      createdBy: stockPreparationFieldPermissionCreatedBy('pack-alpha'),
+    })
+    // NOT a re-implementation: the same function the installer resolves its rectangle with. A second
+    // copy of the sha1 (in a migration's SQL, say) is a copy that can drift.
+    expect(soleOwners[0].sheetId).toBe(getObjectSheetId('p1', 'plm_stock_preparation_main'))
+  })
+
+  it('TWO packs on one target is AMBIGUOUS and is never guessed — this is the P0', () => {
+    // The exact shape the first revision got wrong: two packs share the canonical sheet, every row
+    // on it carries the bare marker, and "it must be mine" would hand pack A's live denials to B.
+    const { soleOwners, ambiguous } = selectSoleOwnerSheets([
+      { projectId: 'p1', objectId: 'obj', packIds: ['pack-alpha', 'pack-beta'] },
+    ])
+    expect(soleOwners).toEqual([])
+    expect(ambiguous).toEqual([{ projectId: 'p1', objectId: 'obj', packIds: ['pack-alpha', 'pack-beta'] }])
+  })
+
+  it('duplicate ledger rows for the SAME pack are still one pack', () => {
+    // A re-install writes one row per (tenant, project, object, pack), so the same pack can appear
+    // more than once across tenants. That is still one owner, and refusing it would leave every
+    // multi-tenant host permanently unattributed.
+    const { soleOwners, ambiguous } = selectSoleOwnerSheets([
+      { projectId: 'p1', objectId: 'obj', packIds: ['pack-alpha', 'pack-alpha'] },
+    ])
+    expect(ambiguous).toEqual([])
+    expect(soleOwners.map((row) => row.packId)).toEqual(['pack-alpha'])
+  })
+
+  it('an EMPTY pack list is ambiguous, not trusted — absence of evidence is not evidence', () => {
+    const { soleOwners, ambiguous } = selectSoleOwnerSheets([
+      { projectId: 'p1', objectId: 'obj', packIds: [] },
+      { projectId: 'p2', objectId: 'obj', packIds: ['   ', ''] },
+    ])
+    expect(soleOwners).toEqual([])
+    expect(ambiguous).toHaveLength(2)
+  })
+
+  it('two DIFFERENT targets are decided independently', () => {
+    const { soleOwners, ambiguous } = selectSoleOwnerSheets([
+      { projectId: 'p1', objectId: 'obj', packIds: ['pack-alpha'] },
+      { projectId: 'p2', objectId: 'obj', packIds: ['pack-alpha', 'pack-beta'] },
+      { projectId: 'p3', objectId: 'obj', packIds: ['pack-beta'] },
+    ])
+    expect(soleOwners.map((row) => `${row.projectId}:${row.packId}`).sort())
+      .toEqual(['p1:pack-alpha', 'p3:pack-beta'])
+    expect(ambiguous.map((row) => row.projectId)).toEqual(['p2'])
   })
 })

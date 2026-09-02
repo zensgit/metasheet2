@@ -72,7 +72,8 @@
  *   · another pack's marker on a pair this call DECLARES  → throws `PACK_CONFLICT` (the installer
  *     maps it to a coded 422) BEFORE any row is written;
  *   · an unattributed legacy row ANYWHERE in the rectangle → throws `LEGACY_UNATTRIBUTED`, likewise
- *     before any write. A human runs the backfill (migration 083) or clears the rows.
+ *     before any write. A human runs the one-time backfill script
+ *     (`scripts/backfill-stock-preparation-write-scope-pack-ids.ts`) or clears the rows.
  *   · an OPERATOR row on a pair this call declares → THE UPSERT IS SKIPPED FOR THAT PAIR. The row is
  *     not deleted, its `visible` and `read_only` are NOT rewritten, and the pair comes back in
  *     `operatorHeld` so the caller names it. Operator decisions win and are reported, never
@@ -841,7 +842,8 @@ export function assertRoleWriteScopeClassificationInstallable(
     throw new StockPreparationFieldPermissionsError(
       'LEGACY_UNATTRIBUTED',
       `${classification.legacyUnattributed.length} pack-less write-scope row(s) inside this pack's `
-        + 'region cannot be attributed to any pack; run the one-time backfill (migration 083) or '
+        + 'region cannot be attributed to any pack; run '
+        + 'scripts/backfill-stock-preparation-write-scope-pack-ids.ts --apply or '
         + 'clear them before installing',
       [],
       classification.legacyUnattributed,

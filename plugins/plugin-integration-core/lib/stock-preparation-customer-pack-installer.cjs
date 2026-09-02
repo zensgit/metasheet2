@@ -842,8 +842,9 @@ function assertClassificationInstallable({ classification, pack }) {
       'this sheet carries write-scope rows written before the provenance marker recorded a pack id, '
         + 'and the install ledger does not show this pack as the only pack ever installed here — so '
         + 'they cannot be proven to be this pack\'s. Retiring them would be a guess with another '
-        + 'pack\'s enforced denials at stake. Run the one-time backfill (core migration 083) or '
-        + 'clear the rows, then re-run. Refused before any column is created.',
+        + 'pack\'s enforced denials at stake. Run the one-time backfill script '
+        + '(packages/core-backend/scripts/backfill-stock-preparation-write-scope-pack-ids.ts --apply) '
+        + 'or clear the rows, then re-run. Refused before any column is created.',
       {
         objectId: pack.targetObjectId,
         packId: pack.packId,

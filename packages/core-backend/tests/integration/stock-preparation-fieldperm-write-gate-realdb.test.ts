@@ -378,7 +378,9 @@ const RC_MOVING = `fld_bliao_rc_moving_${TS}` // 实际到货日期
 const RC_STABLE = `fld_bliao_rc_stable_${TS}` // 采购回复
 /** Governed by no policy at all — the out-of-region control on the COLUMN axis. */
 const RC_UNGOVERNED = `fld_bliao_rc_ungoverned_${TS}`
-const RC_FIELDS = [RC_MOVING, RC_STABLE, RC_UNGOVERNED]
+/** IN the rectangle but declared by NEITHER revision — where a SIBLING pack's live row sits. */
+const RC_SHARED = `fld_bliao_rc_shared_${TS}`
+const RC_FIELDS = [RC_MOVING, RC_STABLE, RC_UNGOVERNED, RC_SHARED]
 
 const RC_PURCHASING = `role_bliao_rc_purchasing_${TS}`
 const RC_WAREHOUSE = `role_bliao_rc_warehouse_${TS}`
@@ -397,7 +399,7 @@ const RC_TWIN_SHEET = `sheet_bliao_rc_twin_${TS}`
 
 // The (columns × roles) rectangle the pack re-declares in full. RC_UNGOVERNED is deliberately NOT
 // in it.
-const RC_REGION = { fieldIds: [RC_MOVING, RC_STABLE], roleIds: RC_ROLES }
+const RC_REGION = { fieldIds: [RC_MOVING, RC_STABLE, RC_SHARED], roleIds: RC_ROLES }
 // v1: 仓库 owns the moving column, so 采购 is denied it. 采购 owns the stable column.
 const RC_V1 = [
   { fieldId: RC_MOVING, roleId: RC_PURCHASING },
@@ -505,8 +507,12 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
     // FOUR rows positioned to be deleted if any one narrowing were missing. Each fails exactly one:
     //   (a) an OPERATOR's row — same sheet, in-region column AND role; only `created_by` differs.
     //   (b) this plugin's row on a column OUTSIDE the region.
-    //   (c) ANOTHER PACK's row — same sheet, in-region column AND role, plugin family; only the
-    //       pack id inside the marker differs. This is the two-packs-one-sheet case.
+    //   (c) ANOTHER PACK's row — same sheet, IN-REGION column AND role, plugin family; only the
+    //       pack id inside the marker differs, and neither revision DECLARES the pair. This is the
+    //       two-packs-one-sheet case that must coexist rather than refuse (a DECLARED overlap is a
+    //       422 instead, witnessed in its own test below).
+    //   (e) an OPERATOR EDIT on a pair v2 DOES declare, in the shape the authoring route wrote
+    //       before it started stamping: `created_by` NULL, hidden, writable.
     //   (d) an identical (field, role) pair on ANOTHER SHEET. Only `sheet_id = $1` saves it, and
     //       `field_permissions` has no tenant or project column, so that clause is the entire
     //       project/tenant bound of the statement.
@@ -523,12 +529,22 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
     await q(
       `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)
        VALUES ($1,$2,'role',$3,true,true,$4)`,
-      [RC_SHEET, RC_MOVING, RC_WAREHOUSE, `${STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY}#${RC_OTHER_PACK}`],
+      [RC_SHEET, RC_SHARED, RC_WAREHOUSE, `${STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY}#${RC_OTHER_PACK}`],
     )
     await q(
       `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)
        VALUES ($1,$2,'role',$3,true,true,$4)`,
       [RC_TWIN_SHEET, RC_MOVING, RC_PURCHASING, `${STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY}#${RC_PACK}`],
+    )
+    // (e) AN OPERATOR EDIT ON A PAIR v2 DECLARES, in the shape the authoring route wrote before it
+    //     started stamping: `created_by` NULL, the column HIDDEN, and writable. This is the case the
+    //     first revision silently destroyed — its unconditional `visible = true, read_only = true`
+    //     un-hid the column and imposed a denial the reconcile could then never retire (round-2
+    //     findings 3, 9 and 15). v2 must SKIP the pair entirely and leave all three columns alone.
+    await q(
+      `UPDATE field_permissions SET visible = false, read_only = false, created_by = NULL
+        WHERE sheet_id = $1 AND field_id = $2 AND subject_type = 'role' AND subject_id = $3`,
+      [RC_SHEET, RC_STABLE, RC_WAREHOUSE],
     )
 
     // Under v1, 采购 may NOT write the moving column — that is what v2 is about to change.
@@ -538,22 +554,41 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
     const v2 = await service.applyRoleWriteScopes({
       sheetId: RC_SHEET, entries: RC_V2, packId: RC_PACK, reconcile: RC_REGION,
     })
-    expect(v2.applied).toBe(2)
+    // ONE row written, not two: the operator holds `RC_STABLE|RC_WAREHOUSE`, so the upsert SKIPPED
+    // that pair entirely rather than rewriting a human's decision.
+    expect(v2.applied).toBe(1)
     expect(v2.removed).toEqual([{ fieldId: RC_MOVING, roleId: RC_PURCHASING }])
+    expect(v2.operatorHeld).toEqual([{ fieldId: RC_STABLE, roleId: RC_WAREHOUSE, packId: null }])
+    expect(v2.governedByOtherPacks)
+      .toEqual([{ fieldId: RC_SHARED, roleId: RC_WAREHOUSE, packId: RC_OTHER_PACK }])
 
-    // THE TABLE: exactly the rows that should be there, and the two untouchable ones still are.
+    // THE TABLE: exactly the rows that should be there, and the untouchable ones still are.
     const rows = await scopeRows()
     expect(rows.map(key).sort()).toEqual([
       `${RC_MOVING}|${RC_WAREHOUSE}`,
+      `${RC_SHARED}|${RC_WAREHOUSE}`, // the SIBLING PACK's row — in-region, declared by neither
       `${RC_STABLE}|${RC_PURCHASING}`, // the OPERATOR's row — same sheet, in-region column AND role
       `${RC_STABLE}|${RC_WAREHOUSE}`,
       `${RC_UNGOVERNED}|${RC_PURCHASING}`, // this port's row, on a column outside the region
     ].sort())
     expect(rows.find((r) => key(r) === `${RC_STABLE}|${RC_PURCHASING}`)!.created_by).toBe(OPERATOR_CREATED_BY)
-    // The re-declared row on the moving column belongs to THIS pack, and the other pack's row was
-    // upserted rather than deleted — its provenance is not this pack's to take, so it kept it.
-    expect(rows.find((r) => key(r) === `${RC_MOVING}|${RC_WAREHOUSE}`)!.created_by)
+    // ═══ THE OPERATOR'S EDIT SURVIVED INTACT, IN REAL POSTGRES. ═══
+    // All three columns are exactly as the human left them: still hidden, still writable, still
+    // unattributed. The previous revision's unconditional `visible = true, read_only = true` un-hid
+    // the column and created a denial the reconcile could never retire.
+    const operatorEdited = await q(
+      `SELECT visible, read_only, created_by FROM field_permissions
+        WHERE sheet_id = $1 AND field_id = $2 AND subject_type = 'role' AND subject_id = $3`,
+      [RC_SHEET, RC_STABLE, RC_WAREHOUSE],
+    )
+    expect(operatorEdited.rows[0]).toMatchObject({ visible: false, read_only: false, created_by: null })
+    // The sibling pack's row was neither deleted nor re-stamped — its provenance is not this pack's
+    // to take, and the pair is not one this pack declares.
+    expect(rows.find((r) => key(r) === `${RC_SHARED}|${RC_WAREHOUSE}`)!.created_by)
       .toBe(`${STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY}#${RC_OTHER_PACK}`)
+    // The re-declared row on the moving column belongs to THIS pack.
+    expect(rows.find((r) => key(r) === `${RC_MOVING}|${RC_WAREHOUSE}`)!.created_by)
+      .toBe(`${STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY}#${RC_PACK}`)
     // THE SHEET AXIS: the identical pair on the twin sheet is untouched.
     const twin = await q(
       'SELECT field_id, subject_id FROM field_permissions WHERE sheet_id = $1',
@@ -564,10 +599,13 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
     // THE CENSUS attributes every row, and never claims one it did not write.
     const census = await service.listRoleWriteScopes({ sheetId: RC_SHEET })
     expect(census.entries.map((entry) => `${entry.fieldId}|${entry.roleId}|${entry.packId}`).sort()).toEqual([
-      `${RC_MOVING}|${RC_WAREHOUSE}|${RC_OTHER_PACK}`,
-      `${RC_STABLE}|${RC_WAREHOUSE}|${RC_PACK}`,
+      `${RC_MOVING}|${RC_WAREHOUSE}|${RC_PACK}`,
+      `${RC_SHARED}|${RC_WAREHOUSE}|${RC_OTHER_PACK}`,
       `${RC_UNGOVERNED}|${RC_PURCHASING}|null`,
     ].sort())
+    // The operator's HIDDEN-but-writable row is in NEITHER list: it is not a write denial at all
+    // (`read_only = false`), which is exactly why the census cannot see it and the CLASSIFICATION
+    // must — the classifier reads both dimensions, the census only denials.
     expect(census.foreignEntries).toEqual([
       { fieldId: RC_STABLE, roleId: RC_PURCHASING, createdBy: OPERATOR_CREATED_BY },
     ])
@@ -580,5 +618,142 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
 
     // … while 仓库, which no longer owns it, is refused.
     expect((await rcPatch(RC_U_WAREHOUSE, [RC_WAREHOUSE], RC_MOVING, 'nope')).status).toBe(403)
+  })
+
+  /**
+   * ═══ RC1 AGAINST REAL POSTGRES: a region with NO entries at all. ═══
+   *
+   * A revision that hands every governed column to every declared role derives ZERO denials, so an
+   * entries-empty call is exactly how "this rectangle should now hold no denial" is expressed. It is
+   * an RC-headline behaviour of the port and it was executed in CI only against the in-memory
+   * decoding pool and the plugin's fake port (round-2 finding 21). Here it runs the real statements,
+   * and the proof is at the GATE: both departments can write the column afterwards.
+   */
+  test('RC1 real-DB: an entries-EMPTY reconcile clears the rectangle and both roles can write', async () => {
+    await q('DELETE FROM field_permissions WHERE sheet_id = $1', [RC_SHEET])
+    const service = new StockPreparationFieldPermissionsService()
+
+    await service.applyRoleWriteScopes({
+      sheetId: RC_SHEET, entries: RC_V1, packId: RC_PACK, reconcile: RC_REGION,
+    })
+    // Under v1 each department is refused the other's column.
+    expect((await rcPatch(RC_U_PURCHASING, [RC_PURCHASING], RC_MOVING, 'v1-refused')).status).toBe(403)
+    expect((await rcPatch(RC_U_WAREHOUSE, [RC_WAREHOUSE], RC_STABLE, 'v1-refused')).status).toBe(403)
+
+    // v3: SHARED CUSTODY. Every declared role owns every governed column, so the declaration derives
+    // no denial — and the rectangle must end up empty rather than frozen at v1.
+    const v3 = await service.applyRoleWriteScopes({
+      sheetId: RC_SHEET, entries: [], packId: RC_PACK, reconcile: RC_REGION,
+    })
+    expect(v3.applied).toBe(0)
+    expect(v3.removed).toEqual([
+      { fieldId: RC_MOVING, roleId: RC_PURCHASING },
+      { fieldId: RC_STABLE, roleId: RC_WAREHOUSE },
+    ])
+    expect(await scopeRows()).toEqual([])
+
+    // THE GATE: both departments now write both columns.
+    expect((await rcPatch(RC_U_PURCHASING, [RC_PURCHASING], RC_MOVING, 'shared-1')).status).toBe(200)
+    expect((await rcPatch(RC_U_WAREHOUSE, [RC_WAREHOUSE], RC_STABLE, 'shared-2')).status).toBe(200)
+  })
+
+  /**
+   * ═══ THE LEGACY ARM OF `created_by = ANY($2)`, AGAINST REAL POSTGRES. ═══
+   *
+   * The second element of that array — the pack-LESS marker — is the arm the P0 was about, and it
+   * had never been executed against Postgres (round-2 finding 21). Both directions are exercised
+   * here, because the two are one decision: WITHOUT the caller's proof the call REFUSES and writes
+   * nothing; WITH it, the row is adopted and retired.
+   */
+  test('RC2 real-DB: a pack-less legacy row refuses without proof and is retired with it', async () => {
+    await q('DELETE FROM field_permissions WHERE sheet_id = $1', [RC_SHEET])
+    const service = new StockPreparationFieldPermissionsService()
+
+    // A row exactly as every host in the field carries it today: this plugin's marker, no pack id.
+    await q(
+      `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)
+       VALUES ($1,$2,'role',$3,true,true,$4)`,
+      [RC_SHEET, RC_MOVING, RC_PURCHASING, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY],
+    )
+
+    // WITHOUT PROOF: refused, and — the load-bearing half — nothing was written or deleted.
+    await expect(service.applyRoleWriteScopes({
+      sheetId: RC_SHEET, entries: RC_V2, packId: RC_PACK, reconcile: RC_REGION,
+    })).rejects.toMatchObject({ reason: 'LEGACY_UNATTRIBUTED' })
+    const untouched = await scopeRows()
+    expect(untouched).toHaveLength(1)
+    expect(untouched[0].created_by).toBe(STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY)
+
+    // WITH PROOF (the install ledger showed this pack is the sheet's only pack): the same call
+    // adopts the row's rectangle and retires it, because v2 no longer declares that pair.
+    const adopted = await service.applyRoleWriteScopes({
+      sheetId: RC_SHEET, entries: RC_V2, packId: RC_PACK, reconcile: RC_REGION, legacyAdoptable: true,
+    })
+    expect(adopted.removed).toEqual([{ fieldId: RC_MOVING, roleId: RC_PURCHASING }])
+    const after = await scopeRows()
+    expect(after.map(key).sort()).toEqual([
+      `${RC_MOVING}|${RC_WAREHOUSE}`,
+      `${RC_STABLE}|${RC_WAREHOUSE}`,
+    ].sort())
+    // And 采购, whose legacy denial has just been retired, can really write the column.
+    expect((await rcPatch(RC_U_PURCHASING, [RC_PURCHASING], RC_MOVING, 'legacy-retired')).status).toBe(200)
+  })
+
+  /**
+   * ═══ THE CROSS-PACK REFUSAL, INSIDE THE WRITE'S OWN TRANSACTION. ═══
+   *
+   * The installer refuses this in its pre-flight, over an untouched sheet. The port refuses it AGAIN
+   * inside `applyRoleWriteScopes`' transaction under the `meta_sheets` row lock, which is the half
+   * that survives concurrency: two installs that each passed their own pre-flight cannot both write
+   * (round-2 finding 18). Only real Postgres can witness the transaction actually rolling back.
+   */
+  test('RC2 real-DB: another pack on a DECLARED pair refuses inside the transaction, writing nothing', async () => {
+    await q('DELETE FROM field_permissions WHERE sheet_id = $1', [RC_SHEET])
+    const service = new StockPreparationFieldPermissionsService()
+
+    // The sibling pack holds a pair THIS pack is about to declare.
+    await q(
+      `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)
+       VALUES ($1,$2,'role',$3,true,true,$4)`,
+      [RC_SHEET, RC_MOVING, RC_WAREHOUSE, `${STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY}#${RC_OTHER_PACK}`],
+    )
+
+    await expect(service.applyRoleWriteScopes({
+      sheetId: RC_SHEET, entries: RC_V2, packId: RC_PACK, reconcile: RC_REGION,
+    })).rejects.toMatchObject({
+      reason: 'PACK_CONFLICT',
+      pairs: [{ fieldId: RC_MOVING, roleId: RC_WAREHOUSE, packId: RC_OTHER_PACK }],
+    })
+
+    // THE TRANSACTION ROLLED BACK: the sibling's row is byte-identical and the OTHER entry this call
+    // would have written (RC_STABLE|RC_WAREHOUSE) does not exist. A refusal that left half the
+    // upserts behind would be worse than no refusal.
+    const rows = await scopeRows()
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      field_id: RC_MOVING,
+      subject_id: RC_WAREHOUSE,
+      created_by: `${STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY}#${RC_OTHER_PACK}`,
+    })
+  })
+
+  /**
+   * ═══ THE PRE-FLIGHT'S FIELD AXIS, AGAINST THE REAL `meta_fields`. ═══
+   *
+   * `findMissingFieldIds` is the question the installer asks before it creates a single column, and
+   * it is answered by the same statement `applyRoleWriteScopes` runs inside its transaction — so
+   * "the pre-flight said yes" and "the write agreed" cannot come apart on the shape of the question.
+   */
+  test('findMissingFieldIds names exactly the columns this sheet does not have', async () => {
+    const service = new StockPreparationFieldPermissionsService()
+    const absent = `fld_bliao_rc_absent_${TS}`
+    expect(await service.findMissingFieldIds({ sheetId: RC_SHEET, fieldIds: RC_FIELDS }))
+      .toEqual({ missing: [] })
+    expect(await service.findMissingFieldIds({ sheetId: RC_SHEET, fieldIds: [RC_MOVING, absent] }))
+      .toEqual({ missing: [absent] })
+    // Scoped to THIS sheet: a real column belonging to the twin sheet is "missing" here, which is
+    // the whole point — `field_permissions.field_id` must reference a field OF THIS SHEET.
+    expect(await service.findMissingFieldIds({ sheetId: RC_TWIN_SHEET, fieldIds: [RC_MOVING] }))
+      .toEqual({ missing: [RC_MOVING] })
   })
 })

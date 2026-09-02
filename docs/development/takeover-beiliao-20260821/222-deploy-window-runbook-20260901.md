@@ -311,6 +311,30 @@ GET /api/integration/stock-preparation/preflight
 
 四条"围栏姿态"(production Apply 关闭 / K3 永久禁写 / B2a 登记休眠 / 通用出站写门不设)只报状态、不给 `fix`——**不设就是当前正确姿态**,预检不会推你去开它们(production Apply 的开启在 Step 7,是当场的、有时限的动作,不是这里的常驻状态)。
 
+**3-3a. 备料列写权限行的一次性回填（#5455，必做，在任何 customer-pack 安装/升级之前）**
+
+背景：#5455 之前，`field_permissions.created_by` 只写插件级标记
+`plugin:plugin-integration-core/stock-preparation`，不带 pack id。所以现场每一行列写权限都是
+“无主”的：不同 pack 写的行字面上完全一样。新的对账逻辑因此**不猜**：它对矩形内无法归属的
+旧行直接拒装（422 `CUSTOMER_PACK_FIELD_WRITE_SCOPE_LEGACY_UNATTRIBUTED`）。没跑这一步，Step 3-3
+里的 `STOCK_PREP_PACK_TARGET_INCOMPLETE` 修不回去。
+
+- 先看（默认就是 dry-run，不写库）：
+```
+DATABASE_URL=... pnpm dlx tsx packages/core-backend/scripts/backfill-stock-preparation-write-scope-pack-ids.ts
+```
+- 看输出里两个数：`would be stamped`（能归属的行）和 `left unattributed`（归不了的行）。
+  - `left unattributed` 为 0 → 直接执行。
+  - 不为 0 → 那块 sheet 上装过**两个以上** pack，脚本不会碰它们；**这是设计而不是故障**（猜错了就是删掉另一个
+    pack 正在生效的列写禁止）。记下那几行，找 owner 定完再手工处理（手动改 `created_by`，
+    或用 `PUT /api/multitable/sheets/:sheetId/field-permissions { remove: true }` 清掉）。
+- 再写：
+```
+DATABASE_URL=... pnpm dlx tsx packages/core-backend/scripts/backfill-stock-preparation-write-scope-pack-ids.ts --apply
+```
+- 验证：再跑一次 dry-run，`would be stamped` 应为 0（脚本幂等，只改仍然是裸标记的行）。
+- 失败处理：不跑也不会造成静默错误——安装会带码拒绝并在错误里点名这个脚本。先拒后修是安全方向。
+
 **3-4. F20 陷阱预防性检查(受管表建成后必须自带默认视图,否则整个 base 打不开)**
 - 背景:`first-deployment-lessons-20260831.md` F20——`ensureObject` 只建 sheet/字段,不建 `meta_views` 行;多维表打开 base 时要渲染每张表的默认视图,零视图的表会拖累**整个 base** 打不开。
 - 动作:打开备料所在的 base(工作台里点开"备料"),确认能正常打开,四张受管表(确认裁决账本 / 沙箱目标 / canonical 主表 / 其他卫星表)都能点开。
