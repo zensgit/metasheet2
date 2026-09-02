@@ -435,18 +435,26 @@ async function main() {
     template: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, expandedRows: rows, existingRows: [],
     runId: 'demo-1', plannedAt: '2026-09-01T00:00:00.000Z',
   })
-  // The human cells a 备料/采购/仓库 person types (canonical band + pack ext band).
+  // The human cells a 备料/采购/仓库 person types (canonical band + 自制/外购 + the
+  // departmental response band + pack ext band). Same five new values as the sibling
+  // rehearsal driver's humanCells (stock-preparation-structure-exact-rehearsal.test.cjs)
+  // -- a select LABEL, two booleans and two ISO dates, typed exactly as the template
+  // declares them. `warehouseDone: false` is deliberate, same reasoning as there: the
+  // negative control flips booleans, so a `false` that survives is as load-bearing as a
+  // `true` that does.
   const humanCells = {
     materialType: '30 - Q345R', blankType: '20 - 管材', stockPreparationStatus: '20 - 已下单',
     demandDate: '2026-09-20', leadTimeDays: 14, notes: '按图纸复核后下单',
     procurementReply: '供应商已确认排产', warehouseConfirmation: '待到货',
+    makeOrBuy: '20 - 外购', procurementDone: true, procurementReplyDate: '2026-09-05',
+    warehouseDone: false, actualArrivalDate: '2026-09-18',
     ext_stockPrepDate: '2026-09-02', ext_pickingNode: '10 - 示例节点一', ext_handoverSection: '10 - 示例工段一',
     ext_blankLength: 1250, ext_blankWidth: 800, ext_blankThickness: 12, ext_blankQuantity: 4, ext_blankMass: 94.2,
   }
   for (const id of ALL_HUMAN) assert.ok(Object.prototype.hasOwnProperty.call(humanCells, id), `human fill must cover ${id}`)
   const targetRows = firstPlan.decisions.filter((d) => d.decision === 'add').map((d) => ({ ...d.record, ...humanCells }))
   assert.equal(targetRows.length, 7)
-  say(`  人填 ${BOLD(ALL_HUMAN.length)} 个人列(材料类型/毛胚类型/备料情况/需求日期/提前周期/备注/备料日期/领料节点/毛胚尺寸…)于 7 行`)
+  say(`  人填 ${BOLD(ALL_HUMAN.length)} 个人列(材料类型/毛胚类型/备料情况/需求日期/提前周期/备注/自制外购/采购完成/仓库完成/备料日期/领料节点/毛胚尺寸…)于 7 行`)
 
   // THE WALL (canonical band): re-pull batch #2, re-plan against the filled rows.
   const secondPlan = planStockPreparationConflicts({
@@ -499,7 +507,14 @@ async function main() {
   assert.equal(clobberedCount, ALL_HUMAN.length)
   say(`  ${BOLD('负对照')}:同样的刷新若 ${BOLD('不过')}权属过滤器 → ${clobberedCount} 个人列 ${BOLD('全被冲掉')} ${DIM('—— 证明这堵墙是承重的,不是摆设')}`)
 
-  // THE EXPORT the warehouse/purchasing takes.
+  // THE EXPORT the warehouse/purchasing takes. NOT touched by this change: this local
+  // projection already trails the real exporter (lib/stock-preparation-prep-line-export.cjs,
+  // which has grown parentComponentCode/parentComponentName + componentSpec fallback ahead of
+  // this copy), and PR #5457 (open, not yet merged as of this change) extends the real
+  // exporter further, to 17 columns appending makeOrBuy/procurementDone/procurementReplyDate/
+  // warehouseDone/actualArrivalDate with 是/否 rendering for the two booleans. Re-syncing this
+  // demo copy to either is a separate one-line follow-up once #5457 lands -- out of scope here,
+  // which is only the ALL_HUMAN fixture-coverage regression from #5447.
   const EXPORT_COLUMNS = [
     { id: 'componentCode', label: '图号' }, { id: 'componentName', label: '名称' },
     { id: 'ext_spec', label: '规格' }, { id: 'material', label: '材料' },
