@@ -156,6 +156,32 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
 
 ---
 
+**0-8. 配置「通知下一步」接力链(可选功能;要装就配齐,不装就完全不配)**
+- 背景:备料多人接力(#5442)把「现在轮到谁」变成一个可见信号,并在交接时往钉钉群发一条提醒。**不配这个键,整套行为与没有这个功能时逐字节相同**(状态读返回 `configured:false`,推进路由按名报 501,不写库不发消息),所以本窗口可以整步跳过。
+- 动作(要装才做):
+  1. 在部署机上建一个**不进仓库**的 JSON 文件（它会被读进服务端配置键 `stockPreparationHandoff`），并把路径写进 `dockerpp.env`：
+     ```
+     INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH=D:\metasheet\config\stock-preparation-handoff.json
+     ```
+  2. 文件内容(`tenantId` 是**必填**的,理由见下一条):
+     ```json
+     {
+       "tenantId": "<本部署的租户 id,与其他备料配置里用的同一个>",
+       "steps": [
+         { "key": "prep_entry",   "handlerUserIds": ["<工艺员的 user id>"] },
+         { "key": "process",      "handlerUserIds": ["<处理人的 user id>"] },
+         { "key": "final_review", "handlerUserIds": ["<审核人的 user id>"] }
+       ],
+       "notify":   { "groupDestinationId": "<中间每一跳发的钉钉群 destination id>" },
+       "terminal": { "groupDestinationIds": ["<仓库群 id>", "<采购群 id>"] }
+     }
+     ```
+- **`tenantId` 为什么是必填的**:钉钉目的地 id 是部署级配置,宿主发送时只能证明「这个目的地是管理员管的」,证明不了「它属于正在被播报的那个租户」。而一个在两个组织里都活跃的账号,其 token 不带租户声明(`resolveSessionTenantId` 对 0 个或 2 个以上组织的账号都不发声明),于是 `x-tenant-id` 请求头就能选择用哪个租户身份推进 —— 若链路不声明自己属于谁,另一个租户的项目号就会被播报进这个群。填了之后,不属于该租户的推进一律 403 `STOCK_PREPARATION_HANDOFF_CHAIN_NOT_FOR_THIS_TENANT`,且不写库不发消息。多租户部署目前只能服务一条链(按租户分链是后续工作)。
+- 验证:重启后用任意一个已有项目号请求 `GET /api/integration/stock-preparation/handoff?projectNo=<项目号>`,应当返回 `configured:true` 且 `stepCount` 等于你配的步数;若返回 500 `STOCK_PREPARATION_HANDOFF_CONFIG_INVALID`,报错体里的 `details.field` 就是写错的那个键(例如缺 `tenantId`)。
+- 失败处理:本功能与本窗口的主线(拉取 → 确认 → 沙箱 apply)**无依赖**。配不对就把 `INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH` 从 `app.env` 里拿掉重启,回到「没有这个功能」的状态,不要占用窗口时间排查。
+
+---
+
 ## Step 1 — 备份 / 回滚点(定义一次,后面每一步引用它)
 
 **在 222 上,SSH 进去之后(交互式会话内,不需要转义 `$`;如果是一次性 `ssh host "..."` 单条命令,把 `$` 转义成 `\$`)。**

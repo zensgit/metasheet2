@@ -223,6 +223,70 @@ for (const name of ['stockPreparationTargetWriteInput', 'stockPreparationSandbox
   })
 }
 
+// ── #5442 通知下一步 (F3): THE HANDOFF FACES, ENROLLED ───────────────────────────────────────────
+// This file's header promises that "a new write route … that reaches back for `resolveTenantId(req,
+// input)` … fails the build here". `stockPreparationHandoffAdvance` is the first tenant-scoped write
+// added since that promise was made, and it was enrolled in NEITHER list — reverting its tenant
+// derivation to the pre-#5445 form left this suite green (62 passed, 0 failed) while the dynamic
+// witnesses in stock-preparation-handoff.test.cjs went red. The dynamic ones are the real guard; this
+// one exists because dynamic witnesses can be deleted in the same commit that regresses the code.
+//
+// THE ASSERTIONS ARE SHAPED DIFFERENTLY FROM THE TEN ABOVE, and deliberately. Those routes are the
+// resolveAuthUserTenantId era: derive the tenant from `user.tenantId` and never from the request. That
+// is no longer sufficient here, because `user.tenantId` IS request-fillable — the auth middleware
+// copies the x-tenant-id header onto it whenever the verified token carries no tenant claim. These two
+// routes must go further and make the HOST vouch for the (principal, tenant) pairing, so what is
+// pinned is the presence of `resolveOperatorValueScope(` and the ABSENCE of BOTH older derivations.
+//
+// The STATUS route is included even though its payload is values-free: it is still the route whose
+// tenant a header used to decide, and "it only reads" is exactly the argument that left it out.
+for (const name of ['stockPreparationHandoffAdvance', 'stockPreparationHandoffStatus']) {
+  const body = handlerBody(ROUTES_SRC, name)
+
+  check(`${name}: does NOT derive tenant via the request-steerable resolveTenantId(req, ...)`, () => {
+    assert.equal(
+      /resolveTenantId\(req,/.test(body),
+      false,
+      `${name} calls resolveTenantId(req, …) — it lets a tenantless platform admin select the tenant from the request, which on this route decides whose cursor moves and whose project number is announced`,
+    )
+  })
+
+  check(`${name}: does NOT derive tenant from the header-fillable user.tenantId (resolveAuthUserTenantId)`, () => {
+    assert.equal(
+      body.includes('resolveAuthUserTenantId(req)'),
+      false,
+      `${name} calls resolveAuthUserTenantId(req) — that reads user.tenantId, which the auth middleware fills from the x-tenant-id HEADER when the token carries no tenant claim; on this route that header would choose whose chain advances`,
+    )
+  })
+
+  check(`${name}: derives tenant through the host-vouched operator scope (resolveOperatorValueScope)`, () => {
+    assert.equal(
+      body.includes('resolveOperatorValueScope('),
+      true,
+      `${name} must resolve its tenant through resolveOperatorValueScope — the #5445 seam that prefers the VERIFIED claim, refuses a contradicting carrier, refuses a tenantless principal, and makes the host vouch for the pairing`,
+    )
+  })
+
+  check(`${name}: uses the RESOLVED tenant, not one it re-derived afterwards`, () => {
+    assert.equal(
+      body.includes('scope.tenantId'),
+      true,
+      `${name} must take its tenant from the resolved scope (scope.tenantId); calling the resolver and then using something else would pass the check above while changing nothing`,
+    )
+  })
+}
+
+// The advance route is additionally the one that SPEAKS OUTSIDE THE SYSTEM, so pin that its
+// deploy-config chain is checked against the resolved tenant before anything is written or sent.
+check('stockPreparationHandoffAdvance: checks the configured chain belongs to the resolved tenant', () => {
+  const body = handlerBody(ROUTES_SRC, 'stockPreparationHandoffAdvance')
+  assert.equal(
+    body.includes('requireStockPreparationHandoffChainForTenant(chain, tenantId)'),
+    true,
+    'stockPreparationHandoffAdvance must refuse a chain bound to another tenant — the DingTalk destinations are deploy config and nothing downstream relates them to the advancing tenant',
+  )
+})
+
 console.log(`\nstock-preparation-tenant-scoped-write-guard.test.cjs: ${passed} passed, ${failed} failed`)
 if (failed > 0) {
   console.error('stock-preparation-tenant-scoped-write-guard.test.cjs FAILED')

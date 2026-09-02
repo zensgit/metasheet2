@@ -258,6 +258,9 @@ function parseStockPreparationHandoffConfig(config) {
   if (!raw) {
     return Object.freeze({
       configured: false,
+      // `configured: false` is the ABSENT-KEY state, not a chain without a tenant: a chain that omits
+      // `tenantId` is a configuration ERROR and throws below, precisely so that "forgot the tenant"
+      // can never be mistaken for "this deployment has no handoff".
       tenantId: null,
       steps: Object.freeze([]),
       notifyGroupDestinationId: null,
@@ -309,25 +312,27 @@ function parseStockPreparationHandoffConfig(config) {
 
   assertNoUnknownKeys(raw, HANDOFF_TOP_LEVEL_KEYS, null)
 
-  // RC7 — WHICH TENANT THIS CHAIN BELONGS TO, or null for a deployment asserting it has only one.
+  // WHICH TENANT THIS CHAIN BELONGS TO. REQUIRED — there is no deploy-global chain.
   //
   // The notification seam has no tenant dimension and cannot grow one cheaply: the destination ids
-  // below are deploy-global, and the host's `sendToDestination` proves only that a destination row is
-  // ADMIN-MANAGED (org-scoped), never that its org is the org whose project is being announced. On a
-  // single-tenant deployment — which is what 222 is, and what every deployment of this feature is
-  // today — that is exactly right and costs nothing. On a multi-tenant one it would mean every
-  // tenant's handoff announcing 「项目 …」 into one org's DingTalk group.
+  // below are deploy config, and the host's `sendToDestination` proves only that a destination row is
+  // ADMIN-MANAGED (org-scoped), never that its org is the org whose project is being announced. So
+  // the chain must say whose it is, and the advance route refuses to write or announce for anyone
+  // else; a tenant the chain is not bound to sees `configured: false` and renders nothing.
   //
-  // So the chain MAY name its tenant, and the advance route then refuses to write or announce for any
-  // other one, while a tenant the chain is not bound to sees `configured: false` and renders nothing.
-  // ABSENT means deploy-global, and the config contract (app.manifest.json's `stockPrepHandoff`
-  // surface and the 222 runbook) says in as many words that a deployment leaving it out is asserting
-  // it serves ONE tenant. Per-tenant chains — a map of tenant -> chain — are the natural successor and
-  // are deliberately NOT built here: this is the smallest change that makes the single-tenant
-  // assumption checkable rather than implicit.
-  const boundTenantId = raw.tenantId === undefined || raw.tenantId === null
-    ? null
-    : requiredConfigString(raw.tenantId, 'tenantId')
+  // THE FIRST CUT MADE THIS OPTIONAL and defended the default in a comment: absent meant
+  // "deploy-global", and the deployment was said to be asserting it served one tenant. That
+  // assertion was attributed to a config contract — this key's note in app.manifest.json, and the
+  // 222 runbook — which at the time said nothing about tenancy at all. A guarantee that rests on a
+  // sentence nobody wrote is not a guarantee, and the default it protected was reachable: an account
+  // active in TWO orgs gets a claimless token (resolveSessionTenantId omits the claim for zero or
+  // 2+ memberships), so `user.tenantId` is the x-tenant-id header, the host correctly vouches for
+  // EITHER org, and with no binding the second tenant's project number went into the first tenant's
+  // DingTalk group. Requiring the key costs one line of deploy config and removes the default.
+  //
+  // Per-tenant chains — a map of tenant -> chain — remain the natural successor and are deliberately
+  // not built here.
+  const boundTenantId = requiredConfigString(raw.tenantId, 'tenantId')
 
   const hasNotify = raw.notify !== undefined && raw.notify !== null
   const hasTerminal = raw.terminal !== undefined && raw.terminal !== null
@@ -379,7 +384,7 @@ function parseStockPreparationHandoffConfig(config) {
 
   return Object.freeze({
     configured: true,
-    // null == deploy-global == "this deployment serves one tenant"; see the note above.
+    // Always a non-empty string: the parse above refuses a chain that does not name its tenant.
     tenantId: boundTenantId,
     steps: Object.freeze(steps),
     // OPTIONAL, but only in the ALL-OR-NOTHING sense above. A chain that declares neither `notify`

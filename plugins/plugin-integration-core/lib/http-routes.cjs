@@ -3359,13 +3359,15 @@ function createHandlers(services, options = {}) {
   }
 
   /**
-   * RC7 — IS THIS CHAIN THIS TENANT'S? Returns the chain when the answer is yes.
+   * IS THIS CHAIN THIS TENANT'S? Returns the chain when the answer is yes.
    *
-   * A chain that names no `tenantId` is deploy-global and belongs to everyone the deployment serves,
-   * which the config contract states is exactly one tenant. A chain that DOES name one belongs to
-   * that tenant alone: the destination ids it carries are deploy config, the host proves only that
+   * Every configured chain names its tenant — the parser refuses one that does not — and it belongs
+   * to that tenant alone: the destination ids it carries are deploy config, the host proves only that
    * they are admin-managed, and nothing downstream relates a destination's org to the tenant whose
    * project is about to be announced into it. So the refusal is here, by name, before any write.
+   *
+   * The `chain.tenantId &&` guard is retained for the unconfigured chain object (whose tenantId is
+   * null), which callers never reach with a real tenant because they check `configured` first.
    */
   function requireStockPreparationHandoffChainForTenant(chain, tenantId) {
     if (chain.tenantId && chain.tenantId !== tenantId) {
@@ -7490,6 +7492,7 @@ function createHandlers(services, options = {}) {
     // ORDER OF OPERATIONS, chosen deliberately and pinned by the suite:
     //   1. gate, parse, VALIDATE the projectNo's shape, load the chain — nothing observable yet
     //   2. resolve the tenant from the VERIFIED principal, host-vouched  — RC2
+    //   2b. probe the audit vocabulary, under that tenant                — F2 (a write; never before 2)
     //   3. plan the advance against the persisted cursor                 — the handler gate, RC6
     //   4. prove the project EXISTS in the bound target                  — a 404 before any write
     //   5. COMMIT the turn (compare-and-set, cursor only)
@@ -7524,8 +7527,8 @@ function createHandlers(services, options = {}) {
     //
     // What the old ordering bought is kept by other means: `requireStockPreparationAudit()` still
     // runs FIRST, so an unavailable audit store is a 501 before anything is read or written — and
-    // `requireStockPreparationAuditVocabulary` additionally refuses, by name and with the migration
-    // number, a database whose CHECK constraint does not yet know this action.
+    // `requireStockPreparationAuditVocabulary`, once the tenant is known, additionally refuses by name
+    // and with the migration number a database whose CHECK constraint does not yet know this action.
     //
     // Step 6 is AFTER step 4 on purpose, and a failure there does NOT roll anything back. The turn is
     // the durable business fact — 张三 really did finish — and a DingTalk outage must not silently
@@ -7535,8 +7538,12 @@ function createHandlers(services, options = {}) {
     // at-least-once.
     async stockPreparationHandoffAdvance(req, res) {
       const user = requireAccess(req, STOCK_PREP_OPERATE)
+      // F2: the audit STORE is required here — a wiring check, no IO — but the VOCABULARY PROBE is
+      // not. The probe is a real write-transaction (INSERT into the audit table, then roll back), and
+      // running it before the tenant is established meant every refused tenant-steering caller caused
+      // one. It now runs immediately after the scope resolves, still before any write it is meant to
+      // protect. See requireStockPreparationAuditVocabulary.
       const audit = requireStockPreparationAudit()
-      await requireStockPreparationAuditVocabulary(audit, 'handoff_advance', '085')
       const input = normalizeStockPreparationConfirmBody(
         requestBody(req),
         VALID_STOCK_PREPARATION_HANDOFF_ADVANCE_BODY_KEYS,
@@ -7585,8 +7592,12 @@ function createHandlers(services, options = {}) {
       })
       const tenantId = scope.tenantId
       const actor = scope.actorId
-      // RC7: refuse to write or announce on behalf of a tenant this deployment's chain is not for.
+      // Refuse to write or announce on behalf of a tenant this deployment's chain is not for.
       requireStockPreparationHandoffChainForTenant(chain, tenantId)
+      // F2 — THE VOCABULARY PROBE, NOW THAT WE KNOW WHOSE WRITE THIS IS. Still before every write it
+      // exists to protect, and now probing under the RESOLVED tenant rather than a '__probe__'
+      // placeholder, so the row it inserts and rolls back belongs to the tenant being cleared.
+      await requireStockPreparationAuditVocabulary(audit, 'handoff_advance', '085', tenantId)
 
       // RC6 — THE HANDLER GATE COMES FIRST, BEFORE ANY RECORDS IO. `store.get` is a single indexed
       // read on a tenant-scoped table; the planner then refuses a non-handler with one 403 that is

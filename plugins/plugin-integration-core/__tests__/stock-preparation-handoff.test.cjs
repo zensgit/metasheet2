@@ -122,6 +122,10 @@ const FORBIDDEN_VALUES = Object.freeze([
 function chainConfig() {
   return {
     [HANDOFF_CONFIG_KEY]: {
+      // F1: `tenantId` is REQUIRED. There is no deploy-global chain any more — see
+      // f1AChainWithoutATenantIdIsRefusedRatherThanDeployGlobal for why the old default was not
+      // merely undocumented but exploitable.
+      tenantId: TENANT_ID,
       steps: [
         { key: 'prep_entry', handlerUserIds: [ZHANG] },
         { key: 'process', handlerUserIds: [LI] },
@@ -314,6 +318,9 @@ function mount({
 } = {}) {
   const routes = new Map()
   const auditAppends = []
+  // Every call the ROUTE makes into the audit store, in order — `append` and the F2 vocabulary probe
+  // alike. `auditAppends` still records only the trail rows, so existing witnesses are untouched.
+  const auditCalls = []
   const context = {
     api: {
       http: {
@@ -332,11 +339,21 @@ function mount({
   const services = baseServices()
   services.stockPreparationAuditStore = {
     async append(entry) {
+      auditCalls.push({ method: 'append', action: entry.action, tenantId: entry.tenantId })
       // The REAL gate, so a values-bearing detail reds here exactly as it would in production.
       auditInternals.assertValuesFreeDetail(entry.detail)
       assert.ok(STOCK_PREP_AUDIT_ACTIONS.includes(entry.action), `audit action ${entry.action} is in the closed vocabulary`)
       auditAppends.push(entry)
       return { ok: true }
+    },
+    // F2 — WITHOUT THIS THE RC2 WITNESSES MEASURED NOTHING. `requireStockPreparationAuditVocabulary`
+    // returns at its first line when the store has no `supportsAction`, so a fake that omits it makes
+    // "zero audit calls before the refusal" true BY CONSTRUCTION rather than by the route's ordering.
+    // In production the probe is a real write-transaction against the audit table (INSERT + rollback),
+    // so every call it makes before the tenant is established is a call an unauthorised caller caused.
+    async supportsAction(action, options = {}) {
+      auditCalls.push({ method: 'supportsAction', action, tenantId: (options && options.tenantId) || null })
+      return { supported: true, reason: 'check_constraint_accepts' }
     },
   }
   services.stockPreparationHandoffStore = createStockPreparationHandoffStore({
@@ -353,7 +370,7 @@ function mount({
     services,
     logger: { info() {}, warn() {}, error() {} },
   })
-  return { routes, auditAppends, notifier, db, records, tenantPrincipalDirectory }
+  return { routes, auditAppends, auditCalls, notifier, db, records, tenantPrincipalDirectory }
 }
 
 function createResponse() {
@@ -910,7 +927,7 @@ async function unknownStepKeyIsRefused() {
 async function aStepOutsideTheClosedVocabularyIsRefusedAtConfigParse() {
   assert.throws(
     () => parseStockPreparationHandoffConfig({
-      [HANDOFF_CONFIG_KEY]: { steps: [{ key: 'invented_role', handlerUserIds: ['u1'] }] },
+      [HANDOFF_CONFIG_KEY]: { tenantId: TENANT_ID, steps: [{ key: 'invented_role', handlerUserIds: ['u1'] }] },
     }),
     (error) => {
       assert.ok(error instanceof StockPreparationHandoffError)
@@ -923,6 +940,7 @@ async function aStepOutsideTheClosedVocabularyIsRefusedAtConfigParse() {
   // Every advertised key IS accepted, so the vocabulary and the parser cannot drift apart.
   const chain = parseStockPreparationHandoffConfig({
     [HANDOFF_CONFIG_KEY]: {
+      tenantId: TENANT_ID,
       steps: STOCK_PREP_HANDOFF_STEPS.map((key) => ({ key, handlerUserIds: ['u1'] })),
     },
   })
@@ -957,7 +975,7 @@ async function malformedConfigThrowsRatherThanDegradingToInert() {
 
 async function malformedConfigFailsOnlyTheHandoffRoutes() {
   // The lazy parse is load-bearing: a bad chain must not take the plugin's whole route surface down.
-  const { routes } = mount({ config: { [HANDOFF_CONFIG_KEY]: { steps: [] } } })
+  const { routes } = mount({ config: { [HANDOFF_CONFIG_KEY]: { tenantId: TENANT_ID, steps: [] } } })
   assert.ok(routes.has('GET /api/integration/stock-preparation/prep-lines'), 'unrelated routes still registered')
   const res = await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
   assert.equal(res.statusCode, 500)
@@ -1011,11 +1029,9 @@ async function routeIsTenantScoped() {
   const db = makeMemoryDb()
   const { routes } = mount({ notifier, db })
   const intruder = { id: ZHANG, tenantId: OTHER_TENANT, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] }
-  // RC2 CHANGED THIS, AND IN THE STRICTER DIRECTION. A body naming another tenant used to be silently
-  // applied to the caller's OWN — no cross-tenant write, but a request that said one thing and did
-  // another, and an allowlist entry that looked like it meant something. The #5445 resolver refuses a
-  // carried tenant that disagrees with the principal's, so the intruder now gets a named 403 rather
-  // than a 200 for a chain they did not ask about.
+  // RC2 MADE THIS STRICTER, AND F1 MADE IT STRICTER AGAIN. A body naming another tenant used to be
+  // silently applied to the caller's OWN — no cross-tenant write, but a request that said one thing
+  // and did another. The #5445 resolver refuses a carried tenant that disagrees with the principal's.
   const res = await call(routes, 'POST', ADVANCE_PATH, {
     user: intruder,
     body: { tenantId: TENANT_ID, projectNo: PROJECT, fromStepKey: 'prep_entry' },
@@ -1023,14 +1039,33 @@ async function routeIsTenantScoped() {
   assert.equal(res.statusCode, 403, 'a body naming another tenant is refused, not quietly rewritten')
   assert.equal(res.body.error.code, 'OPERATOR_SCOPE_TENANT_MISMATCH')
   assert.deepEqual(db.rows, [], 'and nothing is written for either tenant')
-  // Without the contradicting key the intruder advances THEIR OWN tenant's chain, as before.
-  const own = await call(routes, 'POST', ADVANCE_PATH, {
+
+  // Drop the contradicting key and the caller is now refused for a DIFFERENT and equally deliberate
+  // reason (F1): this deployment's chain belongs to TENANT_ID, and a chain announces into ITS OWN
+  // tenant's DingTalk group. Being authentic in your own tenant does not make somebody else's chain
+  // yours to advance.
+  const ownTenantOnAForeignChain = await call(routes, 'POST', ADVANCE_PATH, {
+    user: intruder,
+    body: { projectNo: PROJECT, fromStepKey: 'prep_entry' },
+  })
+  assert.equal(ownTenantOnAForeignChain.statusCode, 403)
+  assert.equal(ownTenantOnAForeignChain.body.error.code, 'STOCK_PREPARATION_HANDOFF_CHAIN_NOT_FOR_THIS_TENANT')
+  assert.deepEqual(db.rows, [])
+  assert.equal(notifier.calls.length, 0)
+
+  // On a deployment whose chain IS theirs, the row lands under the AUTHENTICATED tenant — never a
+  // request-supplied one. That is the property this witness exists for, and it survives F1.
+  const theirsConfig = chainConfig()
+  theirsConfig[HANDOFF_CONFIG_KEY].tenantId = OTHER_TENANT
+  const theirs = mount({ config: theirsConfig })
+  const own = await call(theirs.routes, 'POST', ADVANCE_PATH, {
     user: intruder,
     body: { projectNo: PROJECT, fromStepKey: 'prep_entry' },
   })
   assert.equal(own.statusCode, 200)
-  assert.equal(db.rows.length, 1)
-  assert.equal(db.rows[0].tenant_id, OTHER_TENANT, 'the row landed in the AUTHENTICATED tenant, never a request-supplied one')
+  assert.equal(theirs.db.rows.length, 1)
+  assert.equal(theirs.db.rows[0].tenant_id, OTHER_TENANT, 'the row landed in the AUTHENTICATED tenant')
+
   // The victim's chain is untouched.
   const victim = await status(routes, OPERATOR_ZHANG)
   assert.equal(victim.body.data.stepIndex, 0)
@@ -1410,7 +1445,10 @@ async function f3ATypoIsRefusedRatherThanAcceptedAsNoDestinations() {
   ]
   for (const [bad, field] of cases) {
     assert.throws(
-      () => parseStockPreparationHandoffConfig({ [HANDOFF_CONFIG_KEY]: bad }),
+      // `tenantId` is supplied on every case so each one fails on the key it is ABOUT: the parser
+      // refuses a missing tenant (F1) before it looks at notify/terminal, and a witness that tripped
+      // on that instead would stop testing typos.
+      () => parseStockPreparationHandoffConfig({ [HANDOFF_CONFIG_KEY]: { tenantId: TENANT_ID, ...bad } }),
       (error) => {
         assert.ok(error instanceof StockPreparationHandoffError)
         assert.equal(error.code, 'STOCK_PREPARATION_HANDOFF_CONFIG_INVALID', `F3: ${field} got code ${error.code}`)
@@ -1426,13 +1464,13 @@ async function f3ATypoIsRefusedRatherThanAcceptedAsNoDestinations() {
 async function f3TurnStateWithoutNotificationsStaysLegal() {
   // The deliberate turn-state-only deployment. Turn state is useful on its own, and this must stay
   // reachable — what the strict parse removes is arriving in this state BY TYPO, not the state.
-  const chain = parseStockPreparationHandoffConfig({ [HANDOFF_CONFIG_KEY]: { steps: STEPS3 } })
+  const chain = parseStockPreparationHandoffConfig({ [HANDOFF_CONFIG_KEY]: { tenantId: TENANT_ID, steps: STEPS3 } })
   assert.equal(chain.configured, true)
   assert.equal(chain.notifyGroupDestinationId, null)
   assert.deepEqual([...chain.terminalGroupDestinationIds], [])
   // A ONE-STEP chain has no mid-chain hop at all, so it may declare `terminal` alone.
   const single = parseStockPreparationHandoffConfig({
-    [HANDOFF_CONFIG_KEY]: { steps: [{ key: 'final_review', handlerUserIds: [WANG] }], terminal: GOOD_TERMINAL },
+    [HANDOFF_CONFIG_KEY]: { tenantId: TENANT_ID, steps: [{ key: 'final_review', handlerUserIds: [WANG] }], terminal: GOOD_TERMINAL },
   })
   assert.equal(single.configured, true)
   assert.deepEqual([...single.terminalGroupDestinationIds], [WAREHOUSE_DEST])
@@ -1447,7 +1485,7 @@ async function f3TheClaimIsNotSpentOnAHopWithNowhereToSend() {
   // `notified_step_index` is at-most-once: once claimed for a step, the next click is a replay and
   // that hop can NEVER be notified again. Claiming it for a chain with no destination would leave a
   // deployment that adds one tomorrow with yesterday's hops permanently silent.
-  const turnStateOnly = parseStockPreparationHandoffConfig({ [HANDOFF_CONFIG_KEY]: { steps: STEPS3 } })
+  const turnStateOnly = parseStockPreparationHandoffConfig({ [HANDOFF_CONFIG_KEY]: { tenantId: TENANT_ID, steps: STEPS3 } })
   assert.equal(chainHasDestinationForHop(turnStateOnly, false), false)
   assert.equal(chainHasDestinationForHop(turnStateOnly, true), false)
   const full = parseStockPreparationHandoffConfig(chainConfig())
@@ -1458,7 +1496,7 @@ async function f3TheClaimIsNotSpentOnAHopWithNowhereToSend() {
   // End to end: the turn-state-only chain moves the cursor and leaves the claim UNSPENT.
   const db = makeMemoryDb()
   const notifier = makeNotifierSpy()
-  const { routes } = mount({ config: { [HANDOFF_CONFIG_KEY]: { steps: STEPS3 } }, notifier, db })
+  const { routes } = mount({ config: { [HANDOFF_CONFIG_KEY]: { tenantId: TENANT_ID, steps: STEPS3 } }, notifier, db })
   const res = await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
   assert.equal(res.statusCode, 200)
   assert.equal(res.body.data.notifyOutcome, 'not_configured')
@@ -2108,6 +2146,7 @@ async function rc5TheAuditModeComesFromTheCommittedVerdictNotThePlan() {
   // advanced. Two answers to "who handed this off", for one cursor move.
   const config = {
     [HANDOFF_CONFIG_KEY]: {
+      tenantId: TENANT_ID,
       steps: [
         { key: 'prep_entry', handlerUserIds: [ZHANG, 'u_zhao'] },
         { key: 'process', handlerUserIds: [LI] },
@@ -2219,22 +2258,218 @@ async function rc7ATenantBoundChainRefusesEveryOtherTenant() {
   assert.equal(ok.body.data.notifyOutcome, 'sent')
 }
 
-async function rc7AnUnboundChainStaysDeployGlobalAndSaysSo() {
-  // The absent-binding branch, pinned so that "no tenantId means deploy-global, and the deployment
-  // is asserting it is single-tenant" is a decision the config contract states rather than an
-  // accident of parsing.
-  const chain = parseStockPreparationHandoffConfig(chainConfig())
-  assert.equal(chain.tenantId, null, 'an unbound chain is explicitly null, not undefined')
-  const boundConfig = chainConfig()
-  boundConfig[HANDOFF_CONFIG_KEY].tenantId = OTHER_TENANT
-  assert.equal(parseStockPreparationHandoffConfig(boundConfig).tenantId, OTHER_TENANT)
-  // And the binding is typed like every other config string: a non-string is a named refusal.
-  const bad = chainConfig()
-  bad[HANDOFF_CONFIG_KEY].tenantId = 42
+
+
+// ---------------------------------------------------------------------------
+// F1..F3 — round-2 recheck of the RC fixes (3 confirmed, lane B).
+//
+// The RC round closed real holes and left three: RC7's unbound default was justified by a config
+// contract that was never written (F1), RC2's "zero audit calls before the refusal" was true only of
+// a fake that had no probe to call (F2), and the repo's STATIC anti-regression tripwire — the one
+// whose header promises a new write route cannot silently reintroduce the class — never learned about
+// either handoff handler (F3).
+// ---------------------------------------------------------------------------
+
+async function f1AChainWithoutATenantIdIsRefusedRatherThanDeployGlobal() {
+  // RC7 SHIPPED THE GUARD AND LEFT IT OFF BY DEFAULT, citing a contract that does not exist. Two code
+  // comments said app.manifest.json's `stockPrepHandoff` note and the 222 runbook state that omitting
+  // `tenantId` asserts a single-tenant deployment. The manifest note never mentioned tenancy at all
+  // and the PR changed no documentation, so an administrator following the documented contract could
+  // not discover the key — while the default it left on announced one tenant's project number into
+  // another tenant's group (see the dual-org witness below).
+  //
+  // A guarantee that depends on a sentence nobody wrote is not a guarantee. `tenantId` is now
+  // REQUIRED, which costs one line of deploy config and removes the default entirely.
+  const noTenant = chainConfig()
+  delete noTenant[HANDOFF_CONFIG_KEY].tenantId
   assert.throws(
-    () => parseStockPreparationHandoffConfig(bad),
-    (error) => error.code === 'STOCK_PREPARATION_HANDOFF_CONFIG_INVALID' && error.details.field === 'tenantId',
+    () => parseStockPreparationHandoffConfig(noTenant),
+    (error) => {
+      assert.equal(error.status, 500)
+      assert.equal(error.code, 'STOCK_PREPARATION_HANDOFF_CONFIG_INVALID')
+      assert.equal(error.details.field, 'tenantId', 'F1: the refusal NAMES the key an operator has to add')
+      return true
+    },
+    'F1: a chain that names no tenant is a configuration error, not a deploy-global default',
   )
+  // Typed like every other required config string.
+  for (const bad of [42, '', '   ', null, {}]) {
+    const wrong = chainConfig()
+    wrong[HANDOFF_CONFIG_KEY].tenantId = bad
+    assert.throws(
+      () => parseStockPreparationHandoffConfig(wrong),
+      (error) => error.code === 'STOCK_PREPARATION_HANDOFF_CONFIG_INVALID' && error.details.field === 'tenantId',
+      `F1: tenantId=${JSON.stringify(bad)} is refused by name`,
+    )
+  }
+  // And BOTH routes refuse rather than degrading to "no chain here" — a missing required key must
+  // never be indistinguishable from an unconfigured deployment, which is the whole F3 doctrine.
+  const { routes, db, auditAppends, notifier, records } = mount({ config: noTenant })
+  for (const [method, routePath, payload] of [
+    ['POST', ADVANCE_PATH, { body: { projectNo: PROJECT, fromStepKey: 'prep_entry' } }],
+    ['GET', STATUS_PATH, { query: { projectNo: PROJECT } }],
+  ]) {
+    const res = await call(routes, method, routePath, { user: OPERATOR_ZHANG, ...payload })
+    assert.equal(res.statusCode, 500, `F1: ${method} ${routePath} refuses a chain with no tenant`)
+    assert.equal(res.body.error.code, 'STOCK_PREPARATION_HANDOFF_CONFIG_INVALID')
+    assert.equal(res.body.error.details.field, 'tenantId')
+  }
+  assert.deepEqual(db.rows, [], 'F1: nothing written')
+  assert.deepEqual(auditAppends, [], 'F1: nothing audited')
+  assert.equal(notifier.calls.length, 0, 'F1: nothing announced')
+  assert.equal(records.queries.length, 0, 'F1: and no records IO')
+  // The chain object itself no longer has a null-tenant shape to reason about.
+  assert.equal(parseStockPreparationHandoffConfig(chainConfig()).tenantId, TENANT_ID)
+}
+
+async function f1TheDualOrgHeaderReproCannotAnnounceAcrossTenants() {
+  // THE EXECUTED REPRO FROM THE RECHECK, TURNED INTO A WITNESS.
+  //
+  // `resolveSessionTenantId` omits the tenant claim for any account with zero OR TWO-PLUS org
+  // memberships — the codebase says so itself — so a person active in two orgs carries a CLAIMLESS
+  // token, `user.tenantId` is nothing but the x-tenant-id header, and the host directory correctly
+  // vouches for EITHER org. RC2 stops a tenant the principal is not in; it cannot stop a principal
+  // choosing between two tenants that are both genuinely theirs. What stops tenant BETA's project
+  // number reaching tenant ACME's DingTalk group is the chain binding — which is why it may not be
+  // optional.
+  const ACME = 'tenant-acme'
+  const BETA = 'tenant-beta'
+  const chain = {
+    [HANDOFF_CONFIG_KEY]: {
+      tenantId: ACME,
+      steps: [
+        { key: 'prep_entry', handlerUserIds: [ZHANG] },
+        { key: 'process', handlerUserIds: [LI] },
+        { key: 'final_review', handlerUserIds: [WANG] },
+      ],
+      notify: { groupDestinationId: 'acme-prep-group' },
+      terminal: { groupDestinationIds: ['acme-warehouse'] },
+    },
+  }
+  // The real user_orgs shape: Zhang is an active member of BOTH.
+  const directory = makeTenantDirectory((userId, tenantId) => userId === ZHANG && [ACME, BETA].includes(tenantId))
+  const notifier = makeNotifierSpy()
+  const db = makeMemoryDb()
+  const records = makeRecordsApi(['ACME-2026-01', 'BETA-SECRET-PROJECT-9'])
+  const { routes, auditAppends } = mount({ config: chain, notifier, db, records, tenantPrincipalDirectory: directory })
+
+  // The header naming HIS OWN other tenant. Claimless token, so `user.tenantId` IS the header.
+  const beta = await call(routes, 'POST', ADVANCE_PATH, {
+    user: { id: ZHANG, tenantId: BETA, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] },
+    authenticatedTenantId: undefined,
+    body: { projectNo: 'BETA-SECRET-PROJECT-9', fromStepKey: 'prep_entry' },
+  })
+  assert.equal(beta.statusCode, 403, 'F1: the deployment\u2019s chain is ACME\u2019s, so BETA cannot advance through it')
+  assert.equal(beta.body.error.code, 'STOCK_PREPARATION_HANDOFF_CHAIN_NOT_FOR_THIS_TENANT')
+  assert.equal(notifier.calls.length, 0, 'F1: BETA\u2019s project handle never leaves the system')
+  assert.deepEqual(db.rows, [])
+  assert.deepEqual(auditAppends, [])
+
+  // And BETA is told there is no chain here, not shown ACME's turn state.
+  const betaStatus = await call(routes, 'GET', STATUS_PATH, {
+    user: { id: ZHANG, tenantId: BETA, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] },
+    query: { projectNo: 'BETA-SECRET-PROJECT-9' },
+  })
+  assert.equal(betaStatus.statusCode, 200)
+  assert.equal(betaStatus.body.data.configured, false)
+
+  // ACME, the tenant the chain belongs to, is served exactly as before.
+  const acme = await call(routes, 'POST', ADVANCE_PATH, {
+    user: { id: ZHANG, tenantId: ACME, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] },
+    authenticatedTenantId: undefined,
+    body: { projectNo: 'ACME-2026-01', fromStepKey: 'prep_entry' },
+  })
+  assert.equal(acme.statusCode, 200)
+  assert.equal(acme.body.data.notifyOutcome, 'sent')
+  assert.equal(notifier.calls.length, 1)
+  assert.match(notifier.calls[0].body, /ACME-2026-01/)
+  assert.ok(!notifier.calls[0].body.includes('BETA'), 'F1: and nothing about the other tenant rode along')
+}
+
+async function f1TheCodeCitesNoContractItDoesNotCarry() {
+  // The two comments RC7 shipped attributed the safety of the old default to
+  // "app.manifest.json's stockPrepHandoff surface and the 222 runbook". Both were false, and a
+  // citation that cannot be checked is how a reviewer is talked out of checking. Now that the key is
+  // REQUIRED the claim is about a key that must exist, so it is checkable — and checked here.
+  const fs = require('node:fs')
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'app.manifest.json'), 'utf8'))
+  const surface = (manifest.configSurfaces || []).find((entry) => entry.id === 'stockPrepHandoff')
+  assert.ok(surface, 'the handoff config surface is declared')
+  assert.match(surface.note, /tenantId/, 'F1: the ONLY documentation of this file names the tenantId key')
+  assert.ok(/必填|required/i.test(surface.note), 'F1: and says it is required')
+  // And the OPTIONAL PARSE that produced the default is gone from the source, not merely unreachable:
+  // a chain object with a null tenantId can no longer be constructed by the configured branch. (The
+  // two files still SAY "deploy-global" — to record that there is no such thing and why — which is
+  // the opposite of claiming one, so the check is on the code that made it possible, not on prose.)
+  const parser = fs.readFileSync(path.join(__dirname, '..', 'lib', 'stock-preparation-handoff.cjs'), 'utf8')
+  assert.ok(
+    !parser.includes('raw.tenantId === undefined'),
+    'F1: the optional-tenantId parse branch is deleted, not just unreachable',
+  )
+  assert.ok(
+    parser.includes("requiredConfigString(raw.tenantId, 'tenantId')"),
+    'F1: tenantId goes through the same required-string check as every other mandatory config key',
+  )
+  // The runbook PR #5456 made current carries the step.
+  const runbook = fs.readFileSync(
+    path.join(__dirname, '..', '..', '..', 'docs', 'development', 'takeover-beiliao-20260821', '222-deploy-window-runbook-20260901.md'),
+    'utf8',
+  )
+  assert.match(runbook, /stockPreparationHandoff/, 'F1: the 222 runbook names the config key')
+  assert.match(runbook, /tenantId/, 'F1: and the required tenantId within it')
+}
+
+// --- F2: the vocabulary probe is a WRITE, so it may not precede the tenant refusal -------------
+
+async function f2TheAuditVocabularyProbeRunsAfterTheTenantScope() {
+  // THE PROBE IS NOT A CHEAP LOOKUP. In production `supportsAction` opens a transaction, INSERTs into
+  // the audit table and rolls back — that is how it asks the database whether migration 085 widened
+  // the CHECK constraint. Running it before the tenant is established meant every refused
+  // tenant-steering caller caused a write-transaction against integration_stock_prep_audit, which is
+  // exactly what RC2 said could not happen. The RC2 witnesses could not see it because the fake audit
+  // store had no `supportsAction` to call; it does now (see mount()).
+  const denying = makeTenantDirectory(() => false)
+  const cases = [
+    ['header-steered, host refuses to vouch', { user: { id: ZHANG, tenantId: TENANT_ID, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] } }, denying, 403, 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED'],
+    ['header contradicts the verified claim', { user: { id: ZHANG, tenantId: OTHER_TENANT, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] }, authenticatedTenantId: TENANT_ID }, null, 403, 'OPERATOR_SCOPE_TENANT_CONTRADICTED'],
+    ['tenantless principal', { user: { id: 'u_admin', permissions: ['role:admin', 'integration:admin'] } }, null, 403, 'OPERATOR_SCOPE_TENANT_REQUIRED'],
+    ['body names another tenant', { user: OPERATOR_ZHANG, body: { tenantId: OTHER_TENANT } }, null, 403, 'OPERATOR_SCOPE_TENANT_MISMATCH'],
+    ['host directory absent', { user: OPERATOR_ZHANG }, undefined, 501, 'OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE'],
+  ]
+  for (const [label, req, directory, status, code] of cases) {
+    const mountArgs = {}
+    if (directory !== null) mountArgs.tenantPrincipalDirectory = directory === undefined ? null : directory
+    const { routes, auditCalls, db, notifier, records } = mount(mountArgs)
+    const res = await call(routes, 'POST', ADVANCE_PATH, {
+      user: req.user,
+      authenticatedTenantId: req.authenticatedTenantId,
+      body: { projectNo: PROJECT, fromStepKey: 'prep_entry', ...(req.body || {}) },
+    })
+    assert.equal(res.statusCode, status, `F2 (${label}): ${res.statusCode} ${JSON.stringify(res.body && res.body.error)}`)
+    assert.equal(res.body.error.code, code, `F2 (${label}): coded refusal`)
+    assert.deepEqual(auditCalls, [], `F2 (${label}): ZERO audit-store calls — the probe is a write and must not precede the refusal`)
+    assert.deepEqual(db.rows, [], `F2 (${label}): no cursor row`)
+    assert.equal(notifier.calls.length, 0, `F2 (${label}): nothing announced`)
+    assert.equal(records.queries.length, 0, `F2 (${label}): no records IO`)
+  }
+}
+
+async function f2ThePermittedCallerStillProbesOnceAndUnderItsOwnTenant() {
+  // The probe did not go away, it moved. It still runs before any WRITE, still exactly once per
+  // process, and now carries the RESOLVED tenant instead of probing under a '__probe__' placeholder —
+  // so the row it inserts and rolls back belongs to the tenant whose write it is clearing.
+  const { routes, auditCalls } = mount()
+  await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
+  const probes = auditCalls.filter((entry) => entry.method === 'supportsAction')
+  assert.equal(probes.length, 1, 'F2: probed once')
+  assert.equal(probes[0].action, 'handoff_advance')
+  assert.equal(probes[0].tenantId, TENANT_ID, 'F2: under the RESOLVED tenant, not a placeholder')
+  // And it precedes the append, which is the ordering the probe exists for.
+  assert.equal(auditCalls[0].method, 'supportsAction')
+  assert.equal(auditCalls[1].method, 'append')
+  // Six more advances add no further probes.
+  for (let i = 0; i < 6; i += 1) await advance(routes, OPERATOR_ZHANG, { fromStepKey: 'prep_entry' })
+  assert.equal(auditCalls.filter((entry) => entry.method === 'supportsAction').length, 1, 'F2: still once per process')
 }
 
 async function main() {
@@ -2305,7 +2540,12 @@ async function main() {
     ['RC5 the audit mode comes from the committed verdict, not the plan', rc5TheAuditModeComesFromTheCommittedVerdictNotThePlan],
     ['RC6 a non-handler cannot tell an existing project from an unknown one', rc6ANonHandlerCannotTellAnExistingProjectFromAnUnknownOne],
     ['RC7 a tenant-bound chain refuses every other tenant', rc7ATenantBoundChainRefusesEveryOtherTenant],
-    ['RC7 an unbound chain stays deploy-global and says so', rc7AnUnboundChainStaysDeployGlobalAndSaysSo],
+    // --- round 2: lane B's three findings on the RC fixes ---------------------------------------
+    ['F1 a chain without a tenantId is refused, not deploy-global', f1AChainWithoutATenantIdIsRefusedRatherThanDeployGlobal],
+    ['F1 the dual-org header repro cannot announce across tenants', f1TheDualOrgHeaderReproCannotAnnounceAcrossTenants],
+    ['F1 the code cites no contract it does not carry', f1TheCodeCitesNoContractItDoesNotCarry],
+    ['F2 the audit-vocabulary probe runs AFTER the tenant scope', f2TheAuditVocabularyProbeRunsAfterTheTenantScope],
+    ['F2 a permitted caller still probes once, under its own tenant', f2ThePermittedCallerStillProbesOnceAndUnderItsOwnTenant],
   ]
   for (const [name, fn] of tests) {
     await fn()
