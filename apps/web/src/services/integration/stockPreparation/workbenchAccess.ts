@@ -305,11 +305,19 @@ export function canRunStockPrepProjectSync(hasPermission: StockPrepPermissionPro
  * 项目备料页 — who may OPEN the project board tab.
  *
  * Exactly the tier the board READ is gated on server-side (`stock-prep:operate` ∧ `stock-prep:read`,
- * satisfied through the ladder by `stock-prep:admin` and by a platform admin). Every control the tab
- * carries is answerable to that holder — the board read itself, the pull (see above), the export
- * (the operator tier already), and the handoff button, which hides itself when its route is absent
- * or unconfigured — so nothing behind this gate can 403, and R-11's "visible must be actionable"
- * holds for the panel as a whole.
+ * satisfied through the ladder by `stock-prep:admin` and by a platform admin). For a TENANT-BOUND
+ * holder of that tier every control the tab carries is answerable — the board read itself, the pull
+ * (see above), the export (already on the operator tier), and the handoff button, which hides itself
+ * when its route is absent or unconfigured — so R-11's "visible must be actionable" holds.
+ *
+ * ONE PRINCIPAL IS THE EXCEPTION, and it is an inherited one rather than a new one: a TENANTLESS
+ * platform admin passes the RBAC ladder here and is then refused by the server for having no tenant
+ * of its own (403 OPERATOR_SCOPE_TENANT_REQUIRED — see stock-preparation-operator-scope.cjs). That is
+ * the deliberate posture #5445 shipped for the whole operator VALUE plane, not a gap this tab opens:
+ * the existing `confirmationQueue.projectDirectory` control has exactly the same property, on exactly
+ * the same tier, for exactly the same reason. Their values-free surfaces are untouched and still
+ * answer for every tenant. Narrowing this predicate to exclude them is a change to that posture and
+ * belongs with it, not here.
  *
  * A `stock-prep:read` holder does NOT see it. That is the correct answer rather than a limitation:
  * the board carries project numbers and names, and the read tier is the values-free queue-watcher
