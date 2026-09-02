@@ -44,6 +44,13 @@ const STOCK_PREP_AUDIT_ACTIONS = Object.freeze([
   // counts only (rowCount/activeRowCount), never a material name/quantity (see stock-preparation-
   // prep-line-export.cjs, which computes them, and the route, which is the only caller).
   'prep_line_export',
+  // 一线看得见自己工厂的项目 (migration 082): an operator listed THEIR OWN tenant's project directory,
+  // which is the first READ on this trail that carries customer values (project numbers and names) to
+  // the caller. The audited ROW stays values-free regardless — project_id is NULL, mode is the
+  // operator_directory|operator_directory_idle enum, and detail is counts + booleans only. Audited
+  // because the reopened OD-E3 gate requires an audit vocabulary for the value plane, not merely a
+  // permission for it.
+  'project_directory_read',
 ])
 const ACTION_SET = new Set(STOCK_PREP_AUDIT_ACTIONS)
 

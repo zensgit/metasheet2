@@ -457,6 +457,14 @@ module.exports = {
         // and must not add one. OPTIONAL — absent → the export route 501s instead of a 500 crash.
         // Duck-typed to { buildWorkbookBuffer({ sheetName, headers, rows }) => Promise<Buffer> }.
         stockPreparationXlsxExport: (context.services && context.services.stockPreparationXlsxExport) || null,
+    // 一线看得见自己工厂的项目: the tenant PRINCIPAL DIRECTORY (packages/core-backend
+    // tenant-principal-directory-boundary.ts), injected by the host for this plugin only — same
+    // INJECTED-per-plugin shape as the two above. Unlike them it is NOT fail-open: the operator
+    // project directory is the plugin's first tenant-scoped VALUE-BEARING read, and absent this port
+    // it 501s rather than deciding tenancy from `req.user.tenantId` (which the auth middleware may
+    // have filled from the `x-tenant-id` header). Duck-typed to
+    // { verifyTenantMembership({ userId, tenantId }) => Promise<{ member }> }.
+    tenantPrincipalDirectory: (context.services && context.services.tenantPrincipalDirectory) || null,
         externalSystemRegistry,
         readSourceConfigStore,
         stockPreparationAuditStore,

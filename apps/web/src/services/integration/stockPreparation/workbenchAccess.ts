@@ -86,6 +86,18 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     control: 'stock-prep-confirmation-export',
   }),
   Object.freeze({
+    // 一线看得见自己工厂的项目 — the operator's OWN-TENANT project directory / worklist. VALUE-BEARING
+    // (project numbers and names), so it rides the OPERATE tier for the same reason
+    // confirmationQueue.valueEntry and confirmationQueue.export do. The values-free
+    // GET /stock-preparation/projects route is a separate, untouched platform/admin surface and is
+    // deliberately not a member of this manifest.
+    capability: 'confirmationQueue.projectDirectory',
+    code: STOCK_PREP_OPERATE,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/operator/projects',
+    control: 'stock-prep-operator-project-directory',
+  }),
+  Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,
     method: 'POST',

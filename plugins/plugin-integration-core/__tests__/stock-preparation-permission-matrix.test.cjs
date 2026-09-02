@@ -213,6 +213,15 @@ function mount() {
   }
   // Present so reconcile passes the lease accessor and reaches its NEXT dependency — which is what
   // lets the matrix tell "refused by the gate" apart from "gate passed, failed downstream".
+  // 一线看得见自己工厂的项目: the host tenant principal directory. Present (and admitting) so the
+  // project-directory route reaches its READ for a permitted actor — otherwise every 'pass' cell for
+  // that capability would be a 501 for a reason unrelated to the permission gate, and the matrix
+  // would be measuring the wrong thing. The gate cells are unaffected: they refuse before this.
+  services.tenantPrincipalDirectory = {
+    async verifyTenantMembership() {
+      return { member: true }
+    },
+  }
   services.stockPreparationConfirmationReconcileLease = {
     async acquire() {
       return { leaseId: 'lease_1' }
@@ -286,6 +295,11 @@ const REQUEST_BY_CAPABILITY = Object.freeze({
   // (findObjectSheet misses -> zero rows -> PREP_LINE_EXPORT_PROJECT_NOT_FOUND), which is exactly the
   // "gate let it through, something else happened" case M-01 measures (404 is not refusedByGate).
   'confirmationQueue.export': () => ({ query: { projectNo: PROJECT_NO } }),
+  // 一线看得见自己工厂的项目: the operator project directory takes no selector — it IS the selector.
+  // A 'pass' actor reaches the read and gets an empty-but-successful directory (the shared mount()'s
+  // provisioning only knows the LEDGER object, so the project table misses and directoryReady is
+  // false), which is exactly the "gate let it through, something else happened" case M-01 measures.
+  'confirmationQueue.projectDirectory': () => ({ query: {} }),
 })
 
 async function callCapability(routes, capability, user) {
@@ -319,6 +333,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.valueEntry': 'gate',
     'confirmationQueue.confirm': 'gate',
     'confirmationQueue.export': 'gate',
+    'confirmationQueue.projectDirectory': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -328,6 +343,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.valueEntry': 'gate',
     'confirmationQueue.confirm': 'gate',
     'confirmationQueue.export': 'gate',
+    'confirmationQueue.projectDirectory': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -337,6 +353,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.valueEntry': 'gate',
     'confirmationQueue.confirm': 'gate',
     'confirmationQueue.export': 'gate',
+    'confirmationQueue.projectDirectory': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -346,6 +363,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.valueEntry': 'gate',
     'confirmationQueue.confirm': 'gate',
     'confirmationQueue.export': 'gate',
+    'confirmationQueue.projectDirectory': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -355,6 +373,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.valueEntry': 'pass',
     'confirmationQueue.confirm': 'pass',
     'confirmationQueue.export': 'pass',
+    'confirmationQueue.projectDirectory': 'pass',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -364,6 +383,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.valueEntry': 'gate',
     'confirmationQueue.confirm': 'gate',
     'confirmationQueue.export': 'gate',
+    'confirmationQueue.projectDirectory': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -373,6 +393,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.valueEntry': 'pass',
     'confirmationQueue.confirm': 'pass',
     'confirmationQueue.export': 'pass',
+    'confirmationQueue.projectDirectory': 'pass',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -382,6 +403,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.valueEntry': 'pass',
     'confirmationQueue.confirm': 'pass',
     'confirmationQueue.export': 'pass',
+    'confirmationQueue.projectDirectory': 'pass',
     'confirmationQueue.ensure': 'pass',
     'confirmationQueue.reconcile': 'pass',
   }),
@@ -604,6 +626,11 @@ async function orphanOperateGrantConfersNothing() {
       'confirmationQueue.confirm',
       'confirmationQueue.export',
       'confirmationQueue.list',
+      // 一线看得见自己工厂的项目: the own-tenant project directory joins the operator tier. Note this
+      // list is the RENDERABLE set; holding the tier is necessary but not sufficient to be ANSWERED
+      // this one — the route additionally requires a principal with a tenant of its own, which is
+      // what keeps a tenantless platform admin off the value surface (see the directory suite's G-04).
+      'confirmationQueue.projectDirectory',
       'confirmationQueue.readiness',
       'confirmationQueue.valueEntry',
     ],

@@ -49,6 +49,12 @@ import { GovernedAiService } from './services/governed-ai-service'
 // implementation. See packages/core-backend/src/routes/univer-meta.ts for the generic-export sibling
 // that already calls buildXlsxBuffer this same way (xlsx module lazily imported, never top-level).
 import { buildXlsxBuffer, type XlsxModule } from './multitable/xlsx-service'
+// 一线看得见自己工厂的项目: the tenant PRINCIPAL DIRECTORY port, injected into plugin-integration-core
+// ONLY — same per-plugin-injected-service shape as the two above. It exists because a plugin cannot
+// establish tenancy from `req.user.tenantId` alone (the auth middleware copies the `x-tenant-id`
+// header onto that field when the token carried no claim), and the plugin's first value-bearing
+// tenant-scoped read must not be built on a caller-supplied string.
+import { createTenantPrincipalDirectoryBoundaryV1 } from './services/tenant-principal-directory-boundary'
 import { eventBus } from './integration/events/event-bus'
 import { initializeEventBusService } from './integration/events/event-bus-service'
 import { messageBus } from './integration/messaging/message-bus'
@@ -2840,6 +2846,20 @@ export class MetaSheetServer {
         // absent for every other plugin.
         stockPreparationXlsxExport: manifest.name === 'plugin-integration-core'
           ? { buildWorkbookBuffer: buildStockPreparationExportWorkbookBuffer }
+          : undefined,
+        // 一线看得见自己工厂的项目: the tenant PRINCIPAL DIRECTORY for plugin-integration-core ONLY.
+        // The plugin's first tenant-scoped VALUE-BEARING read (the operator project directory, which
+        // carries the caller's own project numbers and names) must not accept `req.user.tenantId` as
+        // proof of tenancy — hydrateAuthenticatedUser copies the `x-tenant-id` HEADER onto that field
+        // when the verified token carried no claim. This narrow port lets the plugin ask the host to
+        // vouch for the (user, tenant) pairing instead, submitting two identity strings and receiving
+        // one boolean; the host keeps the table, the SQL and the pool. Absent for every other plugin,
+        // and REQUIRED (not fail-open) by the one read that uses it.
+        tenantPrincipalDirectory: manifest.name === 'plugin-integration-core'
+          ? createTenantPrincipalDirectoryBoundaryV1({
+              query: (sql: string, params?: unknown[]) =>
+                poolManager.get().query(sql, params) as unknown as Promise<{ rows: unknown[] }>,
+            })
           : undefined,
         security: this.pluginRuntimeSecurityService,
       } as unknown as import('./types/plugin').PluginServices,
