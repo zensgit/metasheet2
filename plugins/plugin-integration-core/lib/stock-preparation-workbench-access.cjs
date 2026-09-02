@@ -220,11 +220,12 @@ const STOCK_PREP_ROUTE_PERMISSION = STOCK_PREP_READ
 // can change — the split can add an admission, never remove one, and never re-route an existing one.
 //
 // WHAT DID NOT MOVE, and why it is named here rather than left implicit:
-//   * confirmation-decisions/reconcile — re-runs the readonly plan, i.e. a SOURCE READ off the
-//     customer's system that consumes a B2a operation claim when armed. Letting a customer operator
-//     trigger source reads is an owner-level decision; the header's PLATFORM_ADMIN_GATE note already
-//     says so and this PR does not move it.
-//   * mvp-persist — writes the snapshot batch; still platform-admin and still flag-gated.
+//   * mvp-persist — writes the snapshot batch; still platform-admin and still flag-gated. Its
+//     absence costs an operator nothing on their own run: the rows they came for are already in the
+//     sheet, and what is missing is a housekeeping copy the diff view uses.
+// RECONCILE DID MOVE, and the reasoning is with its manifest row below: it is the step that puts
+// held rows into the confirmation queue, so leaving it behind left the operator pointed at a queue
+// that could never contain their work.
 // The web orchestration degrades over both of those (skip with a reason, never an error), which is
 // what makes an operator's four-step run finish honestly rather than reddening on a 403.
 //
@@ -322,16 +323,36 @@ const STOCK_PREP_OPERATOR_PULL_STEPS = Object.freeze([
     path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/cancel',
     legacyGate: 'write',
   }),
-])
-
-/** The sub-routes that STAYED platform-admin. Listed so a suite can prove the split did not drift. */
-const STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS = Object.freeze([
+  // ── RECONCILE — the step that closes the loop for a plan with human-confirm rows ───────────────
+  //
+  // IT STAYED PLATFORM-ADMIN, AND THAT PUT THE OPERATOR IN A CLOSED LOOP. A plan whose rows the
+  // system is unsure about does not write them; it holds them for a person, and the queue they are
+  // held in is filled BY THIS ROUTE. With reconcile refused, the operator's run went: 试算 says
+  // "some rows need a person", reconcile is skipped, 写入 is skipped for want of a token — and the
+  // page then pointed them at a confirmation queue that would never contain those rows, because the
+  // only thing that puts them there is the step that was refused. Every door in the room was
+  // painted on.
+  //
+  // WHY IT IS SAFE TO MOVE, stated precisely, because R-11(b) named this route as owner-level:
+  //   * it is a SOURCE READ plus a write to the plugin's OWN confirmation-decision ledger. It
+  //     writes no customer row and touches no external system's data.
+  //   * the source read now runs under the SERVER-HELD BINDING OWNER for this one action id (see
+  //     resolveTableActionReadPrincipal), so admitting an operator does not hand them a connection
+  //     they do not own — it is the same delegated read the dry-run already performs.
+  //   * the B2a operation claim it consumes when armed is consumed under that same delegated
+  //     identity and the same purpose the dry-run uses, so the fence sees one actor, not a new one.
+  // mvp-persist does NOT move: it writes the snapshot archive, its absence costs an operator
+  // nothing on their own run, and the page says so in words.
   Object.freeze({
     step: 'reconcile',
     method: 'POST',
     path: '/api/integration/table-actions/:actionId/confirmation-decisions/reconcile',
     legacyGate: PLATFORM_ADMIN_GATE,
   }),
+])
+
+/** The sub-routes that STAYED platform-admin. Listed so a suite can prove the split did not drift. */
+const STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS = Object.freeze([
   Object.freeze({
     step: 'mvp-persist',
     method: 'POST',

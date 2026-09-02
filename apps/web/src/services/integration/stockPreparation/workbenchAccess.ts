@@ -111,16 +111,19 @@ export const STOCK_PREP_OPERATOR_PULL_STEPS: readonly { step: string; method: st
     path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/cancel',
     legacyGate: 'write',
   }),
-])
-
-/** The pull steps that STAYED platform-admin. The web orchestration skips over both with a reason. */
-export const STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS: readonly { step: string; method: string; path: string; legacyGate: string }[] = Object.freeze([
+  // RECONCILE — the step that puts HELD rows into the confirmation queue. Without it, a plan with
+  // uncertain rows left the operator in a closed loop: nothing queued, nothing written, and a page
+  // pointing them at a queue that could never contain their work.
   Object.freeze({
     step: 'reconcile',
     method: 'POST',
     path: '/api/integration/table-actions/:actionId/confirmation-decisions/reconcile',
     legacyGate: PLATFORM_ADMIN_GATE,
   }),
+])
+
+/** The pull steps that STAYED platform-admin. The web orchestration skips over both with a reason. */
+export const STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS: readonly { step: string; method: string; path: string; legacyGate: string }[] = Object.freeze([
   Object.freeze({
     step: 'mvp-persist',
     method: 'POST',

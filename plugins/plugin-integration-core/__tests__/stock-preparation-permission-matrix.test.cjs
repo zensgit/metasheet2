@@ -765,9 +765,14 @@ async function reconcileAndEnsureDidNotMove() {
   assert.deepEqual(
     ownerLevel.map((capability) => capability.capability).sort(),
     ['confirmationQueue.ensure', 'confirmationQueue.reconcile'],
-    'M-06: exactly reconcile and ensure stay platform-admin',
+    'M-06: reconcile and ensure keep the PLATFORM_ADMIN_GATE code in this manifest',
   )
-  // No stock-prep code, not even the workbench-admin ceiling, reaches them.
+  // WHAT THE MANIFEST CODE MEANS FOR RECONCILE, now that the route is also in the operator pull
+  // split: this manifest governs the CONFIRMATION-QUEUE control set, and its reconcile control
+  // still renders for a platform admin alone. The split is a DUAL GATE on the ROUTE, scoped to one
+  // frozen action id — which is why it lives in STOCK_PREP_OPERATOR_PULL_STEPS and not here, the
+  // same reason dry-run and apply were never manifest members. The actors below still cannot reach
+  // the reconcile capability through THIS manifest's request shape, and that is what this measures.
   for (const user of [OPERATOR_READ, OPERATOR_CONFIRM, WORKBENCH_ADMIN]) {
     for (const capability of ownerLevel) {
       const { routes } = mount()
@@ -780,9 +785,18 @@ async function reconcileAndEnsureDidNotMove() {
     /async stockPreparationConfirmationDecisionsEnsure\(req, res\) \{\s*requireAccess\(req, 'admin'\)/.test(HTTP_ROUTES_SOURCE),
     "M-06: ensure still calls requireAccess(req, 'admin')",
   )
+  // RECONCILE is the one that MOVED (round-2 C13), and its structure says exactly how: the legacy
+  // 'admin' gate is still the FIRST thing checked — `requireTableActionAccess` consults it before it
+  // consults anything else, so no existing caller's outcome changed — and the operator tier is
+  // admitted only afterwards, only for the frozen action id, and only with the tenant verified.
+  // Asserted as SHAPE, not prose: the handler must route through that helper with the admin token.
   assert.ok(
-    /async tableActionConfirmationDecisionsReconcile\(req, res\) \{\s*const user = requireAccess\(req, 'admin'\)/.test(HTTP_ROUTES_SOURCE),
-    "M-06: reconcile still calls requireAccess(req, 'admin')",
+    /async tableActionConfirmationDecisionsReconcile\(req, res\) \{[\s\S]{0,800}?requireTableActionAccess\(req, reconcileActionId, 'admin', tenantPrincipalDirectory\)/.test(HTTP_ROUTES_SOURCE),
+    'M-06: reconcile keeps the platform-admin gate FIRST and adds the operator tier behind it',
+  )
+  assert.ok(
+    !/async tableActionConfirmationDecisionsReconcile\(req, res\) \{\s*const user = requireAccess\(req, 'admin'\)/.test(HTTP_ROUTES_SOURCE),
+    'M-06: …and no longer refuses the operator tier outright',
   )
 }
 
@@ -927,10 +941,13 @@ const PROJECT_SYNC_ROUTES = Object.freeze([
     operatorMayRun: true,
   }),
   Object.freeze({
+    // MOVED in round 2 (C13): reconcile is what puts HELD rows into the confirmation queue, so an
+    // operator refused it was pointed at a queue that could never contain their work. Its legacy
+    // 'admin' tier is unchanged and still checked FIRST — the split is additive, as everywhere.
     handler: 'tableActionConfirmationDecisionsReconcile',
     gate: 'admin',
     path: '/api/integration/table-actions/:actionId/confirmation-decisions/reconcile',
-    operatorMayRun: false,
+    operatorMayRun: true,
   }),
   Object.freeze({
     handler: 'tableActionMvpPersist',
@@ -951,7 +968,7 @@ function projectSyncGatesAreUnchanged() {
     // as the second argument of `requireAccess`. Either way the TOKEN must be the one the route has
     // always used.
     const pattern = route.operatorMayRun
-      ? new RegExp(`async ${route.handler}\\(req, res\\) \\{[\\s\\S]{0,400}?await requireTableActionAccess\\(req, actionId, '([a-z]+)'`)
+      ? new RegExp(`async ${route.handler}\\(req, res\\) \\{[\\s\\S]{0,400}?await requireTableActionAccess\\(req, [A-Za-z]+, '([a-z]+)'`)
       : new RegExp(`async ${route.handler}\\(req, res\\) \\{[\\s\\S]{0,400}?requireAccess\\(req, '([a-z]+)'\\)`)
     const match = pattern.exec(HTTP_ROUTES_SOURCE)
     assert.ok(match, `M-10a: ${route.handler} must open with its gate call`)
@@ -999,8 +1016,9 @@ async function projectSyncRefusesTheTiersItAlwaysRefused() {
     }
   }
 
-  // THE TWO THAT STAYED: the operator tier, and the workbench-admin tier above it, are refused on
-  // reconcile and mvp-persist — on the pull action itself, where the split is live.
+  // WHAT STAYED: mvp-persist alone. Reconcile moved with the rest of the pull (C13) because it is
+  // the step that fills the queue an operator is sent to; mvp-persist writes the snapshot archive,
+  // whose absence costs an operator nothing on their own run, and the page says so in words.
   for (const user of [OPERATOR_CONFIRM, WORKBENCH_ADMIN]) {
     for (const route of PROJECT_SYNC_ROUTES.filter((entry) => !entry.operatorMayRun)) {
       const res = await call(routes, 'POST', route.path, {

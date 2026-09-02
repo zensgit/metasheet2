@@ -410,6 +410,71 @@ async function aStoredLargeBomJobIsRunOnlyByItsCreator() {
   )
 }
 
+// ---------------------------------------------------------------------------
+// P-11 — THE HUMAN-CONFIRM LOOP CLOSES, END TO END
+// ---------------------------------------------------------------------------
+//
+// THE CLOSED LOOP THIS BREAKS. A plan whose rows the system is unsure about does not write them; it
+// HOLDS them for a person. The queue they are held in is filled by `confirmation-decisions/reconcile`
+// — and that step was platform-admin. So an operator's run went:
+//
+//   1. 试算  -> 「算好了,但其中有几行系统拿不准」
+//   2. reconcile -> 403, reported as 「跳过它不影响这次导入」 (false: it is exactly what decides
+//      whether those rows are ever queued)
+//   3. 写入  -> skipped, no token
+//   4. and the page points at a confirmation queue that will never contain those rows, because the
+//      only thing that puts them there is the step that was refused.
+//
+// Three sentences, each locally plausible, forming a room with no door. This asserts the door: the
+// operator reaches every step of that loop for the frozen action id.
+async function theHumanConfirmLoopIsReachableByTheOperator() {
+  const routes = mount()
+  const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
+
+  // Every step of the loop, in the order an operator walks it.
+  for (const [label, route] of [
+    ['1. 试算 — plan the pull', DRY_RUN],
+    ['2. reconcile — put the held rows in the queue', RECONCILE],
+    ['3. 写入 — apply what was decided', APPLY],
+  ]) {
+    assert.equal(
+      await gateVerdict(routes, { ...route, user: OPERATOR, actionId: pull }),
+      'admitted',
+      `P-11: ${label} must be reachable — a loop with one refused step is a room with no door`,
+    )
+  }
+
+  // The two READ surfaces the operator is pointed AT are already theirs (the confirmation queue and
+  // its value readback ride stock-prep:read / :operate), so the only step that was missing was the
+  // one that fills them. Asserted here so the loop is proved end to end from this suite rather than
+  // inferred across three of them.
+  for (const [label, method, routePath] of [
+    ['the queue the operator is sent to', 'GET', '/api/integration/stock-preparation/confirmation-decisions'],
+    ['the decision they then make', 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm'],
+  ]) {
+    assert.equal(
+      await gateVerdict(routes, { method, routePath, user: OPERATOR, actionId: pull }),
+      'admitted',
+      `P-11: ${label} is reachable`,
+    )
+  }
+
+  // AND THE STEP THAT STAYED still refuses them — the split moved what the loop needs and nothing
+  // more. mvp-persist's absence costs an operator nothing on their own run.
+  assert.equal(
+    await gateVerdict(routes, { ...MVP_PERSIST, user: OPERATOR, actionId: pull }),
+    'refused',
+    'P-11: mvp-persist is not part of the loop and did not move',
+  )
+
+  // …and none of it leaks to another action id.
+  assert.equal(
+    await gateVerdict(routes, { ...RECONCILE, user: OPERATOR, actionId: OTHER_ACTION_ID }),
+    'refused',
+    'P-11: reconcile is admitted for the frozen action id ONLY',
+  )
+}
+
 async function theOperatorPullReadsAsTheBindingOwner() {
   const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
 
@@ -510,15 +575,19 @@ async function theOperatorPullsButNeitherReconcilesNorArchives() {
     'admitted',
     'P-01: the operator may APPLY the stock-prep pull',
   )
+  // RECONCILE MOVED (round-2 C13). It is the step that puts HELD rows into the confirmation queue,
+  // so leaving it behind put an operator whose plan had human-confirm rows into a closed loop: the
+  // write step skipped for want of a token, and the page then pointed them at a queue that could
+  // never contain their work, because the only thing that fills it was the step they were refused.
   assert.equal(
     await gateVerdict(routes, { ...RECONCILE, user: OPERATOR, actionId: pull }),
-    'refused',
-    'P-02: reconcile stayed platform-admin — a source read is an owner-level act',
+    'admitted',
+    'P-02: the operator may RECONCILE the stock-prep pull — it is what puts their held rows in the queue',
   )
   assert.equal(
     await gateVerdict(routes, { ...MVP_PERSIST, user: OPERATOR, actionId: pull }),
     'refused',
-    'P-02: mvp-persist stayed platform-admin',
+    'P-02: mvp-persist stayed platform-admin — its absence costs the operator nothing on their own run',
   )
 }
 
@@ -574,10 +643,12 @@ async function theLegacyTiersAreExactlyWhatTheyWere() {
     }
   }
 
-  // stock-prep:admin satisfies operate through the ladder, so it pulls — and still not reconcile.
+  // stock-prep:admin satisfies operate through the ladder, so it pulls AND reconciles — and still
+  // does not archive.
   assert.equal(await gateVerdict(routes, { ...DRY_RUN, user: WORKBENCH_ADMIN, actionId: pull }), 'admitted')
   assert.equal(await gateVerdict(routes, { ...APPLY, user: WORKBENCH_ADMIN, actionId: pull }), 'admitted')
-  assert.equal(await gateVerdict(routes, { ...RECONCILE, user: WORKBENCH_ADMIN, actionId: pull }), 'refused')
+  assert.equal(await gateVerdict(routes, { ...RECONCILE, user: WORKBENCH_ADMIN, actionId: pull }), 'admitted')
+  assert.equal(await gateVerdict(routes, { ...MVP_PERSIST, user: WORKBENCH_ADMIN, actionId: pull }), 'refused')
 }
 
 // ---------------------------------------------------------------------------
@@ -602,18 +673,20 @@ function theRuleIsDeclaredOnceAndTheSplitIsNamed() {
       'large-bom-apply-get',
       'large-bom-apply-run',
       'large-bom-expansion-cancel',
+      // The step that fills the confirmation queue an operator is pointed at.
+      'reconcile',
     ],
     'P-05: exactly these steps moved to the operator tier',
   )
   assert.deepEqual(
     STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS.map((step) => step.step),
-    ['reconcile', 'mvp-persist'],
-    'P-05: exactly two steps stayed platform-admin',
+    ['mvp-persist'],
+    'P-05: exactly one step stayed platform-admin',
   )
   for (const step of STOCK_PREP_OPERATOR_PULL_STEPS) {
     assert.ok(['GET', 'POST'].includes(step.method), `P-05: ${step.step} names a real method`)
     assert.ok(step.path.startsWith('/api/integration/table-actions/:actionId/'))
-    assert.ok(['read', 'write'].includes(step.legacyGate), 'P-05: each moved step names the legacy gate it keeps')
+    assert.ok(['read', 'write', 'admin'].includes(step.legacyGate), 'P-05: each moved step names the legacy gate it keeps')
   }
 
   // The CONJUNCTION, restated at this boundary: operate alone confers nothing here either.
@@ -842,17 +915,15 @@ async function theOperatorReachesTheBoundedBackgroundChannel() {
     }
   }
 
-  // 6. WHAT STAYED, STAYED. reconcile and mvp-persist are still refused for the operator tier, and
-  //    the background channel changes nothing about that.
+  // 6. WHAT STAYED, STAYED. mvp-persist is still refused for the operator tier, and the background
+  //    channel changes nothing about that.
   {
     const routes = mount()
-    for (const route of [RECONCILE, MVP_PERSIST]) {
-      assert.equal(
-        await gateVerdict(routes, { ...route, user: OPERATOR, actionId: pull }),
-        'refused',
-        `P-07: ${route.routePath} is still platform-admin`,
-      )
-    }
+    assert.equal(
+      await gateVerdict(routes, { ...MVP_PERSIST, user: OPERATOR, actionId: pull }),
+      'refused',
+      'P-07: mvp-persist is still platform-admin',
+    )
   }
 }
 
@@ -881,6 +952,7 @@ function everyLargeBomRouteIsInTheSplit() {
 
 async function main() {
   await theOperatorPullsButNeitherReconcilesNorArchives()
+  await theHumanConfirmLoopIsReachableByTheOperator()
   await theOperatorPullReadsAsTheBindingOwner()
   await aStoredLargeBomJobIsRunOnlyByItsCreator()
   await theOperatorReachesTheBoundedBackgroundChannel()

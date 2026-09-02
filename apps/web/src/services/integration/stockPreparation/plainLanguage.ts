@@ -1018,16 +1018,23 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     enNext: 'Anything already in the queue is still there. Open the tab, or sync again later.',
   }),
   /**
-   * 一线自己拉数据: the operator runs 试算 and 写入 themselves and is, by the owner's ruling, not the
-   * one who runs this step. Deliberately NOT phrased as 「稍后再试」 — for this caller there is no
-   * later in which the refusal turns into a success, and an instruction that can never work is worse
-   * than no instruction. It says who does it and where their own work continues.
+   * 一线自己拉数据 — AND THE SENTENCE THAT WAS FALSE.
+   *
+   * This step is what puts HELD rows into the confirmation queue. The first cut of this copy said
+   * 「跳过它不影响这次导入」, which is true only when the plan held nothing: on a plan with rows the
+   * system is unsure about, skipping this step means those rows are never queued, the write step
+   * then skips for want of a token, and the operator is sent to a queue that will never contain
+   * their work. Three sentences, each locally plausible, forming a closed loop.
+   *
+   * Reconcile has since joined the operator split, so this reason is now reachable only where the
+   * step genuinely cannot run for this caller. The copy therefore says what it costs — not that it
+   * costs nothing.
    */
   RECONCILE_NOT_PERMITTED: Object.freeze({
-    zh: '重新扫描待确认的事这一步不归您做',
-    en: 'Re-scanning for things to confirm is not your step',
-    zhNext: '这一步由平台管理员来跑,跳过它不影响这次导入。「确认队列」里原有的待办还在,可以照常处理。',
-    enNext: 'A platform administrator runs it, and skipping it does not affect this import. Anything already in the confirmation queue is still there and can be worked through as usual.',
+    zh: '重新扫描待确认的事这一步没能跑',
+    en: 'The step that queues rows for confirmation did not run',
+    zhNext: '如果这次试算里有拿不准的行,它们就还没进「确认队列」,这次也不会写入。请找平台管理员跑一次这一步;如果试算没有拿不准的行,这一步跳过不影响写入。',
+    enNext: 'If this plan held any uncertain rows, they have NOT reached the confirmation queue and will not be written this time. Ask a platform administrator to run this step. If the plan held nothing uncertain, skipping it does not affect the write.',
   }),
 
   // 3. 写入
@@ -1043,11 +1050,20 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '同一份数据再同步一次不会重复写,这是正常的。',
     enNext: 'Syncing the same data again writes nothing twice; that is the expected result.',
   }),
+  /**
+   * THE PROMISE IN THE SECOND LINE IS CONDITIONAL, and the condition is the step before it.
+   *
+   * 「处理完再同步就会写进去」 is true only if those rows actually REACHED the queue, which is what
+   * reconcile does. When reconcile is refused they did not, and telling the operator to go and
+   * clear a queue that is empty of their work is the middle sentence of a closed loop. So this now
+   * names the precondition instead of assuming it; the run report shows the reconcile step
+   * immediately above, so a reader can see for themselves which case they are in.
+   */
   WRITE_HELD_FOR_CONFIRMATION: Object.freeze({
     zh: '先不写入 —— 等您把拿不准的那几行定下来',
     en: 'Not written yet — waiting for you to decide the uncertain rows',
-    zhNext: '到「确认队列」处理完,再回来点一次同步,这次就会写进去。',
-    enNext: 'Clear them on the confirmation-queue tab, then sync again and it will write.',
+    zhNext: '这些行进了「确认队列」的话,处理完再点一次同步就会写进去;如果上面那步「拿不准的交给人」没有跑成,它们还没进队列,得先让它跑起来。',
+    enNext: 'If those rows reached the confirmation queue, clear them there and sync again and it will write. If the step above (the one that queues them) did not run, they are not in the queue yet — that step has to run first.',
   }),
   WRITE_NO_PLAN: Object.freeze({
     zh: '没有可以执行的计划,所以没有写入',

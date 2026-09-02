@@ -5434,8 +5434,14 @@ function requireStockPreparationAudit() {
     // values-free manual-confirm decision metadata (duplicate_expanded_key class, first cut). No
     // plan row is applied, no request-supplied plan/value payload is accepted, and the canonical
     // sheet is untouched by construction (the ledger module holds no capability toward it).
+    // 一线自己拉数据: reconcile is the step that puts HELD rows into the confirmation queue, so the
+    // operator split had to include it — without it a plan with human-confirm rows left the operator
+    // pointed at a queue that could never contain their work. Same frozen action id, same equality
+    // comparison, legacy 'admin' checked first; the source read underneath runs under the server-held
+    // binding owner, exactly as the dry-run's does.
     async tableActionConfirmationDecisionsReconcile(req, res) {
-      const user = requireAccess(req, 'admin')
+      const reconcileActionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      const user = await requireTableActionAccess(req, reconcileActionId, 'admin', tenantPrincipalDirectory)
       const audit = requireStockPreparationAudit()
       const reconcileLease = requireConfirmationDecisionReconcileLease()
       const body = normalizeTableActionBody(
