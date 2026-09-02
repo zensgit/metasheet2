@@ -480,10 +480,16 @@ async function aHostThatCannotReconcileIsRefusedNotDegraded() {
   assert.equal(plan.willRemoveWriteScopes, null, 'no removal is promised that cannot happen')
   assert.equal(plan.canInstall, false)
 
+  // A pack that WOULD create a column, so "refused before the first schema write" is observable:
+  // with the pre-flight gone the refusal still happens, but only after this column exists.
+  const packThatCreatesAColumn = {
+    ...packWith('bounds', 1, V1_SPLIT),
+    extensionFields: [{ id: 'ext_boundsProbe', label: '边界探针', type: 'string', ownership: 'human_preserved' }],
+  }
   const provisioning = createFakeProvisioning()
   let caught = null
   try {
-    await install(port, packWith('bounds', 1, V1_SPLIT), undefined, provisioning)
+    await install(port, packThatCreatesAColumn, undefined, provisioning)
   } catch (error) {
     caught = error
   }
