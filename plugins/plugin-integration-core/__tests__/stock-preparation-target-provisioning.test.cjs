@@ -9,6 +9,7 @@ const path = require('node:path')
 
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  HUMAN_PRESERVED_FIELD_IDS,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
 const {
   SANDBOX_FIELD_MAP_MODE,
@@ -20,6 +21,7 @@ const {
   ensureStockPreparationCanonicalTarget,
   ensureStockPreparationSandboxTarget,
   repairStockPreparationCanonicalTarget,
+  assertRepairableFieldOwnership,
   assertSandboxObjectId,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-target-provisioning.cjs'))
 
@@ -166,6 +168,17 @@ function createContext({
     },
     calls,
   }
+}
+
+// Sync twin of rejectsWith: returns the thrown error so a caller can assert on its
+// closed `code`. `assert.throws` does not hand the error back.
+function throwsWith(fn) {
+  try {
+    fn()
+  } catch (error) {
+    return error
+  }
+  return null
 }
 
 async function rejectsWith(fn, code) {
@@ -500,18 +513,81 @@ async function main() {
     assert.equal(already.mode, 'canonical_already_ready')
     assert.equal(already.evidence.addedFieldCount, 0)
 
-    // (b) LOAD-BEARING: repair REJECTS a missing human_preserved field. The main table's
-    //     8 human fields must never grow via a repair back door.
-    const humanCtx = createContext({ sheetExists: true, missingFields: ['materialType'] })
-    let humanErr = null
-    try {
-      await repairStockPreparationCanonicalTarget({ context: humanCtx.context, projectId: 'proj_x', permission: 'admin' })
-    } catch (error) {
-      humanErr = error
-    }
-    assert.ok(humanErr instanceof StockPreparationTargetProvisioningError, 'human-field repair rejected')
-    assert.equal(humanErr.code, 'REPAIR_HUMAN_FIELD_FORBIDDEN')
-    assert.equal((humanCtx.calls.ensureMissingObjectFields || []).length, 0, 'no additive write when a human field is in the repair set')
+    // (b) THE HEAL PATH FOR THE HUMAN BAND. A human column that the frozen template and
+    //     the design-gated HUMAN_PRESERVED_FIELD_IDS whitelist AGREE about is healed
+    //     additively. Without this an existing install could never gain the five columns
+    //     added in this change: `ensure` throws TARGET_SCHEMA_INCOMPLETE the moment the
+    //     template outgrows the sheet, and repair is the only additive verb there is.
+    const humanCtx = createContext({ sheetExists: true, missingFields: ['procurementDone'] })
+    const humanRepaired = await repairStockPreparationCanonicalTarget({
+      context: humanCtx.context, projectId: 'proj_x', permission: 'admin',
+    })
+    assert.equal(humanRepaired.mode, 'canonical_repaired', 'a whitelisted human column heals')
+    assert.equal(humanRepaired.evidence.addedFieldCount, 1)
+    assert.equal(
+      (humanCtx.calls.ensureMissingObjectFields || []).length, 1,
+      'the human heal still goes through the additive-only primitive',
+    )
+
+    // (b2) THE BACK DOOR IS STILL SHUT -- the RED witness for the narrowed rule. The
+    //      predicate is exercised directly because the loosening lives THERE; going
+    //      through repair could only ever present ids the frozen template already
+    //      agrees with, so it cannot reach three of these four cases at all.
+    //
+    //      human in the template but NOT in the whitelist => refused. This is precisely
+    //      the "grow the human whitelist through the repair back door" attempt that the
+    //      original unconditional guard existed to stop, and it still fails closed.
+    const backDoor = throwsWith(() => assertRepairableFieldOwnership({
+      fieldId: 'smuggledHumanColumn',
+      ownership: 'human_preserved',
+      isWhitelisted: false,
+      templateFieldIds: ['projectNo'],
+      objectId: 'plm_stock_preparation_main',
+    }))
+    assert.equal(backDoor.code, 'REPAIR_HUMAN_FIELD_FORBIDDEN')
+    assert.match(backDoor.message, /design gate/)
+
+    //      DRIFT, the reverse disagreement: whitelisted but not human in the template.
+    //      Guessing which authority is right is how a load-bearing wall gets holed.
+    const drift = throwsWith(() => assertRepairableFieldOwnership({
+      fieldId: 'notes',
+      ownership: 'plm_system',
+      isWhitelisted: true,
+      templateFieldIds: ['projectNo'],
+      objectId: 'plm_stock_preparation_main',
+    }))
+    assert.equal(drift.code, 'REPAIR_HUMAN_FIELD_FORBIDDEN')
+
+    //      AGREEMENT in both directions is admitted, and the plm_system band is
+    //      completely unchanged by the narrowing.
+    assert.doesNotThrow(() => assertRepairableFieldOwnership({
+      fieldId: 'procurementDone', ownership: 'human_preserved', isWhitelisted: true,
+      templateFieldIds: ['projectNo'], objectId: 'plm_stock_preparation_main',
+    }), 'template + whitelist agree => healable')
+    assert.doesNotThrow(() => assertRepairableFieldOwnership({
+      fieldId: 'path', ownership: 'plm_system', isWhitelisted: false,
+      templateFieldIds: ['projectNo'], objectId: 'plm_stock_preparation_main',
+    }), 'the plm_system band is unaffected')
+
+    //      A non-human, non-plm id must still be a valid tenant `ext_` id -- the
+    //      namespace check the narrowing must not have bypassed.
+    assert.ok(
+      throwsWith(() => assertRepairableFieldOwnership({
+        fieldId: 'notAnExtensionId', ownership: 'tenant_extension', isWhitelisted: false,
+        templateFieldIds: ['projectNo'], objectId: 'plm_stock_preparation_main',
+      })),
+      'a bare id is still rejected by the extension-namespace check',
+    )
+
+    //      STRUCTURAL: for the frozen template the two authorities agree EXACTLY, so
+    //      the refusal branches above are unreachable through the public repair verb.
+    //      That is the guarantee; the direct witnesses prove the rule behind it.
+    assert.deepEqual(
+      STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields
+        .filter((f) => f.ownership === 'human_preserved').map((f) => f.id).sort(),
+      [...HUMAN_PRESERVED_FIELD_IDS].sort(),
+      'frozen template human band === the design-gated whitelist',
+    )
 
     // (b2) POST-WRITE completeness re-verify: if the additive write does NOT actually
     //      leave the schema complete (a field still missing on re-read), repair must

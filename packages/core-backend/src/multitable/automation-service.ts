@@ -56,7 +56,7 @@ import { resolveSheetCapabilitiesForUser } from './sheet-capabilities'
 const EVENT_DELIVERY_LEASE_MS = 60_000
 import { ensureRecordNotLocked } from './record-lock'
 import { publishMultitableSheetRealtime } from './realtime-publish'
-import { extractSelectOptions, normalizeJson } from './field-codecs'
+import { extractSelectOptions, isPlainObject, normalizeJson } from './field-codecs'
 import { recordRecordRevision } from './record-history-service'
 import { fenceWriterEntry } from './canonical-sheet-fence'
 import {
@@ -151,6 +151,15 @@ export interface AutomationTestRunOptions {
   testRunOperationId?: string
   /** Explicit side-effect acknowledgement; required for real_fire. */
   confirmSideEffects?: boolean
+}
+
+function isReadableAutomationTestRunSampleRecord(value: unknown): value is AutomationTestRunSampleRecord {
+  return isPlainObject(value)
+    && typeof value.recordId === 'string'
+    && value.recordId.trim().length > 0
+    && isPlainObject(value.data)
+    && typeof value.actorId === 'string'
+    && value.actorId.trim().length > 0
 }
 
 export class AutomationTestRunRejectedError extends Error {
@@ -3743,6 +3752,13 @@ export class AutomationService {
           409,
           eligibility.code,
           'The rule cannot run in real-fire test mode under the current safety gates',
+        )
+      }
+      if (!isReadableAutomationTestRunSampleRecord(options.sampleRecord)) {
+        throw new AutomationTestRunRejectedError(
+          400,
+          'TEST_RUN_SAMPLE_RECORD_REQUIRED',
+          'A readable sample record is required for a real-fire test run',
         )
       }
     } else if (mode !== 'simulate') {
