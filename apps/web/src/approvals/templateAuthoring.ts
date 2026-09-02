@@ -182,6 +182,11 @@ export interface FieldAuthoringDraft {
   departmentDefaultMode: '' | 'requester_department' | 'designated'
   departmentDefaultIds: string[]
   departmentMaxSelectionsText: string
+  userAllowSelf: boolean
+  userSelection: 'single' | 'multi'
+  userDefaultMode: '' | 'requester' | 'designated'
+  userDefaultIds: string[]
+  userMaxSelectionsText: string
   original?: FormField
 }
 
@@ -401,6 +406,11 @@ export function createEmptyFieldDraft(index = 1): FieldAuthoringDraft {
     departmentDefaultMode: '',
     departmentDefaultIds: [],
     departmentMaxSelectionsText: '',
+    userAllowSelf: false,
+    userSelection: 'single',
+    userDefaultMode: '',
+    userDefaultIds: [],
+    userMaxSelectionsText: '',
   }
 }
 
@@ -648,6 +658,20 @@ function fieldDraftFromField(field: FormField): FieldAuthoringDraft | null {
         : [],
     departmentMaxSelectionsText:
       field.type === 'department' && typeof props.maxSelections === 'number'
+        ? String(props.maxSelections)
+        : '',
+    userAllowSelf: field.type === 'user' && props.allowSelf === true,
+    userSelection: field.type === 'user' && props.selection === 'multi' ? 'multi' : 'single',
+    userDefaultMode:
+      field.type === 'user' && (props.defaultMode === 'requester' || props.defaultMode === 'designated')
+        ? props.defaultMode
+        : '',
+    userDefaultIds:
+      field.type === 'user' && Array.isArray(props.defaultUserIds)
+        ? props.defaultUserIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+        : [],
+    userMaxSelectionsText:
+      field.type === 'user' && typeof props.maxSelections === 'number'
         ? String(props.maxSelections)
         : '',
     original: field,
@@ -1621,6 +1645,18 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
             : {}),
           ...(maxSelections ? { maxSelections: Number(maxSelections) } : {}),
         }
+      } else if (field.type === 'user') {
+        const maxSelections = field.userMaxSelectionsText.trim()
+        const props: Record<string, unknown> = {}
+        if (field.userAllowSelf) props.allowSelf = true
+        if (field.userSelection === 'multi') props.selection = 'multi'
+        if (field.userDefaultMode) props.defaultMode = field.userDefaultMode
+        if (field.userDefaultMode === 'designated' && field.userDefaultIds.length > 0) {
+          props.defaultUserIds = [...field.userDefaultIds]
+        }
+        if (maxSelections) props.maxSelections = Number(maxSelections)
+        if (Object.keys(props).length === 0) delete next.props
+        else next.props = props
       } else if (next.props && typeof next.props === 'object') {
         // Drop record-link pins + L8-C display keys + L8-B date_range keys + L8-A explanation
         // text when type changes away; keep other type-specific props only if still meaningful (do
@@ -1633,6 +1669,11 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
         delete props.thousandsSeparator
         delete props.uppercaseCny
         delete props.dateType
+        delete props.allowSelf
+        delete props.selection
+        delete props.defaultMode
+        delete props.defaultUserIds
+        delete props.maxSelections
         delete props.startLabel
         delete props.endLabel
         delete props.durationLabel
@@ -2138,6 +2179,30 @@ export function validateTemplateFormFields(
         if (pinError) errors.push(pinError)
       }
     }
+    if (field.type === 'user') {
+      const maxText = field.userMaxSelectionsText.trim()
+      const maxSelections = Number(maxText)
+      if (
+        field.userSelection === 'multi'
+        && (!maxText || !Number.isInteger(maxSelections) || maxSelections < 1)
+      ) {
+        errors.push(`${authorLabel}（联系人）多选时需要填写不小于 1 的最多可选人数`)
+      }
+      if (field.userSelection === 'single' && field.userDefaultIds.length > 1) {
+        errors.push(`${authorLabel}（联系人）单选时最多设置一个默认人员`)
+      }
+      if (
+        field.userSelection === 'multi'
+        && Number.isInteger(maxSelections)
+        && maxSelections > 0
+        && field.userDefaultIds.length > maxSelections
+      ) {
+        errors.push(`${authorLabel}（联系人）的默认人员超过最多可选人数`)
+      }
+      if (field.userDefaultMode === 'requester' && !field.userAllowSelf) {
+        errors.push(`${authorLabel}（联系人）默认申请人时必须允许选择本人`)
+      }
+    }
   })
   // Mirror the server visibility-rule reject-set (normalizeFormFieldVisibilityRule +
   // validateFormFieldVisibilityRules): dependency must reference an existing field,
@@ -2274,14 +2339,38 @@ export function validateTemplateApprovalFlow(
       : undefined
     errors.push(...validateApprovalNodeEdits(draft.approvalNodeEdits, draft.fields, parallelRegionNodeKeys, approvalNodeKeys))
   }
-  const userFieldIds = new Set(draft.fields.filter((field) => field.type === 'user').map((field) => field.id.trim()))
+  const userFieldsById = new Map(
+    draft.fields
+      .filter((field) => field.type === 'user')
+      .map((field) => [field.id.trim(), field]),
+  )
   draft.steps.forEach((step, index) => {
     const label = step.name.trim() || `审批步骤 ${index + 1}`
     if ((step.sourceKind === 'static_user' || step.sourceKind === 'static_role') && parseIdsText(step.idsText).length === 0) {
       errors.push(`${label} 需要填写用户/角色 id`)
     }
-    if (step.sourceKind === 'form_field_user' && !userFieldIds.has(step.fieldId.trim())) {
-      errors.push(`${label} 的表单用户字段无效`)
+    if (
+      step.sourceKind === 'form_field_user'
+      || step.sourceKind === 'form_field_user_manager'
+      || step.sourceKind === 'form_field_user_dept_head'
+    ) {
+      const userField = userFieldsById.get(step.fieldId.trim())
+      if (!userField) {
+        errors.push(`${label} 的表单用户字段无效`)
+      } else {
+        if (!userField.required) errors.push(`${label} 的联系人路由字段必须设为必填`)
+        if (userField.visibility.dependsOnFieldId.trim()) {
+          errors.push(`${label} 的联系人路由字段不能设置显示条件`)
+        }
+        if (
+          userField.userSelection === 'multi'
+          && (!userField.userMaxSelectionsText.trim()
+            || !Number.isInteger(Number(userField.userMaxSelectionsText.trim()))
+            || Number(userField.userMaxSelectionsText.trim()) < 1)
+        ) {
+          errors.push(`${label} 的多选联系人路由字段需要设置最多可选人数`)
+        }
+      }
     }
     // Lock-1 §K2 PREVIEW (backend normalize is the final arbiter): a members/role scope needs
     // at least one configured id — the backend rejects an empty scope list the same way.

@@ -185,6 +185,29 @@ describe('retypeFormField - identity preservation (FB-D5)', () => {
 })
 
 describe('buildFormSchema - cross-type props ownership', () => {
+  it('emits no props for an untouched user field and round-trips every Lock-2 user prop when configured', () => {
+    const untouched = draftWith([field(1, { type: 'user' })])
+    expect(buildFormSchema(untouched).fields[0]).not.toHaveProperty('props')
+
+    const configured = draftWith([
+      field(1, {
+        type: 'user',
+        userAllowSelf: true,
+        userSelection: 'multi',
+        userDefaultMode: 'designated',
+        userDefaultIds: ['u1', 'u2'],
+        userMaxSelectionsText: '3',
+      }),
+    ])
+    expect(buildFormSchema(configured).fields[0].props).toEqual({
+      allowSelf: true,
+      selection: 'multi',
+      defaultMode: 'designated',
+      defaultUserIds: ['u1', 'u2'],
+      maxSelections: 3,
+    })
+  })
+
   it('drops persisted date_range props when retyped to number', () => {
     const original: FormField = {
       id: 'field_1',
@@ -284,6 +307,35 @@ describe('buildFormSchema - cross-type props ownership', () => {
       currencySymbol: '¥',
       thousandsSeparator: true,
     })
+  })
+
+  it('drops persisted user props after retyping to a non-user field', () => {
+    const original: FormField = {
+      id: 'field_1',
+      type: 'user',
+      label: '联系人',
+      props: {
+        allowSelf: true,
+        selection: 'multi',
+        defaultMode: 'designated',
+        defaultUserIds: ['u1', 'u2'],
+        maxSelections: 3,
+      },
+    }
+    const source = draftWith([
+      field(1, {
+        type: 'user',
+        original,
+        userAllowSelf: true,
+        userSelection: 'multi',
+        userDefaultMode: 'designated',
+        userDefaultIds: ['u1', 'u2'],
+        userMaxSelectionsText: '3',
+      }),
+    ])
+    const retyped = retypeFormField(source, 'local_1', 'text')
+    assertOk(retyped)
+    expect(buildFormSchema(retyped.draft).fields[0]).not.toHaveProperty('props')
   })
 })
 
@@ -899,6 +951,46 @@ describe('updateFormFieldProperties - committed inspector edits (FB-D7)', () => 
     expect(JSON.stringify(source)).toBe(before)
   })
 
+  it('writes Lock-2 user properties only to user fields and rejects mixed cross-type patches atomically', () => {
+    const source = draftWith([
+      field(1, { type: 'user' }),
+      field(2, { type: 'text' }),
+    ])
+    const before = JSON.stringify(source)
+    const updated = updateFormFieldProperties(source, 'local_1', {
+      userAllowSelf: true,
+      userSelection: 'multi',
+      userDefaultMode: 'designated',
+      userDefaultIds: ['u1', 'u2'],
+      userMaxSelectionsText: '3',
+    })
+    assertOk(updated)
+    expect(updated.draft.fields[0]).toMatchObject({
+      id: 'field_1',
+      localId: 'local_1',
+      type: 'user',
+      userAllowSelf: true,
+      userSelection: 'multi',
+      userDefaultMode: 'designated',
+      userDefaultIds: ['u1', 'u2'],
+      userMaxSelectionsText: '3',
+    })
+    expect(JSON.stringify(source)).toBe(before)
+
+    expect(
+      updateFormFieldProperties(source, 'local_2', {
+        userSelection: 'multi',
+      }),
+    ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+    expect(
+      updateFormFieldProperties(source, 'local_1', {
+        userSelection: 'multi',
+        departmentSelection: 'multi',
+      }),
+    ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+    expect(JSON.stringify(source)).toBe(before)
+  })
+
   it('rejects every type-specific property on the wrong current type, including mixed patches, with zero mutation', () => {
     const source = draftWith([field(1)])
     const before = JSON.stringify(source)
@@ -913,6 +1005,11 @@ describe('updateFormFieldProperties - committed inspector edits (FB-D7)', () => 
       { dateRangeEndLabel: '结束' },
       { dateRangeDurationLabel: '时长' },
       { explanationText: '说明' },
+      { userAllowSelf: true },
+      { userSelection: 'multi' },
+      { userDefaultMode: 'requester' },
+      { userDefaultIds: ['u1'] },
+      { userMaxSelectionsText: '2' },
     ]
     for (const patch of patches) {
       expect(

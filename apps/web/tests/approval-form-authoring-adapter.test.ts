@@ -528,6 +528,12 @@ describe('legacy length-derived helpers - frozen fallback baseline (delta §5 F1
       departmentDefaultMode: '',
       departmentDefaultIds: [],
       departmentMaxSelectionsText: '',
+      // Lock-2 L2-B: neutral authoring carriers until retyped to `user`.
+      userAllowSelf: false,
+      userSelection: 'single',
+      userDefaultMode: '',
+      userDefaultIds: [],
+      userMaxSelectionsText: '',
     })
     expect(localId).toMatch(/^field_\d+_[0-9a-f]{1,6}$/)
     // Default-arg pin: the historical `index = 1` default stays intact.

@@ -504,8 +504,38 @@ export function validateFieldType(
   switch (field.type) {
     case 'text':
     case 'textarea':
-    case 'user':
       return typeof value === 'string' || isRecord(value) ? null : `${field.id} must be a string`
+    case 'user': {
+      const selection = field.props?.selection === 'multi' ? 'multi' : 'single'
+      if (selection === 'multi' && !Array.isArray(value)) {
+        return `${field.id} must be an array of users`
+      }
+      const values = Array.isArray(value) ? value : [value]
+      if (selection === 'single' && values.length !== 1) {
+        return `${field.id} must contain exactly one user`
+      }
+      // Preserve the field-derived routing door: a blank scalar is an empty anchor, not a
+      // malformed principal. The create-time routing guard returns the established values-free
+      // APPROVAL_FORM_ROUTING_FIELD_EMPTY response for that case.
+      if (values.length === 1 && typeof values[0] === 'string' && values[0].trim().length === 0) {
+        return null
+      }
+      const ids: string[] = []
+      for (const entry of values) {
+        const id = typeof entry === 'string'
+          ? entry.trim()
+          : isRecord(entry) && typeof entry.id === 'string'
+            ? entry.id.trim()
+            : ''
+        if (!id) return `${field.id} must contain only user ids or objects with an id`
+        ids.push(id)
+      }
+      if (new Set(ids).size !== ids.length) return `${field.id} must not contain duplicate users`
+      if (typeof field.props?.maxSelections === 'number' && ids.length > field.props.maxSelections) {
+        return `${field.id} exceeds the configured user selection limit`
+      }
+      return null
+    }
     case 'attachment':
       if (options.attachmentValueMode !== 'ids') {
         return typeof value === 'string' || isRecord(value) ? null : `${field.id} must be a string`
