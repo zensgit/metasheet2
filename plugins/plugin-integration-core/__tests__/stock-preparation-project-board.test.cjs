@@ -366,11 +366,11 @@ function mount({
     getObjectViewId(projectId, objectId, viewId) {
       return `view_${projectId}_${objectId}_${viewId}`
     },
-    // The host's OWNERSHIP lookup. plugin-scope has already narrowed it to this plugin's namespace,
-    // so a sheet owned elsewhere reaches this plugin as null, never as another project's id.
+    // The host's OWNERSHIP question — a BOOLEAN about the project we name, so no other tenant's
+    // project id is ever returned to this plugin.
     ...(owners === null ? {} : {
-      async findSheetOwnerProjectId(sheetId) {
-        return owners[sheetId] ?? null
+      async isSheetOwnedByProject(sheetId, projectId) {
+        return (owners[sheetId] ?? null) === projectId
       },
     }),
     async ensureObject() {
@@ -908,6 +908,83 @@ async function theBoardReflectsThePullRatherThanTheAdminsArchive() {
 }
 
 // ---------------------------------------------------------------------------
+// B-13 — THE TENANT MODEL OF THE BOUND SHEET, PINNED FROM BOTH SIDES
+// ---------------------------------------------------------------------------
+//
+// The bound `action.target` is DEPLOY-TIME configuration — one list, shared by every tenant — and
+// `plm_stock_preparation_main` has NO tenant column; its only row-level scope is `projectNo`. Those
+// are properties of the table-action model, not of this PR, and the export route has stated them in
+// its own header since it shipped.
+//
+// An earlier version of the board comment claimed more than that: it said no cross-tenant projectNo
+// could ever be answered. What is actually true — and sufficient — is a model with two halves, and
+// this pins BOTH, because a claim that only ever gets tested on its comfortable side is not pinned.
+async function theBoundSheetsTenantModelHoldsFromBothSides() {
+  const CANONICAL_SHEET = ownSheetIdFor(STAGING_A, MAIN_OBJECT_ID)
+  const NEIGHBOUR_PROJECT_NO = '230920007'
+
+  // HALF ONE — THE OWNER READS THE WHOLE SHEET, and that is what "owning" means here. Two different
+  // project numbers living in tenant A's own bound sheet are BOTH tenant A's data by definition:
+  // the sheet has exactly one owner, and rows only arrive in it through an `apply` that owner ran.
+  // Answering 404 for the second would be the bug, not the guarantee.
+  {
+    const harness = mount({
+      archivePersisted: false,
+      mainTableRows: [
+        { projectNo: PROJECT_A_NO },
+        { projectNo: NEIGHBOUR_PROJECT_NO },
+        { projectNo: NEIGHBOUR_PROJECT_NO },
+      ],
+    })
+    const first = await callBoard(harness.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(first.statusCode, 200, 'B-13: the owner reads their own project')
+    assert.equal(first.body.data.pulledRowCount, 1)
+
+    const second = await callBoard(mount({
+      archivePersisted: false,
+      mainTableRows: [
+        { projectNo: PROJECT_A_NO },
+        { projectNo: NEIGHBOUR_PROJECT_NO },
+        { projectNo: NEIGHBOUR_PROJECT_NO },
+      ],
+    }).routes, { user: OPERATOR_A, projectNo: NEIGHBOUR_PROJECT_NO })
+    assert.equal(
+      second.statusCode,
+      200,
+      'B-13: and every OTHER project number in the sheet they own, because a single-tenant sheet has '
+      + 'no foreign project numbers in it',
+    )
+    assert.equal(second.body.data.pulledRowCount, 2)
+  }
+
+  // HALF TWO — A NON-OWNER LEARNS NOTHING, even about a project number that really does have rows in
+  // that sheet. This is the half the boundary rests on: tenant B is not the owner of tenant A's
+  // bound sheet, so `resolveOwnBoundSheet` refuses it, the sheet is never queried, and the
+  // pull-target disjunct cannot fire. The refusal is the SAME detail-free 404 an unknown number gets.
+  {
+    const harness = mount({
+      archivePersisted: false,
+      mainTableRows: [{ projectNo: PROJECT_A_NO }, { projectNo: PROJECT_A_NO }],
+      // Tenant B's own registry answer and hash both fail against tenant A's sheet.
+      sheetOwners: { [CANONICAL_SHEET]: STAGING_A },
+    })
+    const foreign = await callBoard(harness.routes, { user: OPERATOR_B, projectNo: PROJECT_A_NO })
+    const unknown = await callBoard(mount({
+      archivePersisted: false,
+      mainTableRows: [{ projectNo: PROJECT_A_NO }, { projectNo: PROJECT_A_NO }],
+      sheetOwners: { [CANONICAL_SHEET]: STAGING_A },
+    }).routes, { user: OPERATOR_B, projectNo: UNKNOWN_PROJECT_NO })
+
+    assert.equal(foreign.statusCode, 404, 'B-13: a non-owner is refused a projectNo that HAS rows')
+    assert.deepEqual(
+      foreign.body,
+      unknown.body,
+      'B-13: and the refusal is byte-identical to the one an unknown number gets — the non-owner '
+      + 'learns nothing about which project numbers exist in a sheet they do not own',
+    )
+  }
+}
+// ---------------------------------------------------------------------------
 // B-12 — TENANCY IS PROVED FROM THE SHEET, NOT FROM THE SHAPE OF THE BINDING
 // ---------------------------------------------------------------------------
 //
@@ -1149,6 +1226,7 @@ async function main() {
   await theDeepLinkHandleAppearsOnlyWhenTheFillTableExists()
   await theBoardReflectsThePullRatherThanTheAdminsArchive()
   await tenancyIsProvedFromTheSheetNotTheBindingShape()
+  await theBoundSheetsTenantModelHoldsFromBothSides()
   await oneProjectsBoardCostsOneProjectsQueries()
   await theModuleRefusesToProjectAValueWithoutAScope()
   theFillViewIdMirrorsTheHostsDefaultViewId()

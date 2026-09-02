@@ -181,10 +181,9 @@ describe('multitable plugin scope helper', () => {
         // assertProjectIdAllowedForPlugin exactly like its sheet-id sibling — and therefore has to
         // be exercised on BOTH sides here, or dropping that guard stays green.
         getObjectViewId: vi.fn(() => 'view_1'),
-        // The sheet-ownership lookup. Answers with the OWNING project id, which plugin-scope then
-        // narrows to the caller's own namespace.
-        findSheetOwnerProjectId: vi.fn(async (sheetId: string) => (
-          sheetId === 'sheet_of_another_plugin' ? 'tenant_42:attendance' : 'tenant_42:after-sales'
+        // The sheet-ownership question. A BOOLEAN: the owning project id never leaves the host.
+        isSheetOwnedByProject: vi.fn(async (sheetId: string, projectId: string) => (
+          sheetId === 'sheet_1' && projectId === 'tenant_42:after-sales'
         )),
         getFieldId: vi.fn(() => 'fld_1'),
         isSheetOwnedByProject: vi.fn(async () => true),
@@ -242,7 +241,14 @@ describe('multitable plugin scope helper', () => {
 
     expect(scoped.provisioning.getObjectSheetId('tenant_42:after-sales', 'serviceTicket')).toBe('sheet_1')
     expect(scoped.provisioning.getObjectViewId('tenant_42:after-sales', 'serviceTicket', 'default')).toBe('view_1')
-    await expect(scoped.provisioning.findSheetOwnerProjectId!('sheet_1')).resolves.toBe('tenant_42:after-sales')
+    await expect(
+      scoped.provisioning.isSheetOwnedByProject!('sheet_1', 'tenant_42:after-sales'),
+    ).resolves.toBe(true)
+    // A sheet this project does not own is a plain no — the same answer an unclaimed sheet gets, so
+    // the port cannot be used to find out whose it actually is.
+    await expect(
+      scoped.provisioning.isSheetOwnedByProject!('sheet_of_another_tenant', 'tenant_42:after-sales'),
+    ).resolves.toBe(false)
     expect(scoped.provisioning.getFieldId('tenant_42:after-sales', 'serviceTicket', 'status')).toBe('fld_1')
     await expect(
       scoped.provisioning.isSheetOwnedByProject('sheet_1', 'tenant_42:after-sales'),
@@ -321,13 +327,13 @@ describe('multitable plugin scope helper', () => {
     expect(() =>
       scoped.provisioning.getObjectViewId('tenant_42:attendance', 'serviceTicket', 'default'),
     ).toThrow(MultitableProjectNamespaceError)
-    // The ownership lookup takes a SHEET id, so the namespace guard lands on the ANSWER: a sheet
-    // owned outside this plugin's namespace yields null and never the real project id. NULL rather
-    // than a throw on purpose - "somebody else's" and "no such sheet" must be one answer, or the
-    // port becomes an ownership oracle over sheet ids.
+    // The ownership question names a PROJECT, so it takes the same namespace assertion every other
+    // project argument takes, and throws like them. There is no answer to narrow afterwards: the
+    // port returns a boolean, so it can never hand back another tenant's project id — which is what
+    // an earlier id-returning cut did, since plugin namespaces are per-PLUGIN, not per-tenant.
     await expect(
-      scoped.provisioning.findSheetOwnerProjectId!('sheet_of_another_plugin'),
-    ).resolves.toBeNull()
+      scoped.provisioning.isSheetOwnedByProject!('sheet_1', 'tenant_42:attendance'),
+    ).rejects.toThrow(MultitableProjectNamespaceError)
     expect(() =>
       scoped.provisioning.getFieldId('tenant_42:attendance', 'serviceTicket', 'status'),
     ).toThrow(MultitableProjectNamespaceError)

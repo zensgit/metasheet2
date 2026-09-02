@@ -8260,11 +8260,26 @@ function requireStockPreparationAudit() {
     // number addresses the resource. It is the caller's own input echoed back in the response (which
     // is fine — it is theirs) and it reaches NO audit row (which is the point: see below).
     //
-    // THE 404 IS NOT AN EXISTENCE ORACLE. `readOperatorProjectBoard` looks the number up in the
-    // caller's OWN directory, so "another tenant's project" is not a branch — it is simply absent,
-    // and takes the identical path an unknown number takes to an identical, detail-free 404. There is
-    // no reading of the response, the status or the timing from which a tenant-A operator learns
-    // that a number exists in tenant B.
+    // WHOSE PROJECT NUMBERS THIS CAN ANSWER FOR — the same model the export route states, in the
+    // same words, because it is the same table.
+    //
+    // `action.target` is DEPLOY-TIME configuration shared by every tenant on the deployment, and
+    // `plm_stock_preparation_main` carries NO tenant column — its only row-level scope is
+    // `projectNo`. So the boundary this route can enforce, and does, is OWNERSHIP OF THE SHEET:
+    //
+    //   * a caller whose own staging project does not own the bound sheet never reads it at all
+    //     (`resolveOwnBoundSheet` refuses first), so for them every project number — one that exists
+    //     in that sheet as much as one that exists nowhere — takes the identical path to the
+    //     identical, detail-free 404. Nothing in the response, the status or the timing separates
+    //     the two. That is the property B-02/B-13 assert.
+    //   * the ONE caller who does own it reads all of it, and every project number in it is theirs
+    //     by definition: a single-owner sheet has no foreign project numbers, because rows only
+    //     arrive through an `apply` that owner ran.
+    //
+    // What this route does NOT claim is that a deployment pointing several tenants at one shared
+    // target keeps their rows apart. It cannot — the table has no tenant column — and the export
+    // route has the same property for the same reason. Making the target per-tenant is a change to
+    // the table-action model that both routes need, and it is not this one.
     //
     // MULTITABLE ENFORCES ACCESS ON LANDING. The `fillTarget` in the response is a HANDLE, not a
     // permission decision. This plugin has no user-aware multitable ACL seam — the read runs on the

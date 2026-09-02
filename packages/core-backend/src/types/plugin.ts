@@ -441,19 +441,24 @@ export interface MultitableProvisioningAPI {
    */
   getObjectViewId(projectId: string, objectId: string, viewId: string): string
   /**
-   * WHICH PROJECT OWNS THIS SHEET, from the provisioning registry — `null` when the sheet is
-   * unclaimed, and `null` (never the real id) when it belongs outside the calling plugin's project
-   * namespace, so the port cannot be used to enumerate other owners.
+   * IS THIS SHEET OWNED BY THIS PROJECT, per the provisioning registry — a yes/no, and deliberately
+   * never "whose is it".
    *
    * It exists because a sheet id ALONE cannot be checked for ownership by recomputing a hash: the
    * hash is over (projectId, objectId), so a caller must already know the objectId the sheet was
    * created under. A deployment that rebinds a table action to a different objectId while KEEPING
    * its existing sheet still owns that sheet, and only a registry lookup says so.
    *
+   * THE SHAPE IS A BOOLEAN ON PURPOSE. Plugin project namespaces are per-PLUGIN, not per-tenant, so
+   * an id-returning form cannot be made safe by narrowing its answer to the namespace: every tenant
+   * of the same plugin shares that namespace, and the caller would be handed another tenant's
+   * staging project id. Callers only need "is the sheet I was handed mine?", so the id never leaves
+   * the database.
+   *
    * OPTIONAL: a plugin newer than its host degrades to "cannot prove ownership this way" rather
-   * than erroring.
+   * than erroring. `projectId` is namespace-checked exactly like every other project argument.
    */
-  findSheetOwnerProjectId?(sheetId: string): Promise<string | null>
+  isSheetOwnedByProject?(sheetId: string, projectId: string): Promise<boolean>
   findObjectSheet(input: {
     projectId: string
     objectId: string

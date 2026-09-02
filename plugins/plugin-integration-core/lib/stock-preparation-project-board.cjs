@@ -276,10 +276,10 @@ async function lastExportAtFor(audit, { tenantId, projectNo }) {
  * counts would report "table not ready" over a table full of their own rows. It also cannot speak at
  * all about a sheet an administrator bound by hand.
  *
- * So ownership is proved from the SHEET as well. `findSheetOwnerProjectId` is the host's
+ * So ownership is proved from the SHEET as well. `isSheetOwnedByProject` is the host's
  * provisioning-registry lookup — `plugin_multitable_object_registry` records which project owns each
- * sheet at provisioning time — narrowed by plugin-scope to this plugin's own namespace, so a sheet
- * owned elsewhere arrives here as `null` and never as another tenant's project id.
+ * sheet at provisioning time — and it answers a BOOLEAN about the project we name, so no other
+ * tenant's project id is ever returned to this plugin in the first place.
  *
  * The two are a DISJUNCTION of independently sufficient proofs, not a replacement: either the
  * registry says the sheet is ours, or its id hashes from our own project. Both are sound, so their
@@ -296,17 +296,19 @@ async function resolveOwnBoundSheet(provisioning, stagingProjectId, boundTarget)
   const objectId = optionalString(boundTarget && boundTarget.objectId) || STOCK_PREPARATION_FILL_OBJECT_ID
 
   // PROOF 1 — THE REGISTRY. Optional capability: a plugin newer than its host simply falls through.
-  if (typeof provisioning.findSheetOwnerProjectId === 'function') {
-    let owner = null
+  // The port answers a yes/no about the project we ASK about, so it never hands back another
+  // tenant's project id — an id-returning form could not be made safe here, because plugin project
+  // namespaces are per-PLUGIN and every stock-prep tenant shares one.
+  if (typeof provisioning.isSheetOwnedByProject === 'function') {
+    let owned = false
     try {
-      owner = await provisioning.findSheetOwnerProjectId(boundSheetId)
+      owned = await provisioning.isSheetOwnedByProject(boundSheetId, stagingProjectId) === true
     } catch {
-      owner = null
+      owned = false
     }
-    // Equality with the caller's OWN staging project, which was derived from the verified scope.
-    // Anything else — another tenant's project, another plugin's, or an unclaimed sheet — is not a
-    // proof and falls through to the second one rather than being treated as a refusal.
-    if (optionalString(owner) === stagingProjectId) return { sheetId: boundSheetId, objectId }
+    // A "no" is not a refusal — an unclaimed sheet answers the same way — so it falls through to the
+    // second proof rather than ending the resolution.
+    if (owned) return { sheetId: boundSheetId, objectId }
   }
 
   // PROOF 2 — THE DETERMINISTIC ID, plus an existence check. Unchanged from the first cut.
@@ -478,11 +480,11 @@ async function readOperatorProjectBoard({
   const pullTarget = await readPullTargetRowFacts(recordsApi, ownSheet, boundTarget, wanted)
 
   // ---------------------------------------------------------------------------
-  // EXISTENCE: EITHER STORE, AND WHY THAT IS STILL NOT AN ORACLE
+  // EXISTENCE: EITHER STORE — AND THE TENANT MODEL THAT MAKES THAT SOUND
   // ---------------------------------------------------------------------------
   //
-  // "Is this project one of yours?" now has two admissible answers, because the two stores are
-  // written by two different tiers and the operator can only reach one of them:
+  // "Is this project one of yours?" has two admissible answers, because the two stores are written
+  // by two different tiers and the operator can only reach one of them:
   //
   //   * the ARCHIVE (`match`) — the MVP project ledger under the caller's own staging project,
   //     written by `mvp-persist`, which stayed platform-admin; and
@@ -492,14 +494,37 @@ async function readOperatorProjectBoard({
   // Without the second, a project a floor operator pulled themselves was NOT FOUND forever: the page
   // built for them could not show them the work they had just done.
   //
-  // NEITHER DISJUNCT REACHES OUTSIDE THE CALLER'S OWN TENANT. The archive is read under the staging
-  // project derived from the verified scope (the directory module refuses any other). The pull target
-  // is read ONLY when `resolveOwnBoundSheet` has proved the bound sheet is the one the CALLER'S OWN
-  // provisioning computes for their OWN staging project — a deploy-time target pointing anywhere else
-  // is never queried at all, so it can neither confirm nor deny a project number. A cross-tenant
-  // projectNo therefore still takes the identical path an unknown number takes, to the identical
-  // detail-free 404, and the suite asserts the two bodies byte-for-byte (B-02) plus the gate itself
-  // from both sides (B-11 case 4).
+  // ---------------------------------------------------------------------------
+  // THE TENANT MODEL, STATED PLAINLY — because an earlier version of this comment overclaimed
+  // ---------------------------------------------------------------------------
+  //
+  // THE FACTS, none of which this PR invented:
+  //   * `action.target` is DEPLOY-TIME configuration. There is one list, shared by every tenant on
+  //     the deployment; the sheet it names is not derived from anybody's tenant.
+  //   * `plm_stock_preparation_main` has NO tenant column. The only row-level scope inside it is
+  //     `projectNo`.
+  // The export route has said exactly this in its own header since it shipped; this comment now says
+  // it too, in the same words, instead of implying a stronger boundary than the data model has.
+  //
+  // WHAT THAT MAKES TRUE, AND IT IS ENOUGH:
+  //   * the bound sheet is owned by exactly ONE project, and `resolveOwnBoundSheet` proves the
+  //     caller's own staging project is that one — by the provisioning registry, or by the
+  //     deterministic id. A caller who is NOT the owner never reads that sheet at all, so for them
+  //     the pull-target disjunct cannot fire and every projectNo answers the identical, detail-free
+  //     404 an unknown number gets. That much is a real boundary and B-02 pins it.
+  //   * for the ONE tenant who DOES own the sheet, every projectNo in it is theirs BY DEFINITION.
+  //     There is no "another tenant's projectNo" inside a single-tenant sheet — the sheet has one
+  //     owner, and rows only arrive in it through an `apply` that owner ran.
+  //
+  // WHAT THIS DOES NOT CLAIM. It does not claim that a deployment which points several tenants at one
+  // shared target keeps their rows apart: it cannot, because the table has no tenant column, and the
+  // export route has the same property for the same reason. On such a deployment the owning tenant
+  // reads the whole sheet — which is what "owning" means here. Making the target per-tenant is a
+  // change to the table-action model that both routes need, and it is not this PR.
+  //
+  // The suite pins BOTH halves: two projectNos in the owner's own bound sheet are both readable, and
+  // a non-owning tenant gets the identical 404 for a projectNo even when rows for it exist in that
+  // sheet (B-13).
   if (!match && pullTarget.rowCount === 0) {
     // Reported so the ROUTE can audit that a miss happened, then rethrown. The refusal itself stays
     // shapeless — the caller learns nothing beyond "not one of yours".
