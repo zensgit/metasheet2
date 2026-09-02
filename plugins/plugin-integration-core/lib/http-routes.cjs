@@ -5617,9 +5617,12 @@ function createHandlers(services, options = {}) {
     },
 
     async tableActionLargeBomExpansionJobStart(req, res) {
-      requireAccess(req, 'read')
-      const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_LARGE_BOM_START_BODY_KEYS)
+      // 一线自己拉数据 — the bounded background channel. The action id is read from the route params
+      // FIRST because the gate is scoped to it, exactly as on the small dry-run route; it is a pure
+      // param read, so the 401/403 still precedes every other validation and every IO.
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
+      const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_LARGE_BOM_START_BODY_KEYS)
       const routeScope = largeBomJobScope(req, { actionId })
       const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
       const parameters = normalizeActionParameters(body.parameters)
@@ -5634,8 +5637,8 @@ function createHandlers(services, options = {}) {
     },
 
     async tableActionLargeBomExpansionJobGet(req, res) {
-      requireAccess(req, 'read')
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
       assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
       const routeScope = largeBomJobScope(req, { actionId })
       const job = await loadLargeBomBackgroundExpansionJob({
@@ -5648,9 +5651,9 @@ function createHandlers(services, options = {}) {
     },
 
     async tableActionLargeBomExpansionJobRun(req, res) {
-      requireAccess(req, 'read')
-      normalizeTableActionBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
+      normalizeTableActionBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS)
       const jobId = firstString(requestParams(req).jobId)
       const routeScope = largeBomJobScope(req, { actionId })
       const queuedJob = await loadLargeBomBackgroundExpansionJob({
@@ -5719,9 +5722,9 @@ function createHandlers(services, options = {}) {
     },
 
     async tableActionLargeBomExpansionJobPlan(req, res) {
-      requireAccess(req, 'read')
-      const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_LARGE_BOM_PLAN_BODY_KEYS)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
+      const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_LARGE_BOM_PLAN_BODY_KEYS)
       const jobId = firstString(requestParams(req).jobId)
       const routeScope = largeBomJobScope(req, { actionId })
       const job = await loadLargeBomBackgroundExpansionJob({
@@ -5761,9 +5764,12 @@ function createHandlers(services, options = {}) {
     },
 
     async tableActionLargeBomApplyJobStart(req, res) {
-      const user = requireAccess(req, 'write')
-      const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_LARGE_BOM_APPLY_START_BODY_KEYS)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      // `applyPermissionForUser(user)` below still reads the SERVER-side capability from the real
+      // principal, so an operator admitted here carries 'write', never 'admin' — the split adds an
+      // admission, it does not promote anyone.
+      const user = await requireTableActionAccess(req, actionId, 'write', tenantPrincipalDirectory)
+      const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_LARGE_BOM_APPLY_START_BODY_KEYS)
       const jobId = firstString(requestParams(req).jobId)
       const routeScope = largeBomJobScope(req, { actionId })
       assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
@@ -5781,8 +5787,8 @@ function createHandlers(services, options = {}) {
     },
 
     async tableActionLargeBomApplyJobGet(req, res) {
-      requireAccess(req, 'read')
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
       const jobId = firstString(requestParams(req).jobId)
       const routeScope = largeBomJobScope(req, { actionId })
       assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
@@ -5797,9 +5803,9 @@ function createHandlers(services, options = {}) {
     },
 
     async tableActionLargeBomApplyJobRun(req, res) {
-      requireAccess(req, 'write')
-      normalizeTableActionBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      await requireTableActionAccess(req, actionId, 'write', tenantPrincipalDirectory)
+      normalizeTableActionBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS)
       const jobId = firstString(requestParams(req).jobId)
       const routeScope = largeBomJobScope(req, { actionId })
       assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
@@ -5839,9 +5845,9 @@ function createHandlers(services, options = {}) {
     },
 
     async tableActionLargeBomExpansionJobCancel(req, res) {
-      requireAccess(req, 'write')
-      normalizeTableActionBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      await requireTableActionAccess(req, actionId, 'write', tenantPrincipalDirectory)
+      normalizeTableActionBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS)
       assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
       const routeScope = largeBomJobScope(req, { actionId })
       const job = await cancelLargeBomBackgroundExpansionJob({

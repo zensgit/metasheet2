@@ -247,6 +247,71 @@ const STOCK_PREP_OPERATOR_PULL_STEPS = Object.freeze([
     path: '/api/integration/table-actions/:actionId/apply',
     legacyGate: 'write',
   }),
+  // ── THE BOUNDED BACKGROUND CHANNEL — THE SAME PULL, JUST TOO BIG TO DO IN ONE REQUEST ──────────
+  //
+  // A first cut of this split moved dry-run and apply only. That left the operator tier admitted to
+  // the pull right up to the point where the pull is HARD: the moment a BOM is too large to expand
+  // inline, the panel switches to these eight routes automatically and every one of them 403'd — and
+  // it did so directly underneath copy that promised 「不用重新点同步,也不用联系我们」. A large BOM
+  // is not a different act from a small one, and it is the case where "ask a platform administrator"
+  // costs the most: the projects that need the background channel are precisely the big ones.
+  //
+  // These are the SAME pull under the same frozen action id, so they take the SAME rule — equality
+  // on `plm.stock-preparation.pull-bom.v1`, the legacy gate checked first, the tenant verified
+  // through `resolveOperatorValueScope`. The apply-side members reach the SAME
+  // `assertStockPrepApplyAllowed` sandbox/production gate and the same plan-bound check the small
+  // apply route rides, so an operator gains no write the admin path did not already fence.
+  //
+  // `cancel` is in the list deliberately: it stops a job THIS caller started, and a channel you can
+  // start but not stop is worse than one you cannot start at all.
+  Object.freeze({
+    step: 'large-bom-expansion-start',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'large-bom-expansion-get',
+    method: 'GET',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'large-bom-expansion-run',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'large-bom-expansion-plan',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/plan',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'large-bom-apply-start',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs',
+    legacyGate: 'write',
+  }),
+  Object.freeze({
+    step: 'large-bom-apply-get',
+    method: 'GET',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'large-bom-apply-run',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId/run',
+    legacyGate: 'write',
+  }),
+  Object.freeze({
+    step: 'large-bom-expansion-cancel',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/cancel',
+    legacyGate: 'write',
+  }),
 ])
 
 /** The sub-routes that STAYED platform-admin. Listed so a suite can prove the split did not drift. */

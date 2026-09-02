@@ -918,6 +918,19 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '请核对项目号有没有打错;也可能这个项目还没到 PLM 里。什么都没有改动。',
     enNext: 'Check the number for a typo — or the project may not be in PLM yet. Nothing was changed.',
   }),
+  /**
+   * 一线自己拉数据 — THE PROMISE IN THE SECOND LINE, AND WHY IT IS NOW TRUE.
+   *
+   * 「不用重新点同步,也不用联系我们」 is a claim about who can finish the run, and for a while it was
+   * false for the very tier this page is for: the split moved dry-run and apply only, so the moment
+   * the panel switched itself to the bounded background channel, all eight of those routes 403'd a
+   * stock-prep operator — directly under this sentence.
+   *
+   * The eight routes are now in STOCK_PREP_OPERATOR_PULL_STEPS (workbenchAccess.ts), so every tier
+   * that can press 同步 at all — a platform admin, or the stock-prep operator conjunction; those are
+   * the only two `canRunStockPrepProjectSync` admits — can also drive the channel to the end. The
+   * promise is kept for every caller who can read it.
+   */
   PLAN_LARGE_BOM_BOUNDED: Object.freeze({
     zh: '这个项目的 BOM 太大,没法当场展开',
     en: 'This project’s BOM is too large to expand on the spot',

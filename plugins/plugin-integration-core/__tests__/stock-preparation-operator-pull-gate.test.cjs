@@ -97,6 +97,10 @@ const PAST_THE_GATE = 'PAST_THE_GATE'
 
 function mount({ tenantPrincipalDirectory = { async verifyTenantMembership() { return { member: true } } } } = {}) {
   const routes = new Map()
+  // EVERY host touch, counted. A refusal that is a real gate refusal costs ZERO of these: the gate is
+  // the first thing each of these handlers does, so a refused caller must not reach a sheet, a record
+  // or an external system. Counting is what turns "it 403'd" into "it 403'd before doing anything".
+  let hostCalls = 0
   const context = {
     api: {
       http: {
@@ -106,11 +110,11 @@ function mount({ tenantPrincipalDirectory = { async verifyTenantMembership() { r
       },
       multitable: {
         provisioning: {
-          async findObjectSheet() { throw new Error(PAST_THE_GATE) },
-          async resolveFieldIds() { throw new Error(PAST_THE_GATE) },
+          async findObjectSheet() { hostCalls += 1; throw new Error(PAST_THE_GATE) },
+          async resolveFieldIds() { hostCalls += 1; throw new Error(PAST_THE_GATE) },
         },
         records: {
-          async queryRecords() { throw new Error(PAST_THE_GATE) },
+          async queryRecords() { hostCalls += 1; throw new Error(PAST_THE_GATE) },
         },
       },
     },
@@ -141,6 +145,8 @@ function mount({ tenantPrincipalDirectory = { async verifyTenantMembership() { r
     services,
     logger: { info() {}, warn() {}, error() {} },
   })
+  routes.hostCallCount = () => hostCalls
+  routes.resetHostCalls = () => { hostCalls = 0 }
   return routes
 }
 
@@ -174,11 +180,16 @@ const GATE_REFUSAL_CODES = new Set([
   'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED',
 ])
 
+// The large-BOM routes carry job handles in the path. They are supplied for every call because a
+// route that reads them AFTER its gate must behave identically whether they are present or not — the
+// gate is the first statement, and nothing below it runs for a refused caller.
+const JOB_PARAMS = Object.freeze({ jobId: 'job_1', applyJobId: 'applyjob_1' })
+
 async function gateVerdict(routes, { method, routePath, user, actionId, body = {}, query = {}, authenticatedTenantId } = {}) {
   const handler = routes.get(`${method.toUpperCase()} ${routePath}`)
   assert.ok(handler, `route ${method} ${routePath} is registered`)
   const res = createResponse()
-  const req = { user, body, query, params: { actionId } }
+  const req = { user, body, query, params: { ...JOB_PARAMS, actionId } }
   if (authenticatedTenantId !== undefined) req.authenticatedTenantId = authenticatedTenantId
   try {
     await handler(req, res)
@@ -201,7 +212,7 @@ async function refusalCode(routes, input) {
   const handler = routes.get(`${input.method.toUpperCase()} ${input.routePath}`)
   assert.ok(handler, 'route is registered')
   const res = createResponse()
-  const req = { user: input.user, body: input.body || {}, query: input.query || {}, params: { actionId: input.actionId } }
+  const req = { user: input.user, body: input.body || {}, query: input.query || {}, params: { ...JOB_PARAMS, actionId: input.actionId } }
   if (input.authenticatedTenantId !== undefined) req.authenticatedTenantId = input.authenticatedTenantId
   try {
     await handler(req, res)
@@ -215,6 +226,19 @@ const DRY_RUN = { method: 'POST', routePath: '/api/integration/table-actions/:ac
 const APPLY = { method: 'POST', routePath: '/api/integration/table-actions/:actionId/apply' }
 const RECONCILE = { method: 'POST', routePath: '/api/integration/table-actions/:actionId/confirmation-decisions/reconcile' }
 const MVP_PERSIST = { method: 'POST', routePath: '/api/integration/table-actions/:actionId/mvp-persist' }
+
+/**
+ * THE BOUNDED BACKGROUND CHANNEL — the eight routes the 项目备料 panel switches to on its own the
+ * moment a BOM is too large to expand inline. Read out of the shared manifest rather than retyped,
+ * so a route that joins the split without joining this suite is impossible.
+ */
+const LARGE_BOM_ROUTES = STOCK_PREP_OPERATOR_PULL_STEPS
+  .filter((step) => step.step.startsWith('large-bom-'))
+  .map((step) => ({ method: step.method, routePath: step.path, step: step.step }))
+
+/** Every moved step, small and large, as callable route descriptors. */
+const ALL_MOVED_ROUTES = STOCK_PREP_OPERATOR_PULL_STEPS
+  .map((step) => ({ method: step.method, routePath: step.path, step: step.step }))
 
 // ---------------------------------------------------------------------------
 // P-01 / P-02 — what moved, and what did not
@@ -313,8 +337,21 @@ function theRuleIsDeclaredOnceAndTheSplitIsNamed() {
 
   assert.deepEqual(
     STOCK_PREP_OPERATOR_PULL_STEPS.map((step) => step.step),
-    ['dry-run', 'apply'],
-    'P-05: exactly two steps moved to the operator tier',
+    [
+      'dry-run',
+      'apply',
+      // The bounded background channel — the same pull, taken in pieces because the BOM is too big
+      // to expand in one request. See P-07.
+      'large-bom-expansion-start',
+      'large-bom-expansion-get',
+      'large-bom-expansion-run',
+      'large-bom-expansion-plan',
+      'large-bom-apply-start',
+      'large-bom-apply-get',
+      'large-bom-apply-run',
+      'large-bom-expansion-cancel',
+    ],
+    'P-05: exactly these steps moved to the operator tier',
   )
   assert.deepEqual(
     STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS.map((step) => step.step),
@@ -322,7 +359,7 @@ function theRuleIsDeclaredOnceAndTheSplitIsNamed() {
     'P-05: exactly two steps stayed platform-admin',
   )
   for (const step of STOCK_PREP_OPERATOR_PULL_STEPS) {
-    assert.equal(typeof step.method, 'string')
+    assert.ok(['GET', 'POST'].includes(step.method), `P-05: ${step.step} names a real method`)
     assert.ok(step.path.startsWith('/api/integration/table-actions/:actionId/'))
     assert.ok(['read', 'write'].includes(step.legacyGate), 'P-05: each moved step names the legacy gate it keeps')
   }
@@ -417,8 +454,183 @@ async function theOperatorBranchCannotBeSteeredAcrossTenants() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// P-07 — THE BOUNDED BACKGROUND CHANNEL IS THE SAME PULL, SO IT TAKES THE SAME RULE
+// ---------------------------------------------------------------------------
+//
+// THE BUG THIS PINS. The split originally moved dry-run and apply only. But the moment a BOM is too
+// large to expand inline, the 项目备料 panel switches to the eight large-BOM routes BY ITSELF — and
+// every one of them 403'd for the operator tier, underneath copy that promised
+// 「不用重新点同步,也不用联系我们」. The operator was admitted to the easy pull and refused the hard
+// one, which is the wrong way round: the projects that need the background channel are the big ones.
+//
+// Everything the small routes are asserted for is asserted here, route by route, from the manifest.
+async function theOperatorReachesTheBoundedBackgroundChannel() {
+  const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
+  assert.equal(LARGE_BOM_ROUTES.length, 8, 'P-07: all eight background-channel routes are in the split')
+
+  // 1. ADMITTED for the pull-bom action id.
+  {
+    const routes = mount()
+    for (const route of LARGE_BOM_ROUTES) {
+      assert.equal(
+        await gateVerdict(routes, { ...route, user: OPERATOR, actionId: pull }),
+        'admitted',
+        `P-07: the operator may run ${route.step}`,
+      )
+    }
+  }
+
+  // 2. SCOPED TO ONE ACTION ID. The same operator, on any other table action, is refused exactly as
+  //    before — the widening is not a wildcard over the table-action namespace, on these routes any
+  //    more than on the small ones. AND IT COSTS NO IO.
+  {
+    const routes = mount()
+    for (const route of LARGE_BOM_ROUTES) {
+      routes.resetHostCalls()
+      assert.equal(
+        await gateVerdict(routes, { ...route, user: OPERATOR, actionId: OTHER_ACTION_ID }),
+        'refused',
+        `P-07: ${route.step} is refused for a table action that is not the stock-prep pull`,
+      )
+      assert.equal(routes.hostCallCount(), 0, `P-07: ${route.step} refuses a foreign action id with zero IO`)
+    }
+  }
+
+  // 3. NOBODY ELSE GAINS. The tiers that hold neither the legacy gate nor the operator conjunction
+  //    are still refused everywhere, and still for free.
+  {
+    const routes = mount()
+    for (const user of [ANONYMOUS, LOGGED_IN, OPERATOR_READ, OPERATOR_ORPHAN]) {
+      for (const route of LARGE_BOM_ROUTES) {
+        routes.resetHostCalls()
+        assert.equal(
+          await gateVerdict(routes, { ...route, user, actionId: pull }),
+          'refused',
+          `P-07: ${user ? user.id : 'anonymous'} must be refused ${route.step}`,
+        )
+        assert.equal(routes.hostCallCount(), 0, `P-07: and reaches no host API doing it`)
+      }
+    }
+  }
+
+  // 4. THE LEGACY TIERS ARE UNCHANGED on these routes too. integration:read still reaches the read
+  //    half and still cannot reach the write half.
+  {
+    const routes = mount()
+    for (const route of LARGE_BOM_ROUTES) {
+      const step = STOCK_PREP_OPERATOR_PULL_STEPS.find((entry) => entry.step === route.step)
+      const legacyUser = step.legacyGate === 'write' ? INTEGRATION_WRITER : INTEGRATION_READER
+      assert.equal(
+        await gateVerdict(routes, { ...route, user: legacyUser, actionId: pull }),
+        'admitted',
+        `P-07: the legacy ${step.legacyGate} tier still reaches ${route.step}`,
+      )
+      if (step.legacyGate === 'write') {
+        assert.equal(
+          await gateVerdict(routes, { ...route, user: INTEGRATION_READER, actionId: pull }),
+          'refused',
+          `P-07: integration:read did not gain ${route.step}`,
+        )
+      }
+    }
+  }
+
+  // 5. THE TENANT IS VERIFIED, exactly as on the small routes — the whole reason the operator branch
+  //    cannot lean on `resolveTenantId`, whose `user.tenantId` is filled from the x-tenant-id REQUEST
+  //    HEADER on a tenant-claimless deployment. Every refusal below happens with zero IO.
+  {
+    const routes = mount()
+    for (const route of LARGE_BOM_ROUTES) {
+      routes.resetHostCalls()
+      assert.equal(
+        await refusalCode(routes, { ...route, user: OPERATOR, actionId: pull, query: { tenantId: TENANT_B } }),
+        'OPERATOR_SCOPE_TENANT_MISMATCH',
+        `P-07: ${route.step} refuses a steered tenant`,
+      )
+      assert.equal(routes.hostCallCount(), 0, `P-07: ${route.step} refuses a steered tenant with zero IO`)
+
+      routes.resetHostCalls()
+      assert.equal(
+        await refusalCode(routes, { ...route, user: OPERATOR, actionId: pull, authenticatedTenantId: TENANT_B }),
+        'OPERATOR_SCOPE_TENANT_CONTRADICTED',
+        `P-07: ${route.step} refuses a header contradicting the verified claim`,
+      )
+      assert.equal(routes.hostCallCount(), 0, `P-07: ${route.step} refuses a contradicted tenant with zero IO`)
+
+      routes.resetHostCalls()
+      const tenantless = { id: 'u_op_tenantless', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] }
+      assert.equal(
+        await refusalCode(routes, { ...route, user: tenantless, actionId: pull }),
+        'OPERATOR_SCOPE_TENANT_REQUIRED',
+        `P-07: ${route.step} refuses a tenantless operator`,
+      )
+      assert.equal(routes.hostCallCount(), 0, `P-07: ${route.step} refuses a tenantless operator with zero IO`)
+    }
+  }
+
+  // The host cannot vouch -> fail CLOSED on every one of them.
+  {
+    const routes = mount({ tenantPrincipalDirectory: null })
+    for (const route of LARGE_BOM_ROUTES) {
+      assert.equal(
+        await refusalCode(routes, { ...route, user: OPERATOR, actionId: pull }),
+        'OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE',
+        `P-07: ${route.step} fails closed without the membership seam`,
+      )
+    }
+    // …and the LEGACY branch still returns before any of it, so no existing caller pays for it.
+    for (const route of LARGE_BOM_ROUTES) {
+      const step = STOCK_PREP_OPERATOR_PULL_STEPS.find((entry) => entry.step === route.step)
+      assert.equal(
+        await gateVerdict(routes, { ...route, user: step.legacyGate === 'write' ? INTEGRATION_WRITER : INTEGRATION_READER, actionId: pull }),
+        'admitted',
+        `P-07: the legacy tier does not pay for the operator branch on ${route.step}`,
+      )
+    }
+  }
+
+  // 6. WHAT STAYED, STAYED. reconcile and mvp-persist are still refused for the operator tier, and
+  //    the background channel changes nothing about that.
+  {
+    const routes = mount()
+    for (const route of [RECONCILE, MVP_PERSIST]) {
+      assert.equal(
+        await gateVerdict(routes, { ...route, user: OPERATOR, actionId: pull }),
+        'refused',
+        `P-07: ${route.routePath} is still platform-admin`,
+      )
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// P-08 — THE MANIFEST AND THE ROUTE TABLE AGREE, STEP FOR STEP
+// ---------------------------------------------------------------------------
+//
+// Every moved step must name a route that is actually registered, and every large-BOM route the
+// plugin registers must be in the split — otherwise the panel can auto-start a route the manifest
+// does not know about, which is exactly how the first cut shipped eight silent 403s.
+function everyLargeBomRouteIsInTheSplit() {
+  const routes = mount()
+  for (const route of ALL_MOVED_ROUTES) {
+    assert.ok(
+      routes.get(`${route.method.toUpperCase()} ${route.routePath}`),
+      `P-08: the manifest names ${route.step}, so the route table must register it`,
+    )
+  }
+  const registeredLargeBom = [...routes.keys()].filter((key) => key.includes('/large-bom/'))
+  assert.equal(
+    registeredLargeBom.length,
+    LARGE_BOM_ROUTES.length,
+    `P-08: every registered large-BOM route must be in the split (registered: ${JSON.stringify(registeredLargeBom)})`,
+  )
+}
+
 async function main() {
   await theOperatorPullsButNeitherReconcilesNorArchives()
+  await theOperatorReachesTheBoundedBackgroundChannel()
+  everyLargeBomRouteIsInTheSplit()
   await theOperatorBranchCannotBeSteeredAcrossTenants()
   await theWideningIsNotAWildcardOverTheTableActionNamespace()
   await theLegacyTiersAreExactlyWhatTheyWere()
