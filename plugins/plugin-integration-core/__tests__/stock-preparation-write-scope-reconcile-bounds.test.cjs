@@ -60,11 +60,17 @@ const physical = (fieldId) => `fld_${PROJECT_ID}_${OBJECT_ID}_${fieldId}`
 // ---------------------------------------------------------------------------
 function createFakeProvisioning() {
   const fields = new Map()
+  // Every host WRITE primitive is recorded by name, so "refused before the first schema write" is a
+  // checkable claim rather than an ordering the reader has to take on trust.
+  const writes = []
   return {
+    fields,
+    writes,
     getFieldId: (projectId, objectId, fieldId) => `fld_${projectId}_${objectId}_${fieldId}`,
     async findObjectSheet() { return { id: SHEET_ID } },
     async readObjectFieldsContent() { return { fields: [...fields.values()] } },
     async ensureMissingObjectFields({ fields: requested }) {
+      writes.push('ensureMissingObjectFields')
       const created = []
       for (const field of requested || []) {
         if (fields.has(field.id)) continue
@@ -73,8 +79,8 @@ function createFakeProvisioning() {
       }
       return { created, skipped: [] }
     },
-    async patchObjectFieldProperty() { return { ok: true } },
-    async ensureView() { return { ok: true } },
+    async patchObjectFieldProperty() { writes.push('patchObjectFieldProperty'); return { ok: true } },
+    async ensureView() { writes.push('ensureView'); return { ok: true } },
     async ensureObjectView() { return { ok: true } },
     async listObjectViews() { return { views: [] } },
   }
@@ -157,8 +163,8 @@ const packWith = (packId, packVersion, policies) => ({
   fieldWritePolicies: policies.map((policy) => ({ ...policy })),
 })
 
-const install = (port, pack, logger) => installCustomerPack({
-  provisioning: createFakeProvisioning(),
+const install = (port, pack, logger, provisioning) => installCustomerPack({
+  provisioning: provisioning || createFakeProvisioning(),
   projectId: PROJECT_ID,
   pack,
   logger: logger || { info() {}, warn() {} },
@@ -302,6 +308,20 @@ async function aSecondPackIsRefusedNotResolvedByDeletion() {
     { fieldId: physical('warehouseConfirmation'), roleId: ROLE_PURCHASING, packId: 'pack-alpha' },
   ])
   assert.equal(plan.counts.packConflictWriteScopes, 2)
+  // …and they are never counted as work THIS install will do. `inReconcileRegion` is a claim about
+  // what the DELETE can reach, and it cannot reach another pack's rows however deep in the
+  // rectangle they sit — so every one of them must land on the human's list, not the promise list.
+  const conflictKeys = plan.packConflictWriteScopes.map((row) => `${row.fieldId} ${row.roleId}`)
+  for (const row of plan.staleWriteScopes) {
+    if (!conflictKeys.includes(`${row.fieldId} ${row.roleId}`)) continue
+    assert.equal(row.inReconcileRegion, false, 'another pack row is never promised')
+  }
+  assert.deepEqual(plan.willRemoveWriteScopes, [], 'this install would retire nothing here')
+  assert.equal(
+    plan.operatorMustClearWriteScopes.length,
+    plan.staleWriteScopes.length,
+    'every stale row is a human decision while the conflict stands',
+  )
 
   // THE INSTALL refuses with a coded 422 that names the other pack, over an UNTOUCHED sheet.
   let caught = null
@@ -460,17 +480,23 @@ async function aHostThatCannotReconcileIsRefusedNotDegraded() {
   assert.equal(plan.willRemoveWriteScopes, null, 'no removal is promised that cannot happen')
   assert.equal(plan.canInstall, false)
 
+  const provisioning = createFakeProvisioning()
   let caught = null
   try {
-    await install(port, packWith('bounds', 1, V1_SPLIT))
+    await install(port, packWith('bounds', 1, V1_SPLIT), undefined, provisioning)
   } catch (error) {
     caught = error
   }
   assert.ok(caught, 'the install refuses rather than silently doing nothing')
   assert.equal(caught.status, 501)
   assert.equal(caught.code, 'CUSTOMER_PACK_FIELD_PERMISSION_RECONCILE_UNSUPPORTED')
-  assert.equal(port.applyCalls.length, 0, 'refused BEFORE any write')
-  assert.equal(port.rows.size, 0, 'and the sheet is untouched')
+  assert.equal(port.applyCalls.length, 0, 'the permission port was never reached')
+  assert.equal(port.rows.size, 0, 'and no permission row exists')
+  // BEFORE THE FIRST SCHEMA WRITE, not merely before the permission call: a refusal that arrives
+  // after the columns are created and stamped leaves a half-applied sheet behind, which is the
+  // exact failure mode the pre-flight exists to prevent.
+  assert.deepEqual(provisioning.writes, [], 'not one host write primitive was called')
+  assert.equal(provisioning.fields.size, 0, 'and not one column was created')
 }
 
 // The 'unsupported_port' arm of applyFieldWritePolicies is unreachable through installCustomerPack

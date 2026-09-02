@@ -1154,10 +1154,11 @@ async function planCustomerPackInstall({ provisioning, projectId, pack, fieldPer
   // (the port's scoped reconcile); the rest it can never touch. Computing this here rather than
   // twice inside the report is what keeps the lists and their counts from ever disagreeing.
   //
-  // A host that cannot honour the region promises NOTHING: `willRemoveWriteScopes` is null there,
-  // never a list, because a rehearsal that says "1 row will be retired" against a port that will
-  // retire none is worse than saying nothing at all.
-  const willRemoveWriteScopes = (staleWriteScopes && portReconciles)
+  // A host that cannot honour the region promises NOTHING, and that is enforced upstream rather
+  // than repeated here: `writeScopeCheck: 'host_port_no_reconcile'` skips the census entirely, so
+  // `staleWriteScopes` is null and both projections below are null with it. A rehearsal that said
+  // "1 row will be retired" against a port that will retire none is worse than saying nothing.
+  const willRemoveWriteScopes = staleWriteScopes
     ? staleWriteScopes.filter((row) => row.inReconcileRegion)
     : null
   const operatorMustClearWriteScopes = staleWriteScopes
