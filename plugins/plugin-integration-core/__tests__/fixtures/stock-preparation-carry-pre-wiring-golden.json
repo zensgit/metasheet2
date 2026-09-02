@@ -117,7 +117,12 @@
       "leadTimeDays",
       "notes",
       "procurementReply",
-      "warehouseConfirmation"
+      "warehouseConfirmation",
+      "makeOrBuy",
+      "procurementDone",
+      "procurementReplyDate",
+      "warehouseDone",
+      "actualArrivalDate"
     ],
     "plmSystemFields": [
       "projectNo",

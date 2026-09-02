@@ -126,6 +126,15 @@ function adds(plan) {
 // The golden below was captured by running THIS input through the PRE-WIRING
 // planner (origin/main a2080ae8e, before any carry code existed). With no
 // carryPolicy input the wired planner must reproduce it byte-for-byte.
+//
+// REGENERATED DELIBERATELY when the canonical template gained the five
+// human_preserved columns makeOrBuy / procurementDone / procurementReplyDate /
+// warehouseDone / actualArrivalDate: the plan's `summary.humanPreservedFields` —
+// the planner's report of what a refresh must NOT touch — is five entries longer.
+// FALSIFIED BEFORE ACCEPTING: taking the NEW plan and removing exactly those five ids
+// from that ONE array reproduces the PREVIOUS golden byte-for-byte, so every count,
+// every decision and the whole plmSystemFields band are unchanged. The invariant this
+// golden defends — "no carryPolicy input => pre-wiring behaviour" — still holds.
 // ---------------------------------------------------------------------------
 function representativePlanInput() {
   const addRow = row({ componentSourceId: 'PART-ADD' })
