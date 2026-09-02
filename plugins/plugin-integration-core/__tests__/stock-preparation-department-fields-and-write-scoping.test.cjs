@@ -434,9 +434,12 @@ function createRecordingPort() {
   const calls = []
   return {
     calls,
+    // A host that HONOURS the region. Without this the install refuses (501) rather than writing
+    // rows a later revision could never retire — see the bounds suite for that branch.
+    supportsWriteScopeReconcile: true,
     async applyRoleWriteScopes(input) {
       calls.push(input)
-      return { applied: input.entries.length, entries: input.entries }
+      return { applied: input.entries.length, entries: input.entries, removed: [] }
     },
   }
 }
@@ -617,6 +620,9 @@ function applyHelperIsPure() {
 // this port's; anything else is an OPERATOR row, which the census hides and the reconcile may never
 // delete. The host-side unit suite proves the real SQL enforces the same thing.
 const PLUGIN_MARKER = 'plugin:plugin-integration-core/stock-preparation'
+// …and its PER-PACK form. The delete's owner predicate is this, not the bare prefix: two packs on
+// one canonical sheet must not be able to retire each other's denials.
+const markerForPack = (packId) => `${PLUGIN_MARKER}#${packId}`
 
 function createStatefulPort({
   withRead = true,
@@ -630,11 +636,24 @@ function createStatefulPort({
   const port = {
     rows,
     applyCalls: [],
-    async applyRoleWriteScopes({ sheetId, entries, reconcile }) {
-      this.applyCalls.push({ sheetId, entries, reconcile })
-      // UPSERT, exactly like the real port.
+    // The capability marker the installer feature-detects.  models an OLDER
+    // host: it does not declare it, and the install refuses such a host rather than degrading.
+    ...(withReconcile ? { supportsWriteScopeReconcile: true } : {}),
+    async applyRoleWriteScopes({ sheetId, entries, packId, reconcile }) {
+      this.applyCalls.push({ sheetId, entries, packId, reconcile })
+      const createdBy = typeof packId === 'string' && packId ? markerForPack(packId) : PLUGIN_MARKER
+      // UPSERT, exactly like the real port — including its refusal to re-stamp provenance on a row
+      // this call could not also delete, which is what keeps an operator's row an operator's row.
       for (const entry of entries) {
-        rows.set(`${entry.fieldId} ${entry.roleId}`, { ...entry, sheetId, createdBy: PLUGIN_MARKER })
+        const key = `${entry.fieldId} ${entry.roleId}`
+        const existing = rows.get(key)
+        const adoptable = !existing || existing.createdBy === createdBy || existing.createdBy === PLUGIN_MARKER
+        rows.set(key, {
+          ...(existing || {}),
+          ...entry,
+          sheetId,
+          createdBy: adoptable ? createdBy : existing.createdBy,
+        })
       }
       if (!withReconcile || !reconcile) return { applied: entries.length, entries }
 
@@ -645,10 +664,13 @@ function createStatefulPort({
       const desired = new Set(entries.map((entry) => `${entry.fieldId} ${entry.roleId}`))
       const fieldIds = new Set(reconcile.fieldIds)
       const roleIds = new Set(reconcile.roleIds)
+      // EXACTLY the two markers the real statement binds: this pack's own, and the pack-less legacy
+      // one (which no other pack can claim).
+      const mine = new Set([createdBy, PLUGIN_MARKER])
       const removed = []
       for (const [key, row] of [...rows.entries()]) {
         if (row.sheetId !== sheetId) continue
-        if (row.createdBy !== PLUGIN_MARKER) continue
+        if (!mine.has(row.createdBy)) continue
         if (!fieldIds.has(row.fieldId) || !roleIds.has(row.roleId)) continue
         if (desired.has(key)) continue
         rows.delete(key)
@@ -661,12 +683,26 @@ function createStatefulPort({
     },
   }
   if (withRead) {
-    port.listRoleWriteScopes = async ({ sheetId }) => ({
-      sheetId,
-      entries: [...rows.values()]
-        .filter((row) => row.sheetId === sheetId && row.createdBy === PLUGIN_MARKER)
-        .map(({ fieldId, roleId }) => ({ fieldId, roleId })),
-    })
+    port.listRoleWriteScopes = async ({ sheetId }) => {
+      const entries = []
+      const foreignEntries = []
+      for (const row of rows.values()) {
+        if (row.sheetId !== sheetId) continue
+        const isPlugin = row.createdBy === PLUGIN_MARKER
+          || (typeof row.createdBy === 'string' && row.createdBy.startsWith(`${PLUGIN_MARKER}#`))
+        if (isPlugin) {
+          entries.push({
+            fieldId: row.fieldId,
+            roleId: row.roleId,
+            createdBy: row.createdBy,
+            packId: row.createdBy === PLUGIN_MARKER ? null : row.createdBy.slice(PLUGIN_MARKER.length + 1),
+          })
+        } else {
+          foreignEntries.push({ fieldId: row.fieldId, roleId: row.roleId, createdBy: row.createdBy || null })
+        }
+      }
+      return { sheetId, entries, foreignEntries }
+    }
   }
   if (withRoleCheck) {
     port.findMissingRoleIds = async ({ roleIds }) => ({
@@ -826,31 +862,43 @@ async function reconcileNeverReachesRowsItDoesNotOwn() {
       fieldId: physical('procurementReply'),
       logicalFieldId: 'procurementReply',
       roleId: OTHER_ROLE,
+      // ATTRIBUTED. This row was seeded with the pack-LESS legacy marker, so it reports packId null
+      // — and it survives anyway, because it is out of the rectangle on the ROLE axis. Provenance
+      // and position are two independent reasons a row is out of reach, and the report names both.
+      packId: null,
       inReconcileRegion: false,
     },
   ], 'what the reconcile may not touch is handed to the operator by name')
   assert.equal(v2.staleWriteScopeCount, 1)
 }
 
-// An OLDER host whose port ignores the region must degrade VISIBLY, never be assumed to have
-// reconciled. `null` and `[]` are different answers and stay different.
-async function anOlderPortDegradesVisiblyRatherThanSilently() {
+// AN OLDER HOST IS REFUSED, NOT DEGRADED.
+//
+// This started life as "degrade visibly": install anyway, report `unsupported_port`, leave the
+// orphan for a human. That reads reasonable and is not: on such a host the v1 denial stays in force
+// while the install returns success, so the column is unwritable by BOTH declared roles — precisely
+// the failure the reconcile exists to end — and the deployer's only warning is a token in a summary.
+// Worse, the dry-run had no way to know, so it promised a removal that could never happen.
+//
+// The port therefore declares `supportsWriteScopeReconcile`, and a pack with a governed rectangle is
+// refused (coded 501) over an UNTOUCHED sheet when the host does not. The dry-run's half of the same
+// contract lives in the bounds suite.
+async function anOlderPortIsRefusedBeforeAnyWrite() {
   const port = createStatefulPort({ withReconcile: false })
-  await installWith(port, V1_POLICIES, 1)
-  const v2 = await installWith(port, V2_POLICIES, 2)
+  assert.equal(port.supportsWriteScopeReconcile, undefined, 'the older host declares nothing')
 
-  assert.equal(v2.writeScopeReconcile, 'unsupported_port')
-  assert.equal(v2.removedWriteScopes, null, 'null — never [], which would read as "reconciled, nothing to retire"')
-  assert.equal(v2.removedWriteScopeCount, 0)
-  // The old hazard is still REPORTED on such a host, which is the previous behaviour intact.
-  assert.deepEqual(v2.staleWriteScopes, [
-    {
-      fieldId: physical('actualArrivalDate'),
-      logicalFieldId: 'actualArrivalDate',
-      roleId: ROLE_PURCHASING,
-      inReconcileRegion: true,
-    },
-  ], 'an un-reconciled orphan is still named, and marked as one the install SHOULD have healed')
+  let caught = null
+  try {
+    await installWith(port, V1_POLICIES, 1)
+  } catch (error) {
+    caught = error
+  }
+  assert.ok(caught, 'a governed pack must not install against a host that cannot reconcile')
+  assert.equal(caught.status, 501)
+  assert.equal(caught.code, 'CUSTOMER_PACK_FIELD_PERMISSION_RECONCILE_UNSUPPORTED')
+  assert.equal(caught.details.packId, 'dept-scoping')
+  assert.equal(port.rows.size, 0, 'and not one permission row was written')
+  assert.equal(port.applyCalls.length, 0, 'the write half was never reached')
 }
 
 async function dryRunPreviewsTheDenialPlanAndTheStaleRows() {
@@ -872,6 +920,7 @@ async function dryRunPreviewsTheDenialPlanAndTheStaleRows() {
       fieldId: physical('actualArrivalDate'),
       logicalFieldId: 'actualArrivalDate',
       roleId: ROLE_PURCHASING,
+      packId: 'dept-scoping',
       inReconcileRegion: true,
     },
   ])
@@ -1250,7 +1299,7 @@ async function main() {
   await installerFailsClosedWhenThePortIsMissing()
   await ownershipTransferIsNeverASilentSuccess()
   await reconcileNeverReachesRowsItDoesNotOwn()
-  await anOlderPortDegradesVisiblyRatherThanSilently()
+  await anOlderPortIsRefusedBeforeAnyWrite()
   await theLedgerSummaryEnumeratesTheWriteScopeOutcome()
   await theRealDbProofIsWiredIntoCi()
   await dryRunPreviewsTheDenialPlanAndTheStaleRows()

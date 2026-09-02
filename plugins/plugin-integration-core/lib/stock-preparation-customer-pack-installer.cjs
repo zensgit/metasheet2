@@ -644,8 +644,14 @@ function deriveFieldWriteScopePlan({ provisioning, projectId, pack }) {
   //
   // Roles are the pack's declared roles only, columns the ones its policies actually claim. A
   // column no policy names, or a role this pack does not declare, is outside the rectangle and the
-  // port cannot touch it — which is what keeps a second pack's rows on the same canonical sheet
-  // safe from this one's install.
+  // port cannot touch it.
+  //
+  // THE RECTANGLE ALONE DOES NOT SEPARATE TWO PACKS. Two packs installed on the same canonical
+  // sheet can declare OVERLAPPING rectangles — `targetObjectId` defaults to that one table and the
+  // physical ids are a pure function of (project, object, logical id), so the overlap is the normal
+  // case, not a contrived one. What keeps them apart is the per-PACK provenance marker the port
+  // stamps, plus the pre-write conflict refusal below; the rectangle bounds the delete, it does not
+  // attribute the rows inside it.
   const regionFieldIds = []
   const seenFields = new Set()
   for (const policy of pack.fieldWritePolicies) {
@@ -661,12 +667,17 @@ function deriveFieldWriteScopePlan({ provisioning, projectId, pack }) {
     rows,
     entries: rows.map(({ fieldId, roleId }) => ({ fieldId, roleId })),
     declaredKeys: new Set(rows.map((row) => `${row.fieldId} ${row.roleId}`)),
-    // Null when the pack declares nothing at all: there is no region to be authoritative over, so
-    // no delete may be requested. `regionKey` answers "is this existing row inside the rectangle",
-    // which is what separates a stale row the install HEALS from one only an operator can clear.
-    region: regionRoleIds.length === 0 || regionFieldIds.length === 0
+    // NULL exactly when the pack declares no fieldWritePolicies at all — the pack validator forces
+    // every declared policy to carry a NON-EMPTY ownsFieldIds and a roleId, so a declared policy
+    // always yields both axes. `region !== null` is therefore the same question as "does this pack
+    // govern anything", and it — never the DERIVED denial count — is what decides whether a
+    // reconcile is requested and whether the census runs.
+    region: regionRoleIds.length === 0
       ? null
       : { fieldIds: regionFieldIds, roleIds: regionRoleIds },
+    // "is this existing row inside the rectangle" — what separates a stale row the install HEALS
+    // from one only an operator can clear. BOTH axes matter: a row on a column no policy names is
+    // as far out of reach as a row for a role this pack does not declare.
     inRegion: (fieldId, roleId) => seenFields.has(fieldId) && regionRoleIds.includes(roleId),
   }
 }
@@ -686,55 +697,111 @@ function buildLogicalFieldIdIndex({ provisioning, projectId, pack }) {
 }
 
 /**
- * THE STALE-SCOPE CENSUS -- the answer to "what did an EARLIER revision of this pack leave behind".
+ * THE STALE-SCOPE CENSUS — what is standing on this sheet that the CURRENT declaration does not
+ * want, and which half of it can this install actually fix.
  *
- * The port is upsert-only by design (removing a write restriction is an operator action with its
- * own audit trail, never a plugin's). That asymmetry is safe for a pack that only ever GROWS, and
- * unsafe the moment a revision MOVES a column's owner: v1's denial for the old owner survives v2's
- * denial for the new one, and the column silently becomes read-only for EVERY declared role.
+ * Since the scoped reconcile landed there are two kinds of orphan and a deployer acts on them
+ * differently, so this function classifies rather than merely lists:
  *
- * Neither the port nor this installer may fix that automatically -- the heal is the operator's
- * `PUT /api/multitable/sheets/:sheetId/field-permissions { remove: true }`, which records the
- * config revision a permission REMOVAL must leave behind. What this function removes is the
- * SILENCE: the install summary and the dry-run both name the orphaned (field, role) rows.
+ *   INSIDE the pack's governed rectangle, carrying THIS PACK's provenance (or the pack-less legacy
+ *   marker): the install RETIRES it itself, in the same transaction as the upserts. Without that,
+ *   a revision that MOVES a column's owner leaves v1's denial standing beside v2's and the write
+ *   gate ORs `read_only`, so the column becomes unwritable by every declared role.
  *
- * FAIL-VISIBLE, NOT FAIL-CLOSED. Refusing the install would deadlock the deployment (the stale
- * rows are already on the sheet and only an operator can clear them), so the honest posture is to
- * report. `null` vs `[]` is load-bearing: a host whose port has no census method reports `null`
- * and `writeScopeCheck: 'unsupported_port'`, never an empty list that would read as "checked".
+ *   Everything else — a column no policy names, a role this pack does not declare, another PACK's
+ *   row, or a row an OPERATOR authored — the install cannot touch, by construction. Those it only
+ *   REPORTS (`operatorMustClearWriteScopes`), because nothing in the current declaration
+ *   establishes that they are wrong.
  *
- * KNOWN OVER-REPORT, stated here rather than discovered later: the census is scoped to the PORT
- * (`created_by = <plugin marker>`), not to the PACK — the platform row carries no pack id. If a
- * SECOND pack that also declares `fieldWritePolicies` is installed onto the same canonical sheet,
- * each install reports the other's rows as stale. That direction is deliberate: this is a warning,
- * never a refusal or a delete, so the failure mode is a noisy list a deployer must read rather than
- * a scope silently dropped. Narrowing it needs a pack id on the permission row, which is a platform
- * schema change and not this PR's to make.
+ * FAIL-VISIBLE, NOT FAIL-CLOSED, for orphans. Refusing over a row only an operator can clear would
+ * deadlock the deployment, so the honest posture is to report. (A cross-PACK CONFLICT is the one
+ * exception and is refused instead — see `detectPackWriteScopeConflicts`: there the right answer is
+ * a human decision, not a delete and not a shrug.) `null` vs `[]` is load-bearing throughout: a
+ * host whose port has no census method reports `null` and `writeScopeCheck: 'unsupported_port'`,
+ * never an empty list that would read as "checked, nothing stale".
+ *
+ * OPERATOR-HELD ROWS ARE REPORTED, NOT CLAIMED. `foreignEntries` (rows this plugin did not write)
+ * are folded into the report when they sit inside the rectangle, so "a human holds this
+ * (column, role)" is visible — but they are never counted as this plugin's debris and the port's
+ * DELETE cannot see them at all.
  */
-async function detectStaleWriteScopes({ fieldPermissions, sheetId, plan, logicalFieldIds }) {
+async function detectStaleWriteScopes({ fieldPermissions, sheetId, plan, logicalFieldIds, packId }) {
   if (!fieldPermissions || typeof fieldPermissions.listRoleWriteScopes !== 'function') {
     return { check: 'unsupported_port', stale: null }
   }
   const existing = await fieldPermissions.listRoleWriteScopes({ sheetId })
   const entries = (existing && Array.isArray(existing.entries)) ? existing.entries : []
+  const foreign = (existing && Array.isArray(existing.foreignEntries)) ? existing.foreignEntries : []
+  const inRegion = (fieldId, roleId) => (typeof plan.inRegion === 'function'
+    ? plan.inRegion(fieldId, roleId)
+    : false)
+  // A row is RETIRABLE by this install only if it is in the rectangle AND this pack may own it.
+  // `packId === null` is a legacy, pack-less row: no other pack can claim it, so whichever pack
+  // governs it adopts it — the same rule the port's DELETE applies, stated once on each side.
+  const ownedByThisPack = (entry) => entry.packId === undefined
+    || entry.packId === null
+    || entry.packId === packId
   const stale = entries
     .filter((entry) => entry && !plan.declaredKeys.has(`${entry.fieldId} ${entry.roleId}`))
     .map((entry) => ({
       fieldId: entry.fieldId,
       logicalFieldId: logicalFieldIds.get(entry.fieldId) || null,
       roleId: entry.roleId,
-      // THE ACTIONABLE HALF. Inside the pack's governed rectangle the install RETIRES this row
-      // itself (the port's scoped reconcile, same transaction as the upserts); outside it, only an
-      // operator can. A deployer reading a dry-run needs to know which of the two a row is, because
-      // one is a preview of work about to happen and the other is a to-do item for a human.
-      inReconcileRegion: typeof plan.inRegion === 'function'
-        ? plan.inRegion(entry.fieldId, entry.roleId)
-        : false,
+      // Which pack wrote it. `null` = a legacy row from before the marker carried a pack id.
+      packId: entry.packId === undefined ? null : entry.packId,
+      // THE ACTIONABLE HALF: true only when the install will really retire this row.
+      inReconcileRegion: inRegion(entry.fieldId, entry.roleId) && ownedByThisPack(entry),
     }))
+  // Rows a human owns inside the rectangle. Named so a deployer sees them; never `inReconcileRegion`.
+  for (const entry of foreign) {
+    if (!entry || !inRegion(entry.fieldId, entry.roleId)) continue
+    if (plan.declaredKeys.has(`${entry.fieldId} ${entry.roleId}`)) continue
+    stale.push({
+      fieldId: entry.fieldId,
+      logicalFieldId: logicalFieldIds.get(entry.fieldId) || null,
+      roleId: entry.roleId,
+      packId: null,
+      inReconcileRegion: false,
+      // The one thing that distinguishes it: it is not this plugin's row at all.
+      heldBy: typeof entry.createdBy === 'string' ? entry.createdBy : null,
+    })
+  }
   stale.sort((left, right) => (left.fieldId === right.fieldId
     ? left.roleId.localeCompare(right.roleId)
     : left.fieldId.localeCompare(right.fieldId)))
   return { check: 'checked', stale }
+}
+
+/**
+ * THE CROSS-PACK CONFLICT — the one write-scope condition that is REFUSED rather than reported.
+ *
+ * `targetObjectId` defaults to the single canonical main table and the physical field id is a pure
+ * function of (project, object, logical id), so two customer packs installed in one project land on
+ * the SAME sheet with the SAME ids. If both claim authority over the same (column, role) pair, one
+ * of them is wrong — and the answer is a human deciding which, not this install deleting the other
+ * pack's enforced denial and reporting it as its own history.
+ *
+ * Refused BEFORE the first schema write, with a coded 422 naming the other pack and every pair, so
+ * a deployer gets an actionable message over an untouched sheet.
+ */
+async function detectPackWriteScopeConflicts({ fieldPermissions, sheetId, plan, packId }) {
+  if (!plan.region) return { check: 'not_declared', conflicts: null }
+  if (!fieldPermissions || typeof fieldPermissions.listRoleWriteScopes !== 'function') {
+    return { check: 'unsupported_port', conflicts: null }
+  }
+  const existing = await fieldPermissions.listRoleWriteScopes({ sheetId })
+  const entries = (existing && Array.isArray(existing.entries)) ? existing.entries : []
+  const conflicts = entries
+    .filter((entry) => entry
+      && typeof entry.packId === 'string'
+      && entry.packId !== packId
+      && typeof plan.inRegion === 'function'
+      && plan.inRegion(entry.fieldId, entry.roleId))
+    .map((entry) => ({ fieldId: entry.fieldId, roleId: entry.roleId, packId: entry.packId }))
+  conflicts.sort((left, right) => (left.fieldId === right.fieldId
+    ? left.roleId.localeCompare(right.roleId)
+    : left.fieldId.localeCompare(right.fieldId)))
+  return { check: 'checked', conflicts }
 }
 
 /**
@@ -745,17 +812,56 @@ async function detectStaleWriteScopes({ fieldPermissions, sheetId, plan, logical
  * very END of the install, after every column has been created and stamped -- so a typo'd role id
  * leaves a half-applied sheet behind AND surfaces as an uncoded 500.
  *
- * Two independent conditions are checked here rather than at the port call:
- *   1. the port must be present at all when a policy is declared (fail-closed, 503); and
- *   2. every declared role must exist (fail-closed, coded 422).
- * A host whose port predates `findMissingRoleIds` skips (2) only -- the late mapping in
+ * FOUR independent conditions are checked here rather than at the port call:
+ *   1. the port must be present at all when a policy is declared (fail-closed, 503);
+ *   2. the host port must be able to HONOUR a reconcile region when one will be sent — a host that
+ *      silently ignores it would leave the previous revision's denials in force while the install
+ *      reported success, so this is a coded 501 rather than a quiet downgrade (fail-closed);
+ *   3. no ANOTHER pack's row may sit inside this pack's governed rectangle (coded 422); and
+ *   4. every declared role must exist (fail-closed, coded 422).
+ * A host whose port predates `findMissingRoleIds` skips (4) only -- the late mapping in
  * applyFieldWritePolicies still turns its rejection into the same coded 422.
+ *
+ * GATED ON THE DECLARATION, NEVER ON ITS DERIVED COMPLEMENT. `fieldWriteDenials` is the set of
+ * (column, role) pairs that follow from the declaration, and a perfectly ordinary revision — every
+ * declared role owning every governed column — derives NONE while still governing a full rectangle.
+ * Keying any of this on the denial count made the whole write-scope half of the install vanish for
+ * exactly the revision it exists to serve.
  */
-async function preflightFieldWritePolicies({ fieldPermissions, pack }) {
-  if (pack.fieldWriteDenials.length === 0) return { roleCheck: 'not_declared' }
+async function preflightFieldWritePolicies({ fieldPermissions, pack, sheetId, plan }) {
+  const resolved = plan || null
+  const governs = resolved ? Boolean(resolved.region) : pack.fieldWritePolicies.length > 0
+  if (!governs) return { roleCheck: 'not_declared', packConflictCheck: 'not_declared' }
   assertFieldPermissionsPort({ fieldPermissions, pack })
+  assertFieldPermissionsReconcileSupport({ fieldPermissions, pack })
+
+  let packConflictCheck = 'not_declared'
+  if (resolved && sheetId) {
+    const conflictCensus = await detectPackWriteScopeConflicts({
+      fieldPermissions, sheetId, plan: resolved, packId: pack.packId,
+    })
+    packConflictCheck = conflictCensus.check
+    if (conflictCensus.conflicts && conflictCensus.conflicts.length > 0) {
+      const others = [...new Set(conflictCensus.conflicts.map((row) => row.packId))].sort()
+      throw new StockPreparationCustomerPackInstallError(
+        422,
+        'CUSTOMER_PACK_FIELD_WRITE_SCOPE_PACK_CONFLICT',
+        'another customer pack already governs (column, role) pairs inside this pack\'s declared '
+          + 'write-scope region on this sheet. Two packs claiming the same authority is a conflict '
+          + 'a human must resolve — this install will neither delete the other pack\'s enforced '
+          + 'denials nor silently coexist with them. Refused before any column is created.',
+        {
+          objectId: pack.targetObjectId,
+          packId: pack.packId,
+          conflictingPackIds: others,
+          conflicts: conflictCensus.conflicts,
+        },
+      )
+    }
+  }
+
   if (typeof fieldPermissions.findMissingRoleIds !== 'function') {
-    return { roleCheck: 'unsupported_port' }
+    return { roleCheck: 'unsupported_port', packConflictCheck }
   }
   const roleIds = [...new Set(pack.fieldWritePolicies.map((policy) => policy.roleId))]
   const result = await fieldPermissions.findMissingRoleIds({ roleIds })
@@ -769,7 +875,7 @@ async function preflightFieldWritePolicies({ fieldPermissions, pack }) {
       { objectId: pack.targetObjectId, packId: pack.packId, roleIds: missing },
     )
   }
-  return { roleCheck: 'checked' }
+  return { roleCheck: 'checked', packConflictCheck }
 }
 
 // The port-presence gate, shared by the pre-flight and the apply so the two cannot drift on the
@@ -785,6 +891,26 @@ function assertFieldPermissionsPort({ fieldPermissions, pack }) {
       { objectId: pack.targetObjectId, packId: pack.packId, declaredDenials: pack.fieldWriteDenials.length },
     )
   }
+}
+
+// The RECONCILE-SUPPORT gate. A host port that predates the region argument accepts the call and
+// ignores it, so the only difference between "reconciled" and "silently did nothing" is a
+// capability the port declares about itself. Without it a revision that MOVES a column's owner
+// leaves the old denial in force while the install reports success — the exact silent breakage this
+// whole mechanism exists to end — so it is refused, not degraded. Coded 501 (the HOST lacks the
+// capability) rather than 422 (the request is wrong), and raised in the pre-flight so the sheet is
+// untouched.
+function assertFieldPermissionsReconcileSupport({ fieldPermissions, pack }) {
+  if (fieldPermissions && fieldPermissions.supportsWriteScopeReconcile === true) return
+  throw new StockPreparationCustomerPackInstallError(
+    501,
+    'CUSTOMER_PACK_FIELD_PERMISSION_RECONCILE_UNSUPPORTED',
+    'this pack declares fieldWritePolicies, but the host\'s stockPreparationFieldPermissions port '
+      + 'does not declare supportsWriteScopeReconcile. Installing against it would leave an earlier '
+      + 'revision\'s denials in force while reporting success, so the install is refused before any '
+      + 'column is created rather than downgraded silently.',
+    { objectId: pack.targetObjectId, packId: pack.packId },
+  )
 }
 
 /**
@@ -827,21 +953,30 @@ function assertFieldPermissionsPort({ fieldPermissions, pack }) {
  * assumed, so an older host degrades to the previous report-only behaviour visibly.
  */
 async function applyFieldWritePolicies({ provisioning, fieldPermissions, projectId, sheetId, pack, plan }) {
-  if (pack.fieldWriteDenials.length === 0) {
+  const resolvedPlan = plan || deriveFieldWriteScopePlan({ provisioning, projectId, pack })
+  // GATED ON THE RECTANGLE, NOT ON THE DERIVED DENIAL COUNT. `region` is null exactly when the pack
+  // declares no fieldWritePolicies at all; a pack that declares them but derives zero denials (every
+  // declared role owns every governed column) still governs a rectangle, and skipping it there left
+  // the previous revision's denials locking those columns for every role the new one names.
+  if (!resolvedPlan.region) {
     return { applied: 0, roleCount: 0, skipped: 'not_declared', removed: null, reconcile: 'not_declared' }
   }
   assertFieldPermissionsPort({ fieldPermissions, pack })
+  assertFieldPermissionsReconcileSupport({ fieldPermissions, pack })
   // The plan is derived ONCE per install (deriveFieldWriteScopePlan) and passed in, so the rows a
   // dry-run previewed, the rows the stale census diffs against, and the rows written here are the
   // same array. The fallback keeps this helper independently callable (it is exported on
   // __internals and exercised directly).
-  const resolved = plan || deriveFieldWriteScopePlan({ provisioning, projectId, pack })
+  const resolved = resolvedPlan
   let result
   try {
     result = await fieldPermissions.applyRoleWriteScopes({
       sheetId,
       entries: resolved.entries,
-      ...(resolved.region ? { reconcile: resolved.region } : {}),
+      // THE PACK IDENTITY, stamped into `created_by`. It is what makes "this pack's own rows" a
+      // property of the data rather than of the plugin, and it is the DELETE's owner predicate.
+      packId: pack.packId,
+      reconcile: resolved.region,
     })
   } catch (error) {
     // A rejection from the port's closed failure vocabulary becomes a coded install error; any
@@ -849,14 +984,16 @@ async function applyFieldWritePolicies({ provisioning, fieldPermissions, project
     if (isFieldPermissionsError(error)) throw translateFieldPermissionsError(error, pack)
     throw error
   }
-  // `removed` ABSENT and `removed` EMPTY are different answers and are kept different: an older
-  // host that never looked reports null + 'unsupported_port', never [] (which reads as "looked,
-  // found nothing to retire").
+  // `removed` ABSENT and `removed` EMPTY are different answers and are kept different: a port that
+  // returned no array never looked, so it reports null + 'unsupported_port', never [] (which reads
+  // as "looked, found nothing to retire"). The pre-flight refuses such a host outright, so this arm
+  // is reachable only through a direct call to this function with a hand-built port — which is
+  // exactly how the unit witness reaches it.
   const removedRaw = result && result.removed
-  const reconciled = resolved.region && Array.isArray(removedRaw)
+  const reconciled = Array.isArray(removedRaw)
   return {
     applied: Number(result && result.applied) || 0,
-    roleCount: new Set(pack.fieldWriteDenials.map((denial) => denial.roleId)).size,
+    roleCount: new Set(pack.fieldWritePolicies.map((policy) => policy.roleId)).size,
     skipped: null,
     removed: reconciled
       ? removedRaw.map((entry) => ({ fieldId: entry.fieldId, roleId: entry.roleId }))
@@ -965,25 +1102,46 @@ async function planCustomerPackInstall({ provisioning, projectId, pack, fieldPer
   })
   const portPresent = Boolean(fieldPermissions)
     && typeof fieldPermissions.applyRoleWriteScopes === 'function'
+  const portReconciles = Boolean(fieldPermissions)
+    && fieldPermissions.supportsWriteScopeReconcile === true
   let writeScopeCheck = 'not_declared'
   let staleWriteScopes = null
   let unknownRoleIds = null
-  if (normalized.fieldWriteDenials.length > 0) {
+  let packConflictWriteScopes = null
+  // GATED ON THE RECTANGLE, not on the derived denial count — the same condition the install uses,
+  // so a revision that governs columns but derives no denial is rehearsed instead of skipped.
+  if (writeScopePlan.region) {
     if (!portPresent) {
       // Unlike the install this does NOT throw — reporting the blocker is the point of a dry-run.
       writeScopeCheck = 'port_absent'
+    } else if (!portReconciles) {
+      // The host accepts the call and ignores the region. Saying nothing here would let the
+      // rehearsal promise removals that cannot happen; the install refuses such a host outright.
+      writeScopeCheck = 'host_port_no_reconcile'
     } else {
+      const conflictCensus = await detectPackWriteScopeConflicts({
+        fieldPermissions,
+        sheetId: targetSheet.id,
+        plan: writeScopePlan,
+        packId: normalized.packId,
+      })
+      packConflictWriteScopes = conflictCensus.conflicts
       const census = await detectStaleWriteScopes({
         fieldPermissions,
         sheetId: targetSheet.id,
         plan: writeScopePlan,
+        packId: normalized.packId,
         logicalFieldIds: buildLogicalFieldIdIndex({
           provisioning: api,
           projectId: resolvedProjectId,
           pack: normalized,
         }),
       })
-      writeScopeCheck = census.check
+      // A cross-pack conflict is what the install REFUSES, so it is the headline the dry-run
+      // reports — ahead of the census, which describes a sheet that install will never reach.
+      writeScopeCheck = (packConflictWriteScopes && packConflictWriteScopes.length > 0)
+        ? 'pack_conflict'
+        : census.check
       staleWriteScopes = census.stale
       if (typeof fieldPermissions.findMissingRoleIds === 'function') {
         const roleIds = [...new Set(normalized.fieldWritePolicies.map((policy) => policy.roleId))]
@@ -996,7 +1154,11 @@ async function planCustomerPackInstall({ provisioning, projectId, pack, fieldPer
   // THE SPLIT A DEPLOYER ACTS ON, derived ONCE. The install RETIRES the in-region orphans itself
   // (the port's scoped reconcile); the rest it can never touch. Computing this here rather than
   // twice inside the report is what keeps the lists and their counts from ever disagreeing.
-  const willRemoveWriteScopes = staleWriteScopes
+  //
+  // A host that cannot honour the region promises NOTHING: `willRemoveWriteScopes` is null there,
+  // never a list, because a rehearsal that says "1 row will be retired" against a port that will
+  // retire none is worse than saying nothing at all.
+  const willRemoveWriteScopes = (staleWriteScopes && portReconciles)
     ? staleWriteScopes.filter((row) => row.inReconcileRegion)
     : null
   const operatorMustClearWriteScopes = staleWriteScopes
@@ -1039,6 +1201,8 @@ async function planCustomerPackInstall({ provisioning, projectId, pack, fieldPer
     // as blocking as an ownership conflict — the install would refuse, so the dry-run says no.
     canInstall: conflicting.size === 0
       && writeScopeCheck !== 'port_absent'
+      && writeScopeCheck !== 'host_port_no_reconcile'
+      && writeScopeCheck !== 'pack_conflict'
       && (unknownRoleIds === null || unknownRoleIds.length === 0),
     willCreateFieldIds: [...scan.missing].sort(),
     willStampFieldIds: [...scan.needsStamp].sort(),
@@ -1091,6 +1255,12 @@ async function planCustomerPackInstall({ provisioning, projectId, pack, fieldPer
       : null,
     willRemoveWriteScopes,
     operatorMustClearWriteScopes,
+    // Whether the host port declares that it HONOURS a reconcile region. `false` with a governed
+    // rectangle is a refusal at install time, not a downgrade — so it belongs in the rehearsal.
+    fieldPermissionsReconcileSupported: portReconciles,
+    // (column, role) pairs inside this pack's rectangle that ANOTHER pack already governs. NULL
+    // when the question could not be asked; a non-empty list is what the install refuses over.
+    packConflictWriteScopes,
     // Declared roles this host does not have. NULL when the question could not be asked.
     unknownRoleIds,
     counts: {
@@ -1109,6 +1279,7 @@ async function planCustomerPackInstall({ provisioning, projectId, pack, fieldPer
       staleWriteScopes: staleWriteScopes ? staleWriteScopes.length : 0,
       willRemoveWriteScopes: willRemoveWriteScopes ? willRemoveWriteScopes.length : 0,
       operatorMustClearWriteScopes: operatorMustClearWriteScopes ? operatorMustClearWriteScopes.length : 0,
+      packConflictWriteScopes: packConflictWriteScopes ? packConflictWriteScopes.length : 0,
     },
   }
 }
@@ -1157,11 +1328,25 @@ async function installCustomerPack({
     pack: normalized,
   })
 
-  // PRE-FLIGHT, BEFORE THE FIRST SCHEMA WRITE. Both conditions a declared fieldWritePolicies needs
-  // from the host — the port exists, and every role it names exists — are answered here rather than
-  // at the end of the install. A pack naming a role this host does not have used to create and
-  // stamp every column first and only THEN be refused, as an uncoded 500 over a half-applied sheet.
-  await preflightFieldWritePolicies({ fieldPermissions, pack: normalized })
+  // THE PLAN IS DERIVED ONCE, HERE, so the pre-flight, the write and the census all reason about
+  // the same rectangle. (It is a pure `getFieldId` derivation — no host call, no write.)
+  const writeScopePlan = deriveFieldWriteScopePlan({
+    provisioning: api,
+    projectId: resolvedProjectId,
+    pack: normalized,
+  })
+
+  // PRE-FLIGHT, BEFORE THE FIRST SCHEMA WRITE. Every condition a declared fieldWritePolicies needs
+  // from the host — the port exists, it honours a reconcile region, no OTHER pack already governs
+  // pairs inside this rectangle, and every role it names exists — is answered here rather than at
+  // the end of the install. A pack naming a role this host does not have used to create and stamp
+  // every column first and only THEN be refused, as an uncoded 500 over a half-applied sheet.
+  await preflightFieldWritePolicies({
+    fieldPermissions,
+    pack: normalized,
+    sheetId: sheet.id,
+    plan: writeScopePlan,
+  })
 
   // VALIDATE ALL, THEN WRITE. The pre-scan is the last read-only step: after it
   // returns, either the pack agrees with every live column or nothing happened.
@@ -1202,11 +1387,6 @@ async function installCustomerPack({
   })
   // LAST, and deliberately so: the columns must exist and be classified before any
   // permission can name one. A pack with no fieldWritePolicies makes no call at all.
-  const writeScopePlan = deriveFieldWriteScopePlan({
-    provisioning: api,
-    projectId: resolvedProjectId,
-    pack: normalized,
-  })
   const appliedWriteScopes = await applyFieldWritePolicies({
     provisioning: api,
     fieldPermissions,
@@ -1221,12 +1401,13 @@ async function installCustomerPack({
   // has since retired and hand a deployer a to-do list of work already done. Read last, this
   // reports the sheet as it now stands: only the orphans OUTSIDE the rectangle, which are exactly
   // the ones no install can clear.
-  const writeScopeCensus = normalized.fieldWriteDenials.length === 0
+  const writeScopeCensus = !writeScopePlan.region
     ? { check: 'not_declared', stale: null }
     : await detectStaleWriteScopes({
       fieldPermissions,
       sheetId: sheet.id,
       plan: writeScopePlan,
+      packId: normalized.packId,
       logicalFieldIds: buildLogicalFieldIdIndex({
         provisioning: api,
         projectId: resolvedProjectId,
@@ -1259,11 +1440,17 @@ async function installCustomerPack({
   // still denying a column, and only an operator can clear it.
   if (writeScopeCensus.stale && writeScopeCensus.stale.length > 0) {
     const warn = logger && typeof logger.warn === 'function' ? logger.warn.bind(logger) : log.info
+    // WHY each row survived, in the row's own terms. Lumping them together under "outside the
+    // region" was false for a row held by an operator or by another pack INSIDE the region, and it
+    // is the sentence a deployer acts on, so it is derived rather than asserted.
+    const outsideRegion = writeScopeCensus.stale.filter((row) => !row.inReconcileRegion && !row.heldBy)
+    const humanHeld = writeScopeCensus.stale.filter((row) => row.heldBy)
     warn(
       `[plugin-integration-core] customer pack install left ${writeScopeCensus.stale.length} STALE`
         + ` write scope(s) behind. pack=${normalized.packId} v${normalized.packVersion}`
-        + ' — denials on (column, role) pairs OUTSIDE the region this pack governs, so the'
-        + ' install may not retire them; clear them with'
+        + ` — ${outsideRegion.length} on (column, role) pairs OUTSIDE the region this pack governs`
+        + ` and ${humanHeld.length} authored by somebody other than this plugin; the install may`
+        + ' retire neither. Clear them with'
         + ' PUT /api/multitable/sheets/:sheetId/field-permissions { remove: true }.',
     )
   }
