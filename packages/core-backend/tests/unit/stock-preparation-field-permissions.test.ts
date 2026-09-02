@@ -444,7 +444,9 @@ describe('STRUCTURAL read-safety: this port can never produce a read restriction
     // what turns a scoped reconcile into a revoke channel:
     const statement = src.slice(src.search(/DELETE\s+FROM\s+field_permissions/i))
     const where = statement.slice(0, statement.indexOf('RETURNING'))
-    //  1. this port's own rows only — never an operator's
+    //  1. rows whose provenance this call is entitled to retire — bound as an ARRAY so the legacy
+    //     arm can be present or absent per call (`legacyAdoptable`). A row an operator AUTHORED
+    //     (marker or NULL) and a sibling pack's row are outside the array in every case.
     expect(where).toMatch(/AND\s+created_by\s*=\s*ANY\(\$2::text\[\]\)/)
     //  2. actual denials only — never a row an operator relaxed
     expect(where).toMatch(/AND\s+read_only\s*=\s*true/)
@@ -1595,6 +1597,40 @@ describe('7-RC2. provenance is per PACK, not per plugin', () => {
     expect(fake.rows.some((row) => row.field_id === F_MATERIAL_TYPE)).toBe(true)
   })
 
+  /**
+   * THE PORT ITSELF REFUSES, not merely the installer. The plugin raises the same 422 from its
+   * pre-flight, so a mutation that removed the refusal HERE stayed green across the plugin suites:
+   * the installer's copy caught it first. That is precisely the arrangement the atomicity fix exists
+   * to defeat — under concurrency the pre-flight's verdict is stale and only this one is binding.
+   */
+  it('the PORT refuses a declared pair another pack holds, before writing anything', async () => {
+    const fake = createDecodingTablePool([
+      packRow(F_WAREHOUSE_DATE, ROLE_WAREHOUSE, markerFor(PACK_B)), // the pair v2 declares
+      packRow(F_PURCHASE_REPLY, ROLE_PURCHASING, markerFor(PACK_A)), // ours, no longer declared
+    ])
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    await expect(service.applyRoleWriteScopes({
+      sheetId: SHEET,
+      entries: [{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_WAREHOUSE }],
+      packId: PACK_A,
+      reconcile: REGION,
+    })).rejects.toMatchObject({
+      reason: 'PACK_CONFLICT',
+      offending: [PACK_B],
+      pairs: [{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_WAREHOUSE, packId: PACK_B }],
+    })
+
+    // NOTHING WAS WRITTEN AND NOTHING WAS DELETED: the refusal precedes the first upsert, so our own
+    // stale row is still standing too — a half-applied refusal would be worse than none.
+    expect(fake.deletes).toHaveLength(0)
+    expect(fake.rows.map((row) => `${row.field_id} ${row.subject_id}`).sort()).toEqual([
+      `${F_PURCHASE_REPLY} ${ROLE_PURCHASING}`,
+      `${F_WAREHOUSE_DATE} ${ROLE_WAREHOUSE}`,
+    ].sort())
+    expect(fake.rows.find((row) => row.field_id === F_WAREHOUSE_DATE)!.created_by).toBe(markerFor(PACK_B))
+  })
+
   it('a reconcile with NO packId is refused: an unattributable delete is not a reconcile', async () => {
     const fake = createDecodingTablePool([packRow(F_WAREHOUSE_DATE, ROLE_PURCHASING, markerFor(PACK_A))])
     const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
@@ -1818,5 +1854,165 @@ describe('8. backfill: only a sheet with exactly ONE pack in the ledger can be a
     expect(soleOwners.map((row) => `${row.projectId}:${row.packId}`).sort())
       .toEqual(['p1:pack-alpha', 'p3:pack-beta'])
     expect(ambiguous.map((row) => row.projectId)).toEqual(['p2'])
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// 9. THE CLASSIFICATION'S OWN PROJECTIONS — the invariant, asserted directly.
+//
+// The plugin suites exercise the INSTALLER against a fake port, so a rule that lives in this file's
+// classifier is invisible to them by construction: mutating it there changes nothing they can see.
+// Every projection boundary is therefore pinned HERE, against the real function.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describe('9. classifyRoleWriteScopeRows — each projection holds exactly what it claims', () => {
+  const OUT_ROLE = 'role_beiliao_quality'
+  const REGION = {
+    fieldIds: [F_WAREHOUSE_DATE, F_PURCHASE_REPLY],
+    roleIds: [ROLE_PURCHASING, ROLE_WAREHOUSE],
+  }
+  const snapshotRow = (
+    fieldId: string,
+    roleId: string,
+    createdBy: string | null,
+    over: Partial<{ visible: boolean; readOnly: boolean }> = {},
+  ) => ({ fieldId, roleId, createdBy, visible: true, readOnly: true, ...over })
+
+  /** One sheet carrying every kind of row this invariant knows about. */
+  const classifyMixed = (legacyAdoptable: boolean) => classifyRoleWriteScopeRows({
+    sheetId: SHEET,
+    packId: PACK_A,
+    entries: [{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_WAREHOUSE }],
+    region: REGION,
+    legacyAdoptable,
+    rows: [
+      // IN-REGION, ours, no longer declared → the DELETE's row set.
+      snapshotRow(F_WAREHOUSE_DATE, ROLE_PURCHASING, markerFor(PACK_A)),
+      // IN-REGION, ANOTHER pack, on a pair we DECLARE → a conflict.
+      snapshotRow(F_WAREHOUSE_DATE, ROLE_WAREHOUSE, markerFor(PACK_B)),
+      // IN-REGION, ANOTHER pack, on a pair we do NOT declare → coexistence, not conflict.
+      snapshotRow(F_PURCHASE_REPLY, ROLE_WAREHOUSE, markerFor(PACK_B)),
+      // IN-REGION, a HUMAN (the real NULL shape) → never changed, reported.
+      snapshotRow(F_PURCHASE_REPLY, ROLE_PURCHASING, LEGACY_OPERATOR_CREATED_BY),
+      // OUT of region (column axis), pack-less → adoptable or unattributed, on the caller's proof.
+      snapshotRow(F_MATERIAL_TYPE, ROLE_PURCHASING, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY),
+      // OUT of region (role axis), ours → the ONLY genuine operator to-do.
+      snapshotRow(F_WAREHOUSE_DATE, OUT_ROLE, markerFor(PACK_A)),
+      // OUT of region (role axis), ANOTHER pack's → not ours, not a to-do.
+      snapshotRow(F_PURCHASE_REPLY, OUT_ROLE, markerFor(PACK_B)),
+      // OUT of region (role axis), a HUMAN's → a decision, not debris.
+      snapshotRow(F_PURCHASE_ETA, OUT_ROLE, OPERATOR_MARKER),
+    ],
+  })
+
+  it('CONFLICT is a DECLARED-pair overlap only — a sibling pack elsewhere in the rectangle coexists', () => {
+    // Widening this to "any sibling row inside my rectangle" bricks every legitimate second pack on
+    // the canonical table, which is why the two buckets are asserted together.
+    const c = classifyMixed(true)
+    expect(c.packConflicts).toEqual([
+      { fieldId: F_WAREHOUSE_DATE, roleId: ROLE_WAREHOUSE, packId: PACK_B },
+    ])
+    expect(c.governedByOtherPacks).toEqual([
+      { fieldId: F_PURCHASE_REPLY, roleId: ROLE_WAREHOUSE, packId: PACK_B },
+    ])
+  })
+
+  it('the operator TO-DO list holds only THIS pack’s own out-of-rectangle debris', () => {
+    // Four rows sit outside the rectangle and exactly one of them is this pack’s to answer for.
+    // A sibling pack’s live denial and a human’s decision are neither wrong nor ours; an
+    // unattributable legacy row out there is not claimable at all.
+    const c = classifyMixed(false)
+    expect(c.operatorMustClear).toEqual([
+      { fieldId: F_WAREHOUSE_DATE, roleId: OUT_ROLE, packId: PACK_A },
+    ])
+  })
+
+  it('a HUMAN’s in-region row is reported with WHAT they decided, and is never retired', () => {
+    const c = classifyMixed(true)
+    expect(c.operatorHeldInRegion).toEqual([
+      {
+        fieldId: F_PURCHASE_REPLY,
+        roleId: ROLE_PURCHASING,
+        createdBy: null,
+        packId: null,
+        owner: 'operator',
+        declared: false,
+        visible: true,
+        readOnly: true,
+      },
+    ])
+    expect(c.willRetire).toEqual([{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_PURCHASING }])
+  })
+
+  it('a pack-less row is CLAIMED only on the caller’s proof — otherwise nobody speaks for it', () => {
+    // The same row, the same position, two verdicts. With proof it is this pack’s (and so, being
+    // out of the rectangle, becomes the operator’s to-do); without it, it belongs to nobody this
+    // call can name and appears in no projection at all.
+    const proven = classifyMixed(true)
+    expect(proven.operatorMustClear.map((r) => r.fieldId)).toContain(F_MATERIAL_TYPE)
+    const unproven = classifyMixed(false)
+    expect(unproven.operatorMustClear.map((r) => r.fieldId)).not.toContain(F_MATERIAL_TYPE)
+  })
+
+  it('an operator on a DECLARED pair removes it from the write set — `applied` counts rows WRITTEN', async () => {
+    // The port drops the pair before the statement, so the operator's row is not merely guarded by
+    // the DO UPDATE's CASE — it is never addressed. `applied` is therefore the number of rows this
+    // call really wrote, which is what makes the install's own arithmetic honest.
+    for (const createdBy of [OPERATOR_MARKER, LEGACY_OPERATOR_CREATED_BY]) {
+      const fake = createDecodingTablePool([
+        {
+          ...pluginRow(F_WAREHOUSE_DATE, ROLE_WAREHOUSE),
+          created_by: createdBy,
+          visible: false,
+          read_only: false,
+        },
+      ])
+      const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+      const result = await service.applyRoleWriteScopes({
+        sheetId: SHEET,
+        entries: [
+          { fieldId: F_WAREHOUSE_DATE, roleId: ROLE_WAREHOUSE },
+          { fieldId: F_PURCHASE_REPLY, roleId: ROLE_WAREHOUSE },
+        ],
+        packId: PACK_A,
+        reconcile: REGION,
+      })
+      expect(result.applied).toBe(1)
+      expect(result.entries).toEqual([{ fieldId: F_PURCHASE_REPLY, roleId: ROLE_WAREHOUSE }])
+      expect(result.operatorHeld).toEqual([
+        { fieldId: F_WAREHOUSE_DATE, roleId: ROLE_WAREHOUSE, packId: null },
+      ])
+      // And the human's row is byte-identical: hidden, writable, unattributed to this plugin.
+      const held = fake.rows.find((r) => r.field_id === F_WAREHOUSE_DATE)!
+      expect(held).toMatchObject({ visible: false, read_only: false, created_by: createdBy })
+    }
+  })
+
+  /**
+   * THE POST-CONDITION IS ITSELF WITNESSED. `RECONCILE_DIVERGED` is defence in depth: with every
+   * narrowing correct it can never fire, so removing it alone changes no other test. Here the pool
+   * is rigged to report a delete the classification did not authorise — the shape a widened or
+   * cross-wired narrowing produces — and the call must ABORT rather than report the extra delete.
+   */
+  it('a DELETE that reaches a row the classification did not authorise ABORTS the call', async () => {
+    const base = createDecodingTablePool([pluginRow(F_WAREHOUSE_DATE, ROLE_PURCHASING, markerFor(PACK_A))])
+    const rigged: StockPreparationFieldPermissionsPool = {
+      async transaction(handler) {
+        return base.pool.transaction(async ({ query }) => handler({
+          query: async (sql, params) => {
+            const result = await query(sql, params)
+            if (!/DELETE FROM field_permissions/.test(sql)) return result
+            // One extra pair, exactly as a widened predicate would have returned.
+            return { rows: [...result.rows, { field_id: F_PURCHASE_ETA, subject_id: ROLE_WAREHOUSE }] }
+          },
+        }))
+      },
+    }
+    const service = new StockPreparationFieldPermissionsService({ pool: rigged })
+    await expect(service.applyRoleWriteScopes({
+      sheetId: SHEET,
+      entries: [{ fieldId: F_WAREHOUSE_DATE, roleId: ROLE_WAREHOUSE }],
+      packId: PACK_A,
+      reconcile: REGION,
+    })).rejects.toMatchObject({ reason: 'RECONCILE_DIVERGED' })
   })
 })

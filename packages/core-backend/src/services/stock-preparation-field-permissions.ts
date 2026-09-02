@@ -143,6 +143,26 @@
  *
  * None can hide a column, none can drop a restriction, and none takes a `visible` argument — the
  * load-bearing property above is unaffected by their existence.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════
+ * LIMITS — WHAT THIS PORT STILL CANNOT SEE, STATED RATHER THAN DISCOVERED
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════
+ * 1. AN OPERATOR EDIT MADE BEFORE THE AUTHORING ROUTE STARTED STAMPING IS INVISIBLE AS SUCH.
+ *    `routes/univer-meta.ts` now writes `created_by = 'operator:<actorId>'` on both its INSERT and
+ *    its DO UPDATE, so an operator decision layered on top of a row a pack created takes over the
+ *    provenance and this port treats it as an operator row. Rows edited BEFORE that shipped still
+ *    carry the PACK's marker, and nothing in the data distinguishes them from installer output — so
+ *    a reconcile can retire one. There is no fix inside this file: the information was never
+ *    recorded. It is named in the install's RETIRED log line rather than claimed away.
+ * 2. PROVENANCE IS THE ONLY OWNERSHIP SIGNAL. `field_permissions` has no pack column and no tenant
+ *    column; `created_by` and `sheet_id` are the entire vocabulary this port can reason in. That is
+ *    why `legacyAdoptable` is a caller-supplied PROOF rather than something looked up here.
+ * 3. TWO PACKS MAY STILL LOCK A COLUMN BETWEEN THEM. The conflict refusal fires on a pair BOTH packs
+ *    DECLARE. Two packs whose declared pairs are disjoint but whose denials overlap in effect can
+ *    still leave a column unwritable by every role, because `deriveFieldPermissions` ORs `read_only`
+ *    across a user's rows. Refusing on mere rectangle overlap instead would brick every legitimate
+ *    sibling pack on the canonical table, so the pairs are REPORTED (`governedByOtherPacks`) and the
+ *    decision is left to a human.
  */
 
 import { poolManager } from '../integration/db/connection-pool'
@@ -152,9 +172,19 @@ import { poolManager } from '../integration/db/connection-pool'
  * names no pack. See PROVENANCE above.
  *
  * A row stamped with exactly this value is a LEGACY row: written before the marker carried a pack
- * id, so there is no pack it can be attributed to. Such a row is adoptable by whichever pack
- * re-declares it (there is no other owner to protect it for) — that is the ONLY marker other than
- * its own that a pack's reconcile may touch, and it is stated here rather than left to inference.
+ * id, so nothing IN THE ROW says which pack it belongs to.
+ *
+ * IT DOES NOT FOLLOW THAT IT BELONGS TO NOBODY. That inference — "a pack-less row has no other
+ * owner to protect it for, so whichever pack re-declares it may adopt it" — is the P0 this change
+ * exists to close. Every row every pack had EVER written carried exactly this value (the pack id
+ * lands in `created_by` only as of #5455), so on a canonical sheet two packs share it licensed pack
+ * B to retire pack A's live, enforced denials and report them as its own history.
+ *
+ * A legacy row is therefore adoptable ONLY when the CALLER supplies proof from outside the row —
+ * `legacyAdoptable: true`, which the installer derives from the pack-install ledger showing this
+ * pack is the only pack ever installed on this sheet, and which the one-time backfill script
+ * (`scripts/backfill-stock-preparation-write-scope-pack-ids.ts`) makes permanent by stamping the
+ * pack id. Without that proof the row is UNATTRIBUTED and the call is refused.
  */
 export const STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY =
   'plugin:plugin-integration-core/stock-preparation'

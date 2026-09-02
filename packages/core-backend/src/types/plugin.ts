@@ -1204,11 +1204,17 @@ export interface PluginServices {
    * column's owner leaves the old denial standing next to the new one, and the write gate ORs
    * `read_only` across a user's rows, so the column becomes unwritable by EVERY declared role while
    * the install reports success. The delete is bounded FIVE ways — the target sheet only (the only
-   * project/tenant bound this table can carry); this PACK's `created_by` marker or the pack-less
-   * legacy one only (never an operator's row, never a sibling pack's); `read_only = true` only;
-   * inside the declared region only (which the implementation REQUIRES to contain every entry being
-   * written); and never a row the same call just wrote — so it can neither reach another consumer's
-   * rows nor become "clear this sheet". Removals are returned, never silent.
+   * project/tenant bound this table can carry); this PACK's `created_by` marker, plus the pack-less
+   * LEGACY marker only when the caller passes `legacyAdoptable` (a row an operator AUTHORED and a
+   * sibling pack's row are outside the predicate either way); `read_only = true` only; inside the
+   * declared region only (which the implementation REQUIRES to contain every entry being written);
+   * and never a row the same call just wrote — so it can neither reach another consumer's rows nor
+   * become "clear this sheet". Removals are returned, never silent.
+   *
+   * THE ONE THING IT CANNOT SEE: an operator edit made through the authoring route BEFORE that route
+   * started stamping `operator:<actorId>` left the PACK's marker on the row, so such a row is
+   * indistinguishable from installer output and a reconcile can retire it. Rows edited since are
+   * attributed and untouchable. There is no signal in the data to recover the difference.
    *
    * An entries-EMPTY call WITH a region is a legitimate "this rectangle should now hold no denial",
    * not a no-op: that is exactly how a revision that hands every governed column to every declared

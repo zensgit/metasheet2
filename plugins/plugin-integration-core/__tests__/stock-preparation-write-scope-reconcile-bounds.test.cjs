@@ -515,6 +515,41 @@ async function noLedgerAtAllMeansNoAdoption() {
   assert.equal(plan2.canInstall, false)
 }
 
+/**
+ * THE OPERATOR'S TO-DO LIST HOLDS ONLY THIS PACK'S OWN DEBRIS — the negative control.
+ *
+ * `operatorMustClear` exists to say "this row is provably ours, it is wrong, and this revision has
+ * no authority to reach it". Widening it to every out-of-rectangle row would put an operator's own
+ * decisions and a sibling pack's live denials on a list headed "clear these", which is round-2
+ * finding 2 in a different place. Three rows sit OUTSIDE this pack's rectangle here and exactly one
+ * of them belongs on the list.
+ */
+async function theOperatorsToDoListHoldsOnlyThisPacksOwnDebris() {
+  const ledger = createLedger(['bounds', 'pack-beta'])
+  const OUT_ROLE = 'plugin-integration-core:bom-prep:quality'
+  const port = createWriteScopePort({
+    rows: seedRows(
+      // (a) THIS pack's own denial for a role it no longer declares — the one real to-do.
+      packRow(SHEET_ID, physical('procurementReply'), OUT_ROLE, 'bounds'),
+      // (b) A SIBLING pack's live denial, same out-of-rectangle role. Not ours, not wrong, not ours
+      //     to hand anybody.
+      packRow(SHEET_ID, physical('procurementDone'), OUT_ROLE, 'pack-beta'),
+      // (c) A HUMAN's denial, same out-of-rectangle role. A deliberate decision, not debris.
+      operatorRow(SHEET_ID, physical('warehouseDone'), OUT_ROLE),
+    ),
+  })
+  const summary = await install(port, packWith('bounds', 1, V1_SPLIT), { ledger })
+  assert.deepEqual(summary.operatorMustClearWriteScopes.map(key), [
+    `${physical('procurementReply')} ${OUT_ROLE}`,
+  ], "only THIS pack's own out-of-rectangle denial is an operator to-do")
+  assert.equal(summary.operatorMustClearWriteScopeCount, 1)
+  // All three survive — the reconcile reaches none of them.
+  assert.equal(port.rows.size, 3 + 4, 'the three seeded rows plus the four this revision declares')
+  // And out-of-rectangle rows are not reported under the in-rectangle projections either.
+  assert.deepEqual(summary.governedByOtherPacks, [])
+  assert.deepEqual(summary.operatorHeldWriteScopes, [])
+}
+
 // ---------------------------------------------------------------------------
 // RC3. The dry-run split is witnessed on BOTH axes.
 // ---------------------------------------------------------------------------
@@ -822,6 +857,7 @@ async function main() {
   await aLegacyPackLessRowIsRefusedWithoutProof()
   await aLegacyPackLessRowIsAdoptedOnceTheLedgerProvesSoleOwnership()
   await noLedgerAtAllMeansNoAdoption()
+  await theOperatorsToDoListHoldsOnlyThisPacksOwnDebris()
   await theDryRunSplitIsWitnessedOnBothAxes()
   await anOperatorRowInsideTheRectangleIsReportedNotRetired()
   await anOperatorRowOnADeclaredPairIsSkippedNotOverwritten()
