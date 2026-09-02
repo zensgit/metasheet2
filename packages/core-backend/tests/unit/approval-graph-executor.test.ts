@@ -726,8 +726,8 @@ describe('ApprovalGraphExecutor', () => {
   // ── Lock-1 §K6 precondition (landed by the K3 slice): normalizeApprovalMode fails CLOSED ──
   // The executor's mode normalizer previously mapped ANY unrecognized mode silently to 'single'
   // (fail-open). Contract-valid data never reached that arm (the authoring choke + the stored-graph
-  // re-normalize both reject unknown modes), but deploy skew / rollback around a future mode (e.g.
-  // 'sequential') would degrade it silently to first-approver-wins. These tests pin the closure:
+  // re-normalize both reject unknown modes), but deploy skew / rollback around a future mode would
+  // degrade it silently to first-approver-wins. These tests pin the closure:
   // the MUTATION "revert normalizeApprovalMode to fail-open" must red the first test below.
   it('fails CLOSED: an unrecognized approvalMode reaching the executor throws APPROVAL_MODE_UNSUPPORTED instead of running as single (G-14 arm; mutation: revert to fail-open reds THIS test)', () => {
     const unknownModeGraph = (approvalMode: unknown): RuntimeGraph => ({
@@ -749,7 +749,7 @@ describe('ApprovalGraphExecutor', () => {
       policy: { allowRevoke: true },
     })
 
-    for (const unknown of ['sequential', 'SINGLE', 'or_sign', null, 42]) {
+    for (const unknown of ['SINGLE', 'or_sign', null, 42]) {
       const executor = new ApprovalGraphExecutor(unknownModeGraph(unknown), {})
       // Accessor path (getApprovalMode) and resolution path (resolveInitialState) both fail
       // closed — under the OLD fail-open arm both would have run the node as 'single'.
@@ -772,7 +772,7 @@ describe('ApprovalGraphExecutor', () => {
     }
   })
 
-  it('positive controls per mode: every LEGITIMATE shipped approvalMode — absent (≡ single), single, all, any, threshold — still executes (the rejection is unknown-selected, not blanket)', () => {
+  it('positive controls per mode: every LEGITIMATE shipped approvalMode — absent (≡ single), single, all, any, threshold, sequential — still executes (G-14)', () => {
     const modeGraph = (config: Record<string, unknown>): RuntimeGraph => ({
       nodes: [
         { key: 'start', type: 'start', config: {} },
@@ -800,6 +800,61 @@ describe('ApprovalGraphExecutor', () => {
     const thresholdExecutor = new ApprovalGraphExecutor(modeGraph({ approvalMode: 'threshold', approvalThreshold: 2 }), {})
     expect(thresholdExecutor.getApprovalMode('node-m')).toBe('threshold')
     expect(thresholdExecutor.resolveInitialState().assignments).toHaveLength(2)
+
+    const sequentialExecutor = new ApprovalGraphExecutor(modeGraph({ approvalMode: 'sequential' }), {})
+    expect(sequentialExecutor.getApprovalMode('node-m')).toBe('sequential')
+    expect(sequentialExecutor.resolveInitialState().assignments).toEqual([
+      expect.objectContaining({
+        assigneeId: 'approver-a',
+        metadata: { sequentialQueue: { position: 1, length: 2, state: 'active' } },
+      }),
+      expect.objectContaining({
+        assigneeId: 'approver-b',
+        metadata: { sequentialQueue: { position: 2, length: 2, state: 'queued' } },
+      }),
+    ])
+  })
+
+  it('sequential order follows assigneeSources order, resolver emission order, and first-occurrence dedup', () => {
+    const graph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'ordered',
+          type: 'approval',
+          config: {
+            assigneeSources: [
+              { kind: 'static_user', userIds: ['u-b', 'u-a'] },
+              { kind: 'static_user', userIds: ['u-a', 'u-c'] },
+            ],
+            approvalMode: 'sequential',
+          },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'start-ordered', source: 'start', target: 'ordered' },
+        { key: 'ordered-end', source: 'ordered', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+    const executor = new ApprovalGraphExecutor(graph, {}, {
+      assignmentResolver: ({ nodeKey, sourceStep, config }) => resolveApprovalAssignees({
+        nodeKey,
+        sourceStep,
+        config,
+        formSnapshot: {},
+        requesterSnapshot: { id: 'requester' },
+      }),
+    })
+    expect(executor.resolveInitialState().assignments.map((assignment) => ({
+      id: assignment.assigneeId,
+      queue: assignment.metadata?.sequentialQueue,
+    }))).toEqual([
+      { id: 'u-b', queue: { position: 1, length: 3, state: 'active' } },
+      { id: 'u-a', queue: { position: 2, length: 3, state: 'queued' } },
+      { id: 'u-c', queue: { position: 3, length: 3, state: 'queued' } },
+    ])
   })
 
   // ── Lock-1 §K3 prior_node_approver — REAL resolver + REAL executor oracle ──

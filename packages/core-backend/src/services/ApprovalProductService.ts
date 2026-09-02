@@ -93,6 +93,12 @@ import {
   serializeApprovalDesignatedFallbackEligibility,
   type ApprovalDesignatedFallbackEligibilitySnapshot,
 } from './approval-designated-fallback-eligibility'
+import {
+  inheritSequentialQueueMetadata,
+  isSequentialQueueActive,
+  promoteNextSequentialQueueAssignment,
+  readSequentialQueueMetadata,
+} from './approval-sequential-mode'
 import { validateAmountTotalConsistency } from './amount-total-check'
 import { isApprovalAttachmentsEnabled } from '../routes/approval-attachments'
 import {
@@ -649,7 +655,7 @@ export const DETAIL_LEAF_FIELD_TYPES = new Set(
 // `ApprovalNodeType` union and the FE `apps/web/src/types/approval.ts` node-type list.
 const APPROVAL_NODE_TYPES = new Set(['start', 'approval', 'cc', 'condition', 'parallel', 'end', 'handler'])
 const CONDITION_OPERATORS = new Set(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'isEmpty'])
-const APPROVAL_MODES = new Set<ApprovalMode>(['single', 'all', 'any', 'threshold'])
+const APPROVAL_MODES = new Set<ApprovalMode>(['single', 'all', 'any', 'threshold', 'sequential'])
 const PARALLEL_JOIN_MODES = new Set(['all', 'any'])
 // Lock-4 §3 F4-B — 'designated' joins the enum. §1.3 four-allowlist arithmetic tracks the FE side.
 const EMPTY_ASSIGNEE_POLICIES = new Set<EmptyAssigneePolicy>(['error', 'auto-approve', 'designated'])
@@ -727,6 +733,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+function handoverAssignmentMetadata(
+  sourceAssignments: readonly Pick<ApprovalAssignmentRow, 'metadata'>[],
+  metadata: Record<string, unknown>,
+): Record<string, unknown> {
+  const inherited = inheritSequentialQueueMetadata(
+    sourceAssignments.map((assignment) => assignment.metadata),
+    metadata,
+  )
+  if (!inherited) {
+    throw new ServiceError(
+      'Sequential approval queue handover metadata is invalid',
+      409,
+      'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+    )
+  }
+  return inherited
+}
+
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
 }
@@ -734,7 +758,7 @@ function isNonEmptyString(value: unknown): value is string {
 function normalizeApprovalMode(value: unknown, context: ValidationContext, path: string): ApprovalMode | undefined {
   if (value === undefined) return undefined
   if (typeof value !== 'string' || !APPROVAL_MODES.has(value as ApprovalMode)) {
-    failValidation(context, `${path} must be single, all, any, or threshold`)
+    failValidation(context, `${path} must be single, all, any, threshold, or sequential`)
   }
   return value as ApprovalMode
 }
@@ -3612,6 +3636,13 @@ function collectBranchAssignees(
           'APPROVAL_THRESHOLD_IN_PARALLEL',
         )
       }
+      if (config.approvalMode === 'sequential') {
+        throw new ServiceError(
+          "approvalGraph approvalMode 'sequential' is not supported inside a parallel region",
+          400,
+          'APPROVAL_SEQUENTIAL_IN_PARALLEL',
+        )
+      }
       config.assigneeIds?.forEach((assignee) => assignees.add(assignee))
       for (const source of config.assigneeSources ?? []) {
         if (source.kind === 'static_user') source.userIds.forEach((assignee) => assignees.add(assignee))
@@ -3661,6 +3692,13 @@ function collectAllBranchAssignees(
         `approvalGraph node ${node.key} uses approvalMode 'threshold' inside a parallel region — threshold mode is linear-only in v1`,
         400,
         'APPROVAL_THRESHOLD_IN_PARALLEL',
+      )
+    }
+    if (approvalConfig.approvalMode === 'sequential') {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} uses approvalMode 'sequential' inside a parallel region — sequential mode is linear-only in v1`,
+        400,
+        'APPROVAL_SEQUENTIAL_IN_PARALLEL',
       )
     }
     const local: string[] = []
@@ -5246,7 +5284,23 @@ export class ApprovalProductService {
         return resolution
       }
 
-      const evaluations = resolution.assignments
+      const currentNode = runtimeGraph.nodes.find((node) => node.key === nodeKey)
+      if (currentNode?.type === 'handler') {
+        return resolution
+      }
+
+      const approvalMode = executor.getApprovalMode(nodeKey)
+      const evaluationCandidates = approvalMode === 'sequential'
+        ? resolution.assignments.filter((assignment) => isSequentialQueueActive(assignment.metadata))
+        : resolution.assignments
+      if (approvalMode === 'sequential' && evaluationCandidates.length !== 1) {
+        throw new ServiceError(
+          'Sequential approval queue has no unique active head',
+          409,
+          'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+        )
+      }
+      const evaluations = evaluationCandidates
         .filter((assignment) =>
           !blockedAutoAssignmentKeys.has(`${assignment.nodeKey}:${assignment.assignmentType}:${assignment.assigneeId}`))
         .map((assignment) => evaluateAutoApprovalAssignment(runtimeGraph, executor, assignment, requesterId, history))
@@ -5284,7 +5338,21 @@ export class ApprovalProductService {
         appendAutoApprovalHistory(history, evaluation.event)
       }
 
-      const approvalMode = executor.getApprovalMode(nodeKey)
+      if (approvalMode === 'sequential' && remainingAssignments.length > 0) {
+        const promotedAssignments = promoteNextSequentialQueueAssignment(remainingAssignments)
+        if (!promotedAssignments) {
+          throw new ServiceError(
+            'Sequential approval queue metadata is invalid',
+            409,
+            'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+          )
+        }
+        resolution = {
+          ...resolution,
+          assignments: promotedAssignments,
+        }
+        continue
+      }
       if (approvalMode === 'all' && remainingAssignments.length > 0) {
         return {
           ...resolution,
@@ -8309,11 +8377,11 @@ export class ApprovalProductService {
             assigneeId: toUserId,
             sourceStep: assignment.source_step ?? 0,
             nodeKey: assignment.node_key || '',
-            metadata: {
+            metadata: handoverAssignmentMetadata([assignment], {
               reassignedFrom: fromUserId,
               adminReassign: true,
               previousAssignmentId: assignment.id,
-            },
+            }),
           })
           reassignmentsByEpoch.set(epoch, bucket)
         }
@@ -8739,11 +8807,11 @@ export class ApprovalProductService {
             assigneeId: resolvedManagerId,
             sourceStep: assignment.source_step ?? 0,
             nodeKey: assignment.node_key || '',
-            metadata: {
+            metadata: handoverAssignmentMetadata([assignment], {
               departureTransfer: true,
               reassignedFrom: userId,
               previousAssignmentId: assignment.id,
-            },
+            }),
           })
           reassignmentsByEpoch.set(epoch, bucket)
         }
@@ -8961,6 +9029,15 @@ export class ApprovalProductService {
         // Read the current epoch BEFORE the node-wide deactivate below (afterwards the node is empty)
         // and stamp the handed-to assignee with it; NEVER bump node_activation_seq.
         const timeoutTransferEntryEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
+        const timeoutTransferSources = await client.query<ApprovalAssignmentRow>(
+          `SELECT *
+             FROM approval_assignments
+            WHERE instance_id = $1 AND node_key = $2 AND is_active = TRUE
+            ORDER BY created_at ASC
+            FOR UPDATE`,
+          [id, currentNodeKey],
+        )
+        const timeoutTransferMetadata = handoverAssignmentMetadata(timeoutTransferSources.rows, {})
         // Hand the WHOLE node over: every active assignment at the node is deactivated and the
         // static target takes it (mode semantics reset to the single handed-over approver).
         await client.query(
@@ -8969,7 +9046,9 @@ export class ApprovalProductService {
            WHERE instance_id = $1 AND node_key = $2 AND is_active = TRUE`,
           [id, currentNodeKey],
         )
-        const createdTaskEvents = await this.insertAssignments(client, id, executor.buildTransferAssignments(currentNodeKey, targetUserId), timeoutTransferEntryEpoch)
+        const timeoutTransferAssignments = executor.buildTransferAssignments(currentNodeKey, targetUserId)
+          .map((assignment) => ({ ...assignment, metadata: timeoutTransferMetadata }))
+        const createdTaskEvents = await this.insertAssignments(client, id, timeoutTransferAssignments, timeoutTransferEntryEpoch)
         // Parity with the dispatch transfer: an in-place handover does not bump the instance version.
         await this.insertApprovalRecord(client, id, {
           action: 'transfer',
@@ -9629,8 +9708,11 @@ export class ApprovalProductService {
         // current epoch BEFORE deactivating the actor's seat (a single-approver node would be EMPTY at
         // the read otherwise) and stamp the handed-to assignee with it; NEVER bump node_activation_seq.
         const transferEntryEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
+        const transferMetadata = handoverAssignmentMetadata(actorAssignments, {})
         await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
-        const createdTaskEvents = await this.insertAssignments(client, id, executor.buildTransferAssignments(currentNodeKey, request.targetUserId), transferEntryEpoch)
+        const transferAssignments = executor.buildTransferAssignments(currentNodeKey, request.targetUserId)
+          .map((assignment) => ({ ...assignment, metadata: transferMetadata }))
+        const createdTaskEvents = await this.insertAssignments(client, id, transferAssignments, transferEntryEpoch)
         await this.insertApprovalRecord(client, id, {
           action: 'transfer',
           actorId: actor.userId,
@@ -10327,13 +10409,64 @@ export class ApprovalProductService {
         ? await this.currentNodeEntryEpoch(client, id, currentNodeKey)
         : null
       // Approval aggregation semantics:
+      //   'sequential': complete only the active head and promote exactly one queued successor.
       //   'all'    (会签): deactivate only the actor's assignment, short-circuit if siblings remain.
       //   'any'    (或签): first approver wins — deactivate siblings with an audit trail
       //                    (aggregateCancelledBy/aggregateCancelledAt metadata) + one 'sign' record.
       //   'single' / default: exactly one assignee expected; blanket-deactivate all active rows.
       let aggregateCancelledAssigneeIds: string[] = []
       let parallelCancelledAssigneeIds: string[] = []
-      if (approvalMode === 'all') {
+      if (approvalMode === 'sequential') {
+        if (actorAssignments.length !== 1) {
+          throw new ServiceError(
+            'Sequential approval queue has no unique actor head',
+            409,
+            'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+          )
+        }
+        const queueAdvance = await this.advanceSequentialQueue(
+          client,
+          id,
+          currentNodeKey,
+          actorAssignments[0],
+          currentNodeEpoch,
+        )
+        if (queueAdvance.remainingAssignments > 0) {
+          await client.query(
+            `UPDATE approval_instances
+             SET version = $2,
+                 updated_at = now()
+             WHERE id = $1`,
+            [id, nextVersion],
+          )
+          await this.insertApprovalRecord(client, id, {
+            action: 'approve',
+            actorId: actor.userId,
+            actorName,
+            comment: request.comment || null,
+            fromStatus: instance.status,
+            toStatus: instance.status,
+            fromVersion: instance.version,
+            toVersion: nextVersion,
+            metadata: {
+              nodeKey: currentNodeKey,
+              nextNodeKey: currentNodeKey,
+              approvalMode,
+              aggregateComplete: false,
+              remainingAssignments: queueAdvance.remainingAssignments,
+              ...(request.channelOrigin
+                ? { channel: request.channelOrigin.channel, cardDeliveryId: request.channelOrigin.cardDeliveryId }
+                : {}),
+              ...(currentNodeEpoch !== null ? { nodeEntryEpoch: currentNodeEpoch } : {}),
+            },
+          }, actor)
+          await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, queueAdvance.createdTasks)
+          await client.query('COMMIT')
+          await this.emitApprovalTaskCreatedEventsPostCommit(id, queueAdvance.createdTasks)
+          this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
+          return (await this.getApproval(id, actor.userId, actor.roles))!
+        }
+      } else if (approvalMode === 'all') {
         await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
         const remainingAssignments = currentNodeAssignments.length - actorAssignments.length
         if (remainingAssignments > 0) {
@@ -11149,27 +11282,60 @@ export class ApprovalProductService {
     assignments: Array<{ assignmentType: 'user' | 'role'; assigneeId: string; nodeKey: string; sourceStep: number; metadata?: unknown }>,
     entryEpoch: number | null,
   ): Promise<ApprovalTaskCreatedTaskSnapshot[]> {
-    await this.assertNoActiveAssignmentConflicts(client, instanceId, assignments)
+    const preparedAssignments = assignments.map((assignment) => {
+      const queue = readSequentialQueueMetadata(assignment.metadata)
+      if (isRecord(assignment.metadata) && 'sequentialQueue' in assignment.metadata && !queue) {
+        throw new ServiceError(
+          'Sequential approval queue metadata is invalid',
+          409,
+          'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+        )
+      }
+      return { assignment, queue }
+    })
+    const activeAssignments = preparedAssignments
+      .filter(({ queue }) => queue ? queue.state === 'active' : true)
+      .map(({ assignment }) => assignment)
+    await this.assertNoActiveAssignmentConflicts(client, instanceId, activeAssignments)
     // A-2a: every USER-typed row is one new actionable pending item — collected by the caller
     // (still inside its transaction) and emitted as approval.task_created AFTER commit, mirroring
     // the completion-event discipline. Role-typed rows do not fire v1 recipient events.
     const createdTasks: ApprovalTaskCreatedTaskSnapshot[] = []
-    for (const assignment of assignments) {
-      await client.query(
-        `INSERT INTO approval_assignments
-         (instance_id, assignment_type, assignee_id, source_step, node_key, is_active, entry_epoch, metadata, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7::jsonb, now(), now())`,
-        [
-          instanceId,
-          assignment.assignmentType,
-          assignment.assigneeId,
-          assignment.sourceStep,
-          assignment.nodeKey,
-          entryEpoch,
-          JSON.stringify(assignment.metadata ?? {}),
-        ],
-      )
-      if (assignment.assignmentType === 'user') {
+    for (const { assignment, queue } of preparedAssignments) {
+      const isActive = queue ? queue.state === 'active' : true
+      if (queue) {
+        await client.query(
+          `INSERT INTO approval_assignments
+           (instance_id, assignment_type, assignee_id, source_step, node_key, is_active, entry_epoch, metadata, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, now(), now())`,
+          [
+            instanceId,
+            assignment.assignmentType,
+            assignment.assigneeId,
+            assignment.sourceStep,
+            assignment.nodeKey,
+            isActive,
+            entryEpoch,
+            JSON.stringify(assignment.metadata ?? {}),
+          ],
+        )
+      } else {
+        await client.query(
+          `INSERT INTO approval_assignments
+           (instance_id, assignment_type, assignee_id, source_step, node_key, entry_epoch, metadata, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now(), now())`,
+          [
+            instanceId,
+            assignment.assignmentType,
+            assignment.assigneeId,
+            assignment.sourceStep,
+            assignment.nodeKey,
+            entryEpoch,
+            JSON.stringify(assignment.metadata ?? {}),
+          ],
+        )
+      }
+      if (isActive && assignment.assignmentType === 'user') {
         createdTasks.push({
           nodeKey: assignment.nodeKey,
           entryEpoch,
@@ -11179,6 +11345,133 @@ export class ApprovalProductService {
       }
     }
     return createdTasks
+  }
+
+  private async advanceSequentialQueue(
+    client: ApprovalDbClient,
+    instanceId: string,
+    nodeKey: string,
+    activeAssignment: ApprovalAssignmentRow,
+    entryEpoch: number | null,
+  ): Promise<{ createdTasks: ApprovalTaskCreatedTaskSnapshot[]; remainingAssignments: number }> {
+    const activeQueue = readSequentialQueueMetadata(activeAssignment.metadata)
+    if (!activeQueue || activeQueue.state !== 'active') {
+      throw new ServiceError(
+        'Sequential approval queue head metadata is invalid',
+        409,
+        'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+      )
+    }
+    const completed = await client.query<{ id: string }>(
+      `UPDATE approval_assignments
+          SET is_active = FALSE,
+              metadata = jsonb_set(metadata, '{sequentialQueue,state}', to_jsonb('completed'::text), false),
+              updated_at = now()
+        WHERE id = $1
+          AND instance_id = $2
+          AND node_key = $3
+          AND is_active = TRUE
+          AND entry_epoch IS NOT DISTINCT FROM $4
+        RETURNING id`,
+      [activeAssignment.id, instanceId, nodeKey, entryEpoch],
+    )
+    if (completed.rows.length !== 1) {
+      throw new ServiceError(
+        'Sequential approval queue head could not be completed',
+        409,
+        'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+      )
+    }
+
+    const queued = await client.query<ApprovalAssignmentRow>(
+      `SELECT *
+         FROM approval_assignments
+        WHERE instance_id = $1
+          AND node_key = $2
+          AND is_active = FALSE
+          AND entry_epoch IS NOT DISTINCT FROM $3
+          AND metadata->'sequentialQueue'->>'state' = 'queued'
+        ORDER BY id ASC
+        FOR UPDATE`,
+      [instanceId, nodeKey, entryEpoch],
+    )
+    if (queued.rows.length === 0) {
+      if (activeQueue.position !== activeQueue.length) {
+        throw new ServiceError(
+          'Sequential approval queue ended before its declared length',
+          409,
+          'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+        )
+      }
+      return { createdTasks: [], remainingAssignments: 0 }
+    }
+
+    const parsedQueued = queued.rows.map((row) => ({
+      row,
+      queue: readSequentialQueueMetadata(row.metadata),
+    }))
+    if (parsedQueued.some(({ queue }) => queue === null)) {
+      throw new ServiceError(
+        'Sequential approval queue ordering is invalid',
+        409,
+        'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+      )
+    }
+    const orderedQueued = parsedQueued
+      .map(({ row, queue }) => ({ row, queue: queue! }))
+      .sort((left, right) => left.queue.position - right.queue.position)
+    const expectedRemaining = activeQueue.length - activeQueue.position
+    if (
+      orderedQueued.length !== expectedRemaining
+      || orderedQueued.some(({ queue }, index) => (
+        queue.state !== 'queued'
+        || queue.length !== activeQueue.length
+        || queue.position !== activeQueue.position + index + 1
+      ))
+    ) {
+      throw new ServiceError(
+        'Sequential approval queue ordering is invalid',
+        409,
+        'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+      )
+    }
+    const next = orderedQueued[0].row
+    if (next.assignment_type !== 'user' && next.assignment_type !== 'role') {
+      throw new ServiceError(
+        'Sequential approval queue assignment type is invalid',
+        409,
+        'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+      )
+    }
+    await this.assertNoActiveAssignmentConflicts(client, instanceId, [{
+      assignmentType: next.assignment_type,
+      assigneeId: next.assignee_id,
+      nodeKey,
+      metadata: next.metadata,
+    }])
+    const activated = await client.query<{ id: string }>(
+      `UPDATE approval_assignments
+          SET is_active = TRUE,
+              metadata = jsonb_set(metadata, '{sequentialQueue,state}', to_jsonb('active'::text), false),
+              updated_at = now()
+        WHERE id = $1
+          AND is_active = FALSE
+        RETURNING id`,
+      [next.id],
+    )
+    if (activated.rows.length !== 1) {
+      throw new ServiceError(
+        'Sequential approval queue head could not be activated',
+        409,
+        'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+      )
+    }
+    return {
+      createdTasks: next.assignment_type === 'user'
+        ? [{ nodeKey, entryEpoch, assigneeUserId: next.assignee_id, sourceStep: next.source_step }]
+        : [],
+      remainingAssignments: activeQueue.length - activeQueue.position,
+    }
   }
 
   /**

@@ -2057,7 +2057,7 @@ function hasRecordTableBadgeMetadata(metadata?: Record<string, unknown> | null, 
 }
 
 function approvalModeLabel(mode: string): string {
-  const map: Record<string, string> = { single: '单人', all: '会签', any: '或签' }
+  const map: Record<string, string> = { single: '单人', all: '会签', any: '或签', threshold: '门槛会签', sequential: '依次审批' }
   return map[mode] ?? mode
 }
 

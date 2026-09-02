@@ -201,6 +201,21 @@ describe('P1-C threshold control (M7 wired, not inert)', () => {
     expect(api.approvalNodeMode('approval_1')).toBe('threshold')
   })
 
+  it('the mode picker offers sequential and disables it inside a parallel region', () => {
+    const api = createStubConfigApi({ approval_1: {} })
+    const c = mountEditorFlat(approvalNode(), api)
+    const select = c.querySelector('[data-testid="approval-node-mode"]') as HTMLSelectElement
+    const option = c.querySelector('[data-testid="approval-node-mode-sequential-option"]') as HTMLOptionElement
+    expect(option.disabled).toBe(false)
+    select.value = 'sequential'
+    select.dispatchEvent(new Event('change'))
+    expect(api.approvalNodeMode('approval_1')).toBe('sequential')
+
+    const parallelApi = createStubConfigApi({ approval_1: {} }, { inParallelRegion: true })
+    const parallel = mountEditorFlat(approvalNode(), parallelApi)
+    expect((parallel.querySelector('[data-testid="approval-node-mode-sequential-option"]') as HTMLOptionElement).disabled).toBe(true)
+  })
+
   it('the N input renders once mode is threshold and setApprovalNodeThreshold fires on change', async () => {
     const api = createStubConfigApi({ approval_1: { approvalMode: 'threshold', approvalThreshold: 1 } })
     const c = mountEditorFlat(approvalNode(), api)

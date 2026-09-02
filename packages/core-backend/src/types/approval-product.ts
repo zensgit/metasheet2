@@ -17,7 +17,7 @@ export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[numb
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
 export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver' | 'user_group' | 'form_field_user_manager' | 'form_field_user_dept_head'
-export type ApprovalMode = 'single' | 'all' | 'any' | 'threshold'
+export type ApprovalMode = 'single' | 'all' | 'any' | 'threshold' | 'sequential'
 
 /**
  * Lock-3 §1.5 / OD-L3-6(a) — the RATIFIED handler assignee-source registry: exactly SEVEN of the
@@ -615,6 +615,16 @@ export interface ApprovalAssigneeResolutionMetadata {
    * post-delegation comparison.
    */
   samePersonTransfer?: { from: string; policy: 'transfer_direct_manager' | 'transfer_dept_head' }
+  /**
+   * Lock-1 K6 — deterministic within-node queue position. All seats are persisted at activation,
+   * but only `state: 'active'` is actionable; queued rows are promoted one at a time in the same
+   * node-entry epoch. A fresh activation rebuilds the queue from position 1.
+   */
+  sequentialQueue?: {
+    position: number
+    length: number
+    state: 'active' | 'queued' | 'completed'
+  }
 }
 
 export interface ConditionNodeConfig {
