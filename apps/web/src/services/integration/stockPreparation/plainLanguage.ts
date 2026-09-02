@@ -960,6 +960,18 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '队列里原有的待办还在。可以直接去「确认队列」看,或稍后再同步一次。',
     enNext: 'Anything already in the queue is still there. Open the tab, or sync again later.',
   }),
+  /**
+   * 一线自己拉数据: the operator runs 试算 and 写入 themselves and is, by the owner's ruling, not the
+   * one who runs this step. Deliberately NOT phrased as 「稍后再试」 — for this caller there is no
+   * later in which the refusal turns into a success, and an instruction that can never work is worse
+   * than no instruction. It says who does it and where their own work continues.
+   */
+  RECONCILE_NOT_PERMITTED: Object.freeze({
+    zh: '重新扫描待确认的事这一步不归您做',
+    en: 'Re-scanning for things to confirm is not your step',
+    zhNext: '这一步由平台管理员来跑,跳过它不影响这次导入。「确认队列」里原有的待办还在,可以照常处理。',
+    enNext: 'A platform administrator runs it, and skipping it does not affect this import. Anything already in the confirmation queue is still there and can be worked through as usual.',
+  }),
 
   // 3. 写入
   IMPORTED: Object.freeze({
@@ -1025,6 +1037,17 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
   BATCH_ARCHIVE_NOT_ATTEMPTED: Object.freeze({
     zh: '这次没有写入数据,所以不用存档',
     en: 'Nothing was written this time, so there is nothing to keep',
+  }),
+  /**
+   * 一线自己拉数据: the same shape as RECONCILE_NOT_PERMITTED, at the other end of the run. The
+   * important half of this sentence is the FIRST clause — the operator's rows are in, and the line
+   * they are reading is about a copy somebody else keeps, not about their import.
+   */
+  BATCH_ARCHIVE_NOT_PERMITTED: Object.freeze({
+    zh: '数据已经写进去了;留存这一批快照不归您做',
+    en: 'The data is in; keeping a copy of this batch is not your step',
+    zhNext: '导入本身已经完成,可以照常用。留快照这一步由平台管理员来跑,少这一批只影响「差异对比」。',
+    enNext: 'The import itself is done and usable. A platform administrator keeps the snapshot; missing this batch only affects the diff view.',
   }),
   BATCH_ARCHIVE_FAILED: Object.freeze({
     zh: '数据已经写进去了,但这次的存档没成功',

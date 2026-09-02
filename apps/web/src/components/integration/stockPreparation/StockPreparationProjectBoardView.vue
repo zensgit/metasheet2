@@ -1,0 +1,669 @@
+<template>
+  <div class="sp-board" data-testid="stock-prep-project-board">
+    <p class="sp-board__lede" data-testid="stock-prep-project-board-lede">
+      {{ bi(
+        '一个项目,一页做完:先把 BOM 从 PLM 拉过来,再到多维表里填采购和仓库的进度,填完通知下一步,需要给别人时导出成 Excel。',
+        'One project, one page: pull the BOM in from PLM, fill in purchasing and warehouse progress in the multitable, tell the next person when you are done, and export to Excel when someone needs a copy.',
+      ) }}
+    </p>
+
+    <!-- ── 1. 搜项目 ────────────────────────────────────────────────────────────────────────────
+         The SAME native datalist #5445 built for the confirmation queue: option VALUE is the number
+         and option LABEL is the name, so the browser's own type-ahead filters on either. An operator
+         who only remembers 「注射水缓冲罐」 finds 230920006 without being told it, and the trained
+         operator who types the number keeps the path they already use. -->
+    <div class="sp-board__search">
+      <label class="sp-board__field">
+        <span>{{ bi('项目号(可按号码或名称搜)', 'Project no. (search by number or name)') }}</span>
+        <input
+          v-model="projectNoInput"
+          type="text"
+          list="stock-prep-board-directory-options"
+          data-testid="stock-prep-project-board-input"
+          :placeholder="bi('项目号或名称', 'Project number or name')"
+          @keyup.enter="openProject"
+        >
+        <datalist id="stock-prep-board-directory-options" data-testid="stock-prep-project-board-datalist">
+          <option
+            v-for="project in directoryProjects"
+            :key="project.projectId"
+            :value="project.projectNo ?? ''"
+          >{{ project.projectName ?? '' }}</option>
+        </datalist>
+      </label>
+      <button
+        type="button"
+        class="sp-board__open"
+        data-testid="stock-prep-project-board-open"
+        :disabled="busy || projectNoInput.trim().length === 0"
+        @click="openProject"
+      >
+        {{ busy ? bi('正在打开…', 'Opening…') : bi('打开这个项目', 'Open this project') }}
+      </button>
+    </div>
+
+    <!-- The clamped enum code stays on screen — it is what a person quotes when they ask for help —
+         subordinate to a sentence that says what actually happened. -->
+    <p v-if="errorCode" class="sp-board__error" data-testid="stock-prep-project-board-error">
+      {{ bi(errorPlain(errorCode).zh, errorPlain(errorCode).en) }}
+      <code class="sp-board__token">{{ errorCode }}</code>
+    </p>
+
+    <!-- THREE-WAY EMPTY STATE, reused verbatim from #5445 rather than re-derived: it is the one
+         place that can tell 「号码打错了」 from 「这台系统里还没有任何项目」 from 「表还没建好」. -->
+    <p v-if="emptyPlain" class="sp-board__empty" data-testid="stock-prep-project-board-empty">
+      {{ bi(emptyPlain.zh, emptyPlain.en) }}
+      <span v-if="emptyPlain.zhNext" class="sp-board__empty-next">
+        {{ bi(emptyPlain.zhNext, emptyPlain.enNext ?? '') }}
+      </span>
+    </p>
+
+    <template v-if="board">
+      <!-- ── 2. 状态条 ──────────────────────────────────────────────────────────────────────────
+           Everything an operator needs to know before deciding what to press, in one line each. No
+           row values: a name, a number, counts, a step key and two timestamps. -->
+      <section class="sp-board__status" data-testid="stock-prep-project-board-status">
+        <h3 class="sp-board__title" data-testid="stock-prep-project-board-title">
+          <span class="sp-board__no">{{ board.projectNo }}</span>
+          <span v-if="board.projectName" class="sp-board__name">{{ board.projectName }}</span>
+        </h3>
+        <dl class="sp-board__facts">
+          <div class="sp-board__fact" data-testid="stock-prep-project-board-batches">
+            <dt>{{ bi('拉过几次', 'Times pulled in') }}</dt>
+            <dd>{{ batchText }}</dd>
+          </div>
+          <div class="sp-board__fact" data-testid="stock-prep-project-board-pull-state">
+            <dt>{{ bi('拉取状态', 'Pull status') }}</dt>
+            <dd>{{ pullStateText }}</dd>
+          </div>
+          <div class="sp-board__fact" data-testid="stock-prep-project-board-turn">
+            <dt>{{ bi('轮到谁', 'Whose turn') }}</dt>
+            <dd>{{ turnText }}</dd>
+          </div>
+          <div class="sp-board__fact" data-testid="stock-prep-project-board-last-export">
+            <dt>{{ bi('最近导出', 'Last export') }}</dt>
+            <dd>{{ lastExportText }}</dd>
+          </div>
+        </dl>
+        <p v-if="board.pendingDecisionCount > 0" class="sp-board__pending" data-testid="stock-prep-project-board-pending">
+          {{ bi(
+            `这个项目有 ${board.pendingDecisionCount} 件事等您在「确认队列」里拿主意。`,
+            `${board.pendingDecisionCount} thing(s) on this project are waiting for your decision in the confirmation queue.`,
+          ) }}
+          <button
+            type="button"
+            class="sp-board__link"
+            data-testid="stock-prep-project-board-goto-queue"
+            @click="emit('navigate-stage', 'confirmation-queue')"
+          >{{ bi('去确认队列', 'Open the confirmation queue') }}</button>
+        </p>
+      </section>
+
+      <!-- ── 3. 四个动作 ────────────────────────────────────────────────────────────────────────
+           从PLM拉取 / 通知下一步 / 导出Excel / 推送宜搭. Every control that renders is one the
+           server answers for this caller (R-11); the ones that do not render say why in words. -->
+      <section class="sp-board__actions" data-testid="stock-prep-project-board-actions">
+        <!-- 从PLM拉取 — the EXISTING 项目接入 panel, composed rather than forked, so the #5435
+             large-BOM progress panel and the four-step report come with it unchanged. It is seeded
+             with the project this board is about, so the operator does not retype the number. -->
+        <StockPreparationProjectSyncPanel
+          :scope="scope"
+          :project-no="board.projectNo ?? ''"
+          :api="syncApi"
+          :large-bom-api="largeBomApi"
+          :large-bom-poll-wait="largeBomPollWait"
+          @navigate-stage="(key: string) => emit('navigate-stage', key)"
+          @open-multitable="openFillTarget"
+          @synced="reloadBoard"
+        />
+
+        <div class="sp-board__buttons">
+          <!-- 通知下一步 — the #5442 contract. ABSENT, not disabled, when the deployment has no
+               handoff chain: a disabled button still tells the operator the capability exists here. -->
+          <button
+            v-if="handoff"
+            type="button"
+            class="sp-board__button"
+            data-testid="stock-prep-project-board-notify-next"
+            :disabled="busy || !handoff.isCurrentHandler || handoff.terminal"
+            :title="notifyTitle"
+            @click="notifyNext"
+          >
+            {{ bi('通知下一步', 'Tell the next person') }}
+          </button>
+
+          <!-- 导出Excel — the #5437 client, reused. Same route, same gate, same download trigger. -->
+          <button
+            type="button"
+            class="sp-board__button"
+            data-testid="stock-prep-project-board-export"
+            :disabled="busy || !board.projectNo"
+            @click="exportMaterials"
+          >
+            {{ bi('导出物料清单(Excel)', 'Export materials (Excel)') }}
+          </button>
+
+          <!-- 推送宜搭 — a PLACEHOLDER, and it says so in the words a factory uses. It is deliberately
+               present-and-disabled rather than absent: 宜搭 is on the customer's own roadmap, and an
+               operator who is looking for it deserves「还没接入」rather than silence that reads as
+               「这个系统不支持」. It is not a permission gate, so it is not an R-11 decoy. -->
+          <button
+            type="button"
+            class="sp-board__button sp-board__button--placeholder"
+            data-testid="stock-prep-project-board-yida"
+            disabled
+            :title="bi('宜搭推送暂未接入', 'Pushing to Yida is not connected yet')"
+          >
+            {{ bi('推送宜搭(暂未接入)', 'Push to Yida (not connected yet)') }}
+          </button>
+        </div>
+
+        <p v-if="handoffNotice" class="sp-board__notice" data-testid="stock-prep-project-board-handoff-notice" role="status">
+          {{ handoffNotice }}
+        </p>
+        <p v-if="exportEmptyNotice" class="sp-board__notice" data-testid="stock-prep-project-board-export-empty">
+          {{ bi(
+            '这个项目号下没有有效的物料行,已下载一份仅含表头的空白模板。',
+            'This project number has no active material rows — an empty, headers-only template was downloaded.',
+          ) }}
+        </p>
+      </section>
+
+      <!-- ── 4. 填写区 ──────────────────────────────────────────────────────────────────────────
+           Filling happens in the multitable grid, not here — this page has no editable cell by
+           design. What it offers is the shortest path to the right sheet. -->
+      <section class="sp-board__fill" data-testid="stock-prep-project-board-fill">
+        <template v-if="board.fillTarget">
+          <button
+            type="button"
+            class="sp-board__fill-cta"
+            data-testid="stock-prep-project-board-open-multitable"
+            @click="openFillTarget"
+          >
+            {{ bi('到多维表填写这个项目', 'Open the multitable to fill this project in') }}
+          </button>
+          <p class="sp-board__fill-hint">
+            {{ bi(
+              '打开的是备料主表。表里是这台系统上所有项目的行,请按项目号找您这一个 —— 目前还不能只显示一个项目。',
+              'This opens the stock-preparation table. It holds the rows for every project on this system, so find yours by project number — filtering it down to a single project is not available yet.',
+            ) }}
+          </p>
+        </template>
+        <p v-else class="sp-board__fill-hint" data-testid="stock-prep-project-board-no-fill-target">
+          {{ bi(
+            '填写用的备料主表还没建好,所以暂时没有可以打开的地方。请管理员在「安装 / 体检」里把表建出来。',
+            'The stock-preparation table you would fill in has not been created yet, so there is nowhere to open. Ask an administrator to create it on the Install / Health tab.',
+          ) }}
+        </p>
+      </section>
+    </template>
+  </div>
+</template>
+
+<script setup lang="ts">
+// 项目备料页 — THE PAGE THAT STRINGS THE FOUR STEPS TOGETHER.
+//
+// WHAT THIS COMPONENT IS, AND WHAT IT DELIBERATELY IS NOT.
+//
+// It is COMPOSITION. Every part of the operator's flow already shipped and none of it is reimplemented
+// here: the project search is #5445's directory and its three-way empty state, the pull is the
+// existing 项目接入 panel (with #5435's large-BOM progress inside it, unforked), the export is
+// #5437's client and the same download trigger, and the 通知下一步 button is #5442's contract. What
+// this file adds is the ONE read that lets those four sit on a page in an order that matches the job,
+// and the sentences that say which one to press next.
+//
+// IT HAS NO EDITABLE CELL, on purpose. Filling stays in the multitable grid, where the column-level
+// write permissions and the human-field wall already live. A cell here would be a second write path
+// into the same rows with none of that behind it.
+//
+// THE DEEP LINK IS A LINK, NOT A PERMISSION CHECK. The board returns a handle only when the sheet
+// exists; whether this operator may open it is multitable's answer, given when they land. The page
+// says nothing to the contrary, and the fill-area copy says plainly that the sheet holds every
+// project's rows — because a transient per-project filter turned out to need changes across the
+// multitable view model and ACL layers, and promising a filter we did not build would be worse than
+// the honest sentence.
+import { computed, onMounted, ref, watch } from 'vue'
+import { useLocale } from '../../../composables/useLocale'
+import type { IntegrationScope } from '../../../services/integration/workbench'
+import StockPreparationProjectSyncPanel from './StockPreparationProjectSyncPanel.vue'
+import {
+  readStockPreparationOperatorDirectory,
+  exportStockPreparationPrepLines,
+  type StockPreparationOperatorDirectory,
+  type StockPreparationOperatorProject,
+} from '../../../services/integration/stockPreparation/confirmationQueue'
+import {
+  advanceStockPreparationHandoff,
+  readStockPreparationHandoff,
+  readStockPreparationProjectBoard,
+  type StockPreparationHandoffCursor,
+  type StockPreparationProjectBoard,
+} from '../../../services/integration/stockPreparation/projectBoard'
+import type { StockPreparationProjectSyncApi } from '../../../services/integration/stockPreparation/projectSync'
+import type { StockPreparationLargeBomJobApi } from '../../../services/integration/stockPreparation/largeBomPull'
+import {
+  stockPrepDirectoryEmptyPlain,
+  stockPrepDirectoryEmptyState,
+  stockPrepErrorPlain,
+  type StockPrepPlainEntry,
+} from '../../../services/integration/stockPreparation/plainLanguage'
+
+const props = withDefaults(
+  defineProps<{
+    scope?: IntegrationScope
+    /** Seeded from the shell's `?projectNo=` query so a reload or a shared link keeps the project. */
+    projectNo?: string
+    /** Test seam ONLY — forwarded to the composed sync panel so specs never hit a real endpoint. */
+    syncApi?: StockPreparationProjectSyncApi | null
+    /** Test seam ONLY — forwarded to the large-BOM sub-panel. */
+    largeBomApi?: StockPreparationLargeBomJobApi | null
+    /** Test seam ONLY — forwarded so specs never wait on a real timer. */
+    largeBomPollWait?: ((ms: number) => Promise<void>) | null
+  }>(),
+  { scope: () => ({}), projectNo: '', syncApi: null, largeBomApi: null, largeBomPollWait: null },
+)
+
+const emit = defineEmits<{
+  /** Reuses the shell's ONE tab-nav surface. */
+  (e: 'navigate-stage', viewKey: string): void
+  /** The shell owns routing; this view composes no route. */
+  (e: 'open-multitable', target: { sheetId: string; viewId: string }): void
+  /** Mirrors the opened project into the shell's `?projectNo=` query. */
+  (e: 'select-project-no', projectNo: string): void
+}>()
+
+const { locale } = useLocale()
+
+function bi(zh: string, en: string): string {
+  return locale.value === 'zh-CN' ? zh : en
+}
+
+const errorPlain = stockPrepErrorPlain
+
+const projectNoInput = ref<string>(props.projectNo ?? '')
+const busy = ref(false)
+const errorCode = ref<string | null>(null)
+const board = ref<StockPreparationProjectBoard | null>(null)
+const handoff = ref<StockPreparationHandoffCursor | null>(null)
+const handoffNotice = ref<string>('')
+const exportEmptyNotice = ref(false)
+const directory = ref<StockPreparationOperatorDirectory | null>(null)
+/** The number a load actually asked for — frozen at request time, decoupled from the live input. */
+const openedProjectNo = ref<string>('')
+
+const directoryProjects = computed<StockPreparationOperatorProject[]>(() => {
+  // `Array.isArray` rather than a truthiness check: a degraded or partial payload must leave the
+  // operator with an empty list, never a blank page from a thrown computed.
+  const projects = directory.value && Array.isArray(directory.value.projects) ? directory.value.projects : []
+  return projects.filter((project) => typeof project.projectNo === 'string' && project.projectNo.length > 0)
+})
+
+const projectKnown = computed<boolean>(() =>
+  directoryProjects.value.some((project) => project.projectNo === openedProjectNo.value))
+
+/**
+ * WHICH empty state, if any — decided by #5445's pure helper rather than inline, so the copy and the
+ * condition it belongs to cannot drift apart. `pendingRowCount` is 1 when a board is in hand, which
+ * is how the helper is told "there is something to show, render no empty state at all".
+ */
+const emptyPlain = computed<StockPrepPlainEntry | null>(() => {
+  if (board.value) return null
+  if (openedProjectNo.value === '') return null
+  const state = stockPrepDirectoryEmptyState({
+    directoryAvailable: directory.value !== null,
+    directoryReady: directory.value?.directoryReady ?? false,
+    ledgerReady: directory.value?.ledgerReady ?? false,
+    projectCount: directory.value?.projectCount ?? 0,
+    projectNo: openedProjectNo.value,
+    projectKnown: projectKnown.value,
+    pendingRowCount: 0,
+  })
+  return stockPrepDirectoryEmptyPlain(state)
+})
+
+const batchText = computed<string>(() => {
+  const count = board.value?.snapshotBatchCount ?? 0
+  if (count === 0) return bi('还没拉过', 'Not pulled in yet')
+  return bi(`${count} 次`, `${count} time(s)`)
+})
+
+const pullStateText = computed<string>(() => {
+  const current = board.value
+  if (!current) return '—'
+  if (!current.lastSyncRunId) return bi('还没从 PLM 拉过这个项目', 'This project has not been pulled from PLM yet')
+  if (current.heldLineCount > 0) {
+    return bi(
+      `已拉进来;有 ${current.heldLineCount} 行还卡着,${current.readyLineCount} 行可以用`,
+      `Pulled in; ${current.heldLineCount} row(s) still stuck, ${current.readyLineCount} usable`,
+    )
+  }
+  return bi(`已拉进来,${current.readyLineCount} 行可以用`, `Pulled in, ${current.readyLineCount} row(s) usable`)
+})
+
+/**
+ * 轮到谁. Three honest answers, and the first one is the important one: a deployment with no handoff
+ * chain must not be told a turn it does not have.
+ */
+const turnText = computed<string>(() => {
+  const cursor = handoff.value
+  if (!cursor) return bi('这台系统没有设置流转顺序', 'No handoff order is set up on this system')
+  if (cursor.completed || cursor.terminal) return bi('已经走完最后一步', 'The last step is done')
+  const step = cursor.currentStepKey ?? ''
+  const position = cursor.stepIndex !== null && cursor.stepCount > 0
+    ? bi(`(第 ${cursor.stepIndex + 1}/${cursor.stepCount} 步)`, ` (step ${cursor.stepIndex + 1} of ${cursor.stepCount})`)
+    : ''
+  if (!step) return bi('还没开始', 'Not started yet')
+  return cursor.isCurrentHandler
+    ? bi(`轮到您了${position}`, `It is your turn${position}`)
+    : bi(`${step}${position}`, `${step}${position}`)
+})
+
+const lastExportText = computed<string>(() => {
+  const at = board.value?.lastExportAt
+  if (!at) return bi('还没导出过', 'Never exported')
+  const parsed = new Date(at)
+  if (Number.isNaN(parsed.getTime())) return bi('还没导出过', 'Never exported')
+  return parsed.toLocaleString(locale.value === 'zh-CN' ? 'zh-CN' : 'en-US')
+})
+
+const notifyTitle = computed<string>(() => {
+  const cursor = handoff.value
+  if (!cursor) return ''
+  if (cursor.terminal) return bi('已经是最后一步了', 'This is already the last step')
+  if (!cursor.isCurrentHandler) return bi('现在不是轮到您,所以不用您来通知', 'It is not your turn, so this is not yours to send')
+  return ''
+})
+
+async function run(work: () => Promise<void>): Promise<void> {
+  busy.value = true
+  errorCode.value = null
+  try {
+    await work()
+  } catch (error) {
+    const code = (error as { code?: unknown })?.code
+    errorCode.value = typeof code === 'string' ? code : 'STOCK_PREPARATION_CONFIRM_REQUEST_FAILED'
+  } finally {
+    busy.value = false
+  }
+}
+
+/**
+ * The directory is loaded ONCE, on mount, for the search box. It is loaded independently of any
+ * board read: an operator arriving with nothing typed must still see their own projects in the
+ * type-ahead, and a directory failure must not stop a board read that was going to work.
+ */
+async function loadDirectory(): Promise<void> {
+  try {
+    directory.value = await readStockPreparationOperatorDirectory(props.scope)
+  } catch {
+    directory.value = null
+  }
+}
+
+async function loadBoard(projectNo: string): Promise<void> {
+  const target = projectNo.trim()
+  openedProjectNo.value = target
+  board.value = null
+  handoff.value = null
+  handoffNotice.value = ''
+  exportEmptyNotice.value = false
+  if (!target) return
+  await run(async () => {
+    board.value = await readStockPreparationProjectBoard({ ...props.scope, projectNo: target })
+    // The handoff route may not exist on this deployment. `null` means "render no button", and only
+    // an absent/unconfigured route produces it — a real failure still surfaces as an error code.
+    handoff.value = await readStockPreparationHandoff({ ...props.scope, projectNo: target })
+  })
+}
+
+async function openProject(): Promise<void> {
+  const target = projectNoInput.value.trim()
+  if (!target) return
+  emit('select-project-no', target)
+  await loadBoard(target)
+}
+
+async function reloadBoard(): Promise<void> {
+  if (!openedProjectNo.value) return
+  await loadBoard(openedProjectNo.value)
+}
+
+async function notifyNext(): Promise<void> {
+  const current = board.value
+  const cursor = handoff.value
+  if (!current || !current.projectNo || !cursor || !cursor.isCurrentHandler || cursor.terminal) return
+  handoffNotice.value = ''
+  await run(async () => {
+    const result = await advanceStockPreparationHandoff({ ...props.scope, projectNo: current.projectNo as string })
+    handoff.value = await readStockPreparationHandoff({ ...props.scope, projectNo: current.projectNo as string })
+    // The three outcomes are said as three different sentences because they are three different
+    // facts. "已经通知" on a deployment whose notifier is not configured would be a claim we cannot
+    // back — the turn moved, and nobody was told.
+    if (result.notifyOutcome === 'sent') {
+      handoffNotice.value = bi('已经交给下一步,并且通知到了。', 'Handed to the next step, and they were notified.')
+    } else if (result.changed) {
+      handoffNotice.value = bi(
+        '已经交给下一步。这台系统没有配通知渠道,所以没有发出提醒 —— 记得口头知会一声。',
+        'Handed to the next step. This system has no notification channel configured, so no alert was sent — tell them yourself.',
+      )
+    } else {
+      handoffNotice.value = bi('这一步已经交出去了,没有重复交。', 'This step had already been handed on; it was not handed on twice.')
+    }
+  })
+}
+
+async function exportMaterials(): Promise<void> {
+  const projectNo = board.value?.projectNo
+  if (!projectNo) return
+  exportEmptyNotice.value = false
+  await run(async () => {
+    const result = await exportStockPreparationPrepLines({ ...props.scope, projectNo })
+    triggerExportDownload(result.blob, result.filename)
+    exportEmptyNotice.value = result.activeRowCount === 0
+  })
+}
+
+/** The same client-side trigger #5437 uses: a Blob object URL + a synthetic `<a download>` click,
+ *  never a direct `<a href>` to the API (which would carry no Authorization header). */
+function triggerExportDownload(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
+
+/** The shell owns routing — this view only hands it the handle the server proved exists. */
+function openFillTarget(): void {
+  const target = board.value?.fillTarget
+  if (!target) return
+  emit('open-multitable', target)
+}
+
+watch(() => props.projectNo, (next) => {
+  const target = (next ?? '').trim()
+  if (!target || target === openedProjectNo.value) return
+  projectNoInput.value = target
+  void loadBoard(target)
+})
+
+onMounted(async () => {
+  await loadDirectory()
+  const seeded = (props.projectNo ?? '').trim()
+  if (seeded) await loadBoard(seeded)
+})
+</script>
+
+<style scoped>
+.sp-board {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-4);
+}
+
+.sp-board__lede {
+  margin: 0;
+  color: var(--ms-text-2);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.sp-board__search {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--ms-space-3);
+}
+
+.sp-board__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ms-text-2);
+}
+
+.sp-board__field input {
+  min-width: 240px;
+  padding: 6px 8px;
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  font: inherit;
+}
+
+.sp-board__open,
+.sp-board__button,
+.sp-board__fill-cta {
+  padding: 7px 14px;
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-1);
+  font: inherit;
+  cursor: pointer;
+}
+
+.sp-board__open:disabled,
+.sp-board__button:disabled,
+.sp-board__fill-cta:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.sp-board__button--placeholder {
+  border-style: dashed;
+}
+
+.sp-board__error,
+.sp-board__empty,
+.sp-board__notice {
+  margin: 0;
+  padding: var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 8px;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.sp-board__empty-next {
+  display: block;
+  margin-top: 4px;
+}
+
+.sp-board__token {
+  margin-left: 6px;
+  font-size: 12px;
+  color: var(--ms-text-3);
+}
+
+.sp-board__status {
+  padding: var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 8px;
+}
+
+.sp-board__title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--ms-space-2);
+  margin: 0 0 var(--ms-space-3);
+  font-size: 15px;
+}
+
+.sp-board__name {
+  color: var(--ms-text-2);
+  font-weight: 400;
+}
+
+.sp-board__facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--ms-space-3);
+  margin: 0;
+}
+
+.sp-board__fact dt {
+  color: var(--ms-text-3);
+  font-size: 12px;
+}
+
+.sp-board__fact dd {
+  margin: 2px 0 0;
+  color: var(--ms-text-1);
+  font-size: 13px;
+}
+
+.sp-board__pending {
+  margin: var(--ms-space-3) 0 0;
+  color: var(--ms-text-2);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.sp-board__link {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--ms-color-primary, #1677ff);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.sp-board__actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-3);
+}
+
+.sp-board__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ms-space-2);
+}
+
+.sp-board__fill {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-2);
+  padding: var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 8px;
+}
+
+.sp-board__fill-cta {
+  align-self: flex-start;
+  font-weight: 600;
+}
+
+.sp-board__fill-hint {
+  margin: 0;
+  color: var(--ms-text-2);
+  font-size: 13px;
+  line-height: 1.7;
+}
+</style>
