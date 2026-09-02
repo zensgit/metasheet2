@@ -590,6 +590,12 @@ export function createAutomationRoutes(
         error: { code: 'CONFIRM_SIDE_EFFECTS_REQUIRED', message: 'confirmSideEffects must be true for a real-fire test run' },
       })
     }
+    if (rawMode === 'real_fire' && body.recordId === undefined) {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'TEST_RUN_SAMPLE_RECORD_REQUIRED', message: 'A sample record is required for a real-fire test run' },
+      })
+    }
 
     const rawRecordId = body.recordId
     if (

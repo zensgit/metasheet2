@@ -10,6 +10,12 @@ import {
 } from '../helpers/approval-schema-bootstrap'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
+const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+
+itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL', () => {
+  expect(process.env.DATABASE_URL).toBeTruthy()
+})
+
 const TS = Date.now()
 const REQUESTER = `l2a-requester-${TS}`
 const APPROVER = `l2a-approver-${TS}`

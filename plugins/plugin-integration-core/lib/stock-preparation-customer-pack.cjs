@@ -9,10 +9,12 @@
 // away from hand-built customer sheets: what a deployer used to do by dragging
 // columns in the UI becomes a reviewable object with a closed shape.
 //
-// A pack may only carry three ADDITIVE things:
-//   extensionFields — extra `ext_` columns on the canonical main table
-//   optionSets      — dictionary literals for select fields (pack or template)
-//   roleViews       — role-banded views over the main table (column hiding only)
+// A pack may only carry four ADDITIVE things:
+//   extensionFields   — extra `ext_` columns on the canonical main table
+//   optionSets        — dictionary literals for select fields (pack or template)
+//   roleViews         — role-banded views over the main table (column hiding only)
+//   fieldWritePolicies — which role OWNS (may write) which columns; the installer
+//                        turns this into the PLATFORM's own `field_permissions` rows
 //
 // plus ONE placement key:
 //   targetObjectId  — OPTIONAL. Absent = the frozen canonical main table (the
@@ -83,10 +85,28 @@ const {
 const PACK_ID_PATTERN = /^[a-z][a-z0-9-]{1,31}$/
 const ROLE_VIEW_ID_PATTERN = /^[a-z][a-z0-9-]{1,31}$/
 
-const PACK_KEYS = Object.freeze(['packId', 'packVersion', 'label', 'targetObjectId', 'extensionFields', 'optionSets', 'roleViews'])
+const PACK_KEYS = Object.freeze(['packId', 'packVersion', 'label', 'targetObjectId', 'extensionFields', 'optionSets', 'roleViews', 'fieldWritePolicies'])
 const EXTENSION_FIELD_KEYS = Object.freeze(['id', 'label', 'type', 'ownership'])
 const OPTION_SET_KEYS = Object.freeze(['fieldId', 'options'])
 const ROLE_VIEW_KEYS = Object.freeze(['viewId', 'label', 'hideOwnerships', 'hideFieldIds'])
+
+// WHY THIS IS A SIBLING KEY AND NOT AN EXTENSION OF `roleViews`.
+//
+// A role view is COSMETIC BY EXPLICIT DESIGN: it hides columns in one grid view and
+// enforces nothing. Its four-key schema above (viewId / label / hideOwnerships /
+// hideFieldIds) is fail-closed on purpose, so a role view structurally CANNOT express a
+// permission -- that boundary is the thing that stops "hidden in a view" from being
+// mistaken for "cannot be written". Widening it into a permission carrier would erase
+// exactly the distinction it exists to hold, and would silently convert every existing
+// pack's display preferences into access-control decisions nobody reviewed. So write
+// scoping gets its own key, and the two stay legible side by side: a role view is what a
+// department SEES BY DEFAULT, a field write policy is what it MAY CHANGE.
+const FIELD_WRITE_POLICY_KEYS = Object.freeze(['roleId', 'label', 'ownsFieldIds'])
+
+// Platform role ids are opaque text (`roles.id`, which in this schema doubles as the
+// role code -- e.g. `member`, or a plugin-provisioned `${pluginId}:${appId}:${slug}`).
+// Kept deliberately boring: it ends up in evidence and in a SQL parameter.
+const FIELD_WRITE_POLICY_ROLE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{1,127}$/
 
 // Content-bearing keys that would turn a schema-only field descriptor into a
 // values carrier. Same vocabulary the frozen template's normalizeField rejects
@@ -125,6 +145,13 @@ const STOCK_PREPARATION_CUSTOMER_PACK_ERROR_REASONS = Object.freeze([
   'ROLE_VIEW_LABEL_INVALID',
   'ROLE_VIEW_OWNERSHIP_INVALID',
   'ROLE_VIEW_HIDE_FIELD_UNKNOWN',
+  'FIELD_WRITE_POLICIES_INVALID',
+  'FIELD_WRITE_POLICY_UNKNOWN_KEY',
+  'FIELD_WRITE_POLICY_ROLE_INVALID',
+  'FIELD_WRITE_POLICY_DUPLICATE_ROLE',
+  'FIELD_WRITE_POLICY_LABEL_INVALID',
+  'FIELD_WRITE_POLICY_FIELDS_INVALID',
+  'FIELD_WRITE_POLICY_FIELD_UNKNOWN',
 ])
 
 // Module-private brand stamped on a normalized pack. It exists so
@@ -491,6 +518,114 @@ function normalizeRoleViews(input, catalog) {
 }
 
 /**
+ * FIELD WRITE POLICIES — who may CHANGE which column.
+ *
+ * DECLARED AS OWNERSHIP, APPLIED AS DENIAL. A policy says "this role OWNS these
+ * columns", which is how a deployer actually thinks about it. What the platform stores
+ * is the complement: for every column some declared role owns, every OTHER DECLARED
+ * role gets a `field_permissions` row marking that column read-only for it. Deriving
+ * the denials here (rather than in the installer) keeps the mapping pure and testable
+ * with no provisioning API in hand, and makes a re-install byte-identical.
+ *
+ * WRITE ONLY. READ STAYS SHARED. This is the load-bearing business constraint, not a
+ * stylistic choice. In 备料 the production band (材料类型 / 毛胚类型 / 需求日期 /
+ * 提前周期 …) is exactly what tells 采购 WHAT to buy and BY WHEN, and tells 仓库 what to
+ * prepare and when it is due; neither department re-enters that data, they read it and
+ * add their own response. So a policy can only ever produce a WRITE restriction — the
+ * derived plan carries no visibility dimension at all, and the host port it feeds
+ * hardcodes `visible = true`. A model in which purchasing cannot SEE 需求日期 would
+ * break the real flow and be worse than today's free-for-all.
+ *
+ * ABSENT MEANS ABSENT. A pack with no `fieldWritePolicies` derives an EMPTY plan, the
+ * installer writes no permission rows, and behaviour is byte-for-byte what it is today.
+ * A role that is not named in any policy gets no rows either, so it is entirely
+ * unaffected — this is an opt-in, per-deployment declaration, never a default posture.
+ *
+ * TWO ROLES MAY OWN THE SAME COLUMN. That is a legitimate declaration (shared custody),
+ * and it simply means neither denies the other.
+ */
+function normalizeFieldWritePolicies(input, catalog) {
+  if (input === undefined || input === null) {
+    return { policies: Object.freeze([]), writeDenials: Object.freeze([]) }
+  }
+  if (!Array.isArray(input)) {
+    fail('FIELD_WRITE_POLICIES_INVALID', 'fieldWritePolicies must be an array', { field: 'fieldWritePolicies' })
+  }
+  const seenRoles = new Set()
+  const policies = input.map((raw, index) => {
+    const label = `fieldWritePolicies[${index}]`
+    if (!isPlainObject(raw)) {
+      fail('FIELD_WRITE_POLICIES_INVALID', `${label} must be a plain object`, { field: label })
+    }
+    assertNoContentKeys(raw, label, 'FIELD_WRITE_POLICIES_INVALID')
+    assertOnlyKnownKeys(raw, FIELD_WRITE_POLICY_KEYS, 'FIELD_WRITE_POLICY_UNKNOWN_KEY', label)
+
+    const roleId = safeLabel(raw.roleId, 'FIELD_WRITE_POLICY_ROLE_INVALID', `${label}.roleId`)
+    if (!FIELD_WRITE_POLICY_ROLE_ID_PATTERN.test(roleId)) {
+      fail('FIELD_WRITE_POLICY_ROLE_INVALID', `${label}.roleId must match ${FIELD_WRITE_POLICY_ROLE_ID_PATTERN}`, {
+        field: `${label}.roleId`,
+      })
+    }
+    if (seenRoles.has(roleId)) {
+      fail('FIELD_WRITE_POLICY_DUPLICATE_ROLE', 'fieldWritePolicies must not carry two policies for the same role', {
+        field: `${label}.roleId`,
+      })
+    }
+    seenRoles.add(roleId)
+
+    if (!Array.isArray(raw.ownsFieldIds) || raw.ownsFieldIds.length === 0) {
+      fail('FIELD_WRITE_POLICY_FIELDS_INVALID', `${label}.ownsFieldIds must be a non-empty array`, {
+        field: `${label}.ownsFieldIds`,
+      })
+    }
+    const owns = []
+    const seenFields = new Set()
+    for (const fieldId of raw.ownsFieldIds) {
+      if (typeof fieldId !== 'string' || !catalog.has(fieldId)) {
+        fail(
+          'FIELD_WRITE_POLICY_FIELD_UNKNOWN',
+          `${label}.ownsFieldIds names a field that is neither a template field nor a pack extension field`,
+          { field: `${label}.ownsFieldIds`, fieldId: String(fieldId) },
+        )
+      }
+      if (seenFields.has(fieldId)) continue
+      seenFields.add(fieldId)
+      owns.push(fieldId)
+    }
+    return Object.freeze({
+      roleId,
+      label: raw.label === undefined || raw.label === null
+        ? roleId
+        : safeLabel(raw.label, 'FIELD_WRITE_POLICY_LABEL_INVALID', `${label}.label`),
+      ownsFieldIds: Object.freeze([...owns]),
+    })
+  })
+
+  // THE DERIVED DENIAL PLAN. Catalog order for fields (template fields first, in
+  // template order, then pack fields in pack order) and declaration order for roles, so
+  // the plan is stable and diffable and an installer re-run produces an identical array.
+  const ownersByField = new Map()
+  for (const policy of policies) {
+    for (const fieldId of policy.ownsFieldIds) {
+      if (!ownersByField.has(fieldId)) ownersByField.set(fieldId, new Set())
+      ownersByField.get(fieldId).add(policy.roleId)
+    }
+  }
+  const writeDenials = []
+  for (const entry of catalog.values()) {
+    const owners = ownersByField.get(entry.id)
+    // A column NO declared role claims is left completely alone — no rows, so whoever
+    // can write it today still can. Scoping is additive, never a sweep.
+    if (!owners) continue
+    for (const policy of policies) {
+      if (owners.has(policy.roleId)) continue
+      writeDenials.push(Object.freeze({ fieldId: entry.id, roleId: policy.roleId }))
+    }
+  }
+  return { policies: Object.freeze(policies), writeDenials: Object.freeze(writeDenials) }
+}
+
+/**
  * Validate + normalize a customer pack. Throws StockPreparationCustomerPackError
  * with a closed `.reason` on any violation; on success returns a deeply frozen
  * pack. Pure — no I/O, no host API, no clock.
@@ -513,6 +648,7 @@ function normalizeCustomerPack(input) {
 
   const extensionFields = normalizeExtensionFields(input.extensionFields)
   const catalog = buildFieldCatalog(extensionFields)
+  const { policies, writeDenials } = normalizeFieldWritePolicies(input.fieldWritePolicies, catalog)
 
   return brandAndFreeze({
     packId,
@@ -524,6 +660,11 @@ function normalizeCustomerPack(input) {
     extensionFields,
     optionSets: normalizeOptionSets(input.optionSets, catalog),
     roleViews: normalizeRoleViews(input.roleViews, catalog),
+    fieldWritePolicies: policies,
+    // Derived, never authored — the complement of the declared ownership. Empty
+    // whenever `fieldWritePolicies` is absent, which is what keeps today's behaviour
+    // byte-for-byte unchanged for every pack that does not opt in.
+    fieldWriteDenials: writeDenials,
   })
 }
 
@@ -554,12 +695,21 @@ function summarizeCustomerPackForEvidence(pack) {
       hideOwnerships: [...view.hideOwnerships],
       hiddenFieldCount: view.hiddenFieldIds.length,
     })),
+    // Schema ids and counts only, exactly like every other projection here. Role ids
+    // are deploy-time configuration, not customer business data, and naming them is the
+    // point: an auditor must be able to read which role was scoped out of which column.
+    fieldWritePolicies: normalized.fieldWritePolicies.map((policy) => ({
+      roleId: policy.roleId,
+      ownsFieldCount: policy.ownsFieldIds.length,
+    })),
+    fieldWriteDenialCount: normalized.fieldWriteDenials.length,
   }
 }
 
 module.exports = {
   PACK_ID_PATTERN,
   ROLE_VIEW_ID_PATTERN,
+  FIELD_WRITE_POLICY_ROLE_ID_PATTERN,
   STOCK_PREPARATION_CUSTOMER_PACK_ERROR_REASONS,
   StockPreparationCustomerPackError,
   isNormalizedCustomerPack,
@@ -570,11 +720,13 @@ module.exports = {
     EXTENSION_FIELD_KEYS,
     OPTION_SET_KEYS,
     ROLE_VIEW_KEYS,
+    FIELD_WRITE_POLICY_KEYS,
     INLINE_VALUE_KEYS,
     TEMPLATE_FIELD_IDS,
     buildFieldCatalog,
     resolveHiddenFieldIds,
     normalizeExtensionFields,
+    normalizeFieldWritePolicies,
     normalizePackTargetObjectId,
   },
 }
