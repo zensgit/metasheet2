@@ -392,6 +392,11 @@ export default defineConfig({
       // the no-DB default job cannot collect-and-skip-green it, and carried by the dedicated
       // .github/workflows/approval-realdb-sequential-mode.yml PG15/16 lane. Two-point wiring.
       'tests/integration/approval-sequential-mode.db.test.ts',
+      // Lock-2 §L2-A department field and directory routing real-DB acceptance. DATABASE_URL-gated;
+      // excluded here so the no-DB default job cannot collect-and-skip-green it, and carried by
+      // approval-realdb-acceptance.yml (sibling job approval-realdb-lock2-department-field).
+      // Two-point wiring, same commit.
+      'tests/integration/approval-department-field.db.test.ts',
       // Lock-1 §K4 continuous_dept_heads real-DB acceptance (G-1/G-2/G-13, continue-past-empty,
       // freeze purity). DATABASE_URL-gated; excluded here so the no-DB default job cannot
       // collect-and-skip-green it, and carried by the SAME dedicated
