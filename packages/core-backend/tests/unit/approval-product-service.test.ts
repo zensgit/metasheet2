@@ -1618,6 +1618,45 @@ describe('ApprovalProductService', () => {
     })
   })
 
+  describe('department field contract (Lock-2 L2-A author-time)', () => {
+    const create = async (field: Record<string, unknown>) => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      return new ApprovalProductService().createTemplate({
+        key: `department-${Date.now()}`,
+        name: 'Department',
+        formSchema: { fields: [field] },
+        approvalGraph: buildRuntimeGraph(),
+      } as never)
+    }
+
+    it('rejects missing, unknown, and invalid department props before any write', async () => {
+      await expect(create({ id: 'dept', type: 'department', label: '部门' }))
+        .rejects.toThrow(/props\.selection/)
+      await expect(create({
+        id: 'dept', type: 'department', label: '部门',
+        props: { selection: 'single', display: 'full_path', externalDepartmentId: 'leak' },
+      })).rejects.toThrow(/unknown keys/)
+      await expect(create({
+        id: 'dept', type: 'department', label: '部门',
+        props: { selection: 'many', display: 'full_path' },
+      })).rejects.toThrow(/props\.selection/)
+      await expect(create({
+        id: 'dept', type: 'department', label: '部门',
+        props: { selection: 'multi', display: 'full_path', defaultDepartmentIds: ['d1', 'd1'] },
+      })).rejects.toThrow(/unique non-blank ids/)
+    })
+
+    it('rejects department inside detail rows', async () => {
+      await expect(create({
+        id: 'items', type: 'detail', label: '明细',
+        columns: [{
+          id: 'dept', type: 'department', label: '部门',
+          props: { selection: 'single', display: 'leaf_only' },
+        }],
+      })).rejects.toThrow(/department cannot nest inside a detail group|not a valid leaf sub-field/)
+    })
+  })
+
   describe('number field props contract (L8-C formatted-number, approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6/OD-L8-7)', () => {
     // M10 verbatim: props on the EXISTING `number` type — NOT a new union member (OD-L8-6). The
     // allowlist mirrors record-link's fail-closed shape (§1.3/OD-L8-7): unknown keys REJECT at

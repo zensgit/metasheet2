@@ -184,6 +184,7 @@ export type FormFieldType =
   | 'select'
   | 'multi-select'
   | 'user'
+  | 'department'
   | 'attachment'
   | 'detail'
   /** FWB-0 Layer 2: single linked multitable record (server-pinned baseId/sheetId in props). */

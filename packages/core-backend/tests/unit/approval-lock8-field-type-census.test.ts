@@ -156,6 +156,8 @@ function minimalField(type: string): Record<string, unknown> {
       return { id: 'src', type, label: 'Src', props: { dateType: 'date', startLabel: 'S', endLabel: 'E' } }
     case 'explanation':
       return { id: 'src', type, label: 'Src', props: { text: 'x' } }
+    case 'department':
+      return { id: 'src', type, label: 'Src', props: { selection: 'single', display: 'leaf_only' } }
     default:
       return { id: 'src', type, label: 'Src' }
   }
@@ -179,6 +181,7 @@ const MS8_VISIBILITY_ADMITTED: Readonly<Record<string, boolean>> = {
   'record-link': false,
   date_range: false,
   explanation: false,
+  department: false,
 }
 
 // Named refusal pattern per REFUSED MS-8 type. Required so a REFUSED row's assertion can never be
@@ -190,6 +193,7 @@ const MS8_REFUSAL_MESSAGE: Readonly<Record<string, RegExp>> = {
   'record-link': /cannot reference a record-link field/,
   date_range: /cannot reference a date_range field/,
   explanation: /cannot reference an explanation field/,
+  department: /cannot reference a department field/,
 }
 
 // MS-10 expectation table (condition-branch rule admission). `detail` is TRUE here — a PRE-
@@ -210,6 +214,7 @@ const MS10_CONDITION_ADMITTED: Readonly<Record<string, boolean>> = {
   'record-link': false,
   date_range: false,
   explanation: false,
+  department: false,
 }
 
 // Named refusal pattern per REFUSED MS-10 type — same rejects-must-be-attributable discipline as
@@ -218,6 +223,7 @@ const MS10_REFUSAL_MESSAGE: Readonly<Record<string, RegExp>> = {
   'record-link': /cannot reference record-link field/,
   date_range: /cannot reference date_range field/,
   explanation: /cannot reference explanation field/,
+  department: /cannot reference department field/,
 }
 
 describe('Lock-8 L8-A field-type census (N-1) — backend sites', () => {
@@ -229,9 +235,9 @@ describe('Lock-8 L8-A field-type census (N-1) — backend sites', () => {
     pgState.pool.connect.mockResolvedValue(pgState.client)
   })
 
-  it('MS-2: FORM_FIELD_TYPES is exactly the 13 canonical types (mutation: drop one → reds directly)', () => {
+  it('MS-2: FORM_FIELD_TYPES is exactly the 14 canonical types (mutation: drop one → reds directly)', () => {
     expect([...FORM_FIELD_TYPES].sort()).toEqual([
-      'attachment', 'date', 'date_range', 'datetime', 'detail', 'explanation',
+      'attachment', 'date', 'date_range', 'datetime', 'department', 'detail', 'explanation',
       'multi-select', 'number', 'record-link', 'select', 'text', 'textarea', 'user',
     ].sort())
   })
@@ -239,7 +245,7 @@ describe('Lock-8 L8-A field-type census (N-1) — backend sites', () => {
   it('MS-4: DETAIL_LEAF_FIELD_TYPES is DERIVED — exactly FORM_FIELD_TYPES minus the excluded set', () => {
     const expected = new Set(
       [...FORM_FIELD_TYPES].filter(
-        (type) => type !== 'detail' && type !== 'record-link' && type !== 'date_range' && type !== 'explanation',
+        (type) => type !== 'detail' && type !== 'record-link' && type !== 'date_range' && type !== 'explanation' && type !== 'department',
       ),
     )
     expect([...DETAIL_LEAF_FIELD_TYPES].sort()).toEqual([...expected].sort())
@@ -250,6 +256,7 @@ describe('Lock-8 L8-A field-type census (N-1) — backend sites', () => {
     expect(DETAIL_LEAF_FIELD_TYPES.has('record-link')).toBe(false)
     expect(DETAIL_LEAF_FIELD_TYPES.has('date_range')).toBe(false)
     expect(DETAIL_LEAF_FIELD_TYPES.has('explanation')).toBe(false)
+    expect(DETAIL_LEAF_FIELD_TYPES.has('department')).toBe(false)
     expect(DETAIL_LEAF_FIELD_TYPES.has('text')).toBe(true)
   })
 
@@ -350,6 +357,16 @@ describe('Lock-8 L8-A MS-7: OpenAPI dist/openapi.json (stale-artifact detector, 
     components: {
       schemas: {
         FormFieldGeneric: { properties: { type: { enum: string[] } } }
+        DepartmentFieldProps: {
+          additionalProperties: boolean
+          required: string[]
+          properties: Record<string, unknown>
+        }
+        FormFieldDepartment: {
+          additionalProperties: boolean
+          properties: { type: { enum: string[] }; props: { $ref: string } }
+          required: string[]
+        }
         FormField: { discriminator: { mapping: Record<string, string> } }
       }
     }
@@ -368,5 +385,26 @@ describe('Lock-8 L8-A MS-7: OpenAPI dist/openapi.json (stale-artifact detector, 
     expect(openapi.components.schemas.FormFieldGeneric.properties.type.enum).toContain('date_range')
     expect(openapi.components.schemas.FormField.discriminator.mapping.date_range)
       .toBe('#/components/schemas/FormFieldGeneric')
+  })
+
+  it('registers department through a dedicated strict props schema', () => {
+    const department = openapi.components.schemas.FormFieldDepartment
+    const props = openapi.components.schemas.DepartmentFieldProps
+    expect(openapi.components.schemas.FormFieldGeneric.properties.type.enum).not.toContain('department')
+    expect(department.additionalProperties).toBe(false)
+    expect(department.properties.type.enum).toEqual(['department'])
+    expect(department.properties.props.$ref).toBe('#/components/schemas/DepartmentFieldProps')
+    expect(department.required).toEqual(['id', 'type', 'label', 'props'])
+    expect(props.additionalProperties).toBe(false)
+    expect(props.required).toEqual(['selection', 'display'])
+    expect(Object.keys(props.properties).sort()).toEqual([
+      'defaultDepartmentIds',
+      'defaultMode',
+      'display',
+      'maxSelections',
+      'selection',
+    ])
+    expect(openapi.components.schemas.FormField.discriminator.mapping.department)
+      .toBe('#/components/schemas/FormFieldDepartment')
   })
 })

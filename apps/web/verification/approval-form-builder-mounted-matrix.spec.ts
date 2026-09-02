@@ -26,11 +26,51 @@ async function routeNetworkTemplateDependencies(page: Page): Promise<void> {
     contentType: 'application/json',
     body: JSON.stringify({ plugins: [] }),
   }))
-  await page.route('**/api/approvals/directory/**', (route) => route.fulfill({
-    status: 200,
-    contentType: 'application/json',
-    body: JSON.stringify({ users: [], roles: [], groups: [] }),
-  }))
+  await page.route('**/api/approvals/directory/**', (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/api/approvals/directory/departments') {
+      const departments = url.searchParams.get('mode') === 'tree'
+        ? url.searchParams.get('parentId') === 'dept_finance'
+          ? [{
+              id: 'dept_accounts',
+              name: '会计组',
+              fullPath: '总部 / 财务部 / 会计组',
+              parentId: 'dept_finance',
+              hasChildren: false,
+            }]
+          : [{
+              id: 'dept_finance',
+              name: '财务部',
+              fullPath: '总部 / 财务部',
+              hasChildren: true,
+            }]
+        : [
+            {
+              id: 'dept_finance',
+              name: '财务部',
+              fullPath: '总部 / 财务部',
+              hasChildren: true,
+            },
+            {
+              id: 'dept_accounts',
+              name: '会计组',
+              fullPath: '总部 / 财务部 / 会计组',
+              parentId: 'dept_finance',
+              hasChildren: false,
+            },
+          ]
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ departments, requesterDepartmentId: 'dept_finance' }),
+      })
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ users: [], roles: [], groups: [] }),
+    })
+  })
   await page.route('**/api/approval-templates/directory/**', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -439,9 +479,9 @@ test('B11 — legacy compatibility: an unsupported field type keeps the WHOLE te
   await page.screenshot({ path: `${OUT}/afb-mounted-b11.png` })
 })
 
-// --- B12: Lock-8 controls and attachment boundary -----------------------------------
+// --- B12: advanced controls and attachment boundary ---------------------------------
 
-test('B12 — number, date range, and explanation controls remain usable and responsive; attachment stays absent', async ({ page }) => {
+test('B12 — number, date range, explanation, and department controls remain usable and responsive; attachment stays absent', async ({ page }) => {
   for (const [width, height] of [[1440, 900], [1024, 768], [390, 844]] as const) {
     await page.setViewportSize({ width, height })
     await mountFields(page)
@@ -501,6 +541,43 @@ test('B12 — number, date range, and explanation controls remain usable and res
     await dateRangeCard.click()
     await explanationCard.click()
     await expect(explanation).toHaveValue('第一行\n第二行')
+
+    await page.click('[data-testid="approval-form-palette-chip-department"]')
+    const departmentCard = page.locator('[data-testid="approval-form-builder-card"][data-field-type="department"]').last()
+    await departmentCard.click()
+    const selection = page.locator('[data-testid="approval-form-field-inspector-department-selection"]')
+    const display = page.locator('[data-testid="approval-form-field-inspector-department-display"]')
+    const defaultMode = page.locator('[data-testid="approval-form-field-inspector-department-default-mode"]')
+    await expect(selection).toHaveAccessibleName('选择数量')
+    await expect(display).toHaveAccessibleName('展示格式')
+    await expect(defaultMode).toHaveAccessibleName('默认值')
+    await selection.selectOption('multi')
+    await display.selectOption('full_path')
+    const maxSelections = page.locator('[data-testid="approval-form-field-inspector-department-max"]')
+    await expect(maxSelections).toHaveAccessibleName('最多可选')
+    await maxSelections.fill('2')
+    await maxSelections.blur()
+    await defaultMode.selectOption('designated')
+    await page.click('[data-testid="approval-department-tree-mode"]')
+    const finance = page.getByRole('button', { name: '总部 / 财务部', exact: true })
+    await expect(finance).toBeVisible()
+    await finance.click()
+    await page.getByRole('button', { name: '浏览财务部下级部门' }).click()
+    const accounts = page.getByRole('button', { name: '总部 / 财务部 / 会计组', exact: true })
+    await expect(accounts).toBeVisible()
+    await accounts.click()
+    await expect(accounts).toHaveAttribute('aria-pressed', 'true')
+
+    await initialCard.click()
+    await departmentCard.click()
+    await expect(selection).toHaveValue('multi')
+    await expect(display).toHaveValue('full_path')
+    await expect(maxSelections).toHaveValue('2')
+    await expect(defaultMode).toHaveValue('designated')
+    await page.click('[data-testid="approval-department-tree-mode"]')
+    await expect(page.getByRole('button', { name: '总部 / 财务部', exact: true })).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.locator('body')).not.toContainText('dept_finance')
+    await expect(page.locator('body')).not.toContainText('dept_accounts')
 
     await page.waitForTimeout(100)
     const overflow = await page.evaluate(

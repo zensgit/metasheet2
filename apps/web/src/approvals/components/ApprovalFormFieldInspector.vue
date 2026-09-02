@@ -125,6 +125,72 @@
       </section>
 
       <section
+        v-if="field.type === 'department'"
+        class="approval-form-field-inspector__section"
+        data-testid="approval-form-field-inspector-department"
+      >
+        <p class="approval-form-field-inspector__label">部门设置</p>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">选择数量</span>
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-department-selection"
+            :value="field.departmentSelection"
+            @change="onDepartmentSelectionChange($event)"
+          >
+            <option value="single">单选</option>
+            <option value="multi">多选</option>
+          </select>
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">展示格式</span>
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-department-display"
+            :value="field.departmentDisplay"
+            @change="onDepartmentDisplayChange($event)"
+          >
+            <option value="leaf_only">仅末级名称</option>
+            <option value="full_path">完整部门路径</option>
+          </select>
+        </label>
+        <label v-if="field.departmentSelection === 'multi'" class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">最多可选</span>
+          <input
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-department-max"
+            inputmode="numeric"
+            :value="textValue('departmentMaxSelectionsText')"
+            @input="onTextInput('departmentMaxSelectionsText', $event)"
+            @blur="commitTextBuffer('departmentMaxSelectionsText')"
+            @keydown.enter.prevent="commitTextBuffer('departmentMaxSelectionsText')"
+          />
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">默认值</span>
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-department-default-mode"
+            :value="field.departmentDefaultMode"
+            @change="onDepartmentDefaultModeChange($event)"
+          >
+            <option value="">不设置</option>
+            <option value="requester_department">申请人所在部门</option>
+            <option value="designated">指定部门</option>
+          </select>
+        </label>
+        <ApprovalDepartmentPicker
+          v-if="field.departmentDefaultMode === 'designated'"
+          :model-value="departmentDefaultValue"
+          :selection="field.departmentSelection"
+          :display="field.departmentDisplay"
+          :max-selections="departmentMaxSelections"
+          aria-label="选择默认部门"
+          @update:model-value="onDepartmentDefaultIdsChange"
+        />
+      </section>
+
+      <section
         v-if="field.type === 'number'"
         class="approval-form-field-inspector__section"
         data-testid="approval-form-field-inspector-number-format"
@@ -578,6 +644,7 @@ import {
   APPROVAL_FORM_FIELD_TYPE_LABELS,
   APPROVAL_FORM_PALETTE_GROUPS,
 } from './ApprovalFormPalette.vue'
+import ApprovalDepartmentPicker from './ApprovalDepartmentPicker.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -624,6 +691,14 @@ const columnTypeOptions = DETAIL_LEAF_FIELD_TYPES.map((type) => ({
 }))
 
 const field = computed(() => props.field)
+const departmentDefaultValue = computed(() => (
+  field.value?.departmentDefaultIds.map((id) => ({ id })) ?? []
+))
+const departmentMaxSelections = computed<number | undefined>(() => {
+  const text = field.value?.departmentMaxSelectionsText.trim() ?? ''
+  const value = Number(text)
+  return text && Number.isInteger(value) && value > 0 ? value : undefined
+})
 const recordLinkConfigured = computed(
   () =>
     Boolean(field.value) &&
@@ -659,6 +734,7 @@ type TextBufferKey =
   | 'dateRangeEndLabel'
   | 'dateRangeDurationLabel'
   | 'explanationText'
+  | 'departmentMaxSelectionsText'
 
 interface EditBuffer {
   text: Partial<Record<TextBufferKey, string>>
@@ -857,6 +933,15 @@ function bufferValidationError(): string | null {
   }
   const minRows = buffer.text.minRowsText ?? current.minRowsText
   const maxRows = buffer.text.maxRowsText ?? current.maxRowsText
+  const departmentMaxSelections =
+    buffer.text.departmentMaxSelectionsText ?? current.departmentMaxSelectionsText
+  if (
+    current.type === 'department' &&
+    departmentMaxSelections.trim() !== '' &&
+    (!/^\d+$/.test(departmentMaxSelections.trim()) || Number(departmentMaxSelections.trim()) < 1)
+  ) {
+    return INSPECTOR_INVALID_BUFFER_MESSAGE
+  }
   if (
     buffer.text.minRowsText !== undefined ||
     buffer.text.maxRowsText !== undefined
@@ -929,7 +1014,8 @@ function keyBlocksCommit(key: TextBufferKey): boolean {
     key === 'maxRowsText' ||
     key === 'dateRangeStartLabel' ||
     key === 'dateRangeEndLabel' ||
-    key === 'explanationText'
+    key === 'explanationText' ||
+    key === 'departmentMaxSelectionsText'
   )
 }
 
@@ -973,6 +1059,44 @@ function onNumberCurrencyChange(event: Event): void {
   if (!commitPatch({ numberCurrencySymbol: select.value })) {
     select.value = current.numberCurrencySymbol
   }
+}
+
+function onDepartmentSelectionChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const departmentSelection = select.value as FieldAuthoringDraft['departmentSelection']
+  const patch: FormFieldPropertyPatch = departmentSelection === 'single'
+    ? {
+        departmentSelection,
+        departmentMaxSelectionsText: '',
+        departmentDefaultIds: current.departmentDefaultIds.slice(0, 1),
+      }
+    : { departmentSelection }
+  if (!commitPatch(patch)) select.value = current.departmentSelection
+}
+
+function onDepartmentDisplayChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const departmentDisplay = select.value as FieldAuthoringDraft['departmentDisplay']
+  if (!commitPatch({ departmentDisplay })) select.value = current.departmentDisplay
+}
+
+function onDepartmentDefaultModeChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const departmentDefaultMode = select.value as FieldAuthoringDraft['departmentDefaultMode']
+  const patch: FormFieldPropertyPatch = departmentDefaultMode === 'designated'
+    ? { departmentDefaultMode }
+    : { departmentDefaultMode, departmentDefaultIds: [] }
+  if (!commitPatch(patch)) select.value = current.departmentDefaultMode
+}
+
+function onDepartmentDefaultIdsChange(value: Array<{ id: string }>): void {
+  commitPatch({ departmentDefaultIds: value.map((entry) => entry.id) })
 }
 
 function onNumberThousandsChange(event: Event): void {
@@ -1210,6 +1334,7 @@ function settlePendingEdits(): boolean {
     dateRangeEndLabel?: string
     dateRangeDurationLabel?: string
     explanationText?: string
+    departmentMaxSelectionsText?: string
     visibility?: FieldVisibilityDraft
   } = {}
   if (buffer.text.label !== undefined && buffer.text.label !== current.label) {
@@ -1256,6 +1381,12 @@ function settlePendingEdits(): boolean {
     buffer.text.explanationText !== current.explanationText
   ) {
     patch.explanationText = buffer.text.explanationText
+  }
+  if (
+    buffer.text.departmentMaxSelectionsText !== undefined &&
+    buffer.text.departmentMaxSelectionsText !== current.departmentMaxSelectionsText
+  ) {
+    patch.departmentMaxSelectionsText = buffer.text.departmentMaxSelectionsText
   }
   if (
     buffer.text.valueText !== undefined &&

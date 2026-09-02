@@ -553,6 +553,36 @@ export function validateFieldType(
         return `${field.id} must contain only configured options`
       }
       return null
+    case 'department': {
+      if (!Array.isArray(value)) {
+        return `${field.id} must be an array of departments`
+      }
+      // Optional array-valued controls submit [] after the user clears them. Required fields are
+      // rejected by validateApprovalFormData's shared isEmptyValue gate before reaching this arm.
+      if (value.length === 0) return null
+      const ids: string[] = []
+      for (const entry of value) {
+        if (
+          !isRecord(entry)
+          || Object.keys(entry).length !== 1
+          || typeof entry.id !== 'string'
+          || !entry.id.trim()
+        ) {
+          return `${field.id} must contain only exact { id } department values`
+        }
+        ids.push(entry.id.trim())
+      }
+      if (new Set(ids).size !== ids.length) {
+        return `${field.id} must not contain duplicate departments`
+      }
+      if (field.props?.selection === 'single' && ids.length !== 1) {
+        return `${field.id} must contain exactly one department`
+      }
+      if (typeof field.props?.maxSelections === 'number' && ids.length > field.props.maxSelections) {
+        return `${field.id} exceeds the configured department selection limit`
+      }
+      return null
+    }
     case 'record-link': {
       // FWB-0 Layer 2 structural shape only (sync): exactly one `{ recordId: non-blank string }`.
       // No arrays, free-text ids, or extra keys (incl. target base/sheet overrides). Filler read

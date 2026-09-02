@@ -122,6 +122,10 @@ import {
   extractApprovalConditionFormulaFieldIds,
 } from './ApprovalConditionFormula'
 import { resolveApprovalRequesterOrgRelations, ApprovalRoutingPolicyError, MAX_MANAGER_CHAIN_LEVELS, type ApprovalRequesterOrgRelations } from './ApprovalDirectoryOrg'
+import {
+  ApprovalDepartmentUnavailableError,
+  canonicalizeApprovalDepartmentFormData,
+} from './approval-department-field'
 import { resolveApprovalRequesterRoleIds } from './ApprovalRequesterRoles'
 import { fetchCuratedApprovalRoleIds, fetchCuratedApprovalMemberGroupIds, fetchMemberGroupSnapshot } from './approval-directory'
 import { resolveActiveDelegationMap } from './ApprovalDelegations'
@@ -567,6 +571,8 @@ export const FORM_FIELD_TYPES = new Set([
   'select',
   'multi-select',
   'user',
+  // Lock-2 L2-A: top-level directory-backed department selector.
+  'department',
   'attachment',
   'detail',
   // FWB-0 Layer 2: top-level only (explicitly excluded from DETAIL_LEAF below).
@@ -618,6 +624,14 @@ export const DATE_RANGE_FIELD_ALLOWED_PROP_KEYS = new Set([
 // fail-closed shape (§0.4): unknown keys fail publish, canonicalized props never spread residually.
 export const EXPLANATION_FIELD_ALLOWED_PROP_KEYS = new Set(['text'])
 
+export const DEPARTMENT_FIELD_ALLOWED_PROP_KEYS = new Set([
+  'selection',
+  'display',
+  'defaultMode',
+  'defaultDepartmentIds',
+  'maxSelections',
+])
+
 // Leaf sub-field types allowed inside a `detail` group's columns. The attachment pipeline narrows
 // this set only while its feature flag is enabled; flag OFF preserves the pre-feature authoring
 // contract for existing templates. `record-link` is v1-excluded from detail (FWB-0 Layer 2:
@@ -643,10 +657,14 @@ export const EXPLANATION_FIELD_ALLOWED_PROP_KEYS = new Set(['text'])
 // nested explanation column — no pre-emption ambiguity to correct later.
 //
 // EXPORTED (mirrors FORM_FIELD_TYPES) so a census test can assert this DERIVED set is exactly
-// FORM_FIELD_TYPES minus {detail, record-link, date_range, explanation} rather than re-declaring it.
+// FORM_FIELD_TYPES minus {detail, record-link, date_range, explanation, department} rather than re-declaring it.
 export const DETAIL_LEAF_FIELD_TYPES = new Set(
   [...FORM_FIELD_TYPES].filter(
-    (type) => type !== 'detail' && type !== 'record-link' && type !== 'date_range' && type !== 'explanation',
+    (type) => type !== 'detail'
+      && type !== 'record-link'
+      && type !== 'date_range'
+      && type !== 'explanation'
+      && type !== 'department',
   ),
 )
 
@@ -1473,6 +1491,84 @@ function normalizeFormField(
     dateRangeProps = canonical
   }
 
+  let departmentProps: Record<string, unknown> | undefined
+  if (value.type === 'department') {
+    if (nested) {
+      failValidation(context, `formSchema.fields[${index}] department cannot nest inside a detail group (v1)`)
+    }
+    const props = isRecord(value.props) ? value.props : null
+    const extraKeys = props
+      ? Object.keys(props).filter((key) => !DEPARTMENT_FIELD_ALLOWED_PROP_KEYS.has(key))
+      : []
+    if (extraKeys.length > 0) {
+      failValidation(context, `formSchema.fields[${index}] department props contain unknown keys`)
+    }
+    const selection = props?.selection
+    const display = props?.display
+    if (selection !== 'single' && selection !== 'multi') {
+      failValidation(context, `formSchema.fields[${index}] department props.selection must be single or multi`)
+    }
+    if (display !== 'leaf_only' && display !== 'full_path') {
+      failValidation(context, `formSchema.fields[${index}] department props.display must be leaf_only or full_path`)
+    }
+    const defaultMode = props?.defaultMode
+    if (
+      defaultMode !== undefined
+      && defaultMode !== 'requester_department'
+      && defaultMode !== 'designated'
+    ) {
+      failValidation(context, `formSchema.fields[${index}] department props.defaultMode is invalid`)
+    }
+    const defaultDepartmentIds = props?.defaultDepartmentIds
+    let normalizedDefaultDepartmentIds: string[] | undefined
+    if (defaultDepartmentIds !== undefined) {
+      if (!Array.isArray(defaultDepartmentIds)) {
+        failValidation(context, `formSchema.fields[${index}] department props.defaultDepartmentIds must be an array`)
+      }
+      normalizedDefaultDepartmentIds = defaultDepartmentIds.map((id) => (
+        typeof id === 'string' ? id.trim() : ''
+      ))
+      if (
+        normalizedDefaultDepartmentIds.some((id) => !id)
+        || new Set(normalizedDefaultDepartmentIds).size !== normalizedDefaultDepartmentIds.length
+      ) {
+        failValidation(
+          context,
+          `formSchema.fields[${index}] department props.defaultDepartmentIds must contain unique non-blank ids`,
+        )
+      }
+    }
+    const maxSelections = props?.maxSelections
+    if (
+      maxSelections !== undefined
+      && (typeof maxSelections !== 'number' || !Number.isInteger(maxSelections) || maxSelections < 1)
+    ) {
+      failValidation(context, `formSchema.fields[${index}] department props.maxSelections must be a positive integer`)
+    }
+    if (selection === 'single') {
+      if (maxSelections !== undefined && maxSelections !== 1) {
+        failValidation(context, `formSchema.fields[${index}] single department fields require maxSelections 1 when present`)
+      }
+      if (normalizedDefaultDepartmentIds && normalizedDefaultDepartmentIds.length > 1) {
+        failValidation(context, `formSchema.fields[${index}] single department fields allow at most one default department`)
+      }
+    }
+    if (
+      typeof maxSelections === 'number'
+      && normalizedDefaultDepartmentIds
+      && normalizedDefaultDepartmentIds.length > maxSelections
+    ) {
+      failValidation(context, `formSchema.fields[${index}] department defaults exceed maxSelections`)
+    }
+    departmentProps = {
+      selection,
+      display,
+      ...(defaultMode !== undefined ? { defaultMode } : {}),
+      ...(normalizedDefaultDepartmentIds ? { defaultDepartmentIds: normalizedDefaultDepartmentIds } : {}),
+      ...(maxSelections !== undefined ? { maxSelections } : {}),
+    }
+  }
+
   // Lock-8 L8-A (§1.1, OD-L8-2/OD-L8-3, A-1): explanation is DISPLAY-ONLY — no submitted value, so
   // `required`/`defaultValue`/`options`/`placeholder` are each refused OUTRIGHT at publish (nothing
   // to require, default, choose among, or prompt for). The generic shape checks above only reject a
@@ -1539,9 +1635,11 @@ function normalizeFormField(
           ? { props: dateRangeProps }
           : explanationProps
             ? { props: explanationProps }
-            : isRecord(value.props)
-              ? { props: { ...value.props } }
-              : {}),
+            : departmentProps
+              ? { props: departmentProps }
+              : isRecord(value.props)
+                ? { props: { ...value.props } }
+                : {}),
     ...(visibilityRule ? { visibilityRule } : {}),
     ...detail,
   } as FormSchema['fields'][number]
@@ -1759,6 +1857,12 @@ function validateFormFieldVisibilityRules(
         failValidation(
           context,
           `formSchema.fields[${index}].visibilityRule.fieldId cannot reference an explanation field (it carries no value)`,
+        )
+      }
+      if (target.type === 'department') {
+        failValidation(
+          context,
+          `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a department field as a scalar value (v1)`,
         )
       }
       return
@@ -2943,6 +3047,7 @@ function validateNonScalarFieldsNotUsedInConditions(
     { type: 'record-link', label: 'record-link' },
     { type: 'date_range', label: 'date_range' },
     { type: 'explanation', label: 'explanation' },
+    { type: 'department', label: 'department' },
   ]
   const fieldTypeById = new Map((formSchema.fields ?? []).map((field) => [field.id, field.type]))
   const nonScalarFieldIds = new Set(
@@ -7137,6 +7242,10 @@ export class ApprovalProductService {
     // Lock-1 §K4 — separate opt-in gate for the department-head chain (a different snapshot field,
     // a different walk, a different ApprovalDirectoryOrg option); see runtimeGraphUsesDeptHeadChain.
     const needsDeptHeadChain = runtimeGraphUsesDeptHeadChain(runtimeGraph)
+    const needsDepartmentDirectory = formSchema.fields.some((field) => {
+      const value = normalizedFormData[field.id]
+      return field.type === 'department' && Array.isArray(value) && value.length > 0
+    })
     let orgRelations: ApprovalRequesterOrgRelations = {}
     let orgReadFailed = false
     // B5-b: a routing-POLICY config error (policy points at a missing/inactive integration, or the
@@ -7150,6 +7259,7 @@ export class ApprovalProductService {
       orgRelations = await resolveApprovalRequesterOrgRelations(effectiveRequester.userId, pool.query.bind(pool), {
         includeManagerChain: needsManagerChain,
         includeDeptHeadChain: needsDeptHeadChain,
+        ...(needsDepartmentDirectory ? { includeDepartmentFieldContext: true } : {}),
       })
     } catch (error) {
       orgReadFailed = true
@@ -7159,6 +7269,47 @@ export class ApprovalProductService {
           error instanceof Error ? error.message : 'unknown error'
         }`,
       )
+    }
+
+    if (needsDepartmentDirectory) {
+      if (orgReadFailed) {
+        throw new ServiceError(
+          'Approval department directory is unavailable',
+          orgPolicyMisconfigured ? 422 : 503,
+          orgPolicyMisconfigured
+            ? 'APPROVAL_ROUTING_POLICY_MISCONFIGURED'
+            : 'APPROVAL_DEPARTMENT_DIRECTORY_UNRESOLVED',
+        )
+      }
+      const integrationId = orgRelations.canonicalIntegrationId
+      if (!integrationId) {
+        throw new ServiceError(
+          'Approval department directory is unavailable',
+          422,
+          'APPROVAL_DEPARTMENT_DIRECTORY_UNRESOLVED',
+        )
+      }
+      try {
+        await canonicalizeApprovalDepartmentFormData(
+          formSchema,
+          normalizedFormData,
+          integrationId,
+          pool.query.bind(pool),
+        )
+      } catch (error) {
+        if (error instanceof ApprovalDepartmentUnavailableError) {
+          throw new ServiceError(
+            'Approval department selection is unavailable',
+            422,
+            'APPROVAL_DEPARTMENT_UNRESOLVED',
+          )
+        }
+        throw new ServiceError(
+          'Approval department directory is unavailable',
+          503,
+          'APPROVAL_DEPARTMENT_DIRECTORY_UNRESOLVED',
+        )
+      }
     }
 
     // RA-1b: `requester.role in [...]` routes on the requester's CURRENT role membership. Resolve it with a
@@ -11923,7 +12074,7 @@ export class ApprovalProductService {
         // `readonly` ⇒ non-editable; `hidden` ⇒ not even visible. Both refuse WITHOUT echoing a value.
         throw new ServiceError('Field write is not permitted at this node', 403, 'APPROVAL_FIELD_WRITE_FORBIDDEN', { nodeKey, fieldId })
       }
-      // v1 fail-closed (DEFERRED, OD-L7-3): `record-link` / `attachment` writes need binding+authz
+      // v1 fail-closed (DEFERRED, OD-L7-3): `record-link` / `attachment` / `department` writes need binding+authz
       // that Lock-7's named validators (validateFieldType/Constraints/Detail) do NOT cover —
       // create-time record-link confused-deputy authz (projectRecordLinkFormSnapshotForViewer) and
       // attachment-id binding into the immutable snapshot. Rejected here, not silently dropped; the
@@ -11941,7 +12092,12 @@ export class ApprovalProductService {
       // field type A-1 declares is contractually absent from formSnapshot. The payload this closes is
       // necessarily `null`-only — any non-null value is independently refused by `validateFieldType`'s
       // arm above, unaffected by this change.
-      if (field.type === 'record-link' || field.type === 'attachment' || field.type === 'explanation') {
+      if (
+        field.type === 'record-link'
+        || field.type === 'attachment'
+        || field.type === 'department'
+        || field.type === 'explanation'
+      ) {
         throw new ServiceError('Field type is not writable at a handler node yet', 400, 'APPROVAL_FIELD_WRITE_UNSUPPORTED_TYPE', { nodeKey, fieldId })
       }
       // Re-run the FROZEN-schema validators (L7-C / G-6). MS-3 fail-open is INHERITED, not fixed: a

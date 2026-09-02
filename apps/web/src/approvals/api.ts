@@ -1361,6 +1361,74 @@ export async function searchApprovalDirectoryUsers(
   }
 }
 
+export interface ApprovalDirectoryDepartment {
+  id: string
+  name: string
+  fullPath: string
+  parentId?: string
+  hasChildren: boolean
+}
+
+export interface ApprovalDepartmentDirectoryResult {
+  departments: ApprovalDirectoryDepartment[]
+  requesterDepartmentId?: string
+}
+
+export async function searchApprovalDirectoryDepartments(
+  q: string,
+  limit = 20,
+  treeParentId?: string | null,
+): Promise<ApprovalDepartmentDirectoryResult> {
+  try {
+    const params = new URLSearchParams()
+    const normalized = q.trim()
+    if (normalized) params.set('q', normalized)
+    params.set('limit', String(limit))
+    if (treeParentId !== undefined) {
+      params.set('mode', 'tree')
+      if (treeParentId) params.set('parentId', treeParentId)
+    }
+    const response = await apiFetch(`/api/approvals/directory/departments?${params.toString()}`)
+    if (!response.ok) return { departments: [] }
+    const payload = await response.json().catch(() => null) as {
+      departments?: unknown
+      requesterDepartmentId?: unknown
+    } | null
+    if (!payload || !Array.isArray(payload.departments)) return { departments: [] }
+    const departments: ApprovalDirectoryDepartment[] = []
+    for (const entry of payload.departments) {
+      if (!entry || typeof entry !== 'object') continue
+      const record = entry as Record<string, unknown>
+      if (
+        typeof record.id !== 'string'
+        || !record.id.trim()
+        || typeof record.name !== 'string'
+        || !record.name.trim()
+        || typeof record.fullPath !== 'string'
+        || !record.fullPath.trim()
+        || typeof record.hasChildren !== 'boolean'
+      ) continue
+      departments.push({
+        id: record.id,
+        name: record.name.trim(),
+        fullPath: record.fullPath.trim(),
+        ...(typeof record.parentId === 'string' && record.parentId.trim()
+          ? { parentId: record.parentId }
+          : {}),
+        hasChildren: record.hasChildren,
+      })
+    }
+    return {
+      departments,
+      ...(typeof payload.requesterDepartmentId === 'string' && payload.requesterDepartmentId.trim()
+        ? { requesterDepartmentId: payload.requesterDepartmentId }
+        : {}),
+    }
+  } catch {
+    return { departments: [] }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // member-display-identity (2026-08-19; tightened 2026-08-19 per owner decision — role resolution
 // stays admin-only) — authorized-scope EXACT batch id->name resolver, wrapping GET

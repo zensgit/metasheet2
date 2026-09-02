@@ -1843,6 +1843,52 @@ describe('validateApprovalFormData — record-link value shape (FWB-0 Layer 2)',
   })
 })
 
+describe('validateApprovalFormData — department value shape (Lock-2 L2-A)', () => {
+  const single: FormSchema = {
+    fields: [{
+      id: 'dept',
+      type: 'department',
+      label: '部门',
+      required: true,
+      props: { selection: 'single', display: 'full_path' },
+    }],
+  }
+  const multi: FormSchema = {
+    fields: [{
+      id: 'dept',
+      type: 'department',
+      label: '部门',
+      props: { selection: 'multi', display: 'leaf_only', maxSelections: 2 },
+    }],
+  }
+
+  it('accepts exact local-id objects and preserves required handling', () => {
+    expect(validateApprovalFormData(single, { dept: [{ id: 'd1' }] })).toEqual([])
+    expect(validateApprovalFormData(single, {})).toEqual(['dept is required'])
+    expect(validateApprovalFormData(single, { dept: [] })).toEqual(['dept is required'])
+    expect(validateApprovalFormData(multi, { dept: [] })).toEqual([])
+    expect(validateApprovalFormData(multi, { dept: [{ id: 'd1' }, { id: 'd2' }] })).toEqual([])
+  })
+
+  it('rejects free text, extra keys, duplicates, single overflow, and maxSelections overflow', () => {
+    expect(validateApprovalFormData(single, { dept: ['d1'] })).toEqual([
+      'dept must contain only exact { id } department values',
+    ])
+    expect(validateApprovalFormData(single, { dept: [{ id: 'd1', name: 'spoof' }] })).toEqual([
+      'dept must contain only exact { id } department values',
+    ])
+    expect(validateApprovalFormData(multi, { dept: [{ id: 'd1' }, { id: 'd1' }] })).toEqual([
+      'dept must not contain duplicate departments',
+    ])
+    expect(validateApprovalFormData(single, { dept: [{ id: 'd1' }, { id: 'd2' }] })).toEqual([
+      'dept must contain exactly one department',
+    ])
+    expect(validateApprovalFormData(multi, { dept: [{ id: 'd1' }, { id: 'd2' }, { id: 'd3' }] })).toEqual([
+      'dept exceeds the configured department selection limit',
+    ])
+  })
+})
+
 describe('canonicalizeRecordLinkFormData — FWB-0 Layer 2', () => {
   it('rewrites padded recordId to the exact trimmed canonical object in-place', () => {
     const schema: FormSchema = {

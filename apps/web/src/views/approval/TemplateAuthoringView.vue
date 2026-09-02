@@ -2105,6 +2105,7 @@ const conditionFieldOptions = computed(() =>
       && field.type !== 'detail'
       && field.type !== 'date_range'
       && field.type !== 'explanation'
+      && field.type !== 'department'
     ))
     .map((field) => ({ id: field.id.trim(), label: fieldDisplayLabel(field) })),
 )
@@ -3570,6 +3571,7 @@ const FIELD_PALETTE_LABELS: Record<AuthorableFieldType, string> = {
   select: '单选',
   'multi-select': '多选',
   user: '人员',
+  department: '部门',
   detail: '明细',
   'record-link': '关联记录',
   date_range: '日期区间',
@@ -3584,6 +3586,7 @@ const FIELD_PALETTE_MARKS: Record<AuthorableFieldType, string> = {
   select: '○',
   'multi-select': '☑',
   user: '人',
+  department: '部',
   detail: '表',
   'record-link': '链',
   date_range: '区',
@@ -3599,7 +3602,7 @@ const fieldPaletteGroups = [
   { id: 'number', label: '数值', types: ['number'] },
   { id: 'choice', label: '选项', types: ['select', 'multi-select'] },
   { id: 'date', label: '日期', types: ['date', 'datetime', 'date_range'] },
-  { id: 'other', label: '其他', types: ['user', 'detail', 'record-link', 'explanation'] },
+  { id: 'other', label: '其他', types: ['user', 'department', 'detail', 'record-link', 'explanation'] },
 ].map((group) => ({
   ...group,
   entries: group.types.map((type) => ({
@@ -3751,7 +3754,7 @@ function visibilityFieldOptions(current: FieldAuthoringDraft) {
   for (const field of draft.value.fields) {
     if (field.localId === current.localId) continue
     if (!field.id.trim()) continue
-    if (field.type === 'record-link' || field.type === 'detail') continue
+    if (field.type === 'record-link' || field.type === 'detail' || field.type === 'department') continue
     // Lock-8 L8-A (§1.1): explanation carries no value at all — never offered, bare or dotted (it
     // has no endpoints, unlike date_range).
     if (field.type === 'explanation') continue
@@ -3795,6 +3798,7 @@ function invalidateStaleRecordLinkDependencies(changedField: FieldAuthoringDraft
     // Lock-8 L8-A (§1.1): explanation matches record-link/detail's ONE-direction shape — nothing
     // could ever validly have depended on it, so only "became explanation" needs clearing.
     || changedField.type === 'explanation'
+    || changedField.type === 'department'
   const stillDateRange = changedField.type === 'date_range'
   for (const field of draft.value.fields) {
     const dependsOn = field.visibility.dependsOnFieldId.trim()
