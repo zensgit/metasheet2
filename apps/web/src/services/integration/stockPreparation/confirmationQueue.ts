@@ -269,6 +269,109 @@ export async function readStockPreparationValueEntry(
   return parseStockPreparationConfirmResponse<StockPreparationDecisionValueEntry>(response)
 }
 
+// ---------------------------------------------------------------------------
+// 通知下一步 — the light multi-person handoff
+//
+// Several people each fill their own fields on a project's prep rows, in order. Whoever is done
+// presses 通知下一步; the turn moves on and the group chat is told who is up next. The last step
+// additionally tells 仓库/采购.
+//
+// THIS IS A VISIBLE TURN SIGNAL, NOT A PERMISSION MECHANISM. Nothing here decides who may write
+// which column — per-column write enforcement is a separate, deliberately deferred decision. What
+// the server does enforce on the advance is that the caller is the CURRENT handler (403
+// STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER) and that nobody advanced the same step first (409
+// STOCK_PREPARATION_HANDOFF_STEP_MISMATCH) — i.e. it protects the signal's integrity, not the data.
+//
+// VALUES-FREE, both directions. Step keys, 0-based indices, booleans and a handler COUNT cross here;
+// no material name, no quantity, and no handler NAME — the name a person needs is in the DingTalk
+// message, which the server composes.
+// ---------------------------------------------------------------------------
+
+/** One step of the chain. `handlerCount` is a COUNT — the names never cross this boundary. */
+export interface StockPreparationHandoffStep {
+  key: string
+  order: number
+  handlerCount: number
+}
+
+/** Whose turn it is on one project. `configured: false` = this deployment has no chain; feature inert. */
+export interface StockPreparationHandoffStatus {
+  configured: boolean
+  projectNo: string
+  steps: StockPreparationHandoffStep[]
+  stepCount: number
+  /** 0-based index of the CURRENT step; null when `configured` is false. */
+  stepIndex: number | null
+  currentStepKey: string | null
+  /** The current step is the last one — advancing it notifies 仓库/采购. */
+  terminal: boolean
+  /** The chain has been advanced past the last step. */
+  completed: boolean
+  /** SERVER-COMPUTED. The client never derives this from a name it holds. */
+  isCurrentHandler: boolean
+  notifiedStepIndex: number | null
+}
+
+/** Frozen server vocabulary for what happened to the notification itself. */
+export type StockPreparationHandoffNotifyOutcome = 'sent' | 'failed' | 'skipped' | 'not_configured'
+
+export interface StockPreparationHandoffAdvanceResult {
+  projectNo: string
+  fromStepKey: string
+  /** The NEW current step — null when this advance completed the chain. */
+  currentStepKey: string | null
+  stepIndex: number | null
+  stepCount: number
+  /** false = an idempotent replay of the same transition; nothing moved, nothing re-notified. */
+  changed: boolean
+  /** This advance completed the LAST step. */
+  terminal: boolean
+  notified: boolean
+  notifyOutcome: StockPreparationHandoffNotifyOutcome
+}
+
+/**
+ * Whose turn it is on this project. Values-free, and inert rather than fatal on a deployment with no
+ * handoff config — the route answers 200 with `configured: false`.
+ * GET /api/integration/stock-preparation/handoff
+ */
+export async function readStockPreparationHandoff(
+  scope: IntegrationScope & { projectNo: string },
+): Promise<StockPreparationHandoffStatus> {
+  const query = buildQuerySuffix({
+    tenantId: scope.tenantId,
+    workspaceId: scope.workspaceId,
+    projectNo: scope.projectNo,
+  })
+  const response = await apiFetch(`/api/integration/stock-preparation/handoff${query}`)
+  return parseStockPreparationConfirmResponse<StockPreparationHandoffStatus>(response)
+}
+
+/**
+ * Move the turn on one step and let the next person know. The body allowlist is CLOSED server-side —
+ * an unexpected key is REFUSED 400, not ignored — so this builds exactly the four permitted keys and
+ * omits the scope ones when they are empty rather than sending a null the allowlist has to tolerate.
+ * `fromStepKey` is what makes a double-press idempotent instead of a double-advance: the server
+ * compares it to the step it actually holds and answers 409 when someone else moved first.
+ * POST /api/integration/stock-preparation/handoff/advance
+ */
+export async function advanceStockPreparationHandoff(
+  scope: IntegrationScope & { projectNo: string; fromStepKey: string },
+): Promise<StockPreparationHandoffAdvanceResult> {
+  const body: Record<string, unknown> = {
+    projectNo: scope.projectNo,
+    fromStepKey: scope.fromStepKey,
+  }
+  if (typeof scope.tenantId === 'string' && scope.tenantId.length > 0) body.tenantId = scope.tenantId
+  if (typeof scope.workspaceId === 'string' && scope.workspaceId.length > 0) body.workspaceId = scope.workspaceId
+  const response = await apiFetch('/api/integration/stock-preparation/handoff/advance', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return parseStockPreparationConfirmResponse<StockPreparationHandoffAdvanceResult>(response)
+}
+
 /**
  * Confirm one decision. The body allowlist is the server's
  * VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_CONFIRM_BODY_KEYS verbatim — no tenantId/projectId

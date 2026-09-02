@@ -51,6 +51,12 @@ const STOCK_PREP_AUDIT_ACTIONS = Object.freeze([
   // because the reopened OD-E3 gate requires an audit vocabulary for the value plane, not merely a
   // permission for it.
   'project_directory_read',
+  // 通知下一步 (migration 083): a person finished their step of the 备料 handoff chain and handed it
+  // to the next one — or, on the last step, finished the project and had 仓库/采购 told. The only
+  // action here that records a decision about the WORK rather than about the data. Values-free:
+  // `subject_id` is a step key from the closed handoff vocabulary, `detail` carries cursor integers
+  // and booleans only (see stock-preparation-handoff.cjs and the route, its only caller).
+  'handoff_advance',
 ])
 const ACTION_SET = new Set(STOCK_PREP_AUDIT_ACTIONS)
 
