@@ -3278,7 +3278,19 @@ function createHandlers(services, options = {}) {
   // it — an unaudited confirm/generation/resolve is refused, not silently allowed. System-sync
   // persists instead carry their immutable run record inside the same unit of work.
   const stockPreparationAudit = services.stockPreparationAuditStore || null
-  function requireStockPreparationAudit() {
+  // NO ROUTE FORWARDS A CALLER'S RAW `?workspaceId` INTO THE AUDIT TRAIL.
+//
+// `workspace_id` is a plain nullable TEXT column on that table, and the store cannot shape-gate it
+// (see stock-preparation-audit-store.cjs: gating a caller column turns a completed write into an
+// unaudited 422, and turns a legitimate free-text project number into a refused export). So the
+// discipline lives here instead, and it is one sentence: this plugin has NO workspace registry to
+// validate a caller-supplied workspace against, so it selects nothing from one. `workspaceId` stays
+// in the query allowlists for shape compatibility — a client that sends it is not 400'd — and it
+// steers nothing, exactly like `tenantId` on the operator surfaces.
+//
+// Before this rule, `?workspaceId=<a project number>` was enough to put a customer business value on
+// a trail whose entire claim is that it carries none, on any of twelve routes.
+function requireStockPreparationAudit() {
     if (!stockPreparationAudit || typeof stockPreparationAudit.append !== 'function') {
       throw new HttpRouteError(501, 'AUDIT_STORE_UNAVAILABLE', 'stock-preparation audit store is not available; writes are refused without an audit trail')
     }
@@ -6707,7 +6719,6 @@ function createHandlers(services, options = {}) {
       })
       await audit.append({
         tenantId,
-        workspaceId: input.workspaceId,
         projectId: input.projectId,
         action: 'mapping_candidates_sync',
         subjectId: result.snapshotBatchId,
@@ -6739,7 +6750,6 @@ function createHandlers(services, options = {}) {
       })
       await audit.append({
         tenantId,
-        workspaceId: input.workspaceId,
         projectId: input.projectId,
         action: 'mapping_confirm',
         subjectId: result.mappingId,
@@ -6767,7 +6777,6 @@ function createHandlers(services, options = {}) {
       })
       await audit.append({
         tenantId,
-        workspaceId: input.workspaceId,
         projectId: input.projectId,
         action: 'mapping_retire',
         subjectId: result.mappingId,
@@ -6801,7 +6810,6 @@ function createHandlers(services, options = {}) {
       })
       await audit.append({
         tenantId,
-        workspaceId: input.workspaceId,
         projectId: input.projectId,
         action: 'unit_confirm',
         subjectId: result.conversionRuleId,
@@ -6829,7 +6837,6 @@ function createHandlers(services, options = {}) {
       })
       await audit.append({
         tenantId,
-        workspaceId: input.workspaceId,
         projectId: input.projectId,
         action: 'unit_retire',
         subjectId: result.conversionRuleId,
@@ -6985,7 +6992,6 @@ function createHandlers(services, options = {}) {
       // confirmation-decision confirm route set. Values-free: counts, mode tokens, booleans.
       await audit.append({
         tenantId,
-        workspaceId: input.workspaceId,
         projectId: input.projectId,
         action: 'exception_resolve',
         subjectId: decisionId || undefined,
@@ -7021,7 +7027,6 @@ function createHandlers(services, options = {}) {
       })
       await audit.append({
         tenantId,
-        workspaceId: input.workspaceId,
         projectId: input.projectId,
         action: 'generation_run',
         subjectId: result.snapshotBatchId,
@@ -7057,7 +7062,6 @@ function createHandlers(services, options = {}) {
       })
       await audit.append({
         tenantId,
-        workspaceId: input.workspaceId,
         projectId: input.projectId,
         action: 'exception_resolve',
         subjectId: result.exceptionId,
@@ -7087,7 +7091,6 @@ function createHandlers(services, options = {}) {
       })
       await audit.append({
         tenantId,
-        workspaceId: input.workspaceId,
         projectId: input.projectId,
         action: 'exception_bulk_resolve',
         mode: result.mode,
@@ -7360,7 +7363,6 @@ function createHandlers(services, options = {}) {
       // a reviewer asking "who touched this" wants to see.
       await audit.append({
         tenantId: scope.tenantId,
-        workspaceId: scope.workspaceId,
         action: 'source_binding_set',
         subjectId: binding.externalSystemId,
         mode: previousExternalSystemId ? 'rebound' : 'bound',
@@ -7618,7 +7620,6 @@ function createHandlers(services, options = {}) {
       // streamed. Values-free: counts only, never a material name/quantity.
       await audit.append({
         tenantId,
-        workspaceId: input.workspaceId,
         projectId: projectNo,
         action: 'prep_line_export',
         actor: user.id || user.email,

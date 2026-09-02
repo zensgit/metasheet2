@@ -12,13 +12,14 @@
 // dedicated subject_id column).
 //
 // HARD boundary:
-//   - values-free BY CONSTRUCTION, not by caller discipline alone, and as a property of the whole
-//     ROW rather than of one column: `detail` passes a structural guard — scalars (finite numbers /
-//     booleans / enum-shaped strings) and ONE nested level of numeric count maps — and
-//     workspace_id / project_id / subject_id / mode / actor each pass the SAME enum/handle shape
-//     gate (assertValuesFreeColumn). A drawing number with spaces, an exception message, a URL, or
-//     any long / unshaped string is REJECTED fail-closed before it can reach the table, in whichever
-//     column it was handed to.
+//   - values-free BY CONSTRUCTION, not by caller discipline alone: `detail` passes a structural
+//     guard — scalars (finite numbers / booleans / enum-shaped strings) and ONE nested level of
+//     numeric count maps — and the two SERVER-GENERATED columns `mode` and `subject_id` pass the
+//     same enum/handle shape gate (assertValuesFreeColumn). A drawing number with spaces, an
+//     exception message, a URL, or any long / unshaped string is REJECTED fail-closed before it can
+//     reach the table. project_id / workspace_id / actor carry caller data and are NOT shape-gated —
+//     gating them refuses real work instead of protecting anything (see assertValuesFreeColumn), so
+//     their discipline lives at the ROUTES: no route forwards a caller's raw ?workspaceId here.
 //   - closed action vocabulary (9 actions) — an unknown action is refused, never stored.
 //   - subject_id / actor are internal handles (content-hash ids / user id) — never business values.
 //   - append-only: the store exposes no update or delete surface.
@@ -141,22 +142,34 @@ function assertValuesFreeDetail(detail) {
 }
 
 /**
- * THE SAME GATE, APPLIED TO THE OTHER COLUMNS — so "values-free" is a property of the ROW.
+ * THE SHAPE GATE, AND THE TWO COLUMNS IT MAY GOVERN.
  *
- * `assertValuesFreeDetail` above has always covered `detail`, and nothing else. Every other nullable
- * TEXT column went through `optionalString` alone, which accepts any non-empty string: a route that
- * forwarded an unvetted request value into `workspace_id` / `project_id` / `subject_id` / `mode` /
- * `actor` wrote it verbatim onto a trail whose entire claim is that it carries no customer values.
- * That was reachable, not theoretical — the operator project-board route forwarded the caller's own
- * `?workspaceId`, so `?workspaceId=<a project number>` was enough.
+ * `assertValuesFreeDetail` above covers `detail`. This covers `mode` and `subject_id` — and
+ * DELIBERATELY NOT `project_id`, `workspace_id` or `actor`.
  *
- * The columns this gates are handle-shaped by design (enum modes, sha16 subject handles, user ids /
- * e-mails, `${tenant}:integration-core` staging ids, project NUMBERS on the export route's own
- * subject), which is exactly what SAFE_STRING_PATTERN already describes — so this refuses the
- * unshaped and passes every shape the call sites really produce.
+ * WHY THE LINE IS DRAWN THERE. A shape gate is safe only on a column whose contents the SERVER
+ * generates. `mode` is chosen from a frozen set in this repository's own code and `subject_id` is a
+ * content handle, so a non-conforming value there is a bug here, and failing closed is right.
  *
- * FAIL-CLOSED and value-blind, the same discipline as AUDIT_DETAIL_INVALID: the refusal names the
- * COLUMN and never echoes what was in it.
+ * The other three carry CALLER and CUSTOMER data, and an earlier cut of this change gated them too.
+ * That was a fail-closed bug in both directions:
+ *
+ *   * `project_id` is where the export route stamps the customer's own projectNo — deliberately;
+ *     it is that route's subject. A project number containing a Chinese character, a space or a
+ *     slash is ordinary, and with the gate on that column the operator's export 422s. The workbook
+ *     they came for would be refused in order to protect the trail from a value the trail EXISTS to
+ *     carry.
+ *   * eight write routes append AFTER their effect. A 422 there prevents nothing — the write has
+ *     already happened — it merely destroys the row that was supposed to record it, turning an
+ *     audited write into an unaudited write plus an error. That is strictly worse than the leak it
+ *     was guarding against.
+ *
+ * The values-free property for those columns is kept where it can be kept without refusing real
+ * work: AT THE ROUTES. No stock-prep route forwards a caller's raw `?workspaceId` into this store
+ * any more (there is no workspace registry to validate one against, so the honest answer is to
+ * select nothing from it), and `project_id` is written only by the route whose subject it is.
+ *
+ * FAIL-CLOSED and value-blind on what it does gate: the refusal names the COLUMN, never the value.
  */
 function assertValuesFreeColumn(value, field) {
   const normalized = optionalString(value)
@@ -201,13 +214,15 @@ function createStockPreparationAuditStore({ db, idGenerator = crypto.randomUUID 
     const row = {
       id: idGenerator(),
       tenant_id: tenant,
-      // Every one of these is gated the same way `detail` is — see assertValuesFreeColumn.
-      workspace_id: assertValuesFreeColumn(workspaceId, 'workspaceId'),
-      project_id: assertValuesFreeColumn(projectId, 'projectId'),
+      // CALLER/CUSTOMER columns — stored as given. See assertValuesFreeColumn for why gating these
+      // would refuse real work rather than protect anything.
+      workspace_id: optionalString(workspaceId),
+      project_id: optionalString(projectId),
       action: normalizedAction,
+      // SERVER-GENERATED columns — shape-gated, fail-closed.
       subject_id: assertValuesFreeColumn(subjectId, 'subjectId'),
       mode: assertValuesFreeColumn(mode, 'mode'),
-      actor: assertValuesFreeColumn(actor, 'actor'),
+      actor: optionalString(actor),
       detail: safeDetail,
     }
     await db.insertOne(AUDIT_TABLE, row)
