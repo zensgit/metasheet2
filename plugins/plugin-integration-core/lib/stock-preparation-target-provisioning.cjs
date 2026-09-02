@@ -603,6 +603,62 @@ function assertNoExistingFieldMutated(beforeContent, afterContent, objectId) {
   }
 }
 
+/**
+ * MAY REPAIR ADD THIS COLUMN? -- the ownership half of the additive heal path.
+ *
+ * Extracted from the repair transaction deliberately: as an inline branch inside a
+ * closure the rule could only be exercised through a mocked host, so three of its four
+ * cases were untestable and in practice untested. As a pure predicate every case has a
+ * direct witness.
+ *
+ * THE HUMAN-COLUMN RULE, NARROWED -- the one deliberate loosening in this change.
+ *
+ * WAS: every human_preserved column was refused, unconditionally. That made the frozen
+ * template's human band UNHEALABLE. `ensureStockPreparationTarget` throws
+ * TARGET_SCHEMA_INCOMPLETE the moment the template carries a column an existing sheet
+ * lacks, and repair -- the designated heal path that #5431/#5436 used for their template
+ * growth -- was the only additive verb, and it refused. Growing the human band therefore
+ * had no migration path at all: every existing install would have started failing
+ * `ensure` with no way to heal.
+ *
+ * NOW: a human column may be healed IF AND ONLY IF the frozen template and the
+ * design-gated whitelist AGREE about it. The property the original guard actually
+ * protected is preserved in full, because what it protected against was an ARBITRARY
+ * human column, and that stays impossible for two independent reasons:
+ *   1. `repairStockPreparationCanonicalTarget` IGNORES `input.template` and heals only
+ *      against the frozen STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, so the ids that can
+ *      reach here are closed to that module and to no caller; and
+ *   2. the id must ALSO appear in HUMAN_PRESERVED_FIELD_IDS -- the whitelist whose growth
+ *      is the independent design gate (general-prep-execution-plan-20260722.md §3), and
+ *      which is simultaneously the apply-writer's refusal vocabulary, the carry policy's
+ *      carry set, the conflict-planner's drift check and the suggestion operators' target
+ *      set. It cannot be grown quietly, or for one subsystem alone.
+ *
+ * So the back door stays shut: a human column present in the template but ABSENT from the
+ * whitelist is still refused. The reverse disagreement -- whitelisted but not human in the
+ * template -- is refused too, because it means the two authorities have drifted and
+ * guessing which one is right is exactly how a load-bearing wall gets holed.
+ */
+function assertRepairableFieldOwnership({ fieldId, ownership, isWhitelisted, templateFieldIds, objectId } = {}) {
+  const isHuman = ownership === 'human_preserved'
+  if (isHuman !== isWhitelisted) {
+    throw new StockPreparationTargetProvisioningError(
+      422,
+      'REPAIR_HUMAN_FIELD_FORBIDDEN',
+      isHuman
+        ? 'repair may not add a human_preserved column that is absent from HUMAN_PRESERVED_FIELD_IDS; grow the human whitelist through its own design gate'
+        : 'repair refuses a field the human whitelist and the frozen template disagree about',
+      { objectId, fieldId },
+    )
+  }
+  // Unchanged for the non-human band: plm_system passes, anything else must be a valid
+  // tenant `ext_` id. A whitelisted human column has already been admitted above and must
+  // NOT be run through the extension-namespace check, which would reject its bare id.
+  if (!isHuman && ownership !== 'plm_system') {
+    assertExtensionFieldIdValid(fieldId, { templateFieldIds })
+  }
+}
+
 // W2/P2-3 canonical repair runs its whole read/write/verify body inside ONE host
 // transaction via runObjectFieldsRepairTransaction (atomic fail-close). The tx-bound
 // surface it receives provides findObjectSheet/resolveExistingObjectFieldIds/
@@ -622,9 +678,9 @@ function getCanonicalRepairApi(context) {
 }
 
 // W2 template-evolution rung — canonical main-table repair. This is where the
-// human-field-reject guard is LOAD-BEARING: the canonical main carries the 8
-// HUMAN_PRESERVED_FIELD_IDS, so a repair that could add a human column would be a
-// back door around the apply-writer ownership wall's vocab. Same discipline as the
+// human-field-reject guard is LOAD-BEARING: the canonical main carries the
+// HUMAN_PRESERVED_FIELD_IDS, so a repair that could add an ARBITRARY human column
+// would be a back door around the apply-writer ownership wall's vocab. Same discipline as the
 // MVP repair: admin-gated, missing-set-only, plm_system/ext_ only, ensure's
 // TARGET_SCHEMA_INCOMPLETE throw left untouched; existing columns untouched by the
 // DO-NOTHING primitive (proven at the primitive layer, W2 realdb test).
@@ -672,18 +728,13 @@ async function repairStockPreparationCanonicalTarget(input = {}) {
     const ownershipById = new Map(template.fields.map((field) => [field.id, field.ownership]))
     const missingDescriptors = []
     for (const id of missingIds) {
-      const ownership = ownershipById.get(id)
-      if (humanSet.has(id) || ownership === 'human_preserved') {
-        throw new StockPreparationTargetProvisioningError(
-          422,
-          'REPAIR_HUMAN_FIELD_FORBIDDEN',
-          'repair may not add a human_preserved column; grow the human whitelist through its own design gate',
-          { objectId: template.objectId, fieldId: id },
-        )
-      }
-      if (ownership !== 'plm_system') {
-        assertExtensionFieldIdValid(id, { templateFieldIds: fieldIds })
-      }
+      assertRepairableFieldOwnership({
+        fieldId: id,
+        ownership: ownershipById.get(id),
+        isWhitelisted: humanSet.has(id),
+        templateFieldIds: fieldIds,
+        objectId: template.objectId,
+      })
       const found = descriptor.fields.find((field) => field.id === id)
       if (found) missingDescriptors.push(found)
     }
@@ -737,6 +788,9 @@ async function repairStockPreparationCanonicalTarget(input = {}) {
 module.exports = {
   CANONICAL_FIELD_MAP_MODE,
   repairStockPreparationCanonicalTarget,
+  // Exported for its own direct witnesses: the ownership rule that decides whether the
+  // additive heal path may create a given column (see the doc comment above it).
+  assertRepairableFieldOwnership,
   SANDBOX_FIELD_MAP_MODE,
   CANONICAL_KEY_FIELD,
   REQUIRED_PERMISSION,

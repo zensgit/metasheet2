@@ -1144,6 +1144,32 @@ export interface PluginServices {
     >
   }
   /**
+   * 备料按部门列写权限 — host→plugin, narrow, least-privilege WRITE-SCOPE port over the platform's
+   * real per-column permission table (`field_permissions`), the ONE table the grid's write gate
+   * actually reads (`loadFieldPermissionScopeMap` → `deriveFieldPermissions` →
+   * `isFieldWriteForbidden`). Same posture as `approvalAssigneeResolver` above: core-backend is the
+   * PROVIDER and ONLY plugin-integration-core receives it; every other plugin gets `undefined` and
+   * a consumer must check before use. Implementation:
+   * `services/stock-preparation-field-permissions.ts` (the concrete class is deliberately NOT
+   * exported into this type surface — only this structural shape is).
+   *
+   * Each entry means "this ROLE may NOT WRITE this column". THE LOAD-BEARING PROPERTY: the port
+   * scopes WRITE ONLY and is structurally incapable of restricting READ — `field_permissions.visible`
+   * is a hardcoded literal inside the implementation, not a parameter of this method, so no caller
+   * can hide a column through this port. That is required by the 备料 flow: 采购 and 仓库 must keep
+   * SEEING the production band (材料类型 / 毛胚类型 / 需求日期 / 提前周期 …) and each other's
+   * responses. Read scoping, and REMOVAL of a scope, are operator actions on
+   * `PUT /api/multitable/sheets/:sheetId/field-permissions` — this port is purely additive and has
+   * no revoke path. Fail-closed: unknown sheet / field-not-on-sheet / unknown role rejects the whole
+   * call with nothing written.
+   */
+  stockPreparationFieldPermissions?: {
+    applyRoleWriteScopes(input: {
+      sheetId: string
+      entries: Array<{ fieldId: string; roleId: string }>
+    }): Promise<{ applied: number; entries: Array<{ fieldId: string; roleId: string }> }>
+  }
+  /**
    * E-learning L2 — host-provided reminder-intent producer. Only
    * plugin-elearning receives this port. The plugin submits a persisted job
    * envelope; core owns same-org eligibility, canonical occurrence-key
