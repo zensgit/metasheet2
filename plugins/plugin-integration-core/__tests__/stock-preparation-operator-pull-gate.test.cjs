@@ -27,6 +27,15 @@
 //        is a CONJUNCTION.
 //   P-05 the decision is a pure function of (permissions, actionId) and is exported, so the web
 //        mirror can be asserted byte-equal against it rather than re-deriving the rule.
+//   P-06 THE OPERATOR BRANCH VERIFIES ITS TENANT. These routes resolve their tenant with
+//        `resolveTenantId`, which accepts `user.tenantId` — a field the host's auth middleware fills
+//        from the `x-tenant-id` REQUEST HEADER when the token carries no tenant claim. For the
+//        legacy `integration:*` tiers that is pre-existing; for the operator tier it would be a NEW
+//        cross-tenant capability on a route that reads the customer's PLM through a per-tenant source
+//        binding. So an operator admitted through the split also passes `resolveOperatorValueScope`
+//        (verified claim preferred, contradicting header refused, tenantless refused, steering
+//        refused, HOST vouches for the pairing) — and the legacy branch returns before any of it, so
+//        no existing caller changes shape.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -82,7 +91,7 @@ function inertService(methods) {
  */
 const PAST_THE_GATE = 'PAST_THE_GATE'
 
-function mount() {
+function mount({ tenantPrincipalDirectory = { async verifyTenantMembership() { return { member: true } } } } = {}) {
   const routes = new Map()
   const context = {
     api: {
@@ -116,7 +125,7 @@ function mount() {
     readSourceCompositionConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
     bridgeAgentChecklistStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForApply']),
     stockPreparationAuditStore: { async append() { return { ok: true } } },
-    tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
+    ...(tenantPrincipalDirectory ? { tenantPrincipalDirectory } : {}),
     stockPreparationConfirmationReconcileLease: {
       async acquire() { return { leaseId: 'lease_1' } },
       async release() { return true },
@@ -149,25 +158,57 @@ function createResponse() {
  *   'refused'   — 401/403 with the gate's own error code, and no action lookup happened
  *   'admitted'  — execution reached past the gate (the sentinel, or any non-gate failure)
  */
-async function gateVerdict(routes, { method, routePath, user, actionId, body = {} }) {
+const GATE_REFUSAL_CODES = new Set([
+  'UNAUTHENTICATED',
+  'FORBIDDEN',
+  // The operator branch's own refusals — every one of them is a gate refusal, decided before the
+  // route touches an action, a source or a sheet.
+  'TENANT_MISMATCH',
+  'TENANT_CONTEXT_REQUIRED',
+  'OPERATOR_SCOPE_UNAUTHENTICATED',
+  'OPERATOR_SCOPE_TIER_REQUIRED',
+  'OPERATOR_SCOPE_TENANT_CONTRADICTED',
+  'OPERATOR_SCOPE_TENANT_REQUIRED',
+  'OPERATOR_SCOPE_TENANT_MISMATCH',
+  'OPERATOR_SCOPE_PRINCIPAL_UNKNOWN',
+  'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED',
+])
+
+async function gateVerdict(routes, { method, routePath, user, actionId, body = {}, query = {}, authenticatedTenantId } = {}) {
   const handler = routes.get(`${method.toUpperCase()} ${routePath}`)
   assert.ok(handler, `route ${method} ${routePath} is registered`)
   const res = createResponse()
-  const req = { user, body, query: {}, params: { actionId } }
+  const req = { user, body, query, params: { actionId } }
+  if (authenticatedTenantId !== undefined) req.authenticatedTenantId = authenticatedTenantId
   try {
     await handler(req, res)
   } catch (error) {
-    // Anything thrown that is NOT an HttpRouteError gate refusal means we got past the gate.
-    if (error && (error.status === 401 || error.status === 403) && (error.code === 'UNAUTHENTICATED' || error.code === 'FORBIDDEN')) {
+    // Anything thrown that is NOT a gate refusal means we got past the gate.
+    if (error && (error.status === 401 || error.status === 403) && GATE_REFUSAL_CODES.has(error.code)) {
       return 'refused'
     }
     return 'admitted'
   }
   const code = res.body && res.body.error && res.body.error.code
-  if ((res.statusCode === 401 || res.statusCode === 403) && (code === 'UNAUTHENTICATED' || code === 'FORBIDDEN')) {
+  if ((res.statusCode === 401 || res.statusCode === 403) && GATE_REFUSAL_CODES.has(code)) {
     return 'refused'
   }
   return 'admitted'
+}
+
+/** The exact refusal code, for the assertions that care WHICH refusal happened. */
+async function refusalCode(routes, input) {
+  const handler = routes.get(`${input.method.toUpperCase()} ${input.routePath}`)
+  assert.ok(handler, 'route is registered')
+  const res = createResponse()
+  const req = { user: input.user, body: input.body || {}, query: input.query || {}, params: { actionId: input.actionId } }
+  if (input.authenticatedTenantId !== undefined) req.authenticatedTenantId = input.authenticatedTenantId
+  try {
+    await handler(req, res)
+  } catch (error) {
+    return error && error.code ? String(error.code) : 'THREW'
+  }
+  return res.body && res.body.error && res.body.error.code ? String(res.body.error.code) : `OK_${res.statusCode}`
 }
 
 const DRY_RUN = { method: 'POST', routePath: '/api/integration/table-actions/:actionId/dry-run' }
@@ -296,8 +337,89 @@ function theRuleIsDeclaredOnceAndTheSplitIsNamed() {
   assert.equal(operatorMayRunStockPrepPull(null, STOCK_PREP_OPERATOR_PULL_ACTION_ID), false)
 }
 
+// ---------------------------------------------------------------------------
+// P-06 — the operator branch verifies its tenant; the legacy branch is untouched
+// ---------------------------------------------------------------------------
+
+const TENANT_B = 'tenant-b'
+
+async function theOperatorBranchCannotBeSteeredAcrossTenants() {
+  const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
+
+  // A request that CARRIES another tenant is refused outright, never resolved toward it.
+  {
+    const routes = mount()
+    for (const route of [DRY_RUN, APPLY]) {
+      const code = await refusalCode(routes, { ...route, user: OPERATOR, actionId: pull, query: { tenantId: TENANT_B } })
+      assert.equal(code, 'OPERATOR_SCOPE_TENANT_MISMATCH', `P-06: ${route.routePath} refuses a steered tenant`)
+    }
+  }
+
+  // A carried tenant that CONTRADICTS the verified token claim is refused rather than resolved —
+  // the header-against-header case that makes `resolveTenantId` alone insufficient here.
+  {
+    const routes = mount()
+    for (const route of [DRY_RUN, APPLY]) {
+      const code = await refusalCode(routes, { ...route, user: OPERATOR, actionId: pull, authenticatedTenantId: TENANT_B })
+      assert.equal(code, 'OPERATOR_SCOPE_TENANT_CONTRADICTED', `P-06: ${route.routePath} refuses a contradicted tenant`)
+    }
+  }
+
+  // The HOST says this principal is not a member of the tenant it claims -> refused. On a
+  // tenant-claimless deployment this is the check that makes a spoofed x-tenant-id header useless.
+  {
+    const routes = mount({ tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: false } } } })
+    for (const route of [DRY_RUN, APPLY]) {
+      const code = await refusalCode(routes, { ...route, user: OPERATOR, actionId: pull })
+      assert.equal(code, 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED', `P-06: ${route.routePath} refuses a non-member`)
+    }
+  }
+
+  // No membership seam at all -> fail CLOSED (501), never proceed on the request's own say-so.
+  {
+    const routes = mount({ tenantPrincipalDirectory: null })
+    for (const route of [DRY_RUN, APPLY]) {
+      const code = await refusalCode(routes, { ...route, user: OPERATOR, actionId: pull })
+      assert.equal(code, 'OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE', `P-06: ${route.routePath} fails closed without the seam`)
+    }
+  }
+
+  // A principal with NO tenant of its own holding only the operator tier is refused — the operator
+  // branch has no notion of a tenantless caller to serve.
+  {
+    const routes = mount()
+    const tenantless = { id: 'u_op_tenantless', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] }
+    for (const route of [DRY_RUN, APPLY]) {
+      const code = await refusalCode(routes, { ...route, user: tenantless, actionId: pull })
+      assert.equal(code, 'OPERATOR_SCOPE_TENANT_REQUIRED', `P-06: ${route.routePath} refuses a tenantless operator`)
+    }
+  }
+
+  // THE LEGACY BRANCH IS UNTOUCHED: it returns before any of the above, so an integration:* caller
+  // never reaches the scope — proven by the seam being ABSENT and them still getting through.
+  {
+    const routes = mount({ tenantPrincipalDirectory: null })
+    assert.equal(
+      await gateVerdict(routes, { ...DRY_RUN, user: INTEGRATION_READER, actionId: pull }),
+      'admitted',
+      'P-06: the legacy tier does not pay for the operator branch',
+    )
+    assert.equal(
+      await gateVerdict(routes, { ...APPLY, user: INTEGRATION_WRITER, actionId: pull }),
+      'admitted',
+      'P-06: nor does the legacy write tier',
+    )
+    assert.equal(
+      await gateVerdict(routes, { ...DRY_RUN, user: PLATFORM_ADMIN, actionId: pull }),
+      'admitted',
+      'P-06: nor does the platform admin',
+    )
+  }
+}
+
 async function main() {
   await theOperatorPullsButNeitherReconcilesNorArchives()
+  await theOperatorBranchCannotBeSteeredAcrossTenants()
   await theWideningIsNotAWildcardOverTheTableActionNamespace()
   await theLegacyTiersAreExactlyWhatTheyWere()
   theRuleIsDeclaredOnceAndTheSplitIsNamed()

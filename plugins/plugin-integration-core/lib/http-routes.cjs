@@ -949,15 +949,51 @@ function requireAccess(req, action) {
  * of two tiers scoped to one action id, and writing it as a gate token would either widen those
  * generic routes to every table action or make `stockPrepGateTokensInSource`'s typo tripwire read a
  * conditional gate as an unconditional one.
+ *
+ * ---------------------------------------------------------------------------------------------
+ * WHY THE OPERATOR BRANCH ALSO VERIFIES THE TENANT, AND THE LEGACY BRANCH DOES NOT
+ * ---------------------------------------------------------------------------------------------
+ *
+ * These routes resolve their tenant with `resolveTenantId`, which — correctly, for the tier it was
+ * built for — accepts `user.tenantId`. But `user.tenantId` IS NOT ALWAYS A VERIFIED CLAIM: the host's
+ * auth middleware copies the `x-tenant-id` REQUEST HEADER onto the user object when the token carries
+ * no tenant claim (see stock-preparation-operator-scope.cjs's header for the exact code). For the
+ * legacy `integration:*` tiers that is pre-existing and unchanged by this PR. For the operator tier
+ * it would be NEW, and it would be new on a route that reads the customer's PLM through a per-tenant
+ * source binding — so admitting an operator through `resolveTenantId` alone would hand this tier a
+ * cross-tenant capability the split was never asked to grant.
+ *
+ * So the operator branch runs the SAME scope every other operator surface runs
+ * (`resolveOperatorValueScope`: prefer the verified claim, refuse a contradicting header, refuse a
+ * principal with no tenant of its own, refuse request-carried steering, and make the HOST vouch for
+ * the (user, tenant) pairing) and then requires the tenant the route is about to use to EQUAL it.
+ * On a tenant-claimless deployment the host membership check is what makes that safe; on a
+ * claim-bearing one the verified claim already did.
+ *
+ * The legacy branch returns before any of this, so no existing caller pays for it or changes shape.
  */
-function requireTableActionAccess(req, actionId, legacyGate) {
+async function requireTableActionAccess(req, actionId, legacyGate, tenantPrincipalDirectory) {
   const user = getUser(req)
   if (!user) {
     throw new HttpRouteError(401, 'UNAUTHENTICATED', 'Authentication required')
   }
   if (hasPermission(user, legacyGate)) return user
-  if (operatorMayRunStockPrepPull(listUserPermissions(user), actionId)) return user
-  throw new HttpRouteError(403, 'FORBIDDEN', 'Insufficient integration permissions')
+  if (!operatorMayRunStockPrepPull(listUserPermissions(user), actionId)) {
+    throw new HttpRouteError(403, 'FORBIDDEN', 'Insufficient integration permissions')
+  }
+  const scope = await resolveOperatorValueScope({
+    user,
+    authenticatedTenantId: req.authenticatedTenantId,
+    explicitTenantIds: collectExplicitTenantIds(req, {}),
+    tenantPrincipalDirectory,
+  })
+  // The tenant this route is ABOUT to act on, compared against the one the host just vouched for.
+  // Equality is the whole assertion: it cannot widen `resolveTenantId` (it only ever refuses), and it
+  // makes it impossible for an operator to be admitted for one tenant and served another.
+  if (resolveTenantId(req, {}) !== scope.tenantId) {
+    throw new HttpRouteError(403, 'TENANT_MISMATCH', 'tenant scope mismatch')
+  }
+  return user
 }
 
 function firstString(...values) {
@@ -5256,7 +5292,7 @@ function createHandlers(services, options = {}) {
       // The action id is read from the route params FIRST because the gate is scoped to it — but it
       // is a pure param read, so the 401/403 still precedes every other validation and every IO.
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
-      requireTableActionAccess(req, actionId, 'read')
+      await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
       const body = normalizeTableActionBody(requestBody(req))
       const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
       const dryRunTenantId = resolveTenantId(req, {})
@@ -5509,7 +5545,7 @@ function createHandlers(services, options = {}) {
     // apply anything they did not just plan.
     async tableActionApply(req, res) {
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
-      const user = requireTableActionAccess(req, actionId, 'write')
+      const user = await requireTableActionAccess(req, actionId, 'write', tenantPrincipalDirectory)
       const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_APPLY_BODY_KEYS)
       const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
       const applyTenantId = resolveTenantId(req, {})

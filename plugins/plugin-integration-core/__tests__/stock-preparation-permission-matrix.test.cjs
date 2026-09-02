@@ -859,7 +859,7 @@ function projectSyncGatesAreUnchanged() {
     // as the second argument of `requireAccess`. Either way the TOKEN must be the one the route has
     // always used.
     const pattern = route.operatorMayRun
-      ? new RegExp(`async ${route.handler}\\(req, res\\) \\{[\\s\\S]{0,400}?requireTableActionAccess\\(req, actionId, '([a-z]+)'\\)`)
+      ? new RegExp(`async ${route.handler}\\(req, res\\) \\{[\\s\\S]{0,400}?await requireTableActionAccess\\(req, actionId, '([a-z]+)'`)
       : new RegExp(`async ${route.handler}\\(req, res\\) \\{[\\s\\S]{0,400}?requireAccess\\(req, '([a-z]+)'\\)`)
     const match = pattern.exec(HTTP_ROUTES_SOURCE)
     assert.ok(match, `M-10a: ${route.handler} must open with its gate call`)
