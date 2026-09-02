@@ -13,8 +13,8 @@
 // host multitable provisioning API:
 //
 //   a. normalize the 21-column rehearsal pack
-//   b. install run #1 onto a table that already carries the frozen 25 canonical
-//      columns  ->  46 logical columns, ownership-stamped
+//   b. install run #1 onto a table that already carries the frozen 28 canonical
+//      columns  ->  49 logical columns, ownership-stamped
 //   c. install run #2  ->  nothing created, nothing destroyed, same wire
 //   d. REFRESH-PRESERVATION PROOF: seed a row with BOTH bands filled, project a
 //      PLM refresh through the ownership filter DERIVED FROM THE INSTALLED FIELD
@@ -91,7 +91,7 @@ function physicalFieldId(projectId, objectId, fieldId) {
 // This is the one place this fake goes further than the #5065 installer mock
 // (which stored `{ ownership }` alone): the refresh proof in act (d) derives its
 // writable set from the STORED property, so a fake that omits preserveOnRefresh
-// on the canonical half would make that proof vacuous for 25 of the 46 columns.
+// on the canonical half would make that proof vacuous for 28 of the 49 columns.
 function canonicalFieldProperty(templateField) {
   const property = {
     stockPreparation: {
@@ -284,8 +284,13 @@ function rehearsalPackNormalizes() {
   assert.equal(pack.targetObjectId, OBJECT_ID)
   assert.equal(pack.extensionFields.length, 21, 'the rehearsal pack carries 21 extension columns')
   assert.equal(PACK_FIELD_COUNT, 21)
-  assert.equal(CANONICAL_FIELD_COUNT, 25, 'the frozen canonical template is untouched at 25 columns')
-  assert.equal(LANDING_SHEET_FIELD_COUNT, 46)
+  // 25 -> 28: 备料主表 gained parentComponentCode / parentComponentName / componentSpec, the three
+  // PLM columns the working sheet was missing (they reached the sheet only through THIS pack's
+  // ext_parentDrawingNo / ext_parentName / ext_spec until now). The pack is unchanged: the frozen
+  // ids deliberately avoid those ext_ suffixes, because a frozen id equal to an installed pack's
+  // suffix is refused outright (FIELD_ID_TEMPLATE_COLLISION) and would break this very install.
+  assert.equal(CANONICAL_FIELD_COUNT, 28, 'the frozen canonical template carries 28 columns')
+  assert.equal(LANDING_SHEET_FIELD_COUNT, 49)
 
   const byOwnership = { plm_system: [], human_preserved: [] }
   for (const field of pack.extensionFields) {
@@ -602,7 +607,7 @@ async function refreshPreservesHumanCells() {
 
   assert.equal(allFieldIds.length, LANDING_SHEET_FIELD_COUNT)
   assert.equal(humanFieldIds.length, 16, '8 canonical + 8 pack human columns')
-  assert.equal(plmFieldIds.length, 30, '17 canonical + 13 pack PLM columns')
+  assert.equal(plmFieldIds.length, 33, '20 canonical + 13 pack PLM columns')
   assert.deepEqual([...writable].sort(), [...plmFieldIds].sort(), 'the guard admits exactly the PLM band')
   for (const fieldId of humanFieldIds) {
     assert.equal(writableSet.has(fieldId), false, `a refresh must not be allowed to write ${fieldId}`)
@@ -659,6 +664,12 @@ async function refreshPreservesHumanCells() {
     depth: 2,
     componentCode: 'GJ-0007',
     componentName: '筒体',
+    // The three PLM columns 备料主表 gained: 父组件图号 / 父组件名称 / 规格. The pack's own
+    // ext_parentDrawingNo / ext_parentName / ext_spec below still carry the same data on this
+    // deployment — both bands coexist, and both are plm_system, so BOTH must move on a refresh.
+    parentComponentCode: 'TZ-0001',
+    parentComponentName: '主体组件',
+    componentSpec: 'DN1200',
     material: 'Q345R',
     sourceVersion: 'A.1',
     rawQuantity: 2,
@@ -704,12 +715,12 @@ async function refreshPreservesHumanCells() {
   assert.deepEqual(
     Object.keys(seededRow).sort(),
     [...allFieldIds].sort(),
-    'the seeded row must cover the whole 46-column sheet, or the proof has blind spots',
+    'the seeded row must cover the whole 49-column sheet, or the proof has blind spots',
   )
 
   // A refresh payload shaped like the SHEET, not like the PLM band — this is
   // precisely the naive projection the guard exists to narrow. Every one of the
-  // 46 columns carries a new value.
+  // 49 columns carries a new value.
   const refreshPayload = {}
   for (const fieldId of allFieldIds) {
     const current = seededRow[fieldId]

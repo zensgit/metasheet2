@@ -2,13 +2,18 @@
 
 // FOS-4b-3-prod P1 — production apply policy CONTRACT (normalize/validate + negative controls).
 //
-// LOCK-SAFE: this module is NOT wired into the apply path. The sandbox-only guard
-// (assertStockPrepApplySandboxAllowed) is unchanged and the production canonical target stays rejected by
-// default. P2 will wire a validated production policy into BOTH write entry points (small-BOM
-// applyStockPreparationAction and large-BOM tableActionLargeBomApplyJobRun) behind explicit owner
-// authorization, fail-closed by default. This file only defines + validates the policy shape so that the
-// future wiring has a strict contract. It does not open production apply, touch the canonical, or change
-// any runtime. See data-factory-fos-4b-3-prod-apply-gate-design-lock-20260625.md.
+// LOCK-SAFE: this module IS wired into the apply path (since PR #3199, FOS-4b-3-prod P2). The exported
+// resolveStockPrepApplyProductionPolicy + assertStockPrepApplyAllowed are called first — before any token
+// consume, dry-run, or write — in BOTH write entry points: the small-BOM applyStockPreparationAction
+// (stock-preparation-table-actions.cjs, gate call ~:1604, assertStockPrepApplyAllowed defined ~:1568) and
+// the large-BOM checkpoint apply route (http-routes.cjs, gate call ~:5287, productionPolicy resolved
+// ~:5077 for the dry-run route and ~:5289 for the apply route). The gate is still dormant by default:
+// productionPolicy is server-config-only (never request-supplied), so an absent config keeps the unchanged
+// sandbox-only guard (assertStockPrepApplySandboxAllowed) in force and the production canonical target
+// stays rejected. Only an explicit, valid, unexpired policy opens the controlled canonical exception,
+// fail-closed on any failure. This file defines + validates that policy shape and the shared gate; it does
+// not itself open production apply or change any runtime beyond what the config explicitly authorizes.
+// See data-factory-fos-4b-3-prod-apply-gate-design-lock-20260625.md.
 
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,

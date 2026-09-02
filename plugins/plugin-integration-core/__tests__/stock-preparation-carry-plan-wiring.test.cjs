@@ -126,6 +126,14 @@ function adds(plan) {
 // The golden below was captured by running THIS input through the PRE-WIRING
 // planner (origin/main a2080ae8e, before any carry code existed). With no
 // carryPolicy input the wired planner must reproduce it byte-for-byte.
+//
+// RE-PINNED ONCE, DELIBERATELY: 备料主表 gained parentComponentCode /
+// parentComponentName / componentSpec, and `summary.plmSystemFields` is DERIVED
+// from the template's plm_system band, so three ids appear in it. That is the
+// ONLY difference against the previous golden — verified field by field: no
+// decision, record, patch, changedFields entry, count, conflictSummary or
+// duplicate diagnostic moved. The invariant this golden guards (no carryPolicy
+// input => the carry wiring contributes nothing) is untouched.
 // ---------------------------------------------------------------------------
 function representativePlanInput() {
   const addRow = row({ componentSourceId: 'PART-ADD' })

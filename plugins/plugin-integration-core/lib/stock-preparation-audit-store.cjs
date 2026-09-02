@@ -2,7 +2,9 @@
 
 // #3751 stock-prep MVP — W5b (#3890): VALUES-FREE audit trail for the stock-preparation DECISION
 // surface — confirms / retires / candidate sync / generation runs / exception resolution plus the
-// bounded P4 one-shot repair operation (9 actions).
+// bounded P4 one-shot repair operation (9 actions), plus the project materials export (10th, added for
+// the 按项目导出物料 Excel route — the export leaves the system as a downloadable file, so it gets the
+// same audit trail discipline as a write, even though the route itself is a GET).
 // Provisioning/ensure/option-sync/plan/persist keep their own run records and are deliberately NOT
 // routed through this trail. Stored in plugin SQL (integration_stock_prep_audit, migrations 066/067).
 // The structural gate below is a BACKSTOP on top of call-site discipline: enum-shaped short strings
@@ -38,6 +40,10 @@ const STOCK_PREP_AUDIT_ACTIONS = Object.freeze([
   // from rather than about the data itself — and the one that was previously unauditable by
   // construction, because the source lived in a server env file.
   'source_binding_set',
+  // 按项目导出物料 Excel: the workbook leaves the system as a file, so the export itself is audited —
+  // counts only (rowCount/activeRowCount), never a material name/quantity (see stock-preparation-
+  // prep-line-export.cjs, which computes them, and the route, which is the only caller).
+  'prep_line_export',
 ])
 const ACTION_SET = new Set(STOCK_PREP_AUDIT_ACTIONS)
 

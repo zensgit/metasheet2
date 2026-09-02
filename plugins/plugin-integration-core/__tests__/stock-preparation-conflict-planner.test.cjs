@@ -904,6 +904,197 @@ function testO1bKeyedHoldsAndTheReservedNamespaceAreUntouched() {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 备料主表 gains 父组件图号 / 父组件名称 / 规格
+//
+// RED WITNESSES for the three PLM columns the WORKING SHEET was missing. They are
+// composed at record construction, from the SAME expansion batch the snapshot line
+// is built from:
+//   * the parent pair through the in-batch parent index (the expansion emits the
+//     parent as an OBJ_ID only), and
+//   * 规格 from the expansion row's `spec`, which exists ONLY where the deployment
+//     DECLARED readPlan.part.specField — undeclared means an empty column, never a
+//     guessed source column and never a throw.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// A two-level batch: one root and one child of it, as the expander emits them.
+function parentChildBatch(childOverrides = {}) {
+  const parent = row({ componentSourceId: 'PART-ROOT', componentCode: 'TZ-0001', componentName: '主体组件' })
+  const child = row({
+    componentSourceId: 'PART-CHILD',
+    parentSourceId: 'PART-ROOT',
+    pathTokens: ['PART-ROOT', 'PART-CHILD'],
+    componentCode: 'GJ-0007',
+    componentName: '筒体',
+    ...childOverrides,
+  })
+  return { parent, child }
+}
+
+function testDenormalizedParentAndSpecReachTheMainRow() {
+  const { parent, child } = parentChildBatch({ spec: 'DN1200' })
+  const plan = planStockPreparationConflicts({
+    expandedRows: [parent, child],
+    existingRows: [],
+    runId: 'run-parent-spec',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  const adds = byDecision(plan, DECISIONS.ADD)
+  assert.equal(adds.length, 2, 'both rows are added')
+
+  const childAdd = adds.find((decision) => decision.record.componentSourceId === 'PART-CHILD')
+  assert.equal(childAdd.record.parentComponentCode, 'TZ-0001', '父组件图号 lands on the child row')
+  assert.equal(childAdd.record.parentComponentName, '主体组件', '父组件名称 lands on the child row')
+  assert.equal(childAdd.record.componentSpec, 'DN1200', '规格 lands on the row')
+  // ALL SEVEN on one record — the claim the project export depends on.
+  for (const [fieldId, expected] of [
+    ['parentComponentCode', 'TZ-0001'],
+    ['parentComponentName', '主体组件'],
+    ['componentCode', 'GJ-0007'],
+    ['componentName', '筒体'],
+    ['componentSpec', 'DN1200'],
+    ['material', 'Steel'],
+    ['totalQuantity', 2],
+  ]) {
+    assert.equal(childAdd.record[fieldId], expected, `the seven fields are all on the main row: ${fieldId}`)
+  }
+  assertNoHumanFields(childAdd.record, 'parent/spec add record')
+
+  // A ROOT row has no parent: absence, not an empty string. `spec` still rides.
+  const rootAdd = adds.find((decision) => decision.record.componentSourceId === 'PART-ROOT')
+  assert.equal(Object.prototype.hasOwnProperty.call(rootAdd.record, 'parentComponentCode'), false, 'a root row carries no 父组件图号 key at all')
+  assert.equal(Object.prototype.hasOwnProperty.call(rootAdd.record, 'parentComponentName'), false, 'a root row carries no 父组件名称 key at all')
+}
+
+function testUndeclaredSpecSlotYieldsAnEmptyColumnAndNoError() {
+  // The DEFAULT read plan declares no part.specField, so the expansion row has no `spec` key at
+  // all. That must be an empty column, never a crash and never a guessed source column.
+  const { parent, child } = parentChildBatch()
+  assert.equal(Object.prototype.hasOwnProperty.call(child, 'spec'), false, 'the fixture models an undeclared spec slot')
+  const plan = planStockPreparationConflicts({
+    expandedRows: [parent, child],
+    existingRows: [],
+    runId: 'run-no-spec',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  assert.equal(plan.valid, true, 'a deployment with no declared spec slot plans cleanly')
+  for (const decision of byDecision(plan, DECISIONS.ADD)) {
+    assert.equal(Object.prototype.hasOwnProperty.call(decision.record, 'componentSpec'), false, 'no 规格 key is invented')
+  }
+  // The parent join is unaffected by the missing spec slot.
+  const childAdd = byDecision(plan, DECISIONS.ADD).find((d) => d.record.componentSourceId === 'PART-CHILD')
+  assert.equal(childAdd.record.parentComponentCode, 'TZ-0001')
+
+  // A blank spec is the same as an absent one — no empty-string cell.
+  for (const blank of ['', '   ', null, undefined]) {
+    const blanked = parentChildBatch({ spec: blank })
+    const blankPlan = planStockPreparationConflicts({
+      expandedRows: [blanked.parent, blanked.child],
+      existingRows: [],
+      runId: 'run-blank-spec',
+      plannedAt: '2026-09-02T00:00:00.000Z',
+    })
+    const add = byDecision(blankPlan, DECISIONS.ADD).find((d) => d.record.componentSourceId === 'PART-CHILD')
+    assert.equal(Object.prototype.hasOwnProperty.call(add.record, 'componentSpec'), false, `blank spec ${JSON.stringify(blank)} writes no cell`)
+  }
+}
+
+function testUnresolvableParentIsAbsenceNotAGuess() {
+  // The child's parent is NOT in this batch (a partial expansion). Nothing may be invented from
+  // the OBJ_ID, and the plan must not fail.
+  const { child } = parentChildBatch()
+  const plan = planStockPreparationConflicts({
+    expandedRows: [child],
+    existingRows: [],
+    runId: 'run-orphan',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  assert.equal(plan.valid, true)
+  const add = byDecision(plan, DECISIONS.ADD)[0]
+  assert.equal(Object.prototype.hasOwnProperty.call(add.record, 'parentComponentCode'), false, 'an unresolvable parent writes no 父组件图号')
+  assert.equal(Object.prototype.hasOwnProperty.call(add.record, 'parentComponentName'), false, 'an unresolvable parent writes no 父组件名称')
+  assert.equal(add.record.parentSourceId, 'PART-ROOT', 'the OBJ_ID lineage column itself is untouched')
+}
+
+function testExistingRowsAreBackfilledByAReRun() {
+  // The migration answer for rows written BEFORE this change: an ordinary re-pull. The row is
+  // otherwise unchanged, so before this change it was a SKIP; the three empty columns make it a
+  // plm_system refresh like any other — no migration, no backfill script.
+  const { parent, child } = parentChildBatch({ spec: 'DN1200' })
+  const stale = { ...child, notes: 'human note that must survive' }
+  delete stale.spec
+  const plan = planStockPreparationConflicts({
+    expandedRows: [parent, child],
+    existingRows: [{ ...parent }, stale],
+    runId: 'run-backfill',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  const updates = byDecision(plan, DECISIONS.UPDATE)
+  assert.equal(updates.length, 1, 'only the child row needs a refresh')
+  const patch = updates[0].patch
+  assert.equal(patch.parentComponentCode, 'TZ-0001', 're-pull backfills 父组件图号')
+  assert.equal(patch.parentComponentName, '主体组件', 're-pull backfills 父组件名称')
+  assert.equal(patch.componentSpec, 'DN1200', 're-pull backfills 规格')
+  assert.deepEqual(
+    updates[0].changedFields.slice().sort(),
+    ['componentSpec', 'parentComponentCode', 'parentComponentName'],
+    'the three empty columns are exactly what changed — nothing else was touched',
+  )
+  assertNoHumanFields(patch, 'backfill patch')
+
+  // Idempotent: a SECOND run over the already-backfilled sheet is a SKIP again.
+  const backfilled = { ...stale, parentComponentCode: 'TZ-0001', parentComponentName: '主体组件', componentSpec: 'DN1200' }
+  const second = planStockPreparationConflicts({
+    expandedRows: [parent, child],
+    existingRows: [{ ...parent }, backfilled],
+    runId: 'run-backfill-2',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  assert.equal(byDecision(second, DECISIONS.UPDATE).length, 0, 'a re-run over a backfilled sheet writes nothing')
+  assert.equal(byDecision(second, DECISIONS.SKIP).length, 2)
+}
+
+function testTheHumanFieldWallIsUnaffected() {
+  const humanBand = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields
+    .filter((field) => field.ownership === 'human_preserved')
+    .map((field) => field.id)
+  const { parent, child } = parentChildBatch({ spec: 'DN1200' })
+  const plan = planStockPreparationConflicts({
+    expandedRows: [parent, child],
+    existingRows: [],
+    runId: 'run-wall',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  // The band itself did not move: still exactly the 8 human columns, in template order.
+  assert.deepEqual(
+    plan.summary.humanPreservedFields,
+    humanBand,
+    'the human-preserved band is untouched by three new plm_system columns',
+  )
+  assert.equal(plan.summary.humanPreservedFields.length, 8)
+  // The three newcomers are on the PLM side of the wall, and only there.
+  for (const fieldId of ['parentComponentCode', 'parentComponentName', 'componentSpec']) {
+    assert.ok(plan.summary.plmSystemFields.includes(fieldId), `${fieldId} is refreshable`)
+    assert.equal(plan.summary.humanPreservedFields.includes(fieldId), false, `${fieldId} is never human-preserved`)
+  }
+  // MUTATION CONTROL: the guard still bites. Feed a human field into a record the way a mis-scoped
+  // projection would, and the planner must refuse — if this passes silently the wall is decorative.
+  let refused = null
+  try {
+    __internals.assertNoHumanFields({ componentSpec: 'DN1200', notes: 'smuggled' }, humanBand, 'add record')
+  } catch (error) {
+    refused = error
+  }
+  assert.ok(refused instanceof StockPreparationConflictPlannerError, 'the human-field wall still throws')
+  assert.equal(refused.details.field, 'notes')
+  // ...and it does NOT fire on the three new columns.
+  __internals.assertNoHumanFields(
+    { parentComponentCode: 'TZ-0001', parentComponentName: '主体组件', componentSpec: 'DN1200' },
+    humanBand,
+    'add record',
+  )
+}
+
 function main() {
   testAddUpdateSkipInactive()
   testRowErrorsDoNotAbortGoodRows()
@@ -924,6 +1115,11 @@ function main() {
   testO1bAnonymousFamiliesGetGranularityCorrectIdentities()
   testO1bIdentityIsReproducibleFromTheSameInput()
   testO1bKeyedHoldsAndTheReservedNamespaceAreUntouched()
+  testDenormalizedParentAndSpecReachTheMainRow()
+  testUndeclaredSpecSlotYieldsAnEmptyColumnAndNoError()
+  testUnresolvableParentIsAbsenceNotAGuess()
+  testExistingRowsAreBackfilledByAReRun()
+  testTheHumanFieldWallIsUnaffected()
 
   console.log('stock-preparation-conflict-planner.test.cjs OK')
 }

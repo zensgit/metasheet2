@@ -796,7 +796,7 @@ import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
 import StockPreparationSourceBindingPanel from './StockPreparationSourceBindingPanel.vue'
 import SchemaMappingCopilotPanel from './SchemaMappingCopilotPanel.vue'
-import type { SchemaMappingSignalsInput } from '../../../services/integration/stockPreparation/schemaMappingCopilot'
+import type { SchemaMappingColumnInput, SchemaMappingSignalsInput } from '../../../services/integration/stockPreparation/schemaMappingCopilot'
 import {
   buildStockPreparationInstallDefaults,
   readStockPreparationAppManifest,
@@ -864,10 +864,6 @@ function bi(zh: string, en: string): string {
 
 const canRun = computed(() => canRunStockPrepInstall((permission) => auth.hasPermission(permission)))
 
-// 列映射副驾 signals come from a source-discovery read (columns + dictionary tables). Held null until a
-// discovery has run — the panel then renders its "run a discovery first" guidance (honest empty state).
-const copilotSignals = ref<SchemaMappingSignalsInput | null>(null)
-
 const busy = ref(false)
 const errorStatus = ref<number | null>(null)
 const defaults = ref<StockPreparationInstallDefaults | null>(null)
@@ -916,6 +912,36 @@ const sourceUndecidableAtCap = computed(() => Boolean(
   && sourcePreflight.value.checks.topology.undecidableAtCap
   && sourcePreflight.value.checks.topology.bridgeSource === 'measured',
 ))
+
+// 列映射副驾 signals, DERIVED from the latest successful source preflight — nothing is fabricated here.
+// The preflight's per-table probes already carry the discovered column names (`probe.columns`) and
+// which tables answered (`probe.object`); this page has already been putting those same names on
+// screen (源就绪预检 → 逐表读数 → 表名/`probe.object`), so following that precedent to the copilot
+// signals widens nothing. What is genuinely NOT on this web-visible report is the dictionary TABLE
+// ROWS (columnName/label pairs) — the preflight only surfaces a count (`quantityField.dictionaryEnabledRows`)
+// and a couple of identifiers, never the rows themselves — so `dictionaryRows` ships empty rather than
+// invented. The copilot panel does not require it (`hasSignals` only checks `columns.length > 0`); an
+// empty dictionaryRows only means the deterministic dict-label hint is unavailable, exactly as if no
+// dictionary probe had been read. Held null until a preflight has actually run — the panel then
+// renders its "run a discovery first" guidance (honest empty state).
+const copilotSignals = computed<SchemaMappingSignalsInput | null>(() => {
+  const pre = sourcePreflight.value
+  if (!pre) return null
+  const tableNames = Array.from(
+    new Set(pre.probes.map((probe) => probe.object).filter((object): object is string => Boolean(object))),
+  )
+  const seen = new Set<string>()
+  const columns: SchemaMappingColumnInput[] = []
+  for (const probe of pre.probes) {
+    for (const name of probe.columns) {
+      if (seen.has(name)) continue
+      seen.add(name)
+      columns.push({ id: name, name })
+    }
+  }
+  if (columns.length === 0) return null
+  return { tableNames, columns, dictionaryRows: [] }
+})
 
 const sourceVerdictText = computed(() => {
   if (!sourcePreflight.value) return ''
