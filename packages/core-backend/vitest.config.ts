@@ -1457,6 +1457,14 @@ export default defineConfig({
       // P4 Option C repair proof constructs legacy partial writes against real Postgres and is wired
       // as a whole file in plugin-tests.yml. Keep it out of the no-DB default run so it cannot skip-green.
       'tests/integration/stock-preparation-p4-repair-once-realdb.test.ts',
+      // 备料按部门列写权限 — the ONLY end-to-end proof that the rows
+      // StockPreparationFieldPermissionsService writes are actually enforced by
+      // POST /api/multitable/patch. It seeds real meta_sheets/meta_fields/roles rows and asserts a
+      // cross-department write is REFUSED while the read stays shared, so it needs real Postgres.
+      // Excluded here (its `describeIfDatabase` would otherwise skip-green in the no-DB job, which is
+      // how it went un-run entirely) and wired as a WHOLE FILE into plugin-tests.yml's multitable
+      // real-DB step, where DATABASE_URL is set and the in-suite sentinel fails-not-skips.
+      'tests/integration/stock-preparation-fieldperm-write-gate-realdb.test.ts',
       // multitable-view-config.api.test.ts uses an in-file MOCK pool (no live DB) and
       // self-contains its RBAC mocking — it runs under the default config + setup.ts, so
       // it stays IN the standard `test` job (runs on every PR, Node 18 + 20). Excluding it

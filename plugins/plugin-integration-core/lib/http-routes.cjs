@@ -3148,6 +3148,14 @@ function createHandlers(services, options = {}) {
   // loaded once and reused for family detection + as the confirm skeleton — NEVER request-supplied.
   const governedAi = (services && services.governedAi) || null
 
+  // 列级写权限: the narrow host port that writes the PLATFORM's own `field_permissions`
+  // rows, injected per-plugin exactly like governedAi above. OPTIONAL here on purpose —
+  // a customer pack that declares no `fieldWritePolicies` never reaches for it, so an
+  // environment that has not wired it installs precisely as it does today. A pack that
+  // DOES declare policies and finds no port makes the installer fail closed rather than
+  // report a complete install whose scoping would not be enforced.
+  const stockPreparationFieldPermissions = (services && services.stockPreparationFieldPermissions) || null
+
   // 按项目导出物料 Excel: the xlsx BUFFER BUILDER is INJECTED (packages/core-backend xlsx-service.ts
   // buildXlsxBuffer, wrapped around a lazily-imported `xlsx` module), same INJECTED-per-plugin shape as
   // governedAi above and for the same reason — the plugin has no `xlsx` dependency of its own (it is
@@ -5681,6 +5689,11 @@ function createHandlers(services, options = {}) {
         provisioning: getCustomerPackProvisioning(),
         projectId,
         pack,
+        // The SAME capability the install below is given. Without it a dry-run could say nothing at
+        // all about the permission rows an install would write — the one step with no undo would be
+        // the one step with no rehearsal. The port is used READ-ONLY here (the census + the role
+        // pre-flight question); planCustomerPackInstall never reaches its write half.
+        fieldPermissions: stockPreparationFieldPermissions,
       })
       return sendOk(res, { projectId, ...plan })
     },
@@ -5705,6 +5718,7 @@ function createHandlers(services, options = {}) {
         tenantId,
         workspaceId: resolveWorkspaceId(req, {}),
         mode: body.mode === 'reinstall' ? 'reinstall' : 'install',
+        fieldPermissions: stockPreparationFieldPermissions,
       })
       const created = Array.isArray(result.createdFields) ? result.createdFields.length : 0
       return sendOk(res, { projectId, ...result }, created > 0 ? 201 : 200)

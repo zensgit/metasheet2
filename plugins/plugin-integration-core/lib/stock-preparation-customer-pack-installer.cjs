@@ -574,6 +574,236 @@ async function ensureRoleViews({ provisioning, projectId, sheetId, pack }) {
   return ensured
 }
 
+/**
+ * THE HOST PORT'S CLOSED FAILURE VOCABULARY, mapped onto this installer's coded errors.
+ *
+ * `StockPreparationFieldPermissionsService` (packages/core-backend) throws a typed
+ * `StockPreparationFieldPermissionsError` whose `.reason` is one of exactly four members. This
+ * plugin is CommonJS and cannot import that TypeScript class, so it recognises the error
+ * STRUCTURALLY (`name` + a string `reason`) -- which is the only honest way across the port
+ * boundary, and is asserted by the department-fields suite with a hand-built error of that shape.
+ *
+ * WHY THIS MAPPING EXISTS AT ALL: without it the port's rejection escapes `installCustomerPack`
+ * as a foreign error, and every caller above (the HTTP route included) turns it into an UNCODED
+ * 500. "The role you named does not exist on this host" is a 4xx a deployer can act on, not a
+ * server fault. An unrecognised error is deliberately NOT swallowed into this vocabulary -- it
+ * propagates unchanged, so the mapping can never become a catch-all that hides a real bug.
+ */
+const FIELD_PERMISSION_ERROR_NAME = 'StockPreparationFieldPermissionsError'
+const FIELD_PERMISSION_FAILURE_MAP = Object.freeze({
+  ROLE_NOT_FOUND: Object.freeze({ status: 422, code: 'CUSTOMER_PACK_FIELD_PERMISSION_ROLE_UNKNOWN' }),
+  FIELD_NOT_ON_SHEET: Object.freeze({ status: 422, code: 'CUSTOMER_PACK_FIELD_PERMISSION_FIELD_UNKNOWN' }),
+  SHEET_NOT_FOUND: Object.freeze({ status: 409, code: 'CUSTOMER_PACK_FIELD_PERMISSION_SHEET_UNKNOWN' }),
+  ENTRIES_INVALID: Object.freeze({ status: 422, code: 'CUSTOMER_PACK_FIELD_PERMISSION_ENTRIES_INVALID' }),
+})
+
+function isFieldPermissionsError(error) {
+  return Boolean(error)
+    && error.name === FIELD_PERMISSION_ERROR_NAME
+    && typeof error.reason === 'string'
+}
+
+// Rethrow a port rejection as a coded install error. `offending` carries ids only (the port's own
+// contract), so the details stay values-free.
+function translateFieldPermissionsError(error, pack) {
+  const mapped = FIELD_PERMISSION_FAILURE_MAP[error.reason]
+  const offending = Array.isArray(error.offending) ? [...error.offending] : []
+  return new StockPreparationCustomerPackInstallError(
+    mapped ? mapped.status : 500,
+    mapped ? mapped.code : 'CUSTOMER_PACK_FIELD_PERMISSION_FAILED',
+    'the host field-permission port refused this pack\'s declared write scoping',
+    {
+      objectId: pack.targetObjectId,
+      packId: pack.packId,
+      reason: error.reason,
+      // The role branch names its ids under a role-shaped key so a caller does not have to know
+      // which member of the vocabulary produced them.
+      ...(error.reason === 'ROLE_NOT_FOUND' ? { roleIds: offending } : { offending }),
+    },
+  )
+}
+
+/**
+ * LOGICAL -> PHYSICAL, once. `field_permissions.field_id` references `meta_fields.id`, so every
+ * derived denial must be mapped through the host's own pure `getFieldId` rather than by string
+ * building. Both projections come out of here so the plan a dry-run PRINTS and the entries an
+ * install WRITES cannot drift: `entries` is exactly the port's `{fieldId, roleId}` shape (nothing
+ * else may reach it), while `rows` keeps the logical id alongside for human-readable reporting.
+ */
+function deriveFieldWriteScopePlan({ provisioning, projectId, pack }) {
+  const rows = pack.fieldWriteDenials.map((denial) => ({
+    fieldId: provisioning.getFieldId(projectId, pack.targetObjectId, denial.fieldId),
+    logicalFieldId: denial.fieldId,
+    roleId: denial.roleId,
+  }))
+  return {
+    rows,
+    entries: rows.map(({ fieldId, roleId }) => ({ fieldId, roleId })),
+    declaredKeys: new Set(rows.map((row) => `${row.fieldId} ${row.roleId}`)),
+  }
+}
+
+// Physical -> logical for EVERY column this pack could possibly have scoped (frozen template band
+// + the pack's own extension band), so a stale row left by an older revision can still be reported
+// in the vocabulary a deployer reads the pack in. A row whose column is in neither band reports a
+// null logical id rather than a guess.
+function buildLogicalFieldIdIndex({ provisioning, projectId, pack }) {
+  const index = new Map()
+  const record = (fieldId) => {
+    index.set(provisioning.getFieldId(projectId, pack.targetObjectId, fieldId), fieldId)
+  }
+  for (const field of STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields) record(field.id)
+  for (const field of pack.extensionFields) record(field.id)
+  return index
+}
+
+/**
+ * THE STALE-SCOPE CENSUS -- the answer to "what did an EARLIER revision of this pack leave behind".
+ *
+ * The port is upsert-only by design (removing a write restriction is an operator action with its
+ * own audit trail, never a plugin's). That asymmetry is safe for a pack that only ever GROWS, and
+ * unsafe the moment a revision MOVES a column's owner: v1's denial for the old owner survives v2's
+ * denial for the new one, and the column silently becomes read-only for EVERY declared role.
+ *
+ * Neither the port nor this installer may fix that automatically -- the heal is the operator's
+ * `PUT /api/multitable/sheets/:sheetId/field-permissions { remove: true }`, which records the
+ * config revision a permission REMOVAL must leave behind. What this function removes is the
+ * SILENCE: the install summary and the dry-run both name the orphaned (field, role) rows.
+ *
+ * FAIL-VISIBLE, NOT FAIL-CLOSED. Refusing the install would deadlock the deployment (the stale
+ * rows are already on the sheet and only an operator can clear them), so the honest posture is to
+ * report. `null` vs `[]` is load-bearing: a host whose port has no census method reports `null`
+ * and `writeScopeCheck: 'unsupported_port'`, never an empty list that would read as "checked".
+ *
+ * KNOWN OVER-REPORT, stated here rather than discovered later: the census is scoped to the PORT
+ * (`created_by = <plugin marker>`), not to the PACK — the platform row carries no pack id. If a
+ * SECOND pack that also declares `fieldWritePolicies` is installed onto the same canonical sheet,
+ * each install reports the other's rows as stale. That direction is deliberate: this is a warning,
+ * never a refusal or a delete, so the failure mode is a noisy list a deployer must read rather than
+ * a scope silently dropped. Narrowing it needs a pack id on the permission row, which is a platform
+ * schema change and not this PR's to make.
+ */
+async function detectStaleWriteScopes({ fieldPermissions, sheetId, plan, logicalFieldIds }) {
+  if (!fieldPermissions || typeof fieldPermissions.listRoleWriteScopes !== 'function') {
+    return { check: 'unsupported_port', stale: null }
+  }
+  const existing = await fieldPermissions.listRoleWriteScopes({ sheetId })
+  const entries = (existing && Array.isArray(existing.entries)) ? existing.entries : []
+  const stale = entries
+    .filter((entry) => entry && !plan.declaredKeys.has(`${entry.fieldId} ${entry.roleId}`))
+    .map((entry) => ({
+      fieldId: entry.fieldId,
+      logicalFieldId: logicalFieldIds.get(entry.fieldId) || null,
+      roleId: entry.roleId,
+    }))
+  stale.sort((left, right) => (left.fieldId === right.fieldId
+    ? left.roleId.localeCompare(right.roleId)
+    : left.fieldId.localeCompare(right.fieldId)))
+  return { check: 'checked', stale }
+}
+
+/**
+ * ROLE PRE-FLIGHT -- asked BEFORE the first schema write, which is the entire point.
+ *
+ * The pack's own validation can only check that a `roleId` is well SHAPED; whether the role EXISTS
+ * is knowledge only the host has. Without this pre-flight the refusal arrives from the port at the
+ * very END of the install, after every column has been created and stamped -- so a typo'd role id
+ * leaves a half-applied sheet behind AND surfaces as an uncoded 500.
+ *
+ * Two independent conditions are checked here rather than at the port call:
+ *   1. the port must be present at all when a policy is declared (fail-closed, 503); and
+ *   2. every declared role must exist (fail-closed, coded 422).
+ * A host whose port predates `findMissingRoleIds` skips (2) only -- the late mapping in
+ * applyFieldWritePolicies still turns its rejection into the same coded 422.
+ */
+async function preflightFieldWritePolicies({ fieldPermissions, pack }) {
+  if (pack.fieldWriteDenials.length === 0) return { roleCheck: 'not_declared' }
+  assertFieldPermissionsPort({ fieldPermissions, pack })
+  if (typeof fieldPermissions.findMissingRoleIds !== 'function') {
+    return { roleCheck: 'unsupported_port' }
+  }
+  const roleIds = [...new Set(pack.fieldWritePolicies.map((policy) => policy.roleId))]
+  const result = await fieldPermissions.findMissingRoleIds({ roleIds })
+  const missing = (result && Array.isArray(result.missing)) ? [...result.missing].sort() : []
+  if (missing.length > 0) {
+    throw new StockPreparationCustomerPackInstallError(
+      422,
+      'CUSTOMER_PACK_FIELD_PERMISSION_ROLE_UNKNOWN',
+      'this pack declares fieldWritePolicies for a role that does not exist on this host; '
+        + 'refusing before any column is created, so the sheet is untouched',
+      { objectId: pack.targetObjectId, packId: pack.packId, roleIds: missing },
+    )
+  }
+  return { roleCheck: 'checked' }
+}
+
+// The port-presence gate, shared by the pre-flight and the apply so the two cannot drift on the
+// one condition that must never degrade into "call it and hope".
+function assertFieldPermissionsPort({ fieldPermissions, pack }) {
+  if (!fieldPermissions || typeof fieldPermissions.applyRoleWriteScopes !== 'function') {
+    throw new StockPreparationCustomerPackInstallError(
+      503,
+      'CUSTOMER_PACK_FIELD_PERMISSIONS_UNAVAILABLE',
+      'this pack declares fieldWritePolicies, but the host did not inject the '
+        + 'stockPreparationFieldPermissions capability; refusing to report an install as complete '
+        + 'while the declared column write scoping would not be enforced',
+      { objectId: pack.targetObjectId, packId: pack.packId, declaredDenials: pack.fieldWriteDenials.length },
+    )
+  }
+}
+
+/**
+ * APPLY THE PACK'S FIELD WRITE POLICIES to the PLATFORM's own per-column permission
+ * model. This is the step that makes the declaration real rather than decorative.
+ *
+ * IT USES THE PLATFORM MODEL; IT DOES NOT FORK ONE. The rows land in the host's
+ * `field_permissions` table, which is what `loadFieldPermissionScopeMap` reads and what
+ * `isFieldWriteForbidden` enforces server-side on the record-write routes. Note there is
+ * a DIFFERENT, parallel table (`plugin_field_policy_registry`, written by
+ * PluginRbacProvisioningService's `fieldPolicies`) that the multitable grid never reads —
+ * writing there would look like a permission and enforce nothing, which is precisely the
+ * trap this avoids.
+ *
+ * WRITE ONLY, READ SHARED. The port takes no visibility argument at all: it marks a
+ * column read-only for a role and can never hide it. That is deliberate and structural —
+ * purchasing and warehouse must keep SEEING the production band they work from.
+ *
+ * OPTIONAL CAPABILITY, and ABSENT DECLARATION CHANGES NOTHING. Two independent
+ * conditions must both hold before a single row is written: the pack must declare
+ * `fieldWritePolicies`, and the host must have injected the narrow
+ * `stockPreparationFieldPermissions` port. A pack with no declaration returns
+ * immediately, so behaviour is byte-for-byte today's. A declaration with NO host port is
+ * a FAIL-CLOSED error rather than a silent skip: a deployer who asked for enforcement
+ * must never be told the install succeeded while the columns stayed writable by everyone.
+ *
+ * ADDITIVE, like the rest of this installer. The port only ever upserts a denial; it has
+ * no revoke path. Removing a scope is an operator action through the platform's existing
+ * field-permission route.
+ */
+async function applyFieldWritePolicies({ provisioning, fieldPermissions, projectId, sheetId, pack, plan }) {
+  if (pack.fieldWriteDenials.length === 0) return { applied: 0, roleCount: 0, skipped: 'not_declared' }
+  assertFieldPermissionsPort({ fieldPermissions, pack })
+  // The plan is derived ONCE per install (deriveFieldWriteScopePlan) and passed in, so the rows a
+  // dry-run previewed, the rows the stale census diffs against, and the rows written here are the
+  // same array. The fallback keeps this helper independently callable (it is exported on
+  // __internals and exercised directly).
+  const resolved = plan || deriveFieldWriteScopePlan({ provisioning, projectId, pack })
+  let result
+  try {
+    result = await fieldPermissions.applyRoleWriteScopes({ sheetId, entries: resolved.entries })
+  } catch (error) {
+    // A rejection from the port's closed failure vocabulary becomes a coded install error; any
+    // OTHER error propagates unchanged, so this can never become a catch-all.
+    if (isFieldPermissionsError(error)) throw translateFieldPermissionsError(error, pack)
+    throw error
+  }
+  return {
+    applied: Number(result && result.applied) || 0,
+    roleCount: new Set(pack.fieldWriteDenials.map((denial) => denial.roleId)).size,
+    skipped: null,
+  }
+}
+
 // The canonical target PRECONDITION, shared by the dry-run and the install so the two cannot drift
 // on the one thing a deployer trips over first. The rehearsal report (F5) flags this as the reason a
 // CLI/route needs a two-step flow, so the error names the ensure path rather than the raw absence.
@@ -652,12 +882,55 @@ function toLedgerFieldEntries(entries) {
  * Values-free: logical schema ids, frozen ownership tokens, counts. `conflicts` carries only the
  * already-sanitized describeDeclared* projections.
  */
-async function planCustomerPackInstall({ provisioning, projectId, pack } = {}) {
+async function planCustomerPackInstall({ provisioning, projectId, pack, fieldPermissions } = {}) {
   const api = assertProvisioningApi(provisioning)
   const resolvedProjectId = requiredProjectId(projectId)
   const normalized = normalizeCustomerPack(pack)
 
-  await requireCanonicalTargetSheet({ provisioning: api, projectId: resolvedProjectId, pack: normalized })
+  const targetSheet = await requireCanonicalTargetSheet({
+    provisioning: api,
+    projectId: resolvedProjectId,
+    pack: normalized,
+  })
+
+  // THE WRITE-SCOPE PREVIEW (F2/F3 of the adversarial review). Before this, a dry-run said nothing
+  // at all about the permission rows an install would write, so the one step with no undo was also
+  // the one step with no rehearsal. Everything below is READ-ONLY by construction: a pure
+  // getFieldId derivation plus, at most, the port's two census reads.
+  const writeScopePlan = deriveFieldWriteScopePlan({
+    provisioning: api,
+    projectId: resolvedProjectId,
+    pack: normalized,
+  })
+  const portPresent = Boolean(fieldPermissions)
+    && typeof fieldPermissions.applyRoleWriteScopes === 'function'
+  let writeScopeCheck = 'not_declared'
+  let staleWriteScopes = null
+  let unknownRoleIds = null
+  if (normalized.fieldWriteDenials.length > 0) {
+    if (!portPresent) {
+      // Unlike the install this does NOT throw — reporting the blocker is the point of a dry-run.
+      writeScopeCheck = 'port_absent'
+    } else {
+      const census = await detectStaleWriteScopes({
+        fieldPermissions,
+        sheetId: targetSheet.id,
+        plan: writeScopePlan,
+        logicalFieldIds: buildLogicalFieldIdIndex({
+          provisioning: api,
+          projectId: resolvedProjectId,
+          pack: normalized,
+        }),
+      })
+      writeScopeCheck = census.check
+      staleWriteScopes = census.stale
+      if (typeof fieldPermissions.findMissingRoleIds === 'function') {
+        const roleIds = [...new Set(normalized.fieldWritePolicies.map((policy) => policy.roleId))]
+        const missing = await fieldPermissions.findMissingRoleIds({ roleIds })
+        unknownRoleIds = (missing && Array.isArray(missing.missing)) ? [...missing.missing].sort() : []
+      }
+    }
+  }
 
   const scan = await scanExistingExtensionFields({
     provisioning: api,
@@ -691,7 +964,11 @@ async function planCustomerPackInstall({ provisioning, projectId, pack } = {}) {
     packVersion: normalized.packVersion,
     objectId: normalized.targetObjectId,
     targetPresent: true,
-    canInstall: conflicting.size === 0,
+    // A declared policy whose port is missing, or which names a role this host does not have, is
+    // as blocking as an ownership conflict — the install would refuse, so the dry-run says no.
+    canInstall: conflicting.size === 0
+      && writeScopeCheck !== 'port_absent'
+      && (unknownRoleIds === null || unknownRoleIds.length === 0),
     willCreateFieldIds: [...scan.missing].sort(),
     willStampFieldIds: [...scan.needsStamp].sort(),
     alreadyStampedFieldIds: [...scan.alreadyStamped].sort(),
@@ -708,6 +985,22 @@ async function planCustomerPackInstall({ provisioning, projectId, pack } = {}) {
       hiddenFieldIds: [...roleView.hiddenFieldIds].sort(),
       hiddenFieldCount: roleView.hiddenFieldIds.length,
     })),
+    // THE DERIVED DENIAL PLAN — exactly the rows installCustomerPack will upsert, named by both the
+    // logical id the pack declares and the PHYSICAL id the platform table stores.
+    fieldWriteDenials: writeScopePlan.rows.map((row) => ({ ...row })),
+    fieldWritePolicyRoles: normalized.fieldWritePolicies.map((policy) => ({
+      roleId: policy.roleId,
+      ownsFieldCount: policy.ownsFieldIds.length,
+    })),
+    // Whether the host handed this plugin the capability at all. `false` with a non-empty
+    // fieldWriteDenials is the fail-closed case the install refuses with a 503.
+    fieldPermissionsPortAvailable: portPresent,
+    // 'not_declared' | 'port_absent' | 'unsupported_port' | 'checked'. NULL (not []) whenever the
+    // census did not actually run — absence of a check is not absence of stale rows.
+    writeScopeCheck,
+    staleWriteScopes,
+    // Declared roles this host does not have. NULL when the question could not be asked.
+    unknownRoleIds,
     counts: {
       extensionFields: normalized.extensionFields.length,
       willCreate: scan.missing.length,
@@ -716,6 +1009,8 @@ async function planCustomerPackInstall({ provisioning, projectId, pack } = {}) {
       conflicting: conflicting.size,
       optionSets: normalized.optionSets.length,
       roleViews: normalized.roleViews.length,
+      fieldWriteDenials: writeScopePlan.rows.length,
+      staleWriteScopes: staleWriteScopes ? staleWriteScopes.length : 0,
     },
   }
 }
@@ -748,6 +1043,10 @@ async function installCustomerPack({
   tenantId,
   workspaceId,
   mode,
+  // The narrow host port that writes the platform's own `field_permissions`. OPTIONAL:
+  // a pack that declares no fieldWritePolicies never touches it, which is why an older
+  // host (or any caller that does not pass it) installs exactly as it does today.
+  fieldPermissions,
 } = {}) {
   const api = assertProvisioningApi(provisioning)
   const resolvedProjectId = requiredProjectId(projectId)
@@ -759,6 +1058,12 @@ async function installCustomerPack({
     projectId: resolvedProjectId,
     pack: normalized,
   })
+
+  // PRE-FLIGHT, BEFORE THE FIRST SCHEMA WRITE. Both conditions a declared fieldWritePolicies needs
+  // from the host — the port exists, and every role it names exists — are answered here rather than
+  // at the end of the install. A pack naming a role this host does not have used to create and
+  // stamp every column first and only THEN be refused, as an uncoded 500 over a half-applied sheet.
+  await preflightFieldWritePolicies({ fieldPermissions, pack: normalized })
 
   // VALIDATE ALL, THEN WRITE. The pre-scan is the last read-only step: after it
   // returns, either the pack agrees with every live column or nothing happened.
@@ -797,14 +1102,59 @@ async function installCustomerPack({
     sheetId: sheet.id,
     pack: normalized,
   })
+  // LAST, and deliberately so: the columns must exist and be classified before any
+  // permission can name one. A pack with no fieldWritePolicies makes no call at all.
+  const writeScopePlan = deriveFieldWriteScopePlan({
+    provisioning: api,
+    projectId: resolvedProjectId,
+    pack: normalized,
+  })
+  const appliedWriteScopes = await applyFieldWritePolicies({
+    provisioning: api,
+    fieldPermissions,
+    projectId: resolvedProjectId,
+    sheetId: sheet.id,
+    pack: normalized,
+    plan: writeScopePlan,
+  })
+  // THE STALE CENSUS — read AFTER the upsert on purpose: the port only ever adds rows that ARE in
+  // the derived plan, so the diff is identical either way, and reading last means the summary
+  // describes the sheet as it now stands rather than as it was mid-install.
+  const writeScopeCensus = normalized.fieldWriteDenials.length === 0
+    ? { check: 'not_declared', stale: null }
+    : await detectStaleWriteScopes({
+      fieldPermissions,
+      sheetId: sheet.id,
+      plan: writeScopePlan,
+      logicalFieldIds: buildLogicalFieldIdIndex({
+        provisioning: api,
+        projectId: resolvedProjectId,
+        pack: normalized,
+      }),
+    })
 
   const log = logger && typeof logger.info === 'function' ? logger : console
   log.info(
     `[plugin-integration-core] customer pack install done. pack=${normalized.packId}`
       + ` v${normalized.packVersion} created=${createdFields.length} skipped=${skippedFields.length}`
       + ` stamped=${stampedExistingFields.length} alreadyStamped=${alreadyStampedFields.length}`
-      + ` optionFields=${syncedOptionFields.length} views=${ensuredViews.length}`,
+      + ` optionFields=${syncedOptionFields.length} views=${ensuredViews.length}`
+      + ` writeScopes=${appliedWriteScopes.applied}`
+      + ` staleWriteScopes=${writeScopeCensus.stale ? writeScopeCensus.stale.length : 'unchecked'}`,
   )
+  // An orphaned denial is not an install failure, but it IS the one outcome a deployer must not
+  // have to go looking for: the column is now unwritable by a role the CURRENT declaration says
+  // owns it, and only an operator can clear it.
+  if (writeScopeCensus.stale && writeScopeCensus.stale.length > 0) {
+    const warn = logger && typeof logger.warn === 'function' ? logger.warn.bind(logger) : log.info
+    warn(
+      `[plugin-integration-core] customer pack install left ${writeScopeCensus.stale.length} STALE`
+        + ` write scope(s) behind. pack=${normalized.packId} v${normalized.packVersion}`
+        + ' — an earlier revision of this pack denied a (column, role) pair the current one does'
+        + ' not. The port has no revoke path by design; clear them with'
+        + ' PUT /api/multitable/sheets/:sheetId/field-permissions { remove: true }.',
+    )
+  }
 
   // F5: the summary now carries the ownership band per id, so a CLI or a route no longer has to
   // re-normalize the pack to say "13 PLM / 8 human columns". Values-free — ids, frozen ownership
@@ -829,6 +1179,17 @@ async function installCustomerPack({
     installedFields,
     syncedOptionFields,
     ensuredViews,
+    // Counts and role ids only — no option values, no rows. `appliedWriteScopes: 0` with
+    // `skipped: 'not_declared'` is the shape EVERY pack that exists today reports, and it
+    // is how a reader tells "nothing was declared" from "declared and applied".
+    appliedWriteScopes: appliedWriteScopes.applied,
+    writeScopeRoleCount: appliedWriteScopes.roleCount,
+    writeScopeSkipped: appliedWriteScopes.skipped,
+    // 'not_declared' | 'unsupported_port' | 'checked'. `staleWriteScopes` is NULL — never [] —
+    // whenever the census did not run, because an empty list reads as "checked, nothing stale".
+    writeScopeCheck: writeScopeCensus.check,
+    staleWriteScopes: writeScopeCensus.stale,
+    staleWriteScopeCount: writeScopeCensus.stale ? writeScopeCensus.stale.length : 0,
   }
 
   // TERMINAL-ONLY LEDGER WRITE — the LAST thing the install does, after every host mutation has
@@ -928,7 +1289,14 @@ module.exports = {
   installCustomerPack,
   planCustomerPackInstall,
   __internals: {
+    applyFieldWritePolicies,
     assertProvisioningApi,
+    buildLogicalFieldIdIndex,
+    deriveFieldWriteScopePlan,
+    detectStaleWriteScopes,
+    isFieldPermissionsError,
+    preflightFieldWritePolicies,
+    translateFieldPermissionsError,
     buildExtensionFieldProperty,
     buildExtensionFieldDescriptors,
     buildInstalledFieldEntries,

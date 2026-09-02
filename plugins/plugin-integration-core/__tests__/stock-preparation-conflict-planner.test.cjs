@@ -1065,13 +1065,20 @@ function testTheHumanFieldWallIsUnaffected() {
     runId: 'run-wall',
     plannedAt: '2026-09-02T00:00:00.000Z',
   })
-  // The band itself did not move: still exactly the 8 human columns, in template order.
+  // The band is reported exactly as the template declares it, in template order. It is 13
+  // today: the original 8 plus 自制/外购 and the departmental response band (makeOrBuy /
+  // procurementDone / procurementReplyDate / warehouseDone / actualArrivalDate), which grew
+  // it through the design gate — NOT through the three plm_system columns this test is about.
   assert.deepEqual(
     plan.summary.humanPreservedFields,
     humanBand,
     'the human-preserved band is untouched by three new plm_system columns',
   )
-  assert.equal(plan.summary.humanPreservedFields.length, 8)
+  assert.equal(plan.summary.humanPreservedFields.length, 13)
+  assert.deepEqual(plan.summary.humanPreservedFields.slice(0, 8), [
+    'materialType', 'blankType', 'stockPreparationStatus', 'demandDate', 'leadTimeDays', 'notes',
+    'procurementReply', 'warehouseConfirmation',
+  ], 'the original eight are first and unchanged')
   // The three newcomers are on the PLM side of the wall, and only there.
   for (const fieldId of ['parentComponentCode', 'parentComponentName', 'componentSpec']) {
     assert.ok(plan.summary.plmSystemFields.includes(fieldId), `${fieldId} is refreshable`)

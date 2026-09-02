@@ -87,8 +87,22 @@ const PLANNED_AT = '2026-01-02T03:04:05.000Z'
  *      same quantity reason it always was.
  * No count, no decision kind, no conflictSummary, no human field, and no ext_ column
  * moved — the "no pack fields => zero behaviour change" contract is intact.
+ *
+ * RE-PINNED DELIBERATELY (again, was 16df242d…0ea8f0 after the step above): the canonical template gained the
+ * five human_preserved columns `makeOrBuy` / `procurementDone` / `procurementReplyDate` /
+ * `warehouseDone` / `actualArrivalDate`, so the plan's `humanPreservedFields` array — the
+ * planner's report of what a refresh must NOT touch — is five entries longer.
+ *
+ * THE MOVE WAS FALSIFIED BEFORE IT WAS ACCEPTED, which is the only reason it is allowed to
+ * move at all. Taking the NEW plan and deleting exactly those five ids from that ONE array
+ * (nothing else touched, one array rolled back) reproduces the PREVIOUS digest
+ * 16df242d…0ea8f0 BYTE-FOR-BYTE. So every decision, every count
+ * (add 1 / update 1 / skip 1 / inactive 1 / manual_confirm 0), every row and the whole
+ * plmSystemFields band are UNCHANGED: the contract this pin defends — "no pack fields =>
+ * zero behaviour change" — still holds. The larger protected set is the intended effect of
+ * the template growth, not a behaviour change in the planner.
  */
-const CONTROL_PLAN_SHA256 = '16df242d92e8120ec6c8518a15526ebe2d1a6f0e27434d0a9df3e8bcfa0ea8f0'
+const CONTROL_PLAN_SHA256 = '10bb6cbbf386775d798921947a5d225731bb7c43f2063ee1420822cf88ec71f8'
 
 function expandedRows() {
   return [

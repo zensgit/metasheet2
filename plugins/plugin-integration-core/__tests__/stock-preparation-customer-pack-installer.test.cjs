@@ -823,7 +823,11 @@ async function summaryIsValuesFree() {
   assert.deepEqual(
     summary.ensuredViews,
     [
-      { roleViewId: 'production', descriptorId: 'sp-factory-a-production', hiddenFieldCount: 12 },
+      // 12 -> 17: this fixture's production view hides by OWNERSHIP (`human_preserved`),
+      // so it picks up the five new human columns automatically. Note this is the
+      // COSMETIC layer — a role view hiding a column is a display convenience and is
+      // NOT the write scoping added in this change (see fieldWritePolicies).
+      { roleViewId: 'production', descriptorId: 'sp-factory-a-production', hiddenFieldCount: 17 },
       { roleViewId: 'procurement', descriptorId: 'sp-factory-a-procurement', hiddenFieldCount: 7 },
     ],
   )
