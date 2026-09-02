@@ -394,9 +394,11 @@ describe('collectPlatformApps — install-page manifest sections', () => {
     expect((app.posture?.entries ?? []).map((entry) => entry.id).sort())
       .toEqual(['b2aTrialRegistry', 'k3ExternalWrite', 'outboundHttpWrite', 'productionApply'])
 
-    // Deployment data the page must MARK as such rather than offer a field for.
+    // Deployment data the page must MARK as such rather than offer a field for. `stockPrepHandoff`
+    // (通知下一步) is deployment data of exactly this class: an uncommitted JSON file on the deploy
+    // host, named to the page by env var, never a field the installer types into.
     expect((app.configSurfaces ?? []).map((surface) => surface.id).sort())
-      .toEqual(['customerPack', 'extFieldMapping', 'sandboxWriteAuthorization'])
+      .toEqual(['customerPack', 'extFieldMapping', 'sandboxWriteAuthorization', 'stockPrepHandoff'])
     for (const surface of app.configSurfaces ?? []) {
       expect(surface.committed).toBe(false)
     }
