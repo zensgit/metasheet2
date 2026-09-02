@@ -6,10 +6,13 @@ real-tenant data access.
 
 **Original code baseline:** `origin/main@81960ae650d974dbd9a96c922ffb4a917292ac24`.
 **Original code head:** `0f4331010c60405278bbcd4ab4e38fd5b5d92c38`.
-**Final replay base:** `origin/main@24942c70fb07133b580250c00aecbc208aa2f8e8`.
-**Final replay code head:** `bdf7626d6c8b1ffefcbccfc33571d04974f31224`.
-**Final replay tree:** `777c7bf0d4ac419715ee8d4abd370bca973222f1`.
-**PR:** Draft/HOLD #5439. The final replay remains 12 files: the 10 code files
+**Historical replay base/head:** `origin/main@24942c70fb07133b580250c00aecbc208aa2f8e8` /
+`bdf7626d6c8b1ffefcbccfc33571d04974f31224`.
+**Current-main replay base:** `origin/main@8a7649b6eeaea4b57bc53e476f214985a622fc7f`.
+**Current-main replay code head/tree:**
+`e27bcd028659b87285b8dc38d846c632d1158125` /
+`dc8ddbf1553d6cf7f24ede4f214d2f5ffc6abaf7`.
+**PR:** Draft/HOLD #5439. The current replay remains 12 files: the 10 code files
 and these two reports; no migrations, flags, shared branch-protection edits,
 dispatches, deployments, or production actions.
 
@@ -84,8 +87,24 @@ replay patches have identical SHA-256
 Draft PR #5439 at final replay code head
 `bdf7626d6c8b1ffefcbccfc33571d04974f31224` completed 24 SUCCESS plus one
 intentional Strict E2E SKIPPED, with Node 18, Node 20, Web Tests, F4-E real-DB,
-and coverage successful. This report-refresh child has no CI result at this
-authoring point; its own exact-head result remains separate evidence.
+and coverage successful. That is retained as historical exact-head evidence.
+
+The 2026-09-02 current-main replay is a true no-conflict merge with ordered
+parents `6199d860b050b5497708f5e392f0e341906da053` then
+`8a7649b6eeaea4b57bc53e476f214985a622fc7f`. The main-only range and candidate
+range have zero changed-file overlap. Relative to the second parent, the
+candidate still changes exactly the 12 files in this report. Range-diff
+preserves the four content commits `a2efd8b49`, `0f4331010`, `129556911`,
+and `6199d860b` in order, with no manual conflict resolution.
+
+At current-main replay code head `e27bcd028659b87285b8dc38d846c632d1158125`,
+the focused unit set passed 77/77. Five integration files passed together
+70/70 against one freshly migrated native PostgreSQL 15 cluster, followed by
+cluster deletion and zero owned residue. Core-backend type check passed;
+targeted ESLint exited zero with only the pre-existing warning; and
+`git diff --check` passed. The report-refresh child and its remote exact-head
+CI do not exist at this authoring point and must be recorded separately after
+publication.
 
 ## Merge predicates
 
