@@ -31,6 +31,22 @@
 //        validation: the audit store's SAFE_STRING_PATTERN would happily accept `230920006`.
 //   S-07 NO AUDIT STORE, NO VALUES. `requireStockPreparationAudit`'s 501 was untested on this route.
 //
+// THIRD-ROUND ADDITION — S-03d. `ownTenantId`'s resolved `tenantId` (verified-claim-preferred) is what
+// scope.cjs:279 must send the host, not `user.tenantId` re-read at the call site: a mutant
+// `tenantId: optionalString(user.tenantId) || ''` survived every existing fixture because every one of
+// them sets `user.tenantId === authenticatedTenantId`, so the two values were always the same string.
+// S-03d is a principal that carries NO `user.tenantId` at all (a verified-claim-only token) — the two
+// values then differ (`''` vs the verified claim), and only the resolved one is correct.
+//
+// A NOTE ON `OPERATOR_SCOPE_TENANT_CONTRADICTED`: as `packages/core-backend/src/auth/jwt-middleware.ts`
+// (`hydrateAuthenticatedUser`) is written today, `req.authenticatedTenantId` is assigned FROM
+// `user.tenantId` at the moment it is set (`authenticatedTenantId = user.tenantId.trim()`), and the
+// `x-tenant-id` header is only ever copied onto `user.tenantId` in the branch where `user.tenantId` was
+// falsy — the branch that never set `authenticatedTenantId` in the first place. So a verified claim and
+// a DIFFERENT carried `user.tenantId` cannot co-occur through this host as it stands today: the
+// contradiction guard is unreachable via this real caller, and is defence-in-depth for a host wired
+// differently (or wired incorrectly later), not a path this suite can red through the real middleware.
+//
 // Hermetic: no DB, no network. Every service these routes must not touch is stubbed to throw.
 
 const assert = require('node:assert/strict')
@@ -145,6 +161,14 @@ const OPERATOR_A_EMAIL_ONLY = Object.freeze({
   tenantId: TENANT_A,
   permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE],
 })
+/**
+ * NO `tenantId` FIELD AT ALL — a verified-claim-only principal, the shape a token-only deployment
+ * produces (see the header note on `OPERATOR_SCOPE_TENANT_CONTRADICTED`). S-03d's subject: this is the
+ * one fixture where `user.tenantId` and the resolved `ownTenantId(...).tenantId` are NOT the same
+ * string (`undefined`/`''` vs the verified claim), so a call site that re-reads `user.tenantId` instead
+ * of the resolved value is distinguishable.
+ */
+const OPERATOR_A_NO_CARRIED_TENANT = Object.freeze({ id: 'u_op_a', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] })
 /** A TENANT-BOUND platform admin holding NO stock-prep grant whatsoever. S-05's subject. */
 const PLATFORM_ADMIN_IN_TENANT_A = Object.freeze({ id: 'u_adm_a', tenantId: TENANT_A, roles: ['admin'], permissions: ['integration:admin'] })
 const INTEGRATION_ADMIN_IN_TENANT_A = Object.freeze({ id: 'u_iadm_a', tenantId: TENANT_A, permissions: ['integration:admin'] })
