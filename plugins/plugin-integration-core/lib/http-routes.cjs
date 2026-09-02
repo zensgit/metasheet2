@@ -1673,6 +1673,13 @@ const VALID_STOCK_PREPARATION_HANDOFF_ADVANCE_BODY_KEYS = new Set([
 // rather than silently resolved toward one of the two. `tenantId` is accepted only so the shared
 // `collectExplicitTenantIds` check can refuse a steering attempt with the right code; it never
 // selects anything.
+//
+// NEITHER DOES `workspaceId`, AND THAT IS THE POINT. It used to be forwarded verbatim into the audit
+// row's `workspace_id`, which made this route's "the trail never carries the projectNo" claim
+// depend on the caller not putting it there: `?workspaceId=230920006` wrote the number to a column
+// no gate looked at. This plugin has no workspace registry to validate it against, so the honest
+// answer is to select nothing from it — the key stays accepted for shape compatibility with the rest
+// of this family (and so a client that sends it is not 400'd), exactly like `tenantId`.
 const VALID_STOCK_PREPARATION_OPERATOR_PROJECT_BOARD_QUERY_KEYS = new Set([
   'tenantId',
   'workspaceId',
@@ -7692,7 +7699,6 @@ function createHandlers(services, options = {}) {
       // refusing audit store blocks the values (H3-0 ③).
       await audit.append({
         tenantId: scope.tenantId,
-        workspaceId: input.workspaceId,
         action: 'project_directory_read',
         actor: scope.actorId,
         mode: result.pendingProjectCount > 0 ? 'operator_directory' : 'operator_directory_idle',
@@ -8295,7 +8301,6 @@ function createHandlers(services, options = {}) {
           projectNo,
           boundTarget,
           audit,
-          workspaceId: input.workspaceId,
         })
       } catch (error) {
         // A MISS IS STILL A READ, and it is audited as one — values-free, so the trail cannot become
@@ -8303,7 +8308,6 @@ function createHandlers(services, options = {}) {
         if (error instanceof StockPreparationProjectBoardError && error.status === 404) {
           await audit.append({
             tenantId: scope.tenantId,
-            workspaceId: input.workspaceId,
             action: STOCK_PREPARATION_PROJECT_BOARD_AUDIT_ACTION,
             actor: scope.actorId,
             mode: STOCK_PREPARATION_PROJECT_BOARD_MODES[1],
@@ -8323,7 +8327,6 @@ function createHandlers(services, options = {}) {
       // one route that is ABOUT a single project.
       await audit.append({
         tenantId: scope.tenantId,
-        workspaceId: input.workspaceId,
         action: STOCK_PREPARATION_PROJECT_BOARD_AUDIT_ACTION,
         actor: scope.actorId,
         mode: STOCK_PREPARATION_PROJECT_BOARD_MODES[0],

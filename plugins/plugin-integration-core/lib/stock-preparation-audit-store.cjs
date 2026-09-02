@@ -12,10 +12,13 @@
 // dedicated subject_id column).
 //
 // HARD boundary:
-//   - values-free BY CONSTRUCTION, not by caller discipline alone: `detail` passes a structural
-//     guard — scalars (finite numbers / booleans / enum-shaped strings) and ONE nested level of
-//     numeric count maps. A drawing number with spaces, an exception message, a URL, or any long /
-//     unshaped string is REJECTED fail-closed before it can reach the table.
+//   - values-free BY CONSTRUCTION, not by caller discipline alone, and as a property of the whole
+//     ROW rather than of one column: `detail` passes a structural guard — scalars (finite numbers /
+//     booleans / enum-shaped strings) and ONE nested level of numeric count maps — and
+//     workspace_id / project_id / subject_id / mode / actor each pass the SAME enum/handle shape
+//     gate (assertValuesFreeColumn). A drawing number with spaces, an exception message, a URL, or
+//     any long / unshaped string is REJECTED fail-closed before it can reach the table, in whichever
+//     column it was handed to.
 //   - closed action vocabulary (9 actions) — an unknown action is refused, never stored.
 //   - subject_id / actor are internal handles (content-hash ids / user id) — never business values.
 //   - append-only: the store exposes no update or delete surface.
@@ -137,6 +140,33 @@ function assertValuesFreeDetail(detail) {
   return detail
 }
 
+/**
+ * THE SAME GATE, APPLIED TO THE OTHER COLUMNS — so "values-free" is a property of the ROW.
+ *
+ * `assertValuesFreeDetail` above has always covered `detail`, and nothing else. Every other nullable
+ * TEXT column went through `optionalString` alone, which accepts any non-empty string: a route that
+ * forwarded an unvetted request value into `workspace_id` / `project_id` / `subject_id` / `mode` /
+ * `actor` wrote it verbatim onto a trail whose entire claim is that it carries no customer values.
+ * That was reachable, not theoretical — the operator project-board route forwarded the caller's own
+ * `?workspaceId`, so `?workspaceId=<a project number>` was enough.
+ *
+ * The columns this gates are handle-shaped by design (enum modes, sha16 subject handles, user ids /
+ * e-mails, `${tenant}:integration-core` staging ids, project NUMBERS on the export route's own
+ * subject), which is exactly what SAFE_STRING_PATTERN already describes — so this refuses the
+ * unshaped and passes every shape the call sites really produce.
+ *
+ * FAIL-CLOSED and value-blind, the same discipline as AUDIT_DETAIL_INVALID: the refusal names the
+ * COLUMN and never echoes what was in it.
+ */
+function assertValuesFreeColumn(value, field) {
+  const normalized = optionalString(value)
+  if (normalized === null) return null
+  if (!SAFE_STRING_PATTERN.test(normalized)) {
+    throw new StockPreparationAuditError(422, 'AUDIT_FIELD_INVALID', 'audit column value is not enum/handle-shaped', { field })
+  }
+  return normalized
+}
+
 function rowToPublicEntry(row) {
   if (!row) return null
   return {
@@ -171,12 +201,13 @@ function createStockPreparationAuditStore({ db, idGenerator = crypto.randomUUID 
     const row = {
       id: idGenerator(),
       tenant_id: tenant,
-      workspace_id: optionalString(workspaceId),
-      project_id: optionalString(projectId),
+      // Every one of these is gated the same way `detail` is — see assertValuesFreeColumn.
+      workspace_id: assertValuesFreeColumn(workspaceId, 'workspaceId'),
+      project_id: assertValuesFreeColumn(projectId, 'projectId'),
       action: normalizedAction,
-      subject_id: optionalString(subjectId),
-      mode: optionalString(mode),
-      actor: optionalString(actor),
+      subject_id: assertValuesFreeColumn(subjectId, 'subjectId'),
+      mode: assertValuesFreeColumn(mode, 'mode'),
+      actor: assertValuesFreeColumn(actor, 'actor'),
       detail: safeDetail,
     }
     await db.insertOne(AUDIT_TABLE, row)
@@ -282,6 +313,7 @@ module.exports = {
   StockPreparationAuditError,
   createStockPreparationAuditStore,
   __internals: {
+    assertValuesFreeColumn,
     assertValuesFreeDetail,
     isSafeScalar,
     rowToPublicEntry,

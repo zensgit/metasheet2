@@ -146,6 +146,47 @@ async function main() {
     assert.equal(db.inserted.length, 1)
   })
 
+  // VALUES-FREE IS A PROPERTY OF THE ROW, NOT OF ONE COLUMN.
+  //
+  // The structural gate above covered `detail` alone. Every other nullable TEXT column on this table
+  // — workspace_id, project_id, subject_id, mode, actor — went through `optionalString` and nothing
+  // else, so a caller that forwarded an unvetted request string into any of them wrote it verbatim.
+  // (That is not hypothetical: the project-board route forwarded the caller's own `?workspaceId`,
+  // and a caller who sends `?workspaceId=<their project number>` put a customer business value on a
+  // trail whose whole claim is that it carries none.) The same SAFE_STRING_PATTERN the detail gate
+  // already enforced now applies to the whole row, with the same fail-closed discipline: refuse,
+  // never store, and NAME THE COLUMN WITHOUT ECHOING THE VALUE.
+  await run('the values-free gate covers the whole ROW, not just detail', async () => {
+    const { db, store } = newStore()
+    const base = { tenantId: 'tenant_1', action: 'generation_run' }
+    for (const column of ['workspaceId', 'projectId', 'subjectId', 'mode', 'actor']) {
+      const error = await expectAuditError(store.append({ ...base, [column]: SECRET }), 'AUDIT_FIELD_INVALID')
+      assert.ok(
+        !JSON.stringify(error.details || {}).includes(SECRET),
+        `${column}: the refusal must name the column, never echo the value`,
+      )
+      assert.equal(error.details && error.details.field, column, `${column}: the offending column is named`)
+      await expectAuditError(store.append({ ...base, [column]: 'x'.repeat(81) }), 'AUDIT_FIELD_INVALID')
+      await expectAuditError(store.append({ ...base, [column]: 'has space' }), 'AUDIT_FIELD_INVALID')
+    }
+    assert.equal(db.inserted.length, 0, 'not one refused row reached the table')
+
+    // The shapes real call sites actually pass still go through untouched: enum modes, sha16 subject
+    // handles, uuid/e-mail actors, `${tenant}:integration-core` staging ids, project NUMBERS (the
+    // export route's own subject), and an absent column.
+    await store.append({
+      ...base,
+      workspaceId: 'workspace-default',
+      projectId: 'tenant_1:integration-core',
+      subjectId: 'sha16:0000000000000001',
+      mode: 'created',
+      actor: 'ops.lead@example.com',
+    })
+    await store.append({ ...base, projectId: '230920006', actor: 'e2b1c0de-0000-4000-8000-000000000001' })
+    await store.append({ ...base })
+    assert.equal(db.inserted.length, 3, 'the shapes the routes really pass are unaffected')
+  })
+
   await run('list filters by tenant/action/project, clamps limit, and maps public entries', async () => {
     const { db, store } = newStore()
     await store.append({ tenantId: 'tenant_1', projectId: 'proj_1', action: 'unit_confirm', subjectId: 'rule_1', mode: 'created', actor: 'user_admin_1', detail: { persisted: true } })
