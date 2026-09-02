@@ -1,0 +1,128 @@
+{
+  "timestamp": "2026-06-09T03:02:27Z",
+  "metrics_url": "http://23.254.236.11:8081/metrics/prom",
+  "configuration": {
+    "count_cache_miss_as_fallback": false,
+    "thresholds_file": "/home/runner/work/metasheet2/metasheet2/scripts/phase5-thresholds.json"
+  },
+  "percentiles": {},
+  "counters": {
+    "cache_hit_rate": 0,
+    "cache_hit_rate_source": "none",
+    "cache_hits": 0,
+    "cache_misses": 0,
+    "cache_total": 0,
+    "raw_fallback": 0,
+    "effective_fallback": 0,
+    "fallback_effective_ratio": 0,
+    "http_success_rate": 100.00,
+    "error_rate": 0,
+    "memory_rss_mb": 221.81,
+    "redis_recent_failures": 0,
+    "fallback_by_reason": {"http_timeout":0,"http_error":0,"message_timeout":0,"message_error":0,"cache_miss":0,"circuit_breaker":0,"upstream_error":0,"unknown":0}
+  },
+  "validation": {
+    "fallback_taxonomy_valid": true
+  },
+  "warnings": [{
+  "metric": "metasheet_fallback_total",
+  "issue": "no_fallback_events",
+  "message": "No fallback events observed - acceptable baseline (ratio trivially 0)"
+}],
+  "assertions": [{
+  "metric": "plugin_reload_latency_p95",
+  "actual": 0,
+  "threshold": 2.0,
+  "unit": "seconds",
+  "type": "upper_bound",
+  "comparison": "N/A",
+  "status": "na"
+},{
+  "metric": "plugin_reload_latency_p99",
+  "actual": 0,
+  "threshold": 5.0,
+  "unit": "seconds",
+  "type": "upper_bound",
+  "comparison": "N/A",
+  "status": "na"
+},{
+  "metric": "snapshot_restore_latency_p95",
+  "actual": 0,
+  "threshold": 5.0,
+  "unit": "seconds",
+  "type": "upper_bound",
+  "comparison": "N/A",
+  "status": "na"
+},{
+  "metric": "snapshot_restore_latency_p99",
+  "actual": 0,
+  "threshold": 8.0,
+  "unit": "seconds",
+  "type": "upper_bound",
+  "comparison": "N/A",
+  "status": "na"
+},{
+  "metric": "snapshot_create_latency_p95",
+  "actual": 0,
+  "threshold": 5.0,
+  "unit": "seconds",
+  "type": "upper_bound",
+  "comparison": "N/A",
+  "status": "na"
+},{
+  "metric": "snapshot_create_latency_p99",
+  "actual": 0,
+  "threshold": 8.0,
+  "unit": "seconds",
+  "type": "upper_bound",
+  "comparison": "N/A",
+  "status": "na"
+},{
+  "metric": "cache_hit_rate",
+  "actual": 0,
+  "threshold": 80.0,
+  "unit": "percent",
+  "type": "lower_bound",
+  "comparison": "≥",
+  "status": "fail"
+},{
+  "metric": "fallback_effective_ratio",
+  "actual": 0,
+  "threshold": 0.6,
+  "unit": "ratio",
+  "type": "upper_bound",
+  "comparison": "≤",
+  "status": "pass"
+},{
+  "metric": "memory_rss",
+  "actual": 221.81,
+  "threshold": 500.0,
+  "unit": "megabytes",
+  "type": "upper_bound",
+  "comparison": "≤",
+  "status": "pass"
+},{
+  "metric": "http_success_rate",
+  "actual": 100.00,
+  "threshold": 98.0,
+  "unit": "percent",
+  "type": "lower_bound",
+  "comparison": "≥",
+  "status": "pass"
+},{
+  "metric": "error_rate",
+  "actual": 0,
+  "threshold": 1.0,
+  "unit": "percent",
+  "type": "upper_bound",
+  "comparison": "≤",
+  "status": "pass"
+}],
+  "summary": {
+    "total_checks": 11,
+    "passed": 4,
+    "failed": 1,
+    "na": 6,
+    "overall_status": "fail"
+  }
+}
