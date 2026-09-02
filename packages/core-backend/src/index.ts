@@ -104,6 +104,7 @@ import {
   assertPluginOwnsObject,
   assertPluginOwnsSheet,
   claimPluginObjectScope,
+  findSheetOwnerProjectId,
   createPluginScopedMultitableApi,
   MultitableObjectScopeError,
   MultitableSheetScopeError,
@@ -742,6 +743,23 @@ export class MetaSheetServer {
         provisioning: {
           getObjectSheetId: (projectId, objectId) => getProvisionedObjectSheetId(projectId, objectId),
           getFieldId: (projectId, objectId, fieldId) => getProvisionedObjectFieldId(projectId, objectId, fieldId),
+          // WHICH PROJECT OWNS THIS SHEET. Backed by `plugin_multitable_object_registry`, the one
+          // place a sheet's project is actually recorded — `meta_sheets` has no project column, and
+          // the derived id is one-way and is not an invariant any consumer maintains. Read-only.
+          findSheetOwnerProjectId: async ({ sheetId }) => {
+            const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+              const result = await poolManager.get().query(sql, params)
+              return {
+                rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                  ? (result as { rows: unknown[] }).rows
+                  : [],
+                rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                  ? (result as { rowCount: number }).rowCount
+                  : undefined,
+              }
+            }
+            return findSheetOwnerProjectId(txQuery, sheetId)
+          },
           findObjectSheet: async ({ projectId, objectId }) => {
             const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
               const result = await poolManager.get().query(sql, params)

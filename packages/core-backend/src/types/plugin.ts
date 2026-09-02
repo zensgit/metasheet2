@@ -404,6 +404,23 @@ export interface MultitableRepairTransactionSurface {
 
 export interface MultitableProvisioningAPI {
   getObjectSheetId(projectId: string, objectId: string): string
+  /**
+   * WHICH PROJECT OWNS THIS SHEET — the only tenancy fact about a sheet that is actually recorded.
+   *
+   * `meta_sheets` carries no project column; a sheet's project appears only inside its DERIVED id
+   * (`sheet_ + sha1(projectId:objectId)`), which is one-way and, more importantly, is not an
+   * invariant any consumer maintains: `sheetId` and `objectId` are independent fields on a table
+   * action, and a deployment may legitimately point an objectId at a sheet created under a different
+   * one. Reversing the hash is therefore neither possible nor sufficient.
+   *
+   * What IS recorded is `plugin_multitable_object_registry`, written by plugin-scoped
+   * `provisioning.ensureObject` and keyed by `sheet_id`. This reads that row.
+   *
+   * Returns null when the sheet is not in the registry — a pre-registry/legacy sheet, or one this
+   * plugin may not be told about. Null means "not attributable", never "yours": a caller deciding a
+   * tenancy question must treat it as a failure to prove ownership, not as permission.
+   */
+  findSheetOwnerProjectId(input: { sheetId: string }): Promise<string | null>
   getFieldId(projectId: string, objectId: string, fieldId: string): string
   findObjectSheet(input: {
     projectId: string

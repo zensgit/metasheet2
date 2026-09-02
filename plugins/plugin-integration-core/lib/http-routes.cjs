@@ -718,28 +718,69 @@ function sendError(res, error) {
   })
 }
 
-// THE CARRY TENANT WALL. `target` is the deploy-time bound action target; `targetProjectId` is the
-// CALLER's own staging project. The bound sheet is acceptable only if it is the sheet provisioning
-// holds for that project and that objectId — i.e. the caller's own. Absence and disagreement are the
-// same verdict and get the same typed code: in neither case is the bound sheet provably the
-// caller's, and a write that cannot be proven to land in the caller's own tenant must not happen.
+// THE CARRY TENANT WALL — "is the sheet this deployment is bound to the CALLER'S sheet?"
 //
-// Values-free: the refusal names the objectId (a public config identifier) and nothing else — never
-// a sheet id, never a row.
+// WHAT THIS IS NOT ANY MORE. The first cut asked whether `target.sheetId` equalled
+// `findObjectSheet(callerProject, target.objectId).id`, i.e. whether the two halves of the binding
+// were derived from one tuple. That is a binding-SHAPE rule, not a tenancy proof, and nothing else
+// in this line maintains it: `normalizeTarget` accepts any sheetId and defaults objectId
+// independently, the sandbox apply gate reads ONLY objectId, and the writer / export / conflict
+// policies take sheetId verbatim. Worse, the repo's own 222 deploy-window runbook prescribes exactly
+// the decoupled edit — change objectId into the sandbox namespace, KEEP the existing sheetId — so
+// the rule refused a SANCTIONED config while apply, dry-run and the export all kept working, and it
+// blamed "tenancy" for what was a shape mismatch. An on-site operator would have chased a
+// tenant/membership problem that did not exist.
+//
+// WHAT OWNERSHIP ACTUALLY IS. `meta_sheets` carries no project column; a sheet's project survives
+// only inside its derived id, which is one-way and — as above — is not an invariant. The one place
+// ownership is RECORDED is `plugin_multitable_object_registry` (sheet_id -> project_id), written by
+// plugin-scoped `provisioning.ensureObject`. So the wall asks the registry, through the host port
+// `findSheetOwnerProjectId`, and compares the owning project with the caller's staging project.
+// A hand-bound sheet that the caller's own tenant really provisioned passes — which is precisely the
+// 222 window shape — and a sheet owned by another tenant is refused however its id was derived.
+//
+// THE REGISTRY MISS IS NOT A PASS. A sheet with no registry row is not "yours", it is
+// "unattributable" (a pre-registry legacy install, or an id nothing ever provisioned). For a WRITE
+// that lands human work in a customer's table, an unprovable owner must not be treated as
+// permission — so a miss falls back to the only other evidence there is, the derived id, and refuses
+// with its OWN code when that fails too. The two refusals say different things on purpose, because
+// they send an operator to different places.
+//
+// Values-free: refusals name the objectId (a public config identifier) and nothing else — never a
+// sheet id, never a project id, never a row.
 async function assertCarryTargetBelongsToTenant({ provisioning, targetProjectId, target } = {}) {
   const boundSheetId = target && typeof target.sheetId === 'string' ? target.sheetId.trim() : ''
   const objectId = target && typeof target.objectId === 'string' ? target.objectId.trim() : ''
   if (!boundSheetId || !objectId) {
     throw new HttpRouteError(409, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH', 'the bound stock-preparation target cannot be attributed to a tenant', { objectId: objectId || null })
   }
-  if (!provisioning || typeof provisioning.findObjectSheet !== 'function') {
-    throw new HttpRouteError(501, 'CONFIRM_CARRY_PROVISIONING_UNAVAILABLE', 'the carry tenant check requires multitable.provisioning.findObjectSheet', { requiredMethods: ['findObjectSheet'] })
+  // REACHABLE, and deliberately so: the caller hands this the RAW host surface rather than a helper
+  // that has already refused on its own terms, so a host without the ownership port fails here, with
+  // the code that names what is missing, instead of behind a generic provisioning 503.
+  if (!provisioning || typeof provisioning.findSheetOwnerProjectId !== 'function') {
+    throw new HttpRouteError(501, 'CONFIRM_CARRY_PROVISIONING_UNAVAILABLE', 'the carry tenant check requires multitable.provisioning.findSheetOwnerProjectId', { requiredMethods: ['findSheetOwnerProjectId'] })
   }
-  const sheet = await provisioning.findObjectSheet({ projectId: targetProjectId, objectId })
-  const ownSheetId = sheet && typeof sheet.id === 'string' ? sheet.id.trim() : ''
-  if (!ownSheetId || ownSheetId !== boundSheetId) {
-    throw new HttpRouteError(409, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH', 'the bound stock-preparation target does not belong to the tenant of this caller', { objectId })
+  const ownerProjectId = await provisioning.findSheetOwnerProjectId({ sheetId: boundSheetId })
+  const owner = typeof ownerProjectId === 'string' ? ownerProjectId.trim() : ''
+  if (owner) {
+    if (owner !== targetProjectId) {
+      throw new HttpRouteError(409, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH', 'the sheet this deployment is bound to belongs to another project', { objectId })
+    }
+    return
   }
+  // No registry row. Fall back to the derived id — the only remaining evidence that this sheet was
+  // ever meant to be this project's.
+  const derive = provisioning && typeof provisioning.getObjectSheetId === 'function'
+    ? provisioning.getObjectSheetId
+    : null
+  const derived = derive ? String(derive.call(provisioning, targetProjectId, objectId) || '').trim() : ''
+  if (derived && derived === boundSheetId) return
+  throw new HttpRouteError(
+    409,
+    'CONFIRM_CARRY_TARGET_OWNER_UNKNOWN',
+    'the sheet this deployment is bound to is not registered to any project and its id is not the one derived for this caller, so its owner cannot be established',
+    { objectId },
+  )
 }
 
 function inferDataSourceBridgeErrorCode(error) {
@@ -6695,7 +6736,10 @@ function createHandlers(services, options = {}) {
       // approval bookkeeping in the caller's project is never consulted for a write into another
       // tenant's sheet.
       await assertCarryTargetBelongsToTenant({
-        provisioning: getMultitableProvisioning(),
+        // The RAW host surface, not `getMultitableProvisioning()`: that helper throws its own generic
+        // 503 when provisioning is absent or lacks `findObjectSheet`, which would mask this check's
+        // own typed 501 about the ownership port it actually needs.
+        provisioning: context && context.api && context.api.multitable && context.api.multitable.provisioning,
         targetProjectId,
         target: carryAction.target,
       })

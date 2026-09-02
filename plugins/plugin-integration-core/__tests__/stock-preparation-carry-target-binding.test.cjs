@@ -35,6 +35,7 @@
 // defect got wrong.
 
 const assert = require('node:assert/strict')
+const { createHash } = require('node:crypto')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -72,6 +73,18 @@ const SANDBOX_SHEET = 'sheet_stock_prep_sandbox_twin'
 // lets T7-j witness its own headline: while both said `plm_stock_preparation_main`, an executor that
 // reported a hardcoded canonical id satisfied the assertion identically.
 const SANDBOX_OBJECT_ID = 'plm_stock_preparation_sandbox_m0'
+// The sheet the ATTACKER's tenant provisioned for the same objectId under its own project. Its
+// existence is what makes the wall's comparison the deciding clause rather than a presence check.
+const FOREIGN_TWIN_SHEET = 'sheet_stock_prep_sandbox_twin_of_tenant_zzz'
+// The sheet id a correctly-DERIVED binding would carry for (staging project, sandbox objectId).
+let DERIVED_SANDBOX_SHEET = ''
+
+/** The platform's own pure sheet-id derivation (provisioning.ts getObjectSheetId). */
+function derivedSheetId(projectId, objectId) {
+  const digest = createHash('sha1').update([projectId, objectId].join(':')).digest('hex').slice(0, 24)
+  return `sheet_${digest}`.slice(0, 50)
+}
+DERIVED_SANDBOX_SHEET = derivedSheetId(STAGING, SANDBOX_OBJECT_ID)
 const LEDGER_SHEET = 'sheet_confirmation_decisions'
 const OPERATOR = 'user_admin_1'
 
@@ -195,18 +208,22 @@ function targetFor(sheetId, { without = [] } = {}) {
  *   MAIN_SHEET    — an owner-configured PRODUCTION install: the canonical table holds them.
  * Neither is named inside the executor; both are the same code path with a different binding.
  */
-function substrate({ boundSheet = SANDBOX_SHEET, mainRows, sandboxRows, ledgerRows = [] } = {}) {
+function substrate({ boundSheet = SANDBOX_SHEET, mainRows, sandboxRows, ledgerRows = [], extraSheetOwners = {}, seedDerivedSheet = false } = {}) {
   const records = makeStrictRecordsApi({
     stagingProjectId: STAGING,
     objectIdBySheetId: {
       [MAIN_SHEET]: MAIN_OBJECT_ID,
       [SANDBOX_SHEET]: MAIN_OBJECT_ID,
+      [DERIVED_SANDBOX_SHEET]: MAIN_OBJECT_ID,
       [LEDGER_SHEET]: LEDGER_OBJECT_ID,
     },
     rowsBySheet: {
       [MAIN_SHEET]: mainRows || (boundSheet === MAIN_SHEET ? operatorRows() : decoyRows()),
       [SANDBOX_SHEET]: sandboxRows || (boundSheet === SANDBOX_SHEET ? operatorRows() : decoyRows()),
       [LEDGER_SHEET]: ledgerRows,
+      // The sheet a DERIVED binding would name. Seeded only for the legacy-install case, so every
+      // other fixture keeps exactly the two sheets it had.
+      ...(seedDerivedSheet ? { [DERIVED_SANDBOX_SHEET]: operatorRows() } : {}),
     },
   })
   // Provisioning still resolves the CANONICAL objectId to the canonical sheet — exactly as a real
@@ -216,7 +233,35 @@ function substrate({ boundSheet = SANDBOX_SHEET, mainRows, sandboxRows, ledgerRo
     stagingProjectId: STAGING,
     sheetIdByObjectId: { [MAIN_OBJECT_ID]: MAIN_SHEET, [SANDBOX_OBJECT_ID]: SANDBOX_SHEET, [LEDGER_OBJECT_ID]: LEDGER_SHEET },
   })
-  return { records, provisioning, target: targetFor(boundSheet), boundSheet }
+  // ---------------------------------------------------------------------------------------------
+  // THE SHEET-OWNERSHIP REGISTRY — a TWO-PROJECT stub, which is what the wall is actually decided by.
+  //
+  // The single-project fake above answers null for any project that is not the deployment's, so a
+  // foreign-tenant case resolved to "no sheet" and the wall's comparison was never the deciding
+  // clause: weakening it to a presence check kept every suite green while re-opening the
+  // cross-tenant write. This models the ordinary multi-tenant shape instead — the attacker tenant
+  // has ALSO provisioned its own stock-prep twin, so ownership really has to be COMPARED.
+  //
+  // Ownership is keyed by SHEET, exactly as `plugin_multitable_object_registry` keys it, and is
+  // deliberately independent of whether the sheet id is the derived one: that decoupling is the
+  // whole point of the fix (the 222 window keeps a hand-bound sheetId under a new objectId).
+  const sheetOwner = new Map([
+    [MAIN_SHEET, STAGING],
+    [SANDBOX_SHEET, STAGING],
+    [LEDGER_SHEET, STAGING],
+    // The attacker's own, separately-provisioned twin. Same objectId, different sheet, their project.
+    [FOREIGN_TWIN_SHEET, `${FOREIGN_TENANT}:integration-core`],
+  ])
+  for (const [sheetId, projectId] of Object.entries(extraSheetOwners)) sheetOwner.set(sheetId, projectId)
+  const provisioningCalls = { findSheetOwnerProjectId: [] }
+  provisioning.findSheetOwnerProjectId = async ({ sheetId } = {}) => {
+    provisioningCalls.findSheetOwnerProjectId.push(sheetId)
+    return sheetOwner.has(sheetId) ? sheetOwner.get(sheetId) : null
+  }
+  provisioning.getObjectSheetId = (projectId, objectId) => derivedSheetId(projectId, objectId)
+  provisioning.sheetOwner = sheetOwner
+  provisioning.ownerCalls = provisioningCalls.findSheetOwnerProjectId
+  return { records, provisioning, target: targetFor(boundSheet), boundSheet, sheetOwner }
 }
 
 function callInput(env, overrides = {}) {
@@ -293,8 +338,9 @@ function tableActionConfigFor(target) {
   }
 }
 
-function mountCarryRoute({ boundSheet = SANDBOX_SHEET, configured = true, targetOverride, memberVerdict = true } = {}) {
-  const env = substrate({ boundSheet })
+function mountCarryRoute({ boundSheet = SANDBOX_SHEET, configured = true, targetOverride, memberVerdict = true, extraSheetOwners, seedDerivedSheet = false, dropOwnershipPort = false } = {}) {
+  const env = substrate({ boundSheet, extraSheetOwners, seedDerivedSheet })
+  if (dropOwnershipPort) delete env.provisioning.findSheetOwnerProjectId
   // The host capability #5445 requires of every tenant-scoped operator surface: the plugin submits
   // two identity strings and receives one boolean. Injected exactly as the host injects it
   // (packages/core-backend/src/index.ts), so the carry route is exercised through the real seam.
@@ -939,6 +985,112 @@ async function main() {
     assert.equal(res.body.error.code, 'CONFIRM_CARRY_FIELD_NOT_BOUND')
     assert.deepEqual(res.body.error.details.fields, ['notes'],
       'T8g: the refusal names the carried column that is unbound, and only it')
+    assert.equal(env.records.patchCalls.length, 0)
+  })
+
+  await run('T9-g: the attacker OWNS a sheet of their own for the same objectId - ownership is COMPARED', async () => {
+    // THE SHAPE THE SUITE PREVIOUSLY OMITTED. The old fixture answered null for any project that was
+    // not the deployment's, so `!owner` alone decided every foreign-tenant case and the comparison
+    // was never exercised: weakening it to a presence check kept all 16 suites green while
+    // re-opening the cross-tenant write. Here the attacker's tenant has ALSO provisioned the twin,
+    // so the registry answers a project for BOTH sides and only the comparison can refuse.
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+    assert.equal(env.sheetOwner.get(FOREIGN_TWIN_SHEET), FOREIGN_TENANT + ':integration-core',
+      'T9-g: the attacker really does own a sheet - the registry is not answering null for them')
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: FOREIGN_ADMIN,
+      authenticatedTenantId: FOREIGN_TENANT,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH')
+    assert.deepEqual(env.provisioning.ownerCalls, [SANDBOX_SHEET],
+      'T9-g: the wall asked who owns the BOUND sheet, and refused on the answer')
+    assert.equal(env.records.queryCalls.length, 0)
+    assert.equal(env.records.patchCalls.length, 0)
+    assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, undefined)
+  })
+
+  await run('T9-h: the 222 window shape - a HAND-BOUND sheetId owned by the caller carries', async () => {
+    // 222-deploy-window-runbook-20260901.md Step 0-7 item 2 prescribes changing ONLY objectId into
+    // the sandbox namespace and KEEPING the existing sheetId. The binding's two halves then name
+    // different tuples and the sheet id is NOT the derived one - and that is a sanctioned,
+    // deployable config. It must carry. The earlier derived-id rule refused exactly this.
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+    assert.notEqual(SANDBOX_SHEET, DERIVED_SANDBOX_SHEET,
+      'T9-h: the bound sheetId really is NOT the derived one - otherwise this case proves nothing')
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      authenticatedTenantId: TENANT_ID,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, HUMAN_NOTE,
+      'T9-h: the human fields landed on the hand-bound sheet the deployment actually uses')
+  })
+
+  await run('T9-i: a sheet owned by ANOTHER project is refused even under the objectId of this caller', async () => {
+    const { routes, env } = mountCarryRoute({
+      boundSheet: SANDBOX_SHEET,
+      extraSheetOwners: { [SANDBOX_SHEET]: FOREIGN_TENANT + ':integration-core' },
+    })
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      authenticatedTenantId: TENANT_ID,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH')
+    assert.equal(env.records.patchCalls.length, 0)
+  })
+
+  await run('T9-j: an UNREGISTERED sheet is not a pass - it falls back to the derived id, then refuses', async () => {
+    // A registry miss means "unattributable", never "yours". For a write that lands human work in a
+    // customer table, an unprovable owner must not be permission. The fallback lets a pre-registry
+    // legacy install whose binding IS derived through (T9-k); anything else is refused with its OWN
+    // code, so an operator is sent to the binding rather than to a tenancy problem that is not there.
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+    env.provisioning.sheetOwner.delete(SANDBOX_SHEET)
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      authenticatedTenantId: TENANT_ID,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'CONFIRM_CARRY_TARGET_OWNER_UNKNOWN',
+      'T9-j: its own code - not the tenancy one, which would send the operator to the wrong place')
+    assert.equal(env.records.patchCalls.length, 0)
+  })
+
+  await run('T9-k: an unregistered but DERIVED binding still carries (the pre-registry legacy install)', async () => {
+    const { routes, env } = mountCarryRoute({
+      boundSheet: SANDBOX_SHEET,
+      seedDerivedSheet: true,
+      targetOverride(target) { return { ...target, sheetId: DERIVED_SANDBOX_SHEET } },
+    })
+    env.provisioning.sheetOwner.delete(DERIVED_SANDBOX_SHEET)
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      authenticatedTenantId: TENANT_ID,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.equal(rowByKey(env, DERIVED_SANDBOX_SHEET, NEW_KEY).data.notes, HUMAN_NOTE)
+  })
+
+  await run('T9-l: a host with no ownership port fails with the code that NAMES the missing port', async () => {
+    // E4: the wall is handed the RAW host surface, not a helper that has already refused on its own
+    // terms, so this branch is reachable and says which capability is absent instead of surfacing as
+    // a generic provisioning 503 about a different method.
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET, dropOwnershipPort: true })
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      authenticatedTenantId: TENANT_ID,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 501, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'CONFIRM_CARRY_PROVISIONING_UNAVAILABLE')
+    assert.deepEqual(res.body.error.details.requiredMethods, ['findSheetOwnerProjectId'])
     assert.equal(env.records.patchCalls.length, 0)
   })
 

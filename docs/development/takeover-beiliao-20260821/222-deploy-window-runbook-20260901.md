@@ -146,12 +146,33 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
      ```
      （objectId 必须匹配 `plugins/plugin-integration-core/lib/stock-preparation-target-provisioning.cjs:82` 的 `SANDBOX_OBJECT_ID_NAMESPACE_PATTERN`——`plm_stock_preparation_sandbox` 开头,后面接 `_`/`-` 或结尾。)
   2. 在 `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON`(部署既有的 action 配置,通常也在 `docker\app.env` 或它指向的文件里)中,给 `plm.stock-preparation.pull-bom.v1` 这条 action 显式写上同一个 objectId:
-     ```json
-     { "plm.stock-preparation.pull-bom.v1": { "target": { "objectId": "<同上 STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS 里那个值>", "sheetId": "<既有 sheetId,不变>" } } }
+     **`objectId` 改了,`sheetId` 必须一起重算——不能留用既有那个。** 本条早先写的是"`sheetId`:既有值,不变",那是错的,照做会出事:
+
+     - `assertStockPrepApplySandboxAllowed`(`stock-preparation-table-actions.cjs`)**只读 `objectId`**;
+     - 而 apply 实际写哪张表、导出实际读哪张表,用的是 **`target.sheetId`**(`stock-preparation-apply-writer.cjs` / `stock-preparation-prep-line-export.cjs` 都逐字取用)。
+
+     两者是**互相独立的字段**。于是"objectId 换成沙箱、sheetId 留着正式表那个"的组合会让沙箱门放行,然后**把行写进正式主表**——挂着沙箱的名,干着正式表的事,正好是 D1=B 要避免的那件事。
+
+     正确做法(二选一,都不需要连库):
      ```
+     # A. 离线推导(推荐,窗口前在开发机上就能跑完)
+     node scripts/ops/stock-preparation-derive-target-binding.mjs        --tenant-id <本部署 tenantId>        --object-id <本窗口沙箱 objectId>        --action-fragment
+     # 输出里的 sheetId / fieldIdMap 整段贴进 action 配置
+
+     # B. 或者调 ensure 让平台建表并回传绑定
+     POST /api/integration/stock-preparation/sandbox-target/ensure
+     ```
+     ```json
+     { "plm.stock-preparation.pull-bom.v1": { "target": { "objectId": "<同上 STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS 里那个值>", "sheetId": "<上面 A 或 B 输出的 sheetId,不是旧的那个>", "fieldIdMap": { "…": "同上输出" } } } }
+     ```
+     `fieldIdMap` 也必须跟着重算:物理列 id 是 `fld_+sha1(projectId:objectId:fieldId)`,objectId 一变**整张表的列 id 全变**,沿用旧 map 会让写入落到不存在的列上。
+
      不写 `target.objectId`(或写错)会默认成 canonical(`stock-preparation-table-actions.cjs:147-157`),导致 Step 6-2 在 `assertStockPrepApplySandboxAllowed` 那一步被无条件拒绝(`reason: prod_canonical`)。
   3. 若这次窗口装了 customer pack,确认 pack 配置(`INTEGRATION_CORE_STOCK_PREPARATION_CUSTOMER_PACKS_PATH` 指向的文件)里的 `targetObjectId` 是**同一个**沙箱 objectId——这条本来就只允许沙箱命名空间(`stock-preparation-customer-pack.cjs:269-285` 的 `normalizePackTargetObjectId`),不需要为 D1=B 额外改,只需要核对三处(env 允许清单、action 绑定、pack 目标)用的是同一个字符串,不是三个不同的沙箱 objectId。
-- 验证:三处配置里的沙箱 objectId 字符串完全一致(diff 一下三份配置文件里的这个值,不要靠肉眼扫);Step 3-3 部署预检不再报 `STOCK_PREP_SANDBOX_MODE_NOT_ENABLED` / `STOCK_PREP_SANDBOX_ALLOWLIST_MISSING_TARGET`。
+- 验证:
+  - 三处配置里的沙箱 objectId 字符串完全一致(diff 一下三份配置文件里的这个值,不要靠肉眼扫);
+  - **action 绑定里的 `sheetId` 等于上面 A/B 的输出**(把 derive 脚本再跑一次,和配置里的值对一下;两者不一致说明 objectId 换了而绑定没重算);
+  - Step 3-3 部署预检不再报 `STOCK_PREP_SANDBOX_MODE_NOT_ENABLED` / `STOCK_PREP_SANDBOX_ALLOWLIST_MISSING_TARGET` / `STOCK_PREP_CARRY_TARGET_HUMAN_FIELDS_UNBOUND`,且 `posture.carryTargetBinding.state` 不是 `not_derived`(是 `not_derived` 就说明 sheetId 与 objectId 指向两张不同的表——除非你**确知**这张手工绑定的表就是本租户要用的那张,否则按上面重算)。
 - 失败处理:三处不一致 → 以 action 绑定里的 `target.objectId` 为准改另外两处(action 绑定是唯一决定"apply 写到哪"的配置,allowlist 和 pack 目标都要跟着它,不是反过来)。
 
 ---

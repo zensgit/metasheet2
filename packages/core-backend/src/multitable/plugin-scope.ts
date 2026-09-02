@@ -36,6 +36,7 @@ export type MultitableScopeHooks = {
   assertObjectScope?: (input: AssertPluginObjectScopeInput) => Promise<void>
   claimObjectScope?: (input: ClaimPluginObjectScopeInput) => Promise<void>
   assertSheetScope?: (input: AssertPluginSheetScopeInput) => Promise<void>
+  findSheetOwnerProjectId?: (input: { sheetId: string }) => Promise<string | null>
   runStockPreparationPersistUnitOfWork?: <T>(
     input: StockPreparationPersistUnitOfWorkInput & { pluginName: string },
     operation: (records: MultitableRecordsWriteUnitOfWorkAPI) => Promise<T>,
@@ -149,6 +150,28 @@ export async function claimPluginObjectScope(
   }
 }
 
+/**
+ * The project that owns `sheetId`, or null when the registry has no row for it.
+ *
+ * Deliberately NOT plugin-filtered: the caller asks a tenancy question ("is this sheet in MY
+ * project"), and answering "no row" for a sheet owned by another plugin would turn a foreign-owned
+ * sheet into an unattributable one. The plugin-scoped wrapper decides what a foreign namespace means.
+ */
+export async function findSheetOwnerProjectId(
+  query: MultitableScopeQueryFn,
+  sheetId: string,
+): Promise<string | null> {
+  const result = await query(
+    `SELECT project_id
+     FROM plugin_multitable_object_registry
+     WHERE sheet_id = $1`,
+    [sheetId],
+  )
+  const row = (result.rows as Array<{ project_id?: unknown }>)[0]
+  if (!row) return null
+  return typeof row.project_id === 'string' && row.project_id.trim() ? row.project_id : null
+}
+
 export async function assertPluginOwnsSheet(
   query: MultitableScopeQueryFn,
   input: AssertPluginSheetScopeInput,
@@ -212,6 +235,23 @@ export function createPluginScopedMultitableApi(
       findObjectSheet: async (input) => {
         assertProjectIdAllowedForPlugin(pluginName, input.projectId)
         return multitable.provisioning.findObjectSheet(input)
+      },
+      // Reads the registry row for a sheet and returns its owning project. The namespace guard is
+      // applied to the ANSWER rather than to an argument, because the argument is a sheet id and the
+      // project is what comes back: a sheet owned by a project outside this plugin's namespaces is
+      // reported as null (not attributable to you) instead of throwing, so a tenancy check gets a
+      // usable "no" rather than an error it would have to interpret.
+      findSheetOwnerProjectId: async (input) => {
+        const projectId = hooks.findSheetOwnerProjectId
+          ? await hooks.findSheetOwnerProjectId({ sheetId: input.sheetId })
+          : await multitable.provisioning.findSheetOwnerProjectId(input)
+        if (!projectId) return null
+        try {
+          assertProjectIdAllowedForPlugin(pluginName, projectId)
+        } catch {
+          return null
+        }
+        return projectId
       },
       resolveFieldIds: async (input) => {
         assertProjectIdAllowedForPlugin(pluginName, input.projectId)
