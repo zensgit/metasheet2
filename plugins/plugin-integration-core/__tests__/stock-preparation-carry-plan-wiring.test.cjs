@@ -134,6 +134,16 @@ function adds(plan) {
 // decision, record, patch, changedFields entry, count, conflictSummary or
 // duplicate diagnostic moved. The invariant this golden guards (no carryPolicy
 // input => the carry wiring contributes nothing) is untouched.
+//
+// RE-PINNED AGAIN, independently, on the same discipline:
+// REGENERATED DELIBERATELY when the canonical template gained the five
+// human_preserved columns makeOrBuy / procurementDone / procurementReplyDate /
+// warehouseDone / actualArrivalDate: the plan's `summary.humanPreservedFields` —
+// the planner's report of what a refresh must NOT touch — is five entries longer.
+// FALSIFIED BEFORE ACCEPTING: taking the NEW plan and removing exactly those five ids
+// from that ONE array reproduces the PREVIOUS golden byte-for-byte, so every count,
+// every decision and the whole plmSystemFields band are unchanged. The invariant this
+// golden defends — "no carryPolicy input => pre-wiring behaviour" — still holds.
 // ---------------------------------------------------------------------------
 function representativePlanInput() {
   const addRow = row({ componentSourceId: 'PART-ADD' })
