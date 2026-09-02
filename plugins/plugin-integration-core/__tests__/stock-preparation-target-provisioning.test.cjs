@@ -475,6 +475,31 @@ async function main() {
     assert.equal(repaired.evidence.addedFieldCount, 1)
     assert.equal((calls.ensureMissingObjectFields || []).length, 1, 'canonical repair uses the additive-only primitive')
 
+    // (a2) EXISTING INSTALLS HEAL — the migration answer for 备料主表's three new PLM columns
+    //      (parentComponentCode / parentComponentName / componentSpec, 父组件图号 / 父组件名称 /
+    //      规格). A sheet provisioned before they existed is simply missing three plm_system
+    //      columns, which is precisely what this additive verb is for: no migration, no DDL script,
+    //      no touch to any pre-existing column (assertNoExistingFieldMutated proves that below).
+    const healCtx = createContext({
+      sheetExists: true,
+      missingFields: ['parentComponentCode', 'parentComponentName', 'componentSpec'],
+    })
+    const healed = await repairStockPreparationCanonicalTarget({ context: healCtx.context, projectId: 'proj_x', permission: 'admin' })
+    assert.equal(healed.ready, true)
+    assert.equal(healed.mode, 'canonical_repaired')
+    assert.equal(healed.evidence.addedFieldCount, 3, 'exactly the three new columns are added')
+    assert.equal(healCtx.calls.ensureMissingObjectFields.length, 1, 'one additive write')
+    assert.deepEqual(
+      healCtx.calls.ensureMissingObjectFields[0].fields.map((field) => field.id).sort(),
+      ['componentSpec', 'parentComponentCode', 'parentComponentName'],
+      'ONLY the missing columns are submitted — no pre-existing column is in the write at all',
+    )
+    // Idempotent: a second repair on the healed install writes nothing.
+    const alreadyCtx = createContext({ sheetExists: true, missingFields: [] })
+    const already = await repairStockPreparationCanonicalTarget({ context: alreadyCtx.context, projectId: 'proj_x', permission: 'admin' })
+    assert.equal(already.mode, 'canonical_already_ready')
+    assert.equal(already.evidence.addedFieldCount, 0)
+
     // (b) LOAD-BEARING: repair REJECTS a missing human_preserved field. The main table's
     //     8 human fields must never grow via a repair back door.
     const humanCtx = createContext({ sheetExists: true, missingFields: ['materialType'] })

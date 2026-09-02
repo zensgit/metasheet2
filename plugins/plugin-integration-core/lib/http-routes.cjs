@@ -6943,10 +6943,18 @@ function createHandlers(services, options = {}) {
         throw new HttpRouteError(400, 'STOCK_PREPARATION_PREP_LINE_EXPORT_REQUEST_INVALID', 'projectNo is required', { field: 'projectNo' })
       }
       const tenantId = resolveTenantId(req, input)
+      // READ THE TABLE APPLY WRITES. Resolved through the SAME seam every other stock-prep route
+      // uses to reach its target — getTableAction + assertStockPreparationTargetReady — so the read
+      // side cannot pick a different sheet from the write side. The first cut hardcoded the
+      // canonical objectId and resolved it through provisioning, which is empty on every default
+      // install: apply is sandbox-only unless an owner configured a production policy, so the rows
+      // are in the sandbox twin and every project answered 404.
+      const action = assertStockPreparationTargetReady(
+        await tableActions.getTableAction({ tenantId, actionId: PLM_STOCK_PREPARATION_ACTION_ID }),
+      )
       const exportResult = await exportStockPreparationPrepLines({
         recordsApi: getMultitableRecordsApi(),
-        provisioning: getMultitableProvisioning(),
-        targetProjectId: resolveIntegrationStagingProjectId(tenantId, undefined),
+        target: action.target,
         projectNo,
         permission: 'admin',
       })
