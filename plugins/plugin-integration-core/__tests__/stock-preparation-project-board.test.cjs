@@ -29,6 +29,7 @@
 //   B-06 the 404 costs the same audit row as a hit, and still leaks nothing.
 
 const assert = require('node:assert/strict')
+const fs = require('node:fs')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -48,8 +49,15 @@ const {
   PROJECT_OBJECT_ID,
 } = require(path.join(LIB, 'stock-preparation-operator-project-directory.cjs'))
 const {
+  BATCH_OBJECT_ID,
+  EXCEPTION_OBJECT_ID,
+  PREP_LINE_OBJECT_ID,
+} = require(path.join(LIB, 'stock-preparation-project-reads.cjs'))
+const {
+  STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
   STOCK_PREPARATION_PROJECT_BOARD_KEYS,
   STOCK_PREPARATION_PROJECT_BOARD_MODES,
+  readOperatorProjectBoard,
 } = require(path.join(LIB, 'stock-preparation-project-board.cjs'))
 const { STOCK_PREP_AUDIT_ACTIONS } = require(path.join(LIB, 'stock-preparation-audit-store.cjs'))
 const {
@@ -70,6 +78,13 @@ const MAIN_OBJECT_ID = 'plm_stock_preparation_main'
 const PROJECT_SHEET_A = 'sheet_project_a'
 const PROJECT_SHEET_B = 'sheet_project_b'
 const LEDGER_SHEET_A = 'sheet_ledger_a'
+// The three MVP snapshot sheets the ARCHIVED numbers are read out of. They are provisioned in this
+// fixture so the per-project loop over them is real work a cost assertion can measure (B-08) — and so
+// the board's snapshot numbers can be told apart from the numbers the operator's own pull produces
+// (B-11), which is the confusion that made a successful pull look like nothing happened.
+const BATCH_SHEET_A = 'sheet_batch_a'
+const EXCEPTION_SHEET_A = 'sheet_exception_a'
+const PREP_LINE_SHEET_A = 'sheet_prep_line_a'
 
 
 const PROJECT_A_NO = '230920006'
@@ -130,6 +145,12 @@ function decisionRow(stagingProjectId, sheetId, recordId, fields) {
   return row
 }
 
+function mvpRow(stagingProjectId, objectId, sheetId, recordId, fields) {
+  const row = physicalRow(stagingProjectId, objectId, fields, recordId)
+  row.sheetId = sheetId
+  return row
+}
+
 const EXPORT_AT = '2026-09-01T02:03:04.000Z'
 
 /**
@@ -150,6 +171,9 @@ function mount({
   auditAppend,
   auditEntries = [{ action: 'prep_line_export', createdAt: EXPORT_AT }],
   omitAuditList = false,
+  // How many OTHER projects tenant A's directory holds besides the one under test. The board is
+  // about ONE project, so its cost must not move when this does — see B-08.
+  extraProjects = 0,
 } = {}) {
   const routes = new Map()
 
@@ -158,6 +182,9 @@ function mount({
     sheetIdByObjectId: {
       [PROJECT_OBJECT_ID]: PROJECT_SHEET_A,
       [DECISION_OBJECT_ID]: LEDGER_SHEET_A,
+      [BATCH_OBJECT_ID]: BATCH_SHEET_A,
+      [EXCEPTION_OBJECT_ID]: EXCEPTION_SHEET_A,
+      [PREP_LINE_OBJECT_ID]: PREP_LINE_SHEET_A,
       ...(mainTableProvisioned ? { [MAIN_OBJECT_ID]: ownSheetIdFor(STAGING_A, MAIN_OBJECT_ID) } : {}),
     },
   })
@@ -167,8 +194,45 @@ function mount({
   })
   const recordsA = makeStrictRecordsApi({
     stagingProjectId: STAGING_A,
-    objectIdBySheetId: { [PROJECT_SHEET_A]: PROJECT_OBJECT_ID, [LEDGER_SHEET_A]: DECISION_OBJECT_ID },
+    objectIdBySheetId: {
+      [PROJECT_SHEET_A]: PROJECT_OBJECT_ID,
+      [LEDGER_SHEET_A]: DECISION_OBJECT_ID,
+      [BATCH_SHEET_A]: BATCH_OBJECT_ID,
+      [EXCEPTION_SHEET_A]: EXCEPTION_OBJECT_ID,
+      [PREP_LINE_SHEET_A]: PREP_LINE_OBJECT_ID,
+    },
     rowsBySheet: {
+      // THE ADMINISTRATOR'S ARCHIVED SNAPSHOT for this project — one persisted batch, one open
+      // exception, two prep lines (one held, one ready). These come from the mvp-persist path, which
+      // is platform-admin, so on an operator's own pull they stay EMPTY; the fixture keeps them
+      // populated precisely so the two number families can be told apart.
+      [BATCH_SHEET_A]: [
+        mvpRow(STAGING_A, BATCH_OBJECT_ID, BATCH_SHEET_A, 'rec_batch_a1', {
+          snapshotBatchId: 'batch_a1',
+          projectId: PROJECT_A_ID,
+          snapshotStatus: 'active',
+        }),
+      ],
+      [EXCEPTION_SHEET_A]: [
+        mvpRow(STAGING_A, EXCEPTION_OBJECT_ID, EXCEPTION_SHEET_A, 'rec_exc_a1', {
+          exceptionId: 'exc_a1',
+          projectId: PROJECT_A_ID,
+          exceptionType: 'missing_mapping',
+          status: 'open',
+        }),
+      ],
+      [PREP_LINE_SHEET_A]: [
+        mvpRow(STAGING_A, PREP_LINE_OBJECT_ID, PREP_LINE_SHEET_A, 'rec_line_a1', {
+          stockPrepLineId: 'line_a1',
+          projectId: PROJECT_A_ID,
+          prepStatus: 'held',
+        }),
+        mvpRow(STAGING_A, PREP_LINE_OBJECT_ID, PREP_LINE_SHEET_A, 'rec_line_a2', {
+          stockPrepLineId: 'line_a2',
+          projectId: PROJECT_A_ID,
+          prepStatus: 'ready',
+        }),
+      ],
       [PROJECT_SHEET_A]: [
         projectRow(STAGING_A, PROJECT_SHEET_A, 'rec_a1', {
           projectId: PROJECT_A_ID,
@@ -177,6 +241,18 @@ function mount({
           projectStatus: 'active',
           lastSyncRunId: 'run_a1',
         }),
+        ...Array.from({ length: extraProjects }, (_unused, index) => projectRow(
+          STAGING_A,
+          PROJECT_SHEET_A,
+          `rec_a_extra_${index}`,
+          {
+            projectId: `stockprep_project_extra_${index}`,
+            sourceProjectNo: `EXTRA-${index}`,
+            projectName: `其他项目 ${index}`,
+            projectStatus: 'active',
+            lastSyncRunId: `run_extra_${index}`,
+          },
+        )),
       ],
       [LEDGER_SHEET_A]: [
         decisionRow(STAGING_A, LEDGER_SHEET_A, 'rec_d1', {
@@ -242,8 +318,10 @@ function mount({
       throw new Error('unexpected provisioning write: ensureObjectDefaultView')
     },
   })
+  let queryCalls = 0
   const records = counted({
     async queryRecords(input = {}) {
+      queryCalls += 1
       const sheetId = input && input.sheetId
       if (sheetId === PROJECT_SHEET_B) return recordsB.queryRecords(input)
       return recordsA.queryRecords(input)
@@ -304,7 +382,13 @@ function mount({
     services,
     logger: { info() {}, warn() {}, error() {} },
   })
-  return { routes, auditAppends, auditListCalls, hostCallCount: () => hostCalls }
+  return {
+    routes,
+    auditAppends,
+    auditListCalls,
+    hostCallCount: () => hostCalls,
+    queryCallCount: () => queryCalls,
+  }
 }
 
 function createResponse() {
@@ -628,12 +712,121 @@ async function anAuditStoreWithoutListStillAnswersTheBoard() {
   assert.equal(res.body.data.lastExportAt, null)
 }
 
+// ---------------------------------------------------------------------------
+// B-08 — ONE PROJECT'S BOARD COSTS ONE PROJECT'S QUERIES
+// ---------------------------------------------------------------------------
+//
+// The first cut answered this route by walking the caller's ENTIRE directory — 3 record queries per
+// project in the tenant, plus a hard 422 above MAX_LIST_ROWS projects — to find one row. That is not
+// a performance nit on a page an operator opens at 07:00 with one number in their hand: it is a page
+// whose cost is set by somebody else's project count, and a tenant that grows past the list bound
+// loses the board entirely for every project, including the one being asked about.
+//
+// The assertion is deliberately a SHAPE, not a magic number: the same board read, against a
+// directory with one project and against a directory with seven, must cost the SAME queries. That
+// stays true under any later refactor that keeps the read narrowed, and goes red the moment somebody
+// re-widens it.
+async function oneProjectsBoardCostsOneProjectsQueries() {
+  const lone = mount()
+  await callBoard(lone.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+  const loneQueries = lone.queryCallCount()
+
+  const crowded = mount({ extraProjects: 6 })
+  const res = await callBoard(crowded.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+  assert.equal(res.statusCode, 200, 'B-08: the crowded directory still answers')
+  assert.equal(res.body.data.projectNo, PROJECT_A_NO, 'B-08: and it answers about the RIGHT project')
+
+  assert.equal(
+    crowded.queryCallCount(),
+    loneQueries,
+    `B-08: a board read must not cost more because the tenant has more projects (1 project: ${loneQueries} queries, 7 projects: ${crowded.queryCallCount()})`,
+  )
+  assert.ok(loneQueries <= 8, `B-08: and the fixed cost stays small, got ${loneQueries}`)
+
+  // A MISS is narrowed the same way — otherwise the cheap path would be the hit and the expensive
+  // one the typo, which is the wrong way round for a search box.
+  const miss = mount({ extraProjects: 6 })
+  const missRes = await callBoard(miss.routes, { user: OPERATOR_A, projectNo: UNKNOWN_PROJECT_NO })
+  assert.equal(missRes.statusCode, 404)
+  assert.ok(
+    miss.queryCallCount() <= loneQueries,
+    `B-08: a miss costs no more than a hit, got ${miss.queryCallCount()}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// B-09 — THE MODULE'S OWN FAIL-CLOSED SCOPE GUARD
+// ---------------------------------------------------------------------------
+//
+// `readOperatorProjectBoard` refuses outright when it is handed no resolved operator scope. Every
+// route-level case above enters through the handler, which always resolves one — so disabling that
+// guard left all nine plugin suites green. It is the module's promise that it cannot be reached from
+// a route that forgot to establish who is asking, so it is asserted by DIRECT CALL, the only way
+// that promise is expressible.
+async function theModuleRefusesToProjectAValueWithoutAScope() {
+  const provisioning = {
+    async findObjectSheet() { throw new Error('B-09: no IO may happen before the scope guard') },
+  }
+  const recordsApi = {
+    async queryRecords() { throw new Error('B-09: no IO may happen before the scope guard') },
+  }
+  for (const [label, scope] of [
+    ['no scope at all', null],
+    ['undefined scope', undefined],
+    ['a scope with an empty tenant', { tenantId: '' }],
+    ['a scope with a whitespace tenant', { tenantId: '   ' }],
+    ['a scope with no tenant key', {}],
+  ]) {
+    await assert.rejects(
+      () => readOperatorProjectBoard({
+        recordsApi,
+        provisioning,
+        targetProjectId: STAGING_A,
+        scope,
+        projectNo: PROJECT_A_NO,
+      }),
+      (error) => {
+        assert.equal(error.code, 'PROJECT_BOARD_SCOPE_REQUIRED', `B-09: ${label}`)
+        assert.equal(error.status, 500, `B-09: ${label} fails closed as a server fault, not a 4xx the caller can shape`)
+        return true
+      },
+      `B-09: ${label} must be refused before any read`,
+    )
+  }
+}
+
+// ---------------------------------------------------------------------------
+// B-10 — THE DEEP LINK'S VIEW ID IS THE HOST'S, NOT A HAND-COPIED LITERAL
+// ---------------------------------------------------------------------------
+//
+// `STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID` must be the same token the host's own default-view
+// provisioning creates (`DEFAULT_OBJECT_VIEW_LOGICAL_ID`). Nothing enforced that: changing the
+// plugin's copy to any other string kept every suite green and shipped a link to a view that does
+// not exist. Mirrored byte-for-byte out of the host source, in the same style B-01's vocabulary
+// mirror uses.
+function theFillViewIdMirrorsTheHostsDefaultViewId() {
+  const provisioningSrc = fs.readFileSync(
+    path.join(__dirname, '..', '..', '..', 'packages', 'core-backend', 'src', 'multitable', 'provisioning.ts'),
+    'utf8',
+  )
+  const match = provisioningSrc.match(/export const DEFAULT_OBJECT_VIEW_LOGICAL_ID = '([^']+)'/)
+  assert.ok(match, 'B-10: the host still declares DEFAULT_OBJECT_VIEW_LOGICAL_ID')
+  assert.equal(
+    STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
+    match[1],
+    'B-10: the fill deep link must name the view id the host\'s own default-view provisioning creates',
+  )
+}
+
 async function main() {
   await onlyTheOperatorTierReachesTheBoard()
   await anotherTenantsProjectIsIndistinguishableFromNoProject()
   await theBoardAnswersWithHandlesCountsAndTheProjectsOwnNameOnly()
   await theAuditRowIsValuesFreeAndPrecedesTheValues()
   await theDeepLinkHandleAppearsOnlyWhenTheFillTableExists()
+  await oneProjectsBoardCostsOneProjectsQueries()
+  await theModuleRefusesToProjectAValueWithoutAScope()
+  theFillViewIdMirrorsTheHostsDefaultViewId()
   await anAuditStoreWithoutListStillAnswersTheBoard()
   console.log('✓ stock-preparation-project-board')
 }
