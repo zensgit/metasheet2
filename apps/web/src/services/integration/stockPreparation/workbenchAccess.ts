@@ -42,7 +42,14 @@ export const STOCK_PREP_ROUTE_PERMISSION = STOCK_PREP_READ
  */
 export const STOCK_PREP_OPERATOR_PULL_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
 
-/** The pull steps that MOVED to the operator tier, each naming the legacy gate it also still keeps. */
+/**
+ * The pull steps that MOVED to the operator tier, each naming the legacy gate it also still keeps.
+ *
+ * The eight `large-bom-*` members are the BOUNDED BACKGROUND CHANNEL — the same pull, taken in
+ * pieces because the BOM is too big to expand in one request. The panel switches to them BY ITSELF,
+ * so leaving them out of the split (as the first cut did) meant the operator was admitted to the
+ * easy pull and refused the hard one, underneath copy promising 「不用重新点同步,也不用联系我们」.
+ */
 export const STOCK_PREP_OPERATOR_PULL_STEPS: readonly { step: string; method: string; path: string; legacyGate: string }[] = Object.freeze([
   Object.freeze({
     step: 'dry-run',
@@ -54,6 +61,54 @@ export const STOCK_PREP_OPERATOR_PULL_STEPS: readonly { step: string; method: st
     step: 'apply',
     method: 'POST',
     path: '/api/integration/table-actions/:actionId/apply',
+    legacyGate: 'write',
+  }),
+  Object.freeze({
+    step: 'large-bom-expansion-start',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'large-bom-expansion-get',
+    method: 'GET',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'large-bom-expansion-run',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'large-bom-expansion-plan',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/plan',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'large-bom-apply-start',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs',
+    legacyGate: 'write',
+  }),
+  Object.freeze({
+    step: 'large-bom-apply-get',
+    method: 'GET',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'large-bom-apply-run',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId/run',
+    legacyGate: 'write',
+  }),
+  Object.freeze({
+    step: 'large-bom-expansion-cancel',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/cancel',
     legacyGate: 'write',
   }),
 ])
