@@ -392,7 +392,7 @@ describe('collectPlatformApps — install-page manifest sections', () => {
     expect(app.posture?.mode).toBe('reported-not-installed')
     expect(app.posture?.installerMayModify).toBe(false)
     expect((app.posture?.entries ?? []).map((entry) => entry.id).sort())
-      .toEqual(['b2aTrialRegistry', 'k3ExternalWrite', 'outboundHttpWrite', 'productionApply'])
+      .toEqual(['b2aTrialRegistry', 'carryTargetBinding', 'k3ExternalWrite', 'outboundHttpWrite', 'productionApply'])
 
     // Deployment data the page must MARK as such rather than offer a field for. `stockPrepHandoff`
     // (通知下一步) is deployment data of exactly this class: an uncommitted JSON file on the deploy

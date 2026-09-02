@@ -192,6 +192,12 @@ export const STOCK_PREP_POSTURE_PLAIN: Record<string, StockPrepPlainEntry> = Obj
     zhNext: '没有配置任何外发目标,这是正确状态,不是漏配。',
     enNext: 'No outbound target is configured — that is the correct state, not a missing setting.',
   }),
+  carryTargetBinding: Object.freeze({
+    zh: '目标表绑定的两半是否指向同一张表',
+    en: 'Whether both halves of the target binding name the same table',
+    zhNext: '写着"未按推导"不是故障,也不会拦住任何操作——手工绑定的表是允许的。只是两半指向不同的表通常是改配置时手滑,所以摆出来看一眼。',
+    enNext: '"Not derived" is not a fault and blocks nothing — a hand-bound table is allowed. It is shown because two halves naming different tables is usually a slip while editing the config.',
+  }),
 })
 
 export function stockPrepPosturePlain(id: string): StockPrepPlainEntry | null {
