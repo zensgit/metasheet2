@@ -422,6 +422,9 @@ npx vitest run \
   approval-explanation-field \
   approval-explanation-inline-editor \
   approval-lock8-field-type-census \
+  approval-department-field \
+  approvalDepartmentPicker \
+  searchApprovalDirectoryDepartments \
   approval-node-operation-policy \
   approval-member-bar-operation-policy --reporter=dot
 npx vitest run featureFlagsApprovalAttachments --reporter=dot
