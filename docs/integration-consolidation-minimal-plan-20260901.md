@@ -152,7 +152,7 @@ Bridge transport 有明确部署约束：MetaSheet backend/plugin runtime 与 Br
 
 - 给 `integration_external_systems` 增加 nullable `connection_id`。
 - 建立到现有 `data_sources.id` 的 `ON DELETE RESTRICT` 引用约束；迁移阶段允许为空。
-- 给 `data_sources` 增加 nullable `tenant_id` 和 `scope_kind`；`scope_kind` 闭集为 `legacy_private | private | workspace`，现有记录默认 `legacy_private`。
+- 给 `data_sources` 增加 nullable `tenant_id` 和 `scope_kind`；`scope_kind` 闭集为 `legacy_private | private | workspace`，现有记录回填为 `legacy_private`，新建记录默认 `private`（workspace 共享须显式选择）。
 - 保留所有 external system ID、Pipeline FK 和 sealed authority 证据。
 - 不修改旧 057 migration。
 
@@ -180,7 +180,7 @@ tenant schema 决策写死如下：
 - 新旧读取路径的 schema、对象列表和只读查询结果一致。
 - 两个 Binding 可以复用一个 Connection，且不复制 secret。
 - 仅对迁移回填且仍保留 `config.dataSourceId` 的旧 Binding，将 `connection_id` 置空后可以回退 legacy 路径。
-- 新建 canonical Binding 的 `connection_id` 不可为空；缺失时返回配置错误。
+- 新建 `data-source:sql-readonly` 类 Binding 的 `connection_id` 不可为空；缺失时返回配置错误。（HTTP/K3/PLM Binding 本阶段合法地没有 `connection_id`，不受此条约束。）
 - tenant 不一致或旧记录 tenant 未确认时，不得扩大为 workspace/service 使用。
 
 ### PR-2：权限、引用追踪和安全删除
