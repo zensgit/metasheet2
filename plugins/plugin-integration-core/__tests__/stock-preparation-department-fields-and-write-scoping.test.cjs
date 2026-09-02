@@ -26,13 +26,21 @@
 //      => the platform's own field_permissions rows, addressed by PHYSICAL field id.
 //      Declaration WITHOUT a port => fail closed, never a silent skip.
 //
-//   E. A PACK REVISION THAT MOVES A COLUMN'S OWNER CANNOT SUCCEED SILENTLY. The port is
-//      upsert-only by design (no revoke path), so the denial row v1 wrote for the OLD
-//      owner survives v2 and the column ends up read-only for BOTH declared roles. The
-//      install and the dry-run must both SURFACE that as `staleWriteScopes` rather than
-//      report a clean `applied=N`. A port that cannot be read at all reports
-//      `writeScopeCheck: 'unsupported_port'` and a NULL list -- never an empty one, which
-//      would read as "checked, nothing stale".
+//   E. A PACK REVISION THAT MOVES A COLUMN'S OWNER IS RECONCILED, NOT JUST REPORTED. An
+//      upsert-only port leaves v1's denial for the OLD owner standing beside v2's for the
+//      new one, and the write gate ORs `read_only` across a user's rows -- so the column
+//      ends up unwritable by BOTH declared roles while the install reports `applied=N`.
+//      The install now passes the pack's governed (columns x roles) rectangle to the port,
+//      which retires its OWN stale denials inside it in the same transaction, and reports
+//      them as `removedWriteScopes`. The three things it must NOT reach are asserted
+//      directly: an OPERATOR-authored row, a plugin row for an undeclared role, and any
+//      row on a column no policy claims -- those stay, and are handed to the operator as
+//      `staleWriteScopes` (each tagged `inReconcileRegion`, which is the line the dry-run
+//      splits "about to be fixed" from "a human must clear this" along). A host too old to
+//      accept the rectangle reports `unsupported_port` + a NULL `removedWriteScopes` --
+//      never [], which would read as "reconciled, nothing to retire" -- and degrades to
+//      the report-only behaviour. A port that cannot be read at all likewise reports
+//      `writeScopeCheck: 'unsupported_port'` and a NULL stale list.
 //
 //   F. AN UNKNOWN ROLE IS A CODED 422, REFUSED BEFORE THE FIRST SCHEMA WRITE. The pack's
 //      regex says nothing about whether the role EXISTS; only the host knows. The
@@ -72,6 +80,12 @@ const {
 const {
   crossProjectPrefillCandidates,
 } = require(path.join(LIB, 'stock-preparation-suggestion-operators.cjs'))
+
+// The REAL ledger store's values-free guard. Used to prove the summary the installer hands the
+// ledger is a shape a LIVE store would accept, rather than one only this suite's fake tolerates.
+const {
+  __internals: packInstallStoreInternals,
+} = require(path.join(LIB, 'stock-preparation-pack-install-store.cjs'))
 
 const applyWriter = require(path.join(LIB, 'stock-preparation-apply-writer.cjs'))
 
@@ -599,24 +613,58 @@ function applyHelperIsPure() {
 // `field_permissions` table as this port sees it: only what THIS plugin ever wrote
 // (created_by = the plugin marker), which is exactly the census the real service's
 // listRoleWriteScopes performs.
-function createStatefulPort({ withRead = true, withRoleCheck = true, knownRoleIds = null } = {}) {
+// `createdBy` mirrors the real table's provenance column. Only rows carrying the plugin marker are
+// this port's; anything else is an OPERATOR row, which the census hides and the reconcile may never
+// delete. The host-side unit suite proves the real SQL enforces the same thing.
+const PLUGIN_MARKER = 'plugin:plugin-integration-core/stock-preparation'
+
+function createStatefulPort({
+  withRead = true,
+  withRoleCheck = true,
+  knownRoleIds = null,
+  // An OLDER host: its applyRoleWriteScopes ignores the `reconcile` argument entirely and returns
+  // no `removed` array, which the installer must detect rather than assume.
+  withReconcile = true,
+} = {}) {
   const rows = new Map()
   const port = {
     rows,
     applyCalls: [],
-    async applyRoleWriteScopes({ sheetId, entries }) {
-      this.applyCalls.push({ sheetId, entries })
-      // UPSERT-ONLY, exactly like the real port: an entry that is no longer derived is
-      // never removed, which is the whole hazard section E exists to catch.
-      for (const entry of entries) rows.set(`${entry.fieldId} ${entry.roleId}`, { ...entry, sheetId })
-      return { applied: entries.length, entries }
+    async applyRoleWriteScopes({ sheetId, entries, reconcile }) {
+      this.applyCalls.push({ sheetId, entries, reconcile })
+      // UPSERT, exactly like the real port.
+      for (const entry of entries) {
+        rows.set(`${entry.fieldId} ${entry.roleId}`, { ...entry, sheetId, createdBy: PLUGIN_MARKER })
+      }
+      if (!withReconcile || !reconcile) return { applied: entries.length, entries }
+
+      // THE SCOPED RECONCILE, mirroring the real statement's four narrowings verbatim: this
+      // plugin's rows only, inside the declared (columns × roles) region only, never a row this
+      // same call just wrote. A fake that deleted more broadly would make the safety assertions
+      // below vacuous, so it deliberately does not.
+      const desired = new Set(entries.map((entry) => `${entry.fieldId} ${entry.roleId}`))
+      const fieldIds = new Set(reconcile.fieldIds)
+      const roleIds = new Set(reconcile.roleIds)
+      const removed = []
+      for (const [key, row] of [...rows.entries()]) {
+        if (row.sheetId !== sheetId) continue
+        if (row.createdBy !== PLUGIN_MARKER) continue
+        if (!fieldIds.has(row.fieldId) || !roleIds.has(row.roleId)) continue
+        if (desired.has(key)) continue
+        rows.delete(key)
+        removed.push({ fieldId: row.fieldId, roleId: row.roleId })
+      }
+      removed.sort((left, right) => (left.fieldId === right.fieldId
+        ? left.roleId.localeCompare(right.roleId)
+        : left.fieldId.localeCompare(right.fieldId)))
+      return { applied: entries.length, entries, removed }
     },
   }
   if (withRead) {
     port.listRoleWriteScopes = async ({ sheetId }) => ({
       sheetId,
       entries: [...rows.values()]
-        .filter((row) => row.sheetId === sheetId)
+        .filter((row) => row.sheetId === sheetId && row.createdBy === PLUGIN_MARKER)
         .map(({ fieldId, roleId }) => ({ fieldId, roleId })),
     })
   }
@@ -674,38 +722,135 @@ async function ownershipTransferIsNeverASilentSuccess() {
     'v1 denied purchasing the column the warehouse owned',
   )
 
-  // v2: the SAME column changes hands. The port has no revoke path, so the v1 row for
-  // purchasing survives while a new row for the warehouse lands - the column is now
-  // read-only for BOTH.
+  // v2: the SAME column changes hands. THE HEADLINE — v1's denial for purchasing is RETIRED in the
+  // same call that writes v2's denial for the warehouse, so the column ends up denied to exactly
+  // one role. Without the reconcile both rows stand, `loadFieldPermissionScopeMap` ORs `read_only`
+  // across them, and the column is unwritable by EVERY declared role while the install reports a
+  // clean applied=N.
   const v2 = await installWith(port, V2_POLICIES, 2)
   assert.ok(
-    port.rows.has(`${physical('actualArrivalDate')} ${ROLE_WAREHOUSE}`)
-      && port.rows.has(`${physical('actualArrivalDate')} ${ROLE_PURCHASING}`),
-    'the hazard is real: after v2 the column carries a denial for BOTH declared roles',
+    port.rows.has(`${physical('actualArrivalDate')} ${ROLE_WAREHOUSE}`),
+    'v2 denies the warehouse, which no longer owns the column',
+  )
+  assert.ok(
+    !port.rows.has(`${physical('actualArrivalDate')} ${ROLE_PURCHASING}`),
+    'and v1\'s denial for purchasing — the role that now OWNS it — is gone, not merely reported',
   )
 
-  // THE FIX: the install refuses to report that as a clean success.
-  assert.equal(v2.writeScopeCheck, 'checked')
-  assert.equal(v2.staleWriteScopeCount, 1)
-  assert.deepEqual(v2.staleWriteScopes, [
-    { fieldId: physical('actualArrivalDate'), logicalFieldId: 'actualArrivalDate', roleId: ROLE_PURCHASING },
-  ], 'the orphaned v1 denial is named, by BOTH its physical and its logical id')
-
+  // The retirement is NAMED, never silent.
+  assert.equal(v2.writeScopeReconcile, 'reconciled')
+  assert.equal(v2.removedWriteScopeCount, 1)
+  assert.deepEqual(v2.removedWriteScopes, [
+    { fieldId: physical('actualArrivalDate'), roleId: ROLE_PURCHASING },
+  ], 'the retired v1 denial is reported back in the port\'s own shape')
   // Values-free: ids and role ids only, no labels and no values.
-  for (const stale of v2.staleWriteScopes) {
-    assert.deepEqual(Object.keys(stale).sort(), ['fieldId', 'logicalFieldId', 'roleId'])
+  for (const removed of v2.removedWriteScopes) {
+    assert.deepEqual(Object.keys(removed).sort(), ['fieldId', 'roleId'])
   }
 
-  // IDEMPOTENT DETECTION, not a growing pile: re-running v2 reports the same one row.
-  const again = await installWith(port, V2_POLICIES, 2)
-  assert.deepEqual(again.staleWriteScopes, v2.staleWriteScopes, 're-running v2 reports the same stale row')
+  // AND the census that used to carry it now reports nothing left over: the reconcile reached it.
+  assert.equal(v2.writeScopeCheck, 'checked')
+  assert.equal(v2.staleWriteScopeCount, 0)
+  assert.deepEqual(v2.staleWriteScopes, [], 'nothing is left for an operator to clear by hand')
 
-  // POSITIVE CONTROL - the assertion is not vacuous. A converged sheet whose declaration
-  // did NOT move reports an empty list, so `[]` still means something.
+  // THE REGION IS EXACTLY THE PACK'S, NOT THE SHEET. The delete request the installer sent names
+  // only the columns this pack's policies claim and only the roles it declares — which is what
+  // keeps another consumer's rows on the same canonical sheet out of reach.
+  const v2Call = port.applyCalls[port.applyCalls.length - 1]
+  assert.deepEqual(v2Call.reconcile.roleIds.slice().sort(), [ROLE_PURCHASING, ROLE_WAREHOUSE].sort())
+  assert.deepEqual(
+    v2Call.reconcile.fieldIds.slice().sort(),
+    ['procurementReply', 'procurementDone', 'procurementReplyDate', 'actualArrivalDate', 'warehouseConfirmation', 'warehouseDone']
+      .map(physical).sort(),
+    'the governed rectangle is the union of ownsFieldIds — never every column on the sheet',
+  )
+
+  // IDEMPOTENT: a second v2 has nothing left to retire, and says so with [] rather than null.
+  const again = await installWith(port, V2_POLICIES, 2)
+  assert.deepEqual(again.removedWriteScopes, [], 're-running a converged v2 retires nothing')
+  assert.equal(again.staleWriteScopeCount, 0)
+
+  // POSITIVE CONTROL - the assertion is not vacuous. A declaration that did NOT move retires
+  // nothing on the second run either, so `[]` still means something.
   const clean = createStatefulPort()
   await installWith(clean, V1_POLICIES, 1)
   const reinstalled = await installWith(clean, V1_POLICIES, 1)
-  assert.deepEqual(reinstalled.staleWriteScopes, [], 'an unchanged declaration leaves nothing stale')
+  assert.deepEqual(reinstalled.removedWriteScopes, [], 'an unchanged declaration retires nothing')
+  assert.deepEqual(reinstalled.staleWriteScopes, [], 'and leaves nothing stale')
+}
+
+// THE OTHER HALF OF THE SAFETY PROPERTY: what the reconcile must NOT reach. Two rows sit on the
+// same sheet and the same column the pack governs — one authored by an OPERATOR, one written by
+// this plugin for a role the pack does not declare. A v2 install must retire neither.
+async function reconcileNeverReachesRowsItDoesNotOwn() {
+  const port = createStatefulPort()
+  await installWith(port, V1_POLICIES, 1)
+
+  const OTHER_ROLE = 'plugin-integration-core:bom-prep:quality'
+  // (a) An operator's own denial, on a column this pack DOES govern and a role it DOES declare —
+  //     inside the rectangle on every axis except the one that matters, provenance.
+  port.rows.set(`${physical('procurementReply')} ${ROLE_WAREHOUSE}`, {
+    fieldId: physical('procurementReply'),
+    roleId: ROLE_WAREHOUSE,
+    sheetId: 'sheet_dept',
+    createdBy: 'operator:univer-meta-authoring-route',
+  })
+  // (b) This plugin's own row for a role OUTSIDE the pack's declared set (a neighbouring pack, or a
+  //     wider earlier revision). Same column, same provenance marker — only the role is out of range.
+  port.rows.set(`${physical('procurementReply')} ${OTHER_ROLE}`, {
+    fieldId: physical('procurementReply'),
+    roleId: OTHER_ROLE,
+    sheetId: 'sheet_dept',
+    createdBy: PLUGIN_MARKER,
+  })
+
+  const v2 = await installWith(port, V2_POLICIES, 2)
+
+  assert.ok(
+    port.rows.has(`${physical('procurementReply')} ${ROLE_WAREHOUSE}`),
+    'the OPERATOR row survives — provenance, not position, is what puts a row out of reach',
+  )
+  assert.ok(
+    port.rows.has(`${physical('procurementReply')} ${OTHER_ROLE}`),
+    'and so does a plugin row for a role this pack does not declare',
+  )
+  assert.deepEqual(
+    v2.removedWriteScopes,
+    [{ fieldId: physical('actualArrivalDate'), roleId: ROLE_PURCHASING }],
+    'exactly the one in-region orphan is retired, and nothing else',
+  )
+  // The out-of-region plugin row is not silently ignored either: it is REPORTED as stale, because
+  // only an operator can decide about it.
+  assert.deepEqual(v2.staleWriteScopes, [
+    {
+      fieldId: physical('procurementReply'),
+      logicalFieldId: 'procurementReply',
+      roleId: OTHER_ROLE,
+      inReconcileRegion: false,
+    },
+  ], 'what the reconcile may not touch is handed to the operator by name')
+  assert.equal(v2.staleWriteScopeCount, 1)
+}
+
+// An OLDER host whose port ignores the region must degrade VISIBLY, never be assumed to have
+// reconciled. `null` and `[]` are different answers and stay different.
+async function anOlderPortDegradesVisiblyRatherThanSilently() {
+  const port = createStatefulPort({ withReconcile: false })
+  await installWith(port, V1_POLICIES, 1)
+  const v2 = await installWith(port, V2_POLICIES, 2)
+
+  assert.equal(v2.writeScopeReconcile, 'unsupported_port')
+  assert.equal(v2.removedWriteScopes, null, 'null — never [], which would read as "reconciled, nothing to retire"')
+  assert.equal(v2.removedWriteScopeCount, 0)
+  // The old hazard is still REPORTED on such a host, which is the previous behaviour intact.
+  assert.deepEqual(v2.staleWriteScopes, [
+    {
+      fieldId: physical('actualArrivalDate'),
+      logicalFieldId: 'actualArrivalDate',
+      roleId: ROLE_PURCHASING,
+      inReconcileRegion: true,
+    },
+  ], 'an un-reconciled orphan is still named, and marked as one the install SHOULD have healed')
 }
 
 async function dryRunPreviewsTheDenialPlanAndTheStaleRows() {
@@ -723,8 +868,22 @@ async function dryRunPreviewsTheDenialPlanAndTheStaleRows() {
   assert.equal(plan.fieldPermissionsPortAvailable, true)
   assert.equal(plan.writeScopeCheck, 'checked')
   assert.deepEqual(plan.staleWriteScopes, [
-    { fieldId: physical('actualArrivalDate'), logicalFieldId: 'actualArrivalDate', roleId: ROLE_PURCHASING },
+    {
+      fieldId: physical('actualArrivalDate'),
+      logicalFieldId: 'actualArrivalDate',
+      roleId: ROLE_PURCHASING,
+      inReconcileRegion: true,
+    },
   ])
+  // AND THE SPLIT A DEPLOYER ACTS ON. The one orphan is inside the pack's governed rectangle, so
+  // the install will retire it — it belongs in the "about to be fixed" list, NOT on the operator's
+  // to-do list. Reporting it in both would overstate the manual work by exactly the rows the
+  // reconcile handles.
+  assert.deepEqual(plan.willRemoveWriteScopes, plan.staleWriteScopes)
+  assert.deepEqual(plan.operatorMustClearWriteScopes, [])
+  assert.equal(plan.counts.willRemoveWriteScopes, 1)
+  assert.equal(plan.counts.operatorMustClearWriteScopes, 0)
+  assert.equal(plan.counts.staleWriteScopes, 1)
 
   // THE DERIVED DENIAL PLAN itself - "what install will do" - visible before it happens.
   assert.equal(plan.counts.fieldWriteDenials, plan.fieldWriteDenials.length)
@@ -911,6 +1070,152 @@ async function aLateRoleRejectionIsStillCodedNotAnUncoded500() {
 }
 
 
+
+// THE LEDGER ROW MUST DESCRIBE THE PERMISSION HALF OF THE INSTALL TOO.
+//
+// Before this, the ledger could say how many COLUMNS an install landed and nothing at all about its
+// write scopes — the one half that now contains a delete. An operator auditing "what did this pack
+// actually do to this sheet" had to re-derive the pack to find out.
+//
+// The four numbers are FLAT rather than a nested `writeScopes` object because the store's own
+// `assertValuesFreeSummary` accepts finite numbers and refuses everything else; that guard is run
+// here against the real summary, so the pin cannot pass while the real store would reject the row.
+async function theLedgerSummaryEnumeratesTheWriteScopeOutcome() {
+  const seen = []
+  const recordingLedger = {
+    async recordInstall(input) {
+      seen.push(input)
+      return {
+        status: 'installed',
+        mode: input.mode,
+        packId: input.packId,
+        packVersion: input.packVersion,
+        objectId: input.objectId,
+        installedFields: input.installedFields,
+      }
+    },
+  }
+  const install = (port, policies, packVersion) => installCustomerPack({
+    provisioning: createFakeProvisioning(),
+    projectId: PROJECT_ID,
+    pack: packWith(policies, packVersion),
+    packInstallStore: recordingLedger,
+    tenantId: 't1',
+    workspaceId: 'w1',
+    logger: { info() {}, warn() {} },
+    fieldPermissions: port,
+  })
+
+  const port = createStatefulPort()
+  await install(port, V1_POLICIES, 1)
+  await install(port, V2_POLICIES, 2)
+
+  const [v1, v2] = seen
+  // v1 declares 6 denials across 2 roles and retires nothing (a first install has no history).
+  assert.deepEqual(v1.summary, {
+    created: 0, skipped: 0, stamped: 0, alreadyStamped: 0, optionFields: 0, views: 0,
+    writeScopesApplied: V2_DENIAL_COUNT, writeScopesRemoved: 0, writeScopeStale: 0, writeScopeRoles: 2,
+  })
+  // v2 moves one column between the two roles: same 6 denials, ONE retired, none left stale.
+  assert.deepEqual(v2.summary, {
+    created: 0, skipped: 0, stamped: 0, alreadyStamped: 0, optionFields: 0, views: 0,
+    writeScopesApplied: V2_DENIAL_COUNT, writeScopesRemoved: 1, writeScopeStale: 0, writeScopeRoles: 2,
+  })
+
+  // The REAL store's values-free guard accepts both, so this shape is not merely asserted here —
+  // it is the shape a live ledger write would actually persist.
+  for (const call of seen) {
+    assert.deepEqual(packInstallStoreInternals.assertValuesFreeSummary(call.summary), call.summary)
+  }
+
+  // A pack that declares NO fieldWritePolicies still reports the four numbers, all zero — the
+  // ledger row shape does not depend on whether the optional feature was used.
+  const bare = []
+  await installCustomerPack({
+    provisioning: createFakeProvisioning(),
+    projectId: PROJECT_ID,
+    pack: { ...BASE_PACK },
+    packInstallStore: { async recordInstall(input) { bare.push(input); return { status: 'installed', mode: input.mode, packId: input.packId, packVersion: input.packVersion, objectId: input.objectId, installedFields: input.installedFields } } },
+    tenantId: 't1',
+    workspaceId: 'w1',
+    logger: { info() {}, warn() {} },
+  })
+  assert.equal(bare[0].summary.writeScopesApplied, 0)
+  assert.equal(bare[0].summary.writeScopesRemoved, 0)
+  assert.equal(bare[0].summary.writeScopeStale, 0)
+  assert.equal(bare[0].summary.writeScopeRoles, 0)
+}
+
+
+// ---------------------------------------------------------------------------
+// G. THE ONE END-TO-END PROOF MUST ACTUALLY RUN IN CI (two-point wiring)
+//
+// `tests/integration/stock-preparation-fieldperm-write-gate-realdb.test.ts` is the only place the
+// rows this plugin declares are pushed through the platform's REAL write gate. It is
+// `describeIfDatabase`-guarded, so BOTH points are needed and either one alone is a false green:
+//
+//   1. EXCLUDED from packages/core-backend/vitest.config.ts, or the no-DB job collects it, skips
+//      every golden, and reports green — which is exactly how it went un-run when it was written.
+//   2. WIRED as a whole file into a real-DB step that runs on the required 20.x leg with a LITERAL
+//      DATABASE_URL — or it is excluded from everything and runs nowhere at all.
+//
+// Both are checked with the repo's OWN shared contract helper (scripts/ops/ci-realdb-step-contract
+// .mjs, the owner ruling on #4496 P2), which locates the step by its stable `id:` rather than by
+// title and refuses an Actions-expression DATABASE_URL — so this cannot be satisfied by a decoy
+// step or by a secret that resolves to the empty string at runtime.
+// ---------------------------------------------------------------------------
+const REALDB_SUITE = 'tests/integration/stock-preparation-fieldperm-write-gate-realdb.test.ts'
+const REALDB_STEP_ID = 'multitable-real-db-integration'
+
+async function theRealDbProofIsWiredIntoCi() {
+  const fs = require('node:fs')
+  const { pathToFileURL } = require('node:url')
+  const repoRoot = path.join(__dirname, '..', '..', '..')
+
+  const { isQuotedInTestExclude, isSuiteWiredInRealDbStep } = await import(
+    pathToFileURL(path.join(repoRoot, 'scripts', 'ops', 'ci-realdb-step-contract.mjs')).href
+  )
+
+  // CI checks out LF; a Windows working copy may hold CRLF. The helper's comment-stripping regex is
+  // anchored with `$` and no `m` flag, so a trailing \r leaves `// …` comments in place and an
+  // apostrophe inside one flips the quote parity for everything after it. Normalising here means
+  // this guard tests the file CI will read, not an artefact of the local checkout.
+  const asCiSeesIt = (relPath) =>
+    fs.readFileSync(path.join(repoRoot, relPath), 'utf8').replace(/\r\n/g, '\n')
+
+  assert.ok(
+    isQuotedInTestExclude(asCiSeesIt(path.join('packages', 'core-backend', 'vitest.config.ts')), REALDB_SUITE),
+    `vitest.config.ts must exclude ${REALDB_SUITE} from the no-DB job, or describeIfDatabase skip-greens it`,
+  )
+
+  const workflow = asCiSeesIt(path.join('.github', 'workflows', 'plugin-tests.yml'))
+  assert.ok(
+    isSuiteWiredInRealDbStep(workflow, REALDB_STEP_ID, REALDB_SUITE),
+    `the ${REALDB_STEP_ID} step must run ${REALDB_SUITE} as a whole file on Node 20 with a literal DATABASE_URL`,
+  )
+
+  assert.ok(
+    fs.existsSync(path.join(repoRoot, 'packages', 'core-backend', REALDB_SUITE)),
+    'the wired suite must exist',
+  )
+
+  // AND the file's own fail-not-skip sentinel must be OUTSIDE describeIfDatabase — a sentinel inside
+  // it skips together with the goldens it is supposed to be guarding, which is a sentinel that can
+  // never fire. Anchored on the step's marker env var, which is what scopes the throw to that step.
+  const suiteSrc = asCiSeesIt(path.join('packages', 'core-backend', REALDB_SUITE))
+  const sentinelAt = suiteSrc.indexOf('METASHEET_REAL_DB_TEST_STEP')
+  assert.ok(sentinelAt > 0, 'the suite must carry the METASHEET_REAL_DB_TEST_STEP fail-not-skip sentinel')
+  assert.ok(
+    sentinelAt < suiteSrc.indexOf('describeIfDatabase('),
+    'the sentinel must come BEFORE the first describeIfDatabase block, i.e. at top level',
+  )
+  assert.match(
+    workflow,
+    /METASHEET_REAL_DB_TEST_STEP:\s*'1'/,
+    'and the step must actually set the marker the sentinel keys on',
+  )
+}
+
 async function main() {
   newColumnsAreHumanOwned()
   plmRefreshCannotWriteTheNewColumns()
@@ -922,6 +1227,10 @@ async function main() {
   await installerWritesPlatformRowsWhenDeclared()
   await installerFailsClosedWhenThePortIsMissing()
   await ownershipTransferIsNeverASilentSuccess()
+  await reconcileNeverReachesRowsItDoesNotOwn()
+  await anOlderPortDegradesVisiblyRatherThanSilently()
+  await theLedgerSummaryEnumeratesTheWriteScopeOutcome()
+  await theRealDbProofIsWiredIntoCi()
   await dryRunPreviewsTheDenialPlanAndTheStaleRows()
   await anUnreadablePortSaysSoRatherThanReportingNothingStale()
   await anUnknownRoleIsACoded422BeforeAnySchemaWrite()

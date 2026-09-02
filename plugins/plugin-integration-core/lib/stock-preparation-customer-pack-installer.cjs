@@ -636,10 +636,38 @@ function deriveFieldWriteScopePlan({ provisioning, projectId, pack }) {
     logicalFieldId: denial.fieldId,
     roleId: denial.roleId,
   }))
+  // THE GOVERNED REGION — the (columns × roles) rectangle this pack re-declares IN FULL, and the
+  // bound on the port's reconcile delete. Deliberately built from `ownsFieldIds`, NOT from the
+  // denial rows: a column every declared role owns (shared custody) produces no denial yet is very
+  // much governed, and it is exactly the column a revision moves INTO shared custody — its older,
+  // single-owner denial has to be removable or the move silently locks it for everyone.
+  //
+  // Roles are the pack's declared roles only, columns the ones its policies actually claim. A
+  // column no policy names, or a role this pack does not declare, is outside the rectangle and the
+  // port cannot touch it — which is what keeps a second pack's rows on the same canonical sheet
+  // safe from this one's install.
+  const regionFieldIds = []
+  const seenFields = new Set()
+  for (const policy of pack.fieldWritePolicies) {
+    for (const logicalFieldId of policy.ownsFieldIds) {
+      const fieldId = provisioning.getFieldId(projectId, pack.targetObjectId, logicalFieldId)
+      if (seenFields.has(fieldId)) continue
+      seenFields.add(fieldId)
+      regionFieldIds.push(fieldId)
+    }
+  }
+  const regionRoleIds = [...new Set(pack.fieldWritePolicies.map((policy) => policy.roleId))]
   return {
     rows,
     entries: rows.map(({ fieldId, roleId }) => ({ fieldId, roleId })),
     declaredKeys: new Set(rows.map((row) => `${row.fieldId} ${row.roleId}`)),
+    // Null when the pack declares nothing at all: there is no region to be authoritative over, so
+    // no delete may be requested. `regionKey` answers "is this existing row inside the rectangle",
+    // which is what separates a stale row the install HEALS from one only an operator can clear.
+    region: regionRoleIds.length === 0 || regionFieldIds.length === 0
+      ? null
+      : { fieldIds: regionFieldIds, roleIds: regionRoleIds },
+    inRegion: (fieldId, roleId) => seenFields.has(fieldId) && regionRoleIds.includes(roleId),
   }
 }
 
@@ -695,6 +723,13 @@ async function detectStaleWriteScopes({ fieldPermissions, sheetId, plan, logical
       fieldId: entry.fieldId,
       logicalFieldId: logicalFieldIds.get(entry.fieldId) || null,
       roleId: entry.roleId,
+      // THE ACTIONABLE HALF. Inside the pack's governed rectangle the install RETIRES this row
+      // itself (the port's scoped reconcile, same transaction as the upserts); outside it, only an
+      // operator can. A deployer reading a dry-run needs to know which of the two a row is, because
+      // one is a preview of work about to happen and the other is a to-do item for a human.
+      inReconcileRegion: typeof plan.inRegion === 'function'
+        ? plan.inRegion(entry.fieldId, entry.roleId)
+        : false,
     }))
   stale.sort((left, right) => (left.fieldId === right.fieldId
     ? left.roleId.localeCompare(right.roleId)
@@ -776,12 +811,25 @@ function assertFieldPermissionsPort({ fieldPermissions, pack }) {
  * a FAIL-CLOSED error rather than a silent skip: a deployer who asked for enforcement
  * must never be told the install succeeded while the columns stayed writable by everyone.
  *
- * ADDITIVE, like the rest of this installer. The port only ever upserts a denial; it has
- * no revoke path. Removing a scope is an operator action through the platform's existing
- * field-permission route.
+ * RECONCILED WITHIN THIS PACK'S OWN REGION, ADDITIVE EVERYWHERE ELSE. The call carries the
+ * `region` derived above — the (columns × roles) rectangle this pack re-declares in
+ * full — and the port drops its OWN stale denials inside it in the SAME transaction as
+ * the upserts. That is the fix for the revision that MOVES a column's owner: without it
+ * v1's denial survives beside v2's and the write gate ORs them, so the column ends up
+ * unwritable by every declared role while the install reports `applied=N`.
+ *
+ * What it still cannot do is exactly what it must not: rows an OPERATOR authored, rows an
+ * operator relaxed, and rows outside the rectangle (another pack's columns or roles) are
+ * unreachable by the statement. Those the install only REPORTS, via the census below.
+ *
+ * A host port that predates the region argument simply ignores it and returns no
+ * `removed` array; that is detected (`reconcile: 'unsupported_port'`) rather than
+ * assumed, so an older host degrades to the previous report-only behaviour visibly.
  */
 async function applyFieldWritePolicies({ provisioning, fieldPermissions, projectId, sheetId, pack, plan }) {
-  if (pack.fieldWriteDenials.length === 0) return { applied: 0, roleCount: 0, skipped: 'not_declared' }
+  if (pack.fieldWriteDenials.length === 0) {
+    return { applied: 0, roleCount: 0, skipped: 'not_declared', removed: null, reconcile: 'not_declared' }
+  }
   assertFieldPermissionsPort({ fieldPermissions, pack })
   // The plan is derived ONCE per install (deriveFieldWriteScopePlan) and passed in, so the rows a
   // dry-run previewed, the rows the stale census diffs against, and the rows written here are the
@@ -790,17 +838,30 @@ async function applyFieldWritePolicies({ provisioning, fieldPermissions, project
   const resolved = plan || deriveFieldWriteScopePlan({ provisioning, projectId, pack })
   let result
   try {
-    result = await fieldPermissions.applyRoleWriteScopes({ sheetId, entries: resolved.entries })
+    result = await fieldPermissions.applyRoleWriteScopes({
+      sheetId,
+      entries: resolved.entries,
+      ...(resolved.region ? { reconcile: resolved.region } : {}),
+    })
   } catch (error) {
     // A rejection from the port's closed failure vocabulary becomes a coded install error; any
     // OTHER error propagates unchanged, so this can never become a catch-all.
     if (isFieldPermissionsError(error)) throw translateFieldPermissionsError(error, pack)
     throw error
   }
+  // `removed` ABSENT and `removed` EMPTY are different answers and are kept different: an older
+  // host that never looked reports null + 'unsupported_port', never [] (which reads as "looked,
+  // found nothing to retire").
+  const removedRaw = result && result.removed
+  const reconciled = resolved.region && Array.isArray(removedRaw)
   return {
     applied: Number(result && result.applied) || 0,
     roleCount: new Set(pack.fieldWriteDenials.map((denial) => denial.roleId)).size,
     skipped: null,
+    removed: reconciled
+      ? removedRaw.map((entry) => ({ fieldId: entry.fieldId, roleId: entry.roleId }))
+      : null,
+    reconcile: reconciled ? 'reconciled' : 'unsupported_port',
   }
 }
 
@@ -997,8 +1058,21 @@ async function planCustomerPackInstall({ provisioning, projectId, pack, fieldPer
     fieldPermissionsPortAvailable: portPresent,
     // 'not_declared' | 'port_absent' | 'unsupported_port' | 'checked'. NULL (not []) whenever the
     // census did not actually run — absence of a check is not absence of stale rows.
+    //
+    // `staleWriteScopes` is EVERY orphan the census found; each row carries `inReconcileRegion`.
+    // The two projections below split that list along the only line a deployer acts on: the install
+    // RETIRES the in-region rows itself (the port's scoped reconcile), and can never touch the rest.
+    // Before the reconcile existed the whole list was the second kind, so a dry-run that did not
+    // make the distinction would now overstate the operator's to-do list by exactly the rows the
+    // install is about to fix.
     writeScopeCheck,
     staleWriteScopes,
+    willRemoveWriteScopes: staleWriteScopes
+      ? staleWriteScopes.filter((row) => row.inReconcileRegion)
+      : null,
+    operatorMustClearWriteScopes: staleWriteScopes
+      ? staleWriteScopes.filter((row) => !row.inReconcileRegion)
+      : null,
     // Declared roles this host does not have. NULL when the question could not be asked.
     unknownRoleIds,
     counts: {
@@ -1011,6 +1085,12 @@ async function planCustomerPackInstall({ provisioning, projectId, pack, fieldPer
       roleViews: normalized.roleViews.length,
       fieldWriteDenials: writeScopePlan.rows.length,
       staleWriteScopes: staleWriteScopes ? staleWriteScopes.length : 0,
+      willRemoveWriteScopes: staleWriteScopes
+        ? staleWriteScopes.filter((row) => row.inReconcileRegion).length
+        : 0,
+      operatorMustClearWriteScopes: staleWriteScopes
+        ? staleWriteScopes.filter((row) => !row.inReconcileRegion).length
+        : 0,
     },
   }
 }
@@ -1140,18 +1220,29 @@ async function installCustomerPack({
       + ` stamped=${stampedExistingFields.length} alreadyStamped=${alreadyStampedFields.length}`
       + ` optionFields=${syncedOptionFields.length} views=${ensuredViews.length}`
       + ` writeScopes=${appliedWriteScopes.applied}`
+      + ` removedWriteScopes=${appliedWriteScopes.removed ? appliedWriteScopes.removed.length : 'unreconciled'}`
       + ` staleWriteScopes=${writeScopeCensus.stale ? writeScopeCensus.stale.length : 'unchecked'}`,
   )
-  // An orphaned denial is not an install failure, but it IS the one outcome a deployer must not
-  // have to go looking for: the column is now unwritable by a role the CURRENT declaration says
-  // owns it, and only an operator can clear it.
+  // A RETIRED denial is not an error, but it is a permission that just stopped applying, so it is
+  // named at INFO rather than folded into a count nobody reads.
+  if (appliedWriteScopes.removed && appliedWriteScopes.removed.length > 0) {
+    log.info(
+      `[plugin-integration-core] customer pack install RETIRED ${appliedWriteScopes.removed.length}`
+        + ` write scope(s) this pack no longer declares. pack=${normalized.packId}`
+        + ` v${normalized.packVersion} — each was written by THIS plugin, inside the (column, role)`
+        + ' region the pack re-declares in full; operator-authored rows are never touched.',
+    )
+  }
+  // What the reconcile could NOT reach is the part a deployer must not have to go looking for: an
+  // orphan outside this pack's governed rectangle (an older, wider revision, or another pack) is
+  // still denying a column, and only an operator can clear it.
   if (writeScopeCensus.stale && writeScopeCensus.stale.length > 0) {
     const warn = logger && typeof logger.warn === 'function' ? logger.warn.bind(logger) : log.info
     warn(
       `[plugin-integration-core] customer pack install left ${writeScopeCensus.stale.length} STALE`
         + ` write scope(s) behind. pack=${normalized.packId} v${normalized.packVersion}`
-        + ' — an earlier revision of this pack denied a (column, role) pair the current one does'
-        + ' not. The port has no revoke path by design; clear them with'
+        + ' — denials on (column, role) pairs OUTSIDE the region this pack governs, so the'
+        + ' install may not retire them; clear them with'
         + ' PUT /api/multitable/sheets/:sheetId/field-permissions { remove: true }.',
     )
   }
@@ -1185,8 +1276,16 @@ async function installCustomerPack({
     appliedWriteScopes: appliedWriteScopes.applied,
     writeScopeRoleCount: appliedWriteScopes.roleCount,
     writeScopeSkipped: appliedWriteScopes.skipped,
+    // The denials this install RETIRED, in the port's own {fieldId, roleId} shape. NULL — never []
+    // — when no reconcile happened at all ('not_declared', or a host port too old to accept the
+    // region), because an empty list reads as "reconciled, nothing to retire".
+    removedWriteScopes: appliedWriteScopes.removed,
+    removedWriteScopeCount: appliedWriteScopes.removed ? appliedWriteScopes.removed.length : 0,
+    // 'not_declared' | 'unsupported_port' | 'reconciled'.
+    writeScopeReconcile: appliedWriteScopes.reconcile,
     // 'not_declared' | 'unsupported_port' | 'checked'. `staleWriteScopes` is NULL — never [] —
     // whenever the census did not run, because an empty list reads as "checked, nothing stale".
+    // After a successful reconcile this holds only the orphans OUTSIDE the governed region.
     writeScopeCheck: writeScopeCensus.check,
     staleWriteScopes: writeScopeCensus.stale,
     staleWriteScopeCount: writeScopeCensus.stale ? writeScopeCensus.stale.length : 0,
@@ -1244,7 +1343,15 @@ async function recordPackInstall({
       packVersion: pack.packVersion,
       mode: mode === 'reinstall' ? 'reinstall' : 'install',
       installedFields: toLedgerFieldEntries(installedFields),
-      // Counts only — the store's own guard rejects anything else, so this stays arithmetic.
+      // Counts only — the store's own guard (assertValuesFreeSummary) accepts FINITE NUMBERS and
+      // nothing else, so this stays arithmetic and the four permission numbers are FLAT rather than
+      // a nested `writeScopes` object, which that guard would reject outright.
+      //
+      // Before these four, the ledger could say how many COLUMNS an install landed but nothing at
+      // all about its permission half — the one half with a delete in it. `writeScopesApplied` +
+      // `writeScopesRemoved` + `writeScopeStale` make the whole write-scope outcome enumerable from
+      // the ledger row alone, without re-deriving the pack. `writeScopeRoles` is the denominator
+      // that makes the other three readable (2 roles × N columns is a different fact from 5 × N).
       summary: {
         created: summary.createdFields.length,
         skipped: summary.skippedFields.length,
@@ -1252,6 +1359,10 @@ async function recordPackInstall({
         alreadyStamped: summary.alreadyStampedFields.length,
         optionFields: summary.syncedOptionFields.length,
         views: summary.ensuredViews.length,
+        writeScopesApplied: summary.appliedWriteScopes,
+        writeScopesRemoved: summary.removedWriteScopeCount,
+        writeScopeStale: summary.staleWriteScopeCount,
+        writeScopeRoles: summary.writeScopeRoleCount,
       },
       // The installer throws rather than warns (validate-all-then-write), so a successful install
       // has no warnings and the store derives status='installed'. The empty array is passed
