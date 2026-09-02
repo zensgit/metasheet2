@@ -85,8 +85,12 @@ interface FakePoolOptions {
   sheetIds?: string[]
   fieldIdsBySheet?: Record<string, string[]>
   roleIds?: string[]
-  /** Rows the census SELECT should return, as `field_permissions` rows this port previously wrote. */
-  existingScopeRows?: Array<{ field_id: string; subject_id: string }>
+  /**
+   * Rows the census SELECT should return. `created_by` defaults to the legacy plugin marker — the
+   * census now reads provenance out of the row rather than filtering on it in SQL, so a row without
+   * one would (correctly) be reported as somebody else's.
+   */
+  existingScopeRows?: Array<{ field_id: string; subject_id: string; created_by?: string | null }>
 }
 
 function createFakePool(options: FakePoolOptions = {}): {
@@ -118,7 +122,14 @@ function createFakePool(options: FakePoolOptions = {}): {
       return { rows: requested.filter((id) => roleIds.has(id)).map((id) => ({ id })) }
     }
     if (sql.includes('FROM field_permissions')) {
-      return { rows: options.existingScopeRows ?? [] }
+      return {
+        rows: (options.existingScopeRows ?? []).map((row) => ({
+          ...row,
+          created_by: row.created_by === undefined
+            ? STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY
+            : row.created_by,
+        })),
+      }
     }
     if (sql.includes('INSERT INTO field_permissions')) return { rows: [], rowCount: 1 }
     throw new Error(`fake pool: unexpected SQL ${sql}`)
@@ -290,10 +301,12 @@ describe('STRUCTURAL read-safety: this port can never produce a read restriction
         expect(row.visible).toBe(true)
         expect(row.read_only).toBe(true)
       }
-      // …and the read dimension is not even reachable from the parameter list: exactly four binds
-      // (sheet_id, field_id, subject_id, created_by), all strings, no booleans anywhere.
+      // …and the read dimension is not even reachable from the parameter list: exactly five binds
+      // (sheet_id, field_id, subject_id, created_by, legacy_marker), all strings, no booleans
+      // anywhere. The fifth is the provenance the DO UPDATE is allowed to adopt — still a marker,
+      // still a string, and still nothing a caller can turn into a read decision.
       for (const insert of fake.inserts) {
-        expect(insert.params).toHaveLength(4)
+        expect(insert.params).toHaveLength(5)
         for (const param of insert.params) expect(typeof param).toBe('string')
       }
     }
@@ -304,7 +317,7 @@ describe('STRUCTURAL read-safety: this port can never produce a read restriction
 
     // The literal upsert this port is allowed to emit — both the VALUES literal and the DO UPDATE.
     expect(src).toContain("VALUES ($1, $2, 'role', $3, true, true, $4)")
-    expect(src).toContain('DO UPDATE SET visible = true, read_only = true, created_by = EXCLUDED.created_by')
+    expect(src).toContain('DO UPDATE SET visible = true, read_only = true,')
 
     // Every assignment to the read column in this file must be the literal `true`. This catches
     // `visible = <the negation>`, `visible = $5`, and `visible = EXCLUDED.visible` alike.
@@ -348,7 +361,7 @@ describe('STRUCTURAL read-safety: this port can never produce a read restriction
     const statement = src.slice(src.search(/DELETE\s+FROM\s+field_permissions/i))
     const where = statement.slice(0, statement.indexOf('RETURNING'))
     //  1. this port's own rows only — never an operator's
-    expect(where).toMatch(/AND\s+created_by\s*=\s*\$2/)
+    expect(where).toMatch(/AND\s+created_by\s*=\s*ANY\(\$2::text\[\]\)/)
     //  2. actual denials only — never a row an operator relaxed
     expect(where).toMatch(/AND\s+read_only\s*=\s*true/)
     //  3. inside the caller's declared region only, on BOTH axes
@@ -624,9 +637,20 @@ describe('listRoleWriteScopes — the provenance census, scoped to what THIS por
 
     expect(result.sheetId).toBe(SHEET)
     expect(result.entries).toEqual([
-      { fieldId: F_PURCHASE_ETA, roleId: ROLE_WAREHOUSE },
-      { fieldId: F_WAREHOUSE_DATE, roleId: ROLE_PURCHASING },
+      {
+        fieldId: F_PURCHASE_ETA,
+        roleId: ROLE_WAREHOUSE,
+        createdBy: STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY,
+        packId: null,
+      },
+      {
+        fieldId: F_WAREHOUSE_DATE,
+        roleId: ROLE_PURCHASING,
+        createdBy: STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY,
+        packId: null,
+      },
     ])
+    expect(result.foreignEntries).toEqual([])
     expect(fake.inserts).toHaveLength(0)
   })
 
@@ -640,9 +664,10 @@ describe('listRoleWriteScopes — the provenance census, scoped to what THIS por
     expect(select!.sql).toContain('sheet_id = $1')
     expect(select!.sql).toContain("subject_type = 'role'")
     expect(select!.sql).toContain('read_only = true')
-    expect(select!.sql).toContain('created_by = $2')
-    // Operator-authored rows are OUT of scope by construction: the marker is bound, not omitted.
-    expect(select!.params[1]).toBe(STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY)
+    // Provenance is SELECTED and split in JS, not filtered away in SQL: a caller that cannot SEE an
+    // operator's row cannot report it either, and both projections must come from one snapshot.
+    expect(select!.sql).toContain('created_by')
+    expect(select!.params).toEqual([SHEET])
     // It must never take the write path's row lock — this is a read.
     expect(select!.sql).not.toMatch(/FOR\s+UPDATE/i)
   })
@@ -652,6 +677,7 @@ describe('listRoleWriteScopes — the provenance census, scoped to what THIS por
     await expect(service.listRoleWriteScopes({ sheetId: SHEET })).resolves.toEqual({
       sheetId: SHEET,
       entries: [],
+      foreignEntries: [],
     })
   })
 
@@ -738,85 +764,18 @@ interface TableRow {
 }
 
 /**
- * A pool whose `field_permissions` is an actual mutable set of rows. The three statements are
- * applied SEMANTICALLY from their bound parameters (this is a model of the statement, not a SQL
- * parser) — but the model implements every clause the source guard pins, so a statement that lost
- * one would be caught there rather than silently passed here.
+ * The section-6 model, now the SAME positional decoder section 7 defines: `$N` is resolved by
+ * position out of the statement text and the `desired(...)` alias order decides which array is
+ * compared against which column. The hand-rolled predecessor re-implemented the semantics from
+ * destructured params, so it was structurally blind to a statement that dropped the sheet axis,
+ * swapped a placeholder or renamed an alias — three mutations that stayed green under it.
  */
 function createTablePool(seed: TableRow[] = []): {
   pool: StockPreparationFieldPermissionsPool
   rows: TableRow[]
   deletes: Captured[]
 } {
-  const rows: TableRow[] = seed.map((row) => ({ ...row }))
-  const deletes: Captured[] = []
-
-  const query = async (sql: string, params: unknown[] = []) => {
-    if (sql.includes('FROM meta_sheets')) return { rows: [{ id: String(params[0]) }] }
-    if (sql.includes('FROM meta_fields')) {
-      return { rows: ((params[1] as string[]) ?? []).map((id) => ({ id })) }
-    }
-    if (sql.includes('FROM roles')) {
-      return { rows: ((params[0] as string[]) ?? []).map((id) => ({ id })) }
-    }
-    if (sql.includes('INSERT INTO field_permissions')) {
-      const [sheetId, fieldId, subjectId, createdBy] = params as string[]
-      const existing = rows.find((row) => row.sheet_id === sheetId
-        && row.field_id === fieldId && row.subject_type === 'role' && row.subject_id === subjectId)
-      if (existing) {
-        existing.visible = true
-        existing.read_only = true
-        existing.created_by = createdBy
-      } else {
-        rows.push({
-          sheet_id: sheetId,
-          field_id: fieldId,
-          subject_type: 'role',
-          subject_id: subjectId,
-          visible: true,
-          read_only: true,
-          created_by: createdBy,
-        })
-      }
-      return { rows: [], rowCount: 1 }
-    }
-    if (sql.includes('DELETE FROM field_permissions')) {
-      deletes.push({ sql, params })
-      const [sheetId, createdBy, regionFields, regionRoles, desiredFields, desiredRoles] =
-        params as [string, string, string[], string[], string[], string[]]
-      const desired = new Set(desiredFields.map((fieldId, i) => `${fieldId} ${desiredRoles[i]}`))
-      const removed: TableRow[] = []
-      for (let i = rows.length - 1; i >= 0; i -= 1) {
-        const row = rows[i]
-        if (row.sheet_id !== sheetId) continue
-        if (row.subject_type !== 'role') continue
-        if (row.created_by !== createdBy) continue
-        if (row.read_only !== true) continue
-        if (!regionFields.includes(row.field_id)) continue
-        if (!regionRoles.includes(row.subject_id)) continue
-        if (desired.has(`${row.field_id} ${row.subject_id}`)) continue
-        removed.push(row)
-        rows.splice(i, 1)
-      }
-      return { rows: removed.map((row) => ({ field_id: row.field_id, subject_id: row.subject_id })) }
-    }
-    if (sql.includes('FROM field_permissions')) {
-      const [sheetId, createdBy] = params as string[]
-      return {
-        rows: rows
-          .filter((row) => row.sheet_id === sheetId && row.subject_type === 'role'
-            && row.read_only === true && row.created_by === createdBy)
-          .map((row) => ({ field_id: row.field_id, subject_id: row.subject_id })),
-      }
-    }
-    throw new Error(`fake pool: unexpected SQL ${sql}`)
-  }
-
-  return {
-    pool: { async transaction(handler) { return handler({ query }) } },
-    rows,
-    deletes,
-  }
+  return createDecodingTablePool(seed)
 }
 
 const pluginRow = (fieldId: string, roleId: string): TableRow => ({
@@ -1060,19 +1019,31 @@ describe('6. the scoped reconcile — a revision that moves a column between dep
       "INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)"
         + " VALUES ($1, $2, 'role', $3, true, true, $4)"
         + ' ON CONFLICT (sheet_id, field_id, subject_type, subject_id)'
-        + ' DO UPDATE SET visible = true, read_only = true, created_by = EXCLUDED.created_by',
+        + ' DO UPDATE SET visible = true, read_only = true,'
+        + ' created_by = CASE WHEN field_permissions.created_by = $4 THEN $4'
+        + ' WHEN field_permissions.created_by = $5 THEN $4'
+        + ' ELSE field_permissions.created_by END',
       "INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)"
         + " VALUES ($1, $2, 'role', $3, true, true, $4)"
         + ' ON CONFLICT (sheet_id, field_id, subject_type, subject_id)'
-        + ' DO UPDATE SET visible = true, read_only = true, created_by = EXCLUDED.created_by',
+        + ' DO UPDATE SET visible = true, read_only = true,'
+        + ' created_by = CASE WHEN field_permissions.created_by = $4 THEN $4'
+        + ' WHEN field_permissions.created_by = $5 THEN $4'
+        + ' ELSE field_permissions.created_by END',
     ])
     // (2) THE BOUND PARAMETERS, in order.
     expect(fake.calls.map((call) => call.params)).toEqual([
       [SHEET],
       [SHEET, [F_WAREHOUSE_DATE, F_PURCHASE_REPLY]],
       [[ROLE_PURCHASING, ROLE_WAREHOUSE]],
-      [SHEET, F_WAREHOUSE_DATE, ROLE_PURCHASING, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY],
-      [SHEET, F_PURCHASE_REPLY, ROLE_WAREHOUSE, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY],
+      [
+        SHEET, F_WAREHOUSE_DATE, ROLE_PURCHASING,
+        STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY,
+      ],
+      [
+        SHEET, F_PURCHASE_REPLY, ROLE_WAREHOUSE,
+        STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY,
+      ],
     ])
     expect(fake.transactions).toBe(1)
 
