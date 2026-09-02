@@ -56,7 +56,6 @@
 //     component of a real project inactive is a legitimate state, not an unknown project.
 
 const { optionalString, isPlainObject } = require('./stock-preparation-common.cjs')
-const { isTenantExtensionField } = require('./stock-preparation-extension-namespace.cjs')
 
 // `permission` is the SERVER's own capability toward the managed table, asserted here as an internal
 // invariant. It is NOT the caller's tier and cannot be: the route passes a literal 'admin', so this
