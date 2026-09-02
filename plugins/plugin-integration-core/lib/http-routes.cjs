@@ -6592,8 +6592,9 @@ function createHandlers(services, options = {}) {
     // W4b (execution-plan W4a/W4b; adjudication Layer 3): the K2 carry confirm — mirror of
     // stockPreparationMaterialMappingConfirm. The human confirms a CARRY_VIA_CONFIRM proposal;
     // the carry EXECUTOR (confirm-writes.applyCarryViaConfirm) copies the inactive predecessor's
-    // human fields onto the re-keyed canonical row: admin-gated, closed body allowlist (the body
-    // can carry NO stamp — carriedBy is the route identity, carriedAt is module-stamped),
+    // human fields onto the re-keyed row IN THE BOUND TARGET TABLE (see the target resolution in
+    // the handler): admin-gated, closed body allowlist (the body can carry NO stamp and NO table —
+    // carriedBy is the route identity, carriedAt is module-stamped, the sheet is the bound action's),
     // no-overwrite, values-free audit. When the body names the matching carry LEDGER row
     // (decisionId + inputFingerprint, both or neither), the row is closed with the reserved
     // carry token AFTER the apply; a ledger-close refusal is reported honestly beside the
@@ -6609,7 +6610,25 @@ function createHandlers(services, options = {}) {
       }
       const tenantId = resolveAuthUserTenantId(req)
       const targetProjectId = resolveIntegrationStagingProjectId(tenantId, undefined)
-      // PRE-FLIGHT BIND, BEFORE the canonical write (the P1 fix). `decision`, `decisionId` and
+      // WRITE THE TABLE APPLY WROTE. Resolved through the SAME seam every other stock-prep route
+      // uses to reach its target — getTableAction + assertStockPreparationTargetReady — so the carry
+      // cannot pick a different sheet from the writer and the export. The first cut hardcoded the
+      // canonical objectId inside the executor and resolved it through provisioning, which is empty
+      // on every default install: apply is sandbox-only unless an owner configured a production
+      // policy, so the operator's rows are in the sandbox twin and the carry either refused or wrote
+      // a table nobody reads. See stock-preparation-confirm-writes.cjs's carry header, and #5446 for
+      // the same fix on the export (read) side.
+      //
+      // DERIVED SERVER-SIDE, exactly as the export route derives it: the actionId is the module
+      // constant, the tenant comes from the authenticated principal, and the body allowlist below is
+      // UNCHANGED — the client still cannot name a table, an action, or a sheet.
+      //
+      // Resolved BEFORE the ledger pre-flight so a deployment with no configured stock-prep action
+      // refuses ahead of any host IO rather than after a read.
+      const carryAction = assertStockPreparationTargetReady(
+        await tableActions.getTableAction({ tenantId, actionId: PLM_STOCK_PREPARATION_ACTION_ID }),
+      )
+      // PRE-FLIGHT BIND, BEFORE the carry write (the P1 fix). `decision`, `decisionId` and
       // `inputFingerprint` arrive as three independent client fields; until they are proven to be
       // ONE approved pair, nothing may be written. Refusing only at the ledger close would leave the
       // carried row written with no approval record — the same defect wearing a different mask.
@@ -6624,12 +6643,12 @@ function createHandlers(services, options = {}) {
           decision: input.decision,
         })
       }
+      // No provisioning and no targetProjectId: the executor has no way to resolve a sheet of its
+      // own, and the bound target is the only thing that tells it where to write.
       const result = await applyCarryViaConfirm({
-        context,
         permission: 'admin',
         recordsApi: getMultitableRecordsApi(),
-        provisioning: getMultitableProvisioning(),
-        targetProjectId,
+        target: carryAction.target,
         decision: input.decision,
         confirmedBy: user.id || user.email,
       })

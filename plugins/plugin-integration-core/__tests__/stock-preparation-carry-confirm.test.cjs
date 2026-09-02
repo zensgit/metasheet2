@@ -45,6 +45,7 @@ const {
   physicalRow,
   logicalData,
 } = require(path.join(__dirname, 'fixtures', 'stock-preparation-multitable-fakes.cjs'))
+const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
 const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
 const { createStockPreparationAuditStore } = require(path.join(LIB, 'stock-preparation-audit-store.cjs'))
 
@@ -53,6 +54,24 @@ const STAGING = 'tenant-a:integration-core'
 const CANONICAL_SHEET = 'sheet_plm_stock_preparation_main'
 const LEDGER_SHEET = 'sheet_confirmation_decisions'
 const OPERATOR = 'user_admin_1'
+
+// THE BOUND TARGET the deployment's table action names. The carry executor takes this instead of
+// resolving the canonical objectId through provisioning: on a default (sandbox-only) install those
+// are DIFFERENT TABLES, and the old lookup addressed one nobody writes. This suite keeps exercising
+// the CANONICAL sheet — i.e. an owner-configured production deployment — and the sandbox-twin half
+// of the contract lives in stock-preparation-carry-target-binding.test.cjs.
+const CARRY_TARGET = Object.freeze({
+  sheetId: CANONICAL_SHEET,
+  objectId: CANONICAL_OBJECT_ID,
+  fieldIdMap: Object.freeze(Object.fromEntries(
+    STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => [field.id, physicalFieldId(STAGING, CANONICAL_OBJECT_ID, field.id)]),
+  )),
+})
+const CARRY_TABLE_ACTION_CONFIG = Object.freeze({
+  actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+  source: { externalSystemId: 'plm_sql_source', kind: 'data-source:sql-readonly' },
+  target: CARRY_TARGET,
+})
 
 const NEW_KEY = JSON.stringify({ projectNo: 'P-9', componentSourceId: 'COMP-X', parentSourceId: null, path: ['NEW', 'COMP-X'] })
 const OLD_KEY = JSON.stringify({ projectNo: 'P-9', componentSourceId: 'COMP-X', parentSourceId: null, path: ['OLD', 'COMP-X'] })
@@ -148,6 +167,7 @@ function callInput(env, overrides = {}) {
     recordsApi: env.records,
     provisioning: env.provisioning,
     targetProjectId: STAGING,
+    target: CARRY_TARGET,
     decision: decisionFixture(),
     confirmedBy: OPERATOR,
     ...overrides,
@@ -230,7 +250,9 @@ function mountCarryRoute({ withAuditStore = true, rows, ledgerRows = [] } = {}) 
       multitable: { provisioning, records },
     },
     storage: new Map(),
-    config: {},
+    // The deploy-time table action the carry route now reads its target off — the SAME config shape
+    // apply and dry-run are driven by.
+    config: { stockPreparationTableActions: [CARRY_TABLE_ACTION_CONFIG] },
   }
   const services = {
     externalSystemRegistry: {
