@@ -4,10 +4,14 @@
 authorize Ready, merge, feature flags, dispatch, deployment, production, or
 real-tenant data access.
 
-**Code baseline:** `origin/main@81960ae650d974dbd9a96c922ffb4a917292ac24`.
-**Candidate:** `0f4331010c60405278bbcd4ab4e38fd5b5d92c38` (Draft PR #5439).
-**Scope:** 10 files, `+348/-24`; no migrations, flags, shared branch-protection
-edits, dispatches, deployments, or production actions.
+**Original code baseline:** `origin/main@81960ae650d974dbd9a96c922ffb4a917292ac24`.
+**Original code head:** `0f4331010c60405278bbcd4ab4e38fd5b5d92c38`.
+**Final replay base:** `origin/main@24942c70fb07133b580250c00aecbc208aa2f8e8`.
+**Final replay code head:** `bdf7626d6c8b1ffefcbccfc33571d04974f31224`.
+**Final replay tree:** `777c7bf0d4ac419715ee8d4abd370bca973222f1`.
+**PR:** Draft/HOLD #5439. The final replay remains 12 files: the 10 code files
+and these two reports; no migrations, flags, shared branch-protection edits,
+dispatches, deployments, or production actions.
 
 ## Authority and bounded objective
 
@@ -48,6 +52,8 @@ its test-run input/CI evidence boundaries.
 8. `packages/core-backend/tests/unit/approval-departure-transfer-ci-wiring.test.ts`
 9. `packages/core-backend/tests/unit/automation-testrun-gate.test.ts`
 10. `packages/core-backend/tests/unit/multitable-automation-service.test.ts`
+11. `docs/development/approval-automation-closeout-development-report-20260902.md`
+12. `docs/development/approval-automation-closeout-verification-report-20260902.md`
 
 ## Non-goals and retained boundaries
 
@@ -64,13 +70,22 @@ its test-run input/CI evidence boundaries.
   operation after exact-head CI and review; this change only creates stable
   evidence and workflow selection.
 
-## Code-head remote gate
+## Replay and code-head evidence
 
-Draft PR #5439 at exact code head
-`0f4331010c60405278bbcd4ab4e38fd5b5d92c38` completed 25 contexts:
-24 SUCCESS, 1 intentional Strict E2E SKIPPED, 0 pending, and 0 failure.
-Node 18 and Node 20 both succeeded. This terminal result is code-head evidence;
-the report-only child commit must obtain its own exact-head terminal result.
+The original report-only head
+`129556911a78764cc6c1d69687bc657b2af52474` completed 24 SUCCESS plus one
+intentional Strict E2E SKIPPED. The final replay is a true no-conflict merge
+with ordered parents `129556911a78764cc6c1d69687bc657b2af52474` then
+`24942c70fb07133b580250c00aecbc208aa2f8e8`. At the `bdf...` code replay, all
+12 approval/automation blobs are byte-identical to `129556...`; the old and
+replay patches have identical SHA-256
+`8b90e3de6340ad99e2c6e743679db08500d32767871c36926038746453eb98e8`.
+
+Draft PR #5439 at final replay code head
+`bdf7626d6c8b1ffefcbccfc33571d04974f31224` completed 24 SUCCESS plus one
+intentional Strict E2E SKIPPED, with Node 18, Node 20, Web Tests, F4-E real-DB,
+and coverage successful. This report-refresh child has no CI result at this
+authoring point; its own exact-head result remains separate evidence.
 
 ## Merge predicates
 
