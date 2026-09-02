@@ -71,10 +71,13 @@ const MAIN_LABELS_ZH = Object.freeze({
   idempotencyKey: '唯一键',
   componentSourceId: '部件源ID',
   parentSourceId: '父件源ID',
+  parentComponentCode: '父组件图号',
+  parentComponentName: '父组件名称',
   path: 'BOM路径',
   depth: 'BOM层级',
   componentCode: '图号',
   componentName: '名称',
+  componentSpec: '规格',
   material: '材料',
   sourceVersion: '源版本',
   rawQuantity: '单层用量',
@@ -124,7 +127,14 @@ const SANDBOX_SHEET_LABEL_ZH = '备料主表(沙箱)'
  * every id, name, type, order, property and the sheet label -- serialised and hashed.
  */
 const BASE_BUILT_DIGESTS = Object.freeze({
-  mainStructure: '9c53cd88d2958afcabab6d5019f4c8ea2c9c4d9723c1b808d919015da9c45097',
+  // mainStructure / canonicalDescriptor / sandboxDescriptor re-pinned DELIBERATELY (were
+  // 9c53cd88…c45097, ce33abaf…237430, 93b98ea7…2a3d23): 备料主表 gained parentComponentCode /
+  // parentComponentName / componentSpec — 父组件图号 / 父组件名称 / 规格, the PLM columns the
+  // WORKING SHEET was missing (they previously reached it only as customer-pack ext_ columns).
+  // Recomputed by running this exact computation against that schema change; the digests still
+  // prove "unset language changes nothing", now over the extended structure. The human_preserved
+  // band is untouched — all three are plm_system.
+  mainStructure: 'f64511506f84483bab365c96067344548ec6d6d26fe0dd07ff15229d6949840f',
   ledgerStructure: 'afaf79ff5ebefaa7d64d3d75e3e0c46b53f1eb0e11d8d70ae539106f1317c4e2',
   // mvpStructures re-pinned DELIBERATELY (was 1248526551…3c2e15, then 477d39ec…c8bb29): the
   // bom-snapshot-line.v1 template gained the persisted `material` field (stock-prep-change-
@@ -133,8 +143,8 @@ const BASE_BUILT_DIGESTS = Object.freeze({
   // computation against that schema change — the digest still proves "unset language changes
   // nothing", now over the extended structure.
   mvpStructures: '269913dcca045127820a28719550fa4fcf22083b089c2f147edbbc4dfddf869d',
-  canonicalDescriptor: 'ce33abaf7b3c4352e62893770fe8654ef0075c11fc4c29779f623983d8237430',
-  sandboxDescriptor: '93b98ea7e5c8dc9c09d9c4ab3a26efe23f28cbfc7e100d1faa89ec83d72a3d23',
+  canonicalDescriptor: 'd722c19d2198b466a661f4e7c4f0abc0522d16bdd64bc9c35fb8199cc12bc81e',
+  sandboxDescriptor: '4ef602a0eb79707f5b08e1c174bbc919a3918f468320d3febb56c5b70afc377d',
 })
 
 const SANDBOX_OBJECT_ID = 'plm_stock_preparation_sandbox_demo'
@@ -192,9 +202,9 @@ function assertCompletenessAndFrozenIds() {
   assert.deepEqual(
     STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((f) => f.id),
     MAIN_IDS,
-    'main table field ids are frozen (25), in order',
+    'main table field ids are frozen (28), in order',
   )
-  assert.equal(MAIN_IDS.length, 25, 'main table has exactly 25 fields')
+  assert.equal(MAIN_IDS.length, 28, 'main table has exactly 28 fields')
   assert.deepEqual(
     STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE.fields.map((f) => f.id),
     LEDGER_IDS,

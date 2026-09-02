@@ -542,13 +542,26 @@ async function main() {
     // 080 widens the closed audit vocabulary, and the store constant stays set-equal to it. (The
     // audit-migration suite asserts this too, against the LATEST vocabulary migration it discovers;
     // restating it here keeps this feature's own suite self-contained about the action it adds.)
-    assert.ok(STOCK_PREP_AUDIT_ACTIONS.includes('source_binding_set'), 'the store knows the new action')
+    //
+    // The expected list below is 080's OWN historical vocabulary — frozen, not derived from the live
+    // STOCK_PREP_AUDIT_ACTIONS import. 080 is a point-in-time migration; a LATER PR may legitimately
+    // widen the vocabulary further (081: 按项目导出物料 Excel added `prep_line_export`) without ever
+    // making 080's own CHECK list wrong. Comparing against the live constant here would make this
+    // assertion fail every time a future action is added anywhere in the plugin — which is exactly
+    // the failure mode stock-preparation-audit-migration.test.cjs's "discover the LATEST migration"
+    // design avoids; this restatement stays self-contained by freezing what 080 actually declared.
+    assert.ok(STOCK_PREP_AUDIT_ACTIONS.includes('source_binding_set'), 'the store still knows the action 080 added')
     const vocabulary = fs.readFileSync(path.join(MIGRATIONS_DIR, '080_extend_stock_prep_audit_source_binding_action.sql'), 'utf8')
     assert.doesNotMatch(vocabulary, /\bDROP\s+TABLE\b/i)
     const checkMatch = vocabulary.match(/ADD CONSTRAINT integration_stock_prep_audit_action_check CHECK \(action IN \(([\s\S]*?)\)\)/)
     assert.ok(checkMatch, '080 installs the widened CHECK vocabulary')
     const checkActions = [...checkMatch[1].matchAll(/'([a-z_]+)'/g)].map((entry) => entry[1]).sort()
-    assert.deepEqual(checkActions, [...STOCK_PREP_AUDIT_ACTIONS].sort(), 'CHECK vocabulary stays set-equal to the store constant')
+    const actionsAsOf080 = [
+      'exception_bulk_resolve', 'exception_resolve', 'generation_run',
+      'mapping_candidates_sync', 'mapping_confirm', 'mapping_retire',
+      'persist_repair_once', 'source_binding_set', 'unit_confirm', 'unit_retire',
+    ].sort()
+    assert.deepEqual(checkActions, actionsAsOf080, "080's CHECK vocabulary matches what this feature introduced")
   })
 
   // -------------------------------------------------------------------------

@@ -16,6 +16,12 @@ const {
   summarizeBomExpansionForEvidence,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-bom-expansion.cjs'))
 
+// The C3 planner, required HERE so one test can carry a declared source column the whole way:
+// source row -> expansion row -> the record actually written to plm_stock_preparation_main. Each
+// leg has its own suite; only an end-to-end assertion catches a value that is read and then dropped
+// at the hand-off, which is exactly what happened to 规格 before 备料主表 had a column for it.
+const { planStockPreparationConflicts } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-conflict-planner.cjs'))
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value))
 }
@@ -619,8 +625,95 @@ async function testSpecAndCreateTimeAreDeclaredNotGuessed() {
   )
 }
 
+// THE LAST MILE: a declared NATIVE source column reaches the 备料 WORKING SHEET.
+//
+// testSpecAndCreateTimeAreDeclaredNotGuessed above proves the declared slot reaches the EXPANSION
+// ROW. This one carries it the rest of the way — expansion -> conflict plan -> the row that is
+// written to plm_stock_preparation_main — because until 备料主表 gained `componentSpec` the value
+// was read from the source and then dropped on the floor at exactly this step.
+//
+// The declared column is spelled `Specification`, a PLAIN NATIVE COLUMN NAME on the part object.
+// That is the measured shape on the customer catalog (docs/development/takeover-beiliao-20260821/
+// onsite-connection-test-runbook-20260901.md §0/§4), and the point of the assertion is that the
+// DECLARED-SLOT design expresses it directly: `readPlan.part.specField` is a column name, exactly
+// like the `codeField: 'IdentityNo'` / `materialField: 'Material'` next to it. No dictionary
+// indirection is required for a deployment whose 规格 is a native column, and none is assumed for
+// one whose 规格 is a dictionary slot — the plan names whichever the deployment actually has.
+async function testDeclaredNativeSpecColumnReachesTheMainTableRow() {
+  const plan = clone(PLM_STOCK_PREPARATION_BOM_READ_PLAN)
+  plan.part.specField = 'Specification'
+  const expansion = await expandPlmProjectBom({
+    sourceAdapter: createAdapter(baseData({
+      DN_PDM_PartLibraryInfo: [
+        { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1', Specification: 'DN1200' },
+        { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1', Specification: 'M20' },
+      ],
+    })).adapter,
+    projectNo: 'P-001',
+    readPlan: plan,
+  })
+  assert.equal(expansion.valid, true)
+
+  const conflictPlan = planStockPreparationConflicts({
+    expandedRows: expansion.rows,
+    existingRows: [],
+    rowErrors: expansion.rowErrors,
+    runId: 'run-native-spec',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  const records = conflictPlan.decisions.filter((decision) => decision.decision === 'add').map((decision) => decision.record)
+  assert.ok(records.length >= 2, 'the expanded rows become main-table writes')
+
+  const root = records.find((record) => record.componentCode === 'A-001')
+  const child = records.find((record) => record.componentCode === 'B-001')
+  assert.ok(root && child, 'both the root and its child are written')
+
+  // 规格 — read from the declared NATIVE column, all the way onto the working sheet.
+  assert.equal(root.componentSpec, 'DN1200', '规格 reaches 备料主表 from a declared native column')
+  assert.equal(child.componentSpec, 'M20')
+
+  // 父组件图号 / 父组件名称 — resolved from the in-batch parent, which is the only place they
+  // exist (the expansion carries the parent as an OBJ_ID).
+  assert.equal(child.parentComponentCode, 'A-001', '父组件图号 reaches 备料主表')
+  assert.equal(child.parentComponentName, 'Assembly', '父组件名称 reaches 备料主表')
+  assert.equal(Object.prototype.hasOwnProperty.call(root, 'parentComponentCode'), false, 'the root has no parent — absence, not a blank')
+
+  // All seven, on one written row, from one pull.
+  for (const fieldId of ['parentComponentCode', 'parentComponentName', 'componentCode', 'componentName', 'componentSpec', 'material', 'totalQuantity']) {
+    assert.ok(child[fieldId] !== undefined && child[fieldId] !== null && child[fieldId] !== '', `the seven fields all land: ${fieldId}`)
+  }
+
+  // UNDECLARED is still absence, end to end — a deployment whose 规格 lives somewhere else gets an
+  // empty column, not a guess off a same-named source column and not a failure.
+  const undeclared = await expandPlmProjectBom({
+    sourceAdapter: createAdapter(baseData({
+      DN_PDM_PartLibraryInfo: [
+        { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1', Specification: 'DN1200' },
+        { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1', Specification: 'M20' },
+      ],
+    })).adapter,
+    projectNo: 'P-001',
+  })
+  const undeclaredPlan = planStockPreparationConflicts({
+    expandedRows: undeclared.rows,
+    existingRows: [],
+    rowErrors: undeclared.rowErrors,
+    runId: 'run-no-native-spec',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  assert.equal(undeclaredPlan.valid, true, 'no declared spec slot is not an error')
+  for (const decision of undeclaredPlan.decisions.filter((d) => d.decision === 'add')) {
+    assert.equal(Object.prototype.hasOwnProperty.call(decision.record, 'componentSpec'), false, 'no 规格 cell is invented')
+    // ...while the parent columns, which need no declaration, still land.
+    if (decision.record.componentCode === 'B-001') {
+      assert.equal(decision.record.parentComponentCode, 'A-001', '父组件图号 needs no per-deployment declaration')
+    }
+  }
+}
+
 async function main() {
   await testSpecAndCreateTimeAreDeclaredNotGuessed()
+  await testDeclaredNativeSpecColumnReachesTheMainTableRow()
   await testSuccessfulExpansion()
   await testReadFailureDiagnosticsAreValuesFree()
   await testNoHit()

@@ -14,6 +14,19 @@ const {
   normalizeStockPreparationTemplate,
 } = require('./stock-preparation-templates.cjs')
 const { isTenantExtensionField } = require('./stock-preparation-extension-namespace.cjs')
+// 父组件图号 / 父组件名称 for the WORKING SHEET. The expansion row carries the parent only as an
+// OBJ_ID (`parentSourceId`), so the readable parent columns have to be resolved by an in-batch
+// join. That join already exists — the immutable snapshot line resolves parentDrawingNo /
+// parentVersion / parentName through it — and it is REUSED here rather than reimplemented, so the
+// working sheet and the snapshot can never disagree about who a row's parent is.
+//
+// Direction is safe: the mapper pulls in bom-expansion / readonly-intake / common only, none of
+// which reaches back into this module, so this is a plain edge and not a load-order cycle (unlike
+// stock-preparation-carry-policy.cjs, which does require this module and is therefore lazy below).
+const {
+  SPEC_KEYS: EXPANSION_SPEC_KEYS,
+  __internals: { buildParentIndex: buildExpansionParentIndex },
+} = require('./stock-preparation-expansion-snapshot-mapper.cjs')
 
 const DECISIONS = Object.freeze({
   ADD: 'add',
@@ -984,6 +997,63 @@ function pickFields(row, fields) {
   return out
 }
 
+// ── 父组件图号 / 父组件名称 / 规格: denormalized onto the working sheet ──────────
+//
+// The three columns the 备料 working sheet was missing, resolved HERE — at the point the add
+// record / update patch is built — and NOT by rewriting the expansion rows, because everything
+// upstream of this point keys, groups, fingerprints and adjudicates on those rows: `keyOf`,
+// `groupByKey`, `duplicateGroupDiscriminator`'s `stableFingerprint`, and the persisted
+// duplicate-resolution key derived from it. Enriching a row before any of that would move
+// persisted identities for values nobody adjudicates on. Deriving it here moves nothing.
+//
+// PARENT (父组件图号/父组件名称): the expansion emits the parent as an OBJ_ID only, so these
+// come from the in-batch parent join — the SAME index the immutable snapshot line resolves its
+// own parentDrawingNo/parentName through, reused rather than reimplemented.
+//
+// 规格: the expansion row already carries `spec`, and ONLY where the deployment DECLARED
+// readPlan.part.specField (stock-preparation-bom-expansion.cjs). The read is the mapper's own
+// closed SPEC_KEYS vocabulary, so the working sheet and the snapshot line accept exactly the
+// same keys. It needs a line here at all only because the frozen column id is `componentSpec`
+// (the `spec` id belongs to the `ext_` namespace — see the template) — never because the source
+// column is guessed. Undeclared => no `spec` key => no `componentSpec` written => empty column.
+//
+// GRACEFUL ABSENCE throughout: a root row (no parentSourceId), a row whose parent is not in this
+// batch, and a deployment with no declared spec slot each add NO key at all. pickFields then
+// writes nothing for that column, so an UPDATE never blanks a value that is already there.
+const DENORMALIZED_PLM_FIELD_IDS = Object.freeze(['parentComponentCode', 'parentComponentName', 'componentSpec'])
+
+function firstPresentValue(row, keys) {
+  for (const key of keys) {
+    if (row && !isBlank(row[key])) return row[key]
+  }
+  return undefined
+}
+
+function denormalizedPlmFields(row, parentIndex) {
+  const out = {}
+  const parentSourceId = row && row.parentSourceId
+  // buildParentIndex keys on `optionalString(componentSourceId)`, i.e. trimmed non-empty STRINGS
+  // only. The lookup mirrors that exactly rather than coercing, so the two can never disagree
+  // about which ids are joinable.
+  if (parentIndex && typeof parentSourceId === 'string' && parentSourceId.trim() !== '') {
+    const parent = parentIndex.get(parentSourceId.trim())
+    if (parent) {
+      if (!isBlank(parent.componentCode)) out.parentComponentCode = parent.componentCode
+      if (!isBlank(parent.componentName)) out.parentComponentName = parent.componentName
+    }
+  }
+  const spec = firstPresentValue(row, EXPANSION_SPEC_KEYS)
+  if (spec !== undefined) out.componentSpec = spec
+  return Object.keys(out).length > 0 ? out : null
+}
+
+// Returns the row unchanged (same object identity) when nothing resolves, so a plan over a batch
+// with no resolvable parents and no declared spec slot is byte-identical to the pre-change one.
+function withDenormalizedPlmFields(row, parentIndex) {
+  const derived = denormalizedPlmFields(row, parentIndex)
+  return derived ? { ...row, ...derived } : row
+}
+
 function assertNoHumanFields(payload, humanFields, context) {
   for (const field of humanFields) {
     if (Object.prototype.hasOwnProperty.call(payload, field)) {
@@ -1208,6 +1278,10 @@ function planStockPreparationConflicts(input = {}) {
   }
   const decisions = []
 
+  // Built over the WHOLE batch as read, before dedup/resolution, exactly as the snapshot mapper
+  // builds it — a parent is a parent whether or not its own row later lands in a duplicate group.
+  const parentIndex = buildExpansionParentIndex(expandedRows)
+
   const expanded = groupByKey(expandedRows)
   const existing = groupByKey(existingRows)
   const resolvedExpanded = resolveDuplicateExpandedRows({
@@ -1299,7 +1373,12 @@ function planStockPreparationConflicts(input = {}) {
 
   for (const [key, rows] of resolvedExpanded.keyed.entries()) {
     if (duplicateExpandedKeys.has(key) || duplicateExistingKeys.has(key)) continue
-    const row = rows[0]
+    // The ONE place the working sheet's row is composed. Everything below — the add record, the
+    // refresh comparison that decides UPDATE vs SKIP, and the update patch — sees the same
+    // derived parent columns, which is also why a re-pull BACKFILLS them onto rows written
+    // before this change: an existing row with no parentDrawing and a resolvable parent is a
+    // plm_system-field change like any other.
+    const row = withDenormalizedPlmFields(rows[0], parentIndex)
     const existingGroup = existing.keyed.get(key)
     const existingRow = existingGroup && existingGroup[0]
     if (!existingRow) {
@@ -1446,6 +1525,7 @@ module.exports = {
   RUN_FIELD_IDS,
   LINEAGE_FIELD_IDS,
   IDENTITY_FIELD_IDS,
+  DENORMALIZED_PLM_FIELD_IDS,
   ANONYMOUS_HOLD_IDENTITY_PREFIX,
   CARRY_PROPOSAL_CONFLICT_TYPE,
   CARRY_PROPOSAL_CONFLICT_SUMMARY,
@@ -1467,6 +1547,8 @@ module.exports = {
     anonymousRowIdentity,
     assertNoHumanFields,
     changedFields,
+    denormalizedPlmFields,
+    withDenormalizedPlmFields,
     normalizeInstalledFieldProperties,
     packAwareOwnershipEvidence,
     pickFields,

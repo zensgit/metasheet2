@@ -670,6 +670,32 @@ const STOCK_PREPARATION_MAIN_TABLE_TEMPLATE = Object.freeze(normalizeStockPrepar
     field('idempotencyKey', 'Idempotency Key', 'string', 'plm_system', { required: true, key: true, labelZh: '唯一键' }),
     field('componentSourceId', 'Component Source ID', 'string', 'plm_system', { required: true, labelZh: '部件源ID' }),
     field('parentSourceId', 'Parent Source ID', 'string', 'plm_system', { labelZh: '父件源ID' }),
+    // 父组件图号 / 父组件名称. The WORKING SHEET has always denormalized the PLM columns a human
+    // needs in front of their eyes (图号/名称/材料/总用量 below); the parent was the exception —
+    // only ever an OBJ_ID (`parentSourceId` above), which nobody can read. These two close that
+    // gap on EXACTLY the terms the snapshot line's own parentName was added on (#5436): OPTIONAL
+    // and plm_system-owned, so rows written before this change simply carry no such column and
+    // nothing downstream may require one, and EXISTING INSTALLS gain the columns through the
+    // additive W2 repair verb (repairStockPreparationCanonicalTarget) rather than a migration.
+    //
+    // They are DENORMALIZED, not authoritative: the immutable versioned record of what PLM said
+    // remains plm_stock_preparation_bom_snapshot_line. Both sides resolve the parent through the
+    // same in-batch parent index (stock-preparation-expansion-snapshot-mapper.cjs buildParentIndex,
+    // reused by stock-preparation-conflict-planner.cjs), so they cannot disagree about who the
+    // parent is. A root row has no parent and therefore no value — absence, not an empty string.
+    //
+    // THE IDS ARE NOT `parentDrawing`/`parentName`/`spec` — deliberately, and not a style choice.
+    // `ext_` extension ids are governed as a DISJOINT namespace whose suffix may never equal a
+    // frozen template field id (stock-preparation-extension-namespace.cjs, FIELD_ID_TEMPLATE_
+    // COLLISION — the rule exists precisely for "a NEW frozen template field added under the same
+    // bare name"). Until today these three columns reached the sheet ONLY as pack columns, and the
+    // shipped pack owns `ext_parentDrawingNo`, `ext_parentName` and `ext_spec`
+    // (lib/customer-packs/factory-a.rehearsal.cjs). Freezing `parentName` or `spec` would make
+    // every install carrying that pack fail its own pack validation. So the ids follow the main
+    // table's OWN vocabulary instead — `componentCode` is 图号 here, therefore 父组件图号 is
+    // `parentComponentCode` — which collides with nothing and reads as a first-class column.
+    field('parentComponentCode', 'Parent Component Code', 'string', 'plm_system', { labelZh: '父组件图号' }),
+    field('parentComponentName', 'Parent Component Name', 'string', 'plm_system', { labelZh: '父组件名称' }),
     field('path', 'BOM Path', 'string', 'plm_system', { required: true, labelZh: 'BOM路径' }),
     field('depth', 'BOM Depth', 'number', 'plm_system', { labelZh: 'BOM层级' }),
     // 图号, deliberately NOT a translation of "Component Code". The customer's own
@@ -677,6 +703,14 @@ const STOCK_PREPARATION_MAIN_TABLE_TEMPLATE = Object.freeze(normalizeStockPrepar
     // same word -- the table speaks the customer's vocabulary, not ours.
     field('componentCode', 'Component Code', 'string', 'plm_system', { labelZh: '图号' }),
     field('componentName', 'Component Name', 'string', 'plm_system', { labelZh: '名称' }),
+    // 规格 — one of the seven fields a 备料 pull must carry, and until now reaching the working
+    // sheet ONLY as a customer-pack extension column (`ext_spec`). Native here, on the same terms
+    // as the two parent columns above (id likewise not `spec`, for the namespace reason spelled
+    // out there), and fed from the same DECLARED read-plan slot the snapshot line's `spec` is fed
+    // from (readPlan.part.specField, absent by default — stock-preparation-bom-expansion.cjs).
+    // A deployment that declares no spec column persists no spec: an empty column, never a
+    // guessed source column.
+    field('componentSpec', 'Component Specification', 'string', 'plm_system', { labelZh: '规格' }),
     field('material', 'Material', 'string', 'plm_system', { labelZh: '材料' }),
     field('sourceVersion', 'PLM Source Version', 'string', 'plm_system', { labelZh: '源版本' }),
     field('rawQuantity', 'Raw Quantity', 'number', 'plm_system', { labelZh: '单层用量' }),

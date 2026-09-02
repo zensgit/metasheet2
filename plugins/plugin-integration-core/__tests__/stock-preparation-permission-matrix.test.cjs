@@ -281,6 +281,11 @@ const REQUEST_BY_CAPABILITY = Object.freeze({
   }),
   'confirmationQueue.ensure': () => ({ body: {} }),
   'confirmationQueue.reconcile': () => ({ params: { actionId: 'plm-stock-preparation' }, body: {} }),
+  // The shared mount()'s provisioning/records fakes only know the confirmation-decision LEDGER object
+  // (LEDGER_SHEET), not plm_stock_preparation_main — a 'pass' actor therefore reaches a 404 downstream
+  // (findObjectSheet misses -> zero rows -> PREP_LINE_EXPORT_PROJECT_NOT_FOUND), which is exactly the
+  // "gate let it through, something else happened" case M-01 measures (404 is not refusedByGate).
+  'confirmationQueue.export': () => ({ query: { projectNo: PROJECT_NO } }),
 })
 
 async function callCapability(routes, capability, user) {
@@ -313,6 +318,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.list': 'gate',
     'confirmationQueue.valueEntry': 'gate',
     'confirmationQueue.confirm': 'gate',
+    'confirmationQueue.export': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -321,6 +327,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.list': 'gate',
     'confirmationQueue.valueEntry': 'gate',
     'confirmationQueue.confirm': 'gate',
+    'confirmationQueue.export': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -329,6 +336,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.list': 'gate',
     'confirmationQueue.valueEntry': 'gate',
     'confirmationQueue.confirm': 'gate',
+    'confirmationQueue.export': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -337,6 +345,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.list': 'pass',
     'confirmationQueue.valueEntry': 'gate',
     'confirmationQueue.confirm': 'gate',
+    'confirmationQueue.export': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -345,6 +354,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.list': 'pass',
     'confirmationQueue.valueEntry': 'pass',
     'confirmationQueue.confirm': 'pass',
+    'confirmationQueue.export': 'pass',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -353,6 +363,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.list': 'gate',
     'confirmationQueue.valueEntry': 'gate',
     'confirmationQueue.confirm': 'gate',
+    'confirmationQueue.export': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -361,6 +372,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.list': 'pass',
     'confirmationQueue.valueEntry': 'pass',
     'confirmationQueue.confirm': 'pass',
+    'confirmationQueue.export': 'pass',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -369,6 +381,7 @@ const MATRIX = Object.freeze({
     'confirmationQueue.list': 'pass',
     'confirmationQueue.valueEntry': 'pass',
     'confirmationQueue.confirm': 'pass',
+    'confirmationQueue.export': 'pass',
     'confirmationQueue.ensure': 'pass',
     'confirmationQueue.reconcile': 'pass',
   }),
@@ -587,7 +600,13 @@ async function orphanOperateGrantConfersNothing() {
   // read turns it into the full operator tier.
   assert.deepEqual(
     grantedStockPrepCapabilities([STOCK_PREP_OPERATE, STOCK_PREP_READ]).sort(),
-    ['confirmationQueue.confirm', 'confirmationQueue.list', 'confirmationQueue.readiness', 'confirmationQueue.valueEntry'],
+    [
+      'confirmationQueue.confirm',
+      'confirmationQueue.export',
+      'confirmationQueue.list',
+      'confirmationQueue.readiness',
+      'confirmationQueue.valueEntry',
+    ],
     'M-05: operate + read is the full operator tier',
   )
 }
