@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vue'
+import { createApp, defineComponent, h as createElement, nextTick, ref, type App as VueApp, type Component } from 'vue'
 
 // 项目备料页 — THE PAGE, and the four claims it must not get wrong.
 //
@@ -144,9 +144,9 @@ function ok(data: unknown): Response {
  * B-09 can run a real pull and then assert on the report that run produced — the emit that used to
  * destroy it is a component event, not a DOM one, and can only be provoked by the real thing.
  */
-function syncApiDouble(): Record<string, unknown> {
+function syncApiDouble(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    plan: vi.fn().mockResolvedValue({
+    dryRun: vi.fn().mockResolvedValue({
       canApply: true,
       dryRunToken: 'tok_abc',
       counts: { add: 3, update: 2, skip: 7, inactive: 0, manual_confirm: 0 },
@@ -159,6 +159,43 @@ function syncApiDouble(): Record<string, unknown> {
       apply: { counts: { created: 3, updated: 2, inactive: 0, skipped: 7, held: 0, failed: 0 } },
     }),
     archive: vi.fn().mockResolvedValue({ status: 'created', persisted: true, created: { batch: 1, lines: 5, run: 1 } }),
+    ...overrides,
+  }
+}
+
+/** A large-BOM job api double that drives the bounded channel to `done` in one pass. */
+function largeBomApiDouble({ onApplied }: { onApplied?: () => void } = {}): Record<string, unknown> {
+  return {
+    startExpansion: vi.fn().mockResolvedValue({ jobId: 'job_1', status: 'queued', authoritative: false }),
+    runExpansion: vi.fn().mockResolvedValue({
+      jobId: 'job_1',
+      status: 'completed',
+      authoritative: true,
+      progress: { rowsExpanded: 620, readCount: 640, frontierRemaining: 0, completedChunks: 1 },
+      budgets: { maxRows: 5000, maxPages: 50, maxReadCount: 6000, maxElapsedMs: 60000, maxDepth: 10, maxArtifactChunks: 1 },
+    }),
+    planExpansion: vi.fn().mockResolvedValue({
+      jobId: 'job_1',
+      status: 'completed',
+      authoritative: true,
+      evidence: { plan: { counts: { add: 620, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } } },
+    }),
+    startApply: vi.fn().mockResolvedValue({
+      jobId: 'apply_1',
+      status: 'queued',
+      counts: { created: 0, updated: 0, inactive: 0, skipped: 0, held: 0, failed: 0 },
+    }),
+    // The moment the rows really land in the sheet.
+    runApplyChunk: vi.fn().mockImplementation(async () => {
+      onApplied?.()
+      return {
+        jobId: 'apply_1',
+        status: 'succeeded',
+        counts: { created: 620, updated: 0, inactive: 0, skipped: 0, held: 0, failed: 0 },
+      }
+    }),
+    getExpansion: vi.fn().mockResolvedValue({ jobId: 'job_1', status: 'completed', authoritative: true }),
+    getApply: vi.fn().mockResolvedValue({ jobId: 'apply_1', status: 'succeeded' }),
   }
 }
 
@@ -413,13 +450,182 @@ describe('项目备料页 — the operator project board', () => {
 
   // ---- B-04 values, empty states and the placeholder -------------------------------------------
 
-  it('B-04: a 404 renders the three-way empty state, not a raw code', async () => {
+  // ---- B-16: THE BOUNDED BACKGROUND CHANNEL ALSO ENDS IN A REFRESH ---------------------------
+  //
+  // THE BUG. A large BOM leaves `runStockPreparationProjectSync` early and hands off to the
+  // background channel, so the parent panel's `synced` never fired for it. The board therefore never
+  // re-read after the channel imported its rows: no row count, no export button, and an empty state
+  // still telling the operator to have an administrator sync a project they had just synced.
+
+  it('B-16: after a bounded large-BOM pull the board re-reads and the export button appears', async () => {
+    let boardReads = 0
+    // THE TIMING IS THE WHOLE TEST. The parent panel emits its own `synced` when the four-step run
+    // returns — which for a large BOM is the HANDOFF, before the channel has written a single row. So
+    // the board is modelled the way the server really behaves: 404 until the channel's apply chunk
+    // has actually run, a board afterwards. A refresh that only happens at handoff therefore sees the
+    // 404 and leaves the operator on an empty page forever, which is exactly the reported bug; only a
+    // refresh driven by the channel's COMPLETION can find the rows.
+    let rowsWritten = false
+    h.apiFetch.mockImplementation(async (path: string) => {
+      if (path.includes('/operator/projects')) return ok(directoryPayload())
+      if (path.includes('/board')) {
+        boardReads += 1
+        return rowsWritten
+          ? ok(boardPayload())
+          : notFound('STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND')
+      }
+      if (path.includes('/handoff')) return new Response('', { status: 404 })
+      return ok({})
+    })
+
+    const root = await mountBoard({
+      // The small route reports the BOM is too large and hands off; the channel then completes.
+      syncApi: syncApiDouble({
+        dryRun: vi.fn().mockResolvedValue({
+          status: 'large_bom_bounded',
+          canApply: false,
+          dryRunToken: null,
+          counts: { add: 0, update: 0, skip: 0, inactive: 0, manual_confirm: 0 },
+          evidence: {},
+        }),
+      }),
+      largeBomApi: largeBomApiDouble({ onApplied: () => { rowsWritten = true } }),
+      largeBomPollWait: async () => {},
+    })
+    expect(boardReads).toBe(1)
+    expect(root.querySelector('[data-testid="stock-prep-project-board-status"]')).toBeNull()
+    const readsBeforeRun = boardReads
+
+    await runPullPanel(root)
+
+    // The channel is mounted and finished…
+    const channel = root.querySelector('[data-testid="stock-prep-large-bom-pull"]')
+    expect(channel, 'the bounded background channel is the path this run took').not.toBeNull()
+
+    // …and the board re-read AFTER the rows landed, not merely at handoff.
+    expect(rowsWritten, 'the channel really wrote its rows').toBe(true)
+    expect(boardReads, 'the background channel must end in a board refresh, like the small route does')
+      .toBeGreaterThan(readsBeforeRun + 1)
+    expect(root.querySelector('[data-testid="stock-prep-project-board-status"]')).not.toBeNull()
+    expect(
+      root.querySelector('[data-testid="stock-prep-project-board-export"]'),
+      'and the operator can now export what they just pulled',
+    ).not.toBeNull()
+  })
+
+  // ---- B-14: THE EMPTY STATE POINTS AT THE FIX, WHICH IS DIRECTLY BELOW IT --------------------
+  //
+  // The board reused the DIRECTORY's three-way empty state, which was written for the confirmation
+  // queue — a page with no pull button, where 「请管理员先把项目同步进来」 is genuinely the next
+  // step. Here it is a dead end pointing away from the answer: 从PLM拉取数据 renders six inches
+  // below, and this operator may press it.
+
+  it('B-14: a 404 tells the operator to pull it in, and names the control below', async () => {
     routeApi({ board: notFound('STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND') })
     const root = await mountBoard({ projectNo: 'NO-SUCH-PROJECT' })
     const empty = root.querySelector('[data-testid="stock-prep-project-board-empty"]') as HTMLElement
     expect(empty).not.toBeNull()
-    expect(empty.textContent).toContain('查不到')
+    expect(empty.textContent).toContain('还没有数据')
+    expect(empty.textContent).toContain('从PLM拉取数据')
+    expect(empty.textContent, 'the fix is on this page — do not send them away for it')
+      .not.toContain('请管理员')
+    // …and the control it names really is rendered, so the sentence is not a promise about a button
+    // that is not there.
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-run"]')).not.toBeNull()
     expect(root.querySelector('[data-testid="stock-prep-project-board-status"]')).toBeNull()
+  })
+
+  it('B-14: …and only says "find an administrator" when the caller truly cannot pull', async () => {
+    // A stock-prep:admin holder opens the tab (canOpenStockPrepProjectBoard) but does NOT satisfy
+    // canRunStockPrepProjectSync's conjunction, so for them the pull control is genuinely absent and
+    // pointing at somebody else is the honest answer rather than a dead end.
+    h.permissions = ['stock-prep:read']
+    h.roles = []
+    routeApi({ board: notFound('STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND') })
+    const root = await mountBoard({ projectNo: 'NO-SUCH-PROJECT' })
+    const empty = root.querySelector('[data-testid="stock-prep-project-board-empty"]') as HTMLElement
+    expect(empty).not.toBeNull()
+    expect(empty.textContent).toContain('还没有数据')
+    expect(empty.textContent).toContain('平台管理员')
+  })
+
+  // ---- B-15: A STALE RESPONSE NEVER OVERWRITES THE PROJECT THE OPERATOR JUST OPENED -----------
+
+  it('B-15: an in-flight refresh cannot land on a newly opened project', async () => {
+    // The refresh's board read is held open; while it is in flight the operator opens ANOTHER
+    // project, which resolves first. When the stale answer finally arrives it must be dropped.
+    const OTHER_NO = '230920099'
+    let releaseStale: (() => void) | null = null
+    const stale = new Promise<void>((resolve) => { releaseStale = resolve })
+    let boardReads = 0
+    h.apiFetch.mockImplementation(async (path: string) => {
+      if (path.includes('/operator/projects')) return ok(directoryPayload())
+      if (path.includes('/board')) {
+        boardReads += 1
+        if (boardReads === 1) return ok(boardPayload())
+        if (boardReads === 2) return stale.then(() => ok(boardPayload())) as unknown as Response
+        return ok(boardPayload({ projectNo: OTHER_NO, projectName: null }))
+      }
+      if (path.includes('/handoff')) return new Response('', { status: 404 })
+      return ok({})
+    })
+
+    const projectNoProp = ref(PROJECT_NO)
+    const Harness = defineComponent({
+      setup() {
+        return () => createElement(StockPreparationProjectBoardView as Component, {
+          scope: SCOPE,
+          projectNo: projectNoProp.value,
+          syncApi: syncApiDouble(),
+        })
+      },
+    })
+    const root = mount(Harness)
+    await flush()
+    await runPullPanel(root)
+    expect(boardReads).toBe(2)
+
+    // HALF ONE: while that refresh is out, 「打开这个项目」 is disabled, so the operator cannot start
+    // the race by hand at all.
+    const openButton = root.querySelector('[data-testid="stock-prep-project-board-open"]') as HTMLButtonElement
+    expect(openButton.disabled, 'the open control is disabled while a refresh is in flight').toBe(true)
+
+    // HALF TWO — the necessary half. The SHELL can still change which project this tab is about
+    // (a ?projectNo= navigation drives the prop watch), and that path has no button to disable. The
+    // request generation is what makes it safe.
+    projectNoProp.value = OTHER_NO
+    await flush()
+    expect(
+      (root.querySelector('[data-testid="stock-prep-project-board-title"]') as HTMLElement).textContent,
+    ).toContain(OTHER_NO)
+
+    // The stale refresh answers now, about the PREVIOUS project.
+    releaseStale!()
+    await flush()
+    expect(
+      (root.querySelector('[data-testid="stock-prep-project-board-title"]') as HTMLElement).textContent,
+      'a response for a project the operator has navigated away from must never be rendered',
+    ).toContain(OTHER_NO)
+  })
+
+  it('B-15: a background refresh that fails raises no error banner', async () => {
+    let boardReads = 0
+    routeApi({
+      board: () => {
+        boardReads += 1
+        return boardReads === 1
+          ? ok(boardPayload())
+          : new Response(JSON.stringify({ ok: false, error: { code: 'INTERNAL', message: 'x' } }), { status: 500 })
+      },
+    })
+    const root = await mountBoard({ syncApi: syncApiDouble() })
+    await runPullPanel(root)
+    expect(boardReads).toBeGreaterThan(1)
+    expect(
+      root.querySelector('[data-testid="stock-prep-project-board-error"]'),
+      'the operator did not ask for that read; an error about it is noise that outlives the failure',
+    ).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-status"]')).not.toBeNull()
   })
 
   it('B-04: the status bar carries the project\'s own number and name, counts and timestamps — nothing else', async () => {

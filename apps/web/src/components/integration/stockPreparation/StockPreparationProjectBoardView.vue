@@ -35,7 +35,7 @@
         type="button"
         class="sp-board__open"
         data-testid="stock-prep-project-board-open"
-        :disabled="busy || projectNoInput.trim().length === 0"
+        :disabled="busy || refreshing || projectNoInput.trim().length === 0"
         @click="openProject"
       >
         {{ busy ? bi('正在打开…', 'Opening…') : bi('打开这个项目', 'Open this project') }}
@@ -291,12 +291,12 @@ import type { StockPreparationProjectSyncApi } from '../../../services/integrati
 import type { StockPreparationLargeBomJobApi } from '../../../services/integration/stockPreparation/largeBomPull'
 import {
   stockPrepBoardErrorPlain,
-  stockPrepDirectoryEmptyPlain,
-  stockPrepDirectoryEmptyState,
   stockPrepErrorPlain,
   type StockPrepPlainEntry,
   type StockPrepPlainText,
 } from '../../../services/integration/stockPreparation/plainLanguage'
+import { canRunStockPrepProjectSync } from '../../../services/integration/stockPreparation/workbenchAccess'
+import { useAuth } from '../../../composables/useAuth'
 
 const props = withDefaults(
   defineProps<{
@@ -326,6 +326,7 @@ const emit = defineEmits<{
 }>()
 
 const { locale } = useLocale()
+const auth = useAuth()
 
 function bi(zh: string, en: string): string {
   return locale.value === 'zh-CN' ? zh : en
@@ -346,6 +347,16 @@ const errorCode = ref<string | null>(null)
  * those and wrong for the other. The shape is recorded per ACTION rather than assumed per page.
  */
 const errorShape = ref<'read' | 'write'>('read')
+/**
+ * REQUEST GENERATION. Every load takes a ticket; only the newest ticket may write to the page.
+ *
+ * THE BUG. A refresh triggered by a finishing pull is in flight for a network round trip, and the
+ * operator can open a DIFFERENT project inside that window — the 「打开这个项目」 button was not
+ * disabled during a refresh, and the refresh branch did not re-check which project it was for. Its
+ * response then landed on top of the project they had just opened: the wrong board, silently, with
+ * no error and nothing on screen to suggest the numbers belonged to another job.
+ */
+let loadGeneration = 0
 const board = ref<StockPreparationProjectBoard | null>(null)
 const handoff = ref<StockPreparationHandoffCursor | null>(null)
 const handoffNotice = ref<string>('')
@@ -361,6 +372,12 @@ const directoryProjects = computed<StockPreparationOperatorProject[]>(() => {
   return projects.filter((project) => typeof project.projectNo === 'string' && project.projectNo.length > 0)
 })
 
+/**
+ * MAY THIS CALLER PRESS 从PLM拉取数据 — the same predicate the composed panel gates its own control
+ * on, so the empty state below can never point at a button this caller does not have.
+ */
+const canRunPull = computed<boolean>(() => canRunStockPrepProjectSync((permission) => auth.hasPermission(permission)))
+
 const projectKnown = computed<boolean>(() =>
   directoryProjects.value.some((project) => project.projectNo === openedProjectNo.value))
 
@@ -372,16 +389,32 @@ const projectKnown = computed<boolean>(() =>
 const emptyPlain = computed<StockPrepPlainEntry | null>(() => {
   if (board.value) return null
   if (openedProjectNo.value === '') return null
-  const state = stockPrepDirectoryEmptyState({
-    directoryAvailable: directory.value !== null,
-    directoryReady: directory.value?.directoryReady ?? false,
-    ledgerReady: directory.value?.ledgerReady ?? false,
-    projectCount: directory.value?.projectCount ?? 0,
-    projectNo: openedProjectNo.value,
-    projectKnown: projectKnown.value,
-    pendingRowCount: 0,
-  })
-  return stockPrepDirectoryEmptyPlain(state)
+
+  // THE ANSWER IS RIGHT BELOW THIS SENTENCE, so say so.
+  //
+  // The directory's three-way empty state was written for the CONFIRMATION QUEUE, where there is no
+  // pull button and 「请管理员先把项目同步进来」 is genuinely the next step. On this page that is a
+  // dead end pointing away from the fix: 从PLM拉取数据 renders directly underneath, and this operator
+  // may press it. Sending them to find an administrator when the control is six inches below is the
+  // same class of wrong answer as 「都清了」 for a project nobody has ever heard of.
+  //
+  // So the board says the honest thing FIRST — this number has no data here yet — and names the
+  // control. The administrator sentence is kept for the one case where it is true: the pull panel is
+  // absent because this caller may not press it.
+  if (canRunPull.value) {
+    return {
+      zh: `这个项目号在您这里还没有数据。`,
+      en: 'There is no data for this project number here yet.',
+      zhNext: '可以直接用下面的「从PLM拉取数据」把它拉进来。如果号码是打错的,改一下再打开。',
+      enNext: 'Use 从PLM拉取数据 just below to pull it in. If the number was a typo, correct it and open again.',
+    }
+  }
+  return {
+    zh: '这个项目号在您这里还没有数据,而拉取数据不是您能做的一步。',
+    en: 'There is no data for this project number here yet, and pulling it in is not a step you can run.',
+    zhNext: '请找有备料操作权限的同事或平台管理员把它拉进来;也请顺便核对一下号码有没有打错。',
+    enNext: 'Ask a colleague with the stock-preparation operator permission, or a platform administrator, to pull it in — and check the number for a typo while you are at it.',
+  }
 })
 
 /**
@@ -554,6 +587,7 @@ async function loadDirectory(): Promise<void> {
  * a different project would be worse than none.
  */
 async function loadBoard(projectNo: string, mode: 'open' | 'refresh' = 'open'): Promise<void> {
+  const mine = ++loadGeneration
   const target = projectNo.trim()
   const refresh = mode === 'refresh' && board.value !== null && openedProjectNo.value === target
   openedProjectNo.value = target
@@ -571,21 +605,29 @@ async function loadBoard(projectNo: string, mode: 'open' | 'refresh' = 'open'): 
     try {
       const next = await readStockPreparationProjectBoard({ ...props.scope, projectNo: target })
       const nextHandoff = await readStockPreparationHandoff({ ...props.scope, projectNo: target })
+      // STALE RESPONSES ARE DROPPED, not rendered. If a newer load started while this one was in
+      // flight — the operator opened another project — this answer is about a project nobody is
+      // looking at any more, and writing it would silently show them the wrong board.
+      if (mine !== loadGeneration || openedProjectNo.value !== target) return
       board.value = next
       handoff.value = nextHandoff
-    } catch (error) {
-      const code = (error as { code?: unknown })?.code
-      errorCode.value = typeof code === 'string' ? code : 'STOCK_PREPARATION_PROJECT_BOARD_READ_FAILED'
+    } catch {
+      // A BACKGROUND re-read that fails says nothing. The operator did not ask for it, the numbers
+      // on screen are still the ones that were correct a moment ago, and an error banner about a
+      // request they never made is noise that outlives the failure.
     } finally {
-      refreshing.value = false
+      if (mine === loadGeneration) refreshing.value = false
     }
     return
   }
   await run(async () => {
-    board.value = await readStockPreparationProjectBoard({ ...props.scope, projectNo: target })
+    const next = await readStockPreparationProjectBoard({ ...props.scope, projectNo: target })
     // The handoff route may not exist on this deployment. `null` means "render no button", and only
     // an absent/unconfigured route produces it — a real failure still surfaces as an error code.
-    handoff.value = await readStockPreparationHandoff({ ...props.scope, projectNo: target })
+    const nextHandoff = await readStockPreparationHandoff({ ...props.scope, projectNo: target })
+    if (mine !== loadGeneration || openedProjectNo.value !== target) return
+    board.value = next
+    handoff.value = nextHandoff
   })
 }
 

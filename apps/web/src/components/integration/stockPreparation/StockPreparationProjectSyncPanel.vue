@@ -146,6 +146,7 @@
       :api="largeBomApi"
       :wait="largeBomPollWait"
       @open-multitable="emit('open-multitable')"
+      @synced="emit('synced')"
     />
 
     <StockPrepTechnicalDetails v-if="report" testid="stock-prep-project-sync-tech">
