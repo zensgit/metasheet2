@@ -2969,8 +2969,11 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
     'G9: nor forbids the exact use the advance route now makes of it',
   )
   const callSites = (read('lib', 'http-routes.cjs').match(/resolveOperatorValueScope\(\{/g) || []).length
-  assert.equal(callSites, 6, 'G9: six call sites — if this changes, the header list must too')
-  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance']) {
+  // 项目备料页 added two: the board read and the project directory read. The count is the whole
+  // point of the assertion — a new surface deciding tenancy on its own must show up HERE, as a
+  // failure, rather than quietly becoming the eighth thing the header does not mention.
+  assert.equal(callSites, 8, 'G9: eight call sites — if this changes, the header list must too')
+  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard']) {
     assert.ok(scope.includes(marker), `G9: the header enumerates ${marker}`)
   }
 }
