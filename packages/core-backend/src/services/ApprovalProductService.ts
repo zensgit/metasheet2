@@ -84,7 +84,7 @@ import {
   isEmptyValue,
 } from './ApprovalGraphExecutor'
 import { collectActiveNodeKeys, collectHiddenFieldIds, fieldAccessAtNodes, resolveFieldAccessAtNodes } from './approval-form-redaction'
-import { fieldDerivedAssigneeSourceKey, resolveApprovalAssignees, resolveFormUserValue } from './ApprovalAssigneeResolver'
+import { fieldDerivedAssigneeSourceKey, resolveApprovalAssignees, resolveFormUserValues } from './ApprovalAssigneeResolver'
 import { isPriorNodeApproverHistoryDedupExempt } from './approval-prior-node-dedup-exemption'
 import {
   buildApprovalDesignatedFallbackResolver,
@@ -632,6 +632,17 @@ export const DEPARTMENT_FIELD_ALLOWED_PROP_KEYS = new Set([
   'maxSelections',
 ])
 
+// Lock-2 §L2-B. `maxSelections` is the carrier required by ratified OD-L2-3's publish-time cap;
+// the prose list in §L2-B names only the other four keys, while the owner record explicitly binds
+// this fifth key. Unknown keys fail rather than riding through as semantic free text.
+export const USER_FIELD_ALLOWED_PROP_KEYS = new Set([
+  'allowSelf',
+  'selection',
+  'defaultMode',
+  'defaultUserIds',
+  'maxSelections',
+])
+
 // Leaf sub-field types allowed inside a `detail` group's columns. The attachment pipeline narrows
 // this set only while its feature flag is enabled; flag OFF preserves the pre-feature authoring
 // contract for existing templates. `record-link` is v1-excluded from detail (FWB-0 Layer 2:
@@ -1158,16 +1169,6 @@ function validateApprovalAssigneeSourcesAgainstFormSchema(
     if (node.type !== 'approval' && node.type !== 'handler') return
     const config = node.config as { assigneeSources?: ApprovalAssigneeSource[] }
     for (const source of config.assigneeSources ?? []) {
-      if (source.kind === 'form_field_user') {
-        const field = fieldById.get(source.fieldId)
-        if (!field || field.type !== 'user') {
-          failValidation(
-            context,
-            `approvalGraph node ${node.key} assigneeSources form_field_user must reference a user field`,
-          )
-        }
-        continue
-      }
       // Lock-2 §L2-C publish pins for the form-field contact extensions — closing the silent-skip
       // this loop otherwise carries for every non-form_field_user kind (the kind-axis twin of
       // Lock-3 R-10's node-type axis on this same function). Pins, in order:
@@ -1182,19 +1183,18 @@ function validateApprovalAssigneeSourcesAgainstFormSchema(
       //       so neither door covers for the other);
       //   (5) `level` in range — enforced by `normalizeApprovalAssigneeSources`, which runs on
       //       every save/publish/restore path ahead of this validator;
-      //   (6) the field must not declare `selection: 'multi'` until OD-L2-7's array support lands
-      //       in the SAME slice as the prop (props are unvalidated free text today, so the pin
-      //       reads the key defensively rather than trusting a typed carrier).
-      // NOTE (OD-L2-4, deliberately deferred): the ratified required-pin RETROFIT onto the shipped
-      // `form_field_user` arm above applies "to all four kinds at the next save/publish" and lands
-      // in its own slice with the authoring-copy disclosure — this slice pins only the kinds it
-      // ships, and the shipped arm keeps its shipped acceptance until that slice lands.
-      if (source.kind === 'form_field_user_manager' || source.kind === 'form_field_user_dept_head') {
+      //   (6) multi-select is admitted only with a positive publish-time maxSelections cap. Runtime
+      //       never truncates; all selected principals are unioned by the resolver (OD-L2-3/7).
+      if (
+        source.kind === 'form_field_user'
+        || source.kind === 'form_field_user_manager'
+        || source.kind === 'form_field_user_dept_head'
+      ) {
         const field = fieldById.get(source.fieldId)
         if (!field || field.type !== 'user') {
           failValidation(
             context,
-            `approvalGraph node ${node.key} assigneeSources ${source.kind} must reference a top-level user field`,
+            `approvalGraph node ${node.key} assigneeSources ${source.kind} must reference a user field`,
           )
         }
         if (field.required !== true) {
@@ -1209,10 +1209,16 @@ function validateApprovalAssigneeSourcesAgainstFormSchema(
             `approvalGraph node ${node.key} assigneeSources ${source.kind} must not reference a field with a visibility rule`,
           )
         }
-        if (isRecord(field.props) && field.props.selection === 'multi') {
+        if (
+          isRecord(field.props)
+          && field.props.selection === 'multi'
+          && (typeof field.props.maxSelections !== 'number'
+            || !Number.isInteger(field.props.maxSelections)
+            || field.props.maxSelections < 1)
+        ) {
           failValidation(
             context,
-            `approvalGraph node ${node.key} assigneeSources ${source.kind} must not reference a multi-select user field`,
+            `approvalGraph node ${node.key} assigneeSources ${source.kind} requires maxSelections for a multi-select user field`,
           )
         }
         continue
@@ -1569,6 +1575,73 @@ function normalizeFormField(
     }
   }
 
+  let userProps: Record<string, unknown> | undefined
+  if (value.type === 'user') {
+    const props = isRecord(value.props) ? value.props : null
+    const extraKeys = props
+      ? Object.keys(props).filter((key) => !USER_FIELD_ALLOWED_PROP_KEYS.has(key))
+      : []
+    if (extraKeys.length > 0) {
+      failValidation(context, `formSchema.fields[${index}] user props contain unknown keys`)
+    }
+    if (props) {
+      const allowSelf = props.allowSelf
+      if (allowSelf !== undefined && typeof allowSelf !== 'boolean') {
+        failValidation(context, `formSchema.fields[${index}] user props.allowSelf must be a boolean`)
+      }
+      const selection = props.selection
+      if (selection !== undefined && selection !== 'single' && selection !== 'multi') {
+        failValidation(context, `formSchema.fields[${index}] user props.selection must be single or multi`)
+      }
+      const defaultMode = props.defaultMode
+      if (defaultMode !== undefined && defaultMode !== 'requester' && defaultMode !== 'designated') {
+        failValidation(context, `formSchema.fields[${index}] user props.defaultMode is invalid`)
+      }
+      let defaultUserIds: string[] | undefined
+      if (props.defaultUserIds !== undefined) {
+        if (!Array.isArray(props.defaultUserIds)) {
+          failValidation(context, `formSchema.fields[${index}] user props.defaultUserIds must be an array`)
+        }
+        defaultUserIds = props.defaultUserIds.map((id) => typeof id === 'string' ? id.trim() : '')
+        if (defaultUserIds.some((id) => !id) || new Set(defaultUserIds).size !== defaultUserIds.length) {
+          failValidation(context, `formSchema.fields[${index}] user props.defaultUserIds must contain unique non-blank ids`)
+        }
+      }
+      const maxSelections = props.maxSelections
+      if (
+        maxSelections !== undefined
+        && (typeof maxSelections !== 'number' || !Number.isInteger(maxSelections) || maxSelections < 1)
+      ) {
+        failValidation(context, `formSchema.fields[${index}] user props.maxSelections must be a positive integer`)
+      }
+      const effectiveSelection = selection === 'multi' ? 'multi' : 'single'
+      if (effectiveSelection === 'single') {
+        if (maxSelections !== undefined && maxSelections !== 1) {
+          failValidation(context, `formSchema.fields[${index}] single user fields require maxSelections 1 when present`)
+        }
+        if (defaultUserIds && defaultUserIds.length > 1) {
+          failValidation(context, `formSchema.fields[${index}] single user fields allow at most one default user`)
+        }
+      }
+      if (typeof maxSelections === 'number' && defaultUserIds && defaultUserIds.length > maxSelections) {
+        failValidation(context, `formSchema.fields[${index}] user defaults exceed maxSelections`)
+      }
+      if (defaultMode === 'requester' && defaultUserIds && defaultUserIds.length > 0) {
+        failValidation(context, `formSchema.fields[${index}] requester defaults cannot carry defaultUserIds`)
+      }
+      if (defaultMode === 'requester' && allowSelf !== true) {
+        failValidation(context, `formSchema.fields[${index}] requester defaults require allowSelf`)
+      }
+      userProps = {
+        ...(allowSelf !== undefined ? { allowSelf } : {}),
+        ...(selection !== undefined ? { selection } : {}),
+        ...(defaultMode !== undefined ? { defaultMode } : {}),
+        ...(defaultUserIds !== undefined ? { defaultUserIds } : {}),
+        ...(maxSelections !== undefined ? { maxSelections } : {}),
+      }
+    }
+  }
+
   // Lock-8 L8-A (§1.1, OD-L8-2/OD-L8-3, A-1): explanation is DISPLAY-ONLY — no submitted value, so
   // `required`/`defaultValue`/`options`/`placeholder` are each refused OUTRIGHT at publish (nothing
   // to require, default, choose among, or prompt for). The generic shape checks above only reject a
@@ -1637,9 +1710,11 @@ function normalizeFormField(
             ? { props: explanationProps }
             : departmentProps
               ? { props: departmentProps }
-              : isRecord(value.props)
-                ? { props: { ...value.props } }
-                : {}),
+              : userProps !== undefined
+                ? { props: userProps }
+                : isRecord(value.props)
+                  ? { props: { ...value.props } }
+                  : {}),
     ...(visibilityRule ? { visibilityRule } : {}),
     ...detail,
   } as FormSchema['fields'][number]
@@ -6839,10 +6914,10 @@ export class ApprovalProductService {
     // value. The publish pins ((3) required + (4) no visibilityRule) make absence unreachable for
     // templates published on this contract; this door is deliberately independent of them (§2.2).
     const anchorNeeds = new Map<string, { includeManagerChain: boolean; includeDeptHeadChain: boolean }>()
-    const anchorBySourceKey = new Map<string, string>()
+    const anchorsBySourceKey = new Map<string, string[]>()
     for (const [key, occurrence] of sources) {
-      const anchorId = resolveFormUserValue(formData[occurrence.source.fieldId])
-      if (!anchorId) {
+      const anchorIds = resolveFormUserValues(formData[occurrence.source.fieldId])
+      if (anchorIds.length === 0) {
         throw new ServiceError(
           `Approval node ${occurrence.nodeKey} routes on form field ${occurrence.source.fieldId}, which is empty`,
           422,
@@ -6850,11 +6925,13 @@ export class ApprovalProductService {
           { nodeKey: occurrence.nodeKey, fieldId: occurrence.source.fieldId },
         )
       }
-      anchorBySourceKey.set(key, anchorId)
-      const needs = anchorNeeds.get(anchorId) ?? { includeManagerChain: false, includeDeptHeadChain: false }
-      if (occurrence.source.kind === 'form_field_user_manager') needs.includeManagerChain = true
-      else needs.includeDeptHeadChain = true
-      anchorNeeds.set(anchorId, needs)
+      anchorsBySourceKey.set(key, anchorIds)
+      for (const anchorId of anchorIds) {
+        const needs = anchorNeeds.get(anchorId) ?? { includeManagerChain: false, includeDeptHeadChain: false }
+        if (occurrence.source.kind === 'form_field_user_manager') needs.includeManagerChain = true
+        else needs.includeDeptHeadChain = true
+        anchorNeeds.set(anchorId, needs)
+      }
     }
 
     // ONE read per distinct anchor, walking only the chain(s) the referencing sources need.
@@ -6892,13 +6969,16 @@ export class ApprovalProductService {
 
     const frozen: Record<string, string[]> = {}
     for (const [key, occurrence] of sources) {
-      const anchorId = anchorBySourceKey.get(key)
-      const relations = (anchorId ? relationsByAnchor.get(anchorId) : undefined) ?? {}
-      const chain = occurrence.source.kind === 'form_field_user_manager'
-        ? (relations.managerChainIds ?? [])
-        : (relations.deptHeadChainIds ?? [])
-      const resolved = chain[occurrence.source.level - 1]
-      frozen[key] = typeof resolved === 'string' && resolved.trim().length > 0 ? [resolved.trim()] : []
+      const resolvedIds = new Set<string>()
+      for (const anchorId of anchorsBySourceKey.get(key) ?? []) {
+        const relations = relationsByAnchor.get(anchorId) ?? {}
+        const chain = occurrence.source.kind === 'form_field_user_manager'
+          ? (relations.managerChainIds ?? [])
+          : (relations.deptHeadChainIds ?? [])
+        const resolved = chain[occurrence.source.level - 1]
+        if (typeof resolved === 'string' && resolved.trim().length > 0) resolvedIds.add(resolved.trim())
+      }
+      frozen[key] = [...resolvedIds]
     }
     return frozen
   }
@@ -7058,6 +7138,94 @@ export class ApprovalProductService {
       frozen[nodeKey] = ids
     }
     return frozen
+  }
+
+  /** Lock-2 §L2-B: active-user and allow-self enforcement for every submitted contact value. */
+  private async assertUserFormValuesAtSubmit(
+    formSchema: FormSchema,
+    formData: Record<string, unknown>,
+    requesterId: string,
+    fieldDerivedSources: ReturnType<typeof collectRuntimeGraphFieldDerivedSources>,
+  ): Promise<void> {
+    if (!pool) throw new Error('Database not available')
+    const routedFieldIds = new Set(
+      [...fieldDerivedSources.values()].map((entry) => entry.source.fieldId),
+    )
+    const values: Array<{ fieldId: string; allowSelf: boolean; ids: string[] }> = []
+    for (const field of formSchema.fields) {
+      if (field.type === 'user') {
+        const rawValue = formData[field.id]
+        if (field.required === true && typeof rawValue === 'string' && rawValue.trim().length === 0) {
+          if (!routedFieldIds.has(field.id)) {
+            throw new ServiceError(
+              'Approval form data is invalid',
+              400,
+              'VALIDATION_ERROR',
+              { errors: [`${field.id} must contain a user id`] },
+            )
+          }
+          continue
+        }
+        const ids = resolveFormUserValues(formData[field.id])
+        if (ids.length > 0) values.push({ fieldId: field.id, allowSelf: field.props?.allowSelf === true, ids })
+        continue
+      }
+      if (field.type !== 'detail' || !Array.isArray(formData[field.id])) continue
+      const rows = formData[field.id] as Array<Record<string, unknown>>
+      for (const column of field.columns ?? []) {
+        if (column.type !== 'user') continue
+        for (const row of rows) {
+          const rawValue = row?.[column.id]
+          if (column.required === true && typeof rawValue === 'string' && rawValue.trim().length === 0) {
+            throw new ServiceError(
+              'Approval form data is invalid',
+              400,
+              'VALIDATION_ERROR',
+              { errors: [`${field.id}.${column.id} must contain a user id`] },
+            )
+          }
+          const ids = resolveFormUserValues(row?.[column.id])
+          if (ids.length > 0) values.push({ fieldId: `${field.id}.${column.id}`, allowSelf: column.props?.allowSelf === true, ids })
+        }
+      }
+    }
+    if (values.length === 0) return
+
+    const normalizedRequesterId = requesterId.trim()
+    const selfViolation = values.find((entry) => !entry.allowSelf && entry.ids.includes(normalizedRequesterId))
+    if (selfViolation) {
+      throw new ServiceError(
+        'The requester cannot be selected in this contact field',
+        422,
+        'APPROVAL_FORM_USER_SELF_NOT_ALLOWED',
+        { fieldId: selfViolation.fieldId },
+      )
+    }
+
+    const ids = [...new Set(values.flatMap((entry) => entry.ids))]
+    let activeResult: { rows: Array<{ id: string }> }
+    try {
+      activeResult = await pool.query<{ id: string }>(
+        `SELECT id FROM users WHERE id = ANY($1::varchar[]) AND is_active = TRUE`,
+        [ids],
+      )
+    } catch {
+      throw new ServiceError(
+        'Could not verify the selected contacts. Please retry.',
+        503,
+        'APPROVAL_FORM_USER_DIRECTORY_UNRESOLVED',
+      )
+    }
+    const activeIds = new Set(activeResult.rows.map((row) => row.id))
+    const unavailable = values.find((entry) => entry.ids.some((id) => !activeIds.has(id)))
+    if (unavailable) {
+      throw new ServiceError(
+        'A selected contact is unavailable',
+        422,
+        'APPROVAL_FORM_USER_UNAVAILABLE',
+        { fieldId: unavailable.fieldId },
+      )
+    }
   }
 
   /**
@@ -7238,6 +7406,13 @@ export class ApprovalProductService {
       // the sample requester's org data can never be client-supplied (owner order ③).
       ? { userId: options.requesterOverride.userId, userName: options.requesterOverride.userName || options.requesterOverride.userId }
       : { userId: actor.userId, userName: actor.userName, email: actor.email, department: actor.department, roles: actor.roles, permissions: actor.permissions }
+    const fieldDerivedSources = collectRuntimeGraphFieldDerivedSources(runtimeGraph)
+    await this.assertUserFormValuesAtSubmit(
+      formSchema,
+      normalizedFormData,
+      effectiveRequester.userId,
+      fieldDerivedSources,
+    )
     const needsManagerChain = runtimeGraphUsesManagerChain(runtimeGraph)
     // Lock-1 §K4 — separate opt-in gate for the department-head chain (a different snapshot field,
     // a different walk, a different ApprovalDirectoryOrg option); see runtimeGraphUsesDeptHeadChain.
@@ -7437,7 +7612,6 @@ export class ApprovalProductService {
     // leaves zero rows. Its own detector + wedge, deliberately NOT `runtimeGraphUsesOrgAssigneeSource`
     // (§2.3): the requester wedge above stays requester-scoped, and a field-derived-only template
     // never pays a requester org read it does not need. OPT-IN — an empty collection does no work.
-    const fieldDerivedSources = collectRuntimeGraphFieldDerivedSources(runtimeGraph)
     let frozenFieldDerivedAssigneeIds: Record<string, string[]> | undefined
     if (fieldDerivedSources.size > 0) {
       frozenFieldDerivedAssigneeIds = await this.resolveAndFreezeFieldDerivedAssignees(

@@ -61,7 +61,7 @@ const FORM_SCHEMA = {
     { id: 'amount', type: 'number', label: 'amount' },
     { id: 'memo', type: 'text', label: 'memo' },
     { id: 'secret', type: 'text', label: 'secret' },
-    { id: 'pick', type: 'user', label: 'pick' },
+    { id: 'pick', type: 'user', label: 'pick', required: true },
     { id: 'route_num', type: 'number', label: 'route_num' },
     { id: 'formula_num', type: 'number', label: 'formula_num' },
     { id: 'req_cond', type: 'text', label: 'req_cond', required: true, visibilityRule: { fieldId: 'amount', operator: 'eq', value: 100 } },
@@ -136,7 +136,10 @@ describeIfDatabase('Lock-7 field-edit enforcement — real-DB acceptance', () =>
     return tid
   }
   async function createInstance(tid: string, formData: Record<string, unknown> = { reason: 'r' }): Promise<string> {
-    const ok = await req(base, '/api/approvals', reqTok, { method: 'POST', body: { templateId: tid, formData } })
+    const ok = await req(base, '/api/approvals', reqTok, {
+      method: 'POST',
+      body: { templateId: tid, formData: { pick: HANDLER2, ...formData } },
+    })
     expect(ok.status, await ok.clone().text()).toBe(201)
     return ((await ok.json()) as { id: string }).id
   }

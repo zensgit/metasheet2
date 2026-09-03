@@ -191,6 +191,97 @@
       </section>
 
       <section
+        v-if="field.type === 'user'"
+        class="approval-form-field-inspector__section"
+        data-testid="approval-form-field-inspector-user"
+      >
+        <p class="approval-form-field-inspector__label">联系人设置</p>
+        <label class="approval-form-field-inspector__row approval-form-field-inspector__row--inline">
+          <input
+            type="checkbox"
+            data-testid="approval-form-field-inspector-user-allow-self"
+            :checked="field.userAllowSelf"
+            @change="onUserAllowSelfChange($event)"
+          />
+          <span class="approval-form-field-inspector__hint">允许选择申请人本人</span>
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">选择数量</span>
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-user-selection"
+            :value="field.userSelection"
+            @change="onUserSelectionChange($event)"
+          >
+            <option value="single">单选</option>
+            <option value="multi">多选</option>
+          </select>
+        </label>
+        <label v-if="field.userSelection === 'multi'" class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">最多可选</span>
+          <input
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-user-max"
+            inputmode="numeric"
+            :value="textValue('userMaxSelectionsText')"
+            @input="onTextInput('userMaxSelectionsText', $event)"
+            @blur="commitTextBuffer('userMaxSelectionsText')"
+            @keydown.enter.prevent="commitTextBuffer('userMaxSelectionsText')"
+          />
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">默认值</span>
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-user-default-mode"
+            :value="field.userDefaultMode"
+            @change="onUserDefaultModeChange($event)"
+          >
+            <option value="">不设置</option>
+            <option value="requester">申请人</option>
+            <option value="designated">指定人员</option>
+          </select>
+        </label>
+        <template v-if="field.userDefaultMode === 'designated'">
+          <label class="approval-form-field-inspector__row">
+            <span class="approval-form-field-inspector__hint">搜索人员</span>
+            <input
+              class="approval-form-field-inspector__control"
+              data-testid="approval-form-field-inspector-user-search"
+              type="search"
+              autocomplete="off"
+              @input="onUserDirectorySearch($event)"
+            />
+          </label>
+          <label class="approval-form-field-inspector__row">
+            <span class="approval-form-field-inspector__hint">默认人员</span>
+            <select
+              class="approval-form-field-inspector__control"
+              data-testid="approval-form-field-inspector-user-default-ids"
+              :multiple="field.userSelection === 'multi'"
+              :value="field.userSelection === 'multi' ? field.userDefaultIds : field.userDefaultIds[0] ?? ''"
+              :aria-busy="userDirectory.usersLoading.value"
+              @focus="onUserDefaultPickerFocus"
+              @change="onUserDefaultIdsChange($event)"
+            >
+              <option value="">不设置</option>
+              <option
+                v-for="(user, index) in authorUserOptions"
+                :key="user.id"
+                :value="user.id"
+                :disabled="!user.name.trim() && !field.userDefaultIds.includes(user.id)"
+              >
+                {{ authorUserLabel(user, index) }}
+              </option>
+            </select>
+          </label>
+          <p v-if="userDirectory.statusMessage.value" class="approval-form-field-inspector__hint" role="status">
+            {{ userDirectory.statusMessage.value }}
+          </p>
+        </template>
+      </section>
+
+      <section
         v-if="field.type === 'number'"
         class="approval-form-field-inspector__section"
         data-testid="approval-form-field-inspector-number-format"
@@ -628,7 +719,7 @@ export function describeDependencyRefusal(
  * - No persistent/local IDs in any rendered copy; `localId` appears only in
  *   non-visible data-* attributes/test ids (§8).
  */
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import type { FormAdapterResult } from '../approvalFormAuthoringAdapter'
 // NOTE: FormFieldPropertyPatch / FormDetailColumnPropertyPatch and the
 // dependency types are imported in the sibling <script> block above; the two
@@ -645,6 +736,7 @@ import {
   APPROVAL_FORM_PALETTE_GROUPS,
 } from './ApprovalFormPalette.vue'
 import ApprovalDepartmentPicker from './ApprovalDepartmentPicker.vue'
+import { useApprovalDirectory, type DirectoryUserOption } from '../useApprovalDirectory'
 
 const props = withDefaults(
   defineProps<{
@@ -691,6 +783,15 @@ const columnTypeOptions = DETAIL_LEAF_FIELD_TYPES.map((type) => ({
 }))
 
 const field = computed(() => props.field)
+const userDirectory = useApprovalDirectory()
+const authorUserOptions = computed<DirectoryUserOption[]>(() => {
+  const fetched = userDirectory.users.value
+  const seen = new Set(fetched.map((user) => user.id))
+  const missing = (field.value?.userDefaultIds ?? [])
+    .filter((id) => id.trim().length > 0 && !seen.has(id))
+    .map((id) => ({ id, name: '', email: '' }))
+  return missing.length > 0 ? [...missing, ...fetched] : fetched
+})
 const departmentDefaultValue = computed(() => (
   field.value?.departmentDefaultIds.map((id) => ({ id })) ?? []
 ))
@@ -699,6 +800,13 @@ const departmentMaxSelections = computed<number | undefined>(() => {
   const value = Number(text)
   return text && Number.isInteger(value) && value > 0 ? value : undefined
 })
+
+onMounted(() => {
+  if (field.value?.type === 'user' && field.value.userDefaultMode === 'designated') {
+    void userDirectory.searchUsers('')
+  }
+})
+
 const recordLinkConfigured = computed(
   () =>
     Boolean(field.value) &&
@@ -735,6 +843,7 @@ type TextBufferKey =
   | 'dateRangeDurationLabel'
   | 'explanationText'
   | 'departmentMaxSelectionsText'
+  | 'userMaxSelectionsText'
 
 interface EditBuffer {
   text: Partial<Record<TextBufferKey, string>>
@@ -935,10 +1044,19 @@ function bufferValidationError(): string | null {
   const maxRows = buffer.text.maxRowsText ?? current.maxRowsText
   const departmentMaxSelections =
     buffer.text.departmentMaxSelectionsText ?? current.departmentMaxSelectionsText
+  const userMaxSelections =
+    buffer.text.userMaxSelectionsText ?? current.userMaxSelectionsText
   if (
     current.type === 'department' &&
     departmentMaxSelections.trim() !== '' &&
     (!/^\d+$/.test(departmentMaxSelections.trim()) || Number(departmentMaxSelections.trim()) < 1)
+  ) {
+    return INSPECTOR_INVALID_BUFFER_MESSAGE
+  }
+  if (
+    current.type === 'user' &&
+    userMaxSelections.trim() !== '' &&
+    (!/^\d+$/.test(userMaxSelections.trim()) || Number(userMaxSelections.trim()) < 1)
   ) {
     return INSPECTOR_INVALID_BUFFER_MESSAGE
   }
@@ -1015,7 +1133,8 @@ function keyBlocksCommit(key: TextBufferKey): boolean {
     key === 'dateRangeStartLabel' ||
     key === 'dateRangeEndLabel' ||
     key === 'explanationText' ||
-    key === 'departmentMaxSelectionsText'
+    key === 'departmentMaxSelectionsText' ||
+    key === 'userMaxSelectionsText'
   )
 }
 
@@ -1097,6 +1216,79 @@ function onDepartmentDefaultModeChange(event: Event): void {
 
 function onDepartmentDefaultIdsChange(value: Array<{ id: string }>): void {
   commitPatch({ departmentDefaultIds: value.map((entry) => entry.id) })
+}
+
+function onUserAllowSelfChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const input = event.target as HTMLInputElement
+  const patch: FormFieldPropertyPatch = input.checked
+    ? { userAllowSelf: true }
+    : {
+        userAllowSelf: false,
+        ...(current.userDefaultMode === 'requester'
+          ? { userDefaultMode: '', userDefaultIds: [] }
+          : {}),
+      }
+  if (!commitPatch(patch)) input.checked = current.userAllowSelf
+}
+
+function onUserSelectionChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const userSelection = select.value as FieldAuthoringDraft['userSelection']
+  const patch: FormFieldPropertyPatch = userSelection === 'single'
+    ? {
+        userSelection,
+        userMaxSelectionsText: '',
+        userDefaultIds: current.userDefaultIds.slice(0, 1),
+      }
+    : { userSelection }
+  if (!commitPatch(patch)) select.value = current.userSelection
+}
+
+function onUserDefaultModeChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const userDefaultMode = select.value as FieldAuthoringDraft['userDefaultMode']
+  const patch: FormFieldPropertyPatch = userDefaultMode === 'designated'
+    ? { userDefaultMode }
+    : {
+        userDefaultMode,
+        userDefaultIds: [],
+        ...(userDefaultMode === 'requester' ? { userAllowSelf: true } : {}),
+      }
+  if (!commitPatch(patch)) {
+    select.value = current.userDefaultMode
+  } else if (userDefaultMode === 'designated') {
+    void userDirectory.searchUsers('')
+  }
+}
+
+function onUserDefaultIdsChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const ids = current.userSelection === 'multi'
+    ? Array.from(select.selectedOptions).map((option) => option.value).filter(Boolean)
+    : select.value ? [select.value] : []
+  commitPatch({ userDefaultIds: ids })
+}
+
+function onUserDirectorySearch(event: Event): void {
+  void userDirectory.searchUsers((event.target as HTMLInputElement).value)
+}
+
+function onUserDefaultPickerFocus(): void {
+  void userDirectory.searchUsers('')
+}
+
+function authorUserLabel(user: DirectoryUserOption, index: number): string {
+  const primary = user.name.trim() || `成员 ${index + 1}`
+  const email = user.email.trim()
+  return email ? `${primary} · ${email}` : primary
 }
 
 function onNumberThousandsChange(event: Event): void {

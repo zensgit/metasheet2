@@ -357,8 +357,15 @@
             <!-- user (B3-04 D-2: real participant directory picker) -->
             <ApprovalUserPicker
               v-else-if="field.type === 'user'"
-              :model-value="(formData[field.id] as string | null | undefined) ?? null"
+              :model-value="userFieldValue(field)"
+              :multiple="userSelection(field) === 'multi'"
+              :max-selections="userMaxSelections(field)"
+              :excluded-user-ids="userExcludedIds(field)"
+              :initial-options="userInitialOptions(field)"
+              :aria-label="`选择${field.label}`"
+              :placeholder="field.placeholder || `请选择${field.label}`"
               @update:model-value="formData[field.id] = $event"
+              @update:multiple-model-value="formData[field.id] = $event"
             />
 
             <ApprovalDepartmentPicker
@@ -462,8 +469,14 @@
                     </el-select>
                     <ApprovalUserPicker
                       v-else-if="column.type === 'user'"
-                      :model-value="(row[column.id] as string | null | undefined) ?? null"
+                      :model-value="(row[column.id] as string | string[] | null | undefined) ?? null"
+                      :multiple="userSelection(column) === 'multi'"
+                      :max-selections="userMaxSelections(column)"
+                      :excluded-user-ids="userExcludedIds(column)"
+                      :initial-options="userInitialOptions(column, row[column.id])"
+                      :aria-label="`选择${column.label}`"
                       @update:model-value="row[column.id] = $event"
+                      @update:multiple-model-value="row[column.id] = $event"
                     />
                     <el-input v-else v-model="row[column.id]" :placeholder="column.label" />
                     </template>
@@ -701,7 +714,7 @@ import {
 } from '../../approvals/attachmentUpload'
 import { collectAttachmentRefIds, dropStaleAttachmentRefs } from '../../approvals/attachmentRefs'
 import { useFeatureFlags } from '../../stores/featureFlags'
-import { ensureUserNamesResolved } from '../../approvals/directoryResolve'
+import { ensureUserNamesResolved, resolvedUserNames } from '../../approvals/directoryResolve'
 
 const route = useRoute()
 const router = useRouter()
@@ -763,6 +776,80 @@ function departmentDefaultIds(field: FormField): string[] {
   return Array.isArray(field.props?.defaultDepartmentIds)
     ? field.props.defaultDepartmentIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
     : []
+}
+
+function userSelection(field: FormField): 'single' | 'multi' {
+  return field.props?.selection === 'multi' ? 'multi' : 'single'
+}
+
+function userMaxSelections(field: FormField): number | undefined {
+  return typeof field.props?.maxSelections === 'number' ? field.props.maxSelections : undefined
+}
+
+function userAllowSelf(field: FormField): boolean {
+  return field.props?.allowSelf === true
+}
+
+function userDefaultIds(field: FormField): string[] {
+  return Array.isArray(field.props?.defaultUserIds)
+    ? field.props.defaultUserIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+    : []
+}
+
+function userExcludedIds(field: FormField): string[] {
+  return !userAllowSelf(field) && draftUserId.value ? [draftUserId.value] : []
+}
+
+function userFieldValue(field: FormField): string | string[] | null {
+  const value = formData[field.id]
+  if (userSelection(field) === 'multi') {
+    return Array.isArray(value)
+      ? value.filter((id): id is string => typeof id === 'string' && id.length > 0)
+      : []
+  }
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function userInitialOptions(
+  field: FormField,
+  sourceValue: unknown = formData[field.id],
+): ApprovalDirectoryUser[] {
+  const ids = Array.isArray(sourceValue)
+    ? sourceValue.filter((id): id is string => typeof id === 'string' && id.length > 0)
+    : typeof sourceValue === 'string' && sourceValue.length > 0 ? [sourceValue] : []
+  return ids.map((id) => ({ id, name: resolvedUserNames[id] ?? '', email: '' }))
+}
+
+function collectSelectedUserIds(): string[] {
+  if (!template.value) return []
+  const ids: string[] = []
+  for (const field of template.value.formSchema.fields) {
+    if (field.type === 'user') {
+      ids.push(...userInitialOptions(field).map((option) => option.id))
+      continue
+    }
+    if (field.type !== 'detail' || !Array.isArray(formData[field.id])) continue
+    for (const row of formData[field.id] as Array<Record<string, unknown>>) {
+      for (const column of field.columns ?? []) {
+        if (column.type === 'user') {
+          ids.push(...userInitialOptions(column, row[column.id]).map((option) => option.id))
+        }
+      }
+    }
+  }
+  return [...new Set(ids)]
+}
+
+function initialUserFieldValue(field: FormField, requesterId: string | null): string | string[] | undefined {
+  const multi = userSelection(field) === 'multi'
+  if (field.props?.defaultMode === 'requester' && requesterId) {
+    return multi ? [requesterId] : requesterId
+  }
+  if (field.props?.defaultMode === 'designated') {
+    const defaults = userDefaultIds(field)
+    return multi ? defaults : defaults[0]
+  }
+  return multi ? [] : undefined
 }
 
 function attachmentList(fieldId: string): Array<{ id: string; name: string }> {
@@ -944,6 +1031,7 @@ function scheduleDraftSave(): void {
 }
 
 watch(formData, scheduleDraftSave, { deep: true })
+watch(formData, () => ensureUserNamesResolved(collectSelectedUserIds()), { deep: true })
 // UX B2-13: folded into the SAME `v-loading` overlay as the template/submit loads (below) so the
 // form can't be interacted with — and submitted un-prefilled — during the brief window between
 // the template finishing its own load and the source-instance prefill fetch resolving.
@@ -1570,12 +1658,16 @@ async function applyResubmitPrefill(): Promise<void> {
 
 onMounted(async () => {
   const templateId = route.params.templateId as string
+  const currentUserPromise = useAuth().getCurrentUserId().catch(() => null)
   await templateStore.loadTemplate(templateId)
+  const currentUserId = await currentUserPromise
   // Initialize form with default values
   if (template.value) {
     for (const field of template.value.formSchema.fields) {
       if (field.defaultValue !== undefined) {
         formData[field.id] = field.defaultValue
+      } else if (field.type === 'user') {
+        formData[field.id] = initialUserFieldValue(field, currentUserId)
       } else if (field.type === 'multi-select' || field.type === 'detail') {
         // detail value is an array of row objects; seed empty so the fill table binds an array.
         formData[field.id] = []
@@ -1590,13 +1682,10 @@ onMounted(async () => {
     }
   }
   await applyResubmitPrefill()
+  ensureUserNamesResolved(collectSelectedUserIds())
   // G-B2-14: arm the draft machinery once user id resolves; the restore offer only appears when
   // NO resubmit prefill claimed the form (prefill wins — it is an explicit user intent).
-  try {
-    draftUserId.value = await useAuth().getCurrentUserId()
-  } catch {
-    draftUserId.value = null // drafting silently unavailable without an identity
-  }
+  draftUserId.value = currentUserId
   if (!prefillNoticeVisible.value) offerDraftRestore()
   draftArmed = true
 })
@@ -1613,6 +1702,8 @@ function syncVisibleFormState() {
     if (formData[field.id] === undefined) {
       if (field.defaultValue !== undefined) {
         formData[field.id] = field.defaultValue
+      } else if (field.type === 'user') {
+        formData[field.id] = initialUserFieldValue(field, draftUserId.value)
       } else if (field.type === 'multi-select' || field.type === 'detail') {
         formData[field.id] = []
       } else if (field.type === 'date_range') {

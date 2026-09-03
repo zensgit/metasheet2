@@ -340,6 +340,11 @@ export function addFormField(
     departmentDefaultMode: '',
     departmentDefaultIds: [],
     departmentMaxSelectionsText: '',
+    userAllowSelf: false,
+    userSelection: 'single',
+    userDefaultMode: '',
+    userDefaultIds: [],
+    userMaxSelectionsText: '',
   }
 
   const fields = [...draft.fields]
@@ -688,6 +693,11 @@ export interface FormFieldPropertyPatch {
   readonly departmentDefaultMode?: FieldAuthoringDraft['departmentDefaultMode']
   readonly departmentDefaultIds?: readonly string[]
   readonly departmentMaxSelectionsText?: string
+  readonly userAllowSelf?: boolean
+  readonly userSelection?: FieldAuthoringDraft['userSelection']
+  readonly userDefaultMode?: FieldAuthoringDraft['userDefaultMode']
+  readonly userDefaultIds?: readonly string[]
+  readonly userMaxSelectionsText?: string
 }
 
 /** Typed patch for one detail column (type changes go through `retypeFormDetailColumn`). */
@@ -723,6 +733,15 @@ export function updateFormFieldProperties(
   if (
     (patch.minRowsText !== undefined || patch.maxRowsText !== undefined) &&
     current.type !== 'detail'
+  )
+    return rejected('unsupported_field_type')
+  if (
+    (patch.userAllowSelf !== undefined ||
+      patch.userSelection !== undefined ||
+      patch.userDefaultMode !== undefined ||
+      patch.userDefaultIds !== undefined ||
+      patch.userMaxSelectionsText !== undefined) &&
+    current.type !== 'user'
   )
     return rejected('unsupported_field_type')
   if (
@@ -813,6 +832,21 @@ export function updateFormFieldProperties(
       : {}),
     ...(patch.departmentMaxSelectionsText !== undefined
       ? { departmentMaxSelectionsText: patch.departmentMaxSelectionsText }
+      : {}),
+    ...(patch.userAllowSelf !== undefined
+      ? { userAllowSelf: patch.userAllowSelf }
+      : {}),
+    ...(patch.userSelection !== undefined
+      ? { userSelection: patch.userSelection }
+      : {}),
+    ...(patch.userDefaultMode !== undefined
+      ? { userDefaultMode: patch.userDefaultMode }
+      : {}),
+    ...(patch.userDefaultIds !== undefined
+      ? { userDefaultIds: [...patch.userDefaultIds] }
+      : {}),
+    ...(patch.userMaxSelectionsText !== undefined
+      ? { userMaxSelectionsText: patch.userMaxSelectionsText }
       : {}),
   }
   const fields = [...draft.fields]

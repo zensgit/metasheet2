@@ -22,6 +22,7 @@ const realFetch: typeof globalThis.fetch = globalThis.fetch.bind(globalThis)
 // DB-provisioned plugin-tests `test:integration` step.
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const REQUESTER_USER_ID = 'uat-requester'
+const APPROVER_USER_ID = 'uat-approver-42'
 
 async function canListenOnEphemeralPort(): Promise<boolean> {
   return await new Promise((resolve) => {
@@ -125,6 +126,12 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
     // needs exactly one active membership or the real `POST /api/approvals` call below 422s
     // (APPROVAL_ORG_UNRESOLVED) before this suite's own authoring/publish/start assertions run.
     await grantApprovalOrgMembership(REQUESTER_USER_ID)
+    await pool.query(
+      `INSERT INTO users (id, email, password_hash, is_active)
+       VALUES ($1, $2, 'x', TRUE)
+       ON CONFLICT (id) DO UPDATE SET is_active = TRUE`,
+      [APPROVER_USER_ID, `${APPROVER_USER_ID}@x.test`],
+    )
     adminToken = await authToken(baseUrl, 'uat-admin')
     requesterToken = await authToken(baseUrl, REQUESTER_USER_ID)
   })
@@ -149,6 +156,7 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
         await pool.query('DELETE FROM approval_template_versions WHERE template_id = ANY($1::uuid[])', [templateIds])
         await pool.query('DELETE FROM approval_templates WHERE id = ANY($1::uuid[])', [templateIds])
       }
+      await pool.query('DELETE FROM users WHERE id = $1', [APPROVER_USER_ID])
     } catch {
       // ignore cleanup failures
     }
@@ -196,7 +204,7 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
     //    the reviewer field — the form_field_user source must resolve to THAT value.
     const startResp = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
       method: 'POST',
-      body: { templateId: template.id, formData: { amount: 1200, reviewer: 'uat-approver-42' } },
+      body: { templateId: template.id, formData: { amount: 1200, reviewer: APPROVER_USER_ID } },
     })
     expect(startResp.status).toBe(201)
     const approval = await startResp.json() as {
@@ -211,7 +219,7 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
     expect(approval.status).toBe('pending')
     expect(approval.currentNodeKey).toBe('approval_1')
     const activeAssignees = approval.assignments.filter((a) => a.isActive).map((a) => a.assigneeId)
-    expect(activeAssignees).toEqual(['uat-approver-42'])
+    expect(activeAssignees).toEqual([APPROVER_USER_ID])
   })
 
   it('restores a historical version into one new draft under concurrent requests without changing the active version', async () => {

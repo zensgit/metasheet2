@@ -1889,6 +1889,47 @@ describe('validateApprovalFormData — department value shape (Lock-2 L2-A)', ()
   })
 })
 
+describe('validateApprovalFormData — contact value shape (Lock-2 L2-B)', () => {
+  const single: FormSchema = {
+    fields: [{ id: 'contact', type: 'user', label: '联系人', required: true }],
+  }
+  const multi: FormSchema = {
+    fields: [{
+      id: 'contacts',
+      type: 'user',
+      label: '联系人',
+      props: { selection: 'multi', maxSelections: 2 },
+    }],
+  }
+
+  it('accepts legacy single values and capped multi values', () => {
+    expect(validateApprovalFormData(single, { contact: 'u1' })).toEqual([])
+    expect(validateApprovalFormData(single, { contact: { id: 'u1' } })).toEqual([])
+    expect(validateApprovalFormData(single, { contact: { id: 'u1', name: 'display-only' } })).toEqual([])
+    expect(validateApprovalFormData(single, { contact: '   ' })).toEqual([])
+    expect(validateApprovalFormData(multi, { contacts: ['u1', { id: 'u2' }] })).toEqual([])
+    expect(validateApprovalFormData(multi, { contacts: [] })).toEqual([])
+  })
+
+  it('rejects malformed, duplicate, wrong-cardinality, and over-limit values', () => {
+    expect(validateApprovalFormData(multi, { contacts: 'u1' })).toEqual([
+      'contacts must be an array of users',
+    ])
+    expect(validateApprovalFormData(single, { contact: ['u1', 'u2'] })).toEqual([
+      'contact must contain exactly one user',
+    ])
+    expect(validateApprovalFormData(multi, { contacts: [{ name: 'missing-id' }] })).toEqual([
+      'contacts must contain only user ids or objects with an id',
+    ])
+    expect(validateApprovalFormData(multi, { contacts: ['u1', 'u1'] })).toEqual([
+      'contacts must not contain duplicate users',
+    ])
+    expect(validateApprovalFormData(multi, { contacts: ['u1', 'u2', 'u3'] })).toEqual([
+      'contacts exceeds the configured user selection limit',
+    ])
+  })
+})
+
 describe('canonicalizeRecordLinkFormData — FWB-0 Layer 2', () => {
   it('rewrites padded recordId to the exact trimmed canonical object in-place', () => {
     const schema: FormSchema = {

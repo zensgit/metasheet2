@@ -1624,7 +1624,14 @@ describe('ApprovalProductService', () => {
       return new ApprovalProductService().createTemplate({
         key: `department-${Date.now()}`,
         name: 'Department',
-        formSchema: { fields: [field] },
+        formSchema: {
+          fields: [
+            field,
+            ...(field.visibilityRule !== undefined
+              ? [{ id: 'toggle', type: 'text', label: '显示联系人' }]
+              : []),
+          ],
+        },
         approvalGraph: buildRuntimeGraph(),
       } as never)
     }
@@ -1654,6 +1661,162 @@ describe('ApprovalProductService', () => {
           props: { selection: 'single', display: 'leaf_only' },
         }],
       })).rejects.toThrow(/department cannot nest inside a detail group|not a valid leaf sub-field/)
+    })
+  })
+
+  describe('user field contract (Lock-2 L2-B author-time)', () => {
+    const create = async (
+      field: Record<string, unknown>,
+      sourceKind?: 'form_field_user' | 'form_field_user_manager' | 'form_field_user_dept_head',
+    ) => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      return new ApprovalProductService().createTemplate({
+        key: `user-${Date.now()}`,
+        name: 'Contact',
+        formSchema: {
+          fields: [
+            field,
+            ...(field.visibilityRule !== undefined
+              ? [{ id: 'toggle', type: 'text', label: '显示联系人' }]
+              : []),
+          ],
+        },
+        approvalGraph: sourceKind
+          ? {
+              nodes: [
+                { key: 'start', type: 'start', config: {} },
+                {
+                  key: 'approval_1',
+                  type: 'approval',
+                  config: {
+                    assigneeSources: [{ kind: sourceKind, fieldId: field.id, ...(sourceKind === 'form_field_user' ? {} : { level: 1 }) }],
+                  },
+                },
+                { key: 'end', type: 'end', config: {} },
+              ],
+              edges: [
+                { key: 'e1', source: 'start', target: 'approval_1' },
+                { key: 'e2', source: 'approval_1', target: 'end' },
+              ],
+            }
+          : buildRuntimeGraph(),
+      } as never)
+    }
+
+    it('pins the exact five-key props allowlist, including the ratified multi cap', async () => {
+      const { USER_FIELD_ALLOWED_PROP_KEYS } = await import('../../src/services/ApprovalProductService')
+      expect([...USER_FIELD_ALLOWED_PROP_KEYS].sort()).toEqual(
+        ['allowSelf', 'defaultMode', 'defaultUserIds', 'maxSelections', 'selection'].sort(),
+      )
+    })
+
+    it('rejects unknown and malformed user props before any write', async () => {
+      await expect(create({
+        id: 'contact', type: 'user', label: '联系人',
+        props: { selection: 'single', externalUserId: 'leak' },
+      })).rejects.toThrow(/user props contain unknown keys/)
+      await expect(create({
+        id: 'contact', type: 'user', label: '联系人', props: { allowSelf: 'true' },
+      })).rejects.toThrow(/props\.allowSelf must be a boolean/)
+      await expect(create({
+        id: 'contact', type: 'user', label: '联系人', props: { selection: 'many' },
+      })).rejects.toThrow(/props\.selection must be single or multi/)
+      await expect(create({
+        id: 'contact', type: 'user', label: '联系人', props: { defaultMode: 'current' },
+      })).rejects.toThrow(/props\.defaultMode is invalid/)
+      await expect(create({
+        id: 'contact', type: 'user', label: '联系人', props: { defaultUserIds: ['u1', 'u1'] },
+      })).rejects.toThrow(/unique non-blank ids/)
+      await expect(create({
+        id: 'contact', type: 'user', label: '联系人', props: { selection: 'single', maxSelections: 2 },
+      })).rejects.toThrow(/single user fields require maxSelections 1/)
+      await expect(create({
+        id: 'contact', type: 'user', label: '联系人',
+        props: { selection: 'multi', maxSelections: 1, defaultMode: 'designated', defaultUserIds: ['u1', 'u2'] },
+      })).rejects.toThrow(/user defaults exceed maxSelections/)
+      await expect(create({
+        id: 'contact', type: 'user', label: '联系人',
+        props: { allowSelf: true, defaultMode: 'requester', defaultUserIds: ['u1'] },
+      })).rejects.toThrow(/requester defaults cannot carry defaultUserIds/)
+      await expect(create({
+        id: 'contact', type: 'user', label: '联系人', props: { defaultMode: 'requester' },
+      })).rejects.toThrow(/requester defaults require allowSelf/)
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it.each(['form_field_user', 'form_field_user_manager', 'form_field_user_dept_head'] as const)(
+      '%s rejects optional, conditional, and uncapped multi routing controls',
+      async (sourceKind) => {
+        await expect(create(
+          { id: 'contact', type: 'user', label: '联系人' },
+          sourceKind,
+        )).rejects.toThrow(/must reference a required user field/)
+        await expect(create(
+          {
+            id: 'contact', type: 'user', label: '联系人', required: true,
+            visibilityRule: { fieldId: 'toggle', operator: 'notEmpty' },
+          },
+          sourceKind,
+        )).rejects.toThrow(/must not reference a field with a visibility rule/)
+        await expect(create(
+          { id: 'contact', type: 'user', label: '联系人', required: true, props: { selection: 'multi' } },
+          sourceKind,
+        )).rejects.toThrow(/requires maxSelections for a multi-select user field/)
+      },
+    )
+
+    it('fails closed with a values-free 503 when active contact verification cannot be read', async () => {
+      pgState.pool.query.mockRejectedValueOnce(new Error('db failed for secret-contact-id'))
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const assertUserValues = (service as unknown as {
+        assertUserFormValuesAtSubmit(
+          formSchema: { fields: Array<Record<string, unknown>> },
+          formData: Record<string, unknown>,
+          requesterId: string,
+          fieldDerivedSources: Map<string, unknown>,
+        ): Promise<void>
+      }).assertUserFormValuesAtSubmit.bind(service)
+
+      const requiredContactSchema = {
+        fields: [{
+          id: 'contact',
+          type: 'user',
+          label: '联系人',
+          required: true,
+          props: { allowSelf: true },
+        }],
+      }
+      await expect(assertUserValues(
+        requiredContactSchema,
+        { contact: '   ' },
+        'requester-1',
+        new Map(),
+      )).rejects.toMatchObject({ statusCode: 400, code: 'VALIDATION_ERROR' })
+      await expect(assertUserValues(
+        requiredContactSchema,
+        { contact: '   ' },
+        'requester-1',
+        new Map([['route', { source: { fieldId: 'contact' } }]]),
+      )).resolves.toBeUndefined()
+
+      let caught: unknown
+      try {
+        await assertUserValues(
+          requiredContactSchema,
+          { contact: 'secret-contact-id' },
+          'requester-1',
+          new Map(),
+        )
+      } catch (error) {
+        caught = error
+      }
+      expect(caught).toMatchObject({
+        statusCode: 503,
+        code: 'APPROVAL_FORM_USER_DIRECTORY_UNRESOLVED',
+      })
+      expect(JSON.stringify(caught)).not.toContain('secret-contact-id')
+      expect(JSON.stringify(caught)).not.toContain('db failed')
     })
   })
 
@@ -2212,6 +2375,7 @@ describe('ApprovalProductService', () => {
     const result = await service.createTemplate(request as never)
 
     const approvalNode = result.approvalGraph.nodes.find((node) => node.key === 'approval_1')
+    expect(result.formSchema.fields.find((field) => field.id === 'reviewer')?.props).toBeUndefined()
     expect(approvalNode?.config).toEqual({
       assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
       approvalMode: 'single',
@@ -2554,7 +2718,7 @@ describe('ApprovalProductService', () => {
           fields: [
             { id: 'amount', type: 'number', label: 'Amount' },
             { id: 'secret', type: 'text', label: 'Secret' },
-            { id: 'pick', type: 'user', label: 'Pick' },
+            { id: 'pick', type: 'user', label: 'Pick', required: true },
             { id: 'note', type: 'explanation', label: 'Note', props: { text: 'note text' } },
             { id: 'doc', type: 'attachment', label: 'Doc' },
             { id: 'link', type: 'record-link', label: 'Link', props: { baseId: 'b1', sheetId: 's1' } },
@@ -6063,6 +6227,9 @@ describe('ApprovalProductService', () => {
       }
       if (statement.startsWith(`SELECT 'AP-' || nextval('approval_request_no_seq')::text AS request_no`)) {
         return { rows: [{ request_no: 'AP-101010' }], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT id FROM users WHERE id = ANY($1::varchar[]) AND is_active = TRUE')) {
+        return { rows: [{ id: 'approver-42' }], rowCount: 1 }
       }
       throw new Error(`Unhandled pool query: ${statement}`)
     })
