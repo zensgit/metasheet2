@@ -98,6 +98,32 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     control: 'stock-prep-operator-project-directory',
   }),
   Object.freeze({
+    // 通知下一步 — whose turn it is on this project. VALUES-FREE (step keys, indices, booleans,
+    // handler counts — never a material name or quantity), so it rides the broad READ queue-watcher
+    // tier like the rest of the values-free stock-prep read surface.
+    //
+    // `control: null` is deliberate and is NOT an oversight. Every other control here is presence-
+    // equivalent to its permission, which is what lets the F-04 matrix assert rendered === granted
+    // in both directions. These two are additionally gated on RUNTIME TURN STATE (the caller must be
+    // the current handler), so a permitted principal who is not whose-turn-it-is legitimately sees no
+    // control — presence would not equal grant and F-04 would red for a correct UI. Their visibility
+    // is covered by StockPreparationHandoff.spec.ts instead.
+    capability: 'handoff.read',
+    code: STOCK_PREP_READ,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/handoff',
+    control: null,
+  }),
+  Object.freeze({
+    // 通知下一步 — the advance itself. Rides the OPERATE write tier, the same notch as
+    // confirmationQueue.confirm: it mutates durable turn state and dispatches a notification.
+    capability: 'handoff.advance',
+    code: STOCK_PREP_OPERATE,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/handoff/advance',
+    control: null,
+  }),
+  Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,
     method: 'POST',

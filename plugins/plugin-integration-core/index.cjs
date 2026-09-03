@@ -22,6 +22,7 @@ const { createExternalSystemRegistry } = require('./lib/external-systems.cjs')
 const { createReadSourceConfigStore } = require('./lib/read-source-config-store.cjs')
 const { createStockPreparationAuditStore } = require('./lib/stock-preparation-audit-store.cjs')
 const { createStockPreparationSourceBindingStore } = require('./lib/stock-preparation-source-binding-store.cjs')
+const { createStockPreparationHandoffStore } = require('./lib/stock-preparation-handoff-store.cjs')
 const { createConfirmationDecisionReconcileLease } = require('./lib/stock-preparation-confirmation-decisions.cjs')
 const { createB2aOperationClaim } = require('./lib/b2a-trial-registry.cjs')
 const {
@@ -83,6 +84,7 @@ let externalSystemRegistry = null
 let readSourceConfigStore = null
 let stockPreparationAuditStore = null
 let stockPreparationSourceBindingStore = null
+let stockPreparationHandoffStore = null
 let stockPreparationPackInstallStore = null
 let stockPreparationConfirmationDecisionLease = null
 let b2aOperationClaim = null
@@ -316,6 +318,11 @@ module.exports = {
     // the whole mechanism by which changing the source stops needing a backend restart. Absent (no
     // SQL db) → no resolver is wired → the action resolves the env default exactly as before.
     stockPreparationSourceBindingStore = createStockPreparationSourceBindingStore({ db })
+    // 通知下一步 (migration 084): the per-(tenant,projectNo) cursor saying whose turn it is
+    // on a 备料 project. Built here so both handoff routes can compare-and-set it in one transaction —
+    // which is what makes a double click a detectable replay instead of a second advance. Absent (no
+    // SQL db) → the routes fail closed with a named 501, never with a plausible-but-volatile turn.
+    stockPreparationHandoffStore = createStockPreparationHandoffStore({ db })
     // Customer-pack install LEDGER (migration 076). Terminal-state rows only; it is what makes a
     // pack's `ext_` columns enumerable, which is what lets a PLM refresh honour their ownership
     // bands instead of falling back to the frozen-template ones.
@@ -474,10 +481,22 @@ module.exports = {
         // Duck-typed to { applyRoleWriteScopes({ sheetId, entries }) => Promise<{ applied }> }.
         stockPreparationFieldPermissions:
           (context.services && context.services.stockPreparationFieldPermissions) || null,
+        // 通知下一步: the DingTalk seam, injected by the host for this plugin only — the same
+        // INJECTED-per-plugin shape as governedAi and stockPreparationXlsxExport above, and for the
+        // same reason: the plugin has no DingTalk client of its own and must not grow one. The host
+        // wraps the EXISTING group-destination machinery (packages/core-backend
+        // dingtalk-group-destination-service.ts), which is why this seam speaks in DESTINATION IDs.
+        //
+        // OPTIONAL — absent → every advance reports notifyOutcome 'not_configured' and still moves the
+        // turn. Turn state and notification are separate concerns; a deployment may want only the
+        // first. Duck-typed to
+        //   { sendToDestinations({ destinationIds, title, body }) => Promise<{ delivered, failed }> }.
+        stockPreparationHandoffNotifier: (context.services && context.services.stockPreparationHandoffNotifier) || null,
         externalSystemRegistry,
         readSourceConfigStore,
         stockPreparationAuditStore,
         stockPreparationSourceBindingStore,
+        stockPreparationHandoffStore,
         stockPreparationPackInstallStore,
         stockPreparationConfirmationDecisionLease,
         b2aOperationClaim,
