@@ -122,7 +122,7 @@ scheduleIdle(() => {
   cursor: pointer;
 }
 .meta-notif-bell__btn:hover { color: var(--ms-color-primary); background: var(--ms-bg-page, #f5f6f8); }
-.meta-notif-bell__icon { font-size: 18px; color: currentColor; }
+.meta-notif-bell__icon { font-size: var(--ms-sheet-icon-size, 16px); color: currentColor; }
 .meta-notif-bell__badge {
   position: absolute; top: 2px; right: 2px;
   display: inline-block; min-width: 16px; padding: 0 4px; border-radius: 8px;

@@ -422,6 +422,7 @@ describe('App sheet chrome (full-bleed workbench)', () => {
     const source = readFileSync(join(__dirname, '../src/App.vue'), 'utf-8')
     expect(source).toMatch(/@media \(max-width: 768px\)[\s\S]*\.app-sheet-chrome/)
     expect(source).toMatch(/\.app-sheet-chrome \.nav-locale__label[\s\S]*display:\s*none/)
+    expect(source).toMatch(/\.app-sheet-chrome \.brand-text[\s\S]*font-size:\s*14px/)
   })
 
   it('hides sheet chrome when embedded=true but still locks app-main scroll', async () => {

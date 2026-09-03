@@ -121,8 +121,9 @@ function onResizeStart(e: MouseEvent) {
 
 <style scoped>
 .meta-field-header {
-  padding: 10px 12px; text-align: left; font-weight: 500; font-size: 13px;
-  border-bottom: 1px solid var(--ms-border-light, #e5e7eb); background: var(--ms-bg-card, #fff); white-space: nowrap;
+  padding: 8px 12px; text-align: left; font-weight: 500; font-size: var(--ms-sheet-font-header, 12px);
+  color: var(--ms-text-2, #4b5563);
+  border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb); background: var(--ms-bg-card, #fff); white-space: nowrap;
   user-select: none; position: sticky; top: 0; z-index: 3;
 }
 .meta-field-header--sortable { cursor: pointer; }

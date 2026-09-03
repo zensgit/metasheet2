@@ -58,6 +58,19 @@ describe('MetaToolbar 简约大气 chrome', () => {
     }
   })
 
+  it('uses the 13px / 16px / 38px sheet grammar tokens (not EP 14/16 admin density)', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const source = readFileSync(join(__dirname, '../src/multitable/components/MetaToolbar.vue'), 'utf-8')
+    expect(source).toMatch(/--ms-sheet-toolbar-height,\s*38px/)
+    expect(source).toMatch(/--ms-sheet-font-body,\s*13px/)
+    expect(source).toMatch(/--ms-sheet-icon-size,\s*16px/)
+    expect(source).toMatch(/--ms-sheet-icon-color,\s*#6b7280/)
+    const root = mountToolbar()
+    const toolbar = root.querySelector('.meta-toolbar') as HTMLElement
+    expect(toolbar).toBeTruthy()
+  })
+
   it('keeps the new-record CTA labeled and moves density / fit / print / import / export into 更多', () => {
     const root = mountToolbar()
     const primary = root.querySelector('.meta-toolbar__primary') as HTMLElement

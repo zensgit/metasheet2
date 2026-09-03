@@ -4570,7 +4570,11 @@ defineExpose({
 </script>
 
 <style scoped>
-.mt-workbench { display: flex; flex-direction: column; height: 100%; overflow: hidden; background: #fff; }
+.mt-workbench {
+  display: flex; flex-direction: column; height: 100%; overflow: hidden; background: #fff;
+  font-size: var(--ms-sheet-font-body, 13px);
+  font-variant-numeric: tabular-nums;
+}
 /* position:relative establishes the positioning context .mt-workbench__rail--drawer (UI-P2-2c) anchors
    against — inert for every other child, which all stay in normal flow. */
 .mt-workbench__content { display: flex; flex: 1; min-height: 0; position: relative; }
@@ -4656,7 +4660,7 @@ defineExpose({
 .mt-workbench__mgr-btn:hover { background: var(--ms-bg-page, #f5f6f8); color: var(--ms-color-primary); }
 .mt-workbench__mgr-btn--attention { color: var(--ms-text-1, #111827); background: transparent; }
 .mt-workbench__mgr-btn--active { color: var(--ms-color-primary); }
-.mt-workbench__mgr-btn-icon { font-size: 18px; color: currentColor; }
+.mt-workbench__mgr-btn-icon { font-size: var(--ms-sheet-icon-size, 16px); color: currentColor; }
 .mt-workbench__mgr-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px; margin-left: 6px; padding: 0 5px; border-radius: 999px; background: var(--ms-color-info, #6b7280); color: #fff; font-size: 11px; font-weight: 500; }
 .mt-workbench__base-bar { padding: 8px 16px 0; border-bottom: 1px solid #f0f0f0; }
 /* UI-P2-2b (design docs/development/multitable-ui-p2-2b-vertical-tree-design-20260713.md §2.1/§3.1):
