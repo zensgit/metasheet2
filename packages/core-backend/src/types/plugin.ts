@@ -404,6 +404,31 @@ export interface MultitableRepairTransactionSurface {
 
 export interface MultitableProvisioningAPI {
   getObjectSheetId(projectId: string, objectId: string): string
+  /**
+   * IS THIS SHEET OWNED BY THIS PROJECT — the only tenancy fact about a sheet that is recorded.
+   *
+   * `meta_sheets` carries no project column; a sheet's project appears only inside its DERIVED id
+   * (`sheet_ + sha1(projectId:objectId)`), which is one-way and, more importantly, is not an
+   * invariant any consumer maintains: `sheetId` and `objectId` are independent fields on a table
+   * action, and a deployment may legitimately point an objectId at a sheet created under a different
+   * one. Reversing the hash is therefore neither possible nor sufficient.
+   *
+   * What IS recorded is `plugin_multitable_object_registry`, written by plugin-scoped
+   * `provisioning.ensureObject` and keyed by `sheet_id`. This asks that row a YES/NO question.
+   *
+   * DELIBERATELY A BOOLEAN, never the owning project id. The plugin-scope wrapper can only narrow by
+   * PROJECT NAMESPACE, and every tenant of one plugin shares that namespace
+   * (`tenant-a:integration-core` and `tenant-b:integration-core` both end in `integration-core`), so
+   * a port that RETURNED the owner would hand one tenant's caller another tenant's project id and
+   * pass the namespace guard while doing it. A boolean cannot: the caller must already know the
+   * project it is asking about, and learns nothing about any other.
+   *
+   * False means "not provably owned by that project" and covers both "owned by someone else" and
+   * "not in the registry at all" — the two are not distinguishable here, and deliberately so. A
+   * caller deciding a tenancy question must treat false as a failure to prove ownership, never as
+   * permission.
+   */
+  isSheetOwnedByProject(sheetId: string, projectId: string): Promise<boolean>
   getFieldId(projectId: string, objectId: string, fieldId: string): string
   findObjectSheet(input: {
     projectId: string

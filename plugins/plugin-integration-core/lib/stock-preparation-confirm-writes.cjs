@@ -27,9 +27,9 @@
 //     booleans / sha16 handles only — never a drawing number, unit symbol, or row payload.
 //
 // W4a EXTENSION (carry wiring — execution-plan W4a, adjudication Layer 3): applyCarryViaConfirm is
-// the ONE additional write face, and the ONE place this module addresses the CANONICAL
-// stock-preparation sheet — via a scoped API pinned to exactly that single objectId, resolved
-// through provisioning under the same staging project. It patches ONLY human-preserved fields whose
+// the ONE additional write face, and the ONE place this module addresses the stock-preparation
+// WORKING sheet — via a scoped API pinned to the BOUND table action's own `target`, the same
+// `{ sheetId, fieldIdMap }` the apply writer writes through. It patches ONLY human-preserved fields whose
 // target cells are blank, copying them from an INACTIVE predecessor row the human confirmed — the
 // K2-style server-signed carry the carry-policy module was built for. carriedBy is the route-derived
 // operator identity and carriedAt is stamped HERE; neither is ever body- or decision-sourced. It
@@ -763,10 +763,44 @@ async function retireUnitConversionRule(input = {}) {
 //      already-carried (full replay ⇒ skipped_already_carried no-op), different ⇒ closed 409
 //      refusal naming field NAMES only, and then NOTHING is written (not even the clean fields:
 //      a half-carried row would misreport as done).
+//
+// IT WRITES THE TABLE THE APPLY PATH WROTE — not a table id of its own choosing.
+//
+// The first cut of this executor located its sheet by hardcoding the CANONICAL objectId
+// `plm_stock_preparation_main` and resolving it through provisioning. That is the wrong table on the
+// deployments customers actually run — the identical defect the 按项目导出物料 Excel export carried
+// until #5446, now on the WRITE side. Apply is sandbox-only unless an owner has configured a
+// time-boxed production policy, and `assertStockPrepApplySandboxAllowed` (stock-preparation-table-
+// actions.cjs) REJECTS the canonical objectId outright on that path — so a default install's rows
+// land in the sandbox twin (`plm_stock_preparation_sandbox*`, the same template restamped) and the
+// canonical table stays empty forever. Carry therefore either refused 409 on a table it never
+// needed, or 404'd on a source row plainly present in the twin, or — worst — operated on the EMPTY
+// canonical table and reported `carried` for a write nobody would ever see. The human work this
+// feature exists to preserve went silently nowhere.
+//
+// The fix is not a second table lookup with a smarter rule — it is to stop having a rule at all. The
+// bound table action already carries the ONE authoritative answer to "which sheet do stock-prep rows
+// live in", because it is the same `target` the writer writes through (apply-writer.cjs
+// normalizeTarget / mapFieldName), the same one the dry-run's own read uses, and the same one the
+// export reads through. This executor now takes that `target` and nothing else.
+//
+// WHERE THE AUTHORITY MOVED, stated rather than glossed. The old lookup's assurance was
+// "provisioning says this objectId maps to this sheet under the staging project". The new one is
+// "the deployment's own server-side table-action config says the stock-prep rows live in this
+// sheet" — the SAME authority that put the rows there, resolved by the route through
+// getTableAction + assertStockPreparationTargetReady exactly as the export route resolves it.
+// Neither is client-reachable: the carry/confirm body allowlist is unchanged and still refuses
+// every target-shaped key. What is gained is that the read side and the write side can no longer
+// name different tables, which is the only property that was actually load-bearing here.
 
 const CANONICAL_TEMPLATE = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE
-const CANONICAL_OBJECT_ID = CANONICAL_TEMPLATE.objectId
 const CANONICAL_KEY_FIELD = CANONICAL_TEMPLATE.keyFields[0] // 'idempotencyKey'
+// The columns carry READS to scope itself and to re-verify every anti-forgery guard below. All four
+// are plm_system columns, so an explicit target map is REQUIRED to bind them
+// (assertTargetFieldMapCompleteness covers exactly the plm_system band plus declared extension ids)
+// — an unbound one means the deployment's config is broken, and a broken scope is a refusal, never
+// a best effort.
+const CARRY_SCOPE_FIELD_IDS = Object.freeze([CANONICAL_KEY_FIELD, 'active', 'componentSourceId', 'projectNo'])
 
 // The FULL closed key set of a carry decision — exactly what the carry module's builder emits.
 // Anything else (a smuggled carriedBy/confirmedAt, a human-field value, a record) is refused by
@@ -823,39 +857,180 @@ function assertCarryDecision(decision) {
   return decision
 }
 
-// Resolve the CANONICAL sheet — pinned to the single canonical objectId, never a caller-chosen one.
-async function resolveScopedCanonicalTarget(recordsApi, provisioning, targetProjectId) {
-  const sheet = await provisioning.findObjectSheet({ projectId: targetProjectId, objectId: CANONICAL_OBJECT_ID })
-  const sheetId = optionalString(sheet && sheet.id)
+// THE BOUND TARGET, normalized exactly as the writer normalizes it (apply-writer.cjs
+// normalizeTarget) and as the export normalizes it (prep-line-export.cjs normalizeExportTarget): a
+// required `sheetId`, and a `fieldIdMap` that is either empty (logical mode) or carries explicit
+// logical -> physical bindings. The objectId is carried for evidence ONLY and is never a decision
+// input — that it is not consulted is the whole point: canonical and sandbox twin differ in objectId
+// and in nothing this executor needs.
+function normalizeCarryTarget(input) {
+  if (!isPlainObject(input)) {
+    throw new StockPreparationConfirmWriteError(422, 'CONFIRM_CARRY_TARGET_INVALID', 'the bound stock-preparation table action target is required', { field: 'target' })
+  }
+  if (input.fieldIdMap !== undefined && input.fieldIdMap !== null && !isPlainObject(input.fieldIdMap)) {
+    throw new StockPreparationConfirmWriteError(422, 'CONFIRM_CARRY_TARGET_INVALID', 'target.fieldIdMap must be an object', { field: 'target.fieldIdMap' })
+  }
+  const sheetId = optionalString(input.sheetId)
   if (!sheetId) {
+    throw new StockPreparationConfirmWriteError(422, 'CONFIRM_CARRY_TARGET_INVALID', 'target.sheetId is required', { field: 'target.sheetId' })
+  }
+  const fieldIdMap = {}
+  for (const [logical, physical] of Object.entries(isPlainObject(input.fieldIdMap) ? input.fieldIdMap : {})) {
+    const logicalName = optionalString(logical)
+    const physicalName = optionalString(physical)
+    if (logicalName && physicalName) fieldIdMap[logicalName] = physicalName
+  }
+  return { sheetId, objectId: optionalString(input.objectId) || null, fieldIdMap }
+}
+
+// "Does this target bind logical ids to physical ids AT ALL?" — the writer's own predicate
+// (apply-writer.cjs fieldIdMapHasExplicitBindings), restated here so all three sides decide the two
+// modes with the same question. An EMPTY map is a legitimate mode: the target is addressed by
+// logical id and every key passes through untranslated, so nothing can be "unbound". A map with at
+// least one binding is the explicit mode, where an id absent from the map is a HOLE.
+function carryFieldIdMapHasExplicitBindings(fieldIdMap) {
+  return Object.keys(fieldIdMap).length > 0
+}
+
+// Resolve EVERY logical id this carry will touch — the four scope columns plus exactly the fields
+// this decision carries — against the bound target. Unlike the export (a projection, where an
+// unbound DISPLAY column is legitimately an empty cell) a carry WRITES, so there is no best effort
+// here: an unresolved id is a refusal, and both refusals name field NAMES only.
+//
+// The two refusals are deliberately different facts:
+//   * a SCOPE column (plm_system) is required by the deploy-time completeness gate
+//     (assertTargetFieldMapCompleteness), so an unbound one means the config is broken in a way that
+//     gate should already have caught -> 500;
+//   * a CARRIED human column is NOT required by that gate, and deliberately still is not. The gate
+//     is shared by fifteen route handlers, and apply / dry-run / mvp-persist / reconcile / the
+//     large-BOM jobs / the export never touch a human column — requiring one there would refuse a
+//     config every one of those paths accepts, taking down six working surfaces to pre-empt a
+//     refusal on a seventh. So a legal config may leave a human column unbound, and a deployment
+//     whose working sheet does not expose the column the human wrote in simply cannot have THIS
+//     carry performed on it -> 409, a state an admin fixes by binding the column, not a server fault.
+//
+// ONLY THE FIELDS THIS DECISION CARRIES are required — never the whole whitelist. A decision that
+// carries `notes` must not be refused because some unrelated column the operator never filled in is
+// unbound. Deploy-time DISCOVERY of the whole band is a different job at a different time, and it
+// lives in the preflight (STOCK_PREP_CARRY_TARGET_HUMAN_FIELDS_UNBOUND,
+// stock-preparation-preflight.cjs) where it costs a deployer one line instead of an outage.
+function resolveCarryFieldBindings(target, carryFields) {
+  const explicit = carryFieldIdMapHasExplicitBindings(target.fieldIdMap)
+  const map = {}
+  const missingFields = []
+  const unboundCarryFields = []
+  function bind(fieldId, unresolved) {
+    if (map[fieldId]) return
+    const physical = target.fieldIdMap[fieldId]
+    if (physical) map[fieldId] = physical
+    else if (!explicit) map[fieldId] = fieldId // logical mode: the raw id addresses the column
+    else unresolved.push(fieldId)
+  }
+  for (const fieldId of CARRY_SCOPE_FIELD_IDS) bind(fieldId, missingFields)
+  for (const fieldId of carryFields) bind(fieldId, unboundCarryFields)
+  if (missingFields.length > 0) {
     throw new StockPreparationConfirmWriteError(
-      409,
-      'CONFIRM_CARRY_TARGET_NOT_PROVISIONED',
-      'the canonical stock-preparation table is not provisioned under this project; carry requires the provisioning-managed canonical target',
-      { objectId: CANONICAL_OBJECT_ID },
+      500,
+      'CONFIRM_CARRY_TARGET_FIELDS_UNRESOLVED',
+      'the bound stock-preparation target does not bind the fields a carry scopes on',
+      { objectId: target.objectId, missingFields },
     )
   }
-  const scoped = await createTargetScopedRecordsApi(recordsApi, { sheetId, objectId: CANONICAL_OBJECT_ID }, { provisioning, projectId: targetProjectId })
-  return { objectId: CANONICAL_OBJECT_ID, sheetId, scoped }
+  if (unboundCarryFields.length > 0) {
+    throw new StockPreparationConfirmWriteError(
+      409,
+      'CONFIRM_CARRY_FIELD_NOT_BOUND',
+      'the bound stock-preparation target does not bind a human column this carry would write',
+      { objectId: target.objectId, fields: unboundCarryFields },
+    )
+  }
+  return map
+}
+
+// A LOGICAL-facing view of the bound sheet, so every guard below keeps speaking the frozen
+// template's own field names.
+//
+// The sheet SCOPE WALL and the write surface come from createTargetScopedRecordsApi in 'pre_mapped'
+// mode — the same mode the apply path drives its writer through (table-actions.cjs
+// applyStockPreparationPlan) — so a call that tried to leave `target.sheetId` is refused by that
+// module, not by trust. The logical<->physical translation then rides the bound target's OWN
+// fieldIdMap, exactly as the writer's `mapFieldName` and the export's `unmapRow` do. Deliberately
+// NOT createTargetScopedRecordsApi's own 'logical' translation: that resolution is keyed by objectId
+// through the frozen-template registry, and a sandbox twin's restamped objectId is not in it — which
+// is another way of saying this executor must not be in the business of knowing which objectId it is
+// talking to.
+function createLogicalCarryView(scoped, fieldIdMap) {
+  const inverse = {}
+  for (const [logical, physical] of Object.entries(fieldIdMap)) inverse[physical] = logical
+  function toPhysical(source, where) {
+    const out = {}
+    for (const [key, value] of Object.entries(isPlainObject(source) ? source : {})) {
+      const physical = fieldIdMap[key]
+      if (!physical) {
+        // Unreachable via resolveCarryFieldBindings above; kept so a future key added to a filter or
+        // a change set fails CLOSED at the boundary instead of addressing no column at all.
+        throw new StockPreparationConfirmWriteError(
+          500,
+          'CONFIRM_CARRY_TARGET_FIELDS_UNRESOLVED',
+          'a carry field reached the records boundary with no physical id bound for it',
+          { missingFields: [key], boundary: where },
+        )
+      }
+      out[physical] = value
+    }
+    return out
+  }
+  function toLogical(record) {
+    if (!isPlainObject(record) || !isPlainObject(record.data)) return record
+    const data = {}
+    for (const [key, value] of Object.entries(record.data)) data[inverse[key] || key] = value
+    return { ...record, data }
+  }
+  return {
+    async queryRecords(input = {}) {
+      const scopedInput = { ...input }
+      if (scopedInput.filters !== undefined) scopedInput.filters = toPhysical(scopedInput.filters, 'filters')
+      const rows = await scoped.queryRecords(scopedInput)
+      // A non-array passes straight through so findByKeyField's own "must return an array" guard
+      // still fires rather than being masked by a mapping TypeError.
+      return Array.isArray(rows) ? rows.map(toLogical) : rows
+    },
+    async patchRecord(input = {}) {
+      return toLogical(await scoped.patchRecord({ ...input, changes: toPhysical(input.changes, 'changes') }))
+    },
+  }
+}
+
+// Resolve the sheet this carry writes: the BOUND table action's target, never a hardcoded objectId.
+async function resolveScopedCarryTarget(recordsApi, targetInput, carryFields) {
+  const target = normalizeCarryTarget(targetInput)
+  const fieldIdMap = resolveCarryFieldBindings(target, carryFields)
+  const scoped = await createTargetScopedRecordsApi(
+    recordsApi,
+    { sheetId: target.sheetId, objectId: target.objectId },
+    { fieldIdTranslation: 'pre_mapped' },
+  )
+  return { objectId: target.objectId, sheetId: target.sheetId, scoped: createLogicalCarryView(scoped, fieldIdMap) }
 }
 
 async function applyCarryViaConfirm(input = {}) {
   if (!isPlainObject(input)) {
     throw new StockPreparationConfirmWriteError(422, 'CONFIRM_CONFIG_INVALID', 'input must be an object')
   }
-  const { permission, recordsApi, provisioning: provisioningInput, context } = input
-  // Step 1 — before ANY provisioning / records access.
+  const { permission, recordsApi } = input
+  // Step 1 — before ANY records access.
   assertAdminPermission(permission)
   // Steps 2+3 — pure decision validation, still before any IO.
   const decision = assertCarryDecision(input.decision)
-  const prov = ensureProvisioning(
-    provisioningInput || (context && context.api && context.api.multitable && context.api.multitable.provisioning),
-  )
   const api = ensureRecordsApi(recordsApi)
-  const targetProjectId = requiredString(input.targetProjectId, 'targetProjectId')
   const confirmedBy = requiredString(input.confirmedBy, 'confirmedBy')
 
-  const target = await resolveScopedCanonicalTarget(api, prov, targetProjectId)
+  // The BOUND target — supplied by the caller from the deployment's own table action, never
+  // resolved here. This executor deliberately takes NO provisioning and NO staging projectId: it
+  // has no way to look a sheet up, which is what makes "carry writes the table apply wrote" a
+  // structural property rather than a convention. Still zero host IO at this point — an invalid or
+  // incompletely-bound target refuses before a single read.
+  const target = await resolveScopedCarryTarget(api, input.target, decision.carryFields)
 
   // Step 4 — the source row must exist and be INACTIVE (carry-policy's precondition, re-checked at
   // write time so a row that came back to life between plan and confirm refuses).
@@ -939,7 +1114,9 @@ async function applyCarryViaConfirm(input = {}) {
   const carriedAt = new Date().toISOString()
   const evidenceBase = {
     subject: 'carry',
-    target: { objectId: CANONICAL_OBJECT_ID, keyField: CANONICAL_KEY_FIELD },
+    // The BOUND target's identity, not a hardcoded one. Both halves are config identifiers (a public
+    // objectId constant and a field-key NAME), never a row value — the values-free contract stands.
+    target: { objectId: target.objectId, keyField: CANONICAL_KEY_FIELD },
     carriedFields: carriedFields.slice(),
     alreadyCarriedFields: alreadyCarriedFields.slice(),
     carriedByPresent: true,

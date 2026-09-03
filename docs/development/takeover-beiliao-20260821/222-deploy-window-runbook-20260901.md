@@ -146,12 +146,39 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
      ```
      （objectId 必须匹配 `plugins/plugin-integration-core/lib/stock-preparation-target-provisioning.cjs:82` 的 `SANDBOX_OBJECT_ID_NAMESPACE_PATTERN`——`plm_stock_preparation_sandbox` 开头,后面接 `_`/`-` 或结尾。)
   2. 在 `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON`(部署既有的 action 配置,通常也在 `docker\app.env` 或它指向的文件里)中,给 `plm.stock-preparation.pull-bom.v1` 这条 action 显式写上同一个 objectId:
-     ```json
-     { "plm.stock-preparation.pull-bom.v1": { "target": { "objectId": "<同上 STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS 里那个值>", "sheetId": "<既有 sheetId,不变>" } } }
+     **`objectId` 改了,`sheetId` 必须一起重算——不能留用既有那个。** 本条早先写的是"`sheetId`:既有值,不变",那是错的,照做会出事:
+
+     - `assertStockPrepApplySandboxAllowed`(`stock-preparation-table-actions.cjs`)**只读 `objectId`**;
+     - 而 apply 实际写哪张表、导出实际读哪张表,用的是 **`target.sheetId`**(`stock-preparation-apply-writer.cjs` / `stock-preparation-prep-line-export.cjs` 都逐字取用)。
+
+     两者是**互相独立的字段**。于是"objectId 换成沙箱、sheetId 留着正式表那个"的组合会让沙箱门放行,然后**把行写进正式主表**——挂着沙箱的名,干着正式表的事,正好是 D1=B 要避免的那件事。
+
+     **正确做法,一条路,别的都别走**:调 ensure,把它**返回的 `targetBinding` 整段**贴进 action 配置。这个接口就是本仓库认可的绑定生成器——它建表(或确认表已在)、写好所有权登记行,然后把该贴的东西原样给你。
+
      ```
+     POST /api/integration/stock-preparation/sandbox-target/ensure
+     { "objectId": "<本窗口沙箱 objectId>", "label": "<表名>" }
+     ```
+     响应里的 `data.targetBinding` 形如 `{ sheetId, objectId, keyField, fieldIdMap }`,**整段**贴进:
+     ```json
+     { "plm.stock-preparation.pull-bom.v1": { "target": "<把 data.targetBinding 整段贴在这里>" } }
+     ```
+
+     两件事都必须来自这次输出,不能手改:
+     - `sheetId` —— apply 写哪张表、导出读哪张表都只看它;
+     - `fieldIdMap` —— 物理列 id 是 `fld_+sha1(projectId:objectId:fieldId)`,objectId 一变**整张表的列 id 全变**,沿用旧 map 会让写入落到不存在的列上。而且**必须是完整的一整份**(含 13 个人工列),少一列结转会在部署期被 `STOCK_PREP_CARRY_TARGET_HUMAN_FIELDS_UNBOUND` 拦下。
+
+     （离线场景:没法调接口时,`node scripts/ops/stock-preparation-derive-target-binding.mjs --tenant-id <tenantId> --object-id <objectId> --action-fragment` 能算出**同样**的绑定。但它只算不建——**之后仍要调一次上面的 ensure**,否则表和所有权登记行不存在,结转会被 `CONFIRM_CARRY_TARGET_TENANT_MISMATCH` 拒。)
+
      不写 `target.objectId`(或写错)会默认成 canonical(`stock-preparation-table-actions.cjs:147-157`),导致 Step 6-2 在 `assertStockPrepApplySandboxAllowed` 那一步被无条件拒绝(`reason: prod_canonical`)。
   3. 若这次窗口装了 customer pack,确认 pack 配置(`INTEGRATION_CORE_STOCK_PREPARATION_CUSTOMER_PACKS_PATH` 指向的文件)里的 `targetObjectId` 是**同一个**沙箱 objectId——这条本来就只允许沙箱命名空间(`stock-preparation-customer-pack.cjs:269-285` 的 `normalizePackTargetObjectId`),不需要为 D1=B 额外改,只需要核对三处(env 允许清单、action 绑定、pack 目标)用的是同一个字符串,不是三个不同的沙箱 objectId。
-- 验证:三处配置里的沙箱 objectId 字符串完全一致(diff 一下三份配置文件里的这个值,不要靠肉眼扫);Step 3-3 部署预检不再报 `STOCK_PREP_SANDBOX_MODE_NOT_ENABLED` / `STOCK_PREP_SANDBOX_ALLOWLIST_MISSING_TARGET`。
+- 验证:
+  - 三处配置里的沙箱 objectId 字符串完全一致(diff 一下三份配置文件里的这个值,不要靠肉眼扫);
+  - **action 绑定里的 `sheetId` 等于这次 ensure 返回的那个**(再调一次 ensure,它是幂等的,把 `data.targetBinding.sheetId` 和配置里的值对一下;不一致说明 objectId 换了而绑定没重算);
+  - Step 3-3 部署预检 `ready: true`、`blockers` 为空。**特别确认这两条不在里面**:
+    - `STOCK_PREP_CARRY_TARGET_NOT_OWNED` —— 绑定的表不属于本部署的项目,结转每次点都会被拒;`detail.carryRouteCode` 里写的就是点击会看到的那个 code。修法就是上面的 ensure。
+    - `STOCK_PREP_CARRY_TARGET_HUMAN_FIELDS_UNBOUND` —— 人工列没绑全。
+    (`posture.carryTargetBinding.state` 是 `not_derived` **不是**故障、也不拦任何操作,它只提示绑定两半指向不同的表;结转允不允许看 `checks.carryTargetBinding.ownershipState`。)
 - 失败处理:三处不一致 → 以 action 绑定里的 `target.objectId` 为准改另外两处(action 绑定是唯一决定"apply 写到哪"的配置,allowlist 和 pack 目标都要跟着它,不是反过来)。
 
 ---

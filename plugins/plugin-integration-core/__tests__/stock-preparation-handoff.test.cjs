@@ -2969,7 +2969,7 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
     'G9: nor forbids the exact use the advance route now makes of it',
   )
   const callSites = (read('lib', 'http-routes.cjs').match(/resolveOperatorValueScope\(\{/g) || []).length
-  assert.equal(callSites, 5, 'G9: five call sites — if this changes, the header list must too')
+  assert.equal(callSites, 6, 'G9: six call sites — if this changes, the header list must too')
   for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance']) {
     assert.ok(scope.includes(marker), `G9: the header enumerates ${marker}`)
   }

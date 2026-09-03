@@ -205,6 +205,11 @@
         "expectedState": "unset",
         "envVar": "INTEGRATION_CORE_OUTBOUND_HTTP_WRITE_TARGETS",
         "what": "通用出站 HTTP 写门未设 = 拒绝,这就是正确姿态。"
+      },
+      {
+        "id": "carryTargetBinding",
+        "expectedState": "unknown",
+        "what": "绑定目标的 sheetId 是否等于 (项目, objectId) 的推导值。sheetId 与 objectId 本就是相互独立的字段(222 窗口 runbook 明确让改 objectId、留既有 sheetId),所以不等**不是故障也永不拒绝**;报出来只因为两半指向不同的表通常是改配置时的手滑。unknown = 该宿主没暴露推导,无从判断。"
       }
     ]
   }

@@ -43,6 +43,12 @@ const TEMPLATE_BY_OBJECT_ID = new Map(
     .map((template) => [template.objectId, template]),
 )
 
+// Byte-for-byte the platform's derivation for a SHEET (stableMetaId + getObjectSheetId).
+function derivedSheetId(projectId, objectId) {
+  const digest = createHash('sha1').update([projectId, objectId].join(':')).digest('hex').slice(0, 24)
+  return `sheet_${digest}`.slice(0, 50)
+}
+
 // Byte-for-byte the platform's derivation (multitable/provisioning.ts stableMetaId + getObjectFieldId).
 function physicalFieldId(projectId, objectId, fieldId) {
   const digest = createHash('sha1').update([projectId, objectId, fieldId].join(':')).digest('hex').slice(0, 24)
@@ -79,8 +85,8 @@ function assertKnownFieldIds(projectId, objectId, keys) {
 // Fake provisioning over a { objectId -> sheetId } registry, scoped to ONE staging project (a lookup
 // with any other projectId misses, mirroring the real provisioning scope). `missing` marks objectIds
 // that are not provisioned even under the staging project.
-function makeFakeProvisioning({ sheetIdByObjectId, stagingProjectId, missing = new Set() } = {}) {
-  const calls = { findObjectSheet: [], resolveFieldIds: [] }
+function makeFakeProvisioning({ sheetIdByObjectId, stagingProjectId, missing = new Set(), sheetOwnerBySheetId = null } = {}) {
+  const calls = { findObjectSheet: [], resolveFieldIds: [], isSheetOwnedByProject: [], getObjectSheetId: [] }
   return {
     calls,
     async findObjectSheet({ projectId, objectId } = {}) {
@@ -93,6 +99,28 @@ function makeFakeProvisioning({ sheetIdByObjectId, stagingProjectId, missing = n
     async resolveFieldIds({ projectId, objectId, fieldIds } = {}) {
       calls.resolveFieldIds.push({ projectId, objectId, fieldIds })
       return resolveFieldIdsFor(projectId, objectId, fieldIds)
+    },
+    // IS THIS SHEET OWNED BY THIS PROJECT — the host port backed by
+    // `plugin_multitable_object_registry` (sheet_id -> project_id), the one place a sheet's project
+    // is actually recorded. A BOOLEAN, never the owner: returning the owner would hand one tenant's
+    // caller another tenant's project id (see the type's doc).
+    //
+    // The default models the ordinary single-tenant deployment: every sheet this fake knows about
+    // was provisioned by THIS staging project. A suite that needs two tenants overrides
+    // `sheetOwnerBySheetId` — the shape the wall is really decided by, and the shape a
+    // single-project fake cannot express.
+    async isSheetOwnedByProject(sheetId, projectId) {
+      calls.isSheetOwnedByProject.push({ sheetId, projectId })
+      if (sheetOwnerBySheetId) {
+        return Object.prototype.hasOwnProperty.call(sheetOwnerBySheetId, sheetId)
+          && sheetOwnerBySheetId[sheetId] === projectId
+      }
+      return Object.values(sheetIdByObjectId).includes(sheetId) && projectId === stagingProjectId
+    },
+    // The platform's own pure derivation (provisioning.ts getObjectSheetId).
+    getObjectSheetId(projectId, objectId) {
+      calls.getObjectSheetId.push({ projectId, objectId })
+      return derivedSheetId(projectId, objectId)
     },
   }
 }
@@ -238,6 +266,7 @@ function logicalData(projectId, objectId, data) {
 }
 
 module.exports = {
+  derivedSheetId,
   physicalFieldId,
   physicalFieldIdSet,
   templateFieldIds,

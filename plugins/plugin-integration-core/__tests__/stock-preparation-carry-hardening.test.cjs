@@ -50,9 +50,11 @@ const {
 const {
   makeFakeProvisioning,
   makeStrictRecordsApi,
+  physicalFieldId,
   physicalRow,
   logicalData,
 } = require(path.join(__dirname, 'fixtures', 'stock-preparation-multitable-fakes.cjs'))
+const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
 const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
 const { createStockPreparationAuditStore } = require(path.join(LIB, 'stock-preparation-audit-store.cjs'))
 
@@ -62,6 +64,23 @@ const CANONICAL_SHEET = 'sheet_plm_stock_preparation_main'
 const LEDGER_SHEET = 'sheet_confirmation_decisions'
 const OPERATOR = 'user_admin_1'
 const PROJECT_NO = 'P-9'
+
+// THE BOUND TARGET the deployment's table action names. The carry executor takes this instead of
+// resolving the canonical objectId through provisioning — see stock-preparation-carry-target-
+// binding.test.cjs for why those are different tables on a default install. Every exploit below is
+// therefore now run against a BOUND target, which is the state a real deployment is in.
+const CARRY_TARGET = Object.freeze({
+  sheetId: CANONICAL_SHEET,
+  objectId: CANONICAL_OBJECT_ID,
+  fieldIdMap: Object.freeze(Object.fromEntries(
+    STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => [field.id, physicalFieldId(STAGING, CANONICAL_OBJECT_ID, field.id)]),
+  )),
+})
+const CARRY_TABLE_ACTION_CONFIG = Object.freeze({
+  actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+  source: { externalSystemId: 'plm_sql_source', kind: 'data-source:sql-readonly' },
+  target: CARRY_TARGET,
+})
 const CARRY_ROUTE = '/api/integration/stock-preparation/carry/confirm'
 
 const ADMIN = Object.freeze({ id: OPERATOR, roles: ['admin'], tenantId: 'tenant-a' })
@@ -217,7 +236,8 @@ function mount({ canonicalRows = pairRows(), recordsWrapper } = {}) {
       multitable: { provisioning, records },
     },
     storage: new Map(),
-    config: {},
+    // The deploy-time table action the carry route reads its target off.
+    config: { stockPreparationTableActions: [CARRY_TABLE_ACTION_CONFIG] },
   }
   const services = {
     externalSystemRegistry: {
@@ -236,6 +256,11 @@ function mount({ canonicalRows = pairRows(), recordsWrapper } = {}) {
     readSourceCompositionConfigStore: { ...inertService(['saveVersion', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']), async list() { return [] } },
     bridgeAgentChecklistStore: inertService(['saveVersion', 'approve', 'retire', 'getForApply']),
     stockPreparationAuditStore: auditStore,
+    // The host capability the carry route's tenant wall requires (#5445): the plugin submits two
+    // identity strings and receives one boolean. These suites drive the route as the deployment's own
+    // tenant, so the pairing is vouched for and the wall is transparent to them — the wall itself is
+    // witnessed in stock-preparation-carry-target-binding.test.cjs (T9-*).
+    tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
   }
   httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
   return { routes, auditDb, provisioning, records, baseRecords }
@@ -442,6 +467,7 @@ async function main() {
         recordsApi: records,
         provisioning,
         targetProjectId: STAGING,
+        target: CARRY_TARGET,
         decision: carryDecision({
           idempotencyKey: p2New, sourceIdempotencyKey: p1Old,
           componentSourceId: sharedComponent, carryFields: ['notes'],
@@ -492,7 +518,7 @@ async function main() {
     let caught = null
     try {
       await applyCarryViaConfirm({
-        permission: 'admin', recordsApi: records, provisioning, targetProjectId: STAGING,
+        permission: 'admin', recordsApi: records, provisioning, targetProjectId: STAGING, target: CARRY_TARGET,
         decision: carryDecision({
           idempotencyKey: targetKey, sourceIdempotencyKey: sourceKey,
           componentSourceId: sharedComponent, carryFields: ['notes'],
@@ -536,7 +562,7 @@ async function main() {
     let caught = null
     try {
       await applyCarryViaConfirm({
-        permission: 'admin', recordsApi: records, provisioning, targetProjectId: STAGING,
+        permission: 'admin', recordsApi: records, provisioning, targetProjectId: STAGING, target: CARRY_TARGET,
         decision: carryDecision({
           idempotencyKey: honestTarget, sourceIdempotencyKey: forgedSource,
           componentSourceId: sharedComponent, carryFields: ['notes'],
@@ -557,6 +583,7 @@ async function main() {
       recordsApi: mounted.records,
       provisioning: mounted.provisioning,
       targetProjectId: STAGING,
+      target: CARRY_TARGET,
       decision: B_DECISION,
       confirmedBy: OPERATOR,
     })
@@ -604,6 +631,7 @@ async function main() {
         recordsApi: mounted.records,
         provisioning: mounted.provisioning,
         targetProjectId: STAGING,
+        target: CARRY_TARGET,
         decision: B_DECISION,
         confirmedBy: OPERATOR,
       })
@@ -624,6 +652,7 @@ async function main() {
       recordsApi: mounted.records,
       provisioning: mounted.provisioning,
       targetProjectId: STAGING,
+      target: CARRY_TARGET,
       decision: B_DECISION,
       confirmedBy: OPERATOR,
     })

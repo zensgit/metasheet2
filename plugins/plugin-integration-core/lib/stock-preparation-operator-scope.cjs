@@ -69,6 +69,16 @@
 //           see whose turn it is — but WHOSE turn is still a tenant fact.
 //        5. POST …/stock-preparation/handoff/advance  `stockPreparationHandoffAdvance`
 //           the advance itself: a WRITE (see below).
+//        6. POST …/stock-preparation/carry/confirm    `stockPreparationCarryConfirm`
+//           the K2 结转 confirm: a WRITE, values-free in its response (modes, counts, field NAMES).
+//           It joins this list for a reason specific to it — the tenant string does not merely scope
+//           what it reads, it decides WHICH SHEET IT WRITES. The bound table action is deploy-global
+//           (`getTableAction` is keyed by actionId alone), so the caller's tenant is the only thing
+//           separating one factory's rows from another's, and a header-fillable `user.tenantId`
+//           would be a steering vector straight into someone else's table. The scope resolved here
+//           is then checked against the bound sheet's own registry ownership
+//           (`isSheetOwnedByProject`) before any records IO — see http-routes.cjs
+//           `assertCarryTargetBelongsToTenant`.
 //
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins

@@ -4258,7 +4258,31 @@ async function testStockPreparationTargetProvisioningRoutes() {
   assert.equal(res.body.data.ready, true)
   assert.equal(res.body.data.mode, 'sandbox_create')
   assert.equal(res.body.data.targetBindingAvailable, true)
-  assert.equal(Object.prototype.hasOwnProperty.call(res.body.data, 'targetBinding'), false, 'sandbox route never exposes target binding')
+  // THE BINDING THE DEPLOYER MUST PASTE. This route is the sanctioned generator: the 222 window
+  // runbook tells an operator to run it and paste the resulting `target` into the table-action
+  // config, and until it returned one that instruction dead-ended.
+  //
+  // WHY RETURNING IT IS NOT A LEAK, given this route used to hide it:
+  //   * `objectId` is the caller's OWN request body (see the call above) — handing back an input is
+  //     not disclosure;
+  //   * `sheetId` and every `fieldIdMap` entry are pure functions of (projectId, objectId), both
+  //     caller-supplied, and scripts/ops/stock-preparation-derive-target-binding.mjs prints all 33
+  //     of them offline with no authentication at all;
+  //   * the canonical sibling route already returns exactly this shape, at exactly this admin tier
+  //     (publicStockPreparationTargetResult). The asymmetry was the anomaly.
+  // The values-free EVIDENCE channel is untouched below — still hashed, still carrying no option
+  // values or labels — because that channel travels further than this response does.
+  assert.ok(res.body.data.targetBinding, 'sandbox ensure returns the binding it created')
+  assert.equal(res.body.data.targetBinding.sheetId, 'sheet_stock_canonical_created')
+  assert.equal(res.body.data.targetBinding.objectId, sandboxObjectId)
+  assert.equal(res.body.data.targetBinding.keyField, 'idempotencyKey')
+  assert.ok(
+    Object.keys(res.body.data.targetBinding.fieldIdMap).length >= 33,
+    'sandbox ensure returns the WHOLE fieldIdMap, human columns included — a partial map is what the carry blocker exists to catch',
+  )
+  for (const humanField of ['notes', 'procurementReply', 'warehouseDone', 'actualArrivalDate']) {
+    assert.ok(res.body.data.targetBinding.fieldIdMap[humanField], `sandbox ensure binds ${humanField}`)
+  }
   assert.equal(res.body.data.evidence.fieldMapMode, 'sandbox')
   assert.equal(res.body.data.evidence.target.fieldIdMapEmpty, false)
   assert.ok(res.body.data.evidence.objectIdHash, 'sandbox route returns object hash evidence')
@@ -4266,8 +4290,10 @@ async function testStockPreparationTargetProvisioningRoutes() {
   assert.ok(res.body.data.optionSync.target.objectIdHash, 'sandbox option sync returns target hash evidence')
   assert.equal(Object.prototype.hasOwnProperty.call(res.body.data.optionSync.target, 'objectId'), false)
   assert.equal(res.body.data.optionSync.evidence.fields.length, 4, 'sandbox route seeds contract + three config_info option fields')
-  assert.equal(JSON.stringify(res.body.data).includes(sandboxObjectId), false, 'sandbox route response hides object id')
-  assert.equal(JSON.stringify(res.body.data).includes('sheet_stock_canonical_created'), false, 'sandbox route response hides sheet id')
+  // The EVIDENCE half stays values-free and identifier-free: it is the half that ends up in issue
+  // reports and support threads, and it still hashes the objectId rather than naming it.
+  assert.equal(JSON.stringify(res.body.data.evidence).includes(sandboxObjectId), false, 'sandbox evidence hides object id')
+  assert.equal(JSON.stringify(res.body.data.evidence).includes('sheet_stock_canonical_created'), false, 'sandbox evidence hides sheet id')
   assert.equal(JSON.stringify(res.body.data).includes('plate'), false, 'sandbox route response hides option values')
   assert.equal(JSON.stringify(res.body.data).includes('Casting'), false, 'sandbox route response hides option labels')
   const sandboxEnsureCall = findCalls(sandboxProvisioning.calls, 'ensureObject')[0]
