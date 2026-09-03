@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, type App } from 'vue'
+import { createApp, h, nextTick, type App } from 'vue'
 import MetaToolbar from '../src/multitable/components/MetaToolbar.vue'
 import type { MetaField } from '../src/multitable/types'
 import { useLocale } from '../src/composables/useLocale'
@@ -73,15 +73,21 @@ describe('MetaToolbar overflow 「更多」', () => {
     expect(onHistory).toHaveBeenCalledTimes(1)
   })
 
-  it('toggles aria-expanded on the 更多 trigger', () => {
+  it('toggles aria-expanded on the 更多 trigger', async () => {
     const root = mountToolbar({
       overflow: () => h('button', { 'data-action': 'open-history' }, 'History'),
     })
     const more = root.querySelector('[data-testid="toolbar-more"]') as HTMLButtonElement
+    const panel = root.querySelector('[data-testid="toolbar-more-panel"]') as HTMLElement
     expect(more.getAttribute('aria-expanded')).toBe('false')
+    expect(panel.style.display).toBe('none')
     more.click()
+    await nextTick()
     expect(more.getAttribute('aria-expanded')).toBe('true')
+    expect(panel.style.display).not.toBe('none')
     more.click()
+    await nextTick()
     expect(more.getAttribute('aria-expanded')).toBe('false')
+    expect(panel.style.display).toBe('none')
   })
 })
