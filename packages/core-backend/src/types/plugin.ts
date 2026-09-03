@@ -455,10 +455,18 @@ export interface MultitableProvisioningAPI {
    * staging project id. Callers only need "is the sheet I was handed mine?", so the id never leaves
    * the database.
    *
-   * OPTIONAL: a plugin newer than its host degrades to "cannot prove ownership this way" rather
-   * than erroring. `projectId` is namespace-checked exactly like every other project argument.
+   * REQUIRED of the host, which is a statement about THIS surface: every host that implements this
+   * interface implements the port. A PLUGIN still probes for it at runtime before calling — a plugin
+   * shipped against a newer host than it is running on receives an object without the key whatever
+   * this type says, and stock-prep's fill-target resolution degrades to its deterministic-id proof
+   * rather than throwing. `projectId` is namespace-checked exactly like every other project
+   * argument.
+   *
+   * SIGNATURE SHARED WITH PR #5459, which built this port independently for the carry path: same
+   * name, same argument order, same boolean return, same guard-on-the-argument placement. Whichever
+   * of the two merges second must not diverge from it.
    */
-  isSheetOwnedByProject?(sheetId: string, projectId: string): Promise<boolean>
+  isSheetOwnedByProject(sheetId: string, projectId: string): Promise<boolean>
   findObjectSheet(input: {
     projectId: string
     objectId: string
