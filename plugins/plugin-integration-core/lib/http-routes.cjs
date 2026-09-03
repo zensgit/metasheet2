@@ -7788,6 +7788,11 @@ function requireStockPreparationAudit() {
         explicitTenantIds: collectExplicitTenantIds(req, input),
         tenantPrincipalDirectory,
       })
+      // H13 — same probe, same reason, for `project_directory_read` (migration 082). This route's
+      // append is fail-closed and precedes the response too, so without it a deployment on an older
+      // schema answered the directory read with a raw CHECK violation rather than with the 503 that
+      // says which migration to run. After the scope, before any records IO.
+      await requireStockPreparationAuditVocabulary(audit, 'project_directory_read', '082', scope.tenantId)
       const result = await listOperatorProjectDirectory({
         recordsApi: getMultitableRecordsApi(),
         provisioning: getMultitableProvisioning(),
@@ -8391,6 +8396,16 @@ function requireStockPreparationAudit() {
         explicitTenantIds: collectExplicitTenantIds(req, input),
         tenantPrincipalDirectory,
       })
+      // H13 — IS THIS DATABASE'S AUDIT VOCABULARY WIDE ENOUGH FOR `project_board_read` YET?
+      //
+      // The board's audit append is FAIL-CLOSED and precedes the response (B-04), so on a deployment
+      // whose CHECK constraint stops at 085 — a real state, because `db:migrate` is a separate CLI —
+      // every board read did the whole tenant-scoped read and then died on a raw constraint violation
+      // the operator could do nothing with. The probe converts that into the 503 that NAMES migration
+      // 086, before any records IO, and it is placed after the scope so the row it inserts and rolls
+      // back belongs to the tenant being cleared. Both audited paths are covered by the one probe:
+      // the hit below and the 404 MISS append, which writes the same action.
+      await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_BOARD_AUDIT_ACTION, '086', scope.tenantId)
       // THE BOUND TABLE-ACTION TARGET — the sheet `apply` actually writes to, which is what the fill
       // link must point at (on a deployment whose production gate is closed that is the sandbox twin,
       // not the canonical table). An UNCONFIGURED or unknown action is a deployment state this page

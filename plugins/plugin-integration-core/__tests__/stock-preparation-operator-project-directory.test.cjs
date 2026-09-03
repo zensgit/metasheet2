@@ -160,6 +160,9 @@ function mount({
   directoryProvisioned = true,
   tenantPrincipalDirectory = { async verifyTenantMembership() { return { member: true } } },
   auditAppend,
+  // G-05c — `undefined` models an audit store with no `supportsAction` at all (the vocabulary guard
+  // returns at its first line, fail-open), which is what every other case here wants.
+  auditSupportsAction,
 } = {}) {
   const routes = new Map()
 
@@ -281,6 +284,7 @@ function mount({
   })
 
   const auditAppends = []
+  const auditProbes = []
   const context = {
     api: {
       http: {
@@ -300,6 +304,12 @@ function mount({
       if (typeof auditAppend === 'function') return auditAppend(entry)
       return { ok: true }
     },
+    ...(typeof auditSupportsAction === 'function' ? {
+      async supportsAction(action, options = {}) {
+        auditProbes.push({ action, tenantId: (options && options.tenantId) || null, at: auditAppends.length })
+        return auditSupportsAction(action, options)
+      },
+    } : {}),
   }
   if (tenantPrincipalDirectory) services.tenantPrincipalDirectory = tenantPrincipalDirectory
 
@@ -308,7 +318,7 @@ function mount({
     services,
     logger: { info() {}, warn() {}, error() {} },
   })
-  return { routes, auditAppends, hostCallCount: () => hostCalls, recordsA, recordsB }
+  return { routes, auditAppends, auditProbes, hostCallCount: () => hostCalls, recordsA, recordsB }
 }
 
 /**
@@ -576,6 +586,48 @@ async function main() {
       'utf8',
     )
     assert.equal(migration.includes("'project_directory_read'"), true, 'the DB CHECK must admit the action the route writes')
+  })
+
+  await run('G-05c (H13) the read refuses BEFORE the values when the DB cannot store its audit action', async () => {
+    // G-05b proves the migration FILE admits the action. It cannot prove the DEPLOYMENT ran it:
+    // `db:migrate` is a separate CLI, so this code can run against a schema whose CHECK constraint
+    // predates 082. Because the append is fail-closed and precedes the response (G-06), the symptom
+    // was the whole tenant-scoped read followed by a raw constraint violation. Now it is a 503 that
+    // names the migration, before any records IO.
+    {
+      const { routes, auditAppends, auditProbes, hostCallCount } = mount({
+        auditSupportsAction: async () => ({ supported: false, reason: 'check_constraint_rejects' }),
+      })
+      const before = hostCallCount()
+      const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+      assert.equal(res.statusCode, 503, `a narrow vocabulary refuses, got ${JSON.stringify(res.body)}`)
+      assert.equal(errorCode(res), 'STOCK_PREPARATION_AUDIT_VOCABULARY_UNAVAILABLE')
+      assert.equal(res.body.error.details.migration, '082', 'the refusal names the migration to run')
+      assert.deepEqual(auditAppends, [], 'nothing is appended when the table cannot accept it')
+      assert.equal(hostCallCount(), before, 'the refusal costs zero records work')
+      assert.equal(auditProbes.length, 1)
+      assert.equal(auditProbes[0].action, 'project_directory_read')
+      // Probed under the RESOLVED tenant, so the row it inserts and rolls back belongs to the tenant
+      // being cleared — not to a placeholder.
+      assert.equal(auditProbes[0].tenantId, TENANT_A)
+      assert.equal(auditProbes[0].at, 0, 'the probe runs before any append')
+    }
+    // A current schema answers, and the positive verdict is cached for the process.
+    {
+      const { routes, auditProbes } = mount({
+        auditSupportsAction: async () => ({ supported: true, reason: 'check_constraint_accepts' }),
+      })
+      assert.equal((await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })).statusCode, 200)
+      assert.equal((await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })).statusCode, 200)
+      assert.equal(auditProbes.length, 1, 'the positive verdict is cached')
+    }
+    // A probe that itself blows up tells us nothing, so it must NOT become a refusal: a connection
+    // blip degrades to "just try the write", exactly as before the probe existed.
+    {
+      const { routes } = mount({ auditSupportsAction: async () => { throw new Error('connection reset') } })
+      const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+      assert.equal(res.statusCode, 200, `an undiagnosable probe fails open, got ${JSON.stringify(res.body)}`)
+    }
   })
 
   // -------------------------------------------------------------------------

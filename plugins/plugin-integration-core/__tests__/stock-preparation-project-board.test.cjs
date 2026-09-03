@@ -183,6 +183,10 @@ function mount({
   actionConfigured = true,
   tenantPrincipalDirectory = { async verifyTenantMembership() { return { member: true } } },
   auditAppend,
+  // B-13 — THE AUDIT VOCABULARY PROBE. `undefined` models a store that has no `supportsAction` at
+  // all (the guard returns at its first line, fail-open), which is what every other case here wants.
+  // A function makes the store probe-capable and records each probe.
+  auditSupportsAction,
   auditEntries = [{ action: 'prep_line_export', createdAt: EXPORT_AT }],
   omitAuditList = false,
   // How many OTHER projects tenant A's directory holds besides the one under test. The board is
@@ -400,6 +404,7 @@ function mount({
 
   const auditAppends = []
   const auditListCalls = []
+  const auditProbes = []
   const context = {
     api: {
       http: {
@@ -446,6 +451,12 @@ function mount({
         return { rowCount: auditEntries.length, entries: auditEntries }
       },
     }),
+    ...(typeof auditSupportsAction === 'function' ? {
+      async supportsAction(action, options = {}) {
+        auditProbes.push({ action, tenantId: (options && options.tenantId) || null, at: auditAppends.length })
+        return auditSupportsAction(action, options)
+      },
+    } : {}),
   }
   if (tenantPrincipalDirectory) services.tenantPrincipalDirectory = tenantPrincipalDirectory
 
@@ -458,6 +469,7 @@ function mount({
     routes,
     auditAppends,
     auditListCalls,
+    auditProbes,
     hostCallCount: () => hostCalls,
     queryCallCount: () => queryCalls,
     queryLog,
@@ -1218,6 +1230,75 @@ function theFillViewIdMirrorsTheHostsDefaultViewId() {
   )
 }
 
+// ---------------------------------------------------------------------------
+// B-13 (H13) — THE AUDIT VOCABULARY GATE
+//
+// The board's audit append is fail-closed and PRECEDES the values (B-04). That makes the width of
+// the database's `action` CHECK constraint a precondition of the whole route, not a detail of its
+// last statement: `db:migrate` is a separate CLI, so a deployment can run this code against a schema
+// whose vocabulary stops at 085 — and then every board read did the entire tenant-scoped read and
+// died on a raw constraint violation naming a constraint the operator has never heard of.
+//
+// Until this case existed, deleting the probe from the route stayed green, because no other case in
+// this file gives the audit store a `supportsAction` at all.
+// ---------------------------------------------------------------------------
+
+async function theBoardRefusesBeforeItsAuditActionCanBeStored() {
+  // (a) The schema is behind. One 503 that NAMES the migration, no audit row, and — the part that
+  //     matters for a values-bearing read — no records IO at all.
+  {
+    const { routes, auditAppends, auditProbes, queryCallCount } = mount({
+      auditSupportsAction: async () => ({ supported: false, reason: 'check_constraint_rejects' }),
+    })
+    const res = await callBoard(routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 503, `B-13: a narrow vocabulary refuses, got ${JSON.stringify(res.body)}`)
+    assert.equal(errorOf(res).code, 'STOCK_PREPARATION_AUDIT_VOCABULARY_UNAVAILABLE')
+    assert.equal(errorOf(res).details.migration, '086', 'B-13: the refusal names the migration to run')
+    assert.deepEqual(auditAppends, [], 'B-13: nothing is appended when the table cannot accept it')
+    assert.equal(queryCallCount(), 0, 'B-13: the refusal costs zero records queries')
+    assert.equal(auditProbes.length, 1)
+    assert.equal(auditProbes[0].action, 'project_board_read')
+    // Probed under the RESOLVED tenant, not a placeholder: the row it inserts and rolls back belongs
+    // to the tenant being cleared.
+    assert.equal(auditProbes[0].tenantId, TENANT_A)
+    assert.equal(auditProbes[0].at, 0, 'B-13: the probe runs before any append')
+  }
+  // (b) The schema is current. The board answers, and the probe is cached: a second read does not
+  //     pay for a second rolled-back INSERT.
+  {
+    const { routes, auditProbes } = mount({
+      auditSupportsAction: async () => ({ supported: true, reason: 'check_constraint_accepts' }),
+    })
+    const first = await callBoard(routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(first.statusCode, 200, `B-13: a current schema answers, got ${JSON.stringify(first.body)}`)
+    const second = await callBoard(routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(second.statusCode, 200)
+    assert.equal(auditProbes.length, 1, 'B-13: the positive verdict is cached for the process')
+  }
+  // (c) THE MISS PATH IS BEHIND THE SAME GATE. The 404 append writes the same action, so a narrow
+  //     vocabulary must refuse a miss with the 503 too — never with the constraint violation that a
+  //     404-then-append would have produced.
+  {
+    const { routes, auditAppends } = mount({
+      auditSupportsAction: async () => ({ supported: false }),
+    })
+    const res = await callBoard(routes, { user: OPERATOR_A, projectNo: 'PRJ-NO-SUCH-THING' })
+    assert.equal(res.statusCode, 503, `B-13: a miss is gated too, got ${JSON.stringify(res.body)}`)
+    assert.equal(errorOf(res).code, 'STOCK_PREPARATION_AUDIT_VOCABULARY_UNAVAILABLE')
+    assert.deepEqual(auditAppends, [])
+  }
+  // (d) FAIL-OPEN ON A PROBE THAT ITSELF BLOWS UP. A connection blip must degrade to "just try the
+  //     write", exactly as before the probe existed — a diagnostic that cannot diagnose must not
+  //     become a refusal.
+  {
+    const { routes } = mount({
+      auditSupportsAction: async () => { throw new Error('connection reset') },
+    })
+    const res = await callBoard(routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200, `B-13: an undiagnosable probe fails open, got ${JSON.stringify(res.body)}`)
+  }
+}
+
 async function main() {
   await onlyTheOperatorTierReachesTheBoard()
   await anotherTenantsProjectIsIndistinguishableFromNoProject()
@@ -1231,6 +1312,7 @@ async function main() {
   await theModuleRefusesToProjectAValueWithoutAScope()
   theFillViewIdMirrorsTheHostsDefaultViewId()
   await anAuditStoreWithoutListStillAnswersTheBoard()
+  await theBoardRefusesBeforeItsAuditActionCanBeStored()
   console.log('✓ stock-preparation-project-board')
 }
 
