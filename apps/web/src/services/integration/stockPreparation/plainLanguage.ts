@@ -585,6 +585,27 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainText> = Object
     zh: '记录接力进度的地方现在读不到,交接没有发生,备料数据也没有变化。',
     en: 'The place that records the handoff could not be reached — the turn did not move, and nothing in your prep data changed.',
   }),
+  // H13 — THE TENANCY REFUSALS, WHICH BOTH PLANES CAN RAISE AND NEITHER HAD WORDS FOR.
+  //
+  // These reach the queue AND the board, so they live in the shared table and are worded to claim
+  // nothing about a write. Without a row here the board fell through to its read generic, 「没能读到
+  // …请稍后再试一次」, which invites a person to retry forever a refusal that will never change:
+  // a platform admin has no tenant this minute and will have none next minute either. The sentence
+  // has to say the account is the reason, and that waiting is not the fix.
+  OPERATOR_SCOPE_TENANT_REQUIRED: Object.freeze({
+    zh: '当前账号不属于任何一家工厂,所以看不到具体项目的数据。这不是故障,再试也一样 —— 请用您工厂的账号登录。',
+    en: 'This account does not belong to any one factory, so it cannot see a specific project’s data. This is not an outage and retrying will not change it — sign in with your factory’s own account.',
+  }),
+  OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED: Object.freeze({
+    zh: '这个账号不在这家工厂的名单里,看不到这里的数据。请找管理员确认账号归属。',
+    en: 'This account is not on this factory’s roster, so it cannot see the data here. Ask an administrator to check which factory the account belongs to.',
+  }),
+  // The 503 the audit-vocabulary gate raises. It is a DEPLOYMENT state with a named fix, and the one
+  // refusal on these routes that a retry genuinely does clear — after somebody runs the migration.
+  STOCK_PREPARATION_AUDIT_VOCABULARY_UNAVAILABLE: Object.freeze({
+    zh: '这套系统的数据库还差一次升级,所以这一步暂时不能记录、也就不能进行。请把这条报错给管理员,升级完再点一次就好。',
+    en: 'This system’s database is one upgrade behind, so this step cannot be recorded and therefore cannot run. Show an administrator this message; once the upgrade is done, click again.',
+  }),
 })
 
 export const STOCK_PREP_ERROR_GENERIC: StockPrepPlainText = Object.freeze({
@@ -594,6 +615,50 @@ export const STOCK_PREP_ERROR_GENERIC: StockPrepPlainText = Object.freeze({
 
 export function stockPrepErrorPlain(code: string): StockPrepPlainText {
   return lookup(STOCK_PREP_ERROR_PLAIN, code) ?? STOCK_PREP_ERROR_GENERIC
+}
+
+// ---------------------------------------------------------------------------
+// 项目备料页 — READ-SHAPED FAILURE COPY
+// ---------------------------------------------------------------------------
+//
+// WHY THIS IS A SECOND TABLE AND NOT MORE ROWS IN THE ONE ABOVE. Every entry above, and the generic
+// it falls back to, says a variation of 「这一步没有保存成功,数据没有变化。」 — which is exactly
+// right for the surface that table was built for, the confirmation queue, where every failure IS a
+// failed write. The project board writes NOTHING. Telling an operator whose board read timed out
+// that "nothing was saved" is not merely clumsy: it answers a question they did not ask and implies
+// they lost work they never did.
+//
+// So a read surface gets read-shaped sentences, and the LOOKUP falls back to a read-shaped generic
+// rather than the write one. The codes that genuinely belong to both planes (FORBIDDEN and friends)
+// are still resolved out of the shared table first, so there is one place to change them.
+export const STOCK_PREP_BOARD_ERROR_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  // The board's own 404. Deliberately DOES NOT say "this project does not exist" — the refusal is
+  // shapeless by construction (a project of another tenant and a number nobody has are the same
+  // answer), so the copy must not claim to know which it was. It says what the operator can do.
+  STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND: Object.freeze({
+    zh: '这个项目号在您这里还没有数据。',
+    en: 'There is no data for this project number here yet.',
+  }),
+  STOCK_PREPARATION_PROJECT_BOARD_REQUEST_INVALID: Object.freeze({
+    zh: '请求里的项目号不对,请重新输入一次。',
+    en: 'The project number in that request was not valid — type it again.',
+  }),
+})
+
+/** The board's read-shaped generic: nothing was changed, because nothing was going to be. */
+export const STOCK_PREP_BOARD_ERROR_GENERIC: StockPrepPlainText = Object.freeze({
+  zh: '没能读到这个项目的情况,请稍后再试一次。什么都没有改动。',
+  en: 'Could not read this project’s status — try again shortly. Nothing was changed.',
+})
+
+/**
+ * The board's failure copy. Its OWN codes first, then the shared table (so FORBIDDEN and the other
+ * cross-plane codes keep one definition), then a READ-shaped generic — never the write one.
+ */
+export function stockPrepBoardErrorPlain(code: string): StockPrepPlainText {
+  return lookup(STOCK_PREP_BOARD_ERROR_PLAIN, code)
+    ?? lookup(STOCK_PREP_ERROR_PLAIN, code)
+    ?? STOCK_PREP_BOARD_ERROR_GENERIC
 }
 
 /** The HTTP read failures the install page surfaces. Status stays visible in the disclosure. */
@@ -918,6 +983,19 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '请核对项目号有没有打错;也可能这个项目还没到 PLM 里。什么都没有改动。',
     enNext: 'Check the number for a typo — or the project may not be in PLM yet. Nothing was changed.',
   }),
+  /**
+   * 一线自己拉数据 — THE PROMISE IN THE SECOND LINE, AND WHY IT IS NOW TRUE.
+   *
+   * 「不用重新点同步,也不用联系我们」 is a claim about who can finish the run, and for a while it was
+   * false for the very tier this page is for: the split moved dry-run and apply only, so the moment
+   * the panel switched itself to the bounded background channel, all eight of those routes 403'd a
+   * stock-prep operator — directly under this sentence.
+   *
+   * The eight routes are now in STOCK_PREP_OPERATOR_PULL_STEPS (workbenchAccess.ts), so every tier
+   * that can press 同步 at all — a platform admin, or the stock-prep operator conjunction; those are
+   * the only two `canRunStockPrepProjectSync` admits — can also drive the channel to the end. The
+   * promise is kept for every caller who can read it.
+   */
   PLAN_LARGE_BOM_BOUNDED: Object.freeze({
     zh: '这个项目的 BOM 太大,没法当场展开',
     en: 'This project’s BOM is too large to expand on the spot',
@@ -960,6 +1038,25 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '队列里原有的待办还在。可以直接去「确认队列」看,或稍后再同步一次。',
     enNext: 'Anything already in the queue is still there. Open the tab, or sync again later.',
   }),
+  /**
+   * 一线自己拉数据 — AND THE SENTENCE THAT WAS FALSE.
+   *
+   * This step is what puts HELD rows into the confirmation queue. The first cut of this copy said
+   * 「跳过它不影响这次导入」, which is true only when the plan held nothing: on a plan with rows the
+   * system is unsure about, skipping this step means those rows are never queued, the write step
+   * then skips for want of a token, and the operator is sent to a queue that will never contain
+   * their work. Three sentences, each locally plausible, forming a closed loop.
+   *
+   * Reconcile has since joined the operator split, so this reason is now reachable only where the
+   * step genuinely cannot run for this caller. The copy therefore says what it costs — not that it
+   * costs nothing.
+   */
+  RECONCILE_NOT_PERMITTED: Object.freeze({
+    zh: '重新扫描待确认的事这一步没能跑',
+    en: 'The step that queues rows for confirmation did not run',
+    zhNext: '如果这次试算里有拿不准的行,它们就还没进「确认队列」,这次也不会写入。请找平台管理员跑一次这一步;如果试算没有拿不准的行,这一步跳过不影响写入。',
+    enNext: 'If this plan held any uncertain rows, they have NOT reached the confirmation queue and will not be written this time. Ask a platform administrator to run this step. If the plan held nothing uncertain, skipping it does not affect the write.',
+  }),
 
   // 3. 写入
   IMPORTED: Object.freeze({
@@ -974,11 +1071,20 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '同一份数据再同步一次不会重复写,这是正常的。',
     enNext: 'Syncing the same data again writes nothing twice; that is the expected result.',
   }),
+  /**
+   * THE PROMISE IN THE SECOND LINE IS CONDITIONAL, and the condition is the step before it.
+   *
+   * 「处理完再同步就会写进去」 is true only if those rows actually REACHED the queue, which is what
+   * reconcile does. When reconcile is refused they did not, and telling the operator to go and
+   * clear a queue that is empty of their work is the middle sentence of a closed loop. So this now
+   * names the precondition instead of assuming it; the run report shows the reconcile step
+   * immediately above, so a reader can see for themselves which case they are in.
+   */
   WRITE_HELD_FOR_CONFIRMATION: Object.freeze({
     zh: '先不写入 —— 等您把拿不准的那几行定下来',
     en: 'Not written yet — waiting for you to decide the uncertain rows',
-    zhNext: '到「确认队列」处理完,再回来点一次同步,这次就会写进去。',
-    enNext: 'Clear them on the confirmation-queue tab, then sync again and it will write.',
+    zhNext: '这些行进了「确认队列」的话,处理完再点一次同步就会写进去;如果上面那步「拿不准的交给人」没有跑成,它们还没进队列,得先让它跑起来。',
+    enNext: 'If those rows reached the confirmation queue, clear them there and sync again and it will write. If the step above (the one that queues them) did not run, they are not in the queue yet — that step has to run first.',
   }),
   WRITE_NO_PLAN: Object.freeze({
     zh: '没有可以执行的计划,所以没有写入',
@@ -1025,6 +1131,17 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
   BATCH_ARCHIVE_NOT_ATTEMPTED: Object.freeze({
     zh: '这次没有写入数据,所以不用存档',
     en: 'Nothing was written this time, so there is nothing to keep',
+  }),
+  /**
+   * 一线自己拉数据: the same shape as RECONCILE_NOT_PERMITTED, at the other end of the run. The
+   * important half of this sentence is the FIRST clause — the operator's rows are in, and the line
+   * they are reading is about a copy somebody else keeps, not about their import.
+   */
+  BATCH_ARCHIVE_NOT_PERMITTED: Object.freeze({
+    zh: '数据已经写进去了;留存这一批快照不归您做',
+    en: 'The data is in; keeping a copy of this batch is not your step',
+    zhNext: '导入本身已经完成,可以照常用。留快照这一步由平台管理员来跑,少这一批只影响「差异对比」。',
+    enNext: 'The import itself is done and usable. A platform administrator keeps the snapshot; missing this batch only affects the diff view.',
   }),
   BATCH_ARCHIVE_FAILED: Object.freeze({
     zh: '数据已经写进去了,但这次的存档没成功',

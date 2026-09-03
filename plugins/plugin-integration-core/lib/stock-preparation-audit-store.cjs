@@ -14,8 +14,12 @@
 // HARD boundary:
 //   - values-free BY CONSTRUCTION, not by caller discipline alone: `detail` passes a structural
 //     guard — scalars (finite numbers / booleans / enum-shaped strings) and ONE nested level of
-//     numeric count maps. A drawing number with spaces, an exception message, a URL, or any long /
-//     unshaped string is REJECTED fail-closed before it can reach the table.
+//     numeric count maps — and the two SERVER-GENERATED columns `mode` and `subject_id` pass the
+//     same enum/handle shape gate (assertValuesFreeColumn). A drawing number with spaces, an
+//     exception message, a URL, or any long / unshaped string is REJECTED fail-closed before it can
+//     reach the table. project_id / workspace_id / actor carry caller data and are NOT shape-gated —
+//     gating them refuses real work instead of protecting anything (see assertValuesFreeColumn), so
+//     their discipline lives at the ROUTES: no route forwards a caller's raw ?workspaceId here.
 //   - closed action vocabulary (9 actions) — an unknown action is refused, never stored.
 //   - subject_id / actor are internal handles (content-hash ids / user id) — never business values.
 //   - append-only: the store exposes no update or delete surface.
@@ -74,6 +78,13 @@ const STOCK_PREP_AUDIT_ACTIONS = Object.freeze([
   // `subject_id` is a step key from the closed handoff vocabulary, `detail` carries cursor integers
   // and booleans only (see stock-preparation-handoff.cjs and the route, its only caller).
   'handoff_advance',
+  // 项目备料页 (migration 086): an operator opened ONE project's board — the page that strings the
+  // pull, the queue, the export and the handoff together. It is the fourth value-bearing read on
+  // this trail (it carries a projectNo and a projectName to the caller), so it is audited for the
+  // same reason project_directory_read is. The audited ROW stays values-free in the same sense:
+  // project_id is NULL, mode is the operator_project_board|operator_project_board_miss enum, and
+  // detail is counts and booleans only — never the projectNo that was asked for, found or not.
+  'project_board_read',
 ])
 const ACTION_SET = new Set(STOCK_PREP_AUDIT_ACTIONS)
 
@@ -130,6 +141,45 @@ function assertValuesFreeDetail(detail) {
   return detail
 }
 
+/**
+ * THE SHAPE GATE, AND THE TWO COLUMNS IT MAY GOVERN.
+ *
+ * `assertValuesFreeDetail` above covers `detail`. This covers `mode` and `subject_id` — and
+ * DELIBERATELY NOT `project_id`, `workspace_id` or `actor`.
+ *
+ * WHY THE LINE IS DRAWN THERE. A shape gate is safe only on a column whose contents the SERVER
+ * generates. `mode` is chosen from a frozen set in this repository's own code and `subject_id` is a
+ * content handle, so a non-conforming value there is a bug here, and failing closed is right.
+ *
+ * The other three carry CALLER and CUSTOMER data, and an earlier cut of this change gated them too.
+ * That was a fail-closed bug in both directions:
+ *
+ *   * `project_id` is where the export route stamps the customer's own projectNo — deliberately;
+ *     it is that route's subject. A project number containing a Chinese character, a space or a
+ *     slash is ordinary, and with the gate on that column the operator's export 422s. The workbook
+ *     they came for would be refused in order to protect the trail from a value the trail EXISTS to
+ *     carry.
+ *   * eight write routes append AFTER their effect. A 422 there prevents nothing — the write has
+ *     already happened — it merely destroys the row that was supposed to record it, turning an
+ *     audited write into an unaudited write plus an error. That is strictly worse than the leak it
+ *     was guarding against.
+ *
+ * The values-free property for those columns is kept where it can be kept without refusing real
+ * work: AT THE ROUTES. No stock-prep route forwards a caller's raw `?workspaceId` into this store
+ * any more (there is no workspace registry to validate one against, so the honest answer is to
+ * select nothing from it), and `project_id` is written only by the route whose subject it is.
+ *
+ * FAIL-CLOSED and value-blind on what it does gate: the refusal names the COLUMN, never the value.
+ */
+function assertValuesFreeColumn(value, field) {
+  const normalized = optionalString(value)
+  if (normalized === null) return null
+  if (!SAFE_STRING_PATTERN.test(normalized)) {
+    throw new StockPreparationAuditError(422, 'AUDIT_FIELD_INVALID', 'audit column value is not enum/handle-shaped', { field })
+  }
+  return normalized
+}
+
 function rowToPublicEntry(row) {
   if (!row) return null
   return {
@@ -164,11 +214,14 @@ function createStockPreparationAuditStore({ db, idGenerator = crypto.randomUUID 
     const row = {
       id: idGenerator(),
       tenant_id: tenant,
+      // CALLER/CUSTOMER columns — stored as given. See assertValuesFreeColumn for why gating these
+      // would refuse real work rather than protect anything.
       workspace_id: optionalString(workspaceId),
       project_id: optionalString(projectId),
       action: normalizedAction,
-      subject_id: optionalString(subjectId),
-      mode: optionalString(mode),
+      // SERVER-GENERATED columns — shape-gated, fail-closed.
+      subject_id: assertValuesFreeColumn(subjectId, 'subjectId'),
+      mode: assertValuesFreeColumn(mode, 'mode'),
       actor: optionalString(actor),
       detail: safeDetail,
     }
@@ -275,6 +328,7 @@ module.exports = {
   StockPreparationAuditError,
   createStockPreparationAuditStore,
   __internals: {
+    assertValuesFreeColumn,
     assertValuesFreeDetail,
     isSafeScalar,
     rowToPublicEntry,

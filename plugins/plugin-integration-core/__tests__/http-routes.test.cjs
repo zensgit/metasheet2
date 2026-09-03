@@ -5369,8 +5369,24 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
   assert.equal(res.statusCode, 400)
   assert.equal(res.body.error.code, 'TABLE_ACTION_REQUEST_INVALID', 'run rejects browser-supplied source scope')
 
+  // A STORED JOB IS RUN BY ITS OWN CREATOR (#5460 round-2 C4). Every scope this route uses comes
+  // from the stored artifact — including the identity the customer-source read is performed under —
+  // so letting any caller who can reach the route drive somebody else's job meant driving it under
+  // somebody else's data-source ownership. That was latent while only `integration:*` holders could
+  // reach it; the stock-prep operator split admitted a new tier and made it reachable. The scope
+  // guarantee below is UNCHANGED and still asserted — the run still reads as the job's stored
+  // principal, never as the triggering request user — it is now simply also true that the triggering
+  // user must BE the creator.
   res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run', {
     user: OTHER_READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+  })
+  assert.equal(res.statusCode, 403, 'a stored large-BOM job is not runnable by another user')
+  assert.equal(res.body.error.code, 'LARGE_BOM_JOB_ACTOR_MISMATCH')
+  assert.equal(findCalls(calls, 'createAdapter').length, 0, 'and it is refused before any adapter is created')
+
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run', {
+    user: READ_USER,
     params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
   })
   assertOkResponse(res, 200)

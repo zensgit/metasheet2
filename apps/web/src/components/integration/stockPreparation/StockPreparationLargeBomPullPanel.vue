@@ -87,6 +87,21 @@ const props = withDefaults(
 const emit = defineEmits<{
   /** Identical to the parent panel's own event — the shell owns the one navigation this surface has. */
   (e: 'open-multitable'): void
+  /**
+   * THE RUN IS OVER AND ROWS ARE IN THE SHEET.
+   *
+   * The bounded background channel is a SECOND completion path, and it was silent. The small route
+   * ends inside `runStockPreparationProjectSync` and the parent panel emits `synced`, which the
+   * board listens to; a large BOM leaves that function early — it hands off to this panel — so a run
+   * that imported 620 rows here finished with nobody told. The board never re-read: no export
+   * button, no row count, an empty state still telling the operator to ask an administrator to sync
+   * a project they had just synced themselves.
+   *
+   * Emitted once, when the channel reaches 'done' — the phase a landed apply produces, which
+   * includes a PARTIAL write (`runStockPreparationLargeBomPull` folds 'succeeded' and 'partial' into
+   * it), because a partial write still put rows in the sheet.
+   */
+  (e: 'synced'): void
 }>()
 
 const { locale } = useLocale()
@@ -140,10 +155,26 @@ const appliedCountsSentence = computed<string>(() => {
   return bi(`已处理:${parts.join('、')}。`, `Processed so far: ${parts.join(', ')}.`)
 })
 
+/** Emitted at most once per mount: a completion is a fact, not a repeating state. */
+let announcedCompletion = false
+
 onMounted(async () => {
   const api = props.api ?? createStockPreparationLargeBomJobApi(props.scope, props.actionId)
   await runStockPreparationLargeBomPull(api, props.projectNo, {
-    onUpdate: (next) => Object.assign(state, next),
+    onUpdate: (next) => {
+      Object.assign(state, next)
+      // ROWS ARE IN THE SHEET -> tell the parent, so the board re-reads. Guarded by `cancelled` for
+      // the same reason the poll loop is: a component that is gone must not drive its parent.
+      if (cancelled || announcedCompletion) return
+      // 'done' IS the landing phase for a partial write too: `runStockPreparationLargeBomPull` folds
+      // both 'succeeded' and 'partial' apply statuses into it (APPLY_LANDED), because a partial write
+      // still put rows in the sheet — the same test the parent panel's own sheet link uses. There is
+      // no separate 'partial' phase to check for, and checking for one was a type error CI caught.
+      if (state.phase === 'done') {
+        announcedCompletion = true
+        emit('synced')
+      }
+    },
     wait: props.wait ?? undefined,
     pollIntervalMs: props.pollIntervalMs,
     isCancelled: () => cancelled,

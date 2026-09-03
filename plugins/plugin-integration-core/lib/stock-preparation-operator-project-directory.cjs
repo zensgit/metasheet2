@@ -116,7 +116,7 @@ function recordData(record) {
  * The directory is still worth serving without it — the operator can still find their project by
  * name — and the FE says which of the two situations it is rather than showing one "都清了" for both.
  */
-async function pendingDecisionCountsByProjectNo(recordsApi, provisioning, targetProjectId) {
+async function pendingDecisionCountsByProjectNo(recordsApi, provisioning, targetProjectId, projectNo) {
   let scoped
   try {
     scoped = await DECISION_INTERNALS.resolveScopedLedger(recordsApi, provisioning, targetProjectId, ['queryRecords'])
@@ -127,7 +127,14 @@ async function pendingDecisionCountsByProjectNo(recordsApi, provisioning, target
     }
     throw error
   }
-  const rows = await DECISION_INTERNALS.queryAll(scoped, { status: DECISION_STATUSES.PENDING })
+  // Narrowed the same way the project sheet is when the caller is about ONE project: the ledger is
+  // keyed by `projectNo`, so the row bound (CONFIRMATION_DECISION_LIST_LIMIT_EXCEEDED) then applies
+  // to that project's pending work rather than to the tenant's — a busy neighbour project can no
+  // longer take the board down.
+  const narrowTo = optionalString(projectNo)
+  const rows = await DECISION_INTERNALS.queryAll(scoped, narrowTo
+    ? { status: DECISION_STATUSES.PENDING, projectNo: narrowTo }
+    : { status: DECISION_STATUSES.PENDING })
   const byProjectNo = new Map()
   for (const row of rows) {
     const projectNo = optionalString(DECISION_INTERNALS.readCell(row, 'projectNo'))
@@ -155,8 +162,25 @@ async function pendingDecisionCountsByProjectNo(recordsApi, provisioning, target
  * number is not in this system" from "that project is real and has nothing pending", and only the
  * full directory can tell them apart. Filtering to pending-only is the FRONT END's default view over
  * this response, never a narrowing of the response itself.
+ *
+ * @param {string} [params.projectNo]  ONE project's number, for a caller that is about one project.
+ *
+ * WHY THE NARROWING LIVES HERE rather than in the caller. 项目备料页 asks about a single project, and
+ * answering it by listing the tenant and then `.find()`-ing cost 3 record queries PER PROJECT IN THE
+ * TENANT plus a hard 422 above MAX_LIST_ROWS — a page whose cost is set by somebody else's project
+ * count, and which stops answering about ANY project once a tenant grows past the bound. The obvious
+ * fix, a second module that resolves one project, would have been a SECOND tenant-confinement
+ * implementation to keep in step with this one; the whole reason the board reuses this function is
+ * that the two must not be able to drift on who may see what. So the narrowing is a parameter: the
+ * scope check, the staging-prefix tripwire, the projection and the counts are one implementation, and
+ * the only thing `projectNo` changes is WHICH project rows are fetched.
+ *
+ * It is a FILTER ON THE PROJECT SHEET, applied under the already-verified staging project, so it can
+ * only ever return a subset of what the unnarrowed call would have — it cannot reach a row the
+ * tenant confinement would have excluded. `projectCount` then means "matching projects" (0 or 1),
+ * which is what the board's audit records, and `projects` is the same row shape either way.
  */
-async function listOperatorProjectDirectory({ recordsApi, provisioning, targetProjectId, scope } = {}) {
+async function listOperatorProjectDirectory({ recordsApi, provisioning, targetProjectId, scope, projectNo, includePendingIndex = false } = {}) {
   if (!scope || !optionalString(scope.tenantId)) {
     throw new StockPreparationOperatorDirectoryError(500, 'OPERATOR_DIRECTORY_SCOPE_REQUIRED', 'operator project directory requires a resolved operator value scope')
   }
@@ -170,8 +194,13 @@ async function listOperatorProjectDirectory({ recordsApi, provisioning, targetPr
     throw new StockPreparationOperatorDirectoryError(403, 'OPERATOR_DIRECTORY_SCOPE_MISMATCH', 'the staging project does not belong to the resolved operator scope')
   }
 
+  // The narrowing, if the caller asked about one project: a FILTER on the project sheet's own
+  // `sourceProjectNo`, resolved through the same scoped records API every other read here uses. An
+  // unnarrowed call passes `{}` and is byte-for-byte the read it always was.
+  const narrowTo = optionalString(projectNo)
+  const projectFilter = narrowTo ? { sourceProjectNo: narrowTo } : {}
   const projectSheet = await findMvpSheet(recordsApi, provisioning, stagingProjectId, PROJECT_OBJECT_ID)
-  const projectRows = projectSheet ? (await queryAllRecords(projectSheet, {})).map(recordData) : []
+  const projectRows = projectSheet ? (await queryAllRecords(projectSheet, projectFilter)).map(recordData) : []
   if (projectRows.length > MAX_LIST_ROWS) {
     throw new StockPreparationOperatorDirectoryError(422, 'OPERATOR_DIRECTORY_ROWS_TOO_LARGE', 'operator project directory exceeded the row bound', { maxRows: MAX_LIST_ROWS })
   }
@@ -179,7 +208,7 @@ async function listOperatorProjectDirectory({ recordsApi, provisioning, targetPr
   const batchSheet = await findMvpSheet(recordsApi, provisioning, stagingProjectId, BATCH_OBJECT_ID)
   const exceptionSheet = await findMvpSheet(recordsApi, provisioning, stagingProjectId, EXCEPTION_OBJECT_ID)
   const prepLineSheet = await findMvpSheet(recordsApi, provisioning, stagingProjectId, PREP_LINE_OBJECT_ID)
-  const pending = await pendingDecisionCountsByProjectNo(recordsApi, provisioning, stagingProjectId)
+  const pending = await pendingDecisionCountsByProjectNo(recordsApi, provisioning, stagingProjectId, narrowTo)
 
   const projects = []
   for (const data of projectRows) {
@@ -226,6 +255,19 @@ async function listOperatorProjectDirectory({ recordsApi, provisioning, targetPr
     ledgerReady: pending.ready,
     projectCount: projects.length,
     pendingProjectCount: projects.filter((project) => project.pendingDecisionCount > 0).length,
+    // THE PENDING MAP ITSELF, projectNo -> count — OPT-IN, and off by default.
+    //
+    // It is keyed by the BUSINESS number, so it is answerable for a project that has NO archive row
+    // at all: the normal shape after an operator's own pull, since the MVP project table is written
+    // by mvp-persist and mvp-persist is platform-admin. A caller reading pending work off a
+    // per-project row silently reports zero for exactly those projects — the board did.
+    //
+    // WHY OPT-IN. The DIRECTORY ROUTE sends this object as its response and its top-level key set is
+    // frozen and asserted (S-02a). An extra key here would be an unreviewed widening of a
+    // value-bearing response projection, and a Map would serialize as `{}` besides. So only a caller
+    // that asks — the board, which consumes it in-process and projects its own frozen key set — gets
+    // it, and the route's shape is unchanged by construction.
+    ...(includePendingIndex ? { pendingByProjectNo: pending.byProjectNo } : {}),
     projects,
   }
 }

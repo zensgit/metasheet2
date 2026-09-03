@@ -58,18 +58,24 @@
 //        1. GET …/confirmation-decisions/value-entry  the per-decision readback  (O1')
 //        2. GET …/prep-lines/export                   the materials workbook     (按项目导出物料 Excel)
 //        3. GET …/operator/projects                   the project directory      (一线看得见自己工厂的项目)
+//        4. GET …/projects/:projectNo/board           `stockPreparationOperatorProjectBoard`
+//           the project board (项目备料页). ONE project's number and name plus counts and booleans — the fourth value-bearing read on
+//           this trail, and audited as one (migration 086, `project_board_read`). Its tenancy is
+//           proven twice over: the scope resolved here decides which staging project is read, and the
+//           bound sheet is then checked against the registry's own ownership record
+//           (`isSheetOwnedByProject`) before the fill deep link is composed.
 //      (1) and (2) predate this module and were left on `resolveTenantId` when it landed, which was a
 //      live cross-tenant leak on a claimless deployment rather than a stylistic gap — see the routes.
 //
 //   B. TENANT-PROOF-ONLY SURFACES — values-free, but the tenant still may not come from a header.
-//        4. GET  …/stock-preparation/handoff          `stockPreparationHandoffStatus`
+//        5. GET  …/stock-preparation/handoff          `stockPreparationHandoffStatus`
 //           whose turn it is (通知下一步), values-free:
 //           step keys from a closed vocabulary, cursor integers, booleans, handler COUNTS. It rides
 //           the broad READ tier (`requiredTier: STOCK_PREP_READ`) because a supervisor is meant to
 //           see whose turn it is — but WHOSE turn is still a tenant fact.
-//        5. POST …/stock-preparation/handoff/advance  `stockPreparationHandoffAdvance`
+//        6. POST …/stock-preparation/handoff/advance  `stockPreparationHandoffAdvance`
 //           the advance itself: a WRITE (see below).
-//        6. POST …/stock-preparation/carry/confirm    `stockPreparationCarryConfirm`
+//        7. POST …/stock-preparation/carry/confirm    `stockPreparationCarryConfirm`
 //           the K2 结转 confirm: a WRITE, values-free in its response (modes, counts, field NAMES).
 //           It joins this list for a reason specific to it — the tenant string does not merely scope
 //           what it reads, it decides WHICH SHEET IT WRITES. The bound table action is deploy-global

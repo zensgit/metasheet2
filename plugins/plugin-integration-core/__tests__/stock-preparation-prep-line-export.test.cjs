@@ -36,6 +36,7 @@ const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
 
+const { createStockPreparationAuditStore } = require(path.join(LIB, 'stock-preparation-audit-store.cjs'))
 const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
 const { STOCK_PREP_OPERATE, STOCK_PREP_READ } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
@@ -60,6 +61,7 @@ const MAIN_OBJECT_ID = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
 const MAIN_SHEET = 'sheet_main'
 
 const PROJECT_A = 'PRJ-A'
+const PROJECT_FREE_TEXT = '注射水缓冲罐 / RY2-2023'
 const PROJECT_B = 'PRJ-B'
 const PROJECT_EMPTY = 'PRJ-EMPTY-ACTIVE'
 const PROJECT_UNKNOWN = 'PRJ-NEVER-SYNCED'
@@ -104,6 +106,10 @@ function mainRow(projectNo, overrides = {}, id) {
 
 function seededRows() {
   return [
+    // A project whose NUMBER is free text — Chinese, a space and a slash, i.e. outside the audit
+    // store's enum/handle pattern. It has real rows, so the export reaches its audit append: this is
+    // the row that turns a shape gate on `project_id` into a refused workbook (R5b).
+    mainRow(PROJECT_FREE_TEXT, { componentCode: 'DWG-F1', componentName: '自由文本项目部件', totalQuantity: 1 }, 'rec_f1'),
     mainRow(PROJECT_A, { componentCode: 'DWG-A1', componentName: 'A项目部件一', totalQuantity: 3 }, 'rec_a1'),
     // rec_a2 deliberately leaves the two completion flags UNSET (never assigned, not merely false) —
     // R13's blank-cell witness: a flag nobody has touched must render as an empty cell, never 否.
@@ -390,7 +396,7 @@ function tableActionConfigFor(target) {
   }
 }
 
-function mount({ boundSheet = SANDBOX_SHEET } = {}) {
+function mount({ boundSheet = SANDBOX_SHEET, realAuditStore = false } = {}) {
   const { records, target } = moduleSubstrate({ boundSheet })
   const routes = new Map()
   const auditAppends = []
@@ -418,12 +424,25 @@ function mount({ boundSheet = SANDBOX_SHEET } = {}) {
     config: { stockPreparationTableActions: [tableActionConfigFor(target)] },
   }
   const services = baseServices()
-  services.stockPreparationAuditStore = {
-    async append(entry) {
-      auditAppends.push(entry)
-      return { ok: true }
-    },
-  }
+  // THE REAL STORE, OPTIONALLY. The stub below records what the route MEANT to write; it cannot see
+  // what the store would REFUSE. A shape gate on a caller-supplied column is exactly the class of
+  // bug a stub hides — the route looks fine and the deployment 422s — so the free-text case drives
+  // the production store over an in-memory db instead.
+  const auditRows = []
+  services.stockPreparationAuditStore = realAuditStore
+    ? createStockPreparationAuditStore({
+      db: {
+        async insertOne(table, row) { auditRows.push({ table, row: { ...row } }); return { ...row } },
+        async select() { return [] },
+      },
+      idGenerator: () => `audit_${auditRows.length + 1}`,
+    })
+    : {
+      async append(entry) {
+        auditAppends.push(entry)
+        return { ok: true }
+      },
+    }
   services.stockPreparationXlsxExport = xlsxExport
   // The HOST TENANT PRINCIPAL DIRECTORY. This export is VALUE-BEARING (material names, quantities),
   // so it now derives its tenant from `stock-preparation-operator-scope.cjs` rather than from
@@ -443,7 +462,7 @@ function mount({ boundSheet = SANDBOX_SHEET } = {}) {
     services,
     logger: { info() {}, warn() {}, error() {} },
   })
-  return { routes, auditAppends, xlsxExport, hostReads }
+  return { routes, auditAppends, auditRows, xlsxExport, hostReads }
 }
 
 function createResponse() {
@@ -543,6 +562,75 @@ async function routeAuditEntryIsValuesFree() {
   for (const forbidden of ['DWG-A1', 'DWG-A2', 'A项目部件一', 'A项目部件二', 'Q235B', 'DN100', 'TZ-A0', 'A项目主体']) {
     assert.ok(!flat.includes(forbidden), `R5: audit entry must not carry ${forbidden}`)
   }
+}
+
+// ---------------------------------------------------------------------------
+// R5b — THE AUDIT GATE MUST NOT REFUSE THE CUSTOMER'S OWN PROJECT NUMBER
+// ---------------------------------------------------------------------------
+//
+// This route stamps the customer's projectNo into the audit row's `project_id` deliberately — it is
+// this route's subject, and the board's last-export lookup reads it back by that key. A round of
+// hardening applied an enum/handle SHAPE gate to every nullable TEXT column on that table, which
+// made the store refuse any project number outside [A-Za-z0-9@._:|-]. A number with a Chinese
+// character, a space or a slash is ordinary in this customer's PLM; with that gate, their export
+// 422s — the workbook they came for refused in order to protect the trail from a value the trail
+// exists to carry.
+//
+// Driven against the REAL store, because the stub in every other case here cannot see a refusal.
+async function routeExportsAndAuditsAFreeTextProjectNumber() {
+  const { routes, auditRows } = mount({ realAuditStore: true })
+  const res = await call(routes, 'GET', EXPORT_PATH, {
+    user: OPERATOR,
+    query: { tenantId: TENANT_ID, projectNo: PROJECT_FREE_TEXT },
+  })
+  assert.equal(
+    res.statusCode,
+    200,
+    `R5b: an export whose project NUMBER is free text must still be delivered (got ${res.statusCode} ${JSON.stringify(res.body)})`,
+  )
+  assert.ok(res.sentBuffer, 'R5b: the workbook really was streamed')
+  assert.equal(auditRows.length, 1, 'R5b: and the export really was audited')
+  assert.equal(
+    auditRows[0].row.project_id,
+    PROJECT_FREE_TEXT,
+    'R5b: the customer project number is the audit row SUBJECT and is stored verbatim',
+  )
+
+  // The ordinary shape still works against the real store too.
+  const seeded = mount({ realAuditStore: true })
+  const ok = await call(seeded.routes, 'GET', EXPORT_PATH, {
+    user: OPERATOR,
+    query: { tenantId: TENANT_ID, projectNo: PROJECT_A },
+  })
+  assert.equal(ok.statusCode, 200, 'R5b: the ordinary export still succeeds against the real store')
+  assert.equal(seeded.auditRows.length, 1, 'R5b: and it really wrote one audit row')
+  assert.equal(seeded.auditRows[0].row.project_id, PROJECT_A)
+}
+
+// ---------------------------------------------------------------------------
+// R5c — `?workspaceId` IS NOT A CHANNEL ONTO THE TRAIL
+// ---------------------------------------------------------------------------
+//
+// The board and directory routes stopped forwarding the caller's raw `?workspaceId` into
+// `workspace_id`; the export did not, so the same one-parameter channel onto a values-free trail was
+// still open here. There is no workspace registry in this plugin to validate one against, so the
+// route selects nothing from it — the key stays accepted for shape compatibility and steers nothing.
+async function routeNeverPutsTheCallersWorkspaceIdOnTheTrail() {
+  const { routes, auditAppends } = mount()
+  const res = await call(routes, 'GET', EXPORT_PATH, {
+    user: OPERATOR,
+    query: { tenantId: TENANT_ID, projectNo: PROJECT_A, workspaceId: 'DWG-A1' },
+  })
+  assert.equal(res.statusCode, 200, 'R5c: a caller-supplied workspaceId is still accepted, not 400')
+  assert.equal(auditAppends.length, 1)
+  assert.ok(
+    !JSON.stringify(auditAppends[0]).includes('DWG-A1'),
+    'R5c: whatever the caller puts in ?workspaceId must not reach the audit row',
+  )
+  assert.ok(
+    auditAppends[0].workspaceId === undefined || auditAppends[0].workspaceId === null,
+    'R5c: the route forwards no workspace at all',
+  )
 }
 
 async function routeRefusedCallerAppendsNoAuditRow() {
@@ -927,6 +1015,8 @@ async function main() {
   await routeZeroActiveRowsYieldsHeadersOnlyNotAnError()
   await routeUnknownProjectIsTheFamiliarNotFoundShape()
   await routeAuditEntryIsValuesFree()
+  await routeExportsAndAuditsAFreeTextProjectNumber()
+  await routeNeverPutsTheCallersWorkspaceIdOnTheTrail()
   await routeRefusedCallerAppendsNoAuditRow()
 
   await routeReadsTheSandboxTwinOnADefaultInstall()

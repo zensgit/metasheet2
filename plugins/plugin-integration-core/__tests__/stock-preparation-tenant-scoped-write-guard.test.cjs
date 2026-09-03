@@ -287,6 +287,128 @@ check('stockPreparationHandoffAdvance: checks the configured chain belongs to th
   )
 })
 
+// ── The VALUE-BEARING READS: the same tripwire, pointed the other way ────────────────────────────
+//
+// The four reads below are the ONLY stock-prep GETs that carry customer values to the caller (project
+// numbers and names, material names and quantities, an author's own entered value). They do NOT use
+// `resolveAuthUserTenantId` — they use `resolveOperatorValueScope`, which is stricter still: it
+// prefers a VERIFIED token claim, refuses a request-carried tenant, refuses a header that
+// contradicts the claim, refuses a principal with no tenant of its own, and makes the HOST vouch for
+// the (user, tenant) pairing. `user.tenantId` alone is not enough here, because the host's auth
+// middleware fills that field from the `x-tenant-id` REQUEST HEADER when a token carries no tenant
+// claim — so on a claimless deployment `resolveTenantId` would let a header pick whose values are
+// served.
+//
+// WHY STATIC. Every route-level behaviour test enters through the handler and therefore only ever
+// sees the scope that IS resolved; swapping `scope.tenantId` for `resolveTenantId(req, input)` at
+// the derivation sites kept all nine plugin suites green. Only a source-level assertion says "this
+// class of handler does not reach for the request-steerable resolver at all", and only that form
+// stays true when a fifth value-bearing read arrives.
+// DERIVED, NOT TYPED. A hand-kept list is a guard that can be disarmed by deleting a line from
+// itself: removing the board from this array left every assertion below still passing, on a
+// smaller set, and said nothing. So the set is SCANNED out of the route source — every handler
+// that calls `resolveOperatorValueScope(` is by definition deciding whose VALUES it may show —
+// and then cross-checked against a pinned literal. A fifth value-bearing read joins the tripwire
+// automatically; deleting one becomes a visible edit to a pinned constant that this file refuses.
+function handlersCallingOperatorValueScope(src) {
+  const found = []
+  const pattern = /\n {4}async ([A-Za-z0-9_$]+)\(req, res\) \{/g
+  let match = pattern.exec(src)
+  while (match) {
+    const body = handlerBody(src, match[1])
+    if (body.includes('resolveOperatorValueScope(')) found.push(match[1])
+    match = pattern.exec(src)
+  }
+  return found.sort()
+}
+
+/** The value-bearing reads as of this commit. A change here is a deliberate, reviewable act. */
+const PINNED_VALUE_BEARING_READ_HANDLERS = [
+  // 结转 (#5459). Its confirm face derives the tenant through the same host-vouched operator scope,
+  // so the DERIVED scan picked it up the moment that PR landed — which is exactly what deriving the
+  // set is for: a surface joined this tripwire without anyone remembering to enrol it.
+  'stockPreparationCarryConfirm',
+  'stockPreparationConfirmationDecisionsValueEntry',
+  // 通知下一步 (#5442). The two handoff faces derive their tenant through the same host-vouched
+  // operator scope, so the DERIVED set picked them up the moment that PR landed — which is the point
+  // of deriving it. They are pinned here rather than special-cased: the three per-handler checks
+  // below are exactly the ones #5442's own block already makes of them, so running them twice costs
+  // nothing and means a future regression on either is caught by whichever guard is read first.
+  'stockPreparationHandoffAdvance',
+  'stockPreparationHandoffStatus',
+  'stockPreparationOperatorProjectBoard',
+  'stockPreparationOperatorProjectDirectory',
+  'stockPreparationPrepLineExport',
+].sort()
+
+const VALUE_BEARING_READ_HANDLERS = handlersCallingOperatorValueScope(ROUTES_SRC)
+
+check('the value-bearing read set is DERIVED from the source and is not empty', () => {
+  assert.ok(
+    VALUE_BEARING_READ_HANDLERS.length > 0,
+    'the scan found no handler calling resolveOperatorValueScope( — the derivation broke, and every '
+    + 'per-handler assertion below became vacuous',
+  )
+})
+
+check('the derived set equals the pinned set (a new value-bearing read must be pinned here)', () => {
+  assert.deepEqual(
+    VALUE_BEARING_READ_HANDLERS,
+    PINNED_VALUE_BEARING_READ_HANDLERS,
+    'a handler that resolves an operator VALUE scope has been added or removed. If added: it carries '
+    + 'customer values, so pin it here and let the three checks below run over it. If removed: say so '
+    + 'in the pin.',
+  )
+})
+
+// The three that derive their staging project inline. (The export does not: its sheet is the bound
+// table action's deploy-time target, which is why its own handler comment spells out what the
+// verified tenant does and does not decide there.)
+const VALUE_BEARING_READS_WITH_INLINE_STAGING = new Set([
+  'stockPreparationConfirmationDecisionsValueEntry',
+  'stockPreparationOperatorProjectDirectory',
+  'stockPreparationOperatorProjectBoard',
+])
+
+for (const name of VALUE_BEARING_READ_HANDLERS) {
+  const body = handlerBody(ROUTES_SRC, name)
+
+  check(`${name}: does NOT derive tenant via the request-steerable resolveTenantId`, () => {
+    assert.equal(
+      /resolveTenantId\(/.test(body),
+      false,
+      `${name} calls resolveTenantId(...) — a VALUE-BEARING read must derive its tenant from resolveOperatorValueScope, which is the sole tenancy authority on this plane`,
+    )
+  })
+
+  check(`${name}: does NOT read user.tenantId directly`, () => {
+    assert.equal(
+      /user\.tenantId/.test(body),
+      false,
+      `${name} reads user.tenantId — that field is filled from the x-tenant-id REQUEST HEADER on a tenant-claimless deployment, so it is not a verified claim`,
+    )
+  })
+
+  check(`${name}: derives WHOSE values through resolveOperatorValueScope`, () => {
+    assert.equal(
+      body.includes('resolveOperatorValueScope('),
+      true,
+      `${name} must resolve the operator value scope`,
+    )
+  })
+
+  if (VALUE_BEARING_READS_WITH_INLINE_STAGING.has(name)) {
+    check(`${name}: the staging project comes from the RESOLVED SCOPE, with no request projectId`, () => {
+      const calls = body.match(/resolveIntegrationStagingProjectId\([^)]*\)/g) || []
+      assert.ok(calls.length > 0, `${name} must derive its staging project`)
+      assert.ok(
+        calls.every((call) => call === 'resolveIntegrationStagingProjectId(scope.tenantId, undefined)'),
+        `${name} must derive the staging project from scope.tenantId with undefined (got ${JSON.stringify(calls)})`,
+      )
+    })
+  }
+}
+
 console.log(`\nstock-preparation-tenant-scoped-write-guard.test.cjs: ${passed} passed, ${failed} failed`)
 if (failed > 0) {
   console.error('stock-preparation-tenant-scoped-write-guard.test.cjs FAILED')
