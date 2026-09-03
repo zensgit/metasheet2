@@ -12,13 +12,15 @@
 
 ## 0. 版本与前置
 
-**版本行**:`{{填:合并后的 main SHA}}` = `origin/main` 在 **#5459**(`fix/stock-prep-carry-target-binding`)与 **#5460**(`feat/stock-prep-project-board`)合入之后。#5442(`feat/stock-prep-notify-next`)已于 `2026-09-03T00:11:49Z` 合入。上机前记一次:
+**版本行**:`b9b5a947f`(package r7-20260903-b9b5a947f)= `origin/main` 在 **#5459**(`fix/stock-prep-carry-target-binding`)与 **#5460**(`feat/stock-prep-project-board`)合入之后。#5442(`feat/stock-prep-notify-next`)已于 `2026-09-03T00:11:49Z` 合入。上机前记一次:
 
 ```bash
 git fetch origin && git rev-parse origin/main
 ```
 
 **备份**(222 上,SSH 交互式会话内;一次性 `ssh host "..."` 要把 `$` 转义。Runbook Step 1-1/1-2):
+
+> r7 订正:一次性远程执行遇引号问题时改用 `powershell -NoProfile -EncodedCommand <脚本 UTF-16LE base64>`;222 上 PATH 无 `pg_dump`/`psql`,用 `C:\Program Files\PostgreSQL\17\bin\pg_dump.exe`(Postgres 17 本地 5432,`postgresql-x64-17` 服务显示 Stopped 属正常,不要启动它)。
 
 ```powershell
 $l = (pm2 env 0 | Select-String '^DATABASE_URL:').Line
@@ -38,6 +40,8 @@ pg_dump $env:DATABASE_URL -Fc -f "$backupDir\pre-upgrade-db.dump"
 | 我方工程师 | §1 部署、§2 绑定、§6 回退 |
 | 平台管理员(`role:admin` / `integration:admin`) | §3 授权限+命名空间准入;`mvp-persist`;`confirmation-decisions/reconcile` |
 | 客户一线操作员(`stock-prep:operate` **且** `stock-prep:read`) | §4 四步 |
+
+> r7 订正:§2/§3 的 admin API 调用用的 token 由宿主内 `scripts/ops/attendance-window-runner-mint-token.mjs`(复制到 `packages/core-backend/scripts/` 下再跑,`--find-admin` 找已存在的 admin,`--mint --user-id <id> --roles admin --expires-in 3600`,用完删掉)现签,不碰密码;**这枚 token 不带 tenant claim,所有调用都要带 `x-tenant-id: default`**,否则 400 `TENANT_REQUIRED`。
 | owner | 全程在场 —— 半生产机,考勤/审批是真实在跑的业务数据 |
 
 **客户必须提前给的三件事**
@@ -61,8 +65,11 @@ pg_dump $env:DATABASE_URL -Fc -f "$backupDir\pre-upgrade-db.dump"
 ```powershell
 .\scripts\ops\multitable-onprem-package-upgrade-inplace.ps1 `
   -PackageArchive <path-to-package>.zip `
+  -RootDir 'C:\metasheet' `
   -Pm2AppName metasheet-backend
 ```
+
+> r7 订正:该脚本**不在**发布包里,需从同一提交的仓库检出单独复制过去;默认 `RootDir` 是 `$PSScriptRoot\..\..`,不显式传 `-RootDir 'C:\metasheet'` 会指错目录。
 
 脚本 8 步自带:SHA-256 校验 → 停 pm2 → 备份(打印 `BACKUP_PATH=`)→ 逐文件替换 → F22 断言+逐文件哈希 → **跑迁移** → `pm2 restart --update-env` + 健康轮询 → 最终报告。
 
@@ -132,6 +139,8 @@ POST /api/integration/stock-preparation/sandbox-target/ensure
 { "plm.stock-preparation.pull-bom.v1": { "target": "<把 data.targetBinding 整段贴在这里>" } }
 ```
 
+> r7 订正:若装了 customer pack,**不要真的"整段"覆盖**——ensure 只返回 33 个 TEMPLATE 字段(20 个 `plm_system` + 13 个人工列),不带 pack 的 21 个 `ext_` 列,直接整段贴会静默丢掉 `ext_` 映射。正确做法是**合并**:ensure 的映射 + 旧配置里的 `ext_*` 条目(同一张 sheet/objectId,旧物理列 id 依然有效),动手前先备份 `app.env`。
+
 **`objectId` 改了,`sheetId` 必须一起重算,不能留用既有那个。** 沙箱门(`assertStockPrepApplySandboxAllowed`)**只读 objectId**,而 apply 写哪张表、导出读哪张表**只看 `target.sheetId`** —— 两者互相独立。「objectId 换成沙箱、sheetId 留正式表那个」会让门放行、行却写进**正式主表**,正是 D1=B 要避免的那件事。`fieldIdMap` 同理(列 id = `fld_+sha1(projectId:objectId:fieldId)`,objectId 一变整张表的列 id 全变),且**必须是完整一整份(含 13 个人工列)**。
 
 **若装了 customer pack —— 这里有个静默陷阱,必须显式核。** pack 配置里的 `targetObjectId` **必须写出来**,且与上面两处是**同一个字符串**(三处 diff,不要肉眼扫)。**漏写这个键不会报错,它会静默默认成 canonical**:`normalizePackTargetObjectId` 在值为 `undefined`/`null` 时直接返回 `STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId`(`stock-preparation-customer-pack.cjs:269-272`)。而**预检对此故意不报 blocker** —— 代码原话:「a canonical-declaring pack raises no allowlist blocker」(`stock-preparation-preflight.cjs`),因为 canonical 在沙箱路径上结构性不可写,提示你去把它加进允许清单是「行不通的建议」。**净效果:预检 `ready: true`,apply 当场 403 `reason: prod_canonical`。** 所以要人眼确认这个键**存在且是沙箱值**,别等预检替你说话。(写了值则必须落在沙箱命名空间,否则 pack 在**插件激活时**就报 `PACK_TARGET_OBJECT_ID_INVALID` —— 只有「压根没写」这一种情况会静默滑向 canonical。这也订正了 Runbook Step 0-7 第 3 条「本来就只允许沙箱命名空间」的说法:**只在键存在时成立**,脚注 [9]。)
@@ -192,6 +201,8 @@ PATCH /api/admin/users/{{填:操作员 userId}}/namespaces/stock-prep/admission
 | 搜自己租户的项目、开项目备料页 | `mvp-persist`(落快照批次) |
 | 跑 `dry-run` + `apply`(含大 BOM 有界通道 8 条路由,含 `cancel`) | 装表 / 装 pack / `sandbox-target/ensure` |
 | `confirmation-decisions/reconcile` | 选源 `source-binding`(要 `integration:admin`) |
+
+> r7 订正:#5452(统一 SQL 连接绑定,2026-09-03 已合入main)之后,`data-source:sql-readonly` 外部系统要求 `integration_external_systems.connection_id` 非空,r6 时代未打 `dataSourceOwnerId` 标记的行(如 `Customer PLM readonly` `104e9bad`、`Synthetic PLM readonly` `7130b124`)会在 source-preflight 报 `CONNECTION_LEGACY_FALLBACK_DENIED`。修法:`GET /api/integration/external-systems/:id` 取原样公开字段,加上 `connectionId = config.dataSourceId` 后 `POST /api/integration/external-systems` 回写(admin token + `x-tenant-id`)。
 | 在多维表里填人工列 | 生产写 canonical(本次谁都不能,加载器缺失) |
 | 「通知下一步」推进、导出 Excel(17 列) | 跨租户读任何东西 |
 
