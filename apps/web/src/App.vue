@@ -68,8 +68,37 @@
         </template>
       </div>
     </nav>
+    <nav v-else-if="showSheetChrome" class="app-sheet-chrome" data-testid="sheet-chrome">
+      <div class="sheet-chrome__brand">
+        <router-link
+          to="/multitable"
+          class="sheet-chrome__back"
+          data-testid="sheet-chrome-back"
+        >{{ sheetChromeLabels.back }}</router-link>
+        <span class="brand-text">{{ brandText }}</span>
+      </div>
+      <div class="sheet-chrome__actions">
+        <label class="nav-locale">
+          <span class="nav-locale__label">{{ navLabels.language }}</span>
+          <select
+            class="nav-locale__select"
+            data-testid="locale-switcher"
+            :value="locale"
+            @change="onLocaleChange"
+          >
+            <option value="en">English</option>
+            <option value="zh-CN">中文</option>
+          </select>
+        </label>
+        <template v-if="isLoggedIn">
+          <span v-if="accountEmail" class="nav-user" :title="accountEmail">{{ accountEmailDisplay }}</span>
+          <router-link to="/settings" class="nav-link">{{ navLabels.mySessions }}</router-link>
+          <button class="nav-link nav-link--button" type="button" @click="logout">{{ navLabels.signOut }}</button>
+        </template>
+      </div>
+    </nav>
     <!-- CI trigger: lockfile update -->
-    <main class="app-main">
+    <main class="app-main" :class="{ 'app-main--sheet': lockSheetScroll }">
       <router-view />
     </main>
   </div>
@@ -82,6 +111,7 @@ import { useAuth } from './composables/useAuth'
 import { useLocale } from './composables/useLocale'
 import { usePlugins } from './composables/usePlugins'
 import { setMultitableApiErrorLocaleResolver } from './multitable/api/client'
+import { AppRouteNames } from './router/types'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
 import { STOCK_PREP_ROUTE_PERMISSION } from './services/integration/stockPreparation/workbenchAccess'
 import { useFeatureFlags } from './stores/featureFlags'
@@ -95,9 +125,29 @@ const { clearToken, getAccessSnapshot, getToken, hasPermission } = useAuth()
 const { locale, isZh, setLocale } = useLocale()
 setMultitableApiErrorLocaleResolver(() => isZh.value)
 
+function isEmbeddedQuery(): boolean {
+  const raw = route.query.embedded
+  const value = Array.isArray(raw) ? raw[0] : raw
+  return value === 'true' || value === '1'
+}
+
 const showNav = computed(() => {
   return route.meta?.hideNavbar !== true
 })
+
+const showSheetChrome = computed(() => {
+  return route.meta?.sheetChrome === true && !isEmbeddedQuery()
+})
+
+const lockSheetScroll = computed(() => {
+  return route.meta?.sheetChrome === true || route.name === AppRouteNames.MULTITABLE
+})
+
+const sheetChromeLabels = computed(() => (
+  isZh.value
+    ? { back: '返回' }
+    : { back: 'Back' }
+))
 
 const isPublicRoute = computed(() => {
   return route.path === '/login'
@@ -405,6 +455,58 @@ html, body {
 .app-main {
   flex: 1;
   overflow: auto;
+}
+
+.app-main--sheet {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-sheet-chrome {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 40px;
+  padding: 0 16px;
+  flex-shrink: 0;
+  background: var(--ms-bg-card, #fff);
+  border-bottom: 1px solid var(--ms-border-light, #e0e0e0);
+}
+
+.sheet-chrome__brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.sheet-chrome__back {
+  flex: 0 0 auto;
+  color: var(--ms-text-2, #666);
+  text-decoration: none;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.sheet-chrome__back:hover {
+  color: var(--ms-color-primary);
+}
+
+.sheet-chrome__actions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 12px;
+  min-width: 0;
+}
+
+.app-sheet-chrome .brand-text {
+  font-size: 16px;
+}
+
+.app-sheet-chrome .nav-link {
+  padding: 4px 10px;
 }
 
 @media (max-width: 768px) {

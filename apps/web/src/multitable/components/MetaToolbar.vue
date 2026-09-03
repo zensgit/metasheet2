@@ -227,12 +227,33 @@
       </MtButton>
       <!-- UI-P2-1c: primary CTA migrated to shared MtButton variant="primary". -->
       <MtButton v-if="canCreateRecord" variant="primary" @click="emit('add-record')">{{ l('toolbar.newRecord') }}</MtButton>
+      <div v-if="$slots.overflow" ref="moreRef" class="meta-toolbar__more">
+        <MtButton
+          data-testid="toolbar-more"
+          :title="l('toolbar.more')"
+          :aria-label="l('toolbar.more')"
+          :aria-expanded="showMore ? 'true' : 'false'"
+          aria-haspopup="menu"
+          @click="showMore = !showMore"
+        >
+          <template #icon><el-icon><component :is="ICON.more" /></el-icon></template>
+          {{ l('toolbar.more') }}
+        </MtButton>
+        <div
+          v-show="showMore"
+          class="meta-toolbar__more-panel"
+          role="menu"
+          data-testid="toolbar-more-panel"
+        >
+          <slot name="overflow" />
+        </div>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import type { MetaField, RowDensity } from '../types'
 import type { SortRule, FilterRule, FilterGroup, FilterConjunction } from '../composables/useMultitableGrid'
 import { useLocale } from '../../composables/useLocale'
@@ -272,6 +293,7 @@ import {
   Upload as IconImport,
   Download as IconExport,
   Check as IconCheck,
+  More as IconMore,
 } from '@element-plus/icons-vue'
 
 // Reusable monochrome icon map for toolbar buttons (UI-P1 slice-1). Keyed by toolbar action so the
@@ -290,6 +312,7 @@ const ICON = {
   import: IconImport,
   export: IconExport,
   check: IconCheck,
+  more: IconMore,
 } as const
 
 const props = withDefaults(defineProps<{
@@ -350,6 +373,28 @@ const showFieldPicker = ref(false)
 const showSortPanel = ref(false)
 const showFilterPanel = ref(false)
 const showGroupPanel = ref(false)
+const showMore = ref(false)
+const moreRef = ref<HTMLElement | null>(null)
+
+function onMoreDocMouseDown(evt: MouseEvent) {
+  if (!moreRef.value?.contains(evt.target as Node)) showMore.value = false
+}
+function onMoreDocKeydown(evt: KeyboardEvent) {
+  if (evt.key === 'Escape') showMore.value = false
+}
+watch(showMore, (open) => {
+  if (open) {
+    document.addEventListener('mousedown', onMoreDocMouseDown)
+    document.addEventListener('keydown', onMoreDocKeydown)
+  } else {
+    document.removeEventListener('mousedown', onMoreDocMouseDown)
+    document.removeEventListener('keydown', onMoreDocKeydown)
+  }
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('mousedown', onMoreDocMouseDown)
+  document.removeEventListener('keydown', onMoreDocKeydown)
+})
 const DENSITIES: Array<{ value: RowDensity; labelKey: MetaCoreLabelKey }> = [
   { value: 'compact', labelKey: 'density.compact' },
   { value: 'normal', labelKey: 'density.normal' },
@@ -434,9 +479,13 @@ function onAddFilterGroup() {
 </script>
 
 <style scoped>
-.meta-toolbar { display: flex; justify-content: space-between; align-items: center; padding: 6px 12px; border-bottom: 1px solid var(--ms-border-light, #e7e8ec); background: var(--ms-bg-card, #fff); }
-.meta-toolbar__left { display: flex; gap: 2px; align-items: center; }
-.meta-toolbar__right { display: flex; gap: 4px; align-items: center; }
+.meta-toolbar {
+  display: flex; justify-content: space-between; align-items: center; padding: 6px 12px;
+  border-bottom: 1px solid var(--ms-border-light, #e7e8ec); background: var(--ms-bg-card, #fff);
+  min-width: 0; flex-wrap: nowrap; flex-shrink: 0; gap: 8px;
+}
+.meta-toolbar__left { display: flex; gap: 2px; align-items: center; flex-wrap: nowrap; flex: 0 1 auto; min-width: 0; }
+.meta-toolbar__right { display: flex; gap: 4px; align-items: center; flex-wrap: nowrap; flex: 1 1 auto; min-width: 0; justify-content: flex-end; }
 .meta-toolbar__divider { display: inline-block; width: 1px; align-self: stretch; margin: 4px 6px; background: var(--ms-border-light, #e7e8ec); flex-shrink: 0; }
 .meta-toolbar__btn {
   display: inline-flex; align-items: center; gap: 4px; height: var(--ms-control-height, 32px); box-sizing: border-box;
@@ -495,11 +544,27 @@ function onAddFilterGroup() {
 .meta-toolbar__group-remove:hover { color: #f56c6c; }
 .meta-toolbar__group-add { border: none; background: none; color: #409eff; cursor: pointer; font-size: 12px; padding: 4px 0; }
 .meta-toolbar__group-add:hover { text-decoration: underline; }
-.meta-toolbar__search { display: flex; align-items: center; gap: 4px; height: var(--ms-control-height, 32px); box-sizing: border-box; border: 1px solid var(--ms-border-light, #e7e8ec); border-radius: var(--ms-radius-sm, 6px); padding: 0 8px; background: var(--ms-bg-page, #f5f6f8); transition: border-color 0.2s, background 0.2s; }
+.meta-toolbar__search { display: flex; align-items: center; gap: 4px; height: var(--ms-control-height, 32px); box-sizing: border-box; border: 1px solid var(--ms-border-light, #e7e8ec); border-radius: var(--ms-radius-sm, 6px); padding: 0 8px; background: var(--ms-bg-page, #f5f6f8); transition: border-color 0.2s, background 0.2s; flex: 1 1 72px; min-width: 72px; max-width: 180px; }
 .meta-toolbar__search:focus-within { border-color: var(--ms-color-primary, #245bdb); background: var(--ms-bg-card, #fff); }
 .meta-toolbar__search--active { border-color: var(--ms-color-primary, #245bdb); background: var(--el-color-primary-light-9, #eef3ff); }
 .meta-toolbar__search-icon { font-size: 12px; opacity: 0.5; }
-.meta-toolbar__search-input { border: none; outline: none; font-size: 12px; width: 140px; background: transparent; color: #333; }
+.meta-toolbar__search-input { border: none; outline: none; font-size: 12px; width: 100%; min-width: 0; background: transparent; color: #333; }
+.meta-toolbar__more { position: relative; flex: 0 0 auto; }
+.meta-toolbar__more-panel {
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 30;
+  display: flex; flex-direction: column; align-items: stretch; gap: 2px;
+  min-width: 200px; max-height: min(70vh, 480px); overflow-x: hidden; overflow-y: auto;
+  padding: var(--ms-space-2); box-sizing: border-box;
+  background: var(--ms-bg-card, #fff); border: 1px solid var(--ms-border-light, #e7e8ec);
+  border-radius: var(--ms-radius-sm, 6px); box-shadow: var(--ms-shadow-pop, 0 4px 12px rgba(0,0,0,.1));
+}
+.meta-toolbar__more-panel :deep(.mt-workbench__mgr-btn),
+.meta-toolbar__more-panel :deep(.mt-workbench__presence-chip),
+.meta-toolbar__more-panel :deep(.mt-workbench__mention-chip),
+.meta-toolbar__more-panel :deep(.meta-notif-bell) {
+  width: 100%;
+  justify-content: flex-start;
+}
 .meta-toolbar__search-input::placeholder { color: #bbb; }
 .meta-toolbar__search-clear { border: none; background: none; color: #999; cursor: pointer; font-size: 14px; padding: 0 2px; line-height: 1; }
 .meta-toolbar__search-clear:hover { color: #f56c6c; }

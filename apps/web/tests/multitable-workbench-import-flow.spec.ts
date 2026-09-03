@@ -101,14 +101,17 @@ vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
     name: 'MetaToolbar',
     emits: ['import'],
     render() {
-      return h(
-        'button',
-        {
-          'data-open-import': 'true',
-          onClick: () => this.$emit('import'),
-        },
-        'open-import',
-      )
+      return h('div', [
+        h(
+          'button',
+          {
+            'data-open-import': 'true',
+            onClick: () => this.$emit('import'),
+          },
+          'open-import',
+        ),
+        this.$slots.overflow?.(),
+      ])
     },
   }),
 }))

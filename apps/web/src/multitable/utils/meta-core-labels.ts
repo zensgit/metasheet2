@@ -45,6 +45,7 @@ export type MetaCoreLabelKey =
   | 'toolbar.importRecords' | 'toolbar.import'
   | 'toolbar.exportCsv' | 'toolbar.exportExcel' | 'toolbar.exportExcelXlsx' | 'toolbar.exportXlsx'
   | 'toolbar.newRecord'
+  | 'toolbar.more'
   // --- Export options dialog (A2: column/row selection) ---
   | 'export.title' | 'export.close' | 'export.columns' | 'export.selectAll' | 'export.clearAll'
   | 'export.rowScope' | 'export.allRows' | 'export.selectedRows'
@@ -160,6 +161,7 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'toolbar.exportExcel': { en: 'Export Excel', zh: '导出 Excel' },
   'toolbar.exportExcelXlsx': { en: 'Export Excel (.xlsx)', zh: '导出 Excel (.xlsx)' },
   'toolbar.exportXlsx': { en: 'Export XLSX', zh: '导出 XLSX' },
+  'toolbar.more': { en: 'More', zh: '更多' },
   'export.title': { en: 'Export options', zh: '导出选项' },
   'export.close': { en: 'Close', zh: '关闭' },
   'export.columns': { en: 'Columns', zh: '列' },

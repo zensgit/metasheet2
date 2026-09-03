@@ -12,49 +12,71 @@
         <MtButton class="mt-workbench__conflict-btn" @click="grid.dismissConflict()">{{ wb('conflict.dismiss', isZh) }}</MtButton>
       </div>
     </div>
-    <div class="mt-workbench__actions">
-      <div
-        v-if="sheetPresenceState.activeCollaboratorCount.value > 0"
-        class="mt-workbench__presence-chip"
-        :title="sheetPresenceTitle"
-      >
-        &#x1F465; <strong>{{ sheetPresenceState.activeCollaboratorCount.value }}</strong>
-        <span>{{ sheetPresenceLabel }}</span>
-      </div>
-      <button
-        v-if="mentionInboxState.summary.value && mentionInboxState.summary.value.unresolvedMentionCount > 0"
-        class="mt-workbench__mention-chip"
-        :class="{ 'mt-workbench__mention-chip--unread': mentionInboxState.unreadMentionCount.value > 0 }"
-        @click="onMentionChipClick"
-      >
-        <el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.mentions" /></el-icon> {{ wb('toolbar.mentions', isZh) }} <strong>{{ mentionInboxState.unreadMentionCount.value || mentionInboxState.summary.value.unresolvedMentionCount }}</strong>
-        <span v-if="mentionInboxState.unreadMentionCount.value > 0" class="mt-workbench__mention-chip-unread">{{ fmtMentionsUnread(mentionInboxState.unreadMentionCount.value, isZh) }}</span>
-        <span class="mt-workbench__mention-chip-records">{{ fmtMentionsRecords(mentionInboxState.summary.value.mentionedRecordCount, isZh) }}</span>
-      </button>
-      <button
-        class="mt-workbench__mgr-btn"
-        :class="{ 'mt-workbench__mgr-btn--attention': commentInboxBadgeCount > 0 }"
-        :title="fmtCommentInboxTitle(commentInboxBadgeCount, isZh)"
-        @click="openCommentInbox()"
-      >
-        <el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.commentInbox" /></el-icon> {{ wb('toolbar.commentInbox', isZh) }}
-        <span v-if="commentInboxBadgeCount > 0" class="mt-workbench__mgr-badge">{{ commentInboxBadgeCount }}</span>
-      </button>
-      <MetaNotificationBell :api-client="workbench.client" @navigate="onNotificationNavigate" />
-      <button v-if="caps.canManageFields.value" class="mt-workbench__mgr-btn" @click="showFieldManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.fields" /></el-icon> {{ wb('toolbar.fields', isZh) }}</button>
-      <button v-if="caps.canManageSheetAccess.value" class="mt-workbench__mgr-btn" @click="showPermissionManager = true; void loadPermissionEntries()"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.access" /></el-icon> {{ wb('toolbar.access', isZh) }}</button>
-      <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.views" /></el-icon> {{ wb('toolbar.views', isZh) }}</button>
-      <button v-if="canOpenWorkflowDesigner" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.workflow" /></el-icon> {{ wb('toolbar.workflow', isZh) }}</button>
-      <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="showAutomationManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.automations" /></el-icon> {{ wb('toolbar.automations', isZh) }}</button>
-      <button v-if="canCreateBasesAndSheets" class="mt-workbench__mgr-btn" data-action="open-template-library" @click="openTemplateLibrary"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.templates" /></el-icon> {{ wb('toolbar.templates', isZh) }}</button>
-      <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.dashboard" /></el-icon> {{ wb('toolbar.dashboard', isZh) }}</button>
-      <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.shareForm" /></el-icon> {{ wb('toolbar.shareForm', isZh) }}</button>
-      <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.apiWebhooks" /></el-icon> {{ wb('toolbar.apiWebhooks', isZh) }}</button>
-      <button v-if="caps.canDeleteRecord.value" class="mt-workbench__mgr-btn" data-action="open-trash" @click="showTrash = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.trash" /></el-icon> {{ wb('toolbar.trash', isZh) }}</button>
-      <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-history" @click="historyDeepLinkBatchId = null; showHistory = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.history" /></el-icon> {{ isZh ? '历史' : 'History' }}</button>
-      <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-config-history" @click="openConfigHistory"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.configHistory" /></el-icon> {{ isZh ? '配置历史' : 'Config history' }}</button>
-      <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-archive-recovery" @click="showRecoveryArchive = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.archiveRecovery" /></el-icon> {{ isZh ? '归档恢复' : 'Archive recovery' }}</button>
-    </div>
+    <MetaToolbar
+      :fields="propertyVisibleGridFields" :hidden-field-ids="grid.hiddenFieldIds.value"
+      :sort-rules="grid.sortRules.value" :filter-rules="grid.filterRules.value"
+      :filter-groups="grid.filterGroups.value"
+      :filter-conjunction="grid.filterConjunction.value"
+      :sort-filter-dirty="grid.sortFilterDirty.value"
+      :can-create-record="caps.canCreateRecord.value" :can-export="caps.canExport.value" :can-undo="grid.canUndo.value" :can-redo="grid.canRedo.value"
+      @toggle-field="grid.toggleFieldVisibility" @add-sort="grid.addSortRule" @remove-sort="grid.removeSortRule"
+      @update-sort="onUpdateSort" @add-filter="grid.addFilterRule" @update-filter="grid.updateFilterRule"
+      @remove-filter="grid.removeFilterRule" @clear-filters="onClearFilters" @set-conjunction="onSetConjunction"
+      @add-filter-group="grid.addFilterGroup" @update-filter-group="grid.updateFilterGroup" @remove-filter-group="grid.removeFilterGroup"
+      :group-field-ids="grid.groupFieldIds.value"
+      :search-text="searchText" :total-rows="grid.page.value.total" :row-density="rowDensity"
+      :can-reset-to-shared="canResetToShared"
+      @apply-sort-filter="grid.applySortFilter" @add-record="onAddRecord" @undo="grid.undo" @redo="grid.redo"
+      @set-group-fields="onSetGroupFields" @export-csv="onExportCsv" @export-xlsx="onExportXlsx" @import="onOpenImportModal" @update:search-text="onSearchTextUpdate"
+      @print="onPrint" @set-row-density="onSetRowDensity" @auto-fit-columns="onAutoFitColumns"
+      @reset-to-shared="onResetToShared"
+    >
+      <template #overflow>
+        <div class="mt-workbench__actions">
+          <div
+            v-if="sheetPresenceState.activeCollaboratorCount.value > 0"
+            class="mt-workbench__presence-chip"
+            :title="sheetPresenceTitle"
+          >
+            &#x1F465; <strong>{{ sheetPresenceState.activeCollaboratorCount.value }}</strong>
+            <span>{{ sheetPresenceLabel }}</span>
+          </div>
+          <button
+            v-if="mentionInboxState.summary.value && mentionInboxState.summary.value.unresolvedMentionCount > 0"
+            class="mt-workbench__mention-chip"
+            :class="{ 'mt-workbench__mention-chip--unread': mentionInboxState.unreadMentionCount.value > 0 }"
+            @click="onMentionChipClick"
+          >
+            <el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.mentions" /></el-icon> {{ wb('toolbar.mentions', isZh) }} <strong>{{ mentionInboxState.unreadMentionCount.value || mentionInboxState.summary.value.unresolvedMentionCount }}</strong>
+            <span v-if="mentionInboxState.unreadMentionCount.value > 0" class="mt-workbench__mention-chip-unread">{{ fmtMentionsUnread(mentionInboxState.unreadMentionCount.value, isZh) }}</span>
+            <span class="mt-workbench__mention-chip-records">{{ fmtMentionsRecords(mentionInboxState.summary.value.mentionedRecordCount, isZh) }}</span>
+          </button>
+          <button
+            class="mt-workbench__mgr-btn"
+            :class="{ 'mt-workbench__mgr-btn--attention': commentInboxBadgeCount > 0 }"
+            :title="fmtCommentInboxTitle(commentInboxBadgeCount, isZh)"
+            @click="openCommentInbox()"
+          >
+            <el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.commentInbox" /></el-icon> {{ wb('toolbar.commentInbox', isZh) }}
+            <span v-if="commentInboxBadgeCount > 0" class="mt-workbench__mgr-badge">{{ commentInboxBadgeCount }}</span>
+          </button>
+          <MetaNotificationBell :api-client="workbench.client" @navigate="onNotificationNavigate" />
+          <button v-if="caps.canManageFields.value" class="mt-workbench__mgr-btn" @click="showFieldManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.fields" /></el-icon> {{ wb('toolbar.fields', isZh) }}</button>
+          <button v-if="caps.canManageSheetAccess.value" class="mt-workbench__mgr-btn" @click="showPermissionManager = true; void loadPermissionEntries()"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.access" /></el-icon> {{ wb('toolbar.access', isZh) }}</button>
+          <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.views" /></el-icon> {{ wb('toolbar.views', isZh) }}</button>
+          <button v-if="canOpenWorkflowDesigner" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.workflow" /></el-icon> {{ wb('toolbar.workflow', isZh) }}</button>
+          <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="showAutomationManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.automations" /></el-icon> {{ wb('toolbar.automations', isZh) }}</button>
+          <button v-if="canCreateBasesAndSheets" class="mt-workbench__mgr-btn" data-action="open-template-library" @click="openTemplateLibrary"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.templates" /></el-icon> {{ wb('toolbar.templates', isZh) }}</button>
+          <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.dashboard" /></el-icon> {{ wb('toolbar.dashboard', isZh) }}</button>
+          <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.shareForm" /></el-icon> {{ wb('toolbar.shareForm', isZh) }}</button>
+          <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.apiWebhooks" /></el-icon> {{ wb('toolbar.apiWebhooks', isZh) }}</button>
+          <button v-if="caps.canDeleteRecord.value" class="mt-workbench__mgr-btn" data-action="open-trash" @click="showTrash = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.trash" /></el-icon> {{ wb('toolbar.trash', isZh) }}</button>
+          <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-history" @click="historyDeepLinkBatchId = null; showHistory = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.history" /></el-icon> {{ isZh ? '历史' : 'History' }}</button>
+          <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-config-history" @click="openConfigHistory"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.configHistory" /></el-icon> {{ isZh ? '配置历史' : 'Config history' }}</button>
+          <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-archive-recovery" @click="showRecoveryArchive = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.archiveRecovery" /></el-icon> {{ isZh ? '归档恢复' : 'Archive recovery' }}</button>
+        </div>
+      </template>
+    </MetaToolbar>
     <ResetToPointPicker
       v-if="workbench.activeSheetId.value"
       :pit-reset-enabled="pitResetEnabled"
@@ -116,25 +138,6 @@
       :display-field-id="mentionDisplayFieldId"
       @close="showMentionPopover = false"
       @select-record="onMentionPopoverSelect"
-    />
-    <MetaToolbar
-      :fields="propertyVisibleGridFields" :hidden-field-ids="grid.hiddenFieldIds.value"
-      :sort-rules="grid.sortRules.value" :filter-rules="grid.filterRules.value"
-      :filter-groups="grid.filterGroups.value"
-      :filter-conjunction="grid.filterConjunction.value"
-      :sort-filter-dirty="grid.sortFilterDirty.value"
-      :can-create-record="caps.canCreateRecord.value" :can-export="caps.canExport.value" :can-undo="grid.canUndo.value" :can-redo="grid.canRedo.value"
-      @toggle-field="grid.toggleFieldVisibility" @add-sort="grid.addSortRule" @remove-sort="grid.removeSortRule"
-      @update-sort="onUpdateSort" @add-filter="grid.addFilterRule" @update-filter="grid.updateFilterRule"
-      @remove-filter="grid.removeFilterRule" @clear-filters="onClearFilters" @set-conjunction="onSetConjunction"
-      @add-filter-group="grid.addFilterGroup" @update-filter-group="grid.updateFilterGroup" @remove-filter-group="grid.removeFilterGroup"
-      :group-field-ids="grid.groupFieldIds.value"
-      :search-text="searchText" :total-rows="grid.page.value.total" :row-density="rowDensity"
-      :can-reset-to-shared="canResetToShared"
-      @apply-sort-filter="grid.applySortFilter" @add-record="onAddRecord" @undo="grid.undo" @redo="grid.redo"
-      @set-group-fields="onSetGroupFields" @export-csv="onExportCsv" @export-xlsx="onExportXlsx" @import="onOpenImportModal" @update:search-text="onSearchTextUpdate"
-      @print="onPrint" @set-row-density="onSetRowDensity" @auto-fit-columns="onAutoFitColumns"
-      @reset-to-shared="onResetToShared"
     />
     <div class="mt-workbench__content">
       <aside
@@ -4562,11 +4565,11 @@ defineExpose({
 </script>
 
 <style scoped>
-.mt-workbench { display: flex; flex-direction: column; height: 100%; background: #fff; }
+.mt-workbench { display: flex; flex-direction: column; height: 100%; overflow: hidden; background: #fff; }
 /* position:relative establishes the positioning context .mt-workbench__rail--drawer (UI-P2-2c) anchors
    against — inert for every other child, which all stay in normal flow. */
 .mt-workbench__content { display: flex; flex: 1; min-height: 0; position: relative; }
-.mt-workbench__main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.mt-workbench__main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 .mt-workbench__conflict {
   margin: 8px 16px 0;
   padding: 10px 12px;
@@ -4588,7 +4591,7 @@ defineExpose({
    `--primary` amber variant below is deliberately KEPT as an additive class — MtButton has no
    warning/amber variant, so it preserves the banner's attention fill on the retry action. */
 .mt-workbench__conflict-btn--primary { background: #f59e0b; border-color: #f59e0b; color: #fff; }
-.mt-workbench__actions { display: flex; gap: 6px; padding: 4px 16px 0; }
+.mt-workbench__actions { display: flex; flex-direction: column; align-items: stretch; gap: 2px; }
 .mt-workbench__capability-banner {
   margin: 8px 16px 0;
   padding: 3px 10px;

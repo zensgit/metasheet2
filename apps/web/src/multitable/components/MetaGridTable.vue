@@ -1397,6 +1397,9 @@ function onKeydown(e: KeyboardEvent) {
    body-row appearance — only the header cells adopt the panel/token look. */
 thead .meta-grid__row-num,
 thead .meta-grid__check-col {
+  position: sticky;
+  top: 0;
+  z-index: 5;
   background: var(--ms-bg-card, #fff);
   border-bottom: 1px solid var(--ms-border-light, #e7e8ec);
 }

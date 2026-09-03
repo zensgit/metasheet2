@@ -79,7 +79,7 @@ export function buildMultitableRoute(component: NonNullable<RouteRecordRaw['comp
     name: AppRouteNames.MULTITABLE,
     component,
     props: resolveMultitableRouteProps,
-    meta: { title: 'Multitable', requiresAuth: true },
+    meta: { title: 'Multitable', requiresAuth: true, hideNavbar: true, sheetChrome: true },
   }
 }
 

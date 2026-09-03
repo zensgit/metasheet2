@@ -60,7 +60,14 @@ vi.mock('../src/multitable/composables/useMultitableSheetRealtime', () => ({ use
 vi.mock('../src/multitable/import/bulk-import', () => ({ bulkImportRecords: vi.fn() }))
 
 vi.mock('../src/multitable/components/MetaSheetViewRail.vue', () => ({ default: stubComponent('MetaSheetViewRail') }))
-vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({ default: stubComponent('MetaToolbar') }))
+vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
+  default: defineComponent({
+    name: 'MetaToolbar',
+    setup(_, { slots }) {
+      return () => h('div', { 'data-stub-MetaToolbar': 'true' }, slots.overflow?.())
+    },
+  }),
+}))
 // Capturing stub for the grid — records the real listeners (for the duplicate-record wire-drift lock).
 vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
   default: defineComponent({

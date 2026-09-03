@@ -67,7 +67,14 @@ vi.mock('../src/multitable/components/MetaGalleryView.vue', () => ({ default: st
 vi.mock('../src/multitable/components/MetaCalendarView.vue', () => ({ default: stubComponent('MetaCalendarView') }))
 vi.mock('../src/multitable/components/MetaTimelineView.vue', () => ({ default: stubComponent('MetaTimelineView') }))
 vi.mock('../src/multitable/components/MetaSheetViewRail.vue', () => ({ default: stubComponent('MetaSheetViewRail') }))
-vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({ default: stubComponent('MetaToolbar') }))
+vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
+  default: defineComponent({
+    name: 'MetaToolbar',
+    setup(_, { slots }) {
+      return () => h('div', { 'data-stub-MetaToolbar': 'true' }, slots.overflow?.())
+    },
+  }),
+}))
 // W2 S3: MultitableWorkbench.vue now renders MetaRecordInspector.vue directly (MetaRecordDrawer.vue
 // is a deprecated thin compat shell no longer mounted by the workbench, OD-W2-7=b).
 vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({ default: stubComponent('MetaRecordInspector') }))

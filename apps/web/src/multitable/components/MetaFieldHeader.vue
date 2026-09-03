@@ -91,8 +91,9 @@ const headerStyle = computed(() => {
     style.minWidth = `${props.width}px`
     style.maxWidth = `${props.width}px`
   }
-  // frozen header: inline position:sticky overrides the CSS `position: relative`, giving horizontal
-  // stickiness; the absolute resize handle still anchors to this th (sticky is a containing block).
+  // Frozen headers keep CSS `position: sticky; top: 0` for vertical stickiness and add
+  // horizontal `left` + a z-index above non-frozen headers (3) and frozen body cells (2).
+  // `position: sticky` is a containing block, so the absolute resize handle still anchors here.
   if (props.frozenLeft != null) {
     style.position = 'sticky'
     style.left = `${props.frozenLeft}px`
@@ -122,7 +123,7 @@ function onResizeStart(e: MouseEvent) {
 .meta-field-header {
   padding: 8px 12px; text-align: left; font-weight: 500; font-size: 13px;
   border-bottom: 1px solid var(--ms-border-light, #e7e8ec); background: var(--ms-bg-card, #fff); white-space: nowrap;
-  user-select: none; position: sticky; top: 0; z-index: 1; position: relative;
+  user-select: none; position: sticky; top: 0; z-index: 3;
 }
 .meta-field-header--sortable { cursor: pointer; }
 .meta-field-header--sortable:hover { background: var(--ms-bg-page, #f5f6f8); }

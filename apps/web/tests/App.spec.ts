@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({
   route: {
     path: '/login',
     fullPath: '/login',
+    name: 'login',
+    query: {} as Record<string, unknown>,
     meta: {
       hideNavbar: true,
       requiresGuest: true,
@@ -80,6 +82,8 @@ describe('App guest bootstrap', () => {
   beforeEach(() => {
     mocks.route.path = '/login'
     mocks.route.fullPath = '/login'
+    mocks.route.name = 'login'
+    mocks.route.query = {}
     mocks.route.meta = {
       hideNavbar: true,
       requiresGuest: true,
@@ -165,6 +169,8 @@ describe('App guest bootstrap', () => {
 
     mocks.route.path = '/attendance'
     mocks.route.fullPath = '/attendance?tab=admin'
+    mocks.route.name = 'attendance'
+    mocks.route.query = {}
     mocks.route.meta = {}
     window.localStorage.setItem('auth_token', 'session-token')
     window.localStorage.setItem('jwt', 'session-token')
@@ -232,6 +238,8 @@ describe('App top-bar account identity display', () => {
   beforeEach(() => {
     mocks.route.path = '/attendance'
     mocks.route.fullPath = '/attendance'
+    mocks.route.name = 'attendance'
+    mocks.route.query = {}
     mocks.route.meta = {}
     mocks.loadProductFeatures.mockResolvedValue(undefined)
     mocks.fetchPlugins.mockResolvedValue(undefined)
@@ -336,5 +344,83 @@ describe('App top-bar account identity display', () => {
 
     const el = await mountApp()
     expect(el.querySelector('.nav-user')).toBeNull()
+  })
+})
+
+describe('App sheet chrome (full-bleed workbench)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    mocks.route.path = '/multitable/sheet_1/view_1'
+    mocks.route.fullPath = '/multitable/sheet_1/view_1'
+    mocks.route.name = 'multitable'
+    mocks.route.query = {}
+    mocks.route.meta = { hideNavbar: true, sheetChrome: true, requiresAuth: true }
+    mocks.loadProductFeatures.mockResolvedValue(undefined)
+    mocks.fetchPlugins.mockResolvedValue(undefined)
+    window.localStorage.clear()
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    setMultitableApiErrorLocaleResolver(undefined)
+    window.localStorage.clear()
+    vi.clearAllMocks()
+  })
+
+  async function mountApp(): Promise<HTMLDivElement> {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(App as Component)
+    app.component('router-view', { render: () => h('div') })
+    app.component('router-link', {
+      props: ['to'],
+      render() {
+        return h('a', { href: this.$props.to }, this.$slots.default ? this.$slots.default() : [])
+      },
+    })
+    app.mount(container)
+    for (let i = 0; i < 4; i += 1) {
+      await Promise.resolve()
+      await nextTick()
+    }
+    return container
+  }
+
+  it('hides the product nav and shows a compact sheet strip on /multitable/:sheetId/:viewId', async () => {
+    const el = await mountApp()
+    expect(el.querySelector('.app-nav')).toBeNull()
+    expect(el.querySelector('[data-testid="sheet-chrome"]')).toBeTruthy()
+    expect(el.querySelector('[data-testid="sheet-chrome-back"]')?.textContent).toBe('返回')
+    expect(el.querySelector('.app-sheet-chrome .brand-text')?.textContent).toBe('MetaSheet')
+    expect(el.querySelector('.app-main')?.classList.contains('app-main--sheet')).toBe(true)
+    const navText = el.textContent ?? ''
+    expect(navText).not.toContain('考勤')
+    expect(navText).not.toContain('应用')
+    expect(navText).not.toContain('流程')
+  })
+
+  it('keeps the global product nav on /multitable home', async () => {
+    mocks.route.path = '/multitable'
+    mocks.route.fullPath = '/multitable'
+    mocks.route.name = 'multitable-home'
+    mocks.route.meta = { title: 'Multitable', requiresAuth: true }
+    const el = await mountApp()
+    expect(el.querySelector('.app-nav')).toBeTruthy()
+    expect(el.querySelector('[data-testid="sheet-chrome"]')).toBeNull()
+    expect(el.querySelector('.app-main')?.classList.contains('app-main--sheet')).toBe(false)
+    expect(el.querySelector('.app-nav')?.textContent).toContain('多维表')
+  })
+
+  it('hides sheet chrome when embedded=true but still locks app-main scroll', async () => {
+    mocks.route.query = { embedded: 'true' }
+    const el = await mountApp()
+    expect(el.querySelector('.app-nav')).toBeNull()
+    expect(el.querySelector('[data-testid="sheet-chrome"]')).toBeNull()
+    expect(el.querySelector('.app-main')?.classList.contains('app-main--sheet')).toBe(true)
   })
 })

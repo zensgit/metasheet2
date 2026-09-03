@@ -29,6 +29,25 @@ function resolveMultitableProps(path: string) {
 }
 
 describe('multitable app shell route wiring', () => {
+  it('marks the sheet workbench route as full-bleed sheet chrome', async () => {
+    const MultitableRouteStub = defineComponent({
+      name: 'MultitableRouteStub',
+      template: '<div />',
+    })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [buildMultitableRoute(MultitableRouteStub)],
+    })
+    await router.push('/multitable/sheet_orders/view_grid')
+    await router.isReady()
+    const matched = router.currentRoute.value.matched.find((record) => record.name === AppRouteNames.MULTITABLE)
+    expect(matched?.meta).toMatchObject({
+      hideNavbar: true,
+      sheetChrome: true,
+      requiresAuth: true,
+    })
+  })
+
   it('maps the pilot grid URL contract into embed host props', async () => {
     const props = await resolveMultitableProps('/multitable/sheet_orders/view_grid?baseId=base_ops')
 
@@ -113,6 +132,7 @@ describe('public multitable form route wiring', () => {
       requiresAuth: false,
       skipShellBootstrap: true,
     })
+    expect(matched?.meta.sheetChrome).toBeUndefined()
     expect(resolvePublicMultitableFormRouteProps(router.currentRoute.value as any)).toEqual({
       sheetId: 'sheet_orders',
       viewId: 'view_form',
