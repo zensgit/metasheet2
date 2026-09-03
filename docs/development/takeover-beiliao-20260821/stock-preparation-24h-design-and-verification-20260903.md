@@ -162,7 +162,7 @@ owner 裁决"项目备料页 = 备料工作台新 tab,不另起炉灶":真正新
 | #5442 | `feat/stock-prep-notify-next` | **MERGED** | 3 轮(10→13→10 条确证) | merge commit `b274f6798f2c037c786600b729fd7a0a946167ef`,2026-09-03T00:11:49Z |
 | #5455 | `fix/stock-prep-field-permissions-reconcile` | OPEN | 3 轮(17→21→11/1 条确证),第三轮改写为单一不变式,**尚待新一轮对抗复核** | 已修到 `0382bc9166a6001b1d59ef816c1625f6fa19752a` 且 CI 绿,按 owner 裁决推到演示后合 |
 | #5459 | `fix/stock-prep-carry-target-binding` | **MERGED** | 3 轮(5→6→6 条确证,第三轮 3 条 P1 待修) | merge commit `a3397e0f422c4d4b6f5062cd902e540bf58dc180`,2026-09-03T01:33:46Z |
-| #5460 | `feat/stock-prep-project-board` | OPEN | 2 轮(13→16 条确证,含 1 条 P0) | 当前分支头 `23cca1cbd5c8ad4387fcecf9e834a505d1dce61a`(写作时点,非最终)。最终合并 SHA 与合并状态:{{TODO: #5460 合并 SHA}} |
+| #5460 | `feat/stock-prep-project-board` | OPEN | 2 轮(13→16 条确证,含 1 条 P0) | 当前分支头 `23cca1cbd5c8ad4387fcecf9e834a505d1dce61a`(写作时点,非最终)。最终合并 SHA 与合并状态:6ea9b6367(2026-09-03 04:41 合入) |
 
 ---
 
