@@ -31,6 +31,9 @@
       @print="onPrint" @set-row-density="onSetRowDensity" @auto-fit-columns="onAutoFitColumns"
       @reset-to-shared="onResetToShared"
     >
+      <template #status>
+        <MetaNotificationBell :api-client="workbench.client" @navigate="onNotificationNavigate" />
+      </template>
       <template #overflow>
         <div class="mt-workbench__actions">
           <div
@@ -60,7 +63,6 @@
             <el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.commentInbox" /></el-icon> {{ wb('toolbar.commentInbox', isZh) }}
             <span v-if="commentInboxBadgeCount > 0" class="mt-workbench__mgr-badge">{{ commentInboxBadgeCount }}</span>
           </button>
-          <MetaNotificationBell :api-client="workbench.client" @navigate="onNotificationNavigate" />
           <button v-if="caps.canManageFields.value" class="mt-workbench__mgr-btn" @click="showFieldManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.fields" /></el-icon> {{ wb('toolbar.fields', isZh) }}</button>
           <button v-if="caps.canManageSheetAccess.value" class="mt-workbench__mgr-btn" @click="showPermissionManager = true; void loadPermissionEntries()"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.access" /></el-icon> {{ wb('toolbar.access', isZh) }}</button>
           <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.views" /></el-icon> {{ wb('toolbar.views', isZh) }}</button>

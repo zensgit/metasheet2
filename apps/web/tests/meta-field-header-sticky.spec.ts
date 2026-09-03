@@ -14,6 +14,12 @@ describe('MetaFieldHeader sticky contract', () => {
     expect(styleBlock).toMatch(/z-index:\s*3/)
   })
 
+  it('gives the dashboard its own scroller after app-main is locked', () => {
+    const dash = readFileSync(join(WEB_ROOT, 'multitable/components/MetaDashboardView.vue'), 'utf-8')
+    expect(dash).toMatch(/\.meta-dashboard \{[^}]*overflow:\s*auto/)
+    expect(dash).toMatch(/\.meta-dashboard \{[^}]*min-height:\s*0/)
+  })
+
   it('places header z-index above frozen body cells (2)', () => {
     const header = readFileSync(join(WEB_ROOT, 'multitable/components/MetaFieldHeader.vue'), 'utf-8')
     const grid = readFileSync(join(WEB_ROOT, 'multitable/components/MetaGridTable.vue'), 'utf-8')

@@ -1395,7 +1395,7 @@ onBeforeUnmount(resetChartPreview)
 </script>
 
 <style scoped>
-.meta-dashboard { padding: 12px 16px; display: flex; flex-direction: column; gap: 12px; }
+.meta-dashboard { padding: 12px 16px; display: flex; flex-direction: column; gap: 12px; flex: 1; min-height: 0; overflow: auto; }
 
 .meta-dashboard__header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .meta-dashboard__selector { display: flex; align-items: center; gap: 8px; }

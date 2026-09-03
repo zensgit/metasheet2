@@ -115,7 +115,7 @@ vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
   default: defineComponent({
     name: 'MetaToolbar',
     setup(_, { slots }) {
-      return () => h('div', { 'data-stub-MetaToolbar': 'true' }, slots.overflow?.())
+      return () => h('div', { 'data-stub-MetaToolbar': 'true' }, [slots.status?.(), slots.overflow?.()])
     },
   }),
 }))

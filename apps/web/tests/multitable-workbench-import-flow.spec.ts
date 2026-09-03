@@ -110,6 +110,7 @@ vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
           },
           'open-import',
         ),
+        this.$slots.status?.(),
         this.$slots.overflow?.(),
       ])
     },

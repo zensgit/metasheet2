@@ -73,6 +73,18 @@ describe('MetaToolbar overflow 「更多」', () => {
     expect(onHistory).toHaveBeenCalledTimes(1)
   })
 
+  it('pins 更多 outside the scrollable primary cluster so it stays reachable', () => {
+    const root = mountToolbar({
+      overflow: () => h('button', { 'data-action': 'open-history' }, 'History'),
+    })
+    const more = root.querySelector('[data-testid="toolbar-more"]') as HTMLButtonElement
+    const end = root.querySelector('.meta-toolbar__end') as HTMLElement
+    const primary = root.querySelector('.meta-toolbar__primary') as HTMLElement
+    expect(end).toBeTruthy()
+    expect(end.contains(more)).toBe(true)
+    expect(primary.contains(more)).toBe(false)
+  })
+
   it('toggles aria-expanded on the 更多 trigger', async () => {
     const root = mountToolbar({
       overflow: () => h('button', { 'data-action': 'open-history' }, 'History'),

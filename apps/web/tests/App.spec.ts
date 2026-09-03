@@ -416,6 +416,14 @@ describe('App sheet chrome (full-bleed workbench)', () => {
     expect(el.querySelector('.app-nav')?.textContent).toContain('多维表')
   })
 
+  it('declares a narrow-viewport rule for the 40px sheet strip', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const source = readFileSync(join(__dirname, '../src/App.vue'), 'utf-8')
+    expect(source).toMatch(/@media \(max-width: 768px\)[\s\S]*\.app-sheet-chrome/)
+    expect(source).toMatch(/\.app-sheet-chrome \.nav-locale__label[\s\S]*display:\s*none/)
+  })
+
   it('hides sheet chrome when embedded=true but still locks app-main scroll', async () => {
     mocks.route.query = { embedded: 'true' }
     const el = await mountApp()

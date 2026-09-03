@@ -1,6 +1,7 @@
 <template>
   <div class="meta-toolbar" role="toolbar" :aria-label="l('toolbar.aria')">
-    <div class="meta-toolbar__left">
+    <div class="meta-toolbar__primary">
+      <div class="meta-toolbar__left">
       <!--
         Hide Fields (UI-P2-1c slice-3: migrated to shared MtPopover, NOT MtMenu — this is a
         multi-toggle field list, so toggling one field must NOT close the panel, unlike MtMenu's
@@ -227,6 +228,10 @@
       </MtButton>
       <!-- UI-P2-1c: primary CTA migrated to shared MtButton variant="primary". -->
       <MtButton v-if="canCreateRecord" variant="primary" @click="emit('add-record')">{{ l('toolbar.newRecord') }}</MtButton>
+    </div>
+    </div>
+    <div v-if="$slots.status || $slots.overflow" class="meta-toolbar__end">
+      <slot name="status" />
       <div v-if="$slots.overflow" ref="moreRef" class="meta-toolbar__more">
         <MtButton
           data-testid="toolbar-more"
@@ -484,8 +489,13 @@ function onAddFilterGroup() {
   border-bottom: 1px solid var(--ms-border-light, #e7e8ec); background: var(--ms-bg-card, #fff);
   min-width: 0; flex-wrap: nowrap; flex-shrink: 0; gap: 8px;
 }
+.meta-toolbar__primary {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  flex: 1 1 auto; min-width: 0; overflow-x: auto; overscroll-behavior-x: contain;
+}
 .meta-toolbar__left { display: flex; gap: 2px; align-items: center; flex-wrap: nowrap; flex: 0 1 auto; min-width: 0; }
 .meta-toolbar__right { display: flex; gap: 4px; align-items: center; flex-wrap: nowrap; flex: 1 1 auto; min-width: 0; justify-content: flex-end; }
+.meta-toolbar__end { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
 .meta-toolbar__divider { display: inline-block; width: 1px; align-self: stretch; margin: 4px 6px; background: var(--ms-border-light, #e7e8ec); flex-shrink: 0; }
 .meta-toolbar__btn {
   display: inline-flex; align-items: center; gap: 4px; height: var(--ms-control-height, 32px); box-sizing: border-box;

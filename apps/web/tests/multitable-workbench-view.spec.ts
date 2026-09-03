@@ -291,6 +291,7 @@ vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
             },
             'set-row-density-compact',
           ),
+          this.$slots.status?.(),
           this.$slots.overflow?.(),
         ],
       )

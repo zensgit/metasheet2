@@ -510,6 +510,42 @@ html, body {
 }
 
 @media (max-width: 768px) {
+  .app-sheet-chrome {
+    height: 40px;
+    padding: 0 8px;
+    gap: 8px;
+    flex-wrap: nowrap;
+  }
+
+  .app-sheet-chrome .nav-locale__label {
+    display: none;
+  }
+
+  .app-sheet-chrome .nav-user {
+    min-width: 0;
+    max-width: 12ch;
+  }
+
+  .app-sheet-chrome .nav-link {
+    padding: 4px 6px;
+  }
+
+  .sheet-chrome__actions {
+    gap: 6px;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .sheet-chrome__brand {
+    min-width: 0;
+  }
+
+  .app-sheet-chrome .brand-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .app-nav {
     height: auto;
     flex-wrap: wrap;
