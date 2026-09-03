@@ -1,10 +1,10 @@
 # Approval Lock-2B Contact Multi-Select Development Report
 
-Date: 2026-09-02
-Status: IMPLEMENTED IN ISOLATED SUCCESSOR; DRAFT/HOLD
+Date: 2026-09-03
+Status: IMPLEMENTED AND VERIFIED; OWNER READY/MERGE GATE
 Contract: `approval-lock2-org-controls-field-routing-20260817.md` L2-B/L2-C, OD-L2-2(a), OD-L2-3(a), OD-L2-7(a)
-Parent: `dc757afcd8d6885de75d893fd2765a018b39117f` (#5454 Lock-2A department successor)
-Implementation: `8a61cfb00ac2f2c4378d94a8b9ce0440c8e1b05d`
+Parent: `c7ef42a221ec8f3a04a8702fe89a6fa145b6e211` (#5454 Lock-2A merged main)
+Pre-evidence exact head: `0bc10532f4af2b0668094223bb0ae0097d434df4`
 
 ## 1. Result
 
@@ -70,10 +70,10 @@ Production backend:
 - `packages/core-backend/src/services/ApprovalGraphExecutor.ts`
 - `packages/core-backend/src/services/ApprovalProductService.ts`
 
-Twelve existing focused test files were updated. The twelfth is the Lock-7 field-edit real-DB fixture: its `form_field_user` driver now carries the ratified required pin and its generic create helper supplies an already-seeded default contact. No workflow, shared test manifest, package manifest, migration, OpenAPI file, or feature-flag registry changed.
+Fifteen existing focused test files were updated. The Lock-7 field-edit real-DB fixture now carries the ratified required pin and supplies an active contact. Three older integration fixtures were also aligned with the same active-contact and required-field contract after the first published Node 20 run exposed them. No workflow, shared test manifest, package manifest, migration, OpenAPI file, or feature-flag registry changed.
 
 ## 5. Release Boundary
 
-The isolated synthetic database census returned zero persisted user fields, but it does not substitute for the ratified pre-landing census of the deployed approval template corpus. Before this successor can be merged, an owner-authorized read-only census must confirm the set of persisted `user.props` keys and classify every non-empty result.
+The isolated synthetic database census returned zero persisted user fields. The separately owner-authorized staging census then found one persisted `user` field, zero fields carrying `props`, and an empty props-key set. It ran as an aggregate-only read in an explicit read-only transaction and selected no field values, user ids, tenant ids, or template payloads. The result is compatible with the five-key allowlist and requires no data rewrite or exception. Production was not queried.
 
-Until that evidence exists, status remains DRAFT/HOLD. This report authorizes no Ready transition, merge, branch-protection change, flag change, dispatch, staging action, deployment, production action, or real-customer-data read.
+The implementation and staging compatibility gate are complete. Ready/merge remains a separate owner decision. This report authorizes no branch-protection change, flag change, dispatch, deployment, production action, production-data read, or additional staging action.
