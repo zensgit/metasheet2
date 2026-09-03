@@ -94,6 +94,41 @@
         {{ bi('导出物料清单(Excel)', 'Export materials (Excel)') }}
       </button>
 
+      <!-- 通知下一步 — A TURN SIGNAL, NOT A GUARD.
+           Several people fill their own fields on this project's rows in order; this button moves
+           whose-turn-it-is on one notch and tells the group chat who is up next (the last step also
+           tells 仓库/采购). It decides NOTHING about who may write which column — per-column write
+           enforcement is a separate, deferred decision.
+           The `isCurrentHandler` half of the condition is COURTESY, not enforcement: the server
+           re-checks it on the advance and answers 403 NOT_CURRENT_HANDLER regardless of what this
+           template rendered. Hiding the button simply keeps five people from all seeing a button
+           that only one of them can use.
+           This pair is why `handoff.read`/`handoff.advance` carry `control: null` in the manifest:
+           they are additionally gated on RUNTIME state, so presence ≠ grant and the F-04 matrix
+           cannot measure them. StockPreparationHandoff.spec.ts covers their visibility instead. -->
+      <!-- J1: the SECOND condition is the resend. The owed-notice invitation above is only honest if
+           the button it names is on screen, and in that state `isCurrentHandler` is false — the turn
+           has already moved on; what is outstanding is the message for the hop this caller completed.
+           The server decides both (it holds the monotonic claim column and the step rosters); the
+           page only renders what it is told. `completed` is deliberately NOT a bar on this branch: a
+           terminal hop whose claim was interrupted leaves the chain finished and the 仓库/采购 notice
+           still owed, which is the single most important message this feature sends. -->
+      <button
+        v-if="can('handoff.advance') && handoff.configured
+          && ((handoff.isCurrentHandler && !handoff.completed) || handoffResendableStepKey)"
+        type="button"
+        data-testid="stock-prep-handoff-advance"
+        :disabled="busy || !projectNo"
+        :title="!projectNo ? bi('先填项目号', 'Enter a project number first') : ''"
+        @click="advanceHandoff"
+      >
+        {{ handoffResendableStepKey
+          ? bi('通知下一步(补发上一步的群消息)', 'Notify the next person (resend the previous step\'s message)')
+          : (handoff.terminal
+            ? bi('通知仓库和采购', 'Notify warehouse & purchasing')
+            : bi('通知下一步', 'Notify the next person')) }}
+      </button>
+
       <!-- Platform-admin capabilities. Reconcile performs a SOURCE READ (and consumes a B2a
            operation claim when armed); ensure PROVISIONS the ledger table. Both stay owner-level, so
            an operator never sees either. -->
@@ -162,6 +197,54 @@
         </li>
       </ul>
     </section>
+    <!-- Whose turn it is. Renders for ANYONE who could read the status — the point of a turn signal
+         is that the other four people can see it too, not only the one person holding the turn. A
+         deployment with no chain configured renders nothing at all here. -->
+    <p v-if="handoff.configured" class="stock-prep-confirm__hint" data-testid="stock-prep-handoff-status">
+      <template v-if="handoff.completed">
+        {{ bi('这个项目的备料接力已经走完。', 'The handoff chain for this project has run to the end.') }}
+      </template>
+      <template v-else>
+        {{ bi('当前在:', 'Currently with: ') }}{{ handoffStepLabel(handoff.currentStepKey) }}
+        <code v-if="handoff.currentStepKey" class="stock-prep-confirm__token">{{ handoff.currentStepKey }}</code>
+      </template>
+    </p>
+
+    <!-- STILL OWED, STILL SENDABLE. The first version of this banner fired on exactly this state and
+         told the operator it could NOT be resent — copy that discourages the one click that fixes it.
+         It is an invitation now, and it renders only for the handler who can actually act on it. -->
+    <p
+      v-if="handoffResendableStepKey"
+      class="stock-prep-confirm__hint"
+      data-testid="stock-prep-handoff-notification-resendable"
+    >
+      {{ bi(
+        '上一跳的群通知还没发出去,再点一次「通知下一步」就会补发。',
+        'The group notice for the previous step has not gone out yet — press 通知下一步 again and it will be sent.',
+      ) }}
+      <code class="stock-prep-confirm__token">{{ handoffResendableStepKey }}</code>
+    </p>
+
+    <!-- GONE FOR GOOD. A later hop's claim moved the monotonic max past this one, so nothing the
+         system can do will send it. Named from the append-only trail, because an interior gap has no
+         other representation. -->
+    <p
+      v-if="handoffLostStepKeys.length > 0"
+      class="stock-prep-confirm__hint"
+      data-testid="stock-prep-handoff-notification-gap"
+    >
+      {{ bi(
+        `「${handoffLostStepLabels}」这一步的群通知没发出去,系统已经不能补发了 —— 请您口头跟相关的人确认一下。`,
+        `The group notice for "${handoffLostStepLabels}" never went out and can no longer be resent — please confirm with the people involved in person.`,
+      ) }}
+    </p>
+
+    <!-- What just happened to the turn AND to the message — two separate facts, said as two facts.
+         The enum stays on screen subordinate to the sentence, like every other token on this page. -->
+    <p v-if="handoffNoticeText" class="stock-prep-confirm__hint" data-testid="stock-prep-handoff-notice">
+      {{ handoffNoticeText }}
+      <code v-if="handoffNoticeToken" class="stock-prep-confirm__token">{{ handoffNoticeToken }}</code>
+    </p>
 
     <p v-if="readiness !== null" class="stock-prep-confirm__readiness" data-testid="stock-prep-confirmation-readiness-result">
       {{ readiness.ready === true
@@ -345,10 +428,12 @@ import type { IntegrationScope } from '../../../services/integration/workbench'
 import {
   STOCK_PREPARATION_DECISION_STATUSES,
   STOCK_PREPARATION_RESOLUTION_ACTIONS,
+  advanceStockPreparationHandoff,
   confirmStockPreparationDecision,
   exportStockPreparationPrepLines,
   listStockPreparationDecisions,
   readStockPreparationDecisionReadiness,
+  readStockPreparationHandoff,
   readStockPreparationOperatorDirectory,
   readStockPreparationValueEntry,
   type StockPreparationDecisionQueue,
@@ -356,6 +441,8 @@ import {
   type StockPreparationDecisionRow,
   type StockPreparationDecisionStatus,
   type StockPreparationDecisionValueEntry,
+  type StockPreparationHandoffAdvanceResult,
+  type StockPreparationHandoffStatus,
   type StockPreparationOperatorDirectory,
   type StockPreparationOperatorProject,
   type StockPreparationResolutionAction,
@@ -373,6 +460,8 @@ import {
   stockPrepDirectoryEmptyState,
   stockPrepEnumPlain,
   stockPrepErrorPlain,
+  stockPrepHandoffOutcomePlain,
+  stockPrepHandoffStepPlain,
   type StockPrepPlainEntry,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 
@@ -414,6 +503,12 @@ function decisionActionLabel(action: string | null): string {
 }
 
 const errorPlain = stockPrepErrorPlain
+
+/** The step vocabulary in words, degrading to the raw key exactly like the two labels above. */
+function handoffStepLabel(key: string | null): string {
+  const plain = stockPrepHandoffStepPlain(key ?? '')
+  return plain ? bi(plain.zh, plain.en) : (key ?? '—')
+}
 
 const projectNo = ref<string>(props.projectNo ?? '')
 const statusFilter = ref<StockPreparationDecisionStatus | ''>('')
@@ -559,6 +654,110 @@ onMounted(() => {
   void loadDirectory()
 })
 
+/**
+ * 通知下一步 state. INERT is the fail-soft resting position, and it is what the view holds whenever
+ * the status is unknown for ANY reason — no project number typed yet, no `handoff.read` grant, a
+ * deployment whose backend predates this route, or a rejected fetch. `configured: false` renders no
+ * control and no status line, which is exactly the behaviour of a deployment that has not set a
+ * chain up, so an outage degrades to "feature absent" rather than to a broken queue.
+ */
+const HANDOFF_INERT: StockPreparationHandoffStatus = Object.freeze({
+  configured: false,
+  projectNo: '',
+  steps: [],
+  stepCount: 0,
+  stepIndex: null,
+  currentStepKey: null,
+  terminal: false,
+  completed: false,
+  isCurrentHandler: false,
+  notifiedStepIndex: null,
+  notificationsConfigured: false,
+  resendableStepKey: null,
+  lostStepKeys: [],
+})
+
+const handoff = ref<StockPreparationHandoffStatus>(HANDOFF_INERT)
+/** The last advance's result — the source of the plain-language notice, cleared on each new press. */
+const handoffAdvance = ref<StockPreparationHandoffAdvanceResult | null>(null)
+
+/**
+ * What to tell the operator after an advance.
+ *
+ * THE DISCRIMINATOR IS `notifyOutcome`, NOT `changed`, and that correction is the whole of this
+ * comment. `changed` says whether the TURN moved; it says nothing about whether a message went out.
+ * Those two used to be the same question, and the first version of this notice short-circuited on
+ * `changed === false` and printed 「没有重复通知」.
+ *
+ * They came apart when the notification claim became a compare-and-set of its own: a request that is
+ * BOTH a replay and the one that finally sends the owed notice is now ordinary, and so is the same
+ * request FAILING to send it. On the old wording an operator whose resend had just failed — or
+ * half-failed across 仓库 and 采购 — was told in words that nothing needed sending. The claim is spent
+ * by then, so no later click can ever resend it: being told the wrong thing here is terminal, and the
+ * group that missed the notice is never chased.
+ *
+ * So: if something was actually attempted (sent / partial / failed), say what happened to it. Only
+ * `skipped` and `not_configured` on an unchanged turn are genuinely "nothing needed sending".
+ */
+const handoffNoticeText = computed<string>(() => {
+  const result = handoffAdvance.value
+  if (!result) return ''
+  const attempted = result.notifyOutcome === 'sent'
+    || result.notifyOutcome === 'partial'
+    || result.notifyOutcome === 'failed'
+  // J2: `resumed` is the COMMITTED verdict that this click took the claim, so a request carrying it
+  // may never render the replay sentence — whatever the outcome. The first cut checked only
+  // `attempted`, which left one outcome ('not_configured', now 'no_destination') reaching the
+  // 「没什么要发」 wording on a click that had just spent the hop's one chance to be announced.
+  if (result.changed === false && !attempted && result.resumed !== true) {
+    return bi(
+      '这一步之前已经交接过了,没有重复通知。',
+      'This step had already been handed on, so nobody was notified a second time.',
+    )
+  }
+  const plain = stockPrepHandoffOutcomePlain(result.notifyOutcome)
+  if (!plain) return bi('已经交给下一步了。', 'It has been handed on to the next step.')
+  const lead = bi(plain.zh, plain.en)
+  const next = bi(plain.zhNext ?? '', plain.enNext ?? '')
+  const body = next ? `${lead} ${next}` : lead
+  // A RESUME is not the same event as a first advance and must not be described as one: the turn
+  // moved earlier, and what this click did was send the notice that hop had been owed since.
+  if (result.resumed === true) {
+    return `${bi('这一跳之前没发出去的通知,这次补发了。', 'The notice this step had been owed was sent now.')} ${body}`
+  }
+  return body
+})
+
+/** The enum, kept on screen but subordinate — what a person quotes when they ask us about it. */
+const handoffNoticeToken = computed<string | null>(() => handoffAdvance.value?.notifyOutcome ?? null)
+
+/**
+ * IS THERE A HOP WHOSE NOTICE NEVER WENT OUT? The claim is monotonic, so once a later hop is claimed
+ * an earlier owed one can never be sent by anyone — pressing the button again does not help, and
+ * until this line existed nothing on the screen said so.
+ *
+ * Two guards, both load-bearing. `notificationsConfigured` keeps a deliberate turn-state-only
+ * deployment — whose `notifiedStepIndex` is null forever and correctly so — from being told it has
+ * lost every notice it never meant to send. And the comparison is against `stepIndex - 1` because the
+ * CURRENT hop has not been handed off yet: its notice is not late, it is not due.
+ */
+const handoffLostStepKeys = computed<string[]>(() => {
+  const state = handoff.value
+  if (!state.configured) return []
+  return Array.isArray(state.lostStepKeys) ? state.lostStepKeys : []
+})
+
+/** The step whose notice is still owed AND still sendable by this caller. Server-computed. */
+const handoffResendableStepKey = computed<string | null>(() => {
+  const state = handoff.value
+  if (!state.configured) return null
+  return typeof state.resendableStepKey === 'string' && state.resendableStepKey ? state.resendableStepKey : null
+})
+
+/** The committed labels for the lost hops, so the sentence names them rather than counting them. */
+const handoffLostStepLabels = computed<string>(() =>
+  handoffLostStepKeys.value.map((key) => handoffStepLabel(key)).join('、'))
+
 /** What the currently chosen handling actually does, in one line, before the operator commits. */
 const selectedActionHint = computed<string>(() => {
   const plain = stockPrepEnumPlain(STOCK_PREP_DECISION_ACTION_PLAIN, resolutionAction.value)
@@ -586,6 +785,32 @@ async function run(task: () => Promise<void>): Promise<void> {
   }
 }
 
+/**
+ * Whose turn it is, read FAIL-SOFT and deliberately OUTSIDE `run()`.
+ *
+ * Outside, because the turn signal is an addition to this page, not a precondition of it: a
+ * deployment whose backend predates the handoff route, or one having a bad minute, must leave the
+ * confirmation queue — the only page a floor operator has — working exactly as before. So this
+ * swallows its own failure into INERT (feature absent) and never touches `errorCode` or `busy`.
+ */
+async function loadHandoff(): Promise<void> {
+  if (!projectNo.value || !can('handoff.read')) {
+    handoff.value = HANDOFF_INERT
+    return
+  }
+  try {
+    const status = await readStockPreparationHandoff({ ...props.scope, projectNo: projectNo.value })
+    handoff.value = status && typeof status === 'object' ? status : HANDOFF_INERT
+  } catch {
+    handoff.value = HANDOFF_INERT
+  }
+}
+
+/**
+ * The queue refresh is this view's ONE load-on-demand entry point (there is no watcher and no
+ * onMounted here — the operator types a project number and presses 刷新列表), so the turn signal
+ * rides it rather than introducing a second refresh idiom the file does not otherwise use.
+ */
 async function loadQueue(): Promise<void> {
   await run(async () => {
     queue.value = await listStockPreparationDecisions({
@@ -594,6 +819,7 @@ async function loadQueue(): Promise<void> {
       status: statusFilter.value === '' ? null : statusFilter.value,
     })
   })
+  await loadHandoff()
 }
 
 async function loadReadiness(): Promise<void> {
@@ -628,6 +854,30 @@ async function exportMaterials(): Promise<void> {
     const result = await exportStockPreparationPrepLines({ ...props.scope, projectNo: projectNo.value })
     triggerExportDownload(result.blob, result.filename)
     exportEmptyNotice.value = result.activeRowCount === 0
+  })
+}
+
+/**
+ * 通知下一步. `fromStepKey` is the step this view BELIEVES is current; the server compares it to the
+ * one it actually holds and answers 409 STEP_MISMATCH when somebody else moved first — which is why
+ * a stale page cannot double-advance the chain. The server also re-checks that the caller is the
+ * current handler; the button's `isCurrentHandler` condition is courtesy, not the gate.
+ */
+async function advanceHandoff(): Promise<void> {
+  // FINISH WHAT IS OWED BEFORE MOVING ON. When a hop's notice is still unsent, replaying THAT hop is
+  // what sends it; advancing the current one instead would claim the next step and push the monotonic
+  // max past the owed hop, losing it for good. So the resend wins when both are possible — which is
+  // also what the invitation on screen promises the click will do.
+  const fromStepKey = handoffResendableStepKey.value ?? handoff.value.currentStepKey
+  if (!projectNo.value || !fromStepKey) return
+  handoffAdvance.value = null
+  await run(async () => {
+    handoffAdvance.value = await advanceStockPreparationHandoff({
+      ...props.scope,
+      projectNo: projectNo.value,
+      fromStepKey,
+    })
+    await loadHandoff()
   })
 }
 

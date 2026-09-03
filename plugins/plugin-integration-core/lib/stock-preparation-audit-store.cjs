@@ -24,6 +24,23 @@
 const crypto = require('node:crypto')
 
 const AUDIT_TABLE = 'integration_stock_prep_audit'
+// The constraint the vocabulary migrations (067/080/081/082/085) drop and re-add. Named here so the
+// probe below can tell "this action is outside the DB's vocabulary" from any other write failure.
+const AUDIT_ACTION_CHECK_CONSTRAINT = 'integration_stock_prep_audit_action_check'
+
+/**
+ * Is this a CHECK-constraint violation on the named constraint? PostgreSQL reports 23514 and names
+ * the constraint; a driver that reports neither is treated as "not this", which keeps the probe's
+ * fail-open posture (see supportsAction).
+ */
+function isCheckConstraintViolation(error, constraintName) {
+  if (!error) return false
+  const code = String(error.code || (error.cause && error.cause.code) || '')
+  if (code !== '23514') return false
+  const named = String(error.constraint || (error.cause && error.cause.constraint) || '')
+  if (named) return named === constraintName
+  return String(error.message || '').includes(constraintName)
+}
 
 const STOCK_PREP_AUDIT_ACTIONS = Object.freeze([
   'mapping_candidates_sync',
@@ -51,6 +68,12 @@ const STOCK_PREP_AUDIT_ACTIONS = Object.freeze([
   // because the reopened OD-E3 gate requires an audit vocabulary for the value plane, not merely a
   // permission for it.
   'project_directory_read',
+  // 通知下一步 (migration 085): a person finished their step of the 备料 handoff chain and handed it
+  // to the next one — or, on the last step, finished the project and had 仓库/采购 told. The only
+  // action here that records a decision about the WORK rather than about the data. Values-free:
+  // `subject_id` is a step key from the closed handoff vocabulary, `detail` carries cursor integers
+  // and booleans only (see stock-preparation-handoff.cjs and the route, its only caller).
+  'handoff_advance',
 ])
 const ACTION_SET = new Set(STOCK_PREP_AUDIT_ACTIONS)
 
@@ -178,7 +201,72 @@ function createStockPreparationAuditStore({ db, idGenerator = crypto.randomUUID 
     return { rowCount: list.length, entries: list.map(rowToPublicEntry) }
   }
 
-  return { append, list }
+  /**
+   * IS THE DATABASE'S CHECK CONSTRAINT ACTUALLY WIDE ENOUGH FOR `action` YET? (RC1)
+   *
+   * `STOCK_PREP_AUDIT_ACTIONS` above is what this PROCESS believes the vocabulary is. The DATABASE
+   * believes whatever the last vocabulary migration installed, and the two are different facts:
+   * `db:migrate` is a separate CLI (packages/core-backend/src/db/migrate.ts), not a boot step, so a
+   * deployment can legitimately be running code that knows about `handoff_advance` against a schema
+   * whose CHECK constraint stops at 082. Every write of the new action then failed at the database —
+   * with a raw constraint-violation message, at a point in the caller's flow where the damage was
+   * already done.
+   *
+   * So a caller that is ABOUT to write a new action can ask first, and refuse by name instead.
+   *
+   * HOW: a real INSERT inside a transaction that is then ROLLED BACK. Reading `pg_constraint` would
+   * mean raw SQL, which the plugin's db helper deliberately does not offer (lib/db.cjs exposes a
+   * structured API precisely so a plugin cannot hand-write SQL). The dry insert asks the question the
+   * only way this layer can: it makes the database answer it.
+   *
+   * The row can never survive — the callback always throws, so the transaction always rolls back —
+   * and it is written with `tenant_id` of the caller's own probe scope so that a database which
+   * somehow DID commit it would leave something recognisable rather than a foreign-tenant row.
+   *
+   * FAIL-OPEN ON AN UNKNOWN ERROR, deliberately: this is a diagnostic, and a probe that cannot tell
+   * "constraint too narrow" from "connection blipped" must not turn a transient blip into a refusal
+   * of a route that would have worked. `{ supported: true, reason: 'probe_unavailable' }` means "ask
+   * the real write", which then behaves exactly as it did before this method existed.
+   */
+  async function supportsAction(action, { tenantId } = {}) {
+    const normalizedAction = optionalString(action)
+    if (!normalizedAction || !ACTION_SET.has(normalizedAction)) {
+      return { supported: false, reason: 'action_not_in_store_vocabulary' }
+    }
+    if (typeof db.transaction !== 'function') {
+      return { supported: true, reason: 'probe_unavailable' }
+    }
+    const sentinel = new Error('stock-prep audit vocabulary probe: rolling back on purpose')
+    sentinel.__stockPrepAuditProbe = true
+    try {
+      await db.transaction(async (trx) => {
+        await trx.insertOne(AUDIT_TABLE, {
+          id: idGenerator(),
+          tenant_id: optionalString(tenantId) || '__probe__',
+          workspace_id: null,
+          project_id: null,
+          action: normalizedAction,
+          subject_id: null,
+          mode: 'vocabulary_probe',
+          actor: null,
+          detail: { operation: 'vocabulary_probe' },
+        })
+        throw sentinel
+      })
+      // A transaction that swallowed our throw is not a transaction we can reason about.
+      return { supported: true, reason: 'probe_unavailable' }
+    } catch (error) {
+      if (error === sentinel || (error && error.__stockPrepAuditProbe === true)) {
+        return { supported: true, reason: 'check_constraint_accepts' }
+      }
+      if (isCheckConstraintViolation(error, AUDIT_ACTION_CHECK_CONSTRAINT)) {
+        return { supported: false, reason: 'action_not_in_check_constraint' }
+      }
+      return { supported: true, reason: 'probe_unavailable' }
+    }
+  }
+
+  return { append, list, supportsAction }
 }
 
 module.exports = {
