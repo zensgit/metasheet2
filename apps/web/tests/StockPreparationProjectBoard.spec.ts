@@ -531,8 +531,60 @@ describe('项目备料页 — the operator project board', () => {
       .not.toContain('请管理员')
     // …and the control it names really is rendered, so the sentence is not a promise about a button
     // that is not there.
-    expect(root.querySelector('[data-testid="stock-prep-project-sync-run"]')).not.toBeNull()
+    const run = root.querySelector('[data-testid="stock-prep-project-sync-run"]') as HTMLButtonElement
+    expect(run).not.toBeNull()
+    // H14 — AND IT CARRIES THAT NAME. Rendering *a* button was never the claim: the sentence names a
+    // control, and until this assertion existed the button underneath said 「同步这个项目」 while the
+    // sentence above it said 「从PLM拉取数据」. An operator who reads a page that names a button it
+    // does not have looks down, finds no such thing, and stops — a dead end that is worse for
+    // pointing at something visible. The repeat-safety promise rides along, because it is a fact
+    // about the button rather than about the word.
+    expect(run.textContent).toContain('从PLM拉取数据')
+    expect(run.textContent, 'and it still promises what pressing twice does').toContain('不会重复写')
     expect(root.querySelector('[data-testid="stock-prep-project-board-status"]')).toBeNull()
+  })
+
+  // ---- B-17 (H13): THE TENANCY AND SCHEMA REFUSALS HAVE WORDS OF THEIR OWN ---------------------
+  //
+  // Both reach this page and neither had a sentence, so both fell through to the board's read
+  // generic 「没能读到这个项目的情况,请稍后再试一次」. For a tenantless platform admin that invites a
+  // person to retry forever a refusal that will never change; for a deployment one migration behind
+  // it hides the only thing anyone could act on. Both now say what the account or the system is, and
+  // whether waiting is the fix.
+
+  it('B-17: a tenantless principal is told it is the account, not an outage', async () => {
+    routeApi({
+      board: () => new Response(
+        JSON.stringify({ ok: false, error: { code: 'OPERATOR_SCOPE_TENANT_REQUIRED', message: 'x' } }),
+        { status: 403 },
+      ),
+    })
+    const root = await mountBoard()
+    const banner = root.querySelector('[data-testid="stock-prep-project-board-error"]') as HTMLElement
+    expect(banner).not.toBeNull()
+    expect(banner.textContent).toContain('不属于任何一家工厂')
+    expect(banner.textContent, 'retrying is precisely what will not help').toContain('再试也一样')
+    expect(banner.textContent, 'the read generic must not answer this').not.toContain('请稍后再试一次')
+    expect(banner.textContent, 'and this page writes nothing').not.toContain('没有保存成功')
+  })
+
+  it('B-17: a database one migration behind names the fix instead of the generic', async () => {
+    routeApi({
+      board: () => new Response(
+        JSON.stringify({
+          ok: false,
+          error: { code: 'STOCK_PREPARATION_AUDIT_VOCABULARY_UNAVAILABLE', message: 'x', details: { migration: '086' } },
+        }),
+        { status: 503 },
+      ),
+    })
+    const root = await mountBoard()
+    const banner = root.querySelector('[data-testid="stock-prep-project-board-error"]') as HTMLElement
+    expect(banner).not.toBeNull()
+    expect(banner.textContent).toContain('数据库还差一次升级')
+    expect(banner.textContent, 'this one IS clearable — but by an administrator, not by waiting')
+      .toContain('管理员')
+    expect(banner.textContent).not.toContain('没有保存成功')
   })
 
   it('B-14: …and only says "find an administrator" when the caller truly cannot pull', async () => {

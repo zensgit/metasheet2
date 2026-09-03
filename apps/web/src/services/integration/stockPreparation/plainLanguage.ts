@@ -585,6 +585,27 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainText> = Object
     zh: '记录接力进度的地方现在读不到,交接没有发生,备料数据也没有变化。',
     en: 'The place that records the handoff could not be reached — the turn did not move, and nothing in your prep data changed.',
   }),
+  // H13 — THE TENANCY REFUSALS, WHICH BOTH PLANES CAN RAISE AND NEITHER HAD WORDS FOR.
+  //
+  // These reach the queue AND the board, so they live in the shared table and are worded to claim
+  // nothing about a write. Without a row here the board fell through to its read generic, 「没能读到
+  // …请稍后再试一次」, which invites a person to retry forever a refusal that will never change:
+  // a platform admin has no tenant this minute and will have none next minute either. The sentence
+  // has to say the account is the reason, and that waiting is not the fix.
+  OPERATOR_SCOPE_TENANT_REQUIRED: Object.freeze({
+    zh: '当前账号不属于任何一家工厂,所以看不到具体项目的数据。这不是故障,再试也一样 —— 请用您工厂的账号登录。',
+    en: 'This account does not belong to any one factory, so it cannot see a specific project’s data. This is not an outage and retrying will not change it — sign in with your factory’s own account.',
+  }),
+  OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED: Object.freeze({
+    zh: '这个账号不在这家工厂的名单里,看不到这里的数据。请找管理员确认账号归属。',
+    en: 'This account is not on this factory’s roster, so it cannot see the data here. Ask an administrator to check which factory the account belongs to.',
+  }),
+  // The 503 the audit-vocabulary gate raises. It is a DEPLOYMENT state with a named fix, and the one
+  // refusal on these routes that a retry genuinely does clear — after somebody runs the migration.
+  STOCK_PREPARATION_AUDIT_VOCABULARY_UNAVAILABLE: Object.freeze({
+    zh: '这套系统的数据库还差一次升级,所以这一步暂时不能记录、也就不能进行。请把这条报错给管理员,升级完再点一次就好。',
+    en: 'This system’s database is one upgrade behind, so this step cannot be recorded and therefore cannot run. Show an administrator this message; once the upgrade is done, click again.',
+  }),
 })
 
 export const STOCK_PREP_ERROR_GENERIC: StockPrepPlainText = Object.freeze({

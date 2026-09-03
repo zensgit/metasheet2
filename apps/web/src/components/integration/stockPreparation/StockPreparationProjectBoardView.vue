@@ -81,9 +81,12 @@
          one an unknown number gets (the server decides that, and its suite asserts it) — what
          changed is only what this tab renders around that refusal. -->
     <section v-if="openedProjectNo" class="sp-board__pull" data-testid="stock-prep-project-board-pull">
+      <!-- H14: this page's step 1 is 从PLM拉取数据, and its empty state already sends people to a
+           button by that name. `run-variant` makes the button actually carry it. See the panel. -->
       <StockPreparationProjectSyncPanel
         :scope="scope"
         :project-no="openedProjectNo"
+        run-variant="pull"
         :api="syncApi"
         :large-bom-api="largeBomApi"
         :large-bom-poll-wait="largeBomPollWait"

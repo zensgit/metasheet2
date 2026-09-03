@@ -35,9 +35,7 @@
         :disabled="!canSubmit"
         @click="onRun"
       >
-        {{ busy
-          ? bi('正在同步…', 'Syncing…')
-          : bi('同步这个项目(可以重复点,不会重复写)', 'Sync this project (safe to repeat — it never writes twice)') }}
+        {{ busy ? bi(...runningLabel) : bi(...runLabel) }}
       </button>
       <!-- R-11: a control the caller cannot exercise is ABSENT, and the reason is said in words.
            一线自己拉数据 widened who may press it — a stock-prep operator now can — so this line no
@@ -250,8 +248,25 @@ const props = withDefaults(
     largeBomApi?: StockPreparationLargeBomJobApi | null
     /** Test seam ONLY — forwarded to StockPreparationLargeBomPullPanel so specs never wait on a real timer. */
     largeBomPollWait?: ((ms: number) => Promise<void>) | null
+    /**
+     * H14 — WHAT THIS BUTTON IS CALLED ON THE SURFACE THAT HOSTS IT.
+     *
+     * One button, two vocabularies, because it genuinely sits on two surfaces with two audiences.
+     * The admin surfaces (项目接入, 数据来源) have called this 「同步这个项目」 since it shipped, and
+     * their own copy references that name in four places. 项目备料页 is the OPERATOR's page and its
+     * whole framing is the four steps 从 PLM 拉取 / 通知下一步 / 导出 Excel / 到多维表填写 — its empty
+     * state already tells a person to press 「从PLM拉取数据」.
+     *
+     * Which was a lie until now: the button underneath said 同步这个项目. A page that names a control
+     * by a name the control does not have is a dead end pointing at something visible, which is the
+     * worst kind — the operator reads the sentence, looks down, sees no such button, and stops. So
+     * the label is a prop, the board passes its own, and neither surface has to adopt the other's
+     * word. The repeat-safety promise rides along with whichever name is used, because it is true of
+     * the button and not of the word.
+     */
+    runVariant?: 'sync' | 'pull'
   }>(),
-  { scope: () => ({}), armedAt: 0, projectNo: '', api: null, largeBomApi: null, largeBomPollWait: null },
+  { scope: () => ({}), armedAt: 0, projectNo: '', api: null, largeBomApi: null, largeBomPollWait: null, runVariant: 'sync' },
 )
 
 const emit = defineEmits<{
@@ -271,6 +286,15 @@ function bi(zh: string, en: string): string {
 }
 
 const canRun = computed(() => canRunStockPrepProjectSync((permission) => auth.hasPermission(permission)))
+
+/** See `runVariant`. Tuples so the template can spread them straight into `bi`. */
+const runLabel = computed<[string, string]>(() => (props.runVariant === 'pull'
+  ? ['从PLM拉取数据(可以重复点,不会重复写)', 'Pull data from PLM (safe to repeat — it never writes twice)']
+  : ['同步这个项目(可以重复点,不会重复写)', 'Sync this project (safe to repeat — it never writes twice)']))
+
+const runningLabel = computed<[string, string]>(() => (props.runVariant === 'pull'
+  ? ['正在拉取…', 'Pulling…']
+  : ['正在同步…', 'Syncing…']))
 
 const projectNo = ref(props.projectNo ?? '')
 const busy = ref(false)
