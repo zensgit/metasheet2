@@ -12,13 +12,15 @@
 
 ## 0. 版本与前置
 
-**版本行**:`{{填:合并后的 main SHA}}` = `origin/main` 在 **#5459**(`fix/stock-prep-carry-target-binding`)与 **#5460**(`feat/stock-prep-project-board`)合入之后。#5442(`feat/stock-prep-notify-next`)已于 `2026-09-03T00:11:49Z` 合入。上机前记一次:
+**版本行**:`b9b5a947f`(package r7-20260903-b9b5a947f)= `origin/main` 在 **#5459**(`fix/stock-prep-carry-target-binding`)与 **#5460**(`feat/stock-prep-project-board`)合入之后。#5442(`feat/stock-prep-notify-next`)已于 `2026-09-03T00:11:49Z` 合入。上机前记一次:
 
 ```bash
 git fetch origin && git rev-parse origin/main
 ```
 
 **备份**(222 上,SSH 交互式会话内;一次性 `ssh host "..."` 要把 `$` 转义。Runbook Step 1-1/1-2):
+
+> r7 订正:一次性远程执行遇引号问题时改用 `powershell -NoProfile -EncodedCommand <脚本 UTF-16LE base64>`;222 上 PATH 无 `pg_dump`/`psql`,用 `C:\Program Files\PostgreSQL\17\bin\pg_dump.exe`(Postgres 17 本地 5432,`postgresql-x64-17` 服务显示 Stopped 属正常,不要启动它)。
 
 ```powershell
 $l = (pm2 env 0 | Select-String '^DATABASE_URL:').Line
@@ -61,8 +63,11 @@ pg_dump $env:DATABASE_URL -Fc -f "$backupDir\pre-upgrade-db.dump"
 ```powershell
 .\scripts\ops\multitable-onprem-package-upgrade-inplace.ps1 `
   -PackageArchive <path-to-package>.zip `
+  -RootDir 'C:\metasheet' `
   -Pm2AppName metasheet-backend
 ```
+
+> r7 订正:该脚本**不在**发布包里,需从同一提交的仓库检出单独复制过去;默认 `RootDir` 是 `$PSScriptRoot\..\..`,不显式传 `-RootDir 'C:\metasheet'` 会指错目录。
 
 脚本 8 步自带:SHA-256 校验 → 停 pm2 → 备份(打印 `BACKUP_PATH=`)→ 逐文件替换 → F22 断言+逐文件哈希 → **跑迁移** → `pm2 restart --update-env` + 健康轮询 → 最终报告。
 

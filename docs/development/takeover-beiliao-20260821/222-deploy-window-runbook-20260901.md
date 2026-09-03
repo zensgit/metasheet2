@@ -93,6 +93,22 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
 
 ---
 
+## 2026-09-03 r7 实际执行记录与订正
+
+本节记录 r7 窗口(2026-09-03)在 222 上实际执行时发现、且与上面 §0 描述不一致或缺失的细节,供下一个窗口直接用,不要重新踩坑。
+
+1. **打包必须走 CI,不能在本地(尤其 Windows 检出)打包**:用 `gh workflow run multitable-onprem-package-build.yml --ref main -f package_tag=<tag> -f expected_sha=<full sha>` 触发。该 run 会上传产物 `multitable-onprem-package-<run_id>-<attempt>`,内含 `.zip`、`.zip.sha256`、`SHA256SUMS`、`deploy-bootstrap` 的 `.ps1`/`.bat`,以及一个 `verify/` 目录(验证器输出的 json/md)。**在 Windows 检出上本地打包会在 `multitable-onprem-package-verify.sh` 的"S6-A sealed-export package provenance pins did not verify"这一步失败**(CRLF 检出 vs LF blob 不一致)——不要发布本地(尤其 Windows)打出来的包。今天的产物:run `33720470573`,包名 `metasheet-multitable-onprem-v2.5.0-r7-20260903-b9b5a947f`,sha256 `ee3792b2ca141f44b88b4e07ea328a9669f865552518f1bb1a03fbc4bebedb99`,对应 `main` 提交 `b9b5a947f`(= #5460 的 `6ea9b6367` + docs #5465)。
+2. **Step 2-2 订正**:`scripts/ops/multitable-onprem-package-upgrade-inplace.ps1` **不在**包里(不在 `REQUIRED_PATHS` 清单中);需要从同一提交的仓库检出中单独复制(例如 scp 到 `C:\metasheet\output\releases\incoming\tools-r7\`),并且调用时必须**显式**传 `-RootDir 'C:\metasheet'`——该脚本的默认 `RootDir` 是 `$PSScriptRoot\..\..`,不传的话会指向 tools 目录而不是部署根目录。示例:
+   ```
+   powershell -NoProfile -ExecutionPolicy Bypass -File <tools>\multitable-onprem-package-upgrade-inplace.ps1 -PackageArchive <zip> -RootDir 'C:\metasheet' -Pm2AppName 'metasheet-backend'
+   ```
+3. **Step 1-2 订正**:222 上 PATH 里没有 `pg_dump`/`psql`,需要用完整路径 `C:\Program Files\PostgreSQL\17\bin\pg_dump.exe`(本地 Postgres 17,监听 5432 端口;`postgresql-x64-17` 服务在服务列表里显示 Stopped,但服务器实际在监听——不要去"启动"它)。今天的 DB 快照:`C:\metasheet\output\backups\upgrade-backup-20260903-135009\pre-upgrade-db.dump`(2.0 MB);脚本自带的代码备份:`upgrade-backup-20260903-140619`(docker/config/dist/web dist/plugins)。
+4. **时间线与验收**:停机 14:06:18 → 健康检查 OK 14:08:55(约 2.5 分钟);F22 must-exist 清单 OK,插件 hash 校验 OK(436 个文件),node_modules 泄漏检查 OK;执行的迁移:`079`、`080`、`081`、`082`、`084`、`085`、`086`,以及 `zzzz20260830200000`/`211000`/`220000`/`230000`、`zzzz20260831090000`、`zzzz20260902120000`;audit CHECK 现在列出 `handoff_advance` 和 `project_board_read`;`integration_stock_prep_handoff` 表存在;`attendance_records`/`approval_instances` 行数不变(0/0)。**in-place 脚本不会刷新 `C:\metasheet\BUILD_PROVENANCE.json`**——升级完成后要手动从包根目录把新的 `BUILD_PROVENANCE.json` 拷过去(旧的已存到备份目录,存为 `BUILD_PROVENANCE.r6.json`),否则 Step 3-1 读到的还是旧提交。
+5. **远程执行注意事项**:一次性 `ssh 192.168.1.222 powershell -Command "..."` 遇到引号会出问题;改用 `powershell -NoProfile -EncodedCommand <脚本的 UTF-16LE base64>`(例如用 Node 生成:`Buffer.from(script,'utf16le').toString('base64')`)。
+6. **升级完成后待办(需要 admin Bearer token;preflight 路由在没有 token 时返回 401 UNAUTHORIZED)**:针对**已存在**的 objectId `plm_stock_preparation_sandbox_r6_trial` 重新推导沙箱绑定——调用 `POST /api/integration/stock-preparation/sandbox-target/ensure`(当前绑定的 `sheet_32df959afa3cecfa564e5486` 缺少 #5447 新增的五个部门列 `makeOrBuy`/`procurementDone`/`procurementReplyDate`/`warehouseDone`/`actualArrivalDate`),把返回的 `data.targetBinding` 贴进 `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON`,`pm2 restart metasheet-backend --update-env`,再用 `GET /api/integration/stock-preparation/preflight` 确认 `ready:true`。222 上已有一个做这件事的辅助脚本(token 从文件读取,不会回显):`C:\metasheet\output\releases\incoming\222-rebind-sandbox-target.ps1`。
+
+---
+
 ## Step 0 — 窗口开始前的准备(不在 222 上做,在开发机上做)
 
 **0-1. 合入 #5416(源就绪预检 + 拓扑自测)**
