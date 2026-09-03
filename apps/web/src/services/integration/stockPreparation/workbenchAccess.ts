@@ -219,6 +219,8 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     method: 'POST',
     path: '/api/integration/stock-preparation/handoff/advance',
     control: null,
+  }),
+  Object.freeze({
     // 项目备料页 — ONE PROJECT'S BOARD, the operator's landing view. VALUE-BEARING (this project's
     // number and name), so it rides OPERATE for the same reason valueEntry, export and the project
     // directory do. It belongs in this manifest because it is gated on a stock-prep code and has a

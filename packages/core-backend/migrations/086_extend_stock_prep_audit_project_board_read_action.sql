@@ -1,4 +1,4 @@
--- 083_extend_stock_prep_audit_project_board_read_action.sql
+-- 086_extend_stock_prep_audit_project_board_read_action.sql
 -- 项目备料页: add the operator PROJECT BOARD read to the closed values-free stock-prep audit
 -- vocabulary.
 --
@@ -28,12 +28,25 @@
 -- All of those pass the store's structural gate (assertValuesFreeDetail). The route's audit.append
 -- call in http-routes.cjs (stockPreparationOperatorProjectBoard) is the only caller.
 --
--- The 067/080/081/082 shape is reused verbatim (DROP the constraint, ADD it back with the widened
--- list) rather than invented, and the store constant STOCK_PREP_AUDIT_ACTIONS stays SET-EQUAL to
--- this list — __tests__/stock-preparation-audit-migration.test.cjs asserts exactly that, in both
--- directions, against the HIGHEST-NUMBERED migration that installs the constraint. That is also the
--- tripwire that catches a parallel branch adding its own action in a later-numbered file without
--- carrying this one forward: the widened list is a full replacement, never a delta.
+-- The 067/080/081/082/085 shape is reused verbatim (DROP the constraint, ADD it back with the
+-- widened list) rather than invented, and the store constant STOCK_PREP_AUDIT_ACTIONS stays
+-- SET-EQUAL to this list — __tests__/stock-preparation-audit-migration.test.cjs asserts exactly
+-- that, in both directions, against the HIGHEST-NUMBERED migration that installs the constraint.
+--
+-- WHY 086 AND NOT 083, WHICH IS WHAT THIS FILE WAS NUMBERED WHEN IT WAS WRITTEN.
+--
+-- 通知下一步 (#5442) merged first and brought 084 (the handoff table) and 085, which re-lists this
+-- same vocabulary to add `handoff_advance`. Migrations run in NUMBER ORDER, and each of these files
+-- REPLACES the constraint rather than adding to it — so an 083 that added `project_board_read` would
+-- have been silently undone minutes later by 085's own full list, which does not contain it. The
+-- symptom on a real deployment would not be a failed migration: it would be every board read 500ing
+-- against a CHECK violation the moment an operator opened the page.
+--
+-- So this file is renumbered to run AFTER 085 and re-lists EVERY action, main's included. That is
+-- exactly the drift the suite's set-equality tripwire exists to force, and it is why that assertion
+-- resolves the highest-numbered vocabulary migration by DISCOVERY rather than by a pinned filename:
+-- it went red on the rebase and named this file, instead of letting the branch merge green and break
+-- on deploy.
 
 ALTER TABLE integration_stock_prep_audit
   DROP CONSTRAINT IF EXISTS integration_stock_prep_audit_action_check;
@@ -47,5 +60,7 @@ ALTER TABLE integration_stock_prep_audit
     'source_binding_set',
     'prep_line_export',
     'project_directory_read',
+    -- from 085 (通知下一步). Re-listed, not inherited: this constraint is a full replacement.
+    'handoff_advance',
     'project_board_read'
   ));

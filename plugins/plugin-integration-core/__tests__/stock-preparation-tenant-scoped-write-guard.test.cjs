@@ -325,6 +325,13 @@ function handlersCallingOperatorValueScope(src) {
 /** The value-bearing reads as of this commit. A change here is a deliberate, reviewable act. */
 const PINNED_VALUE_BEARING_READ_HANDLERS = [
   'stockPreparationConfirmationDecisionsValueEntry',
+  // 通知下一步 (#5442). The two handoff faces derive their tenant through the same host-vouched
+  // operator scope, so the DERIVED set picked them up the moment that PR landed — which is the point
+  // of deriving it. They are pinned here rather than special-cased: the three per-handler checks
+  // below are exactly the ones #5442's own block already makes of them, so running them twice costs
+  // nothing and means a future regression on either is caught by whichever guard is read first.
+  'stockPreparationHandoffAdvance',
+  'stockPreparationHandoffStatus',
   'stockPreparationOperatorProjectBoard',
   'stockPreparationOperatorProjectDirectory',
   'stockPreparationPrepLineExport',
