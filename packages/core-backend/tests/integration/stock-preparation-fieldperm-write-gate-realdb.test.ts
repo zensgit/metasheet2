@@ -388,7 +388,9 @@ const RC_ROLES = [RC_PURCHASING, RC_WAREHOUSE]
 
 const RC_U_PURCHASING = `u_bliao_rc_purchasing_${TS}`
 const RC_U_WAREHOUSE = `u_bliao_rc_warehouse_${TS}`
-const RC_USERS = [RC_U_PURCHASING, RC_U_WAREHOUSE]
+/** The HUMAN who edits a permission through the real authoring route. R1's actor. */
+const RC_U_OPERATOR = `u_bliao_rc_operator_${TS}`
+const RC_USERS = [RC_U_PURCHASING, RC_U_WAREHOUSE, RC_U_OPERATOR]
 
 const OPERATOR_CREATED_BY = 'operator:univer-meta-authoring-route'
 /** The pack under test, and a SIBLING pack that legitimately shares this canonical sheet. */
@@ -415,14 +417,45 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
   let rcApp: Express
   let rcUser = RC_U_PURCHASING
   let rcRoles: string[] = [RC_PURCHASING]
+  // The authoring PUT is gated on canManageFields, which needs manage-schema perms AND a sheet-level
+  // grant — so the operator actor is a different principal from the two department users.
+  let rcPerms: string[] = ['multitable:read', 'multitable:write']
 
   const rcPatch = (userId: string, roles: string[], fieldId: string, value: unknown) => {
     rcUser = userId
     rcRoles = roles
+    rcPerms = ['multitable:read', 'multitable:write']
     return request(rcApp)
       .post('/api/multitable/patch')
       .send({ sheetId: RC_SHEET, changes: [{ recordId: RC_REC, fieldId, value }] })
   }
+
+  /**
+   * THE REAL OPERATOR-FACING AUTHORING ROUTE — `PUT .../field-permissions/:fieldId/role/:roleId`.
+   *
+   * Driven end-to-end rather than simulated. Every operator fixture in this branch until now
+   * FABRICATED the row with a hardcoded `created_by` literal, so nothing anywhere executed the
+   * statement that actually stamps it (round-3 P1). This is the only place the two halves of R1 meet.
+   */
+  const rcPutFieldPermission = (
+    fieldId: string,
+    roleId: string,
+    body: { visible?: boolean; readOnly?: boolean; remove?: boolean },
+  ) => {
+    rcUser = RC_U_OPERATOR
+    rcRoles = []
+    rcPerms = ['multitable:read', 'multitable:write', 'multitable:manage', 'multitable:manage-schema']
+    return request(rcApp)
+      .put(`/api/multitable/sheets/${RC_SHEET}/field-permissions/${fieldId}/role/${roleId}`)
+      .send(body)
+  }
+
+  /** One row, both dimensions and its provenance — what the classifier reads. */
+  const rcRow = async (fieldId: string, roleId: string) => (await q(
+    `SELECT visible, read_only, created_by FROM field_permissions
+      WHERE sheet_id = $1 AND field_id = $2 AND subject_type = 'role' AND subject_id = $3`,
+    [RC_SHEET, fieldId, roleId],
+  )).rows[0] as { visible: boolean; read_only: boolean; created_by: string | null } | undefined
 
   const scopeRows = async () => (
     await q(
@@ -441,7 +474,7 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
       ;(req as { user?: unknown }).user = {
         id: rcUser,
         roles: rcRoles,
-        perms: ['multitable:read', 'multitable:write'],
+        perms: rcPerms,
       }
       next()
     })
@@ -471,6 +504,20 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
       )
       await q('INSERT INTO user_roles (user_id, role_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [userId, roleId])
     }
+    // THE OPERATOR: no department role, but sheet-admin on this sheet, which is what
+    // `canManageFields` resolves from. Without the grant the authoring PUT answers 403 and the R1
+    // witness below would pass vacuously.
+    await q(
+      `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
+       VALUES ($1,$2,$1,'x','member',$3::jsonb, TRUE, FALSE)
+       ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions`,
+      [RC_U_OPERATOR, `${RC_U_OPERATOR}@t.local`, JSON.stringify(['multitable:read', 'multitable:write'])],
+    )
+    await q(
+      `INSERT INTO spreadsheet_permissions (sheet_id, subject_type, subject_id, perm_code)
+       VALUES ($1,'user',$2,'spreadsheet:admin') ON CONFLICT DO NOTHING`,
+      [RC_SHEET, RC_U_OPERATOR],
+    )
   })
 
   afterAll(async () => {
@@ -483,6 +530,8 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
     await q('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [RC_USERS]).catch(() => {})
     await q('DELETE FROM users WHERE id = ANY($1::text[])', [RC_USERS]).catch(() => {})
     await q('DELETE FROM roles WHERE id = ANY($1::text[])', [RC_ROLES]).catch(() => {})
+    await q('DELETE FROM spreadsheet_permissions WHERE sheet_id = $1', [RC_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_config_revisions WHERE sheet_id = $1', [RC_SHEET]).catch(() => {})
   })
 
   beforeEach(async () => {
@@ -744,6 +793,104 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
    * it is answered by the same statement `applyRoleWriteScopes` runs inside its transaction — so
    * "the pre-flight said yes" and "the write agreed" cannot come apart on the shape of the question.
    */
+
+  /**
+   * ═══ R1, END TO END, THROUGH THE REAL AUTHORING ROUTE. ═══
+   *
+   * The one witness that was missing entirely (round-3 P1). Every operator fixture on this branch
+   * fabricated its row with a hardcoded `created_by` literal, so nothing anywhere executed the
+   * statement that actually stamps one — the whole of R1 could be deleted and CI stayed green.
+   *
+   * The chain this drives is the real one: a HUMAN edits a permission on a pair a customer pack
+   * already owns, through `PUT .../field-permissions/...`, and that write must TAKE OVER the
+   * provenance. `created_by = EXCLUDED.created_by` on the DO UPDATE is the token that does it, and
+   * everything downstream depends on it — without the flip the row keeps the PACK's marker and the
+   * next revision's reconcile deletes the human's decision (round-2 findings 12 and 17).
+   */
+  test('R1 real-DB: an operator edit takes over a PACK-marked row, and the next revisions honour it', async () => {
+    await q('DELETE FROM field_permissions WHERE sheet_id = $1', [RC_SHEET])
+    const service = new StockPreparationFieldPermissionsService()
+
+    // v1 — the pack denies 采购 the moving column. The row is unambiguously THIS PACK's.
+    await service.applyRoleWriteScopes({
+      sheetId: RC_SHEET, entries: RC_V1, packId: RC_PACK, reconcile: RC_REGION,
+    })
+    expect((await rcRow(RC_MOVING, RC_PURCHASING))?.created_by)
+      .toBe(`${STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY}#${RC_PACK}`)
+
+    // ── THE OPERATOR EDITS IT, through the route a human actually uses ────────────────────────────
+    // They HIDE the column as well as denying the write — a read decision this port is structurally
+    // incapable of making, which is exactly why it must survive everything below.
+    const put = await rcPutFieldPermission(RC_MOVING, RC_PURCHASING, { visible: false, readOnly: true })
+    expect(put.status).toBe(200)
+
+    // THE FLIP. This single assertion is the whole of R1: the row is no longer attributable to the
+    // pack, and `parseStockPreparationFieldPermissionCreatedBy` now reads it as somebody else's.
+    const edited = await rcRow(RC_MOVING, RC_PURCHASING)
+    expect(edited?.created_by).toBe(`operator:${RC_U_OPERATOR}`)
+    expect(edited?.visible).toBe(false)
+    expect(edited?.read_only).toBe(true)
+
+    // ── CONSEQUENCE 1: a revision that STILL DECLARES the pair defers to the human ────────────────
+    // The upsert is skipped for that pair, so the operator's HIDE survives an install that would
+    // otherwise have re-asserted `visible = true`, and the pair is named rather than silently kept.
+    const again = await service.applyRoleWriteScopes({
+      sheetId: RC_SHEET, entries: RC_V1, packId: RC_PACK, reconcile: RC_REGION,
+    })
+    expect(again.operatorHeld).toEqual([{ fieldId: RC_MOVING, roleId: RC_PURCHASING, packId: null }])
+    expect(again.removed).toEqual([])
+    const afterRedeclare = await rcRow(RC_MOVING, RC_PURCHASING)
+    expect(afterRedeclare).toMatchObject({
+      visible: false, read_only: true, created_by: `operator:${RC_U_OPERATOR}`,
+    })
+
+    // ── CONSEQUENCE 2: a revision that DROPS the pair does not retire it ──────────────────────────
+    // This is round-2 findings 12/17 as an executable regression. Before R1 this row still carried
+    // the pack's marker, so v2's reconcile deleted the operator's decision and reported it as its own
+    // history. It must now survive untouched.
+    const v2 = await service.applyRoleWriteScopes({
+      sheetId: RC_SHEET, entries: RC_V2, packId: RC_PACK, reconcile: RC_REGION,
+    })
+    expect(v2.removed).toEqual([])
+    const survived = await rcRow(RC_MOVING, RC_PURCHASING)
+    expect(survived).toMatchObject({
+      visible: false, read_only: true, created_by: `operator:${RC_U_OPERATOR}`,
+    })
+
+    // …and the census still refuses to claim it: an operator's row is never this plugin's.
+    const census = await service.listRoleWriteScopes({ sheetId: RC_SHEET })
+    expect(census.entries.map((entry) => `${entry.fieldId}|${entry.roleId}`))
+      .not.toContain(`${RC_MOVING}|${RC_PURCHASING}`)
+    expect(census.foreignEntries).toContainEqual({
+      fieldId: RC_MOVING, roleId: RC_PURCHASING, createdBy: `operator:${RC_U_OPERATOR}`,
+    })
+
+    // THE GATE agrees with the human: 采购 is still refused the column the operator locked, even
+    // though the pack's v2 declaration says nothing about that pair any more.
+    expect((await rcPatch(RC_U_PURCHASING, [RC_PURCHASING], RC_MOVING, 'operator-said-no')).status).toBe(403)
+  })
+
+  /**
+   * The de-escalation restore path stamps too — the SECOND write site the source guard pins. It is
+   * reached by the permission-revert flow rather than by this route, so it is exercised here through
+   * the same helper's `remove` arm plus a re-grant, which is the shape that path replays.
+   */
+  test('R1 real-DB: removing and re-granting through the route leaves an attributable row', async () => {
+    await q('DELETE FROM field_permissions WHERE sheet_id = $1', [RC_SHEET])
+
+    expect((await rcPutFieldPermission(RC_STABLE, RC_WAREHOUSE, { visible: true, readOnly: true })).status).toBe(200)
+    expect((await rcRow(RC_STABLE, RC_WAREHOUSE))?.created_by).toBe(`operator:${RC_U_OPERATOR}`)
+
+    expect((await rcPutFieldPermission(RC_STABLE, RC_WAREHOUSE, { remove: true })).status).toBe(200)
+    expect(await rcRow(RC_STABLE, RC_WAREHOUSE)).toBeUndefined()
+
+    // Re-granting goes through the DO UPDATE arm on a fresh INSERT — still stamped, never NULL.
+    expect((await rcPutFieldPermission(RC_STABLE, RC_WAREHOUSE, { visible: true, readOnly: false })).status).toBe(200)
+    const regranted = await rcRow(RC_STABLE, RC_WAREHOUSE)
+    expect(regranted?.created_by).toBe(`operator:${RC_U_OPERATOR}`)
+    expect(regranted?.read_only).toBe(false)
+  })
+
   test('findMissingFieldIds names exactly the columns this sheet does not have', async () => {
     const service = new StockPreparationFieldPermissionsService()
     const absent = `fld_bliao_rc_absent_${TS}`

@@ -41,6 +41,7 @@ import {
   FIELD_PERMISSION_OPERATOR_ROUTE_CREATED_BY,
   classifyRoleWriteScopeRows,
   operatorFieldPermissionCreatedBy,
+  parseStockPreparationFieldPermissionCreatedBy,
   stockPreparationFieldPermissionCreatedBy,
   type StockPreparationFieldPermissionsPool,
 } from '../../src/services/stock-preparation-field-permissions'
@@ -2138,5 +2139,82 @@ describe('10. runWriteScopePackIdBackfill — dry run rehearses the write it wou
       rowsStamped: 0,
       rowsLeftUnattributed: 0,
     })
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// 11. R1 — THE OPERATOR STAMP, AT ITS TWO WRITE SITES.
+//
+// `routes/univer-meta.ts` is the ONLY thing that makes an operator's decision attributable, and it
+// is the half of the invariant that lives outside this port. It shipped with NO witness anywhere:
+// stripping `created_by` from both INSERT column lists, both `$7` binds and both DO UPDATEs left
+// `tsc` clean and every plausible core-backend suite green, and the real-DB suite never drove the
+// route at all — it fabricated operator rows with a hardcoded literal.
+//
+// `created_by = EXCLUDED.created_by` on the DO UPDATE is the load-bearing token. It is what turns a
+// PACK-marked row into an operator row the moment a human edits on top of it — and without it,
+// round-2 findings 12 and 17 (the next revision's reconcile deleting an operator's decision) come
+// back verbatim, silently.
+//
+// A source guard is the right shape here for the same reason the DELETE has one: this is a property
+// of a STATEMENT in a file this suite does not otherwise execute. The behavioural half — the flip
+// from pack marker to `operator:<actorId>`, and the reconcile then leaving the row alone — is driven
+// end-to-end through the real router in
+// tests/integration/stock-preparation-fieldperm-write-gate-realdb.test.ts.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+const OPERATOR_ROUTE_SOURCE_PATH = join(__dirname, '../../src/routes/univer-meta.ts')
+
+describe('11. R1 source guard: both operator write sites stamp their own provenance', () => {
+  it('every field_permissions INSERT in univer-meta.ts carries created_by, binds it, and ADOPTS it', () => {
+    const src = readFileSync(OPERATOR_ROUTE_SOURCE_PATH, 'utf8')
+
+    // EXACTLY TWO write sites: the operator-facing authoring PUT and the de-escalation restore.
+    // Asserted as a count so a third writer cannot appear unstamped without moving this line.
+    const inserts = [...src.matchAll(/INSERT INTO field_permissions\(([^)]*)\)/g)]
+    expect(inserts).toHaveLength(2)
+
+    for (const insert of inserts) {
+      const columns = insert[1].split(',').map((column) => column.trim())
+      // (1) THE COLUMN LIST. Dropping `created_by` here is the whole mutation — it leaves a row that
+      //     is indistinguishable from an unattributed one.
+      expect(columns).toContain('created_by')
+
+      // The statement plus its bound-parameter array, whitespace-canonicalised (one site is a
+      // template literal, the other a single-line string, and neither formatting is load-bearing).
+      const start = insert.index ?? 0
+      const next = src.indexOf('INSERT INTO field_permissions', start + 1)
+      const statement = src.slice(start, next === -1 ? start + 900 : Math.min(next, start + 900))
+      const canonical = statement.replace(/\s+/g, ' ')
+
+      // (2) THE BIND. The value must come from the shared helper, not a hand-rolled string — that is
+      //     what keeps `operator:<actorId>` parseable by the port's classifier.
+      expect(canonical).toContain('operatorFieldPermissionCreatedBy(')
+
+      // (3) THE ADOPTION ARM, and it must be UNCONDITIONAL. An operator editing on top of a row a
+      //     customer pack created must TAKE OVER the provenance; a CASE-guarded arm here would leave
+      //     the pack's marker in place and hand the row back to the next revision's reconcile.
+      expect(canonical).toMatch(/DO UPDATE SET[^`']*created_by = EXCLUDED\.created_by/)
+      expect(canonical).not.toMatch(/DO UPDATE SET[^`']*created_by = CASE/)
+    }
+
+    // (4) THE IMPORT, so the helper cannot be shadowed by a local of the same name.
+    expect(src).toContain(
+      "import { operatorFieldPermissionCreatedBy } from '../services/stock-preparation-field-permissions'",
+    )
+  })
+
+  it('the stamp the route writes is the shape the port classifies as an operator row', () => {
+    // The two halves of R1 meet here: whatever the route stamps must come back from the port's own
+    // parser as NOT-a-plugin-row, or the classifier would treat a human's decision as pack debris.
+    for (const actorId of ['u_operator_1', 'user-with-dash', undefined, null, '', '  ', 'has space', 'has#hash']) {
+      const stamped = operatorFieldPermissionCreatedBy(actorId as string | undefined)
+      expect(stamped.startsWith('operator:')).toBe(true)
+      expect(parseStockPreparationFieldPermissionCreatedBy(stamped).isPluginRow).toBe(false)
+    }
+    // A usable id is carried through; anything that would make the marker unparseable degrades to
+    // the route marker rather than producing a value nothing can read back.
+    expect(operatorFieldPermissionCreatedBy('u_operator_1')).toBe('operator:u_operator_1')
+    expect(operatorFieldPermissionCreatedBy('has#hash')).toBe(FIELD_PERMISSION_OPERATOR_ROUTE_CREATED_BY)
+    expect(operatorFieldPermissionCreatedBy(undefined)).toBe(FIELD_PERMISSION_OPERATOR_ROUTE_CREATED_BY)
   })
 })
