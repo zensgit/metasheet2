@@ -29,6 +29,8 @@ const IDENTITY_KEY = crypto
   .createHash('sha256')
   .update('s6a-runtime-core-identity')
   .digest()
+const SOURCE_PASSWORD = '  private-password  '
+const SOURCE_USER = '  readonly_user  '
 
 function sourceSystem() {
   return {
@@ -46,8 +48,8 @@ function sourceSystem() {
     createdAt: null,
     credentials: {
       [SOURCE_CONFIG_KEY]: {
-        password: 'private-password',
-        user: 'readonly_user',
+        password: SOURCE_PASSWORD,
+        user: SOURCE_USER,
       },
     },
     id: 'system-s6a',
@@ -408,7 +410,10 @@ async function main() {
     let persistCalls = 0
     const runtime = createStockPreparationRuntimeCore({
       artifactRoot: root,
-      captureServiceFactory: async ({ captureRoot }) => ({
+      captureServiceFactory: async ({ captureRoot, connectionConfig }) => {
+        assert.equal(connectionConfig.user, SOURCE_USER)
+        assert.equal(connectionConfig.password, SOURCE_PASSWORD)
+        return {
         async execute({ envelope }) {
           sourceReads += 1
           await fs.mkdir(captureRoot, { recursive: true })
@@ -417,10 +422,18 @@ async function main() {
         async verifyManifestWithLifecycle() {
           return { signatureVerified: true }
         },
-      }),
+        }
+      },
       clock: () => NOW_MS,
       externalSystemRegistry: {
-        async getExternalSystemForAdapter() {
+        async getExternalSystemForSealedSnapshot(input) {
+          assert.deepEqual(input, {
+            id: 'system-s6a',
+            tenantId: 'tenant-s6a',
+            workspaceId: null,
+            principal: 'operator-s6a',
+            runAs: 'user',
+          })
           sourceLoads += 1
           return sourceSystem()
         },

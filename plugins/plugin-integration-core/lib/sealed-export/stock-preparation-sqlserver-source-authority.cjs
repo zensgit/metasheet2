@@ -128,6 +128,24 @@ function requiredText(value, maxLength = 256) {
   return value
 }
 
+// Driver credentials are opaque input, not identifiers. Leading/trailing spaces may be part of
+// either the login or password and must survive byte-for-byte. Keep the sealed boundary finite
+// and control-free, but never normalize a credential before it reaches the SQL Server driver.
+function requiredCredentialText(value, maxLength) {
+  if (
+    typeof value !== 'string'
+    || value.length < 1
+    || value.length > maxLength
+  ) {
+    refuse()
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code < 0x20 || code === 0x7f) refuse()
+  }
+  return value
+}
+
 function nullableText(value, maxLength = 256) {
   return value === null ? null : requiredText(value, maxLength)
 }
@@ -275,9 +293,9 @@ function normalizeExternalSystem(raw, binding) {
     trustServerCertificate: config.trustServerCertificate,
   })
   const principal = Object.freeze({
-    user: requiredText(credentials.user),
+    user: requiredCredentialText(credentials.user, 256),
   })
-  const password = requiredText(credentials.password, 4096)
+  const password = requiredCredentialText(credentials.password, 4096)
   const options = {
     encrypt: endpoint.encrypt,
     readOnlyIntent: true,

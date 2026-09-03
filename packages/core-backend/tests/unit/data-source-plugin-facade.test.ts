@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   createDataSourcePluginFacade,
+  createDataSourceSealedSnapshotConnectionFacade,
   createDataSourceWritePluginFacade,
   DATA_SOURCE_NOT_FOUND_CODE,
   DATA_SOURCE_NOT_READ_ONLY_CODE,
@@ -10,6 +11,7 @@ import {
   DATA_SOURCE_PRINCIPAL_REQUIRED_CODE,
   DATA_SOURCE_QUERY_INVALID_CODE,
   DATA_SOURCE_REQUEST_TIMEOUT_DISABLED_CODE,
+  DATA_SOURCE_SEALED_SNAPSHOT_CONNECTION_INVALID_CODE,
   DataSourceUnavailableError,
   MISSING_PRINCIPAL_MESSAGE,
   requestTimeoutDisabledMessage,
@@ -29,6 +31,7 @@ interface AdapterStubOptions {
   // requestTimeoutMs) without disturbing every OTHER test's postgres default.
   type?: string
   connection?: Record<string, unknown>
+  credentials?: Record<string, unknown>
   // 对接总览: the display descriptor reads getName()/getType(), so a test can give the stub a name
   // distinct from its id and prove the descriptor reports the adapter's own, not the requested id.
   name?: string
@@ -41,17 +44,18 @@ function adapterStub(opts: AdapterStubOptions = {}) {
     isReadOnly: () => opts.readOnly ?? true,
     getName: () => opts.name ?? 'pg',
     getType: () => opts.type ?? 'postgres',
-    getConfig: () => ({
+    getConfig: vi.fn(() => ({
       id: 'pg',
       name: 'pg',
       type: opts.type ?? 'postgres',
       connection: opts.connection ?? {},
+      ...(opts.credentials ? { credentials: opts.credentials } : {}),
       options: {
         ...(opts.readOnly === undefined ? {} : { readOnly: opts.readOnly }),
         ...(opts.c6WriteTarget === undefined ? {} : { c6WriteTarget: opts.c6WriteTarget }),
         ...(opts.genericQueryDisabled === undefined ? {} : { genericQueryDisabled: opts.genericQueryDisabled }),
       },
-    }),
+    })),
     getSchema: vi.fn(async (_schema?: string) => ({ tables: [], views: [] })),
     getTableInfo: vi.fn(async (table: string, _schema?: string) => ({ name: table, columns: [] })),
   }
@@ -60,6 +64,12 @@ function adapterStub(opts: AdapterStubOptions = {}) {
 interface ManagerStubOptions {
   adapter?: ReturnType<typeof adapterStub>
   deny?: boolean
+  scope?: {
+    ownerId: string
+    workspaceId: string | null
+    tenantId: string | null
+    scopeKind: 'legacy_private' | 'private' | 'workspace'
+  }
 }
 
 function managerStub(opts: ManagerStubOptions = {}) {
@@ -69,6 +79,12 @@ function managerStub(opts: ManagerStubOptions = {}) {
     // unchanged (no existence leak), so the test asserts against the real message shape.
     assertAccess: vi.fn((id: string, _owner: string | undefined) => {
       if (opts.deny) throw new Error(`Data source with id '${id}' not found`)
+    }),
+    getScope: vi.fn(() => opts.scope ?? {
+      ownerId: 'owner-1',
+      workspaceId: null,
+      tenantId: 'tenant-1',
+      scopeKind: 'private',
     }),
     getDataSource: vi.fn(() => adapter),
     connectDataSource: vi.fn(async () => undefined),
@@ -85,7 +101,9 @@ describe('createDataSourcePluginFacade', () => {
     // `assertReferenceable` (P2-A bind probe, #5401) and `describe` (对接总览 display descriptor)
     // both joined this list. Both belong to the read-only class: no mutation, no credentials,
     // principal-gated — see their own describe blocks below.
-    expect(Object.keys(facade).sort()).toEqual(['assertReferenceable', 'describe', 'getSchema', 'getTableInfo', 'select', 'test'])
+    expect(Object.keys(facade).sort()).toEqual([
+      'assertReferenceable', 'describe', 'getSchema', 'getTableInfo', 'resolveConnectionRegistration', 'select', 'test',
+    ])
     const surface = facade as unknown as Record<string, unknown>
     for (const forbidden of [
       'insert', 'update', 'delete', 'create', 'remove', 'rotate', 'connect', 'disconnect',
@@ -93,6 +111,74 @@ describe('createDataSourcePluginFacade', () => {
     ]) {
       expect(surface).not.toHaveProperty(forbidden)
     }
+  })
+
+  describe('resolveConnectionRegistration (canonical values-free registration)', () => {
+    it('returns only id/type/tenantId/scopeKind and never connects or reads config', async () => {
+      const m = managerStub({ adapter: adapterStub({ type: 'sqlserver', connected: false }) })
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      const result = await facade.resolveConnectionRegistration('pg', {
+        tenantId: 'tenant-1',
+        principal: 'owner-1',
+      })
+      expect(result).toEqual({ id: 'pg', type: 'sqlserver', tenantId: 'tenant-1', scopeKind: 'private' })
+      expect(Object.keys(result).sort()).toEqual(['id', 'scopeKind', 'tenantId', 'type'])
+      expect(m.stub.assertAccess).toHaveBeenCalledWith('pg', 'owner-1')
+      expect(m.stub.connectDataSource).not.toHaveBeenCalled()
+      expect(m.adapter.getConfig).not.toHaveBeenCalled()
+    })
+
+    it('requires exact tenant and owner-only access, with no admin-shaped bypass', async () => {
+      const denied = managerStub({ deny: true })
+      const facade = createDataSourcePluginFacade(() => denied.manager)
+      await expect(facade.resolveConnectionRegistration('pg', {
+        tenantId: 'tenant-1', principal: 'stranger',
+      })).rejects.toBeInstanceOf(DataSourceUnavailableError)
+
+      const mismatched = managerStub()
+      const mismatchFacade = createDataSourcePluginFacade(() => mismatched.manager)
+      await expect(mismatchFacade.resolveConnectionRegistration('pg', {
+        tenantId: 'tenant-2', principal: 'owner-1',
+      })).rejects.toBeInstanceOf(DataSourceUnavailableError)
+      expect(mismatched.stub.assertAccess).toHaveBeenCalledWith('pg', 'owner-1')
+    })
+
+    it('permits tenantless legacy_private only for user/owner runs and rejects service runs', async () => {
+      const m = managerStub({ scope: {
+        ownerId: 'owner-1', workspaceId: null, tenantId: null, scopeKind: 'legacy_private',
+      } })
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      await expect(facade.resolveConnectionRegistration('pg', {
+        tenantId: 'tenant-1', workspaceId: 'workspace-a', principal: 'owner-1', runAs: 'owner',
+      })).resolves.toEqual({ id: 'pg', type: 'postgres', tenantId: null, scopeKind: 'legacy_private' })
+      await expect(facade.resolveConnectionRegistration('pg', {
+        tenantId: 'tenant-1', principal: 'owner-1', runAs: 'service',
+      })).rejects.toBeInstanceOf(DataSourceUnavailableError)
+      await expect(facade.resolveConnectionRegistration('pg', {
+        tenantId: 'tenant-1', principal: 'owner-1',
+      })).rejects.toBeInstanceOf(DataSourceUnavailableError)
+    })
+
+    it('treats workspaceId as binding context, not a PR-1 sharing grant', async () => {
+      const m = managerStub()
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      await expect(facade.resolveConnectionRegistration('pg', {
+        tenantId: 'tenant-1', workspaceId: 'workspace-a', principal: 'owner-1', runAs: 'service',
+      })).resolves.toEqual({ id: 'pg', type: 'postgres', tenantId: 'tenant-1', scopeKind: 'private' })
+      expect(m.stub.assertAccess).toHaveBeenCalledWith('pg', 'owner-1')
+    })
+
+    it('fails closed when the principal or tenant is missing', async () => {
+      const getManager = vi.fn(() => managerStub().manager)
+      const facade = createDataSourcePluginFacade(getManager)
+      await expect(facade.resolveConnectionRegistration('pg', {
+        tenantId: 'tenant-1', principal: undefined,
+      })).rejects.toThrow(MISSING_PRINCIPAL_MESSAGE)
+      await expect(facade.resolveConnectionRegistration('pg', {
+        tenantId: '  ', principal: 'owner-1',
+      })).rejects.toBeInstanceOf(DataSourceUnavailableError)
+      expect(getManager).not.toHaveBeenCalled()
+    })
   })
 
   describe('describe (对接总览 display descriptor)', () => {
@@ -438,6 +524,161 @@ describe('createDataSourcePluginFacade', () => {
       })
       expect(m.stub.connectDataSource).not.toHaveBeenCalled()
     })
+  })
+})
+
+describe('createDataSourceSealedSnapshotConnectionFacade', () => {
+  const baseConnection = {
+    server: 'sql.example.test',
+    database: 'production',
+    encrypt: true,
+    trustServerCertificate: false,
+  }
+
+  const createFacade = (overrides: ManagerStubOptions = {}) => {
+    const m = overrides.adapter
+      ? managerStub(overrides)
+      : managerStub({
+          ...overrides,
+          adapter: adapterStub({
+            type: 'sqlserver',
+            connection: baseConnection,
+            credentials: { username: 'readonly-user', password: 'readonly-password' },
+          }),
+        })
+    return { facade: createDataSourceSealedSnapshotConnectionFacade(() => m.manager), m }
+  }
+
+  it('projects only the sealed SQL shape, defaults the port, and never connects', async () => {
+    const { facade, m } = createFacade()
+    const result = await facade.resolveSqlServerConnection('sql-1', {
+      tenantId: 'tenant-1',
+      principal: 'owner-1',
+      runAs: 'user',
+    })
+    expect(result).toEqual({
+      connection: {
+        database: 'production',
+        encrypt: true,
+        instanceName: null,
+        port: 1433,
+        server: 'sql.example.test',
+        trustServerCertificate: false,
+      },
+      credentials: { password: 'readonly-password', user: 'readonly-user' },
+    })
+    expect(Object.keys(result).sort()).toEqual(['connection', 'credentials'])
+    expect(Object.keys(result.connection).sort()).toEqual([
+      'database', 'encrypt', 'instanceName', 'port', 'server', 'trustServerCertificate',
+    ])
+    expect(Object.keys(result.credentials).sort()).toEqual(['password', 'user'])
+    expect(m.stub.assertAccess).toHaveBeenCalledWith('sql-1', 'owner-1')
+    expect(m.stub.connectDataSource).not.toHaveBeenCalled()
+    expect(m.adapter.getConfig).toHaveBeenCalledTimes(1)
+  })
+
+  it('reuses owner and exact-tenant authorization, and rejects service runs', async () => {
+    const denied = createFacade({ deny: true })
+    await expect(denied.facade.resolveSqlServerConnection('sql-1', {
+      tenantId: 'tenant-1', principal: 'stranger', runAs: 'user',
+    })).rejects.toBeInstanceOf(DataSourceUnavailableError)
+
+    const mismatched = createFacade()
+    ;(mismatched.m.stub.getScope as ReturnType<typeof vi.fn>).mockReturnValue({
+      ownerId: 'owner-1', workspaceId: null, tenantId: 'tenant-2', scopeKind: 'private',
+    })
+    await expect(mismatched.facade.resolveSqlServerConnection('sql-1', {
+      tenantId: 'tenant-1', principal: 'owner-1', runAs: 'user',
+    })).rejects.toBeInstanceOf(DataSourceUnavailableError)
+
+    const tenantfulService = createFacade()
+    await expect(tenantfulService.facade.resolveSqlServerConnection('sql-1', {
+      tenantId: 'tenant-1', principal: 'owner-1', runAs: 'service',
+    })).rejects.toMatchObject({ code: DATA_SOURCE_SEALED_SNAPSHOT_CONNECTION_INVALID_CODE })
+
+    const tenantless = createFacade()
+    ;(tenantless.m.stub.getScope as ReturnType<typeof vi.fn>).mockReturnValue({
+      ownerId: 'owner-1', workspaceId: null, tenantId: null, scopeKind: 'legacy_private',
+    })
+    await expect(tenantless.facade.resolveSqlServerConnection('sql-1', {
+      tenantId: 'tenant-1', principal: 'owner-1', runAs: 'service',
+    })).rejects.toMatchObject({ code: DATA_SOURCE_SEALED_SNAPSHOT_CONNECTION_INVALID_CODE })
+  })
+
+  it('rejects non-SQL Server and writable adapters before reading config', async () => {
+    const wrongType = createFacade({ adapter: adapterStub({ type: 'postgres' }) })
+    await expect(wrongType.facade.resolveSqlServerConnection('sql-1', {
+      tenantId: 'tenant-1', principal: 'owner-1', runAs: 'user',
+    })).rejects.toMatchObject({ code: DATA_SOURCE_SEALED_SNAPSHOT_CONNECTION_INVALID_CODE })
+    expect(wrongType.m.adapter.getConfig).not.toHaveBeenCalled()
+
+    const writable = createFacade({ adapter: adapterStub({ type: 'sqlserver', readOnly: false }) })
+    await expect(writable.facade.resolveSqlServerConnection('sql-1', {
+      tenantId: 'tenant-1', principal: 'owner-1', runAs: 'user',
+    })).rejects.toMatchObject({ code: DATA_SOURCE_SEALED_SNAPSHOT_CONNECTION_INVALID_CODE })
+    expect(writable.m.adapter.getConfig).not.toHaveBeenCalled()
+  })
+
+  it('fails closed for legacy TLS and unrepresentable connection fields', async () => {
+    const manager = managerStub({
+      adapter: adapterStub({
+        type: 'sqlserver',
+        connection: { ...baseConnection, legacyTls: true },
+        credentials: { username: 'u', password: 'p' },
+      }),
+    })
+    const invalid = createDataSourceSealedSnapshotConnectionFacade(() => manager.manager)
+    await expect(invalid.resolveSqlServerConnection('sql-1', {
+      tenantId: 'tenant-1', principal: 'owner-1', runAs: 'user',
+    })).rejects.toMatchObject({ code: DATA_SOURCE_SEALED_SNAPSHOT_CONNECTION_INVALID_CODE })
+
+    const stringPort = createFacade({
+      adapter: adapterStub({
+        type: 'sqlserver',
+        connection: { ...baseConnection, port: '1444' },
+        credentials: { username: 'u', password: 'p' },
+      }),
+    })
+    await expect(stringPort.facade.resolveSqlServerConnection('sql-1', {
+      tenantId: 'tenant-1', principal: 'owner-1', runAs: 'user',
+    })).rejects.toMatchObject({ code: DATA_SOURCE_SEALED_SNAPSHOT_CONNECTION_INVALID_CODE })
+  })
+
+  it('preserves password bytes and rejects instanceName because MSSQLAdapter does not consume it', async () => {
+    const password = '  password with spaces  '
+    const withPassword = createFacade({
+      adapter: adapterStub({
+        type: 'sqlserver',
+        connection: baseConnection,
+        credentials: { username: '  readonly-user  ', password },
+      }),
+    })
+    const result = await withPassword.facade.resolveSqlServerConnection('sql-1', {
+      tenantId: 'tenant-1', principal: 'owner-1', runAs: 'user',
+    })
+    expect(result.credentials).toEqual({ password, user: '  readonly-user  ' })
+
+    const withInstance = createFacade({
+      adapter: adapterStub({
+        type: 'sqlserver',
+        connection: { ...baseConnection, instanceName: 'SQLEXPRESS' },
+        credentials: { username: 'u', password: 'p' },
+      }),
+    })
+    await expect(withInstance.facade.resolveSqlServerConnection('sql-1', {
+      tenantId: 'tenant-1', principal: 'owner-1', runAs: 'user',
+    })).rejects.toMatchObject({ code: DATA_SOURCE_SEALED_SNAPSHOT_CONNECTION_INVALID_CODE })
+
+    const withEncodedInstance = createFacade({
+      adapter: adapterStub({
+        type: 'sqlserver',
+        connection: { ...baseConnection, server: 'sql.example.test\\SQLEXPRESS' },
+        credentials: { username: 'u', password: 'p' },
+      }),
+    })
+    await expect(withEncodedInstance.facade.resolveSqlServerConnection('sql-1', {
+      tenantId: 'tenant-1', principal: 'owner-1', runAs: 'user',
+    })).rejects.toMatchObject({ code: DATA_SOURCE_SEALED_SNAPSHOT_CONNECTION_INVALID_CODE })
   })
 })
 

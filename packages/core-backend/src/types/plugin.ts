@@ -430,6 +430,16 @@ export interface MultitableProvisioningAPI {
    */
   isSheetOwnedByProject(sheetId: string, projectId: string): Promise<boolean>
   getFieldId(projectId: string, objectId: string, fieldId: string): string
+  /**
+   * The deterministic id of one of a provisioned object's views — the read-only sibling of
+   * `getObjectSheetId` and `getFieldId`, and derived by the same content hash.
+   *
+   * PURE: it performs no IO and touches no view. It does NOT assert that the view exists, grant any
+   * access to it, or say anything about who may open it — it composes an id, exactly as the two
+   * accessors beside it do. A caller that needs existence must prove it separately (the stock-prep
+   * project board proves the SHEET exists via `findObjectSheet` before it composes a deep link).
+   */
+  getObjectViewId(projectId: string, objectId: string, viewId: string): string
   findObjectSheet(input: {
     projectId: string
     objectId: string

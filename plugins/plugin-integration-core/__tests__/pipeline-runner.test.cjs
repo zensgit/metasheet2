@@ -254,6 +254,7 @@ function createDataSourceBridgeHarness({ rows, createdBy }) {
   const db = createMockDb()
   const targetRows = new Map()
   const facadeCalls = { test: [], getSchema: [], getTableInfo: [], select: [] }
+  const adapterLoads = []
   function requirePrincipal(principal) {
     if (typeof principal !== 'string' || principal.trim() === '') {
       throw new Error('data source read requires an owner principal (none provided)')
@@ -296,7 +297,11 @@ function createDataSourceBridgeHarness({ rows, createdBy }) {
   ])
   const externalSystemRegistry = {
     async getExternalSystem(input) { return systems.get(input.id) },
-    async getExternalSystemForAdapter(input) { const s = systems.get(input.id); return s ? { ...s } : null },
+    async getExternalSystemForAdapter(input) {
+      adapterLoads.push({ ...input })
+      const s = systems.get(input.id)
+      return s ? { ...s } : null
+    },
   }
   const adapterRegistry = createAdapterRegistry()
     .registerAdapter('data-source:sql-readonly', createDataSourceSqlReadonlySourceAdapterFactory({ context: { api: { dataSources: dataSourcesApi } } }))
@@ -321,7 +326,7 @@ function createDataSourceBridgeHarness({ rows, createdBy }) {
     runLogger: createRunLogger({ pipelineRegistry }),
     clock: (() => { let tick = 0; return () => tick++ * 25 })(),
   })
-  return { db, pipeline, runner, facadeCalls, targetRows }
+  return { db, pipeline, runner, facadeCalls, targetRows, adapterLoads }
 }
 
 function createDataSourceWriteGatedTargetHarness({ createdBy = 'owner-7' } = {}) {
@@ -2088,6 +2093,9 @@ async function main() {
     // Principal keystone: the facade saw pipeline.createdBy, not the request user and not null.
     assert.ok(h.facadeCalls.select.length >= 1, 'C2a: the source read routed through the host facade')
     assert.equal(h.facadeCalls.select[0].principal, 'owner-7', 'C2a: run uses pipeline.createdBy as the source principal')
+    assert.ok(h.adapterLoads.length >= 2, 'C2a: source and target systems were loaded')
+    assert.ok(h.adapterLoads.every((load) => load.runAs === 'service'),
+      'C2a: a direct/in-process runner call defaults to service identity')
   }
 
   // --- C2a: NULL createdBy fails closed (no fallback principal, no read performed) --------------

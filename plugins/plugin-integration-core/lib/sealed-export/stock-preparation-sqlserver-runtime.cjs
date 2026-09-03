@@ -159,7 +159,7 @@ function createStockPreparationSqlServerRuntime({
     || !(evidenceKey instanceof Uint8Array)
     || evidenceKey.byteLength < 32
     || !externalSystemRegistry
-    || typeof externalSystemRegistry.getExternalSystemForAdapter !== 'function'
+    || typeof externalSystemRegistry.getExternalSystemForSealedSnapshot !== 'function'
     || !(identityKey instanceof Uint8Array)
     || identityKey.byteLength < 32
     || typeof persistStockPreparation !== 'function'

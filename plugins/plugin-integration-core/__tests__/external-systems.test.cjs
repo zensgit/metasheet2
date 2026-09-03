@@ -3,12 +3,39 @@
 const assert = require('node:assert/strict')
 const path = require('node:path')
 const {
-  createExternalSystemRegistry,
+  createExternalSystemRegistry: createExternalSystemRegistryRaw,
   ExternalSystemConflictError,
   ExternalSystemNotFoundError,
   ExternalSystemValidationError,
   __internals,
 } = require(path.join(__dirname, '..', 'lib', 'external-systems.cjs'))
+const { createConnectionResolver } = require(path.join(__dirname, '..', 'lib', 'connection-resolver.cjs'))
+
+function createExternalSystemRegistry(options = {}) {
+  if (options.connectionResolver || !options.dataSourceBinder) {
+    return createExternalSystemRegistryRaw(options)
+  }
+  const binder = options.dataSourceBinder
+  return createExternalSystemRegistryRaw({
+    ...options,
+    connectionResolver: createConnectionResolver({
+      facade: {
+        async resolveConnectionRegistration(id, context) {
+          if (typeof context.principal !== 'string' || context.principal.trim().length === 0) {
+            throw new Error('connection binding requires an authenticated principal')
+          }
+          await binder.assertReferenceable(id, context.principal)
+          return {
+            id,
+            tenantId: context.tenantId,
+            type: 'sqlserver',
+            scopeKind: 'private',
+          }
+        },
+      },
+    }),
+  })
+}
 
 function createMockCredentialStore() {
   return {
@@ -246,9 +273,11 @@ async function main() {
     status: 'active',
     principal: 'owner_1',
   })
-  assert.equal(publicProjectionCreate.config.dataSourceId, 'sql-readonly-1')
-  assert.equal(publicProjectionCreate.config.dataSourceOwnerId, 'owner_1',
-    'a validated binding is stamped with the owning principal (what the core delete guard counts)')
+  assert.equal(publicProjectionCreate.connectionId, 'sql-readonly-1')
+  assert.equal(publicProjectionCreate.config.dataSourceId, undefined,
+    'a new SQL binding stores the selected Connection only in connection_id')
+  assert.equal(publicProjectionCreate.config.dataSourceOwnerId, undefined,
+    'canonical bindings do not retain the legacy owner-attribution stamp')
   assert.deepEqual(projectionBinderCalls, [['sql-readonly-1', 'owner_1']],
     'the binder saw exactly the asserted binding')
   assert.equal(publicProjectionCreate.config.schema, 'dbo')
@@ -269,6 +298,8 @@ async function main() {
   const adapterProjectionSystem = await projectionRegistry.getExternalSystemForAdapter({
     tenantId: 'tenant_1',
     id: 'sys_lookup_projection',
+    principal: 'owner_1',
+    runAs: 'user',
   })
   assert.deepEqual(adapterProjectionSystem.config.lookupProjection, lookupProjection,
     'private adapter load retains the persisted lookup projection exactly')
@@ -304,6 +335,8 @@ async function main() {
   const preservedProjectionSystem = await projectionRegistry.getExternalSystemForAdapter({
     tenantId: 'tenant_1',
     id: 'sys_lookup_projection',
+    principal: 'owner_1',
+    runAs: 'user',
   })
   assert.deepEqual(preservedProjectionSystem.config.lookupProjection, lookupProjection,
     'public config round-trip cannot accidentally erase the hidden projection')
@@ -320,6 +353,8 @@ async function main() {
   const clearedProjectionSystem = await projectionRegistry.getExternalSystemForAdapter({
     tenantId: 'tenant_1',
     id: 'sys_lookup_projection',
+    principal: 'owner_1',
+    runAs: 'user',
   })
   assert.equal(clearedProjectionSystem.config.lookupProjection, null,
     'trusted-admin explicit null clears the private lookup projection')
@@ -1024,8 +1059,8 @@ async function testDataSourceBindingValidation() {
       config: { dataSourceId: 'ds-1' },
       principal: 'owner_1',
     }),
-    (err) => err instanceof ExternalSystemValidationError && /binder/.test(err.message),
-    'a dataSourceId binding with no wired binder is refused (fail closed), never silently persisted',
+    (err) => err instanceof ExternalSystemValidationError && /resolution/.test(err.message),
+    'a canonical SQL binding with no wired resolver is refused (fail closed), never silently persisted',
   )
 
   const binderCalls = []
@@ -1046,6 +1081,43 @@ async function testDataSourceBindingValidation() {
     dataSourceBinder: binder,
   })
 
+  const encryptCallsBeforeForbiddenCredential = credentialStore.calls.filter(([name]) => name === 'encrypt').length
+  await assert.rejects(
+    () => registry.upsertExternalSystem({
+      tenantId: 'tenant_1',
+      name: 'binding-must-not-own-credentials',
+      kind: 'data-source:sql-readonly',
+      role: 'source',
+      connectionId: 'ds-owned',
+      config: { schema: 'dbo' },
+      credentials: { password: 'duplicate-secret' },
+      principal: 'owner_1',
+    }),
+    (err) => err instanceof ExternalSystemValidationError
+      && err.details.code === 'CONNECTION_BINDING_CREDENTIALS_FORBIDDEN',
+    'a SQL Binding cannot create a second executable credential document',
+  )
+  assert.equal(
+    credentialStore.calls.filter(([name]) => name === 'encrypt').length,
+    encryptCallsBeforeForbiddenCredential,
+    'forbidden Binding credentials are rejected before encryption',
+  )
+
+  await assert.rejects(
+    () => registry.upsertExternalSystem({
+      tenantId: 'tenant_1',
+      name: 'missing-canonical-connection',
+      kind: 'data-source:sql-readonly',
+      role: 'source',
+      config: { schema: 'dbo' },
+      principal: 'owner_1',
+    }),
+    (err) => err instanceof ExternalSystemValidationError
+      && err.details.field === 'connectionId'
+      && /required/.test(err.message),
+    'a new SQL readonly binding cannot be persisted without a canonical Connection',
+  )
+
   // fail CLOSED without an authenticated principal
   await assert.rejects(
     () => registry.upsertExternalSystem({
@@ -1055,8 +1127,9 @@ async function testDataSourceBindingValidation() {
       role: 'source',
       config: { dataSourceId: 'ds-owned' },
     }),
-    (err) => err instanceof ExternalSystemValidationError && /principal/.test(err.message),
-    'a dataSourceId binding without an authenticated principal is refused',
+    (err) => err instanceof ExternalSystemValidationError
+      && err.details.code === 'CONNECTION_CANONICAL_UNAVAILABLE',
+    'a canonical binding without an authenticated principal is refused without an identity leak',
   )
   assert.equal(binderCalls.length, 0, 'the binder is never consulted without a principal')
 
@@ -1071,8 +1144,8 @@ async function testDataSourceBindingValidation() {
       principal: 'stranger_9',
     }),
     (err) => err instanceof ExternalSystemValidationError
-      && err.message === "Data source with id 'ds-owned' not found",
-    'a non-owner bind is refused with the uniform not-found (no existence leak) and does not persist',
+      && err.details.code === 'CONNECTION_CANONICAL_UNAVAILABLE',
+    'a non-owner canonical bind is refused with a values-free error and does not persist',
   )
   assert.equal(db.rows.length, 0, 'a refused bind leaves no row behind')
 
@@ -1087,7 +1160,7 @@ async function testDataSourceBindingValidation() {
   assert.equal(unbound.config.dataSourceOwnerId, undefined,
     'dataSourceOwnerId is server-owned metadata: a client-sent stamp without a binding is stripped')
 
-  // ...and OVERWRITTEN by the validated principal when a binding is asserted
+  // ...and discarded when the selected Connection is persisted canonically.
   const bound = await registry.upsertExternalSystem({
     tenantId: 'tenant_1',
     name: 'bind-owned',
@@ -1096,8 +1169,87 @@ async function testDataSourceBindingValidation() {
     config: { dataSourceId: 'ds-owned', schema: 'dbo', dataSourceOwnerId: 'victim_7' },
     principal: 'owner_1',
   })
-  assert.equal(bound.config.dataSourceOwnerId, 'owner_1',
-    'the stamp is the VALIDATED principal — a client-sent value cannot survive')
+  assert.equal(bound.connectionId, 'ds-owned')
+  assert.equal(bound.config.dataSourceId, undefined)
+  assert.equal(bound.config.dataSourceOwnerId, undefined,
+    'canonical storage keeps neither the client pointer nor its legacy attribution stamp')
+  const boundRow = db.rows.find((row) => row.id === bound.id)
+  assert.equal(boundRow.connection_id, 'ds-owned')
+  assert.equal(boundRow.legacy_connection_fallback_eligible, false,
+    'post-cutover rows can never gain legacy fallback implicitly')
+
+  // Even if a migrated row retains dormant ciphertext, SQL adapter loading
+  // resolves only the canonical Connection and never decrypts the Binding copy.
+  boundRow.credentials_encrypted = `enc:${Buffer.from(JSON.stringify({ password: 'dormant-copy' })).toString('base64')}`
+  const decryptCallsBeforeCanonicalLoad = credentialStore.calls.filter(([name]) => name === 'decrypt').length
+  const canonicalAdapterSystem = await registry.getExternalSystemForAdapter({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    id: bound.id,
+    principal: 'owner_1',
+    runAs: 'user',
+  })
+  assert.equal(canonicalAdapterSystem.config.dataSourceId, 'ds-owned')
+  assert.equal(canonicalAdapterSystem.credentials, undefined)
+  assert.equal(
+    credentialStore.calls.filter(([name]) => name === 'decrypt').length,
+    decryptCallsBeforeCanonicalLoad,
+    'SQL adapter loading never decrypts credentials_encrypted from the Binding row',
+  )
+  const sealedFacadeCalls = []
+  const sealedRegistry = createExternalSystemRegistryRaw({
+    db,
+    credentialStore,
+    connectionResolver: createConnectionResolver({
+      facade: {
+        async resolveConnectionRegistration(id) {
+          return { id, tenantId: 'tenant_1', type: 'sqlserver', scopeKind: 'private' }
+        },
+      },
+      sealedSnapshotFacade: {
+        async resolveSqlServerConnection(id, input) {
+          sealedFacadeCalls.push({ id, input })
+          return {
+            connection: { database: 'sealed_db' },
+            credentials: { password: 'sealed-secret', user: 'sealed-user' },
+          }
+        },
+      },
+    }),
+  })
+  const ordinarySqlAdapter = await sealedRegistry.getExternalSystemForAdapter({
+    tenantId: 'tenant_1', workspaceId: null, id: bound.id, principal: 'owner_1', runAs: 'user',
+  })
+  assert.equal(ordinarySqlAdapter.credentials, undefined,
+    'ordinary SQL adapter access never receives the sealed projection')
+  assert.equal(ordinarySqlAdapter.config.sealedSnapshotSqlServer, undefined)
+  const sealedSqlAdapter = await sealedRegistry.getExternalSystemForSealedSnapshot({
+    tenantId: 'tenant_1', workspaceId: null, id: bound.id, principal: 'owner_1', runAs: 'user',
+  })
+  assert.deepEqual(sealedSqlAdapter.config.sealedSnapshotSqlServer, { database: 'sealed_db' })
+  assert.deepEqual(sealedSqlAdapter.credentials, {
+    sealedSnapshotSqlServer: { password: 'sealed-secret', user: 'sealed-user' },
+  })
+  assert.deepEqual(sealedFacadeCalls, [{
+    id: 'ds-owned',
+    input: { tenantId: 'tenant_1', workspaceId: null, principal: 'owner_1', runAs: 'user' },
+  }])
+  boundRow.credentials_encrypted = null
+
+  await assert.rejects(
+    () => registry.upsertExternalSystem({
+      tenantId: 'tenant_1',
+      name: 'mismatched-dual-reference',
+      kind: 'data-source:sql-readonly',
+      role: 'source',
+      connectionId: 'ds-owned',
+      config: { dataSourceId: 'other-ds' },
+      principal: 'owner_1',
+    }),
+    (err) => err instanceof ExternalSystemValidationError
+      && err.details.code === 'CONNECTION_BINDING_MISMATCH',
+    'canonical and retained legacy references that disagree fail closed',
+  )
 
   // a config-preserving update (the test-result persist path) re-validates nothing and
   // needs no principal: the stored, already-validated binding rides through untouched.
@@ -1110,8 +1262,8 @@ async function testDataSourceBindingValidation() {
     status: 'error',
     lastError: 'connection test failed',
   })
-  assert.equal(preserved.config.dataSourceId, 'ds-owned', 'preserved config keeps the binding')
-  assert.equal(preserved.config.dataSourceOwnerId, 'owner_1', 'preserved config keeps the stamp')
+  assert.equal(preserved.connectionId, 'ds-owned', 'preserved update keeps the canonical binding')
+  assert.equal(preserved.config.schema, 'dbo', 'preserved update keeps semantic config')
 
   console.log('  external-systems: dataSourceId bind-time validation OK')
 }
@@ -1145,15 +1297,27 @@ async function testBridgeEditPreservesFullConfig() {
   })
 
   const lookupProjection = { table: 'dbo.t_Unit', keyColumn: 'FItemID', valueColumn: 'FName' }
-  await registry.upsertExternalSystem({
-    tenantId: 'tenant_1',
+  // Simulate a migration-backfilled row whose canonical id was deliberately nulled during the
+  // rollback window. The durable marker makes this the one shape allowed to keep exercising the
+  // legacy config.dataSourceId PATCH semantics below.
+  db.rows.push({
+    id: 'sys_bridge',
+    tenant_id: 'tenant_1',
+    workspace_id: null,
+    project_id: null,
     name: 'SQL bridge',
     kind: 'data-source:sql-readonly',
     role: 'source',
     status: 'active',
-    principal: 'owner_1',
     config: { dataSourceId: 'ds-1', object: 'dbo.t_ICItem', schema: 'dbo', pageSize: 500, lookupProjection },
+    capabilities: {},
+    credentials_encrypted: null,
+    connection_id: null,
+    legacy_connection_fallback_eligible: true,
+    created_at: '2026-08-31T00:00:00.000Z',
+    updated_at: '2026-09-02T00:00:00.000Z',
   })
+  db.rows[0].config.dataSourceOwnerId = 'owner_1'
   const created = db.rows.find((row) => row.id === 'sys_bridge')
   assert.equal(created.config.schema, 'dbo', 'precondition: the created bridge stores a schema')
   assert.equal(created.config.dataSourceOwnerId, 'owner_1', 'precondition: the binding is stamped')

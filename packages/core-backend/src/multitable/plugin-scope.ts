@@ -233,6 +233,14 @@ export function createPluginScopedMultitableApi(
         assertProjectIdAllowedForPlugin(pluginName, projectId)
         return multitable.provisioning.getFieldId(projectId, objectId, fieldId)
       },
+      // Pure deterministic id derivation, exactly like the two accessors above: no IO, no view
+      // touched, no access granted. It takes the SAME project-namespace assertion they take and,
+      // like them, no object-scope check — composing an id for an object the plugin does not own
+      // reveals nothing, because every capability that could act on that id checks scope itself.
+      getObjectViewId: (projectId, objectId, viewId) => {
+        assertProjectIdAllowedForPlugin(pluginName, projectId)
+        return multitable.provisioning.getObjectViewId(projectId, objectId, viewId)
+      },
       findObjectSheet: async (input) => {
         assertProjectIdAllowedForPlugin(pluginName, input.projectId)
         return multitable.provisioning.findObjectSheet(input)

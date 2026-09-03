@@ -173,6 +173,18 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     control: null,
   }),
   Object.freeze({
+    // 项目备料页 — ONE PROJECT'S BOARD, the operator's landing view. VALUE-BEARING (this project's
+    // number and name), so it rides OPERATE for the same reason valueEntry, export and the project
+    // directory do. It belongs in this manifest because it is gated on a stock-prep code and has a
+    // control of its own — the reverse assertion in the matrix suite (every OPERATE-gated
+    // stock-prep route is a member) is what now makes that non-optional.
+    capability: 'confirmationQueue.projectBoard',
+    code: STOCK_PREP_OPERATE,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/board',
+    control: 'stock-prep-operator-project-board',
+  }),
+  Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,
     method: 'POST',
@@ -190,6 +202,166 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
 
 /** The route meta gate for `/stock-prep`: reachability is exactly the queue READ code. */
 const STOCK_PREP_ROUTE_PERMISSION = STOCK_PREP_READ
+
+// ---------------------------------------------------------------------------
+// 一线自己拉数据 — THE OPERATOR PULL GATE SPLIT
+// ---------------------------------------------------------------------------
+//
+// The owner ruled that a floor operator may self-serve the PLM pull. Two things about that ruling
+// have to be encoded rather than remembered, and this block is where they live.
+//
+// FIRST: THE ROUTES IT TOUCHES ARE GENERIC. `/api/integration/table-actions/:actionId/dry-run` and
+// `.../apply` serve EVERY table action on the deployment, present and future. So the split is not
+// "the operator tier now satisfies the dry-run gate" — that would hand a stock-prep operator every
+// other connector's plan and write. It is scoped to ONE frozen action id, compared for EQUALITY (no
+// prefix, no namespace, no wildcard), and that comparison is the whole rule.
+//
+// SECOND: IT IS ADDITIVE, NEVER A REPLACEMENT. The legacy `integration:read` / `integration:write`
+// gates on those two routes are untouched and still admit exactly whom they admitted. The operator
+// tier is checked only AFTER the legacy gate has already refused, so no existing caller's outcome
+// can change — the split can add an admission, never remove one, and never re-route an existing one.
+//
+// WHAT DID NOT MOVE, and why it is named here rather than left implicit:
+//   * mvp-persist — writes the snapshot batch; still platform-admin and still flag-gated. Its
+//     absence costs an operator nothing on their own run: the rows they came for are already in the
+//     sheet, and what is missing is a housekeeping copy the diff view uses.
+// RECONCILE DID MOVE, and the reasoning is with its manifest row below: it is the step that puts
+// held rows into the confirmation queue, so leaving it behind left the operator pointed at a queue
+// that could never contain their work.
+// The web orchestration degrades over both of those (skip with a reason, never an error), which is
+// what makes an operator's four-step run finish honestly rather than reddening on a 403.
+//
+// These rows are NOT members of STOCK_PREP_WORKBENCH_CAPABILITIES, deliberately and for the same
+// reason `canRunStockPrepInstall` is not: that manifest is the confirmation-queue CONTROL set,
+// asserted control-for-control against the queue view's DOM by the matrix suites on both sides.
+// These are dual-gated routes whose controls live in a different component; adding them there would
+// make the alignment assertion measure the wrong DOM and would break its "visible == actionable"
+// equality for every legacy `integration:*` holder, who reaches them without holding any stock-prep
+// code at all. They get their own suite instead (stock-preparation-operator-pull-gate.test.cjs).
+
+/** The ONE table action an operator may self-serve. Compared for equality — never a prefix. */
+const STOCK_PREP_OPERATOR_PULL_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
+
+/**
+ * The sub-routes that MOVED to the operator tier, each naming the legacy gate it also still keeps.
+ * `legacyGate` is the token the route passes to `hasPermission` first; the operator tier is only
+ * consulted when that has already said no.
+ */
+const STOCK_PREP_OPERATOR_PULL_STEPS = Object.freeze([
+  Object.freeze({
+    step: 'dry-run',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/dry-run',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'apply',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/apply',
+    legacyGate: 'write',
+  }),
+  // ── THE BOUNDED BACKGROUND CHANNEL — THE SAME PULL, JUST TOO BIG TO DO IN ONE REQUEST ──────────
+  //
+  // A first cut of this split moved dry-run and apply only. That left the operator tier admitted to
+  // the pull right up to the point where the pull is HARD: the moment a BOM is too large to expand
+  // inline, the panel switches to these eight routes automatically and every one of them 403'd — and
+  // it did so directly underneath copy that promised 「不用重新点同步,也不用联系我们」. A large BOM
+  // is not a different act from a small one, and it is the case where "ask a platform administrator"
+  // costs the most: the projects that need the background channel are precisely the big ones.
+  //
+  // These are the SAME pull under the same frozen action id, so they take the SAME rule — equality
+  // on `plm.stock-preparation.pull-bom.v1`, the legacy gate checked first, the tenant verified
+  // through `resolveOperatorValueScope`. The apply-side members reach the SAME
+  // `assertStockPrepApplyAllowed` sandbox/production gate and the same plan-bound check the small
+  // apply route rides, so an operator gains no write the admin path did not already fence.
+  //
+  // `cancel` is in the list deliberately: it stops a job THIS caller started, and a channel you can
+  // start but not stop is worse than one you cannot start at all.
+  Object.freeze({
+    step: 'large-bom-expansion-start',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'large-bom-expansion-get',
+    method: 'GET',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'large-bom-expansion-run',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'large-bom-expansion-plan',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/plan',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'large-bom-apply-start',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs',
+    legacyGate: 'write',
+  }),
+  Object.freeze({
+    step: 'large-bom-apply-get',
+    method: 'GET',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'large-bom-apply-run',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId/run',
+    legacyGate: 'write',
+  }),
+  Object.freeze({
+    step: 'large-bom-expansion-cancel',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/cancel',
+    legacyGate: 'write',
+  }),
+  // ── RECONCILE — the step that closes the loop for a plan with human-confirm rows ───────────────
+  //
+  // IT STAYED PLATFORM-ADMIN, AND THAT PUT THE OPERATOR IN A CLOSED LOOP. A plan whose rows the
+  // system is unsure about does not write them; it holds them for a person, and the queue they are
+  // held in is filled BY THIS ROUTE. With reconcile refused, the operator's run went: 试算 says
+  // "some rows need a person", reconcile is skipped, 写入 is skipped for want of a token — and the
+  // page then pointed them at a confirmation queue that would never contain those rows, because the
+  // only thing that puts them there is the step that was refused. Every door in the room was
+  // painted on.
+  //
+  // WHY IT IS SAFE TO MOVE, stated precisely, because R-11(b) named this route as owner-level:
+  //   * it is a SOURCE READ plus a write to the plugin's OWN confirmation-decision ledger. It
+  //     writes no customer row and touches no external system's data.
+  //   * the source read now runs under the SERVER-HELD BINDING OWNER for this one action id (see
+  //     resolveTableActionReadPrincipal), so admitting an operator does not hand them a connection
+  //     they do not own — it is the same delegated read the dry-run already performs.
+  //   * the B2a operation claim it consumes when armed is consumed under that same delegated
+  //     identity and the same purpose the dry-run uses, so the fence sees one actor, not a new one.
+  // mvp-persist does NOT move: it writes the snapshot archive, its absence costs an operator
+  // nothing on their own run, and the page says so in words.
+  Object.freeze({
+    step: 'reconcile',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/confirmation-decisions/reconcile',
+    legacyGate: PLATFORM_ADMIN_GATE,
+  }),
+])
+
+/** The sub-routes that STAYED platform-admin. Listed so a suite can prove the split did not drift. */
+const STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS = Object.freeze([
+  Object.freeze({
+    step: 'mvp-persist',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/mvp-persist',
+    legacyGate: PLATFORM_ADMIN_GATE,
+  }),
+])
 
 function isStockPrepPermissionCode(code) {
   return typeof code === 'string' && code.startsWith(`${STOCK_PREP_PERMISSION_NAMESPACE}:`)
@@ -229,6 +401,26 @@ function grantedStockPrepCapabilities(permissions) {
       ? holdsPlatformAdmin(held)
       : satisfiesStockPrepAccess(held, entry.code)))
     .map((entry) => entry.capability)
+}
+
+/**
+ * MAY THIS PRINCIPAL SELF-SERVE THIS TABLE ACTION'S PULL? The whole operator-pull rule, as one pure
+ * function of `(permissions, actionId)` so the route, the suite and the web mirror all read the SAME
+ * decision instead of three restatements of it.
+ *
+ * Both halves are load-bearing:
+ *   * the action id must EQUAL the one frozen id — a different action, a prefix of it, an empty
+ *     string or a null all answer false, so the split can never leak across the table-action
+ *     namespace; and
+ *   * the permission side delegates to `satisfiesStockPrepAccess`, so the operate-AND-read
+ *     conjunction and the platform-admin short-circuit stay defined in exactly one place.
+ *
+ * It GRANTS nothing on its own: the routes call it only after their legacy gate has refused, and a
+ * false answer there is the same refusal the caller already had.
+ */
+function operatorMayRunStockPrepPull(permissions, actionId) {
+  if (typeof actionId !== 'string' || actionId !== STOCK_PREP_OPERATOR_PULL_ACTION_ID) return false
+  return satisfiesStockPrepAccess(permissions, STOCK_PREP_OPERATE)
 }
 
 /**
@@ -275,15 +467,19 @@ module.exports = {
   PLATFORM_ADMIN_PERMISSIONS,
   STOCK_PREP_ADMIN,
   STOCK_PREP_OPERATE,
+  STOCK_PREP_OPERATOR_PULL_ACTION_ID,
+  STOCK_PREP_OPERATOR_PULL_STEPS,
   STOCK_PREP_PERMISSION_CODES,
   STOCK_PREP_PERMISSION_DESCRIPTORS,
   STOCK_PREP_PERMISSION_NAMESPACE,
+  STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS,
   STOCK_PREP_READ,
   STOCK_PREP_ROUTE_PERMISSION,
   STOCK_PREP_WORKBENCH_CAPABILITIES,
   grantedStockPrepCapabilities,
   holdsPlatformAdmin,
   isStockPrepPermissionCode,
+  operatorMayRunStockPrepPull,
   requireAccessGateExpressionsInSource,
   satisfiesStockPrepAccess,
   stockPrepGateTokensInSource,

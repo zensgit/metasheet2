@@ -26,7 +26,8 @@ const SENSITIVE_CREDENTIAL_KEYS = ['password', 'apiKey', 'token']
 export const DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED_CODE = 'DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED'
 export const DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED_CODE = 'DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED'
 // Referential delete guard (see countExternalSystemReferences): a source referenced by an
-// integration external system's config.dataSourceId refuses a plain delete with this code.
+// integration external system's canonical connection_id or attributable legacy
+// config.dataSourceId refuses a plain delete with this code.
 export const DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE = 'DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS'
 export const DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY_CODE = 'DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY'
 
@@ -137,6 +138,17 @@ export function c6WriteTargetCopyUnsupportedMessage(dataSourceId: string): strin
 }
 
 // Database record types
+export const DATA_SOURCE_SCOPE_KINDS = ['legacy_private', 'private', 'workspace'] as const
+export type DataSourceScopeKind = typeof DATA_SOURCE_SCOPE_KINDS[number]
+
+function isDataSourceScopeKind(value: unknown): value is DataSourceScopeKind {
+  return typeof value === 'string' && (DATA_SOURCE_SCOPE_KINDS as readonly string[]).includes(value)
+}
+
+function normalizeTenantId(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
+}
+
 interface DataSourceRecord {
   id: string
   name: string
@@ -148,6 +160,8 @@ interface DataSourceRecord {
   last_error: string | null
   owner_id: string
   workspace_id: string | null
+  tenant_id?: string | null
+  scope_kind?: string | null
   is_active: boolean
   auto_connect: boolean
   metadata: unknown | null
@@ -168,7 +182,12 @@ export class DataSourceManager extends EventEmitter {
   private connectionPool: Map<string, Promise<void>> = new Map()
   // Per-source ownership for scope enforcement (A0.1). Owner is the enforced
   // boundary this slice; workspace is stored for a future workspace-shared model.
-  private scopes: Map<string, { ownerId: string; workspaceId: string | null }> = new Map()
+  private scopes: Map<string, {
+    ownerId: string
+    workspaceId: string | null
+    tenantId: string | null
+    scopeKind: DataSourceScopeKind
+  }> = new Map()
   private db?: Kysely<unknown>
   private initialized = false
 
@@ -222,7 +241,11 @@ export class DataSourceManager extends EventEmitter {
           // Ownership lives on the DB record, not in config (recordToConfig strips it)
           this.scopes.set(record.id, {
             ownerId: record.owner_id,
-            workspaceId: record.workspace_id ?? null
+            workspaceId: record.workspace_id ?? null,
+            // Older databases do not have these columns. Treat absent or
+            // malformed scope metadata as the narrowest legacy posture.
+            tenantId: normalizeTenantId(record.tenant_id),
+            scopeKind: isDataSourceScopeKind(record.scope_kind) ? record.scope_kind : 'legacy_private'
           })
 
           if (record.auto_connect) {
@@ -305,7 +328,9 @@ export class DataSourceManager extends EventEmitter {
   private configToRecord(
     config: DataSourceConfig,
     ownerId: string,
-    workspaceId?: string
+    workspaceId: string | null | undefined,
+    tenantId: string | null,
+    scopeKind: DataSourceScopeKind
   ): Omit<DataSourceRecord, 'created_at' | 'updated_at' | 'deleted_at' | 'last_connected_at' | 'last_error'> {
     return {
       id: config.id,
@@ -321,6 +346,8 @@ export class DataSourceManager extends EventEmitter {
       status: 'disconnected',
       owner_id: ownerId,
       workspace_id: workspaceId || null,
+      tenant_id: tenantId,
+      scope_kind: scopeKind,
       is_active: true,
       auto_connect: config.options?.autoConnect === true,
       metadata: null,
@@ -345,7 +372,13 @@ export class DataSourceManager extends EventEmitter {
    */
   async addDataSource(
     config: DataSourceConfig,
-    options?: { ownerId?: string; workspaceId?: string; persist?: boolean }
+    options?: {
+      ownerId?: string
+      workspaceId?: string
+      tenantId?: string | null
+      scopeKind?: DataSourceScopeKind
+      persist?: boolean
+    }
   ): Promise<BaseDataAdapter> {
     // Reject duplicates BEFORE persisting — otherwise a create that will be
     // rejected still runs the upsert and overwrites the existing row's config
@@ -357,6 +390,11 @@ export class DataSourceManager extends EventEmitter {
     const persist = options?.persist !== false && this.db !== undefined
     const ownerId = options?.ownerId || 'system'
     const workspaceId = options?.workspaceId
+    const tenantId = normalizeTenantId(options?.tenantId)
+    const scopeKind = options?.scopeKind ?? 'private'
+    if (!isDataSourceScopeKind(scopeKind)) {
+      throw new Error(`Invalid data source scope kind: ${String(scopeKind)}`)
+    }
 
     // FIX 2: refuse — BEFORE any persistence — to provision an id that a deploy file has armed for SQL
     // write but that was not pinned at allowlist-load time. This is the arm-ahead-of-provisioning
@@ -371,11 +409,16 @@ export class DataSourceManager extends EventEmitter {
 
     // Persist to database first (if enabled)
     if (persist && this.db) {
-      await this.persistDataSource(config, ownerId, workspaceId)
+      await this.persistDataSource(config, ownerId, workspaceId, tenantId, scopeKind)
     }
 
     const adapter = await this.addDataSourceInternal(config, false)
-    this.scopes.set(config.id, { ownerId, workspaceId: workspaceId ?? null })
+    this.scopes.set(config.id, {
+      ownerId,
+      workspaceId: workspaceId ?? null,
+      tenantId,
+      scopeKind
+    })
     return adapter
   }
 
@@ -389,7 +432,12 @@ export class DataSourceManager extends EventEmitter {
   async updateDataSource(
     id: string,
     config: DataSourceConfig,
-    options?: { ownerId?: string; workspaceId?: string }
+    options?: {
+      ownerId?: string
+      workspaceId?: string
+      tenantId?: string | null
+      scopeKind?: DataSourceScopeKind
+    }
   ): Promise<BaseDataAdapter> {
     const existing = this.adapters.get(id)
     if (!existing) {
@@ -398,6 +446,13 @@ export class DataSourceManager extends EventEmitter {
     const priorScope = this.scopes.get(id)
     const ownerId = options?.ownerId ?? priorScope?.ownerId ?? 'system'
     const workspaceId = options?.workspaceId ?? priorScope?.workspaceId ?? undefined
+    const tenantId = options && Object.prototype.hasOwnProperty.call(options, 'tenantId')
+      ? normalizeTenantId(options.tenantId)
+      : (priorScope?.tenantId ?? null)
+    const scopeKind = options?.scopeKind ?? priorScope?.scopeKind ?? 'private'
+    if (!isDataSourceScopeKind(scopeKind)) {
+      throw new Error(`Invalid data source scope kind: ${String(scopeKind)}`)
+    }
 
     // G-4 MARKER DURABILITY (P1). The k3Destination marker is SET-ONCE: once a source is a declared
     // K3 destination, no later update — from any caller, through any merge — may clear or unset it.
@@ -423,7 +478,7 @@ export class DataSourceManager extends EventEmitter {
 
     // Persist first — if this throws, the live source is untouched.
     if (this.db !== undefined) {
-      await this.persistDataSource(config, ownerId, workspaceId)
+      await this.persistDataSource(config, ownerId, workspaceId, tenantId, scopeKind)
     }
 
     // Persist succeeded: swap the in-memory adapter (no further failure-prone I/O).
@@ -439,7 +494,12 @@ export class DataSourceManager extends EventEmitter {
     this.connectionPool.delete(id)
 
     const adapter = await this.addDataSourceInternal(config, false)
-    this.scopes.set(id, { ownerId, workspaceId: workspaceId ?? null })
+    this.scopes.set(id, {
+      ownerId,
+      workspaceId: workspaceId ?? null,
+      tenantId,
+      scopeKind
+    })
     return adapter
   }
 
@@ -476,15 +536,25 @@ export class DataSourceManager extends EventEmitter {
   }
 
   /** Stored ownership scope for a data source, if present. */
-  getScope(id: string): { ownerId: string; workspaceId: string | null } | undefined {
+  getScope(id: string): {
+    ownerId: string
+    workspaceId: string | null
+    tenantId: string | null
+    scopeKind: DataSourceScopeKind
+  } | undefined {
     return this.scopes.get(id)
   }
 
   /**
-   * COUNT of integration_external_systems rows that reference this source
-   * ATTRIBUTABLY (the referential delete guard's input): rows whose
-   * config->>'dataSourceId' equals the id AND whose server-stamped
-   * config->>'dataSourceOwnerId' equals the source's OWNER.
+   * COUNT of integration_external_systems rows that reference this source (the
+   * referential delete guard's input), across BOTH migration-time shapes:
+   * - canonical rows whose connection_id equals the id; and
+   * - legacy-only rows whose connection_id is NULL, config->>'dataSourceId'
+   *   equals the id, and server-stamped config->>'dataSourceOwnerId' equals the
+   *   source's OWNER.
+   *
+   * The explicit connection_id IS NULL predicate prevents a migrated row that
+   * retains its rollback pointer from being counted twice.
    *
    * WHY owner-attributed, not raw (P2-A): the raw dataSourceId match let any
    * integration:write holder in ANY tenant pin a foreign user's source id and
@@ -518,18 +588,31 @@ export class DataSourceManager extends EventEmitter {
     // No known owner scope → nothing can be attributed to it. (Route callers
     // sit behind assertAccess, so the scope exists on every real delete path.)
     if (ownerId === undefined) return 0
+    let canonicalCount: number
     try {
-      const rows = await this.db
+      const canonicalRows = await this.db
         .selectFrom('integration_external_systems' as never)
         .select(sql<number>`count(*)::int`.as('count') as never)
-        .where(sql`config->>'dataSourceId'` as never, '=', id as never)
-        .where(sql`config->>'dataSourceOwnerId'` as never, '=', ownerId as never)
+        .where('connection_id' as never, '=', id as never)
         .execute() as Array<{ count: number }>
-      return rows[0]?.count ?? 0
+      canonicalCount = canonicalRows[0]?.count ?? 0
     } catch (err) {
+      // Only the FIRST observation may prove that the referencing layer does
+      // not exist. Once the table has been observed, a later 42P01 is a DDL
+      // race/failure and must propagate rather than discarding a canonical
+      // count that may already be non-zero.
       if ((err as { code?: string } | null)?.code === UNDEFINED_TABLE_SQLSTATE) return 0
       throw err
     }
+
+    const legacyRows = await this.db
+      .selectFrom('integration_external_systems' as never)
+      .select(sql<number>`count(*)::int`.as('count') as never)
+      .where('connection_id' as never, 'is', null as never)
+      .where(sql`config->>'dataSourceId'` as never, '=', id as never)
+      .where(sql`config->>'dataSourceOwnerId'` as never, '=', ownerId as never)
+      .execute() as Array<{ count: number }>
+    return canonicalCount + (legacyRows[0]?.count ?? 0)
   }
 
   /**
@@ -600,11 +683,13 @@ export class DataSourceManager extends EventEmitter {
   private async persistDataSource(
     config: DataSourceConfig,
     ownerId: string,
-    workspaceId?: string
+    workspaceId: string | null | undefined,
+    tenantId: string | null,
+    scopeKind: DataSourceScopeKind
   ): Promise<void> {
     if (!this.db) return
 
-    const record = this.configToRecord(config, ownerId, workspaceId)
+    const record = this.configToRecord(config, ownerId, workspaceId, tenantId, scopeKind)
 
     await this.db
       .insertInto('data_sources' as never)
@@ -616,6 +701,8 @@ export class DataSourceManager extends EventEmitter {
           config: record.config,
           owner_id: record.owner_id,
           workspace_id: record.workspace_id,
+          tenant_id: record.tenant_id,
+          scope_kind: record.scope_kind,
           status: record.status,
           auto_connect: record.auto_connect,
           // Revive a previously soft-deleted row (remove() sets these) so an
