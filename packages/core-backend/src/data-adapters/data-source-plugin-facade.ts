@@ -1,9 +1,11 @@
 import type { DataSourceManager } from './DataSourceManager'
+import type { DataSourceScopeKind } from './DataSourceManager'
 import {
   isC6WriteTargetConfig,
   isGenericQueryDisabledConfig,
 } from './DataSourceManager'
-import type { DbValue, QueryOptions, QueryResult, SchemaInfo, TableInfo } from './BaseAdapter'
+import type { DataSourceConfig, DbValue, QueryOptions, QueryResult, SchemaInfo, TableInfo } from './BaseAdapter'
+import { parseSqlServerEndpoint } from '@metasheet/mssql-readonly-utils'
 
 /**
  * Narrow, READ-ONLY data-source surface handed to the integration plugin so the Data
@@ -40,7 +42,55 @@ export interface DataSourceDescriptor {
   status: 'connected' | 'disconnected'
 }
 
+/** Values-free registration metadata used by the integration binding resolver. */
+export interface DataSourceConnectionRegistration {
+  id: string
+  type: string
+  tenantId: string | null
+  scopeKind: DataSourceScopeKind
+}
+
+export interface ResolveConnectionRegistrationOptions {
+  tenantId: string
+  workspaceId?: string | null
+  principal: string | undefined
+  runAs?: 'user' | 'owner' | 'service'
+}
+
+/** The only connection material the sealed SQL Server snapshot runtime may receive. */
+export interface DataSourceSealedSnapshotConnection {
+  connection: {
+    database: string
+    encrypt: boolean
+    instanceName: string | null
+    port: number
+    server: string
+    trustServerCertificate: boolean
+  }
+  credentials: {
+    password: string
+    user: string
+  }
+}
+
+/** Separate from DataSourceReadOnlyFacade because this surface carries secrets. */
+export interface DataSourceSealedSnapshotConnectionFacade {
+  resolveSqlServerConnection(
+    dataSourceId: string,
+    options: ResolveConnectionRegistrationOptions
+  ): Promise<DataSourceSealedSnapshotConnection>
+}
+
 export interface DataSourceReadOnlyFacade {
+  /**
+   * Resolve canonical connection registration metadata without opening the
+   * adapter or touching its config/credentials. This is owner-only and exact
+   * tenant scoped; legacy tenantless rows are usable only by a user/owner run.
+   */
+  resolveConnectionRegistration(
+    dataSourceId: string,
+    options: ResolveConnectionRegistrationOptions
+  ): Promise<DataSourceConnectionRegistration>
   /**
    * Resolve a data source id to its display descriptor, for the 对接总览 hub screen.
    *
@@ -153,6 +203,8 @@ export const DATA_SOURCE_NOT_READ_ONLY_CODE = 'DATA_SOURCE_NOT_READ_ONLY'
 export const DATA_SOURCE_NOT_WRITABLE_CODE = 'DATA_SOURCE_NOT_WRITABLE'
 export const DATA_SOURCE_NOT_C6_WRITE_TARGET_CODE = 'DATA_SOURCE_NOT_C6_WRITE_TARGET'
 export const DATA_SOURCE_QUERY_INVALID_CODE = 'DATA_SOURCE_QUERY_INVALID'
+export const DATA_SOURCE_SEALED_SNAPSHOT_CONNECTION_INVALID_CODE =
+  'DATA_SOURCE_SEALED_SNAPSHOT_CONNECTION_INVALID'
 // W-5: thrown only when a caller opts into `select(..., strict=true)` (see `DataSourceReadOnlyFacade`
 // above) AND the resolved source is a `sqlserver` data source configured with
 // `connection.requestTimeoutMs=0` ("no timeout" — a legitimate, deliberate mssql convention for the
@@ -435,6 +487,44 @@ function normalizeWriteRows(
 export function createDataSourcePluginFacade(
   getManager: () => DataSourceManager
 ): DataSourceReadOnlyFacade {
+  async function resolveRegistration(
+    dataSourceId: string,
+    options: ResolveConnectionRegistrationOptions | undefined
+  ) {
+    const principal = requirePrincipal(options?.principal)
+    const requestedTenant = typeof options?.tenantId === 'string' ? options.tenantId.trim() : ''
+    if (!requestedTenant) {
+      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+    }
+    const runAs = options?.runAs ?? 'service'
+    if (runAs !== 'user' && runAs !== 'owner' && runAs !== 'service') {
+      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+    }
+    const manager = getManager()
+    let scope
+    let adapter
+    try {
+      manager.assertAccess(dataSourceId, principal)
+      scope = manager.getScope(dataSourceId)
+      adapter = manager.getDataSource(dataSourceId)
+    } catch (err) {
+      throw new DataSourceUnavailableError(err instanceof Error ? err.message : String(err))
+    }
+    if (!scope) {
+      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+    }
+    if (scope.tenantId !== null && scope.tenantId !== requestedTenant) {
+      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+    }
+    if (scope.tenantId === null && scope.scopeKind !== 'legacy_private') {
+      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+    }
+    if (scope.tenantId === null && runAs === 'service') {
+      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+    }
+    return { adapter, manager, scope }
+  }
+
   async function authorize(dataSourceId: string, principal: string | undefined, strict = false) {
     const owner = requirePrincipal(principal)
     const manager = getManager()
@@ -486,6 +576,15 @@ export function createDataSourcePluginFacade(
   }
 
   return {
+    async resolveConnectionRegistration(dataSourceId, options) {
+      const { adapter, scope } = await resolveRegistration(dataSourceId, options)
+      return {
+        id: dataSourceId,
+        type: adapter.getType(),
+        tenantId: scope.tenantId,
+        scopeKind: scope.scopeKind,
+      }
+    },
     async describe(dataSourceId, principal) {
       // OWNER-ONLY (see the interface doc): `owner` is a bare principal string, so #5401's
       // normalizeActor treats this as the data-plane shape — no platform-admin bypass. A non-owner
@@ -563,6 +662,151 @@ export function createDataSourcePluginFacade(
         queryOptions.strictOffsetOrdering = true
       }
       return manager.select<Record<string, DbValue>>(dataSourceId, table, queryOptions)
+    },
+  }
+}
+
+const SEALED_SQL_CONNECTION_FIELDS = new Set([
+  'database',
+  'encrypt',
+  'host',
+  'instanceName',
+  'port',
+  'server',
+  'trustServerCertificate',
+])
+const SEALED_SQL_CREDENTIAL_FIELDS = new Set(['password', 'username'])
+
+function sealedSnapshotConnectionInvalid(field: string): never {
+  throw new DataSourceBridgeConfigError(
+    DATA_SOURCE_SEALED_SNAPSHOT_CONNECTION_INVALID_CODE,
+    `data source sealed snapshot SQL Server connection field '${field}' is not representable`,
+    'DataSourceSealedSnapshotConnectionError'
+  )
+}
+
+function requiredSealedString(value: unknown, field: string): string {
+  if (typeof value !== 'string' || value.trim() === '') sealedSnapshotConnectionInvalid(field)
+  // Match BaseAdapter/getStringConfig: preserve the configured string verbatim. The trim above
+  // is only an emptiness check; in particular, credentials may intentionally contain whitespace.
+  return value
+}
+
+function projectSealedSnapshotConnection(config: DataSourceConfig): DataSourceSealedSnapshotConnection {
+  if (!isPlainObject(config)) sealedSnapshotConnectionInvalid('config')
+  if (!isPlainObject(config.connection)) sealedSnapshotConnectionInvalid('connection')
+  if (!isPlainObject(config.credentials)) sealedSnapshotConnectionInvalid('credentials')
+  for (const field of Object.keys(config.connection)) {
+    if (!SEALED_SQL_CONNECTION_FIELDS.has(field)) sealedSnapshotConnectionInvalid(`connection.${field}`)
+  }
+  for (const field of Object.keys(config.credentials)) {
+    if (!SEALED_SQL_CREDENTIAL_FIELDS.has(field)) sealedSnapshotConnectionInvalid(`credentials.${field}`)
+  }
+
+  const connection = config.connection as Record<string, unknown>
+  const credentials = config.credentials as Record<string, unknown>
+  const database = requiredSealedString(connection.database, 'connection.database')
+  const username = requiredSealedString(credentials.username, 'credentials.username')
+  const password = requiredSealedString(credentials.password, 'credentials.password')
+  if (connection.encrypt !== undefined && typeof connection.encrypt !== 'boolean') {
+    sealedSnapshotConnectionInvalid('connection.encrypt')
+  }
+  if (
+    connection.trustServerCertificate !== undefined
+    && typeof connection.trustServerCertificate !== 'boolean'
+  ) {
+    sealedSnapshotConnectionInvalid('connection.trustServerCertificate')
+  }
+  // MSSQLAdapter does not consume instanceName when it builds its actual pool endpoint. Returning
+  // one here would therefore describe a different server than the adapter uses, so fail closed.
+  if (
+    Object.prototype.hasOwnProperty.call(connection, 'instanceName')
+    && connection.instanceName !== null
+    && connection.instanceName !== undefined
+  ) {
+    sealedSnapshotConnectionInvalid('connection.instanceName')
+  }
+  const instanceName = null
+
+  // Match MSSQLAdapter/getNumberConfig exactly. The shared endpoint parser deliberately coerces
+  // numeric strings, but the real adapter ignores them; accepting one here could make sealed and
+  // ordinary reads use different ports.
+  if (
+    Object.prototype.hasOwnProperty.call(connection, 'port')
+    && connection.port !== undefined
+    && typeof connection.port !== 'number'
+  ) {
+    sealedSnapshotConnectionInvalid('connection.port')
+  }
+
+  let endpoint: { server: string; port?: number }
+  try {
+    endpoint = parseSqlServerEndpoint({
+      host: connection.host,
+      server: connection.server,
+      port: connection.port,
+    })
+  } catch {
+    sealedSnapshotConnectionInvalid('connection.server/port')
+  }
+  // A named instance may also be encoded directly in the server string (host\\instance).
+  // MSSQLAdapter leaves that form to the driver, while the sealed runtime requires an explicit
+  // port-or-instance projection. Defaulting it to TCP 1433 could therefore target a different
+  // endpoint, so keep the two paths equivalent by refusing the ambiguous form.
+  if (endpoint.server.includes('\\')) {
+    sealedSnapshotConnectionInvalid('connection.server')
+  }
+  const port = endpoint.port ?? 1433
+  return Object.freeze({
+    connection: Object.freeze({
+      database,
+      encrypt: connection.encrypt === undefined ? true : connection.encrypt as boolean,
+      instanceName,
+      port,
+      server: endpoint.server,
+      trustServerCertificate:
+        connection.trustServerCertificate === undefined
+          ? true
+          : connection.trustServerCertificate as boolean,
+    }),
+    credentials: Object.freeze({ password, user: username }),
+  })
+}
+
+/**
+ * Secret-bearing capability for the sealed SQL Server snapshot runtime. This is intentionally a
+ * separate surface from DataSourceReadOnlyFacade: callers receive only the exact temporary
+ * connection projection required by the sealed runtime, never the adapter/config object.
+ */
+export function createDataSourceSealedSnapshotConnectionFacade(
+  getManager: () => DataSourceManager
+): DataSourceSealedSnapshotConnectionFacade {
+  const registrationFacade = createDataSourcePluginFacade(getManager)
+  return {
+    async resolveSqlServerConnection(dataSourceId, options) {
+      if (options?.runAs !== 'user') sealedSnapshotConnectionInvalid('runAs')
+      const registration = await registrationFacade.resolveConnectionRegistration(dataSourceId, options)
+      if (typeof registration.type !== 'string' || registration.type.toLowerCase() !== 'sqlserver') {
+        sealedSnapshotConnectionInvalid('type')
+      }
+      let adapter
+      try {
+        adapter = getManager().getDataSource(dataSourceId)
+      } catch (err) {
+        throw new DataSourceUnavailableError(err instanceof Error ? err.message : String(err))
+      }
+      const adapterType = adapter.getType()
+      if (typeof adapterType !== 'string' || adapterType.toLowerCase() !== 'sqlserver') {
+        sealedSnapshotConnectionInvalid('type')
+      }
+      if (!adapter.isReadOnly()) sealedSnapshotConnectionInvalid('readOnly')
+      let config: DataSourceConfig
+      try {
+        config = adapter.getConfig()
+      } catch {
+        sealedSnapshotConnectionInvalid('connection')
+      }
+      return projectSealedSnapshotConnection(config)
     },
   }
 }

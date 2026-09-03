@@ -151,6 +151,7 @@ Bridge transport 有明确部署约束：MetaSheet backend/plugin runtime 与 Br
 新增一条前向 migration：
 
 - 给 `integration_external_systems` 增加 nullable `connection_id`。
+- 增加服务端维护的 `legacy_connection_fallback_eligible` 布尔标记：仅迁移时被可靠回填的旧 SQL 只读 Binding 置为 `true`，新记录固定默认 `false`；回退资格不使用时间常量推断。
 - 建立到现有 `data_sources.id` 的 `ON DELETE RESTRICT` 引用约束；迁移阶段允许为空。
 - 给 `data_sources` 增加 nullable `tenant_id` 和 `scope_kind`；`scope_kind` 闭集为 `legacy_private | private | workspace`，现有记录回填为 `legacy_private`，新建记录默认 `private`（workspace 共享须显式选择）。
 - 保留所有 external system ID、Pipeline FK 和 sealed authority 证据。
@@ -161,6 +162,7 @@ tenant schema 决策写死如下：
 - `tenant_id` 是 `data_sources` 上的显式列，**不得仅从 `workspace_id` 隐式派生**。
 - 新建 Connection 必须从 JWT/服务身份绑定的可信认证上下文写入 `tenant_id`，不得接受请求体自报 tenant。
 - 旧记录在 tenant 归属未被可靠证明前允许 `tenant_id = NULL`，但只能由原 owner 使用，不能 workspace 共享或由 service identity 运行。
+- `runAs` 缺省按 service 处理；只有经过认证的 HTTP 用户入口可显式标记 user delegation，跨插件/Automation 运行强制为 service，不能通过请求字段自报为 user。
 - 仅当权威 workspace membership 能唯一证明 tenant/workspace 时才回填；歧义记录进入人工 reconciliation。
 - Resolver 必须比较 Binding、Connection 和执行上下文的 tenant；任一不一致即 fail closed。
 
@@ -172,7 +174,7 @@ tenant schema 决策写死如下：
 4. 新建 `data-source:sql-readonly` binding 只写 `connection_id`，不再复制账号密码；如果该引用缺失，必须作为孤儿配置 fail closed，不能假装回退。
 5. `connection_id` 与 legacy `config.dataSourceId` 同时存在但指向不同 Connection 时立即 fail closed；HTTP/K3/PLM 继续走各自现有路径，不属于本次 Resolver fallback。
 
-首批只回填已经引用 `dataSourceId` 的 SQL 只读 binding。不要按相同 endpoint 自动去重，也不要迁移 HTTP/K3/PLM 凭据。
+首批只回填已经引用 `dataSourceId`、且 legacy `dataSourceOwnerId` 与 Connection owner 可证明一致的 SQL 只读 binding；无法归属的记录保持 `connection_id = NULL` 并进入 reconciliation。不要按相同 endpoint 自动去重，也不要迁移 HTTP/K3/PLM 凭据。
 
 #### PR-1 验收
 
@@ -209,6 +211,8 @@ interface ConnectionAccessContext {
 - `POST /api/data-sources/:id/query` 必须同时满足现有 `data_sources:execute` RBAC 和 Connection owner/`manage` 授权；Bridge transport 即使 owner 也永久拒绝 raw query。
 - 增加 Connection 引用查询；迁移期必须同时检查新 `integration_external_systems.connection_id` 和 legacy `config.dataSourceId`。任一种引用存在时，soft/hard DELETE 都返回 `409` 和 values-free consumer 信息；不能只依赖不会被 soft delete 触发的 FK。
 - 删除必须在事务中先检查引用并更新数据库，提交后才清理内存。
+- 已标记可回退的 legacy Binding 若修改 `config.dataSourceId`，必须在同一次写入中提供 `connectionId` 并转为 canonical；不得允许旧指针在 legacy 状态下静默改指向。
+- PR-2 的 tenant 回填和授权不得把 `integration_external_systems.tenant_id`、请求体、`x-tenant-id` 或其兼容回填后的 `req.user.tenantId` 当证据源；只能使用 JWT 专属可信 claim、服务身份或权威 workspace membership。即使 #5445 先行修复，也保留这条数据溯源约束。
 
 当前删除路径可能先删除内存实例，再处理数据库：
 `packages/core-backend/src/data-adapters/DataSourceManager.ts:506-543`。该问题必须在统一引用后修复，避免连接重启后“复活”。

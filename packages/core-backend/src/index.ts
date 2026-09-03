@@ -293,7 +293,11 @@ import { spreadsheetPermissionsRouter } from './routes/spreadsheet-permissions'
 import { eventsRouter } from './routes/events'
 import { commentsRouter } from './routes/comments'
 import { dataSourcesRouter, getDataSourceManager } from './routes/data-sources'
-import { createDataSourcePluginFacade, createDataSourceWritePluginFacade } from './data-adapters/data-source-plugin-facade'
+import {
+  createDataSourcePluginFacade,
+  createDataSourceSealedSnapshotConnectionFacade,
+  createDataSourceWritePluginFacade,
+} from './data-adapters/data-source-plugin-facade'
 import { federationRouter } from './routes/federation'
 import internalRouter from './routes/internal'
 import cacheTestRouter from './routes/cache-test'
@@ -2961,6 +2965,13 @@ export class MetaSheetServer {
         stockPreparationHandoffNotifier: manifest.name === 'plugin-integration-core'
           ? { sendToDestinations: sendStockPreparationHandoffNotification }
           : undefined,
+        // Secret-bearing SQL Server projection for the sealed snapshot runtime. Keep this as a
+        // separate, plugin-scoped capability; the ordinary dataSources facade never carries
+        // credentials, and every other plugin receives no capability at all.
+        dataSourceSealedSnapshotConnections:
+          manifest.name === 'plugin-integration-core'
+            ? createDataSourceSealedSnapshotConnectionFacade(getDataSourceManager)
+            : undefined,
         security: this.pluginRuntimeSecurityService,
       } as unknown as import('./types/plugin').PluginServices,
       storage,

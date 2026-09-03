@@ -509,7 +509,11 @@ describe('data-sources route — sqlserver type', () => {
   let currentUser: { id: string; role?: string } | undefined
   const app = express()
   app.use(express.json())
-  app.use((req, _res, next) => { req.user = currentUser as never; next() })
+  app.use((req, _res, next) => {
+    req.user = currentUser as never
+    req.authenticatedTenantId = currentUser ? 'tenant-mssql-route' : undefined
+    next()
+  })
   app.use(dataSourcesRouter())
   const admin = (id: string) => ({ id, role: 'admin' })
   const body = (id: string) => ({

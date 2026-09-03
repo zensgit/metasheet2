@@ -601,9 +601,9 @@ interface ConnectionDraft {
   status: ConnectionDraftStatus
   configText: string
   capabilitiesText: string
-  // C2b: structured config for the read-only data-source bridge (kind 'data-source:sql-readonly').
-  // The connection only ever references a data_sources id — credentials stay in /data-sources.
-  dataSourceId: string
+  // PR-1: canonical binding for the read-only data-source bridge. The connection only ever
+  // references a data_sources id at top level — credentials stay in /data-sources.
+  connectionId: string
   dataSourceObject: string
 }
 
@@ -931,7 +931,7 @@ const connectionDraft = reactive<ConnectionDraft>({
   status: 'active',
   configText: '{}',
   capabilitiesText: '{}',
-  dataSourceId: '',
+  connectionId: '',
   dataSourceObject: '',
 })
 const connectionDraftMode = ref<'new' | 'edit' | 'copy'>('new')
@@ -969,7 +969,7 @@ async function loadBridgeDataSources(): Promise<void> {
 watch(() => connectionDraft.kind, (kind) => {
   if (kind === DATA_SOURCE_BRIDGE_KIND) {
     void loadBridgeDataSources()
-    if (connectionDraft.dataSourceId.trim()) void loadBridgeDataSourceObjects(connectionDraft.dataSourceId)
+    if (connectionDraft.connectionId.trim()) void loadBridgeDataSourceObjects(connectionDraft.connectionId)
   } else {
     clearBridgeDataSourceObjects()
   }
@@ -1005,8 +1005,8 @@ function buildBridgeObjectOptions(tables: DataSourceTableInfo[] | undefined, kin
     .filter((item): item is BridgeDataSourceObjectOption => item !== null)
 }
 
-async function loadBridgeDataSourceObjects(dataSourceId: string): Promise<void> {
-  const id = dataSourceId.trim()
+async function loadBridgeDataSourceObjects(connectionId: string): Promise<void> {
+  const id = connectionId.trim()
   const requestId = ++bridgeDataSourceObjectRequestId
   bridgeDataSourceObjectOptions.value = []
   bridgeDataSourceObjectsError.value = ''
@@ -1017,13 +1017,13 @@ async function loadBridgeDataSourceObjects(dataSourceId: string): Promise<void> 
   bridgeDataSourceObjectsLoading.value = true
   try {
     const schema = await getDataSourceSchema(id)
-    if (requestId !== bridgeDataSourceObjectRequestId || connectionDraft.dataSourceId.trim() !== id) return
+    if (requestId !== bridgeDataSourceObjectRequestId || connectionDraft.connectionId.trim() !== id) return
     bridgeDataSourceObjectOptions.value = [
       ...buildBridgeObjectOptions(schema.tables, 'table'),
       ...buildBridgeObjectOptions(schema.views, 'view'),
     ]
   } catch (error) {
-    if (requestId !== bridgeDataSourceObjectRequestId || connectionDraft.dataSourceId.trim() !== id) return
+    if (requestId !== bridgeDataSourceObjectRequestId || connectionDraft.connectionId.trim() !== id) return
     bridgeDataSourceObjectsError.value = formatWorkbenchConnectionError(error, 'bridge-schema')
   } finally {
     if (requestId === bridgeDataSourceObjectRequestId) bridgeDataSourceObjectsLoading.value = false
@@ -1039,21 +1039,21 @@ function clearBridgeDataSourceObjects(): void {
 
 function onBridgeDataSourceChange(): void {
   connectionDraft.dataSourceObject = ''
-  void loadBridgeDataSourceObjects(connectionDraft.dataSourceId)
+  void loadBridgeDataSourceObjects(connectionDraft.connectionId)
 }
 
 function buildDataSourceBridgeConfig(): Record<string, unknown> {
   const object = connectionDraft.dataSourceObject.trim()
-  // Only the data_sources reference + object — NO credentials are ever entered for this kind.
+  // Only the semantic object config — the data_sources reference is sent as top-level connectionId.
+  // NO credentials are ever entered for this kind.
   //
-  // This picker renders TWO of the connection's config keys; a stored bridge can carry more
+  // This picker renders the connection's object config key; a stored bridge can carry more
   // (config.schema, a lookupProjection, paging hints). The registry treats a supplied config as a
   // PATCH, so the keys absent here are preserved rather than erased — which is what stops a rename
   // from silently dropping config.schema. The corollary is that this object must NAME every key it
   // means to control: `object` is emitted even when empty, because omitting it would now read as
   // "keep the stored one" instead of "there is no object selected".
   return {
-    dataSourceId: connectionDraft.dataSourceId.trim(),
     object: object || null,
   }
 }
@@ -1065,7 +1065,7 @@ function bridgeConfigString(config: unknown, key: string): string {
 
 function bridgeDataSourceIdForSystem(system: WorkbenchExternalSystem | null): string {
   if (!system || system.kind !== DATA_SOURCE_BRIDGE_KIND) return ''
-  return bridgeConfigString(system.config, 'dataSourceId').trim()
+  return (system.connectionId || bridgeConfigString(system.config, 'dataSourceId')).trim()
 }
 
 function prunePlmCapabilities(systemList: WorkbenchExternalSystem[]): void {
@@ -1334,7 +1334,7 @@ const canSaveConnectionDraft = computed(() => {
   if (isDataSourceBridgeKind.value) {
     const selectedObject = connectionDraft.dataSourceObject.trim()
     const knownObject = bridgeDataSourceObjectOptions.value.some((item) => item.value === selectedObject)
-    if (!connectionDraft.dataSourceId.trim() || !selectedObject || bridgeDataSourceObjectsLoading.value || bridgeDataSourceObjectsError.value || !knownObject) return false
+    if (!connectionDraft.connectionId.trim() || !selectedObject || bridgeDataSourceObjectsLoading.value || bridgeDataSourceObjectsError.value || !knownObject) return false
   }
   return Boolean(
     connectionDraft.name.trim()
@@ -2129,7 +2129,7 @@ function resetConnectionDraft(): void {
   connectionDraft.status = 'active'
   connectionDraft.configText = '{}'
   connectionDraft.capabilitiesText = '{}'
-  connectionDraft.dataSourceId = ''
+  connectionDraft.connectionId = ''
   connectionDraft.dataSourceObject = ''
   clearBridgeDataSourceObjects()
   connectionDraftMode.value = 'new'
@@ -2143,9 +2143,9 @@ function editConnection(system: WorkbenchExternalSystem): void {
   connectionDraft.status = system.status
   connectionDraft.configText = stringifyConnectionDraftJson(system.config)
   connectionDraft.capabilitiesText = stringifyConnectionDraftJson(system.capabilities)
-  connectionDraft.dataSourceId = bridgeConfigString(system.config, 'dataSourceId')
+  connectionDraft.connectionId = (system.connectionId || bridgeConfigString(system.config, 'dataSourceId')).trim()
   connectionDraft.dataSourceObject = bridgeConfigString(system.config, 'object')
-  if (system.kind === DATA_SOURCE_BRIDGE_KIND) void loadBridgeDataSourceObjects(connectionDraft.dataSourceId)
+  if (system.kind === DATA_SOURCE_BRIDGE_KIND) void loadBridgeDataSourceObjects(connectionDraft.connectionId)
   connectionDraftMode.value = 'edit'
   inventoryExpanded.value = true
   setStatus(`已载入连接草稿：${system.name}`, 'idle')
@@ -2159,9 +2159,9 @@ function copyConnection(system: WorkbenchExternalSystem): void {
   connectionDraft.status = 'inactive'
   connectionDraft.configText = stringifyConnectionDraftJson(system.config)
   connectionDraft.capabilitiesText = stringifyConnectionDraftJson(system.capabilities)
-  connectionDraft.dataSourceId = bridgeConfigString(system.config, 'dataSourceId')
+  connectionDraft.connectionId = (system.connectionId || bridgeConfigString(system.config, 'dataSourceId')).trim()
   connectionDraft.dataSourceObject = bridgeConfigString(system.config, 'object')
-  if (system.kind === DATA_SOURCE_BRIDGE_KIND) void loadBridgeDataSourceObjects(connectionDraft.dataSourceId)
+  if (system.kind === DATA_SOURCE_BRIDGE_KIND) void loadBridgeDataSourceObjects(connectionDraft.connectionId)
   connectionDraftMode.value = 'copy'
   inventoryExpanded.value = true
   setStatus(`已复制 ${system.name} 为新连接草稿；保存前请改名并确认用途。`, 'idle')
@@ -2276,6 +2276,7 @@ async function saveConnectionDraft(): Promise<void> {
       kind: connectionDraft.kind,
       role: connectionDraft.role,
       status: connectionDraft.status,
+      ...(isDataSourceBridgeKind.value ? { connectionId: connectionDraft.connectionId.trim() } : {}),
       config: isDataSourceBridgeKind.value
         ? buildDataSourceBridgeConfig()
         : parseConnectionDraftJson(connectionDraft.configText, 'config JSON'),

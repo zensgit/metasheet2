@@ -33,6 +33,8 @@ export interface WorkbenchExternalSystem {
   id: string
   tenantId: string
   workspaceId: string | null
+  /** Opaque data_sources.id for canonical data-source:sql-readonly bindings. */
+  connectionId?: string | null
   name: string
   kind: string
   role: 'source' | 'target' | 'bidirectional'
@@ -169,6 +171,8 @@ export type PlmBomEcoRevisionIntentResult =
 export interface WorkbenchExternalSystemUpsertRequest extends IntegrationScope {
   id?: string
   projectId?: string | null
+  /** Opaque data_sources.id; only used by data-source:sql-readonly. */
+  connectionId?: string | null
   name: string
   kind: string
   role: 'source' | 'target' | 'bidirectional'

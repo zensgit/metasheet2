@@ -1011,6 +1011,17 @@ function scopedInput(req, input = {}) {
   }
 }
 
+// Adapter resolution is an authority-bearing read: a canonical Connection is resolved for the
+// same user that the adapter will execute as. Keeping this beside scopedInput prevents route
+// callers from loading a connection under one identity and constructing the adapter under another.
+function scopedAdapterInput(req, input = {}, principal = requestPrincipal(req)) {
+  return scopedInput(req, {
+    ...input,
+    principal,
+    runAs: 'user',
+  })
+}
+
 function largeBomJobScope(req, input = {}) {
   const scope = scopedInput(req, input)
   return {
@@ -3717,7 +3728,7 @@ function createHandlers(services, options = {}) {
       : externalSystems.getExternalSystem.bind(externalSystems)
     let system
     try {
-      system = await loadSystem(scopedInput(req, {
+      system = await loadSystem(scopedAdapterInput(req, {
         tenantId: input.tenantId,
         workspaceId: input.workspaceId,
         id: row.systemId,
@@ -3940,7 +3951,7 @@ function createHandlers(services, options = {}) {
     const sourceScope = { id: action.source.externalSystemId }
     if (options.tenantId) sourceScope.tenantId = options.tenantId
     if (action.source.workspaceId) sourceScope.workspaceId = action.source.workspaceId
-    const system = await loadSystem(scopedInput(req, sourceScope))
+    const system = await loadSystem(scopedAdapterInput(req, sourceScope))
     if (options.requireActive === true && (!system || system.status !== 'active')) {
       throw new HttpRouteError(409, 'TABLE_ACTION_SOURCE_NOT_ACTIVE', 'configured table action source is not active')
     }
@@ -3989,7 +4000,10 @@ function createHandlers(services, options = {}) {
     const accessibility = new Map()
     await Promise.all(rows.map(async (system) => {
       if (describeConnectorKind(system.kind).connectionModel !== 'data-source') return
-      const dataSourceId = isPlainObject(system.config) ? firstString(system.config.dataSourceId) : null
+      const dataSourceId = firstString(
+        system.connectionId,
+        isPlainObject(system.config) ? system.config.dataSourceId : null,
+      )
       if (!dataSourceId) return
       try {
         const described = await directory.describe(dataSourceId, principal)
@@ -4179,9 +4193,15 @@ function createHandlers(services, options = {}) {
       // P2-A: the registry validates a config.dataSourceId binding against the AUTHENTICATED
       // principal (owner-only, same as every facade read) and stamps attribution server-side —
       // so the principal comes from the request user, never the body (spread order overrides).
-      const withPrincipal = { ...body, principal: requestPrincipal(req) }
+      const withPrincipal = { ...body, principal: requestPrincipal(req), runAs: 'user' }
       if (hasPrivateConfigMutation(body.kind, body.config)) {
         requireAccess(req, 'admin')
+        return sendOk(res, await externalSystems.upsertExternalSystem(scopedAuthenticatedWriteInput(req, withPrincipal)), 201)
+      }
+      // A canonical Connection reference does not reveal or mutate its credentials, so the existing
+      // integration:write authoring tier remains sufficient. It is still a tenant-authority write:
+      // derive tenant from the authenticated principal only, and reject request-body steering.
+      if (body.kind === 'data-source:sql-readonly') {
         return sendOk(res, await externalSystems.upsertExternalSystem(scopedAuthenticatedWriteInput(req, withPrincipal)), 201)
       }
       return sendOk(res, await externalSystems.upsertExternalSystem(scopedInput(req, withPrincipal)), 201)
@@ -4202,7 +4222,7 @@ function createHandlers(services, options = {}) {
       const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
-      const system = await loadSystem(scopedInput(req, { id: requestParams(req).id }))
+      const system = await loadSystem(scopedAdapterInput(req, { id: requestParams(req).id }))
       const adapter = adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
       let result
       try {
@@ -4244,7 +4264,7 @@ function createHandlers(services, options = {}) {
       const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
-      const system = await loadSystem(scopedInput(req, { id: requestParams(req).id }))
+      const system = await loadSystem(scopedAdapterInput(req, { id: requestParams(req).id }))
       // Kind must match the preset (fail-closed). Read-only: the system role/config is never modified here.
       if (!system || system.kind !== preset.requiredKind) {
         throw new HttpRouteError(409, 'READ_SMOKE_KIND_MISMATCH', 'external system kind does not match the preset')
@@ -4285,7 +4305,7 @@ function createHandlers(services, options = {}) {
       const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
-      const system = await loadSystem(scopedInput(req, { id: requestParams(req).id }))
+      const system = await loadSystem(scopedAdapterInput(req, { id: requestParams(req).id }))
       if (!system || system.kind !== probe.plan.requiredKind) {
         throw new HttpRouteError(409, 'READ_SOURCE_PROBE_KIND_MISMATCH', 'external system kind does not match the probe config')
       }
@@ -4435,7 +4455,7 @@ function createHandlers(services, options = {}) {
       const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
-      const system = await loadSystem(scopedInput(req, { id: row.systemId }))
+      const system = await loadSystem(scopedAdapterInput(req, { id: row.systemId }))
       if (!system || system.kind !== prepared.plan.requiredKind) {
         throw new HttpRouteError(409, 'READ_SOURCE_READ_KIND_MISMATCH', 'external system kind does not match the approved config')
       }
@@ -4596,7 +4616,7 @@ function createHandlers(services, options = {}) {
         } catch (error) {
           throw mapReadSourceConfigError(error)
         }
-        const system = await loadSystem(scopedInput(req, { id: row.systemId }))
+        const system = await loadSystem(scopedAdapterInput(req, { id: row.systemId }))
         stepConfigsById[step.readSourceConfigId] = { status: 'approved', config: row.config, system }
       }
 
@@ -4682,7 +4702,7 @@ function createHandlers(services, options = {}) {
       const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
-      const system = await loadSystem(scopedInput(req, { id: requestParams(req).id }))
+      const system = await loadSystem(scopedAdapterInput(req, { id: requestParams(req).id }))
       const adapter = adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
       const adapterObjects = typeof adapter.listObjects === 'function'
         ? await adapter.listObjects()
@@ -4707,7 +4727,7 @@ function createHandlers(services, options = {}) {
       const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
-      const system = await loadSystem(scopedInput(req, { id: requestParams(req).id }))
+      const system = await loadSystem(scopedAdapterInput(req, { id: requestParams(req).id }))
       const template = findDocumentTemplate(system, object)
       if (template) {
         return sendOk(res, sanitizeIntegrationPayload({
@@ -4831,6 +4851,7 @@ function createHandlers(services, options = {}) {
         ...publicRunInput(body),
         pipelineId: requestParams(req).id,
         triggeredBy: 'api',
+        runAs: 'user',
       })
       // W-2: hand the runner's own fence the run this route already claimed under, so the two guards
       // share ONE operation. Attached only when ARMED — a dormant deployment passes the runner the
@@ -4865,6 +4886,7 @@ function createHandlers(services, options = {}) {
         pipelineId: requestParams(req).id,
         triggeredBy: 'api',
         dryRun: true,
+        runAs: 'user',
       })
       // W-2: same shared-run marker as the live route above; armed-only, for the same reason.
       if (b2aTrialRegistry) pipelineDryRunInput[B2A_AUTHORIZED_RUN_ID] = pipelineDryRunB2aRunId
@@ -4906,11 +4928,11 @@ function createHandlers(services, options = {}) {
       const loadSourceSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
-      const sourceSystem = await loadSourceSystem(scopedInput(req, {
+      const sourceSystem = await loadSourceSystem(scopedAdapterInput(req, {
         id: pipeline.sourceSystemId,
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,
-      }))
+      }, ownerPrincipal))
       // `getExternalSystem` is the credential-STRIPPED public accessor. The SOURCE has always used
       // the adapter-capable one (a few lines above); the TARGET never did — so an adapter-backed
       // target (K3) arrived with NO credentials and the C6 dry-run died with
@@ -5058,6 +5080,8 @@ function createHandlers(services, options = {}) {
         id: pipeline.sourceSystemId,
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,
+        principal: ownerPrincipal,
+        runAs: 'user',
       }))
       if (
         targetSystem
@@ -5848,7 +5872,7 @@ function createHandlers(services, options = {}) {
       const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
-      const system = await loadSystem(scopedInput(req, { id: externalSystemId }))
+      const system = await loadSystem(scopedAdapterInput(req, { id: externalSystemId }))
       const adapter = adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
       if (!adapter || typeof adapter.read !== 'function') {
         throw new HttpRouteError(422, 'SOURCE_PREFLIGHT_KIND_UNSUPPORTED', 'this data source kind cannot be read', {
@@ -8363,7 +8387,7 @@ function createHandlers(services, options = {}) {
         for (const source of sources) {
           let adapter = adapterBySystem.get(source.systemId)
           if (!adapter) {
-            const system = await loadSystem(scopedInput(req, { id: source.systemId }))
+            const system = await loadSystem(scopedAdapterInput(req, { id: source.systemId }))
             // P1: fail-closed BEFORE createAdapter — ONLY a metasheet:staging source may back a mapping
             // sheet. Otherwise the preview becomes an arbitrary-adapter read() entry point: a caller
             // pointing at a K3 / other external system would trigger an external read instead of a
@@ -8576,6 +8600,7 @@ function createHandlers(services, options = {}) {
         mode: body.mode,
         id: requestParams(req).id,
         triggeredBy: 'api',
+        runAs: 'user',
       })
       return sendOk(res, await runner.replayDeadLetter(replayInput), 202)
     },
