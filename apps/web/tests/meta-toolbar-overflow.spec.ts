@@ -44,10 +44,14 @@ function mountToolbar(slots?: { overflow?: () => ReturnType<typeof h> }) {
 }
 
 describe('MetaToolbar overflow 「更多」', () => {
-  it('does not render 更多 when no overflow slot is provided', () => {
+  it('always renders 更多 so density / import / export stay reachable without an overflow slot', () => {
     const root = mountToolbar()
-    expect(root.querySelector('[data-testid="toolbar-more"]')).toBeNull()
-    expect(root.querySelector('[data-testid="toolbar-more-panel"]')).toBeNull()
+    const more = root.querySelector('[data-testid="toolbar-more"]') as HTMLButtonElement
+    expect(more).toBeTruthy()
+    expect(more.textContent).toContain('更多')
+    expect(root.querySelector('[data-testid="toolbar-more-panel"]')).toBeTruthy()
+    expect(root.querySelector('button[title="行高"]')).toBeTruthy()
+    expect(root.querySelector('button[title="导出 CSV"]')).toBeTruthy()
   })
 
   it('keeps overflow actions in the tree (v-show) and preserves data-action', async () => {

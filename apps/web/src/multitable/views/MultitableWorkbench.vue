@@ -41,7 +41,8 @@
             class="mt-workbench__presence-chip"
             :title="sheetPresenceTitle"
           >
-            &#x1F465; <strong>{{ sheetPresenceState.activeCollaboratorCount.value }}</strong>
+            <el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.presence" /></el-icon>
+            <strong>{{ sheetPresenceState.activeCollaboratorCount.value }}</strong>
             <span>{{ sheetPresenceLabel }}</span>
           </div>
           <button
@@ -771,6 +772,7 @@ import {
 } from '../utils/base-local-state'
 import { ElIcon } from 'element-plus'
 import {
+  User as IconPresence,
   MessageBox as IconMentions,
   ChatDotRound as IconCommentInbox,
   Setting as IconFields,
@@ -793,6 +795,7 @@ import {
 // the Setting glyph — the source markup already rendered the same gear character (&#x2699;) for all three,
 // so this is a like-for-like swap, not a new distinction.
 const ICON = {
+  presence: IconPresence,
   mentions: IconMentions,
   commentInbox: IconCommentInbox,
   fields: IconFields,
@@ -4641,19 +4644,20 @@ defineExpose({
   background: var(--ms-bg-page, #f5f6f8);
   color: var(--ms-text-2, #646a73);
 }
-.mt-workbench__presence-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border: 1px solid #91caff; border-radius: 12px; background: #e6f4ff; color: #0958d9; font-size: 12px; }
-.mt-workbench__presence-chip strong { font-weight: 600; color: #003eb3; }
-.mt-workbench__mention-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border: 1px solid #e6a23c; border-radius: 12px; background: #fdf6ec; font-size: 12px; cursor: pointer; color: #e6a23c; }
-.mt-workbench__mention-chip:hover { background: #faecd8; border-color: #d48806; }
-.mt-workbench__mention-chip strong { font-weight: 600; color: #d48806; }
-.mt-workbench__mention-chip--unread { border-color: #d48806; background: #faecd8; }
-.mt-workbench__mention-chip-unread { color: #d48806; font-size: 11px; font-weight: 600; }
-.mt-workbench__mention-chip-records { color: #999; font-size: 11px; }
-.mt-workbench__mgr-btn { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border: 1px solid #ddd; border-radius: 4px; background: #fff; font-size: 12px; cursor: pointer; color: #666; }
-.mt-workbench__mgr-btn:hover { background: #f5f7fa; color: #409eff; border-color: #c0d8f0; }
-.mt-workbench__mgr-btn--attention { border-color: #f59e0b; color: #92400e; background: #fffbeb; }
-.mt-workbench__mgr-btn-icon { font-size: 15px; color: currentColor; }
-.mt-workbench__mgr-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: #f59e0b; color: #fff; font-size: 11px; font-weight: 600; }
+.mt-workbench__presence-chip { display: inline-flex; align-items: center; gap: 8px; padding: 8px 10px; border: none; border-radius: var(--ms-radius-sm, 6px); background: transparent; color: var(--ms-color-info, #6b7280); font-size: 13px; }
+.mt-workbench__presence-chip strong { font-weight: 600; color: var(--ms-text-1, #111827); }
+.mt-workbench__mention-chip { display: inline-flex; align-items: center; gap: 8px; padding: 8px 10px; border: none; border-radius: var(--ms-radius-sm, 6px); background: transparent; font-size: 13px; cursor: pointer; color: var(--ms-color-info, #6b7280); }
+.mt-workbench__mention-chip:hover { background: var(--ms-bg-page, #f5f6f8); color: var(--ms-color-primary); }
+.mt-workbench__mention-chip strong { font-weight: 600; color: inherit; }
+.mt-workbench__mention-chip--unread { color: var(--ms-text-1, #111827); }
+.mt-workbench__mention-chip-unread { color: var(--ms-color-info, #6b7280); font-size: 11px; font-weight: 500; }
+.mt-workbench__mention-chip-records { color: var(--ms-text-3, #9ca3af); font-size: 11px; }
+.mt-workbench__mgr-btn { display: inline-flex; align-items: center; gap: 8px; padding: 8px 10px; border: none; border-radius: var(--ms-radius-sm, 6px); background: transparent; font-size: 13px; cursor: pointer; color: var(--ms-color-info, #6b7280); }
+.mt-workbench__mgr-btn:hover { background: var(--ms-bg-page, #f5f6f8); color: var(--ms-color-primary); }
+.mt-workbench__mgr-btn--attention { color: var(--ms-text-1, #111827); background: transparent; }
+.mt-workbench__mgr-btn--active { color: var(--ms-color-primary); }
+.mt-workbench__mgr-btn-icon { font-size: 18px; color: currentColor; }
+.mt-workbench__mgr-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px; margin-left: 6px; padding: 0 5px; border-radius: 999px; background: var(--ms-color-info, #6b7280); color: #fff; font-size: 11px; font-weight: 500; }
 .mt-workbench__base-bar { padding: 8px 16px 0; border-bottom: 1px solid #f0f0f0; }
 /* UI-P2-2b (design docs/development/multitable-ui-p2-2b-vertical-tree-design-20260713.md §2.1/§3.1):
    persistent, collapsible left rail housing the base-bar (workspace picker) + the sheet/view tree

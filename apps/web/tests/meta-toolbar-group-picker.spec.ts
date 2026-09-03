@@ -29,7 +29,7 @@ function mountToolbar(props: Record<string, unknown>) {
 }
 
 async function openGroupPanel(root: HTMLElement): Promise<HTMLElement> {
-  const button = Array.from(root.querySelectorAll('button')).find((b) => b.textContent?.includes('Group')) as HTMLButtonElement
+  const button = root.querySelector('button[title="Group"], button[aria-label="Group"]') as HTMLButtonElement
   button.click()
   await nextTick()
   // UI-P2-1c slice-6: the group panel now renders inside MtPopover, which Teleports its content to

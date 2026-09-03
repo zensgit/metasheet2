@@ -121,15 +121,15 @@ function onResizeStart(e: MouseEvent) {
 
 <style scoped>
 .meta-field-header {
-  padding: 8px 12px; text-align: left; font-weight: 500; font-size: 13px;
-  border-bottom: 1px solid var(--ms-border-light, #e7e8ec); background: var(--ms-bg-card, #fff); white-space: nowrap;
+  padding: 10px 12px; text-align: left; font-weight: 500; font-size: 13px;
+  border-bottom: 1px solid var(--ms-border-light, #e5e7eb); background: var(--ms-bg-card, #fff); white-space: nowrap;
   user-select: none; position: sticky; top: 0; z-index: 3;
 }
 .meta-field-header--sortable { cursor: pointer; }
 .meta-field-header--sortable:hover { background: var(--ms-bg-page, #f5f6f8); }
-.meta-field-header__icon { display: inline-block; width: 22px; text-align: center; color: #999; font-size: 12px; margin-right: 4px; }
+.meta-field-header__icon { display: inline-block; width: 22px; text-align: center; color: var(--ms-color-info, #6b7280); font-size: 12px; margin-right: 4px; }
 .meta-field-header__name { overflow: hidden; text-overflow: ellipsis; }
-.meta-field-header__sort { margin-left: 4px; font-size: 10px; color: #409eff; }
+.meta-field-header__sort { margin-left: 4px; font-size: 10px; color: var(--ms-color-info, #6b7280); }
 .meta-field-header__pin { border: none; background: none; cursor: pointer; padding: 0 2px; margin-left: 4px; font-size: 11px; line-height: 1; opacity: 0; transition: opacity 0.12s; vertical-align: middle; }
 .meta-field-header:hover .meta-field-header__pin { opacity: 0.4; }
 .meta-field-header__pin:hover { opacity: 0.85; }

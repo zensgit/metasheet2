@@ -84,8 +84,7 @@ function mountToolbar(initial: Partial<ToolbarState> = {}) {
 // panel must be looked up via `document`, not `root`, once it's open (the trigger button itself is
 // still inside `root`).
 async function openFilterPanel(root: HTMLElement): Promise<HTMLElement> {
-  const button = Array.from(root.querySelectorAll('button'))
-    .find((candidate) => candidate.textContent?.includes('Filter')) as HTMLButtonElement | undefined
+  const button = root.querySelector('button[title="Filter"], button[aria-label="Filter"]') as HTMLButtonElement | null
   expect(button).toBeTruthy()
   button?.click()
   await nextTick()
@@ -246,7 +245,7 @@ describe('MetaToolbar filter builder', () => {
 
 async function openFilterPanelI18n(root: HTMLElement): Promise<HTMLElement> {
   const button = Array.from(root.querySelectorAll('.meta-toolbar__left button'))
-    .find((b) => /Filter|筛选/.test(b.textContent ?? '')) as HTMLButtonElement | undefined
+    .find((b) => /Filter|筛选/.test(`${b.getAttribute('title') ?? ''} ${b.getAttribute('aria-label') ?? ''}`)) as HTMLButtonElement | undefined
   expect(button).toBeTruthy()
   button?.click()
   await nextTick()
@@ -265,9 +264,17 @@ describe('MetaToolbar i18n', () => {
     useLocale().setLocale('zh-CN')
     const { container: root } = mountToolbar()
     const text = root.textContent ?? ''
-    for (const zh of ['字段', '排序', '筛选', '分组', '导出 CSV', '+ 新建记录']) {
-      expect(text).toContain(zh)
+    for (const [title, visible] of [
+      ['字段', false],
+      ['排序', false],
+      ['筛选', false],
+      ['分组', false],
+    ] as const) {
+      expect(root.querySelector(`button[title="${title}"]`)).toBeTruthy()
+      if (!visible) expect(root.querySelector(`button[title="${title}"]`)?.textContent ?? '').not.toContain(title)
     }
+    expect(text).toContain('导出 CSV')
+    expect(text).toContain('+ 新建记录')
     expect(text).not.toContain('Fields')
     expect(text).not.toContain('+ New Record')
     expect(root.querySelector('[role="toolbar"]')?.getAttribute('aria-label')).toBe('表格工具栏')
@@ -281,9 +288,12 @@ describe('MetaToolbar i18n', () => {
     useLocale().setLocale('en')
     const { container: root } = mountToolbar()
     const text = root.textContent ?? ''
-    for (const en of ['Fields', 'Sort', 'Filter', 'Group', 'Export CSV', '+ New Record']) {
-      expect(text).toContain(en)
+    for (const title of ['Fields', 'Sort', 'Filter', 'Group']) {
+      expect(root.querySelector(`button[title="${title}"]`)).toBeTruthy()
+      expect(root.querySelector(`button[title="${title}"]`)?.textContent ?? '').not.toContain(title)
     }
+    expect(text).toContain('Export CSV')
+    expect(text).toContain('+ New Record')
     expect(text).not.toContain('字段')
     const search = root.querySelector('.meta-toolbar__search-input') as HTMLInputElement
     expect(search.getAttribute('placeholder')).toBe('Search records...')
