@@ -106,11 +106,16 @@
 #   * `INSERT ... ON CONFLICT (id) DO NOTHING` / `ON CONFLICT (user_id, role_id)
 #     DO NOTHING` — idempotent and collision-free regardless of the seeded
 #     roles.name.
-#   * It ENDS with an assertion that EXACTLY one user has the email AND EXACTLY
-#     one `user_roles` admin membership exists for that user (the precise read
-#     path above). Any shortfall RAISEs → the whole transaction rolls back and
-#     psql exits non-zero → this script exits non-zero. Re-running yields the
-#     same asserted 1/1 end-state.
+#   * The same transaction admits the verified account to the repo-owned legacy
+#     `default` organization, but only after proving that directory_integrations
+#     exposes that single anchor and an active default membership already witnesses
+#     it. `ON CONFLICT DO NOTHING` deliberately refuses to resurrect a previously
+#     deactivated membership; the closing assertion then fails and rolls back.
+#   * It ENDS with an assertion that EXACTLY one user has the email, EXACTLY one
+#     `user_roles` admin membership exists, and the account has EXACTLY one active
+#     organization membership, in `default`. Any shortfall RAISEs → the whole
+#     transaction rolls back and psql exits non-zero → this script exits non-zero.
+#     Re-running yields the same asserted 1/1/1/1 end-state.
 #
 # ---------------------------------------------------------------------------
 # USAGE (run ON the deploy host)
@@ -336,6 +341,26 @@ INSERT INTO roles (id, name) VALUES ('admin', 'admin') ON CONFLICT (id) DO NOTHI
 INSERT INTO user_roles (user_id, role_id)
   SELECT u.id, 'admin' FROM users u WHERE u.id = :'uid'
   ON CONFLICT (user_id, role_id) DO NOTHING;
+DO $$
+DECLARE
+  anchor_count int;
+  witness_count int;
+BEGIN
+  SELECT count(DISTINCT org_id) INTO anchor_count
+    FROM directory_integrations
+   WHERE org_id IS NOT NULL AND btrim(org_id) <> '';
+  SELECT count(*) INTO witness_count
+    FROM user_orgs
+   WHERE org_id = 'default' AND is_active = TRUE;
+  IF anchor_count <> 1
+     OR NOT EXISTS (SELECT 1 FROM directory_integrations WHERE org_id = 'default')
+     OR witness_count = 0 THEN
+    RAISE EXCEPTION 'promotion assertion failed: staging default organization anchor is not authoritative';
+  END IF;
+END $$;
+INSERT INTO user_orgs (user_id, org_id, is_active)
+  SELECT u.id, 'default', TRUE FROM users u WHERE u.id = :'uid'
+  ON CONFLICT (user_id, org_id) DO NOTHING;
 -- Stash the (non-secret) verified id + email in transaction-local GUCs so the
 -- assertion block can read them without psql variable interpolation inside the
 -- dollar-quoted body.
@@ -346,17 +371,22 @@ DECLARE
   u_count int;
   m_count int;
   e_count int;
+  o_count int;
+  d_count int;
   uid text := current_setting('l1battery.uid', true);
   em text := current_setting('l1battery.email', true);
 BEGIN
   SELECT count(*) INTO u_count FROM users WHERE id = uid;
   SELECT count(*) INTO m_count FROM user_roles WHERE user_id = uid AND role_id = 'admin';
   SELECT count(*) INTO e_count FROM users WHERE id = uid AND email = em;
-  IF u_count <> 1 OR m_count <> 1 OR e_count <> 1 THEN
-    RAISE EXCEPTION 'promotion assertion failed: users=% admin_memberships=% email_match=% (expected 1/1/1) for id %',
-      u_count, m_count, e_count, uid;
+  SELECT count(*) INTO o_count FROM user_orgs WHERE user_id = uid AND is_active = TRUE;
+  SELECT count(*) INTO d_count FROM user_orgs WHERE user_id = uid AND org_id = 'default' AND is_active = TRUE;
+  IF u_count <> 1 OR m_count <> 1 OR e_count <> 1 OR o_count <> 1 OR d_count <> 1 THEN
+    RAISE EXCEPTION 'promotion assertion failed: users=% admin_memberships=% email_match=% active_orgs=% default_memberships=% (expected 1/1/1/1/1) for id %',
+      u_count, m_count, e_count, o_count, d_count, uid;
   END IF;
-  RAISE NOTICE 'promotion asserted OK: users=% admin_memberships=% for id % (email %)', u_count, m_count, uid, em;
+  RAISE NOTICE 'promotion asserted OK: users=% admin_memberships=% active_orgs=% default_memberships=% for id % (email %)',
+    u_count, m_count, o_count, d_count, uid, em;
 END $$;
 SQL
 then
@@ -364,4 +394,4 @@ then
   exit 1
 fi
 
-echo "[create-l1-admin] DONE — ${EMAIL} exists (server-verified id ${USER_ID}), authenticated with the intended password, and is an RBAC admin. Host password file scrubbed on exit."
+echo "[create-l1-admin] DONE — ${EMAIL} exists (server-verified id ${USER_ID}), authenticated with the intended password, is an RBAC admin, and has one active default-org membership. Host password file scrubbed on exit."
