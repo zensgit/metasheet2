@@ -186,7 +186,6 @@ describe('multitable plugin scope helper', () => {
           sheetId === 'sheet_1' && projectId === 'tenant_42:after-sales'
         )),
         getFieldId: vi.fn(() => 'fld_1'),
-        isSheetOwnedByProject: vi.fn(async () => true),
         findObjectSheet: vi.fn(async () => ({
           id: 'sheet_1',
           baseId: 'base_legacy',
@@ -250,9 +249,6 @@ describe('multitable plugin scope helper', () => {
       scoped.provisioning.isSheetOwnedByProject('sheet_of_another_tenant', 'tenant_42:after-sales'),
     ).resolves.toBe(false)
     expect(scoped.provisioning.getFieldId('tenant_42:after-sales', 'serviceTicket', 'status')).toBe('fld_1')
-    await expect(
-      scoped.provisioning.isSheetOwnedByProject('sheet_1', 'tenant_42:after-sales'),
-    ).resolves.toBe(true)
     await expect(
       scoped.provisioning.findObjectSheet({
         projectId: 'tenant_42:after-sales',
@@ -327,19 +323,14 @@ describe('multitable plugin scope helper', () => {
     expect(() =>
       scoped.provisioning.getObjectViewId('tenant_42:attendance', 'serviceTicket', 'default'),
     ).toThrow(MultitableProjectNamespaceError)
-    // The ownership question names a PROJECT, so it takes the same namespace assertion every other
-    // project argument takes, and throws like them. There is no answer to narrow afterwards: the
-    // port returns a boolean, so it can never hand back another tenant's project id — which is what
-    // an earlier id-returning cut did, since plugin namespaces are per-PLUGIN, not per-tenant.
-    await expect(
-      scoped.provisioning.isSheetOwnedByProject('sheet_1', 'tenant_42:attendance'),
-    ).rejects.toThrow(MultitableProjectNamespaceError)
     expect(() =>
       scoped.provisioning.getFieldId('tenant_42:attendance', 'serviceTicket', 'status'),
     ).toThrow(MultitableProjectNamespaceError)
-    // The ownership port narrows on the projectId ARGUMENT, before the registry is touched — a
-    // plugin may not ask about a project outside its own namespace. (Within one namespace the guard
-    // cannot separate tenants, which is exactly why the port answers a boolean instead of an owner.)
+    // The ownership question names a PROJECT, so it narrows on the projectId ARGUMENT, before the
+    // registry is touched — a plugin may not ask about a project outside its own namespace. There is
+    // no answer to narrow afterwards: the port returns a boolean, so it can never hand back another
+    // tenant's project id — which is what an earlier id-returning cut did, since plugin namespaces
+    // are per-PLUGIN, not per-tenant, and within one namespace the guard cannot separate tenants.
     await expect(
       scoped.provisioning.isSheetOwnedByProject('sheet_1', 'tenant_42:attendance'),
     ).rejects.toThrow(MultitableProjectNamespaceError)

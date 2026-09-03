@@ -324,6 +324,10 @@ function handlersCallingOperatorValueScope(src) {
 
 /** The value-bearing reads as of this commit. A change here is a deliberate, reviewable act. */
 const PINNED_VALUE_BEARING_READ_HANDLERS = [
+  // 结转 (#5459). Its confirm face derives the tenant through the same host-vouched operator scope,
+  // so the DERIVED scan picked it up the moment that PR landed — which is exactly what deriving the
+  // set is for: a surface joined this tripwire without anyone remembering to enrol it.
+  'stockPreparationCarryConfirm',
   'stockPreparationConfirmationDecisionsValueEntry',
   // 通知下一步 (#5442). The two handoff faces derive their tenant through the same host-vouched
   // operator scope, so the DERIVED set picked them up the moment that PR landed — which is the point

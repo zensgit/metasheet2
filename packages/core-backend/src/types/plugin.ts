@@ -440,33 +440,6 @@ export interface MultitableProvisioningAPI {
    * project board proves the SHEET exists via `findObjectSheet` before it composes a deep link).
    */
   getObjectViewId(projectId: string, objectId: string, viewId: string): string
-  /**
-   * IS THIS SHEET OWNED BY THIS PROJECT, per the provisioning registry — a yes/no, and deliberately
-   * never "whose is it".
-   *
-   * It exists because a sheet id ALONE cannot be checked for ownership by recomputing a hash: the
-   * hash is over (projectId, objectId), so a caller must already know the objectId the sheet was
-   * created under. A deployment that rebinds a table action to a different objectId while KEEPING
-   * its existing sheet still owns that sheet, and only a registry lookup says so.
-   *
-   * THE SHAPE IS A BOOLEAN ON PURPOSE. Plugin project namespaces are per-PLUGIN, not per-tenant, so
-   * an id-returning form cannot be made safe by narrowing its answer to the namespace: every tenant
-   * of the same plugin shares that namespace, and the caller would be handed another tenant's
-   * staging project id. Callers only need "is the sheet I was handed mine?", so the id never leaves
-   * the database.
-   *
-   * REQUIRED of the host, which is a statement about THIS surface: every host that implements this
-   * interface implements the port. A PLUGIN still probes for it at runtime before calling — a plugin
-   * shipped against a newer host than it is running on receives an object without the key whatever
-   * this type says, and stock-prep's fill-target resolution degrades to its deterministic-id proof
-   * rather than throwing. `projectId` is namespace-checked exactly like every other project
-   * argument.
-   *
-   * SIGNATURE SHARED WITH PR #5459, which built this port independently for the carry path: same
-   * name, same argument order, same boolean return, same guard-on-the-argument placement. Whichever
-   * of the two merges second must not diverge from it.
-   */
-  isSheetOwnedByProject(sheetId: string, projectId: string): Promise<boolean>
   findObjectSheet(input: {
     projectId: string
     objectId: string

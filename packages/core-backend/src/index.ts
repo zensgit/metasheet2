@@ -771,25 +771,6 @@ export class MetaSheetServer {
           // read-only sibling of the two accessors above. 项目备料页 composes its multitable deep
           // link from this, AFTER proving the sheet itself exists through findObjectSheet.
           getObjectViewId: (projectId, objectId, viewId) => getProvisionedObjectViewId(projectId, objectId, viewId),
-          // 项目备料页 / 结转: IS THIS SHEET OWNED BY THIS PROJECT, straight out of the
-          // provisioning registry. The deep-link and carry paths need a tenancy proof that survives
-          // a rebinding — a deployment that repoints a table action at a sandbox objectId while
-          // keeping the sheet it already had still owns that sheet, and no hash of (project, new
-          // objectId) equals it. A BOOLEAN, so the owning project id never leaves the database.
-          isSheetOwnedByProject: async (sheetId: string, projectId: string) => {
-            const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
-              const result = await poolManager.get().query(sql, params)
-              return {
-                rows: Array.isArray((result as { rows?: unknown[] }).rows)
-                  ? (result as { rows: unknown[] }).rows
-                  : [],
-                rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
-                  ? (result as { rowCount: number }).rowCount
-                  : undefined,
-              }
-            }
-            return isProvisionedSheetOwnedByProject(txQuery, sheetId, projectId)
-          },
           findObjectSheet: async ({ projectId, objectId }) => {
             const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
               const result = await poolManager.get().query(sql, params)
