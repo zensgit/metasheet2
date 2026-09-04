@@ -106,6 +106,7 @@
     class="meta-record-drawer"
     :style="{ '--meta-record-drawer-width': panelWidth + 'px' }"
     @keydown="onInspectorKeydown"
+    @keyup="onInspectorKeyup"
   >
     <div
       class="meta-record-drawer__splitter"
@@ -192,14 +193,21 @@
         <button class="meta-record-drawer__close" :aria-label="l('record.close')" @click="emit('close')">&times;</button>
       </div>
     </div>
-    <div v-if="record" class="meta-record-drawer__body">
+    <div
+      v-if="record"
+      class="meta-record-drawer__body"
+      :style="tabsBarHeight > 0 ? { '--meta-record-tabs-bar-height': tabsBarHeight + 'px' } : undefined"
+    >
       <!-- Resizable panel (2026-09-05): `.meta-record-drawer__tabs` is `inline-flex` (sized to its own
            pill content, well under the panel's full width) -- making IT ALONE sticky would only mask
            scrolled content directly behind the pill, leaving scrolled field rows visible in the empty
            strip to its right. This wrapper carries the sticky positioning + a FULL-WIDTH opaque
            background instead (see its own style comment below); the inner div is unchanged (still the
-           `role="tablist"`, still the pill visual). -->
-      <div class="meta-record-drawer__tabs-bar">
+           `role="tablist"`, still the pill visual).
+           P3-2: also bound to `setTabsBarRef` (a function ref, not a plain template ref + `watch`) so a
+           ResizeObserver can (dis)connect exactly as this element mounts/unmounts under the `v-if`
+           above -- see that function's own comment. -->
+      <div class="meta-record-drawer__tabs-bar" :ref="(el) => setTabsBarRef(el as HTMLElement | null)">
         <div class="meta-record-drawer__tabs" role="tablist" :aria-label="l('record.tabsAria')">
           <button
             v-for="tab in tabDescriptors"
@@ -752,19 +760,57 @@ const panelWidth = ref(readStoredPanelWidth())
 // The width to restore when the expand toggle is switched back off -- the most recent MANUALLY
 // chosen width (drag or keyboard), not necessarily the mount-time one.
 const lastChosenPanelWidth = ref(panelWidth.value)
+// NIT-4: intentionally NOT persisted -- only `panelWidth` (the px number it produces) survives to
+// `localStorage`. A reload always starts collapsed (this re-inits to `false`), even if the panel was
+// expanded when the tab closed; the WIDTH itself is still remembered (it is exactly `maxPanelWidth` at
+// the time, so a reload restores the same px value, just with the toggle showing its default
+// "expand" affordance rather than "collapse"). This is a deliberate scope line for this feature, not
+// an oversight -- expanded/collapsed is presentation state, not a value worth a second storage key.
 const isExpanded = ref(false)
 
-watch(panelWidth, (width) => persistPanelWidth(width))
+// NIT-1 (persist on release, not per pointermove/keydown): this used to be a blanket
+// `watch(panelWidth, persist)`, firing a synchronous localStorage write on every intermediate value
+// during a drag or a held-down arrow key. Persistence now happens ONLY at the three points a resize
+// actually ends: `onUp` (pointerup/pointercancel, see `onSplitterPointerDown` below),
+// `onInspectorKeyup` (keyup on the splitter, see below), and `toggleExpand` (a discrete click, already
+// a single "release"). `panelWidth` itself is still written on every intermediate step
+// (`applyPanelWidth` / the P3-1 watcher below) -- only the localStorage WRITE is deferred, so the
+// visible width/ARIA stay perfectly live during a drag.
 
 /** Manual resize (drag or keyboard): clamp, apply, remember for a later expand-toggle collapse, and
  *  always exit the expanded state -- a manual choice is no longer "the max" even if it happens to
- *  land exactly on it, so the toggle's own aria-pressed must not claim otherwise. */
+ *  land exactly on it, so the toggle's own aria-pressed must not claim otherwise. Does NOT persist
+ *  (NIT-1) -- called on every intermediate pointermove/keydown step of a resize gesture; the
+ *  localStorage write happens once the gesture releases (`onUp`/`onInspectorKeyup` below). */
 function applyPanelWidth(next: number) {
   const clamped = clampPanelWidth(next)
   panelWidth.value = clamped
   lastChosenPanelWidth.value = clamped
   isExpanded.value = false
 }
+
+// P3-1 (viewport shrink never re-clamped): `maxPanelWidth` is viewport-derived (see
+// `syncViewportWidth`/`viewportWidth` below) and can DROP on a live window resize -- e.g. the user
+// narrows the browser after dragging the panel wide. Without this watcher `panelWidth` stayed at
+// whatever it was chosen at the wider viewport: the CSS `max-width: min(720px, 60vw)`
+// belt-and-suspenders fallback on the root (see that rule's own comment) would visually clip the box,
+// but the JS-tracked `panelWidth` and the ARIA trio it drives (`aria-valuenow`, the inline
+// `--meta-record-drawer-width` var) stayed stale and GREATER than the new `aria-valuemax` -- an
+// invalid ARIA state (valuenow > valuemax) the CSS clip alone does not fix. Writes `panelWidth`
+// DIRECTLY rather than through `applyPanelWidth`: routing through it would also clear `isExpanded` and
+// overwrite `lastChosenPanelWidth`, neither of which a viewport change should do. Does not persist
+// (NIT-1) -- a viewport change is not a user choice.
+watch(maxPanelWidth, (max) => {
+  if (isExpanded.value) {
+    // Expanded means "pinned to the max" by definition -- keep it pinned to the NEW max instead of
+    // leaving it at the old (now out-of-range) one.
+    panelWidth.value = max
+    return
+  }
+  if (panelWidth.value > max) {
+    panelWidth.value = clampPanelWidth(panelWidth.value)
+  }
+})
 
 function toggleExpand() {
   if (isExpanded.value) {
@@ -775,6 +821,9 @@ function toggleExpand() {
     panelWidth.value = maxPanelWidth.value
     isExpanded.value = true
   }
+  // NIT-1: the toggle click is itself a single, discrete "release" -- persist here directly rather
+  // than relying on a per-render watcher.
+  persistPanelWidth(panelWidth.value)
 }
 
 // Dispatched from `onInspectorKeydown` (the single root-level listener) by target, NOT bound directly
@@ -813,6 +862,11 @@ function onSplitterKeydown(event: KeyboardEvent) {
 // mid-drag unmount (`visible` flipping false) simply removes the element -- and its own listeners --
 // with nothing left listening on `document`.
 function onSplitterPointerDown(event: PointerEvent) {
+  // Primary-button guard: a touch/pen pointer has no meaningful "button" concept (`pointerType` is
+  // not `'mouse'`, so this never applies to them) -- only a MOUSE pointerdown is checked, and only a
+  // non-primary button (right-click == 2, middle-click == 1) is rejected. Returns before
+  // `preventDefault()`/capture below, so a right-click here still opens its native context menu
+  // instead of silently starting (or blocking) a drag.
   if (event.pointerType === 'mouse' && event.button !== 0) return
   // Same reason MetaFieldHeader.vue's own column-resize handler binds `@mousedown.stop.prevent`: a
   // drag without preventDefault starts a text selection across the panel (`touch-action: none` above
@@ -826,14 +880,41 @@ function onSplitterPointerDown(event: PointerEvent) {
     applyPanelWidth(startWidth - (moveEvent.clientX - startX))
   }
   function onUp(upEvent: PointerEvent) {
-    handle.releasePointerCapture?.(upEvent.pointerId)
-    handle.removeEventListener('pointermove', onMove)
-    handle.removeEventListener('pointerup', onUp)
-    handle.removeEventListener('pointercancel', onUp)
+    // NIT-2: `releasePointerCapture` has been observed to throw on some browser/input-device
+    // combinations (it is already called defensively with `?.` above for jsdom, which has no real
+    // implementation at all -- see the pointer-drag spec's own comment). Without this `finally`, a
+    // throw here would skip the three `removeEventListener` calls below, leaving `onMove` (and this
+    // very `onUp`) permanently attached to the handle -- a leaked listener that keeps applying every
+    // later pointermove on this element forever, well past the drag that started it. `try/finally`
+    // (not `try/catch`) is deliberate: any exception still propagates and is reported by the platform
+    // (the standard behavior for a throw inside an event listener) -- this block's only job is to
+    // guarantee cleanup runs, not to swallow the error.
+    try {
+      handle.releasePointerCapture?.(upEvent.pointerId)
+    } finally {
+      handle.removeEventListener('pointermove', onMove)
+      handle.removeEventListener('pointerup', onUp)
+      handle.removeEventListener('pointercancel', onUp)
+      // NIT-1: persist on release (pointerup/pointercancel), not on every pointermove.
+      persistPanelWidth(panelWidth.value)
+    }
   }
   handle.addEventListener('pointermove', onMove)
   handle.addEventListener('pointerup', onUp)
   handle.addEventListener('pointercancel', onUp)
+}
+
+// NIT-1 (keyboard release): mirrors `onInspectorKeydown`'s single-root-listener dispatch discipline
+// (see that function's own file-header comment for why a second, descendant-bound listener is
+// unreliable under this vitest/jsdom harness) -- persists the CURRENT width once a splitter
+// arrow/Home/End key is RELEASED, not on every keydown (a held-down key repeat-fires keydown many
+// times before the eventual keyup, and `onSplitterKeydown` already applies each step live via
+// `applyPanelWidth`; this only defers the localStorage write to the gesture's end).
+function onInspectorKeyup(event: KeyboardEvent) {
+  const target = event.target as HTMLElement | null
+  if (target?.closest('[role="separator"]') != null) {
+    persistPanelWidth(panelWidth.value)
+  }
 }
 
 onMounted(() => {
@@ -841,6 +922,44 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   window.removeEventListener('resize', syncViewportWidth)
+})
+
+// P3-2 (sticky tabs bar hides a focused/scrolled-into-view field): `.meta-record-drawer__tabs-bar`
+// (see its own template/style comments) sits `position: sticky` above `.meta-record-drawer__body`'s
+// scroll content, so a field scrolled into view via `scrollIntoView()` (browser default) or Tab-focus
+// auto-scroll can land directly UNDER the bar, invisible. The fix is `scroll-padding-top` on the
+// scroll container (`.meta-record-drawer__body`, below) set to the bar's own box height -- but that
+// height is NOT a constant: tab labels are i18n'd (locale-dependent string length), and at the 320px
+// minimum panel width the tab pills can wrap onto a second line, growing the bar. A single fixed px
+// value would therefore be wrong by construction on at least some locale/viewport combinations, so
+// the height is MEASURED live via ResizeObserver (the same guard-for-absence idiom already used by
+// MetaChartRenderer.vue's `ensureResizeObserver`) and published as the
+// `--meta-record-tabs-bar-height` custom property, consumed by `.meta-record-drawer__body`'s
+// `scroll-padding-top: var(--meta-record-tabs-bar-height, 48px)`. The `48px` fallback is the ONLY
+// value exercised by this component's own jsdom tests (jsdom performs no layout, so ResizeObserver
+// never fires here) -- a rough approximation of the bar's typical single-line box, not a
+// real-browser-measured value; the LIVE var is what real usage renders and is NOT behaviorally
+// verified by this PR's test suite (same real-browser-verification caveat as this file's existing
+// focus-ring and sticky-tabs-bar comments). Bound via a function ref (not a plain template ref + a
+// `watch`) because the element is inside `v-if="record"` and needs to (dis)connect the observer
+// exactly as it mounts/unmounts, not merely change value.
+const tabsBarHeight = ref(0)
+let tabsBarResizeObserver: ResizeObserver | null = null
+function setTabsBarRef(el: HTMLElement | null) {
+  tabsBarResizeObserver?.disconnect()
+  tabsBarResizeObserver = null
+  if (!el || typeof ResizeObserver === 'undefined') return
+  const target = el
+  tabsBarResizeObserver = new ResizeObserver((entries) => {
+    const entry = entries[0]
+    if (!entry) return
+    tabsBarHeight.value = entry.borderBoxSize?.[0]?.blockSize ?? target.offsetHeight
+  })
+  tabsBarResizeObserver.observe(target)
+}
+onBeforeUnmount(() => {
+  tabsBarResizeObserver?.disconnect()
+  tabsBarResizeObserver = null
 })
 
 const recordSubscribed = ref(false)
@@ -1004,14 +1123,27 @@ async function toggleRecordSubscription() {
    needing `position: sticky` of its own; `flex: 0 0 auto` just keeps it from ever being squeezed by
    `.meta-record-drawer__body`'s `flex: 1` on a very tall field list -- the body scrolls internally
    long before that could happen. */
-.meta-record-drawer__header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #eee; flex: 0 0 auto; }
+/* P3-3 (header overflow at the 320px minimum): title + nav + actions no longer fit on one row at
+   320px once several action buttons (watch/comment/workflow/permissions/duplicate/delete/expand/
+   close) are all visible -- `flex-wrap: wrap` lets the row break onto a second line instead of
+   overflowing the panel horizontally (the page-level no-horizontal-scroll contract this file's other
+   rules already protect, see e.g. the overlay-mode width comment). `.meta-record-drawer__actions`
+   gets its own `flex-wrap: wrap` too, so a still-too-narrow action group wraps internally rather than
+   pushing the row wider than the panel. */
+.meta-record-drawer__header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #eee; flex: 0 0 auto; flex-wrap: wrap; row-gap: 6px; }
 /* Resizable panel (2026-09-05): the drag/keyboard splitter on the panel's left edge (see the
    component's `onSplitterPointerDown`/`onSplitterKeydown`). Absolutely positioned against
    `.meta-record-drawer`'s own `position: relative` (added above) so it never participates in the
-   header/body flex column and spans the panel's full height regardless of scroll position; straddles
-   the edge (-4px to +4px) for an easy grab target without visually widening the 1px border. */
+   header/body flex column and spans the panel's full height regardless of scroll position.
+   NIT-3 (2026-09-05 follow-up): this originally straddled the edge (`left: -4px`, half in / half out)
+   for an easy grab target -- but the half reaching OUTSIDE the panel (into `.mt-workbench__main`, the
+   grid column to its left) sat at `z-index: 6`, ABOVE that column's own content, silently stealing a
+   few px of its vertical scrollbar/edge hit area in push mode. The hit area now sits entirely
+   `left: 0`, INSIDE the panel's own box, and is narrowed from 8px to 6px alongside the move so it
+   still reads as a slim edge affordance rather than a thick strip now that it no longer needs to
+   straddle anything. */
 .meta-record-drawer__splitter {
-  position: absolute; top: 0; bottom: 0; left: -4px; width: 8px; cursor: col-resize; z-index: 6; touch-action: none;
+  position: absolute; top: 0; bottom: 0; left: 0; width: 6px; cursor: col-resize; z-index: 6; touch-action: none;
 }
 .meta-record-drawer__splitter:hover, .meta-record-drawer__splitter:focus-visible {
   background: var(--ms-color-primary); opacity: 0.35;
@@ -1019,8 +1151,11 @@ async function toggleRecordSubscription() {
 .meta-record-drawer__splitter:focus-visible { outline: 2px solid var(--ms-color-primary); outline-offset: -2px; }
 .meta-record-drawer__expand { font-size: 13px; line-height: 1; }
 .meta-record-drawer__expand--active { border-color: var(--ms-color-primary); color: var(--ms-color-primary); }
-.meta-record-drawer__title { font-size: 15px; font-weight: 600; margin: 0; }
-.meta-record-drawer__actions { display: flex; gap: 8px; align-items: center; }
+/* P3-3: `min-width: 0` is the standard flex-item fix that lets `text-overflow: ellipsis` actually
+   engage on a flex child -- without it the title's automatic min-width is its own text length, so it
+   would push the row wider instead of truncating. */
+.meta-record-drawer__title { font-size: 15px; font-weight: 600; margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta-record-drawer__actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .meta-record-drawer__btn { padding: 4px 10px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 12px; }
 .meta-record-drawer__btn--comment { border-radius: 999px; padding: 3px 8px; }
 .meta-record-drawer__btn--comment.meta-record-drawer__btn--comment--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
@@ -1058,7 +1193,14 @@ async function toggleRecordSubscription() {
    chain". `overflow-y: auto` (moved down from the root, see that rule's own comment) is what makes a
    long field/history/comments/attachments list scroll IN PLACE instead of growing the whole panel (or
    the page) the way it did before this change. */
-.meta-record-drawer__body { padding: 12px 16px; flex: 1; min-height: 0; overflow-y: auto; }
+/* P3-2 (sticky tabs bar hides a focused/scrolled-into-view field): `scroll-padding-top` shifts where
+   the browser's native scroll-into-view (`scrollIntoView()`, Tab-focus auto-scroll) settles a target
+   -- keeping it BELOW the sticky `.meta-record-drawer__tabs-bar` instead of directly under it. The
+   value comes from the `--meta-record-tabs-bar-height` custom property, set on this element from the
+   bar's own live-measured height (see the component's `tabsBarHeight`/`setTabsBarRef`); the `48px`
+   fallback only applies before that JS measurement lands (or in a ResizeObserver-less/jsdom
+   environment) -- see that code's own comment for why a fixed value alone would be wrong here. */
+.meta-record-drawer__body { padding: 12px 16px; flex: 1; min-height: 0; overflow-y: auto; scroll-padding-top: var(--meta-record-tabs-bar-height, 48px); }
 /* `position: sticky` keeps the tab strip visible while `.meta-record-drawer__body` above scrolls
    underneath it (item 1's "…and tabs stay visible") -- `top: 0` sticks it flush against the body's own
    scrollport (its nearest scrolling ancestor). Spans the FULL scroll width (cancels the body's own
