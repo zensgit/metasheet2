@@ -337,7 +337,7 @@
       v-if="aiRunVisible"
       type="button"
       class="meta-cell-editor__link-btn meta-cell-editor__ai-run"
-      :disabled="aiRunState?.pending || aiRunState?.busy"
+      :disabled="aiRunDisabled"
       data-test="cell-ai-run"
       @click="emit('ai-run')"
       @keydown.tab="onAiRunTab"
@@ -346,7 +346,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, toRef } from 'vue'
+import { ref, computed, onMounted, toRef } from 'vue'
 import type { MetaAttachment, MetaAttachmentDeleteFn, MetaAttachmentUploadContext, MetaAttachmentUploadFn, MetaCommentMentionSuggestion, MetaField } from '../../types'
 import MetaAttachmentList from '../MetaAttachmentList.vue'
 import MetaYjsPresenceChip from '../MetaYjsPresenceChip.vue'
@@ -375,6 +375,7 @@ import {
 } from '../../utils/field-display'
 import { useYjsCellBinding, type YjsCellBinding } from '../../composables/useYjsCellBinding'
 import { useYjsScalarCell, type YjsScalarCellBinding } from '../../composables/useYjsScalarCell'
+import { isDateLikeStringField, isYjsTextEligible } from '../../utils/yjs-text-eligibility'
 import { useLocale } from '../../../composables/useLocale'
 import {
   metaCoreLabel,
@@ -411,29 +412,37 @@ const props = defineProps<{
    */
   mentionSuggestions?: MetaCommentMentionSuggestion[]
   /**
-   * D2 (grid-commit-reliability): opt-in for Tab/Shift+Tab inside the editor
-   * to preventDefault + emit `tab-commit` instead of doing nothing (native
-   * Tab, in a grid `<td>` that isn't itself in tab order, would otherwise
-   * jump focus to whatever the next DOM tabindex happens to be). MUST be
-   * requested by the host — MetaCellEditor cannot infer it: MetaGridTable
-   * passes `commit-on-tab` and listens for `tab-commit` (moves focus to the
-   * adjacent cell); MetaBulkEditDialog does NOT — its value input sits in an
-   * ordinary tab sequence with a "Set value"/Cancel footer after it, and an
-   * unconditional preventDefault here previously trapped keyboard focus
-   * inside that input (Tab did nothing — no listener consumed the emit).
-   * Default undefined/false = plain native Tab, byte-identical to pre-D2.
+   * D2/P2-1 (grid-commit-reliability): the SOLE host opt-in switch for every
+   * commit/discard-on-blur AND commit-on-Tab behaviour this editor can emit
+   * (`blur-commit`, `cancel`-on-invalid-blur, `tab-commit`). MUST be
+   * requested by the host — MetaCellEditor cannot infer it:
+   *   - `'grid'`: MetaGridTable passes this and listens for `blur-commit` /
+   *     `tab-commit` (commits the draft, moves focus to the adjacent cell on
+   *     Tab). Native Tab, in a grid `<td>` that isn't itself in tab order,
+   *     would otherwise jump focus to whatever the next DOM tabindex happens
+   *     to be — preventDefault here is what fixes that.
+   *   - `'none'` / undefined (the default): plain native blur/Tab,
+   *     byte-identical to pre-D2. MetaBulkEditDialog relies on this — its
+   *     value input sits in an ordinary tab sequence with a "Set value"/
+   *     Cancel footer after it, and only listens for `@cancel` (Escape/close
+   *     button). P2-1: an EARLIER version of this gate covered Tab only;
+   *     blur was wired unconditionally, so `onScalarBlur`'s P3-C
+   *     invalid-numeric-draft path emitted `cancel` regardless of host —
+   *     which MetaBulkEditDialog's `@cancel="onCancel"` reads as "dismiss
+   *     the whole dialog". Blurring a number input mid-typing '-7' (a
+   *     WHATWG-sanitized-to-empty in-progress value, see
+   *     `numberInvalidRawDraft` below) silently closed the bulk-edit dialog.
+   *     Every blur handler now checks this policy FIRST, before anything
+   *     else (including before touching `numberInvalidRawDraft`), so a
+   *     `'none'`-policy host is a true no-op — see each handler below.
    */
-  commitOnTab?: boolean
+  hostCommitPolicy?: 'none' | 'grid'
 }>()
 
-const DATE_RE = /^\d{4}-\d{2}-\d{2}/
-const DATE_FIELD_NAMES = /date|time|deadline|due|start|end|created|updated|birthday/i
-const isDateLike = computed(() => {
-  if (props.field.type !== 'string') return false
-  if (DATE_FIELD_NAMES.test(props.field.name)) return true
-  if (typeof props.modelValue === 'string' && DATE_RE.test(props.modelValue)) return true
-  return false
-})
+// isDateLikeStringField / isYjsTextEligible live in ../../utils/yjs-text-eligibility so
+// MetaGridTable's D1 type-to-edit can apply the IDENTICAL eligibility rule (see P3-1
+// below) without duplicating these regexes and risking drift.
+const isDateLike = computed(() => isDateLikeStringField(props.field, props.modelValue))
 
 const emit = defineEmits<{
   (e: 'update:modelValue', val: unknown): void
@@ -491,6 +500,13 @@ const aiRunVisible = computed(() => {
   const raw = (props.field.property ?? {}).aiShortcut
   return Boolean(raw) && typeof raw === 'object' && !Array.isArray(raw)
 })
+// P2-2: the single source of truth for the button's own `:disabled` AND for
+// onTextTab's Tab-yield decision (see that handler's doc comment) — kept as
+// ONE computed so the two can never independently drift out of sync.
+const aiRunDisabled = computed(() => Boolean(props.aiRunState?.pending || props.aiRunState?.busy))
+// Rendered AND not disabled: a disabled <button> is never a native Tab stop,
+// so `aiRunVisible` alone over-promises reachability.
+const aiRunFocusable = computed(() => aiRunVisible.value && !aiRunDisabled.value)
 
 const readonlyDisplayValue = computed(() =>
   formatFieldDisplay({
@@ -526,7 +542,18 @@ const inertYjsBinding: YjsCellBinding = {
   collaborators: ref([]),
   release: () => { /* nothing to release */ },
 }
-const yjsEligibleAtSetup = props.field?.type === 'string' && !isDateLike.value && !!props.recordId
+// P3-1 (grid-commit-reliability, round 3): eligibility is the SAME predicate
+// MetaGridTable's D1 type-to-edit now checks (isYjsTextEligible, imported
+// above) BEFORE it ever seeds a keystroke — see that call site's doc comment
+// for the full story. Because D1 no longer seeds `modelValue` for a cell
+// this composable might bind, there is no local pre-activation draft left to
+// lose, so the previous "forward the pending draft into Y.Text the instant
+// the binding activates" watcher (keyed on `yjsText.value === ''`) has been
+// REMOVED rather than fixed: that heuristic could not tell "nobody has
+// synced anything yet" apart from "a collaborator just synced an empty
+// string", and resolving that ambiguity from the client is unsafe — see the
+// removed watcher in git history (P3-B, round 2) for the superseded attempt.
+const yjsEligibleAtSetup = isYjsTextEligible(props.field, props.recordId, props.modelValue)
 const yjsBinding = yjsEligibleAtSetup
   ? useYjsCellBinding({
       recordId: computed<string | null>(() => recordIdRef.value ?? null),
@@ -542,31 +569,6 @@ const yjsBinding = yjsEligibleAtSetup
 const yjsActive = computed(() => yjsBinding.active.value)
 const yjsText = computed(() => yjsBinding.text.value)
 const yjsCollaborators = computed(() => yjsBinding.collaborators.value)
-
-// P3-B (grid-commit-reliability, round 2): a local edit made BEFORE the Yjs
-// binding activates — most concretely D1's type-to-edit seed character,
-// which sets `modelValue` directly and mounts this editor before any Y.Doc
-// has connected — displays fine while `yjsActive` is false (the `<input>`
-// reads `modelValue`), but the INSTANT `active` flips true the input's
-// `:value` binding switches over to `yjsText` instead. Nothing forwards
-// that local draft into Y.Text by then, so it just vanishes — lost from
-// BOTH the REST path (confirmEdit skips the patch once `yjs-commit` fires)
-// and the Yjs path (Y.Text was never written).
-//
-// Fix: the instant the binding activates, if Y.Text is still empty (no one
-// has synced real content into this field yet) and there IS a non-empty
-// local draft waiting, adopt it as Y.Text's initial content once. Gated on
-// `yjsText.value === ''` specifically so this can NEVER clobber a
-// collaborator's already-synced content — only a field nobody has written
-// to yet, which is exactly D1's seed scenario (and, more generally, any
-// keystroke typed in the connect-timeout window before Yjs takes over).
-watch(yjsActive, (nowActive, wasActive) => {
-  if (!nowActive || wasActive) return
-  const pending = props.modelValue
-  if (typeof pending === 'string' && pending !== '' && yjsText.value === '') {
-    yjsBinding.setText(pending)
-  }
-})
 
 // --- Yjs opt-in binding for ATOMIC (non-text) scalar cells (LWW via the
 // `fields` Y.Map). Same gating/fallback discipline as the text binding:
@@ -750,70 +752,100 @@ function shouldIgnoreBlur(e: FocusEvent): boolean {
   const related = e.relatedTarget as Node | null
   return !!(related && editorRoot.value && editorRoot.value.contains(related))
 }
+// P2-1: `hostCommitPolicy !== 'grid'` is the FIRST statement in every blur
+// handler below — before `shouldIgnoreBlur`, before `numberInvalidRawDraft`.
+// A host that never opts in (MetaBulkEditDialog) must see these blur
+// handlers as a true no-op: no `blur-commit`, no `cancel`, and no mutation
+// of `numberInvalidRawDraft` as a side effect (clearing that flag on a
+// policy-'none' blur would still be observable — the NEXT event to read it,
+// e.g. a later Tab, would see a false "resolved" state that was never
+// actually resolved by anything the host asked for).
 function onScalarBlur(e: FocusEvent) {
+  if (props.hostCommitPolicy !== 'grid') return
   if (shouldIgnoreBlur(e)) return
-  // P3-C: a blur while an invalid numeric draft is pending (see
-  // `numberInvalidRawDraft`) discards instead of committing — `cancel` is
-  // the existing no-patch/close path (same one Escape already uses), so
-  // this can never persist the earlier keystroke's `null` commit.
+  // P3-C/NIT: a blur while an invalid numeric draft is pending (see
+  // `numberInvalidRawDraft`). If NO valid draft was ever reached this edit
+  // session (e.g. a lone '-' as the very first keystroke), discard via
+  // `cancel` — the existing no-patch/close path (same one Escape already
+  // uses) — so this can never persist that keystroke's would-be `null`
+  // commit. If a valid draft WAS reached earlier ('7' before a trailing
+  // '.'), `numberHasValidDraft` is true and editCell's staged value already
+  // holds that last-valid number (onNumberInput never overwrote it with the
+  // invalid keystroke) — fall through and commit it normally instead of
+  // discarding the whole session (the number-prefix-loss NIT).
   if (numberInvalidRawDraft.value) {
     numberInvalidRawDraft.value = false
-    emit('cancel')
-    return
+    if (!numberHasValidDraft.value) {
+      emit('cancel')
+      return
+    }
   }
   if (scalarActive.value) emit('yjs-commit')
   emit('blur-commit')
 }
 function onTextBlur(e: FocusEvent) {
+  if (props.hostCommitPolicy !== 'grid') return
   if (shouldIgnoreBlur(e)) return
   if (yjsActive.value) emit('yjs-commit')
   emit('blur-commit')
 }
 function onPlainBlur(e: FocusEvent) {
+  if (props.hostCommitPolicy !== 'grid') return
   if (shouldIgnoreBlur(e)) return
   emit('blur-commit')
 }
 // preventDefault stops the browser's native Tab focus-jump (which would land
 // on whatever the next DOM tabindex happens to be, not the next grid cell) —
 // the host moves focus itself in response to `tab-commit`. stopPropagation
-// for the same reason as onEnterConfirm above. Gated on `props.commitOnTab`
+// for the same reason as onEnterConfirm above. Gated on `props.hostCommitPolicy`
 // FIRST, before preventDefault/stopPropagation/any emit — without the gate,
-// a host that never wires `tab-commit` (MetaBulkEditDialog) would still have
-// Tab silently swallowed (preventDefault with no listener consuming the
-// emit), trapping keyboard focus inside the value input. See the prop doc
-// comment above for why this can't be inferred instead of asked for.
+// a host that never opts in (MetaBulkEditDialog) would still have Tab
+// silently swallowed (preventDefault with no listener consuming the emit),
+// trapping keyboard focus inside the value input. See the prop doc comment
+// above for why this can't be inferred instead of asked for.
 function onScalarTab(e: KeyboardEvent) {
-  if (!props.commitOnTab) return
+  if (props.hostCommitPolicy !== 'grid') return
   if (isComposingEvent(e)) return
-  // P3-C: an invalid numeric draft pending → do NOT intercept. Returning
-  // before preventDefault lets the native Tab move focus out of the input
-  // as normal, which fires a genuine `blur` — `onScalarBlur` sees the same
-  // flag and discards there. One discard path (no new event, no dangling
-  // `document.body` focus from a preventDefault'd Tab that goes nowhere).
-  if (numberInvalidRawDraft.value) return
+  // P3-C/NIT: an invalid numeric draft pending with NO earlier valid draft
+  // this session → do NOT intercept. Returning before preventDefault lets
+  // the native Tab move focus out of the input as normal, which fires a
+  // genuine `blur` — `onScalarBlur` sees the same flags and discards there.
+  // One discard path (no new event, no dangling `document.body` focus from
+  // a preventDefault'd Tab that goes nowhere). When a valid draft WAS
+  // reached earlier, fall through to the normal intercept below so focus
+  // still moves to the adjacent cell (byte-identical to a resolved draft).
+  if (numberInvalidRawDraft.value && !numberHasValidDraft.value) return
   e.preventDefault()
   e.stopPropagation()
+  numberInvalidRawDraft.value = false
   if (scalarActive.value) emit('yjs-commit')
   emit('tab-commit', e.shiftKey)
 }
 function onTextTab(e: KeyboardEvent) {
-  if (!props.commitOnTab) return
+  if (props.hostCommitPolicy !== 'grid') return
   if (isComposingEvent(e)) return
-  // P3-A (round 2): when the AI-run button renders as a focusable sibling
-  // (`aiRunVisible`), a FORWARD Tab must reach it via native focus movement
-  // instead of being intercepted here — otherwise the button is keyboard-
-  // unreachable (Tab always commits+moves before focus can land on it). Tab
-  // FROM the button (`onAiRunTab` below) still commits+moves like this
-  // handler always has. Shift+Tab is unaffected: there is nothing focusable
-  // BEFORE the input in this branch, so shift+Tab has nowhere to land.
-  if (aiRunVisible.value && !e.shiftKey) return
+  // P3-A (round 2) / P2-2 (round 3): when the AI-run button renders as a
+  // focusable sibling (`aiRunFocusable`), a FORWARD Tab must reach it via
+  // native focus movement instead of being intercepted here — otherwise the
+  // button is keyboard-unreachable (Tab always commits+moves before focus
+  // can land on it). P2-2: `aiRunVisible` alone is not enough — the button
+  // can be RENDERED but `disabled` (pending/busy), and a disabled button is
+  // never a native Tab stop, so yielding to it in that state would just
+  // exit the grid's tab sequence entirely (native Tab moves past it to
+  // whatever the next document-order tabindex is) instead of committing.
+  // `aiRunFocusable` folds in the disabled check so this only yields when
+  // the button can actually receive focus. Tab FROM the button
+  // (`onAiRunTab` below) still commits+moves like this handler always has.
+  // Shift+Tab is unaffected: there is nothing focusable BEFORE the input in
+  // this branch, so shift+Tab has nowhere to land.
+  if (aiRunFocusable.value && !e.shiftKey) return
   e.preventDefault()
   e.stopPropagation()
   if (yjsActive.value) emit('yjs-commit')
   emit('tab-commit', e.shiftKey)
 }
 function onPlainTab(e: KeyboardEvent) {
-  if (!props.commitOnTab) return
+  if (props.hostCommitPolicy !== 'grid') return
   if (isComposingEvent(e)) return
   e.preventDefault()
   e.stopPropagation()
@@ -824,12 +856,18 @@ function onPlainTab(e: KeyboardEvent) {
 // from the input itself — the button is a valid exit point, not a dead
 // end. Shift+Tab is left alone (native default returns focus to the input,
 // which is the CORRECT "back" target — nothing to commit yet).
+// P3-2: mirrors onTextTab/onTextBlur's `yjs-commit` emit when the Yjs text
+// binding is live — this Tab exits the SAME text editor session those
+// handlers do (the button is a sibling of the same `<input>`), so omitting
+// it here left the host without the signal it needs to skip the redundant
+// REST patch once Yjs already carried the edit.
 function onAiRunTab(e: KeyboardEvent) {
-  if (!props.commitOnTab) return
+  if (props.hostCommitPolicy !== 'grid') return
   if (isComposingEvent(e)) return
   if (e.shiftKey) return
   e.preventDefault()
   e.stopPropagation()
+  if (yjsActive.value) emit('yjs-commit')
   emit('tab-commit', false)
 }
 
@@ -992,7 +1030,22 @@ function onFileDrop(e: DragEvent) {
 // null commit explicitly so Enter's own behaviour stays exactly what it was
 // before this fix (see its doc comment) — Enter is the ONE path that still
 // intentionally commits null here.
+//
+// NIT (round 3, number-prefix loss): the ORIGINAL P3-C fix above stopped the
+// invalid-draft's OWN keystroke from committing `null`, but blur/Tab then
+// discarded the WHOLE session unconditionally on any pending invalid draft —
+// so typing '7' (a resolved, committed draft) then '.' (sanitizes to '',
+// invalid) and blurring lost the 7, not just the '.'. `numberHasValidDraft`
+// tracks whether a resolved value was EVER reached this session; it is set
+// ONLY in the resolved branch below — never pre-seeded from the initial
+// `modelValue` on mount — so a session whose very FIRST keystroke is invalid
+// ('-' alone, nothing resolved yet) still discards on blur/Tab exactly as
+// before. `onScalarBlur`/`onScalarTab` read this flag alongside
+// `numberInvalidRawDraft` to decide discard vs. commit-the-last-resolved-
+// value; `onEnterScalarConfirm` is UNCHANGED by this — Enter keeps
+// committing `null` on an unresolved invalid draft regardless.
 const numberInvalidRawDraft = ref(false)
+const numberHasValidDraft = ref(false)
 function onNumberInput(e: Event) {
   const v = (e.target as HTMLInputElement).value
   const inputType = (e as InputEvent).inputType ?? ''
@@ -1001,6 +1054,7 @@ function onNumberInput(e: Event) {
     return
   }
   numberInvalidRawDraft.value = false
+  numberHasValidDraft.value = true
   commitScalar(v === '' ? null : Number(v))
 }
 

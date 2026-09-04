@@ -55,7 +55,15 @@ function makeRows(): MetaRecord[] {
   ]
 }
 
-function mountGrid(rows: MetaRecord[], onPatchCell: (...args: unknown[]) => void): HTMLDivElement {
+// `propsOverride` (round 3: P2-2's disabled-AI-run-button fixture, P3-1's grouped-mode regression
+// guard) merges INTO the base props rather than each variant getting its own `h(MetaGridTable, ...)`
+// literal — this file stays vue/one-component-per-file clean (ONE render-function literal, reused)
+// exactly the way the (now-deleted) seed-forward spec's own "single mount helper" comment described.
+function mountGrid(
+  rows: MetaRecord[],
+  onPatchCell: (...args: unknown[]) => void,
+  propsOverride: Record<string, unknown> = {},
+): HTMLDivElement {
   container = document.createElement('div')
   document.body.appendChild(container)
   app = createApp({
@@ -79,6 +87,7 @@ function mountGrid(rows: MetaRecord[], onPatchCell: (...args: unknown[]) => void
         aiRunPending: false,
         aiRunBusy: false,
         onPatchCell,
+        ...propsOverride,
       })
     },
   })
@@ -176,23 +185,73 @@ describe('MetaGridTable cell-edit commit reliability round 2 (P1, P3-A..D)', () 
       expect(patchSpy).not.toHaveBeenCalled()
     })
 
-    it('positive control: the SAME printable key on the grid root itself still seeds the editor and IS defaultPrevented', async () => {
+    it('positive control (number column — unaffected by the P3-1 Yjs carve-out below): the SAME printable key on the grid root itself still seeds the editor and IS defaultPrevented', async () => {
       // Proves the two tests above fail for the right reason (target rejection), not because
       // type-to-edit broke outright — this is the byte-identical round-1 D1 path, now with an
       // explicit defaultPrevented assertion (round-1's value-only assertion can't discriminate the
       // preventDefault call in jsdom, which never double-types on a non-prevented keydown either way).
+      //
+      // Uses the SCORE (number) column rather than title — P3-1 below carves Yjs-eligible `string`
+      // cells (title, in this fixture) OUT of this exact seed+preventDefault path, so proving the
+      // base D1 mechanism is still intact needs a field type P3-1 does not touch.
       const patchSpy = vi.fn()
       const root = mountGrid(makeRows(), patchSpy)
       await flushUi()
 
-      cellAt(root, 0, 0).click()
+      cellAt(root, 0, 1).click() // score, column 1
+
+      const evt = new KeyboardEvent('keydown', { key: '5', bubbles: true, cancelable: true })
+      gridEl(root).dispatchEvent(evt)
       await flushUi()
+
+      expect(editorInput(root)).toBeTruthy()
+      expect(editorInput(root)!.value).toBe('5')
+      expect(evt.defaultPrevented).toBe(true)
+    })
+  })
+
+  // ── P3-1: a Yjs-eligible text cell must not be seeded, and the keydown must not be
+  //          preventDefault'd (the D1 seed heuristic this replaces raced the Yjs binding's async
+  //          activation — see MetaGridTable's onKeydown doc comment for the full story) ─────────
+  describe('P3-1: Yjs-eligible cells open empty on type-to-edit instead of racing the seed into Y.Text', () => {
+    it('a printable key on a Yjs-eligible (string, recordId-wired) cell opens the editor EMPTY and is NOT defaultPrevented', async () => {
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeRows(), patchSpy)
+      await flushUi()
+
+      cellAt(root, 0, 0).click() // title — string, non-grouped render path wires :record-id
 
       const evt = new KeyboardEvent('keydown', { key: 'a', bubbles: true, cancelable: true })
       gridEl(root).dispatchEvent(evt)
       await flushUi()
 
-      expect(editorInput(root)).toBeTruthy()
+      const input = editorInput(root)
+      expect(input).toBeTruthy() // the editor still opens
+      expect(input!.value).toBe('') // ...just not seeded with the pressed character
+      expect(evt.defaultPrevented).toBe(false)
+      expect(patchSpy).not.toHaveBeenCalled()
+    })
+
+    it('grouped-mode regression guard: the SAME string column, grouped, still seeds normally — grouped rows never wire recordId', async () => {
+      // MetaGridTable's grouped-rows render path passes NO `:record-id` to MetaCellEditor (only the
+      // flat/ungrouped path does), so a grouped-mode string cell can never be Yjs-eligible — the D1
+      // seed-suppression above must not over-broaden to it. Without deriving the eligibility check's
+      // recordId the SAME way the template does (`groupedRows.value ? null : r.id`), this is exactly
+      // the regression a naive `isYjsTextEligible(f, r.id, ...)` call (always passing r.id) would
+      // introduce silently.
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeRows(), patchSpy, { groupFields: [SCORE_FIELD] })
+      await flushUi()
+
+      cellAt(root, 0, 0).click() // first grouped data row's title cell
+
+      const evt = new KeyboardEvent('keydown', { key: 'x', bubbles: true, cancelable: true })
+      gridEl(root).dispatchEvent(evt)
+      await flushUi()
+
+      const input = editorInput(root)
+      expect(input).toBeTruthy()
+      expect(input!.value).toBe('x') // seeded normally — NOT the P3-1 empty-draft carve-out
       expect(evt.defaultPrevented).toBe(true)
     })
   })
@@ -531,5 +590,204 @@ describe('MetaGridTable cell-edit commit reliability round 2 (P1, P3-A..D)', () 
 
       expect(editorInput(root)).toBeTruthy()
     })
+  })
+
+  // ── P2-2: a RENDERED-but-DISABLED AI-run button is not a native Tab stop — the yield in
+  //          onTextTab must check focusability, not just visibility ────────────────────────────
+  describe('P2-2: AI-run button focusability (not just visibility) gates the Tab handoff', () => {
+    it('forward Tab from the text input IS intercepted (commits+moves) when the rendered AI-run button is disabled', async () => {
+      const patchSpy = vi.fn()
+      // aiRunPending: true — the button still RENDERS (aiRunVisible) but is disabled.
+      const root = mountGrid(makeRows(), patchSpy, { aiRunPending: true })
+      await flushUi()
+
+      clickThenDblclick(cellAt(root, 0, 0))
+      await flushUi()
+      const button = aiRunButton(root)
+      expect(button).toBeTruthy() // sanity: still rendered
+      expect(button!.disabled).toBe(true) // sanity: and disabled — this is the state P3-A's original
+                                            // `aiRunVisible` gate alone could not distinguish from focusable
+      typeInto(editorInput(root)!, 'hello')
+      await flushUi()
+
+      const evt = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+      editorInput(root)!.dispatchEvent(evt)
+      await flushUi()
+
+      expect(evt.defaultPrevented).toBe(true) // intercepted, unlike the enabled-button case
+      expect(patchSpy).toHaveBeenCalledTimes(1)
+      expect(patchSpy).toHaveBeenCalledWith('r0', 'title', 'hello', 1)
+      expect(editorInput(root)).toBeNull()
+      expect(focusedColIndex(root)).toBe(1) // moved to the adjacent (score) column, same as the no-AI-button case
+    })
+  })
+
+  // ── P3-4: the target gate must reject a descendant EVEN INSIDE the currently-focused cell ───
+  describe('P3-4: type-to-edit target gate rejects a focusable descendant of the focused cell itself', () => {
+    it('a printable key fired from a synthetic focusable <button> appended inside the focused cell does not seed the editor', async () => {
+      // The field-comment-action button is the REAL production case that renders as a descendant of
+      // exactly the currently-focused `<td>` (see MetaGridTable's template) — this test proves the
+      // fix without depending on that button's own conditional-render fixture wiring.
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeRows(), patchSpy)
+      await flushUi()
+
+      const cell = cellAt(root, 0, 0)
+      cell.click()
+      await flushUi()
+
+      const injected = document.createElement('button')
+      injected.type = 'button'
+      cell.appendChild(injected)
+      injected.focus()
+
+      const evt = new KeyboardEvent('keydown', { key: 'a', bubbles: true, cancelable: true })
+      injected.dispatchEvent(evt)
+      await flushUi()
+
+      expect(editorInput(root)).toBeNull()
+      expect(evt.defaultPrevented).toBe(false)
+      expect(patchSpy).not.toHaveBeenCalled()
+      injected.remove()
+    })
+  })
+
+  // ── P3-5: the SAME target-rejection rule now guards Enter/Tab/Arrows/Escape too, not just D1 ─
+  describe('P3-5: descendant controls keep their native keyboard behaviour for the whole switch, not just type-to-edit', () => {
+    it('Enter on the row-expand button does not open the editor and does not suppress the button\'s own default', async () => {
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeRows(), patchSpy)
+      await flushUi()
+
+      cellAt(root, 0, 0).click()
+      await flushUi()
+
+      const expandBtn = root.querySelector('tbody .meta-grid__expand-btn') as HTMLButtonElement
+      expect(expandBtn).toBeTruthy()
+      expandBtn.focus()
+
+      const evt = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+      expandBtn.dispatchEvent(evt)
+      await flushUi()
+
+      expect(evt.defaultPrevented).toBe(false)
+      expect(editorInput(root)).toBeNull()
+    })
+
+    it('Tab on the row-select checkbox is not intercepted by the grid (its own focusCol never moves)', async () => {
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeRows(), patchSpy)
+      await flushUi()
+
+      cellAt(root, 0, 0).click()
+      await flushUi()
+      expect(focusedColIndex(root)).toBe(0)
+
+      const checkbox = root.querySelector('tbody .meta-grid__check-col input[type="checkbox"]') as HTMLInputElement
+      expect(checkbox).toBeTruthy()
+      checkbox.focus()
+
+      const evt = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+      checkbox.dispatchEvent(evt)
+      await flushUi()
+
+      expect(evt.defaultPrevented).toBe(false)
+      // Pre-existing defect, fixed under the SAME rule as D1/P1 above (not a new mechanism): before
+      // this fix, this exact keydown fell into the switch's `case 'ArrowRight': case 'Tab':` and
+      // moved the GRID's own focus cursor — this assertion is the one that catches that specifically
+      // (defaultPrevented alone would not: the checkbox's OWN default was never at stake here).
+      expect(focusedColIndex(root)).toBe(0)
+    })
+
+    it('positive control: the identical Enter on the grid root itself (correct target) still opens the editor', async () => {
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeRows(), patchSpy)
+      await flushUi()
+
+      cellAt(root, 0, 0).click()
+      await flushUi()
+
+      gridEl(root).dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+      await flushUi()
+
+      expect(editorInput(root)).toBeTruthy()
+    })
+  })
+
+  // ── NIT: number-prefix loss — blur/Tab must commit the LAST VALID draft when one was reached
+  //        this session, and discard only when none ever was ────────────────────────────────────
+  describe('NIT: number blur/Tab commits the last valid draft instead of discarding the whole session', () => {
+    async function openScoreEditorTypeValidThenInvalid(root: HTMLElement) {
+      clickThenDblclick(cellAt(root, 0, 1)) // score, original value 10
+      await flushUi()
+      const input = editorInput(root) as HTMLInputElement
+      // '7' — genuinely VALID, committed immediately (editCell.value.value becomes 7).
+      input.value = '7'
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, data: '7', inputType: 'insertText' }))
+      await flushUi()
+      // '.' — WHATWG sanitizes "7." to '' on the .value getter; still an in-progress edit, not a
+      // clear — must NOT overwrite the retained 7.
+      input.value = ''
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, data: '.', inputType: 'insertText' }))
+      return input
+    }
+
+    it('blur commits the last valid draft (7), not null — only the invalid trailing "." is discarded', async () => {
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeRows(), patchSpy)
+      await flushUi()
+
+      const input = await openScoreEditorTypeValidThenInvalid(root)
+      await flushUi()
+      const outside = document.createElement('button')
+      document.body.appendChild(outside)
+      input.dispatchEvent(new FocusEvent('blur', { relatedTarget: outside, bubbles: true }))
+      await flushUi()
+
+      expect(patchSpy).toHaveBeenCalledTimes(1)
+      expect(patchSpy).toHaveBeenCalledWith('r0', 'score', 7, 1)
+      expect(editorInput(root)).toBeNull()
+      outside.remove()
+    })
+
+    it('Tab commits the last valid draft (7) too and moves focus, same as any resolved draft', async () => {
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeRows(), patchSpy)
+      await flushUi()
+
+      const input = await openScoreEditorTypeValidThenInvalid(root)
+      await flushUi()
+      const evt = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+      input.dispatchEvent(evt)
+      await flushUi()
+
+      expect(evt.defaultPrevented).toBe(true)
+      expect(patchSpy).toHaveBeenCalledTimes(1)
+      expect(patchSpy).toHaveBeenCalledWith('r0', 'score', 7, 1)
+      expect(editorInput(root)).toBeNull()
+      expect(focusedRowIndex(root)).toBe(1) // wrapped forward — score is the last column
+      expect(focusedColIndex(root)).toBe(0)
+    })
+
+    it('asymmetry (stated explicitly, matches the ledger): Enter in the SAME scenario still commits null, unchanged — only blur/Tab commit the retained 7', async () => {
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeRows(), patchSpy)
+      await flushUi()
+
+      const input = await openScoreEditorTypeValidThenInvalid(root)
+      await flushUi()
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+      await flushUi()
+
+      expect(patchSpy).toHaveBeenCalledTimes(1)
+      expect(patchSpy).toHaveBeenCalledWith('r0', 'score', null, 1)
+      expect(editorInput(root)).toBeNull()
+    })
+
+    // The event-level regression guard for "a lone '-' as the FIRST keystroke still discards
+    // (not commits) on blur" lives in tests/multitable-yjs-cell-editor.spec.ts (mounting
+    // MetaCellEditor directly, asserting `cancel` vs `blur-commit` — see that file for why the
+    // grid-level `patchSpy` assertion alone cannot discriminate the relevant mutation here) rather
+    // than duplicating another `h(MetaCellEditor, ...)` literal into this MetaGridTable-only file.
   })
 })

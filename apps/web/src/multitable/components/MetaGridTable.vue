@@ -101,7 +101,7 @@
                   :upload-context="{ recordId: item.row.id, fieldId: field.id }"
                   :ai-run-state="aiRunState"
                   :mention-suggestions="props.mentionSuggestions"
-                  :commit-on-tab="true"
+                  :host-commit-policy="'grid'"
                   @update:model-value="editCell!.value = $event"
                   @confirm="onEditorConfirm"
                   @blur-commit="onEditorBlurCommit"
@@ -247,7 +247,7 @@
                   :upload-context="{ recordId: row.id, fieldId: field.id }"
                   :ai-run-state="aiRunState"
                   :mention-suggestions="props.mentionSuggestions"
-                  :commit-on-tab="true"
+                  :host-commit-policy="'grid'"
                   @update:model-value="editCell!.value = $event"
                   @confirm="onEditorConfirm"
                   @blur-commit="onEditorBlurCommit"
@@ -407,6 +407,7 @@ import {
 } from '../utils/comment-affordance'
 import { isSystemField } from '../utils/system-fields'
 import { isFieldAlwaysReadOnly } from '../utils/field-permissions'
+import { isYjsTextEligible } from '../utils/yjs-text-eligibility'
 import { useLocale } from '../../composables/useLocale'
 import { frozenPrefixCount } from '../utils/frozen-columns'
 import {
@@ -1489,20 +1490,34 @@ function isGridComposingEvent(e: KeyboardEvent): boolean {
 // Cells (`<td role="gridcell">`) are never independently focusable (no
 // tabindex) — real DOM focus is either on `gridRoot` itself (the normal
 // case; tabindex="0" on `.meta-grid`) or on one of those descendant
-// controls once a click/Tab has focused it. So the allowlist is: the event
-// target IS the grid root, OR it's the specific gridcell `<td>` that
-// currently matches focusRow/focusCol (defensive — cells aren't focusable
-// today, so this arm is normally unreachable, but a future change that adds
-// per-cell tabindex should not silently regress this guard). Anything else
-// (an <input>/<button>/<select>/<textarea>/[contenteditable]/[role=checkbox]
-// descendant, or a `<td>` that ISN'T the focused one) is rejected.
-function isValidTypeToEditTarget(e: KeyboardEvent): boolean {
+// controls once a click/Tab has focused it. So the allowlist is EXACT-
+// ELEMENT: the event target IS the grid root, OR the target ITSELF is the
+// specific gridcell `<td>` that currently matches focusRow/focusCol
+// (defensive — cells aren't focusable today, so this arm is normally
+// unreachable, but a future change that adds per-cell tabindex should not
+// silently regress this guard). Anything else — including a descendant
+// INSIDE that same focused `<td>` (an <input>/<button>/<select>/<textarea>/
+// [contenteditable]/[role=checkbox], e.g. the per-cell field-comment button
+// that renders precisely when its `<td>` is the focused one) — is rejected.
+//
+// P3-4 (round 3): this used to walk up via `target.closest('[role="gridcell"]')`
+// before comparing dataset.ri/ci, which finds the ANCESTOR gridcell of a
+// descendant too — so a focusable descendant of the CURRENTLY-focused `<td>`
+// (the field-comment-action button is the one that actually renders there)
+// passed this check even though the doc comment already claimed descendants
+// were rejected. Reading `target.getAttribute('role')` directly instead of
+// `closest()` means only an element that IS itself `role="gridcell"` can
+// match — a descendant button has no such attribute of its own.
+//
+// P3-5 (round 3): also the single target gate for the REST of onKeydown's
+// switch (Arrow/Tab/Enter/Escape) below — see that call site. Renamed from
+// `isValidTypeToEditTarget` since it now guards more than just D1 seeding.
+function isValidGridKeydownTarget(e: KeyboardEvent): boolean {
   const target = e.target as HTMLElement | null
   if (!target) return false
   if (target === gridRoot.value) return true
-  const cell = target.closest('[role="gridcell"]') as HTMLElement | null
-  if (!cell) return false
-  return Number(cell.dataset.ri) === focusRow.value && Number(cell.dataset.ci) === focusCol.value
+  if (target.getAttribute('role') !== 'gridcell') return false
+  return Number(target.dataset.ri) === focusRow.value && Number(target.dataset.ci) === focusCol.value
 }
 
 function onKeydown(e: KeyboardEvent) {
@@ -1530,10 +1545,42 @@ function onKeydown(e: KeyboardEvent) {
   //   - boolean/date/select/link/attachment (the rest of EDITABLE): NOT
   //     seeded — a checkbox/date/dropdown/picker has no meaningful "replace
   //     with one printable character" semantics.
-  if (!mod && !e.altKey && e.key.length === 1 && focusRow.value >= 0 && focusCol.value >= 0 && isValidTypeToEditTarget(e)) {
+  //
+  //   P3-1 (round 3): a Yjs-eligible `string` cell (`isYjsTextEligible` —
+  //   the SAME condition MetaCellEditor uses to decide whether to construct
+  //   a live binding at all) is a carve-out from the seed-with-e.key rule
+  //   above: it must NOT be seeded, and the keydown must NOT be
+  //   preventDefault'd. The prior behaviour (seed `modelValue` with the
+  //   typed character, same as any other string cell) raced the Yjs binding's
+  //   async activation — see the removed watcher this superseded (P3-B,
+  //   round 2, in MetaCellEditor's git history) for why trying to forward
+  //   that pre-activation draft into Y.Text after the fact is unsafe (no
+  //   reliable way to tell "nobody has synced anything yet" apart from "a
+  //   collaborator just synced an empty string"). The editor still opens —
+  //   just empty, with editing starting fresh instead of pre-seeded.
+  //   Disclosure: NOT calling `preventDefault()` here does not, in practice,
+  //   make the keystroke "type natively" anywhere — `gridRoot` is a plain,
+  //   non-editable `<div>`, and the freshly-opened editor's `<input>` does
+  //   not exist in the DOM until Vue's next patch cycle (after this
+  //   synchronous keydown has already finished dispatching), so the
+  //   character is simply not captured by anything; the user must retype
+  //   it once the (now-focused, now-mounted) editor is open. Recorded here
+  //   for whoever revisits this: a seed-after-mount or forward-on-activate
+  //   follow-up is a legitimate next step, deliberately NOT attempted here.
+  //   `groupedRows.value ? null : r.id` mirrors exactly what the template
+  //   wires as `:record-id` on MetaCellEditor for each render path (the
+  //   grouped-rows branch passes no `record-id` at all) — grouped-mode
+  //   string cells are therefore never Yjs-eligible and keep seeding
+  //   normally, same as before this fix.
+  if (!mod && !e.altKey && e.key.length === 1 && focusRow.value >= 0 && focusCol.value >= 0 && isValidGridKeydownTarget(e)) {
     const r = navRows[focusRow.value]
     const f = props.visibleFields[focusCol.value]
     if (r && f && isEditable(r.id, f)) {
+      if (isYjsTextEligible(f, groupedRows.value ? null : r.id, r.data[f.id])) {
+        yjsHandledCellKey.value = null
+        editCell.value = { recordId: r.id, fieldId: f.id, value: '' }
+        return
+      }
       const seedValue: unknown =
         f.type === 'string' ? e.key
         : f.type === 'number' && /^[0-9]$/.test(e.key) ? Number(e.key)
@@ -1546,6 +1593,20 @@ function onKeydown(e: KeyboardEvent) {
       }
     }
   }
+  // P3-5 (round 3, same target-rejection rule as D1 above, pre-existing
+  // defect fixed under the same rule): without this gate, Enter/Tab/Arrows/
+  // Escape fired on a DESCENDANT interactive control (the row-expand
+  // button, the lock-toggle button, the row-select checkbox, a pager/bulk-
+  // bar button, ...) were hijacked by this switch purely because the
+  // keydown bubbled up into `.meta-grid` — e.g. Enter on the expand button
+  // was preventDefault'd AND opened the cell editor on whatever
+  // focusRow/focusCol last pointed at; Tab from the row checkbox was
+  // preventDefault'd and moved the grid's OWN focus cursor instead of
+  // letting native Tab order continue past the checkbox. Gating the whole
+  // switch on the same `isValidGridKeydownTarget` check D1 already uses
+  // fixes both — descendant controls now keep their native keyboard
+  // behaviour untouched.
+  if (!isValidGridKeydownTarget(e)) return
   switch (e.key) {
     case 'ArrowDown': e.preventDefault(); if (focusRow.value < maxR) { focusRow.value++; if (focusCol.value < 0) focusCol.value = 0; emit('select-record', navRows[focusRow.value].id) } break
     case 'ArrowUp': e.preventDefault(); if (focusRow.value > 0) { focusRow.value--; emit('select-record', navRows[focusRow.value].id) } break

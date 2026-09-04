@@ -327,13 +327,14 @@ describe('MetaBulkEditDialog', () => {
   })
 
   // grid-commit-reliability regression: MetaCellEditor's D2 Tab-commit feature is scoped to grid
-  // hosts via the `commit-on-tab` opt-in prop (MetaGridTable passes it; MetaBulkEditDialog does
-  // not). Without that gate, Tab pressed in the value input would call preventDefault()
-  // unconditionally — and since this dialog never listens for `tab-commit`, the keydown would be
-  // silently swallowed with nothing consuming it, trapping keyboard focus inside the input (Tab
-  // could never reach "Set value" / Cancel). MUTATION: removing the `!props.commitOnTab` guard in
-  // MetaCellEditor's onTextTab makes this go red (defaultPrevented flips to true).
-  it('does not intercept Tab in the value editor (commitOnTab is not wired here)', async () => {
+  // hosts via the `host-commit-policy` opt-in prop (MetaGridTable passes `'grid'`; MetaBulkEditDialog
+  // does not set it, so it defaults to `'none'`). Without that gate, Tab pressed in the value input
+  // would call preventDefault() unconditionally — and since this dialog never listens for
+  // `tab-commit`, the keydown would be silently swallowed with nothing consuming it, trapping
+  // keyboard focus inside the input (Tab could never reach "Set value" / Cancel). MUTATION: removing
+  // the `props.hostCommitPolicy !== 'grid'` guard in MetaCellEditor's onTextTab makes this go red
+  // (defaultPrevented flips to true).
+  it('does not intercept Tab in the value editor (hostCommitPolicy is not wired here)', async () => {
     const { app, root } = mountDialog({ mode: 'set' })
     await nextTick()
 
@@ -348,6 +349,44 @@ describe('MetaBulkEditDialog', () => {
     input.dispatchEvent(tabEvent)
 
     expect(tabEvent.defaultPrevented).toBe(false)
+    app.unmount()
+  })
+
+  // grid-commit-reliability P2-1: MetaCellEditor's number branch wires `@blur="onScalarBlur"`, and
+  // `onScalarBlur` can emit `cancel` on its own (the P3-C invalid-numeric-draft discard path) even
+  // when the host never opted into commit-on-blur at all. Before P2-1, that blur handler was gated
+  // on nothing — only the Tab handlers checked the opt-in prop — so blurring a number input while
+  // mid-typing a negative/decimal (e.g. a lone '-', which the WHATWG number-input value-sanitization
+  // algorithm reports as '' from `.value` while still mid-edit) reached `onScalarBlur`, hit the
+  // invalid-draft branch, and emitted `cancel` — which THIS dialog's `@cancel="onCancel"` on
+  // MetaCellEditor reads as "dismiss the whole bulk-edit dialog". MUTATION: removing the
+  // `props.hostCommitPolicy !== 'grid'` guard at the top of `onScalarBlur` makes this go red
+  // (onCancel gets called).
+  it('does not dismiss the dialog when a number input is blurred mid-typing a negative number (hostCommitPolicy is not wired here)', async () => {
+    const onCancel = vi.fn()
+    const { app, root } = mountDialog({ mode: 'set', onCancel })
+    await nextTick()
+
+    const select = root.querySelector('.meta-bulk-edit__select') as HTMLSelectElement
+    select.value = 'fld_amount'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    const input = root.querySelector('.meta-bulk-edit__value-wrap input[type=number]') as HTMLInputElement
+    expect(input).not.toBeNull()
+    input.value = '-' // sanitizes to '' on the getter — an in-progress, not-yet-resolved draft
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, data: '-', inputType: 'insertText' }))
+    await nextTick()
+
+    const outside = document.createElement('button')
+    document.body.appendChild(outside)
+    input.dispatchEvent(new FocusEvent('blur', { relatedTarget: outside, bubbles: true }))
+    await nextTick()
+
+    expect(onCancel).not.toHaveBeenCalled()
+    // The value editor for the selected field is still mounted — the dialog's own state never reset.
+    expect(root.querySelector('.meta-bulk-edit__value-wrap input[type=number]')).not.toBeNull()
+    outside.remove()
     app.unmount()
   })
 
