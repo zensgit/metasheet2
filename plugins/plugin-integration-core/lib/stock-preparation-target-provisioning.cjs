@@ -267,6 +267,11 @@ function summarizeStockPreparationTargetReadiness(input = {}) {
     keyField: CANONICAL_KEY_FIELD,
     fieldCounts: templateFieldCounts(template),
     missingFields,
+    // Which probe answered "does this field exist" — 'db' (real read of meta_fields),
+    // 'computed' (older host without the W2 read), or 'computed_scope_unavailable' (the object is
+    // not claimed in the plugin object registry). Only 'db' can actually detect template drift, so
+    // a deployment that cares about drift asserts on this rather than trusting a bare `ready`.
+    ...(optionalString(input.fieldExistenceMode) ? { fieldExistenceMode: input.fieldExistenceMode } : {}),
     optionSources: template.fields
       .filter((field) => field.optionSource)
       .map((field) => ({
@@ -325,6 +330,63 @@ function missingLogicalFields(template, resolvedFieldIds = {}, extraFieldIds = [
     .filter((fieldId) => !optionalString(resolvedFieldIds[fieldId]))
 }
 
+/**
+ * The object-scope refusal the DB-backed existence read can raise and the compute-only one cannot.
+ * Matched by name/code rather than instanceof: the class lives in the HOST
+ * (`packages/core-backend/src/multitable/plugin-scope.ts:73-82`) and is not importable from a
+ * plugin. It carries no `status`, so letting it escape turns a readiness read into an opaque 500/503.
+ */
+function isObjectScopeError(error) {
+  if (!error) return false
+  return error.name === 'MultitableObjectScopeError' || error.code === 'MULTITABLE_OBJECT_SCOPE_FORBIDDEN'
+}
+
+/**
+ * The field-existence probe every `*_incomplete` verdict below rests on.
+ *
+ * WHY THIS EXISTS: `provisioning.resolveFieldIds` is COMPUTE-ONLY — it derives a stable id for each
+ * requested field and never omits one (`resolveObjectFieldIds`,
+ * `packages/core-backend/src/multitable/provisioning.ts:182-192`; the host says so itself at
+ * `packages/core-backend/src/index.ts:817-819`). So `missingLogicalFields` against that map is
+ * ALWAYS empty, and every drift verdict in this module was unreachable on a real host: a sheet
+ * provisioned by an older template reported `ready` and handed back a fieldIdMap naming physical
+ * columns that do not exist, and the drift only surfaced much later as an opaque host
+ * `VALIDATION_ERROR: Unknown fieldId` when a write finally addressed one of them. The host's
+ * DB-backed `resolveExistingObjectFieldIds` omits fields genuinely absent from `meta_fields`, which
+ * is what makes the verdict real.
+ *
+ * CAPABILITY-DETECTED, NOT REQUIRED: it stays out of `getProvisioningApi`'s required-method gate so
+ * an older host — and every provisioning fake in the test-suite — falls back to the compute-only map
+ * and keeps today's behaviour byte-for-byte. The answering probe travels in evidence as
+ * `fieldExistenceMode` so a deployment can prove which one spoke rather than assume.
+ *
+ * SCOPE REFUSAL DEGRADES, IT DOES NOT FAIL: the DB read carries an object-scope assertion the
+ * compute-only path never had (`plugin-scope.ts:266-274`), and an object this plugin never claimed
+ * in `plugin_multitable_object_registry` — a hand-made or dump-restored sheet — would otherwise turn
+ * a working readiness read into an opaque failure. Degrading to the compute-only probe is exactly
+ * today's behaviour, and the distinct mode keeps the degradation observable instead of silent.
+ */
+async function resolveFieldExistence({ provisioning, projectId, objectId, fieldIds }) {
+  if (typeof provisioning.resolveExistingObjectFieldIds === 'function') {
+    try {
+      return {
+        resolved: await provisioning.resolveExistingObjectFieldIds({ projectId, objectId, fieldIds }),
+        fieldExistenceMode: 'db',
+      }
+    } catch (error) {
+      if (!isObjectScopeError(error)) throw error
+      return {
+        resolved: await provisioning.resolveFieldIds({ projectId, objectId, fieldIds }),
+        fieldExistenceMode: 'computed_scope_unavailable',
+      }
+    }
+  }
+  return {
+    resolved: await provisioning.resolveFieldIds({ projectId, objectId, fieldIds }),
+    fieldExistenceMode: 'computed',
+  }
+}
+
 async function inspectStockPreparationCanonicalTarget(input = {}) {
   return inspectStockPreparationTarget({
     ...input,
@@ -371,7 +433,8 @@ async function inspectStockPreparationTarget(input = {}) {
       }),
     }
   }
-  const resolved = await provisioning.resolveFieldIds({
+  const { resolved, fieldExistenceMode } = await resolveFieldExistence({
+    provisioning,
     projectId,
     objectId: template.objectId,
     fieldIds: templateFieldIds(template).concat(extensionFieldIds),
@@ -389,6 +452,7 @@ async function inspectStockPreparationTarget(input = {}) {
         missingFields,
         fieldMapMode,
         includeObjectId,
+        fieldExistenceMode,
       }),
     }
   }
@@ -404,6 +468,7 @@ async function inspectStockPreparationTarget(input = {}) {
       fieldIdMapEmpty: false,
       fieldMapMode,
       includeObjectId,
+      fieldExistenceMode,
     }),
   }
 }

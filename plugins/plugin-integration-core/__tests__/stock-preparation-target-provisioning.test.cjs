@@ -293,7 +293,12 @@ async function main() {
   assert.deepEqual(bound.evidence.missingFields, [])
   assert.equal(bound.evidence.target.fieldIdMapEmpty, false)
   assert.equal(bindCalls.findObjectSheet.length, 1)
-  assert.equal(bindCalls.resolveFieldIds.length, 1)
+  // The bind path probes field EXISTENCE against meta_fields, not the compute-only derivation.
+  // `resolveFieldIds` never omits a field, so a drifted sheet used to bind `ready` with a fieldIdMap
+  // naming columns that do not exist; `resolveExistingObjectFieldIds` is what makes the verdict real.
+  assert.equal(bindCalls.resolveExistingObjectFieldIds.length, 1, 'bind probes DB-backed field existence')
+  assert.equal(bindCalls.resolveFieldIds.length, 0, 'bind no longer trusts the compute-only derivation')
+  assert.equal(bound.evidence.fieldExistenceMode, 'db', 'evidence names the probe that answered')
   assert.equal(bindCalls.ensureObject.length, 0, 'existing target bind does not create/repair')
   assert.equal(bindCalls.records.length, 0, 'bind path never uses records API')
 
@@ -323,6 +328,62 @@ async function main() {
   assert.equal(incompleteError.details.targetObjectId, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId)
   assert.equal(JSON.stringify(incompleteError.details).includes('sheet_private_stock_target'), false, 'error is values-free')
   assert.equal(incompleteCalls.ensureObject.length, 0, 'incomplete existing target is not repaired in place')
+
+  // REGRESSION (2026-09-04, 222 rehearsal): a host whose ONLY field resolver is the compute-only
+  // derivation cannot see drift at all. `resolveFieldIds` returns an id for every requested field,
+  // so `missingLogicalFields` came back empty and a sheet provisioned by an older template bound
+  // `ready` with a fieldIdMap naming columns that do not exist in meta_fields — the drift only
+  // surfaced later as an opaque host `Unknown fieldId` when a write addressed one of them.
+  // Two things are pinned here: (1) with the DB-backed probe the SAME drifted sheet is now caught at
+  // inspect time and names the missing fields, and (2) a host without that probe still answers
+  // (no hard dependency) but must SAY the verdict came from the compute-only derivation, so a
+  // deployment can tell "no drift" apart from "cannot see drift".
+  const computedOnlyCtx = createContext({ sheetExists: true, missingFields: ['path', 'makeOrBuy'] })
+  delete computedOnlyCtx.context.api.multitable.provisioning.resolveExistingObjectFieldIds
+  const computedOnlyInspect = await inspectStockPreparationCanonicalTarget({
+    context: computedOnlyCtx.context,
+    projectId: 'tenant:proj',
+    permission: 'admin',
+  })
+  assert.equal(
+    computedOnlyInspect.evidence.fieldExistenceMode,
+    'computed',
+    'a host without the DB-backed probe still answers, and says which probe answered',
+  )
+
+  // A host that refuses the scoped read (the object was never claimed in the plugin object
+  // registry — a hand-made or dump-restored sheet) must DEGRADE to today's behaviour, not turn a
+  // working readiness read into an opaque failure. The distinct mode keeps that observable.
+  const scopeDeniedCtx = createContext({ sheetExists: true })
+  scopeDeniedCtx.context.api.multitable.provisioning.resolveExistingObjectFieldIds = async () => {
+    const error = new Error('Plugin cannot claim multitable object; owned by unclaimed')
+    error.name = 'MultitableObjectScopeError'
+    error.code = 'MULTITABLE_OBJECT_SCOPE_FORBIDDEN'
+    throw error
+  }
+  const scopeDeniedInspect = await inspectStockPreparationCanonicalTarget({
+    context: scopeDeniedCtx.context,
+    projectId: 'tenant:proj',
+    permission: 'admin',
+  })
+  assert.equal(scopeDeniedInspect.ready, true, 'a scope refusal degrades to the compute-only probe')
+  assert.equal(scopeDeniedInspect.evidence.fieldExistenceMode, 'computed_scope_unavailable')
+
+  // A non-scope failure from the DB probe is NOT swallowed — degrading on every error would hide
+  // real host faults behind a verdict that cannot see drift.
+  const probeBrokenCtx = createContext({ sheetExists: true })
+  probeBrokenCtx.context.api.multitable.provisioning.resolveExistingObjectFieldIds = async () => {
+    throw new Error('connection terminated unexpectedly')
+  }
+  await assert.rejects(
+    () => inspectStockPreparationCanonicalTarget({
+      context: probeBrokenCtx.context,
+      projectId: 'tenant:proj',
+      permission: 'admin',
+    }),
+    /connection terminated unexpectedly/,
+    'only an object-scope refusal degrades; other probe failures propagate',
+  )
   assert.equal(incompleteCalls.records.length, 0, 'incomplete path never uses records API')
 
   // Missing target creates metadata only, then verifies logical fields by
