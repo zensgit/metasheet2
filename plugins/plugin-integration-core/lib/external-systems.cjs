@@ -593,15 +593,33 @@ function createExternalSystemRegistry({
     return publicRow(credentialStore, row || insertRow)
   }
 
+  // Scoped BY-ID read shared by the four read accessors below (public get, adapter-config, adapter
+  // load, sealed snapshot). Exact (tenant, workspace, id) first. When the caller carries a workspace
+  // hint and misses, fall back ONCE to the SAME tenant's tenant-wide row (workspace_id IS NULL).
+  //
+  // WHY: single-tenant on-prem deployments provision sources tenant-wide, while the web workbench
+  // carries a workspace hint (URL/localStorage, in practice often the tenant id) and the sealed
+  // mvp-persist step derives workspace=null from the principal (tokens carry no workspace claim).
+  // Without this the two halves of ONE pull disagree on scope and dry-run/apply 404 with
+  // ExternalSystemNotFoundError. What does NOT change: tenant_id must still match (the fallback
+  // query carries the caller's tenant), a workspace-scoped row is never reached from another
+  // workspace or from a null hint, and writes/list/delete keep their exact scope.
+  //
+  // Returns the workspace the row was actually matched under, so downstream policy (the
+  // connection resolver) sees the row's own scope rather than the caller's hint.
+  async function selectScopedRow({ tenantId, workspaceId, id }) {
+    const exact = await db.selectOne(TABLE, { tenant_id: tenantId, workspace_id: workspaceId, id })
+    if (exact) return { row: exact, matchedWorkspaceId: workspaceId }
+    if (workspaceId === null) return { row: null, matchedWorkspaceId: workspaceId }
+    const tenantWide = await db.selectOne(TABLE, { tenant_id: tenantId, workspace_id: null, id })
+    return { row: tenantWide, matchedWorkspaceId: tenantWide ? null : workspaceId }
+  }
+
   async function getExternalSystem(input) {
     const tenantId = requiredString(input?.tenantId, 'tenantId')
     const workspaceId = normalizeWorkspaceId(input?.workspaceId)
     const id = requiredString(input?.id, 'id')
-    const row = await db.selectOne(TABLE, {
-      tenant_id: tenantId,
-      workspace_id: workspaceId,
-      id,
-    })
+    const { row } = await selectScopedRow({ tenantId, workspaceId, id })
     if (!row) {
       throw new ExternalSystemNotFoundError('external system not found', { id, tenantId, workspaceId })
     }
@@ -627,11 +645,7 @@ function createExternalSystemRegistry({
     const tenantId = requiredString(input?.tenantId, 'tenantId')
     const workspaceId = normalizeWorkspaceId(input?.workspaceId)
     const id = requiredString(input?.id, 'id')
-    const row = await db.selectOne(TABLE, {
-      tenant_id: tenantId,
-      workspace_id: workspaceId,
-      id,
-    })
+    const { row } = await selectScopedRow({ tenantId, workspaceId, id })
     if (!row) {
       throw new ExternalSystemNotFoundError('external system not found', { id, tenantId, workspaceId })
     }
@@ -646,11 +660,7 @@ function createExternalSystemRegistry({
     const tenantId = requiredString(input?.tenantId, 'tenantId')
     const workspaceId = normalizeWorkspaceId(input?.workspaceId)
     const id = requiredString(input?.id, 'id')
-    const row = await db.selectOne(TABLE, {
-      tenant_id: tenantId,
-      workspace_id: workspaceId,
-      id,
-    })
+    const { row, matchedWorkspaceId } = await selectScopedRow({ tenantId, workspaceId, id })
     if (!row) {
       throw new ExternalSystemNotFoundError('external system not found', { id, tenantId, workspaceId })
     }
@@ -666,7 +676,7 @@ function createExternalSystemRegistry({
       try {
         resolved = await connectionResolver.resolve(unresolved, {
           tenantId,
-          workspaceId,
+          workspaceId: matchedWorkspaceId,
           principal: input?.principal,
           runAs: input?.runAs,
         })
@@ -696,11 +706,7 @@ function createExternalSystemRegistry({
     const tenantId = requiredString(input?.tenantId, 'tenantId')
     const workspaceId = normalizeWorkspaceId(input?.workspaceId)
     const id = requiredString(input?.id, 'id')
-    const row = await db.selectOne(TABLE, {
-      tenant_id: tenantId,
-      workspace_id: workspaceId,
-      id,
-    })
+    const { row, matchedWorkspaceId } = await selectScopedRow({ tenantId, workspaceId, id })
     if (!row) {
       throw new ExternalSystemNotFoundError('external system not found', { id, tenantId, workspaceId })
     }
@@ -720,7 +726,7 @@ function createExternalSystemRegistry({
     try {
       return await connectionResolver.resolveSealedSqlServer(unresolved, {
         tenantId,
-        workspaceId,
+        workspaceId: matchedWorkspaceId,
         principal: input?.principal,
         runAs: input?.runAs,
       })
