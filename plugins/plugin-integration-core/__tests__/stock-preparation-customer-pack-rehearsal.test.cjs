@@ -882,9 +882,13 @@ async function summaryAndLogsAreValuesFree() {
   // classification: this rehearsal installs all 21 ext_ columns fresh onto a
   // canonical-only sheet, so both are 0 — the takeover case (hand-built columns
   // needing an ownership stamp) is covered by the installer suite.
-  // `staleWriteScopes=unchecked` is the honest reading for a pack that declared nothing: the census
-  // has nothing to diff against and was never run, which is NOT the same as "0 stale rows found".
-  assert.match(fake.logs[0], /pack=factory-a-rehearsal v1 created=21 skipped=0 stamped=0 alreadyStamped=0 optionFields=5 views=3 writeScopes=0 staleWriteScopes=unchecked/)
+  // `operatorMustClearWriteScopes=unchecked` is the honest reading for a pack that declared nothing:
+  // the classification has nothing to diff against and was never run, which is NOT the same as
+  // "0 stale rows found". `legacyAdoption=no_ledger` says the same about the adoption proof.
+  // `removedWriteScopes=unreconciled` (not `=0`) is the honest token for a pack that declares no
+  // fieldWritePolicies: no region was governed, so no reconcile was even requested — which is a
+  // different fact from "reconciled and retired nothing".
+  assert.match(fake.logs[0], /pack=factory-a-rehearsal v1 created=21 skipped=0 stamped=0 alreadyStamped=0 optionFields=5 views=3 writeScopes=0 removedWriteScopes=unreconciled operatorHeldWriteScopes=unclassified otherPackWriteScopes=unclassified operatorMustClearWriteScopes=unchecked legacyAdoption=no_ledger/)
   assert.deepEqual(Object.keys(summary).sort(), [
     'alreadyStampedFields',
     // COLUMN WRITE SCOPING. This rehearsal pack declares NO `fieldWritePolicies`, which is
@@ -895,23 +899,42 @@ async function summaryAndLogsAreValuesFree() {
     'appliedWriteScopes',
     'createdFields',
     'ensuredViews',
+    // ANOTHER PACK'S ROWS inside this pack's region. NULL here — nothing was classified — and it is a
+    // separate projection from the operator's to-do list precisely because a sibling pack's live
+    // denials are not this install's debris and must never be reported as work for a human.
+    'governedByOtherPackCount',
+    'governedByOtherPacks',
     // F5 closure: the summary now carries the OWNERSHIP BAND per id, so a CLI/route no longer has to
     // re-normalize the pack to say "13 PLM / 8 human columns added". `ledger` is absent here because
     // this rehearsal installs without an install store — the ledger stays optional.
     'installedFields',
+    // WHY pack-less rows were or were not adoptable on this sheet, in the ledger's own terms
+    // ('no_ledger' here: no install store was supplied, so nothing could be proven).
+    'legacyAdoption',
     'objectId',
+    // PAIRS THE INSTALL DEFERRED TO A HUMAN ON. NULL here for the same reason as everything else on
+    // this list: nothing was declared, so nothing was classified.
+    'operatorHeldWriteScopeCount',
+    'operatorHeldWriteScopes',
+    // THE OPERATOR'S TO-DO LIST — THIS pack's OWN denials outside the region it governs, and only
+    // those. NULL here — never [] — because this pack declares no policy, so no classification ran;
+    // `writeScopeCheck` names which of the three reasons that was. The distinction is the whole
+    // point: an empty array would read as "checked, nothing orphaned", which is a claim this install
+    // never made.
+    'operatorMustClearWriteScopeCount',
+    'operatorMustClearWriteScopes',
     'packId',
     'packVersion',
+    // THE RETIRED DENIALS. NULL here — never [] — for the same reason as the census below: this
+    // pack governs no (column, role) region, so no reconcile was requested at all, which is a
+    // different fact from "reconciled and found nothing to retire".
+    'removedWriteScopeCount',
+    'removedWriteScopes',
     'skippedFields',
-    // THE STALE-SCOPE CENSUS. `staleWriteScopes` is NULL here — never [] — because this pack
-    // declares no policy, so the census never ran; `writeScopeCheck` names which of the three
-    // reasons that was. The distinction is the whole point: an empty array would read as
-    // "checked, nothing orphaned", which is a claim this install never made.
-    'staleWriteScopeCount',
-    'staleWriteScopes',
     'stampedExistingFields',
     'syncedOptionFields',
     'writeScopeCheck',
+    'writeScopeReconcile',
     'writeScopeRoleCount',
     'writeScopeSkipped',
   ])
@@ -922,8 +945,15 @@ async function summaryAndLogsAreValuesFree() {
   assert.equal(summary.writeScopeRoleCount, 0)
   assert.equal(summary.writeScopeSkipped, 'not_declared')
   assert.equal(summary.writeScopeCheck, 'not_declared')
-  assert.equal(summary.staleWriteScopes, null, 'no declaration => no census => NULL, not an empty list')
-  assert.equal(summary.staleWriteScopeCount, 0)
+  assert.equal(summary.operatorMustClearWriteScopes, null, 'no declaration => no census => NULL, not an empty list')
+  assert.equal(summary.operatorMustClearWriteScopeCount, 0)
+  assert.equal(summary.operatorHeldWriteScopes, null)
+  assert.equal(summary.governedByOtherPacks, null)
+  assert.equal(summary.legacyAdoption.basis, 'no_ledger', 'no store was supplied, so nothing was proven')
+  assert.equal(summary.legacyAdoption.allowed, false)
+  assert.equal(summary.writeScopeReconcile, 'not_declared')
+  assert.equal(summary.removedWriteScopes, null, 'no declaration => no reconcile => NULL, not an empty list')
+  assert.equal(summary.removedWriteScopeCount, 0)
 
   // The join is the point: every installed id carries the band the pack declared, and NOTHING else
   // (no label, no option value, no free text) rides along.

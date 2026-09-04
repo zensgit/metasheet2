@@ -492,7 +492,18 @@ module.exports = {
         // it takes no visibility argument, so it cannot hide a column from a department that needs to
         // read it. OPTIONAL — absent → a pack with no fieldWritePolicies installs exactly as today,
         // and a pack WITH them fails closed rather than silently skipping enforcement.
-        // Duck-typed to { applyRoleWriteScopes({ sheetId, entries }) => Promise<{ applied }> }.
+        // Duck-typed to { applyRoleWriteScopes({ sheetId, entries, packId?, reconcile?,
+        //   legacyAdoptable? }) => Promise<{ applied, entries, removed?, operatorHeld?,
+        //   governedByOtherPacks? }> } plus FOUR optional read-only siblings the installer
+        // feature-detects rather than assumes: classifyRoleWriteScopeRegion (the rehearsal of the
+        // reconcile's whole invariant), listRoleWriteScopes, findMissingRoleIds and
+        // findMissingFieldIds. `reconcile` names the (columns x roles) region the pack re-declares
+        // in full, and is what lets a revision that MOVES a column's owner retire the old denial
+        // instead of leaving the column read-only for both departments; a host that ignores it
+        // returns no `removed` and the installer reports 'unsupported_port'. `legacyAdoptable` is
+        // the installer's PROOF, from the pack-install ledger, that a pack-less row on this sheet
+        // can have no other owner — without it such a row refuses the install rather than being
+        // adopted.
         stockPreparationFieldPermissions:
           (context.services && context.services.stockPreparationFieldPermissions) || null,
         // 通知下一步: the DingTalk seam, injected by the host for this plugin only — the same
