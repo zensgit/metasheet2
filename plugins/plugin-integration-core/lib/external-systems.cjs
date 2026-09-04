@@ -646,11 +646,28 @@ function createExternalSystemRegistry({
     const tenantId = requiredString(input?.tenantId, 'tenantId')
     const workspaceId = normalizeWorkspaceId(input?.workspaceId)
     const id = requiredString(input?.id, 'id')
-    const row = await db.selectOne(TABLE, {
+    let row = await db.selectOne(TABLE, {
       tenant_id: tenantId,
       workspace_id: workspaceId,
       id,
     })
+    // Tenant-wide fallback: a workspace-scoped adapter lookup that misses falls back to the
+    // tenant-wide (workspace_id IS NULL) system of the SAME tenant. Single-tenant on-prem
+    // deployments provision sources tenant-wide, while the web client sends a workspace hint
+    // copied from the tenant id; meanwhile the non-steerable mvp-persist step derives
+    // workspace=null from the principal (tokens carry no workspace claim). Without this fallback
+    // the two halves of one pull disagree on scope and dry-run/apply 404 with
+    // ExternalSystemNotFoundError. Tenant isolation is unchanged — tenant_id still must match —
+    // and the fallback only reaches a source explicitly stored tenant-wide.
+    let matchedWorkspaceId = workspaceId
+    if (!row && workspaceId) {
+      row = await db.selectOne(TABLE, {
+        tenant_id: tenantId,
+        workspace_id: null,
+        id,
+      })
+      if (row) matchedWorkspaceId = null
+    }
     if (!row) {
       throw new ExternalSystemNotFoundError('external system not found', { id, tenantId, workspaceId })
     }
@@ -666,7 +683,7 @@ function createExternalSystemRegistry({
       try {
         resolved = await connectionResolver.resolve(unresolved, {
           tenantId,
-          workspaceId,
+          workspaceId: matchedWorkspaceId,
           principal: input?.principal,
           runAs: input?.runAs,
         })

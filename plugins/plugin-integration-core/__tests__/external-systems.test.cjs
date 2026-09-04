@@ -188,6 +188,28 @@ async function main() {
   const isolated = await registry.listExternalSystems({ tenantId: 'tenant_1', workspaceId: 'other' })
   assert.equal(isolated.length, 0, 'workspace scope isolates rows')
 
+  // --- 3b. Adapter load falls back to the tenant-wide (workspace_id IS NULL) system ------
+  // A workspace-scoped adapter lookup that misses resolves the tenant-wide row of the SAME tenant.
+  // This keeps one pull flow's steps consistent when the web client sends a workspace hint copied
+  // from the tenant id while the non-steerable persist step derives workspace=null. Tenant isolation
+  // is unchanged: the fallback only reaches a null-workspace row of the SAME tenant.
+  const adapterViaWorkspace = await registry.getExternalSystemForAdapter({
+    tenantId: 'tenant_1',
+    workspaceId: 'ws_from_web',
+    id: 'sys_1',
+  })
+  assert.equal(adapterViaWorkspace.id, 'sys_1', 'workspace-scoped adapter lookup falls back to the tenant-wide system')
+  assert.deepEqual(
+    adapterViaWorkspace.credentials,
+    { username: 'u', password: 'secret' },
+    'fallback still decrypts the tenant-wide system credentials',
+  )
+  await assert.rejects(
+    registry.getExternalSystemForAdapter({ tenantId: 'tenant_2', workspaceId: 'ws_from_web', id: 'sys_1' }),
+    /external system not found/,
+    'tenant-wide fallback never crosses the tenant boundary',
+  )
+
   // --- 4. Public config is redacted while adapter config stays raw -------
   const configDb = createMockDb()
   const configRegistry = createExternalSystemRegistry({
