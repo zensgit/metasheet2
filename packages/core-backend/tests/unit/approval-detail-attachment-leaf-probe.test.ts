@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ServiceError } from '../../src/services/ApprovalBridgeService'
 
 // REGRESSION (approval-detail-leaf-attachment-pin-20260904): does the backend template authoring
 // gate admit an `attachment` column inside a `detail` group, and does the answer depend on
@@ -17,10 +18,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // (:1785-1792), not by the leaf check. That meant a template saved while the flag was OFF could
 // carry an attachment column inside a detail group, then start 500ing at publish/read/instance-
 // create once the flag was turned ON (those re-run the now-tightened check via `asFormSchema`).
-// This file now pins the FIXED contract: `DETAIL_LEAF_FIELD_TYPES` excludes `attachment`
+// This file now pins the FIXED contract AT THE WRITE PATH (`createTemplate`, which validates
+// against `REQUEST_VALIDATION_CONTEXT`): `DETAIL_LEAF_FIELD_TYPES` excludes `attachment`
 // unconditionally, so cases (a)/(b) below are both REJECT, with the SAME leaf-check message,
-// regardless of flag state — the flag-gated sweep becomes unreachable for this case (kept as
-// defense in depth) rather than being what makes rejection happen.
+// regardless of flag state — the flag-gated sweep is unreachable for this case ON THIS PATH (kept
+// as defense in depth) rather than being what makes rejection happen. CORRECTION (round 2, gate
+// F1): the sweep is NOT unreachable everywhere — `assertFormSchema` is also run against
+// `STORED_FORM_SCHEMA_CONTEXT` to re-validate already-persisted form_schema (getTemplate and
+// friends), where the leaf check now carries a narrow, read-path-only tolerance for exactly this
+// shape (see the comment at `normalizeDetailFieldParts`'s leaf-check call site in
+// ApprovalProductService.ts), and the flag-gated sweep is what rejects it there instead — pinned
+// separately by approval-detail-attachment-stored-context.test.ts, not by this file.
 
 const pgState = vi.hoisted(() => ({
   client: { query: vi.fn(), release: vi.fn() },
@@ -127,6 +135,15 @@ describe('REGRESSION: attachment column inside a detail group is rejected at tem
     ],
   })
 
+  // CORRECTION (round 2, gate F5): the prior version of this helper folded ANY thrown error into
+  // `kind: 'REJECT'` — a `TypeError` from a harness bug (wrong mock shape, a missing pg case, an
+  // `undefined` property access) would be classified identically to the real validation rejection
+  // this test exists to prove. That is exactly backwards for a probe/regression file: it means a
+  // broken harness reads as "the fix works" instead of erroring loudly. Classification is now
+  // STRICT — only a `ServiceError` with the leaf-check's specific status/code (400/VALIDATION_ERROR,
+  // `REQUEST_VALIDATION_CONTEXT`) is a REJECT; anything else (a different ServiceError, a plain
+  // Error, a TypeError) rethrows so the test fails with the harness's own real error instead of a
+  // false REJECT.
   const run = async (request: unknown): Promise<Outcome> => {
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
     try {
@@ -134,8 +151,10 @@ describe('REGRESSION: attachment column inside a detail group is rejected at tem
       const leafTypes = (result.formSchema.fields[0].columns ?? []).map((c) => c.type)
       return { kind: 'ACCEPT', leafTypes }
     } catch (error) {
-      const err = error as { message?: string; code?: string }
-      return { kind: 'REJECT', message: String(err?.message ?? error), code: err?.code }
+      if (error instanceof ServiceError && error.statusCode === 400 && error.code === 'VALIDATION_ERROR') {
+        return { kind: 'REJECT', message: error.message, code: error.code }
+      }
+      throw error
     }
   }
 

@@ -684,10 +684,20 @@ export const USER_FIELD_ALLOWED_PROP_KEYS = new Set([
 // way while the flag was OFF would go on to 500 (`APPROVAL_TEMPLATE_SCHEMA_INVALID`) at publish/
 // read/instance-create once the flag was turned ON (those paths re-run `assertFormSchema` via
 // `asFormSchema` against the SAME now-tightened set). Excluding it here, independent of the flag,
-// makes `normalizeDetailFieldParts`'s leaf check (below) the sole rejection site for ALL entry
-// paths regardless of flag state; the flag-gated sweep in `assertFormSchema` is now unreachable
-// for this specific case and is kept as defense in depth, not removed, since it still guards any
-// other future path that might construct `fields` without going through this leaf check.
+// makes `normalizeDetailFieldParts`'s leaf check (below) the sole rejection site for the WRITE
+// path (REQUEST_VALIDATION_CONTEXT) in both flag states.
+//
+// FURTHER CORRECTION (same date, gate F1): making this exclusion *unconditional* also reaches
+// STORED_FORM_SCHEMA_CONTEXT (`asFormSchema`, used by getTemplate/getTemplateVersion/publish/
+// instance-create/frozen-schema load) — which would flip an ALREADY-STORED template containing
+// this shape (reachable pre-fix via flag-OFF createTemplate) from "readable" to "500s on every
+// read," at the shipped default, for data nobody touched. That is a blast-radius change to
+// stored data this fix must not make. `normalizeDetailFieldParts` therefore carries a narrow,
+// STORED_FORM_SCHEMA_CONTEXT-only tolerance for a stored `attachment` leaf (see its own comment
+// at the leaf-check call site) so the flag-gated sweep below — NOT this Set — remains the
+// rejection site for stored data, matching main's pre-fix read-path behavior exactly in both
+// flag states. The sweep is kept as defense in depth for stored data and is reachable again
+// (not dead) for that one case; it is only unreachable, as before, on the WRITE path.
 //
 // EXPORTED (mirrors FORM_FIELD_TYPES) so a census test can assert this DERIVED set is exactly
 // FORM_FIELD_TYPES minus {detail, record-link, date_range, explanation, department, attachment}
@@ -1770,7 +1780,25 @@ function normalizeDetailFieldParts(
   }
   const columns = value.columns.map((column, columnIndex) => {
     const normalized = normalizeFormField(column, columnIndex, context, true)
-    if (!DETAIL_LEAF_FIELD_TYPES.has(normalized.type)) {
+    // CORRECTION (approval-detail-leaf-attachment-pin-20260904, F1): `DETAIL_LEAF_FIELD_TYPES`
+    // above excludes `attachment` unconditionally, which is correct for the WRITE path
+    // (REQUEST_VALIDATION_CONTEXT: createTemplate/updateTemplate must reject a new attachment
+    // detail column in both flag states). But `assertFormSchema` is also called as `asFormSchema`
+    // against STORED_FORM_SCHEMA_CONTEXT to re-validate form_schema that is ALREADY PERSISTED
+    // (getTemplate, getTemplateVersion, publish, instance-create, frozen-schema runtime load) —
+    // and because flag-OFF createTemplate historically accepted an attachment column inside detail
+    // (the bug this branch's earlier commit fixed going forward), a template saved under that
+    // window can exist in the DB today. Rejecting it unconditionally here would make an
+    // already-stored, previously-readable template start 500ing on read — a blast-radius change
+    // to STORED data that this fix must not make. So: tolerate a stored `attachment` leaf ONLY in
+    // STORED_FORM_SCHEMA_CONTEXT, leaving the pre-existing flag-gated sweep below (inside
+    // `assertFormSchema`) as the sole thing that still rejects it — exactly main's pre-fix
+    // behavior for stored data (flag OFF: readable; flag ON: 500 via that sweep). This is legacy
+    // tolerance for a shape the write path no longer produces, not a re-opening of the leaf set;
+    // cleanup (removing this tolerance once no stored template needs it) is census-driven — see
+    // scripts/ops/approval-detail-attachment-census.sql.
+    const isLegacyStoredAttachmentColumn = normalized.type === 'attachment' && context === STORED_FORM_SCHEMA_CONTEXT
+    if (!DETAIL_LEAF_FIELD_TYPES.has(normalized.type) && !isLegacyStoredAttachmentColumn) {
       failValidation(context, `formSchema.fields[${index}].columns[${columnIndex}].type is not a valid leaf sub-field`)
     }
     return normalized
