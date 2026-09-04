@@ -1,5 +1,5 @@
 <template>
-  <div class="meta-grid" :class="[rowDensity ? `meta-grid--${rowDensity}` : '']" tabindex="0" role="grid" :aria-label="l('grid.aria')" @keydown="onKeydown">
+  <div ref="gridRoot" class="meta-grid" :class="[rowDensity ? `meta-grid--${rowDensity}` : '']" tabindex="0" role="grid" :aria-label="l('grid.aria')" @keydown="onKeydown">
     <div v-if="enableMultiSelect && selectedIds.size > 0" class="meta-grid__bulk-bar">
       <span class="meta-grid__bulk-count">{{ selectedCount(selectedIds.size, isZh) }}</span>
       <button v-if="canBulkEdit" class="meta-grid__bulk-btn" :aria-label="l('grid.setFieldAria')" @click="onBulkEdit('set')">{{ l('grid.setField') }}</button>
@@ -101,8 +101,11 @@
                   :upload-context="{ recordId: item.row.id, fieldId: field.id }"
                   :ai-run-state="aiRunState"
                   :mention-suggestions="props.mentionSuggestions"
+                  :commit-on-tab="true"
                   @update:model-value="editCell!.value = $event"
-                  @confirm="confirmEdit(item.row)"
+                  @confirm="onEditorConfirm"
+                  @blur-commit="onEditorBlurCommit"
+                  @tab-commit="onEditorTabCommit"
                   @cancel="cancelEdit"
                   @open-link-picker="openLinkPickerFromCell(item.row.id, field)"
                   @open-person-picker="openPersonPickerFromCell(item.row.id, field)"
@@ -242,8 +245,11 @@
                   :upload-context="{ recordId: row.id, fieldId: field.id }"
                   :ai-run-state="aiRunState"
                   :mention-suggestions="props.mentionSuggestions"
+                  :commit-on-tab="true"
                   @update:model-value="editCell!.value = $event"
-                  @confirm="confirmEdit(row)"
+                  @confirm="onEditorConfirm"
+                  @blur-commit="onEditorBlurCommit"
+                  @tab-commit="onEditorTabCommit"
                   @yjs-commit="markYjsHandled(row.id, field.id)"
                   @cancel="cancelEdit"
                   @open-link-picker="openLinkPickerFromCell(row.id, field)"
@@ -544,6 +550,11 @@ const { isZh } = useLocale()
 const l = (key: MetaCoreLabelKey) => metaCoreLabel(key, isZh.value)
 
 const editCell = ref<EditingCell | null>(null)
+// D2/D3: the grid root DOM element, so a commit-and-close (Enter, Tab, or a
+// click-away that closed a dangling editor) can hand DOM focus back to it —
+// the editor's <input> just unmounted, and without an explicit refocus the
+// next keystroke would go nowhere (focus falls to document.body).
+const gridRoot = ref<HTMLElement | null>(null)
 const focusRow = ref(-1)
 const focusCol = ref(-1)
 const selectedIds = ref<Set<string>>(new Set())
@@ -1265,9 +1276,21 @@ function onFieldCommentKeydown(event: KeyboardEvent, recordId: string, fieldId: 
   handleCommentAffordanceKeydown(event, () => emit('open-field-comments', { recordId, fieldId }))
 }
 
+// D2 (grid-commit-reliability): a plain click on a DIFFERENT cell while an
+// editor is open must not leave the old editor mounted holding a draft (the
+// "dangling editor" bug — see confirmEdit/startEdit's matching guard below).
+// This click doesn't open a new editor itself (single click never has),
+// it only needs to close/commit whatever was open before moving focus.
 function onCellClick(ri: number, ci: number, rid: string) {
-  focusRow.value = ri; focusCol.value = ci; emit('select-record', rid)
   const fieldId = props.visibleFields[ci]?.id
+  if (editCell.value && (editCell.value.recordId !== rid || editCell.value.fieldId !== fieldId)) {
+    confirmEdit()
+    // The old editor's <input> just unmounted (its own DOM focus goes to
+    // `document.body` per spec); return focus to the grid root so keyboard
+    // nav (Enter/Arrows) keeps working without an extra click.
+    refocusGridRoot()
+  }
+  focusRow.value = ri; focusCol.value = ci; emit('select-record', rid)
   if (fieldId) emit('cursor-focus', { recordId: rid, fieldId })
 }
 
@@ -1278,25 +1301,113 @@ function hasRemoteCursor(recordId: string, fieldId: string): boolean {
 
 function startEdit(row: MetaRecord, field: MetaField) {
   if (!isEditable(row.id, field)) return
+  // D2: switching the edit target (dblclick a DIFFERENT cell than the one
+  // currently open) must commit-or-close the previous editor first — never
+  // let two drafts exist at once. A no-op when the previous draft's value is
+  // unchanged (confirmEdit's own `value !== row.data[fieldId]` guard).
+  if (editCell.value && (editCell.value.recordId !== row.id || editCell.value.fieldId !== field.id)) {
+    confirmEdit()
+  }
   yjsHandledCellKey.value = null
   editCell.value = { recordId: row.id, fieldId: field.id, value: row.data[field.id] ?? null }
 }
 
-function confirmEdit(row: MetaRecord) {
+// Commits the CURRENTLY open edit (if any) and closes it — the single
+// canonical "close this editor" path reused by @confirm (Enter / native
+// change), @blur-commit (click-away on the text/number/date branches),
+// @tab-commit, and the cross-cell guards in startEdit/onCellClick above. Takes
+// no row argument (unlike the pre-D2 signature) so every caller — including
+// blur/Tab, which have no `row` in scope — can share it; the row is looked up
+// by id via `recordById` (already built from `props.rows` for lock-state).
+function confirmEdit() {
   if (!editCell.value) return
   const { recordId, fieldId, value } = editCell.value
-  // Skip the REST patch only when the editor signalled that Yjs carried
-  // the edit for this exact cell. If the Yjs path was not active (flag
-  // off, timeout, error) we stay on REST unchanged.
-  const handledViaYjs = yjsHandledCellKey.value === cellKey(recordId, fieldId)
-  if (!handledViaYjs && value !== row.data[fieldId]) {
-    emit('patch-cell', recordId, fieldId, value, row.version)
+  const row = recordById.value.get(recordId)
+  // Row can be missing if it was paged/filtered away mid-edit — close
+  // without emitting rather than dereferencing `row.data`.
+  if (row) {
+    // Skip the REST patch only when the editor signalled that Yjs carried
+    // the edit for this exact cell. If the Yjs path was not active (flag
+    // off, timeout, error) we stay on REST unchanged.
+    const handledViaYjs = yjsHandledCellKey.value === cellKey(recordId, fieldId)
+    if (!handledViaYjs && value !== row.data[fieldId]) {
+      emit('patch-cell', recordId, fieldId, value, row.version)
+    }
   }
   editCell.value = null
   yjsHandledCellKey.value = null
 }
 
 function cancelEdit() { editCell.value = null; yjsHandledCellKey.value = null }
+
+// D3: Enter commits via the same confirmEdit() as blur/Tab, then explicitly
+// returns DOM focus to the grid root — the editor's <input> just unmounted,
+// and without this "commit + close + keep focus on the same cell" (the
+// chosen Enter semantics — Airtable-style, no auto-move-down) would only be
+// a visual outline: the NEXT keystroke would go nowhere (focus fell to
+// `document.body`). Reused by every @confirm source (Enter, and native
+// change on select/boolean/rating/etc.), not just literal Enter presses —
+// none of those other sources hand focus to anything else, so reclaiming it
+// is safe/consistent for all of them.
+function onEditorConfirm() {
+  confirmEdit()
+  refocusGridRoot()
+}
+
+// D2: click-away commit for the editor's blur-commit signal (see
+// MetaCellEditor's `blur-commit` doc comment for which branches emit it).
+// Deliberately does NOT refocus the grid — a blur means focus already moved
+// somewhere else (another cell, the record panel, ...); stealing it back
+// would fight the user.
+function onEditorBlurCommit() {
+  confirmEdit()
+}
+
+// D2: Tab / Shift+Tab inside the open editor = commit + move focus to the
+// adjacent cell, opening nothing (matches the Enter semantics above — no
+// auto-open). "Adjacent cell" rather than "next *editable* cell" (the
+// literal task wording) to match the EXISTING arrow-key nav, which also does
+// not skip read-only columns — introducing a different traversal rule for
+// Tab-out-of-an-editor alone would be a bigger, less coherent behavior change
+// than reusing the nav the grid already has everywhere else.
+function onEditorTabCommit(shiftKey: boolean) {
+  confirmEdit()
+  moveFocusAfterEditorTab(!shiftKey)
+  refocusGridRoot()
+}
+
+// Mirrors the ArrowRight/ArrowLeft wrap-to-next/prev-row logic in onKeydown
+// below, but is intentionally a SEPARATE function rather than a shared
+// extraction: onKeydown's non-editing Tab case has its own (pre-existing,
+// out-of-scope) Shift+Tab quirk — see the comment on that switch-case — and
+// reusing one function for both would risk carrying this new, correct
+// direction handling into that unrelated path.
+function moveFocusAfterEditorTab(forward: boolean) {
+  const navRows = displayRows.value
+  const maxC = props.visibleFields.length - 1
+  const maxR = navRows.length - 1
+  if (forward) {
+    if (focusCol.value < maxC) focusCol.value++
+    else if (focusRow.value < maxR) { focusRow.value++; focusCol.value = 0; emit('select-record', navRows[focusRow.value].id) }
+  } else {
+    if (focusCol.value > 0) focusCol.value--
+    else if (focusRow.value > 0) { focusRow.value--; focusCol.value = maxC; emit('select-record', navRows[focusRow.value].id) }
+  }
+  scrollFocusedRowIntoWindow()
+}
+
+// Guarded by `!editCell.value` at fire time (not just at schedule time): if a
+// NEW edit session opened in between (e.g. this callback was scheduled by an
+// Enter-commit, and something reopened an editor before the microtask ran),
+// stealing DOM focus back to the grid root would yank focus out of that
+// freshly-opened, freshly-self-focused editor. Without this guard a stale
+// refocus can even mask an unrelated bug: it blurs the reopened editor,
+// and — because blur on the text/number/date branches now commits (D2) —
+// that blur-triggered close can look indistinguishable from the reopen
+// never having happened at all.
+function refocusGridRoot() {
+  nextTick(() => { if (!editCell.value) gridRoot.value?.focus() })
+}
 
 function openLinkPickerFromCell(recordId: string, field: MetaField) {
   cancelEdit()
@@ -1349,16 +1460,67 @@ async function pasteFocusedCell() {
   } catch { /* clipboard access denied */ }
 }
 
+// D4: isComposing (Chrome/Firefox) / keyCode 229 (older Safari/IME shims) /
+// key === 'Process' (some IME shims report this literal key value during
+// composition) all mean this keydown is part of an IME composition, not a
+// real keystroke from the user. Guards the WHOLE grid-root handler (not just
+// Enter/Escape) — harmless for other keys (arrow/copy/paste are not
+// meaningful mid-composition either) and, combined with the length===1 check
+// on the D1 type-to-edit branch below, means a composition keystroke can
+// never seed a new edit nor reach the Enter/Escape switch cases.
+function isGridComposingEvent(e: KeyboardEvent): boolean {
+  return e.isComposing || e.keyCode === 229 || e.key === 'Process'
+}
+
 function onKeydown(e: KeyboardEvent) {
+  if (isGridComposingEvent(e)) return
   const mod = e.metaKey || e.ctrlKey
   if (mod && e.key === 'c' && !editCell.value) { e.preventDefault(); copyFocusedCell(); return }
   if (mod && e.key === 'v' && !editCell.value) { e.preventDefault(); pasteFocusedCell(); return }
   if (editCell.value) return
   const navRows = displayRows.value
   const maxR = navRows.length - 1, maxC = props.visibleFields.length - 1
+  // D1: type-to-edit. A printable single character on a focused, editable
+  // string/number cell opens the editor with the draft SEEDED (replace, not
+  // appended) to that character, consuming the keystroke (preventDefault) so
+  // it isn't ALSO typed once the editor mounts — and, for a plain <div>
+  // holding focus, preventDefault also stops incidental browser defaults
+  // (e.g. Space triggering a page-scroll).
+  //   - string: any printable single character seeds the draft as-is.
+  //   - number: seeding is restricted to DIGITS 0-9 only (not '.'/'-') so the
+  //     seeded draft is always a clean, finite Number — never a string typed
+  //     into a numeric column, and never NaN from a lone '-' or '.'. This is
+  //     a deliberate narrowing versus the string case: decimals/negatives
+  //     remain fully editable via dblclick, or by continuing to type after
+  //     the digit seed (onNumberInput re-parses the whole field each
+  //     keystroke, same as always).
+  //   - boolean/date/select/link/attachment (the rest of EDITABLE): NOT
+  //     seeded — a checkbox/date/dropdown/picker has no meaningful "replace
+  //     with one printable character" semantics.
+  if (!mod && !e.altKey && e.key.length === 1 && focusRow.value >= 0 && focusCol.value >= 0) {
+    const r = navRows[focusRow.value]
+    const f = props.visibleFields[focusCol.value]
+    if (r && f && isEditable(r.id, f)) {
+      const seedValue: unknown =
+        f.type === 'string' ? e.key
+        : f.type === 'number' && /^[0-9]$/.test(e.key) ? Number(e.key)
+        : undefined
+      if (seedValue !== undefined) {
+        e.preventDefault()
+        yjsHandledCellKey.value = null
+        editCell.value = { recordId: r.id, fieldId: f.id, value: seedValue }
+        return
+      }
+    }
+  }
   switch (e.key) {
     case 'ArrowDown': e.preventDefault(); if (focusRow.value < maxR) { focusRow.value++; if (focusCol.value < 0) focusCol.value = 0; emit('select-record', navRows[focusRow.value].id) } break
     case 'ArrowUp': e.preventDefault(); if (focusRow.value > 0) { focusRow.value--; emit('select-record', navRows[focusRow.value].id) } break
+    // Pre-existing, out-of-scope quirk (left untouched): this case matches
+    // 'Tab' regardless of e.shiftKey, so a non-editing Shift+Tab moves focus
+    // FORWARD here (same as plain Tab) instead of backward — unrelated to
+    // the grid-commit-reliability work, which only touches Tab INSIDE an
+    // open editor (see onEditorTabCommit / moveFocusAfterEditorTab above).
     case 'ArrowRight': case 'Tab':
       if (e.key === 'Tab' && !e.shiftKey) e.preventDefault()
       if (e.key === 'ArrowRight') e.preventDefault()

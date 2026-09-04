@@ -326,6 +326,31 @@ describe('MetaBulkEditDialog', () => {
     app.unmount()
   })
 
+  // grid-commit-reliability regression: MetaCellEditor's D2 Tab-commit feature is scoped to grid
+  // hosts via the `commit-on-tab` opt-in prop (MetaGridTable passes it; MetaBulkEditDialog does
+  // not). Without that gate, Tab pressed in the value input would call preventDefault()
+  // unconditionally — and since this dialog never listens for `tab-commit`, the keydown would be
+  // silently swallowed with nothing consuming it, trapping keyboard focus inside the input (Tab
+  // could never reach "Set value" / Cancel). MUTATION: removing the `!props.commitOnTab` guard in
+  // MetaCellEditor's onTextTab makes this go red (defaultPrevented flips to true).
+  it('does not intercept Tab in the value editor (commitOnTab is not wired here)', async () => {
+    const { app, root } = mountDialog({ mode: 'set' })
+    await nextTick()
+
+    const select = root.querySelector('.meta-bulk-edit__select') as HTMLSelectElement
+    select.value = 'fld_name'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    const input = root.querySelector('.meta-bulk-edit__value-wrap input[type=text]') as HTMLInputElement
+    expect(input).not.toBeNull()
+    const tabEvent = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+    input.dispatchEvent(tabEvent)
+
+    expect(tabEvent.defaultPrevented).toBe(false)
+    app.unmount()
+  })
+
   it('emits cancel when the close button is clicked', async () => {
     const onCancel = vi.fn()
     const { app, root } = mountDialog({ onCancel })

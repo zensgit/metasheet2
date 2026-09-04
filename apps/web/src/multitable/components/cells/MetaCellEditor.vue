@@ -1,5 +1,5 @@
 <template>
-  <div class="meta-cell-editor">
+  <div class="meta-cell-editor" ref="editorRoot">
     <!-- date field type -->
     <input
       v-if="field.type === 'date'"
@@ -8,8 +8,10 @@
       type="date"
       :value="textControlValue(scalarActive ? scalarValue : modelValue)"
       @input="commitScalar(($event.target as HTMLInputElement).value)"
-      @keydown.enter="scalarConfirm()"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterScalarConfirm"
+      @keydown.escape="onEscapeCancel"
+      @keydown.tab="onScalarTab"
+      @blur="onScalarBlur"
     />
     <!-- datetime field type -->
     <input
@@ -19,8 +21,8 @@
       type="datetime-local"
       :value="dateTimeInputValue(scalarActive ? scalarValue : modelValue)"
       @input="commitScalar(dateTimeValueFromLocalInput(($event.target as HTMLInputElement).value))"
-      @keydown.enter="scalarConfirm()"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterScalarConfirm"
+      @keydown.escape="onEscapeCancel"
     />
     <!-- string: date-like -->
     <input
@@ -30,8 +32,10 @@
       type="date"
       :value="textControlValue(modelValue)"
       @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
-      @keydown.enter="emit('confirm')"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterConfirm"
+      @keydown.escape="onEscapeCancel"
+      @keydown.tab="onPlainTab"
+      @blur="onPlainBlur"
     />
     <!-- string: normal -->
     <div v-else-if="field.type === 'string'" class="meta-cell-editor__text-wrap">
@@ -41,8 +45,10 @@
         type="text"
         :value="yjsActive ? yjsText : (modelValue ?? '')"
         @input="onTextInput"
-        @keydown.enter="onTextConfirm"
-        @keydown.escape="emit('cancel')"
+        @keydown.enter="onEnterTextConfirm"
+        @keydown.escape="onEscapeCancel"
+        @keydown.tab="onTextTab"
+        @blur="onTextBlur"
       />
       <MetaYjsPresenceChip
         v-if="yjsActive && yjsCollaborators.length > 0"
@@ -72,9 +78,9 @@
       rows="4"
       :value="textControlValue(modelValue)"
       @input="emit('update:modelValue', ($event.target as HTMLTextAreaElement).value)"
-      @keydown.meta.enter.prevent="emit('confirm')"
-      @keydown.ctrl.enter.prevent="emit('confirm')"
-      @keydown.escape="emit('cancel')"
+      @keydown.meta.enter.prevent="onEnterConfirm"
+      @keydown.ctrl.enter.prevent="onEnterConfirm"
+      @keydown.escape="onEscapeCancel"
     />
 
     <!-- barcode: text-backed field; scanner/image generation is out of scope. -->
@@ -87,8 +93,8 @@
       :placeholder="l('cell.barcodePlaceholder')"
       :value="textControlValue(modelValue)"
       @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
-      @keydown.enter="emit('confirm')"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterConfirm"
+      @keydown.escape="onEscapeCancel"
     />
 
     <!-- qrcode: text-backed source string; the QR image renders read-only in the cell/drawer. -->
@@ -101,8 +107,8 @@
       :placeholder="l('cell.qrcodePlaceholder')"
       :value="textControlValue(modelValue)"
       @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
-      @keydown.enter="emit('confirm')"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterConfirm"
+      @keydown.escape="onEscapeCancel"
     />
 
     <!-- location: address-only editor; coordinates can still be supplied through API. -->
@@ -114,8 +120,8 @@
       :placeholder="l('cell.locationPlaceholder')"
       :value="locationAddressValue(modelValue)"
       @input="emit('update:modelValue', locationValueFromAddress(($event.target as HTMLInputElement).value))"
-      @keydown.enter="emit('confirm')"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterConfirm"
+      @keydown.escape="onEscapeCancel"
     />
 
     <!-- number -->
@@ -127,8 +133,10 @@
       :step="numericStep"
       :value="scalarActive ? (scalarValue ?? '') : (modelValue ?? '')"
       @input="onNumberInput"
-      @keydown.enter="scalarConfirm()"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterScalarConfirm"
+      @keydown.escape="onEscapeCancel"
+      @keydown.tab="onScalarTab"
+      @blur="onScalarBlur"
     />
 
     <!-- boolean -->
@@ -148,7 +156,7 @@
       class="meta-cell-editor__select"
       :value="(scalarActive ? scalarValue : modelValue) ?? ''"
       @change="commitScalar(($event.target as HTMLSelectElement).value); scalarConfirm()"
-      @keydown.escape="emit('cancel')"
+      @keydown.escape="onEscapeCancel"
     >
       <option value="">—</option>
       <option v-for="opt in field.options ?? []" :key="opt.value" :value="opt.value">
@@ -164,9 +172,9 @@
       multiple
       :value="multiSelectValue"
       @change="onMultiSelectChange"
-      @keydown.meta.enter.prevent="scalarConfirm()"
-      @keydown.ctrl.enter.prevent="scalarConfirm()"
-      @keydown.escape="emit('cancel')"
+      @keydown.meta.enter.prevent="onEnterScalarConfirm"
+      @keydown.ctrl.enter.prevent="onEnterScalarConfirm"
+      @keydown.escape="onEscapeCancel"
     >
       <option v-for="opt in field.options ?? []" :key="opt.value" :value="opt.value">
         {{ opt.value }}
@@ -197,8 +205,8 @@
       :step="numericStep"
       :value="scalarActive ? (scalarValue ?? '') : (modelValue ?? '')"
       @input="onNumberInput"
-      @keydown.enter="scalarConfirm()"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterScalarConfirm"
+      @keydown.escape="onEscapeCancel"
     />
 
     <!-- duration: format-aware text (h:mm / mm:ss) parsed to seconds. A LOCAL
@@ -215,8 +223,8 @@
       :placeholder="durationFormat"
       :value="durationText"
       @input="onDurationInput"
-      @keydown.enter="durationConfirm()"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterDurationConfirm"
+      @keydown.escape="onEscapeCancel"
     />
 
     <!-- rating: click-to-set stars -->
@@ -246,8 +254,8 @@
       placeholder="https://example.com"
       :value="modelValue ?? ''"
       @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
-      @keydown.enter="emit('confirm')"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterConfirm"
+      @keydown.escape="onEscapeCancel"
     />
     <input
       v-else-if="field.type === 'email'"
@@ -257,8 +265,8 @@
       placeholder="name@example.com"
       :value="modelValue ?? ''"
       @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
-      @keydown.enter="emit('confirm')"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterConfirm"
+      @keydown.escape="onEscapeCancel"
     />
     <input
       v-else-if="field.type === 'phone'"
@@ -268,8 +276,8 @@
       placeholder="+86 138 0000 0000"
       :value="modelValue ?? ''"
       @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
-      @keydown.enter="emit('confirm')"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterConfirm"
+      @keydown.escape="onEscapeCancel"
     />
 
     <!-- attachment -->
@@ -290,7 +298,7 @@
             class="meta-cell-editor__file-input"
             :disabled="!!attachmentActivity || uploading"
             @change="onFileSelect"
-            @keydown.escape="emit('cancel')"
+            @keydown.escape="onEscapeCancel"
           />
           <span
             class="meta-cell-editor__file-trigger-label"
@@ -401,6 +409,20 @@ const props = defineProps<{
    * `commentMentionSuggestions` (no fresh fetch). Absent on the anonymous form path.
    */
   mentionSuggestions?: MetaCommentMentionSuggestion[]
+  /**
+   * D2 (grid-commit-reliability): opt-in for Tab/Shift+Tab inside the editor
+   * to preventDefault + emit `tab-commit` instead of doing nothing (native
+   * Tab, in a grid `<td>` that isn't itself in tab order, would otherwise
+   * jump focus to whatever the next DOM tabindex happens to be). MUST be
+   * requested by the host — MetaCellEditor cannot infer it: MetaGridTable
+   * passes `commit-on-tab` and listens for `tab-commit` (moves focus to the
+   * adjacent cell); MetaBulkEditDialog does NOT — its value input sits in an
+   * ordinary tab sequence with a "Set value"/Cancel footer after it, and an
+   * unconditional preventDefault here previously trapped keyboard focus
+   * inside that input (Tab did nothing — no listener consumed the emit).
+   * Default undefined/false = plain native Tab, byte-identical to pre-D2.
+   */
+  commitOnTab?: boolean
 }>()
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}/
@@ -428,6 +450,25 @@ const emit = defineEmits<{
   (e: 'yjs-commit'): void
   /** A3: AI shortcut run requested for this cell (host resolves record/field). */
   (e: 'ai-run'): void
+  /**
+   * D2 (grid-commit-reliability): the editor's input lost focus to something
+   * OUTSIDE this editor (click-away / focus moved elsewhere in the page).
+   * Emitted ONLY by the plain scalar/text/number/date branches (see the
+   * per-branch `on*Blur` handlers below) — select/multiSelect/attachment/link
+   * are excluded because their native pickers legitimately steal focus
+   * mid-edit (a blur there is a false positive, not a click-away). The host
+   * commits the draft (same "only if changed" rule as `confirm`) and closes.
+   */
+  (e: 'blur-commit'): void
+  /**
+   * D2: Tab / Shift+Tab pressed while this editor is open. Emitted by the
+   * SAME four branches as `blur-commit` (see the enumeration above) — Tab is
+   * intentionally NOT wired as a delegated wrapper-level listener because
+   * that would also swallow Tab used for in-editor keyboard nav (the
+   * attachment "choose file" → "clear all" tab order, the AI-run button
+   * sibling). Payload is `event.shiftKey` (true = move backward).
+   */
+  (e: 'tab-commit', shiftKey: boolean): void
 }>()
 
 const { isZh } = useLocale()
@@ -605,6 +646,110 @@ function onTextInput(event: Event) {
 function onTextConfirm() {
   if (yjsActive.value) emit('yjs-commit')
   emit('confirm')
+}
+
+// --- D3/D4 (grid-commit-reliability): Enter/Escape hardening ---------------
+// isComposing (Chrome/Firefox) or keyCode 229 (older Safari/IME shims) means
+// this keydown is part of an IME composition (confirming a candidate), not a
+// real Enter/Escape from the user — every confirm/cancel wrapper below bails
+// out on it so an IME confirm can never prematurely commit or close the cell.
+function isComposingEvent(e: KeyboardEvent): boolean {
+  return e.isComposing || e.keyCode === 229
+}
+// D3: stopPropagation is the chosen mechanism for "Enter must not re-open the
+// editor" — MetaGridTable.confirmEdit() clears editCell.value synchronously,
+// and without this the SAME keydown would keep bubbling to the grid root's
+// `@keydown="onKeydown"`, where (editCell.value is now falsy) the Enter case
+// would immediately call startEdit() again on the just-committed cell. See
+// MetaGridTable.vue onKeydown for the matching grid-root-side guard.
+function onEnterConfirm(e: KeyboardEvent) {
+  if (isComposingEvent(e)) return
+  e.stopPropagation()
+  emit('confirm')
+}
+function onEnterScalarConfirm(e: KeyboardEvent) {
+  if (isComposingEvent(e)) return
+  e.stopPropagation()
+  scalarConfirm()
+}
+function onEnterTextConfirm(e: KeyboardEvent) {
+  if (isComposingEvent(e)) return
+  e.stopPropagation()
+  onTextConfirm()
+}
+function onEnterDurationConfirm(e: KeyboardEvent) {
+  if (isComposingEvent(e)) return
+  e.stopPropagation()
+  durationConfirm()
+}
+// Escape does NOT stopPropagation: that bubble-to-grid-root behavior
+// (resetting focusRow/focusCol) predates this PR and is out of scope here —
+// only the isComposing guard is new.
+function onEscapeCancel(e: KeyboardEvent) {
+  if (isComposingEvent(e)) return
+  emit('cancel')
+}
+
+// --- D2 (grid-commit-reliability): commit-on-blur / commit-on-Tab ----------
+// Wired ONLY on the plain scalar/text/number/date branches (date, the
+// date-like string, the normal string, and number) — see the `blur-commit` /
+// `tab-commit` emit doc comments above for why select/multiSelect/attachment/
+// link are excluded.
+const editorRoot = ref<HTMLElement | null>(null)
+// A blur whose relatedTarget is still WITHIN this editor (e.g. focus moving
+// from the text input to the sibling AI-run button) is an in-editor focus
+// move, not a click-away — ignore it. `e.relatedTarget` is unset in some
+// jsdom/browser file-picker paths too, which is exactly the sort of
+// ambiguity that keeps blur-commit off the attachment/link branches.
+function shouldIgnoreBlur(e: FocusEvent): boolean {
+  const related = e.relatedTarget as Node | null
+  return !!(related && editorRoot.value && editorRoot.value.contains(related))
+}
+function onScalarBlur(e: FocusEvent) {
+  if (shouldIgnoreBlur(e)) return
+  if (scalarActive.value) emit('yjs-commit')
+  emit('blur-commit')
+}
+function onTextBlur(e: FocusEvent) {
+  if (shouldIgnoreBlur(e)) return
+  if (yjsActive.value) emit('yjs-commit')
+  emit('blur-commit')
+}
+function onPlainBlur(e: FocusEvent) {
+  if (shouldIgnoreBlur(e)) return
+  emit('blur-commit')
+}
+// preventDefault stops the browser's native Tab focus-jump (which would land
+// on whatever the next DOM tabindex happens to be, not the next grid cell) —
+// the host moves focus itself in response to `tab-commit`. stopPropagation
+// for the same reason as onEnterConfirm above. Gated on `props.commitOnTab`
+// FIRST, before preventDefault/stopPropagation/any emit — without the gate,
+// a host that never wires `tab-commit` (MetaBulkEditDialog) would still have
+// Tab silently swallowed (preventDefault with no listener consuming the
+// emit), trapping keyboard focus inside the value input. See the prop doc
+// comment above for why this can't be inferred instead of asked for.
+function onScalarTab(e: KeyboardEvent) {
+  if (!props.commitOnTab) return
+  if (isComposingEvent(e)) return
+  e.preventDefault()
+  e.stopPropagation()
+  if (scalarActive.value) emit('yjs-commit')
+  emit('tab-commit', e.shiftKey)
+}
+function onTextTab(e: KeyboardEvent) {
+  if (!props.commitOnTab) return
+  if (isComposingEvent(e)) return
+  e.preventDefault()
+  e.stopPropagation()
+  if (yjsActive.value) emit('yjs-commit')
+  emit('tab-commit', e.shiftKey)
+}
+function onPlainTab(e: KeyboardEvent) {
+  if (!props.commitOnTab) return
+  if (isComposingEvent(e)) return
+  e.preventDefault()
+  e.stopPropagation()
+  emit('tab-commit', e.shiftKey)
 }
 
 const inputRef = ref<HTMLElement | null>(null)
