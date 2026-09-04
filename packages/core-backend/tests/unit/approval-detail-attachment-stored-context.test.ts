@@ -27,6 +27,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const pgState = vi.hoisted(() => ({
   pool: { query: vi.fn(), connect: vi.fn() },
+  client: { query: vi.fn(), release: vi.fn() },
 }))
 
 vi.mock('../../src/db/pg', () => ({
@@ -96,6 +97,62 @@ function mockStoredTemplate(tplId: string, verId: string) {
   })
 }
 
+/**
+ * R4 (approval-detail-leaf-attachment-pin-20260904 round 3): the WRITE-path test below asserts
+ * createTemplate rejects BEFORE ever calling `pool.connect()` — true under the shipped code. But
+ * under a mutation that defeats that rejection (e.g. round 2's own M1: tolerate `attachment`
+ * unconditionally instead of only in STORED_FORM_SCHEMA_CONTEXT), createTemplate WOULD proceed to
+ * `pool.connect()` — and a bare, unconfigured `vi.fn()` there resolves to `undefined`, so
+ * `client.query('BEGIN')` throws a raw TypeError that gets caught and rethrown as-is. The test
+ * would still go red (a TypeError has no `statusCode`/`code`, so `.rejects.toMatchObject` still
+ * fails), but for the WRONG reason: a harness crash reads identically to "the write path stopped
+ * rejecting," so this test could not tell the two apart, and an unrelated future connect-wiring
+ * break would false-positive the same way. Wiring a real INSERT-capable client mock here means a
+ * defeated rejection actually SUCCEEDS (the promise resolves), so the assertion fails on "expected
+ * rejection, got a resolved value" — a diagnostic that names the actual defect, not the harness.
+ */
+function wireInsertCapableClient(tplId: string, verId: string) {
+  pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+    const s = sql.replace(/\s+/g, ' ').trim()
+    if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [], rowCount: 0 }
+    if (s.startsWith('INSERT INTO approval_templates')) {
+      return {
+        rows: [{
+          id: tplId, key: String(params?.[0]), name: String(params?.[1]), description: null, category: null,
+          visibility_scope: JSON.parse(String(params?.[4])), sla_hours: null, status: 'draft',
+          active_version_id: null, latest_version_id: null,
+          created_at: new Date('2026-09-01T00:00:00.000Z'), updated_at: new Date('2026-09-01T00:00:00.000Z'),
+        }],
+        rowCount: 1,
+      }
+    }
+    if (s.startsWith('INSERT INTO approval_template_versions')) {
+      return {
+        rows: [{
+          id: verId, template_id: tplId, version: 1, status: 'draft',
+          form_schema: JSON.parse(String(params?.[1])),
+          approval_graph: JSON.parse(String(params?.[2])),
+          created_at: new Date('2026-09-01T00:00:00.000Z'), updated_at: new Date('2026-09-01T00:00:00.000Z'),
+        }],
+        rowCount: 1,
+      }
+    }
+    if (s.startsWith('UPDATE approval_templates')) {
+      return {
+        rows: [{
+          id: tplId, key: `key-${tplId}`, name: 'Stored Attachment-Leaf Tpl', description: null, category: null,
+          visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+          active_version_id: null, latest_version_id: verId,
+          created_at: new Date('2026-09-01T00:00:00.000Z'), updated_at: new Date('2026-09-01T00:00:00.000Z'),
+        }],
+        rowCount: 1,
+      }
+    }
+    throw new Error(`Unhandled client query: ${s}`)
+  })
+  pgState.pool.connect.mockResolvedValue(pgState.client)
+}
+
 const FLAG = 'APPROVAL_ATTACHMENTS_ENABLED'
 
 describe('REGRESSION (F1): stored form_schema with an attachment detail column — read-path parity with origin/main', () => {
@@ -104,6 +161,9 @@ describe('REGRESSION (F1): stored form_schema with an attachment detail column �
   beforeEach(() => {
     pgState.pool.query.mockReset()
     pgState.pool.connect.mockReset()
+    pgState.client.query.mockReset()
+    pgState.client.release.mockReset()
+    wireInsertCapableClient('tpl-stored-attach-write-mint', 'ver-stored-attach-write-mint')
   })
 
   afterEach(() => {
