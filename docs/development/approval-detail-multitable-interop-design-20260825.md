@@ -1,6 +1,6 @@
 # 审批明细表 × 多维表互通设计短文(含宜搭子表单对标)
 
-日期:2026-08-25 · **v13(2026-09-04 第十二次修订)** · 状态:**PROPOSED**(§7 为五个独立裁决包:A/B/C/D1/D2)
+日期:2026-08-25 · **v14(2026-09-04 第十三次修订)** · 状态:**PROPOSED**(§7 为五个独立裁决包:A/B/C/D1/D2)
 
 ## 0. 符号锚点与 ratify 前置(v12 新增)
 
@@ -9,10 +9,18 @@
 A/B 任一包 ratify 前,须对届时的 origin/main 重生成该表;每条非 TRUE 行必须归入且只能归入三类之一并
 在「处置」列标注——①**已在正文更正**(引用节号;须能对应到正文变更)、②**规范性目标**(合同要求,
 抽取器误当现状核)、③**分类产物**(抽取器把否定句或复合句拆错);不允许第四类,也不允许未标注的
-FALSE/STALE/UNCLEAR。观察列不截断。本文任何「当前 main」表述以附录锚点为准。
+FALSE/STALE/UNCLEAR。**同一事实出现在多行时的裁决(v14,门审 R6)**:以合同原句是否为规范句为准——
+含「须/必须/应/不得/目标/v1.1」等规范标记者一律②;③仅限抽取器拆错的**事实句**,且③行必须在观察列
+引用被拆错的原句。观察列不截断。本文任何「当前 main」表述以附录锚点为准。
 独立修复 PR(后端明细叶子集写路径显式拒绝 attachment + web↔backend 等值钉 + 只读 census SQL):
 分支 `fix/approval-detail-leaf-attachment-pin-20260904`(PR 号见该分支;B 包前置 ⑪)。
 
+> **v14 修订说明**(门审 @ `ab5711c15d`:合并 APPROVE-with-hardening、A APPROVE、B APPROVE-with-hardening,
+> 六项 P3/NIT 残留):R1 规则级联删除是第二条 event-fire 删除路径(terminate-on-absent 覆盖+gate 3 正控);
+> R2 跨表 NOT EXISTS 的 READ COMMITTED EPQ 窗口未构造,列为 B 实现必做并发用例;R3 SQL 补表别名;
+> R4 terminate-on-absent 补 consumer 终态前置、`actionClaimId` v1 必非 null;R5 证据表改代理主键
+> (fence 重起 1 会撞旧已解决行);R6 §0 增加规范句优先的裁决规则,附录按此重分类。
+>
 > **v13 修订说明**(门审 @ `887c47346f`:合并 APPROVE-with-hardening、B 包 REQUEST CHANGES,1 P1 + 2 P2
 > + 6 P3,全部亲验后整合):**P1** 既有 7 天保留清扫无 status 谓词会删掉本状态机依赖的 event-fire 行
 > ——增加「未解决证据行存在则不清扫」的 NOT EXISTS 谓词(additive,禁 FK 实现),并规定行已缺失时
@@ -411,7 +419,10 @@ CREATE TABLE meta_fwb_detail_mismatch (
   resolved_at timestamptz NULL,
   resolution text NULL
     CONSTRAINT fwb_detail_mismatch_resolution CHECK (resolution IN ('reopened_after_repair','terminated_failed')),
-  CONSTRAINT pk_fwb_detail_mismatch PRIMARY KEY (rule_id, dedup_key, fence),
+  id text NOT NULL,                          -- 代理键(v14):event-fire 行被删后 fence 从 1 重起,
+                                             -- 复合主键会让旧的已解决行阻断再检测
+  CONSTRAINT pk_fwb_detail_mismatch PRIMARY KEY (id),
+  CONSTRAINT uq_fwb_detail_mismatch_episode UNIQUE (rule_id, dedup_key, fence, detected_at),
   CONSTRAINT fwb_detail_mismatch_resolution_paired CHECK
     ((resolved_at IS NULL AND resolution IS NULL) OR (resolved_at IS NOT NULL AND resolution IS NOT NULL))
 );
@@ -419,7 +430,9 @@ CREATE UNIQUE INDEX uq_fwb_detail_mismatch_open
   ON meta_fwb_detail_mismatch (rule_id, dedup_key) WHERE resolved_at IS NULL;
 ```
 
-- 主键含 `fence` 是**审计身份**(每个检测周期一行:reopen 后再次 mismatch 以新 fence 落新行),
+- `fence` 入唯一索引 `uq_fwb_detail_mismatch_episode` 是**审计身份**(每个检测周期一行:reopen 后再次
+  mismatch 以新 fence 落新行;v14 起主键为代理键——event-fire 行被清扫/级联删除后再次 fresh-claim 从
+  fence=1 重起,而已解决的证据行**永不清理**,复合主键会让旧 `(rule_id,dedup_key,1)` 行阻断再检测),
   **不是**重入去重机制(v13 更正 v12 的过强表述):reclaim/reopen/resume 都会 bump fence,且终态 CAS
   提交后 `claimEventFiresLease` 的终态短路使 callback 不再重入,「同 fence 二次 INSERT」在构造上
   不可达。重入零二次的机械保证=**终态短路 + `uq_fwb_detail_mismatch_open`**(任一 event-fire 至多
@@ -428,9 +441,15 @@ CREATE UNIQUE INDEX uq_fwb_detail_mismatch_open
   `DELETE FROM meta_automation_event_fires WHERE fired_at < cutoff`(`EVENT_DEDUP_RETENTION_DAYS = 7`,
   **无 status 谓词**,`fired_at` 不随 reclaim 刷新,且在多处无条件触发)。不改动即意味着 7 天后本状态机
   的 event-fire 目标行消失:四个 owner 操作全部因「锁不到两行」拒绝,未解决证据行使严格状态面永久
-  失败且无授权出口。合同要求(additive):该 DELETE 增加
-  `AND NOT EXISTS (SELECT 1 FROM meta_fwb_detail_mismatch m WHERE m.rule_id = f.rule_id AND m.dedup_key = f.dedup_key AND m.resolved_at IS NULL)`
+  失败且无授权出口。合同要求(additive):该 DELETE 改写为
+  `DELETE FROM meta_automation_event_fires f WHERE f.fired_at < cutoff AND NOT EXISTS (SELECT 1 FROM meta_fwb_detail_mismatch m WHERE m.rule_id = f.rule_id AND m.dedup_key = f.dedup_key AND m.resolved_at IS NULL)`
   ——只保护带未解决证据的行,其余行的保留行为逐字节不变;证据行 resolve 后下一次清扫照常删除。
+  **第二条删除路径(v14,门审 R1)**:`automation_rules` 的删除经外键级联删掉其 event-fires,NOT EXISTS 谓词
+  拦不住;其后果由下文「event-fire 行已不存在时只允许 terminate」覆盖,并在 gate 3 增加该路径正控
+  (删规则后证据行仍在、strict status 仍失败、terminate 可解决、reopen 被拒)。
+  **并发弱点(v14,门审 R2)**:该跨表 NOT EXISTS 在 READ COMMITTED 下与证据 INSERT 同刻存在 EvalPlanQual
+  窗口,本文**未**构造证明;gate 3 的保留正控为顺序用例,B 实现时必须另构造并发用例(TOCTOU 必须构造
+  并发,不得以顺序论证代替)。
   **禁止**以外键实现该保护(FK 会让整表批量 DELETE 中止,静默杀死保留)。`meta_fwb_action_applied`
   无清扫,不受影响。
 - 该表只存身份、计数与摘要,不存任何表单值或目标记录内容;`observed_digest` 的输入是
@@ -492,6 +511,8 @@ B 旗。底层 FWB/durable 安全能力暂不可用时，必须进入 detail 专
 `classifyFwbDeliveryDisposition(execution): { kind: 'settled' } | { kind: 'retryable' } | { kind: 'outcome_unknown', evidence: DetailMismatchEvidence }`
 (v13:判别联合而非三值字符串——证据列需要通道),其中
 `DetailMismatchEvidence = { actionClaimId: string | null, expectedRows: number, mismatchKind: <§4.2 闭集>, observedDigest: <sha256 hex> }`
+(`actionClaimId` 在 v1 **必非 null**——`N>0 无子证据` 分支仍持有已提交父行 id;可空仅为未来 mode 预留,
+v1 测试必须断言非 null;v14,门审 R4)
 由 detail executor 在检测点计算并挂在 step result 的**类型化字段** `detailMismatch?: DetailMismatchEvidence`
 上(不塞进 error 字符串;step `status` 仍为 `failed`、error token 仍为
 `fwb_outcome_unknown:detail_provenance_mismatch`)。分类器扫描一次
@@ -569,8 +590,9 @@ attempts **计数**(不得含用户值)。若保留已达 `maxAttempts` 的值,�
 写 `resolved_at` 与对应 `resolution`(严格状态面随之恢复);若不存在未解决证据行(例如非 detail
 来源的 `outcome_unknown`),操作照常执行,审计记 `evidence_row=absent`。ack-terminal 与
 resume-in-progress-after-quiescence 不触碰证据行。
-**event-fire 行已不存在时**(修复前被清扫或人工删除):`terminate` 允许仅对证据行写
-`resolved_at`/`resolution='terminated_failed'`(审计记 `event_fire=absent`);`reopen-after-repair` 与
+**event-fire 行已不存在时**(修复前被清扫、规则级联删除或人工删除):`terminate` 允许仅对证据行写
+`resolved_at`/`resolution='terminated_failed'`(审计记 `event_fire=absent`),但**仍要求**匹配的
+outbox consumer 行处于终态(`done`/`dead_letter`)且 lease 为 NULL,否则拒绝(v14,门审 R4);`reopen-after-repair` 与
 `resume-in-progress-after-quiescence` 必须拒绝(无可重开的行),**不得**为此重建 event-fire 行。
 四种操作均须 values-free 审计、显式 owner 授权;禁止普通业务 API 或自动定时器调用。审计必须
 记录操作名、`resume_reason`(若适用)、转换前两个 status/fence/attempts **计数**和静默证明类型,
