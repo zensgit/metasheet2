@@ -113,17 +113,6 @@ function typeInto(input: HTMLInputElement, value: string) {
 describe('MetaGridTable cell-edit commit reliability (D1-D4)', () => {
   // ── D1: type-to-edit ────────────────────────────────────────────────────────────────────────
   it('D1: a single click only focuses (no editor); a printable key then opens the editor seeded with exactly that character', async () => {
-    // CONTRACT CHANGE (round 3, P3-1): the `title` column here is a plain
-    // `string` field AND this fixture's non-grouped MetaGridTable render
-    // path wires `:record-id="row.id"` — the exact condition that now makes
-    // a cell "Yjs-binding-eligible" (see MetaGridTable's D1 doc comment /
-    // `isYjsTextEligible`), regardless of whether the Yjs feature flag is
-    // actually on. P3-1 carves Yjs-eligible cells OUT of the seed-with-e.key
-    // rule this test exercises: the editor still opens on the SAME printable
-    // keydown, but empty rather than pre-seeded with 'a' (see the round-2
-    // spec's dedicated P3-1 test for the full rationale + `defaultPrevented`
-    // assertion). The number column below (D1 number-gating) is UNAFFECTED —
-    // P3-1 only applies to `string` fields.
     const patchSpy = vi.fn()
     const root = mountGrid(makeRows(), patchSpy)
     await flushUi()
@@ -140,8 +129,9 @@ describe('MetaGridTable cell-edit commit reliability (D1-D4)', () => {
 
     const input = editorInput(root)
     expect(input).toBeTruthy()
-    // Empty, not 'a' — see the CONTRACT CHANGE note above (P3-1).
-    expect(input!.value).toBe('')
+    // Exactly 'a' — not '' (nothing opened) and not e.g. 'aa' (the keystroke double-typed because the
+    // grid didn't preventDefault before the editor mounted and captured focus).
+    expect(input!.value).toBe('a')
     expect(patchSpy).not.toHaveBeenCalled()
   })
 

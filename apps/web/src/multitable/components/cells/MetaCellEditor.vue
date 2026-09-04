@@ -341,6 +341,7 @@
       data-test="cell-ai-run"
       @click="emit('ai-run')"
       @keydown.tab="onAiRunTab"
+      @blur="onAiRunBlur"
     >{{ aiRunState?.pending ? l('cell.aiRunning') : l('cell.aiRun') }}</button>
   </div>
 </template>
@@ -870,6 +871,23 @@ function onAiRunTab(e: KeyboardEvent) {
   if (yjsActive.value) emit('yjs-commit')
   emit('tab-commit', false)
 }
+// P3-1 (round 4): the AI-run button is a valid Tab STOP (onAiRunTab above,
+// reached via onTextTab's `aiRunFocusable` yield) but had no blur handler at
+// all — clicking away FROM the button (as opposed to Tab-ing out of it) hit
+// no listener, so the editor was left dangling: neither committed nor
+// cancelled, exactly the D2 "click-away must commit" defect this whole
+// grid-commit-reliability line exists to close, just reachable through one
+// more focus target. Mirrors onTextBlur exactly: same `hostCommitPolicy`
+// opt-in gate, same `shouldIgnoreBlur` exclusion for focus moving back INTO
+// the editor (e.g. Shift+Tab from the button returns to the input — an
+// in-editor focus move, not a click-away), same yjs-commit-before-
+// blur-commit order as every other blur handler here.
+function onAiRunBlur(e: FocusEvent) {
+  if (props.hostCommitPolicy !== 'grid') return
+  if (shouldIgnoreBlur(e)) return
+  if (yjsActive.value) emit('yjs-commit')
+  emit('blur-commit')
+}
 
 const inputRef = ref<HTMLElement | null>(null)
 const multiSelectValue = computed(() => {
@@ -1046,8 +1064,31 @@ function onFileDrop(e: DragEvent) {
 // committing `null` on an unresolved invalid draft regardless.
 const numberInvalidRawDraft = ref(false)
 const numberHasValidDraft = ref(false)
+// P2 (round 4): this in-progress-draft tracking is opt-in state for the SAME
+// `hostCommitPolicy === 'grid'` host (MetaGridTable) that opts into
+// blur/Tab-commit above — it exists to feed onScalarBlur/onScalarTab's
+// discard-vs-commit-last-valid decision, which are themselves already gated
+// on `hostCommitPolicy`. A host that never opts in (MetaBulkEditDialog,
+// `hostCommitPolicy` left unset → 'none') has no blur/Tab-commit reading
+// these flags at all, so leaving this logic ungated here was a silent
+// behavioural DIVERGENCE from main, not a no-op: on 'none', a resolved
+// draft ('7') followed by an in-progress invalid keystroke ('.', which the
+// WHATWG number-input value-sanitization algorithm reports as '' from
+// `.value` while still mid-edit) used to skip the `commitScalar(null)` call
+// main always made on every keystroke — so `value.value` stayed at the
+// stale last-valid 7 (and, since MetaBulkEditDialog reads that same
+// `value` ref for "Set value"'s disabled state, the button stayed ENABLED)
+// instead of committing `null` and disabling it, exactly like main. Gating
+// this block on `hostCommitPolicy === 'grid'` FIRST — before touching either
+// flag — restores byte-identical main behaviour for 'none': every keystroke
+// commits `v === '' ? null : Number(v)` unconditionally, regardless of
+// `inputType`.
 function onNumberInput(e: Event) {
   const v = (e.target as HTMLInputElement).value
+  if (props.hostCommitPolicy !== 'grid') {
+    commitScalar(v === '' ? null : Number(v))
+    return
+  }
   const inputType = (e as InputEvent).inputType ?? ''
   if (v === '' && inputType.startsWith('insert')) {
     numberInvalidRawDraft.value = true

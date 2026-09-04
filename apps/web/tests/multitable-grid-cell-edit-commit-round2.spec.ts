@@ -18,11 +18,48 @@
  *           either way, which D2's new blur/Tab commit then silently persisted.
  *   P3-D  — five load-bearing guards from round 1 had zero discriminating coverage.
  *
+ * Round 4 addition (labelled "P1" in the round-4 finding ledger — distinct from round 2's own P1
+ * above; see that describe block's title for the disambiguating text): the Yjs carve-out this
+ * file's P3-1 tests originally covered turned out to check eligibility alone, never the
+ * `VITE_ENABLE_YJS_COLLAB` build flag `useYjsCellBinding` itself gates on — see the "P1 (round 4...)"
+ * describe block below for the full story and the flag-off/flag-on split this added.
+ *
  * Each `it` is a DISCRIMINATING test — see the per-test comment for the mutation it catches.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick, type App } from 'vue'
+import { createApp, h, nextTick, ref, type App } from 'vue'
 import MetaGridTable from '../src/multitable/components/MetaGridTable.vue'
+
+// P1 (round 4): replace the socket-bearing `useYjsCellBinding` composable with an inert fake for
+// this whole file — these tests only need to observe MetaGridTable's OWN decision (via the REAL
+// `isYjsCollabEnabled`, kept below via `importOriginal`) at keydown time, never a live Yjs
+// connection. Without this, the flag-ON tests below would have MetaCellEditor's real
+// `useYjsCellBinding` call `socketIO('/yjs')` against jsdom with no server behind it (a real 2500ms
+// fallback timer per mount, actual network attempts) — this fake is a drop-in behavioural match for
+// the REAL composable's own flag-off inert stub (`active` stays false, `setText` is a no-op),
+// exactly what every OTHER (non-P1) test in this file already exercised implicitly before this
+// mock existed (flag off by default → the real composable's own early return was already inert).
+// `isYjsCollabEnabled` is spread from `importOriginal` — NOT reimplemented here — so the flag stub
+// in the P1 tests exercises the SAME helper MetaGridTable's onKeydown imports, not a test-authored
+// copy of it.
+const useYjsCellBindingMock = vi.fn(() => ({
+  active: ref(false),
+  text: ref(''),
+  setText: vi.fn(),
+  collaborators: ref([]),
+  release: vi.fn(),
+}))
+vi.mock('../src/multitable/composables/useYjsCellBinding', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/multitable/composables/useYjsCellBinding')>()
+  return {
+    ...actual,
+    // `vi.fn()`-wrapped (not a bare arrow factory) so the flag-ON "editor switches to the live
+    // yjsText once the binding activates" test below can reach the SPECIFIC binding instance a
+    // given mount constructed via `useYjsCellBindingMock.mock.results` — matching the pattern
+    // multitable-yjs-cell-editor.spec.ts already uses for the same reason.
+    useYjsCellBinding: (...args: unknown[]) => useYjsCellBindingMock(...args),
+  }
+})
 import type { MetaField, MetaRecord } from '../src/multitable/types'
 import { useLocale } from '../src/composables/useLocale'
 
@@ -35,6 +72,7 @@ afterEach(() => {
   container?.remove()
   container = null
   useLocale().setLocale('en')
+  useYjsCellBindingMock.mockClear()
 })
 
 // title: string WITH an aiShortcut config (P3-A / P3-D guard #2 need the AI-run button rendered).
@@ -210,11 +248,24 @@ describe('MetaGridTable cell-edit commit reliability round 2 (P1, P3-A..D)', () 
     })
   })
 
-  // ── P3-1: a Yjs-eligible text cell must not be seeded, and the keydown must not be
-  //          preventDefault'd (the D1 seed heuristic this replaces raced the Yjs binding's async
-  //          activation — see MetaGridTable's onKeydown doc comment for the full story) ─────────
-  describe('P3-1: Yjs-eligible cells open empty on type-to-edit instead of racing the seed into Y.Text', () => {
-    it('a printable key on a Yjs-eligible (string, recordId-wired) cell opens the editor EMPTY and is NOT defaultPrevented', async () => {
+  // ── P1 (round 4, supersedes round 3's P3-1 below): the Yjs carve-out must consult the SAME
+  //          build flag (`isYjsCollabEnabled`) `useYjsCellBinding` itself gates on, not eligibility
+  //          alone — round 3's version fired for every populated, recordId-wired string cell
+  //          regardless of the flag, so with the flag OFF (the default) a printable key opened an
+  //          EMPTY editor (keystroke silently discarded) and a plain click-away then blur-committed
+  //          that empty draft, ERASING the cell. See MetaGridTable's onKeydown doc comment for the
+  //          full story. `useYjsCellBinding` itself is mocked to an inert fake for this whole file
+  //          (see the `vi.mock` at the top) — these tests only need to observe MetaGridTable's OWN
+  //          decision at keydown time, never a live Yjs connection; `isYjsCollabEnabled` is kept
+  //          REAL (spread from `importOriginal`) so the flag stub below exercises production gating
+  //          logic, not a test-authored reimplementation of it. ─────────────────────────────────
+  describe('P1: the Yjs carve-out only applies when the build flag is actually on', () => {
+    afterEach(() => {
+      delete process.env.VITE_ENABLE_YJS_COLLAB
+      vi.unstubAllEnvs()
+    })
+
+    it('flag OFF (default): a Yjs-eligible cell seeds normally like any other string cell — editor opens with the typed character, defaultPrevented true, and click-away patches that typed character (NEVER \'\')', async () => {
       const patchSpy = vi.fn()
       const root = mountGrid(makeRows(), patchSpy)
       await flushUi()
@@ -226,19 +277,93 @@ describe('MetaGridTable cell-edit commit reliability round 2 (P1, P3-A..D)', () 
       await flushUi()
 
       const input = editorInput(root)
-      expect(input).toBeTruthy() // the editor still opens
-      expect(input!.value).toBe('') // ...just not seeded with the pressed character
-      expect(evt.defaultPrevented).toBe(false)
-      expect(patchSpy).not.toHaveBeenCalled()
+      expect(input).toBeTruthy()
+      expect(input!.value).toBe('a') // seeded with the typed character — NOT ''
+      expect(evt.defaultPrevented).toBe(true)
+      expect(patchSpy).not.toHaveBeenCalled() // not yet — only on commit
+
+      const outside = document.createElement('button')
+      document.body.appendChild(outside)
+      input!.dispatchEvent(new FocusEvent('blur', { relatedTarget: outside, bubbles: true }))
+      await flushUi()
+
+      expect(patchSpy).toHaveBeenCalledTimes(1)
+      expect(patchSpy).toHaveBeenCalledWith('r0', 'title', 'a', 1) // the typed character, never ''
+      outside.remove()
     })
 
-    it('grouped-mode regression guard: the SAME string column, grouped, still seeds normally — grouped rows never wire recordId', async () => {
+    it('flag ON: a Yjs-eligible cell opens with the ROW\'S CURRENT VALUE staged (never the typed character, never \'\'), defaultPrevented true; click-away with no further typing emits NO patch (value unchanged)', async () => {
+      process.env.VITE_ENABLE_YJS_COLLAB = 'true'
+      vi.stubEnv('VITE_ENABLE_YJS_COLLAB', 'true')
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeRows(), patchSpy)
+      await flushUi()
+
+      cellAt(root, 0, 0).click() // title, original value 'Row 0'
+
+      const evt = new KeyboardEvent('keydown', { key: 'a', bubbles: true, cancelable: true })
+      gridEl(root).dispatchEvent(evt)
+      await flushUi()
+
+      const input = editorInput(root)
+      expect(input).toBeTruthy() // the editor still opens
+      expect(input!.value).toBe('Row 0') // the CURRENT value — not 'a', not ''
+      expect(evt.defaultPrevented).toBe(true) // still preventDefault'd (no Space-scroll etc.)
+      expect(patchSpy).not.toHaveBeenCalled()
+
+      const outside = document.createElement('button')
+      document.body.appendChild(outside)
+      input!.dispatchEvent(new FocusEvent('blur', { relatedTarget: outside, bubbles: true }))
+      await flushUi()
+
+      // No further typing happened — the staged value is identical to row.data.title, so
+      // confirmEdit's own "only patch if changed" guard means click-away commits nothing.
+      expect(patchSpy).not.toHaveBeenCalled()
+      outside.remove()
+    })
+
+    it('flag ON: once the async binding activates, the editor switches from the staged current-value display to the live yjsText — the staged value is a pre-activation display only, not a frozen snapshot', async () => {
+      // Isolated from the test above on purpose (one mechanism per test — see this repo's own
+      // "confounded mutation needs an isolated variant" doctrine): this checks what
+      // MetaCellEditor's `:value="yjsActive ? yjsText : (modelValue ?? '')"` binding actually
+      // RENDERS once the binding goes live, independent of the blur/patch-commit assertions above.
+      // Without this, the commit's "type-to-edit degrades to opening the editor as if Enter had
+      // been pressed" claim would rest only on the grid's OWN decision (what it stages into
+      // `editCell.value`), never on what the mounted editor displays once Yjs activates.
+      process.env.VITE_ENABLE_YJS_COLLAB = 'true'
+      vi.stubEnv('VITE_ENABLE_YJS_COLLAB', 'true')
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeRows(), patchSpy)
+      await flushUi()
+
+      cellAt(root, 0, 0).click() // title, original value 'Row 0'
+      gridEl(root).dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true, cancelable: true }))
+      await flushUi()
+
+      const input = editorInput(root)!
+      expect(input.value).toBe('Row 0') // pre-activation: the staged current-value display
+
+      const binding = useYjsCellBindingMock.mock.results[0]!.value as {
+        active: { value: boolean }
+        text: { value: string }
+      }
+      binding.active.value = true
+      binding.text.value = 'synced-value' // deliberately DIFFERENT from the staged 'Row 0'
+      await flushUi()
+
+      expect(editorInput(root)!.value).toBe('synced-value') // switched to the live Y.Text — not stuck on the pre-activation snapshot
+    })
+
+    it('grouped-mode regression guard (flag ON): the SAME string column, grouped, still seeds normally — grouped rows never wire recordId, so this stays ineligible even with the flag on', async () => {
       // MetaGridTable's grouped-rows render path passes NO `:record-id` to MetaCellEditor (only the
       // flat/ungrouped path does), so a grouped-mode string cell can never be Yjs-eligible — the D1
-      // seed-suppression above must not over-broaden to it. Without deriving the eligibility check's
-      // recordId the SAME way the template does (`groupedRows.value ? null : r.id`), this is exactly
-      // the regression a naive `isYjsTextEligible(f, r.id, ...)` call (always passing r.id) would
-      // introduce silently.
+      // seed-suppression above must not over-broaden to it. Run with the flag ON: with it off (the
+      // file default), a naive `isYjsTextEligible(f, r.id, ...)` call (always passing r.id, ignoring
+      // `groupedRows.value`) would ALSO pass this test — for the wrong reason, since the flag check
+      // alone already keeps ungated eligibility from mattering. Stubbing the flag on is what makes
+      // this test actually exercise the `groupedRows.value ? null : r.id` derivation.
+      process.env.VITE_ENABLE_YJS_COLLAB = 'true'
+      vi.stubEnv('VITE_ENABLE_YJS_COLLAB', 'true')
       const patchSpy = vi.fn()
       const root = mountGrid(makeRows(), patchSpy, { groupFields: [SCORE_FIELD] })
       await flushUi()
@@ -251,7 +376,7 @@ describe('MetaGridTable cell-edit commit reliability round 2 (P1, P3-A..D)', () 
 
       const input = editorInput(root)
       expect(input).toBeTruthy()
-      expect(input!.value).toBe('x') // seeded normally — NOT the P3-1 empty-draft carve-out
+      expect(input!.value).toBe('x') // seeded normally — NOT the current-value carve-out
       expect(evt.defaultPrevented).toBe(true)
     })
   })
@@ -321,6 +446,39 @@ describe('MetaGridTable cell-edit commit reliability round 2 (P1, P3-A..D)', () 
       expect(evt.defaultPrevented).toBe(true)
       expect(patchSpy).toHaveBeenCalledTimes(1)
       expect(editorInput(root)).toBeNull()
+    })
+
+    it('P3-1 (round 4): blurring AWAY from the AI-run button (click-away, not Tab) commits exactly once and unmounts the editor — no dangling draft', async () => {
+      // Before round 4, the AI-run button (a real Tab STOP — P3-A above) had no `@blur` handler at
+      // all: reaching it via Tab then clicking away from it (as opposed to Tab-ing further) hit no
+      // listener, leaving the editor mounted with an uncommitted draft — the exact D2 "click-away
+      // must commit" defect this whole line exists to close, reachable through one more focus
+      // target. MUTATION: removing `onAiRunBlur`'s `@blur` wiring (or gutting the handler) reds
+      // this — the editor stays mounted and patchSpy is never called.
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeRows(), patchSpy)
+      await flushUi()
+
+      clickThenDblclick(cellAt(root, 0, 0)) // title (AI-enabled)
+      await flushUi()
+      const input = editorInput(root)!
+      typeInto(input, 'hello')
+      await flushUi()
+
+      const tabEvt = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+      input.dispatchEvent(tabEvt) // reach the button via native focus movement (onTextTab yields)
+      await flushUi()
+      const button = aiRunButton(root)!
+
+      const outside = document.createElement('button')
+      document.body.appendChild(outside)
+      button.dispatchEvent(new FocusEvent('blur', { relatedTarget: outside, bubbles: true }))
+      await flushUi()
+
+      expect(patchSpy).toHaveBeenCalledTimes(1)
+      expect(patchSpy).toHaveBeenCalledWith('r0', 'title', 'hello', 1)
+      expect(editorInput(root)).toBeNull() // unmounted — no dangling draft
+      outside.remove()
     })
   })
 
@@ -711,6 +869,113 @@ describe('MetaGridTable cell-edit commit reliability round 2 (P1, P3-A..D)', () 
       await flushUi()
 
       expect(editorInput(root)).toBeTruthy()
+    })
+  })
+
+  // ── round 4: P3-3 (the target gate must cover mod+c/v too) + P3-4 guard 2 (the Arrow/Escape
+  //             half of the SAME gate, previously covered only for Enter/Tab above) ──────────────
+  describe('round 4 (P3-3 / P3-4 guard 2): the single target gate also covers mod+c/v and Arrow/Escape', () => {
+    it('P3-3: Ctrl+V on the row-select checkbox does not paste into the focused cell (and Ctrl+C does not copy it)', async () => {
+      // Before round 4, mod+c/v had NO target-gate call at all (unlike D1/the switch) — only the
+      // `!editCell.value` check. A descendant control's own Ctrl+C/Ctrl+V (this checkbox has no
+      // native clipboard semantics of its own, but the mechanism is the same one D1/P3-5 already
+      // fixed for typing and Enter/Tab/Arrow/Escape) fired copyFocusedCell()/pasteFocusedCell()
+      // against whatever cell focusRow/focusCol last pointed at. MUTATION: deleting the single
+      // top-of-handler `isValidGridKeydownTarget` gate reds this (defaultPrevented flips true).
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeRows(), patchSpy)
+      await flushUi()
+
+      cellAt(root, 0, 0).click() // focus title, row 0
+      await flushUi()
+
+      const checkbox = root.querySelector('tbody .meta-grid__check-col input[type="checkbox"]') as HTMLInputElement
+      expect(checkbox).toBeTruthy()
+      checkbox.focus()
+
+      const pasteEvt = new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true, cancelable: true })
+      checkbox.dispatchEvent(pasteEvt)
+      const copyEvt = new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true })
+      checkbox.dispatchEvent(copyEvt)
+      await flushUi()
+
+      expect(pasteEvt.defaultPrevented).toBe(false)
+      expect(copyEvt.defaultPrevented).toBe(false)
+      expect(patchSpy).not.toHaveBeenCalled() // pasteFocusedCell never ran (would patch-cell on a resolved clipboard read)
+    })
+
+    it('P3-3 positive control: the identical Ctrl+V on the grid root itself (correct target) IS intercepted', async () => {
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeRows(), patchSpy)
+      await flushUi()
+
+      cellAt(root, 0, 0).click()
+      await flushUi()
+
+      const evt = new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true, cancelable: true })
+      gridEl(root).dispatchEvent(evt)
+      await flushUi()
+
+      expect(evt.defaultPrevented).toBe(true) // pasteFocusedCell's own preventDefault, unconditional on the target gate passing
+    })
+
+    it('P3-4 guard 2: ArrowDown on the row-select checkbox does not move the grid\'s own focus row', async () => {
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeRows(), patchSpy)
+      await flushUi()
+
+      cellAt(root, 0, 0).click()
+      await flushUi()
+      expect(focusedRowIndex(root)).toBe(0)
+
+      const checkbox = root.querySelector('tbody .meta-grid__check-col input[type="checkbox"]') as HTMLInputElement
+      expect(checkbox).toBeTruthy()
+      checkbox.focus()
+
+      const evt = new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true })
+      checkbox.dispatchEvent(evt)
+      await flushUi()
+
+      expect(evt.defaultPrevented).toBe(false)
+      // Unchanged — would be 1 if the switch's ArrowDown case had run against this keydown.
+      expect(focusedRowIndex(root)).toBe(0)
+    })
+
+    it('P3-4 guard 2: Escape on the row-select checkbox does not clear the grid\'s own focus cell', async () => {
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeRows(), patchSpy)
+      await flushUi()
+
+      cellAt(root, 0, 0).click()
+      await flushUi()
+      expect(focusedColIndex(root)).toBe(0)
+
+      const checkbox = root.querySelector('tbody .meta-grid__check-col input[type="checkbox"]') as HTMLInputElement
+      expect(checkbox).toBeTruthy()
+      checkbox.focus()
+
+      const evt = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+      checkbox.dispatchEvent(evt)
+      await flushUi()
+
+      expect(evt.defaultPrevented).toBe(false)
+      // The Escape case sets focusRow/focusCol to -1 when it runs — still 0 here proves it didn't.
+      expect(focusedColIndex(root)).toBe(0)
+    })
+
+    it('P3-4 guard 2 positive control: the identical Escape on the grid root itself (correct target) DOES clear focus', async () => {
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeRows(), patchSpy)
+      await flushUi()
+
+      cellAt(root, 0, 0).click()
+      await flushUi()
+      expect(focusedColIndex(root)).toBe(0)
+
+      gridEl(root).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+      await flushUi()
+
+      expect(focusedColIndex(root)).toBe(-1)
     })
   })
 

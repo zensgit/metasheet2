@@ -359,9 +359,21 @@ describe('MetaBulkEditDialog', () => {
   // mid-typing a negative/decimal (e.g. a lone '-', which the WHATWG number-input value-sanitization
   // algorithm reports as '' from `.value` while still mid-edit) reached `onScalarBlur`, hit the
   // invalid-draft branch, and emitted `cancel` — which THIS dialog's `@cancel="onCancel"` on
-  // MetaCellEditor reads as "dismiss the whole bulk-edit dialog". MUTATION: removing the
-  // `props.hostCommitPolicy !== 'grid'` guard at the top of `onScalarBlur` makes this go red
-  // (onCancel gets called).
+  // MetaCellEditor reads as "dismiss the whole bulk-edit dialog".
+  //
+  // Round-4 note (P2, this file's own P2 test below): since `onNumberInput` now ALSO gates
+  // `numberInvalidRawDraft` on `hostCommitPolicy === 'grid'` (it never sets that flag at all under
+  // 'none'), `onScalarBlur`'s invalid-draft branch can no longer be REACHED on this dialog even if
+  // its own `hostCommitPolicy !== 'grid'` guard were deleted — so that specific mutation no longer
+  // reds THIS test via `onCancel` (it instead emits an unlistened `blur-commit`, harmlessly, from
+  // this dialog's perspective). Removing `onScalarBlur`'s own guard is still independently
+  // discriminating — just no longer through this dialog: see
+  // "round 4 (P3-4): hostCommitPolicy guards with a mutation-tested probe" in
+  // multitable-yjs-cell-editor.spec.ts, which spies the full emit surface directly on MetaCellEditor
+  // and catches it via `blur-commit` firing instead. This test is KEPT as-is (still a real,
+  // independently-useful regression guard for the ORIGINAL pre-P2-1 defect it was written for —
+  // a corrupted/reverted `onNumberInput` that went back to setting `numberInvalidRawDraft`
+  // unconditionally would immediately reawaken the `cancel` path this asserts against).
   it('does not dismiss the dialog when a number input is blurred mid-typing a negative number (hostCommitPolicy is not wired here)', async () => {
     const onCancel = vi.fn()
     const { app, root } = mountDialog({ mode: 'set', onCancel })
@@ -387,6 +399,56 @@ describe('MetaBulkEditDialog', () => {
     // The value editor for the selected field is still mounted — the dialog's own state never reset.
     expect(root.querySelector('.meta-bulk-edit__value-wrap input[type=number]')).not.toBeNull()
     outside.remove()
+    app.unmount()
+  })
+
+  // P2 (round 4): the numberInvalidRawDraft / numberHasValidDraft "retain the last valid draft"
+  // tracking MetaCellEditor's onNumberInput grew in round 3 is opt-in state for the SAME
+  // `hostCommitPolicy === 'grid'` host that reads it (MetaGridTable's blur/Tab-commit discard-vs-
+  // commit-last-valid decision). Before this fix, `onNumberInput` applied that tracking
+  // UNCONDITIONALLY — so on THIS dialog ('none' policy, never wired), a valid draft ('7', committed
+  // immediately) followed by an in-progress invalid keystroke ('.', which the WHATWG number-input
+  // value-sanitization algorithm reports as '' from `.value` while still mid-edit) hit the
+  // `numberInvalidRawDraft` early-return and skipped `commitScalar` entirely for that keystroke —
+  // leaving the dialog's `value` ref stuck at the STALE last-valid 7 (and "Set value" stayed
+  // ENABLED) instead of the byte-identical-to-main behaviour: main's `onNumberInput` (no draft
+  // tracking at all) commits `v === '' ? null : Number(v)` on EVERY keystroke unconditionally, so
+  // the same '7' → '.' sequence commits `null` and disables the button. `value.value` itself isn't
+  // readable from outside the dialog; the submit button's `disabled` state is the only externally
+  // observable proxy for it, so that's what this asserts. MUTATION: removing the
+  // `props.hostCommitPolicy !== 'grid'` guard from the top of `onNumberInput` reds this (`submit.
+  // disabled` stays `false`, reflecting the retained stale `7`). Scope: `onNumberInput` is the
+  // SAME shared handler for the number/currency/percent branches (identical `<input type="number">`
+  // wiring, see the template) — this fixture exercises the `number` field type; currency/percent
+  // are not separately re-verified here. The 'grid'-policy counterpart of this exact sequence
+  // (blur commits the retained 7, not null) is unaffected by this fix and is already covered by
+  // multitable-grid-cell-edit-commit-round2.spec.ts's "NIT: number blur/Tab commits the last valid
+  // draft instead of discarding the whole session" tests.
+  it('P2: "Set value" is disabled with value null after a valid draft (7) is followed by an in-progress invalid keystroke (.), matching main byte-for-byte (hostCommitPolicy is not wired here)', async () => {
+    const { app, root } = mountDialog({ mode: 'set' })
+    await nextTick()
+
+    const select = root.querySelector('.meta-bulk-edit__select') as HTMLSelectElement
+    select.value = 'fld_amount'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    const input = root.querySelector('.meta-bulk-edit__value-wrap input[type=number]') as HTMLInputElement
+    expect(input).not.toBeNull()
+
+    input.value = '7'
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, data: '7', inputType: 'insertText' }))
+    await nextTick()
+
+    const submitAfterValid = Array.from(root.querySelectorAll('.meta-bulk-edit__btn--primary'))[0] as HTMLButtonElement
+    expect(submitAfterValid.disabled).toBe(false) // sanity: 7 is a meaningful value, button is enabled
+
+    input.value = '' // '.': sanitizes to '' on the getter — an in-progress, not-yet-resolved draft
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, data: '.', inputType: 'insertText' }))
+    await nextTick()
+
+    const submitAfterInvalid = Array.from(root.querySelectorAll('.meta-bulk-edit__btn--primary'))[0] as HTMLButtonElement
+    expect(submitAfterInvalid.disabled).toBe(true) // main: value committed to null, button disabled
     app.unmount()
   })
 

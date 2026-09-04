@@ -408,6 +408,7 @@ import {
 import { isSystemField } from '../utils/system-fields'
 import { isFieldAlwaysReadOnly } from '../utils/field-permissions'
 import { isYjsTextEligible } from '../utils/yjs-text-eligibility'
+import { isYjsCollabEnabled } from '../composables/useYjsCellBinding'
 import { useLocale } from '../../composables/useLocale'
 import { frozenPrefixCount } from '../utils/frozen-columns'
 import {
@@ -1522,6 +1523,18 @@ function isValidGridKeydownTarget(e: KeyboardEvent): boolean {
 
 function onKeydown(e: KeyboardEvent) {
   if (isGridComposingEvent(e)) return
+  // P3-3 (round 4): the SINGLE target gate for this ENTIRE handler — mod+c/v copy/paste, D1's
+  // type-to-edit seed, AND the Enter/Tab/Arrow/Escape switch below all now sit behind this one
+  // call, folded in from what used to be three separate call sites (D1 carried its own inline
+  // `&& isValidGridKeydownTarget(e)`, the switch had a second copy just above it, and mod+c/v had
+  // NONE at all). That third gap meant a descendant control's own Ctrl+C/Ctrl+V — e.g. copying text
+  // selected inside a focusable descendant with its own clipboard semantics — fired
+  // copyFocusedCell()/pasteFocusedCell() against whatever cell focusRow/focusCol last pointed at,
+  // instead of leaving the descendant's own default alone (same "hijacked by name, not by real
+  // target" defect the D1/P3-5 fixes already closed for typing and Enter/Tab/Arrow/Escape). Keeping
+  // ONE gate (rather than three copies that could drift) means removing it reds every one of those
+  // paths at once — see isValidGridKeydownTarget's doc comment above for the allowlist itself.
+  if (!isValidGridKeydownTarget(e)) return
   const mod = e.metaKey || e.ctrlKey
   if (mod && e.key === 'c' && !editCell.value) { e.preventDefault(); copyFocusedCell(); return }
   if (mod && e.key === 'v' && !editCell.value) { e.preventDefault(); pasteFocusedCell(); return }
@@ -1546,39 +1559,46 @@ function onKeydown(e: KeyboardEvent) {
   //     seeded — a checkbox/date/dropdown/picker has no meaningful "replace
   //     with one printable character" semantics.
   //
-  //   P3-1 (round 3): a Yjs-eligible `string` cell (`isYjsTextEligible` —
-  //   the SAME condition MetaCellEditor uses to decide whether to construct
-  //   a live binding at all) is a carve-out from the seed-with-e.key rule
-  //   above: it must NOT be seeded, and the keydown must NOT be
-  //   preventDefault'd. The prior behaviour (seed `modelValue` with the
-  //   typed character, same as any other string cell) raced the Yjs binding's
-  //   async activation — see the removed watcher this superseded (P3-B,
-  //   round 2, in MetaCellEditor's git history) for why trying to forward
-  //   that pre-activation draft into Y.Text after the fact is unsafe (no
-  //   reliable way to tell "nobody has synced anything yet" apart from "a
-  //   collaborator just synced an empty string"). The editor still opens —
-  //   just empty, with editing starting fresh instead of pre-seeded.
-  //   Disclosure: NOT calling `preventDefault()` here does not, in practice,
-  //   make the keystroke "type natively" anywhere — `gridRoot` is a plain,
-  //   non-editable `<div>`, and the freshly-opened editor's `<input>` does
-  //   not exist in the DOM until Vue's next patch cycle (after this
-  //   synchronous keydown has already finished dispatching), so the
-  //   character is simply not captured by anything; the user must retype
-  //   it once the (now-focused, now-mounted) editor is open. Recorded here
-  //   for whoever revisits this: a seed-after-mount or forward-on-activate
-  //   follow-up is a legitimate next step, deliberately NOT attempted here.
+  //   P1 (round 4, superseding P3-1/round 3): a Yjs-eligible `string` cell
+  //   (`isYjsTextEligible` — the SAME condition MetaCellEditor uses to decide
+  //   whether to CONSTRUCT a live binding at all) is a carve-out from the
+  //   seed-with-e.key rule above ONLY when `isYjsCollabEnabled()` — the SAME
+  //   build-flag helper `useYjsCellBinding` itself gates on — is also true.
+  //   Round 3's version of this carve-out checked eligibility alone, so with
+  //   the flag off (the default: `VITE_ENABLE_YJS_COLLAB` unset) it fired for
+  //   every populated, recordId-wired string cell even though no live binding
+  //   was ever going to be constructed to catch the keystroke — the editor
+  //   opened EMPTY on a printable key (the keystroke silently discarded) and
+  //   a plain click-away then blur-committed that empty draft, erasing the
+  //   cell. Consulting the flag here fixes that: flag OFF (default) falls
+  //   straight through to the normal string-seed branch below, byte-
+  //   identical to a non-eligible string cell.
+  //
+  //   Flag ON + eligible: still preventDefault (no Space-scroll, no Firefox
+  //   quick-find on '/', no workbench '?' shortcut) and still open the
+  //   editor immediately — but stage the ROW'S CURRENT VALUE, never the
+  //   typed character and never ''. This is exactly `startEdit`'s own seed
+  //   (`row.data[field.id] ?? null`, see that function) minus the keystroke:
+  //   type-to-edit on a Yjs-eligible cell degrades to "open the editor as if
+  //   Enter had been pressed". The pressed character itself is not applied —
+  //   forwarding a pre-activation draft into Y.Text once the async binding
+  //   connects is the same unsafe "nobody synced yet" vs. "a collaborator
+  //   just synced empty" ambiguity documented in the removed P3-B watcher
+  //   (round 2, MetaCellEditor git history); flag-ON collaborative editing is
+  //   a follow-up owner decision, not attempted here.
   //   `groupedRows.value ? null : r.id` mirrors exactly what the template
   //   wires as `:record-id` on MetaCellEditor for each render path (the
   //   grouped-rows branch passes no `record-id` at all) — grouped-mode
-  //   string cells are therefore never Yjs-eligible and keep seeding
-  //   normally, same as before this fix.
-  if (!mod && !e.altKey && e.key.length === 1 && focusRow.value >= 0 && focusCol.value >= 0 && isValidGridKeydownTarget(e)) {
+  //   string cells are therefore never Yjs-eligible (regardless of the flag)
+  //   and keep seeding normally.
+  if (!mod && !e.altKey && e.key.length === 1 && focusRow.value >= 0 && focusCol.value >= 0) {
     const r = navRows[focusRow.value]
     const f = props.visibleFields[focusCol.value]
     if (r && f && isEditable(r.id, f)) {
-      if (isYjsTextEligible(f, groupedRows.value ? null : r.id, r.data[f.id])) {
+      if (isYjsCollabEnabled() && isYjsTextEligible(f, groupedRows.value ? null : r.id, r.data[f.id])) {
+        e.preventDefault()
         yjsHandledCellKey.value = null
-        editCell.value = { recordId: r.id, fieldId: f.id, value: '' }
+        editCell.value = { recordId: r.id, fieldId: f.id, value: r.data[f.id] ?? null }
         return
       }
       const seedValue: unknown =
@@ -1594,19 +1614,21 @@ function onKeydown(e: KeyboardEvent) {
     }
   }
   // P3-5 (round 3, same target-rejection rule as D1 above, pre-existing
-  // defect fixed under the same rule): without this gate, Enter/Tab/Arrows/
-  // Escape fired on a DESCENDANT interactive control (the row-expand
-  // button, the lock-toggle button, the row-select checkbox, a pager/bulk-
-  // bar button, ...) were hijacked by this switch purely because the
-  // keydown bubbled up into `.meta-grid` — e.g. Enter on the expand button
-  // was preventDefault'd AND opened the cell editor on whatever
-  // focusRow/focusCol last pointed at; Tab from the row checkbox was
+  // defect fixed under the same rule): without the single gate at the top of
+  // this handler, Enter/Tab/Arrows/Escape fired on a DESCENDANT interactive
+  // control (the row-expand button, the lock-toggle button, the row-select
+  // checkbox, a pager/bulk-bar button, ...) would be hijacked by this switch
+  // purely because the keydown bubbled up into `.meta-grid` — e.g. Enter on
+  // the expand button preventDefault'd AND opened the cell editor on
+  // whatever focusRow/focusCol last pointed at; Tab from the row checkbox
   // preventDefault'd and moved the grid's OWN focus cursor instead of
-  // letting native Tab order continue past the checkbox. Gating the whole
-  // switch on the same `isValidGridKeydownTarget` check D1 already uses
-  // fixes both — descendant controls now keep their native keyboard
-  // behaviour untouched.
-  if (!isValidGridKeydownTarget(e)) return
+  // letting native Tab order continue past the checkbox. The top-of-handler
+  // `isValidGridKeydownTarget` gate (see its call site and doc comment
+  // above) covers this switch too — descendant controls keep their native
+  // keyboard behaviour untouched. (Round 4: this used to be a SECOND call to
+  // the same check, right here; collapsed into the single top-of-handler
+  // gate — see that call site's doc comment for why a second copy would
+  // have made some P3-4/P3-5 mutations non-discriminating.)
   switch (e.key) {
     case 'ArrowDown': e.preventDefault(); if (focusRow.value < maxR) { focusRow.value++; if (focusCol.value < 0) focusCol.value = 0; emit('select-record', navRows[focusRow.value].id) } break
     case 'ArrowUp': e.preventDefault(); if (focusRow.value > 0) { focusRow.value--; emit('select-record', navRows[focusRow.value].id) } break
