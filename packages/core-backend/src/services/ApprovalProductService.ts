@@ -667,15 +667,40 @@ export const USER_FIELD_ALLOWED_PROP_KEYS = new Set([
 // either way), so THIS filter is the sole, independently mutation-provable rejection site for a
 // nested explanation column — no pre-emption ambiguity to correct later.
 //
+// CORRECTION (approval-detail-leaf-attachment-pin-20260904): `attachment` also joins the
+// exclusion set, and — unlike every sibling exclusion above — UNCONDITIONALLY, not behind
+// `isApprovalAttachmentsEnabled()`. A prior version of this filter admitted `attachment` here
+// and relied solely on the flag-gated sweep inside `assertFormSchema`
+// (`if (isApprovalAttachmentsEnabled()) { … field.columns?.some(column => column.type ===
+// 'attachment') … }`) to reject it — which meant that with the flag OFF (the shipped default),
+// `createTemplate`/`updateTemplate` SILENTLY ACCEPTED an attachment column inside a `detail`
+// group (mutation-verified: `DETAIL_LEAF_FIELD_TYPES.has('attachment')` was `true`, and
+// `normalizeDetailFieldParts`'s leaf check at the map callback below is the ONLY place that can
+// reject a column type before the flag-gated sweep runs). The web author-time literal
+// (`apps/web/src/approvals/detailField.ts`'s `DETAIL_LEAF_FIELD_TYPES`) never offered attachment
+// as a detail-column type to begin with, so this was reachable only via direct API calls or a
+// hand-crafted formSchema, not the shipped editor UI — but attachment v1 (design lock) requires
+// attachment fields to stay top-level-only regardless of entry path, and a template saved this
+// way while the flag was OFF would go on to 500 (`APPROVAL_TEMPLATE_SCHEMA_INVALID`) at publish/
+// read/instance-create once the flag was turned ON (those paths re-run `assertFormSchema` via
+// `asFormSchema` against the SAME now-tightened set). Excluding it here, independent of the flag,
+// makes `normalizeDetailFieldParts`'s leaf check (below) the sole rejection site for ALL entry
+// paths regardless of flag state; the flag-gated sweep in `assertFormSchema` is now unreachable
+// for this specific case and is kept as defense in depth, not removed, since it still guards any
+// other future path that might construct `fields` without going through this leaf check.
+//
 // EXPORTED (mirrors FORM_FIELD_TYPES) so a census test can assert this DERIVED set is exactly
-// FORM_FIELD_TYPES minus {detail, record-link, date_range, explanation, department} rather than re-declaring it.
+// FORM_FIELD_TYPES minus {detail, record-link, date_range, explanation, department, attachment}
+// rather than re-declaring it. Also mirrored (as a set, cross-package) against the web literal in
+// `approval-detail-leaf-set-mirror.test.ts`.
 export const DETAIL_LEAF_FIELD_TYPES = new Set(
   [...FORM_FIELD_TYPES].filter(
     (type) => type !== 'detail'
       && type !== 'record-link'
       && type !== 'date_range'
       && type !== 'explanation'
-      && type !== 'department',
+      && type !== 'department'
+      && type !== 'attachment',
   ),
 )
 
