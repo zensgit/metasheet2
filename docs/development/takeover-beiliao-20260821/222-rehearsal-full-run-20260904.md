@@ -171,3 +171,22 @@ SYN-A-1000              2     true   add       10 - Q235B   10 - 待备料  2026
 ### 7.5 由此立项的系统性问题
 
 §2.2 的沙箱表缺 8 字段与 §7.2 的快照行表缺 5 字段是**同一个根因**:各 ensure 路径遇到"表已存在但缺模板新增字段"时,只解析已有字段、不补新增字段,把错误推迟到写入期才以"未知 fieldId"的面目出现。目前靠脚本手工补(`scripts/ops/stock-preparation-sandbox-add-missing-template-fields.cjs`)。应有一支系统性 PR 让 ensure 侧安全地自动补齐(纯增量、幂等、不改不删已有字段),该方案正在评估中。
+
+
+---
+
+## 8. 2026-09-04 晚:r8 就地升级 222(交付版)
+
+演示通过、客户要求尽快交付后,把今天合进 main 的修复打成正式包并升级 222。
+
+| 项 | 值 |
+|---|---|
+| 包 | `metasheet-multitable-onprem-v2.5.0-r8-20260904.zip`,SHA256 `1fe052fc…38a922`,CI run 33880564195 |
+| 钉住的提交 | main `45cca21eec86f15a565e10745cb443d1bf308213`(含 #5471 workspace 回退、#5474 记录、#5475 漂移检测、#5455 列级写权限对账) |
+| 升级前备份 | `C:\metasheet\outputackups\pre-r8-20260904-215941.dump`(pg_dump 自定义格式,2 MB)+ 升级脚本自带 `upgrade-backup-20260904-215944` |
+| 升级 | must-exist 清单 OK;插件哈希 438 文件 OK;node_modules 泄漏 0;迁移退出 0;pm2 重启后健康 OK(第 3 次探测) |
+| `app.env` | 34 行原样保留,`TABLE_ACTIONS_JSON` 在 |
+| #5455 回填 | dry-run:0 行需打标、0 行无主、扫描 1 个账本目标 → **无需 `--apply`** |
+| 复验 | dry-run 200(skip 7)/ apply 200 / mvp-persist 201 / 导出 200(20681 B) |
+
+两条备注:①升级脚本报 `plugin lib/ file count` 包 178 vs 部署 342 的差异,这是就地升级**不删除**包里已不再发布的旧文件所致,`index.cjs` 不引用它们,不影响运行;②#5455 的回填脚本是 TS、引用 `../src/`,而部署机只有 `dist`,本次用 esbuild 转成 CJS 并把引用改指 `../dist/src/` 后放到 `packages/core-backend/scripts/` 下运行——交付说明已按此写。
