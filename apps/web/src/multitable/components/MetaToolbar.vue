@@ -1,6 +1,7 @@
 <template>
   <div class="meta-toolbar" role="toolbar" :aria-label="l('toolbar.aria')">
-    <div class="meta-toolbar__left">
+    <div class="meta-toolbar__primary">
+      <div class="meta-toolbar__left">
       <!--
         Hide Fields (UI-P2-1c slice-3: migrated to shared MtPopover, NOT MtMenu — this is a
         multi-toggle field list, so toggling one field must NOT close the panel, unlike MtMenu's
@@ -9,9 +10,13 @@
       -->
       <MtPopover v-model:open="showFieldPicker">
         <template #trigger>
-          <MtButton :title="l('toolbar.fields')" :aria-label="l('toolbar.fields')">
+          <MtButton
+            class="meta-toolbar__icon-btn"
+            :class="{ 'is-active': hiddenCount > 0 }"
+            :title="l('toolbar.fields')"
+            :aria-label="l('toolbar.fields')"
+          >
             <template #icon><el-icon><component :is="ICON.fields" /></el-icon></template>
-            {{ l('toolbar.fields') }}
             <span v-if="hiddenCount" class="meta-toolbar__badge">{{ hiddenCount }}</span>
           </MtButton>
         </template>
@@ -33,9 +38,13 @@
       -->
       <MtPopover v-model:open="showSortPanel">
         <template #trigger>
-          <MtButton :title="l('toolbar.sort')" :aria-label="l('toolbar.sort')">
+          <MtButton
+            class="meta-toolbar__icon-btn"
+            :class="{ 'is-active': sortRules.length > 0 }"
+            :title="l('toolbar.sort')"
+            :aria-label="l('toolbar.sort')"
+          >
             <template #icon><el-icon><component :is="ICON.sort" /></el-icon></template>
-            {{ l('toolbar.sort') }}
             <span v-if="sortRules.length" class="meta-toolbar__badge">{{ sortRules.length }}</span>
           </MtButton>
         </template>
@@ -72,9 +81,13 @@
       -->
       <MtPopover v-model:open="showFilterPanel">
         <template #trigger>
-          <MtButton :title="l('toolbar.filter')" :aria-label="l('toolbar.filter')">
+          <MtButton
+            class="meta-toolbar__icon-btn"
+            :class="{ 'is-active': (filterRules.length + filterGroups.length) > 0 }"
+            :title="l('toolbar.filter')"
+            :aria-label="l('toolbar.filter')"
+          >
             <template #icon><el-icon><component :is="ICON.filter" /></el-icon></template>
-            {{ l('toolbar.filter') }}
             <span v-if="filterRules.length + filterGroups.length" class="meta-toolbar__badge">{{ filterRules.length + filterGroups.length }}</span>
           </MtButton>
         </template>
@@ -122,9 +135,13 @@
            MtPopover's document-level Escape + click-outside now cover it. -->
       <MtPopover v-model:open="showGroupPanel">
         <template #trigger>
-          <MtButton :title="l('toolbar.group')" :aria-label="l('toolbar.group')">
+          <MtButton
+            class="meta-toolbar__icon-btn"
+            :class="{ 'is-active': activeGroupFieldIds.length > 0 }"
+            :title="l('toolbar.group')"
+            :aria-label="l('toolbar.group')"
+          >
             <template #icon><el-icon><component :is="ICON.group" /></el-icon></template>
-            {{ l('toolbar.group') }}
             <span v-if="activeGroupFieldIds.length" class="meta-toolbar__badge">{{ activeGroupFieldIds.length }}</span>
           </MtButton>
         </template>
@@ -183,56 +200,83 @@
         <button v-if="searchText" class="meta-toolbar__search-clear" :aria-label="l('toolbar.clearSearch')" @click="emit('update:search-text', '')">&times;</button>
       </div>
       <span v-if="totalRows !== undefined" class="meta-toolbar__row-count">{{ rowCount(totalRows, isZh) }}</span>
-      <span class="meta-toolbar__divider" aria-hidden="true"></span>
-      <!-- Row density (UI-P2-1c slice-2: migrated to shared MtMenu/MtMenuItem, built on MtPopover) -->
-      <MtMenu>
-        <template #trigger>
-          <MtButton :title="l('toolbar.rowHeight')" :aria-label="l('toolbar.rowHeight')">
-            <template #icon><el-icon><component :is="ICON.rowHeight" /></el-icon></template>
-            {{ l('toolbar.rows') }}
-          </MtButton>
-        </template>
-        <MtMenuItem
-          v-for="d in DENSITIES"
-          :key="d.value"
-          class="meta-toolbar__density-item"
-          :class="{ 'meta-toolbar__density-item--active': rowDensity === d.value }"
-          :aria-current="rowDensity === d.value ? 'true' : undefined"
-          @select="emit('set-row-density', d.value)"
-        >
-          <template #icon><el-icon v-if="rowDensity === d.value"><component :is="ICON.check" /></el-icon></template>
-          {{ l(d.labelKey) }}
-        </MtMenuItem>
-      </MtMenu>
-      <!-- UI-P2-1c: standalone action buttons (icon+label) migrated to shared MtButton (ghost). -->
-      <MtButton :title="l('toolbar.autoFitColumns')" :aria-label="l('toolbar.autoFitColumns')" @click="emit('auto-fit-columns')">
-        <template #icon><el-icon><component :is="ICON.fit" /></el-icon></template>
-        {{ l('toolbar.fit') }}
-      </MtButton>
-      <MtButton :title="l('toolbar.print')" :aria-label="l('toolbar.printGrid')" @click="emit('print')">
-        <template #icon><el-icon><component :is="ICON.print" /></el-icon></template>
-        {{ l('toolbar.print') }}
-      </MtButton>
-      <MtButton v-if="canCreateRecord" :title="l('toolbar.importRecords')" :aria-label="l('toolbar.importRecords')" @click="emit('import')">
-        <template #icon><el-icon><component :is="ICON.import" /></el-icon></template>
-        {{ l('toolbar.import') }}
-      </MtButton>
-      <MtButton v-if="canExport" :title="l('toolbar.exportCsv')" :aria-label="l('toolbar.exportCsv')" @click="emit('export-csv')">
-        <template #icon><el-icon><component :is="ICON.export" /></el-icon></template>
-        {{ l('toolbar.exportCsv') }}
-      </MtButton>
-      <MtButton v-if="canExport" :title="l('toolbar.exportExcelXlsx')" :aria-label="l('toolbar.exportExcel')" @click="emit('export-xlsx')">
-        <template #icon><el-icon><component :is="ICON.export" /></el-icon></template>
-        {{ l('toolbar.exportXlsx') }}
-      </MtButton>
-      <!-- UI-P2-1c: primary CTA migrated to shared MtButton variant="primary". -->
+      <!-- UI-P2-1c: primary CTA migrated to shared MtButton variant="primary". Short text stays. -->
       <MtButton v-if="canCreateRecord" variant="primary" @click="emit('add-record')">{{ l('toolbar.newRecord') }}</MtButton>
+    </div>
+    </div>
+    <div class="meta-toolbar__end">
+      <slot name="status" />
+      <div ref="moreRef" class="meta-toolbar__more">
+        <MtButton
+          data-testid="toolbar-more"
+          :title="l('toolbar.more')"
+          :aria-label="l('toolbar.more')"
+          :aria-expanded="showMore ? 'true' : 'false'"
+          aria-haspopup="menu"
+          @click="showMore = !showMore"
+        >
+          <template #icon><el-icon><component :is="ICON.more" /></el-icon></template>
+          {{ l('toolbar.more') }}
+        </MtButton>
+        <div
+          v-show="showMore"
+          class="meta-toolbar__more-panel"
+          role="menu"
+          data-testid="toolbar-more-panel"
+        >
+          <div class="meta-toolbar__more-native">
+            <!-- Row density (UI-P2-1c slice-2: still MtMenu/MtMenuItem; trigger lives in overflow). -->
+            <MtMenu>
+              <template #trigger>
+                <MtButton class="meta-toolbar__more-item" :title="l('toolbar.rowHeight')" :aria-label="l('toolbar.rowHeight')">
+                  <template #icon><el-icon><component :is="ICON.rowHeight" /></el-icon></template>
+                  {{ l('toolbar.rows') }}
+                </MtButton>
+              </template>
+              <MtMenuItem
+                v-for="d in DENSITIES"
+                :key="d.value"
+                class="meta-toolbar__density-item"
+                :class="{ 'meta-toolbar__density-item--active': rowDensity === d.value }"
+                :aria-current="rowDensity === d.value ? 'true' : undefined"
+                @select="emit('set-row-density', d.value)"
+              >
+                <template #icon><el-icon v-if="rowDensity === d.value"><component :is="ICON.check" /></el-icon></template>
+                {{ l(d.labelKey) }}
+              </MtMenuItem>
+            </MtMenu>
+            <MtButton class="meta-toolbar__more-item" :title="l('toolbar.autoFitColumns')" :aria-label="l('toolbar.autoFitColumns')" @click="emit('auto-fit-columns')">
+              <template #icon><el-icon><component :is="ICON.fit" /></el-icon></template>
+              {{ l('toolbar.fit') }}
+            </MtButton>
+            <MtButton class="meta-toolbar__more-item" :title="l('toolbar.print')" :aria-label="l('toolbar.printGrid')" @click="emit('print')">
+              <template #icon><el-icon><component :is="ICON.print" /></el-icon></template>
+              {{ l('toolbar.print') }}
+            </MtButton>
+            <MtButton v-if="canCreateRecord" class="meta-toolbar__more-item" :title="l('toolbar.importRecords')" :aria-label="l('toolbar.importRecords')" @click="emit('import')">
+              <template #icon><el-icon><component :is="ICON.import" /></el-icon></template>
+              {{ l('toolbar.import') }}
+            </MtButton>
+            <MtButton v-if="canExport" class="meta-toolbar__more-item" :title="l('toolbar.exportCsv')" :aria-label="l('toolbar.exportCsv')" @click="emit('export-csv')">
+              <template #icon><el-icon><component :is="ICON.export" /></el-icon></template>
+              {{ l('toolbar.exportCsv') }}
+            </MtButton>
+            <MtButton v-if="canExport" class="meta-toolbar__more-item" :title="l('toolbar.exportExcelXlsx')" :aria-label="l('toolbar.exportExcel')" @click="emit('export-xlsx')">
+              <template #icon><el-icon><component :is="ICON.export" /></el-icon></template>
+              {{ l('toolbar.exportXlsx') }}
+            </MtButton>
+          </div>
+          <div v-if="$slots.overflow" class="meta-toolbar__more-slot">
+            <slot name="overflow" />
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import type { MetaField, RowDensity } from '../types'
 import type { SortRule, FilterRule, FilterGroup, FilterConjunction } from '../composables/useMultitableGrid'
 import { useLocale } from '../../composables/useLocale'
@@ -272,6 +316,7 @@ import {
   Upload as IconImport,
   Download as IconExport,
   Check as IconCheck,
+  More as IconMore,
 } from '@element-plus/icons-vue'
 
 // Reusable monochrome icon map for toolbar buttons (UI-P1 slice-1). Keyed by toolbar action so the
@@ -290,6 +335,7 @@ const ICON = {
   import: IconImport,
   export: IconExport,
   check: IconCheck,
+  more: IconMore,
 } as const
 
 const props = withDefaults(defineProps<{
@@ -350,6 +396,34 @@ const showFieldPicker = ref(false)
 const showSortPanel = ref(false)
 const showFilterPanel = ref(false)
 const showGroupPanel = ref(false)
+const showMore = ref(false)
+const moreRef = ref<HTMLElement | null>(null)
+
+function onMoreDocMouseDown(evt: MouseEvent) {
+  const target = evt.target as Node | null
+  if (moreRef.value?.contains(target)) return
+  // Density / other MtMenu + MtPopover panels Teleport to document.body. Treat
+  // those surfaces as inside 更多 so a menu pick is not a click-outside.
+  const el = target instanceof Element ? target : target?.parentElement
+  if (el?.closest('.mt-popover, .mt-menu')) return
+  showMore.value = false
+}
+function onMoreDocKeydown(evt: KeyboardEvent) {
+  if (evt.key === 'Escape') showMore.value = false
+}
+watch(showMore, (open) => {
+  if (open) {
+    document.addEventListener('mousedown', onMoreDocMouseDown)
+    document.addEventListener('keydown', onMoreDocKeydown)
+  } else {
+    document.removeEventListener('mousedown', onMoreDocMouseDown)
+    document.removeEventListener('keydown', onMoreDocKeydown)
+  }
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('mousedown', onMoreDocMouseDown)
+  document.removeEventListener('keydown', onMoreDocKeydown)
+})
 const DENSITIES: Array<{ value: RowDensity; labelKey: MetaCoreLabelKey }> = [
   { value: 'compact', labelKey: 'density.compact' },
   { value: 'normal', labelKey: 'density.normal' },
@@ -434,10 +508,37 @@ function onAddFilterGroup() {
 </script>
 
 <style scoped>
-.meta-toolbar { display: flex; justify-content: space-between; align-items: center; padding: 6px 12px; border-bottom: 1px solid var(--ms-border-light, #e7e8ec); background: var(--ms-bg-card, #fff); }
-.meta-toolbar__left { display: flex; gap: 2px; align-items: center; }
-.meta-toolbar__right { display: flex; gap: 4px; align-items: center; }
-.meta-toolbar__divider { display: inline-block; width: 1px; align-self: stretch; margin: 4px 6px; background: var(--ms-border-light, #e7e8ec); flex-shrink: 0; }
+.meta-toolbar {
+  --ms-control-height: 28px;
+  display: flex; justify-content: space-between; align-items: center;
+  height: var(--ms-sheet-toolbar-height, 38px); min-height: var(--ms-sheet-toolbar-height, 38px);
+  padding: 0 12px;
+  border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb); background: var(--ms-bg-card, #fff);
+  min-width: 0; flex-wrap: nowrap; flex-shrink: 0; gap: 8px;
+  font-size: var(--ms-sheet-font-body, 13px);
+  font-variant-numeric: tabular-nums;
+}
+/* One icon language: 16px EP glyphs (fill-based; no Lucide in-repo), muted at rest. */
+.meta-toolbar :deep(.mt-button--ghost) {
+  color: var(--ms-sheet-icon-color, #6b7280);
+  background: transparent;
+  border-color: transparent;
+}
+.meta-toolbar :deep(.mt-button--ghost:hover:not(:disabled)) { color: var(--ms-color-primary); background: var(--ms-bg-page); }
+.meta-toolbar :deep(.mt-button) { font-size: var(--ms-sheet-font-body, 13px); }
+.meta-toolbar :deep(.mt-button__icon) { font-size: var(--ms-sheet-icon-size, 16px); color: currentColor; }
+.meta-toolbar :deep(.el-icon) { font-size: var(--ms-sheet-icon-size, 16px); color: currentColor; }
+.meta-toolbar :deep(.el-icon svg) { width: var(--ms-sheet-icon-size, 16px); height: var(--ms-sheet-icon-size, 16px); }
+.meta-toolbar__icon-btn { padding: 0 4px !important; min-width: var(--ms-control-height, 28px); }
+.meta-toolbar__icon-btn.is-active { color: var(--ms-color-primary); }
+.meta-toolbar__primary {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  flex: 1 1 auto; min-width: 0; overflow-x: auto; overscroll-behavior-x: contain;
+}
+.meta-toolbar__left { display: flex; gap: 2px; align-items: center; flex-wrap: nowrap; flex: 0 1 auto; min-width: 0; }
+.meta-toolbar__right { display: flex; gap: 4px; align-items: center; flex-wrap: nowrap; flex: 1 1 auto; min-width: 0; justify-content: flex-end; }
+.meta-toolbar__end { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.meta-toolbar__divider { display: inline-block; width: 1px; align-self: stretch; margin: 6px 6px; background: var(--ms-sheet-hairline, #ebebeb); flex-shrink: 0; }
 .meta-toolbar__btn {
   display: inline-flex; align-items: center; gap: 4px; height: var(--ms-control-height, 32px); box-sizing: border-box;
   padding: 0 10px; font-size: 13px; border: 1px solid transparent; border-radius: var(--ms-radius-sm, 6px);
@@ -447,10 +548,11 @@ function onAddFilterGroup() {
 .meta-toolbar__btn:disabled { opacity: 0.35; cursor: not-allowed; }
 .meta-toolbar__btn--primary { background: var(--ms-color-primary, #245bdb); color: #fff; border-color: var(--ms-color-primary, #245bdb); }
 .meta-toolbar__btn--primary:hover:not(:disabled) { background: var(--el-color-primary-dark-2, #1e4fc0); color: #fff; }
-.meta-toolbar__btn--reset-personal { color: #067647; border-color: #6ce9a6; background: #ecfdf3; }
-.meta-toolbar__btn--reset-personal:hover { background: #d1fadf; }
-.meta-toolbar__btn-icon { font-size: 15px; color: currentColor; }
-.meta-toolbar__badge { font-size: 10px; background: var(--ms-color-primary, #245bdb); color: #fff; padding: 0 5px; border-radius: 8px; min-width: 16px; text-align: center; }
+.meta-toolbar__btn--reset-personal { color: var(--ms-text-2, #4b5563); border-color: transparent; background: transparent; }
+.meta-toolbar__btn--reset-personal:hover { background: var(--ms-bg-page, #f5f6f8); color: var(--ms-text-1, #111827); }
+.meta-toolbar__btn-icon { font-size: var(--ms-sheet-icon-size, 16px); color: currentColor; }
+.meta-toolbar__badge { font-size: 11px; font-weight: 500; background: transparent; color: var(--ms-color-info, #6b7280); padding: 0 2px; min-width: 0; text-align: center; }
+.meta-toolbar__icon-btn.is-active .meta-toolbar__badge { color: var(--ms-color-primary); }
 .meta-toolbar__dropdown { position: relative; }
 .meta-toolbar__panel { position: absolute; top: 100%; left: 0; z-index: 20; min-width: 200px; background: var(--ms-bg-card, #fff); border: 1px solid var(--ms-border-light, #e7e8ec); border-radius: var(--ms-radius-sm, 6px); box-shadow: var(--ms-shadow-pop, 0 4px 12px rgba(0,0,0,.1)); padding: 8px; margin-top: 4px; }
 .meta-toolbar__panel--filter { min-width: 420px; }
@@ -495,11 +597,32 @@ function onAddFilterGroup() {
 .meta-toolbar__group-remove:hover { color: #f56c6c; }
 .meta-toolbar__group-add { border: none; background: none; color: #409eff; cursor: pointer; font-size: 12px; padding: 4px 0; }
 .meta-toolbar__group-add:hover { text-decoration: underline; }
-.meta-toolbar__search { display: flex; align-items: center; gap: 4px; height: var(--ms-control-height, 32px); box-sizing: border-box; border: 1px solid var(--ms-border-light, #e7e8ec); border-radius: var(--ms-radius-sm, 6px); padding: 0 8px; background: var(--ms-bg-page, #f5f6f8); transition: border-color 0.2s, background 0.2s; }
-.meta-toolbar__search:focus-within { border-color: var(--ms-color-primary, #245bdb); background: var(--ms-bg-card, #fff); }
-.meta-toolbar__search--active { border-color: var(--ms-color-primary, #245bdb); background: var(--el-color-primary-light-9, #eef3ff); }
-.meta-toolbar__search-icon { font-size: 12px; opacity: 0.5; }
-.meta-toolbar__search-input { border: none; outline: none; font-size: 12px; width: 140px; background: transparent; color: #333; }
+.meta-toolbar__search { display: flex; align-items: center; gap: 6px; height: var(--ms-control-height, 28px); box-sizing: border-box; border: 1px solid transparent; border-radius: var(--ms-radius-sm, 6px); padding: 0 8px; background: transparent; transition: border-color 0.2s, background 0.2s; flex: 1 1 96px; min-width: 96px; max-width: 220px; }
+.meta-toolbar__search:focus-within { border-color: var(--ms-sheet-hairline, #ebebeb); background: var(--ms-bg-card, #fff); }
+.meta-toolbar__search--active { border-color: var(--ms-sheet-hairline, #ebebeb); background: transparent; }
+.meta-toolbar__search-icon { font-size: var(--ms-sheet-icon-size, 16px); color: var(--ms-sheet-icon-color, #6b7280); }
+.meta-toolbar__search-input { border: none; outline: none; font-size: var(--ms-sheet-font-body, 13px); width: 100%; min-width: 0; background: transparent; color: var(--ms-text-1, #111827); }
+.meta-toolbar__more { position: relative; flex: 0 0 auto; }
+.meta-toolbar__more-panel {
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 30;
+  display: flex; flex-direction: column; align-items: stretch; gap: 2px;
+  min-width: 220px; max-height: min(70vh, 480px); overflow-x: hidden; overflow-y: auto;
+  padding: var(--ms-space-2); box-sizing: border-box;
+  background: var(--ms-bg-card, #fff); border: 1px solid var(--ms-sheet-hairline, #ebebeb);
+  border-radius: var(--ms-radius-sm, 6px); box-shadow: none;
+}
+.meta-toolbar__more-native,
+.meta-toolbar__more-slot { display: flex; flex-direction: column; align-items: stretch; gap: 2px; }
+.meta-toolbar__more-slot { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--ms-sheet-hairline, #ebebeb); }
+.meta-toolbar__more-item { width: 100%; justify-content: flex-start; }
+.meta-toolbar__more-panel :deep(.mt-button) { width: 100%; justify-content: flex-start; }
+.meta-toolbar__more-panel :deep(.mt-workbench__mgr-btn),
+.meta-toolbar__more-panel :deep(.mt-workbench__presence-chip),
+.meta-toolbar__more-panel :deep(.mt-workbench__mention-chip),
+.meta-toolbar__more-panel :deep(.meta-notif-bell) {
+  width: 100%;
+  justify-content: flex-start;
+}
 .meta-toolbar__search-input::placeholder { color: #bbb; }
 .meta-toolbar__search-clear { border: none; background: none; color: #999; cursor: pointer; font-size: 14px; padding: 0 2px; line-height: 1; }
 .meta-toolbar__search-clear:hover { color: #f56c6c; }

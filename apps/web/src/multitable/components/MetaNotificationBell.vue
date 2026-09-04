@@ -5,10 +5,11 @@
       class="meta-notif-bell__btn"
       :class="{ 'meta-notif-bell__btn--attention': hasUnread }"
       :title="l('notification.bell')"
+      :aria-label="l('notification.bell')"
       data-test="notification-bell-btn"
       @click="toggle"
     >
-      🔔 {{ l('notification.bell') }}
+      <el-icon class="meta-notif-bell__icon" aria-hidden="true"><Bell /></el-icon>
       <span v-if="hasUnread" class="meta-notif-bell__badge" data-test="notification-bell-badge">{{ unreadCount }}</span>
     </button>
     <div v-if="open" class="meta-notif-bell__panel" data-test="notification-panel">
@@ -53,6 +54,8 @@
 
 <script setup lang="ts">
 import { onBeforeUnmount, ref } from 'vue'
+import { ElIcon } from 'element-plus'
+import { Bell } from '@element-plus/icons-vue'
 import { useLocale } from '../../composables/useLocale'
 import { scheduleIdle } from '../../utils/scheduleIdle'
 import { recordLabel, type MetaRecordLabelKey } from '../utils/meta-record-labels'
@@ -104,8 +107,27 @@ scheduleIdle(() => {
 
 <style scoped>
 .meta-notif-bell { position: relative; display: inline-block; }
-.meta-notif-bell__btn { position: relative; }
-.meta-notif-bell__badge { display: inline-block; min-width: 16px; padding: 0 5px; margin-left: 4px; border-radius: 9px; background: #ef4444; color: #fff; font-size: 11px; line-height: 16px; text-align: center; }
+.meta-notif-bell__btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--ms-control-height, 32px);
+  height: var(--ms-control-height, 32px);
+  padding: 0;
+  border: none;
+  border-radius: var(--ms-radius-sm, 6px);
+  background: transparent;
+  color: var(--ms-color-info, #6b7280);
+  cursor: pointer;
+}
+.meta-notif-bell__btn:hover { color: var(--ms-color-primary); background: var(--ms-bg-page, #f5f6f8); }
+.meta-notif-bell__icon { font-size: var(--ms-sheet-icon-size, 16px); color: currentColor; }
+.meta-notif-bell__badge {
+  position: absolute; top: 2px; right: 2px;
+  display: inline-block; min-width: 16px; padding: 0 4px; border-radius: 8px;
+  background: var(--ms-color-danger, #dc2626); color: #fff; font-size: 10px; line-height: 14px; text-align: center;
+}
 .meta-notif-bell__panel { position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; width: 320px; max-height: 420px; overflow-y: auto; background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12); }
 .meta-notif-bell__head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid #f1f5f9; }
 .meta-notif-bell__title { font-weight: 600; color: #0f172a; }

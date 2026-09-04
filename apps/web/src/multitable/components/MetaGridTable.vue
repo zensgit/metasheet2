@@ -1385,11 +1385,13 @@ function onKeydown(e: KeyboardEvent) {
 <style scoped>
 .meta-grid {
   position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; outline: none;
-  border: 1px solid var(--ms-border-light, #e7e8ec);
-  border-radius: var(--ms-radius-lg, 12px);
+  border: none;
+  border-radius: 0;
   background: var(--ms-bg-card, #fff);
-  box-shadow: var(--ms-shadow-card, 0 1px 2px rgba(31,35,41,.04), 0 8px 24px rgba(31,35,41,.06));
+  box-shadow: none;
   overflow: hidden;
+  font-size: var(--ms-sheet-font-body, 13px);
+  font-variant-numeric: tabular-nums;
 }
 .meta-grid__table-wrap { flex: 1; overflow: auto; }
 /* Header-only refinements: target thead specifically so the shared
@@ -1397,20 +1399,23 @@ function onKeydown(e: KeyboardEvent) {
    body-row appearance — only the header cells adopt the panel/token look. */
 thead .meta-grid__row-num,
 thead .meta-grid__check-col {
+  position: sticky;
+  top: 0;
+  z-index: 5;
   background: var(--ms-bg-card, #fff);
-  border-bottom: 1px solid var(--ms-border-light, #e7e8ec);
+  border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb);
 }
-.meta-grid__table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.meta-grid__row-num { width: 56px; min-width: 56px; text-align: center; color: #999; font-size: 12px; background: #f9fafb; border-bottom: 1px solid #eee; border-right: 1px solid #eee; padding: 6px 4px; position: sticky; left: 0; z-index: 1; }
+.meta-grid__table { width: 100%; border-collapse: collapse; font-size: var(--ms-sheet-font-body, 13px); }
+.meta-grid__row-num { width: 56px; min-width: 56px; text-align: center; color: var(--ms-text-3, #9ca3af); font-size: var(--ms-sheet-font-header, 12px); background: var(--ms-bg-card, #fff); border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb); border-right: 1px solid var(--ms-sheet-hairline, #ebebeb); padding: 8px 4px; position: sticky; left: 0; z-index: 1; }
 .meta-grid__row-num > span { display: inline-flex; align-items: center; justify-content: center; }
 .meta-grid__check-col { position: sticky; z-index: 1; }
 .meta-grid__row { transition: background 0.1s; content-visibility: auto; contain-intrinsic-size: auto 36px; }
 .meta-grid__row:hover { background: var(--ms-bg-page, #f5f6f8); }
-.meta-grid__row--selected, .meta-grid__row--focused { background: #ecf5ff; }
-.meta-grid__cell { position: relative; padding: 6px 12px; border-bottom: 1px solid #eee; overflow: hidden; text-overflow: ellipsis; cursor: default; }
+.meta-grid__row--selected, .meta-grid__row--focused { background: var(--el-color-primary-light-9, #eff6ff); }
+.meta-grid__cell { position: relative; padding: 8px 12px; border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb); overflow: hidden; text-overflow: ellipsis; cursor: default; }
 .meta-grid__cell--editing { padding: 2px 4px; background: #fff; }
 .meta-grid__cell--readonly { color: #666; }
-.meta-grid__cell--focused { outline: 2px solid #409eff; outline-offset: -2px; }
+.meta-grid__cell--focused { outline: 1px solid var(--ms-color-primary); outline-offset: -1px; }
 /* Live cell-cursor: a remote collaborator is on this cell (presentational, no interaction change). */
 .meta-grid__cell--remote-cursor { outline: 2px dashed #e6a23c; outline-offset: -2px; position: relative; }
 .meta-grid__cell-scale-icon { display: inline-block; margin-right: 4px; font-weight: 700; vertical-align: middle; }
@@ -1481,7 +1486,7 @@ thead .meta-grid__check-col {
 .meta-grid__skeleton-row { display: flex; gap: 12px; margin-bottom: 12px; }
 .meta-grid__skeleton-cell { flex: 1; height: 20px; background: linear-gradient(90deg, #eee 25%, #e0e0e0 50%, #eee 75%); background-size: 200% 100%; border-radius: 4px; animation: meta-skeleton-pulse 1.5s ease-in-out infinite; }
 @keyframes meta-skeleton-pulse { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
-.meta-grid__check-col { width: 36px; min-width: 36px; text-align: center; padding: 4px; border-bottom: 1px solid #eee; border-right: 1px solid #eee; background: #f9fafb; position: sticky; left: 0; z-index: 1; }
+.meta-grid__check-col { width: 36px; min-width: 36px; text-align: center; padding: 4px; border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb); border-right: 1px solid var(--ms-sheet-hairline, #ebebeb); background: var(--ms-bg-card, #fff); position: sticky; left: 0; z-index: 1; }
 .meta-grid__expand-btn { border: none; background: none; cursor: pointer; font-size: 8px; color: #bbb; padding: 0 2px; transition: transform 0.15s; display: inline-block; }
 .meta-grid__expand-btn:hover { color: #666; }
 .meta-grid__expand-btn--open { transform: rotate(90deg); color: #409eff; }
@@ -1497,11 +1502,11 @@ thead .meta-grid__check-col {
 .meta-grid__bulk-btn--danger { color: #f56c6c; border-color: #f56c6c; }
 .meta-grid__bulk-btn--danger:hover { background: #fef0f0; }
 .meta-grid__group-header { cursor: pointer; }
-.meta-grid__group-header td { padding: 6px 12px; background: #f0f4f8; font-size: 13px; font-weight: 600; color: #333; border-bottom: 1px solid #dde3ea; }
-.meta-grid__group-header:hover td { background: #e6ecf2; }
-/* Nested levels: lighter background + thinner text as depth increases (visual hierarchy). */
-.meta-grid__group-header--l1 td { background: #f5f8fb; font-weight: 500; }
-.meta-grid__group-header--l2 td { background: #fafcfe; font-weight: 500; }
+.meta-grid__group-header td { padding: 8px 12px; background: var(--ms-bg-card, #fff); font-size: var(--ms-sheet-font-body, 13px); font-weight: 600; color: var(--ms-text-1, #111827); border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb); }
+.meta-grid__group-header:hover td { background: var(--ms-bg-page, #f5f6f8); }
+/* Nested levels: quieter than a zebra stripe — type weight only, same white ground. */
+.meta-grid__group-header--l1 td { background: var(--ms-bg-card, #fff); font-weight: 500; }
+.meta-grid__group-header--l2 td { background: var(--ms-bg-card, #fff); font-weight: 500; }
 .meta-grid__group-indent { display: inline-flex; align-items: center; }
 .meta-grid__group-toggle { display: inline-block; width: 16px; font-size: 10px; color: #999; }
 .meta-grid__group-label { margin-right: 6px; }

@@ -145,7 +145,14 @@ vi.mock('../src/multitable/import/bulk-import', () => ({
 }))
 
 vi.mock('../src/multitable/components/MetaSheetViewRail.vue', () => ({ default: stubMetaSheetViewRail() }))
-vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({ default: stubComponent('MetaToolbar') }))
+vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
+  default: defineComponent({
+    name: 'MetaToolbar',
+    setup(_, { slots }) {
+      return () => h('div', { 'data-stub-MetaToolbar': 'true' }, [slots.status?.(), slots.overflow?.()])
+    },
+  }),
+}))
 vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({ default: stubComponent('MetaGridTable') }))
 vi.mock('../src/multitable/components/MetaFormView.vue', () => ({ default: stubComponent('MetaFormView') }))
 // W2 S3: MultitableWorkbench.vue now renders MetaRecordInspector.vue directly (MetaRecordDrawer.vue
