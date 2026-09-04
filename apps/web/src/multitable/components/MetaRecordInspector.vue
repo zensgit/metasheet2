@@ -92,13 +92,28 @@
   wins by source order over the base `.meta-record-drawer` width rule this feature adds). Two pieces:
   (a) a `role="separator"` drag/keyboard splitter on the panel's LEFT edge — width persists to
   `localStorage` per viewer (corrupt/absent → DEFAULT_PANEL_WIDTH, same discipline as
-  `../quickPhrases.ts`), clamped to `[320, min(720, 60vw)]`, exposed as the `--meta-record-drawer-width`
+  `../quickPhrases.ts`), clamped to `[360, min(720, 60vw)]` (P2 2026-09-05 follow-up: floor raised from
+  320 to 360, see MIN_PANEL_WIDTH's own comment), exposed as the `--meta-record-drawer-width`
   CSS custom property on this root element; (b) an "expand" header toggle that snaps to the max and
   back to the last manually-chosen width. See `onSplitterPointerDown`/`onSplitterKeydown`/
   `toggleExpand` below for the mechanics, and the `.meta-record-drawer`/`__header`/`__body`/`__tabs`
   style comments below for the companion height-contract fix (sticky header+tabs, scrolling body) that
   motivated this slice: a long field list previously grew the WHOLE panel (title/tabs included, see
   those rules' own comments) rather than scrolling in place.
+
+  P2/P3-A (2026-09-05 follow-up, real-browser measurements at a 1512px Chromium viewport, verifier P2/
+  P3): two defects the jsdom-only test suite above could not itself catch (see the frozen file-header
+  honesty caveats throughout this file) turned up once actually rendered. P2: at the then-320px
+  minimum the un-wrapped 4-tab pill (355px) ran 36px past the panel's right edge, forcing a
+  page-level horizontal scrollbar -- `.meta-record-drawer__tabs` now wraps (`flex-wrap: wrap`, kept
+  `inline-flex` so the pill still hugs its own content at normal widths) and MIN_PANEL_WIDTH moved to
+  360 (the pre-existing default, so nothing regresses for anyone who never drags the splitter). P3-A:
+  the sticky tabs bar left a 12px strip of scrolled content visible above it once stuck --
+  `.meta-record-drawer__body`'s top padding (which the bar, as its first child, sat 12px below) moved
+  onto the bar's own `padding-top` instead, so that 12px is now inside the bar's own painted,
+  sticking box. See `.meta-record-drawer__tabs`/`__tabs-bar`/`__body`'s own style comments for the
+  full mechanics of each (including a real-browser-verified rejected approach for P3-A, recorded so it
+  is not retried).
 -->
 <template>
   <div
@@ -206,7 +221,19 @@
            `role="tablist"`, still the pill visual).
            P3-2: also bound to `setTabsBarRef` (a function ref, not a plain template ref + `watch`) so a
            ResizeObserver can (dis)connect exactly as this element mounts/unmounts under the `v-if`
-           above -- see that function's own comment. -->
+           above -- see that function's own comment. NIT-A (2026-09-05 follow-up): this inline arrow
+           wrapper is UNCHANGED (kept, not hoisted into a stable top-level reference) -- an earlier
+           draft of this fix tried stabilizing the binding instead (`:ref="setTabsBarRef"` directly),
+           reasoning that Vue's compiler would then treat this vnode as static/hoistable and skip
+           re-invoking the ref on updates entirely. That reasoning was correct as far as it went (a
+           stable-identifier ref IS hoisted, and does stop being re-invoked after mount), but it made
+           `setTabsBarRef`'s own identity check unreachable/untestable, and is a bigger, less targeted
+           deviation from the element's existing `setTabRef`-idiom siblings (see the tab buttons' own
+           `:ref` just below) than the bug actually needs -- reverted in favor of the smaller fix: keep
+           the inline wrapper, and make `setTabsBarRef` itself cheap to call repeatedly. See that
+           function's own comment for the measured call pattern this wrapper produces (called on every
+           re-render with the SAME element, not interleaved with a `null` call as originally assumed --
+           verified by direct instrumentation, not by reasoning from Vue's ref-patching source alone). -->
       <div class="meta-record-drawer__tabs-bar" :ref="(el) => setTabsBarRef(el as HTMLElement | null)">
         <div class="meta-record-drawer__tabs" role="tablist" :aria-label="l('record.tabsAria')">
           <button
@@ -709,7 +736,17 @@ function onInspectorKeydown(event: KeyboardEvent) {
 // `withinTablist` guard, which returns early for any target outside `[role="tab"]`); Escape typed
 // while the splitter has focus still bubbles to that SAME root handler and closes the inspector like
 // everywhere else in the panel -- no `.stop` here, so that stays unchanged.
-const MIN_PANEL_WIDTH = 320
+// P2 (2026-09-05, real-browser follow-up, verifier P2): at the OLD 320px minimum the 4-tab pill
+// (355px, un-wrapped) ran 36px past the panel's right edge and forced a page-level horizontal
+// scrollbar -- a genuine overflow, not merely a real-browser-verification gap like this file's other
+// jsdom-can't-render-CSS caveats. Wrapping the pill (`.meta-record-drawer__tabs`'s own `flex-wrap:
+// wrap` below) fixes the overflow at any width, but 320px was ALSO simply too narrow for this panel's
+// header actions (watch/comment/workflow/permissions/duplicate/delete/expand/close, up to 8 buttons)
+// to read comfortably even wrapped onto two rows. Raising the floor to 360px -- the pre-existing
+// DEFAULT_PANEL_WIDTH, not a new number -- means the shipped default already sat exactly at the new
+// minimum: nobody who never touches the splitter loses anything, and the ARIA `aria-valuemin` / the
+// Home key's jump-to-minimum both move to this same value with no separate behavior to add.
+const MIN_PANEL_WIDTH = 360
 const MAX_PANEL_WIDTH_CAP = 720
 const DEFAULT_PANEL_WIDTH = 360
 const PANEL_WIDTH_STORAGE_KEY = 'metasheet2:record-inspector-width'
@@ -910,7 +947,17 @@ function onSplitterPointerDown(event: PointerEvent) {
 // arrow/Home/End key is RELEASED, not on every keydown (a held-down key repeat-fires keydown many
 // times before the eventual keyup, and `onSplitterKeydown` already applies each step live via
 // `applyPanelWidth`; this only defers the localStorage write to the gesture's end).
+//
+// NIT-B (2026-09-05 follow-up): the original version fired on ANY keyup whose target sat inside the
+// splitter -- including a Tab keyup, which merely MOVES focus onto/off the splitter and never calls
+// `applyPanelWidth` at all. That wrote whatever `panelWidth` already happened to be to `localStorage`
+// on every such Tab, a spurious write with no corresponding resize (harmless in effect, since the
+// value written was unchanged, but a needless localStorage round-trip on pure focus movement, and a
+// footgun for any future caller that assumes a keyup-on-splitter write implies an actual width
+// change). Scoped to the same four keys `onSplitterKeydown` itself acts on.
+const SPLITTER_RESIZE_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'Home', 'End'])
 function onInspectorKeyup(event: KeyboardEvent) {
+  if (!SPLITTER_RESIZE_KEYS.has(event.key)) return
   const target = event.target as HTMLElement | null
   if (target?.closest('[role="separator"]') != null) {
     persistPanelWidth(panelWidth.value)
@@ -929,25 +976,44 @@ onBeforeUnmount(() => {
 // scroll content, so a field scrolled into view via `scrollIntoView()` (browser default) or Tab-focus
 // auto-scroll can land directly UNDER the bar, invisible. The fix is `scroll-padding-top` on the
 // scroll container (`.meta-record-drawer__body`, below) set to the bar's own box height -- but that
-// height is NOT a constant: tab labels are i18n'd (locale-dependent string length), and at the 320px
-// minimum panel width the tab pills can wrap onto a second line, growing the bar. A single fixed px
-// value would therefore be wrong by construction on at least some locale/viewport combinations, so
-// the height is MEASURED live via ResizeObserver (the same guard-for-absence idiom already used by
-// MetaChartRenderer.vue's `ensureResizeObserver`) and published as the
-// `--meta-record-tabs-bar-height` custom property, consumed by `.meta-record-drawer__body`'s
-// `scroll-padding-top: var(--meta-record-tabs-bar-height, 48px)`. The `48px` fallback is the ONLY
-// value exercised by this component's own jsdom tests (jsdom performs no layout, so ResizeObserver
-// never fires here) -- a rough approximation of the bar's typical single-line box, not a
-// real-browser-measured value; the LIVE var is what real usage renders and is NOT behaviorally
+// height is NOT a constant: tab labels are i18n'd (locale-dependent string length), and at the 360px
+// minimum panel width (P2 2026-09-05 follow-up: was 320px) the tab pills wrap onto a second line,
+// growing the bar. A single fixed px value would therefore be wrong by construction on at least some
+// locale/viewport combinations, so the height is MEASURED live via ResizeObserver (the same
+// guard-for-absence idiom already used by MetaChartRenderer.vue's `ensureResizeObserver`) and
+// published as the `--meta-record-tabs-bar-height` custom property, consumed by
+// `.meta-record-drawer__body`'s `scroll-padding-top: var(--meta-record-tabs-bar-height, 58px)`. The
+// `58px` fallback (P3-A 2026-09-05 follow-up: was `48px`; the bar's own `padding-top` grew by 12px in
+// that same follow-up, see its own comment) is the ONLY value exercised by this component's own jsdom
+// tests (jsdom performs no layout, so ResizeObserver never fires here) -- a real-browser-measured
+// single-line box height (Chromium, 1512px viewport), not an arithmetic re-derivation; the LIVE var is
+// what real usage renders and is NOT behaviorally
 // verified by this PR's test suite (same real-browser-verification caveat as this file's existing
 // focus-ring and sticky-tabs-bar comments). Bound via a function ref (not a plain template ref + a
 // `watch`) because the element is inside `v-if="record"` and needs to (dis)connect the observer
 // exactly as it mounts/unmounts, not merely change value.
 const tabsBarHeight = ref(0)
 let tabsBarResizeObserver: ResizeObserver | null = null
+// NIT-A (2026-09-05 follow-up): the template binds this via an INLINE arrow (`:ref="(el) =>
+// setTabsBarRef(el as HTMLElement | null)"`, unchanged -- see that binding's own comment), which
+// Vue's compiler cannot hoist into a static vnode (an inline function literal is a new value every
+// render), so this function IS called again on every re-render of the component -- e.g. every
+// pointermove of a drag, since each one writes `panelWidth` and re-renders for the live width/ARIA
+// update. Measured directly (temporary call-counting instrumentation, not inferred from Vue's
+// ref-patching source): those repeat calls all arrive with the SAME element already observed, not
+// interleaved with an intermediate `null` call the way un-hoisted ref churn is sometimes assumed to
+// work -- so `observedTabsBarElement` tracking WHICH element the live observer is currently attached
+// to, and early-returning when a call's element already matches it, is enough on its own to turn every
+// one of those repeat calls into a no-op. Before this guard existed, EVERY one of those repeat calls
+// unconditionally tore down and reconstructed the ResizeObserver -- pure churn, since the target
+// element never actually changes mid-drag (verified: 6 constructions across 1 mount + 5 forced
+// re-renders without this guard, vs. 1 with it, in an isolated repro).
+let observedTabsBarElement: HTMLElement | null = null
 function setTabsBarRef(el: HTMLElement | null) {
+  if (el === observedTabsBarElement) return
   tabsBarResizeObserver?.disconnect()
   tabsBarResizeObserver = null
+  observedTabsBarElement = el
   if (!el || typeof ResizeObserver === 'undefined') return
   const target = el
   tabsBarResizeObserver = new ResizeObserver((entries) => {
@@ -1070,7 +1136,10 @@ async function toggleRecordSubscription() {
    order, so this is a no-op there. */
 .meta-record-drawer {
   width: var(--meta-record-drawer-width, 360px);
-  min-width: 320px;
+  /* P2 (2026-09-05 follow-up): mirrors the JS `MIN_PANEL_WIDTH` bump (320 -> 360, see that constant's
+     own comment) -- this is the belt-and-suspenders CSS fallback for the JS clamp, so the two must
+     stay in lockstep. */
+  min-width: 360px;
   max-width: min(720px, 60vw);
   border-left: 1px solid #e5e7eb; background: #fff; display: flex; flex-direction: column;
   position: relative;
@@ -1093,13 +1162,18 @@ async function toggleRecordSubscription() {
   inset: 0 0 0 auto;
   z-index: 5;
   width: min(360px, calc(100vw - 32px));
-  /* Resizable panel (2026-09-05): the base `.meta-record-drawer` rule above now also sets
-     `min-width: 320px` (belt-and-suspenders for the JS-clamped push width). `min-width` wins over
+  /* Resizable panel (2026-09-05; P2 2026-09-05 follow-up bumped the referenced number 320 -> 360, see
+     the base rule's own comment): the base `.meta-record-drawer` rule above also sets a push-mode
+     `min-width` (now 360px, belt-and-suspenders for the JS-clamped push width). `min-width` wins over
      `width` in the cascade, so WITHOUT this override this rule's own narrow-viewport gutter
      (`calc(100vw - 32px)`, the whole reason this rule exists per the comment above) would stop
-     holding below ~352px viewport width -- at 320px the 32px gutter is gone, and narrower than that
-     the right-anchored panel clips off the left edge. Mirrors the width rule's own idiom exactly so
-     min tracks width instead of fighting it. */
+     holding below ~392px viewport width -- at 360px the 32px gutter is gone, and narrower than that
+     the right-anchored panel clips off the left edge. This override's OWN value stays 320 (not
+     re-derived from the push-mode minimum): it fully overrides the base rule regardless of what that
+     rule sets (same specificity, later in source order always wins), so it is free to keep its own,
+     independent overlay-mode safety floor for very narrow phones -- unaffected by, and not required
+     to track, the push-mode splitter's minimum. Mirrors the width rule's own idiom (`min(px, calc(100vw
+     - 32px))`) so min tracks width instead of fighting it. */
   min-width: min(320px, calc(100vw - 32px));
   max-width: none;
   background: var(--ms-bg-card);
@@ -1123,9 +1197,12 @@ async function toggleRecordSubscription() {
    needing `position: sticky` of its own; `flex: 0 0 auto` just keeps it from ever being squeezed by
    `.meta-record-drawer__body`'s `flex: 1` on a very tall field list -- the body scrolls internally
    long before that could happen. */
-/* P3-3 (header overflow at the 320px minimum): title + nav + actions no longer fit on one row at
-   320px once several action buttons (watch/comment/workflow/permissions/duplicate/delete/expand/
-   close) are all visible -- `flex-wrap: wrap` lets the row break onto a second line instead of
+/* P3-3 (header overflow at the panel minimum, then 320px): title + nav + actions no longer fit on one
+   row at the minimum width once several action buttons (watch/comment/workflow/permissions/duplicate/
+   delete/expand/close) are all visible -- true at the original 320px floor this rule was written
+   against, and unchanged in kind now that P2 (2026-09-05 follow-up) raised the floor to 360px: more
+   room helps, but does not on its own guarantee every combination of enabled action buttons fits
+   un-wrapped, so this rule stays. `flex-wrap: wrap` lets the row break onto a second line instead of
    overflowing the panel horizontally (the page-level no-horizontal-scroll contract this file's other
    rules already protect, see e.g. the overlay-mode width comment). `.meta-record-drawer__actions`
    gets its own `flex-wrap: wrap` too, so a still-too-narrow action group wraps internally rather than
@@ -1192,15 +1269,27 @@ async function toggleRecordSubscription() {
    scrolling) -- `.meta-record-drawer` (the flex column) and this rule are the two ends of that "flex
    chain". `overflow-y: auto` (moved down from the root, see that rule's own comment) is what makes a
    long field/history/comments/attachments list scroll IN PLACE instead of growing the whole panel (or
-   the page) the way it did before this change. */
+   the page) the way it did before this change.
+   P3-A (2026-09-05 follow-up): `padding-top: 0` -- this used to be `12px` (the shorthand below was
+   `padding: 12px 16px`, i.e. 12px on every side); see `.meta-record-drawer__tabs-bar`'s own comment
+   for why that top padding, combined with the sticky bar sitting as this element's first child, left a
+   12px strip of scrolled content visible above the bar once it stuck. The 12px is not gone -- it moved
+   onto `.meta-record-drawer__tabs-bar`'s own `padding-top` instead, so it is now painted as part of
+   the bar's opaque box (and therefore stuck, and covering, WITH it) rather than being this element's
+   naked, unpainted padding sitting ABOVE the bar's sticky reach. Left/right/bottom padding (16px/16px/
+   12px) are unchanged -- this only ever affected the FIRST child's leading offset, never the other
+   three sides. */
 /* P3-2 (sticky tabs bar hides a focused/scrolled-into-view field): `scroll-padding-top` shifts where
    the browser's native scroll-into-view (`scrollIntoView()`, Tab-focus auto-scroll) settles a target
    -- keeping it BELOW the sticky `.meta-record-drawer__tabs-bar` instead of directly under it. The
    value comes from the `--meta-record-tabs-bar-height` custom property, set on this element from the
-   bar's own live-measured height (see the component's `tabsBarHeight`/`setTabsBarRef`); the `48px`
-   fallback only applies before that JS measurement lands (or in a ResizeObserver-less/jsdom
-   environment) -- see that code's own comment for why a fixed value alone would be wrong here. */
-.meta-record-drawer__body { padding: 12px 16px; flex: 1; min-height: 0; overflow-y: auto; scroll-padding-top: var(--meta-record-tabs-bar-height, 48px); }
+   bar's own live-measured height (see the component's `tabsBarHeight`/`setTabsBarRef`); the `58px`
+   fallback (P3-A 2026-09-05 follow-up: was `48px` -- bumped by the same 12px the bar's own padding-top
+   grew by just above, and re-measured live rather than re-derived by arithmetic: 58px is the bar's
+   actual live-measured single-line box height in Chromium at a 1512px viewport) only applies before
+   that JS measurement lands (or in a ResizeObserver-less/jsdom environment) -- see that code's own
+   comment for why a fixed value alone would be wrong here. */
+.meta-record-drawer__body { padding: 0 16px 12px; flex: 1; min-height: 0; overflow-y: auto; scroll-padding-top: var(--meta-record-tabs-bar-height, 58px); }
 /* `position: sticky` keeps the tab strip visible while `.meta-record-drawer__body` above scrolls
    underneath it (item 1's "…and tabs stay visible") -- `top: 0` sticks it flush against the body's own
    scrollport (its nearest scrolling ancestor). Spans the FULL scroll width (cancels the body's own
@@ -1211,8 +1300,43 @@ async function toggleRecordSubscription() {
    in particular whether the SAME opaque background needs to extend into `.meta-record-drawer__body`'s
    own `padding-top` (a few px at the very top of the scrollport) is a real-browser question this PR
    could not check; see the PR's manual-check note. */
-.meta-record-drawer__tabs-bar { position: sticky; top: 0; z-index: 2; margin: 0 -16px; padding: 0 16px 14px; background: #fff; }
-.meta-record-drawer__tabs { display: inline-flex; gap: 4px; padding: 3px; border: 1px solid #e5e7eb; border-radius: 999px; background: #f8fafc; }
+/* P3-A (2026-09-05 follow-up, verifier P3): real-browser measurement found a ~12px strip of scrolled
+   field content peeking through directly ABOVE this sticky bar once it engages -- `.meta-record-drawer
+   __body`'s own top padding put this bar's natural resting position 12px down from the scrollport's
+   actual top edge, but the bar's OWN box (its opaque `background: #fff`) only ever covered its own
+   height, not that leading 12px gap the parent's padding created above it.
+   Real-browser-verified rejected approach, recorded so it is not tried again: pulling the bar up with
+   `margin-top: -12px` (compensated by an equal `padding-top: 12px` here, so total flow height and
+   sibling spacing stay unchanged) was tried first and measured to have ZERO effect on the STUCK
+   position in Chromium -- the 12px gap persisted identically whether scrolled or not, i.e. a negative
+   top margin on a `position: sticky` element does not shift its stick threshold the way it shifts a
+   plain in-flow box, at least for the first child of an `overflow: auto` container. The fix actually
+   used instead: `.meta-record-drawer__body`'s OWN `padding-top` was moved to 0 (see that rule's own
+   comment) and re-created HERE as this rule's `padding-top: 12px` -- with no parent top padding to
+   sit below, this element's natural (unstuck) position is already flush with the scrollport's real
+   top, so `top: 0` sticks it flush with no gap, in BOTH the unscrolled and the scrolled state
+   (verified live: `barRect.top === bodyRect.top` at `scrollTop` 0 and 400 alike in a 1512px Chromium
+   window). `padding-top: 12px` on this element (rather than 0) is what preserves the SAME 12px of
+   visual clearance above the tab pill as before -- now painted as part of this element's own opaque
+   background instead of being the parent's naked, unpainted padding, so it scrolls (and is covered)
+   WITH the bar instead of staying behind it. See `.meta-record-drawer__body` below for the matching
+   `scroll-padding-top` fallback bump (58px bar height measured live in Chromium at 1512px, see that
+   rule's own comment). */
+.meta-record-drawer__tabs-bar { position: sticky; top: 0; z-index: 2; margin: 0 -16px; padding: 12px 16px 14px; background: #fff; }
+/* P2 (2026-09-05 follow-up, verifier P2): was `inline-flex` with no wrapping -- at the (then-320px,
+   now 360px) panel minimum the 4-tab pill's un-wrapped content width (355px measured in Chromium) ran
+   PAST the panel's own content box, forcing a page-level horizontal scrollbar (the pill's right edge
+   sat ~36px outside the panel at 320px, and the overflow persisted even at 360px). `flex-wrap: wrap`
+   lets the pill break its buttons onto a second row instead of overflowing horizontally, at ANY panel
+   width down to the JS/CSS-enforced 360px minimum -- `display: inline-flex` is deliberately KEPT (not
+   changed to a block-level `flex`): an inline-level flex container is still sized via shrink-to-fit
+   (same algorithm as `inline-block`), so at a WIDE panel width (available space > the pill's own
+   unwrapped content width) it still hugs its own content and reads as a compact rounded "pill", not a
+   full-width bar -- switching to block-level `flex` would make it fill the ENTIRE available row width
+   unconditionally (a `flex` container's used `width` is "fill available space" like any other block
+   box), stretching the pill's background across the whole tabs-bar even at normal/wide widths, which
+   is exactly the "pill look" this change is required to keep. */
+.meta-record-drawer__tabs { display: inline-flex; flex-wrap: wrap; row-gap: 4px; column-gap: 4px; padding: 3px; border: 1px solid #e5e7eb; border-radius: 999px; background: #f8fafc; }
 .meta-record-drawer__tab { min-width: 76px; padding: 5px 12px; border: none; border-radius: 999px; background: transparent; color: #64748b; cursor: pointer; font-size: 12px; font-weight: 600; }
 .meta-record-drawer__tab--active { background: #111827; color: #fff; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.16); }
 /* W2 S3 (lock §3.3 focus ring convention, H4-2/#4281 lineage, same token as MetaSheetViewRail.vue).
