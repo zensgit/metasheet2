@@ -829,6 +829,7 @@ async function main() {
   await testInstanceDigestIsProductionBehaviour()
   await testDataSourceBindingValidation()
   await testBridgeEditPreservesFullConfig()
+  await testTenantWideScopedReadFallback()
 
   console.log('✓ external-systems: registry + credential boundary tests passed')
 }
@@ -1430,4 +1431,112 @@ async function testBridgeEditPreservesFullConfig() {
   assert.equal(unbound.config.schema, 'dbo', 'clearing one key clears only that key')
 
   console.log('  external-systems: bridge edit preserves the full config OK')
+}
+
+// --- Tenant-wide scoped read fallback (by-id reads only) --------------------
+//
+// A caller carrying a workspace hint that misses the exact (tenant, workspace, id) row falls back
+// ONCE to the SAME tenant's tenant-wide row (workspace_id IS NULL). Tenant isolation is untouched,
+// a workspace-scoped row is never reached from another workspace or from a null hint, the four
+// by-id read accessors agree, the resolver sees the matched scope (null) rather than the hint, and
+// delete keeps its exact scope.
+async function testTenantWideScopedReadFallback() {
+  const db = createMockDb()
+  const credentialStore = createMockCredentialStore()
+  const resolverContexts = []
+  const registry = createExternalSystemRegistry({
+    db,
+    credentialStore,
+    idGenerator: () => 'unused',
+    connectionResolver: {
+      async resolve(binding, context) {
+        resolverContexts.push({ ...context })
+        return binding
+      },
+    },
+  })
+  const tenantWide = {
+    id: 'sys_tenant_wide',
+    tenant_id: 'tenant_1',
+    workspace_id: null,
+    project_id: null,
+    name: 'Tenant-wide HTTP',
+    kind: 'http',
+    role: 'source',
+    config: { baseUrl: 'https://tenant-wide.example.test' },
+    credentials_encrypted: null,
+    capabilities: {},
+    status: 'active',
+    created_at: '2026-09-01T00:00:00.000Z',
+    updated_at: '2026-09-01T00:00:00.000Z',
+  }
+  const workspaceScoped = {
+    ...tenantWide,
+    id: 'sys_ws_a',
+    workspace_id: 'ws_a',
+    name: 'Workspace A HTTP',
+  }
+  const tenantWideSql = {
+    ...tenantWide,
+    id: 'sys_tenant_wide_sql',
+    kind: 'data-source:sql-readonly',
+    connection_id: 'connection_1',
+    legacy_connection_fallback_eligible: false,
+    config: { schema: 'dbo' },
+  }
+  db.rows.push(tenantWide, workspaceScoped, tenantWideSql)
+
+  // 1. A workspace hint that misses reaches the tenant-wide row, via exactly one fallback query
+  //    that still carries the caller's tenant.
+  db.calls.length = 0
+  const viaHint = await registry.getExternalSystemForAdapter({ tenantId: 'tenant_1', workspaceId: 'ws_hint', id: 'sys_tenant_wide' })
+  assert.equal(viaHint.id, 'sys_tenant_wide')
+  assert.equal(viaHint.workspaceId, null, 'the row keeps its own (tenant-wide) scope')
+  const lookups = db.calls.filter(([op]) => op === 'selectOne')
+  assert.equal(lookups.length, 2, 'exact lookup, then one tenant-wide fallback')
+  assert.deepEqual(lookups[0][2], { tenant_id: 'tenant_1', workspace_id: 'ws_hint', id: 'sys_tenant_wide' })
+  assert.deepEqual(lookups[1][2], { tenant_id: 'tenant_1', workspace_id: null, id: 'sys_tenant_wide' },
+    'the fallback is tenant-bound and tenant-wide only')
+
+  // 2. The four by-id read accessors agree.
+  const publicViaHint = await registry.getExternalSystem({ tenantId: 'tenant_1', workspaceId: 'ws_hint', id: 'sys_tenant_wide' })
+  assert.equal(publicViaHint.id, 'sys_tenant_wide')
+  const configViaHint = await registry.getExternalSystemAdapterConfig({ tenantId: 'tenant_1', workspaceId: 'ws_hint', id: 'sys_tenant_wide' })
+  assert.equal(configViaHint.kind, 'http')
+  const exact = await registry.getExternalSystemForAdapter({ tenantId: 'tenant_1', workspaceId: null, id: 'sys_tenant_wide' })
+  assert.equal(exact.id, 'sys_tenant_wide', 'an exact null-scope lookup still works and needs no fallback')
+
+  // 3. Tenant isolation: another tenant never reaches the tenant-wide row, hint or not.
+  const foreign = await registry.getExternalSystemForAdapter({ tenantId: 'tenant_2', workspaceId: 'ws_hint', id: 'sys_tenant_wide' }).catch((e) => e)
+  assert.ok(foreign instanceof ExternalSystemNotFoundError, 'cross-tenant read is refused even with the fallback')
+  const foreignNull = await registry.getExternalSystem({ tenantId: 'tenant_2', workspaceId: null, id: 'sys_tenant_wide' }).catch((e) => e)
+  assert.ok(foreignNull instanceof ExternalSystemNotFoundError)
+
+  // 4. No cross-workspace and no reverse fallback: a workspace-scoped row is reached only from its
+  //    own workspace.
+  const otherWorkspace = await registry.getExternalSystemForAdapter({ tenantId: 'tenant_1', workspaceId: 'ws_b', id: 'sys_ws_a' }).catch((e) => e)
+  assert.ok(otherWorkspace instanceof ExternalSystemNotFoundError, 'a workspace row is not visible from another workspace')
+  const nullHint = await registry.getExternalSystemForAdapter({ tenantId: 'tenant_1', workspaceId: null, id: 'sys_ws_a' }).catch((e) => e)
+  assert.ok(nullHint instanceof ExternalSystemNotFoundError, 'a null hint never widens into workspace rows')
+  const own = await registry.getExternalSystemForAdapter({ tenantId: 'tenant_1', workspaceId: 'ws_a', id: 'sys_ws_a' })
+  assert.equal(own.id, 'sys_ws_a')
+
+  // 5. The connection resolver sees the MATCHED scope (null), not the caller's hint, so a
+  //    tenant-wide SQL binding is resolved under its own scope.
+  resolverContexts.length = 0
+  const sqlViaHint = await registry.getExternalSystemForAdapter({
+    tenantId: 'tenant_1', workspaceId: 'ws_hint', id: 'sys_tenant_wide_sql', principal: 'owner_1', runAs: 'user',
+  })
+  assert.equal(sqlViaHint.id, 'sys_tenant_wide_sql')
+  assert.equal(resolverContexts.length, 1)
+  assert.equal(resolverContexts[0].workspaceId, null, 'resolver context carries the matched (tenant-wide) scope')
+  assert.equal(resolverContexts[0].tenantId, 'tenant_1')
+  assert.equal(resolverContexts[0].principal, 'owner_1')
+
+  // 6. Writes keep the exact scope: delete under a workspace hint does not reach the tenant-wide row.
+  const deleteViaHint = await registry.deleteExternalSystem({ tenantId: 'tenant_1', workspaceId: 'ws_hint', id: 'sys_tenant_wide' }).catch((e) => e)
+  assert.ok(deleteViaHint instanceof ExternalSystemNotFoundError, 'delete does not fall back')
+  assert.ok(db.rows.some((r) => r.id === 'sys_tenant_wide'), 'the tenant-wide row survives a mis-scoped delete')
+
+  console.log('  external-systems: tenant-wide scoped read fallback OK')
 }
