@@ -1,16 +1,27 @@
 # 审批明细表 × 多维表互通设计短文(含宜搭子表单对标)
 
-日期:2026-08-25 · **v12(2026-09-04 第十一次修订)** · 状态:**PROPOSED**(§7 为五个独立裁决包:A/B/C/D1/D2)
+日期:2026-08-25 · **v13(2026-09-04 第十二次修订)** · 状态:**PROPOSED**(§7 为五个独立裁决包:A/B/C/D1/D2)
 
 ## 0. 符号锚点与 ratify 前置(v12 新增)
 
 本文对「当前 main」的每条可核断言已按 **`5133df1c5d`** 机械锚定,全表见附录
-`approval-detail-interop-anchor-table-20260904.md`(316 条:TRUE 231 / 规范性 30 / 其余为分类产物或
-已在本版更正的前提错误)。**规程**:A/B 任一包 ratify 前,须对届时的 origin/main 重生成该表,
-STALE/FALSE 行为零(或逐条在正文更正)方可进入裁决;本文任何「当前 main」表述以附录锚点为准。
+`approval-detail-interop-anchor-table-20260904.md`(316 条;每行带「处置」列)。**规程**(v13 收紧):
+A/B 任一包 ratify 前,须对届时的 origin/main 重生成该表;每条非 TRUE 行必须归入且只能归入三类之一并
+在「处置」列标注——①**已在正文更正**(引用节号;须能对应到正文变更)、②**规范性目标**(合同要求,
+抽取器误当现状核)、③**分类产物**(抽取器把否定句或复合句拆错);不允许第四类,也不允许未标注的
+FALSE/STALE/UNCLEAR。观察列不截断。本文任何「当前 main」表述以附录锚点为准。
 独立修复 PR(后端明细叶子集写路径显式拒绝 attachment + web↔backend 等值钉 + 只读 census SQL):
 分支 `fix/approval-detail-leaf-attachment-pin-20260904`(PR 号见该分支;B 包前置 ⑪)。
 
+> **v13 修订说明**(门审 @ `887c47346f`:合并 APPROVE-with-hardening、B 包 REQUEST CHANGES,1 P1 + 2 P2
+> + 6 P3,全部亲验后整合):**P1** 既有 7 天保留清扫无 status 谓词会删掉本状态机依赖的 event-fire 行
+> ——增加「未解决证据行存在则不清扫」的 NOT EXISTS 谓词(additive,禁 FK 实现),并规定行已缺失时
+> 只允许 terminate;**P2** 证据列(expected_rows/mismatch_kind/observed_digest)此前无通道——分类器改判别
+> 联合、step result 增类型化 `detailMismatch` 字段、`markEventFiresOutcomeUnknown` 增 evidence 参数;
+> **P2** 「主键含 fence ⇒ 重入撞键」在构造上不可达(reclaim bump fence + 终态短路)——改为审计身份,
+> 去重靠短路 + partial unique,gate 3 改正控;**P3** §0 规程改三类处置且观察不截断;§2 表补 W7/T3-6 两行;
+> v1.1 ⑥ 补 §3.1 gate 7 与 §7-A ②;§7-A ③ 明列 `AUTOMATION_*` 臂;修复分支待推/开 PR。
+>
 > **v12 修订说明**(外审 REQUEST CHANGES @ `d5c5606d84`:3 P2 + 5 P3,全部代码亲验后整合;并按 316 条
 > 锚点普查更正前提):**P2-2** 「required alert」组件既无定义也不存在,且把持久化状态转换挂在网络
 > 调用之后——改为**终态 CAS + values-free mismatch 证据行同事务**(§4.2 新表 `meta_fwb_detail_mismatch`,
@@ -157,6 +168,8 @@ v11 误记为 #5143)投影到按人/角色的表权限——两个权限模型
 |---|---|---|---|
 | 关联记录 | 表→审批 | 表单引用表中行;发布时 `assertRecordLinkTargetsReadableByCreator` | ✅ 已上线(单选) |
 | 审批桥 | 表→审批 | 表事件自动发起审批(lease 机制) | ✅ 落 main,**旗 OFF** |
+| 审批桥 · W7 resultWriteback | 审批→表 | 审批状态/审批人/完成时间写回触发记录(T3-5) | ✅ 已上线 |
+| T3-6 记录投影 | 审批→表 | approvals-as-records 投影(`approval-record-projection-service.ts`) | ✅ 已上线 |
 | FWB v1 | 审批→表 | 批准后,主表字段建行/经关联记录锚定更新;目标不信客户端。类型:**text/date/select**;**number 被 exact-number stop rule 阻断**(save+execute 双卡,待 D0-D4 服务端精确数值能力,刻意非环境旗) | ✅ RATIFIED+落地,**旗 OFF** |
 | **FWB v2 明细展开** | 审批→表 | 明细 N 行→表 N 行 | ❌ §4,delta lock |
 | **明细引用桥 v1.2** | 表→审批 | 重明细「先建后审」 | ❌ §5,证据门 |
@@ -268,6 +281,9 @@ safe);date 只收**文本单元格**中的严格 `YYYY-MM-DD`;datetime 只收带
    把日期序列或区域日期改成接受时对应测试必须红。
 5. mounted spec 同时进入 approval web guard 与 `run-required-web-tests.sh`;在 1440/1024/390 真浏览器
    验证表格横向滚动、行操作和键盘等价路径。旗 OFF 截图与当前 main 一致。
+7. 填单页明细数据行表 row-key(v1.1 ⑥,v13 补门):把 #5142 子字段表 spec 的形状移植到填单页数据行
+   (删中间行后焦点与输入归属正确、复制行独立、排序后身份不漂);去掉 `:row-key` 或改回下标时该
+   mounted spec 必须红;进入 approval web guard 与 `run-required-web-tests.sh`。
 6. 从 `localStorage` 恢复 201 行旧草稿时不清空用户数据,但提交必须在任何实例/
    outbox 写入前拒绝。`form_snapshot` writer census 对当前精确类别集和 status-guard 轴有正控;新增一个
    未分类写入器、或让考勤固定形状开始绑定明细 schema,均须使 required guard 变红。
@@ -403,9 +419,20 @@ CREATE UNIQUE INDEX uq_fwb_detail_mismatch_open
   ON meta_fwb_detail_mismatch (rule_id, dedup_key) WHERE resolved_at IS NULL;
 ```
 
-- 主键含 `fence`:同一 event-fire 在 reopen 后再次 mismatch 会以新 fence 落新行,而**同一 fence 的
-  崩溃重入**撞主键——这就是「重入零二次」的机械保证,不靠调用方记忆。`uq_fwb_detail_mismatch_open`
-  保证任一 event-fire 至多一条未解决证据。
+- 主键含 `fence` 是**审计身份**(每个检测周期一行:reopen 后再次 mismatch 以新 fence 落新行),
+  **不是**重入去重机制(v13 更正 v12 的过强表述):reclaim/reopen/resume 都会 bump fence,且终态 CAS
+  提交后 `claimEventFiresLease` 的终态短路使 callback 不再重入,「同 fence 二次 INSERT」在构造上
+  不可达。重入零二次的机械保证=**终态短路 + `uq_fwb_detail_mismatch_open`**(任一 event-fire 至多
+  一条未解决证据);任何测试不得声称以主键碰撞作正控。
+- **与既有保留清扫的交互(v13,门审 P1)**:`automation-service.ts` 的 event-fires 保留清扫为
+  `DELETE FROM meta_automation_event_fires WHERE fired_at < cutoff`(`EVENT_DEDUP_RETENTION_DAYS = 7`,
+  **无 status 谓词**,`fired_at` 不随 reclaim 刷新,且在多处无条件触发)。不改动即意味着 7 天后本状态机
+  的 event-fire 目标行消失:四个 owner 操作全部因「锁不到两行」拒绝,未解决证据行使严格状态面永久
+  失败且无授权出口。合同要求(additive):该 DELETE 增加
+  `AND NOT EXISTS (SELECT 1 FROM meta_fwb_detail_mismatch m WHERE m.rule_id = f.rule_id AND m.dedup_key = f.dedup_key AND m.resolved_at IS NULL)`
+  ——只保护带未解决证据的行,其余行的保留行为逐字节不变;证据行 resolve 后下一次清扫照常删除。
+  **禁止**以外键实现该保护(FK 会让整表批量 DELETE 中止,静默杀死保留)。`meta_fwb_action_applied`
+  无清扫,不受影响。
 - 该表只存身份、计数与摘要,不存任何表单值或目标记录内容;`observed_digest` 的输入是
   `(row_index,event_id)` 对的规范 JSON,与 §4.4 的 identity 派生同一纪律。
 - 只读严格状态面(observation-kit 形态的 SQL census)对 `resolved_at IS NULL` 计数;非零即失败。
@@ -444,7 +471,8 @@ B 旗。底层 FWB/durable 安全能力暂不可用时，必须进入 detail 专
   必须保留现有 `claimEventFiresLease` 的入口终态短路:`done/outcome_unknown/failed/
   dead_letter` 都返回运输层 `done`,而 `runWithEventDedup` 不再执行 callback。因此若进程在
   `outcome_unknown` CAS 提交后、consumer `done` 写入前崩溃,下一次 consumer 尝试必须读到
-  该终态、跳过 callback、不写第二条证据行(同 fence 重入撞 `pk_fwb_detail_mismatch`),并完成
+  该终态、跳过 callback、不写第二条证据行(终态短路使 callback 不再执行;`uq_fwb_detail_mismatch_open`
+  兜底),并完成
   运输确认;这个 `done` 只表示「不再自动执行」,不得被产品或审计层解释成业务写回成功。
   **告警是派生物,不是前置条件**:任何通知(钉钉/邮件/webhook)都从证据行**派生**、at-least-once、
   允许重复与失败,业务正确性与状态机**不依赖**它,通知失败不得改变任一持久状态。必须存在的是一个
@@ -461,7 +489,12 @@ B 旗。底层 FWB/durable 安全能力暂不可用时，必须进入 detail 专
   而不是每次都重新「成功」。
 
 第三处置必须是**类型化控制流**,不能靠通用异常字符串碰运气。新增纯分类器
-`classifyFwbDeliveryDisposition(execution): 'settled' | 'retryable' | 'outcome_unknown'`,扫描一次
+`classifyFwbDeliveryDisposition(execution): { kind: 'settled' } | { kind: 'retryable' } | { kind: 'outcome_unknown', evidence: DetailMismatchEvidence }`
+(v13:判别联合而非三值字符串——证据列需要通道),其中
+`DetailMismatchEvidence = { actionClaimId: string | null, expectedRows: number, mismatchKind: <§4.2 闭集>, observedDigest: <sha256 hex> }`
+由 detail executor 在检测点计算并挂在 step result 的**类型化字段** `detailMismatch?: DetailMismatchEvidence`
+上(不塞进 error 字符串;step `status` 仍为 `failed`、error token 仍为
+`fwb_outcome_unknown:detail_provenance_mismatch`)。分类器扫描一次
 execution 的全部 FWB step,优先级固定为 `outcome_unknown > retryable > settled`:任一
 `fwb_outcome_unknown:*` 都终止本次 event delivery;否则沿用现有 `hasRetryableFwbFailure` 语义
 ——它是**settled 前缀的 denylist**(`fwb_rejected:*` 与 `write_approval_form_values requires` 为
@@ -469,12 +502,13 @@ settled,其余一切失败含 `fwb_execution_failed` 均 retryable);确定性拒
 step 级 `AutomationStepResult.status` 联合(`success|failed|skipped`)**不变**——第三处置由 error
 token 前缀驱动的 delivery 级分类承载,step 仍记 `failed`。现有 `hasRetryableFwbFailure` 可委派给该分类器,但不得把
 未知/空白基础设施失败改成白名单外的 settled。`runWithEventDedup` 的 durable 回调结果相应改成
-显式 `done | outcome_unknown`;`outcome_unknown` 必须调用新增的
-`markEventFiresOutcomeUnknown(ruleId,dedupKey,fence)`,后者与 done helper 一样只允许当前
+显式 `{ outcome: 'done' } | { outcome: 'outcome_unknown', evidence: DetailMismatchEvidence }`;
+`outcome_unknown` 必须调用新增的 `markEventFiresOutcomeUnknown(ruleId, dedupKey, fence, evidence)`,
+后者与 done helper 一样只允许当前
 `in_progress` fence 单行 CAS,在同一 UPDATE 中写 terminal status 并清 lease,并在同一事务内以
 CAS=1 为前提 INSERT 证据行。CAS 命中 0 行时必须重读同一 `(rule_id,dedup_key)`:若已是
 `outcome_unknown` 且 lease 为 NULL,说明竞争者已达成同一终态(其证据行同事务已提交),adapter 可
-返回运输层 success,不得再写证据行(主键兜底);若仍是外来 fence 持有的 `in_progress`、行消失,
+返回运输层 success,不得再写证据行(`uq_fwb_detail_mismatch_open` 兜底);若仍是外来 fence 持有的 `in_progress`、行消失,
 或出现 `outcome_unknown` 但 lease 非 NULL 等任何其他形状,均 fail closed、不得完成。
 无法证明终态已达成的 CAS-0、证据行 INSERT 失败、或 DB 读写失败时,外层 outbox consumer
 都不得完成。只有「终态 CAS + 证据行」事务已提交(由本尝试或竞争者完成)后,adapter 才可返回
@@ -535,6 +569,9 @@ attempts **计数**(不得含用户值)。若保留已达 `maxAttempts` 的值,�
 写 `resolved_at` 与对应 `resolution`(严格状态面随之恢复);若不存在未解决证据行(例如非 detail
 来源的 `outcome_unknown`),操作照常执行,审计记 `evidence_row=absent`。ack-terminal 与
 resume-in-progress-after-quiescence 不触碰证据行。
+**event-fire 行已不存在时**(修复前被清扫或人工删除):`terminate` 允许仅对证据行写
+`resolved_at`/`resolution='terminated_failed'`(审计记 `event_fire=absent`);`reopen-after-repair` 与
+`resume-in-progress-after-quiescence` 必须拒绝(无可重开的行),**不得**为此重建 event-fire 行。
 四种操作均须 values-free 审计、显式 owner 授权;禁止普通业务 API 或自动定时器调用。审计必须
 记录操作名、`resume_reason`(若适用)、转换前两个 status/fence/attempts **计数**和静默证明类型,
 不得记录用户值。
@@ -606,8 +643,11 @@ event-fires/两个 endpoint effect,完整重放不新增 effect。系统内部�
    成功路径得到 event-fire `outcome_unknown` + lease NULL 和 consumer `done`;把第三态折回异常重试、
    确定性 done 或无条件 `markEventFiresDone` 时各自指定测试必须红。还必须构造两个重入
    顺序:①event-fire CAS 已提交、consumer 未 done 即崩溃,下一次尝试终态短路、
-   callback 零二次、证据行恰 1 行(主键正控)、consumer 完成;②旧 fence CAS-0,重读为已持久化
+   callback 零二次、证据行恰 1 行(partial-unique 正控:强行第二次 INSERT 被 `uq_fwb_detail_mismatch_open`
+   拒绝)、consumer 完成;②旧 fence CAS-0,重读为已持久化
    `outcome_unknown` 时完成,重读为外来 `in_progress` 或 `outcome_unknown`+非空 lease 时仍重试。
+   保留清扫正控(v13):存在未解决证据行且 `fired_at` 已过期时执行清扫,event-fire 行保留;resolve 后
+   再清扫,行删除;去掉 `NOT EXISTS` 谓词时该测试必须红;另证明清扫对无证据行的行为与 main 逐字节相同。
    严格状态面另构造:存在未解决证据行时 strict status 必须失败,reopen-after-repair/terminate 在
    同一事务写 `resolved_at`/`resolution` 后恢复;派生通知的发送失败**不得**改变任一持久状态
    (注入通知失败,event-fire/证据行/consumer 三者与通知成功时逐字节相同)。
@@ -782,8 +822,11 @@ durable/FWB 已通过各自 UAT、additive migration 已应用、全 worker capa
 ## 7. 待 owner 裁决(v11:五个独立裁决包)
 
 **A. v1.1 录入效率包 — 建议 RATIFY(以 v12 为准)。**裁决面收窄为:①系统硬上限固定 **200**、
-嵌套 session capability 与七路径合同按 §3;②复制/上下移/删除确认/序号列/xlsx 导入/minRows 播种开工;
-③新旗默认 OFF,按 ELEARNING 先例为 manifest 加 `APPROVAL_*` 臂与条目,按「服务端持久数据」运行 census 且对
+嵌套 session capability 与七路径合同按 §3;②复制/上下移/删除确认/序号列/xlsx 导入/minRows 播种/
+**填单页行 row-key(⑥,§3.1 gate 7)**开工;
+③新旗默认 OFF,按 ELEARNING 先例为 manifest 加 `APPROVAL_*` **与 `AUTOMATION_*`** 臂与条目(含既有
+`APPROVAL_FWB_WRITEBACK_ENABLED`、`AUTOMATION_DURABLE_DELIVERY_ENABLED` 的登记——共享治理件,v13 明列),
+按「服务端持久数据」运行 census 且对
 `form_snapshot` 写入器做 source-derived 完整性分类;非零结果先逐项处置;④钉钉嵌入端 390px 真浏览器实测为
 staging 激活前置。
 **不并入 A:**文件导出/回导、通用金额求和,两者各自立项,不让小包膨胀。
