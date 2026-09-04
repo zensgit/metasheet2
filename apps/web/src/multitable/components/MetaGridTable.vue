@@ -221,6 +221,8 @@
                 v-for="(field, ci) in visibleFields"
                 :key="field.id"
                 role="gridcell"
+                :data-ri="ri"
+                :data-ci="ci"
                 :aria-label="field.name"
                 class="meta-grid__cell"
                 :class="{ 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(row.id, field), 'meta-grid__cell--focused': focusRow === ri && focusCol === ci, 'meta-grid__cell--scale-fill': cellHasScaleFill(row.id, field.id), 'meta-grid__cell--remote-cursor': hasRemoteCursor(row.id, field.id) }"
@@ -1472,6 +1474,37 @@ function isGridComposingEvent(e: KeyboardEvent): boolean {
   return e.isComposing || e.keyCode === 229 || e.key === 'Process'
 }
 
+// P1 (grid-commit-reliability, round 2): D1's type-to-edit branch below must
+// NOT seed/preventDefault a keydown whose real origin is a descendant
+// interactive control (row-select checkbox, header select-all, expand
+// button, bulk bar/pager buttons, footer aggregation <select>, ...) that
+// merely happens to sit inside `.meta-grid` and so has this handler bubble
+// to it. Without this check, pressing a printable key (Space included — the
+// keyboard-activation key for a checkbox/button) while one of those controls
+// has real DOM focus both suppresses its native activation (preventDefault)
+// AND opens the editor on whatever cell focusRow/focusCol last pointed at,
+// seeded with that character — silently overwriting that cell's value on
+// the next click-away now that blur-commit (D2) is wired.
+//
+// Cells (`<td role="gridcell">`) are never independently focusable (no
+// tabindex) — real DOM focus is either on `gridRoot` itself (the normal
+// case; tabindex="0" on `.meta-grid`) or on one of those descendant
+// controls once a click/Tab has focused it. So the allowlist is: the event
+// target IS the grid root, OR it's the specific gridcell `<td>` that
+// currently matches focusRow/focusCol (defensive — cells aren't focusable
+// today, so this arm is normally unreachable, but a future change that adds
+// per-cell tabindex should not silently regress this guard). Anything else
+// (an <input>/<button>/<select>/<textarea>/[contenteditable]/[role=checkbox]
+// descendant, or a `<td>` that ISN'T the focused one) is rejected.
+function isValidTypeToEditTarget(e: KeyboardEvent): boolean {
+  const target = e.target as HTMLElement | null
+  if (!target) return false
+  if (target === gridRoot.value) return true
+  const cell = target.closest('[role="gridcell"]') as HTMLElement | null
+  if (!cell) return false
+  return Number(cell.dataset.ri) === focusRow.value && Number(cell.dataset.ci) === focusCol.value
+}
+
 function onKeydown(e: KeyboardEvent) {
   if (isGridComposingEvent(e)) return
   const mod = e.metaKey || e.ctrlKey
@@ -1497,7 +1530,7 @@ function onKeydown(e: KeyboardEvent) {
   //   - boolean/date/select/link/attachment (the rest of EDITABLE): NOT
   //     seeded — a checkbox/date/dropdown/picker has no meaningful "replace
   //     with one printable character" semantics.
-  if (!mod && !e.altKey && e.key.length === 1 && focusRow.value >= 0 && focusCol.value >= 0) {
+  if (!mod && !e.altKey && e.key.length === 1 && focusRow.value >= 0 && focusCol.value >= 0 && isValidTypeToEditTarget(e)) {
     const r = navRows[focusRow.value]
     const f = props.visibleFields[focusCol.value]
     if (r && f && isEditable(r.id, f)) {

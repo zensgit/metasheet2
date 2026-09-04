@@ -340,12 +340,13 @@
       :disabled="aiRunState?.pending || aiRunState?.busy"
       data-test="cell-ai-run"
       @click="emit('ai-run')"
+      @keydown.tab="onAiRunTab"
     >{{ aiRunState?.pending ? l('cell.aiRunning') : l('cell.aiRun') }}</button>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, toRef } from 'vue'
+import { ref, computed, watch, onMounted, toRef } from 'vue'
 import type { MetaAttachment, MetaAttachmentDeleteFn, MetaAttachmentUploadContext, MetaAttachmentUploadFn, MetaCommentMentionSuggestion, MetaField } from '../../types'
 import MetaAttachmentList from '../MetaAttachmentList.vue'
 import MetaYjsPresenceChip from '../MetaYjsPresenceChip.vue'
@@ -464,9 +465,18 @@ const emit = defineEmits<{
    * D2: Tab / Shift+Tab pressed while this editor is open. Emitted by the
    * SAME four branches as `blur-commit` (see the enumeration above) — Tab is
    * intentionally NOT wired as a delegated wrapper-level listener because
-   * that would also swallow Tab used for in-editor keyboard nav (the
-   * attachment "choose file" → "clear all" tab order, the AI-run button
-   * sibling). Payload is `event.shiftKey` (true = move backward).
+   * that would also swallow Tab used for in-editor keyboard nav.
+   *
+   * P3-A (round 2): concretely, the string branch's own per-input handler
+   * (`onTextTab`) now honours that in-editor nav case rather than just
+   * describing it — when the AI-run button is rendered as a focusable
+   * sibling (`aiRunVisible`), a forward Tab is left un-intercepted so native
+   * focus movement reaches the button instead of the button becoming
+   * keyboard-unreachable; Tab FROM the button (`onAiRunTab`) still emits
+   * `tab-commit` like every other exit point. Shift+Tab out of the input is
+   * unaffected (there is nothing focusable BEFORE it to reach).
+   *
+   * Payload is `event.shiftKey` (true = move backward).
    */
   (e: 'tab-commit', shiftKey: boolean): void
 }>()
@@ -532,6 +542,31 @@ const yjsBinding = yjsEligibleAtSetup
 const yjsActive = computed(() => yjsBinding.active.value)
 const yjsText = computed(() => yjsBinding.text.value)
 const yjsCollaborators = computed(() => yjsBinding.collaborators.value)
+
+// P3-B (grid-commit-reliability, round 2): a local edit made BEFORE the Yjs
+// binding activates — most concretely D1's type-to-edit seed character,
+// which sets `modelValue` directly and mounts this editor before any Y.Doc
+// has connected — displays fine while `yjsActive` is false (the `<input>`
+// reads `modelValue`), but the INSTANT `active` flips true the input's
+// `:value` binding switches over to `yjsText` instead. Nothing forwards
+// that local draft into Y.Text by then, so it just vanishes — lost from
+// BOTH the REST path (confirmEdit skips the patch once `yjs-commit` fires)
+// and the Yjs path (Y.Text was never written).
+//
+// Fix: the instant the binding activates, if Y.Text is still empty (no one
+// has synced real content into this field yet) and there IS a non-empty
+// local draft waiting, adopt it as Y.Text's initial content once. Gated on
+// `yjsText.value === ''` specifically so this can NEVER clobber a
+// collaborator's already-synced content — only a field nobody has written
+// to yet, which is exactly D1's seed scenario (and, more generally, any
+// keystroke typed in the connect-timeout window before Yjs takes over).
+watch(yjsActive, (nowActive, wasActive) => {
+  if (!nowActive || wasActive) return
+  const pending = props.modelValue
+  if (typeof pending === 'string' && pending !== '' && yjsText.value === '') {
+    yjsBinding.setText(pending)
+  }
+})
 
 // --- Yjs opt-in binding for ATOMIC (non-text) scalar cells (LWW via the
 // `fields` Y.Map). Same gating/fallback discipline as the text binding:
@@ -670,6 +705,16 @@ function onEnterConfirm(e: KeyboardEvent) {
 function onEnterScalarConfirm(e: KeyboardEvent) {
   if (isComposingEvent(e)) return
   e.stopPropagation()
+  // P3-C (round 2): Enter's behaviour is UNCHANGED by the P3-C fix below —
+  // an unresolved invalid numeric draft ('-'/'.', trailing '.') still
+  // commits `null` here, exactly like every OTHER keystroke's `onNumberInput`
+  // used to (byte-identical to pre-fix). Only blur/Tab (onScalarBlur /
+  // onScalarTab) now diverge and discard instead of persisting that null —
+  // see `numberInvalidRawDraft`'s doc comment on `onNumberInput` for why.
+  if (numberInvalidRawDraft.value) {
+    numberInvalidRawDraft.value = false
+    commitScalar(null)
+  }
   scalarConfirm()
 }
 function onEnterTextConfirm(e: KeyboardEvent) {
@@ -707,6 +752,15 @@ function shouldIgnoreBlur(e: FocusEvent): boolean {
 }
 function onScalarBlur(e: FocusEvent) {
   if (shouldIgnoreBlur(e)) return
+  // P3-C: a blur while an invalid numeric draft is pending (see
+  // `numberInvalidRawDraft`) discards instead of committing — `cancel` is
+  // the existing no-patch/close path (same one Escape already uses), so
+  // this can never persist the earlier keystroke's `null` commit.
+  if (numberInvalidRawDraft.value) {
+    numberInvalidRawDraft.value = false
+    emit('cancel')
+    return
+  }
   if (scalarActive.value) emit('yjs-commit')
   emit('blur-commit')
 }
@@ -731,6 +785,12 @@ function onPlainBlur(e: FocusEvent) {
 function onScalarTab(e: KeyboardEvent) {
   if (!props.commitOnTab) return
   if (isComposingEvent(e)) return
+  // P3-C: an invalid numeric draft pending → do NOT intercept. Returning
+  // before preventDefault lets the native Tab move focus out of the input
+  // as normal, which fires a genuine `blur` — `onScalarBlur` sees the same
+  // flag and discards there. One discard path (no new event, no dangling
+  // `document.body` focus from a preventDefault'd Tab that goes nowhere).
+  if (numberInvalidRawDraft.value) return
   e.preventDefault()
   e.stopPropagation()
   if (scalarActive.value) emit('yjs-commit')
@@ -739,6 +799,14 @@ function onScalarTab(e: KeyboardEvent) {
 function onTextTab(e: KeyboardEvent) {
   if (!props.commitOnTab) return
   if (isComposingEvent(e)) return
+  // P3-A (round 2): when the AI-run button renders as a focusable sibling
+  // (`aiRunVisible`), a FORWARD Tab must reach it via native focus movement
+  // instead of being intercepted here — otherwise the button is keyboard-
+  // unreachable (Tab always commits+moves before focus can land on it). Tab
+  // FROM the button (`onAiRunTab` below) still commits+moves like this
+  // handler always has. Shift+Tab is unaffected: there is nothing focusable
+  // BEFORE the input in this branch, so shift+Tab has nowhere to land.
+  if (aiRunVisible.value && !e.shiftKey) return
   e.preventDefault()
   e.stopPropagation()
   if (yjsActive.value) emit('yjs-commit')
@@ -750,6 +818,19 @@ function onPlainTab(e: KeyboardEvent) {
   e.preventDefault()
   e.stopPropagation()
   emit('tab-commit', e.shiftKey)
+}
+// P3-A: Tab pressed FROM the AI-run button (reached via the native focus
+// movement `onTextTab` now leaves alone) commits+moves exactly like Tab
+// from the input itself — the button is a valid exit point, not a dead
+// end. Shift+Tab is left alone (native default returns focus to the input,
+// which is the CORRECT "back" target — nothing to commit yet).
+function onAiRunTab(e: KeyboardEvent) {
+  if (!props.commitOnTab) return
+  if (isComposingEvent(e)) return
+  if (e.shiftKey) return
+  e.preventDefault()
+  e.stopPropagation()
+  emit('tab-commit', false)
 }
 
 const inputRef = ref<HTMLElement | null>(null)
@@ -883,8 +964,43 @@ function onFileDrop(e: DragEvent) {
   if (files?.length) void uploadFiles(files)
 }
 
+// P3-C (grid-commit-reliability, round 2): a number `<input>`'s `.value`
+// getter sanitizes an in-progress-but-invalid floating-point string (a lone
+// '-'/'.', a trailing '.') to '' — IDENTICAL to a genuinely emptied field
+// (WHATWG "value sanitization algorithm" for type=number; jsdom reproduces
+// it too). `onNumberInput` alone can't tell "the user cleared this field"
+// from "the user is mid-typing a negative/decimal number".
+//
+// The signal that survives the sanitization is the native InputEvent's own
+// `inputType`: an `insert*` type (insertText, insertFromPaste, ...) means
+// the empty `.value` is a REJECTED, still-in-progress edit; a `delete*` /
+// `historyUndo` type means the user actually cleared the field. (Deliberately
+// NOT keyed on `event.data`: a paste or the number input's spinner can carry
+// truthy `data` while genuinely representing a clear/replace, so `inputType`
+// is the narrower, correct discriminator.)
+//
+// On that "still typing" keystroke, do NOT commit — `numberInvalidRawDraft`
+// is the ONLY state that reflects it; `editCell.value.value` (the draft
+// MetaGridTable would patch) is left exactly as it was before this
+// keystroke. This matters beyond blur/Tab: startEdit's/onCellClick's
+// commit-previous guards and any other confirmEdit() caller that might fire
+// mid-typing read that same draft — leaving it untouched means NONE of them
+// can ever persist a `null` the user never asked to commit. `onScalarBlur`/
+// `onScalarTab` below discard explicitly (and quickly, via the flag) rather
+// than relying on that alone, but the flag is what makes "no commit
+// happened" true in the first place. `onEnterScalarConfirm` re-derives the
+// null commit explicitly so Enter's own behaviour stays exactly what it was
+// before this fix (see its doc comment) — Enter is the ONE path that still
+// intentionally commits null here.
+const numberInvalidRawDraft = ref(false)
 function onNumberInput(e: Event) {
   const v = (e.target as HTMLInputElement).value
+  const inputType = (e as InputEvent).inputType ?? ''
+  if (v === '' && inputType.startsWith('insert')) {
+    numberInvalidRawDraft.value = true
+    return
+  }
+  numberInvalidRawDraft.value = false
   commitScalar(v === '' ? null : Number(v))
 }
 
