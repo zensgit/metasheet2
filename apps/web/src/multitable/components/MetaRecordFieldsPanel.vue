@@ -82,13 +82,16 @@
           :mention-suggestions="mentionSuggestions"
           @change="emit('patch', field.id, $event)"
         />
-        <!-- plain longText: unchanged textarea -->
+        <!-- plain longText: same textarea, same @change-only commit (record inspector resizable-panel
+             slice, 2026-09-05) -- `rows="6"` (was 5) is a comfort bump now that the panel itself can be
+             widened/lengthened; `resize: vertical` (unchanged, see the style rule below) still lets a
+             viewer grow it further by hand. -->
         <textarea
           v-else-if="canEditField(field.id) && field.type === 'longText'"
           :id="`drawer_field_${field.id}`"
           class="meta-record-drawer__textarea"
           :value="textControlValue(record.data[field.id])"
-          rows="5"
+          rows="6"
           @change="emit('patch', field.id, ($event.target as HTMLTextAreaElement).value)"
         />
         <input
@@ -731,8 +734,12 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 .meta-record-drawer__comment-anchor--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-record-drawer__input { width: 100%; padding: 4px 8px; border: 1px solid #ddd; border-radius: 3px; font-size: 13px; }
 .meta-record-drawer__input--multi { min-height: 96px; }
+/* min-height bumped 104px -> 132px (record inspector resizable-panel slice, 2026-09-05) to roughly
+   match the template's `rows="6"` (was 5) at this font-size/line-height -- `resize: vertical`
+   (unchanged) still lets a viewer grow it further by hand; long-text editing is the field type users
+   most often complained the old 5-row box felt cramped for. */
 .meta-record-drawer__textarea {
-  width: 100%; min-height: 104px; padding: 6px 8px; border: 1px solid #ddd; border-radius: 3px;
+  width: 100%; min-height: 132px; padding: 6px 8px; border: 1px solid #ddd; border-radius: 3px;
   font-size: 13px; line-height: 1.45; resize: vertical; white-space: pre-wrap;
 }
 .meta-record-drawer__check { cursor: pointer; }

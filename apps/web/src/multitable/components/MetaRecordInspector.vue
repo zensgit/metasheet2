@@ -85,9 +85,40 @@
   (MultitableWorkbench.vue) left<->right (anchored to the right edge instead of the left, rounded
   corners on the open/left edge instead of the open/right edge) — same tokens, same
   min(px, calc(100vw - 32px)) clamp idiom, no new hex.
+
+  Resizable panel (2026-09-05, user request "拉长些" / more comfortable operation): PUSH-mode only
+  (unchanged for the S7 overlay above, which keeps its own fixed `min(360px, 100vw-32px)` width -- a
+  drag handle adds little value at <=768px, and the overlay's own responsive-safety width rule already
+  wins by source order over the base `.meta-record-drawer` width rule this feature adds). Two pieces:
+  (a) a `role="separator"` drag/keyboard splitter on the panel's LEFT edge — width persists to
+  `localStorage` per viewer (corrupt/absent → DEFAULT_PANEL_WIDTH, same discipline as
+  `../quickPhrases.ts`), clamped to `[320, min(720, 60vw)]`, exposed as the `--meta-record-drawer-width`
+  CSS custom property on this root element; (b) an "expand" header toggle that snaps to the max and
+  back to the last manually-chosen width. See `onSplitterPointerDown`/`onSplitterKeydown`/
+  `toggleExpand` below for the mechanics, and the `.meta-record-drawer`/`__header`/`__body`/`__tabs`
+  style comments below for the companion height-contract fix (sticky header+tabs, scrolling body) that
+  motivated this slice: a long field list previously grew the WHOLE panel (title/tabs included, see
+  those rules' own comments) rather than scrolling in place.
 -->
 <template>
-  <div v-if="visible" class="meta-record-drawer" @keydown="onInspectorKeydown">
+  <div
+    v-if="visible"
+    class="meta-record-drawer"
+    :style="{ '--meta-record-drawer-width': panelWidth + 'px' }"
+    @keydown="onInspectorKeydown"
+  >
+    <div
+      class="meta-record-drawer__splitter"
+      role="separator"
+      aria-orientation="vertical"
+      :aria-valuenow="Math.round(panelWidth)"
+      :aria-valuemin="MIN_PANEL_WIDTH"
+      :aria-valuemax="Math.round(maxPanelWidth)"
+      :aria-label="l('record.resizeHandle')"
+      tabindex="0"
+      data-testid="record-inspector-splitter"
+      @pointerdown="onSplitterPointerDown"
+    ></div>
     <div class="meta-record-drawer__header">
       <h3 class="meta-record-drawer__title">{{ l('record.title') }}</h3>
       <div class="meta-record-drawer__nav" v-if="recordIds.length > 1">
@@ -148,25 +179,43 @@
              → white-on-white "Delete". The danger variant must own the cascade, so the base class is
              dropped HERE ONLY; `--danger` stays as a stable spec/test anchor (its bespoke rule is gone). -->
         <MtButton v-if="resolvedCanDelete" variant="danger" class="meta-record-drawer__btn--danger" @click="emit('delete')">{{ l('record.delete') }}</MtButton>
+        <button
+          type="button"
+          class="meta-record-drawer__btn meta-record-drawer__expand"
+          :class="{ 'meta-record-drawer__expand--active': isExpanded }"
+          :aria-pressed="isExpanded"
+          :aria-label="l(isExpanded ? 'record.collapse' : 'record.expand')"
+          :title="l(isExpanded ? 'record.collapse' : 'record.expand')"
+          data-testid="record-inspector-expand-toggle"
+          @click="toggleExpand"
+        >{{ isExpanded ? '⤡' : '⤢' }}</button>
         <button class="meta-record-drawer__close" :aria-label="l('record.close')" @click="emit('close')">&times;</button>
       </div>
     </div>
     <div v-if="record" class="meta-record-drawer__body">
-      <div class="meta-record-drawer__tabs" role="tablist" :aria-label="l('record.tabsAria')">
-        <button
-          v-for="tab in tabDescriptors"
-          :key="tab.id"
-          :ref="(el) => setTabRef(tab.id, el as HTMLButtonElement | null)"
-          :id="tabButtonId(tab.id)"
-          class="meta-record-drawer__tab"
-          :class="{ 'meta-record-drawer__tab--active': activeTab === tab.id }"
-          type="button"
-          role="tab"
-          :aria-selected="activeTab === tab.id"
-          :aria-controls="tabPanelId(tab.id)"
-          :tabindex="activeTab === tab.id ? 0 : -1"
-          @click="selectTab(tab.id)"
-        >{{ tab.label }}</button>
+      <!-- Resizable panel (2026-09-05): `.meta-record-drawer__tabs` is `inline-flex` (sized to its own
+           pill content, well under the panel's full width) -- making IT ALONE sticky would only mask
+           scrolled content directly behind the pill, leaving scrolled field rows visible in the empty
+           strip to its right. This wrapper carries the sticky positioning + a FULL-WIDTH opaque
+           background instead (see its own style comment below); the inner div is unchanged (still the
+           `role="tablist"`, still the pill visual). -->
+      <div class="meta-record-drawer__tabs-bar">
+        <div class="meta-record-drawer__tabs" role="tablist" :aria-label="l('record.tabsAria')">
+          <button
+            v-for="tab in tabDescriptors"
+            :key="tab.id"
+            :ref="(el) => setTabRef(tab.id, el as HTMLButtonElement | null)"
+            :id="tabButtonId(tab.id)"
+            class="meta-record-drawer__tab"
+            :class="{ 'meta-record-drawer__tab--active': activeTab === tab.id }"
+            type="button"
+            role="tab"
+            :aria-selected="activeTab === tab.id"
+            :aria-controls="tabPanelId(tab.id)"
+            :tabindex="activeTab === tab.id ? 0 : -1"
+            @click="selectTab(tab.id)"
+          >{{ tab.label }}</button>
+        </div>
       </div>
       <div v-if="subscriptionError" class="meta-record-drawer__watch-error">{{ subscriptionError }}</div>
       <div v-if="record?.locked" class="meta-record-drawer__lock-banner" data-test="record-lock-banner">
@@ -320,7 +369,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, useId, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import type {
   LinkedRecordSummary,
@@ -577,21 +626,30 @@ async function moveTabFocusTo(tab: InspectorTab) {
   tabRefs.value[tab]?.focus()
 }
 
-// lock §3.3: ONE root-level keydown handler covering both tab navigation and Escape-to-close.
-// Deliberately NOT split into two separate `@keydown` bindings at different tree levels (e.g. one on
-// the tablist, one on the shell root): reproduced in isolation (a minimal two-listener Vue 3.5.18
-// component under this exact vitest/jsdom harness) that two independently-bound `@keydown` listeners
-// on ancestor/descendant elements of the SAME component intermittently fail to both fire on a single
-// bubbled event -- a harness/runtime interaction, not a logic bug, but the safe fix is architectural:
-// one listener, dispatching internally by `event.target`, sidesteps it entirely (verified stable
-// across 100+ mount/dispatch/unmount cycles after consolidating, vs. reproducibly flaky before).
+// lock §3.3: ONE root-level keydown handler covering tab navigation, Escape-to-close, AND (2026-09-05
+// addition) the resize splitter below -- deliberately NOT split into separate `@keydown` bindings at
+// different tree levels (e.g. one on the tablist, one on the splitter, one on the shell root):
+// reproduced in isolation (a minimal two-listener Vue 3.5.18 component under this exact vitest/jsdom
+// harness) that two independently-bound `@keydown` listeners on ancestor/descendant elements of the
+// SAME component intermittently fail to both fire on a single bubbled event -- a harness/runtime
+// interaction, not a logic bug, but the safe fix is architectural: one listener, dispatching
+// internally by `event.target`, sidesteps it entirely (verified stable across 100+ mount/dispatch/
+// unmount cycles after consolidating, vs. reproducibly flaky before). The splitter's own keydown
+// handling was ORIGINALLY a second `@keydown` binding on the splitter element itself -- reproducibly
+// flaky under this same harness/runtime interaction for the exact reason above (an Escape dispatched
+// on the splitter intermittently never reached this root handler) -- so it was folded into this single
+// dispatcher instead, the same fix already applied here for the tablist.
 //
-// Two independent concerns, dispatched by key/target:
+// Three independent concerns, dispatched by key/target:
 //   1. Tab navigation (Left/Right/Home/End) -- ONLY when the event originates from within the
 //      tablist (a tab button or its descendant), so arrow keys typed into an unrelated field editor
 //      elsewhere in the panel are never hijacked. Left/Right move focus AND activate (automatic-
 //      activation model, lock §3.3 "移焦 + 激活"); Home/End jump to first/last; wraps at the ends.
-//   2. Escape -- closes the inspector (same `close` emit the header's × button already uses; lock
+//   2. Resize (Left/Right/Home/End) -- ONLY when the event originates from the splitter
+//      (`role="separator"`) itself; see `onSplitterKeydown` below for the ±16px step / min-max clamp.
+//      Mutually exclusive with #1 by construction (the splitter is not `[role="tab"]` and a tab is
+//      never `[role="separator"]`), so there is no ordering ambiguity between the two branches.
+//   3. Escape -- closes the inspector (same `close` emit the header's × button already uses; lock
 //      §3.3 "Esc 从 panel 回到关闭/grid"), guarded so it never fires when a descendant already
 //      consumed Escape (defaultPrevented) and never inspects any other key -- mod+z / mod+y / `?`
 //      are untouched here and bubble to MultitableWorkbench's own `onGlobalKeydown` unmodified.
@@ -604,7 +662,13 @@ function onInspectorKeydown(event: KeyboardEvent) {
     return
   }
 
-  const withinTablist = (event.target as HTMLElement | null)?.closest('[role="tab"]') != null
+  const target = event.target as HTMLElement | null
+  if (target?.closest('[role="separator"]') != null) {
+    onSplitterKeydown(event)
+    return
+  }
+
+  const withinTablist = target?.closest('[role="tab"]') != null
   if (!withinTablist) return
   const idx = TAB_ORDER.indexOf(activeTab.value)
   if (idx < 0) return
@@ -629,6 +693,155 @@ function onInspectorKeydown(event: KeyboardEvent) {
       break
   }
 }
+
+// --- Resizable panel (2026-09-05, user request "拉长些" / more comfortable operation): a drag- and
+// keyboard-resizable width, persisted per viewer, plus an expand-to-max toggle. Independent of the
+// tab/keydown machinery above -- the splitter is `role="separator"`, not `[role="tab"]`, so
+// `onInspectorKeydown`'s tablist-scoped arrow handling never sees these keys (see that function's
+// `withinTablist` guard, which returns early for any target outside `[role="tab"]`); Escape typed
+// while the splitter has focus still bubbles to that SAME root handler and closes the inspector like
+// everywhere else in the panel -- no `.stop` here, so that stays unchanged.
+const MIN_PANEL_WIDTH = 320
+const MAX_PANEL_WIDTH_CAP = 720
+const DEFAULT_PANEL_WIDTH = 360
+const PANEL_WIDTH_STORAGE_KEY = 'metasheet2:record-inspector-width'
+const PANEL_WIDTH_STEP = 16
+
+// Viewport-tracked (not a one-time read) so the `min(720px, 60vw)` cap -- and thus Home/End,
+// pointer-drag clamping, and the expand target -- stays correct across a live window resize, mirroring
+// MultitableWorkbench.vue's own `isRailNarrow`/`syncRailViewportState` resize-listener convention
+// (same file-header comment lineage, S7 above) rather than inventing a second idiom for this file.
+const viewportWidth = ref(typeof window !== 'undefined' ? window.innerWidth : 1280)
+function syncViewportWidth() {
+  viewportWidth.value = window.innerWidth
+}
+const maxPanelWidth = computed(() => Math.min(MAX_PANEL_WIDTH_CAP, viewportWidth.value * 0.6))
+
+function clampPanelWidth(width: number): number {
+  return Math.max(MIN_PANEL_WIDTH, Math.min(maxPanelWidth.value, width))
+}
+
+// Per-viewer (browser localStorage, no userId scoping -- unlike quickPhrases.ts's per-user keys, a
+// panel width is a device/browser preference, not an identity-scoped one), corrupt-safe: an absent,
+// non-numeric, non-finite, or non-positive stored value falls back to DEFAULT_PANEL_WIDTH; a numeric
+// value outside the CURRENT [min, max] range (e.g. saved on a wider screen, restored on a narrower
+// one) is clamped rather than discarded.
+function readStoredPanelWidth(): number {
+  if (typeof window === 'undefined') return DEFAULT_PANEL_WIDTH
+  try {
+    const raw = window.localStorage?.getItem(PANEL_WIDTH_STORAGE_KEY)
+    if (!raw) return DEFAULT_PANEL_WIDTH
+    const parsed = Number(raw)
+    if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_PANEL_WIDTH
+    return clampPanelWidth(parsed)
+  } catch {
+    return DEFAULT_PANEL_WIDTH
+  }
+}
+
+function persistPanelWidth(width: number) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage?.setItem(PANEL_WIDTH_STORAGE_KEY, String(Math.round(width)))
+  } catch {
+    // Quota/serialization failures must never block resizing itself -- persistence is best-effort.
+  }
+}
+
+const panelWidth = ref(readStoredPanelWidth())
+// The width to restore when the expand toggle is switched back off -- the most recent MANUALLY
+// chosen width (drag or keyboard), not necessarily the mount-time one.
+const lastChosenPanelWidth = ref(panelWidth.value)
+const isExpanded = ref(false)
+
+watch(panelWidth, (width) => persistPanelWidth(width))
+
+/** Manual resize (drag or keyboard): clamp, apply, remember for a later expand-toggle collapse, and
+ *  always exit the expanded state -- a manual choice is no longer "the max" even if it happens to
+ *  land exactly on it, so the toggle's own aria-pressed must not claim otherwise. */
+function applyPanelWidth(next: number) {
+  const clamped = clampPanelWidth(next)
+  panelWidth.value = clamped
+  lastChosenPanelWidth.value = clamped
+  isExpanded.value = false
+}
+
+function toggleExpand() {
+  if (isExpanded.value) {
+    panelWidth.value = clampPanelWidth(lastChosenPanelWidth.value)
+    isExpanded.value = false
+  } else {
+    lastChosenPanelWidth.value = panelWidth.value
+    panelWidth.value = maxPanelWidth.value
+    isExpanded.value = true
+  }
+}
+
+// Dispatched from `onInspectorKeydown` (the single root-level listener) by target, NOT bound directly
+// on the splitter -- see that function's own file-header comment for why a second `@keydown` on a
+// descendant element reproducibly drops events under this vitest/jsdom harness.
+function onSplitterKeydown(event: KeyboardEvent) {
+  switch (event.key) {
+    // The handle sits on the panel's LEFT edge (the panel is anchored to the right of the
+    // workbench): moving it further left grows the panel -- the same direction as the pointer-drag
+    // handler below -- so ArrowLeft widens and ArrowRight narrows.
+    case 'ArrowLeft':
+      event.preventDefault()
+      applyPanelWidth(panelWidth.value + PANEL_WIDTH_STEP)
+      break
+    case 'ArrowRight':
+      event.preventDefault()
+      applyPanelWidth(panelWidth.value - PANEL_WIDTH_STEP)
+      break
+    case 'Home':
+      event.preventDefault()
+      applyPanelWidth(MIN_PANEL_WIDTH)
+      break
+    case 'End':
+      event.preventDefault()
+      applyPanelWidth(maxPanelWidth.value)
+      break
+    default:
+      break
+  }
+}
+
+// Pointer Events + setPointerCapture on the HANDLE ITSELF (not `document`, unlike
+// MetaFieldHeader.vue's pre-existing mousedown/mousemove/mouseup-on-document column-resize idiom):
+// capture redirects every subsequent pointermove/pointerup to this exact element regardless of where
+// the pointer travels, so the listeners can live (and be torn down) on the handle alone, and a
+// mid-drag unmount (`visible` flipping false) simply removes the element -- and its own listeners --
+// with nothing left listening on `document`.
+function onSplitterPointerDown(event: PointerEvent) {
+  if (event.pointerType === 'mouse' && event.button !== 0) return
+  // Same reason MetaFieldHeader.vue's own column-resize handler binds `@mousedown.stop.prevent`: a
+  // drag without preventDefault starts a text selection across the panel (`touch-action: none` above
+  // only covers touch scrolling, not selection).
+  event.preventDefault()
+  const startX = event.clientX
+  const startWidth = panelWidth.value
+  const handle = event.currentTarget as HTMLElement
+  handle.setPointerCapture?.(event.pointerId)
+  function onMove(moveEvent: PointerEvent) {
+    applyPanelWidth(startWidth - (moveEvent.clientX - startX))
+  }
+  function onUp(upEvent: PointerEvent) {
+    handle.releasePointerCapture?.(upEvent.pointerId)
+    handle.removeEventListener('pointermove', onMove)
+    handle.removeEventListener('pointerup', onUp)
+    handle.removeEventListener('pointercancel', onUp)
+  }
+  handle.addEventListener('pointermove', onMove)
+  handle.addEventListener('pointerup', onUp)
+  handle.addEventListener('pointercancel', onUp)
+}
+
+onMounted(() => {
+  window.addEventListener('resize', syncViewportWidth)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', syncViewportWidth)
+})
 
 const recordSubscribed = ref(false)
 const subscriptionLoading = ref(false)
@@ -726,7 +939,23 @@ async function toggleRecordSubscription() {
 </script>
 
 <style scoped>
-.meta-record-drawer { width: 360px; border-left: 1px solid #e5e7eb; background: #fff; display: flex; flex-direction: column; overflow-y: auto; }
+/* Resizable panel (2026-09-05): width is driven by the `--meta-record-drawer-width` custom property
+   set inline on this root element (see the component's `panelWidth` ref + `:style` binding above),
+   with a matching `min`/`max` on the box itself as a CSS-only safety net -- the JS clamp in
+   `clampPanelWidth` is the primary bound, this is a belt-and-suspenders fallback if the var is ever
+   absent. `overflow-y: auto` moved from HERE to `.meta-record-drawer__body` below (item 1): before
+   this change the ROOT scrolled as one unit once the tabpanel's content outgrew it, taking the header
+   (title/actions) and the tabs with it (see the file-header CONTEXT this PR was scoped against);
+   `position: relative` establishes the containing block the splitter (below) anchors to in PUSH mode
+   -- `.meta-record-drawer--overlay` already sets its own `position: absolute` and wins by source
+   order, so this is a no-op there. */
+.meta-record-drawer {
+  width: var(--meta-record-drawer-width, 360px);
+  min-width: 320px;
+  max-width: min(720px, 60vw);
+  border-left: 1px solid #e5e7eb; background: #fff; display: flex; flex-direction: column;
+  position: relative;
+}
 /* W2 S7 (design-lock docs/development/multitable-w2-unified-record-inspector-design-lock-20260714.md
    §3.4/§6bis, OD-W2-6=(b)): narrow viewport (<= RAIL_NARROW_BREAKPOINT, the SAME single JS constant
    defined in MultitableWorkbench.vue — no second threshold here, applied via the `isInspectorOverlay`
@@ -745,11 +974,51 @@ async function toggleRecordSubscription() {
   inset: 0 0 0 auto;
   z-index: 5;
   width: min(360px, calc(100vw - 32px));
+  /* Resizable panel (2026-09-05): the base `.meta-record-drawer` rule above now also sets
+     `min-width: 320px` (belt-and-suspenders for the JS-clamped push width). `min-width` wins over
+     `width` in the cascade, so WITHOUT this override this rule's own narrow-viewport gutter
+     (`calc(100vw - 32px)`, the whole reason this rule exists per the comment above) would stop
+     holding below ~352px viewport width -- at 320px the 32px gutter is gone, and narrower than that
+     the right-anchored panel clips off the left edge. Mirrors the width rule's own idiom exactly so
+     min tracks width instead of fighting it. */
+  min-width: min(320px, calc(100vw - 32px));
+  max-width: none;
   background: var(--ms-bg-card);
   box-shadow: var(--ms-shadow-pop);
   border-radius: var(--ms-radius-lg) 0 0 var(--ms-radius-lg);
 }
-.meta-record-drawer__header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #eee; }
+/* Resizable panel (2026-09-05): the splitter is still MOUNTED in overlay mode (no JS/v-if branch for
+   it -- keeping the markup identical between modes is simpler and cheaper than threading overlay
+   state down to gate rendering), but is visually and interactively hidden here -- the overlay rule
+   above overrides `width` unconditionally, so dragging or expanding would update `panelWidth`/ARIA
+   with no visible effect, which is worse than not offering the control at all at <=768px (see this
+   file's own header comment: "a drag handle adds little value at <=768px"). `pointer-events: none`
+   on top of `display: none` is redundant defense, not load-bearing on its own. */
+.meta-record-drawer--overlay .meta-record-drawer__splitter,
+.meta-record-drawer--overlay .meta-record-drawer__expand {
+  display: none;
+  pointer-events: none;
+}
+/* Item 1: this header is now the sticky region (title/actions) -- it lives OUTSIDE the scrolling
+   `.meta-record-drawer__body` below (a sibling, not an ancestor), so it always stays visible without
+   needing `position: sticky` of its own; `flex: 0 0 auto` just keeps it from ever being squeezed by
+   `.meta-record-drawer__body`'s `flex: 1` on a very tall field list -- the body scrolls internally
+   long before that could happen. */
+.meta-record-drawer__header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #eee; flex: 0 0 auto; }
+/* Resizable panel (2026-09-05): the drag/keyboard splitter on the panel's left edge (see the
+   component's `onSplitterPointerDown`/`onSplitterKeydown`). Absolutely positioned against
+   `.meta-record-drawer`'s own `position: relative` (added above) so it never participates in the
+   header/body flex column and spans the panel's full height regardless of scroll position; straddles
+   the edge (-4px to +4px) for an easy grab target without visually widening the 1px border. */
+.meta-record-drawer__splitter {
+  position: absolute; top: 0; bottom: 0; left: -4px; width: 8px; cursor: col-resize; z-index: 6; touch-action: none;
+}
+.meta-record-drawer__splitter:hover, .meta-record-drawer__splitter:focus-visible {
+  background: var(--ms-color-primary); opacity: 0.35;
+}
+.meta-record-drawer__splitter:focus-visible { outline: 2px solid var(--ms-color-primary); outline-offset: -2px; }
+.meta-record-drawer__expand { font-size: 13px; line-height: 1; }
+.meta-record-drawer__expand--active { border-color: var(--ms-color-primary); color: var(--ms-color-primary); }
 .meta-record-drawer__title { font-size: 15px; font-weight: 600; margin: 0; }
 .meta-record-drawer__actions { display: flex; gap: 8px; align-items: center; }
 .meta-record-drawer__btn { padding: 4px 10px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 12px; }
@@ -782,8 +1051,26 @@ async function toggleRecordSubscription() {
 .meta-record-drawer__nav-btn:hover:not(:disabled) { background: #f5f5f5; }
 .meta-record-drawer__nav-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 .meta-record-drawer__nav-pos { font-size: 11px; color: #999; min-width: 36px; text-align: center; }
-.meta-record-drawer__body { padding: 12px 16px; flex: 1; }
-.meta-record-drawer__tabs { display: inline-flex; gap: 4px; padding: 3px; margin-bottom: 14px; border: 1px solid #e5e7eb; border-radius: 999px; background: #f8fafc; }
+/* Item 1: the inner scroll body. `flex: 1` + `min-height: 0` is the standard flexbox fix for a
+   scrolling flex child (without `min-height: 0` a flex item's automatic minimum size is its content
+   size, so it would grow to fit everything instead of shrinking to the column's remaining space and
+   scrolling) -- `.meta-record-drawer` (the flex column) and this rule are the two ends of that "flex
+   chain". `overflow-y: auto` (moved down from the root, see that rule's own comment) is what makes a
+   long field/history/comments/attachments list scroll IN PLACE instead of growing the whole panel (or
+   the page) the way it did before this change. */
+.meta-record-drawer__body { padding: 12px 16px; flex: 1; min-height: 0; overflow-y: auto; }
+/* `position: sticky` keeps the tab strip visible while `.meta-record-drawer__body` above scrolls
+   underneath it (item 1's "…and tabs stay visible") -- `top: 0` sticks it flush against the body's own
+   scrollport (its nearest scrolling ancestor). Spans the FULL scroll width (cancels the body's own
+   left/right padding via a negative margin, then re-adds it as its own padding) rather than only the
+   `.meta-record-drawer__tabs` pill's own (narrower) content width -- see the template comment on
+   `.meta-record-drawer__tabs-bar` for why that distinction matters. NOT real-browser-verified in this
+   PR (jsdom cannot render CSS, same caveat as this file's existing focus-ring comments below) --
+   in particular whether the SAME opaque background needs to extend into `.meta-record-drawer__body`'s
+   own `padding-top` (a few px at the very top of the scrollport) is a real-browser question this PR
+   could not check; see the PR's manual-check note. */
+.meta-record-drawer__tabs-bar { position: sticky; top: 0; z-index: 2; margin: 0 -16px; padding: 0 16px 14px; background: #fff; }
+.meta-record-drawer__tabs { display: inline-flex; gap: 4px; padding: 3px; border: 1px solid #e5e7eb; border-radius: 999px; background: #f8fafc; }
 .meta-record-drawer__tab { min-width: 76px; padding: 5px 12px; border: none; border-radius: 999px; background: transparent; color: #64748b; cursor: pointer; font-size: 12px; font-weight: 600; }
 .meta-record-drawer__tab--active { background: #111827; color: #fff; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.16); }
 /* W2 S3 (lock §3.3 focus ring convention, H4-2/#4281 lineage, same token as MetaSheetViewRail.vue).
