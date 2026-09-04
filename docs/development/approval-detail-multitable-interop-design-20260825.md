@@ -1,6 +1,28 @@
 # 审批明细表 × 多维表互通设计短文(含宜搭子表单对标)
 
-日期:2026-08-25 · **v11(2026-08-26 十次修订)** · 状态:**PROPOSED**(§7 为五个独立裁决包:A/B/C/D1/D2)
+日期:2026-08-25 · **v12(2026-09-04 第十一次修订)** · 状态:**PROPOSED**(§7 为五个独立裁决包:A/B/C/D1/D2)
+
+## 0. 符号锚点与 ratify 前置(v12 新增)
+
+本文对「当前 main」的每条可核断言已按 **`5133df1c5d`** 机械锚定,全表见附录
+`approval-detail-interop-anchor-table-20260904.md`(316 条:TRUE 231 / 规范性 30 / 其余为分类产物或
+已在本版更正的前提错误)。**规程**:A/B 任一包 ratify 前,须对届时的 origin/main 重生成该表,
+STALE/FALSE 行为零(或逐条在正文更正)方可进入裁决;本文任何「当前 main」表述以附录锚点为准。
+独立修复 PR(后端明细叶子集写路径显式拒绝 attachment + web↔backend 等值钉 + 只读 census SQL):
+分支 `fix/approval-detail-leaf-attachment-pin-20260904`(PR 号见该分支;B 包前置 ⑪)。
+
+> **v12 修订说明**(外审 REQUEST CHANGES @ `d5c5606d84`:3 P2 + 5 P3,全部代码亲验后整合;并按 316 条
+> 锚点普查更正前提):**P2-2** 「required alert」组件既无定义也不存在,且把持久化状态转换挂在网络
+> 调用之后——改为**终态 CAS + values-free mismatch 证据行同事务**(§4.2 新表 `meta_fwb_detail_mismatch`,
+> 主键含 fence 使崩溃重入撞键),告警降为派生物,只读严格状态面对未解决证据行计数;**P2-1** 后端明细
+> 叶子集含 attachment(9)且仅旗 ON 拒绝、web 为 8——矩阵按旗态陈述并把修复列为 B 前置;**P2-3**
+> 基线落后 534 提交,已 rebase 并建 §0 锚点规程;**P3** manifest 已是 MULTITABLE+ELEARNING 双臂、
+> `/:id` 遮蔽理由不成立、gate-10 数值改为 owner ratify 时定死、Lock-7 原位 UPDATE 无 SQL 级谓词写明为
+> 待交付;**锚点普查更正**:A2「三缝」漏了 FWB-0 §0 自列的 W7 resultWriteback 与 T3-6 投影(改「既有缝
+> 原则」);按节点权限为 #4961 非 #5143;#5142 row-key 只修了设计器子字段表,填单行表仍按下标(并入
+> v1.1 ⑥);CI 真库 lane 为 PG14;manifest 未登记两个依赖旗;boot schema assertion、「精确同形」helper、
+> capability barrier、逐字节 event-id golden、update 路径 reclaim 用例均为**新建**而非既有;免登发起
+> 表单今日不存在;row_index 定义为终态快照数组元素序;save-time 旗门为新增;step 级 status 联合不变。
 
 > **v11 修订说明**(第十轮终态组合与 zombie 前置对账):①`ack-terminal` 扩到全部
 > resolve-permitting event-fire 终态,闭合「业务已完成、consumer 在下一次 claim-time poison」的
@@ -83,7 +105,7 @@
 > 补行数边界合同;⑥**子列显隐已上线**而 v1 误列为待开发(幽灵待办类错误,自记);⑦共享单元格层
 > 成本被低估(类型名非直接子集、编辑器内嵌 Yjs/附件/成员协议),v1.2 继承口径收窄为「提交前编辑能力」。
 
-输入:宜搭「子表单」官方文档全文存档(2026-08-25)、FWB0 锁(已 RATIFY)、exact-number 停用规则
+输入:宜搭「子表单」官方文档全文存档(2026-08-25,**用户本地文件,不在仓内**)、FWB0 锁(已 RATIFY)、exact-number 停用规则
 (PROPOSED 2026-07-21)、#3203 Gate A 行派生锁、B0-B2 明细/授权线交付(#5142/#5143)。
 
 ## 1. 判据:审批明细是「证据」,多维表行是「活数据」
@@ -95,15 +117,23 @@
 
 - **A1(终态冻结边界)**:提交建立初始证据,办理节点可在 pending 期受控修订;批准终态后快照冻结。
   该冻结必须由 `form_snapshot` UPDATE 自身的 `status='pending'` 谓词和受影响行数检查保证,不能只依赖
-  远处调用者先检查 status。明细 `row_index` 与逐行事件身份均以该终态快照的最终行序为准。
-  不存在审批单↔表的实时双向同步。
-- **A2(三缝原则)**:关联记录(引用进)、FWB(批准后快照出)、automation 桥(表事件触发审批)。
-  新能力必须落在三缝上,不开第四条。
+  远处调用者先检查 status。明细 `row_index` **定义为**终态快照中该明细字段 JSONB 数组的元素序
+  (0 起);当前 main 没有任何持久化的 row_index 概念(字段 revision 按顶层 field_id 记整段),
+  逐行事件身份以该元素序为准。不存在审批单↔表的实时双向同步。
+- **A2(既有缝原则)**(v12 更正:v11 的「三缝」漏了 FWB-0 锁 §0 表自己列出的两条已上线线路):
+  既有的表↔审批缝为——①关联记录(表→审批,引用进);②automation 桥 `start_approval`(表事件→
+  发起审批),其 **W7 resultWriteback** 子能力(T3-5,已上线)把审批状态/审批人/完成时间写回触发
+  记录;③**T3-6 approvals-as-records 投影**(`approval-record-projection-service.ts`,审批→表的
+  记录投影);④FWB(审批→表,批准后按映射写值)。新能力必须落在这些既有缝上;不开新缝。
+  本文的 B 落在 ④,C 落在 ①+②,不触碰 ②W7/③ 的语义。
 
 ### 1.1 权威与增量修订边界
 
 Lock-7 已授权且运行时已实现 `pending` 办理节点在同一锁事务中原位更新
-`approval_instances.form_snapshot` 并追加 revision。因此,若 owner ratify B,该裁决**仅**
+`approval_instances.form_snapshot` 并追加 revision。**当前 main 的该原位 UPDATE 为 `WHERE id = $1`,
+无 SQL 级 `status='pending'` 谓词与受影响行数检查**;其安全性目前由同事务 `FOR UPDATE` 锁 + 锁定行上
+的 status 复核保证(独立门审已追完整调用链,判定非活漏洞)。A1 要求的「UPDATE 自身结构守卫」是
+B 包**待交付项**(§4.5 gate 7),不是已有事实(v12 澄清)。因此,若 owner ratify B,该裁决**仅**
 将 `approval-form-writeback-fwb0-designlock-20260712.md` §1 与 D4 中的数据源口径修订为:
 
 - FWB 服务端按 `instanceId` 读取 `status='approved'` 的**批准终态
@@ -116,7 +146,8 @@ Lock-7 已授权且运行时已实现 `pending` 办理节点在同一锁事务�
 未 ratify B 时,本节仅是待决的精确 delta,不得被当成已更改 FWB-0。
 
 三相成本分析(为何不做「表单内嵌可编辑网格」):提交前 1~20 行/单人/分钟级——嵌千行级协作网格
-是阻抗错配;**审批中**要把按节点字段权限(#5143 已交付)投影到按人/角色的表权限——两个权限模型
+是阻抗错配;**审批中**要把按节点字段权限(Lock-7 P4-B,#4961 交付,#4979/#5026 精修;v12 更正
+v11 误记为 #5143)投影到按人/角色的表权限——两个权限模型
 的乘积,是嵌表方案的真实硬核成本;审批后「数据进表」已被 FWB 解决。宜搭「平铺方式」是表格在
 移动端不成立的自供状——嵌网格同样要接这道题。
 
@@ -136,7 +167,10 @@ Lock-7 已授权且运行时已实现 `pending` 办理节点在同一锁事务�
 ## 3. v1.1 原生补刀(轻明细,零架构变化)
 
 范围:①复制行;②上/下移;③删除确认;④xlsx 批量导入到原生明细行(复用仓内 pinned SheetJS,
-但使用审批域自己的有界解析 adapter,不直接依赖考勤 UI 模块;公开免登表单禁用导入);⑤序号列。
+但使用审批域自己的有界解析 adapter,不直接依赖考勤 UI 模块;**若**将来出现公开免登发起表单面则
+禁用导入——当前 main 没有免登发起表单,唯一 `requiresAuth:false` 的审批路由是卡片决策页
+`/m/approval-decision`,不含发起/明细);⑤序号列;⑥**填单页明细数据行表补 row-key**(v12 新增:
+#5142 只修了设计器子字段表,填单行表仍按下标绑定——复制/排序在无稳定行身份的表上做不对)。
 
 **行数边界合同(v6 固定数值与传输,审阅 P2-2/P2-5)**:
 - 现状:`maxRows` 可不填,服务端仅校验非负整数,**无系统硬上限**;`minRows≥1` 时发起页初始
@@ -151,8 +185,9 @@ Lock-7 已授权且运行时已实现 `pending` 办理节点在同一锁事务�
 - **唯一权威值:**后端域模块导出 `APPROVAL_DETAIL_MAX_ROWS = 200`;复用现有认证
   `/api/auth/me` session bootstrap 的 `data.features`,在同一个 `buildFeaturePayload` 中增加独立嵌套节点
   `{ approvalDetail: { v11Enabled: boolean, maxRows: 200 } }`。不新建
-  `/api/approvals/capabilities` 路由,避免被既有 `/api/approvals/:id` 参数路由遮蔽,也避免页面再发一条
-  可独立失败的请求。现有 `ProductFeatures`、`RouteFeatureGuard.requiredFeature`、`hasFeature` 和开发态
+  `/api/approvals/capabilities` 路由——理由是不让页面多一条可独立失败的启动请求,且能力与登录身份
+  同源(v12 更正:v11 所写「避免被 `/api/approvals/:id` 遮蔽」不成立——`/pending`、`/pending-count`
+  等静态路由本就注册在 `/:id` 之前,新静态路由同样可以;遮蔽不是理由)。现有 `ProductFeatures`、`RouteFeatureGuard.requiredFeature`、`hasFeature` 和开发态
   localStorage override 都是**布尔合同**,不得加入数字 cap。审批域新增纯解析器/只读状态
   `ApprovalDetailCapability`,由 `useAuth` 已缓存的原始 session payload 构造专用只读 accessor;
   不得复用会丢弃未知嵌套键的 `extractFeaturesFromPayload`,也不得二次请求 `/api/auth/me`。该 accessor
@@ -179,9 +214,12 @@ Lock-7 已授权且运行时已实现 `pending` 办理节点在同一锁事务�
   路径开始携带模板明细时,required guard 必须变红,先纳入上限合同才能放行。
 - **发布与回滚:**能力置于新旗 `APPROVAL_DETAIL_V11_ENABLED` 后,exact-literal `'true'` 才显示/启用;
   上述七路径全部受同一旗控制,默认 OFF;旗 OFF 时既有保存/发布/提交/办理写入行为逐字节不变。
-  仓内现有 `global-history-flag-manifest.mjs` 的 source-derived/phantom 规则只接受 `MULTITABLE_*`,不能
-  直接塞入 `APPROVAL_*` 也不能用 denylist 绕过。A 的第一片必须在**同一登记体系**增加可分域的 approval
-  flag registry/export 与 source-derived completeness test,同时保持 Global-History status 只显示原域;
+  仓内 `global-history-flag-manifest.mjs` 的 source-derived/phantom 规则**已是多域**(v12 更正 v11 的
+  「只接受 `MULTITABLE_*`」):completeness 测试同时扫 `MULTITABLE_*` 与 `ELEARNING_*_ENABLED` 两条前缀臂,
+  并有 `NON_GH_PREFIXES`/`NON_GH_EXACT` denylist——不得用 denylist 绕过登记。A 的第一片按 ELEARNING 先例在
+  **同一登记体系**加一条 `APPROVAL_[A-Z_0-9]+`(仅 `_ENABLED` 后缀)臂与对应 manifest 条目;该测试目前只
+  grep `core-backend/src`,FE 侧的旗读取不在其视野——A 的 FE 只经 §3 的 session capability 取能力,不直接
+  读旗;同时保持 Global-History status 只显示原域;
   此后 A/B 新旗及依赖关系均登记其中。census 清零或完成定点处置后才可在 staging 打开;回滚只关旗,
   不得删改用户已录入或已经提交的明细行。
 
@@ -285,8 +323,12 @@ type FwbMappingSource =
   源格缺失、`null` 或空白字符串均在父 claim 前以 `missing_required_value` 拒绝整个
   动作。不得因为 `minRows` 播种了空行就静默丢行、压缩 `row_index` 或只写部分列;
   「可选映射」若未来需要,须独立设计,不由 v2 推断。
-- 源叶子 8 类(text/textarea/number/date/datetime/select/multi-select/user),目标闭集为
-  text/date/select(number 待 D0-D4)。v1 矩阵:text/textarea→text;date→date;select→select,且
+- 源叶子集合(v12 更正):web 字面量为 8 类(text/textarea/number/date/datetime/select/multi-select/
+  user);后端 `DETAIL_LEAF_FIELD_TYPES` 在当前 main 以减法派生、**含 attachment(9 类)**,且 attachment
+  进明细的唯一拒绝点包在 attachments 旗 ON 之内——旗 OFF(默认)时后端接受 web 不认的形状。B 的矩阵以
+  8 类为源前提,因此 **B 的前置之一是该不一致已修**(独立修复 PR:后端叶子集显式排除 attachment +
+  web↔backend 叶子集等值钉,见 §0 锚点表);修复落地前,矩阵对 attachment 一格按拒绝处理,但那是实现
+  时的防御,不是合同事实。目标闭集为 text/date/select(number 待 D0-D4)。v1 矩阵:text/textarea→text;date→date;select→select,且
   select 的 execute-time 有效闭集必须是**确认哈希中的选项 ∩ 当前目标字段仍存在的选项**;
   新增但未确认的目标选项不能绕过确认。datetime、multi-select、user、number 及其他所有格子明确拒绝。
   datetime 不截断,避免制造带时区语义的日期。
@@ -328,8 +370,45 @@ CREATE TABLE meta_fwb_detail_row_applied (
 - v1 只有 `create_detail_rows`,每个源行必须创建不同的目标记录;因此同父
   `target_record_id` 唯一是 corruption guard,不是对未来「多行更新同一记录」的暗示。
   若日后增加 detail update,必须另立 mode/身份/重放合同和迁移,不能在本约束上放宽。
-- 迁移只有一次 additive create。上线前验证「表不存在或精确同形」,同名漂移对象 fail closed;
+- 迁移只有一次 additive create。上线前验证「表不存在或精确同形」,同名漂移对象 fail closed
+  (v12 注:仓内现有 `_patterns.ts` 只有 `checkTableExists`/`checkColumnExists` 类 helper,**无**
+  「精确同形」检查;该检查是本包新建的 helper,与 §4.5 gate 11 的 boot schema assertion 共用);
   旧镜像和 FWB-1/2/3 不读该表,因此迁移前后行为不变,无需删旧索引、replica census 或代码回滚下限。
+
+第二张 additive 表承载 §4.3 第三处置的**证据**(v12 新增,取代 v11 的「required alert」):
+
+```sql
+CREATE TABLE meta_fwb_detail_mismatch (
+  rule_id text NOT NULL,
+  dedup_key text NOT NULL,
+  fence text NOT NULL,                       -- 检测到 mismatch 时持有的 event-fire fence
+  action_claim_id text NULL
+    REFERENCES meta_fwb_action_applied(id) ON DELETE RESTRICT,
+  expected_rows integer NOT NULL
+    CONSTRAINT fwb_detail_mismatch_expected_nonneg CHECK (expected_rows >= 0),
+  mismatch_kind text NOT NULL
+    CONSTRAINT fwb_detail_mismatch_kind CHECK (mismatch_kind IN
+      ('missing_rows','extra_rows','event_id_mismatch','record_id_blank','no_child_evidence')),
+  observed_digest text NOT NULL             -- sha256(规范 JSON 的 (row_index,event_id) 观测集),values-free
+    CONSTRAINT fwb_detail_mismatch_digest_hex CHECK (observed_digest ~ '^[0-9a-f]{64}$'),
+  detected_at timestamptz NOT NULL DEFAULT now(),
+  resolved_at timestamptz NULL,
+  resolution text NULL
+    CONSTRAINT fwb_detail_mismatch_resolution CHECK (resolution IN ('reopened_after_repair','terminated_failed')),
+  CONSTRAINT pk_fwb_detail_mismatch PRIMARY KEY (rule_id, dedup_key, fence),
+  CONSTRAINT fwb_detail_mismatch_resolution_paired CHECK
+    ((resolved_at IS NULL AND resolution IS NULL) OR (resolved_at IS NOT NULL AND resolution IS NOT NULL))
+);
+CREATE UNIQUE INDEX uq_fwb_detail_mismatch_open
+  ON meta_fwb_detail_mismatch (rule_id, dedup_key) WHERE resolved_at IS NULL;
+```
+
+- 主键含 `fence`:同一 event-fire 在 reopen 后再次 mismatch 会以新 fence 落新行,而**同一 fence 的
+  崩溃重入**撞主键——这就是「重入零二次」的机械保证,不靠调用方记忆。`uq_fwb_detail_mismatch_open`
+  保证任一 event-fire 至多一条未解决证据。
+- 该表只存身份、计数与摘要,不存任何表单值或目标记录内容;`observed_digest` 的输入是
+  `(row_index,event_id)` 对的规范 JSON,与 §4.4 的 identity 派生同一纪律。
+- 只读严格状态面(observation-kit 形态的 SQL census)对 `resolved_at IS NULL` 计数;非零即失败。
 
 ### 4.3 一次父 claim、整批事务和严格重放
 
@@ -337,7 +416,9 @@ CREATE TABLE meta_fwb_detail_row_applied (
 detail executor 必须在自己的新路径上调用既有 `recheckFwbPermissionGates` 和
 `resolveFwbRuntimeMappings`;后者继续负责目标字段存在/类型、select 确认交集与 number precision
 替换。不得因不复用旧 executor 而复制或省略这两道 execute-time 门。规则保存/启用要求 A 旗、
-既有 FWB 旗、durable-delivery 旗和 B admission 旗同时有效；已持久化 detail 动作执行时不得再读
+既有 FWB 旗、durable-delivery 旗和 B admission 旗同时有效(v12 注:当前 main 的规则保存路径**不检查**
+FWB 旗,durable 旗仅在部分路径检查——此为 B 新增的 save-time 门,不是既有门的延展);已持久化
+detail 动作执行时不得再读
 B 旗。底层 FWB/durable 安全能力暂不可用时，必须进入 detail 专用、values-free 的
 `fwb_retryable:*` 命名空间，不得记录 skipped/done；真正未知的 mode 仍保留既有确定性拒绝，不能
 因本包变成无限重试。随后在**同一个数据库事务**调用原
@@ -353,18 +434,23 @@ B 旗。底层 FWB/durable 安全能力暂不可用时，必须进入 detail 专
   不是两行成功)、
   每行 `event_id` 等于本次纯函数推导值、`target_record_id` 非空。完全相等才返回
   `already_applied`;缺行、多行、错 event 或 **N>0 时**父行无子证据均以 values-free
-  `fwb_outcome_unknown:detail_provenance_mismatch` 进入**第三种交付处置**:required alert
-  必须成功上报,随后以当前 fence-CAS 将对应 `meta_automation_event_fires` 行从
-  `in_progress` 终结为既有 `outcome_unknown` 并原子清 lease;不得调用
-  `markEventFiresDone`,不得进入 `hasRetryableFwbFailure`,也不得等 lease 到期自动 reclaim。
+  `fwb_outcome_unknown:detail_provenance_mismatch` 进入**第三种交付处置**:在**同一个数据库
+  事务**内,以当前 fence-CAS 将对应 `meta_automation_event_fires` 行从 `in_progress` 终结为既有
+  `outcome_unknown` 并原子清 lease,并在 CAS 命中恰 1 行的前提下 INSERT 一条 values-free 的
+  **mismatch 证据行**(§4.2 `meta_fwb_detail_mismatch`);两者同提交同回滚。承重物是「终态 CAS +
+  证据行」这一笔事务——**该状态转换之前或之内不存在任何网络调用**(v12 更正:v11 要求「required
+  alert 必须成功上报」再 CAS,把持久化转换挂在了不可靠通道上,且该组件既无定义也不存在;作废)。
+  不得调用 `markEventFiresDone`,不得进入 `hasRetryableFwbFailure`,也不得等 lease 到期自动 reclaim。
   必须保留现有 `claimEventFiresLease` 的入口终态短路:`done/outcome_unknown/failed/
   dead_letter` 都返回运输层 `done`,而 `runWithEventDedup` 不再执行 callback。因此若进程在
   `outcome_unknown` CAS 提交后、consumer `done` 写入前崩溃,下一次 consumer 尝试必须读到
-  该终态、跳过 callback/重复 alert,并完成运输确认;这个 `done` 只表示「不再自动执行」,
-  不得被产品或审计层解释成业务写回成功。
-  required alert 的交付语义是 **at-least-once**,不是 exactly-once:若进程在 alert 成功后、
-  终态 CAS 前崩溃或失去租约,重入允许再次告警;实现与验收不得把「终态 CAS 后重入零二次」
-  扩张为全时序恰好一次。告警聚合可使用不含用户值的稳定 incident key,但业务正确性不得依赖聚合。
+  该终态、跳过 callback、不写第二条证据行(同 fence 重入撞 `pk_fwb_detail_mismatch`),并完成
+  运输确认;这个 `done` 只表示「不再自动执行」,不得被产品或审计层解释成业务写回成功。
+  **告警是派生物,不是前置条件**:任何通知(钉钉/邮件/webhook)都从证据行**派生**、at-least-once、
+  允许重复与失败,业务正确性与状态机**不依赖**它,通知失败不得改变任一持久状态。必须存在的是一个
+  **只读严格状态面**:沿既有 observation-kit「只读 SQL census + runbook 门控」形态,对
+  `resolved_at IS NULL` 的证据行计数,非零即 strict status 失败并阻断相关 runbook 门;它是 owner
+  恢复操作(见下)的唯一入口信号,不由业务 API 或定时器自动消费。
   外层 outbox consumer 只有在该 sink 终态写成功后才可完成自己的运输责任;它的 `done`
   不得被解释成业务写回成功。恢复不是普通 retry:owner 必须通过 values-free、审计化操作同时锁定
   该 event-fire 与匹配的 `(outbox_id,consumer_key)` 行,以 expected status/fence 防并发漂移,并在
@@ -377,19 +463,22 @@ B 旗。底层 FWB/durable 安全能力暂不可用时，必须进入 detail 专
 第三处置必须是**类型化控制流**,不能靠通用异常字符串碰运气。新增纯分类器
 `classifyFwbDeliveryDisposition(execution): 'settled' | 'retryable' | 'outcome_unknown'`,扫描一次
 execution 的全部 FWB step,优先级固定为 `outcome_unknown > retryable > settled`:任一
-`fwb_outcome_unknown:*` 都终止本次 event delivery;否则沿用现有 denylist 语义判断 retryable;
-确定性拒绝和全部成功才是 settled。现有 `hasRetryableFwbFailure` 可委派给该分类器,但不得把
+`fwb_outcome_unknown:*` 都终止本次 event delivery;否则沿用现有 `hasRetryableFwbFailure` 语义
+——它是**settled 前缀的 denylist**(`fwb_rejected:*` 与 `write_approval_form_values requires` 为
+settled,其余一切失败含 `fwb_execution_failed` 均 retryable);确定性拒绝和全部成功才是 settled。
+step 级 `AutomationStepResult.status` 联合(`success|failed|skipped`)**不变**——第三处置由 error
+token 前缀驱动的 delivery 级分类承载,step 仍记 `failed`。现有 `hasRetryableFwbFailure` 可委派给该分类器,但不得把
 未知/空白基础设施失败改成白名单外的 settled。`runWithEventDedup` 的 durable 回调结果相应改成
 显式 `done | outcome_unknown`;`outcome_unknown` 必须调用新增的
 `markEventFiresOutcomeUnknown(ruleId,dedupKey,fence)`,后者与 done helper 一样只允许当前
-`in_progress` fence 单行 CAS,在同一 UPDATE 中写 terminal status 并清 lease。required alert 失败、
-CAS 命中 0 行时必须重读同一 `(rule_id,dedup_key)`:若已是
-`outcome_unknown` 且 lease 为 NULL,说明竞争者已达成同一终态,adapter 可返回运输层
-success,不得因重读再发第二条 alert;若仍是外来 fence 持有的 `in_progress`、行消失,
+`in_progress` fence 单行 CAS,在同一 UPDATE 中写 terminal status 并清 lease,并在同一事务内以
+CAS=1 为前提 INSERT 证据行。CAS 命中 0 行时必须重读同一 `(rule_id,dedup_key)`:若已是
+`outcome_unknown` 且 lease 为 NULL,说明竞争者已达成同一终态(其证据行同事务已提交),adapter 可
+返回运输层 success,不得再写证据行(主键兜底);若仍是外来 fence 持有的 `in_progress`、行消失,
 或出现 `outcome_unknown` 但 lease 非 NULL 等任何其他形状,均 fail closed、不得完成。
-required alert 失败、无法证明终态已达成的 CAS-0、或 DB 读写失败时,外层 outbox consumer
-都不得完成。只有 alert 成功且 `outcome_unknown` 已持久化(由本尝试或竞争者完成)后,
-adapter 才可返回运输层 success。旧 create/update 的 settled/retry
+无法证明终态已达成的 CAS-0、证据行 INSERT 失败、或 DB 读写失败时,外层 outbox consumer
+都不得完成。只有「终态 CAS + 证据行」事务已提交(由本尝试或竞争者完成)后,adapter 才可返回
+运输层 success;派生通知是否发出不参与该判定。旧 create/update 的 settled/retry
 控制流和 event-id 字节必须不变。所有 `runWithEventDedup` 调用点必须显式返回上述闭集结果;
 任何遗漏返回值或运行时闭集外值均 fail closed,不得默认折叠为 `done`。`retryable`
 不是第三个 callback 返回值:它继续以现有异常抛出(不产生正常返回值)交回
@@ -420,7 +509,7 @@ event-fire、匹配的 `(outbox_id,consumer_key)` 行、两个 expected fence/�
   lease_expires_at <= 事务时钟)` + `outbox_consumer(status='dead_letter',lease IS NULL)`。
   租约仍存活时没有可执行分支,owner 必须等待它过期,不得提前改写。请求还必须带 values-free
   `resume_reason` 闭集:`provenance_terminalization` 或 `retryable_execution`。前者证明
-  required-alert/DB 终态写通道已恢复;后者证明对应 FWB/基础设施依赖已恢复。两者都必须证明旧
+  DB 终态写/证据行写入通道已恢复;后者证明对应 FWB/基础设施依赖已恢复。两者都必须证明旧
   adapter 所在 worker cohort 已静默或重启,因为当前 event-fire fence 只保护终态 CAS,不能阻止
   非协作 zombie 在租约过期后提交业务事务。没有该静默证据时整笔拒绝,不能仅凭 lease expiry 前进。
   条件满足后,同一事务保持 event-fire `in_progress`、将 lease 设为事务时钟之前并使 fence 加一;
@@ -442,6 +531,10 @@ attempts **计数**(不得含用户值)。若保留已达 `maxAttempts` 的值,�
 `claimDueConsumers` 会在调用 adapter 前直接 poison。owner 转换本身不改 event-fire
 `attempts`,下一次过期租约 reclaim 才按既有规则递增。不得把 event-fire 改成
 `pending`,因为现有 `claimEventFiresLease` 对已存在 pending 行既不 fresh-claim 也不 reclaim。
+**证据行的解决**:reopen-after-repair 与 terminate 必须在同一事务把该 event-fire 的未解决证据行
+写 `resolved_at` 与对应 `resolution`(严格状态面随之恢复);若不存在未解决证据行(例如非 detail
+来源的 `outcome_unknown`),操作照常执行,审计记 `evidence_row=absent`。ack-terminal 与
+resume-in-progress-after-quiescence 不触碰证据行。
 四种操作均须 values-free 审计、显式 owner 授权;禁止普通业务 API 或自动定时器调用。审计必须
 记录操作名、`resume_reason`(若适用)、转换前两个 status/fence/attempts **计数**和静默证明类型,
 不得记录用户值。
@@ -475,19 +568,23 @@ event-fires/两个 endpoint effect,完整重放不新增 effect。系统内部�
 
 ### 4.5 验证门(缺一不可)
 
-1. **Additive upgrade:**PG15 真库从旧 schema+旧父行执行唯一迁移;迁移前后原六列 helper 的首次
+1. **Additive upgrade:**在 **CI 真库 lane(plugin-tests.yml 为 PG14,ankane/setup-postgres)**与
+   **staging 同款 PG15 镜像**两处,从旧 schema+旧父行执行唯一迁移(v12 更正:v11 只写 PG15,而承载
+   FWB 账本真库测试的 CI lane 是 PG14);迁移前后原六列 helper 的首次
    claim/重放结果与 SQL 逐字节不变。子表 FK、非空、负 index、同父重复 index/event 分别按命名
    约束拒绝,同父两行复用同一 target record 也必须被命名约束拒绝;同名漂移表必须让迁移失败,
    不能被 `IF NOT EXISTS` 吞掉。
 2. **Mode/activation:**parser、类型联合、保存验证和 executor 三 case 穷尽一致;把 detail case 删掉或
    恢复「非 update 即 create」时,flag-ON 测试必须红且业务行保持 0。B 在 A/FWB/durable 任一 OFF 时
    save/enable 均 fail closed;已持久化 detail 动作不再读取 B admission 旗；底层 capability 暂不可用
-   时必须保持 event-fire 非 done 并 values-free 告警，不得将 skipped/确定性拒绝记作成功。
+   时必须保持 event-fire 非 done 并以 values-free 错误 token 留痕(strict status 可见),不得将
+   skipped/确定性拒绝记作成功。
    detail 新增的 `fwb_retryable:*` 是对既有可重试集合的**增量**；共享
    `hasRetryableFwbFailure` 必须继续把现有 create/update 产生的 `fwb_execution_failed`
    以及它们今日其他非确定性基础设施/事务失败视为可重试，不得改成「只认
-   `fwb_retryable:*`」的白名单。中和 `fwb_execution_failed` 这条旧腿时，既有 create/update
-   真库用例必须证明 delivery 不再 reclaim 而变红；detail 的 `fwb_retryable:*` 与
+   `fwb_retryable:*`」的白名单。中和 `fwb_execution_failed` 这条旧腿时，既有 create 真库用例
+   (`multitable-fwb-activation-realdb`)必须证明 delivery 不再 reclaim 而变红;**update 路径今日无同类
+   用例**(其 realdb 套件不经 `handleApprovalCompletionTrigger`),B 前须补齐(v12 更正);detail 的 `fwb_retryable:*` 与
    `fwb_rejected:*`/`unknown_mode` 分别有独立正反例。既有 `unknown_mode` 仍是确定性配置拒绝。
    `fwb_outcome_unknown:detail_provenance_mismatch` 必须走 §4.3 第三处置:既不进入上述重试集合,
    也不被确定性拒绝路径折叠成 event-fire `done`;把它改成 `fwb_retryable:*`、
@@ -503,15 +600,18 @@ event-fires/两个 endpoint effect,完整重放不新增 effect。系统内部�
    完整赢家。空数组的 N=0 有正控;字段缺失/`null`/非数组的负例必须在 claim 前拒绝。
    把 detail 路径退回旧 duplicate 短路,或删除任一严格 replay 核对(行集/event/record id)时,
    指定 corruption golden 必须红。provenance mismatch 必须另有真库状态机 golden:分类优先级
-   `outcome_unknown > retryable > settled`,required alert 失败/无法证明终态的 CAS 失败均不完成
-   outer consumer,
+   `outcome_unknown > retryable > settled`,证据行 INSERT 失败/无法证明终态的 CAS 失败均不完成
+   outer consumer;注入「CAS 已执行、INSERT 前崩溃」时事务整体回滚——event-fire 仍为
+   `in_progress`、零证据行(原子性正控);
    成功路径得到 event-fire `outcome_unknown` + lease NULL 和 consumer `done`;把第三态折回异常重试、
    确定性 done 或无条件 `markEventFiresDone` 时各自指定测试必须红。还必须构造两个重入
    顺序:①event-fire CAS 已提交、consumer 未 done 即崩溃,下一次尝试终态短路、
-   callback/alert 零二次、consumer 完成;②旧 fence CAS-0,重读为已持久化
+   callback 零二次、证据行恰 1 行(主键正控)、consumer 完成;②旧 fence CAS-0,重读为已持久化
    `outcome_unknown` 时完成,重读为外来 `in_progress` 或 `outcome_unknown`+非空 lease 时仍重试。
-   required alert 另构造「alert 成功后、CAS 前崩溃」正控,允许重入再次告警,防止测试误宣称
-   exactly-once。detail 正常完成也须构造 stale done-CAS:只有重读为 `done`+NULL lease 才完成,
+   严格状态面另构造:存在未解决证据行时 strict status 必须失败,reopen-after-repair/terminate 在
+   同一事务写 `resolved_at`/`resolution` 后恢复;派生通知的发送失败**不得**改变任一持久状态
+   (注入通知失败,event-fire/证据行/consumer 三者与通知成功时逐字节相同)。
+   detail 正常完成也须构造 stale done-CAS:只有重读为 `done`+NULL lease 才完成,
    外来 `in_progress` 时 consumer 不得 done。中和终态短路或去掉任一 CAS-0 重读时各自指定测试
    必须红。owner 的 ack-terminal/reopen-after-repair/
    resume-in-progress-after-quiescence/terminate 四分支须逐一用真库钉住;status/fence/租约或关联错、
@@ -538,7 +638,8 @@ event-fires/两个 endpoint effect,完整重放不新增 effect。系统内部�
    钉住 `JSON.stringify(['fwb_detail_row_v1','apply',baseEventId,ruleId,actionKey,rowIndex])`
    与 `fwb_detail_row_<64hex>` 输出。把 `rowIndex` 改为字符串、改变元素顺序/域标签、漏掉
    `applicationMode`,或改回以现有 `fwbEventId` 为单一 seed 时指定测试必须红,而旧
-   create/update event-id golden 仍字节不变。
+   create/update event-id golden 仍字节不变——**该 golden 今日不存在**(现有测试只以 `::fwb::` 前缀
+   LIKE/正则钉形状),B 的第一步是先在 main 上落一条逐字节 golden,再动任何 executor 代码(v12 更正)。
    合同同时钉住「同一 instance 只能有一次 approved 终态事件」;若未来允许第二次
    approved transition,必须先扩父业务键/event identity 与恢复语义,不能让 event mismatch 变成无恢复吸收态。
 7. **Cap/terminal snapshot:**办理节点写 200/201 与批准终态读取均有真库测试;先提交行 A、再由办理
@@ -559,8 +660,12 @@ event-fires/两个 endpoint effect,完整重放不新增 effect。系统内部�
    dead-letter/租约错误数;不得在看到实测数字后再改门槛。容量计数按 routing manifest 产生的
    **consumer 行总数**计,不得只记 200 条 producer event。
 11. **Rolling deploy/rollback:**先 additive migration,再全 worker 新代码且四旗 OFF;flag-ON boot 对
-    子表、约束、索引做精确 schema assertion,缺失/漂移即中止。激活前证明所有 dispatcher 都报告
-    `create_detail_rows` capability,且 capability registry/部署 barrier 为本包明确前置基础设施,再按
+    子表、约束、索引做精确 schema assertion,缺失/漂移即中止(v12 注:既有 boot 处置
+    `durableBootFailureDisposition`/`assertDurableRuntimeDependency`/`bootDurableDelivery` 只对**运行时
+    服务依赖**缺失 fail-closed,不检查 schema 形状——schema assertion 是挂进该 boot 路径的**新**机制)。
+    激活前证明所有 dispatcher 都报告 `create_detail_rows` capability,且 capability registry/部署 barrier
+    为本包明确前置基础设施(既有 `ConsumerAdapterRegistry` 是每 worker 的单一枚举源,可作种子;
+    「capability」概念今日不存在),再按
     A→durable/FWB→B 开启。回滚先关 B admission、禁止/停用新 detail 规则,但新 worker 的 execution
     支持保持有效;排空并证明不存在 `status IN ('pending','in_progress')` 的 detail
     delivery(报告必须另列 `status='in_progress' AND lease_expires_at <= now()` 计数),且不存在
@@ -573,7 +678,9 @@ event-fires/两个 endpoint effect,完整重放不新增 effect。系统内部�
 Excel 文件、无回导。文件级导出(含主+子一并导出、编辑后回导)为独立缺口,是否立项见 §7-A。
 新旗 `APPROVAL_FWB_DETAIL_EXPANSION_ENABLED` 默认 OFF、exact-literal `'true'`,登记全域 manifest;
 登记项明确依赖 `APPROVAL_DETAIL_V11_ENABLED`、`APPROVAL_FWB_WRITEBACK_ENABLED` 与
-`AUTOMATION_DURABLE_DELIVERY_ENABLED`;registry 构建时任何 `dependsOn` key 不在跨域总索引中都必须
+`AUTOMATION_DURABLE_DELIVERY_ENABLED`——**后两者今日均未登记在该 manifest**(它只含 MULTITABLE_*/
+ELEARNING_* 条目,v12 更正),故 A/B 的登记前置包括为这两个既有旗补条目(各自前缀臂);
+registry 构建时任何 `dependsOn` key 不在跨域总索引中都必须
 fail loud,不能被 `depSpec && ...` 当成已满足。source-derived completeness 覆盖被声明依赖的跨前缀 key;
 非法组合让 boot/strict status 失败。启用前要求 A 与既有
 durable/FWB 已通过各自 UAT、additive migration 已应用、全 worker capability 完整、B 历史快照 census
@@ -596,14 +703,14 @@ durable/FWB 已通过各自 UAT、additive migration 已应用、全 worker capa
 
 | 宜搭能力 | 处置 | 依据 |
 |---|---|---|
-| 子字段类型/必填/选项、行删除、min/max 行数 | ✅ 已有(8 叶子类型) | detailField.ts;系统上限仍待 §3 实现 |
-| 焦点稳定编辑 | ✅ 已有 | #5142 row-key |
+| 子字段类型/必填/选项、行删除、min/max 行数 | ✅ 已有(web 8 叶子类型;后端派生集含 attachment 且仅旗 ON 拒绝——独立修复 PR 在途,§0) | detailField.ts;系统上限仍待 §3 实现 |
+| 焦点稳定编辑 | ⚠️ **部分已有**(v12 更正):#5142 的 row-key 修在**模板设计器的子字段定义表**(ApprovalFormInlineEditor);**填单页的明细数据行表**(ApprovalNewView)当前无 row-key、按下标绑定 | 填单页行 row-key 并入 v1.1 ⑥(复制/排序前置) |
 | **按主表值/行内值控制子列显隐** | ✅ **已有**(v1 误列待开发,更正) | `visibleDetailColumnsForRow` 按行求值 + `pruneHiddenDetailRow` 提交前剪枝——看不见的不提交 |
 | 行内计算列(小计) | ⚠️ **部分已有**:`lineDerivation`(#3203 Gate A)——FE-only、仅 product、backend 不校验不重算、声明坏则退化普通列 | 通用行公式=独立锁,§6b |
 | 金额合计自动求和 | ⚠️ 已有但**限 amountConsistencyCheck 预置模板**,非通用可配 | 通用化另立小项,不并入 A |
-| 草稿宽/发布严、按节点字段权限作用于明细 | ✅ 已有,反超项 | B0/#5143;宜搭无工作流节点级权限 |
+| 草稿宽/发布严、按节点字段权限作用于明细 | ✅ 已有,反超项 | 草稿宽/发布严=B0/#5143(`{minimal:true}` 覆盖明细子列);按节点权限=Lock-7 #4961(+#4979/#5026);宜搭无工作流节点级权限 |
 | 复制行/上下移/删除确认/序号列/仅一条禁删 | → **v1.1** | 固定闭集行动作 |
-| 批量导入(含免登禁用) | → **v1.1**(边界合同前置) | §3 |
+| 批量导入(免登面若出现则禁用) | → **v1.1**(边界合同前置) | §3;当前 main 无免登发起表单 |
 | **Excel 导出/主+子一并导出/回导** | ❌ **独立缺口**(v5 延续 v2 更正:不由 FWB v2 覆盖) | 另立裁决,不并入 A |
 | 报表分析、批后数据联动 | → **FWB v2**(批准后路径) | §4 |
 | 大批量/多人协作预填 | → **v1.2**(证据门) | §5 |
@@ -674,14 +781,14 @@ durable/FWB 已通过各自 UAT、additive migration 已应用、全 worker capa
 
 ## 7. 待 owner 裁决(v11:五个独立裁决包)
 
-**A. v1.1 录入效率包 — 建议 RATIFY v7。**裁决面收窄为:①系统硬上限固定 **200**、
+**A. v1.1 录入效率包 — 建议 RATIFY(以 v12 为准)。**裁决面收窄为:①系统硬上限固定 **200**、
 嵌套 session capability 与七路径合同按 §3;②复制/上下移/删除确认/序号列/xlsx 导入/minRows 播种开工;
-③新旗默认 OFF,先补可分域 flag registry,按「服务端持久数据」运行 census 且对
+③新旗默认 OFF,按 ELEARNING 先例为 manifest 加 `APPROVAL_*` 臂与条目,按「服务端持久数据」运行 census 且对
 `form_snapshot` 写入器做 source-derived 完整性分类;非零结果先逐项处置;④钉钉嵌入端 390px 真浏览器实测为
 staging 激活前置。
 **不并入 A:**文件导出/回导、通用金额求和,两者各自立项,不让小包膨胀。
 
-**B. FWB v2 delta lock 包 — 建议 RATIFY v11。**裁决面为:①单一 detailSourceFieldId +
+**B. FWB v2 delta lock 包 — 建议 RATIFY(以 v12 为准)。**裁决面为:①单一 detailSourceFieldId +
 判别式来源;②既有六元父 claim/helper/index 零改动 + additive 逐行溯源表;③一次父 claim、N 行同事务、
 严格 replay(含 N=0 与缺字段区分,不复用旧 duplicate 短路);④旧 create/update 哈希字节不变 +
 detail 专用确认哈希域;⑤以冻结的
@@ -690,9 +797,12 @@ detail 专用确认哈希域;⑤以冻结的
 ⑦新实例只追加;⑧按 §1.1 精确修订 FWB-0 数据源条款、终态冻结语义、缺值全有或全无、
 A/FWB/durable 依赖、穷尽 dispatcher、执行期权限/目标确认交集重检、admission/execution 分离、
 历史批准快照 census、终态 UPDATE 结构守卫、既有 `fwb_execution_failed`
-重试腿不变、provenance mismatch 的 `outcome_unknown` 第三处置、alert at-least-once、
+重试腿不变、provenance mismatch 的 `outcome_unknown` 第三处置(终态 CAS + 证据行同事务,
+告警仅为派生物)、
 done/outcome-unknown 双 CAS-0 重读、崩溃重入与四分支 owner 恢复/终结、
-滚动部署/回滚;⑨§4.5 十一道验证门。
+滚动部署/回滚;⑨§4.5 十一道验证门;⑩gate-10 的三个数值门槛(最大排队深度、排空时间、可接受
+dead-letter/租约错误数)由 owner 在 ratify 时定死写入台账——未定即未裁;⑪B 前置:§4.1 所指
+attachment 叶子集不一致的修复已合入 main。
 任何一项写成「实现时再定」都视为未裁。owner 未逐项接受前仍为 PROPOSED,不得开实现旗。
 
 **C. v1.2 引用桥包 — 建议 ACCEPT AS DEFERRED。**保留 `>50` 行或多人协作预填/导入的真实
@@ -704,5 +814,6 @@ bounded spike 前,不抽域中立 codec/editor contract。
 **D2. 行公式包 — 建议 DEFER。**exact-number D0-D4 与服务端权威重算/舍入/错误/快照/
 `lineDerivation` 收敛五项没有独立锁前,不实现第二套通用行公式。
 
-不裁即维持现状:A1/A2 公理、三缝、拒绝用户 JS、C 的证据门四项为本文保留立场,不随裁决变动。
+不裁即维持现状:A1/A2 公理、既有缝原则(按 FWB-0 §0 清单)、拒绝用户 JS、C 的证据门四项为本文
+保留立场,不随裁决变动。
 本文件仍是 PROPOSED,自身无 ratify 权;A/B 必须分别记录 owner 裁决,不得以合并文档代替 ratify。
