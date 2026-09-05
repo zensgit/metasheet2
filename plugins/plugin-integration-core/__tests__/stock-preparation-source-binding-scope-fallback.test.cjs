@@ -6,19 +6,26 @@
 // THE GAP THIS CLOSES. The unique index on integration_stock_prep_source_binding is
 // `(tenant_id, COALESCE(workspace_id, ''), action_id)` — so a `workspace_id IS NULL` row and a
 // `workspace_id = 'default'` row for the same tenant+action can coexist. The UI writes under
-// `workspaceId=default` (its own query hint), but reconcile, mvp-persist, source preflight, carry,
-// export, handoff and the project board all call `getTableAction`/`store.get()` with NO workspace
-// hint at all — an omitted `workspaceId` normalizes to `null` (`optionalString(undefined) -> null`),
-// so their lookup is always `workspace_id IS NULL` and a binding saved under `'default'` was
-// invisible to them.
+// `workspaceId=default` (its own query hint), but reconcile, mvp-persist, carry, export, handoff and
+// the project board all call `getTableAction`/`store.get()` with NO workspace hint at all — an
+// omitted `workspaceId` normalizes to `null` (`optionalString(undefined) -> null`), so their lookup
+// is always `workspace_id IS NULL` and a binding saved under `'default'` was invisible to them.
+// (`stockPreparationSourcePreflight` at `http-routes.cjs:6163` calls `getTableAction({ actionId })`
+// with no `tenantId` at all, so `applyPersistedSourceBinding` throws and the route's own `catch`
+// swallows it before this fallback is ever reached — that is a separate, pre-existing bug, and
+// preflight is NOT one of this fallback's beneficiaries.)
 //
 // THE FIX, one seam, `get()` only: when the caller's hint is `null` AND the exact
 // `workspace_id IS NULL` row is absent, look for this `(tenant_id, action_id)`'s OTHER
 // (`workspace_id IS NOT NULL`) rows. Exactly one -> return it, annotated. Zero or two-or-more ->
 // `null`, same as today: this is fail-closed, not "guess". A NON-null hint that misses is NEVER
-// widened — that behaviour (asserted independently at
-// stock-preparation-source-binding.test.cjs:482) must survive this change unchanged, so R-04 below
-// re-asserts it here as this suite's own fence.
+// widened — that behaviour is asserted independently at
+// stock-preparation-source-binding.test.cjs:482, and F-07 below is THIS file's own fence for it:
+// F-04 (a non-null miss with only a NULL-workspace row seeded) does NOT actually exercise the
+// `scope.workspaceId !== null` guard, because the sibling scan's own `IS NOT NULL` filter would
+// throw that row away regardless of whether the guard ran — deleting the guard leaves F-04 green.
+// F-07 seeds a SINGLE sibling under a DIFFERENT workspace than the one queried, which the guardless
+// code WOULD wrongly return; that is the mutation-resistant fence.
 //
 // DIRECTION, not `external-systems.cjs`'s `selectScopedRow`. That helper widens a MISSING hint by
 // falling back to the TENANT-WIDE (null) row when a SPECIFIC hint misses — the opposite shape. Here
@@ -32,7 +39,18 @@
 //   * fallback hit (null hint, null row absent, exactly one sibling):
 //       matchedWorkspaceId: <that sibling row's own workspace_id>, scopeFallback: 'single_workspace_binding'
 // `stock-preparation-source-binding.test.cjs`'s R-08 already covers ordinary exact-hit gets; this
-// file is scoped to the fallback branch and its guardrails.
+// file is scoped to the fallback branch and its guardrails. The one real consumer of the two
+// annotation keys is `loadTableActionSourceAdapter` in `http-routes.cjs` (F3) — see
+// `stock-preparation-source-binding-routes.test.cjs`'s R-22 for that end-to-end proof; this file
+// stays scoped to the store.
+//
+// SILENT DEGRADE, BY DESIGN, UNDOCUMENTED AT RUNTIME: if a second workspace ever binds this action's
+// source, the fallback's "exactly one sibling" condition stops holding and `get()` quietly goes back
+// to returning `null` for every hint-less caller — exactly today's pre-fallback behaviour, with no
+// error, no log line, and no event. This store takes no logger/onEvent dependency, so there is
+// nowhere to raise one from; the operator-facing note lives in
+// `docs/development/takeover-beiliao-20260821/222-rehearsal-full-run-20260904.md`'s scope-fallback
+// section instead.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -65,8 +83,11 @@ function run(name, fn) {
 // The same in-memory scoped-db stand-in shape as stock-preparation-source-binding.test.cjs's
 // `makeDb` — pg RESULT shape (`{ rows: [...] }`) off insertOne/updateRow, a bare array off `select`,
 // and a REAL single-row transaction so `set()` (used only to seed rows here) is exercised for real.
+// `calls` records every `select` invocation (table, where, options) so F-10 can assert `get()` asks
+// for `limit: 2` rather than merely happening to behave correctly with a larger page.
 function makeDb() {
   const rows = []
+  const calls = []
   function matches(row, where) {
     return Object.entries(where).every(([column, value]) => (row[column] ?? null) === (value ?? null))
   }
@@ -75,28 +96,52 @@ function makeDb() {
   }
   const handle = {
     rows,
+    calls,
     async selectOne(table, where) {
+      calls.push({ op: 'selectOne', table, where })
       return rows.find((row) => row.__table === table && matches(row, where)) || null
     },
-    async select(table, { where } = {}) {
+    async select(table, options = {}) {
+      calls.push({ op: 'select', table, options })
+      const { where } = options
       return rows.filter((row) => row.__table === table && matches(row, where || {}))
     },
     async insertOne(table, row) {
+      calls.push({ op: 'insertOne', table, row })
       const stored = { __table: table, created_at: 't0', updated_at: 't0', ...row }
       rows.push(stored)
       return result(stored)
     },
     async updateRow(table, set, where) {
+      calls.push({ op: 'updateRow', table, set, where })
       const target = rows.find((row) => row.__table === table && matches(row, where))
       if (!target) return result(null)
       Object.assign(target, set)
       return result(target)
     },
     async transaction(callback) {
+      calls.push({ op: 'transaction' })
       return callback(handle)
     },
   }
   return handle
+}
+
+// Injects an arbitrary raw row directly, bypassing `store.set()` — used only by F-09's read-read
+// race, which needs `select()` to see a row that `selectOne()` (called a statement earlier, inside
+// the SAME `get()`) does not.
+function seedRawRow(db, { tenantId = TENANT, workspaceId = null, actionId = ACTION_ID, externalSystemId }) {
+  db.rows.push({
+    __table: BINDING_TABLE,
+    id: `raw_${db.rows.length}`,
+    tenant_id: tenantId,
+    workspace_id: workspaceId,
+    action_id: actionId,
+    external_system_id: externalSystemId,
+    updated_by: null,
+    created_at: 't0',
+    updated_at: 't0',
+  })
 }
 
 function newStore() {
@@ -156,9 +201,13 @@ async function main() {
   })
 
   // -------------------------------------------------------------------------
-  // F-04 — THE GUARDRAIL. A NON-null hint that misses is NEVER widened, even though a null-workspace
-  // row exists — mirrors stock-preparation-source-binding.test.cjs:482 so this file's own suite
-  // fences the one behaviour direction B must never touch.
+  // F-04 — mirrors stock-preparation-source-binding.test.cjs:482: a NON-null hint that misses stays
+  // null even with a null-workspace row present. NOTE this alone does NOT fence the
+  // `scope.workspaceId !== null` guard in `get()` — with only a null-workspace row seeded, the
+  // sibling scan's own `workspace_id IS NOT NULL` filter throws that row away regardless of whether
+  // the guard ran, so deleting the guard leaves this test green. F-07 below is the real fence: it
+  // seeds a SINGLE sibling under a DIFFERENT workspace, which a guardless `get()` would wrongly
+  // return.
   // -------------------------------------------------------------------------
   await run('F-04 a non-null hint miss stays null and is never widened, even with a null-workspace row present', async () => {
     const { store } = newStore()
@@ -198,6 +247,88 @@ async function main() {
     await bind(store, { workspaceId: 'default', externalSystemId: 'sys_customer_plm' })
     await store.get({ tenantId: TENANT, actionId: ACTION_ID })
     assert.ok(db.rows.every((row) => row.__table === BINDING_TABLE))
+  })
+
+  // -------------------------------------------------------------------------
+  // F-07 — THE REAL FENCE for the `scope.workspaceId !== null` guard. A SINGLE sibling exists, under
+  // a DIFFERENT workspace than the one queried. A guardless `get()` would reach the sibling scan on
+  // this non-null miss, find exactly one candidate, and wrongly return it — which is precisely the
+  // "guess which workspace the admin meant" this guard exists to refuse. Unlike F-04 (only a
+  // null-workspace row seeded), THIS seed is not filtered away by the sibling scan's own
+  // `workspace_id IS NOT NULL` check, so deleting the guard changes this test's OUTCOME, not merely
+  // the suite total.
+  // -------------------------------------------------------------------------
+  await run("F-07 a non-null hint miss is never widened to a DIFFERENT workspace's single binding", async () => {
+    const { store } = newStore()
+    await bind(store, { workspaceId: 'ws_a', externalSystemId: 'sys_a' })
+
+    assert.equal(
+      await store.get({ tenantId: TENANT, workspaceId: 'ws_b', actionId: ACTION_ID }),
+      null,
+      "ws_b must never resolve to ws_a's single binding — that is a guess, not a match",
+    )
+  })
+
+  // -------------------------------------------------------------------------
+  // F-08 — the store refuses to construct without `db.select`, the same posture
+  // stock-preparation-source-binding.test.cjs already asserts for `db.transaction`. `select` backs
+  // the scope fallback's sibling scan; a fake (or a future host binding) that omits it must fail
+  // LOUDLY at construction, not with a bare `TypeError: db.select is not a function` the first time a
+  // null-hint caller's exact lookup happens to miss.
+  // -------------------------------------------------------------------------
+  await run('F-08 construction refuses a db that has every method except select', async () => {
+    const { select: _select, ...withoutSelect } = makeDb()
+    assert.throws(
+      () => createStockPreparationSourceBindingStore({ db: withoutSelect }),
+      /scoped db helper \(incl\. transaction\) is required/,
+    )
+  })
+
+  // -------------------------------------------------------------------------
+  // F-09 — READ-READ RACE. `get()`'s exact lookup (`selectOne`) and its sibling scan (`select`) are
+  // two separate statements, not one snapshot. Simulated here by forcing `selectOne` to report the
+  // null-workspace row absent while `select` — reading the SAME underlying rows — sees it, because a
+  // concurrent INSERT could land in that exact window on a real database. Precedence says the
+  // null-workspace row should win when it exists; discovering it only in the wider scan, after the
+  // exact check already said "absent", is a state `get()` cannot trust either half of — so it refuses
+  // outright rather than resolving to the workspace-scoped sibling (which would silently override the
+  // row that OUGHT to have won) or synthesizing an exact hit it never actually observed.
+  // -------------------------------------------------------------------------
+  await run('F-09 a read-read race — select() sees a null-workspace row selectOne() just reported absent — refuses outright', async () => {
+    const inner = makeDb()
+    seedRawRow(inner, { workspaceId: null, externalSystemId: 'sys_null_row' })
+    seedRawRow(inner, { workspaceId: 'ws_a', externalSystemId: 'sys_a' })
+    // Everything except `selectOne` behaves normally (reads the live `rows` the two seeds landed in);
+    // `selectOne` alone is forced to report "not found", simulating the exact statement having run a
+    // moment before the INSERT that `select` (a later statement) already sees.
+    const racyDb = {
+      ...inner,
+      async selectOne(table, where) {
+        inner.calls.push({ op: 'selectOne(forced-null, simulating a stale exact read)', table, where })
+        return null
+      },
+    }
+    const store = createStockPreparationSourceBindingStore({ db: racyDb, idGenerator: () => 'bind_race' })
+
+    const result = await store.get({ tenantId: TENANT, actionId: ACTION_ID })
+    assert.equal(result, null, 'the inconsistency between the two reads refuses rather than guessing')
+  })
+
+  // -------------------------------------------------------------------------
+  // F-10 — the fallback's sibling scan caps at `limit: 2`. The unique scope index guarantees at most
+  // one null-workspace row, so two rows back already proves "more than one workspace-scoped
+  // candidate" without a hint-less caller's every `get()` paging through a deployment's entire
+  // (tenant, action) row set just to refuse an ambiguous one.
+  // -------------------------------------------------------------------------
+  await run('F-10 the fallback query passes limit: 2 to db.select', async () => {
+    const { store, db } = newStore()
+    await bind(store, { workspaceId: 'default', externalSystemId: 'sys_customer_plm' })
+
+    await store.get({ tenantId: TENANT, actionId: ACTION_ID })
+
+    const selectCalls = db.calls.filter((call) => call.op === 'select')
+    assert.equal(selectCalls.length, 1, 'the fallback makes exactly one select() call')
+    assert.equal(selectCalls[0].options.limit, 2, 'and caps it at 2 rows')
   })
 
   const total = passed + failed

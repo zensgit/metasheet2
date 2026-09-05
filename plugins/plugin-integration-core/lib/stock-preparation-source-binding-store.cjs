@@ -138,23 +138,49 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
    * because here the specific (workspace-scoped) row is the one an admin actually wrote via the
    * workbench picker, and `workspace_id IS NULL` is the row nothing writes on its own).
    *
-   * Several call sites (reconcile, mvp-persist, source preflight, carry, export, handoff, the
-   * project board) invoke this WITHOUT a `workspaceId` at all, so their lookup is always
-   * `workspace_id IS NULL` — and a binding an admin saved under the UI's own `workspaceId=default`
-   * query hint is invisible to them even though it is the only binding that exists. When the exact
-   * null-workspace row is ABSENT and there is EXACTLY ONE workspace-scoped row for this
-   * `(tenant_id, action_id)`, that row is the only thing a human could have meant, so it is returned
-   * — annotated with `matchedWorkspaceId` (the workspace the returned row actually belongs to) and
-   * `scopeFallback: 'single_workspace_binding'`, so a caller that cares can tell a resolved fallback
-   * from an exact hit. An EXACT hit (null-workspace row present, or a non-null hint that matched) is
-   * annotated too, with `matchedWorkspaceId` echoing the input and `scopeFallback: null`, so the
-   * returned shape is uniform regardless of which path produced it.
+   * Several call sites (reconcile, mvp-persist, carry, export, handoff, the project board) invoke
+   * this WITHOUT a `workspaceId` at all, so their lookup is always `workspace_id IS NULL` — and a
+   * binding an admin saved under the UI's own `workspaceId=default` query hint is invisible to them
+   * even though it is the only binding that exists. (`stockPreparationSourcePreflight` at
+   * `http-routes.cjs:6163` calls `getTableAction({ actionId })` with NO `tenantId` at all, so
+   * `applyPersistedSourceBinding` throws `TABLE_ACTION_SOURCE_BINDING_SCOPE_REQUIRED` and the route's
+   * own `catch` swallows it — it never reaches this fallback, before or after this change. That is a
+   * separate, pre-existing bug this PR does not fix.) When the exact null-workspace row is ABSENT and
+   * there is EXACTLY ONE workspace-scoped row for this `(tenant_id, action_id)`, that row is the only
+   * thing a human could have meant, so it is returned — annotated with `matchedWorkspaceId` (the
+   * workspace the returned row actually belongs to) and `scopeFallback: 'single_workspace_binding'`,
+   * so a caller that cares can tell a resolved fallback from an exact hit. An EXACT hit
+   * (null-workspace row present, or a non-null hint that matched) is annotated too, with
+   * `matchedWorkspaceId` echoing the input and `scopeFallback: null`, so the returned shape is
+   * uniform regardless of which path produced it — a caller that does not care about either key can
+   * ignore them, and both currently DO: the `resolveSourceBinding` closure `http-routes.cjs` wires
+   * into the table-action registry extracts only `.externalSystemId`, and `stockPreparationSourceBindingGet`
+   * strips both keys before they reach the wire (`publicPersistedBinding`). The one real consumer is
+   * `loadTableActionSourceAdapter` (`http-routes.cjs`), which needs `matchedWorkspaceId` to find the
+   * external-system row a fallback-resolved id lives under — see its own comment for why.
    *
-   * Two or more workspace-scoped rows is refused exactly like zero — `null` — rather than guessed:
-   * fail-closed, not "pick the newest" or "pick alphabetically first". And a caller that named a
-   * SPECIFIC non-null workspace and missed still gets `null` with no widening at all: only the
-   * caller that supplied no hint is asking "what does this tenant actually have", so only that
-   * caller's miss is worth widening.
+   * FAIL-CLOSED, THREE WAYS:
+   *   * Two or more workspace-scoped rows is refused exactly like zero — `null` — rather than
+   *     guessed: "pick the newest" or "pick alphabetically first" is a decision this store does not
+   *     get to make quietly. NOTE: this means a SECOND workspace ever binding this action's source
+   *     makes the fallback go silently inert again for every hint-less caller — back to exactly
+   *     today's (pre-fallback) behaviour, with no error and no log line, because there is no
+   *     logger/event hook wired into this store to raise one. An operator who binds a second
+   *     workspace and does not also rebind (or delete) the first will not be told.
+   *   * A caller that named a SPECIFIC non-null workspace and missed still gets `null` with no
+   *     widening at all: only the caller that supplied no hint is asking "what does this tenant
+   *     actually have", so only that caller's miss is worth widening. TESTED as its own fence, not
+   *     merely implied by the null-hint tests: `stock-preparation-source-binding-scope-fallback.test.cjs`
+   *     F-07 seeds a SINGLE sibling under a workspace OTHER than the one queried and asserts the miss
+   *     stays a miss — deleting the `scope.workspaceId !== null` guard below fails THAT test on the
+   *     resolved id, not merely a red suite total (a bare null-hint test cannot tell the two apart:
+   *     with only a null-workspace row seeded, the sibling scan's own `workspace_id IS NOT NULL`
+   *     filter throws it away regardless of whether the guard ran).
+   *   * READ-READ RACE: the `exact` lookup and the sibling scan below are two separate statements,
+   *     not one snapshot. If a null-workspace row is inserted between them, the sibling scan can see
+   *     it even though `exact` just reported it absent. Resolving to some OTHER workspace's row in
+   *     that instant would risk overriding the very row precedence says should have won — so this
+   *     refuses (`null`, unlabelled) rather than trusting whichever statement happened to run first.
    */
   async function get(input = {}) {
     const scope = normalizeScope(input)
@@ -164,9 +190,18 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
     }
     if (scope.workspaceId !== null) return null
 
-    const siblings = allRows(await db.select(BINDING_TABLE, {
+    // `limit: 2` — the unique scope index guarantees at most one null-workspace row, so two rows
+    // back is already enough to prove "more than one workspace-scoped candidate" without fetching a
+    // deployment's entire (tenant, action) row set just to refuse it.
+    const raw = allRows(await db.select(BINDING_TABLE, {
       where: { tenant_id: scope.tenantId, action_id: scope.actionId },
-    })).filter((row) => row && row.workspace_id !== null && row.workspace_id !== undefined)
+      limit: 2,
+    }))
+    // The read-read race guard: if a null-workspace row shows up here despite `exact` just reporting
+    // it absent, do not fall through to the sibling scan below at all.
+    if (raw.some((row) => row && (row.workspace_id === null || row.workspace_id === undefined))) return null
+
+    const siblings = raw.filter((row) => row && row.workspace_id !== null && row.workspace_id !== undefined)
     if (siblings.length !== 1) return null
     const [only] = siblings
     return {
