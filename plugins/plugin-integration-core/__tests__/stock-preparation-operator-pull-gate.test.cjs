@@ -36,6 +36,14 @@
 //        (verified claim preferred, contradicting header refused, tenantless refused, steering
 //        refused, HOST vouches for the pairing) — and the legacy branch returns before any of it, so
 //        no existing caller changes shape.
+//   P-10 W4 THE TENANT-CLAIM HARD DOOR, both halves: with
+//        MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED armed, a tenant that was carried rather than
+//        PROVEN is refused before any host work; with it unset (the default) every one of those same
+//        request shapes behaves exactly as it does today. P-10g additionally pins that arming it
+//        changes NONE of P-06's operator-scope refusals — the door backs that scope, it does not
+//        shadow it — and states, rather than leaving to be discovered, the one thing it does cost:
+//        a claimless operator, admitted today, is refused until their token carries the claim.
+//        (P-09 is above, on the data plane; this block is P-10 because that number was taken.)
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -950,6 +958,232 @@ function everyLargeBomRouteIsInTheSplit() {
   )
 }
 
+// ---------------------------------------------------------------------------
+// P-10 — W4: THE TENANT-CLAIM HARD DOOR (MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED)
+// ---------------------------------------------------------------------------
+//
+// NUMBERING. P-09 above is already taken (the pull's data-plane identity), so this block is P-10.
+//
+// WHAT IT PINS. `auth/jwt-middleware.ts` copies the `x-tenant-id` REQUEST HEADER onto `user.tenantId`
+// whenever the verified token carries no tenant claim. Every tenancy check in http-routes.cjs that
+// reads `user.tenantId` is therefore, on a claimless deployment, comparing a request header against
+// itself — which is why the operator plane was moved to `resolveOperatorValueScope` in #5445. The
+// LEGACY `integration:*` tiers were left where they were, because narrowing them is a deployment
+// decision rather than a code one. W4 makes the narrowing available and leaves it OFF: with the flag
+// set, the tenant a route acts under must have come from the VERIFIED TOKEN PAYLOAD.
+//
+// The two halves of the claim, and both are asserted below:
+//   ON  — a principal whose tenant is only carried (or absent) is refused, before any host work.
+//   OFF — every one of those same requests behaves exactly as it does today. That half is the one
+//         that makes the flag safe to merge, so it is asserted request-shape for request-shape
+//         rather than in the abstract.
+const TENANT_CLAIM_FLAG = 'MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED'
+
+/** Run `fn` with the flag in a known state, and leave the environment exactly as it was found. */
+async function withTenantClaimFlag(value, fn) {
+  const had = Object.prototype.hasOwnProperty.call(process.env, TENANT_CLAIM_FLAG)
+  const previous = process.env[TENANT_CLAIM_FLAG]
+  if (value === null) delete process.env[TENANT_CLAIM_FLAG]
+  else process.env[TENANT_CLAIM_FLAG] = value
+  try {
+    return await fn()
+  } finally {
+    if (had) process.env[TENANT_CLAIM_FLAG] = previous
+    else delete process.env[TENANT_CLAIM_FLAG]
+  }
+}
+
+// THE PRINCIPAL THE FLAG EXISTS FOR: a platform admin on a claimless deployment, whose `tenantId`
+// the middleware filled from the header they themselves sent. Indistinguishable, today, from an
+// admin whose token really does say `tenant-b`.
+const HEADER_FILLED_ADMIN = Object.freeze({ id: 'u_hdr_adm', tenantId: 'tenant-evil', roles: ['admin'], permissions: ['integration:admin'] })
+// The same admin with NO tenant at all — `isTenantlessPlatformAdmin`, the one principal
+// `resolveTenantId` still lets steer the tenant from the request.
+const TENANTLESS_ADMIN = Object.freeze({ id: 'u_tl_adm', roles: ['admin'], permissions: ['integration:admin'] })
+
+/** The five request shapes the flag is about, named once and replayed under ON and OFF. */
+const TENANT_CLAIM_CASES = Object.freeze([
+  {
+    id: 'P-10a',
+    what: 'a header-filled admin with NO verified claim',
+    call: { user: HEADER_FILLED_ADMIN },
+    on: 'OPERATOR_SCOPE_TENANT_REQUIRED',
+  },
+  {
+    id: 'P-10b',
+    what: 'the same admin naming the header tenant explicitly on the query string',
+    // The explicit tenant is not what decides this: provenance is checked FIRST, so a caller with no
+    // claim is refused for having no claim, whatever else the request says.
+    call: { user: HEADER_FILLED_ADMIN, query: { tenantId: 'tenant-evil' } },
+    on: 'OPERATOR_SCOPE_TENANT_REQUIRED',
+  },
+  {
+    id: 'P-10c',
+    what: 'a legacy integration:read holder whose token DOES carry its tenant',
+    // Read-only tier, so this one is asserted on DRY-RUN alone: `integration:read` is refused APPLY
+    // today for want of the write half (P-04), and replaying it there would measure that, not this.
+    routes: [DRY_RUN],
+    call: { user: INTEGRATION_READER, authenticatedTenantId: TENANT },
+    on: null, // admitted — the flag narrows provenance, not permission
+  },
+  {
+    id: 'P-10c2',
+    what: 'a legacy integration:write holder whose token DOES carry its tenant',
+    routes: [APPLY],
+    call: { user: INTEGRATION_WRITER, authenticatedTenantId: TENANT },
+    on: null,
+  },
+  {
+    id: 'P-10d',
+    what: 'a tenantless platform admin steering to another tenant from the query string',
+    call: { user: TENANTLESS_ADMIN, authenticatedTenantId: TENANT, query: { tenantId: TENANT_B } },
+    on: 'OPERATOR_SCOPE_TENANT_MISMATCH',
+  },
+  {
+    id: 'P-10e',
+    what: 'a carried tenant that contradicts the verified claim',
+    call: { user: HEADER_FILLED_ADMIN, authenticatedTenantId: TENANT },
+    on: 'OPERATOR_SCOPE_TENANT_CONTRADICTED',
+  },
+])
+
+async function theTenantClaimDoorRefusesUnprovenTenantsWhenArmed() {
+  const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
+
+  // P-10a..e — ARMED. Each shape gets its own named refusal, and none of them costs a host call:
+  // the door is inside the gate helpers every one of these routes calls first.
+  await withTenantClaimFlag('true', async () => {
+    const routes = mount()
+    for (const testCase of TENANT_CLAIM_CASES) {
+      for (const route of testCase.routes || [DRY_RUN, APPLY]) {
+        routes.resetHostCalls()
+        const code = await refusalCode(routes, { ...route, ...testCase.call, actionId: pull })
+        if (testCase.on === null) {
+          assert.notEqual(
+            code,
+            'OPERATOR_SCOPE_TENANT_REQUIRED',
+            `${testCase.id}: ${testCase.what} keeps its access — the flag narrows PROVENANCE, not permission`,
+          )
+          assert.equal(
+            await gateVerdict(routes, { ...route, ...testCase.call, actionId: pull }),
+            'admitted',
+            `${testCase.id}: ${testCase.what} is admitted with the door armed`,
+          )
+          continue
+        }
+        assert.equal(code, testCase.on, `${testCase.id}: ${testCase.what} is refused on ${route.routePath}`)
+        assert.equal(
+          routes.hostCallCount(),
+          0,
+          `${testCase.id}: …and reaches no host API doing it — the refusal precedes every sheet and record touch`,
+        )
+      }
+    }
+  })
+
+  // P-10f — DISARMED IS TODAY, request shape for request shape. All five walk through right now,
+  // which is the fact that makes the flag necessary and the default that makes it safe to merge.
+  await withTenantClaimFlag(null, async () => {
+    const routes = mount()
+    for (const testCase of TENANT_CLAIM_CASES) {
+      for (const route of testCase.routes || [DRY_RUN, APPLY]) {
+        assert.equal(
+          await gateVerdict(routes, { ...route, ...testCase.call, actionId: pull }),
+          'admitted',
+          `${testCase.id}: with the flag unset, ${testCase.what} behaves exactly as it does today`,
+        )
+      }
+    }
+  })
+
+  // …and an explicitly falsy value is the same as unset. A gate whose OFF state depended on the var
+  // being absent would arm itself the first time someone wrote `=false` into an env file.
+  for (const value of ['false', '', 'TRUE_ISH', '1', 'yes']) {
+    await withTenantClaimFlag(value, async () => {
+      const routes = mount()
+      assert.equal(
+        await gateVerdict(routes, { ...DRY_RUN, user: HEADER_FILLED_ADMIN, actionId: pull }),
+        'admitted',
+        `P-10f: ${JSON.stringify(value)} is not 'true', so the door stays open`,
+      )
+    })
+  }
+  // Only the exact token arms it (trimmed and case-folded, same idiom as every other MULTITABLE_ gate).
+  for (const value of ['true', ' TRUE ', 'True']) {
+    await withTenantClaimFlag(value, async () => {
+      const routes = mount()
+      assert.equal(
+        await refusalCode(routes, { ...DRY_RUN, user: HEADER_FILLED_ADMIN, actionId: pull }),
+        'OPERATOR_SCOPE_TENANT_REQUIRED',
+        `P-10f: ${JSON.stringify(value)} arms the door`,
+      )
+    })
+  }
+}
+
+// P-10g — THE OPERATOR TIER'S OWN REFUSALS ARE UNCHANGED BY THE FLAG.
+//
+// The operator branch already resolves the host-vouched scope, and it does so BEFORE the route
+// reaches `resolveTenantId`. So the five refusals P-06 pins must answer with the same code whether
+// the door is armed or not: if arming it changed any of them, the door would be shadowing the scope
+// rather than backing it, and P-06's assurance would have quietly moved to a flagged code path.
+async function theOperatorScopeRefusalsAreIdenticalArmedAndDisarmed() {
+  const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
+  const tenantless = { id: 'u_op_tenantless', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] }
+  const combinations = [
+    { what: 'a steered tenant', mountOptions: undefined, call: { user: OPERATOR, query: { tenantId: TENANT_B } }, expected: 'OPERATOR_SCOPE_TENANT_MISMATCH' },
+    { what: 'a contradicted tenant', mountOptions: undefined, call: { user: OPERATOR, authenticatedTenantId: TENANT_B }, expected: 'OPERATOR_SCOPE_TENANT_CONTRADICTED' },
+    { what: 'a non-member', mountOptions: { tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: false } } } }, call: { user: OPERATOR }, expected: 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED' },
+    { what: 'no membership seam', mountOptions: { tenantPrincipalDirectory: null }, call: { user: OPERATOR }, expected: 'OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE' },
+    { what: 'a tenantless operator', mountOptions: undefined, call: { user: tenantless }, expected: 'OPERATOR_SCOPE_TENANT_REQUIRED' },
+  ]
+  for (const flag of [null, 'true']) {
+    await withTenantClaimFlag(flag, async () => {
+      for (const combination of combinations) {
+        const routes = mount(combination.mountOptions)
+        for (const route of [DRY_RUN, APPLY]) {
+          routes.resetHostCalls()
+          assert.equal(
+            await refusalCode(routes, { ...route, ...combination.call, actionId: pull }),
+            combination.expected,
+            `P-10g: ${combination.what} answers the same with the door ${flag === 'true' ? 'ARMED' : 'disarmed'}`,
+          )
+          assert.equal(routes.hostCallCount(), 0, 'P-10g: and costs no host work either way')
+        }
+      }
+    })
+  }
+
+  // WHAT THE FLAG *DOES* COST THE OPERATOR TIER, STATED RATHER THAN LEFT TO BE DISCOVERED IN 222.
+  // An operator whose token carries no tenant claim is admitted TODAY (the host membership check is
+  // what makes that safe) and is REFUSED once the door is armed — not by the scope, but by
+  // `resolveTenantId` downstream of it. That is the whole blast radius of the flag on this plane,
+  // and it is why the rollout order in the delivery guide re-issues tokens before setting the var.
+  await withTenantClaimFlag(null, async () => {
+    const routes = mount()
+    assert.equal(
+      await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull }),
+      'admitted',
+      'P-10g: a claimless operator is admitted today',
+    )
+  })
+  await withTenantClaimFlag('true', async () => {
+    const routes = mount()
+    routes.resetHostCalls()
+    assert.equal(
+      await refusalCode(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull }),
+      'OPERATOR_SCOPE_TENANT_REQUIRED',
+      'P-10g: …and refused once the door is armed, because their tenant was never proven',
+    )
+    assert.equal(routes.hostCallCount(), 0, 'P-10g: with no host work')
+    assert.equal(
+      await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull, authenticatedTenantId: TENANT }),
+      'admitted',
+      'P-10g: the SAME operator, once their token carries the claim, is admitted again — the fix is a token, not a grant',
+    )
+  })
+}
+
 async function main() {
   await theOperatorPullsButNeitherReconcilesNorArchives()
   await theHumanConfirmLoopIsReachableByTheOperator()
@@ -958,6 +1192,8 @@ async function main() {
   await theOperatorReachesTheBoundedBackgroundChannel()
   everyLargeBomRouteIsInTheSplit()
   await theOperatorBranchCannotBeSteeredAcrossTenants()
+  await theTenantClaimDoorRefusesUnprovenTenantsWhenArmed()
+  await theOperatorScopeRefusalsAreIdenticalArmedAndDisarmed()
   await theWideningIsNotAWildcardOverTheTableActionNamespace()
   await theLegacyTiersAreExactlyWhatTheyWere()
   theRuleIsDeclaredOnceAndTheSplitIsNamed()
