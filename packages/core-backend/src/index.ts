@@ -126,6 +126,7 @@ import { getPoolStats } from './db/pg'
 import { getBuildInfo } from './config/build-info'
 import { isDatabaseSchemaError } from './utils/database-errors'
 import { startOperationAuditRetention } from './audit/operation-audit-retention'
+import { startAuditLogPartitionEnsure } from './audit/audit-partition-schedule'
 import { startMultitableAttachmentCleanup, startMultitableAttachmentBlobPurge } from './multitable/attachment-orphan-retention'
 import { startMetaRevisionRetention } from './multitable/meta-revision-retention'
 import { startFilesOrphanBlobRetention } from './services/files-orphan-blob-retention'
@@ -537,6 +538,7 @@ export class MetaSheetServer {
   private observabilityShutdown?: () => Promise<void>
   private observabilityEnabled = false
   private stopOperationAuditRetention?: () => void
+  private stopAuditPartitionEnsure?: () => void
   private stopMultitableAttachmentCleanup?: () => void
   private stopMetaRevisionRetention?: () => void
   private stopFilesOrphanBlobRetention?: () => void
@@ -3164,6 +3166,13 @@ export class MetaSheetServer {
     }))
     shutdownTasks.push(Promise.resolve().then(() => {
       try {
+        this.stopAuditPartitionEnsure?.()
+      } catch (err) {
+        this.logger.warn(`Audit log partition ensure stop error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }))
+    shutdownTasks.push(Promise.resolve().then(() => {
+      try {
         this.automationService?.shutdown()
         this.automationServiceReady = false
         setAutomationServiceInstance(null)
@@ -4379,6 +4388,7 @@ export class MetaSheetServer {
     // Background tasks (after server starts listening)
     if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
       this.stopOperationAuditRetention = startOperationAuditRetention({ logger: this.logger })
+      this.stopAuditPartitionEnsure = startAuditLogPartitionEnsure({ logger: this.logger })
       this.stopMultitableAttachmentCleanup = startMultitableAttachmentCleanup({ logger: this.logger })
       this.stopMetaRevisionRetention = startMetaRevisionRetention({ logger: this.logger })
       this.stopFilesOrphanBlobRetention = startFilesOrphanBlobRetention({ logger: this.logger })

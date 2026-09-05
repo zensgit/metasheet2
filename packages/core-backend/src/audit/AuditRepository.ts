@@ -1,5 +1,8 @@
 import type { Pool } from 'pg';
 import { query, pool } from '../db/pg';
+import { Logger } from '../core/logger';
+
+const logger = new Logger('AuditRepository');
 
 export interface AuditLogData {
   eventType: string;
@@ -599,5 +602,63 @@ export class AuditRepository {
         END IF;
       END $$;
     `);
+  }
+
+  /**
+   * Proactively ensure the audit_logs partitions for the database server's current AND
+   * next month both exist, in one transaction (a single DO block: PostgreSQL runs it
+   * atomically). Each of the two CREATE TABLE statements is idempotent (guarded by a
+   * to_regclass existence check plus IF NOT EXISTS), and both share the same
+   * pg_advisory_xact_lock scheme as ensureCurrentMonthPartition so a concurrent caller
+   * (this method, ensureCurrentMonthPartition, or another process) can never race to
+   * create the same partition twice.
+   *
+   * Unlike ensureCurrentMonthPartition (invoked reactively, after an insert already
+   * failed on a missing current-month partition — see createAuditLog / #5506), this is
+   * meant to be called proactively (e.g. on startup / a daily timer, see
+   * audit-partition-schedule.ts) so the NEXT month's partition exists before the month
+   * rolls over and writes would otherwise start failing.
+   *
+   * Never throws: a failure here must not block application startup or any caller.
+   * Errors are logged (message only, no connection details) and swallowed; the caller
+   * gets `false` and may retry later (e.g. the reactive self-heal in createAuditLog
+   * still covers the current month if this proactive path never ran).
+   */
+  async ensurePartitionsForCurrentAndNextMonth(): Promise<boolean> {
+    try {
+      await query(`
+        DO $$
+        DECLARE
+          current_month_date DATE := DATE_TRUNC('month', CURRENT_DATE);
+          next_month_date DATE := DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month';
+          month_after_next_date DATE := DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '2 month';
+          current_partition_name TEXT := 'audit_logs_' || TO_CHAR(DATE_TRUNC('month', CURRENT_DATE), 'YYYY_MM');
+          next_partition_name TEXT := 'audit_logs_' || TO_CHAR(DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month', 'YYYY_MM');
+        BEGIN
+          PERFORM pg_advisory_xact_lock(hashtext('audit_logs_partition'), hashtext(current_partition_name));
+          IF to_regclass(current_partition_name) IS NULL THEN
+            EXECUTE format(
+              'CREATE TABLE IF NOT EXISTS %I PARTITION OF audit_logs FOR VALUES FROM (%L) TO (%L)',
+              current_partition_name, current_month_date, next_month_date
+            );
+          END IF;
+
+          PERFORM pg_advisory_xact_lock(hashtext('audit_logs_partition'), hashtext(next_partition_name));
+          IF to_regclass(next_partition_name) IS NULL THEN
+            EXECUTE format(
+              'CREATE TABLE IF NOT EXISTS %I PARTITION OF audit_logs FOR VALUES FROM (%L) TO (%L)',
+              next_partition_name, next_month_date, month_after_next_date
+            );
+          END IF;
+        END $$;
+      `);
+      return true;
+    } catch (error) {
+      logger.warn(
+        'Failed to ensure current/next month audit_logs partitions',
+        error instanceof Error ? error : new Error(String(error)),
+      );
+      return false;
+    }
   }
 }
