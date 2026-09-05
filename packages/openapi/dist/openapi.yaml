@@ -8626,7 +8626,9 @@ components:
         - ordinal
         - status
         - promptVersion
-        - targets
+        - imagePngBase64
+        - imageWidth
+        - imageHeight
         - options
       properties:
         challengeId:
@@ -8645,15 +8647,21 @@ components:
         promptVersion:
           type: string
           enum:
-            - symbol-number-v1
-        targets:
-          type: array
-          minItems: 2
-          maxItems: 2
-          uniqueItems: true
-          items:
-            type: string
-            minLength: 1
+            - raster-position-v2
+        imagePngBase64:
+          type: string
+          format: byte
+          minLength: 12
+          maxLength: 88000
+          pattern: ^iVBORw0KGgo[A-Za-z0-9+/]*={0,2}$
+        imageWidth:
+          type: integer
+          enum:
+            - 360
+        imageHeight:
+          type: integer
+          enum:
+            - 260
         options:
           type: array
           minItems: 6
@@ -8666,13 +8674,29 @@ components:
       additionalProperties: false
       required:
         - optionId
-        - label
+        - x
+        - 'y'
+        - width
+        - height
       properties:
         optionId:
           $ref: '#/components/schemas/ElearningUuid'
-        label:
-          type: string
-          minLength: 1
+        x:
+          type: integer
+          minimum: 0
+          maximum: 359
+        'y':
+          type: integer
+          minimum: 0
+          maximum: 259
+        width:
+          type: integer
+          minimum: 1
+          maximum: 360
+        height:
+          type: integer
+          minimum: 1
+          maximum: 260
     ElearningWatchChallengeAckRequest:
       type: object
       additionalProperties: false
@@ -21352,12 +21376,17 @@ paths:
         and watch-challenge flags to equal the exact literal `true`. The server
         derives organization and actor.
 
-        The server issues an immutable six-option prompt and two ordered target
-        labels. The client submits exactly
+        The server issues an immutable PNG prompt with six randomly bound hit
+        regions. The response exposes only
 
-        two distinct opaque option identifiers. An on-time correct
-        acknowledgement commits only the provisional eligible watch interval; a
-        late acknowledgement
+        raster pixels, region geometry, and opaque option identifiers; target
+        symbols, option labels, and the
+
+        expected selection are never returned as structured fields. The client
+        submits exactly two distinct opaque
+
+        option identifiers. An on-time correct acknowledgement commits only the
+        provisional eligible watch interval; a late acknowledgement
 
         discards that interval and resumes the existing watch session. Same
         requestId and logical payload replay

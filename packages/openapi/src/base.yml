@@ -7118,7 +7118,7 @@ components:
     ElearningWatchChallenge:
       type: object
       additionalProperties: false
-      required: [challengeId, deadlineAt, ordinal, status, promptVersion, targets, options]
+      required: [challengeId, deadlineAt, ordinal, status, promptVersion, imagePngBase64, imageWidth, imageHeight, options]
       properties:
         challengeId:
           $ref: '#/components/schemas/ElearningUuid'
@@ -7133,15 +7133,19 @@ components:
           enum: [challenged, paused]
         promptVersion:
           type: string
-          enum: [symbol-number-v1]
-        targets:
-          type: array
-          minItems: 2
-          maxItems: 2
-          uniqueItems: true
-          items:
-            type: string
-            minLength: 1
+          enum: [raster-position-v2]
+        imagePngBase64:
+          type: string
+          format: byte
+          minLength: 12
+          maxLength: 88000
+          pattern: '^iVBORw0KGgo[A-Za-z0-9+/]*={0,2}$'
+        imageWidth:
+          type: integer
+          enum: [360]
+        imageHeight:
+          type: integer
+          enum: [260]
         options:
           type: array
           minItems: 6
@@ -7152,13 +7156,26 @@ components:
     ElearningWatchChallengeOption:
       type: object
       additionalProperties: false
-      required: [optionId, label]
+      required: [optionId, x, y, width, height]
       properties:
         optionId:
           $ref: '#/components/schemas/ElearningUuid'
-        label:
-          type: string
-          minLength: 1
+        x:
+          type: integer
+          minimum: 0
+          maximum: 359
+        y:
+          type: integer
+          minimum: 0
+          maximum: 259
+        width:
+          type: integer
+          minimum: 1
+          maximum: 360
+        height:
+          type: integer
+          minimum: 1
+          maximum: 260
     ElearningWatchChallengeAckRequest:
       type: object
       additionalProperties: false

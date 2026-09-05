@@ -9524,8 +9524,10 @@ export interface paths {
          * Confirm an active or timed-out watch challenge
          * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires the master, content, media,
          *     and watch-challenge flags to equal the exact literal `true`. The server derives organization and actor.
-         *     The server issues an immutable six-option prompt and two ordered target labels. The client submits exactly
-         *     two distinct opaque option identifiers. An on-time correct acknowledgement commits only the provisional eligible watch interval; a late acknowledgement
+         *     The server issues an immutable PNG prompt with six randomly bound hit regions. The response exposes only
+         *     raster pixels, region geometry, and opaque option identifiers; target symbols, option labels, and the
+         *     expected selection are never returned as structured fields. The client submits exactly two distinct opaque
+         *     option identifiers. An on-time correct acknowledgement commits only the provisional eligible watch interval; a late acknowledgement
          *     discards that interval and resumes the existing watch session. Same requestId and logical payload replay
          *     the stored result; a different payload with the same requestId returns a values-free conflict.
          */
@@ -19595,13 +19597,21 @@ export interface components {
             /** @enum {string} */
             status: "challenged" | "paused";
             /** @enum {string} */
-            promptVersion: "symbol-number-v1";
-            targets: string[];
+            promptVersion: "raster-position-v2";
+            /** Format: byte */
+            imagePngBase64: string;
+            /** @enum {integer} */
+            imageWidth: 360;
+            /** @enum {integer} */
+            imageHeight: 260;
             options: components["schemas"]["ElearningWatchChallengeOption"][];
         };
         ElearningWatchChallengeOption: {
             optionId: components["schemas"]["ElearningUuid"];
-            label: string;
+            x: number;
+            y: number;
+            width: number;
+            height: number;
         };
         ElearningWatchChallengeAckRequest: {
             requestId: components["schemas"]["ElearningUuid"];

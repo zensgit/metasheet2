@@ -11662,7 +11662,9 @@
           "ordinal",
           "status",
           "promptVersion",
-          "targets",
+          "imagePngBase64",
+          "imageWidth",
+          "imageHeight",
           "options"
         ],
         "properties": {
@@ -11687,18 +11689,27 @@
           "promptVersion": {
             "type": "string",
             "enum": [
-              "symbol-number-v1"
+              "raster-position-v2"
             ]
           },
-          "targets": {
-            "type": "array",
-            "minItems": 2,
-            "maxItems": 2,
-            "uniqueItems": true,
-            "items": {
-              "type": "string",
-              "minLength": 1
-            }
+          "imagePngBase64": {
+            "type": "string",
+            "format": "byte",
+            "minLength": 12,
+            "maxLength": 88000,
+            "pattern": "^iVBORw0KGgo[A-Za-z0-9+/]*={0,2}$"
+          },
+          "imageWidth": {
+            "type": "integer",
+            "enum": [
+              360
+            ]
+          },
+          "imageHeight": {
+            "type": "integer",
+            "enum": [
+              260
+            ]
           },
           "options": {
             "type": "array",
@@ -11716,15 +11727,34 @@
         "additionalProperties": false,
         "required": [
           "optionId",
-          "label"
+          "x",
+          "y",
+          "width",
+          "height"
         ],
         "properties": {
           "optionId": {
             "$ref": "#/components/schemas/ElearningUuid"
           },
-          "label": {
-            "type": "string",
-            "minLength": 1
+          "x": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 359
+          },
+          "y": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 259
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 360
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 260
           }
         }
       },
@@ -30484,7 +30514,7 @@
       "post": {
         "operationId": "acknowledgeElearningWatchChallenge",
         "summary": "Confirm an active or timed-out watch challenge",
-        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires the master, content, media,\nand watch-challenge flags to equal the exact literal `true`. The server derives organization and actor.\nThe server issues an immutable six-option prompt and two ordered target labels. The client submits exactly\ntwo distinct opaque option identifiers. An on-time correct acknowledgement commits only the provisional eligible watch interval; a late acknowledgement\ndiscards that interval and resumes the existing watch session. Same requestId and logical payload replay\nthe stored result; a different payload with the same requestId returns a values-free conflict.\n",
+        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires the master, content, media,\nand watch-challenge flags to equal the exact literal `true`. The server derives organization and actor.\nThe server issues an immutable PNG prompt with six randomly bound hit regions. The response exposes only\nraster pixels, region geometry, and opaque option identifiers; target symbols, option labels, and the\nexpected selection are never returned as structured fields. The client submits exactly two distinct opaque\noption identifiers. An on-time correct acknowledgement commits only the provisional eligible watch interval; a late acknowledgement\ndiscards that interval and resumes the existing watch session. Same requestId and logical payload replay\nthe stored result; a different payload with the same requestId returns a values-free conflict.\n",
         "security": [
           {
             "bearerAuth": []
