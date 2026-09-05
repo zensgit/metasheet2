@@ -19,8 +19,11 @@
 // `workspace_id IS NULL` row is absent, look for this `(tenant_id, action_id)`'s OTHER
 // (`workspace_id IS NOT NULL`) rows. Exactly one -> return it, annotated. Zero or two-or-more ->
 // `null`, same as today: this is fail-closed, not "guess". A NON-null hint that misses is NEVER
-// widened — that behaviour is asserted independently at
-// stock-preparation-source-binding.test.cjs:482, and F-07 below is THIS file's own fence for it:
+// widened — that behaviour is asserted independently by stock-preparation-source-binding.test.cjs's
+// R-08 scope-isolation case (`assert.equal(await store.get({ ... workspaceId: 'ws_2', ... }), null)`
+// on an unbound ws_2 scope — referenced by ASSERTION TEXT, not a line number, because a line number
+// drifts the moment an earlier line in that file changes; this exact drift is what moved that
+// assertion from :482 to :486 earlier in this same PR), and F-07 below is THIS file's own fence for it:
 // F-04 (a non-null miss with only a NULL-workspace row seeded) does NOT actually exercise the
 // `scope.workspaceId !== null` guard, because the sibling scan's own `IS NOT NULL` filter would
 // throw that row away regardless of whether the guard ran — deleting the guard leaves F-04 green.
@@ -201,8 +204,9 @@ async function main() {
   })
 
   // -------------------------------------------------------------------------
-  // F-04 — mirrors stock-preparation-source-binding.test.cjs:482: a NON-null hint that misses stays
-  // null even with a null-workspace row present. NOTE this alone does NOT fence the
+  // F-04 — mirrors stock-preparation-source-binding.test.cjs's R-08 scope-isolation assertion (a
+  // `get({ ..., workspaceId: 'ws_2', ... })` miss on an unbound scope returns `null`): a NON-null
+  // hint that misses stays null even with a null-workspace row present. NOTE this alone does NOT fence the
   // `scope.workspaceId !== null` guard in `get()` — with only a null-workspace row seeded, the
   // sibling scan's own `workspace_id IS NOT NULL` filter throws that row away regardless of whether
   // the guard ran, so deleting the guard leaves this test green. F-07 below is the real fence: it

@@ -141,7 +141,13 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
    * Several call sites (reconcile, mvp-persist, carry, export, handoff, the project board) invoke
    * this WITHOUT a `workspaceId` at all, so their lookup is always `workspace_id IS NULL` — and a
    * binding an admin saved under the UI's own `workspaceId=default` query hint is invisible to them
-   * even though it is the only binding that exists. (`stockPreparationSourcePreflight` at
+   * even though it is the only binding that exists. That is BINDING RESOLUTION only — knowing which
+   * `externalSystemId` is bound. Of those six, only reconcile and mvp-persist go on to actually LOAD
+   * that external system (through `loadTableActionSourceAdapter`, alongside dry-run/apply/the
+   * large-BOM run — none of which need THIS fallback themselves, since they carry their own
+   * workspace hint); carry/export/handoff/the project board never load it, so F3's separate fix in
+   * `loadTableActionSourceAdapter` (see its own comment) is not theirs to benefit from either way.
+   * (`stockPreparationSourcePreflight` at
    * `http-routes.cjs:6163` calls `getTableAction({ actionId })` with NO `tenantId` at all, so
    * `applyPersistedSourceBinding` throws `TABLE_ACTION_SOURCE_BINDING_SCOPE_REQUIRED` and the route's
    * own `catch` swallows it — it never reaches this fallback, before or after this change. That is a
