@@ -8,6 +8,16 @@
 2. **去重必须覆盖全部已展开零件,不只是根**:维护"本次已展开的 componentSourceId 集合"(含子件),子树根命中即跳过并计数 `subtreeRootsSkippedAlreadyExpanded`。原因:零件 B 既是订单根 A 的子件、又是子树根时,`idempotencyKey` 分别为 `{P,B,"A",["A","B"]}` 与 `{P,B,null,["B"]}`,规划器视为两行,写入后导出双算。另:同一零件在子树内有多张表头(600028853 有 2 张)→ 按 `part_id` 去重并按版本择一,否则同键两根必然 `duplicate_expanded_key` 挂起。
 3. **读预算要真的存在**:`maxReadCount`/`maxElapsedMs` 是可选项,222 未设即不生效;`maxPages` 是每次 `readAll` 内部归零的分页数,不是总量。要求:`maxSubtreeDepth ≤ 4`、`maxSubtreeNodes ≤ 2000`、`maxSubtreeRoots ≤ 500` 做**代码硬顶**(normalize 时超顶即拒);**启用 `projectSubtree` 时强制要求计划带 `maxReadCount`**,否则 normalize 报错。超限一律 global error(`subtree_node_limit_exceeded`/`subtree_root_limit_exceeded`/`subtree_cycle_detected`),不进 `LARGE_BOM_BOUNDED_ERROR_TYPES`。
 
+
+补充四条(同样是硬要求,已随规格下发给实现者):
+
+4. **预检 values-free 自检**:`assertSourcePreflightValuesFree` 对叶子字符串按闭合词表校验,未登记即 refuse → 所有源的预检 500。新增的 `topology.subtree` 字符串叶子(configured/declared/measured 等)必须登记进 `CLOSED_VOCABULARY_LEAF_FIELDS`(或改布尔/数字);新 blocker 进 blocker 词表。加测试:启用 project-subtree 的预检结果能过自检。
+5. **declaredBridge 单值**:400 文案"must name one of the two bridge candidates"与 `allowed` 列表要随 `DECLARABLE_BRIDGES` 生成;模块头注释写明声明 project-subtree **不能**清掉 `bom_store_signals_conflict`。
+6. **定时拉取的服务账号必须租户绑定**:`requireTableActionAccess` 对持 integration legacyGate 的用户直接放行、跳过 operator-scope 租户校验,只剩 `resolveTenantId`;无租户声明的 token 会被 `x-tenant-id` 请求头决定租户。脚本发请求前解码(不验签)JWT payload,无 `tenantId` 声明即拒绝运行(`--allow-tenantless` 显式放开,默认关);runbook 同样写明。
+7. **`lastPulledAt` 的静默偏差**:`readPullTargetRowFacts` 分页到 `PULL_TARGET_MAX_PAGES` 后返回 `bounded:true`,此时对子集取 max 偏小且不可见。`bounded===true` 时不报 max:`lastPulledAt=null` + `lastPulledAtBounded:true`,前端显示"行数超过看板上限,未统计"。
+
+审查里被实证**推翻**的一条:第 10 条"仓库内无证据表明 `BomHeadInfo.path_id` 存在" —— 2026-09-05 在客户测试 PLM 上只读执行 `SELECT bom_id, part_id, path_id, SysVer FROM DN_PDM_BomHeadInfo` 与 `SELECT OBJ_ID, Parent_OBJ_ID FROM DN_PDM_PathInfo` 均成功,列名以此为准(夹具同名)。第 12 条"缺件行不阻止 apply、静默丢 40–60%"与 222 实测不符:缺件行由规划器以 hold 进入确认队列,`plan.valid=false` → `manual_confirm_required`,apply 被挡(2026-09-04 项目 1-20232045 实测);保留为待复核而非事实。
+
 ## 1. 子树桥接方案
 
 **推荐**:把「项目→文件夹子树→BomHeadInfo.path_id→以 part_id 为根」做成读取计划里的一个**可选块** `projectSubtree`(默认缺省=关闭),在展开器里作为**订单循环之后追加的第二段根发现**实现,复用现有的 readPart / rowFromPart / pushRow / expandChildren,一行订单逻辑不动。预检侧不要把 project-subtree 当成第三个「独占载体」塞进 detectedBridge 的判定——那会撞上 planAssumedBridge/matchesConfigured 与「声明与实测矛盾」;正确做法是:值词表加 project-subtree(让 declaredBridge 能合法承载它),把既有的矛盾判定**收窄到独占对 [order-module, design-bom]**(对这两个值逐字节等价),再给子树轴**新增它自己的实测反证**(bomHead 样本里有没有 path_id 列、非空占比),声明了但数据否认就出新 blocker。这样「人可以声明,但不能声明出数据否认的拓扑」这条规矩在新轴上照样成立。默认计划(PLM_STOCK_PREPARATION_BOM_READ_PLAN)**不加**这个块,合成夹具守卫因此不受默认路径影响,「关掉=逐字节不变」是结构性的而不是靠自觉。
