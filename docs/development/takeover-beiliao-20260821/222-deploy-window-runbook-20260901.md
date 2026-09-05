@@ -844,5 +844,7 @@ schtasks /Create ^
 | A | 拿一个**没有**租户声明的旧令牌调 `GET /api/integration/stock-preparation/confirmation-decisions/readiness` | 403 `OPERATOR_SCOPE_TENANT_REQUIRED` | |
 | B | 拿一个 `--tenant-id` 新签的令牌调同一个接口 | 200(或该账号今天本来的结果) | |
 
+**升级后(不论是否顺带开 flag)按此顺序再跑两个脚本,不要跳步**:先 `claim-flag-probe.cjs`(单次探测,判定 flag 是否真的生效:无声明令牌应 403,带声明令牌应 200),确认 flag 状态符合预期后,再跑 `w4-regression-222.ps1` 做管理员链 + 操作员链的全量回归,并与升级前保存的基线日志逐行 diff(去掉时间戳/UUID/时间字段后应为空)——2026-09-06 在 222 上就是按这个顺序验证的(先探针后回归),不要反过来,回归脚本跑得慢,先用探针快速判定 flag 本身对不对,能省一次无谓的完整回归。
+
 **回滚**(任何一条不过就回滚,不要就地调):删掉 env 里那一行 → `pm2 restart metasheet-backend --update-env`。
 没有迁移、没有落库状态,回滚即刻恢复关闭前的行为。
