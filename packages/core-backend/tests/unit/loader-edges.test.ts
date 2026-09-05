@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PluginLoader } from '../../src/core/plugin-loader'
 import type { LoadedPlugin } from '../../src/core/plugin-loader'
 import { metrics, registry } from '../../src/metrics/metrics'
+import { coreMetrics } from '../../src/integration/metrics/metrics'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const coreAPI: any = { http: { addRoute: () => {} } }
@@ -41,18 +42,23 @@ describe('PluginLoader edge cases', () => {
 
   it('observes one successful reload in seconds in the registered histogram', async () => {
     const loader = new PluginLoader(coreAPI, { pluginDirs: [] })
-    const original = loadedPlugin('reload-metrics-success')
+    const original = loadedPlugin('reload-metrics-requested-name')
     const reloaded = loadedPlugin('reload-metrics-success')
     installLoadedPlugin(loader, original)
     vi.spyOn(loader, 'unload').mockReturnValue(true)
     vi.spyOn(loader, 'load').mockResolvedValue(reloaded)
     vi.spyOn(Date, 'now').mockReturnValueOnce(1_000).mockReturnValueOnce(1_250)
+    const legacyHistogram = vi.spyOn(coreMetrics, 'histogram')
 
     await expect(loader.reloadPlugin(original.manifest.name)).resolves.toBe(reloaded)
 
     const exposition = await metricExposition()
     expect(exposition.match(/metasheet_plugin_reload_duration_seconds_count\{plugin_name="reload-metrics-success"\} 1/g)).toHaveLength(1)
     expect(exposition).toContain('metasheet_plugin_reload_duration_seconds_sum{plugin_name="reload-metrics-success"} 0.25')
+    expect(exposition).not.toContain('plugin_name="reload-metrics-requested-name"')
+    expect(legacyHistogram.mock.calls).toEqual([
+      ['plugin_hot_swap_duration_ms', 250, { plugin: original.manifest.name }],
+    ])
   })
 
   it('does not observe a failed reload and preserves cascade failure callback semantics', async () => {
@@ -85,5 +91,17 @@ describe('PluginLoader edge cases', () => {
 
     await expect(loader.reloadPlugin(original.manifest.name)).resolves.toBe(reloaded)
     expect(observe).toHaveBeenCalledWith({ plugin_name: original.manifest.name }, 0.25)
+  })
+
+  it('preserves a rejected load without observing a successful duration', async () => {
+    const loader = new PluginLoader(coreAPI, { pluginDirs: [] })
+    const original = loadedPlugin('reload-metrics-rejected')
+    installLoadedPlugin(loader, original)
+    vi.spyOn(loader, 'unload').mockReturnValue(true)
+    const failure = new Error('synthetic load failure')
+    vi.spyOn(loader, 'load').mockRejectedValue(failure)
+
+    await expect(loader.reloadPlugin(original.manifest.name)).rejects.toBe(failure)
+    expect(await metricExposition()).not.toContain('plugin_name="reload-metrics-rejected"')
   })
 })
