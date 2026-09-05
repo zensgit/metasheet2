@@ -1,7 +1,8 @@
 # Attendance Acceptance Tooling Hardening Verification
 
-Status: local verification; publication and remote exact-head CI not yet claimed.
-Publication baseline: `177cafd3e34f30b5fc2682b3d392684c92fe67fe`.
+Status: published Draft/HOLD; historical remote success and new replay evidence are separate.
+Current publication baseline: `70dc72d7671cad9cea1925ed93f90d3d9c746aeb`.
+Previous publication baseline: `177cafd3e34f30b5fc2682b3d392684c92fe67fe`.
 Initial implementation baseline: `fdee94dc4997f68ab7cfb0b06b11b6364a05f3aa`.
 Branch: `codex/attendance-prod-acceptance-hardening-20260902`.
 Verified code checkpoint: `959ce7d3eeb9afb8392c72a95b57f0ab2a59b037`.
@@ -10,7 +11,7 @@ Code parent: `39bf9ac6d705a21b59cc43c3ddc130608e88f1ef`.
 The report-only child changes no tested code, test, schema, or workflow bytes.
 Design/development: `attendance-acceptance-tooling-hardening-design-20260905.md`.
 
-## Current-Main Replay
+## Historical Replay
 
 Replay head `51f5c5aecd8d16c9d14ed0a30395a7a23117ff90`, tree
 `a4522e18c6c104e3a44a965723bc313c50ac6dca`, has ordered parents
@@ -19,6 +20,28 @@ Replay head `51f5c5aecd8d16c9d14ed0a30395a7a23117ff90`, tree
 the only first-parent delta is main's delivery-guide documentation. `scripts`,
 `.github`, and `schemas` are byte-identical to the verified code checkpoint.
 The same local gates below were rerun on this replay tree before publication.
+
+## Current-Main Replay
+
+Replay head `3d6eb914d0b7f411cf1c4ba9a49b37a5d9c88f03`, tree
+`75497558e1a78eddc462b3c9b26aeb04d80673d1`, has ordered parents
+`62c8708f015bcb7853b641f8b0c62463b592b9d2` and
+`70dc72d7671cad9cea1925ed93f90d3d9c746aeb`. This is a conflict-free true
+merge, not a docs-only main advance: the first-parent delta is exactly the four
+stock-preparation files from main, including the appended required-Web selector.
+The 30 candidate-owned paths are byte-equivalent to the prior published head;
+the remerge-diff is empty. Strict 275 plus neighbors 38 and syntax 22 were rerun
+on this replay and all passed. Report updates are a separate docs-only child.
+
+## Historical Remote Evidence
+
+[PR #5484](https://github.com/zensgit/metasheet2/pull/5484) at exact
+`62c8708f015bcb7853b641f8b0c62463b592b9d2` reached 20 SUCCESS,
+zero skips, failures, or pending checks. The actual required strict job
+`101236890029`, run `33940514594`, logged all five groups
+99/7/5/17/147 passing with zero skips, plus summary validation. This proves
+execution rather than merely workflow registration. Main advanced meanwhile;
+these results do not validate the new replay's remote head or merged main.
 
 ## Local Gates
 
@@ -115,7 +138,8 @@ and returned no terminal verdict.
 
 | Evidence or operation | Status |
 | --- | --- |
-| Published final exact-head PR checks | NOT YET CLAIMED |
+| Previous published head `62c8708` | 20 SUCCESS, zero pending/failures; strict execution log verified |
+| New current-main replay remote checks | PENDING PUBLICATION; no old-SHA result carried as new CI |
 | Ready / merge | Separate owner authorization required |
 | Merged-main verification | NOT RUN for this candidate |
 | Explicit synthetic-org target configuration | Operator-owned, not changed |

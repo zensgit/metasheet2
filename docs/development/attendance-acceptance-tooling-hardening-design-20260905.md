@@ -1,15 +1,28 @@
 # Attendance Acceptance Tooling Hardening
 
 Status: implementation under standing development authorization; Draft/HOLD.
-Authoritative publication baseline: `177cafd3e34f30b5fc2682b3d392684c92fe67fe`.
+Current publication baseline: `70dc72d7671cad9cea1925ed93f90d3d9c746aeb`.
+Previous publication baseline: `177cafd3e34f30b5fc2682b3d392684c92fe67fe`.
 Initial implementation baseline: `fdee94dc4997f68ab7cfb0b06b11b6364a05f3aa`.
 Scope: existing acceptance tooling, hermetic tests, and its CI wiring.
 Implemented code checkpoint: `959ce7d3eeb9afb8392c72a95b57f0ab2a59b037`.
 Code tree: `474e660c1a6774f5c4beebfcc8e042c884b39862`.
 Code delta: 28 files, 1698 insertions / 120 deletions; this report pair is separate.
-Current-main replay: `51f5c5aecd8d16c9d14ed0a30395a7a23117ff90`, tree
+Historical replay: `51f5c5aecd8d16c9d14ed0a30395a7a23117ff90`, tree
 `a4522e18c6c104e3a44a965723bc313c50ac6dca`. Its first-parent delta is only
 main's unrelated delivery-guide documentation; all tested code is unchanged.
+
+Latest replay: `3d6eb914d0b7f411cf1c4ba9a49b37a5d9c88f03`, tree
+`75497558e1a78eddc462b3c9b26aeb04d80673d1`, with ordered parents
+`62c8708f015bcb7853b641f8b0c62463b592b9d2` and the current baseline above.
+The four stock-preparation source/test/required-Web changes merged automatically.
+All 30 candidate-owned paths retain their pre-merge bytes; no manual resolution
+or source repair was needed. The 313 local contract/neighbor tests and 22 syntax
+checks passed again. The report-only child updates only this report pair.
+
+PR #5484's previous exact head `62c8708f015bcb7853b641f8b0c62463b592b9d2`
+reached 20 successful checks, zero pending/failures. That is historical remote
+evidence, not CI for this new replay or authorization to merge.
 
 ## Contract
 
