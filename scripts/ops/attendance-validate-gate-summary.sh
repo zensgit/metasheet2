@@ -40,9 +40,16 @@ if (( count < EXPECT_MIN_SUMMARIES )); then
 fi
 
 for summary in "${summaries[@]}"; do
-  if ! jq -e '
+  if ! jq -e --arg requireProvenance "${ATTENDANCE_REQUIRE_PROVENANCE:-false}" '
       (.schemaVersion | type == "number" and (floor == .) and . >= 1) and
       (.generatedAt | type == "string" and length > 0) and
+      (if .schemaVersion >= 2 or $requireProvenance == "true" or has("provenance") then
+        (.provenance | type == "object") and
+        (.provenance | keys == ["checkoutSha", "expectedDeploymentSha", "observedDeploymentSha", "source"]) and
+        ([.provenance.checkoutSha, .provenance.expectedDeploymentSha, .provenance.observedDeploymentSha] | all(type == "string" and test("^[0-9a-f]{40}$"))) and
+        (.provenance.source == "backend_health_build_commit") and
+        (.provenance.expectedDeploymentSha == .provenance.observedDeploymentSha)
+      else true end) and
       (.apiBase | type == "string") and
       (.webUrl | type == "string") and
       (.expectProductMode | type == "string" and length > 0) and

@@ -259,6 +259,12 @@ jobs:
     timeout-minutes: 45
     env:
       API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://23.254.236.11:8081/api' }}
+      ATTENDANCE_SYNTHETIC_ORG_ID: ${{ vars.ATTENDANCE_SYNTHETIC_ORG_ID || '' }}
+      ORG_ID: ${{ vars.ATTENDANCE_SYNTHETIC_ORG_ID || '' }}
+      ATTENDANCE_SMOKE_ORG_ID: ${{ vars.ATTENDANCE_SYNTHETIC_ORG_ID || '' }}
+      AUTH_EXPECTED_TENANT_ID: ${{ vars.ATTENDANCE_SYNTHETIC_ORG_ID || '' }}
+      ATTENDANCE_EXPECTED_DEPLOY_SHA: ${{ vars.ATTENDANCE_EXPECTED_DEPLOY_SHA || '' }}
+      ATTENDANCE_REQUIRE_PROVENANCE: 'true'
       AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT || vars.ATTENDANCE_ADMIN_JWT || '' }}
       LOGIN_EMAIL: ${{ secrets.ATTENDANCE_ADMIN_EMAIL || vars.ATTENDANCE_ADMIN_EMAIL || '' }}
       LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD || vars.ATTENDANCE_ADMIN_PASSWORD || '' }}
@@ -306,6 +312,12 @@ jobs:
 
       - name: Install Playwright browsers
         run: pnpm exec playwright install chromium --with-deps
+
+      - name: Verify configured acceptance target
+        run: |
+          set -euo pipefail
+          mkdir -p output/playwright/attendance-prod-acceptance
+          node scripts/ops/attendance-acceptance-preflight.mjs > output/playwright/attendance-prod-acceptance/runtime-provenance.json
 
       - name: Resolve valid auth token
         id: resolve-auth-token
@@ -451,8 +463,18 @@ jobs:
       - name: Finalize strict outcome
         id: strict_final
         if: always()
+        env:
+          STRICT_OUTCOME: ${{ steps.run_strict.outcome }}
+          RETRY_RAN: ${{ steps.run_strict_retry.outputs.retry_ran }}
+          RETRY_OUTCOME: ${{ steps.run_strict_retry.outcome }}
         run: |
           set -euo pipefail
+          # An earlier green summary cannot stand in for an aborted later attempt.
+          if [[ "${STRICT_OUTCOME:-}" != "success" ]] && \
+             ! [[ "${RETRY_RAN:-}" == "true" && "${RETRY_OUTCOME:-}" == "success" ]]; then
+            echo "::error::Strict gates did not complete successfully."
+            exit 1
+          fi
           root="output/playwright/attendance-prod-acceptance"
           latest_summary="$(find "$root" -type f -name 'gate-summary.json' | sort | tail -n 1 || true)"
           if [[ -z "${latest_summary}" || ! -f "${latest_summary}" ]]; then

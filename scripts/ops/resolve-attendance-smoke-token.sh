@@ -3,6 +3,7 @@ set -euo pipefail
 
 required="${ATTENDANCE_TOKEN_RESOLVE_REQUIRED:-false}"
 token_expiry="${ATTENDANCE_SMOKE_TOKEN_EXPIRY:-2h}"
+smoke_org_id="${ATTENDANCE_SMOKE_ORG_ID:-}"
 deploy_path="${DEPLOY_PATH:-metasheet2}"
 deploy_compose_file="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
 
@@ -55,6 +56,10 @@ if [[ -z "${DEPLOY_HOST:-}" || -z "${DEPLOY_USER:-}" || -z "${DEPLOY_SSH_KEY_B64
   warn_or_fail "ATTENDANCE_ADMIN_JWT is invalid and DEPLOY_HOST/DEPLOY_USER/DEPLOY_SSH_KEY_B64 are incomplete for deploy-host token fallback"
 fi
 
+if [[ -z "${smoke_org_id}" ]]; then
+  warn_or_fail "ATTENDANCE_SMOKE_ORG_ID is required for deploy-host token fallback"
+fi
+
 # Host-key pinning (fail-closed): the SSH fallback must verify the deploy-host
 # identity, so DEPLOY_KNOWN_HOSTS is required BEFORE any ssh attempt.
 if [[ -z "${DEPLOY_KNOWN_HOSTS:-}" ]]; then
@@ -82,11 +87,13 @@ ssh_opts=(-o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes -o 
 quoted_deploy_path="$(shell_quote "${deploy_path}")"
 quoted_compose_file="$(shell_quote "${deploy_compose_file}")"
 quoted_token_expiry="$(shell_quote "${token_expiry}")"
+quoted_smoke_org_id="$(shell_quote "${smoke_org_id}")"
 
 set +e
 token="$(
   ssh "${ssh_opts[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
-    "DEPLOY_PATH=${quoted_deploy_path} DEPLOY_COMPOSE_FILE=${quoted_compose_file} ATTENDANCE_SMOKE_TOKEN_EXPIRY=${quoted_token_expiry} bash -s" <<'EOF'
+    "DEPLOY_PATH=${quoted_deploy_path} DEPLOY_COMPOSE_FILE=${quoted_compose_file} ATTENDANCE_SMOKE_TOKEN_EXPIRY=${quoted_token_expiry} ATTENDANCE_SMOKE_ORG_ID=${quoted_smoke_org_id} bash -s" \
+    2>/dev/null <<'EOF'
 set -euo pipefail
 if [[ "${DEPLOY_PATH}" == /* ]]; then
   DEPLOY_REPO_PATH="${DEPLOY_PATH}"
@@ -108,14 +115,20 @@ fi
 
 "${COMPOSE_CMD[@]}" -f "${DEPLOY_COMPOSE_FILE}" exec -T backend \
   env JWT_EXPIRY="${ATTENDANCE_SMOKE_TOKEN_EXPIRY:-2h}" \
+  ATTENDANCE_SMOKE_ORG_ID="${ATTENDANCE_SMOKE_ORG_ID}" \
   node --input-type=module - <<'NODE'
 import pg from 'pg'
 import { authService } from '/app/packages/core-backend/dist/src/auth/AuthService.js'
 
 const { Client } = pg
 const databaseUrl = process.env.DATABASE_URL
+const organizationId = process.env.ATTENDANCE_SMOKE_ORG_ID
 if (!databaseUrl) {
   console.error('DATABASE_URL missing from backend runtime env')
+  process.exit(3)
+}
+if (!organizationId) {
+  console.error('ATTENDANCE_SMOKE_ORG_ID missing from backend runtime env')
   process.exit(3)
 }
 
@@ -137,10 +150,15 @@ try {
       u.permissions,
       u.is_active,
       u.must_change_password,
+      uo.org_id AS tenant_id,
       (ur.user_id IS NOT NULL) AS has_rbac_admin
     FROM users u
+    JOIN user_orgs uo
+      ON uo.user_id = u.id
+     AND uo.org_id = $1
+     AND uo.is_active = true
     LEFT JOIN user_roles ur ON ur.user_id = u.id AND ur.role_id = 'admin'
-    WHERE COALESCE(u.is_active, true) = true
+    WHERE u.is_active = true
       AND COALESCE(u.must_change_password, false) = false
       AND (u.role = 'admin' OR ur.user_id IS NOT NULL)
     ORDER BY
@@ -148,10 +166,10 @@ try {
       CASE WHEN u.id = 'admin' THEN 0 ELSE 1 END,
       u.created_at ASC
     LIMIT 1
-  `)
+  `, [organizationId])
   const row = result.rows[0]
-  if (!row) {
-    console.error('No active admin user found for Attendance smoke token')
+  if (!row || row.tenant_id !== organizationId) {
+    console.error('No active admin membership found for Attendance smoke token')
     process.exit(4)
   }
 
@@ -163,6 +181,7 @@ try {
     mobile: row.mobile ?? null,
     role: row.has_rbac_admin ? 'admin' : (typeof row.role === 'string' && row.role.trim() ? row.role : 'admin'),
     permissions: Array.isArray(row.permissions) ? row.permissions : [],
+    tenantId: organizationId,
     is_active: row.is_active,
     must_change_password: row.must_change_password,
     created_at: new Date(),
