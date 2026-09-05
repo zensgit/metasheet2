@@ -804,6 +804,7 @@ describe('ElearningLearnerView', () => {
     expect([...challengeButtons].map((option) => option.getAttribute('aria-label')))
       .toEqual(['第 1 个位置', '第 2 个位置', '第 3 个位置', '第 4 个位置', '第 5 个位置', '第 6 个位置'])
     expect(root.textContent).not.toMatch(/[●▲■◆★♥][1-9]/u)
+    for (const option of CHALLENGE_OPTIONS) expect(root.innerHTML).not.toContain(option.optionId)
     expect(root.querySelector('.elearning-watch-challenge__image')?.getAttribute('src'))
       .toBe(`data:image/png;base64,${CHALLENGE_IMAGE}`)
     expect((root.querySelector('[data-testid="elearning-watch-challenge-confirm"]') as HTMLButtonElement).disabled)
