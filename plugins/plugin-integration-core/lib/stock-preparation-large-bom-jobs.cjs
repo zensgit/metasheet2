@@ -69,6 +69,18 @@ const BACKGROUND_BUDGET_FIELDS = Object.freeze([
 // an unbounded array. Whatever the cap costs is reported: see `attachDetailList`.
 const LARGE_BOM_READ_FAILURE_DETAIL_LIMIT = 20
 
+// The per-entry bound. `filterFields` is the only variable-length field that
+// survives projection, and its length is adapter-supplied (`metadata.filterFields`),
+// so a hostile or broken adapter could otherwise make ONE diagnostic unbounded
+// while every other cap here counted it as a single item.
+const LARGE_BOM_READ_FAILURE_FILTER_FIELD_LIMIT = 32
+
+// The ceiling on a counter read back OUT of storage. The stored `<key>Total` is
+// written by this module today, but a job row is durable state that outlives the
+// build that wrote it — so on the way out it is treated as a claim to be bounded,
+// not a fact. DON'T TRUST CONTENT AND THEN TRUST ITS COUNTER.
+const LARGE_BOM_EVIDENCE_COUNTER_CEILING = 1000000
+
 const APPLY_COUNT_FIELDS = Object.freeze([
   'created',
   'updated',
@@ -180,9 +192,27 @@ function evidenceTokenListOrEmpty(value) {
   return out
 }
 
-function positiveIntegerOr(value, fallback) {
+/**
+ * A COUNTER READ BACK FROM STORAGE IS A CLAIM, NOT A FACT.
+ *
+ * `attachStoredDetailEvidence` already refuses to trust the stored ARRAY — it
+ * re-projects every entry through the values-free filter. Trusting the stored
+ * COUNT while distrusting the content it counts would be the same mistake one
+ * field over: a row written by another build (or hand-edited) could report
+ * `readFailuresTotal: 1e12` next to a two-element array, and the public
+ * projection would repeat it.
+ *
+ * So: non-integers and negatives fall back to the floor, absurd values are
+ * clamped to the ceiling, and a total that claims FEWER items than we actually
+ * projected is raised to what we can see. The result is never smaller than the
+ * array it describes.
+ */
+function clampStoredTotal(value, floor) {
   const number = Number(value)
-  return Number.isInteger(number) && number >= 0 ? number : fallback
+  const claimed = Number.isInteger(number) && number >= 0
+    ? Math.min(number, LARGE_BOM_EVIDENCE_COUNTER_CEILING)
+    : floor
+  return Math.max(claimed, floor)
 }
 
 /**
@@ -205,6 +235,7 @@ function readFailureEntry(entry) {
   const errorCode = evidenceTokenOrUndefined(entry.errorCode)
   if (errorCode) failure.errorCode = errorCode
   const filterFields = evidenceTokenListOrEmpty(entry.filterFields)
+    .slice(0, LARGE_BOM_READ_FAILURE_FILTER_FIELD_LIMIT)
   if (filterFields.length > 0) failure.filterFields = filterFields
   if (entry.filtersApplied !== undefined) failure.filtersApplied = entry.filtersApplied === true
   const source = evidenceTokenOrUndefined(entry.source)
@@ -212,12 +243,18 @@ function readFailureEntry(entry) {
   return failure
 }
 
-function readFailuresFromDiagnostics(readDiagnostics) {
+function hasAnyKey(entry) {
+  return Object.keys(entry).length > 0
+}
+
+/**
+ * THE CANDIDATE SET, chosen by a values-free predicate that does not depend on
+ * what survives projection. `<key>Total` counts THESE — see `attachDetailList`
+ * for why the count is taken here and not after the filter.
+ */
+function readFailureCandidates(readDiagnostics) {
   if (!Array.isArray(readDiagnostics)) return []
-  return readDiagnostics
-    .filter((entry) => isPlainObject(entry) && entry.status === 'failed')
-    .map(readFailureEntry)
-    .filter((entry) => Object.keys(entry).length > 0)
+  return readDiagnostics.filter((entry) => isPlainObject(entry) && entry.status === 'failed')
 }
 
 /**
@@ -239,28 +276,64 @@ function errorDetailEntry(entry) {
   return detail
 }
 
+/**
+ * A DETAIL MUST ADD SOMETHING `errorTypes` DOES NOT.
+ *
+ * The first cut of this projection kept every entry that produced any key at
+ * all, which meant `{ type }` alone qualified — and the bounded expansions whose
+ * errors carry no object (`max_rows_exceeded` `{maxRows}`, `max_depth_exceeded`
+ * `{maxDepth, parentDepth}`, `cycle_detected` `{depth}`) mounted three extra
+ * evidence keys holding a verbatim copy of `errorTypes`. That is pure noise on
+ * a path with zero failed reads, and it broke the "nothing to report => key set
+ * unchanged" promise this feature is supposed to keep.
+ *
+ * The bar is therefore an OBJECT or a CAUSE CLASS: the two things `errorTypes`
+ * cannot express. Note what this does NOT claim — a bounded error that names its
+ * object (`read_count_exceeded`, `read_page_limit_exceeded`,
+ * `read_time_limit_exceeded`, the three subtree limits) still mounts, and should:
+ * "the read budget blew while reading WHICH object" is exactly the question
+ * `errorTypes` leaves unanswered.
+ */
+function carriesObjectOrCauseClass(entry) {
+  return entry.object !== undefined || entry.causeClass !== undefined
+}
+
 function errorDetailsFromErrors(errors) {
   if (!Array.isArray(errors)) return []
-  return errors.map(errorDetailEntry).filter((entry) => Object.keys(entry).length > 0)
+  return errors.map(errorDetailEntry).filter(carriesObjectOrCauseClass)
 }
 
 /**
  * CONDITIONAL MOUNT, so a run with nothing to report keeps a byte-identical
- * evidence key set. `<key>Total` reports the REAL count and `<key>Truncated`
- * says whether the array was cut — the cap can cost an operator the 21st failed
- * object, never a wrong answer to "how many reads failed".
+ * evidence key set.
+ *
+ * `total` is the size of the CANDIDATE set, counted before projection — not the
+ * length of what survived it. The difference is the whole point: three reads
+ * that failed with driver codes too unsafe to project are still three failed
+ * reads, and reporting `readFailuresTotal: 0` there would be a wrong answer to
+ * the one question this stanza exists to answer.
+ *
+ * `<key>Truncated` is therefore derived as "the array does not list everything
+ * counted" (`shown < total`) rather than "the cap fired". Always exactly true,
+ * whichever way an entry went missing — cap, or unprojectable content.
  */
-function attachDetailList(evidence, key, items) {
-  if (!Array.isArray(items) || items.length === 0) return evidence
-  evidence[key] = items.slice(0, LARGE_BOM_READ_FAILURE_DETAIL_LIMIT)
-  evidence[`${key}Total`] = items.length
-  evidence[`${key}Truncated`] = items.length > LARGE_BOM_READ_FAILURE_DETAIL_LIMIT
+function attachDetailList(evidence, key, { items, total }) {
+  if (!Number.isInteger(total) || total <= 0) return evidence
+  const shown = items.slice(0, LARGE_BOM_READ_FAILURE_DETAIL_LIMIT)
+  evidence[key] = shown
+  evidence[`${key}Total`] = total
+  evidence[`${key}Truncated`] = shown.length < total
   return evidence
 }
 
 function attachReadFailureEvidence(evidence, { readDiagnostics, errors } = {}) {
-  attachDetailList(evidence, 'readFailures', readFailuresFromDiagnostics(readDiagnostics))
-  attachDetailList(evidence, 'errorDetails', errorDetailsFromErrors(errors))
+  const failedReads = readFailureCandidates(readDiagnostics)
+  attachDetailList(evidence, 'readFailures', {
+    items: failedReads.map(readFailureEntry).filter(hasAnyKey),
+    total: failedReads.length,
+  })
+  const details = errorDetailsFromErrors(errors)
+  attachDetailList(evidence, 'errorDetails', { items: details, total: details.length })
   return evidence
 }
 
@@ -270,13 +343,20 @@ function attachReadFailureEvidence(evidence, { readDiagnostics, errors } = {}) {
  * than this one does, so the public projection re-runs the values-free filter
  * instead of trusting what it reads back.
  */
-function attachStoredDetailEvidence(publicEvidence, evidence, key, projectEntry) {
+function attachStoredDetailEvidence(publicEvidence, evidence, key, projectEntry, keepEntry) {
   const stored = Array.isArray(evidence[key]) ? evidence[key] : []
-  const items = stored.map(projectEntry).filter((entry) => Object.keys(entry).length > 0)
+  const items = stored.map(projectEntry).filter(keepEntry)
   if (items.length === 0) return publicEvidence
-  publicEvidence[key] = items.slice(0, LARGE_BOM_READ_FAILURE_DETAIL_LIMIT)
-  publicEvidence[`${key}Total`] = positiveIntegerOr(evidence[`${key}Total`], items.length)
-  publicEvidence[`${key}Truncated`] = evidence[`${key}Truncated`] === true
+  const shown = items.slice(0, LARGE_BOM_READ_FAILURE_DETAIL_LIMIT)
+  const total = clampStoredTotal(evidence[`${key}Total`], items.length)
+  publicEvidence[key] = shown
+  publicEvidence[`${key}Total`] = total
+  // DERIVED, NEVER COPIED. The stored flag is not consulted: a row could carry
+  // `Truncated: false` beside a 40-element array, or a non-boolean like
+  // `'maybe'`. `shown < total` is computed from the two numbers this projection
+  // just established, so it is a boolean, and it is forced true whenever the
+  // slice above actually dropped something.
+  publicEvidence[`${key}Truncated`] = shown.length < total
   return publicEvidence
 }
 
@@ -648,6 +728,12 @@ function updateJobFromExpansion(job, expansion, now) {
   // `readDiagnosticShapePresent` STAYS, byte-identical: it is a boolean other
   // guards may pin, and it answers a different question ("did the expander
   // produce diagnostics at all") from the stanzas below ("which reads failed").
+  //
+  // Both stanzas are conditionally mounted, so a run with no failed read and no
+  // object-bearing error keeps the pre-feature four-key evidence set. That
+  // covers the clean path and the object-less bounded ones (`max_rows_exceeded`,
+  // `max_depth_exceeded`, `cycle_detected`); see `carriesObjectOrCauseClass` for
+  // the bounded errors that DO mount, on purpose.
   job.evidence = attachReadFailureEvidence({
     sourceKind: job.sourceKind,
     readObjects: evidence.readObjects || [],
@@ -1197,12 +1283,12 @@ function summarizeLargeBomBackgroundExpansionJobForEvidence(job = {}) {
     scaleErrorTypes: errorTypes.filter((errorType) => LARGE_BOM_BOUNDED_ERROR_TYPES.includes(errorType)),
     readDiagnosticShapePresent: evidence.readDiagnosticShapePresent === true || job.readDiagnosticShapePresent === true,
   }
-  // Conditional, like the stored stanza: a run with no failed read produces a
-  // public evidence object whose key set is byte-identical to the pre-feature
-  // one. The route (`publicBackgroundExpansionJob` -> `largeBomJobResponse`)
-  // spreads whatever this returns, so nothing outside this module gates them.
-  attachStoredDetailEvidence(publicEvidence, evidence, 'readFailures', readFailureEntry)
-  attachStoredDetailEvidence(publicEvidence, evidence, 'errorDetails', errorDetailEntry)
+  // Conditional on the same rule as the stored stanza, so an evidence object
+  // with neither stanza projects to the pre-feature key set. The route
+  // (`publicBackgroundExpansionJob` -> `largeBomJobResponse`) spreads whatever
+  // this returns, so nothing outside this module gates these keys.
+  attachStoredDetailEvidence(publicEvidence, evidence, 'readFailures', readFailureEntry, hasAnyKey)
+  attachStoredDetailEvidence(publicEvidence, evidence, 'errorDetails', errorDetailEntry, carriesObjectOrCauseClass)
   if (isPlainObject(job.planEvidence)) publicEvidence.plan = cloneJson(job.planEvidence)
   return {
     jobIdPresent: Boolean(optionalString(job.jobId)),

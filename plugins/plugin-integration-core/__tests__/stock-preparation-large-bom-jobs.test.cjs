@@ -1134,8 +1134,187 @@ async function testEscapedThrowKeepsCauseClassWithoutReadFailures() {
   assert.equal('readFailures' in failed.evidence, false, 'no per-read record exists on this path')
   assert.equal(Array.isArray(failed.evidence.errorDetails), true)
   assert.equal(failed.evidence.errorDetails[0].type, failed.evidence.errorTypes[0])
+  // The name of this test promises a cause class, so pin it: without one the
+  // entry would carry only `{ type }` and `carriesObjectOrCauseClass` would drop
+  // it, leaving this path with no detail stanza at all.
+  assert.equal(typeof failed.evidence.errorDetails[0].causeClass, 'string')
+  assert.equal(failed.evidence.errorDetails[0].causeClass.length > 0, true)
   assert.equal(JSON.stringify(failed).includes(RAW_MARKERS[1]), false)
   assertValuesFree(publicBackgroundExpansionJob(failed))
+}
+
+// C, FOUND IN ADVERSARIAL REVIEW OF #5507. The first cut fed `expansion.errors[]`
+// to the projection unconditionally, so a bounded expansion with ZERO failed
+// reads still grew three evidence keys whose content was a verbatim copy of
+// `errorTypes`. `max_rows_exceeded` carries `{maxRows}` and nothing else, so it
+// is the exact case that must come out key-for-key identical to pre-feature main.
+async function testObjectLessBoundedExpansionKeepsThePreFeatureKeySet() {
+  const source = createSourceAdapter(plmData())
+  const failed = await runBackgroundJobUnderActionCaps({
+    action: {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { kind: 'data-source:sql-readonly' },
+      maxRows: 1,
+      largeBom: { maxRows: 1 },
+    },
+    jobId: 'job-bounded-keyset-1',
+    source,
+  })
+
+  assert.equal(failed.status, 'failed')
+  assert.deepEqual(failed.evidence.errorTypes, ['max_rows_exceeded'])
+  assert.deepEqual(Object.keys(failed.evidence), [
+    'sourceKind',
+    'readObjects',
+    'errorTypes',
+    'readDiagnosticShapePresent',
+  ], 'an object-less bounded failure adds no detail keys')
+  assert.deepEqual(Object.keys(publicBackgroundExpansionJob(failed).evidence), [
+    'sourceKind',
+    'readObjects',
+    'errorTypes',
+    'scaleErrorTypes',
+    'readDiagnosticShapePresent',
+  ])
+}
+
+// THE OTHER SIDE OF THE SAME BOUNDARY, so the narrowing is a rule and not a
+// coincidence. A bounded error that NAMES ITS OBJECT still mounts, because
+// "the read budget blew while reading which object" is the one thing
+// `errorTypes` cannot say.
+function testBoundedErrorsThatNameAnObjectStillMount() {
+  const withoutObject = __internals.attachReadFailureEvidence(
+    { errorTypes: ['max_rows_exceeded'] },
+    { errors: [{ type: 'max_rows_exceeded', maxRows: 1 }] },
+  )
+  assert.deepEqual(Object.keys(withoutObject), ['errorTypes'])
+
+  const withObject = __internals.attachReadFailureEvidence(
+    { errorTypes: ['read_count_exceeded'] },
+    { errors: [{ type: 'read_count_exceeded', object: 'DN_PDM_OrderHeadInfo', maxReadCount: 2 }] },
+  )
+  assert.deepEqual(withObject.errorDetails, [
+    { type: 'read_count_exceeded', object: 'DN_PDM_OrderHeadInfo' },
+  ])
+  assert.equal(withObject.errorDetailsTotal, 1)
+  assert.equal(withObject.errorDetailsTruncated, false)
+}
+
+// THE CAP'S EXACT EDGE. Off-by-one here would either hide the 20th failure or
+// claim truncation that did not happen.
+function testDetailCapBoundaryIsExact() {
+  const limit = __internals.LARGE_BOM_READ_FAILURE_DETAIL_LIMIT
+  const diagnosticsOf = (count) => Array.from({ length: count }, (_, index) => ({
+    object: `DN_PDM_Object_${index}`,
+    filterFields: ['FileCode'],
+    cursor: null,
+    status: 'failed',
+    errorCode: 'ECONNRESET',
+  }))
+
+  const atCap = __internals.attachReadFailureEvidence({}, { readDiagnostics: diagnosticsOf(limit) })
+  assert.equal(atCap.readFailures.length, limit)
+  assert.equal(atCap.readFailuresTotal, limit)
+  assert.equal(atCap.readFailuresTruncated, false, 'exactly at the cap is not truncated')
+
+  const overCap = __internals.attachReadFailureEvidence({}, { readDiagnostics: diagnosticsOf(limit + 1) })
+  assert.equal(overCap.readFailures.length, limit)
+  assert.equal(overCap.readFailuresTotal, limit + 1)
+  assert.equal(overCap.readFailuresTruncated, true, 'one over the cap is truncated')
+}
+
+// `<key>Total` COUNTS CANDIDATES, NOT SURVIVORS. Three reads that failed with
+// driver codes too unsafe to project are still three failed reads; reporting 0
+// would be a wrong answer to the question this stanza exists to answer.
+function testTotalCountsCandidatesNotSurvivors() {
+  const evidence = __internals.attachReadFailureEvidence({}, {
+    readDiagnostics: [
+      { object: 'DN_PDM_PathExAttrInfo', status: 'failed', errorCode: 'ECONNRESET' },
+      // Every projectable field unsafe => an empty entry that is still a failed read.
+      { object: `bad object ${RAW_MARKERS[0]}`, status: 'failed', errorCode: `bad code ${RAW_MARKERS[1]}`, filterFields: [] },
+      { object: 'DN_PDM_Ok', status: 'ok', count: 3 },
+    ],
+  })
+  assert.equal(evidence.readFailures.length, 1, 'only the projectable entry is listed')
+  assert.equal(evidence.readFailuresTotal, 2, 'both failed reads are counted; the ok read is not')
+  assert.equal(evidence.readFailuresTruncated, true, 'the array does not list everything counted')
+  assertValuesFree(evidence)
+}
+
+// A STORED COUNTER IS A CLAIM. The public projection already refuses to trust
+// the stored array; this pins that it does not then trust the number beside it.
+function testPublicProjectionRepairsIncoherentStoredCounters() {
+  const publicJob = summarizeLargeBomBackgroundExpansionJobForEvidence({
+    jobId: 'job-incoherent-1',
+    status: 'failed',
+    evidence: {
+      sourceKind: 'data-source:sql-readonly',
+      readObjects: [],
+      errorTypes: ['read_failed'],
+      readDiagnosticShapePresent: true,
+      readFailures: [{ object: 'DN_PDM_PathExAttrInfo', errorCode: 'ECONNRESET' }],
+      readFailuresTotal: 999,
+      readFailuresTruncated: 'maybe',
+    },
+  })
+
+  assert.equal(publicJob.evidence.readFailures.length, 1)
+  assert.equal(publicJob.evidence.readFailuresTotal >= publicJob.evidence.readFailures.length, true)
+  assert.equal(typeof publicJob.evidence.readFailuresTruncated, 'boolean', 'a non-boolean stored flag is never copied through')
+  assert.equal(publicJob.evidence.readFailuresTruncated, true, 'one shown out of 999 counted is truncated')
+  assertValuesFree(publicJob)
+
+  // A total that claims FEWER items than we can see is raised to what we see,
+  // and an absurd one is clamped rather than repeated.
+  const understated = summarizeLargeBomBackgroundExpansionJobForEvidence({
+    status: 'failed',
+    evidence: {
+      readFailures: [
+        { object: 'DN_PDM_A', errorCode: 'ECONNRESET' },
+        { object: 'DN_PDM_B', errorCode: 'ECONNRESET' },
+      ],
+      readFailuresTotal: 0,
+      readFailuresTruncated: true,
+    },
+  })
+  assert.equal(understated.evidence.readFailuresTotal, 2)
+  assert.equal(understated.evidence.readFailuresTruncated, false, 'nothing is missing, so nothing is truncated')
+
+  const absurd = summarizeLargeBomBackgroundExpansionJobForEvidence({
+    status: 'failed',
+    evidence: {
+      readFailures: [{ object: 'DN_PDM_A', errorCode: 'ECONNRESET' }],
+      readFailuresTotal: Number.MAX_SAFE_INTEGER,
+    },
+  })
+  assert.equal(absurd.evidence.readFailuresTotal, 1000000, 'an absurd stored counter is clamped to the ceiling')
+
+  // The stored array is sliced no matter what the row claims, and the flag
+  // follows the slice rather than the claim.
+  const oversized = summarizeLargeBomBackgroundExpansionJobForEvidence({
+    status: 'failed',
+    evidence: {
+      readFailures: Array.from({ length: 40 }, (_, index) => ({ object: `DN_PDM_Object_${index}`, errorCode: 'ECONNRESET' })),
+      readFailuresTruncated: false,
+    },
+  })
+  assert.equal(oversized.evidence.readFailures.length, __internals.LARGE_BOM_READ_FAILURE_DETAIL_LIMIT)
+  assert.equal(oversized.evidence.readFailuresTotal, 40)
+  assert.equal(oversized.evidence.readFailuresTruncated, true, 'an actual slice forces the flag true')
+}
+
+// The per-entry bound: `filterFields` is adapter-supplied, so one diagnostic
+// must not be able to grow without limit while the item cap counts it as one.
+function testFilterFieldsAreBoundedPerEntry() {
+  const evidence = __internals.attachReadFailureEvidence({}, {
+    readDiagnostics: [{
+      object: 'DN_PDM_PathExAttrInfo',
+      status: 'failed',
+      errorCode: 'ECONNRESET',
+      filterFields: Array.from({ length: 200 }, (_, index) => `Field_${index}`),
+    }],
+  })
+  assert.equal(evidence.readFailures[0].filterFields.length, 32)
 }
 
 // The cap has to be a CAP, not a silent truncation: 20 entries out, the real
@@ -1690,7 +1869,13 @@ async function main() {
   await testBackgroundWorkerStoresFailedJobWhenErrorTokenIsUnsafe()
   await testBackgroundWorkerPersistsValuesFreeReadFailureDiagnostics()
   await testEscapedThrowKeepsCauseClassWithoutReadFailures()
+  await testObjectLessBoundedExpansionKeepsThePreFeatureKeySet()
+  testBoundedErrorsThatNameAnObjectStillMount()
   testReadFailureDetailsAreCappedAndReportTheRealTotal()
+  testDetailCapBoundaryIsExact()
+  testTotalCountsCandidatesNotSurvivors()
+  testPublicProjectionRepairsIncoherentStoredCounters()
+  testFilterFieldsAreBoundedPerEntry()
   await testSuccessfulRunHasNoReadFailureKeys()
   await testPlannerHandoffRequiresAuthoritativeArtifact()
   await testPlannerHandoffRejectsMalformedExistingRows()
