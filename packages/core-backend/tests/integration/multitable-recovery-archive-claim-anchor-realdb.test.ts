@@ -1461,7 +1461,7 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
     let claimerOpen = false
     let sealerOpen = false
     let deleterOpen = false
-    let commitWait: Promise<unknown> | undefined
+    let commitWait: Promise<{ error: DatabaseError | null }> | undefined
     try {
       await claimer.query('BEGIN')
       claimerOpen = true
@@ -1480,11 +1480,13 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
       const deleterPid = await backendPid(deleter)
       await deleteSealedOperation(deleter, ordinaryOp)
 
-      commitWait = claimer.query('COMMIT')
+      commitWait = observeStatement(claimer.query('COMMIT'))
       await waitForBlockedBy(claimerPid, deleterPid)
       await deleter.query('COMMIT')
       deleterOpen = false
-      const commitError = await errorOf(commitWait)
+      const commitOutcome = await commitWait
+      if (!commitOutcome.error) throw new Error('expected_database_rejection')
+      const commitError = commitOutcome.error
       expect(['recovery_archive_binding_invalid', '40001', '55P03']).toContain(
         commitError.message === 'recovery_archive_binding_invalid'
           ? commitError.message
