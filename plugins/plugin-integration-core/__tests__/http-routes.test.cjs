@@ -5405,8 +5405,11 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
   assert.deepEqual(res.body.data.budgets, {
     maxRows: 10000 * LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS.maxRows,
     maxPages: 100 * LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS.maxPages,
-    maxReadCount: 0,
-    maxElapsedMs: 0,
+    // `null`, not 0: this action bounds neither reads nor elapsed time
+    // interactively, so the background lane inherits "no bound" — and a 0 here
+    // would read as "the bound is zero".
+    maxReadCount: null,
+    maxElapsedMs: null,
     maxDepth: 20,
     maxArtifactChunks: 1,
   }, 'the run route hands the worker the background caps, not the interactive ones')

@@ -320,6 +320,16 @@ function normalizeActionCarryPolicy(input) {
 // typed 10_000_000 should be told), and a DERIVED value is clamped silently
 // because it is arithmetic, not a statement of intent.
 //
+// There is deliberately NO floor tying a `largeBom` value to its interactive
+// sibling: a block MAY name a value BELOW the interactive cap, which makes the
+// background lane STRICTER than the dry-run that sends callers into it and
+// reproduces exactly the failure this whole block exists to remove. That is a
+// legitimate thing for a deployer to want (a deliberately small background
+// budget on a shared box) and refusing it would be this module inventing
+// policy, so it is allowed and documented in the customer delivery guide
+// instead — unless intended, every `largeBom` value should be >= its
+// interactive sibling.
+//
 // `maxArtifactChunks` is deliberately NOT a member of this family — see
 // stock-preparation-large-bom-jobs.cjs `LARGE_BOM_ARTIFACT_CHUNK_COUNT`.
 const LARGE_BOM_BACKGROUND_CAP_FIELDS = Object.freeze(['maxRows', 'maxPages', 'maxReadCount', 'maxElapsedMs'])

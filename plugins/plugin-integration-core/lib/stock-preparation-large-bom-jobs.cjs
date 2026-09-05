@@ -162,6 +162,27 @@ function nonNegativeProjection(input, fields) {
   return Object.fromEntries(fields.map((field) => [field, nonNegativeInteger(value[field], field)]))
 }
 
+/**
+ * BUDGETS ARE NOT COUNTERS, so they do not share the projection above.
+ * `nonNegativeProjection` reports an absent field as 0, which is right for
+ * `progress` (nothing has happened yet) and actively WRONG for `budgets`:
+ * `maxReadCount` and `maxElapsedMs` have no expander default, so absent means
+ * THERE IS NO BOUND — and `maxReadCount: 0` reads as "the bound is zero", the
+ * exact opposite. Absent is therefore `null`.
+ *
+ * The KEY SET stays fixed (every BACKGROUND_BUDGET_FIELDS member is present) so
+ * a reader can tell "this budget is unbounded" from "this build does not report
+ * that budget at all". Values-free either way: budgets are configured integers.
+ */
+function budgetProjection(input, fields) {
+  const value = isPlainObject(input) ? input : {}
+  return Object.fromEntries(fields.map((field) => {
+    const raw = value[field]
+    if (raw === undefined || raw === null || raw === '') return [field, null]
+    return [field, nonNegativeInteger(raw, field)]
+  }))
+}
+
 function normalizeStatus(value, allowed, field) {
   const status = safeEvidenceToken(value, field)
   if (!allowed.includes(status)) {
@@ -1026,7 +1047,7 @@ function summarizeLargeBomBackgroundExpansionJobForEvidence(job = {}) {
     planRevisionPresent: Boolean(optionalString(job.planRevision || (job.planArtifact && job.planArtifact.revision))),
     projectNoPresent: job.projectNoPresent === true,
     progress: nonNegativeProjection(job.progress, BACKGROUND_PROGRESS_FIELDS),
-    budgets: nonNegativeProjection(job.budgets, BACKGROUND_BUDGET_FIELDS),
+    budgets: budgetProjection(job.budgets, BACKGROUND_BUDGET_FIELDS),
     evidence: publicEvidence,
   }
 }

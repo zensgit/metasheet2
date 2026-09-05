@@ -818,7 +818,14 @@ async function testBackgroundWorkerScalesPastTheInteractiveScaleBudget() {
     'budgets report the background cap that actually ran',
   )
   assert.equal(completed.budgets.maxArtifactChunks, LARGE_BOM_ARTIFACT_CHUNK_COUNT)
-  assertValuesFree(publicBackgroundExpansionJob(completed))
+  // UNBOUNDED IS `null`, NOT 0. This action names no `maxReadCount`/
+  // `maxElapsedMs`, the expander has no default for either, so the background
+  // lane inherits "no bound" — and a projection of 0 would say the opposite.
+  const publicJob = publicBackgroundExpansionJob(completed)
+  assert.equal(publicJob.budgets.maxReadCount, null, 'an unbounded read budget must not read as zero')
+  assert.equal(publicJob.budgets.maxElapsedMs, null, 'an unbounded time budget must not read as zero')
+  assert.equal(publicJob.budgets.maxRows, 1 * LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS.maxRows)
+  assertValuesFree(publicJob)
 }
 
 async function testBackgroundWorkerFailsNonAuthoritativeOnScaleBudget() {
