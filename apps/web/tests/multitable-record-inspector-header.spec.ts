@@ -52,6 +52,14 @@ interface HarnessOptions {
   fields?: MetaField[]
   recordIds?: string[]
   canEdit?: boolean
+  // P3-1 (2026-09-05, header-overflow-bound follow-up): every one of these defaults to `false` (the
+  // pre-existing default shape every OTHER test in this file already relies on) unless a test opts
+  // in — so adding them here changes no existing test's rendered output.
+  canComment?: boolean
+  canDelete?: boolean
+  canCreate?: boolean
+  canManageAutomation?: boolean
+  canManageRecordPermissions?: boolean
   rowActions?: Record<string, unknown> | null
   fieldPermissions?: Record<string, unknown> | null
   openerEl?: HTMLElement | null
@@ -79,8 +87,11 @@ function mountInspector(options: HarnessOptions = {}): { container: HTMLElement;
         record: 'record' in options ? options.record : RECORD,
         fields: options.fields ?? FIELDS,
         canEdit: options.canEdit ?? true,
-        canComment: false,
-        canDelete: false,
+        canComment: options.canComment ?? false,
+        canDelete: options.canDelete ?? false,
+        canCreate: options.canCreate ?? false,
+        canManageAutomation: options.canManageAutomation ?? false,
+        canManageRecordPermissions: options.canManageRecordPermissions ?? false,
         recordIds: options.recordIds ?? ['rec_1'],
         rowActions: options.rowActions as any,
         fieldPermissions: options.fieldPermissions as any,
@@ -96,6 +107,47 @@ function mountInspector(options: HarnessOptions = {}): { container: HTMLElement;
   app.mount(container)
   mountedApps.push(app)
   return { container, app }
+}
+
+// P1 (2026-09-05, focus capture/restore fix): the REAL workbench mounts this component's instance
+// ONCE and toggles `visible` false→true→false→true→… over and over for every real open/close cycle
+// (`mountInspector` above — like several OTHER pre-existing specs in this file — instead mounts
+// with `visible` already `true` and unmounts the whole app for "close", which only exercises this
+// file's onMounted/onBeforeUnmount FALLBACK path, never the live `watch(() => props.visible, ...)`
+// mechanism the real workbench actually depends on). This harness reproduces the real shape: ONE
+// persistent component instance, `visible` and `openerEl` both reactive so a test can drive the
+// exact false→true→false→true sequence the finding names.
+function mountToggleableInspector(): { container: HTMLElement; app: App; setVisible: (v: boolean) => void; setOpener: (el: HTMLElement | null) => void } {
+  const container = document.createElement('div')
+  document.body.appendChild(container)
+  let setVisible: (v: boolean) => void = () => {}
+  let setOpener: (el: HTMLElement | null) => void = () => {}
+  const app = createApp({
+    data() {
+      return { visible: false, openerEl: null as HTMLElement | null }
+    },
+    created() {
+      setVisible = (v: boolean) => { this.visible = v }
+      setOpener = (el: HTMLElement | null) => { this.openerEl = el }
+    },
+    render() {
+      return h(MetaRecordInspector, {
+        visible: this.visible,
+        record: RECORD,
+        fields: FIELDS,
+        canEdit: true,
+        canComment: false,
+        canDelete: false,
+        recordIds: ['rec_1'],
+        sheetId: 'sheet_1',
+        apiClient: fakeApiClient() as any,
+        openerEl: this.openerEl,
+      })
+    },
+  })
+  app.mount(container)
+  mountedApps.push(app)
+  return { container, app, setVisible, setOpener }
 }
 
 afterEach(() => {
@@ -122,6 +174,25 @@ async function openKebab(root: HTMLElement) {
 }
 function menuItems(): HTMLElement[] {
   return Array.from(document.querySelectorAll<HTMLElement>('.mt-menu [role^="menuitem"]'))
+}
+
+// P3-1 (2026-09-05, header-overflow-bound follow-up): the pinned allow-list for
+// "toolbar holds only icon buttons + nav" (the design's own framing for why Row A "can never
+// overflow by construction", MetaRecordInspector.vue's file-header comment). `.mt-popover__trigger`
+// is MtMenu's own rendered trigger wrapper (the kebab `MtIconButton`) — see MtPopover.vue's template.
+const ALLOWED_TOOLBAR_CHILD_SELECTOR = [
+  '.meta-record-drawer__nav',
+  '.meta-record-drawer__toolbar-spacer',
+  '.meta-record-drawer__btn--comment',
+  '[data-testid="record-inspector-copy-link"]',
+  '.meta-record-drawer__expand',
+  '.mt-popover__trigger',
+  '.meta-record-drawer__close',
+].join(', ')
+function assertToolbarChildSetIsClosed(toolbar: Element) {
+  for (const child of Array.from(toolbar.children)) {
+    expect(child.matches(ALLOWED_TOOLBAR_CHILD_SELECTOR)).toBe(true)
+  }
 }
 
 describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
@@ -151,6 +222,81 @@ describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
       const src = readSrc('src/multitable/components/MetaRecordInspector.vue')
       const rule = src.match(/\.meta-record-drawer__toolbar\s*\{[^}]*\}/)?.[0] ?? ''
       expect(rule).toMatch(/flex-wrap:\s*nowrap/)
+    })
+
+    // P3-1 (2026-09-05): with EVERY optional header affordance present at once (the real overflow
+    // risk profile — the previous test above always mounts with `canComment: false`, which can never
+    // exercise the comment chip's own contribution to the row at all), the toolbar's direct child set
+    // must still match the pinned allow-list exactly — nothing else may sneak in. Mutation: append a
+    // stray labeled `<button>Preview</button>` inside `.meta-record-drawer__toolbar` in
+    // MetaRecordInspector.vue's template → this test (and ONLY this test) reds.
+    it('with ALL header gates true, the toolbar child set still matches the "icon buttons + nav only" allow-list exactly — no stray content', async () => {
+      const { container } = mountInspector({
+        recordIds: ['rec_0', 'rec_1', 'rec_2'],
+        canComment: true,
+        canDelete: true,
+        canCreate: true,
+        canManageAutomation: true,
+        canManageRecordPermissions: true,
+      })
+      await flushUi()
+      const toolbar = container.querySelector('.meta-record-drawer__toolbar')!
+      // Sanity: prove the gates actually engaged (a vacuous pass with every gate silently ignored
+      // would trivially satisfy the allow-list below for the wrong reason).
+      expect(toolbar.querySelector('.meta-record-drawer__btn--comment')).toBeTruthy()
+      expect(toolbar.children.length).toBeGreaterThanOrEqual(6)
+      assertToolbarChildSetIsClosed(toolbar)
+    })
+
+    // P3-1 (2026-09-05): the allow-list test above bounds WHICH elements the toolbar may contain
+    // (the "stray element" failure mode, mutation-proven above) — it does NOT, by itself, bound how
+    // WIDE an ALLOWED child may render (jsdom performs no layout, so an allowed child growing
+    // arbitrarily wide is invisible to it). This is the source-text pin for the two CSS bounds that
+    // cover THAT failure mode instead: the position-text span and the comment-chip button both carry
+    // a `max-width` + overflow/ellipsis backstop, so neither can push the (non-shrinking, `flex-wrap:
+    // nowrap`) toolbar row wider than the panel even if its content is unexpectedly long — see each
+    // rule's own comment for why (compact-number formatting for the former, "no badge to cap" for
+    // the latter). Real-browser verification of the resulting layout is out of scope for this pin,
+    // same as this file's other CSS claims.
+    it('[source] .meta-record-drawer__nav-pos and .meta-record-drawer__btn--comment both carry a max-width + overflow bound (jsdom cannot verify the resulting layout)', () => {
+      const src = readSrc('src/multitable/components/MetaRecordInspector.vue')
+      const navPosRule = src.match(/\.meta-record-drawer__nav-pos\s*\{[^}]*\}/)?.[0] ?? ''
+      expect(navPosRule).toMatch(/max-width:\s*64px/)
+      expect(navPosRule).toMatch(/text-overflow:\s*ellipsis/)
+      const commentBtnRule = src.match(/\.meta-record-drawer__btn--comment\s*\{[^}]*\}/)?.[0] ?? ''
+      expect(commentBtnRule).toMatch(/max-width:\s*140px/)
+    })
+
+    // P2-A (2026-09-05, design brief §1.3): `.meta-record-drawer__tabs-bar` is the container-query
+    // container, and below 420px both the tabs pill and each tab get `flex: 1; min-width: 0` so all
+    // four stay on one row at the 360px panel floor. Source-text pin only — jsdom implements neither
+    // layout nor CSS Container Queries, so the resulting one-row layout itself is NOT verified here
+    // (same caveat this file's sibling flex-wrap pin above already discloses); real-browser
+    // verification is this PR's own checklist item "four tabs on one row at 360".
+    it('[source] .meta-record-drawer__tabs-bar is a container, and @container (width < 420px) sets flex:1/min-width:0 on both the tabs pill and each tab (jsdom cannot verify the resulting one-row layout)', () => {
+      const src = readSrc('src/multitable/components/MetaRecordInspector.vue')
+      const tabsBarRule = src.match(/\.meta-record-drawer__tabs-bar\s*\{[^}]*\}/)?.[0] ?? ''
+      expect(tabsBarRule).toMatch(/container-type:\s*inline-size/)
+      const query = src.match(/@container \(width < 420px\)\s*\{[\s\S]*?\n\}/)?.[0] ?? ''
+      expect(query).toBeTruthy()
+      const tabsRule = query.match(/\.meta-record-drawer__tabs\s*\{[^}]*\}/)?.[0] ?? ''
+      expect(tabsRule).toMatch(/flex:\s*1/)
+      expect(tabsRule).toMatch(/min-width:\s*0/)
+      const tabRule = query.match(/\.meta-record-drawer__tab\s*\{[^}]*\}/)?.[0] ?? ''
+      expect(tabRule).toMatch(/flex:\s*1/)
+      expect(tabRule).toMatch(/min-width:\s*0/)
+
+      // Placement (real-browser-verified defect, caught before landing — see the @container block's
+      // own comment): the block must come AFTER the UNCONDITIONAL base `.meta-record-drawer__tab`
+      // rule (`min-width: 76px`), not before it. The `flex:1`/`min-width:0` assertions above alone
+      // do NOT catch a regression that moves the block back above that base rule — both strings
+      // would still be present, just in the wrong relative order, and same-specificity CSS cascade
+      // order (a `@container` wrapper adds none of its own) would then let the LATER, unconditional
+      // `min-width: 76px` win at every width, silently reintroducing the exact defect this PR fixed.
+      const baseTabRuleIndex = src.indexOf('.meta-record-drawer__tab { min-width: 76px')
+      const containerQueryIndex = src.indexOf('@container (width < 420px)')
+      expect(baseTabRuleIndex).toBeGreaterThan(0)
+      expect(containerQueryIndex).toBeGreaterThan(baseTabRuleIndex)
     })
   })
 
@@ -456,6 +602,60 @@ describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
       app.unmount()
       expect(document.activeElement).toBe(gridRoot)
       gridRoot.remove()
+    })
+  })
+
+  // P1 (2026-09-05, verified finding): the two tests directly above mount with `visible` already
+  // `true` and unmount the whole app for "close" — that exercises only this component's
+  // onMounted/onBeforeUnmount FALLBACK path (see MetaRecordInspector.vue's own file-header comment
+  // on the two). In the REAL workbench this instance is created ONCE and `visible` toggles
+  // false→true→false→true→… for every real open/close — this describe block reproduces exactly
+  // that, through `mountToggleableInspector` above.
+  describe('P1: focus capture/restore fires on EVERY open/close, not just the first (real-workbench shape)', () => {
+    it('autofocuses the title and restores focus to the CURRENT opener on every open/close cycle, not only the first', async () => {
+      const opener1 = document.createElement('button')
+      opener1.textContent = 'opener-1'
+      document.body.appendChild(opener1)
+      const opener2 = document.createElement('button')
+      opener2.textContent = 'opener-2'
+      document.body.appendChild(opener2)
+
+      const { container, setVisible, setOpener } = mountToggleableInspector()
+      await flushUi()
+      expect(container.querySelector('.meta-record-drawer')).toBeNull() // starts closed
+
+      // --- open #1 ---
+      setOpener(opener1)
+      setVisible(true)
+      await flushUi()
+      const titleInputAfterOpen1 = container.querySelector<HTMLInputElement>('.meta-record-drawer__title-input')
+      expect(titleInputAfterOpen1).toBeTruthy()
+      expect(document.activeElement).toBe(titleInputAfterOpen1) // autofocus on open #1
+
+      // --- close #1 ---
+      setVisible(false)
+      await flushUi()
+      expect(container.querySelector('.meta-record-drawer')).toBeNull()
+      expect(document.activeElement).toBe(opener1) // restore on close #1
+
+      // --- open #2, with a DIFFERENT opener --- this is the case the finding names: under the
+      // reverted (onMounted-only) implementation, onMounted already fired once, at the instance's
+      // FIRST-EVER creation (with `visible` still false) — it never fires again, so this second
+      // open would leave focus wherever it already was, not on the title.
+      setOpener(opener2)
+      setVisible(true)
+      await flushUi()
+      const titleInputAfterOpen2 = container.querySelector<HTMLInputElement>('.meta-record-drawer__title-input')
+      expect(titleInputAfterOpen2).toBeTruthy()
+      expect(document.activeElement).toBe(titleInputAfterOpen2) // autofocus on open #2 too
+
+      // --- close #2 --- restores to opener2 (the CURRENT open's opener), not opener1 (stale).
+      setVisible(false)
+      await flushUi()
+      expect(document.activeElement).toBe(opener2)
+
+      opener1.remove()
+      opener2.remove()
     })
   })
 

@@ -661,35 +661,74 @@ const kebabMenuRef = ref<InstanceType<typeof MtMenu> | null>(null)
 const titleInputRef = ref<HTMLInputElement | null>(null)
 const titleTextRef = ref<HTMLDivElement | null>(null)
 
-// --- Open/focus (2026-09-05, PR-A §1.1/§1.5) ---
-// This shell mounts (`v-if="visible"`) EXACTLY when the workbench flips `inspectorOpen` true — see
-// MultitableWorkbench.vue's `openRecord`/hash-watcher comments — so `onMounted` here IS "the open
-// transition" the design describes, with no separate WB-side `focusTitle()` call needed: capturing
-// the opener and moving focus to the title both happen exactly once per open, never on a record
-// switch while already open (this component stays mounted throughout "follow while open" — only its
-// `record`/tab content change, not this lifecycle hook).
+// --- Open/focus (2026-09-05, PR-A §1.1/§1.5; P1 fix 2026-09-05 follow-up) ---
+// This shell is mounted UNCONDITIONALLY by MultitableWorkbench.vue (no `v-if` at the CALL site —
+// only this file's OWN root carries `v-if="visible"`), so the component INSTANCE mounts exactly
+// ONCE, whenever the workbench itself mounts, and stays mounted for the workbench's entire life —
+// `visible` toggling false→true→true→false→… over and over is what actually drives every real
+// open/close cycle. `onMounted`/`onBeforeUnmount` therefore fire once EACH, ever: putting the
+// capture/focus/restore logic there (the pre-fix shape) meant it ran, at most, on whichever single
+// instant the instance happened to first exist — for the ordinary case (workbench starts with
+// nothing selected, `visible` starts false) that instant finds no title control to focus and a
+// worthless `document.activeElement` to remember, so NO real open/close ever got the behavior this
+// section's own name promises. The fix: drive both halves from a `watch` on `props.visible` itself,
+// which — unlike the lifecycle hooks — re-fires on every single false→true and true→false edge for
+// as long as this instance lives, i.e. on every real open and every real close. `onMounted` /
+// `onBeforeUnmount` are kept below as narrow FALLBACKS ONLY, for a harness that mounts this
+// component directly with `visible` already `true` (no false→true edge for the watch to observe —
+// several pre-existing specs in this file's own test suite do exactly this) or unmounts it directly
+// while still visible (ditto) — neither happens in the real workbench, where this instance never
+// actually unmounts.
 let restoreFocusTarget: HTMLElement | null = null
-onMounted(() => {
-  // `props.openerEl` (WB's `openRecord(id, opener)`, see that prop's own doc comment) wins when
-  // given; falling back to `document.activeElement` covers mounts WB doesn't drive an opener for
-  // (a deep-link/comment-click-through open, or a router-less spec mounting this shell directly)
-  // and also naturally captures a context-menu-item opener when WB passes none — see MtMenu's own
-  // comment on the identical "capture what's focused right now" idiom for why this is reliable.
-  // `document.body` (or no active element at all) means nothing was actually focused — treated the
-  // SAME as "no opener" so the unmount fallback below reaches `.meta-grid`, not a no-op `body.focus()`.
+
+// `props.openerEl` (WB's `openRecord(id, opener)`, see that prop's own doc comment) wins when
+// given; falling back to `document.activeElement` covers an open WB doesn't drive an opener for
+// (a deep-link/comment-click-through open, or a router-less spec mounting this shell directly)
+// and also naturally captures a context-menu-item opener when WB passes none — see MtMenu's own
+// comment on the identical "capture what's focused right now" idiom for why this is reliable.
+// `document.body` (or no active element at all) means nothing was actually focused — treated the
+// SAME as "no opener" so the close-time restore below reaches `.meta-grid`, not a no-op
+// `body.focus()`. Called on every OPEN edge (see the `watch` below), not just the first.
+function captureOpenerAndFocusTitle() {
   const active = document.activeElement as HTMLElement | null
   restoreFocusTarget = props.openerEl ?? (active && active !== document.body ? active : null)
   void nextTick(() => {
     ;(titleInputRef.value ?? titleTextRef.value)?.focus()
   })
-})
-onBeforeUnmount(() => {
+}
+// Called on every CLOSE edge (see the `watch` below), not just a real unmount.
+function restoreFocusToOpener() {
   const target = restoreFocusTarget
   if (target && target.isConnected && typeof target.focus === 'function') {
     target.focus()
     return
   }
   document.querySelector<HTMLElement>('.meta-grid')?.focus()
+}
+
+// The live mechanism (P1 fix): every false→true edge captures a FRESH opener (WB writes a new
+// `inspectorOpenerEl` before each `openRecord` call, so a second open's opener is never the first
+// open's stale value) and refocuses the title; every true→false edge restores focus to whichever
+// opener THAT open captured. No `immediate` — the mount-time fallback below covers the initial
+// value instead, so the two never both fire for the same edge.
+watch(() => props.visible, (isVisible, wasVisible) => {
+  if (isVisible && !wasVisible) captureOpenerAndFocusTitle()
+  else if (!isVisible && wasVisible) restoreFocusToOpener()
+})
+
+onMounted(() => {
+  // First-mount fallback ONLY: a caller that mounts this component with `visible` already `true`
+  // (several pre-existing specs in this file's own suite do this) gets no false→true edge for the
+  // `watch` above to observe — this substitutes for that ONE edge. The real workbench always mounts
+  // with `visible` false (nothing selected yet), so this is a no-op there.
+  if (props.visible) captureOpenerAndFocusTitle()
+})
+onBeforeUnmount(() => {
+  // Teardown fallback ONLY: a caller that unmounts this component directly while still `visible`
+  // (ditto — several pre-existing specs do this via `app.unmount()`) gets no true→false PROP edge —
+  // `visible` never actually changes, the whole instance just goes away. The real workbench never
+  // unmounts this instance (see the file-header comment above), so this never fires there either.
+  if (props.visible) restoreFocusToOpener()
 })
 
 // --- OD-W2-1 (tabs, lock §6bis): extensible union -- S3 shipped 'details' (fields) + 'history'
@@ -1443,7 +1482,18 @@ async function toggleRecordSubscription() {
 .meta-record-drawer__expand { font-size: 13px; line-height: 1; }
 .meta-record-drawer__expand--active { border-color: var(--ms-color-primary); color: var(--ms-color-primary); }
 .meta-record-drawer__btn { padding: 4px 10px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 12px; }
-.meta-record-drawer__btn--comment { border-radius: 999px; padding: 3px 8px; }
+/* P3-1 (2026-09-05, header-overflow-bound follow-up): `max-width` + `overflow: hidden` here are the
+   "header cannot overflow by construction" claim's bound for THIS contributor. `MetaCommentActionChip`
+   (the locked comment-affordance component rendered inside — three comment-active rules/tokens
+   byte-untouched, §4 item 8) has no unread-COUNT badge of its own to cap (checked: it renders only a
+   state dot + the text label this file already hides below 480px container width, see the
+   `:deep(.meta-comment-action-chip__label)` rule above) — so the bound lives on THIS button, the
+   chip's own container, instead: `max-width` caps how wide the chip can ever push this flex item, and
+   the `:deep()` ellipsis rule just below (same established deep-into-a-locked-component idiom as the
+   <480px label-hide rule above — the LOCKED component's own <style> is untouched either way) keeps an
+   unexpectedly long label truncating rather than visually overflowing this cap. */
+.meta-record-drawer__btn--comment { border-radius: 999px; padding: 3px 8px; max-width: 140px; overflow: hidden; }
+.meta-record-drawer__btn--comment :deep(.meta-comment-action-chip__label) { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .meta-record-drawer__btn--comment.meta-record-drawer__btn--comment--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
 .meta-record-drawer__btn--comment.meta-record-drawer__btn--comment--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 /* W2 S4: inbox link + badge moved verbatim (same values) from MetaCommentsDrawer.vue's own header
@@ -1470,7 +1520,17 @@ async function toggleRecordSubscription() {
 .meta-record-drawer__nav-btn { width: 24px; height: 24px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 14px; display: flex; align-items: center; justify-content: center; }
 .meta-record-drawer__nav-btn:hover:not(:disabled) { background: #f5f5f5; }
 .meta-record-drawer__nav-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-.meta-record-drawer__nav-pos { font-size: 11px; color: #999; min-width: 36px; text-align: center; }
+/* P3-1 (2026-09-05, header-overflow-bound follow-up): the OTHER header-overflow contributor named by
+   that finding — `recordPosition()` (meta-record-labels.ts) already renders huge totals in a
+   COMPACT form (`Intl.NumberFormat` compact notation past 1000, see that function's own comment), but
+   a compact string is still not a HARD bound (a pathological locale/number-format combination is not
+   provably bounded in px), so this rule adds the actual CSS backstop: `min-width: 0` (was a fixed
+   `36px` floor — dropped so this span can actually shrink below it, matching the finding's own
+   wording) lets the flex item shrink inside `.meta-record-drawer__nav` (a flex row), and `max-width` +
+   `overflow: hidden` + `text-overflow: ellipsis` cap how far it can grow past that, so even a
+   pathological value ellipsizes instead of pushing the (non-shrinking, `flex-wrap: nowrap`) toolbar
+   row wider than the panel. */
+.meta-record-drawer__nav-pos { font-size: 11px; color: #999; min-width: 0; max-width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; }
 /* Item 1: the inner scroll body. `flex: 1` + `min-height: 0` is the standard flexbox fix for a
    scrolling flex child (without `min-height: 0` a flex item's automatic minimum size is its content
    size, so it would grow to fit everything instead of shrinking to the column's remaining space and
@@ -1530,7 +1590,32 @@ async function toggleRecordSubscription() {
    WITH the bar instead of staying behind it. See `.meta-record-drawer__body` below for the matching
    `scroll-padding-top` fallback bump (58px bar height measured live in Chromium at 1512px, see that
    rule's own comment). */
-.meta-record-drawer__tabs-bar { position: sticky; top: 0; z-index: 2; margin: 0 -16px; padding: 12px 16px 14px; background: #fff; }
+/* P2-A (2026-09-05, PR-A §1.3, follow-up to the P2 flex-wrap fallback below): `container-type:
+   inline-size` (added here) turns this bar into the CSS Container Queries container the rule below
+   measures. This bar's OWN inline size tracks the PANEL's full width (it spans the panel's whole
+   content box via the negative-margin/re-padding idiom below, not the pill's own shrink-to-fit width
+   -- see that idiom's own comment above), so the query engages reliably at the 360px panel floor
+   regardless of locale string length, independent of the pill's own content width.
+   `display: flex` was tried here first (reasoning: `.meta-record-drawer__tabs`'s own `flex: 1` --
+   see the query below -- looked like it needed a flex PARENT to size against) and then REMOVED after
+   an isolated Chromium repro measured it to be a no-op FOR THE SHIPPED LABEL SET: with the four
+   English tab labels (Details/History/Comments/Attachments) at the 360px panel floor,
+   `pillWidth`/`tabWidths`/row count were BYTE-IDENTICAL with and without `display: flex` on this
+   element, so it was dropped rather than kept as unverified, load-bearing-looking clutter. This is
+   NOT a claim that an unconstrained `flex-grow: 1` inline-flex box generally ignores its immediate
+   parent's `display` for shrink-to-fit sizing -- only that box's shrink-to-fit width, for THAT label
+   set at THAT width, landed at the same value either way; a longer future label (a longer locale, or
+   the zh set 详情/动态/评论/附件, which is actually SHORTER and was not separately re-checked here)
+   was not re-measured against this specific claim. If tab-label overflow is ever reported at the
+   360px floor, re-verify this no-op claim with the actual label set in play before assuming
+   `display: flex` is still safe to leave off. `position: sticky` (this rule's own pre-existing
+   property) was ALSO verified unaffected by adding `container-type: inline-size` alone in the same
+   repro (`contain: layout inline-size`, which a `container-type` other than `normal` implies, does
+   NOT break `position: sticky` sticking behavior against this element's own scrolling ancestor,
+   `.meta-record-drawer__body` below) -- `barRect.top === bodyRect.top` held at `scrollTop` 0 and 300
+   alike, matching the P3-A comment's own established verification idiom just above; this half of the
+   repro's finding IS general (it does not depend on tab-label content). */
+.meta-record-drawer__tabs-bar { position: sticky; top: 0; z-index: 2; margin: 0 -16px; padding: 12px 16px 14px; background: #fff; container-type: inline-size; }
 /* P2 (2026-09-05 follow-up, verifier P2): was `inline-flex` with no wrapping -- at the (then-320px,
    now 360px) panel minimum the 4-tab pill's un-wrapped content width (355px measured in Chromium) ran
    PAST the panel's own content box, forcing a page-level horizontal scrollbar (the pill's right edge
@@ -1546,6 +1631,37 @@ async function toggleRecordSubscription() {
    is exactly the "pill look" this change is required to keep. */
 .meta-record-drawer__tabs { display: inline-flex; flex-wrap: wrap; row-gap: 4px; column-gap: 4px; padding: 3px; border: 1px solid #e5e7eb; border-radius: 999px; background: #f8fafc; }
 .meta-record-drawer__tab { min-width: 76px; padding: 5px 12px; border: none; border-radius: 999px; background: transparent; color: #64748b; cursor: pointer; font-size: 12px; font-weight: 600; }
+/* P2-A (2026-09-05, PR-A §1.3): below 420px container width the pill grows to fill
+   `.meta-record-drawer__tabs-bar`'s full width instead of staying shrink-to-fit (`flex: 1` on this
+   ALREADY-`display: inline-flex` pill, see the base rule above -- measured to reach the SAME rendered
+   width with or without `display: flex` on the bar itself for the shipped label set, see that rule's
+   own comment for the measured result and its stated, deliberately narrow scope), and `min-width: 0`
+   lets it shrink past its own children's combined natural width; each tab ALSO
+   gets `flex: 1; min-width: 0` (its parent, this pill, is ALREADY `display: inline-flex` at any
+   width, so this half needs no extra parent change) so the row's width divides evenly across all
+   four instead of every tab holding at its own `min-width:
+   76px` floor -- 4 x 76px + gaps alone exceeds the panel's content width at the 360px floor, which is
+   exactly what forced the `flex-wrap: wrap` fallback above to engage there before this query existed.
+   PLACEMENT (real-browser-verified defect, caught and fixed before landing): this block must come
+   AFTER both `.meta-record-drawer__tabs` and `.meta-record-drawer__tab`'s own base rules above, not
+   between them -- an earlier draft placed it right after `.tabs` and before `.tab`, and the tab's own
+   UNCONDITIONAL `min-width: 76px` (same specificity, later in source) then won the cascade over this
+   block's conditional `min-width: 0` at EVERY width, container query match or not (a `@container`
+   wrapper adds no specificity of its own -- only normal cascade order decides ties, exactly the same
+   way `@media` does). Verified with an isolated Chromium repro (identical markup/CSS, `min-width`
+   observed via `getComputedStyle` before/after reordering): 76px unconditionally with the old
+   placement, 0px (query matching) here. `flex-wrap: wrap` on the `.tabs` rule above is UNCHANGED and
+   stays the fallback for a `@container`-less browser (every evergreen target this app supports has
+   shipped Container Queries since 2023 -- this fallback is expected to matter only in the
+   jsdom-can't-render-CSS test suite, per the P2 comment's own framing, not in production). The
+   REMAINING layout claim -- that this actually renders as one row inside the real component, not just
+   in the isolated repro -- is NOT verified in this PR; same jsdom-can't-render-CSS caveat as every
+   other layout claim in this file; see the PR's real-browser checklist item "four tabs on one row at
+   360". */
+@container (width < 420px) {
+  .meta-record-drawer__tabs { flex: 1; min-width: 0; }
+  .meta-record-drawer__tab { flex: 1; min-width: 0; }
+}
 .meta-record-drawer__tab--active { background: #111827; color: #fff; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.16); }
 /* W2 S3 (lock §3.3 focus ring convention, H4-2/#4281 lineage, same token as MetaSheetViewRail.vue).
    Not real-browser-verified in this PR — jsdom can't render CSS; §8.3 real-browser sweep lands with

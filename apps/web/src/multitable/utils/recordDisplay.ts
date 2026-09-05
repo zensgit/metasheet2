@@ -64,3 +64,28 @@ export function resolveCanComment(rowActions: MetaRowActions | null | undefined,
 export function resolvePrimaryField(fields: MetaField[] | null | undefined): MetaField | undefined {
   return fields?.[0]
 }
+
+/**
+ * P3-2 (2026-09-05, record inspector v3 header follow-up): a THIRD "what should we call this
+ * record" idiom survived the `resolvePrimaryField` unification above —
+ * `MultitableWorkbench.vue`'s own `mentionDisplayFieldId`, which needs a field whose VALUE renders
+ * as readable text inside an `@mention` chip (a `string`/`longText` field specifically), not just
+ * "the record's primary field" — the primary field can legitimately be a `number`/`date`/`select`/…
+ * field, which would make a poor (or unreadable) mention label. Rather than leave that a fourth,
+ * independently-diverging idiom (or forcibly re-point mentions at a non-text primary field, a real
+ * behavior regression), this hoists ONE rule that PREFERS the primary field and only falls back to
+ * "first string/longText field" when the primary field itself is not text-shaped — so the two
+ * call sites read the SAME field whenever the sheet's primary field IS text (the common case), and
+ * only diverge for the genuinely different question ("what names this record" vs. "what text value
+ * can a mention chip render") when the primary field cannot answer the second one at all. Byte-
+ * identical to the pre-unification `mentionDisplayFieldId` idiom for every input: when `fields[0]`
+ * is itself `string`/`longText`, `.find()` over the SAME array returns that same first element
+ * either way; the two orderings differ only in which field wins when `fields[0]` is NOT text, and in
+ * that case both this function's fallback and the old code fall through to the identical
+ * `.find(...)` call.
+ */
+export function resolveMentionDisplayField(fields: MetaField[] | null | undefined): MetaField | undefined {
+  const primary = resolvePrimaryField(fields)
+  if (primary && (primary.type === 'string' || primary.type === 'longText')) return primary
+  return fields?.find((field) => field.type === 'string' || field.type === 'longText')
+}

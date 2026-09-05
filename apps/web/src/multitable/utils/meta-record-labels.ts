@@ -430,12 +430,36 @@ export function formPageIndicator(current: number, total: number, isZh: boolean)
   return isZh ? `第 ${current} / ${total} 页` : `Page ${current} of ${total}`
 }
 
+// recordCompactCount (P3-1, 2026-09-05 follow-up): a plain integer renders as-is up to 999; past
+// that it switches to `Intl.NumberFormat`'s compact notation ("1.2K", "1万" in zh — CLDR's own
+// compact forms, not a hand-rolled "k" suffix) so a huge record-list total cannot, by itself, make
+// `recordPosition`'s string arbitrarily long. This is ONE of the two header-overflow-bound layers
+// named by the P3-1 finding — the other is the CSS `max-width`/ellipsis backstop on
+// `.meta-record-drawer__nav-pos` (MetaRecordInspector.vue's own style comment) for whatever this
+// compaction still leaves too wide (or an environment without full ICU compact-notation support).
+// An explicit locale (not `undefined`, which reads the runtime's own default and would make this
+// helper's output ENVIRONMENT-dependent) keeps the two locales' output deterministic across Node
+// versions/CI runners the same way this file's other locale-branched helpers already are.
+function recordCompactCount(n: number, isZh: boolean): string {
+  if (!Number.isFinite(n) || Math.abs(n) < 1000) return String(n)
+  try {
+    return new Intl.NumberFormat(isZh ? 'zh-CN' : 'en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(n)
+  } catch {
+    return String(n)
+  }
+}
+
 // recordPosition: inspector Row A "n/N" record-list position indicator (design 2026-09-05, PR-A
 // §1.2). The 360px toolbar floor has no room for surrounding words (see the design's own ASCII
 // mock), so only the separator's spacing differs by locale — zh keeps the tight "n/N" convention,
-// en gets a little breathing room ("n / N").
+// en gets a little breathing room ("n / N"). P3-1 (2026-09-05 follow-up): both numbers route through
+// `recordCompactCount` above — a no-op for every value this file's own tests exercise (all well
+// under 1000), so no existing text pin changes; see that function's own comment for what changes
+// past that.
 export function recordPosition(current: number, total: number, isZh: boolean): string {
-  return isZh ? `${current}/${total}` : `${current} / ${total}`
+  const c = recordCompactCount(current, isZh)
+  const t = recordCompactCount(total, isZh)
+  return isZh ? `${c}/${t}` : `${c} / ${t}`
 }
 
 // configRestoreTypedConfirm: the T9-W destructive-tier typed-confirm input prompt

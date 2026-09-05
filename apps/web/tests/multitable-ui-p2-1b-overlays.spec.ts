@@ -251,6 +251,88 @@ describe('MtMenu / MtMenuItem', () => {
     await nextTick()
     expect(selectCount).toBe(1)
   })
+
+  // Record inspector v3 (2026-09-05, PR-A §4 item 10 additive-only kit change): arrow-key roving +
+  // Escape-returns-focus-to-trigger, added to this shared primitive for the kebab menu's benefit but
+  // exercised here directly, decoupled from any one consumer.
+  describe('keyboard roving + Escape-refocus (additive, PR-A §4 item 10)', () => {
+    // The open-focus/close-refocus chain here is TWO nested `nextTick`s deep — `isOpen`'s own
+    // `watch` callback (pre-flush, itself a microtask-scheduled job) schedules a SECOND `nextTick`
+    // inside its body for the actual `.focus()` call — so a single `await nextTick()` after a click
+    // observes the watcher having run but not yet its own inner focus call. Same multi-cycle
+    // discipline as multitable-record-inspector-header.spec.ts's own `flushUi` helper.
+    async function flushUi(cycles = 4) {
+      for (let i = 0; i < cycles; i += 1) {
+        await Promise.resolve()
+        await nextTick()
+      }
+    }
+
+    function mountThreeItemMenu(): HTMLDivElement {
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      app = createApp({
+        render: () =>
+          h(
+            MtMenu,
+            {},
+            {
+              trigger: () => h('button', { class: 'trigger-btn' }, 'Actions'),
+              default: () => [
+                h(MtMenuItem, { onSelect: () => {} }, { default: () => 'One' }),
+                h(MtMenuItem, { onSelect: () => {} }, { default: () => 'Two' }),
+                h(MtMenuItem, { onSelect: () => {} }, { default: () => 'Three' }),
+              ],
+            },
+          ),
+      })
+      app.mount(container!)
+      return container!
+    }
+
+    // P3-4: the existing consumer-level spec (multitable-record-inspector-header.spec.ts) titles its
+    // roving test "ArrowDown/ArrowUp/Home/End" but its body never actually dispatches ArrowUp — this
+    // is the direct, previously-missing coverage of that case on the shared primitive itself.
+    it('ArrowUp moves focus to the PREVIOUS item, and wraps from the first item to the last', async () => {
+      const c = mountThreeItemMenu()
+      ;(c.querySelector('.trigger-btn') as HTMLButtonElement).click()
+      await flushUi()
+      const items = Array.from(document.querySelectorAll<HTMLElement>('.mt-menu-item'))
+      expect(items).toHaveLength(3)
+      expect(document.activeElement).toBe(items[0]) // auto-focused on open
+
+      items[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
+      expect(document.activeElement).toBe(items[1])
+
+      document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }))
+      expect(document.activeElement).toBe(items[0]) // the actual ArrowUp case P3-4 names
+
+      document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }))
+      expect(document.activeElement).toBe(items[2]) // wraps past the first item to the last
+    })
+
+    // P3-6: the pre-fix implementation captured `document.activeElement` at open time as "the
+    // trigger" — correct only when a real mouse click already moved focus there FIRST. This host
+    // opens the menu WITHOUT ever focusing the trigger button first (`.click()` in jsdom does not
+    // synthesize the browser's own click-focuses-the-target behavior — see the header spec's own
+    // comment on this exact jsdom gap), so `document.activeElement` at open is `document.body`, NOT
+    // the trigger — the discriminating case the old implementation could not handle.
+    it('Escape returns focus to the ACTUAL trigger even when the trigger was NOT document.activeElement at open time', async () => {
+      const c = mountThreeItemMenu()
+      const trigger = c.querySelector('.trigger-btn') as HTMLButtonElement
+      expect(document.activeElement).not.toBe(trigger) // never focused — proves the discriminating setup
+      trigger.click() // opens the menu via a plain click, no prior .focus()
+      await flushUi()
+      const items = document.querySelectorAll<HTMLElement>('.mt-menu-item')
+      expect(items.length).toBeGreaterThan(0)
+      // MtMenu's own auto-focus-first-item-on-open (unrelated to the trigger-capture bug) has already
+      // moved focus off the trigger/body by the time Escape is dispatched — the real-world sequence.
+      document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+      await flushUi()
+      expect(document.querySelector('.mt-menu')).toBeNull() // menu closed
+      expect(document.activeElement).toBe(trigger)
+    })
+  })
 })
 
 describe('MtPanel', () => {

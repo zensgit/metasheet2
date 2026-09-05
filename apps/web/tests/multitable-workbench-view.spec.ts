@@ -1,5 +1,11 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, createApp, defineComponent, h, nextTick, reactive, ref, type App as VueApp, type Component } from 'vue'
+// P3-2 (2026-09-05): pure-function coverage for the mentionDisplayFieldId unification lives here,
+// beside the WB `mentionDisplayFieldId` computed it replaces — see that describe block below.
+import { resolveMentionDisplayField, resolvePrimaryField } from '../src/multitable/utils/recordDisplay'
+import type { MetaField } from '../src/multitable/types'
 
 const showErrorSpy = vi.fn()
 const showSuccessSpy = vi.fn()
@@ -3324,6 +3330,121 @@ describe('MultitableWorkbench view wiring', () => {
       container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
       await flushUi()
       expect(loadCommentsSpy).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  // Also required by the design brief directly (§1.1): a plain cursor move must not merely "write
+  // no hash" (the hash-lifecycle describe's own assertion above) — the inspector shell itself must
+  // never mount/show at all while the panel is closed.
+  describe('closed select-record does not mount/show the inspector (§1.1)', () => {
+    it('select-record with the panel closed does not mount/show the inspector', async () => {
+      mountWorkbench()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer]')).toBeNull()
+      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer]')).toBeNull()
+    })
+  })
+
+  // P2-B (2026-09-05, verified finding): "close retains selectedRecordId" had NO assertion in this
+  // suite before this — re-adding `selectedRecordId.value = null` inside `onCloseDrawer` (the
+  // pre-PR-A behavior, when `selectedRecordId` alone WAS the panel's visibility) would leave every
+  // pre-existing test in this file green. Proven here via the grid's own `selected-record-id` prop
+  // (WB → MetaGridTable, `:selected-record-id="selectedRecordId"`) — the grid stub declares no such
+  // prop, so Vue's normal attrs-fallthrough renders it as a literal DOM attribute on the stub's root.
+  describe('close retains selectedRecordId (§1.1, P2-B)', () => {
+    function gridSelectedRecordId(): string | null {
+      return container!.querySelector('[data-grid-column-widths]')?.getAttribute('selected-record-id') ?? null
+    }
+
+    it('expand-record selects the row; closing the panel keeps that row selected — only the panel itself closes', async () => {
+      mountWorkbench()
+      await flushUi()
+      expect(gridSelectedRecordId()).toBeNull()
+
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      expect(gridSelectedRecordId()).toBe('rec_1')
+      expect(container!.querySelector('[data-record-drawer]')).toBeTruthy()
+
+      container!.querySelector<HTMLButtonElement>('[data-close-drawer="true"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer]')).toBeNull() // panel closed
+      expect(gridSelectedRecordId()).toBe('rec_1') // row STAYS selected — the P2-B assertion itself
+    })
+  })
+
+  // P3-5 (2026-09-05, verified finding): the force-close watcher
+  // (`watch(selectedRecordId, rid => { if (!rid) inspectorOpen.value = false }`) had ZERO coverage.
+  // Deleting a record while the panel is open nulls `selectedRecordId` (`onDeleteRecord`) WITHOUT
+  // going through `onCloseDrawer` — this watcher is the ONLY thing that resets `inspectorOpen` in
+  // that path. Because `visible = inspectorOpen && !!selectedRecordId`, the panel closing right
+  // after the delete is NOT, by itself, proof the watcher ran (`!!selectedRecordId` alone already
+  // hides it) — the discriminating assertion is what happens on the NEXT plain cursor move: with the
+  // watcher in place, `inspectorOpen` is back to `false`, so a later PLAIN `select-record` on a
+  // different row must NOT reopen the panel; with the watcher deleted, `inspectorOpen` stays stuck
+  // `true` from before the delete, and that same plain select-record WOULD reopen it (`visible =
+  // true && !!rec_2` = true) — a real explicit-open-discipline violation.
+  describe('force-close watcher resets inspectorOpen when selectedRecordId is cleared out-of-band (§1.1, P3-5)', () => {
+    it('deleting the open record closes the panel, and a later plain select-record on another row does NOT reopen it', async () => {
+      gridMock.deleteRecord.mockResolvedValueOnce(true)
+      mountWorkbench()
+      await flushUi()
+
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer]')).toBeTruthy()
+
+      container!.querySelector<HTMLButtonElement>('[data-delete-record="true"]')!.click()
+      await flushUi()
+      expect(gridMock.deleteRecord).toHaveBeenCalledWith('rec_1')
+      expect(container!.querySelector('[data-record-drawer]')).toBeNull() // panel closed by the delete
+
+      // The discriminating step: a PLAIN cursor move (not expand-record) on a DIFFERENT record must
+      // not reopen the panel — it would, if `inspectorOpen` were left stuck `true` by the delete.
+      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_2"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer]')).toBeNull()
+    })
+  })
+
+  // P3-2 (2026-09-05, verified finding): `mentionDisplayFieldId` (above) is now routed through
+  // `resolveMentionDisplayField` — pure-function coverage of both branches named by the finding,
+  // plus a source pin proving the WB computed actually calls it (a future edit re-forking the two
+  // idioms would not itself red any DOM-level test, since no mock in this file renders
+  // `displayFieldId`).
+  describe('mention display field resolution unification (P3-2)', () => {
+    const TEXT_PRIMARY: MetaField[] = [
+      { id: 'fld_name', name: 'Name', type: 'string' } as MetaField,
+      { id: 'fld_qty', name: 'Qty', type: 'number' } as MetaField,
+    ]
+    const NON_TEXT_PRIMARY: MetaField[] = [
+      { id: 'fld_qty', name: 'Qty', type: 'number' } as MetaField,
+      { id: 'fld_status', name: 'Status', type: 'select' } as MetaField,
+      { id: 'fld_notes', name: 'Notes', type: 'longText' } as MetaField,
+    ]
+
+    it('when the primary field IS text (string/longText), it wins — same field the title/bulk-fill idioms already read', () => {
+      expect(resolveMentionDisplayField(TEXT_PRIMARY)?.id).toBe('fld_name')
+      expect(resolveMentionDisplayField(TEXT_PRIMARY)?.id).toBe(resolvePrimaryField(TEXT_PRIMARY)?.id)
+    })
+
+    it('when the primary field is NOT text, falls back to the first string/longText field instead (mention chips need a readable value)', () => {
+      expect(resolvePrimaryField(NON_TEXT_PRIMARY)?.id).toBe('fld_qty') // the primary field itself is NOT text
+      expect(resolveMentionDisplayField(NON_TEXT_PRIMARY)?.id).toBe('fld_notes') // mention display falls back
+    })
+
+    it('no string/longText field anywhere resolves to undefined (never throws)', () => {
+      const noTextFields: MetaField[] = [{ id: 'fld_qty', name: 'Qty', type: 'number' } as MetaField]
+      expect(resolveMentionDisplayField(noTextFields)).toBeUndefined()
+    })
+
+    it('[source] MultitableWorkbench.vue routes mentionDisplayFieldId through resolveMentionDisplayField, not a second inline .find() idiom', () => {
+      const src = readFileSync(join(__dirname, '..', 'src/multitable/views/MultitableWorkbench.vue'), 'utf8')
+      const block = src.match(/const mentionDisplayFieldId = computed\(\(\) =>[\s\S]*?\n\)/)?.[0] ?? ''
+      expect(block).toMatch(/resolveMentionDisplayField\(grid\.visibleFields\.value\)/)
+      expect(block).toMatch(/resolveMentionDisplayField\(grid\.fields\.value\)/)
     })
   })
 })

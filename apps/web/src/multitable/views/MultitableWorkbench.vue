@@ -639,7 +639,7 @@ import {
   recordNotFound as fmtRecordNotFound,
 } from '../utils/workbench-labels'
 import { recordLabel } from '../utils/meta-record-labels'
-import { resolvePrimaryField } from '../utils/recordDisplay'
+import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
 import { resolveButtonFieldProperty } from '../utils/field-config'
 import {
   bulkFailure as fmtBulkFailure,
@@ -1457,9 +1457,14 @@ const currentViewPermission = computed<MetaViewPermission | null>(() => {
   const activeViewId = workbench.activeViewId.value
   return activeViewId ? effectiveViewPermissions.value[activeViewId] ?? null : null
 })
+// P3-2 (2026-09-05, record inspector v3 header follow-up): routed through the SAME
+// `resolveMentionDisplayField` (utils/recordDisplay.ts) that hoists this idiom — see that
+// function's own comment for why "prefer the primary field, fall back to the first text field" is
+// byte-identical to the plain `.find()` this replaces for every input, and unifies with the
+// inspector title / bulk-fill idioms whenever the sheet's primary field is itself text.
 const mentionDisplayFieldId = computed(() =>
-  grid.visibleFields.value.find((field) => field.type === 'string' || field.type === 'longText')?.id
-  ?? grid.fields.value.find((field) => field.type === 'string' || field.type === 'longText')?.id
+  resolveMentionDisplayField(grid.visibleFields.value)?.id
+  ?? resolveMentionDisplayField(grid.fields.value)?.id
   ?? null,
 )
 const canConfigureCurrentView = computed(() => currentViewPermission.value?.canConfigure ?? true)

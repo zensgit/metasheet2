@@ -1,5 +1,5 @@
 <template>
-  <MtPopover v-model:open="isOpen" :placement="placement">
+  <MtPopover ref="popoverRef" v-model:open="isOpen" :placement="placement">
     <template #trigger="slotProps">
       <slot name="trigger" v-bind="slotProps" />
     </template>
@@ -41,17 +41,35 @@ withDefaults(defineProps<{
 
 const isOpen = ref(false)
 const menuRef = ref<HTMLElement | null>(null)
+const popoverRef = ref<InstanceType<typeof MtPopover> | null>(null)
 
 provide(MT_MENU_CLOSE_KEY, () => {
   isOpen.value = false
 })
 
-// Captured at the moment the menu opens (== `document.activeElement` at that instant), which in
-// every real open path (click or Enter/Space on the trigger) IS the trigger itself — the click that
-// flips `isOpen` true leaves the clicked element focused before this watcher runs. Used ONLY to
-// restore focus on an Escape-driven close (see `onMenuKeydown` below); a selection-driven close
-// (MtMenuItem's own `closeMenu()` call) leaves focus wherever the browser puts it after the click,
-// unchanged from pre-roving behavior.
+// P3-6 (2026-09-05, record inspector v3 finding): a focusable descendant inside MtPopover's own
+// `triggerRef` span (exposed there specifically for this, see that file's own comment) — a native
+// `<button>`/`<a href>`/etc. rendered by the CONSUMER's `#trigger` slot, e.g. this file's own kebab
+// `<MtIconButton>` consumer. Falls back to the span itself (still focusable if it — unusually — has
+// its own `tabindex`) so a call site whose trigger slot content matches none of these still gets
+// SOME element back rather than `null`.
+const TRIGGER_FOCUSABLE_SELECTOR = 'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+function resolveTriggerElement(): HTMLElement | null {
+  const root = popoverRef.value?.triggerRef ?? null
+  return root?.querySelector<HTMLElement>(TRIGGER_FOCUSABLE_SELECTOR) ?? root
+}
+
+// Captured at the moment the menu opens — the ACTUAL trigger element (identified structurally via
+// `resolveTriggerElement` above), NOT `document.activeElement` at that instant. The pre-fix version
+// read `document.activeElement`, which is only equal to the trigger when the open was a real mouse
+// click that already moved focus there FIRST (true in every real click, and in a test harness that
+// explicitly calls `.focus()` before `.click()` — see multitable-record-inspector-header.spec.ts's
+// own comment on why it does exactly that) — any other open path (a programmatic `isOpen.value =
+// true`, or focus already resting elsewhere when the trigger is activated) captured the WRONG
+// element, so an Escape-driven close silently failed to return focus to the actual trigger. Used
+// ONLY to restore focus on an Escape-driven close (see `onMenuKeydown` below); a selection-driven
+// close (MtMenuItem's own `closeMenu()` call) leaves focus wherever the browser puts it after the
+// click, unchanged from pre-roving behavior.
 let capturedTrigger: HTMLElement | null = null
 
 function menuItems(): HTMLElement[] {
@@ -61,7 +79,7 @@ function menuItems(): HTMLElement[] {
 
 watch(isOpen, (open) => {
   if (!open) return
-  capturedTrigger = document.activeElement as HTMLElement | null
+  capturedTrigger = resolveTriggerElement()
   void nextTick(() => {
     menuItems()[0]?.focus()
   })
