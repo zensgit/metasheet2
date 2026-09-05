@@ -3814,6 +3814,22 @@ describe('MultitableWorkbench view wiring', () => {
       expect(container!.querySelector('[data-test="drawer-field-error"]')).toBeNull()
     })
 
+    it('a failure for ANOTHER record but the SAME field is not attributed to this control either — toast, no inline (round 3: pins the recordId half of the guard)', async () => {
+      await openRec1()
+      gridMock.patchCell.mockImplementation(async () => {
+        gridMock.error.value = 'Title is too long'
+        // fieldId stays fld_title (the edited field); ONLY recordId is foreign. The round-2 fixture above
+        // flips both ids, so it stayed green with the recordId half of `own` deleted.
+        return failureFor('fld_title', 'Title is too long', { recordId: 'rec_9', status: 422, code: 'VALIDATION_ERROR' })
+      })
+      await patchTitle()
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('Title is too long')
+      expect(container!.querySelector('[data-test="drawer-field-error"]')).toBeNull()
+      // A foreign failure never reaches the anchorability ask (`own` short-circuits before it).
+      expect(inspectorStubAnchor).not.toHaveBeenCalled()
+    })
+
     it('the LOCAL row-action refusal (error.value set, patchCell returns null) keeps today\'s toast', async () => {
       await openRec1()
       gridMock.patchCell.mockImplementation(async () => {
@@ -3950,6 +3966,17 @@ describe('MultitableWorkbench view wiring', () => {
       expect(fieldErrorEl('fld_title')).toBeNull()
       expect(showErrorSpy).toHaveBeenCalledTimes(1)
       expect(showErrorSpy).toHaveBeenCalledWith('Failed to patch cell') // metaCoreLabel('grid.errorPatchCell', en)
+    })
+
+    it('…and in zh-CN the generic label is the localised copy, not the English literal (round 3: pins the zh half of metaCoreLabel(\'grid.errorPatchCell\'))', async () => {
+      useLocale().setLocale('zh-CN') // reset to 'en' by the top-level afterEach
+      await openRec1()
+      rejectNextPatch('', { status: 400, code: 'VALIDATION_ERROR' })
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')).toBeNull()
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('更新单元格失败') // metaCoreLabel('grid.errorPatchCell', zh) — meta-core-labels.ts
+      expect(showErrorSpy).not.toHaveBeenCalledWith('Failed to patch cell')
     })
 
     // --- round 2: per-call failure — two in-flight drawer patches never read each other's outcome ---
