@@ -629,6 +629,14 @@ GET /api/multitable/... (该 sheet 的记录列表,sheetId 取自 Step 0-7 actio
 > `INSERT`/`DELETE` 语句里的表名/列名全部不加引号(与
 > `stock-preparation-synthetic-sql-source/01-schema.sql` 的既有约定一致),会被 Postgres 折成小写,
 > 正好落在**有数据、被实际读取**的那一套,不会误伤空的遗留表。
+>
+> **两个 projectSubtree 桥接列**:222 的客户动作配置带了 OPTIONAL `readPlan.projectSubtree` 块
+> (`dn_pdm_bomheadinfo.path_id` 定位表头挂在哪个文件夹节点、`dn_pdm_pathinfo.parent_obj_id` 折叠文件夹
+> 树找子节点),而这两列此前不在这套 `dn_pdm_*` 表上——第一次子树读就报 PG「字段 "path_id" 不存在」,
+> 升级为全局 `read_failed`,整个大 BOM 作业判 `failed`,13151 行白展开。**222 上已于 2026-09-06 手工
+> `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` 补齐**;本生成器现在也在生成的 SQL 开头无条件带同样的
+> `ADD COLUMN IF NOT EXISTS` 语句(幂等,值默认 NULL,不影响本节其余各段描述的行数/展开结果),这样它
+> 对任何一套预置在这两列之前的旧表都能自愈,不必再手工补。
 
 ### 怎么生成
 

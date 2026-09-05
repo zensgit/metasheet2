@@ -62,9 +62,37 @@
 //   CLEANUP-START / CLEANUP-END comments so they can also be run alone, without
 //   the INSERTs that follow, to just remove the synthetic large-BOM rows.
 //
+//   SCHEMA GUARD (same idempotency style, applied to columns instead of rows):
+//   the OPTIONAL `readPlan.projectSubtree` bridge
+//   (lib/stock-preparation-bom-expansion.cjs:1266-1400, see also
+//   docs/development/takeover-beiliao-20260821/project-subtree-bridge-design-20260905.md)
+//   reads `DN_PDM_BomHeadInfo.path_id` and `DN_PDM_PathInfo.Parent_OBJ_ID`. A
+//   customer action config that enables that block (222's does) hits a
+//   Postgres "column does not exist" error — surfaced as a global `read_failed`
+//   that fails the WHOLE job — against any target table that predates those two
+//   columns. This generator therefore emits `ALTER TABLE ... ADD COLUMN IF NOT
+//   EXISTS` for both, unconditionally, before the DELETE/INSERT blocks, so
+//   re-running it against an older table self-heals the schema instead of
+//   erroring. Both columns default to NULL here (see --with-subtree below for
+//   the only way this generator ever populates them), which is deliberate: a
+//   NULL path_id/Parent_OBJ_ID means subtree root discovery finds zero roots
+//   for this dataset, so the existing 13151-row large-BOM expansion result is
+//   unchanged — this generator's job is exercising row-count scale, not the
+//   subtree bridge. (222's live tables were already patched by hand with the
+//   same `ADD COLUMN IF NOT EXISTS` on 2026-09-06; this guard is for every
+//   other/future target.)
+//
 // USAGE
 //   node scripts/ops/stock-preparation-synth-large-bom.mjs --out <file.sql> \
-//     [--fanout 25,25,20] [--project SYN-PROJ-LARGE-0001]
+//     [--fanout 25,25,20] [--project SYN-PROJ-LARGE-0001] [--with-subtree]
+//
+//   --with-subtree additionally seeds ONE folder child node under the project
+//   path (DN_PDM_PathInfo.Parent_OBJ_ID -> the project's own path id) and
+//   points the ROOT part's DN_PDM_BomHeadInfo.path_id at that child node, so
+//   the projectSubtree block has something non-NULL to discover against this
+//   dataset. It changes NOTHING else — same parts, same BOM rows, same 13151
+//   expansion count — and is OFF by default: omitting the flag reproduces
+//   byte-identical SQL to the flag never having existed (see the test file).
 // ============================================================================
 
 import fs from 'node:fs'
@@ -124,13 +152,16 @@ function sqlString(value) {
  * in-memory dataset (every row this generator will emit) plus a summary of
  * expected counts. No I/O — safe to call from tests.
  */
-export function buildLargeBomDataset({ fanout = DEFAULT_FANOUT, project = DEFAULT_PROJECT_NO } = {}) {
+export function buildLargeBomDataset({ fanout = DEFAULT_FANOUT, project = DEFAULT_PROJECT_NO, withSubtree = false } = {}) {
   const [f0, f1, f2] = parseFanout(fanout)
   const projectNo = typeof project === 'string' && project.trim() ? project.trim() : DEFAULT_PROJECT_NO
 
   const pathId = `${PREFIX}PATH-1`
   const orderId = `${PREFIX}ORDER-1`
   const rootPartId = `${PREFIX}PART-L0-1`
+  // Only populated when withSubtree is true: one folder child node under the project path, used
+  // as the ROOT bom head's path_id so projectSubtree discovery has a real, non-NULL node to walk.
+  const subtreePathId = withSubtree ? `${PREFIX}PATH-1-SUB` : null
 
   const parts = []
   const bomHeads = []
@@ -148,9 +179,9 @@ export function buildLargeBomDataset({ fanout = DEFAULT_FANOUT, project = DEFAUL
     materialCursor += 1
   }
 
-  function addBomHead(partId) {
+  function addBomHead(partId, headPathId = null) {
     const bomId = `${partId}-BOM`
-    bomHeads.push({ partId, bomId, sysVer: 'V1', bomAble: '1' })
+    bomHeads.push({ partId, bomId, sysVer: 'V1', bomAble: '1', pathId: headPathId })
     return bomId
   }
 
@@ -161,7 +192,7 @@ export function buildLargeBomDataset({ fanout = DEFAULT_FANOUT, project = DEFAUL
   }
 
   addPart(rootPartId)
-  const rootBomId = addBomHead(rootPartId)
+  const rootBomId = addBomHead(rootPartId, subtreePathId)
 
   const rootQuantity = 1 // DN_PDM_OrderDetailInfo.quantity for the root line
   let totalQuantitySum = rootQuantity // the root row's own totalQuantity
@@ -201,9 +232,10 @@ export function buildLargeBomDataset({ fanout = DEFAULT_FANOUT, project = DEFAUL
   const summary = {
     fanout: [f0, f1, f2],
     projectNo,
+    withSubtree,
     tableRowCounts: {
       [TABLES.pathExAttr]: 1,
-      [TABLES.pathInfo]: 1,
+      [TABLES.pathInfo]: withSubtree ? 2 : 1,
       [TABLES.orderHead]: 1,
       [TABLES.orderDetail]: 1,
       [TABLES.part]: parts.length,
@@ -224,6 +256,7 @@ export function buildLargeBomDataset({ fanout = DEFAULT_FANOUT, project = DEFAUL
     orderId,
     rootPartId,
     projectNo,
+    subtreePathId,
     parts,
     bomHeads,
     bomDetails,
@@ -254,7 +287,7 @@ function renderInsertStatements(table, columnsSql, rows, mapRow, batchSize = 500
  * uses (02-seed-pull-1.sql).
  */
 export function renderSql(dataset) {
-  const { pathId, orderId, rootPartId, projectNo, parts, bomHeads, bomDetails, orderDetail, summary } = dataset
+  const { pathId, orderId, rootPartId, projectNo, subtreePathId, parts, bomHeads, bomDetails, orderDetail, summary } = dataset
   const out = []
 
   out.push('-- ============================================================================')
@@ -270,7 +303,16 @@ export function renderSql(dataset) {
   out.push('-- All identifiers created by this generator are prefixed "SYNL-" (never "SYN-",')
   out.push('-- so this can never collide with plugins/plugin-integration-core/fixtures/')
   out.push('-- stock-preparation-synthetic-sql-source/*.sql, which uses "SYN-").')
+  if (subtreePathId) {
+    out.push(`-- --with-subtree: seeds ${TABLES.pathInfo} child node ${subtreePathId} (Parent_OBJ_ID ->`)
+    out.push(`-- the project path ${pathId}) and points the ROOT part's ${TABLES.bomHead}.path_id at it.`)
+  }
   out.push('-- ============================================================================')
+  out.push('')
+  out.push('-- ==== SCHEMA-GUARD-START (idempotent; adds the projectSubtree-bridge columns if the target table predates them) ====')
+  out.push(`ALTER TABLE ${TABLES.bomHead} ADD COLUMN IF NOT EXISTS path_id varchar(64);`)
+  out.push(`ALTER TABLE ${TABLES.pathInfo} ADD COLUMN IF NOT EXISTS Parent_OBJ_ID varchar(64);`)
+  out.push('-- ==== SCHEMA-GUARD-END ====')
   out.push('')
   out.push('-- ==== CLEANUP-START (safe to run alone to remove this generator\'s rows only) ====')
   out.push(`DELETE FROM ${TABLES.bomDetail} WHERE bom_pid LIKE '${PREFIX}%';`)
@@ -287,8 +329,14 @@ export function renderSql(dataset) {
   out.push(`  (${sqlString(projectNo)}, ${sqlString(pathId)});`)
   out.push('')
 
-  out.push(`INSERT INTO ${TABLES.pathInfo} (OBJ_ID) VALUES`)
-  out.push(`  (${sqlString(pathId)});`)
+  if (subtreePathId) {
+    out.push(`INSERT INTO ${TABLES.pathInfo} (OBJ_ID, Parent_OBJ_ID) VALUES`)
+    out.push(`  (${sqlString(pathId)}, NULL),`)
+    out.push(`  (${sqlString(subtreePathId)}, ${sqlString(pathId)});`)
+  } else {
+    out.push(`INSERT INTO ${TABLES.pathInfo} (OBJ_ID) VALUES`)
+    out.push(`  (${sqlString(pathId)});`)
+  }
   out.push('')
 
   out.push(`INSERT INTO ${TABLES.orderHead} (OBJ_ID, path_id) VALUES`)
@@ -308,12 +356,19 @@ export function renderSql(dataset) {
   out.push(partStatements.join('\n\n'))
   out.push('')
 
-  const headStatements = renderInsertStatements(
-    TABLES.bomHead,
-    'part_id, bom_id, SysVer, bom_able',
-    bomHeads,
-    (h) => `(${sqlString(h.partId)}, ${sqlString(h.bomId)}, ${sqlString(h.sysVer)}, ${sqlString(h.bomAble)})`,
-  )
+  const headStatements = subtreePathId
+    ? renderInsertStatements(
+        TABLES.bomHead,
+        'part_id, bom_id, SysVer, bom_able, path_id',
+        bomHeads,
+        (h) => `(${sqlString(h.partId)}, ${sqlString(h.bomId)}, ${sqlString(h.sysVer)}, ${sqlString(h.bomAble)}, ${h.pathId ? sqlString(h.pathId) : 'NULL'})`,
+      )
+    : renderInsertStatements(
+        TABLES.bomHead,
+        'part_id, bom_id, SysVer, bom_able',
+        bomHeads,
+        (h) => `(${sqlString(h.partId)}, ${sqlString(h.bomId)}, ${sqlString(h.sysVer)}, ${sqlString(h.bomAble)})`,
+      )
   out.push(headStatements.join('\n\n'))
   out.push('')
 
@@ -337,6 +392,7 @@ export function formatSummary(summary) {
   for (const [table, count] of Object.entries(summary.tableRowCounts)) {
     lines.push(`  ${table}: ${count}`)
   }
+  lines.push(`withSubtree: ${summary.withSubtree}`)
   lines.push(`layer counts: layer1=${summary.layerCounts.layer1} layer2=${summary.layerCounts.layer2} layer3=${summary.layerCounts.layer3}`)
   lines.push(`expected expansion rows, child-only formula (layer1+layer2+layer3): ${summary.childRowsFormulaSum}`)
   lines.push(`expected expansion rows, with root (matches dry-run rowsExpanded): ${summary.expectedExpansionRowsWithRoot}`)
@@ -346,14 +402,15 @@ export function formatSummary(summary) {
 }
 
 export function parseArgs(argv) {
-  const result = { out: '', fanout: DEFAULT_FANOUT.slice(), project: DEFAULT_PROJECT_NO }
+  const result = { out: '', fanout: DEFAULT_FANOUT.slice(), project: DEFAULT_PROJECT_NO, withSubtree: false }
   for (let i = 2; i < argv.length; i += 1) {
     const flag = argv[i]
     const value = argv[i + 1]
     if (flag === '--out' && value) { result.out = value; i += 1; continue }
     if (flag === '--fanout' && value) { result.fanout = parseFanout(value); i += 1; continue }
     if (flag === '--project' && value) { result.project = value; i += 1; continue }
-    throw new Error(`USAGE: node scripts/ops/stock-preparation-synth-large-bom.mjs --out <file.sql> [--fanout 25,25,20] [--project ${DEFAULT_PROJECT_NO}] (unrecognized: ${flag})`)
+    if (flag === '--with-subtree') { result.withSubtree = true; continue }
+    throw new Error(`USAGE: node scripts/ops/stock-preparation-synth-large-bom.mjs --out <file.sql> [--fanout 25,25,20] [--project ${DEFAULT_PROJECT_NO}] [--with-subtree] (unrecognized: ${flag})`)
   }
   if (!result.out) {
     throw new Error('USAGE: --out <file.sql> is required')
@@ -363,7 +420,7 @@ export function parseArgs(argv) {
 
 function main(argv) {
   const args = parseArgs(argv)
-  const dataset = buildLargeBomDataset({ fanout: args.fanout, project: args.project })
+  const dataset = buildLargeBomDataset({ fanout: args.fanout, project: args.project, withSubtree: args.withSubtree })
   const sql = renderSql(dataset)
   const outPath = path.resolve(args.out)
   fs.mkdirSync(path.dirname(outPath), { recursive: true })

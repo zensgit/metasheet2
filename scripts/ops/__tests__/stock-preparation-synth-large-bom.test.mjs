@@ -242,3 +242,71 @@ test('CLI rejects a missing --out and an invalid --fanout', () => {
     execFileSync(process.execPath, [SCRIPT_PATH, '--out', 'x.sql', '--fanout', '2,2'], { encoding: 'utf8', stdio: 'pipe' })
   })
 })
+
+// The two columns the OPTIONAL readPlan.projectSubtree bridge reads
+// (lib/stock-preparation-bom-expansion.cjs:1266-1400): DN_PDM_BomHeadInfo.path_id and
+// DN_PDM_PathInfo.Parent_OBJ_ID. A target table created before these existed is missing them,
+// and a customer action config with the projectSubtree block enabled (222's does) turns that into
+// a Postgres "column does not exist" error -> global `read_failed` that fails the whole job.
+const SUBTREE_BRIDGE_COLUMNS = [
+  { table: 'DN_PDM_BomHeadInfo', column: 'path_id' },
+  { table: 'DN_PDM_PathInfo', column: 'Parent_OBJ_ID' },
+]
+
+test('renderSql always emits an idempotent ADD COLUMN IF NOT EXISTS schema guard for both projectSubtree-bridge columns', () => {
+  const dataset = buildLargeBomDataset({ fanout: [2, 2, 2], project: 'SYNL-TEST-SMALL' })
+  const sql = renderSql(dataset)
+
+  const schemaGuardStart = sql.indexOf('SCHEMA-GUARD-START')
+  const schemaGuardEnd = sql.indexOf('SCHEMA-GUARD-END')
+  const cleanupStart = sql.indexOf('CLEANUP-START')
+  assert.ok(schemaGuardStart >= 0 && schemaGuardEnd > schemaGuardStart, 'missing SCHEMA-GUARD block')
+  assert.ok(schemaGuardEnd < cleanupStart, 'schema guard must run before the DELETE/INSERT cleanup+seed block')
+
+  for (const { table, column } of SUBTREE_BRIDGE_COLUMNS) {
+    const pattern = new RegExp(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${column} varchar\\(64\\);`)
+    assert.match(sql, pattern, `missing idempotent ADD COLUMN for ${table}.${column}`)
+    // Exactly one ALTER per column per generated file — re-running the generator regenerates the
+    // whole file rather than appending, so a single run never emits the guard twice.
+    const occurrences = sql.split(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${column}`).length - 1
+    assert.equal(occurrences, 1, `expected exactly one schema-guard ALTER for ${table}.${column}`)
+  }
+})
+
+test('regenerating (even with different --fanout/--project) keeps the schema guard singular — no column accumulation across runs', () => {
+  const first = renderSql(buildLargeBomDataset({ fanout: [2, 2, 2], project: 'SYNL-TEST-SMALL' }))
+  const second = renderSql(buildLargeBomDataset({ fanout: [3, 3, 3], project: 'SYNL-TEST-OTHER' }))
+  for (const sql of [first, second]) {
+    for (const { table, column } of SUBTREE_BRIDGE_COLUMNS) {
+      const occurrences = sql.split(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${column}`).length - 1
+      assert.equal(occurrences, 1)
+    }
+  }
+  // The ALTER statements themselves are param-independent (same two lines regardless of dataset).
+  const extractGuard = (sql) => sql.slice(sql.indexOf('SCHEMA-GUARD-START'), sql.indexOf('SCHEMA-GUARD-END'))
+  assert.equal(extractGuard(first), extractGuard(second))
+})
+
+test('--with-subtree off (default, and explicit false) reproduces byte-identical SQL to the flag never existing', () => {
+  const implicitOff = renderSql(buildLargeBomDataset({ fanout: [2, 2, 2], project: 'SYNL-TEST-SMALL' }))
+  const explicitOff = renderSql(buildLargeBomDataset({ fanout: [2, 2, 2], project: 'SYNL-TEST-SMALL', withSubtree: false }))
+  assert.equal(implicitOff, explicitOff)
+
+  // Structural lock on the off-state shape: one PathInfo row (OBJ_ID only, no Parent_OBJ_ID
+  // column in the INSERT), and BomHeadInfo without a path_id column at all.
+  assert.match(implicitOff, /INSERT INTO DN_PDM_PathInfo \(OBJ_ID\) VALUES/)
+  assert.doesNotMatch(implicitOff, /INSERT INTO DN_PDM_PathInfo \(OBJ_ID, Parent_OBJ_ID\)/)
+  assert.match(implicitOff, /INSERT INTO DN_PDM_BomHeadInfo \(part_id, bom_id, SysVer, bom_able\) VALUES/)
+  assert.doesNotMatch(implicitOff, /INSERT INTO DN_PDM_BomHeadInfo \(part_id, bom_id, SysVer, bom_able, path_id\)/)
+
+  const on = renderSql(buildLargeBomDataset({ fanout: [2, 2, 2], project: 'SYNL-TEST-SMALL', withSubtree: true }))
+  assert.notEqual(on, implicitOff, '--with-subtree must actually change the output')
+  assert.match(on, /INSERT INTO DN_PDM_PathInfo \(OBJ_ID, Parent_OBJ_ID\) VALUES/)
+  assert.match(on, /INSERT INTO DN_PDM_BomHeadInfo \(part_id, bom_id, SysVer, bom_able, path_id\) VALUES/)
+  // Turning it on adds exactly one extra DN_PDM_PathInfo row (the subtree child folder node) and
+  // does not touch part/bomDetail counts or row totals — same 15-row (2,2,2) expansion either way.
+  const dataset = buildLargeBomDataset({ fanout: [2, 2, 2], project: 'SYNL-TEST-SMALL', withSubtree: true })
+  assert.equal(dataset.summary.tableRowCounts.DN_PDM_PathInfo, 2)
+  assert.equal(dataset.summary.expectedExpansionRowsWithRoot, 15)
+  assert.equal(dataset.summary.tableRowCounts.DN_PDM_PartLibraryInfo, 15)
+})
