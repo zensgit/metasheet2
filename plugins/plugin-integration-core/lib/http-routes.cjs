@@ -179,6 +179,31 @@ const ROUTES = [
   // quantities), unlike the values-free /prep-lines summary above, so it does NOT ride the same
   // stock-prep:read tier — see the handler for the gate choice and its justification.
   ['GET', '/api/integration/stock-preparation/prep-lines/export', 'stockPreparationPrepLineExport'],
+  // 一线看得见自己工厂的项目 — the OPERATOR-scoped project directory/worklist. A SIBLING of the
+  // values-free '/stock-preparation/projects' route above, never a widening of it: that one keeps its
+  // byte-identical values-free projection for the platform/admin workspace, this one carries the
+  // caller's OWN tenant's project NUMBER and NAME so a floor operator can find their project by name
+  // instead of memorising that 230920006 is the RY2 注射水缓冲罐部件. VALUE-BEARING, so it rides
+  // stock-prep:operate (the same tier as value-entry and the Excel export), and its tenant is derived
+  // from the AUTHENTICATED principal with the host vouching for the pairing — see the handler.
+  ['GET', '/api/integration/stock-preparation/operator/projects', 'stockPreparationOperatorProjectDirectory'],
+  // 通知下一步 —— 备料多人接力的交接。Several people each fill their OWN fields on a project's prep
+  // rows in an agreed order; this pair is "whose turn is it" and "I'm done, tell the next one". Both
+  // are VALUES-FREE (step keys from a closed vocabulary, cursor integers, booleans, handler COUNTS),
+  // unlike the export above — so the read rides the broad stock-prep:read queue-watcher tier and only
+  // the advance rides the OPERATE write tier. See stock-preparation-handoff.cjs for what this is (a
+  // visible turn signal) and, emphatically, what it is not (a permission mechanism, an approval
+  // graph, or an impersonation of the last approver).
+  ['GET', '/api/integration/stock-preparation/handoff', 'stockPreparationHandoffStatus'],
+  ['POST', '/api/integration/stock-preparation/handoff/advance', 'stockPreparationHandoffAdvance'],
+  // 项目备料页 — ONE project's board: the read behind the operator's single page. A SIBLING of the
+  // directory above and gated identically (stock-prep:operate ∧ read, tenant derived from the
+  // AUTHENTICATED principal). It carries the caller's own tenant's project number/name plus counts,
+  // timestamps and a multitable deep-link HANDLE — never a row value. An unknown number and another
+  // tenant's number take the SAME code path to the SAME 404, so this route is not an existence
+  // oracle across tenants. Path-addressed by projectNo because the board IS one project; the number
+  // never reaches an audit row. See stock-preparation-project-board.cjs.
+  ['GET', '/api/integration/stock-preparation/projects/:projectNo/board', 'stockPreparationOperatorProjectBoard'],
   // #3751 MVP W5b (#3890): values-free audit trail over the stock-prep write surface.
   ['GET', '/api/integration/stock-preparation/audit', 'stockPreparationAuditList'],
   // 工作台里选源 — WHICH source the pull action reads, chosen in the workbench instead of in a server
@@ -420,8 +445,10 @@ const {
 // set and the BE gate set cannot drift.
 const {
   STOCK_PREP_OPERATE,
+  STOCK_PREP_OPERATOR_PULL_ACTION_ID,
   STOCK_PREP_READ,
   isStockPrepPermissionCode,
+  operatorMayRunStockPrepPull,
   satisfiesStockPrepAccess,
 } = require('./stock-preparation-workbench-access.cjs')
 // DEPLOYMENT PREFLIGHT: the one read that aggregates every "this deployment cannot run stock-prep
@@ -472,6 +499,10 @@ const {
   inspectStockPreparationSandboxTarget,
   ensureStockPreparationSandboxTarget,
   sandboxStockPreparationTemplate,
+  // The ONE carry-ownership verdict, shared with the deploy-time preflight so the wall and the
+  // warning cannot drift apart.
+  CARRY_TARGET_OWNERSHIP_STATES,
+  decideCarryTargetOwnership,
 } = require('./stock-preparation-target-provisioning.cjs')
 const {
   StockPreparationOptionSyncError,
@@ -580,6 +611,28 @@ const {
 // READ-gated (broader than the rest of this module — see the route); values-free (projectName /
 // sourceProjectNo never cross, OWNER-GATED OD-W3-1, not opened here).
 const { listStockPreparationProjects } = require('./stock-preparation-project-reads.cjs')
+// 一线看得见自己工厂的项目: the OPERATOR-tier sibling of the read above. Carries the caller's OWN
+// tenant's projectNo + projectName; the values-free module it sits beside is not modified.
+const {
+  StockPreparationOperatorDirectoryError,
+  listOperatorProjectDirectory,
+} = require('./stock-preparation-operator-project-directory.cjs')
+// 项目备料页 — ONE project's board. The fourth value-bearing stock-prep read; it rides the SAME
+// operator value scope as the directory above and returns a frozen key set (numbers, names, counts,
+// timestamps, handles), never a row value. See the module header.
+const {
+  STOCK_PREPARATION_PROJECT_BOARD_AUDIT_ACTION,
+  STOCK_PREPARATION_PROJECT_BOARD_MODES,
+  StockPreparationProjectBoardError,
+  readOperatorProjectBoard,
+} = require('./stock-preparation-project-board.cjs')
+// ...and THE capability that decides whose data the caller may be shown. It is the one place a
+// value-bearing read establishes "whose data is it", and it refuses a principal with no tenant of
+// its own — which is how the platform/consultant side stays out of this surface.
+const {
+  StockPreparationOperatorScopeError,
+  resolveOperatorValueScope,
+} = require('./stock-preparation-operator-scope.cjs')
 // #3751 MVP W3 (diff rows): route-level enum gates for the diff-row filters come from the SAME frozen
 // vocabularies the engine exports (never re-typed literals).
 const { DIFF_TYPES: STOCK_PREPARATION_DIFF_TYPES, REVIEW_STATUSES: STOCK_PREPARATION_REVIEW_STATUSES } = require('./stock-preparation-snapshot-diff.cjs')
@@ -620,7 +673,25 @@ const { MATCH_STATUSES: STOCK_PREPARATION_MATCH_STATUSES } = require('./stock-pr
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('./stock-preparation-templates.cjs')
 // 按项目导出物料 Excel: reads the ACTIVE plm_stock_preparation_main rows of one business project,
 // projected to the agreed EXPORT_COLUMNS. Structurally read-only; never touches xlsx itself.
-const { exportStockPreparationPrepLines } = require('./stock-preparation-prep-line-export.cjs')
+const {
+  exportStockPreparationPrepLines,
+  stockPreparationProjectHasMainRows,
+} = require('./stock-preparation-prep-line-export.cjs')
+// 通知下一步: the pure half of the 备料 handoff — the closed step vocabulary, the deploy-config parse,
+// the compare-and-set advance decision, and the values-free notification bodies. No I/O of its own.
+const {
+  parseStockPreparationHandoffConfig,
+  planStockPreparationHandoffAdvance,
+  buildStockPreparationHandoffNotification,
+  chainHasDestinationForHop,
+  assertStockPreparationHandoffNotifyOutcome,
+  projectHandoffSteps,
+  isHandlerOfStep,
+} = require('./stock-preparation-handoff.cjs')
+// The shared shape rule for a 备料 business project number. See stock-preparation-common.cjs for why
+// this is a HANDLE and not free text: the same string reaches a record filter, an append-only audit
+// row, a durable cursor row and a DingTalk markdown body.
+const { isValidStockPrepProjectNo } = require('./stock-preparation-common.cjs')
 // FOS-2: generic field-option-sync route — resolve a FOS preset (FOS-1 catalog), validate operator
 // option sets against the preset's source keys, and patch each mapped field's options + generic
 // `fieldOptionSync` metadata through the SAME kernel stock-prep uses (no parallel write path).
@@ -669,6 +740,78 @@ function sendError(res, error) {
     },
   })
 }
+
+// THE CARRY TENANT WALL — "is the sheet this deployment is bound to the CALLER'S sheet?"
+//
+// WHAT THIS IS NOT ANY MORE. The first cut asked whether `target.sheetId` equalled
+// `findObjectSheet(callerProject, target.objectId).id`, i.e. whether the two halves of the binding
+// were derived from one tuple. That is a binding-SHAPE rule, not a tenancy proof, and nothing else
+// in this line maintains it: `normalizeTarget` accepts any sheetId and defaults objectId
+// independently, the sandbox apply gate reads ONLY objectId, and the writer / export / conflict
+// policies take sheetId verbatim. A binding whose two halves name different tuples is therefore a
+// state this codebase accepts everywhere else — and pre-registry installs, whose sheets were
+// provisioned before the ownership registry existed, are in exactly that state through no fault of
+// their own. The derived-id rule refused all of them while apply, dry-run and the export kept
+// working, and it blamed "tenancy" for what was a shape mismatch, sending an operator after a
+// tenant/membership problem that did not exist.
+//
+// WHAT OWNERSHIP ACTUALLY IS. `meta_sheets` carries no project column; a sheet's project survives
+// only inside its derived id, which is one-way and — as above — is not an invariant. The one place
+// ownership is RECORDED is `plugin_multitable_object_registry` (sheet_id -> project_id), written by
+// plugin-scoped `provisioning.ensureObject`. So the wall asks the registry, through the host port
+// `isSheetOwnedByProject`, whether the bound sheet belongs to the CALLER's staging project.
+// A hand-bound sheet that the caller's own tenant really provisioned passes — which is precisely the
+// 222 window shape — and a sheet owned by another tenant is refused however its id was derived.
+//
+// THE PORT IS A BOOLEAN, NOT AN OWNER. Asking "who owns this sheet" would hand the answer to a
+// caller who may not be entitled to it: the plugin-scope guard can only narrow by project
+// NAMESPACE, and every tenant of this plugin shares `integration-core`, so a foreign tenant's
+// project id would pass that guard on its way back out. Asking "is it THIS project's" leaks
+// nothing — the caller already knows the project it named. The cost is that "owned by someone
+// else" and "not registered at all" become one answer, which is why the derived-id fallback below
+// exists and why a false answer is never by itself the final word.
+//
+// THE REGISTRY MISS IS NOT A PASS. A sheet with no registry row is not "yours", it is
+// "unattributable" (a pre-registry legacy install, or an id nothing ever provisioned). For a WRITE
+// that lands human work in a customer's table, an unprovable owner must not be treated as
+// permission — so a miss falls back to the only other evidence there is, the derived id, and refuses
+// with its OWN code when that fails too. The two refusals say different things on purpose, because
+// they send an operator to different places.
+//
+// Values-free: refusals name the objectId (a public config identifier) and nothing else — never a
+// sheet id, never a project id, never a row.
+async function assertCarryTargetBelongsToTenant({ provisioning, targetProjectId, target } = {}) {
+  const boundSheetId = target && typeof target.sheetId === 'string' ? target.sheetId.trim() : ''
+  const objectId = target && typeof target.objectId === 'string' ? target.objectId.trim() : ''
+  if (!boundSheetId || !objectId) {
+    throw new HttpRouteError(409, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH', 'the bound stock-preparation target cannot be attributed to a tenant', { objectId: objectId || null })
+  }
+  // REACHABLE, and deliberately so: the caller hands this the RAW host surface rather than a helper
+  // that has already refused on its own terms, so a host without the ownership port fails here, with
+  // the code that names what is missing, instead of behind a generic provisioning 503.
+  if (!provisioning || typeof provisioning.isSheetOwnedByProject !== 'function') {
+    throw new HttpRouteError(501, 'CONFIRM_CARRY_PROVISIONING_UNAVAILABLE', 'the carry tenant check requires multitable.provisioning.isSheetOwnedByProject', { requiredMethods: ['isSheetOwnedByProject'] })
+  }
+  const ownedByProject = await provisioning.isSheetOwnedByProject(boundSheetId, targetProjectId) === true
+  // The derived id is the ONLY fallback evidence, and it is gathered only when ownership was not
+  // proven — a pure hash, no IO. THE VERDICT ITSELF IS NOT DECIDED HERE: it comes from
+  // `decideCarryTargetOwnership`, the same function the deploy-time preflight calls, so what an
+  // operator was warned about and what their click returns cannot drift apart.
+  const derive = !ownedByProject && typeof provisioning.getObjectSheetId === 'function'
+    ? provisioning.getObjectSheetId
+    : null
+  const derivedSheetId = derive ? String(derive.call(provisioning, targetProjectId, objectId) || '') : ''
+  const verdict = decideCarryTargetOwnership({ boundSheetId, objectId, ownedByProject, derivedSheetId })
+  if (verdict.ok) return
+  throw new HttpRouteError(409, verdict.refusalCode, CARRY_TARGET_OWNERSHIP_MESSAGES[verdict.state], { objectId })
+}
+
+// One message per refusing state. Values-free: they name no sheet id and no project id.
+const CARRY_TARGET_OWNERSHIP_MESSAGES = Object.freeze({
+  [CARRY_TARGET_OWNERSHIP_STATES.NOT_OWNED]: 'the sheet this deployment is bound to is not registered to the project of this caller, and its id is not the one derived for that project either',
+  [CARRY_TARGET_OWNERSHIP_STATES.UNDECIDABLE]: 'the bound sheet is not registered to this project and this host exposes no id derivation to fall back on, so its owner cannot be established',
+  [CARRY_TARGET_OWNERSHIP_STATES.UNBOUND]: 'the bound stock-preparation target cannot be attributed to a tenant',
+})
 
 function inferDataSourceBridgeErrorCode(error) {
   const code = error && error.code ? String(error.code) : ''
@@ -783,6 +926,84 @@ function requireAccess(req, action) {
   return user
 }
 
+/**
+ * 一线自己拉数据 — THE TABLE-ACTION GATE, WITH THE OPERATOR SPLIT.
+ *
+ * `requireAccess` answers "does this principal hold this tier". Two table-action sub-routes need a
+ * second question answered after that one says no: "…or is this the ONE stock-prep pull action a
+ * floor operator was ruled able to self-serve?".
+ *
+ * THE ORDER IS THE CONTRACT, and it is what makes this additive rather than a rewrite:
+ *   1. no principal            -> 401, exactly as before;
+ *   2. the LEGACY tier passes  -> admitted, exactly as before, with no operator check performed at
+ *      all. Every caller who reaches these routes today takes this branch and nothing about them
+ *      changes — not the tenant resolution below it, not the audit, not the B2a fence;
+ *   3. otherwise, and ONLY for the one frozen action id, the stock-prep operator tier is consulted;
+ *   4. otherwise 403, with the same code and message `requireAccess` would have produced.
+ *
+ * It is therefore impossible for this helper to REMOVE an admission or to re-route an existing one.
+ * The `actionId` it receives is the one the handler already resolved from the route params (falling
+ * back to the stock-prep action), so the gate and the action lookup can never disagree about which
+ * action is being authorized.
+ *
+ * NOT expressed as a `requireAccess(req, <stock-prep code>)` call on purpose: this is a DISJUNCTION
+ * of two tiers scoped to one action id, and writing it as a gate token would either widen those
+ * generic routes to every table action or make `stockPrepGateTokensInSource`'s typo tripwire read a
+ * conditional gate as an unconditional one.
+ *
+ * ---------------------------------------------------------------------------------------------
+ * WHY THE OPERATOR BRANCH ALSO VERIFIES THE TENANT, AND THE LEGACY BRANCH DOES NOT
+ * ---------------------------------------------------------------------------------------------
+ *
+ * These routes resolve their tenant with `resolveTenantId`, which — correctly, for the tier it was
+ * built for — accepts `user.tenantId`. But `user.tenantId` IS NOT ALWAYS A VERIFIED CLAIM: the host's
+ * auth middleware copies the `x-tenant-id` REQUEST HEADER onto the user object when the token carries
+ * no tenant claim (see stock-preparation-operator-scope.cjs's header for the exact code). For the
+ * legacy `integration:*` tiers that is pre-existing and unchanged by this PR. For the operator tier
+ * it would be NEW, and it would be new on a route that reads the customer's PLM through a per-tenant
+ * source binding — so admitting an operator through `resolveTenantId` alone would hand this tier a
+ * cross-tenant capability the split was never asked to grant.
+ *
+ * So the operator branch runs the SAME scope every other operator surface runs:
+ * `resolveOperatorValueScope` — prefer the verified claim, refuse a contradicting header, refuse a
+ * principal with no tenant of its own, refuse request-carried steering, and make the HOST vouch for
+ * the (user, tenant) pairing. On a tenant-claimless deployment the host membership check is what
+ * makes that safe; on a claim-bearing one the verified claim already did.
+ *
+ * `resolveOperatorValueScope` IS THE SOLE TENANCY AUTHORITY FOR THIS BRANCH, and that is a claim
+ * about this code rather than a hope. An earlier cut also compared `resolveTenantId(req, {})`
+ * against `scope.tenantId` here and called it defence in depth. It was not defence at all: by the
+ * time control reaches this point the scope has ALREADY refused every input that could make the two
+ * differ — a request-carried tenant (OPERATOR_SCOPE_TENANT_MISMATCH), a header contradicting the
+ * verified claim (OPERATOR_SCOPE_TENANT_CONTRADICTED), a principal with no tenant of its own
+ * (OPERATOR_SCOPE_TENANT_REQUIRED), a non-member (OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED) — so the
+ * comparison was unreachable, untestable, and read as if it were the enforcement. A line no test can
+ * turn red is not a guard; it is a claim. It is gone, and the scope's own refusals are pinned by
+ * P-06 below, which is where that assurance actually lives.
+ *
+ * The legacy branch returns before any of this, so no existing caller pays for it or changes shape.
+ */
+async function requireTableActionAccess(req, actionId, legacyGate, tenantPrincipalDirectory) {
+  const user = getUser(req)
+  if (!user) {
+    throw new HttpRouteError(401, 'UNAUTHENTICATED', 'Authentication required')
+  }
+  if (hasPermission(user, legacyGate)) return user
+  if (!operatorMayRunStockPrepPull(listUserPermissions(user), actionId)) {
+    throw new HttpRouteError(403, 'FORBIDDEN', 'Insufficient integration permissions')
+  }
+  // The scope's own refusals ARE the tenancy enforcement for this branch — see the header. Resolved
+  // for its refusals, not for a value this function returns: nothing downstream reads it, because the
+  // routes' own `resolveTenantId` cannot now differ from it for any caller who got this far.
+  await resolveOperatorValueScope({
+    user,
+    authenticatedTenantId: req.authenticatedTenantId,
+    explicitTenantIds: collectExplicitTenantIds(req, {}),
+    tenantPrincipalDirectory,
+  })
+  return user
+}
+
 function firstString(...values) {
   for (const value of values) {
     if (typeof value === 'string' && value.trim().length > 0) return value.trim()
@@ -875,6 +1096,43 @@ function scopedAuthenticatedWriteInput(req, input = {}) {
   }
 }
 
+// THE VERIFIED-CLAIM TENANT, for a write that can DELETE. Stricter than
+// `resolveAuthenticatedWriteTenantId` above in the one way that matters here.
+//
+// `auth/jwt-middleware.ts` copies the `x-tenant-id` REQUEST HEADER onto `user.tenantId` when the
+// verified token carries no tenant claim, so `resolveAuthUserTenantId` — which reads `user.tenantId`
+// — can be steered by a header for a claimless platform admin. That is survivable for an additive
+// write (the worst case is a column created in the wrong tenant's staging project, visible and
+// removable). It is NOT survivable for the customer-pack install, which now issues a bounded DELETE
+// against `field_permissions`: the sheet that delete is aimed at is a pure function of the tenant,
+// so a header would be choosing whose enforced write denials get retired.
+//
+// This resolves from `req.authenticatedTenantId`, which the middleware sets ONLY from the verified
+// token, and refuses everything else — a claimless principal (403, not the header's tenant), and any
+// carried tenant that contradicts the claim (403). Same posture as the operator value scope
+// (#5445) for reads, applied to the one write route with a delete behind it.
+function resolveVerifiedClaimTenantId(req, input = {}) {
+  const claimed = typeof req.authenticatedTenantId === 'string' ? req.authenticatedTenantId.trim() : ''
+  if (!claimed) {
+    throw new HttpRouteError(
+      403,
+      'TENANT_CLAIM_REQUIRED',
+      'this route requires a tenant claim in the verified token; a request header cannot supply one',
+    )
+  }
+  const user = getUser(req)
+  const carried = typeof (user && user.tenantId) === 'string' ? user.tenantId.trim() : ''
+  if (carried && carried !== claimed) {
+    throw new HttpRouteError(403, 'TENANT_MISMATCH', 'tenant scope mismatch')
+  }
+  for (const explicit of collectExplicitTenantIds(req, input)) {
+    if (explicit !== claimed) {
+      throw new HttpRouteError(403, 'TENANT_MISMATCH', 'tenant scope mismatch')
+    }
+  }
+  return claimed
+}
+
 function resolveWorkspaceId(req, input = {}) {
   return firstString(input.workspaceId, req.query && req.query.workspaceId, req.params && req.params.workspaceId)
 }
@@ -885,6 +1143,17 @@ function scopedInput(req, input = {}) {
     tenantId: resolveTenantId(req, input),
     workspaceId: resolveWorkspaceId(req, input),
   }
+}
+
+// Adapter resolution is an authority-bearing read: a canonical Connection is resolved for the
+// same user that the adapter will execute as. Keeping this beside scopedInput prevents route
+// callers from loading a connection under one identity and constructing the adapter under another.
+function scopedAdapterInput(req, input = {}, principal = requestPrincipal(req)) {
+  return scopedInput(req, {
+    ...input,
+    principal,
+    runAs: 'user',
+  })
 }
 
 function largeBomJobScope(req, input = {}) {
@@ -1413,6 +1682,52 @@ const VALID_STOCK_PREPARATION_PREP_LINE_EXPORT_QUERY_KEYS = new Set([
   'tenantId',
   'workspaceId',
   'projectNo',
+])
+// 一线看得见自己工厂的项目: the operator project directory takes NO project selector at all — it IS the
+// selector, and it always returns the caller's whole own-tenant directory so the front end can tell
+// "that number is not in this system" from "that project is real and has nothing pending". `tenantId`
+// is accepted for shape-compatibility with every other call in this family and is NEVER a steering
+// vector: the scope resolver refuses any value that is not the caller's own authenticated tenant.
+const VALID_STOCK_PREPARATION_OPERATOR_PROJECT_DIRECTORY_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+])
+// 通知下一步: the status READ. `projectNo` for the same reason the export uses it — the business
+// project number, which is what a person means by "this project".
+const VALID_STOCK_PREPARATION_HANDOFF_STATUS_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectNo',
+])
+// 通知下一步: the ADVANCE body. `fromStepKey` — the step the caller believes they are completing — is
+// what turns a blind increment into a compare-and-set, which is the whole idempotency story (a double
+// click is a detectable replay rather than a second advance). Deliberately ABSENT, so that a body
+// supplying one is refused as an unknown field: `actor`/`advancedBy` (the principal is the ROUTE
+// user, never the body), `toStepKey`/`stepIndex` (the destination is derived from the configured
+// chain, never chosen by the caller — otherwise anyone could skip to the terminal step and fire the
+// 仓库/采购 notice), and any destination id (the notification targets are deploy config).
+const VALID_STOCK_PREPARATION_HANDOFF_ADVANCE_BODY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectNo',
+  'fromStepKey',
+])
+
+// 项目备料页: the board's query allowlist. `projectNo` is deliberately NOT here — it is a PATH
+// param, so a request that also passes it as a query key is a malformed request and is refused
+// rather than silently resolved toward one of the two. `tenantId` is accepted only so the shared
+// `collectExplicitTenantIds` check can refuse a steering attempt with the right code; it never
+// selects anything.
+//
+// NEITHER DOES `workspaceId`, AND THAT IS THE POINT. It used to be forwarded verbatim into the audit
+// row's `workspace_id`, which made this route's "the trail never carries the projectNo" claim
+// depend on the caller not putting it there: `?workspaceId=230920006` wrote the number to a column
+// no gate looked at. This plugin has no workspace registry to validate it against, so the honest
+// answer is to select nothing from it — the key stays accepted for shape compatibility with the rest
+// of this family (and so a client that sends it is not 400'd), exactly like `tenantId`.
+const VALID_STOCK_PREPARATION_OPERATOR_PROJECT_BOARD_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
 ])
 // FOS-2: generic field-option-sync request — closed allowlist. Operator names a preset (FOS-1
 // catalog) + supplies option sets keyed by the preset's source keys. No sheetId / credentials.
@@ -2248,6 +2563,22 @@ function publicStockPreparationSandboxTargetResult(result) {
     ready: result.ready === true,
     mode: result.mode,
     targetBindingAvailable: result.target != null,
+    // THE BINDING THIS ROUTE JUST CREATED OR VERIFIED — the thing a deployer has to paste into
+    // `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON`. This route IS the sanctioned
+    // generator (the 222 window runbook sends operators here), and returning nothing made that
+    // instruction impossible to follow: the response carried no sheetId, no fieldIdMap, not even a
+    // plaintext objectId.
+    //
+    // It is the SAME key and shape the canonical sibling has always returned at this same admin tier
+    // (publicStockPreparationTargetResult), so this removes an asymmetry rather than opening a door.
+    // Nothing here is a disclosure: `objectId` is the caller's own request body, and `sheetId` and
+    // every fieldIdMap entry are pure functions of (projectId, objectId) that
+    // scripts/ops/stock-preparation-derive-target-binding.mjs prints offline with no auth at all.
+    //
+    // `evidence` below is deliberately NOT changed: it still hashes the objectId and carries no
+    // option values or labels, because that half travels into issue reports while this half is an
+    // answer to the admin who just asked.
+    targetBinding: result.target ? cloneJson(result.target) : null,
     evidence: result.evidence,
     ...(result.optionSync ? { optionSync: result.optionSync } : {}),
   }
@@ -2985,7 +3316,19 @@ function createHandlers(services, options = {}) {
   // it — an unaudited confirm/generation/resolve is refused, not silently allowed. System-sync
   // persists instead carry their immutable run record inside the same unit of work.
   const stockPreparationAudit = services.stockPreparationAuditStore || null
-  function requireStockPreparationAudit() {
+  // NO ROUTE FORWARDS A CALLER'S RAW `?workspaceId` INTO THE AUDIT TRAIL.
+//
+// `workspace_id` is a plain nullable TEXT column on that table, and the store cannot shape-gate it
+// (see stock-preparation-audit-store.cjs: gating a caller column turns a completed write into an
+// unaudited 422, and turns a legitimate free-text project number into a refused export). So the
+// discipline lives here instead, and it is one sentence: this plugin has NO workspace registry to
+// validate a caller-supplied workspace against, so it selects nothing from one. `workspaceId` stays
+// in the query allowlists for shape compatibility — a client that sends it is not 400'd — and it
+// steers nothing, exactly like `tenantId` on the operator surfaces.
+//
+// Before this rule, `?workspaceId=<a project number>` was enough to put a customer business value on
+// a trail whose entire claim is that it carries none, on any of twelve routes.
+function requireStockPreparationAudit() {
     if (!stockPreparationAudit || typeof stockPreparationAudit.append !== 'function') {
       throw new HttpRouteError(501, 'AUDIT_STORE_UNAVAILABLE', 'stock-preparation audit store is not available; writes are refused without an audit trail')
     }
@@ -3118,6 +3461,14 @@ function createHandlers(services, options = {}) {
   // loaded once and reused for family detection + as the confirm skeleton — NEVER request-supplied.
   const governedAi = (services && services.governedAi) || null
 
+  // 列级写权限: the narrow host port that writes the PLATFORM's own `field_permissions`
+  // rows, injected per-plugin exactly like governedAi above. OPTIONAL here on purpose —
+  // a customer pack that declares no `fieldWritePolicies` never reaches for it, so an
+  // environment that has not wired it installs precisely as it does today. A pack that
+  // DOES declare policies and finds no port makes the installer fail closed rather than
+  // report a complete install whose scoping would not be enforced.
+  const stockPreparationFieldPermissions = (services && services.stockPreparationFieldPermissions) || null
+
   // 按项目导出物料 Excel: the xlsx BUFFER BUILDER is INJECTED (packages/core-backend xlsx-service.ts
   // buildXlsxBuffer, wrapped around a lazily-imported `xlsx` module), same INJECTED-per-plugin shape as
   // governedAi above and for the same reason — the plugin has no `xlsx` dependency of its own (it is
@@ -3125,6 +3476,211 @@ function createHandlers(services, options = {}) {
   // not add one; the ONE existing xlsx builder is reused via this host-provided seam instead. Duck-typed
   // to { buildWorkbookBuffer({ sheetName, headers, rows }) => Promise<Buffer> }.
   const stockPreparationXlsxExport = (services && services.stockPreparationXlsxExport) || null
+  // 一线看得见自己工厂的项目: the host TENANT PRINCIPAL DIRECTORY (packages/core-backend
+  // tenant-principal-directory-boundary.ts), same INJECTED-per-plugin shape as governedAi and
+  // stockPreparationXlsxExport above. Unlike both of those it is NOT fail-open — the operator project
+  // directory refuses with a named 501 when it is absent, because a value-bearing tenant-scoped read
+  // that cannot get the host to vouch for the principal must not run on `req.user.tenantId` alone
+  // (the auth middleware fills that field from the `x-tenant-id` header when the token has no claim).
+  // Duck-typed to { verifyTenantMembership({ userId, tenantId }) => Promise<{ member }> }.
+  const tenantPrincipalDirectory = (services && services.tenantPrincipalDirectory) || null
+
+  // 通知下一步: the durable cursor (migration 084). OPTIONAL at REGISTRATION for the same reason the
+  // audit store is — an environment without the SQL db must still be able to register routes — and
+  // NOT optional where it matters: both handoff routes fail closed without it, because a turn signal
+  // nobody can persist is worse than no turn signal (it would show a plausible "current step" that
+  // resets on the next request).
+  const stockPreparationHandoffStore = (services && services.stockPreparationHandoffStore) || null
+  function requireStockPreparationHandoffStore() {
+    if (!stockPreparationHandoffStore
+      || typeof stockPreparationHandoffStore.get !== 'function'
+      || typeof stockPreparationHandoffStore.advance !== 'function'
+      // RC1: the notification claim is a THIRD store call now. A binding that has advance but not
+      // claimNotification would move turns and never notify anyone, silently — exactly the failure
+      // mode the split exists to remove — so the seam is required at the gate, not discovered later.
+      || typeof stockPreparationHandoffStore.claimNotification !== 'function') {
+      throw new HttpRouteError(501, 'STOCK_PREPARATION_HANDOFF_STORE_UNAVAILABLE', 'stock-preparation handoff store is not available; the handoff cannot be read or advanced here')
+    }
+    return stockPreparationHandoffStore
+  }
+
+  // 通知下一步: the DingTalk seam. INJECTED by the host for this plugin only — the same
+  // INJECTED-per-plugin shape as governedAi and stockPreparationXlsxExport above, and for the same
+  // reason: the plugin has no DingTalk client of its own and must not grow one. The host wraps the
+  // EXISTING group-destination machinery (packages/core-backend dingtalk-group-destination-service.ts),
+  // which is also why the seam speaks in DESTINATION IDs rather than webhooks or people.
+  //
+  // OPTIONAL — absent → every advance reports `notifyOutcome: 'not_configured'` and still moves the
+  // turn. Turn state and notification are separate concerns and a deployment is allowed to want only
+  // the first. Duck-typed to
+  //   { sendToDestinations({ destinationIds, title, body, initiatedBy }) => Promise<{ delivered, failed }> }.
+  const stockPreparationHandoffNotifier = (services && services.stockPreparationHandoffNotifier) || null
+
+  // 通知下一步: the deploy-time chain, parsed ONCE and memoized.
+  //
+  // LAZY, not resolved at registration, and the difference is load-bearing. A MALFORMED chain must
+  // throw rather than degrade (a typo must never be indistinguishable from "nothing configured", or
+  // the deployment silently notifies nobody), but that throw must not take the whole plugin's route
+  // surface down with it. Resolving here means a bad `stockPreparationHandoff` key fails exactly the
+  // two handoff routes, loudly and by name, while every other integration route keeps serving.
+  //
+  // ABSENT key → `{ configured: false }` → the status read answers `configured: false` and the
+  // advance refuses with a named 501 BEFORE touching the store, the notifier or the audit trail. A
+  // deployment that never sets it is byte-identical to one that never heard of this feature.
+  let stockPreparationHandoffChainCache = null
+  function loadStockPreparationHandoffChain() {
+    if (!stockPreparationHandoffChainCache) {
+      stockPreparationHandoffChainCache = parseStockPreparationHandoffConfig(context && context.config)
+    }
+    return stockPreparationHandoffChainCache
+  }
+  /**
+   * 通知下一步: dispatch one composed handoff notification. Returns an OUTCOME ENUM, never throws.
+   *
+   * NOT THROWING IS THE POINT. This runs AFTER the turn has already committed, so a throw here would
+   * turn a successful handoff into a 500 and the operator would reasonably click again — at which
+   * point they would be told "already handed off" and would have no idea whether anyone was ever
+   * notified. Returning an enum lets the route answer honestly: the turn moved, the message did not
+   * go out, go and tell them yourself.
+   *
+   *   'no_destination' —— no notifier injected, or the chain names no destination for this hop. The
+   *                       turn still moved; a deployment is allowed to want turn state without
+   *                       notifications. Since J3 the route no longer reaches this function in either
+   *                       case (both fold into `hopHasDestination`, so no claim is spent), but the
+   *                       guards stay: a dispatcher that can be called with nothing to send to must
+   *                       still answer honestly rather than inventing a delivery.
+   *                       NOT 'not_configured' — that meant "this deployment has no chain", which is
+   *                       the advance route's 501 and has its own error copy.
+   *   'sent'           —— every destination took it.
+   *   'partial'        —— SOME destinations took it and some did not (RC4). Only the terminal hop
+   *                       fans out — 仓库 AND 采购 — and that is exactly the hop where collapsing this
+   *                       into 'sent' was worst: the department whose robot is broken is never told,
+   *                       the operator is told in words that the group HAS been told, and at-most-once
+   *                       means clicking again can never fix it. The host already keeps going past a
+   *                       failure and returns both counts; the route used to discard `failed`.
+   *   'failed'         —— the host threw, or every destination refused it.
+   */
+  async function dispatchStockPreparationHandoffNotification(notification) {
+    if (!notification || !Array.isArray(notification.destinationIds) || notification.destinationIds.length === 0) {
+      return 'no_destination'
+    }
+    if (!stockPreparationHandoffNotifier || typeof stockPreparationHandoffNotifier.sendToDestinations !== 'function') {
+      return 'no_destination'
+    }
+    try {
+      const result = await stockPreparationHandoffNotifier.sendToDestinations({
+        destinationIds: notification.destinationIds,
+        title: notification.title,
+        body: notification.body,
+      })
+      const delivered = result && Number.isFinite(Number(result.delivered)) ? Number(result.delivered) : 0
+      const failed = result && Number.isFinite(Number(result.failed)) ? Number(result.failed) : 0
+      if (delivered === 0) return 'failed'
+      return failed > 0 ? 'partial' : 'sent'
+    } catch (error) {
+      // Values-free by construction: the outcome is an enum and the host's own message is discarded
+      // here rather than echoed, so a webhook error string can never reach the caller or the UI.
+      if (routeLogger && typeof routeLogger.warn === 'function') {
+        routeLogger.warn('[plugin-integration-core] stock-prep handoff notification failed; the turn already advanced')
+      }
+      return 'failed'
+    }
+  }
+
+  // RC1 — IS THE DATABASE'S AUDIT VOCABULARY WIDE ENOUGH FOR THIS ACTION YET?
+  //
+  // `requireStockPreparationAudit()` proves the audit SERVICE is wired. It cannot prove the audit
+  // TABLE will accept what we are about to write, and those are different facts: `db:migrate` is a
+  // separate CLI, so a deployment can run code that knows about `handoff_advance` against a schema
+  // whose CHECK constraint stops at 082. Every advance then moved the cursor, failed at the audit
+  // insert, and handed the operator a raw constraint-violation message.
+  //
+  // ONLY THE POSITIVE VERDICT IS CACHED (G4), and the asymmetry is the whole point. The first cut
+  // memoised whatever came back, so a deployment that ran migration 085 exactly as the 503 told it to
+  // kept being refused until somebody restarted the process — a refusal its own instructions could
+  // not clear, with nothing anywhere saying a restart was needed.
+  //
+  //   supported:true  — a deployment fact that cannot regress (a CHECK constraint is never narrowed
+  //                     by a later migration), so it is cached for the life of the process and the
+  //                     steady state costs nothing.
+  //   supported:false — a TRANSIENT deployment state that the operator is actively being told to fix.
+  //                     Re-probed on every request: one rolled-back INSERT per request while the
+  //                     route is genuinely broken and refusing anyway is cheap, and it means the very
+  //                     next click after `db:migrate` succeeds.
+  //
+  // The probe fails OPEN on anything it cannot diagnose — see the store — so a connection blip
+  // degrades to "just try the write", exactly as before this existed.
+  const stockPreparationAuditVocabularySupported = new Set()
+  async function requireStockPreparationAuditVocabulary(audit, action, migration, tenantId) {
+    if (!audit || typeof audit.supportsAction !== 'function') return
+    if (stockPreparationAuditVocabularySupported.has(action)) return
+    let verdict
+    try {
+      verdict = await audit.supportsAction(action, { tenantId })
+    } catch (error) {
+      // A probe that itself blew up tells us nothing; do not convert it into a refusal.
+      return
+    }
+    if (verdict && verdict.supported === false) {
+      throw new HttpRouteError(
+        503,
+        'STOCK_PREPARATION_AUDIT_VOCABULARY_UNAVAILABLE',
+        `this database does not yet accept the '${action}' audit action; run migration ${migration} before using this route`,
+        { migration },
+      )
+    }
+    stockPreparationAuditVocabularySupported.add(action)
+  }
+
+  // How far back the status read looks for notification_lost rows. Bounded because this is a display
+  // hint on a hot read: a project whose trail is longer than this has had far bigger problems, and the
+  // banner degrades to showing the recent losses rather than to costing the page.
+  const STOCK_PREPARATION_HANDOFF_LOST_LOOKBACK = 200
+
+  function requireConfiguredStockPreparationHandoffChain() {
+    const chain = loadStockPreparationHandoffChain()
+    if (!chain.configured) {
+      throw new HttpRouteError(501, 'STOCK_PREPARATION_HANDOFF_NOT_CONFIGURED', 'this deployment has no stock-preparation handoff chain configured')
+    }
+    return chain
+  }
+
+  /**
+   * IS THIS CHAIN THIS TENANT'S? Returns the chain when the answer is yes.
+   *
+   * Every configured chain names its tenant — the parser refuses one that does not — and it belongs
+   * to that tenant alone: the destination ids it carries are deploy config, the host proves only that
+   * they are admin-managed, and nothing downstream relates a destination's org to the tenant whose
+   * project is about to be announced into it. So the refusal is here, before any write.
+   *
+   * G7 — AND THE REFUSAL IS INDISTINGUISHABLE FROM "THERE IS NO CHAIN HERE". The first cut answered a
+   * distinct 403 CHAIN_NOT_FOR_THIS_TENANT, which meant one POST told a foreign tenant that this
+   * deployment HAS a 备料 chain and it is somebody else's — a one-bit cross-tenant configuration
+   * disclosure that the sibling status route was deliberately written to prevent (it answers
+   * `configured: false` to exactly the same caller). A guard that the neighbouring route undoes is
+   * not a guard, so the wire answer is now the same 501 an unconfigured deployment gives, and the
+   * DISTINCT reason stays where an operator can use it and a stranger cannot: the log.
+   *
+   * The `chain.tenantId &&` guard is retained for the unconfigured chain object (whose tenantId is
+   * null), which callers never reach with a real tenant because they check `configured` first.
+   */
+  function requireStockPreparationHandoffChainForTenant(chain, tenantId) {
+    if (chain.tenantId && chain.tenantId !== tenantId) {
+      if (routeLogger && typeof routeLogger.warn === 'function') {
+        // Tenant ids are handles, not customer values, and this line is the operability half the wire
+        // answer gives up.
+        routeLogger.warn(
+          `[plugin-integration-core] stock-prep handoff chain belongs to tenant ${chain.tenantId}; refusing an advance from ${tenantId} as not-configured`,
+        )
+      }
+      throw new HttpRouteError(
+        501,
+        'STOCK_PREPARATION_HANDOFF_NOT_CONFIGURED',
+        'this deployment has no stock-preparation handoff chain configured',
+      )
+    }
+    return chain
+  }
   let vendorPresetCatalogCache = null
   function loadVendorPresetCatalog() {
     if (vendorPresetCatalogCache) return vendorPresetCatalogCache
@@ -3335,7 +3891,7 @@ function createHandlers(services, options = {}) {
       : externalSystems.getExternalSystem.bind(externalSystems)
     let system
     try {
-      system = await loadSystem(scopedInput(req, {
+      system = await loadSystem(scopedAdapterInput(req, {
         tenantId: input.tenantId,
         workspaceId: input.workspaceId,
         id: row.systemId,
@@ -3551,6 +4107,67 @@ function createHandlers(services, options = {}) {
     })
   }
 
+  /**
+   * WHOSE IDENTITY DOES THE SOURCE READ RUN AS — 一线自己拉数据's data-plane half.
+   *
+   * THE PROBLEM THE OPERATOR SPLIT CREATED. Moving the HTTP gate let a stock-prep operator reach
+   * dry-run/apply, but the read underneath still ran as the REQUEST principal. On the DEFAULT source
+   * kind (`data-source:sql-readonly`) the host facade authorizes by STRICT OWNER EQUALITY and has no
+   * admin bypass on the data plane — `DataSourceManager.assertAccess` throws unless the connection's
+   * `ownerId` IS the reading user. A floor operator is never the person who bound the connection, so
+   * every operator pull came back `status:"failed"`, `canApply:false`, `dryRunToken:null`. The tier
+   * was admitted to the route and refused the data, silently, forever. The picker comment further
+   * down this file states the assumption that broke: "binding is upstream of a read that will run as
+   * this same principal" — reader == binder, which the split made false.
+   *
+   * THE DELEGATION, and every bound on it:
+   *   * it applies to ONE frozen action id, compared for EQUALITY — the same id the gate split is
+   *     scoped to. No other table action's read identity changes by a byte.
+   *   * the identity is the SERVER-HELD binding owner: `config.dataSourceOwnerId`, which the
+   *     external-system registry stamps on the server for every dataSourceId-bearing upsert and
+   *     explicitly discards from client payloads (SERVER_OWNED_CONFIG_KEYS). It cannot be steered
+   *     from the request, because it never comes from the request.
+   *   * it only ever REPLACES A GUARANTEED FAILURE. Where the caller already is the owner the value
+   *     is identical; where no owner is stamped there is nothing to delegate to and the request
+   *     principal stands. It cannot widen a read to a source the deployment did not bind to this
+   *     action — the action's `source.externalSystemId` is deploy-time config, not a request input.
+   *   * it is AUDITED AS A DELEGATION: the run's audit row carries the operator as `actor` and the
+   *     owner as the read `principal`, so "who asked" and "whose credentials answered" are two
+   *     recorded facts rather than one conflated one.
+   *
+   * WHAT IT IS NOT. It is not a grant to the operator: they never learn the owner's identity, cannot
+   * name it, and cannot point it at anything else. A first-class share on the data source would be a
+   * better long-term answer and needs a core change; this is the smallest thing that makes the
+   * owner's own ruling — that a floor operator may self-serve the pull — actually true.
+   */
+  function resolveTableActionReadPrincipal(req, action, system, storedPrincipal) {
+    // The fallback, in order of decreasing authority: an explicitly supplied principal (a STORED
+    // job's, which is what keeps a background run from switching data-source scope to whoever
+    // triggered it), then the requester.
+    const fallback = firstString(storedPrincipal) || requestPrincipal(req)
+    const actionId = action && action.actionId ? String(action.actionId) : ''
+    if (actionId !== STOCK_PREP_OPERATOR_PULL_ACTION_ID) return fallback
+    const config = system && isPlainObject(system.config) ? system.config : {}
+    const bindingOwner = firstString(config.dataSourceOwnerId)
+    // The binding owner OVERRIDES even a stored principal, and that is the point: on this one action
+    // the read must run as the identity the host will actually authorize, whoever queued the job.
+    return bindingOwner || fallback
+  }
+
+  /**
+   * WHO MAY RUN A STORED LARGE-BOM JOB: its creator, and nobody else.
+   *
+   * Jobs created before this field existed carry no `actor`; those fall back to the recorded
+   * `principal`, which for every pre-existing job IS the creator (the two were the same value until
+   * they were split apart). So an old job stays runnable by the person who made it and by no one new.
+   */
+  function assertLargeBomJobActor(job, caller) {
+    const owner = firstString(job && job.actor) || firstString(job && job.principal)
+    if (!owner) return
+    if (firstString(caller) === owner) return
+    throw new HttpRouteError(403, 'LARGE_BOM_JOB_ACTOR_MISMATCH', 'this large-BOM job belongs to another user')
+  }
+
   async function loadTableActionSourceAdapter(req, action, options = {}) {
     const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
       ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
@@ -3558,7 +4175,7 @@ function createHandlers(services, options = {}) {
     const sourceScope = { id: action.source.externalSystemId }
     if (options.tenantId) sourceScope.tenantId = options.tenantId
     if (action.source.workspaceId) sourceScope.workspaceId = action.source.workspaceId
-    const system = await loadSystem(scopedInput(req, sourceScope))
+    const system = await loadSystem(scopedAdapterInput(req, sourceScope))
     if (options.requireActive === true && (!system || system.status !== 'active')) {
       throw new HttpRouteError(409, 'TABLE_ACTION_SOURCE_NOT_ACTIVE', 'configured table action source is not active')
     }
@@ -3569,9 +4186,12 @@ function createHandlers(services, options = {}) {
         actualKind: system && system.kind,
       })
     }
-    const principal = Object.prototype.hasOwnProperty.call(options, 'principal')
-      ? options.principal
-      : requestPrincipal(req)
+    const principal = resolveTableActionReadPrincipal(
+      req,
+      action,
+      system,
+      Object.prototype.hasOwnProperty.call(options, 'principal') ? options.principal : null,
+    )
     // W-5: forwards the B2a authorization stanza the caller already computed (dormant/unauthorized
     // omits it entirely — no key at all, not even `undefined` — so a factory that doesn't know this
     // dep sees exactly the same `deps` object it always has). Only `data-source:sql-readonly`
@@ -3607,7 +4227,10 @@ function createHandlers(services, options = {}) {
     const accessibility = new Map()
     await Promise.all(rows.map(async (system) => {
       if (describeConnectorKind(system.kind).connectionModel !== 'data-source') return
-      const dataSourceId = isPlainObject(system.config) ? firstString(system.config.dataSourceId) : null
+      const dataSourceId = firstString(
+        system.connectionId,
+        isPlainObject(system.config) ? system.config.dataSourceId : null,
+      )
       if (!dataSourceId) return
       try {
         const described = await directory.describe(dataSourceId, principal)
@@ -3797,9 +4420,15 @@ function createHandlers(services, options = {}) {
       // P2-A: the registry validates a config.dataSourceId binding against the AUTHENTICATED
       // principal (owner-only, same as every facade read) and stamps attribution server-side —
       // so the principal comes from the request user, never the body (spread order overrides).
-      const withPrincipal = { ...body, principal: requestPrincipal(req) }
+      const withPrincipal = { ...body, principal: requestPrincipal(req), runAs: 'user' }
       if (hasPrivateConfigMutation(body.kind, body.config)) {
         requireAccess(req, 'admin')
+        return sendOk(res, await externalSystems.upsertExternalSystem(scopedAuthenticatedWriteInput(req, withPrincipal)), 201)
+      }
+      // A canonical Connection reference does not reveal or mutate its credentials, so the existing
+      // integration:write authoring tier remains sufficient. It is still a tenant-authority write:
+      // derive tenant from the authenticated principal only, and reject request-body steering.
+      if (body.kind === 'data-source:sql-readonly') {
         return sendOk(res, await externalSystems.upsertExternalSystem(scopedAuthenticatedWriteInput(req, withPrincipal)), 201)
       }
       return sendOk(res, await externalSystems.upsertExternalSystem(scopedInput(req, withPrincipal)), 201)
@@ -3820,7 +4449,7 @@ function createHandlers(services, options = {}) {
       const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
-      const system = await loadSystem(scopedInput(req, { id: requestParams(req).id }))
+      const system = await loadSystem(scopedAdapterInput(req, { id: requestParams(req).id }))
       const adapter = adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
       let result
       try {
@@ -3862,7 +4491,7 @@ function createHandlers(services, options = {}) {
       const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
-      const system = await loadSystem(scopedInput(req, { id: requestParams(req).id }))
+      const system = await loadSystem(scopedAdapterInput(req, { id: requestParams(req).id }))
       // Kind must match the preset (fail-closed). Read-only: the system role/config is never modified here.
       if (!system || system.kind !== preset.requiredKind) {
         throw new HttpRouteError(409, 'READ_SMOKE_KIND_MISMATCH', 'external system kind does not match the preset')
@@ -3903,7 +4532,7 @@ function createHandlers(services, options = {}) {
       const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
-      const system = await loadSystem(scopedInput(req, { id: requestParams(req).id }))
+      const system = await loadSystem(scopedAdapterInput(req, { id: requestParams(req).id }))
       if (!system || system.kind !== probe.plan.requiredKind) {
         throw new HttpRouteError(409, 'READ_SOURCE_PROBE_KIND_MISMATCH', 'external system kind does not match the probe config')
       }
@@ -4053,7 +4682,7 @@ function createHandlers(services, options = {}) {
       const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
-      const system = await loadSystem(scopedInput(req, { id: row.systemId }))
+      const system = await loadSystem(scopedAdapterInput(req, { id: row.systemId }))
       if (!system || system.kind !== prepared.plan.requiredKind) {
         throw new HttpRouteError(409, 'READ_SOURCE_READ_KIND_MISMATCH', 'external system kind does not match the approved config')
       }
@@ -4214,7 +4843,7 @@ function createHandlers(services, options = {}) {
         } catch (error) {
           throw mapReadSourceConfigError(error)
         }
-        const system = await loadSystem(scopedInput(req, { id: row.systemId }))
+        const system = await loadSystem(scopedAdapterInput(req, { id: row.systemId }))
         stepConfigsById[step.readSourceConfigId] = { status: 'approved', config: row.config, system }
       }
 
@@ -4300,7 +4929,7 @@ function createHandlers(services, options = {}) {
       const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
-      const system = await loadSystem(scopedInput(req, { id: requestParams(req).id }))
+      const system = await loadSystem(scopedAdapterInput(req, { id: requestParams(req).id }))
       const adapter = adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
       const adapterObjects = typeof adapter.listObjects === 'function'
         ? await adapter.listObjects()
@@ -4325,7 +4954,7 @@ function createHandlers(services, options = {}) {
       const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
-      const system = await loadSystem(scopedInput(req, { id: requestParams(req).id }))
+      const system = await loadSystem(scopedAdapterInput(req, { id: requestParams(req).id }))
       const template = findDocumentTemplate(system, object)
       if (template) {
         return sendOk(res, sanitizeIntegrationPayload({
@@ -4449,6 +5078,7 @@ function createHandlers(services, options = {}) {
         ...publicRunInput(body),
         pipelineId: requestParams(req).id,
         triggeredBy: 'api',
+        runAs: 'user',
       })
       // W-2: hand the runner's own fence the run this route already claimed under, so the two guards
       // share ONE operation. Attached only when ARMED — a dormant deployment passes the runner the
@@ -4483,6 +5113,7 @@ function createHandlers(services, options = {}) {
         pipelineId: requestParams(req).id,
         triggeredBy: 'api',
         dryRun: true,
+        runAs: 'user',
       })
       // W-2: same shared-run marker as the live route above; armed-only, for the same reason.
       if (b2aTrialRegistry) pipelineDryRunInput[B2A_AUTHORIZED_RUN_ID] = pipelineDryRunB2aRunId
@@ -4524,11 +5155,11 @@ function createHandlers(services, options = {}) {
       const loadSourceSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
-      const sourceSystem = await loadSourceSystem(scopedInput(req, {
+      const sourceSystem = await loadSourceSystem(scopedAdapterInput(req, {
         id: pipeline.sourceSystemId,
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,
-      }))
+      }, ownerPrincipal))
       // `getExternalSystem` is the credential-STRIPPED public accessor. The SOURCE has always used
       // the adapter-capable one (a few lines above); the TARGET never did — so an adapter-backed
       // target (K3) arrived with NO credentials and the C6 dry-run died with
@@ -4676,6 +5307,8 @@ function createHandlers(services, options = {}) {
         id: pipeline.sourceSystemId,
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,
+        principal: ownerPrincipal,
+        runAs: 'user',
       }))
       if (
         targetSystem
@@ -4779,10 +5412,16 @@ function createHandlers(services, options = {}) {
       })))
     },
 
+    // 一线自己拉数据: the legacy `integration:read` tier is unchanged; a stock-prep operator
+    // (operate ∧ read) is additionally admitted, for the pull-bom action id ONLY. Nothing below this
+    // line differs by which branch admitted the caller — the tenant resolution, the B2a fence and
+    // the plan are identical, so an operator's dry run is the same dry run it always was.
     async tableActionDryRun(req, res) {
-      requireAccess(req, 'read')
-      const body = normalizeTableActionBody(requestBody(req))
+      // The action id is read from the route params FIRST because the gate is scoped to it — but it
+      // is a pure param read, so the 401/403 still precedes every other validation and every IO.
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
+      const body = normalizeTableActionBody(requestBody(req))
       const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
       const dryRunTenantId = resolveTenantId(req, {})
       const dryRunB2aRunId = b2aRunId('table-action-dry-run')
@@ -4832,8 +5471,14 @@ function createHandlers(services, options = {}) {
     // values-free manual-confirm decision metadata (duplicate_expanded_key class, first cut). No
     // plan row is applied, no request-supplied plan/value payload is accepted, and the canonical
     // sheet is untouched by construction (the ledger module holds no capability toward it).
+    // 一线自己拉数据: reconcile is the step that puts HELD rows into the confirmation queue, so the
+    // operator split had to include it — without it a plan with human-confirm rows left the operator
+    // pointed at a queue that could never contain their work. Same frozen action id, same equality
+    // comparison, legacy 'admin' checked first; the source read underneath runs under the server-held
+    // binding owner, exactly as the dry-run's does.
     async tableActionConfirmationDecisionsReconcile(req, res) {
-      const user = requireAccess(req, 'admin')
+      const reconcileActionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      const user = await requireTableActionAccess(req, reconcileActionId, 'admin', tenantPrincipalDirectory)
       const audit = requireStockPreparationAudit()
       const reconcileLease = requireConfirmationDecisionReconcileLease()
       const body = normalizeTableActionBody(
@@ -5028,10 +5673,14 @@ function createHandlers(services, options = {}) {
       }, result.persisted ? 201 : 200)
     },
 
+    // 一线自己拉数据: same split as the dry run above — the legacy `integration:write` tier is
+    // unchanged, and a stock-prep operator is additionally admitted for the pull-bom action ONLY.
+    // The dry-run TOKEN is still the thing that authorizes what gets written, so an operator cannot
+    // apply anything they did not just plan.
     async tableActionApply(req, res) {
-      const user = requireAccess(req, 'write')
-      const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_APPLY_BODY_KEYS)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      const user = await requireTableActionAccess(req, actionId, 'write', tenantPrincipalDirectory)
+      const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_APPLY_BODY_KEYS)
       const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
       const applyTenantId = resolveTenantId(req, {})
       const applyB2aRunId = b2aRunId('table-action-apply')
@@ -5088,9 +5737,12 @@ function createHandlers(services, options = {}) {
     },
 
     async tableActionLargeBomExpansionJobStart(req, res) {
-      requireAccess(req, 'read')
-      const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_LARGE_BOM_START_BODY_KEYS)
+      // 一线自己拉数据 — the bounded background channel. The action id is read from the route params
+      // FIRST because the gate is scoped to it, exactly as on the small dry-run route; it is a pure
+      // param read, so the 401/403 still precedes every other validation and every IO.
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
+      const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_LARGE_BOM_START_BODY_KEYS)
       const routeScope = largeBomJobScope(req, { actionId })
       const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
       const parameters = normalizeActionParameters(body.parameters)
@@ -5099,14 +5751,19 @@ function createHandlers(services, options = {}) {
         ...routeScope,
         action,
         parameters,
+        // The creator, recorded on both fields. The identity the READ runs under is NOT decided here
+        // — it is resolved at run time from the action's bound source (see the run route), so this
+        // route loads no external system and the durable-store check stays the first thing that can
+        // fail. `actor` is what the run route compares the caller against.
         principal: requestPrincipal(req),
+        actor: requestPrincipal(req),
       })
       return sendOk(res, largeBomJobResponse(publicBackgroundExpansionJob(job)), 202)
     },
 
     async tableActionLargeBomExpansionJobGet(req, res) {
-      requireAccess(req, 'read')
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
       assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
       const routeScope = largeBomJobScope(req, { actionId })
       const job = await loadLargeBomBackgroundExpansionJob({
@@ -5119,9 +5776,9 @@ function createHandlers(services, options = {}) {
     },
 
     async tableActionLargeBomExpansionJobRun(req, res) {
-      requireAccess(req, 'read')
-      normalizeTableActionBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
+      normalizeTableActionBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS)
       const jobId = firstString(requestParams(req).jobId)
       const routeScope = largeBomJobScope(req, { actionId })
       const queuedJob = await loadLargeBomBackgroundExpansionJob({
@@ -5130,6 +5787,15 @@ function createHandlers(services, options = {}) {
         actionId,
         jobId,
       })
+      // A STORED JOB IS RUN BY ITS OWN CREATOR. Every other scope this route uses comes from the
+      // stored artifact — including the identity its source read is performed under — so without
+      // this a caller could drive somebody else's job, under somebody else's data-source ownership,
+      // by naming its id. Harmless while only `integration:*` could reach the route; a real hole the
+      // moment the operator split admitted a new tier to it.
+      //
+      // DECIDED HERE, before the B2a registration and before the adapter load, so a refusal costs
+      // neither an operation claim nor a credential lookup.
+      assertLargeBomJobActor(queuedJob, requestPrincipal(req))
       const action = assertStockPreparationTargetReady(queuedJob.actionSnapshot)
       // B2a — the FOURTH and last call site of `loadTableActionSourceAdapter`, and the only one
       // gated at the route rather than inside a table-action wrapper. It has to be: this path does
@@ -5165,6 +5831,10 @@ function createHandlers(services, options = {}) {
         now: Date.now(),
       })
       // W-5: same stanza, forwarded — see the dry-run route above for why.
+      // The STORED job's principal, so a background run never switches data-source scope to whoever
+      // triggered it — and, for the frozen stock-prep pull id, the server-held binding owner
+      // overrides even that (see resolveTableActionReadPrincipal). `assertLargeBomJobActor` above
+      // has already refused any caller who is not this job's creator.
       const sourceAdapter = await loadTableActionSourceAdapter(req, action, {
         principal: queuedJob.principal,
         b2aAuthorization: largeBomB2aAuthorization,
@@ -5190,9 +5860,9 @@ function createHandlers(services, options = {}) {
     },
 
     async tableActionLargeBomExpansionJobPlan(req, res) {
-      requireAccess(req, 'read')
-      const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_LARGE_BOM_PLAN_BODY_KEYS)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
+      const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_LARGE_BOM_PLAN_BODY_KEYS)
       const jobId = firstString(requestParams(req).jobId)
       const routeScope = largeBomJobScope(req, { actionId })
       const job = await loadLargeBomBackgroundExpansionJob({
@@ -5232,9 +5902,12 @@ function createHandlers(services, options = {}) {
     },
 
     async tableActionLargeBomApplyJobStart(req, res) {
-      const user = requireAccess(req, 'write')
-      const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_LARGE_BOM_APPLY_START_BODY_KEYS)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      // `applyPermissionForUser(user)` below still reads the SERVER-side capability from the real
+      // principal, so an operator admitted here carries 'write', never 'admin' — the split adds an
+      // admission, it does not promote anyone.
+      const user = await requireTableActionAccess(req, actionId, 'write', tenantPrincipalDirectory)
+      const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_LARGE_BOM_APPLY_START_BODY_KEYS)
       const jobId = firstString(requestParams(req).jobId)
       const routeScope = largeBomJobScope(req, { actionId })
       assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
@@ -5252,8 +5925,8 @@ function createHandlers(services, options = {}) {
     },
 
     async tableActionLargeBomApplyJobGet(req, res) {
-      requireAccess(req, 'read')
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
       const jobId = firstString(requestParams(req).jobId)
       const routeScope = largeBomJobScope(req, { actionId })
       assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
@@ -5268,9 +5941,9 @@ function createHandlers(services, options = {}) {
     },
 
     async tableActionLargeBomApplyJobRun(req, res) {
-      requireAccess(req, 'write')
-      normalizeTableActionBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      await requireTableActionAccess(req, actionId, 'write', tenantPrincipalDirectory)
+      normalizeTableActionBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS)
       const jobId = firstString(requestParams(req).jobId)
       const routeScope = largeBomJobScope(req, { actionId })
       assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
@@ -5310,9 +5983,9 @@ function createHandlers(services, options = {}) {
     },
 
     async tableActionLargeBomExpansionJobCancel(req, res) {
-      requireAccess(req, 'write')
-      normalizeTableActionBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      await requireTableActionAccess(req, actionId, 'write', tenantPrincipalDirectory)
+      normalizeTableActionBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS)
       assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
       const routeScope = largeBomJobScope(req, { actionId })
       const job = await cancelLargeBomBackgroundExpansionJob({
@@ -5390,6 +6063,12 @@ function createHandlers(services, options = {}) {
         extFieldMapping: stockPreparationExtFieldMapping,
         config: context && context.config,
         b2aTrialRegistry,
+        // The SAME registry the carry/apply/dry-run routes resolve their bound target through, so
+        // the binding this reports on and the binding those routes actually write through are one
+        // object, not two readings of a config file.
+        tableActions,
+        tenantId,
+        actionId: PLM_STOCK_PREPARATION_ACTION_ID,
         env: process.env,
       }))
     },
@@ -5460,7 +6139,7 @@ function createHandlers(services, options = {}) {
       const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
-      const system = await loadSystem(scopedInput(req, { id: externalSystemId }))
+      const system = await loadSystem(scopedAdapterInput(req, { id: externalSystemId }))
       const adapter = adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
       if (!adapter || typeof adapter.read !== 'function') {
         throw new HttpRouteError(422, 'SOURCE_PREFLIGHT_KIND_UNSUPPORTED', 'this data source kind cannot be read', {
@@ -5582,8 +6261,11 @@ function createHandlers(services, options = {}) {
     // CUSTOMER PACK — the executable surface. Four routes, one authorization posture:
     //   admin gate (requireAccess 'admin', mirroring plugin-after-sales' hasInstallAdminAccess)
     // + SERVER-HELD pack allowlist (mirroring ALLOWED_TEMPLATE_IDS; the pack is never in the body).
-    // The tenant project is auth-derived (resolveAuthUserTenantId -> staging project id), so a
-    // request cannot steer the install at another tenant's sheet.
+    // The tenant project is derived from the VERIFIED TOKEN CLAIM
+    // (resolveVerifiedClaimTenantId -> staging project id) on the dry-run and the install, so
+    // neither a request field nor an `x-tenant-id` header can steer them at another tenant's sheet.
+    // The two read routes above keep resolveTenantId: they are values-free and cross-tenant reads
+    // are a deliberate platform-admin capability there.
     // ---------------------------------------------------------------------------------------
 
     // What this server is allowed to install. Values-free evidence summaries (ids, types, ownership
@@ -5637,12 +6319,27 @@ function createHandlers(services, options = {}) {
       requireAccess(req, 'admin')
       normalizeCustomerPackBody(requestBody(req))
       const pack = customerPackCatalog.get(firstString(requestParams(req).packId))
-      const tenantId = resolveAuthUserTenantId(req)
+      // The VERIFIED CLAIM, never `user.tenantId` — the dry-run must rehearse the same sheet the
+      // install will act on, and the install's tenant may not be header-steerable.
+      const tenantId = resolveVerifiedClaimTenantId(req, {})
       const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
       const plan = await planCustomerPackInstall({
         provisioning: getCustomerPackProvisioning(),
         projectId,
         pack,
+        // The SAME capability the install below is given. Without it a dry-run could say nothing at
+        // all about the permission rows an install would write — the one step with no undo would be
+        // the one step with no rehearsal. The port is used READ-ONLY here (the census + the role
+        // pre-flight question); planCustomerPackInstall never reaches its write half.
+        fieldPermissions: stockPreparationFieldPermissions,
+        // THE SAME LEDGER THE INSTALL CONSULTS, read-only. `legacyAdoptable` — may this pack adopt
+        // the pack-less write-scope rows on this sheet — is derived from it, and a rehearsal that
+        // guessed differently from the install would rehearse the wrong verdict. Unlike the install
+        // this does NOT require the store: absent, the dry-run reports basis 'no_ledger' and
+        // `canInstall: false` on a sheet that has such rows, which is the same answer the install
+        // would give.
+        packInstallStore: stockPreparationPackInstalls,
+        tenantId,
       })
       return sendOk(res, { projectId, ...plan })
     },
@@ -5654,9 +6351,11 @@ function createHandlers(services, options = {}) {
       const body = normalizeCustomerPackBody(requestBody(req), VALID_CUSTOMER_PACK_INSTALL_BODY_KEYS)
       const pack = customerPackCatalog.get(firstString(requestParams(req).packId))
       const store = requireStockPreparationPackInstalls()
-      // Auth-derived, never request-supplied: a request tenantId/projectId would be a steering
-      // vector on a WRITE route (same discipline as the target-ensure route above).
-      const tenantId = resolveAuthUserTenantId(req)
+      // THE VERIFIED TOKEN CLAIM, never `user.tenantId`. This route issues a bounded DELETE against
+      // `field_permissions`, and the sheet it is aimed at is a pure function of the tenant — so a
+      // claimless admin plus an `x-tenant-id` header must not be able to choose whose enforced write
+      // denials get retired. Refuses a claimless principal (403) rather than falling back to it.
+      const tenantId = resolveVerifiedClaimTenantId(req, {})
       const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
       const result = await installCustomerPack({
         provisioning: getCustomerPackProvisioning(),
@@ -5667,6 +6366,7 @@ function createHandlers(services, options = {}) {
         tenantId,
         workspaceId: resolveWorkspaceId(req, {}),
         mode: body.mode === 'reinstall' ? 'reinstall' : 'install',
+        fieldPermissions: stockPreparationFieldPermissions,
       })
       const created = Array.isArray(result.createdFields) ? result.createdFields.length : 0
       return sendOk(res, { projectId, ...result }, created > 0 ? 201 : 200)
@@ -6160,7 +6860,6 @@ function createHandlers(services, options = {}) {
       })
       await audit.append({
         tenantId,
-        workspaceId: input.workspaceId,
         projectId: input.projectId,
         action: 'mapping_candidates_sync',
         subjectId: result.snapshotBatchId,
@@ -6192,7 +6891,6 @@ function createHandlers(services, options = {}) {
       })
       await audit.append({
         tenantId,
-        workspaceId: input.workspaceId,
         projectId: input.projectId,
         action: 'mapping_confirm',
         subjectId: result.mappingId,
@@ -6220,7 +6918,6 @@ function createHandlers(services, options = {}) {
       })
       await audit.append({
         tenantId,
-        workspaceId: input.workspaceId,
         projectId: input.projectId,
         action: 'mapping_retire',
         subjectId: result.mappingId,
@@ -6254,7 +6951,6 @@ function createHandlers(services, options = {}) {
       })
       await audit.append({
         tenantId,
-        workspaceId: input.workspaceId,
         projectId: input.projectId,
         action: 'unit_confirm',
         subjectId: result.conversionRuleId,
@@ -6282,7 +6978,6 @@ function createHandlers(services, options = {}) {
       })
       await audit.append({
         tenantId,
-        workspaceId: input.workspaceId,
         projectId: input.projectId,
         action: 'unit_retire',
         subjectId: result.conversionRuleId,
@@ -6296,8 +6991,9 @@ function createHandlers(services, options = {}) {
     // W4b (execution-plan W4a/W4b; adjudication Layer 3): the K2 carry confirm — mirror of
     // stockPreparationMaterialMappingConfirm. The human confirms a CARRY_VIA_CONFIRM proposal;
     // the carry EXECUTOR (confirm-writes.applyCarryViaConfirm) copies the inactive predecessor's
-    // human fields onto the re-keyed canonical row: admin-gated, closed body allowlist (the body
-    // can carry NO stamp — carriedBy is the route identity, carriedAt is module-stamped),
+    // human fields onto the re-keyed row IN THE BOUND TARGET TABLE (see the target resolution in
+    // the handler): admin-gated, closed body allowlist (the body can carry NO stamp and NO table —
+    // carriedBy is the route identity, carriedAt is module-stamped, the sheet is the bound action's),
     // no-overwrite, values-free audit. When the body names the matching carry LEDGER row
     // (decisionId + inputFingerprint, both or neither), the row is closed with the reserved
     // carry token AFTER the apply; a ledger-close refusal is reported honestly beside the
@@ -6311,9 +7007,71 @@ function createHandlers(services, options = {}) {
       if (Boolean(decisionId) !== Boolean(inputFingerprint)) {
         throw new HttpRouteError(400, 'STOCK_PREPARATION_CARRY_CONFIRM_REQUEST_INVALID', 'decisionId and inputFingerprint must be provided together', { fields: ['decisionId', 'inputFingerprint'] })
       }
-      const tenantId = resolveAuthUserTenantId(req)
+      // WHOSE CARRY IS THIS — established before anything else, from the AUTHENTICATED principal.
+      //
+      // Deliberately NOT `resolveAuthUserTenantId`: that helper reads `user.tenantId`, which the host
+      // auth middleware fills from the `x-tenant-id` REQUEST HEADER whenever the token carries no
+      // tenant claim (packages/core-backend/src/auth/jwt-middleware.ts hydrateAuthenticatedUser). For
+      // a write whose destination sheet is decided by the tenant string, a header-fillable tenant is
+      // a steering vector. `resolveOperatorValueScope` (#5445) prefers the VERIFIED claim, refuses a
+      // carried tenant that contradicts it, refuses a principal with no tenant of its own, refuses
+      // any request-carried tenant that tries to steer, and makes the HOST vouch for the (principal,
+      // tenant) pairing. Every refusal it raises is decided from the principal plus the request's own
+      // tenant carriers, so all of them cost ZERO records and ZERO provisioning work.
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
       const targetProjectId = resolveIntegrationStagingProjectId(tenantId, undefined)
-      // PRE-FLIGHT BIND, BEFORE the canonical write (the P1 fix). `decision`, `decisionId` and
+      // WRITE THE TABLE APPLY WROTE. Resolved through the SAME seam every other stock-prep route
+      // uses to reach its target — getTableAction + assertStockPreparationTargetReady — so the carry
+      // cannot pick a different sheet from the writer and the export. The first cut hardcoded the
+      // canonical objectId inside the executor and resolved it through provisioning, which is empty
+      // on every default install: apply is sandbox-only unless an owner configured a production
+      // policy, so the operator's rows are in the sandbox twin and the carry either refused or wrote
+      // a table nobody reads. See stock-preparation-confirm-writes.cjs's carry header, and #5446 for
+      // the same fix on the export (read) side.
+      //
+      // DERIVED SERVER-SIDE, exactly as the export route derives it: the actionId is the module
+      // constant, the tenant comes from the authenticated principal, and the body allowlist below is
+      // UNCHANGED — the client still cannot name a table, an action, or a sheet.
+      //
+      // Resolved BEFORE the ledger pre-flight so a deployment with no configured stock-prep action
+      // refuses ahead of any host IO rather than after a read.
+      const carryAction = assertStockPreparationTargetReady(
+        await tableActions.getTableAction({ tenantId, actionId: PLM_STOCK_PREPARATION_ACTION_ID }),
+      )
+      // ...AND IT MUST BE THE SHEET OF THE CALLER'S OWN TENANT.
+      //
+      // The binding above answers "which sheet does this DEPLOYMENT write". It cannot answer "is that
+      // sheet the caller's", because `getTableAction` is keyed by actionId ALONE — the config map is
+      // deploy-global (stock-preparation-table-actions.cjs) and `applyPersistedSourceBinding`
+      // overrides only `externalSystemId`, never `target`. So the binding on its own hands EVERY
+      // tenant the same sheet. Before this check a foreign-tenant admin's carry returned 200 and
+      // patched it, where the earlier canonical-objectId version had refused precisely because it
+      // resolved the sheet under the CALLER's staging project.
+      //
+      // This restores that wall without giving the executor a way to resolve a sheet of its own: the
+      // bound sheet must be the one provisioning holds for the caller's `${tenantId}:integration-core`
+      // project under the target's own objectId. That is exactly how a correctly-derived binding is
+      // produced — scripts/ops/stock-preparation-derive-target-binding.mjs computes
+      // sheet_ + sha1(`${tenantId}:integration-core:${objectId}`), canonical and sandbox twin alike —
+      // so a sanctioned config passes and a config pointing anywhere else is refused rather than
+      // written to. One provisioning read, no records IO, and it runs BEFORE the ledger pre-flight so
+      // approval bookkeeping in the caller's project is never consulted for a write into another
+      // tenant's sheet.
+      await assertCarryTargetBelongsToTenant({
+        // The RAW host surface, not `getMultitableProvisioning()`: that helper throws its own generic
+        // 503 when provisioning is absent or lacks `findObjectSheet`, which would mask this check's
+        // own typed 501 about the ownership port it actually needs.
+        provisioning: context && context.api && context.api.multitable && context.api.multitable.provisioning,
+        targetProjectId,
+        target: carryAction.target,
+      })
+      // PRE-FLIGHT BIND, BEFORE the carry write (the P1 fix). `decision`, `decisionId` and
       // `inputFingerprint` arrive as three independent client fields; until they are proven to be
       // ONE approved pair, nothing may be written. Refusing only at the ledger close would leave the
       // carried row written with no approval record — the same defect wearing a different mask.
@@ -6328,14 +7086,16 @@ function createHandlers(services, options = {}) {
           decision: input.decision,
         })
       }
+      // No provisioning and no targetProjectId: the executor has no way to resolve a sheet of its
+      // own, and the bound target is the only thing that tells it where to write.
       const result = await applyCarryViaConfirm({
-        context,
         permission: 'admin',
         recordsApi: getMultitableRecordsApi(),
-        provisioning: getMultitableProvisioning(),
-        targetProjectId,
+        target: carryAction.target,
         decision: input.decision,
-        confirmedBy: user.id || user.email,
+        // The SAME principal handle the scope was resolved under, so the row stamp, the audit actor
+        // and the tenant wall all name one identity rather than three independently-derived ones.
+        confirmedBy: scope.actorId,
       })
       // Ledger close, AFTER the apply: the carry is the substantive act; the ledger row is its
       // bookkeeping. A typed ledger refusal (e.g. the row was superseded by a newer reconcile)
@@ -6373,7 +7133,6 @@ function createHandlers(services, options = {}) {
       // confirmation-decision confirm route set. Values-free: counts, mode tokens, booleans.
       await audit.append({
         tenantId,
-        workspaceId: input.workspaceId,
         projectId: input.projectId,
         action: 'exception_resolve',
         subjectId: decisionId || undefined,
@@ -6409,7 +7168,6 @@ function createHandlers(services, options = {}) {
       })
       await audit.append({
         tenantId,
-        workspaceId: input.workspaceId,
         projectId: input.projectId,
         action: 'generation_run',
         subjectId: result.snapshotBatchId,
@@ -6445,7 +7203,6 @@ function createHandlers(services, options = {}) {
       })
       await audit.append({
         tenantId,
-        workspaceId: input.workspaceId,
         projectId: input.projectId,
         action: 'exception_resolve',
         subjectId: result.exceptionId,
@@ -6475,7 +7232,6 @@ function createHandlers(services, options = {}) {
       })
       await audit.append({
         tenantId,
-        workspaceId: input.workspaceId,
         projectId: input.projectId,
         action: 'exception_bulk_resolve',
         mode: result.mode,
@@ -6748,7 +7504,6 @@ function createHandlers(services, options = {}) {
       // a reviewer asking "who touched this" wants to see.
       await audit.append({
         tenantId: scope.tenantId,
-        workspaceId: scope.workspaceId,
         action: 'source_binding_set',
         subjectId: binding.externalSystemId,
         mode: previousExternalSystemId ? 'rebound' : 'bound',
@@ -6849,7 +7604,7 @@ function createHandlers(services, options = {}) {
       // around exactly this content: everyone who is not an author keeps seeing counts, fingerprints
       // and status enums, never a value. One notch tighter than the queue, one notch looser than
       // platform admin — which is what makes the workbench usable without widening the value face.
-      requireAccess(req, STOCK_PREP_OPERATE)
+      const user = requireAccess(req, STOCK_PREP_OPERATE)
       const input = normalizeStockPreparationConfirmBody(
         requestQuery(req),
         VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_VALUE_ENTRY_QUERY_KEYS,
@@ -6859,11 +7614,28 @@ function createHandlers(services, options = {}) {
       if (!decisionId) {
         throw new HttpRouteError(400, 'CONFIRMATION_DECISION_VALUE_ENTRY_REQUEST_INVALID', 'decisionId is required', { field: 'decisionId' })
       }
-      const tenantId = resolveTenantId(req, input)
+      // WHOSE VALUES ARE THESE — resolved by the operator value scope, NOT by `resolveTenantId`.
+      //
+      // This route was left on `resolveTenantId` when the operator project directory introduced the
+      // scope module, even though the module's own header names this read as the same tier. That was
+      // a real hole, not a stylistic gap: `auth/jwt-middleware.ts` copies the `x-tenant-id` REQUEST
+      // HEADER onto `user.tenantId` when the verified token carries no tenant claim, and
+      // `resolveTenantId` then compares the request's tenant against that same header-filled field —
+      // header against header. A tenant-A operator sending `x-tenant-id: tenant-b` was served tenant
+      // B's ENTERED VALUES with a 200. The scope below prefers the verified claim, refuses a carried
+      // tenant that contradicts it, refuses a principal with no tenant of its own (the tenantless
+      // platform admin `resolveTenantId` would have let steer), and makes the HOST vouch for the
+      // (user, tenant) pairing — which is the only thing that can decide the claimless case.
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
       const result = await readConfirmationDecisionValueEntry({
         recordsApi: getMultitableRecordsApi(),
         provisioning: getMultitableProvisioning(),
-        targetProjectId: resolveIntegrationStagingProjectId(tenantId, undefined),
+        targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
         permission: 'admin',
         decisionId,
       })
@@ -6942,13 +7714,39 @@ function createHandlers(services, options = {}) {
       if (!projectNo) {
         throw new HttpRouteError(400, 'STOCK_PREPARATION_PREP_LINE_EXPORT_REQUEST_INVALID', 'projectNo is required', { field: 'projectNo' })
       }
-      const tenantId = resolveTenantId(req, input)
+      // WHOSE MATERIALS ARE THESE — the same operator value scope the per-decision readback and the
+      // project directory use, for the same reason and closing the same pre-existing hole: on a
+      // deployment whose tokens carry no tenant claim, `resolveTenantId` compared the request's
+      // tenant against a `user.tenantId` the auth middleware had filled from the `x-tenant-id`
+      // HEADER, so a tenant-A operator sending `x-tenant-id: tenant-b` was served tenant B's
+      // MATERIAL NAMES AND QUANTITIES with a 200. See the scope module's header for the whole
+      // posture; the short version is that a value-bearing read must derive its tenant from the
+      // AUTHENTICATED principal with the host vouching for the pairing, never from anything the
+      // caller can set. Resolved BEFORE the table action below, so an unauthorized or cross-tenant
+      // caller costs no action lookup either.
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
       // READ THE TABLE APPLY WRITES. Resolved through the SAME seam every other stock-prep route
       // uses to reach its target — getTableAction + assertStockPreparationTargetReady — so the read
       // side cannot pick a different sheet from the write side. The first cut hardcoded the
       // canonical objectId and resolved it through provisioning, which is empty on every default
       // install: apply is sandbox-only unless an owner configured a production policy, so the rows
       // are in the sandbox twin and every project answered 404.
+      //
+      // NOTE, PRECISELY, WHAT THE VERIFIED TENANT DECIDES HERE. It keys the ACTION LOOKUP — and so
+      // the persisted per-tenant SOURCE binding — and it keys the audit row, so a header-spoofed
+      // tenant can no longer steer either of those. It does NOT decide the SHEET: `action.target` is
+      // DEPLOY-TIME configuration shared by every tenant on the deployment, and the only row-level
+      // scoping inside it is `projectNo`. That is a property of the table-action target model this
+      // route adopted, not of this scope; it is written down here so nobody reads the scope as a
+      // promise of per-tenant ROW isolation on this route the way it genuinely is on the other two
+      // (value-entry and the directory both derive their sheet from the verified tenant's staging
+      // project). Making this route's target tenant-scoped is a separate change.
       const action = assertStockPreparationTargetReady(
         await tableActions.getTableAction({ tenantId, actionId: PLM_STOCK_PREPARATION_ACTION_ID }),
       )
@@ -6963,7 +7761,6 @@ function createHandlers(services, options = {}) {
       // streamed. Values-free: counts only, never a material name/quantity.
       await audit.append({
         tenantId,
-        workspaceId: input.workspaceId,
         projectId: projectNo,
         action: 'prep_line_export',
         actor: user.id || user.email,
@@ -6989,6 +7786,756 @@ function createHandlers(services, options = {}) {
       // apart from a normally populated export, without parsing the binary body — see the UI notice.
       res.setHeader('X-Stock-Prep-Export-Row-Count', String(exportResult.activeRowCount))
       return res.send(buffer)
+    },
+
+    // 一线看得见自己工厂的项目 — THE OPERATOR PROJECT DIRECTORY / WORKLIST.
+    //
+    // WHAT CHANGED, AND WHAT DID NOT. The values-free project list
+    // (GET /stock-preparation/projects, `requireAccess(req, 'read')`) is UNTOUCHED — same gate, same
+    // module, same byte-identical projection, still serving the platform/admin workspace with handles,
+    // a closed enum and counts. This is a SIBLING route with its own manifest row, and it is the only
+    // one that carries `projectNo` / `projectName`.
+    //
+    // THE POSTURE, ruled by the owner: the boundary is "WHOSE DATA IS IT", not "which screen is it".
+    // The values-free stance exists to keep the PLATFORM/CONSULTANT side out of customer values — the
+    // original design of this line said so in as many words ("The live UI may show business values to
+    // authorized operators because the operator is working inside the tenant workspace. Issue/customer
+    // evidence must remain values-free", data-factory-plm-project-bom-stock-preparation-design-
+    // 20260604.md:282-284). A factory operator seeing their OWN tenant's project numbers and names is
+    // that live UI, not the evidence channel.
+    //
+    // THE THREE GATES the H0 plane-boundary lock requires of any value-bearing read (三重门,缺一不可),
+    // all present here:
+    //   1. RBAC — `stock-prep:operate`, an independent value-read permission that is NOT
+    //      `integration:read` (R-11's mapping is zero-automatic), and the SAME tier already carrying
+    //      the only two other value-bearing stock-prep reads (value-entry, and the materials export
+    //      which already ships material names and quantities).
+    //   2. SERVER-SIDE FIELD WHITELIST — the projection is fixed in
+    //      stock-preparation-operator-project-directory.cjs. Two value fields, named in code; the row
+    //      is never spread into the response.
+    //   3. AUDIT — appended below, and appended BEFORE the values reach the caller, so an audit store
+    //      that refuses the row means no value-bearing body is ever sent (H3-0 ③, fail-closed).
+    //
+    // AND THE SCOPE, which is what makes gate 1 mean "their own": `resolveOperatorValueScope` derives
+    // the tenant from the AUTHENTICATED principal, prefers the VERIFIED token claim over the
+    // header-fillable `user.tenantId`, refuses any request-carried tenant that disagrees, refuses a
+    // principal with no tenant of its own (which is where a tenantless platform admin lands — us), and
+    // makes the host vouch for the (user, tenant) pairing. Deliberately NOT `resolveTenantId`: that
+    // helper lets a tenantless platform admin steer `tenantId` from the request, which is exactly the
+    // cross-tenant capability a value-bearing read must not inherit.
+    async stockPreparationOperatorProjectDirectory(req, res) {
+      const user = requireAccess(req, STOCK_PREP_OPERATE)
+      const audit = requireStockPreparationAudit()
+      const input = normalizeStockPreparationConfirmBody(
+        requestQuery(req),
+        VALID_STOCK_PREPARATION_OPERATOR_PROJECT_DIRECTORY_QUERY_KEYS,
+        'STOCK_PREPARATION_OPERATOR_PROJECT_DIRECTORY_REQUEST_INVALID',
+      )
+      // Establish WHOSE data may be shown before any IO. Every refusal this can raise is decided from
+      // the principal plus the request's own tenant carriers, so an under-privileged, tenantless or
+      // cross-tenant caller costs zero records/provisioning work.
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
+      // H13 — same probe, same reason, for `project_directory_read` (migration 082). This route's
+      // append is fail-closed and precedes the response too, so without it a deployment on an older
+      // schema answered the directory read with a raw CHECK violation rather than with the 503 that
+      // says which migration to run. After the scope, before any records IO.
+      await requireStockPreparationAuditVocabulary(audit, 'project_directory_read', '082', scope.tenantId)
+      const result = await listOperatorProjectDirectory({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        // Derived from the VERIFIED scope, never from the request — there is no reachable input by
+        // which tenant A's caller addresses tenant B's staging project.
+        targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
+        scope,
+      })
+      // VALUES-FREE AUDIT over a value-bearing response. Counts, booleans and handles only: no
+      // projectNo, no projectName, and no `projects` array — the row records THAT a directory read
+      // happened and how big the answer was, never what was in it. Appended before the response so a
+      // refusing audit store blocks the values (H3-0 ③).
+      await audit.append({
+        tenantId: scope.tenantId,
+        action: 'project_directory_read',
+        actor: scope.actorId,
+        mode: result.pendingProjectCount > 0 ? 'operator_directory' : 'operator_directory_idle',
+        detail: {
+          operation: 'operator_project_directory',
+          projectCount: result.projectCount,
+          pendingProjectCount: result.pendingProjectCount,
+          directoryReady: result.directoryReady,
+          ledgerReady: result.ledgerReady,
+          tenantClaimVerified: scope.tenantClaimVerified,
+        },
+      })
+      return sendOk(res, result)
+    },
+
+    // 通知下一步 —— WHOSE TURN IS IT. The read half of the 备料 handoff.
+    //
+    // GATE CHOICE: requireAccess(req, STOCK_PREP_READ) — the broad queue-watcher tier, same as the
+    // confirmation-decision queue beside it, because everything this returns is values-free: step
+    // keys drawn from the closed handoff vocabulary, cursor integers, booleans, and handler COUNTS.
+    // Handler IDENTITIES are deliberately NOT returned (projectHandoffSteps projects them to a
+    // count): a supervisor watching the queue has no need for the personnel roster, and a values-free
+    // surface that leaks a staff list is still a leak. The ONE identity-derived fact that does cross
+    // is `isCurrentHandler` — a boolean about the CALLER's own turn, computed server-side so the
+    // front end never has to hold a roster to decide whether to show the button.
+    async stockPreparationHandoffStatus(req, res) {
+      const user = requireAccess(req, STOCK_PREP_READ)
+      const input = normalizeStockPreparationConfirmBody(
+        requestQuery(req),
+        VALID_STOCK_PREPARATION_HANDOFF_STATUS_QUERY_KEYS,
+        'STOCK_PREPARATION_HANDOFF_REQUEST_INVALID',
+      )
+      const projectNo = firstString(input.projectNo)
+      if (!projectNo) {
+        throw new HttpRouteError(400, 'STOCK_PREPARATION_HANDOFF_REQUEST_INVALID', 'projectNo is required', { field: 'projectNo' })
+      }
+      // Same shape rule as the advance route below — see there for why a projectNo is a HANDLE. The
+      // read has a smaller blast radius (it writes nothing and composes no message body, it only
+      // echoes the handle back), but one route accepting a shape its sibling refuses is how the two
+      // drift apart, and the echo is itself a reflection surface.
+      if (!isValidStockPrepProjectNo(projectNo)) {
+        throw new HttpRouteError(
+          400,
+          'STOCK_PREPARATION_HANDOFF_PROJECT_NO_INVALID',
+          'projectNo must be a business project handle: alphanumeric, then alphanumerics and . _ - / only, at most 80 characters',
+          { field: 'projectNo' },
+        )
+      }
+      // RC2 — THE TENANT COMES FROM THE PRINCIPAL THE HOST VOUCHES FOR, NEVER FROM A HEADER.
+      //
+      // This read used to call `resolveTenantId(req, input)`, i.e. `user.tenantId` — and
+      // `hydrateAuthenticatedUser` copies the x-tenant-id REQUEST HEADER onto that field whenever the
+      // verified token carries no tenant claim (a perfectly ordinary state: `resolveSessionTenantId`
+      // omits the claim for any account with zero or two-plus org memberships). One header therefore
+      // decided whose cursor this route reported.
+      //
+      // It now goes through the SAME #5445 resolver the value-bearing reads use, at its OWN tier: the
+      // payload here is values-free (step keys, cursor integers, booleans, handler counts), so it
+      // stays on the broad queue-watcher READ tier — a supervisor is meant to see whose turn it is —
+      // while the tenant is still derived from the verified claim, refused when a carried tenant
+      // contradicts it, refused for a principal with no tenant of its own, and vouched for by the host.
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+        requiredTier: STOCK_PREP_READ,
+      })
+      const tenantId = scope.tenantId
+      const chain = loadStockPreparationHandoffChain()
+      // RC7: a chain bound to ANOTHER tenant is, from here, no chain at all — the workbench renders
+      // nothing rather than a turn signal this tenant may not act on.
+      if (!chain.configured || (chain.tenantId && chain.tenantId !== tenantId)) {
+        // NOT an error. An unconfigured deployment asking "whose turn is it" gets a truthful "there
+        // is no chain here", 200, so the workbench can render nothing without treating the absence of
+        // an optional feature as a failure of the page it lives on.
+        return sendOk(res, {
+          configured: false,
+          projectNo,
+          steps: [],
+          stepCount: 0,
+          stepIndex: null,
+          currentStepKey: null,
+          terminal: false,
+          completed: false,
+          isCurrentHandler: false,
+          notifiedStepIndex: null,
+          // J5: every key the configured branch returns appears here too, at its inert value. The TS
+          // interface declares them required, and a client reading `undefined` where the type promises
+          // `false` is a bug waiting for its first reader — the two branches drifted once already,
+          // which is why the suite pins this literal field-for-field.
+          notificationsConfigured: false,
+          resendableStepKey: null,
+          lostStepKeys: [],
+        })
+      }
+      const store = requireStockPreparationHandoffStore()
+      // RC3: no `workspaceId`. The turn is a fact about a PROJECT, and the scope key that used to
+      // carry a caller-supplied workspace is the same key the at-most-once notification claim rides —
+      // see the store and migration 084. `workspaceId` stays in the query allowlist for shape
+      // compatibility with the rest of this family (the workbench spreads one scope object into every
+      // call) and is deliberately NOT read here.
+      const persisted = await store.get({ tenantId, projectNo })
+      // No row == never handed off == the chain is at step 0. Absence and zero are the same state.
+      const stepIndex = persisted ? persisted.stepIndex : 0
+      const completed = stepIndex >= chain.steps.length
+      const currentStep = completed ? null : chain.steps[stepIndex]
+      const notified = persisted ? persisted.notifiedStepIndex : null
+      const notificationsConfigured = chainHasDestinationForHop(chain, false) || chainHasDestinationForHop(chain, true)
+
+      // J1(a) — IS THE TAIL HOP STILL RESENDABLE, BY THIS CALLER? Four conditions, each load-bearing:
+      //   * there IS a tail hop (`stepIndex >= 1`) — at step 0 nothing has been handed off yet;
+      //   * it is unclaimed. `notified === null` means nothing was ever claimed, which leaves the tail
+      //     resendable only when the tail IS hop 0; otherwise the tail is unclaimed exactly when the
+      //     max sits one below it (`notified === stepIndex - 2`);
+      //   * the chain actually sends something for that hop — otherwise there is nothing to resend;
+      //   * and the caller is its configured handler, because `planStockPreparationHandoffAdvance`
+      //     checks the roster of the step being REPLAYED. Inviting anybody else to click would be
+      //     inviting them into a 403.
+      const tailStepIndex = stepIndex - 1
+      const tailUnclaimed = notified === null ? stepIndex === 1 : notified === stepIndex - 2
+      const resendableStepKey = (
+        tailStepIndex >= 0
+        && tailUnclaimed
+        && chainHasDestinationForHop(chain, tailStepIndex === chain.steps.length - 1)
+        && isHandlerOfStep(chain, tailStepIndex, scope.actorId)
+      )
+        ? chain.steps[tailStepIndex].key
+        : null
+
+      // J1(b) — WHICH HOPS ARE GONE FOR GOOD. Read from the trail, not inferred from the cursor: the
+      // advance route writes one `notification_lost` row per hop at the moment it becomes
+      // irreversible, and that row is the ONLY representation of an interior gap that exists.
+      //
+      // Fail-soft on purpose: this is a display hint on a values-free read, so a missing or unhappy
+      // audit store costs the banner, never the turn signal. Bounded, and scoped to this project.
+      let lostStepKeys = []
+      const auditForLost = (services && services.stockPreparationAuditStore) || null
+      if (notificationsConfigured && auditForLost && typeof auditForLost.list === 'function') {
+        try {
+          const trail = await auditForLost.list({
+            tenantId,
+            projectId: projectNo,
+            action: 'handoff_advance',
+            limit: STOCK_PREPARATION_HANDOFF_LOST_LOOKBACK,
+          })
+          const seen = new Set()
+          for (const entry of (trail && trail.entries) || []) {
+            if (!entry || entry.mode !== 'notification_lost') continue
+            const lost = entry.detail && Number(entry.detail.lostStepIndex)
+            if (!Number.isInteger(lost) || lost < 0 || lost >= chain.steps.length) continue
+            if (seen.has(lost)) continue
+            seen.add(lost)
+            lostStepKeys.push(chain.steps[lost].key)
+          }
+        } catch (error) {
+          if (routeLogger && typeof routeLogger.warn === 'function') {
+            routeLogger.warn('[plugin-integration-core] stock-prep handoff: could not read the lost-notification trail; the turn signal is unaffected')
+          }
+          lostStepKeys = []
+        }
+      }
+      return sendOk(res, {
+        configured: true,
+        projectNo,
+        steps: projectHandoffSteps(chain),
+        stepCount: chain.steps.length,
+        stepIndex,
+        currentStepKey: currentStep ? currentStep.key : null,
+        terminal: !completed && stepIndex === chain.steps.length - 1,
+        completed,
+        isCurrentHandler: !completed && isHandlerOfStep(chain, stepIndex, scope.actorId),
+        notifiedStepIndex: notified,
+        // G6: whether this chain notifies at all. Without it the workbench cannot tell a hop whose
+        // notice was LOST from a turn-state-only deployment, whose `notifiedStepIndex` is null
+        // forever and correctly so.
+        notificationsConfigured,
+        // J1 — THE TWO STATES, CARRIED SEPARATELY, BECAUSE THE COLUMN CANNOT TELL THEM APART.
+        //
+        // `notified_step_index` is a monotonic MAX. From it alone exactly one thing is derivable:
+        // whether the TAIL hop (the one just completed, `stepIndex - 1`) has been claimed. An
+        // INTERIOR unclaimed hop — one below the max — is not representable at all, because a later
+        // claim raises the max straight past it.
+        //
+        // G6 read that column and got both answers backwards. Its predicate fired on the tail hop,
+        // which is precisely the hop RC1 makes RECOVERABLE by the same handler's next click, and told
+        // the operator it could never be resent — copy that discourages the one action that fixes it.
+        // And it stayed silent for the superseded hop, which really is gone. So:
+        //
+        //   resendableStepKey — the tail hop, unclaimed, and YOU are its handler: press again.
+        //   lostStepKeys      — read back from the `notification_lost` audit rows the advance route
+        //                       writes, because that trail is the only place an interior gap exists.
+        resendableStepKey,
+        lostStepKeys,
+      })
+    },
+
+    // 通知下一步 —— I'M DONE, TELL THE NEXT ONE. The write half.
+    //
+    // GATE CHOICE: requireAccess(req, STOCK_PREP_OPERATE) — the same notch as
+    // stockPreparationConfirmationDecisionsConfirm, and for the same reason: this mutates durable
+    // state AND has an effect outside the system (a DingTalk message that makes someone's phone
+    // buzz). It must not ride the broad READ tier that the status read above uses, because that tier
+    // is the queue-WATCHER tier (supervisor, auditor, dashboard) and a watcher must not be able to
+    // move somebody else's work along.
+    //
+    // The permission is necessary but NOT sufficient: planStockPreparationHandoffAdvance additionally
+    // requires the caller to be a configured handler of the step being handed off. Platform admins
+    // are NOT exempted from that — an admin advancing someone else's step would make the audit trail
+    // say a person handed off when they did not.
+    //
+    // ORDER OF OPERATIONS, chosen deliberately and pinned by the suite:
+    //   1. gate, parse, VALIDATE the projectNo's shape, load the chain — nothing observable yet
+    //   2. resolve the tenant from the VERIFIED principal, host-vouched  — RC2
+    //   2b. probe the audit vocabulary, under that tenant                — F2 (a write; never before 2)
+    //   3. plan the advance against the persisted cursor                 — the handler gate, RC6
+    //   4. prove the project EXISTS in the bound target                  — a 404 before any write
+    //   5. COMMIT the turn (compare-and-set, cursor only)
+    //   6. AUDIT what actually happened
+    //   7. CLAIM the notification (its own compare-and-set)              — RC1
+    //   8. SEND it, best effort
+    //
+    // STEP 3 IS BEFORE STEP 4, and that is RC6. The existence probe used to run first, so a caller the
+    // route was about to refuse could still tell 404 (that project number is real) from 403 (it is
+    // not) — a project-number oracle for anyone holding stock-prep:operate, costing a records query
+    // per guess and leaving no audit row behind. Planning first refuses a non-handler with ONE answer
+    // for every project number, real or invented, before any records IO. The handler's own 404 is
+    // unchanged: the check did not go away, it moved behind the gate.
+    //
+    // STEPS 5-7 ARE THREE WRITES, NOT ONE, and that is RC1. See the store's `claimNotification`.
+    //
+    // STEP 6 IS AFTER STEP 5, and that is a correction rather than the original design. The first cut
+    // audited the INTENT first — the same "record intent FIRST" discipline the rest of this family
+    // uses — and it was wrong HERE for a reason specific to this route: the store's compare-and-set
+    // can REFUSE (a concurrent advance won the row), and the pre-written row said `mode: 'advanced'`
+    // for a handoff that never happened. An append-only trail cannot take that back. So the trail
+    // now records outcomes it has SEEN: a refusal from the planner or the store leaves NO row, and
+    // every row on this trail describes a cursor move that really landed.
+    //
+    // THAT FIX HAD A MIRROR IMAGE, AND STEP 7 IS WHERE IT IS ANSWERED (RC1). While the notification
+    // claim was stamped inside step 5's transaction, an audit append that FAILED left a hop whose
+    // cursor had moved and whose claim was already spent — the next click is a replay, a replay could
+    // not re-claim, and nobody was ever told. So the claim is now its own compare-and-set, taken
+    // AFTER the trail row lands. Every one of the three writes is idempotent and the next click
+    // resumes whichever of them did not happen; the CAS is what keeps "resumable" from meaning
+    // "twice".
+    //
+    // What the old ordering bought is kept by other means: `requireStockPreparationAudit()` still
+    // runs FIRST, so an unavailable audit store is a 501 before anything is read or written — and
+    // `requireStockPreparationAuditVocabulary`, once the tenant is known, additionally refuses by name
+    // and with the migration number a database whose CHECK constraint does not yet know this action.
+    //
+    // Step 6 is AFTER step 4 on purpose, and a failure there does NOT roll anything back. The turn is
+    // the durable business fact — 张三 really did finish — and a DingTalk outage must not silently
+    // un-finish it, leaving the workbench claiming it is still his step. The caller is told the truth
+    // instead (`notified: false`, `notifyOutcome: 'failed'`) and the UI says so in words, so a human
+    // can go and tell the next person. See the store for why this is at-most-once rather than
+    // at-least-once.
+    async stockPreparationHandoffAdvance(req, res) {
+      const user = requireAccess(req, STOCK_PREP_OPERATE)
+      // F2: the audit STORE is required here — a wiring check, no IO — but the VOCABULARY PROBE is
+      // not. The probe is a real write-transaction (INSERT into the audit table, then roll back), and
+      // running it before the tenant is established meant every refused tenant-steering caller caused
+      // one. It now runs immediately after the scope resolves, still before any write it is meant to
+      // protect. See requireStockPreparationAuditVocabulary.
+      const audit = requireStockPreparationAudit()
+      const input = normalizeStockPreparationConfirmBody(
+        requestBody(req),
+        VALID_STOCK_PREPARATION_HANDOFF_ADVANCE_BODY_KEYS,
+        'STOCK_PREPARATION_HANDOFF_REQUEST_INVALID',
+      )
+      const projectNo = firstString(input.projectNo)
+      if (!projectNo) {
+        throw new HttpRouteError(400, 'STOCK_PREPARATION_HANDOFF_REQUEST_INVALID', 'projectNo is required', { field: 'projectNo' })
+      }
+      // THE SHAPE CHECK, and it is not decoration. This string is about to be written verbatim into
+      // an append-only audit row's `project_id`, into a durable cursor row, and — uniquely on this
+      // route — INTERPOLATED INTO A DINGTALK MARKDOWN BODY that a person reads on their phone
+      // (`项目 ${project} …`). Free text there is an injection surface and an unbounded-write
+      // surface at once. The refusal names the field and NEVER echoes the value, so a hostile
+      // projectNo cannot even reach the caller by way of the error it caused.
+      if (!isValidStockPrepProjectNo(projectNo)) {
+        throw new HttpRouteError(
+          400,
+          'STOCK_PREPARATION_HANDOFF_PROJECT_NO_INVALID',
+          'projectNo must be a business project handle: alphanumeric, then alphanumerics and . _ - / only, at most 80 characters',
+          { field: 'projectNo' },
+        )
+      }
+      const fromStepKey = firstString(input.fromStepKey)
+      if (!fromStepKey) {
+        throw new HttpRouteError(400, 'STOCK_PREPARATION_HANDOFF_REQUEST_INVALID', 'fromStepKey is required', { field: 'fromStepKey' })
+      }
+      // J4 — SCOPE BEFORE CHAIN, SO BOTH ROUTES REFUSE IN THE SAME ORDER.
+      //
+      // The chain check used to run first here while the status route resolved the scope first, and
+      // the two therefore disagreed for every caller whose scope cannot resolve: a tenantless admin
+      // got 501 NOT_CONFIGURED on a deployment with no chain and 403 TENANT_REQUIRED on one that has
+      // one — telling them, by the difference alone, that a 备料 chain exists here. Same one-bit
+      // disclosure G7 closed on the binding, reached by ordering instead. The refusal a caller is not
+      // entitled to pass now comes first on both routes.
+      // RC2 — A WRITE DERIVES ITS TENANT FROM THE PRINCIPAL THE HOST VOUCHES FOR.
+      //
+      // This used to be `resolveAuthUserTenantId(req)`, i.e. `user.tenantId` — which the auth
+      // middleware fills from the x-tenant-id REQUEST HEADER whenever the verified token carries no
+      // tenant claim. One header therefore decided whose cursor was advanced, whose audit row was
+      // written, and which project number went into which DingTalk group. It is the same hole #5445
+      // closed for the value-bearing reads three routes above, and this route — which writes AND
+      // speaks outside the system — has strictly more reason to close it.
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+        requiredTier: STOCK_PREP_OPERATE,
+      })
+      const tenantId = scope.tenantId
+      const actor = scope.actorId
+      // Chain BEFORE store: an unconfigured deployment must refuse without ever reaching the database,
+      // which is what makes "absent config = byte-identical behaviour" true rather than merely likely.
+      const chain = requireConfiguredStockPreparationHandoffChain()
+      const store = requireStockPreparationHandoffStore()
+      // Refuse to write or announce on behalf of a tenant this deployment's chain is not for.
+      requireStockPreparationHandoffChainForTenant(chain, tenantId)
+      // F2 — THE VOCABULARY PROBE, NOW THAT WE KNOW WHOSE WRITE THIS IS. Still before every write it
+      // exists to protect, and now probing under the RESOLVED tenant rather than a '__probe__'
+      // placeholder, so the row it inserts and rolls back belongs to the tenant being cleared.
+      await requireStockPreparationAuditVocabulary(audit, 'handoff_advance', '085', tenantId)
+
+      // RC6 — THE HANDLER GATE COMES FIRST, BEFORE ANY RECORDS IO. `store.get` is a single indexed
+      // read on a tenant-scoped table; the planner then refuses a non-handler with one 403 that is
+      // identical for a real project number and an invented one. Only a caller who has passed that
+      // gate gets to learn whether the project exists.
+      // RC3: no `workspaceId` in the scope — the turn is a project-level fact; see the store.
+      const persisted = await store.get({ tenantId, projectNo })
+      const plan = planStockPreparationHandoffAdvance({
+        chain,
+        currentStepIndex: persisted ? persisted.stepIndex : 0,
+        fromStepKey,
+        actorId: actor,
+      })
+      const fromStepIndex = plan.fromStepIndex
+      const terminal = fromStepIndex === chain.steps.length - 1
+
+      // THE PROJECT MUST EXIST BEFORE ANYTHING IS WRITTEN. A well-shaped handle for a project nobody
+      // has is still not a project, and starting a handoff chain on a typo would put a permanent row
+      // in the audit trail, a permanent row in the cursor table, and a DingTalk ping about a project
+      // the recipients cannot find. Resolved through the SAME seam the export read uses
+      // (getTableAction + assertStockPreparationTargetReady), so this route cannot come to a
+      // different opinion about where stock-prep rows live than the writer does.
+      const action = assertStockPreparationTargetReady(
+        await tableActions.getTableAction({ tenantId, actionId: PLM_STOCK_PREPARATION_ACTION_ID }),
+      )
+      const projectExists = await stockPreparationProjectHasMainRows({
+        recordsApi: getMultitableRecordsApi(),
+        target: action.target,
+        projectNo,
+        permission: 'admin',
+      })
+      if (!projectExists) {
+        throw new HttpRouteError(
+          404,
+          'STOCK_PREPARATION_HANDOFF_PROJECT_NOT_FOUND',
+          'no stock-preparation rows exist for this project',
+          { field: 'projectNo' },
+        )
+      }
+
+      // STEP 5 — THE TURN. Cursor only: the notification claim is taken separately, after the trail
+      // row lands, so that a failing audit cannot leave a hop permanently unnotifiable (RC1).
+      const applied = await store.advance({
+        tenantId,
+        projectNo,
+        expectedStepIndex: fromStepIndex,
+        toStepIndex: plan.toStepIndex,
+        actor,
+      })
+
+      // DOES THIS HOP STILL OWE A NOTIFICATION? Asked of the STORE, not of the plan, because the two
+      // can disagree in exactly the case that matters: a replay whose original request died between
+      // the cursor move and the claim. Such a click finds the claim unspent and completes the hop.
+      //
+      // DO NOT SPEND THE CLAIM ON A HOP THAT HAS NOWHERE TO SEND. Once claimed for a step, that hop
+      // can never be notified again; claiming it for a chain that names no destination would mean a
+      // deployment adding one tomorrow finds yesterday's hops permanently silent. With the strict
+      // config parse this is only reachable for the deliberate turn-state-only chain (neither
+      // `notify` nor `terminal` declared) — a typo can no longer land here — but the guard stays,
+      // because the cost of being wrong is an unnotifiable step and the cost of the guard is a
+      // boolean.
+      // J3 — AND THE SEAM COUNTS AS A DESTINATION. This asked the CHAIN CONFIG only, so on a
+      // deployment whose host wired no notifier — which the seam's own contract calls optional — the
+      // claim CAS fired, the dispatcher answered without attempting anything, and the hop became
+      // permanently unnotifiable with no trace: `applied.changed` is true, so the lost-row loop below
+      // (which only covers hops BEFORE this one) never saw it either. A claim may only be spent on a
+      // hop something could actually have been sent for.
+      const notifierWired = Boolean(
+        stockPreparationHandoffNotifier && typeof stockPreparationHandoffNotifier.sendToDestinations === 'function',
+      )
+      const hopHasDestination = notifierWired && chainHasDestinationForHop(chain, terminal)
+      if (!notifierWired && chainHasDestinationForHop(chain, terminal) && routeLogger && typeof routeLogger.warn === 'function') {
+        routeLogger.warn(
+          '[plugin-integration-core] stock-prep handoff: the chain names a destination but no notifier seam is wired; the hop is left UNCLAIMED so a deployment that wires one later can still announce it',
+        )
+      }
+
+      // STEP 6 — RECORD WHAT HAPPENED, now that the store has confirmed it.
+      //
+      // RC5: `mode` is the STORE's committed verdict, never the planner's intent. A step may have
+      // more than one configured handler, and when a co-handler commits the same hop between this
+      // request's plan and its commit the store correctly writes nothing — a trail that took its mode
+      // from the plan then said THIS actor advanced a step somebody else advanced, giving a reviewer
+      // asking 「谁交接的」 two answers for one cursor move.
+      //
+      // G5 — THE ROW RECORDS WHAT THIS REQUEST OBSERVED, NOT WHAT IT HOPES TO DO. The first cut put a
+      // `resumed` boolean here, computed from state read inside the advance transaction and written
+      // twenty lines BEFORE the claim was attempted — the exact intent-vs-verdict bug RC5 had just
+      // fixed for `mode`, in the same detail object. Two concurrent resume clicks wrote two rows both
+      // saying they had completed the owed hop, for one notification.
+      //
+      // The append cannot simply move below the claim: that ordering is what RC1 exists to prevent
+      // (an audit failure after a spent claim loses the ping forever, unrecoverably). So the two
+      // facts are separated by what each can honestly assert at the moment it is written:
+      //
+      //   detail.notificationOwed  — an OBSERVATION, true at append time: the cursor had already
+      //                              moved and this hop's notification was still unclaimed.
+      //   response.resumed         — the committed VERDICT, set from `claim.claimed` below, which is
+      //                              what the workbench renders ("之前没发出去的通知,这次补发了").
+      //
+      // And the case where the owed hop can never be sent at all gets its own row — see the
+      // notification_lost append after this one.
+      const notificationOwed = !applied.changed && hopHasDestination
+        && (applied.handoff.notifiedStepIndex === null || applied.handoff.notifiedStepIndex < fromStepIndex)
+      await audit.append({
+        tenantId,
+        projectId: projectNo,
+        action: 'handoff_advance',
+        subjectId: fromStepKey,
+        mode: applied.changed ? (terminal ? 'completed' : 'advanced') : 'replayed',
+        actor,
+        detail: {
+          operation: 'handoff_advance',
+          fromStepIndex,
+          toStepIndex: plan.toStepIndex,
+          stepCount: chain.steps.length,
+          terminal,
+          notificationOwed,
+        },
+      })
+
+      // G6 — A HOP WHOSE NOTICE CAN NEVER BE SENT LEAVES A RECORD.
+      //
+      // RC1's recovery is real but NARROW, and the prose used to state it without scope: it needs the
+      // SAME handler, before the chain moves on. When a co-handler advances first, their claim moves
+      // `notified_step_index` past the owed hop, the claim is monotonic, and that ping can never be
+      // sent by anyone. Nothing recorded it, so 「谁该被通知却没被通知」 was unanswerable afterwards.
+      //
+      // Detected here because this is the moment it becomes irreversible: this advance is about to
+      // claim `fromStepIndex`, so every hop strictly between the last claimed one and this one is now
+      // permanently unnotifiable. Values-free: a step key from the closed vocabulary plus integers.
+      if (applied.changed && hopHasDestination) {
+        const lastClaimed = applied.handoff.notifiedStepIndex
+        const firstUnclaimed = lastClaimed === null ? 0 : lastClaimed + 1
+        for (let lost = firstUnclaimed; lost < fromStepIndex; lost += 1) {
+          if (!chainHasDestinationForHop(chain, lost === chain.steps.length - 1)) continue
+          await audit.append({
+            tenantId,
+            projectId: projectNo,
+            action: 'handoff_advance',
+            subjectId: chain.steps[lost].key,
+            mode: 'notification_lost',
+            actor,
+            detail: {
+              operation: 'handoff_notification_lost',
+              lostStepIndex: lost,
+              stepCount: chain.steps.length,
+            },
+          })
+        }
+      }
+
+      // STEP 7 — THE CLAIM, its own compare-and-set. `claimed: false` means somebody already has it
+      // (an earlier click, or a concurrent writer who is sending right now), which is a 'skipped',
+      // never an error: the turn really did move.
+      const claim = hopHasDestination
+        ? await store.claimNotification({ tenantId, projectNo, stepIndex: fromStepIndex })
+        : { claimed: false }
+
+      // 'skipped' and 'not_configured' are DIFFERENT ANSWERS and the workbench renders them in
+      // different words — "已经交给下一步,这次没有发群消息" versus "这个部署还没有配置备料接力的步骤".
+      // 'skipped' is for a hop that HAS a destination and whose at-most-once claim was already spent
+      // (a replay). The claim guard above must not silently downgrade the other case to it: before
+      // that guard existed the claim was always made, `dispatchStockPreparationHandoffNotification`
+      // saw an empty destination list and answered 'not_configured', and the turn-state-only chain
+      // must keep getting that same honest answer now that it no longer spends a claim to reach it.
+      let notifyOutcome = hopHasDestination ? 'skipped' : 'no_destination'
+      if (claim.claimed) {
+        const notification = buildStockPreparationHandoffNotification({
+          chain,
+          projectNo,
+          fromStepIndex,
+          // The APPROVER IS NAMED IN THE BODY and the message is sent by the SYSTEM. This is the
+          // relaxed form of "issued in the name of the last approver": no impersonation is attempted,
+          // because true send-as-a-person delegation needs DingTalk-side authorization and a security
+          // review that is out of this change's scope.
+          actorLabel: actor,
+          terminal,
+        })
+        notifyOutcome = await dispatchStockPreparationHandoffNotification(notification)
+      }
+
+      const completed = applied.handoff.stepIndex >= chain.steps.length
+      const currentStep = completed ? null : chain.steps[applied.handoff.stepIndex]
+      return sendOk(res, {
+        projectNo,
+        fromStepKey,
+        currentStepKey: currentStep ? currentStep.key : null,
+        stepIndex: completed ? null : applied.handoff.stepIndex,
+        stepCount: chain.steps.length,
+        changed: applied.changed,
+        terminal,
+        notified: notifyOutcome === 'sent',
+        // J8: a value outside the closed vocabulary is a value the workbench has no words for. The
+        // guard that pairs outcomes with copy used to derive them by reading this file's text, which
+        // one indirection escaped; the vocabulary is a frozen constant now, and this is the wire's
+        // last line of defence against a member that never joined it.
+        notifyOutcome: assertStockPreparationHandoffNotifyOutcome(notifyOutcome),
+        // G1/G5: the COMMITTED verdict — this request found the hop already moved and its notification
+        // still owed, and took the claim. The workbench needs it because `changed:false` alone can no
+        // longer mean "nothing needed sending": since RC1 a replay is exactly how an interrupted hop
+        // gets finished.
+        resumed: !applied.changed && claim.claimed === true,
+      })
+    },
+
+    // 项目备料页 — ONE PROJECT'S BOARD. The read behind the operator's single page.
+    //
+    // THE SAME GATE AND THE SAME TENANCY AS THE DIRECTORY ABOVE, deliberately and literally: this is
+    // the FOURTH value-bearing stock-prep read, and the operator-scope module's header instructs a
+    // fourth to JOIN the list rather than invent a fourth way to decide tenancy. So the tenant is
+    // derived from the AUTHENTICATED principal via `resolveOperatorValueScope` — never
+    // `resolveTenantId`, which lets a tenantless platform admin steer `tenantId` from the request —
+    // and every refusal that scope can raise is decided before any records/provisioning work.
+    //
+    // WHY THE PROJECT NUMBER IS A PATH PARAM AND WHAT THAT COSTS. The board IS one project, so the
+    // number addresses the resource. It is the caller's own input echoed back in the response (which
+    // is fine — it is theirs) and it reaches NO audit row (which is the point: see below).
+    //
+    // WHOSE PROJECT NUMBERS THIS CAN ANSWER FOR — the same model the export route states, in the
+    // same words, because it is the same table.
+    //
+    // `action.target` is DEPLOY-TIME configuration shared by every tenant on the deployment, and
+    // `plm_stock_preparation_main` carries NO tenant column — its only row-level scope is
+    // `projectNo`. So the boundary this route can enforce, and does, is OWNERSHIP OF THE SHEET:
+    //
+    //   * a caller whose own staging project does not own the bound sheet never reads it at all
+    //     (`resolveOwnBoundSheet` refuses first), so for them every project number — one that exists
+    //     in that sheet as much as one that exists nowhere — takes the identical path to the
+    //     identical, detail-free 404. Nothing in the response, the status or the timing separates
+    //     the two. That is the property B-02/B-13 assert.
+    //   * the ONE caller who does own it reads all of it, and every project number in it is theirs
+    //     by definition: a single-owner sheet has no foreign project numbers, because rows only
+    //     arrive through an `apply` that owner ran.
+    //
+    // What this route does NOT claim is that a deployment pointing several tenants at one shared
+    // target keeps their rows apart. It cannot — the table has no tenant column — and the export
+    // route has the same property for the same reason. Making the target per-tenant is a change to
+    // the table-action model that both routes need, and it is not this one.
+    //
+    // MULTITABLE ENFORCES ACCESS ON LANDING. The `fillTarget` in the response is a HANDLE, not a
+    // permission decision. This plugin has no user-aware multitable ACL seam — the read runs on the
+    // service-account records API with the plugin's own authority — so it CANNOT pre-check whether
+    // this operator may open that sheet, and this route makes no such claim. What it does guarantee
+    // is that the handle names a sheet that EXISTS; whether the operator may see it is multitable's
+    // answer, given when they land.
+    async stockPreparationOperatorProjectBoard(req, res) {
+      const user = requireAccess(req, STOCK_PREP_OPERATE)
+      const audit = requireStockPreparationAudit()
+      const input = normalizeStockPreparationConfirmBody(
+        requestQuery(req),
+        VALID_STOCK_PREPARATION_OPERATOR_PROJECT_BOARD_QUERY_KEYS,
+        'STOCK_PREPARATION_PROJECT_BOARD_REQUEST_INVALID',
+      )
+      const projectNo = firstString(requestParams(req).projectNo)
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
+      // H13 — IS THIS DATABASE'S AUDIT VOCABULARY WIDE ENOUGH FOR `project_board_read` YET?
+      //
+      // The board's audit append is FAIL-CLOSED and precedes the response (B-04), so on a deployment
+      // whose CHECK constraint stops at 085 — a real state, because `db:migrate` is a separate CLI —
+      // every board read did the whole tenant-scoped read and then died on a raw constraint violation
+      // the operator could do nothing with. The probe converts that into the 503 that NAMES migration
+      // 086, before any records IO, and it is placed after the scope so the row it inserts and rolls
+      // back belongs to the tenant being cleared. Both audited paths are covered by the one probe:
+      // the hit below and the 404 MISS append, which writes the same action.
+      await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_BOARD_AUDIT_ACTION, '086', scope.tenantId)
+      // THE BOUND TABLE-ACTION TARGET — the sheet `apply` actually writes to, which is what the fill
+      // link must point at (on a deployment whose production gate is closed that is the sandbox twin,
+      // not the canonical table). An UNCONFIGURED or unknown action is a deployment state this page
+      // renders as 「表还没建好」, not a failure of the board, so those two refusals become "no bound
+      // target"; anything else is a real fault and propagates.
+      let boundTarget = null
+      try {
+        const boundAction = await tableActions.getTableAction({
+          tenantId: scope.tenantId,
+          actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+        })
+        boundTarget = boundAction && boundAction.target ? boundAction.target : null
+      } catch (error) {
+        const code = error && error.code ? String(error.code) : ''
+        if (code !== 'TABLE_ACTION_NOT_CONFIGURED' && code !== 'TABLE_ACTION_NOT_FOUND') throw error
+      }
+      let outcome
+      try {
+        outcome = await readOperatorProjectBoard({
+          recordsApi: getMultitableRecordsApi(),
+          provisioning: getMultitableProvisioning(),
+          // Derived from the VERIFIED scope, never from the request — there is no reachable input by
+          // which tenant A's caller addresses tenant B's staging project.
+          targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
+          scope,
+          projectNo,
+          boundTarget,
+          audit,
+        })
+      } catch (error) {
+        // A MISS IS STILL A READ, and it is audited as one — values-free, so the trail cannot become
+        // the oracle the response refuses to be. Anything that is not the miss is rethrown untouched.
+        if (error instanceof StockPreparationProjectBoardError && error.status === 404) {
+          await audit.append({
+            tenantId: scope.tenantId,
+            action: STOCK_PREPARATION_PROJECT_BOARD_AUDIT_ACTION,
+            actor: scope.actorId,
+            mode: STOCK_PREPARATION_PROJECT_BOARD_MODES[1],
+            detail: {
+              operation: 'operator_project_board',
+              found: false,
+              projectCount: Number.isInteger(error.projectCount) ? error.projectCount : 0,
+              // Which of the two stores could even have answered. A miss on a deployment whose pull
+              // target is not ready is a CONFIGURATION fact, not a "no such project" fact, and the
+              // trail is the only place that distinction survives.
+              pullTargetReady: error.pullTargetReady === true,
+              tenantClaimVerified: scope.tenantClaimVerified,
+            },
+          })
+        }
+        throw error
+      }
+      // VALUES-FREE AUDIT over a value-bearing response, appended BEFORE the values reach the caller
+      // so a refusing audit store means no board is ever sent (H3-0 ③, fail-closed). project_id stays
+      // NULL and the projectNo appears nowhere: migration 083 says why that matters most here, on the
+      // one route that is ABOUT a single project.
+      await audit.append({
+        tenantId: scope.tenantId,
+        action: STOCK_PREPARATION_PROJECT_BOARD_AUDIT_ACTION,
+        actor: scope.actorId,
+        mode: STOCK_PREPARATION_PROJECT_BOARD_MODES[0],
+        detail: {
+          operation: 'operator_project_board',
+          found: true,
+          projectCount: outcome.projectCount,
+          pendingDecisionCount: outcome.board.pendingDecisionCount,
+          fillTargetPresent: outcome.board.fillTarget !== null,
+          // WHICH STORE ANSWERED. An operator's own pull produces a board with no archive row at all,
+          // and that is the normal shape for this tier rather than a fault — but it is also exactly
+          // the shape an unfinished mvp-persist leaves behind, so the trail records both booleans
+          // and the row count rather than leaving them to be inferred from silence.
+          archivedSnapshotPresent: outcome.board.archivedSnapshotPresent,
+          pullTargetReady: outcome.board.pullTargetReady,
+          pulledRowCount: outcome.board.pulledRowCount,
+          tenantClaimVerified: scope.tenantClaimVerified,
+        },
+      })
+      return sendOk(res, outcome.board)
     },
 
     // FOS-2: generic, preset-driven field-option-sync. Admin-gated; resolves a FOS preset from the
@@ -7260,7 +8807,7 @@ function createHandlers(services, options = {}) {
         for (const source of sources) {
           let adapter = adapterBySystem.get(source.systemId)
           if (!adapter) {
-            const system = await loadSystem(scopedInput(req, { id: source.systemId }))
+            const system = await loadSystem(scopedAdapterInput(req, { id: source.systemId }))
             // P1: fail-closed BEFORE createAdapter — ONLY a metasheet:staging source may back a mapping
             // sheet. Otherwise the preview becomes an arbitrary-adapter read() entry point: a caller
             // pointing at a K3 / other external system would trigger an external read instead of a
@@ -7473,6 +9020,7 @@ function createHandlers(services, options = {}) {
         mode: body.mode,
         id: requestParams(req).id,
         triggeredBy: 'api',
+        runAs: 'user',
       })
       return sendOk(res, await runner.replayDeadLetter(replayInput), 202)
     },
@@ -7525,6 +9073,7 @@ module.exports = {
     requireAccess,
     resolveTenantId,
     resolveAuthUserTenantId,
+    resolveVerifiedClaimTenantId,
     resolveAuthenticatedWriteTenantId,
     scopedAuthenticatedWriteInput,
     scopedInput,

@@ -1044,6 +1044,7 @@ function fieldTypeLabel(type: FormFieldType) {
     select: '单选',
     'multi-select': '多选',
     user: '用户',
+    department: '部门',
     attachment: '附件',
     detail: '明细',
     'record-link': '关联记录',
@@ -1107,10 +1108,9 @@ function nodeTagType(type: ApprovalNodeType): string {
 }
 
 function approvalModeLabel(mode: ApprovalMode): string {
-  // P1-C: 'threshold' (T2-4 N-of-M) is the shipped engine 4th mode — see the ApprovalMode doc
-  // comment (types/approval.ts) for the linear-only constraint this label does not itself enforce
-  // (a read-only detail view never authors the mode, only echoes what was published).
-  const map: Record<ApprovalMode, string> = { single: '单人审批', all: '会签', any: '或签', threshold: '门槛会签' }
+  // Threshold and sequential are the fourth and fifth shipped engine modes. See ApprovalMode's
+  // type comment for the linear-only constraint this read-only detail label does not enforce.
+  const map: Record<ApprovalMode, string> = { single: '单人审批', all: '会签', any: '或签', threshold: '门槛会签', sequential: '依次审批' }
   return map[mode] ?? mode
 }
 

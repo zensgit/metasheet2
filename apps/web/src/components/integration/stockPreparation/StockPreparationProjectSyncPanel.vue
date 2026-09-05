@@ -35,15 +35,16 @@
         :disabled="!canSubmit"
         @click="onRun"
       >
-        {{ busy
-          ? bi('正在同步…', 'Syncing…')
-          : bi('同步这个项目(可以重复点,不会重复写)', 'Sync this project (safe to repeat — it never writes twice)') }}
+        {{ busy ? bi(...runningLabel) : bi(...runLabel) }}
       </button>
-      <!-- R-11: a control the caller cannot exercise is ABSENT, and the reason is said in words. -->
+      <!-- R-11: a control the caller cannot exercise is ABSENT, and the reason is said in words.
+           一线自己拉数据 widened who may press it — a stock-prep operator now can — so this line no
+           longer says "only a platform administrator": it names both tiers, because sending someone
+           to the wrong person is its own kind of dead end. -->
       <p v-else class="sp-sync__hint" data-testid="stock-prep-project-sync-denied">
         {{ bi(
-          '从 PLM 拉数据这件事要由平台管理员来做。您可以看这里的结果,同步请找平台管理员执行。',
-          'Pulling data from PLM is a platform administrator’s job. You can read the results here; ask a platform administrator to run the sync.',
+          '从 PLM 拉数据要有备料操作权限,或者是平台管理员。您可以看这里的结果,同步请找有权限的同事或平台管理员执行。',
+          'Pulling data from PLM needs the stock-preparation operator permission, or a platform administrator. You can read the results here; ask a colleague who has it, or a platform administrator, to run the sync.',
         ) }}
       </p>
     </div>
@@ -143,6 +144,7 @@
       :api="largeBomApi"
       :wait="largeBomPollWait"
       @open-multitable="emit('open-multitable')"
+      @synced="emit('synced')"
     />
 
     <StockPrepTechnicalDetails v-if="report" testid="stock-prep-project-sync-tech">
@@ -227,6 +229,17 @@ const props = withDefaults(
      */
     armedAt?: number
     /**
+     * 项目备料页: the project this panel is already scoped to, so an operator who opened a board does
+     * not retype a number the page is already about.
+     *
+     * A SEED, NOT A LOCK. The input stays editable — the panel's own 项目接入 use on the legacy tab
+     * has no seed at all, and a locked field would take away the "sync a different project from
+     * here" path that surface relies on. The seed follows the prop, and a later prop change
+     * (the operator opened a different board) replaces what the seed put there — but never what the
+     * operator typed over it while a run was in flight.
+     */
+    projectNo?: string
+    /**
      * Test seam ONLY: an injected API double. Production always builds its own from `scope`, so a
      * component mounted without this prop cannot be pointed at a different endpoint.
      */
@@ -235,8 +248,25 @@ const props = withDefaults(
     largeBomApi?: StockPreparationLargeBomJobApi | null
     /** Test seam ONLY — forwarded to StockPreparationLargeBomPullPanel so specs never wait on a real timer. */
     largeBomPollWait?: ((ms: number) => Promise<void>) | null
+    /**
+     * H14 — WHAT THIS BUTTON IS CALLED ON THE SURFACE THAT HOSTS IT.
+     *
+     * One button, two vocabularies, because it genuinely sits on two surfaces with two audiences.
+     * The admin surfaces (项目接入, 数据来源) have called this 「同步这个项目」 since it shipped, and
+     * their own copy references that name in four places. 项目备料页 is the OPERATOR's page and its
+     * whole framing is the four steps 从 PLM 拉取 / 通知下一步 / 导出 Excel / 到多维表填写 — its empty
+     * state already tells a person to press 「从PLM拉取数据」.
+     *
+     * Which was a lie until now: the button underneath said 同步这个项目. A page that names a control
+     * by a name the control does not have is a dead end pointing at something visible, which is the
+     * worst kind — the operator reads the sentence, looks down, sees no such button, and stops. So
+     * the label is a prop, the board passes its own, and neither surface has to adopt the other's
+     * word. The repeat-safety promise rides along with whichever name is used, because it is true of
+     * the button and not of the word.
+     */
+    runVariant?: 'sync' | 'pull'
   }>(),
-  { scope: () => ({}), armedAt: 0, api: null, largeBomApi: null, largeBomPollWait: null },
+  { scope: () => ({}), armedAt: 0, projectNo: '', api: null, largeBomApi: null, largeBomPollWait: null, runVariant: 'sync' },
 )
 
 const emit = defineEmits<{
@@ -257,7 +287,16 @@ function bi(zh: string, en: string): string {
 
 const canRun = computed(() => canRunStockPrepProjectSync((permission) => auth.hasPermission(permission)))
 
-const projectNo = ref('')
+/** See `runVariant`. Tuples so the template can spread them straight into `bi`. */
+const runLabel = computed<[string, string]>(() => (props.runVariant === 'pull'
+  ? ['从PLM拉取数据(可以重复点,不会重复写)', 'Pull data from PLM (safe to repeat — it never writes twice)']
+  : ['同步这个项目(可以重复点,不会重复写)', 'Sync this project (safe to repeat — it never writes twice)']))
+
+const runningLabel = computed<[string, string]>(() => (props.runVariant === 'pull'
+  ? ['正在拉取…', 'Pulling…']
+  : ['正在同步…', 'Syncing…']))
+
+const projectNo = ref(props.projectNo ?? '')
 const busy = ref(false)
 const armedNote = ref(false)
 const results = ref<StockPreparationProjectSyncStepResult[]>([])
@@ -272,6 +311,15 @@ const projectNoEl = ref<HTMLInputElement | null>(null)
 const submittedProjectNo = ref('')
 
 const canSubmit = computed(() => canRun.value && !busy.value && projectNo.value.trim().length > 0)
+
+// 项目备料页: follow the seed when the PARENT changes which project this panel is about. It never
+// runs anything on its own — the operator still presses 同步 — and it never fires while a run is in
+// flight, so a number the operator typed for their next sync is not overwritten mid-run.
+watch(() => props.projectNo, (next) => {
+  const seeded = (next ?? '').trim()
+  if (!seeded || busy.value) return
+  projectNo.value = seeded
+})
 
 // A row's 刷新 arms this panel: it explains why the number has to be typed and puts the cursor in the
 // field. It deliberately does NOT run anything — the panel cannot know which project a values-free

@@ -29,7 +29,27 @@ export async function loadReadableAutomationSampleRecord(
 ): Promise<ReadableAutomationSampleRecordResult> {
   const readable = await requireRecordReadable(req, query, sheetId, recordId)
   if ('status' in readable) {
-    return { ok: false, status: readable.status, body: readable.body }
+    if (readable.status === 401) {
+      return {
+        ok: false,
+        status: 401,
+        body: { ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } },
+      }
+    }
+    if (readable.status === 403) {
+      return {
+        ok: false,
+        status: 403,
+        body: { ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } },
+      }
+    }
+    return {
+      ok: false,
+      status: readable.status === 404 ? 404 : 500,
+      body: readable.status === 404
+        ? { ok: false, error: { code: 'NOT_FOUND', message: 'Sample record not found' } }
+        : { ok: false, error: { code: 'SAMPLE_RECORD_READ_FAILED', message: 'Failed to read sample record' } },
+    }
   }
 
   const result = await query(

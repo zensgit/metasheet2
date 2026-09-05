@@ -192,6 +192,12 @@ export const STOCK_PREP_POSTURE_PLAIN: Record<string, StockPrepPlainEntry> = Obj
     zhNext: '没有配置任何外发目标,这是正确状态,不是漏配。',
     enNext: 'No outbound target is configured — that is the correct state, not a missing setting.',
   }),
+  carryTargetBinding: Object.freeze({
+    zh: '目标表绑定的两半是否指向同一张表',
+    en: 'Whether both halves of the target binding name the same table',
+    zhNext: '写着"未按推导"不是故障,也不会拦住任何操作——手工绑定的表是允许的。只是两半指向不同的表通常是改配置时手滑,所以摆出来看一眼。',
+    enNext: '"Not derived" is not a fault and blocks nothing — a hand-bound table is allowed. It is shown because two halves naming different tables is usually a slip while editing the config.',
+  }),
 })
 
 export function stockPrepPosturePlain(id: string): StockPrepPlainEntry | null {
@@ -561,6 +567,45 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainText> = Object
     zh: '这条建议已经过期(数据在您查看期间变了),请刷新后重看。',
     en: 'This suggestion is out of date (the data changed while you were looking) — refresh and read it again.',
   }),
+  // 通知下一步. Each one says what happened to the CHAIN, because that is the only thing at stake —
+  // none of these four touched a single prep row.
+  STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER: Object.freeze({
+    zh: '现在不是您这一步,所以不能通知下一步。',
+    en: 'It is not your step right now, so you cannot hand it on.',
+  }),
+  STOCK_PREPARATION_HANDOFF_STEP_MISMATCH: Object.freeze({
+    zh: '这一步已经有人往下交接过了,页面刷新后就是最新的。',
+    en: 'Someone has already handed this step on; refresh the page and you will see where it stands.',
+  }),
+  STOCK_PREPARATION_HANDOFF_NOT_CONFIGURED: Object.freeze({
+    zh: '这个部署还没有配置备料接力的步骤,通知下一步暂时用不了。',
+    en: 'This deployment has no handoff chain set up yet, so notifying the next person is not available.',
+  }),
+  STOCK_PREPARATION_HANDOFF_STORE_UNAVAILABLE: Object.freeze({
+    zh: '记录接力进度的地方现在读不到,交接没有发生,备料数据也没有变化。',
+    en: 'The place that records the handoff could not be reached — the turn did not move, and nothing in your prep data changed.',
+  }),
+  // H13 — THE TENANCY REFUSALS, WHICH BOTH PLANES CAN RAISE AND NEITHER HAD WORDS FOR.
+  //
+  // These reach the queue AND the board, so they live in the shared table and are worded to claim
+  // nothing about a write. Without a row here the board fell through to its read generic, 「没能读到
+  // …请稍后再试一次」, which invites a person to retry forever a refusal that will never change:
+  // a platform admin has no tenant this minute and will have none next minute either. The sentence
+  // has to say the account is the reason, and that waiting is not the fix.
+  OPERATOR_SCOPE_TENANT_REQUIRED: Object.freeze({
+    zh: '当前账号不属于任何一家工厂,所以看不到具体项目的数据。这不是故障,再试也一样 —— 请用您工厂的账号登录。',
+    en: 'This account does not belong to any one factory, so it cannot see a specific project’s data. This is not an outage and retrying will not change it — sign in with your factory’s own account.',
+  }),
+  OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED: Object.freeze({
+    zh: '这个账号不在这家工厂的名单里,看不到这里的数据。请找管理员确认账号归属。',
+    en: 'This account is not on this factory’s roster, so it cannot see the data here. Ask an administrator to check which factory the account belongs to.',
+  }),
+  // The 503 the audit-vocabulary gate raises. It is a DEPLOYMENT state with a named fix, and the one
+  // refusal on these routes that a retry genuinely does clear — after somebody runs the migration.
+  STOCK_PREPARATION_AUDIT_VOCABULARY_UNAVAILABLE: Object.freeze({
+    zh: '这套系统的数据库还差一次升级,所以这一步暂时不能记录、也就不能进行。请把这条报错给管理员,升级完再点一次就好。',
+    en: 'This system’s database is one upgrade behind, so this step cannot be recorded and therefore cannot run. Show an administrator this message; once the upgrade is done, click again.',
+  }),
 })
 
 export const STOCK_PREP_ERROR_GENERIC: StockPrepPlainText = Object.freeze({
@@ -572,11 +617,168 @@ export function stockPrepErrorPlain(code: string): StockPrepPlainText {
   return lookup(STOCK_PREP_ERROR_PLAIN, code) ?? STOCK_PREP_ERROR_GENERIC
 }
 
+// ---------------------------------------------------------------------------
+// 项目备料页 — READ-SHAPED FAILURE COPY
+// ---------------------------------------------------------------------------
+//
+// WHY THIS IS A SECOND TABLE AND NOT MORE ROWS IN THE ONE ABOVE. Every entry above, and the generic
+// it falls back to, says a variation of 「这一步没有保存成功,数据没有变化。」 — which is exactly
+// right for the surface that table was built for, the confirmation queue, where every failure IS a
+// failed write. The project board writes NOTHING. Telling an operator whose board read timed out
+// that "nothing was saved" is not merely clumsy: it answers a question they did not ask and implies
+// they lost work they never did.
+//
+// So a read surface gets read-shaped sentences, and the LOOKUP falls back to a read-shaped generic
+// rather than the write one. The codes that genuinely belong to both planes (FORBIDDEN and friends)
+// are still resolved out of the shared table first, so there is one place to change them.
+export const STOCK_PREP_BOARD_ERROR_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  // The board's own 404. Deliberately DOES NOT say "this project does not exist" — the refusal is
+  // shapeless by construction (a project of another tenant and a number nobody has are the same
+  // answer), so the copy must not claim to know which it was. It says what the operator can do.
+  STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND: Object.freeze({
+    zh: '这个项目号在您这里还没有数据。',
+    en: 'There is no data for this project number here yet.',
+  }),
+  STOCK_PREPARATION_PROJECT_BOARD_REQUEST_INVALID: Object.freeze({
+    zh: '请求里的项目号不对,请重新输入一次。',
+    en: 'The project number in that request was not valid — type it again.',
+  }),
+})
+
+/** The board's read-shaped generic: nothing was changed, because nothing was going to be. */
+export const STOCK_PREP_BOARD_ERROR_GENERIC: StockPrepPlainText = Object.freeze({
+  zh: '没能读到这个项目的情况,请稍后再试一次。什么都没有改动。',
+  en: 'Could not read this project’s status — try again shortly. Nothing was changed.',
+})
+
+/**
+ * The board's failure copy. Its OWN codes first, then the shared table (so FORBIDDEN and the other
+ * cross-plane codes keep one definition), then a READ-shaped generic — never the write one.
+ */
+export function stockPrepBoardErrorPlain(code: string): StockPrepPlainText {
+  return lookup(STOCK_PREP_BOARD_ERROR_PLAIN, code)
+    ?? lookup(STOCK_PREP_ERROR_PLAIN, code)
+    ?? STOCK_PREP_BOARD_ERROR_GENERIC
+}
+
 /** The HTTP read failures the install page surfaces. Status stays visible in the disclosure. */
 export const STOCK_PREP_READ_FAILED: StockPrepPlainText = Object.freeze({
   zh: '没能读到这套部署的信息,请稍后再试。',
   en: 'Could not read this deployment’s information — try again shortly.',
 })
+
+// ---------------------------------------------------------------------------
+// 一线看得见自己工厂的项目 — the five HONEST empty states
+// ---------------------------------------------------------------------------
+
+/**
+ * WHY THIS TABLE EXISTS. The confirmation queue had ONE empty state — 「都清了」 — and it was shown
+ * for three completely different situations: the project had never been synced into this deployment,
+ * the operator mistyped the number, and the project was genuinely up to date. Only the third of those
+ * is good news, and telling a person "all clear" when the truth is "we have never heard of that
+ * number" is the kind of wrong answer that costs a shift.
+ *
+ * The server now returns the two facts needed to tell them apart (`directoryReady`, `ledgerReady`)
+ * plus the caller's own project directory, so each state below is DECIDABLE rather than guessed.
+ *
+ * …AND THE FIFTH, which is what happens when there is no directory to decide from at all. Three real
+ * principals never get one: a `stock-prep:read`-only queue watcher (the client correctly never asks
+ * for them), an operate-holder whose load failed, and a tenantless platform admin whom the server
+ * refuses by design. The first version of this table had no state for them, so `emptyState` returned
+ * null and the page rendered NOTHING where the pre-change page had at least said 「都清了」 — a
+ * strictly worse answer than the wrong one it replaced. `directory_unavailable` says both halves of
+ * what is actually known, and claims neither the good news nor the accusation.
+ *
+ * Keys are front-end state ids, not server enums — nothing server-side emits them — so this map is
+ * exhaustive by construction and `stockPrepDirectoryEmptyPlain` has no generic fallback to hide a
+ * missing case behind. A new state must be added here or it does not render.
+ */
+export const STOCK_PREP_DIRECTORY_EMPTY_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  /**
+   * No directory at all: not permitted, not loaded, or not loadable. Deliberately VALUES-FREE and
+   * deliberately NOT `nothing_synced` — we do not know that nothing was synced, and saying so would
+   * send the operator to an administrator who has nothing to fix.
+   */
+  directory_unavailable: Object.freeze({
+    zh: '这个项目号下当前没有待办;项目清单不可用,无法判断是否已同步。',
+    en: 'Nothing is pending for this project number; the project list is unavailable, so we cannot tell you whether it was ever synced.',
+  }),
+  /** The project table is not provisioned, or holds nothing: nothing has ever been synced here. */
+  nothing_synced: Object.freeze({
+    zh: '这台系统里还没有任何项目。',
+    en: 'No project has been brought into this system yet.',
+    zhNext: '不是您的操作有问题 —— 需要管理员先把项目同步进来,同步完这里就会列出来。',
+    enNext: 'Nothing you did is wrong — an administrator has to sync the projects in first; they will be listed here once that is done.',
+  }),
+  /** The directory has projects, but none matches the number the operator typed. */
+  project_not_found: Object.freeze({
+    zh: '这个项目号在系统里查不到。',
+    en: 'That project number is not in this system.',
+    zhNext: '可能是号码打错了,也可能这个项目还没同步进来。可以直接从下面的列表里挑,支持按号码或名称搜。',
+    enNext: 'It may be a typo, or that project may not have been synced in yet. Pick from the list below instead — you can search it by number or by name.',
+  }),
+  /** The ledger table is not provisioned: pending counts are all zero because nothing can be recorded. */
+  ledger_missing: Object.freeze({
+    zh: '记录确认结果的表还没建好,所以现在看不到待办。',
+    en: 'The table that records your decisions has not been created, so no pending work can show yet.',
+    zhNext: '项目本身能看到,但要开始处理,得先请管理员建这张表。',
+    enNext: 'You can still see the projects; an administrator has to create that table before you can start working through them.',
+  }),
+  /** The good news case — and now it only shows when it is actually true. */
+  nothing_pending: Object.freeze({
+    zh: '这个项目下没有需要您处理的事 —— 都清了。',
+    en: 'Nothing on this project needs your attention — it is all clear.',
+  }),
+})
+
+export type StockPrepDirectoryEmptyState = keyof typeof STOCK_PREP_DIRECTORY_EMPTY_PLAIN
+
+/** Fails soft to `null` like every other lookup here; the caller then renders nothing rather than a lie. */
+export function stockPrepDirectoryEmptyPlain(state: string | null | undefined): StockPrepPlainEntry | null {
+  return lookup(STOCK_PREP_DIRECTORY_EMPTY_PLAIN, state ?? null)
+}
+
+/**
+ * THE DECISION, as a pure function so it can be tested without a component and cannot drift between
+ * the copy above and the view below. Order matters and is the point:
+ *
+ *   0. directory_unavailable — checked FIRST, because every diagnosis below reads a directory. With
+ *                         no directory in hand the honest answer is "the queue is empty and we cannot
+ *                         say why", and guessing any of the other four would be a claim we cannot back.
+ *   1. nothing_synced   — the deployment really is empty; every other diagnosis is then noise, and
+ *                         the operator is not the person who can fix it either way.
+ *   2. project_not_found— only meaningful once we know the directory has SOMETHING to not-find in.
+ *   3. ledger_missing   — the project is real, but no pending work could exist to show.
+ *   4. nothing_pending  — everything is provisioned and this project really is clear.
+ *
+ * Returns null when there IS pending work, i.e. when no empty state should render at all.
+ */
+export function stockPrepDirectoryEmptyState(input: {
+  /**
+   * Whether a directory response is in hand at all. Optional and defaulting to TRUE so the four
+   * directory-derived states keep their exact previous behaviour for every existing caller; a caller
+   * that can be without a directory passes it explicitly.
+   */
+  directoryAvailable?: boolean
+  directoryReady: boolean
+  ledgerReady: boolean
+  projectCount: number
+  /** The number currently typed/selected, or '' when the operator has not chosen one. */
+  projectNo: string
+  /** Whether that number matches a project in the caller's own directory. */
+  projectKnown: boolean
+  /** Rows the confirmation queue returned for it. */
+  pendingRowCount: number
+}): StockPrepDirectoryEmptyState | null {
+  // Work waiting is never an empty state, whatever we do or do not know about the directory.
+  if (input.pendingRowCount > 0) return null
+  if (input.directoryAvailable === false) return 'directory_unavailable'
+  if (!input.directoryReady || input.projectCount === 0) return 'nothing_synced'
+  if (input.projectNo !== '' && !input.projectKnown) return 'project_not_found'
+  if (!input.ledgerReady) return 'ledger_missing'
+  if (input.pendingRowCount === 0) return 'nothing_pending'
+  return null
+}
 
 // ---------------------------------------------------------------------------
 // Operator vocabularies — the enums the queues used to render raw
@@ -781,6 +983,19 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '请核对项目号有没有打错;也可能这个项目还没到 PLM 里。什么都没有改动。',
     enNext: 'Check the number for a typo — or the project may not be in PLM yet. Nothing was changed.',
   }),
+  /**
+   * 一线自己拉数据 — THE PROMISE IN THE SECOND LINE, AND WHY IT IS NOW TRUE.
+   *
+   * 「不用重新点同步,也不用联系我们」 is a claim about who can finish the run, and for a while it was
+   * false for the very tier this page is for: the split moved dry-run and apply only, so the moment
+   * the panel switched itself to the bounded background channel, all eight of those routes 403'd a
+   * stock-prep operator — directly under this sentence.
+   *
+   * The eight routes are now in STOCK_PREP_OPERATOR_PULL_STEPS (workbenchAccess.ts), so every tier
+   * that can press 同步 at all — a platform admin, or the stock-prep operator conjunction; those are
+   * the only two `canRunStockPrepProjectSync` admits — can also drive the channel to the end. The
+   * promise is kept for every caller who can read it.
+   */
   PLAN_LARGE_BOM_BOUNDED: Object.freeze({
     zh: '这个项目的 BOM 太大,没法当场展开',
     en: 'This project’s BOM is too large to expand on the spot',
@@ -823,6 +1038,25 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '队列里原有的待办还在。可以直接去「确认队列」看,或稍后再同步一次。',
     enNext: 'Anything already in the queue is still there. Open the tab, or sync again later.',
   }),
+  /**
+   * 一线自己拉数据 — AND THE SENTENCE THAT WAS FALSE.
+   *
+   * This step is what puts HELD rows into the confirmation queue. The first cut of this copy said
+   * 「跳过它不影响这次导入」, which is true only when the plan held nothing: on a plan with rows the
+   * system is unsure about, skipping this step means those rows are never queued, the write step
+   * then skips for want of a token, and the operator is sent to a queue that will never contain
+   * their work. Three sentences, each locally plausible, forming a closed loop.
+   *
+   * Reconcile has since joined the operator split, so this reason is now reachable only where the
+   * step genuinely cannot run for this caller. The copy therefore says what it costs — not that it
+   * costs nothing.
+   */
+  RECONCILE_NOT_PERMITTED: Object.freeze({
+    zh: '重新扫描待确认的事这一步没能跑',
+    en: 'The step that queues rows for confirmation did not run',
+    zhNext: '如果这次试算里有拿不准的行,它们就还没进「确认队列」,这次也不会写入。请找平台管理员跑一次这一步;如果试算没有拿不准的行,这一步跳过不影响写入。',
+    enNext: 'If this plan held any uncertain rows, they have NOT reached the confirmation queue and will not be written this time. Ask a platform administrator to run this step. If the plan held nothing uncertain, skipping it does not affect the write.',
+  }),
 
   // 3. 写入
   IMPORTED: Object.freeze({
@@ -837,11 +1071,20 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '同一份数据再同步一次不会重复写,这是正常的。',
     enNext: 'Syncing the same data again writes nothing twice; that is the expected result.',
   }),
+  /**
+   * THE PROMISE IN THE SECOND LINE IS CONDITIONAL, and the condition is the step before it.
+   *
+   * 「处理完再同步就会写进去」 is true only if those rows actually REACHED the queue, which is what
+   * reconcile does. When reconcile is refused they did not, and telling the operator to go and
+   * clear a queue that is empty of their work is the middle sentence of a closed loop. So this now
+   * names the precondition instead of assuming it; the run report shows the reconcile step
+   * immediately above, so a reader can see for themselves which case they are in.
+   */
   WRITE_HELD_FOR_CONFIRMATION: Object.freeze({
     zh: '先不写入 —— 等您把拿不准的那几行定下来',
     en: 'Not written yet — waiting for you to decide the uncertain rows',
-    zhNext: '到「确认队列」处理完,再回来点一次同步,这次就会写进去。',
-    enNext: 'Clear them on the confirmation-queue tab, then sync again and it will write.',
+    zhNext: '这些行进了「确认队列」的话,处理完再点一次同步就会写进去;如果上面那步「拿不准的交给人」没有跑成,它们还没进队列,得先让它跑起来。',
+    enNext: 'If those rows reached the confirmation queue, clear them there and sync again and it will write. If the step above (the one that queues them) did not run, they are not in the queue yet — that step has to run first.',
   }),
   WRITE_NO_PLAN: Object.freeze({
     zh: '没有可以执行的计划,所以没有写入',
@@ -888,6 +1131,17 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
   BATCH_ARCHIVE_NOT_ATTEMPTED: Object.freeze({
     zh: '这次没有写入数据,所以不用存档',
     en: 'Nothing was written this time, so there is nothing to keep',
+  }),
+  /**
+   * 一线自己拉数据: the same shape as RECONCILE_NOT_PERMITTED, at the other end of the run. The
+   * important half of this sentence is the FIRST clause — the operator's rows are in, and the line
+   * they are reading is about a copy somebody else keeps, not about their import.
+   */
+  BATCH_ARCHIVE_NOT_PERMITTED: Object.freeze({
+    zh: '数据已经写进去了;留存这一批快照不归您做',
+    en: 'The data is in; keeping a copy of this batch is not your step',
+    zhNext: '导入本身已经完成,可以照常用。留快照这一步由平台管理员来跑,少这一批只影响「差异对比」。',
+    enNext: 'The import itself is done and usable. A platform administrator keeps the snapshot; missing this batch only affects the diff view.',
   }),
   BATCH_ARCHIVE_FAILED: Object.freeze({
     zh: '数据已经写进去了,但这次的存档没成功',
@@ -992,4 +1246,74 @@ export const STOCK_PREP_LARGE_BOM_PHASE_PLAIN: Record<string, StockPrepPlainEntr
 
 export function stockPrepLargeBomPhasePlain(phase: string): StockPrepPlainEntry | null {
   return lookup(STOCK_PREP_LARGE_BOM_PHASE_PLAIN, phase)
+}
+
+// ---------------------------------------------------------------------------
+// 通知下一步 — the light multi-person handoff
+//
+// Several people each fill their own fields on a project's prep rows, in order; whoever finishes
+// presses 通知下一步 and the group chat is told who is up. THE CHAIN IS A TURN SIGNAL, NOT A
+// PERMISSION: nothing in this vocabulary decides who may write which column, and none of these
+// sentences may imply that it does. Per-column write enforcement is a separate, deferred decision.
+// ---------------------------------------------------------------------------
+
+/**
+ * The closed step vocabulary, in the words the floor already uses for these desks. Keys are the
+ * server's; a step added server-side falls through `lookup` to null and the caller renders the raw
+ * key exactly as every other vocabulary in this file degrades.
+ */
+export const STOCK_PREP_HANDOFF_STEP_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  prep_entry: Object.freeze({ zh: '备料填写', en: 'Filling in the prep list' }),
+  process: Object.freeze({ zh: '工艺', en: 'Process engineering' }),
+  planning: Object.freeze({ zh: '计划', en: 'Production planning' }),
+  technical: Object.freeze({ zh: '技术', en: 'Engineering' }),
+  production: Object.freeze({ zh: '生产', en: 'Production' }),
+  final_review: Object.freeze({ zh: '终审', en: 'Final review' }),
+})
+
+export function stockPrepHandoffStepPlain(key: string): StockPrepPlainText | null {
+  return lookup(STOCK_PREP_HANDOFF_STEP_PLAIN, key)
+}
+
+/**
+ * What happened to the NOTIFICATION, as distinct from what happened to the turn. Keeping the two
+ * apart is the whole point of this table: the turn and the DingTalk message are separate things that
+ * can succeed separately, and `failed` is the entry that earns the distinction — the next person is
+ * now up whether or not the group ever heard about it, so the sentence says both halves and hands
+ * the reader the one action that closes the gap. Telling them "通知失败" alone would leave them
+ * believing the handoff itself had not happened, and they would press the button again.
+ */
+export const STOCK_PREP_HANDOFF_OUTCOME_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  sent: Object.freeze({
+    zh: '已经交给下一步,群里也通知到了。',
+    en: 'Handed on to the next step, and the group has been told.',
+  }),
+  partial: Object.freeze({
+    zh: '已经交给下一步了,但有一个群没发出去 —— 请您自己跟对方说一声。',
+    en: 'Handed on to the next step, but one of the groups did not get the message — please tell them yourself.',
+    zhNext: '交接本身是成功的,不用再点一次;再点也不会补发。',
+    enNext: 'The handoff itself succeeded; pressing it again will not resend, so a word in person is the fix.',
+  }),
+  failed: Object.freeze({
+    zh: '已经交给下一步了,但群里的消息没有发出去 —— 请您自己跟下一位说一声。',
+    en: 'The turn has moved to the next step, but the group message did not go out — please tell the next person yourself.',
+    zhNext: '交接本身是成功的,不用再点一次。',
+    enNext: 'The handoff itself succeeded; there is no need to press it again.',
+  }),
+  skipped: Object.freeze({
+    zh: '已经交给下一步,这次没有发群消息。',
+    en: 'Handed on to the next step; no group message was sent this time.',
+    zhNext: '下一位可能还不知道,顺手说一声更稳妥。',
+    enNext: 'The next person may not know yet — a word to them does no harm.',
+  }),
+  no_destination: Object.freeze({
+    zh: '已经交给下一步了;这条接力链没有配群通知,所以没有发出消息。',
+    en: 'Handed on to the next step; this chain has no group destination for it, so no message went out.',
+    zhNext: '这是配置本身的样子,不是出错 —— 下一位不会收到消息,请顺手说一声。',
+    enNext: 'That is how this chain is configured, not a failure — the next person will not be messaged, so pass the word on.',
+  }),
+})
+
+export function stockPrepHandoffOutcomePlain(outcome: string): StockPrepPlainEntry | null {
+  return lookup(STOCK_PREP_HANDOFF_OUTCOME_PLAIN, outcome)
 }

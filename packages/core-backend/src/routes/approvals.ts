@@ -55,7 +55,9 @@ import {
   bindApprovalUsableMemberGroup,
   unbindApprovalUsableMemberGroup,
   resolveDirectoryUsersByIds,
+  listApprovalDepartments,
 } from '../services/approval-directory'
+import { resolveApprovalRequesterOrgRelations } from '../services/ApprovalDirectoryOrg'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { createDelegation, listDelegations, disableDelegation, updateDelegation, disableOwnDelegation, countDelegatedApprovals } from '../services/ApprovalDelegationConfig'
 import {
@@ -891,6 +893,82 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       res.json({ users })
     } catch (error) {
       handleApprovalsError(res, error, 'APPROVAL_PARTICIPANT_DIRECTORY_FAILED', 'Failed to search directory users')
+    }
+  })
+
+  // Lock-2 L2-A: filler-facing department picker. The server derives the canonical directory
+  // integration from the authenticated actor; callers cannot choose an org or integration.
+  r.get('/api/approvals/directory/departments', authenticate, approvalParticipantDirectoryGuard, async (req: Request, res: Response) => {
+    try {
+      const queryKeys = Object.keys(req.query)
+      if (queryKeys.some((key) => key !== 'q' && key !== 'limit' && key !== 'mode' && key !== 'parentId')) {
+        throw new ServiceError('Invalid department directory query', 400, 'VALIDATION_ERROR')
+      }
+      if (req.query.q !== undefined && typeof req.query.q !== 'string') {
+        throw new ServiceError('Invalid department directory query', 400, 'VALIDATION_ERROR')
+      }
+      if (
+        req.query.limit !== undefined
+        && (
+          typeof req.query.limit !== 'string'
+          || !/^\d+$/.test(req.query.limit)
+          || Number(req.query.limit) < 1
+          || Number(req.query.limit) > 50
+        )
+      ) {
+        throw new ServiceError('Invalid department directory query', 400, 'VALIDATION_ERROR')
+      }
+      const mode = req.query.mode === undefined ? 'search' : req.query.mode
+      if (mode !== 'search' && mode !== 'tree') {
+        throw new ServiceError('Invalid department directory query', 400, 'VALIDATION_ERROR')
+      }
+      const parentId = req.query.parentId
+      if (
+        parentId !== undefined
+        && (
+          mode !== 'tree'
+          || typeof parentId !== 'string'
+          || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(parentId)
+        )
+      ) {
+        throw new ServiceError('Invalid department directory query', 400, 'VALIDATION_ERROR')
+      }
+      const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
+      if (q.length > 200) {
+        throw new ServiceError('Invalid department directory query', 400, 'VALIDATION_ERROR')
+      }
+      const rawLimit = req.query.limit
+      const limit = rawLimit === undefined ? 20 : Number.parseInt(rawLimit as string, 10)
+      const actorId = resolveApprovalActorId(req)
+      const relations = await resolveApprovalRequesterOrgRelations(actorId, query, {
+        includeDepartmentFieldContext: true,
+      })
+      if (!relations.canonicalIntegrationId) {
+        throw new ServiceError(
+          'Approval department directory is unavailable',
+          422,
+          'APPROVAL_DEPARTMENT_DIRECTORY_UNRESOLVED',
+        )
+      }
+      const departments = await listApprovalDepartments(
+        relations.canonicalIntegrationId,
+        q,
+        limit,
+        mode === 'tree' ? (typeof parentId === 'string' ? parentId : null) : undefined,
+      )
+      res.json({
+        departments,
+        ...(relations.primaryDepartmentId
+          ? { requesterDepartmentId: relations.primaryDepartmentId }
+          : {}),
+      })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_DEPARTMENT_DIRECTORY_FAILED',
+        'Failed to list approval departments',
+      )
     }
   })
 

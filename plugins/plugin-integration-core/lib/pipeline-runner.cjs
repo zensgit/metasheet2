@@ -401,15 +401,24 @@ function createPipelineRunner(deps = {}) {
         status: pipeline.status,
       })
     }
+    // Runner calls are service-shaped unless the governed HTTP surface stamps
+    // explicit user delegation. The communication API overwrites this field to
+    // service, so in-process callers cannot self-promote into the tenantless
+    // legacy owner path.
+    const connectionRunAs = input.runAs === 'user' ? 'user' : 'service'
     const sourceSystem = await loadExternalSystemForAdapter({
       tenantId,
       workspaceId,
       id: pipeline.sourceSystemId,
+      principal: pipeline.createdBy,
+      runAs: connectionRunAs,
     })
     const targetSystem = await loadExternalSystemForAdapter({
       tenantId,
       workspaceId,
       id: pipeline.targetSystemId,
+      principal: pipeline.createdBy,
+      runAs: connectionRunAs,
     })
     assertActiveSystem(sourceSystem, 'sourceSystem')
     assertActiveSystem(targetSystem, 'targetSystem')
@@ -1305,6 +1314,7 @@ function createPipelineRunner(deps = {}) {
       pipelineId: deadLetter.pipelineId,
       mode: 'replay',
       triggeredBy: input.triggeredBy || 'replay',
+      runAs: input.runAs === 'user' ? 'user' : 'service',
       allowInactive: input.allowInactive,
       sourceRecords: [deadLetter.sourcePayload],
       // Carry the route's already-asserted run marker through, so an HTTP-initiated replay CONTINUES

@@ -101,6 +101,47 @@ export interface StockPreparationExportResult {
   activeRowCount: number
 }
 
+/**
+ * 一线看得见自己工厂的项目 — THE THIRD content-bearing shape in this module.
+ *
+ * One row of the operator's OWN-TENANT project directory. `projectNo` and `projectName` are customer
+ * business values and cross only this route and the value-entry/export reads; every other call in
+ * this module stays values-free. The server refuses this read to any principal without a tenant of
+ * its own, so a values-free platform/admin surface can never receive this shape.
+ */
+export interface StockPreparationOperatorProject {
+  projectId: string
+  /** 番号 — the number an operator would otherwise have to memorise. Null if the row carries none. */
+  projectNo: string | null
+  /** …and the name that makes memorising it unnecessary. */
+  projectName: string | null
+  projectStatus: string
+  lastSyncRunId: string | null
+  snapshotBatchCount: number
+  openExceptionCount: number
+  heldLineCount: number
+  readyLineCount: number
+  /** Rows in the confirmation ledger still waiting on a human, for THIS project. */
+  pendingDecisionCount: number
+}
+
+/**
+ * The directory response. The two `*Ready` booleans are what make an honest empty state possible:
+ * without them "nothing has been synced into this deployment yet", "the confirmation ledger has not
+ * been created yet" and "your project is fine and has nothing pending" are the same blank screen.
+ */
+export interface StockPreparationOperatorDirectory {
+  /** Echo of the tenant the server actually scoped to — a handle, never a business value. */
+  tenantId: string
+  /** False when the project table itself is not provisioned: nothing has ever been synced here. */
+  directoryReady: boolean
+  /** False when the confirmation-decision ledger is not provisioned: pending counts are all zero. */
+  ledgerReady: boolean
+  projectCount: number
+  pendingProjectCount: number
+  projects: StockPreparationOperatorProject[]
+}
+
 const EXPORT_ERROR_CODE_PATTERN = /^[A-Z0-9_]{1,80}$/
 
 /** Same filename-parsing idiom as the generic Multitable export client (multitable/api/client.ts). */
@@ -162,6 +203,27 @@ export async function exportStockPreparationPrepLines(
 }
 
 /**
+ * 一线看得见自己工厂的项目 — THE OPERATOR'S OWN-TENANT PROJECT DIRECTORY / WORKLIST.
+ *
+ * The whole directory comes back, not only the projects with pending work, because the front end has
+ * to be able to tell "that number is not in this system" from "that project is real and has nothing
+ * pending" — and only the full list can distinguish them. Filtering to pending-only is a view over
+ * this response, never a narrowing of the request.
+ *
+ * `tenantId` is sent for shape-compatibility with every other call here and is NOT a selector: the
+ * server derives the scope from the authenticated principal and refuses any value that is not the
+ * caller's own tenant.
+ * GET /api/integration/stock-preparation/operator/projects
+ */
+export async function readStockPreparationOperatorDirectory(
+  scope: IntegrationScope,
+): Promise<StockPreparationOperatorDirectory> {
+  const query = buildQuerySuffix({ tenantId: scope.tenantId, workspaceId: scope.workspaceId })
+  const response = await apiFetch(`/api/integration/stock-preparation/operator/projects${query}`)
+  return parseStockPreparationConfirmResponse<StockPreparationOperatorDirectory>(response)
+}
+
+/**
  * Provisioning state of the ledger target. Values-free.
  * GET /api/integration/stock-preparation/confirmation-decisions/readiness
  */
@@ -205,6 +267,159 @@ export async function readStockPreparationValueEntry(
   })
   const response = await apiFetch(`/api/integration/stock-preparation/confirmation-decisions/value-entry${query}`)
   return parseStockPreparationConfirmResponse<StockPreparationDecisionValueEntry>(response)
+}
+
+// ---------------------------------------------------------------------------
+// 通知下一步 — the light multi-person handoff
+//
+// Several people each fill their own fields on a project's prep rows, in order. Whoever is done
+// presses 通知下一步; the turn moves on and the group chat is told who is up next. The last step
+// additionally tells 仓库/采购.
+//
+// THIS IS A VISIBLE TURN SIGNAL, NOT A PERMISSION MECHANISM. Nothing here decides who may write
+// which column — per-column write scoping exists since #5447 and is a SEPARATE mechanism
+// (`field_permissions` rows written at pack install, keyed by role and column) that never consults
+// the turn, so the cursor moving grants and revokes nothing. What the server does enforce on the
+// advance is that the caller is the CURRENT handler (403
+// STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER) and that nobody advanced the same step first (409
+// STOCK_PREPARATION_HANDOFF_STEP_MISMATCH) — i.e. it protects the signal's integrity, not the data.
+//
+// VALUES-FREE, both directions. Step keys, 0-based indices, booleans and a handler COUNT cross here;
+// no material name, no quantity, and no handler NAME — the name a person needs is in the DingTalk
+// message, which the server composes.
+// ---------------------------------------------------------------------------
+
+/** One step of the chain. `handlerCount` is a COUNT — the names never cross this boundary. */
+export interface StockPreparationHandoffStep {
+  key: string
+  order: number
+  handlerCount: number
+}
+
+/** Whose turn it is on one project. `configured: false` = this deployment has no chain; feature inert. */
+export interface StockPreparationHandoffStatus {
+  configured: boolean
+  projectNo: string
+  steps: StockPreparationHandoffStep[]
+  stepCount: number
+  /** 0-based index of the CURRENT step; null when `configured` is false. */
+  stepIndex: number | null
+  currentStepKey: string | null
+  /** The current step is the last one — advancing it notifies 仓库/采购. */
+  terminal: boolean
+  /** The chain has been advanced past the last step. */
+  completed: boolean
+  /** SERVER-COMPUTED. The client never derives this from a name it holds. */
+  isCurrentHandler: boolean
+  /** The highest step whose completion has had a notification dispatched; null = none yet. */
+  notifiedStepIndex: number | null
+  /**
+   * The step key whose group notice has NOT gone out yet and STILL CAN — pressing 通知下一步 again
+   * sends it. Non-null only when the caller is that step's configured handler. `null` when there is
+   * nothing owed, or when the owed hop is no longer this caller's to resend.
+   *
+   * Server-computed on purpose: it depends on the monotonic claim column and on the step's roster,
+   * neither of which the client holds.
+   */
+  resendableStepKey: string | null
+  /**
+   * Step keys whose group notice can never be sent again — a later hop's claim moved the monotonic
+   * max past them. Read back from the append-only trail, because an interior gap has no other
+   * representation.
+   */
+  lostStepKeys: string[]
+  /**
+   * Does this chain notify at all? Without it the page cannot tell a hop whose notice was LOST from a
+   * turn-state-only deployment, whose `notifiedStepIndex` is null forever and correctly so.
+   */
+  notificationsConfigured: boolean
+}
+
+/**
+ * Frozen server vocabulary for what happened to the notification itself.
+ *
+ * `partial` exists because the TERMINAL hop fans out to two groups (仓库 and 采购) and the host keeps
+ * going past a failed one. Collapsing that into `sent` told the operator the group had been told when
+ * one of the two had not — on the one hop the whole feature exists for, and irreversibly, because the
+ * at-most-once claim means clicking again can never re-send it.
+ *
+ * `no_destination` replaced `not_configured`, which conflated two different facts: "this deployment
+ * has no chain" (the advance route's 501, which has its own error copy) and "this CONFIGURED chain
+ * sends nothing for this hop" (a legal turn-state-only deployment, or a host that wired no notifier).
+ * The second was being shown the first's words — telling an operator whose turn had just moved that
+ * an admin still had to set the chain up, on a screen whose button only renders because the chain IS
+ * configured.
+ */
+export type StockPreparationHandoffNotifyOutcome =
+  | 'sent'
+  | 'partial'
+  | 'failed'
+  | 'skipped'
+  | 'no_destination'
+
+export interface StockPreparationHandoffAdvanceResult {
+  projectNo: string
+  fromStepKey: string
+  /** The NEW current step — null when this advance completed the chain. */
+  currentStepKey: string | null
+  stepIndex: number | null
+  stepCount: number
+  /** false = an idempotent replay of the same transition; nothing moved, nothing re-notified. */
+  changed: boolean
+  /** This advance completed the LAST step. */
+  terminal: boolean
+  notified: boolean
+  notifyOutcome: StockPreparationHandoffNotifyOutcome
+  /**
+   * This request found the hop already moved and its notification still OWED, and took the claim.
+   *
+   * It exists because since the claim became a separate compare-and-set, `changed: false` no longer
+   * means "nothing needed sending": a replay is exactly how an interrupted hop gets finished. The
+   * notice reads `notifyOutcome` to decide what happened and this to decide how to say it.
+   */
+  resumed: boolean
+}
+
+/**
+ * Whose turn it is on this project. Values-free, and inert rather than fatal on a deployment with no
+ * handoff config — the route answers 200 with `configured: false`.
+ * GET /api/integration/stock-preparation/handoff
+ */
+export async function readStockPreparationHandoff(
+  scope: IntegrationScope & { projectNo: string },
+): Promise<StockPreparationHandoffStatus> {
+  const query = buildQuerySuffix({
+    tenantId: scope.tenantId,
+    workspaceId: scope.workspaceId,
+    projectNo: scope.projectNo,
+  })
+  const response = await apiFetch(`/api/integration/stock-preparation/handoff${query}`)
+  return parseStockPreparationConfirmResponse<StockPreparationHandoffStatus>(response)
+}
+
+/**
+ * Move the turn on one step and let the next person know. The body allowlist is CLOSED server-side —
+ * an unexpected key is REFUSED 400, not ignored — so this builds exactly the four permitted keys and
+ * omits the scope ones when they are empty rather than sending a null the allowlist has to tolerate.
+ * `fromStepKey` is what makes a double-press idempotent instead of a double-advance: the server
+ * compares it to the step it actually holds and answers 409 when someone else moved first.
+ * POST /api/integration/stock-preparation/handoff/advance
+ */
+export async function advanceStockPreparationHandoff(
+  scope: IntegrationScope & { projectNo: string; fromStepKey: string },
+): Promise<StockPreparationHandoffAdvanceResult> {
+  const body: Record<string, unknown> = {
+    projectNo: scope.projectNo,
+    fromStepKey: scope.fromStepKey,
+  }
+  if (typeof scope.tenantId === 'string' && scope.tenantId.length > 0) body.tenantId = scope.tenantId
+  if (typeof scope.workspaceId === 'string' && scope.workspaceId.length > 0) body.workspaceId = scope.workspaceId
+  const response = await apiFetch('/api/integration/stock-preparation/handoff/advance', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return parseStockPreparationConfirmResponse<StockPreparationHandoffAdvanceResult>(response)
 }
 
 /**

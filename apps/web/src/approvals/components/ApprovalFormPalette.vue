@@ -77,6 +77,7 @@ export const APPROVAL_FORM_FIELD_TYPE_LABELS: Record<
   select: '单选',
   'multi-select': '多选',
   user: '人员',
+  department: '部门',
   detail: '明细',
   'record-link': '关联记录',
   // Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2).
@@ -94,6 +95,7 @@ export const APPROVAL_FORM_FIELD_TYPE_MARKS: Record<AuthorableFieldType, string>
   select: '○',
   'multi-select': '☑',
   user: '人',
+  department: '部',
   detail: '表',
   'record-link': '链',
   date_range: '区',
@@ -108,7 +110,7 @@ export const APPROVAL_FORM_PALETTE_GROUPS: ApprovalFormPaletteGroup[] = [
   { id: 'number', label: '数值', types: ['number'] },
   { id: 'choice', label: '选项', types: ['select', 'multi-select'] },
   { id: 'date', label: '日期', types: ['date', 'datetime', 'date_range'] },
-  { id: 'other', label: '其他', types: ['user', 'detail', 'record-link', 'explanation'] },
+  { id: 'other', label: '其他', types: ['user', 'department', 'detail', 'record-link', 'explanation'] },
 ].map(({ id, label, types }) => ({
   id,
   label,

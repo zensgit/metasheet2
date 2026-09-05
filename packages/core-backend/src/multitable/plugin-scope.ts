@@ -36,6 +36,7 @@ export type MultitableScopeHooks = {
   assertObjectScope?: (input: AssertPluginObjectScopeInput) => Promise<void>
   claimObjectScope?: (input: ClaimPluginObjectScopeInput) => Promise<void>
   assertSheetScope?: (input: AssertPluginSheetScopeInput) => Promise<void>
+  isSheetOwnedByProject?: (input: { sheetId: string; projectId: string }) => Promise<boolean>
   runStockPreparationPersistUnitOfWork?: <T>(
     input: StockPreparationPersistUnitOfWorkInput & { pluginName: string },
     operation: (records: MultitableRecordsWriteUnitOfWorkAPI) => Promise<T>,
@@ -149,6 +150,29 @@ export async function claimPluginObjectScope(
   }
 }
 
+/**
+ * Is `sheetId` registered to `projectId`? A YES/NO question, never "who owns it".
+ *
+ * The predicate is asked of the DB rather than computed from a returned owner on purpose: see
+ * MultitableProvisioningAPI.isSheetOwnedByProject for why returning the owner would leak one
+ * tenant's project id to another tenant's caller through a namespace guard that cannot tell them
+ * apart. False covers both "owned by another project" and "no registry row" — indistinguishable
+ * here, and for a tenancy decision both mean the same thing: not proven yours.
+ */
+export async function isSheetOwnedByProject(
+  query: MultitableScopeQueryFn,
+  sheetId: string,
+  projectId: string,
+): Promise<boolean> {
+  const result = await query(
+    `SELECT 1
+     FROM plugin_multitable_object_registry
+     WHERE sheet_id = $1 AND project_id = $2`,
+    [sheetId, projectId],
+  )
+  return (result.rows as unknown[]).length > 0
+}
+
 export async function assertPluginOwnsSheet(
   query: MultitableScopeQueryFn,
   input: AssertPluginSheetScopeInput,
@@ -209,9 +233,30 @@ export function createPluginScopedMultitableApi(
         assertProjectIdAllowedForPlugin(pluginName, projectId)
         return multitable.provisioning.getFieldId(projectId, objectId, fieldId)
       },
+      // Pure deterministic id derivation, exactly like the two accessors above: no IO, no view
+      // touched, no access granted. It takes the SAME project-namespace assertion they take and,
+      // like them, no object-scope check — composing an id for an object the plugin does not own
+      // reveals nothing, because every capability that could act on that id checks scope itself.
+      getObjectViewId: (projectId, objectId, viewId) => {
+        assertProjectIdAllowedForPlugin(pluginName, projectId)
+        return multitable.provisioning.getObjectViewId(projectId, objectId, viewId)
+      },
       findObjectSheet: async (input) => {
         assertProjectIdAllowedForPlugin(pluginName, input.projectId)
         return multitable.provisioning.findObjectSheet(input)
+      },
+      // Asks the registry whether a sheet belongs to a project. The namespace guard runs on the
+      // ARGUMENT, before any query, exactly as it does for getObjectSheetId/getObjectViewId — the
+      // plugin may only ask about projects in its own namespace. Nothing about any other project
+      // comes back: the answer is a boolean, so there is no owner id to leak to a caller who should
+      // not have it (every tenant of one plugin shares that plugin's namespace, so the guard alone
+      // could not have prevented that leak).
+      isSheetOwnedByProject: async (sheetId, projectId) => {
+        assertProjectIdAllowedForPlugin(pluginName, projectId)
+        if (hooks.isSheetOwnedByProject) {
+          return hooks.isSheetOwnedByProject({ sheetId, projectId })
+        }
+        return multitable.provisioning.isSheetOwnedByProject(sheetId, projectId)
       },
       resolveFieldIds: async (input) => {
         assertProjectIdAllowedForPlugin(pluginName, input.projectId)

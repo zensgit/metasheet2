@@ -19,9 +19,11 @@ const COMMUNICATION_NAMESPACE = 'integration-core'
 const { createCredentialStore } = require('./lib/credential-store.cjs')
 const { createDb } = require('./lib/db.cjs')
 const { createExternalSystemRegistry } = require('./lib/external-systems.cjs')
+const { createConnectionResolver } = require('./lib/connection-resolver.cjs')
 const { createReadSourceConfigStore } = require('./lib/read-source-config-store.cjs')
 const { createStockPreparationAuditStore } = require('./lib/stock-preparation-audit-store.cjs')
 const { createStockPreparationSourceBindingStore } = require('./lib/stock-preparation-source-binding-store.cjs')
+const { createStockPreparationHandoffStore } = require('./lib/stock-preparation-handoff-store.cjs')
 const { createConfirmationDecisionReconcileLease } = require('./lib/stock-preparation-confirmation-decisions.cjs')
 const { createB2aOperationClaim } = require('./lib/b2a-trial-registry.cjs')
 const {
@@ -83,6 +85,7 @@ let externalSystemRegistry = null
 let readSourceConfigStore = null
 let stockPreparationAuditStore = null
 let stockPreparationSourceBindingStore = null
+let stockPreparationHandoffStore = null
 let stockPreparationPackInstallStore = null
 let stockPreparationConfirmationDecisionLease = null
 let b2aOperationClaim = null
@@ -206,7 +209,9 @@ function buildCommunicationApi() {
     },
     async upsertExternalSystem(input) {
       return requireInitialized(externalSystemRegistry, 'external system registry is not initialized')
-        .upsertExternalSystem(input)
+        // Cross-plugin calls carry no host-authenticated user context. Do not
+        // let a self-reported principal authorize a canonical Connection bind.
+        .upsertExternalSystem({ ...input, principal: undefined, runAs: 'service' })
     },
     async getExternalSystem(input) {
       return requireInitialized(externalSystemRegistry, 'external system registry is not initialized')
@@ -248,7 +253,7 @@ function buildCommunicationApi() {
       // intended posture, stated plainly: cross-plugin DRY RUNS work; cross-plugin WRITES do not —
       // a plugin that needs to write drives the governed HTTP surface, which owns the lifecycle.
       return requireInitialized(pipelineRunner, 'pipeline runner is not initialized')
-        .runPipeline(withoutServerOnlyRunMarkers(input))
+        .runPipeline({ ...withoutServerOnlyRunMarkers(input), runAs: 'service' })
     },
     async listDeadLetters(input) {
       const rows = await requireInitialized(deadLetterStore, 'dead-letter store is not initialized')
@@ -272,7 +277,7 @@ function buildCommunicationApi() {
       // `dryRun` — so on an armed deployment this door is refused outright without the governed
       // route's write-lifecycle context, which the stripper below guarantees it cannot forge.
       return redactReplayResultForCommunication(
-        await runner.replayDeadLetter(withoutServerOnlyRunMarkers(input)),
+        await runner.replayDeadLetter({ ...withoutServerOnlyRunMarkers(input), runAs: 'service' }),
       )
     },
     async listStagingDescriptors() {
@@ -297,6 +302,16 @@ module.exports = {
       logger,
     })
     const sqlServerQueryExecutor = createK3WiseSqlServerReadOnlyExecutor({ logger })
+    const dataSourceFacade = (context.api && context.api.dataSources) || undefined
+    const sealedSnapshotFacade = context.services
+      && context.services.dataSourceSealedSnapshotConnections
+    const connectionResolver = createConnectionResolver({
+      facade: dataSourceFacade,
+      // Secret-bearing and deliberately separate from context.api.dataSources.
+      // The host injects it only for this plugin; ordinary Connection resolution
+      // remains values-free and never receives this capability's projection.
+      sealedSnapshotFacade,
+    })
     externalSystemRegistry = createExternalSystemRegistry({
       db,
       credentialStore,
@@ -304,7 +319,8 @@ module.exports = {
       // assertReferenceable proves the authenticated principal OWNS the referenced core data
       // source before the binding persists (and the registry stamps the owner server-side for
       // the core delete guard's attributed count). Absent facade → dataSourceId binds fail closed.
-      dataSourceBinder: (context.api && context.api.dataSources) || undefined,
+      dataSourceBinder: dataSourceFacade,
+      connectionResolver,
     })
     // S2-c (#1709): content-keyed read-source config versions + values-free audit.
     readSourceConfigStore = createReadSourceConfigStore({ db })
@@ -316,6 +332,11 @@ module.exports = {
     // the whole mechanism by which changing the source stops needing a backend restart. Absent (no
     // SQL db) → no resolver is wired → the action resolves the env default exactly as before.
     stockPreparationSourceBindingStore = createStockPreparationSourceBindingStore({ db })
+    // 通知下一步 (migration 084): the per-(tenant,projectNo) cursor saying whose turn it is
+    // on a 备料 project. Built here so both handoff routes can compare-and-set it in one transaction —
+    // which is what makes a double click a detectable replay instead of a second advance. Absent (no
+    // SQL db) → the routes fail closed with a named 501, never with a plausible-but-volatile turn.
+    stockPreparationHandoffStore = createStockPreparationHandoffStore({ db })
     // Customer-pack install LEDGER (migration 076). Terminal-state rows only; it is what makes a
     // pack's `ext_` columns enumerable, which is what lets a PLM refresh honour their ownership
     // bands instead of falling back to the frozen-template ones.
@@ -457,10 +478,50 @@ module.exports = {
         // and must not add one. OPTIONAL — absent → the export route 501s instead of a 500 crash.
         // Duck-typed to { buildWorkbookBuffer({ sheetName, headers, rows }) => Promise<Buffer> }.
         stockPreparationXlsxExport: (context.services && context.services.stockPreparationXlsxExport) || null,
+    // 一线看得见自己工厂的项目: the tenant PRINCIPAL DIRECTORY (packages/core-backend
+    // tenant-principal-directory-boundary.ts), injected by the host for this plugin only — same
+    // INJECTED-per-plugin shape as the two above. Unlike them it is NOT fail-open: the operator
+    // project directory is the plugin's first tenant-scoped VALUE-BEARING read, and absent this port
+    // it 501s rather than deciding tenancy from `req.user.tenantId` (which the auth middleware may
+    // have filled from the `x-tenant-id` header). Duck-typed to
+    // { verifyTenantMembership({ userId, tenantId }) => Promise<{ member }> }.
+    tenantPrincipalDirectory: (context.services && context.services.tenantPrincipalDirectory) || null,
+        // 列级写权限: the narrow port that writes the PLATFORM's own `field_permissions` rows
+        // (packages/core-backend StockPreparationFieldPermissionsService), injected by the host for
+        // this plugin only — same INJECTED-per-plugin shape as the two above. It scopes WRITE ONLY:
+        // it takes no visibility argument, so it cannot hide a column from a department that needs to
+        // read it. OPTIONAL — absent → a pack with no fieldWritePolicies installs exactly as today,
+        // and a pack WITH them fails closed rather than silently skipping enforcement.
+        // Duck-typed to { applyRoleWriteScopes({ sheetId, entries, packId?, reconcile?,
+        //   legacyAdoptable? }) => Promise<{ applied, entries, removed?, operatorHeld?,
+        //   governedByOtherPacks? }> } plus FOUR optional read-only siblings the installer
+        // feature-detects rather than assumes: classifyRoleWriteScopeRegion (the rehearsal of the
+        // reconcile's whole invariant), listRoleWriteScopes, findMissingRoleIds and
+        // findMissingFieldIds. `reconcile` names the (columns x roles) region the pack re-declares
+        // in full, and is what lets a revision that MOVES a column's owner retire the old denial
+        // instead of leaving the column read-only for both departments; a host that ignores it
+        // returns no `removed` and the installer reports 'unsupported_port'. `legacyAdoptable` is
+        // the installer's PROOF, from the pack-install ledger, that a pack-less row on this sheet
+        // can have no other owner — without it such a row refuses the install rather than being
+        // adopted.
+        stockPreparationFieldPermissions:
+          (context.services && context.services.stockPreparationFieldPermissions) || null,
+        // 通知下一步: the DingTalk seam, injected by the host for this plugin only — the same
+        // INJECTED-per-plugin shape as governedAi and stockPreparationXlsxExport above, and for the
+        // same reason: the plugin has no DingTalk client of its own and must not grow one. The host
+        // wraps the EXISTING group-destination machinery (packages/core-backend
+        // dingtalk-group-destination-service.ts), which is why this seam speaks in DESTINATION IDs.
+        //
+        // OPTIONAL — absent → every advance reports notifyOutcome 'not_configured' and still moves the
+        // turn. Turn state and notification are separate concerns; a deployment may want only the
+        // first. Duck-typed to
+        //   { sendToDestinations({ destinationIds, title, body }) => Promise<{ delivered, failed }> }.
+        stockPreparationHandoffNotifier: (context.services && context.services.stockPreparationHandoffNotifier) || null,
         externalSystemRegistry,
         readSourceConfigStore,
         stockPreparationAuditStore,
         stockPreparationSourceBindingStore,
+        stockPreparationHandoffStore,
         stockPreparationPackInstallStore,
         stockPreparationConfirmationDecisionLease,
         b2aOperationClaim,

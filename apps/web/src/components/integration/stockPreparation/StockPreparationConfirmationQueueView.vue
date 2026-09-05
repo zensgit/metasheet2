@@ -12,14 +12,27 @@
          is never in the DOM — no disabled-but-present decoy, because a disabled control still tells
          the operator the capability exists here, and the matrix suite asserts on presence. -->
     <div class="stock-prep-confirm__bar">
+      <!-- 项目号 with a NATIVE datalist. The list carries every project in the caller's own tenant,
+           each option's VALUE being the number and its LABEL the name, so the browser's own
+           type-ahead filters on either — which is the whole point: an operator who only remembers
+           「注射水缓冲罐」 can now find 230920006 without being told it. The input stays a plain text
+           field, so the hand-typed path a trained operator already uses is unchanged. -->
       <label class="stock-prep-confirm__field">
-        <span>{{ bi('项目号', 'Project no.') }}</span>
+        <span>{{ bi('项目号(可按号码或名称搜)', 'Project no. (search by number or name)') }}</span>
         <input
           v-model="projectNo"
           type="text"
+          list="stock-prep-project-directory-options"
           data-testid="stock-prep-confirmation-project-input"
-          :placeholder="bi('项目号', 'Project no.')"
+          :placeholder="bi('项目号或名称', 'Project number or name')"
         >
+        <datalist id="stock-prep-project-directory-options" data-testid="stock-prep-operator-project-datalist">
+          <option
+            v-for="project in directoryProjects"
+            :key="project.projectId"
+            :value="project.projectNo ?? ''"
+          >{{ project.projectName ?? '' }}</option>
+        </datalist>
       </label>
 
       <label class="stock-prep-confirm__field">
@@ -40,6 +53,21 @@
         @click="loadQueue"
       >
         {{ bi('刷新列表', 'Refresh the list') }}
+      </button>
+
+      <!-- 一线看得见自己工厂的项目 — THE capability's control. It renders whenever the capability is
+           granted, unconditionally on data: R-11's "what is permitted must be visible" is a statement
+           about the PERMISSION, and a control that appeared only once the worklist happened to be
+           non-empty would make the alignment assertion depend on fixtures. The worklist itself is
+           data-conditional and sits below. -->
+      <button
+        v-if="can('confirmationQueue.projectDirectory')"
+        type="button"
+        data-testid="stock-prep-operator-project-directory"
+        :disabled="directoryBusy"
+        @click="loadDirectory"
+      >
+        {{ bi('刷新我的项目', 'Refresh my projects') }}
       </button>
 
       <button
@@ -64,6 +92,41 @@
         @click="exportMaterials"
       >
         {{ bi('导出物料清单(Excel)', 'Export materials (Excel)') }}
+      </button>
+
+      <!-- 通知下一步 — A TURN SIGNAL, NOT A GUARD.
+           Several people fill their own fields on this project's rows in order; this button moves
+           whose-turn-it-is on one notch and tells the group chat who is up next (the last step also
+           tells 仓库/采购). It decides NOTHING about who may write which column — per-column write
+           enforcement is a separate, deferred decision.
+           The `isCurrentHandler` half of the condition is COURTESY, not enforcement: the server
+           re-checks it on the advance and answers 403 NOT_CURRENT_HANDLER regardless of what this
+           template rendered. Hiding the button simply keeps five people from all seeing a button
+           that only one of them can use.
+           This pair is why `handoff.read`/`handoff.advance` carry `control: null` in the manifest:
+           they are additionally gated on RUNTIME state, so presence ≠ grant and the F-04 matrix
+           cannot measure them. StockPreparationHandoff.spec.ts covers their visibility instead. -->
+      <!-- J1: the SECOND condition is the resend. The owed-notice invitation above is only honest if
+           the button it names is on screen, and in that state `isCurrentHandler` is false — the turn
+           has already moved on; what is outstanding is the message for the hop this caller completed.
+           The server decides both (it holds the monotonic claim column and the step rosters); the
+           page only renders what it is told. `completed` is deliberately NOT a bar on this branch: a
+           terminal hop whose claim was interrupted leaves the chain finished and the 仓库/采购 notice
+           still owed, which is the single most important message this feature sends. -->
+      <button
+        v-if="can('handoff.advance') && handoff.configured
+          && ((handoff.isCurrentHandler && !handoff.completed) || handoffResendableStepKey)"
+        type="button"
+        data-testid="stock-prep-handoff-advance"
+        :disabled="busy || !projectNo"
+        :title="!projectNo ? bi('先填项目号', 'Enter a project number first') : ''"
+        @click="advanceHandoff"
+      >
+        {{ handoffResendableStepKey
+          ? bi('通知下一步(补发上一步的群消息)', 'Notify the next person (resend the previous step\'s message)')
+          : (handoff.terminal
+            ? bi('通知仓库和采购', 'Notify warehouse & purchasing')
+            : bi('通知下一步', 'Notify the next person')) }}
       </button>
 
       <!-- Platform-admin capabilities. Reconcile performs a SOURCE READ (and consumes a B2a
@@ -103,6 +166,84 @@
         '这个项目号下没有有效的物料行,已下载一份仅含表头的空白模板。',
         'This project number has no active material rows — an empty, headers-only template was downloaded.',
       ) }}
+    </p>
+
+    <!-- 一线看得见自己工厂的项目 — THE WORKLIST. Rendered on mount, before anything is typed, so the
+         page opens on "here is your work" instead of on an empty box demanding a number the operator
+         was supposed to have memorised. Only projects with pending work appear here; the full
+         directory is still behind the input's datalist above, which is what lets the empty states
+         below tell "unknown number" from "nothing pending". -->
+    <section
+      v-if="can('confirmationQueue.projectDirectory') && worklist.length > 0"
+      class="stock-prep-confirm__worklist"
+      data-testid="stock-prep-operator-project-worklist"
+    >
+      <h3>{{ bi('您这边等着处理的项目', 'Projects waiting on you') }}</h3>
+      <ul>
+        <li v-for="project in worklist" :key="project.projectId">
+          <button
+            type="button"
+            class="stock-prep-confirm__worklist-item"
+            data-testid="stock-prep-operator-project-pick"
+            :disabled="busy || !project.projectNo"
+            @click="pickProject(project)"
+          >
+            <span class="stock-prep-confirm__worklist-no">{{ project.projectNo }}</span>
+            <span class="stock-prep-confirm__worklist-name">{{ project.projectName }}</span>
+            <span class="stock-prep-confirm__worklist-count">
+              {{ bi('等您处理', 'waiting') }}: {{ project.pendingDecisionCount }}
+            </span>
+          </button>
+        </li>
+      </ul>
+    </section>
+    <!-- Whose turn it is. Renders for ANYONE who could read the status — the point of a turn signal
+         is that the other four people can see it too, not only the one person holding the turn. A
+         deployment with no chain configured renders nothing at all here. -->
+    <p v-if="handoff.configured" class="stock-prep-confirm__hint" data-testid="stock-prep-handoff-status">
+      <template v-if="handoff.completed">
+        {{ bi('这个项目的备料接力已经走完。', 'The handoff chain for this project has run to the end.') }}
+      </template>
+      <template v-else>
+        {{ bi('当前在:', 'Currently with: ') }}{{ handoffStepLabel(handoff.currentStepKey) }}
+        <code v-if="handoff.currentStepKey" class="stock-prep-confirm__token">{{ handoff.currentStepKey }}</code>
+      </template>
+    </p>
+
+    <!-- STILL OWED, STILL SENDABLE. The first version of this banner fired on exactly this state and
+         told the operator it could NOT be resent — copy that discourages the one click that fixes it.
+         It is an invitation now, and it renders only for the handler who can actually act on it. -->
+    <p
+      v-if="handoffResendableStepKey"
+      class="stock-prep-confirm__hint"
+      data-testid="stock-prep-handoff-notification-resendable"
+    >
+      {{ bi(
+        '上一跳的群通知还没发出去,再点一次「通知下一步」就会补发。',
+        'The group notice for the previous step has not gone out yet — press 通知下一步 again and it will be sent.',
+      ) }}
+      <code class="stock-prep-confirm__token">{{ handoffResendableStepKey }}</code>
+    </p>
+
+    <!-- GONE FOR GOOD. A later hop's claim moved the monotonic max past this one, so nothing the
+         system can do will send it. Named from the append-only trail, because an interior gap has no
+         other representation. -->
+    <p
+      v-if="handoffLostStepKeys.length > 0"
+      class="stock-prep-confirm__hint"
+      data-testid="stock-prep-handoff-notification-gap"
+    >
+      {{ bi(
+        `「${handoffLostStepLabels}」这一步的群通知没发出去,系统已经不能补发了 —— 请您口头跟相关的人确认一下。`,
+        `The group notice for "${handoffLostStepLabels}" never went out and can no longer be resent — please confirm with the people involved in person.`,
+      ) }}
+    </p>
+
+    <!-- What just happened to the turn AND to the message — two separate facts, said as two facts.
+         The enum stays on screen subordinate to the sentence, like every other token on this page. -->
+    <p v-if="handoffNoticeText" class="stock-prep-confirm__hint" data-testid="stock-prep-handoff-notice">
+      {{ handoffNoticeText }}
+      <code v-if="handoffNoticeToken" class="stock-prep-confirm__token">{{ handoffNoticeToken }}</code>
     </p>
 
     <p v-if="readiness !== null" class="stock-prep-confirm__readiness" data-testid="stock-prep-confirmation-readiness-result">
@@ -165,8 +306,21 @@
       </tbody>
     </table>
 
-    <p v-else-if="queue" class="stock-prep-confirm__empty" data-testid="stock-prep-confirmation-empty">
-      {{ bi('这个项目号下没有需要您处理的事 —— 都清了。', 'Nothing here needs your attention for this project number — it is all clear.') }}
+    <!-- EMPTY-STATE HONESTY. This used to be one sentence — 「都清了」 — shown for three unrelated
+         situations: nothing was ever synced here, the number was mistyped, and the project really is
+         clear. Only the last is good news. `stockPrepDirectoryEmptyState` decides which of the four
+         it actually is from facts the server now returns, and each carries the next step (or says
+         plainly that the next step is not the operator's to take). -->
+    <p
+      v-else-if="queue && emptyState"
+      class="stock-prep-confirm__empty"
+      data-testid="stock-prep-confirmation-empty"
+      :data-empty-state="emptyState"
+    >
+      {{ bi(emptyStateText.zh, emptyStateText.en) }}
+      <span v-if="emptyStateText.zhNext" class="stock-prep-confirm__hint" data-testid="stock-prep-confirmation-empty-next">
+        {{ bi(emptyStateText.zhNext, emptyStateText.enNext ?? '') }}
+      </span>
     </p>
 
     <!-- The value-entry pane: the ONE content-bearing surface, gated on the same code as confirm. -->
@@ -267,23 +421,30 @@
 //     value-entry pane renders content, and it renders under the same gate the server puts on that
 //     read. Errors surface as the CLAMPED enum-shaped code from confirmApi.ts — never a server
 //     message, which could carry a value.
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import { useAuth } from '../../../composables/useAuth'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import {
   STOCK_PREPARATION_DECISION_STATUSES,
   STOCK_PREPARATION_RESOLUTION_ACTIONS,
+  advanceStockPreparationHandoff,
   confirmStockPreparationDecision,
   exportStockPreparationPrepLines,
   listStockPreparationDecisions,
   readStockPreparationDecisionReadiness,
+  readStockPreparationHandoff,
+  readStockPreparationOperatorDirectory,
   readStockPreparationValueEntry,
   type StockPreparationDecisionQueue,
   type StockPreparationDecisionReadiness,
   type StockPreparationDecisionRow,
   type StockPreparationDecisionStatus,
   type StockPreparationDecisionValueEntry,
+  type StockPreparationHandoffAdvanceResult,
+  type StockPreparationHandoffStatus,
+  type StockPreparationOperatorDirectory,
+  type StockPreparationOperatorProject,
   type StockPreparationResolutionAction,
 } from '../../../services/integration/stockPreparation/confirmationQueue'
 import {
@@ -295,8 +456,13 @@ import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
 import {
   STOCK_PREP_DECISION_ACTION_PLAIN,
   STOCK_PREP_DECISION_STATUS_PLAIN,
+  stockPrepDirectoryEmptyPlain,
+  stockPrepDirectoryEmptyState,
   stockPrepEnumPlain,
   stockPrepErrorPlain,
+  stockPrepHandoffOutcomePlain,
+  stockPrepHandoffStepPlain,
+  type StockPrepPlainEntry,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 
 const props = defineProps<{ scope: IntegrationScope; projectNo?: string }>()
@@ -338,6 +504,12 @@ function decisionActionLabel(action: string | null): string {
 
 const errorPlain = stockPrepErrorPlain
 
+/** The step vocabulary in words, degrading to the raw key exactly like the two labels above. */
+function handoffStepLabel(key: string | null): string {
+  const plain = stockPrepHandoffStepPlain(key ?? '')
+  return plain ? bi(plain.zh, plain.en) : (key ?? '—')
+}
+
 const projectNo = ref<string>(props.projectNo ?? '')
 const statusFilter = ref<StockPreparationDecisionStatus | ''>('')
 const busy = ref(false)
@@ -353,6 +525,238 @@ const notes = ref('')
 /** Set after a successful export whose project had zero ACTIVE material rows — the download still
  *  happened (a valid, headers-only workbook), this is purely the plain-language notice for it. */
 const exportEmptyNotice = ref(false)
+
+// --- 一线看得见自己工厂的项目 ------------------------------------------------------------------
+//
+// The caller's OWN-TENANT project directory. Loaded on mount so the page opens on the operator's work
+// rather than on an empty input; the server refuses this read to any principal without a tenant of
+// its own, so nothing here can show one tenant another tenant's names.
+const directory = ref<StockPreparationOperatorDirectory | null>(null)
+
+const directoryProjects = computed<StockPreparationOperatorProject[]>(() => {
+  // `Array.isArray` rather than a truthiness check on `directory.value`: this page renders whatever
+  // the envelope parser hands back, and a degraded or partial payload (an older server, a truncated
+  // response) must leave the operator with an empty list, never a blank page from a thrown computed.
+  const projects = directory.value && Array.isArray(directory.value.projects) ? directory.value.projects : []
+  // Only rows that actually carry a number can be picked or typed — a nameless/numberless row would
+  // be an unselectable datalist entry, which is worse than absent.
+  return projects.filter((project) => typeof project.projectNo === 'string' && project.projectNo.length > 0)
+})
+
+/** The worklist proper: the projects with something waiting, busiest first, then by number. */
+const worklist = computed<StockPreparationOperatorProject[]>(() =>
+  directoryProjects.value
+    .filter((project) => project.pendingDecisionCount > 0)
+    .slice()
+    .sort((left, right) => (right.pendingDecisionCount - left.pendingDecisionCount)
+      || String(left.projectNo).localeCompare(String(right.projectNo))))
+
+/** Does the number currently in the box name a project in the caller's own directory? */
+const projectKnown = computed<boolean>(() =>
+  directoryProjects.value.some((project) => project.projectNo === projectNo.value))
+
+/**
+ * WHICH empty state, if any. Decided by the pure helper in plainLanguage.ts rather than inline, so
+ * the copy and the condition it belongs to cannot drift apart.
+ *
+ * NO DIRECTORY IS ITSELF A STATE, not silence. Returning null here — which the first version did
+ * whenever `directory.value` was null — rendered NOTHING for the three principals who never get a
+ * directory: a `stock-prep:read`-only queue watcher (no request is issued for them at all), an
+ * operate-holder whose load failed, and the tenantless platform admin the server refuses by design.
+ * All three previously saw 「都清了」; a blank page is a worse answer than a wrong one, because the
+ * operator cannot even tell the page finished loading.
+ */
+const emptyState = computed<string | null>(() => {
+  const loaded = directory.value
+  return stockPrepDirectoryEmptyState({
+    directoryAvailable: loaded !== null,
+    // Coerced defensively for the same reason as above: a partial payload must degrade to the most
+    // conservative diagnosis ("nothing synced"), never crash and never claim "all clear".
+    directoryReady: loaded !== null && loaded.directoryReady === true,
+    ledgerReady: loaded !== null && loaded.ledgerReady === true,
+    projectCount: loaded !== null && typeof loaded.projectCount === 'number'
+      ? loaded.projectCount
+      : directoryProjects.value.length,
+    projectNo: projectNo.value,
+    projectKnown: projectKnown.value,
+    pendingRowCount: queue.value && Array.isArray(queue.value.rows) ? queue.value.rows.length : 0,
+  })
+})
+
+const emptyStateText = computed<StockPrepPlainEntry>(() =>
+  stockPrepDirectoryEmptyPlain(emptyState.value) ?? { zh: '', en: '' })
+
+/**
+ * The directory load has its OWN busy flag rather than sharing `busy` with the queue.
+ *
+ * That is not tidiness. `busy` disables the queue's own controls, and this load starts on mount — so
+ * sharing it would leave 「刷新列表」 and every other control dead for the duration of a request the
+ * operator did not ask for, and would make "can I click refresh yet" depend on a race with a
+ * background fetch. The two concerns are independent and their spinners must be too.
+ */
+const directoryBusy = ref(false)
+
+/**
+ * THE TWO SERVER REFUSALS THAT ARE NOT FAULTS.
+ *
+ * The directory read is scoped to the caller's OWN tenant and requires the host to vouch for the
+ * pairing, so it refuses two whole classes of principal BY DESIGN:
+ *
+ *   OPERATOR_SCOPE_TENANT_REQUIRED     — a tenantless platform admin (us: the consultant, support).
+ *                                        They pass the permission gate and are then refused because
+ *                                        they have no tenant of their own, which is the guard doing
+ *                                        its job, not an outage.
+ *   OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE — the deployment injects no host membership seam, so the
+ *                                        read fails closed. Nothing the person at the screen can do.
+ *
+ * Both arrive on MOUNT, unprompted, which put a red write-flavoured error line on the page for every
+ * platform admin on every single page open. Neither is actionable and neither is news, so neither
+ * becomes an error banner. They are not silent, either: `directory_unavailable` renders in the empty
+ * state and says exactly what is and is not known. The list is a CLOSED set of two codes — any other
+ * failure, a 500 included, still surfaces, because a directory that genuinely broke IS news.
+ */
+const DIRECTORY_NOT_FOR_THIS_PRINCIPAL = Object.freeze([
+  'OPERATOR_SCOPE_TENANT_REQUIRED',
+  'OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE',
+])
+
+async function loadDirectory(): Promise<void> {
+  if (!can('confirmationQueue.projectDirectory')) return
+  directoryBusy.value = true
+  try {
+    directory.value = await readStockPreparationOperatorDirectory(props.scope)
+  } catch (error) {
+    if (error instanceof StockPreparationConfirmApiError
+      && DIRECTORY_NOT_FOR_THIS_PRINCIPAL.includes(error.code)) {
+      // Not an error to report — see above. `directory.value` stays null, which is what the empty
+      // state reads to say "no worklist for you, and we cannot judge this number".
+      return
+    }
+    // Every other failure surfaces on the page's one error line like any other — an operator whose
+    // worklist silently failed to load would read the empty page as "no work", which is the exact
+    // dishonesty this change exists to remove.
+    recordError(error)
+  } finally {
+    directoryBusy.value = false
+  }
+}
+
+/** Pick a project from the worklist: fill the number the typed path already uses, then load it. */
+async function pickProject(project: StockPreparationOperatorProject): Promise<void> {
+  if (!project.projectNo) return
+  projectNo.value = project.projectNo
+  await loadQueue()
+}
+
+// The page opens on the operator's own work. A caller without the capability loads nothing and sees
+// exactly the surface they saw before this change.
+onMounted(() => {
+  void loadDirectory()
+})
+
+/**
+ * 通知下一步 state. INERT is the fail-soft resting position, and it is what the view holds whenever
+ * the status is unknown for ANY reason — no project number typed yet, no `handoff.read` grant, a
+ * deployment whose backend predates this route, or a rejected fetch. `configured: false` renders no
+ * control and no status line, which is exactly the behaviour of a deployment that has not set a
+ * chain up, so an outage degrades to "feature absent" rather than to a broken queue.
+ */
+const HANDOFF_INERT: StockPreparationHandoffStatus = Object.freeze({
+  configured: false,
+  projectNo: '',
+  steps: [],
+  stepCount: 0,
+  stepIndex: null,
+  currentStepKey: null,
+  terminal: false,
+  completed: false,
+  isCurrentHandler: false,
+  notifiedStepIndex: null,
+  notificationsConfigured: false,
+  resendableStepKey: null,
+  lostStepKeys: [],
+})
+
+const handoff = ref<StockPreparationHandoffStatus>(HANDOFF_INERT)
+/** The last advance's result — the source of the plain-language notice, cleared on each new press. */
+const handoffAdvance = ref<StockPreparationHandoffAdvanceResult | null>(null)
+
+/**
+ * What to tell the operator after an advance.
+ *
+ * THE DISCRIMINATOR IS `notifyOutcome`, NOT `changed`, and that correction is the whole of this
+ * comment. `changed` says whether the TURN moved; it says nothing about whether a message went out.
+ * Those two used to be the same question, and the first version of this notice short-circuited on
+ * `changed === false` and printed 「没有重复通知」.
+ *
+ * They came apart when the notification claim became a compare-and-set of its own: a request that is
+ * BOTH a replay and the one that finally sends the owed notice is now ordinary, and so is the same
+ * request FAILING to send it. On the old wording an operator whose resend had just failed — or
+ * half-failed across 仓库 and 采购 — was told in words that nothing needed sending. The claim is spent
+ * by then, so no later click can ever resend it: being told the wrong thing here is terminal, and the
+ * group that missed the notice is never chased.
+ *
+ * So: if something was actually attempted (sent / partial / failed), say what happened to it. Only
+ * `skipped` and `not_configured` on an unchanged turn are genuinely "nothing needed sending".
+ */
+const handoffNoticeText = computed<string>(() => {
+  const result = handoffAdvance.value
+  if (!result) return ''
+  const attempted = result.notifyOutcome === 'sent'
+    || result.notifyOutcome === 'partial'
+    || result.notifyOutcome === 'failed'
+  // J2: `resumed` is the COMMITTED verdict that this click took the claim, so a request carrying it
+  // may never render the replay sentence — whatever the outcome. The first cut checked only
+  // `attempted`, which left one outcome ('not_configured', now 'no_destination') reaching the
+  // 「没什么要发」 wording on a click that had just spent the hop's one chance to be announced.
+  if (result.changed === false && !attempted && result.resumed !== true) {
+    return bi(
+      '这一步之前已经交接过了,没有重复通知。',
+      'This step had already been handed on, so nobody was notified a second time.',
+    )
+  }
+  const plain = stockPrepHandoffOutcomePlain(result.notifyOutcome)
+  if (!plain) return bi('已经交给下一步了。', 'It has been handed on to the next step.')
+  const lead = bi(plain.zh, plain.en)
+  const next = bi(plain.zhNext ?? '', plain.enNext ?? '')
+  const body = next ? `${lead} ${next}` : lead
+  // A RESUME is not the same event as a first advance and must not be described as one: the turn
+  // moved earlier, and what this click did was send the notice that hop had been owed since.
+  if (result.resumed === true) {
+    return `${bi('这一跳之前没发出去的通知,这次补发了。', 'The notice this step had been owed was sent now.')} ${body}`
+  }
+  return body
+})
+
+/** The enum, kept on screen but subordinate — what a person quotes when they ask us about it. */
+const handoffNoticeToken = computed<string | null>(() => handoffAdvance.value?.notifyOutcome ?? null)
+
+/**
+ * IS THERE A HOP WHOSE NOTICE NEVER WENT OUT? The claim is monotonic, so once a later hop is claimed
+ * an earlier owed one can never be sent by anyone — pressing the button again does not help, and
+ * until this line existed nothing on the screen said so.
+ *
+ * Two guards, both load-bearing. `notificationsConfigured` keeps a deliberate turn-state-only
+ * deployment — whose `notifiedStepIndex` is null forever and correctly so — from being told it has
+ * lost every notice it never meant to send. And the comparison is against `stepIndex - 1` because the
+ * CURRENT hop has not been handed off yet: its notice is not late, it is not due.
+ */
+const handoffLostStepKeys = computed<string[]>(() => {
+  const state = handoff.value
+  if (!state.configured) return []
+  return Array.isArray(state.lostStepKeys) ? state.lostStepKeys : []
+})
+
+/** The step whose notice is still owed AND still sendable by this caller. Server-computed. */
+const handoffResendableStepKey = computed<string | null>(() => {
+  const state = handoff.value
+  if (!state.configured) return null
+  return typeof state.resendableStepKey === 'string' && state.resendableStepKey ? state.resendableStepKey : null
+})
+
+/** The committed labels for the lost hops, so the sentence names them rather than counting them. */
+const handoffLostStepLabels = computed<string>(() =>
+  handoffLostStepKeys.value.map((key) => handoffStepLabel(key)).join('、'))
 
 /** What the currently chosen handling actually does, in one line, before the operator commits. */
 const selectedActionHint = computed<string>(() => {
@@ -381,6 +785,32 @@ async function run(task: () => Promise<void>): Promise<void> {
   }
 }
 
+/**
+ * Whose turn it is, read FAIL-SOFT and deliberately OUTSIDE `run()`.
+ *
+ * Outside, because the turn signal is an addition to this page, not a precondition of it: a
+ * deployment whose backend predates the handoff route, or one having a bad minute, must leave the
+ * confirmation queue — the only page a floor operator has — working exactly as before. So this
+ * swallows its own failure into INERT (feature absent) and never touches `errorCode` or `busy`.
+ */
+async function loadHandoff(): Promise<void> {
+  if (!projectNo.value || !can('handoff.read')) {
+    handoff.value = HANDOFF_INERT
+    return
+  }
+  try {
+    const status = await readStockPreparationHandoff({ ...props.scope, projectNo: projectNo.value })
+    handoff.value = status && typeof status === 'object' ? status : HANDOFF_INERT
+  } catch {
+    handoff.value = HANDOFF_INERT
+  }
+}
+
+/**
+ * The queue refresh is this view's ONE load-on-demand entry point (there is no watcher and no
+ * onMounted here — the operator types a project number and presses 刷新列表), so the turn signal
+ * rides it rather than introducing a second refresh idiom the file does not otherwise use.
+ */
 async function loadQueue(): Promise<void> {
   await run(async () => {
     queue.value = await listStockPreparationDecisions({
@@ -389,6 +819,7 @@ async function loadQueue(): Promise<void> {
       status: statusFilter.value === '' ? null : statusFilter.value,
     })
   })
+  await loadHandoff()
 }
 
 async function loadReadiness(): Promise<void> {
@@ -423,6 +854,30 @@ async function exportMaterials(): Promise<void> {
     const result = await exportStockPreparationPrepLines({ ...props.scope, projectNo: projectNo.value })
     triggerExportDownload(result.blob, result.filename)
     exportEmptyNotice.value = result.activeRowCount === 0
+  })
+}
+
+/**
+ * 通知下一步. `fromStepKey` is the step this view BELIEVES is current; the server compares it to the
+ * one it actually holds and answers 409 STEP_MISMATCH when somebody else moved first — which is why
+ * a stale page cannot double-advance the chain. The server also re-checks that the caller is the
+ * current handler; the button's `isCurrentHandler` condition is courtesy, not the gate.
+ */
+async function advanceHandoff(): Promise<void> {
+  // FINISH WHAT IS OWED BEFORE MOVING ON. When a hop's notice is still unsent, replaying THAT hop is
+  // what sends it; advancing the current one instead would claim the next step and push the monotonic
+  // max past the owed hop, losing it for good. So the resend wins when both are possible — which is
+  // also what the invitation on screen promises the click will do.
+  const fromStepKey = handoffResendableStepKey.value ?? handoff.value.currentStepKey
+  if (!projectNo.value || !fromStepKey) return
+  handoffAdvance.value = null
+  await run(async () => {
+    handoffAdvance.value = await advanceStockPreparationHandoff({
+      ...props.scope,
+      projectNo: projectNo.value,
+      fromStepKey,
+    })
+    await loadHandoff()
   })
 }
 
@@ -498,6 +953,72 @@ defineExpose({ can })
   margin: 0;
   color: var(--ms-text-3);
   font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 一线看得见自己工厂的项目 — the worklist. Deliberately the widest, plainest thing on the page after
+   the input: it is what an operator opens this page to see. */
+.stock-prep-confirm__worklist {
+  margin-bottom: var(--ms-space-3);
+}
+
+.stock-prep-confirm__worklist h3 {
+  margin: 0 0 var(--ms-space-2);
+  font-size: 13px;
+  color: var(--ms-text-2);
+}
+
+.stock-prep-confirm__worklist ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.stock-prep-confirm__worklist-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--ms-space-2);
+  width: 100%;
+  padding: var(--ms-space-2);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.stock-prep-confirm__worklist-item:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* The number stays monospace and selectable — it is what a person quotes on the phone — but the NAME
+   is the thing that reads first, which is the whole point of this change. */
+.stock-prep-confirm__worklist-no {
+  font-family: var(--ms-font-mono, monospace);
+  color: var(--ms-text-3);
+  font-size: 12px;
+}
+
+.stock-prep-confirm__worklist-name {
+  flex: 1 1 auto;
+  font-weight: 600;
+}
+
+.stock-prep-confirm__worklist-count {
+  color: var(--ms-text-2);
+  font-size: 12px;
+}
+
+.stock-prep-confirm__empty {
+  margin: 0 0 var(--ms-space-3);
+  color: var(--ms-text-2);
+  font-size: 13px;
   line-height: 1.6;
 }
 

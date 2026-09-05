@@ -176,7 +176,7 @@ function createStockPreparationRuntimeCore({
     || typeof captureServiceFactory !== 'function'
     || typeof clock !== 'function'
     || !externalSystemRegistry
-    || typeof externalSystemRegistry.getExternalSystemForAdapter !== 'function'
+    || typeof externalSystemRegistry.getExternalSystemForSealedSnapshot !== 'function'
     || !(identityKey instanceof Uint8Array)
     || typeof persistStockPreparation !== 'function'
     || typeof pipelineFactory !== 'function'
@@ -226,13 +226,19 @@ function createStockPreparationRuntimeCore({
     }
   }
 
-  async function loadSource(binding, scope) {
+  async function loadSource(binding, scope, principal) {
     return privateBoundary(async () => {
       const externalSystem =
-        await externalSystemRegistry.getExternalSystemForAdapter({
+        await externalSystemRegistry.getExternalSystemForSealedSnapshot({
           id: binding.externalSystemId,
           tenantId: scope.tenantId,
           workspaceId: scope.workspaceId,
+          // This runtime is reachable only through the admin-authenticated HTTP
+          // handler, which derives `actor` from the host user. Reuse that same
+          // server-held identity as the Connection owner principal; never infer
+          // an owner from the Binding or silently promote the run to service.
+          principal,
+          runAs: 'user',
         })
       return resolveStockPreparationSqlServerSource({
         binding,
@@ -287,7 +293,7 @@ function createStockPreparationRuntimeCore({
     let captureService
     try {
       authorityState = await runtimeStore.loadCurrentAuthority(binding)
-      source = await loadSource(binding, scope)
+      source = await loadSource(binding, scope, input.actor)
       captureService = await captureServiceFactory({
         authority: source.authority,
         binding,

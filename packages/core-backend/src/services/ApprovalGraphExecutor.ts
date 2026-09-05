@@ -24,6 +24,7 @@ import {
   type RequesterFormulaContext,
 } from './ApprovalConditionFormula'
 import { isValidIsoCalendarDate } from '../utils/calendar-date'
+import { applySequentialQueueMetadata } from './approval-sequential-mode'
 
 export interface ApprovalGraphAssignment {
   assignmentType: 'user' | 'role'
@@ -112,7 +113,7 @@ export interface ApprovalGraphResolution {
    * Any-mode resolution carries `'any'`; all-mode carries `'all'` only when aggregation is complete
    * (the route short-circuits incomplete all-mode before calling `resolveAfterApprove`).
    */
-  aggregateMode: 'single' | 'all' | 'any' | 'threshold' | null
+  aggregateMode: ApprovalMode | null
   /**
    * Indicates that the previous node's aggregation requirement is satisfied and resolution advanced.
    * Always `true` when `resolveAfterApprove` returns (incomplete aggregation never reaches here).
@@ -415,14 +416,15 @@ export function pruneHiddenFormData(
  * normalizer must fail CLOSED. The previous arm silently mapped ANY unrecognized mode to
  * `'single'` — for contract-valid data the gap was unreachable (the authoring choke rejects
  * unknown modes, and `asRuntimeGraph` re-normalizes every STORED graph through that same choke on
- * each dispatch), but the moment a new mode (e.g. `sequential`) becomes authorable, deploy skew or
- * rollback would degrade it silently to first-approver-wins with no error and no audit signal —
+ * each dispatch), but deploy skew around any future mode would degrade it silently to
+ * first-approver-wins with no error and no audit signal —
  * the precise inverse of the S7 governing precedent.
  *
  * Enumerated legitimate inputs (widen-only: every value a re-normalized stored graph can carry):
  *   - `undefined` — the absent default, ≡ `'single'` (the shipped contract; the service-side
  *     normalizer emits the key only when set, and `single` is the documented absent default);
- *   - the four shipped members `'single' | 'all' | 'any' | 'threshold'` — pass through unchanged.
+ *   - the five shipped members `'single' | 'all' | 'any' | 'threshold' | 'sequential'` — pass
+ *     through unchanged.
  * ANYTHING else (an unknown string, `null`, a non-string) throws a typed error instead of running
  * as `'single'`. `null` is deliberately in the reject set: the authoring choke has always rejected
  * it (`typeof null !== 'string'`), so no legitimately stored graph carries it. The raw value is
@@ -430,7 +432,7 @@ export function pruneHiddenFormData(
  */
 function normalizeApprovalMode(value: unknown, nodeKey: string): ApprovalMode {
   if (value === undefined) return 'single'
-  if (value === 'all' || value === 'any' || value === 'single' || value === 'threshold') return value
+  if (value === 'all' || value === 'any' || value === 'single' || value === 'threshold' || value === 'sequential') return value
   throw new ServiceError(
     `Approval node ${nodeKey} has an unsupported approval mode`,
     400,
@@ -502,8 +504,38 @@ export function validateFieldType(
   switch (field.type) {
     case 'text':
     case 'textarea':
-    case 'user':
       return typeof value === 'string' || isRecord(value) ? null : `${field.id} must be a string`
+    case 'user': {
+      const selection = field.props?.selection === 'multi' ? 'multi' : 'single'
+      if (selection === 'multi' && !Array.isArray(value)) {
+        return `${field.id} must be an array of users`
+      }
+      const values = Array.isArray(value) ? value : [value]
+      if (selection === 'single' && values.length !== 1) {
+        return `${field.id} must contain exactly one user`
+      }
+      // Preserve the field-derived routing door: a blank scalar is an empty anchor, not a
+      // malformed principal. The create-time routing guard returns the established values-free
+      // APPROVAL_FORM_ROUTING_FIELD_EMPTY response for that case.
+      if (values.length === 1 && typeof values[0] === 'string' && values[0].trim().length === 0) {
+        return null
+      }
+      const ids: string[] = []
+      for (const entry of values) {
+        const id = typeof entry === 'string'
+          ? entry.trim()
+          : isRecord(entry) && typeof entry.id === 'string'
+            ? entry.id.trim()
+            : ''
+        if (!id) return `${field.id} must contain only user ids or objects with an id`
+        ids.push(id)
+      }
+      if (new Set(ids).size !== ids.length) return `${field.id} must not contain duplicate users`
+      if (typeof field.props?.maxSelections === 'number' && ids.length > field.props.maxSelections) {
+        return `${field.id} exceeds the configured user selection limit`
+      }
+      return null
+    }
     case 'attachment':
       if (options.attachmentValueMode !== 'ids') {
         return typeof value === 'string' || isRecord(value) ? null : `${field.id} must be a string`
@@ -551,6 +583,36 @@ export function validateFieldType(
         return `${field.id} must contain only configured options`
       }
       return null
+    case 'department': {
+      if (!Array.isArray(value)) {
+        return `${field.id} must be an array of departments`
+      }
+      // Optional array-valued controls submit [] after the user clears them. Required fields are
+      // rejected by validateApprovalFormData's shared isEmptyValue gate before reaching this arm.
+      if (value.length === 0) return null
+      const ids: string[] = []
+      for (const entry of value) {
+        if (
+          !isRecord(entry)
+          || Object.keys(entry).length !== 1
+          || typeof entry.id !== 'string'
+          || !entry.id.trim()
+        ) {
+          return `${field.id} must contain only exact { id } department values`
+        }
+        ids.push(entry.id.trim())
+      }
+      if (new Set(ids).size !== ids.length) {
+        return `${field.id} must not contain duplicate departments`
+      }
+      if (field.props?.selection === 'single' && ids.length !== 1) {
+        return `${field.id} must contain exactly one department`
+      }
+      if (typeof field.props?.maxSelections === 'number' && ids.length > field.props.maxSelections) {
+        return `${field.id} exceeds the configured department selection limit`
+      }
+      return null
+    }
     case 'record-link': {
       // FWB-0 Layer 2 structural shape only (sync): exactly one `{ recordId: non-blank string }`.
       // No arrays, free-text ids, or extra keys (incl. target base/sheet overrides). Filler read
@@ -1201,7 +1263,7 @@ export class ApprovalGraphExecutor {
 
   private resolveFromNode(
     nodeKey: string,
-    context: { aggregateMode: 'single' | 'all' | 'any' | 'threshold' | null; aggregateComplete: boolean },
+    context: { aggregateMode: ApprovalMode | null; aggregateComplete: boolean },
   ): ApprovalGraphResolution {
     const ccEvents: ApprovalCcEvent[] = []
     const autoApprovalEvents: ApprovalGraphAutoApprovalEvent[] = []
@@ -1814,7 +1876,7 @@ export class ApprovalGraphExecutor {
           sourceStep,
         }))
     this.assertThresholdReachable(nodeKey, approvalConfig, assignments)
-    return assignments
+    return applySequentialQueueMetadata(assignments, normalizeApprovalMode(approvalConfig.approvalMode, nodeKey))
   }
 
   /**
@@ -1890,7 +1952,10 @@ export class ApprovalGraphExecutor {
     // site 2 (`resolveBranchAdvance`): threshold mode is publish-time rejected inside a parallel
     // region, so `normalizeApprovalMode(...) !== 'threshold'` always holds there.
     this.assertThresholdReachable(nodeKey, approvalConfig, fallbackAssignments)
-    return fallbackAssignments
+    return applySequentialQueueMetadata(
+      fallbackAssignments,
+      normalizeApprovalMode(approvalConfig.approvalMode, nodeKey),
+    )
   }
 
   /**

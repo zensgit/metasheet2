@@ -142,6 +142,7 @@ describe('data-sources /query read-only gate (A-RO)', () => {
   app.use(express.json())
   app.use((req, _res, next) => {
     req.user = currentUser as never
+    req.authenticatedTenantId = currentUser ? 'tenant-readonly-query' : undefined
     next()
   })
   app.use(dataSourcesRouter())
@@ -186,6 +187,7 @@ describe('data-sources /query and /select — a typed gate refusal surfaces code
   app.use(express.json())
   app.use((req, _res, next) => {
     req.user = currentUser as never
+    req.authenticatedTenantId = currentUser ? 'tenant-readonly-refusal' : undefined
     next()
   })
   app.use(dataSourcesRouter())
@@ -279,6 +281,7 @@ describe('data-sources PUT deep-merge (A-RO)', () => {
   app.use(express.json())
   app.use((req, _res, next) => {
     req.user = currentUser as never
+    req.authenticatedTenantId = currentUser ? 'tenant-readonly-update' : undefined
     next()
   })
   app.use(dataSourcesRouter())
