@@ -209,6 +209,7 @@ node __tests__/stock-preparation-structure-exact-rehearsal.test.cjs
 node __tests__/test-chain-runner.test.cjs
 node __tests__/stock-preparation-source-binding.test.cjs
 node __tests__/stock-preparation-source-binding-routes.test.cjs
+node __tests__/stock-preparation-source-binding-scope-fallback.test.cjs
 node __tests__/schema-mapping-copilot-routes.test.cjs
 node __tests__/k3-sqlserver-external-write-fence-parity.test.cjs
 node __tests__/stock-preparation-operator-project-directory.test.cjs

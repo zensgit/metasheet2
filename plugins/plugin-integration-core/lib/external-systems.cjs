@@ -601,9 +601,20 @@ function createExternalSystemRegistry({
   // carries a workspace hint (URL/localStorage, in practice often the tenant id) and the sealed
   // mvp-persist step derives workspace=null from the principal (tokens carry no workspace claim).
   // Without this the two halves of ONE pull disagree on scope and dry-run/apply 404 with
-  // ExternalSystemNotFoundError. What does NOT change: tenant_id must still match (the fallback
-  // query carries the caller's tenant), a workspace-scoped row is never reached from another
-  // workspace or from a null hint, and writes/list/delete keep their exact scope.
+  // ExternalSystemNotFoundError. What does NOT change, INSIDE THIS FUNCTION: tenant_id must still
+  // match (the fallback query carries the caller's tenant), a workspace-scoped row is never reached
+  // from another workspace or from a null `workspaceId` ARGUMENT, and writes/list/delete keep their
+  // exact scope.
+  //
+  // REVERSE POINTER (stock-preparation, F3): "a null hint never widens" is an invariant of what THIS
+  // FUNCTION does with the `workspaceId` it is handed — it says nothing about what that argument
+  // IS on any given call. `loadTableActionSourceAdapter` (plugin-integration-core/lib/http-routes.cjs)
+  // can substitute a server-derived NON-null hint (the stock-prep source binding's own
+  // `matchedWorkspaceId`, from that store's null-workspace scope fallback) in place of a caller whose
+  // OWN request carried none — so a request that looks hint-less end to end may still arrive here
+  // with a real `workspaceId`, and this function then does its own ordinary non-null-hint-miss
+  // widening for it, exactly as for any other caller. That is a decision made ABOVE this function, on
+  // its own inputs; nothing here changes to accommodate it.
   //
   // Returns the workspace the row was actually matched under, so downstream policy (the
   // connection resolver) sees the row's own scope rather than the caller's hint.
