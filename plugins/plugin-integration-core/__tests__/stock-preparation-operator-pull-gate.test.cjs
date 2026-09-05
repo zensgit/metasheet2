@@ -1,24 +1,27 @@
 'use strict'
 
-// 一线自己拉数据 — THE OPERATOR PULL GATE SPLIT, and the four things it must not widen.
+// 一线自己拉数据 — THE OPERATOR PULL GATE SPLIT, across the four routes it touches.
 //
 // THE RULING. The owner ruled that a floor operator may self-serve the PLM pull: without it the
 // 项目备料页 opens on a project whose BOM nobody on the floor can bring in, and "ask a platform
-// administrator" is not an answer at 07:00 on a shop floor. What the ruling did NOT move is the
-// pair of routes R-11(b) names as owner-level:
+// administrator" is not an answer at 07:00 on a shop floor. Round-1 moved dry-run and apply only;
+// round-2 (decision C13, #5460) additionally moved reconcile, because leaving it admin-only put an
+// operator whose plan had human-confirm rows into a closed loop (see below). What NEITHER round
+// moved is mvp-persist, which R-11(b) names as owner-level:
 //
-//   dry-run     was integration:read   -> ALSO stock-prep operate ∧ read, for ONE action id
-//   apply       was integration:write  -> ALSO stock-prep operate ∧ read, for ONE action id
-//   reconcile   requireAccess(req, 'admin')  UNCHANGED — a SOURCE READ that consumes a B2a claim
+//   dry-run     was integration:read        -> ALSO stock-prep operate ∧ read, for ONE action id
+//   apply       was integration:write       -> ALSO stock-prep operate ∧ read, for ONE action id
+//   reconcile   requireAccess(req, 'admin') -> ALSO stock-prep operate ∧ read, for ONE action id (round-2 C13)
 //   mvp-persist requireAccess(req, 'admin')  UNCHANGED
 //
 // WHAT THIS SUITE EXISTS TO CATCH. A gate split is the easiest change in this repository to get
-// silently wrong, because the two routes it touches are GENERIC — `/table-actions/:actionId/...`
+// silently wrong, because the routes it touches are GENERIC — `/table-actions/:actionId/...`
 // serves every table action there is. So the assertions below are not "the operator can pull"; they
 // are:
 //
 //   P-01 the operator reaches dry-run and apply, for the pull-bom action id.
-//   P-02 the operator is REFUSED reconcile and mvp-persist. The two that stayed, stayed.
+//   P-02 the operator is ADMITTED for reconcile (round-2 C13) and REFUSED mvp-persist — the one
+//        route that stayed admin-only, stayed.
 //   P-03 the split is SCOPED TO ONE ACTION ID. The same operator, on any other actionId, is refused
 //        exactly as before — the widening is not a wildcard over the table-action namespace.
 //   P-04 NOBODY ELSE GAINS ANYTHING. The legacy tiers admit exactly whom they admitted; a caller
@@ -725,10 +728,10 @@ const ALL_MOVED_ROUTES = STOCK_PREP_OPERATOR_PULL_STEPS
   .map((step) => ({ method: step.method, routePath: step.path, step: step.step }))
 
 // ---------------------------------------------------------------------------
-// P-01 / P-02 — what moved, and what did not
+// P-01 / P-02 — what moved (dry-run, apply, reconcile), and what did not (mvp-persist)
 // ---------------------------------------------------------------------------
 
-async function theOperatorPullsButNeitherReconcilesNorArchives() {
+async function theOperatorPullsAndReconcilesButDoesNotArchive() {
   const routes = mount()
   const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
 
@@ -1420,7 +1423,7 @@ async function theOperatorScopeRefusalsAreIdenticalArmedAndDisarmed() {
 }
 
 async function main() {
-  await theOperatorPullsButNeitherReconcilesNorArchives()
+  await theOperatorPullsAndReconcilesButDoesNotArchive()
   await theHumanConfirmLoopIsReachableByTheOperator()
   await theOperatorPullReadsAsTheBindingOwner()
   await theDelegationReachesTheConnectionResolution()

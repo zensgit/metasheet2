@@ -24,7 +24,7 @@
 | 交付物 | 说明 |
 |---|---|
 | 部署包(`.zip` + `.zip.sha256` + `SHA256SUMS`) | 由 CI workflow `multitable-onprem-package-build.yml` 打包(**不要用本地检出打包**,尤其 Windows 检出会在包校验的 provenance 步骤失败)。**本次交付**:`metasheet-multitable-onprem-v2.5.0-r8-20260904.zip`,SHA256 `1fe052fcc92be512f5d41081d156e7accaed359ac4c6584bde89f95a7838a922`,钉在 main `45cca21eec86f15a565e10745cb443d1bf308213`(CI run 33880564195);已于 2026-09-04 就地升级到 222 并复验通过。**包标签与 SHA256 由本次实施填写**:标签 `<PACKAGE_TAG>`,SHA256 `<PACKAGE_SHA256>`,对应源码提交 `<SOURCE_COMMIT>`。 |
-| `deploy-bootstrap`(`.ps1` / `.bat`) | 与部署包同一次 CI run 的产物(本次为 `metasheet-multitable-onprem-v2.5.0-r8-20260904-deploy-bootstrap.ps1` / `.bat`,各带 `.sha256`),用于全新环境的引导安装;用法见 `.ps1` 文件头注释。**本次未在客户环境验证其具体用法,标记待核对**——已验证的路径是"已有 222 就地升级"(见 §2.1)。 |
+| `deploy-bootstrap`(`.ps1` / `.bat`) | 与部署包同一次 CI run 的产物(本次为 `metasheet-multitable-onprem-v2.5.0-r8-20260904-deploy-bootstrap.ps1` / `.bat`,各带 `.sha256`)。**2026-09-06 订正**:这是**升级 / 首跳修复入口**(`multitable-onprem-deploy-launcher.ps1`,要求已存在的部署根目录),不是全新安装入口;全新安装应直接用包内 `scripts/ops/multitable-onprem-apply-package.ps1`,2026-09-06 已在 222 隔离目录实测(见 §2.2)。 |
 | 就地升级脚本 `scripts/ops/multitable-onprem-package-upgrade-inplace.ps1` | **不在部署包内**,需从与部署包同一提交的仓库检出单独复制到部署主机;调用时必须显式传 `-RootDir`(默认值指向脚本自身所在目录,不是部署根目录)。 |
 | 补字段脚本 `scripts/ops/stock-preparation-sandbox-add-missing-template-fields.cjs` | 旧模板建的沙箱表缺新增模板字段时,用它增量补字段(只增不改不删,幂等)。 |
 | 本说明文档 | `docs/development/takeover-beiliao-20260821/customer-delivery-guide-20260904.md` |
@@ -76,7 +76,22 @@ New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
 
 ### 2.2 全新安装(无既有部署)
 
-**本节步骤待核对** ——本次核对的源文档只完整验证了"已有 222 就地升级"这条路径(§2.1);全新安装应使用 §1 交付物里的 `deploy-bootstrap`(`.ps1`/`.bat`),但其具体调用方式、前置依赖(如是否需要先建库、是否自带迁移)未在本次复核的源文档中找到逐步记录。建议实施前先联系我方工程师确认,或以 CI 产物里 `deploy-bootstrap` 脚本自身的帮助输出为准。全新安装完成后,§2.1 的"健康检查"标准同样适用,随后直接进入 §3(接入客户 PLM)。
+**2026-09-06 实测结论**:2026-09-06 05:23–05:30 在 222 上另开一个隔离目录(独立 RootDir、独立库名、独立端口)用包内 `scripts/ops/multitable-onprem-apply-package.ps1`(`-InstallDeps 1 -RunMigrations 1 -RestartService 0 -CheckNginx 0 -RunHealthcheck 0`)实跑了一次纯 Windows 全新安装。
+
+- **已验证通过**:解包;从生产 `app.env` 派生新 env(26 个变量加载);依赖冻结安装 —— corepack 固定 pnpm 9.15.9,staging 预检 50 秒 + 离线激活 30 秒,exit 0(在 SYSTEM 账户下也能跑通)。
+- **未验证(如实标注)**:零起点数据库迁移与服务启动。原因:建库需要 `CREATEDB` 或超级用户权限;应用角色 `metasheet` 两者皆无(PostgreSQL 报"创建数据库权限不够"),`postgres` 超级用户按 `pg_hba`(scram-sha-256)需要口令,本次不经手口令,因此迁移在"数据库不存在"上失败退出。
+
+据此,§2.2 的步骤应为:
+
+1. 解包到新的部署根目录。
+2. `docker/app.env` 从模板生成(`PORT` / `DATABASE_URL` / `JWT_SECRET`、附件与上传路径等)。
+3. **客户侧前置,必须先做**:DBA 用持有 `CREATEDB` 或超级用户权限的账号建库,并把所有权授给应用角色 —— 纯 Windows 环境没有 `sudo -u postgres`,用 pgAdmin 或 `psql -U postgres` 代替。**本次在测试机上正是卡在这一步**,后续步骤未能实跑。
+4. 跑 `multitable-onprem-apply-package.ps1`(deps + 迁移;`-RestartService 0` 时脚本不碰 pm2)。
+5. 以**实际运行服务的那个 Windows 用户**启动 pm2(`pm2 start packages\core-backend\dist\src\index.js --name metasheet-backend --cwd <部署根目录>`;SYSTEM 账户下没有 pm2),再跑健康检查(标准同 §2.1)。
+
+随后直接进入 §3(接入客户 PLM)。
+
+**关于 `deploy-bootstrap`**:§1 交付物里的 `deploy-bootstrap`(`.ps1`/`.bat`,即 `multitable-onprem-deploy-launcher.ps1`)是**升级 / 首跳修复入口**——它要求一个已存在的部署根目录(`-RootDir` 指向"已安装根"),用途是解决"用旧 apply 助手升级到带修复的新包时,第一次 apply 仍执行包内旧版助手"这个先有鸡还是先有蛋的问题,**不是全新安装的入口**。全新安装应直接用上面验证过的 `multitable-onprem-apply-package.ps1`。
 
 ---
 
@@ -221,9 +236,10 @@ INSERT INTO DN_PDM_OrderDetailInfo (order_id, part_id, quantity, sort_id) VALUES
 > | 到多维表填报 | ✓ | ✓ |
 > | 导出物料清单 | ✓ 200 | ✓ |
 > | 交接链状态 / 通知下一步 | ✓ 200 | ✓ |
-> | 建确认账本 / 重新扫描对账 / 切换数据源 | ✗ 403(正确拒绝) | ✓ |
+> | 建确认账本 / 切换数据源 | ✗ 403(正确拒绝) | ✓ |
+> | 重新扫描对账(`confirmation-decisions/reconcile`) | ✓(操作员可用;09-05 观测到的拒绝其实是 #5505 委派修复之前的 400 连接错误,与 403 无关;2026-09-06 r12 在 222 实测 201) | ✓ |
 >
-> 即:**归属戳补齐之前,管理员负责"把 BOM 拉进来",一线负责其余全部环节**;补齐之后,拉取也归一线,分工里只剩"建确认账本 / 重新扫描对账 / 切换数据源"留给管理员。请按当前所处的状态安排人员与培训,不要照着"一线自助拉取"直接培训一个还没补戳的部署。
+> 即:**归属戳补齐之前,管理员负责"把 BOM 拉进来",一线负责其余全部环节**;补齐之后,拉取也归一线,分工里只剩"建确认账本 / 切换数据源"留给管理员。请按当前所处的状态安排人员与培训,不要照着"一线自助拉取"直接培训一个还没补戳的部署。
 
 **5-1 两个权限码**(由平台管理员通过 `POST /api/permissions/grant` 授予,`stock-prep:operate` **不隐含** `stock-prep:read`,两个都要单独授予):
 
@@ -451,7 +467,7 @@ CREATE TABLE IF NOT EXISTS audit_logs_2026_10 PARTITION OF audit_logs FOR VALUES
 
 初稿标了 4 条,2026-09-04 晚复核后只剩 1 条:
 
-1. **§1 / §2.2:`deploy-bootstrap`(`.ps1`/`.bat`)全新安装的具体调用方式与前置依赖** —— 本次只实跑并验证了"已有部署就地升级"(§2.1,222 上 r8 已按此升级并复验通过);全新安装路径未在任何环境实跑,交付前若客户是全新装机,须先在一台干净机器上把 §2.2 走一遍再交。
+1. **§2.2 全新安装:零起点数据库迁移与服务启动尚未实测通过** —— 2026-09-06 已在 222 隔离目录用 `multitable-onprem-apply-package.ps1` 实跑,解包/派生 env/依赖冻结安装均通过;但迁移卡在"数据库不存在"(建库需要 `CREATEDB` 或超级用户权限,本次不经手数据库口令),服务启动(pm2)未验证。交付前若客户是全新装机,须先由 DBA 建好库、把 §2.2 剩余步骤在一台干净机器上走完再交。
 
 已补实的三条:§1 的包标签/SHA256/钉住提交(r8-20260904,见 §1 表);§3 步骤 1 的界面入口(顶部导航「外接数据源」);§4 的 59/33 计数出处(2026-09-03 对测试库的只读枚举,记录在 `222-rehearsal-full-run-20260904.md` §1 与 memory)。
 
