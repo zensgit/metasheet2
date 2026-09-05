@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { computed, createApp, defineComponent, h, nextTick, reactive, ref, type App as VueApp, type Component } from 'vue'
+import { computed, createApp, defineComponent, h, nextTick, reactive, ref, type App as VueApp, type Component, type PropType } from 'vue'
 // P3-2 (2026-09-05): pure-function coverage for the mentionDisplayFieldId unification lives here,
 // beside the WB `mentionDisplayFieldId` computed it replaces — see that describe block below.
 import { resolveMentionDisplayField, resolvePrimaryField } from '../src/multitable/utils/recordDisplay'
@@ -14,6 +14,17 @@ const showSuccessSpy = vi.fn()
 // vi.hoisted: the mocked module is imported synchronously by MultitableWorkbench.vue, so a plain
 // top-level const would still be in its TDZ when the factory runs.
 const { buildXlsxBufferMock } = vi.hoisted(() => ({ buildXlsxBufferMock: vi.fn(() => new Uint8Array([1, 2, 3])) }))
+// Round 3 (2026-09-05, record inspector v3 refuter finding): identity capture of the `openerEl` prop
+// the workbench binds via `:opener-el="inspectorOpenerEl"` on `<MetaRecordInspector>`. An
+// HTMLElement cannot round-trip through a DOM attribute (a fallthrough attr would stringify it to
+// "[object HTMLButtonElement]"), so the MetaRecordInspector stub below declares the prop and writes
+// the LATEST value it was rendered with — plus a render counter, so an "unchanged after close"
+// assertion can prove the stub really re-rendered rather than the holder simply being stale — into
+// this hoisted holder. `vi.hoisted` for the same reason as `buildXlsxBufferMock` above. Reset per
+// test in `beforeEach`.
+const { inspectorStubSeen } = vi.hoisted(() => ({
+  inspectorStubSeen: { openerEl: null as HTMLElement | null, renders: 0 },
+}))
 vi.mock('../src/multitable/import/xlsx-mapping', async () => {
   const actual = await vi.importActual<any>('../src/multitable/import/xlsx-mapping')
   return { ...actual, buildXlsxBuffer: buildXlsxBufferMock }
@@ -451,6 +462,10 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
     props: {
       visible: { type: Boolean, default: false },
       record: { type: Object, default: null },
+      // Round 3 (2026-09-05): declared so the workbench's `:opener-el` binding arrives as a typed
+      // prop (recorded into `inspectorStubSeen` in `render` below) instead of a stringified
+      // fallthrough attr — see the holder's own comment near the top of this file.
+      openerEl: { type: Object as PropType<HTMLElement | null>, default: null },
       commentTargetFieldId: { type: String, default: null },
       highlightedCommentId: { type: String, default: null },
       mentionSuggestions: { type: Array, default: () => [] },
@@ -460,6 +475,11 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
       'comment-submit', 'comment-reply', 'comment-cancel-reply', 'update:comment-draft',
     ],
     render() {
+      // Round 3 (2026-09-05): record what THIS render was given, visible or not — the real component
+      // instance stays mounted across every open/close (no `v-if` at the workbench call site), so the
+      // prop keeps flowing to it after `visible` drops back to false too.
+      inspectorStubSeen.openerEl = (this.$props.openerEl as HTMLElement | null) ?? null
+      inspectorStubSeen.renders += 1
       if (!this.$props.visible) return null
       const recordId = (this.$props.record as { id?: string } | null)?.id ?? ''
       return h('div', {
@@ -1193,6 +1213,8 @@ describe('MultitableWorkbench view wiring', () => {
     authAccessSnapshot.isAdmin = false
     workbenchMock = createWorkbenchMock()
     gridMock = createGridMock()
+    inspectorStubSeen.openerEl = null
+    inspectorStubSeen.renders = 0
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -3372,6 +3394,55 @@ describe('MultitableWorkbench view wiring', () => {
       await flushUi()
       expect(container!.querySelector('[data-record-drawer]')).toBeNull() // panel closed
       expect(gridSelectedRecordId()).toBe('rec_1') // row STAYS selected — the P2-B assertion itself
+    })
+  })
+
+  // Round 3 (2026-09-05, refuter finding on round 2): round 2 covered `openRecord`'s STATE but never
+  // that the captured opener actually REACHES the child — the `:opener-el="inspectorOpenerEl"`
+  // binding on `<MetaRecordInspector>` (MultitableWorkbench.vue template) had zero coverage as a
+  // binding. The stub near the top of this file now declares `openerEl` and records the exact object
+  // it was rendered with (`inspectorStubSeen`), so this asserts the wiring by IDENTITY.
+  describe('opener-el wiring: openRecord\'s captured opener reaches <MetaRecordInspector openerEl> by identity (§1.1, round 3)', () => {
+    it('expand-record with a focused opener passes that exact element as openerEl; after the inspector emits close the workbench RETAINS it (not cleared)', async () => {
+      mountWorkbench()
+      await flushUi()
+      expect(inspectorStubSeen.renders).toBeGreaterThan(0) // the stub really rendered (holder is live)
+      expect(inspectorStubSeen.openerEl).toBeNull() // nothing opened yet → the ref's initial null
+
+      // A real, connected element as the opener. The grid's `expand-record` handler
+      // (`onExpandRecord(id)` → `openRecord(id)`) passes NO explicit opener, so `openRecord` falls back
+      // to `document.activeElement` at the instant the grid's synchronous emit handler runs — exactly
+      // what the real grid's row-number icon relies on (see `openRecord`'s own doc comment). jsdom's
+      // `.click()` does NOT move focus, so focusing the opener first and then clicking the stub's
+      // expand button leaves it as the active element for that capture.
+      const opener = document.createElement('button')
+      opener.textContent = 'row-expand-opener'
+      document.body.appendChild(opener)
+      opener.focus()
+      expect(document.activeElement).toBe(opener)
+
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer]')).toBeTruthy() // panel open
+      expect(inspectorStubSeen.openerEl).toBe(opener) // IDENTITY — the exact element, not a stringified attr
+      const rendersWhileOpen = inspectorStubSeen.renders
+
+      // Close via the inspector's own `close` emit (× and Esc both route to `onCloseDrawer`). Current
+      // behaviour, asserted explicitly: `onCloseDrawer` sets `inspectorOpen=false` and RETAINS
+      // `selectedRecordId` — and does NOT touch `inspectorOpenerEl`, so the child keeps receiving the
+      // same opener after close. That is safe by construction: the inspector captures its
+      // restore-focus target on the OPEN edge of its own `watch(visible)`, and every later open goes
+      // through `openRecord`, which overwrites `inspectorOpenerEl` BEFORE `selectRecord` flips
+      // `inspectorOpen` — so a retained value is never consulted stale. Pinned here so a future
+      // "clear on close" is a visible, deliberate contract change rather than a silent one.
+      container!.querySelector<HTMLButtonElement>('[data-close-drawer="true"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer]')).toBeNull() // panel closed
+      expect(inspectorStubSeen.renders).toBeGreaterThan(rendersWhileOpen) // the stub DID re-render on close…
+      expect(inspectorStubSeen.openerEl).toBe(opener) // …and was still handed the same opener (retained)
+      expect(opener.isConnected).toBe(true) // and that element is still a valid, connected target
+
+      opener.remove()
     })
   })
 

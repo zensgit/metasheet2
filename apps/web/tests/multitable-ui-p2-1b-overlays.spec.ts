@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { createApp, h, nextTick, ref, type App } from 'vue'
+import { createApp, h, nextTick, ref, type App, type VNodeChild } from 'vue'
 import MtPopover from '../src/multitable/ui/MtPopover.vue'
 import MtMenu from '../src/multitable/ui/MtMenu.vue'
 import MtMenuItem from '../src/multitable/ui/MtMenuItem.vue'
@@ -24,6 +24,21 @@ afterEach(() => {
   document.querySelectorAll('.mt-popover').forEach((el) => el.remove())
 })
 
+// F3 (2026-09-05, round 3): the ONE `createApp({ render })` in this file. `vue/one-component-per-file`
+// counts every `createApp({...})` object literal as a component and reports ALL of them once a file
+// holds more than one — this file held nine. Each test now passes a render CLOSURE; any reactive
+// harness state (the MtPopover tests' `open` ref) lives in the closure, exactly as it did inside the
+// former per-test `setup()`. Assigns the module-level `app`/`container` the `afterEach` above tears
+// down, and returns the (non-null) container for the caller's own queries.
+function mountApp(render: () => VNodeChild): HTMLDivElement {
+  const el = document.createElement('div')
+  document.body.appendChild(el)
+  container = el
+  app = createApp({ render })
+  app.mount(el)
+  return el
+}
+
 function dispatchOutsideMousedown() {
   const outside = document.createElement('div')
   outside.className = 'outside-target'
@@ -34,28 +49,22 @@ function dispatchOutsideMousedown() {
 
 describe('MtPopover', () => {
   it('opens on trigger click and closes again on a second trigger click (v-model:open)', async () => {
-    container = document.createElement('div')
-    document.body.appendChild(container)
-    app = createApp({
-      setup() {
-        const open = ref(false)
-        return () =>
-          h(
-            MtPopover,
-            { open: open.value, 'onUpdate:open': (v: boolean) => { open.value = v } },
-            {
-              trigger: () => h('button', { class: 'trigger-btn' }, 'Open'),
-              default: () => h('div', { class: 'content' }, 'Popover content'),
-            },
-          )
-      },
-    })
-    app.mount(container)
+    const open = ref(false)
+    const c = mountApp(() =>
+      h(
+        MtPopover,
+        { open: open.value, 'onUpdate:open': (v: boolean) => { open.value = v } },
+        {
+          trigger: () => h('button', { class: 'trigger-btn' }, 'Open'),
+          default: () => h('div', { class: 'content' }, 'Popover content'),
+        },
+      ),
+    )
     await nextTick()
 
     expect(document.querySelector('.mt-popover')).toBeNull()
 
-    const trigger = container.querySelector('.trigger-btn') as HTMLButtonElement
+    const trigger = c.querySelector('.trigger-btn') as HTMLButtonElement
     trigger.click()
     await nextTick()
     expect(document.querySelector('.mt-popover')).not.toBeNull()
@@ -67,26 +76,20 @@ describe('MtPopover', () => {
   })
 
   it('closes on Escape while open', async () => {
-    container = document.createElement('div')
-    document.body.appendChild(container)
-    app = createApp({
-      setup() {
-        const open = ref(false)
-        return () =>
-          h(
-            MtPopover,
-            { open: open.value, 'onUpdate:open': (v: boolean) => { open.value = v } },
-            {
-              trigger: () => h('button', { class: 'trigger-btn' }, 'Open'),
-              default: () => h('div', { class: 'content' }, 'Content'),
-            },
-          )
-      },
-    })
-    app.mount(container)
+    const open = ref(false)
+    const c = mountApp(() =>
+      h(
+        MtPopover,
+        { open: open.value, 'onUpdate:open': (v: boolean) => { open.value = v } },
+        {
+          trigger: () => h('button', { class: 'trigger-btn' }, 'Open'),
+          default: () => h('div', { class: 'content' }, 'Content'),
+        },
+      ),
+    )
     await nextTick()
 
-    ;(container.querySelector('.trigger-btn') as HTMLButtonElement).click()
+    ;(c.querySelector('.trigger-btn') as HTMLButtonElement).click()
     await nextTick()
     expect(document.querySelector('.mt-popover')).not.toBeNull()
 
@@ -96,26 +99,20 @@ describe('MtPopover', () => {
   })
 
   it('closes on a click outside the trigger and panel', async () => {
-    container = document.createElement('div')
-    document.body.appendChild(container)
-    app = createApp({
-      setup() {
-        const open = ref(false)
-        return () =>
-          h(
-            MtPopover,
-            { open: open.value, 'onUpdate:open': (v: boolean) => { open.value = v } },
-            {
-              trigger: () => h('button', { class: 'trigger-btn' }, 'Open'),
-              default: () => h('div', { class: 'content' }, 'Content'),
-            },
-          )
-      },
-    })
-    app.mount(container)
+    const open = ref(false)
+    const c = mountApp(() =>
+      h(
+        MtPopover,
+        { open: open.value, 'onUpdate:open': (v: boolean) => { open.value = v } },
+        {
+          trigger: () => h('button', { class: 'trigger-btn' }, 'Open'),
+          default: () => h('div', { class: 'content' }, 'Content'),
+        },
+      ),
+    )
     await nextTick()
 
-    ;(container.querySelector('.trigger-btn') as HTMLButtonElement).click()
+    ;(c.querySelector('.trigger-btn') as HTMLButtonElement).click()
     await nextTick()
     expect(document.querySelector('.mt-popover')).not.toBeNull()
 
@@ -125,26 +122,20 @@ describe('MtPopover', () => {
   })
 
   it('a click INSIDE the panel does not close it', async () => {
-    container = document.createElement('div')
-    document.body.appendChild(container)
-    app = createApp({
-      setup() {
-        const open = ref(false)
-        return () =>
-          h(
-            MtPopover,
-            { open: open.value, 'onUpdate:open': (v: boolean) => { open.value = v } },
-            {
-              trigger: () => h('button', { class: 'trigger-btn' }, 'Open'),
-              default: () => h('div', { class: 'content' }, 'Content'),
-            },
-          )
-      },
-    })
-    app.mount(container)
+    const open = ref(false)
+    const c = mountApp(() =>
+      h(
+        MtPopover,
+        { open: open.value, 'onUpdate:open': (v: boolean) => { open.value = v } },
+        {
+          trigger: () => h('button', { class: 'trigger-btn' }, 'Open'),
+          default: () => h('div', { class: 'content' }, 'Content'),
+        },
+      ),
+    )
     await nextTick()
 
-    ;(container.querySelector('.trigger-btn') as HTMLButtonElement).click()
+    ;(c.querySelector('.trigger-btn') as HTMLButtonElement).click()
     await nextTick()
     const content = document.querySelector('.mt-popover .content') as HTMLElement
     content.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
@@ -155,24 +146,19 @@ describe('MtPopover', () => {
 
 describe('MtMenu / MtMenuItem', () => {
   function mountMenu(onSelect: () => void, onDisabledSelect: () => void) {
-    container = document.createElement('div')
-    document.body.appendChild(container)
-    app = createApp({
-      render: () =>
-        h(
-          MtMenu,
-          {},
-          {
-            trigger: () => h('button', { class: 'trigger-btn' }, 'Actions'),
-            default: () => [
-              h(MtMenuItem, { onSelect }, { default: () => 'Rename' }),
-              h(MtMenuItem, { disabled: true, onSelect: onDisabledSelect }, { default: () => 'Delete' }),
-            ],
-          },
-        ),
-    })
-    app.mount(container!)
-    return container!
+    return mountApp(() =>
+      h(
+        MtMenu,
+        {},
+        {
+          trigger: () => h('button', { class: 'trigger-btn' }, 'Actions'),
+          default: () => [
+            h(MtMenuItem, { onSelect }, { default: () => 'Rename' }),
+            h(MtMenuItem, { disabled: true, onSelect: onDisabledSelect }, { default: () => 'Delete' }),
+          ],
+        },
+      ),
+    )
   }
 
   it('is closed until the trigger is clicked, then shows its MtMenuItem rows', async () => {
@@ -269,25 +255,20 @@ describe('MtMenu / MtMenuItem', () => {
     }
 
     function mountThreeItemMenu(): HTMLDivElement {
-      container = document.createElement('div')
-      document.body.appendChild(container)
-      app = createApp({
-        render: () =>
-          h(
-            MtMenu,
-            {},
-            {
-              trigger: () => h('button', { class: 'trigger-btn' }, 'Actions'),
-              default: () => [
-                h(MtMenuItem, { onSelect: () => {} }, { default: () => 'One' }),
-                h(MtMenuItem, { onSelect: () => {} }, { default: () => 'Two' }),
-                h(MtMenuItem, { onSelect: () => {} }, { default: () => 'Three' }),
-              ],
-            },
-          ),
-      })
-      app.mount(container!)
-      return container!
+      return mountApp(() =>
+        h(
+          MtMenu,
+          {},
+          {
+            trigger: () => h('button', { class: 'trigger-btn' }, 'Actions'),
+            default: () => [
+              h(MtMenuItem, { onSelect: () => {} }, { default: () => 'One' }),
+              h(MtMenuItem, { onSelect: () => {} }, { default: () => 'Two' }),
+              h(MtMenuItem, { onSelect: () => {} }, { default: () => 'Three' }),
+            ],
+          },
+        ),
+      )
     }
 
     // P3-4: the existing consumer-level spec (multitable-record-inspector-header.spec.ts) titles its
@@ -309,6 +290,46 @@ describe('MtMenu / MtMenuItem', () => {
 
       document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }))
       expect(document.activeElement).toBe(items[2]) // wraps past the first item to the last
+    })
+
+    // Round 3 (2026-09-05, refuter finding on round 2): the test above always starts from an
+    // ALREADY-focused item, so it never exercised `currentIndex === -1` — NO item focused yet (focus
+    // still on the trigger / the `role="menu"` container / body: the window before MtMenu's own
+    // nextTick auto-focus lands, or after focus was moved off the items). The pre-fix ArrowUp math
+    // `(currentIndex - 1 + n) % n` with -1 resolves to `n - 2`: the SECOND-TO-LAST item, silently
+    // skipping the last one; ArrowDown's `(-1 + 1) % n === 0` was right only by arithmetic accident.
+    // Positive control: 3 items, nothing focused → ArrowUp lands on items[2] (pre-fix: items[1]),
+    // ArrowDown on items[0]. Mutation: restore the old modulo expression in MtMenu.vue's ArrowUp
+    // branch → the first `toBe(items[2])` below reds with items[1].
+    it('with NO item focused, ArrowUp enters at the LAST item (not n-2) and ArrowDown at the first; last-item ArrowDown still wraps to the first', async () => {
+      const c = mountThreeItemMenu()
+      ;(c.querySelector('.trigger-btn') as HTMLButtonElement).click()
+      await flushUi()
+      const menu = document.querySelector<HTMLElement>('.mt-menu')!
+      const items = Array.from(document.querySelectorAll<HTMLElement>('.mt-menu-item'))
+      expect(items).toHaveLength(3)
+      expect(document.activeElement).toBe(items[0]) // auto-focused on open (the state we now leave)
+
+      // Deterministic "nothing focused": move focus OFF every item (jsdom: `blur()` → body), the
+      // same `document.activeElement` the handler reads before its auto-focus has landed, so
+      // `items.indexOf(active) === -1` inside `onMenuKeydown`. The event is dispatched on the
+      // `role="menu"` container itself — the element that carries the `@keydown` binding.
+      ;(document.activeElement as HTMLElement).blur()
+      expect(items.includes(document.activeElement as HTMLElement)).toBe(false)
+      menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }))
+      expect(document.activeElement).toBe(items[2]) // the LAST item — pre-fix landed on items[1]
+
+      ;(document.activeElement as HTMLElement).blur()
+      expect(items.includes(document.activeElement as HTMLElement)).toBe(false)
+      menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
+      expect(document.activeElement).toBe(items[0]) // enters at the first item
+
+      // Regression guard: the explicit "no item focused" entry must not have broken the ordinary
+      // wrap — from the LAST item, ArrowDown still wraps around to the first.
+      items[2].focus()
+      expect(document.activeElement).toBe(items[2])
+      items[2].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
+      expect(document.activeElement).toBe(items[0])
     })
 
     // P3-6: the pre-fix implementation captured `document.activeElement` at open time as "the
@@ -337,31 +358,22 @@ describe('MtMenu / MtMenuItem', () => {
 
 describe('MtPanel', () => {
   it('renders its default slot content inside a .mt-panel container', () => {
-    container = document.createElement('div')
-    document.body.appendChild(container)
-    app = createApp({ render: () => h(MtPanel, {}, { default: () => h('div', { class: 'inner' }, 'Grouped') }) })
-    app.mount(container)
-    const panel = container.querySelector('.mt-panel') as HTMLElement
+    const c = mountApp(() => h(MtPanel, {}, { default: () => h('div', { class: 'inner' }, 'Grouped') }))
+    const panel = c.querySelector('.mt-panel') as HTMLElement
     expect(panel).not.toBeNull()
     expect(panel.querySelector('.inner')?.textContent).toBe('Grouped')
   })
 
   it('applies the padding and shadow modifier classes', () => {
-    container = document.createElement('div')
-    document.body.appendChild(container)
-    app = createApp({ render: () => h(MtPanel, { padding: 'sm', shadow: true }, { default: () => 'x' }) })
-    app.mount(container)
-    const panel = container.querySelector('.mt-panel') as HTMLElement
+    const c = mountApp(() => h(MtPanel, { padding: 'sm', shadow: true }, { default: () => 'x' }))
+    const panel = c.querySelector('.mt-panel') as HTMLElement
     expect(panel.classList.contains('mt-panel--sm')).toBe(true)
     expect(panel.classList.contains('mt-panel--shadow')).toBe(true)
   })
 
   it('defaults to md padding and no shadow', () => {
-    container = document.createElement('div')
-    document.body.appendChild(container)
-    app = createApp({ render: () => h(MtPanel, {}, { default: () => 'x' }) })
-    app.mount(container)
-    const panel = container.querySelector('.mt-panel') as HTMLElement
+    const c = mountApp(() => h(MtPanel, {}, { default: () => 'x' }))
+    const panel = c.querySelector('.mt-panel') as HTMLElement
     expect(panel.classList.contains('mt-panel--md')).toBe(true)
     expect(panel.classList.contains('mt-panel--shadow')).toBe(false)
   })

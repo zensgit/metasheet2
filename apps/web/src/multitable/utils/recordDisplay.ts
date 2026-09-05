@@ -54,12 +54,26 @@ export function resolveCanComment(rowActions: MetaRowActions | null | undefined,
  * as the human label everywhere else a record needs a short display name. Hoisted here to replace
  * two WB idioms that had quietly diverged (MultitableWorkbench.vue's `bulkFillRecordName`, which
  * preferred the first `string`/`longText` field, and `captureSelectionLabels`/`batchRecordLabel`,
- * which already used the field at position 0) — both now delegate here so the inspector title and
- * every other "what should we call this record" call site read the exact same field. Position 0 in
- * the caller's own field-ordering (the grid's `visibleFields`, already view-ordered) is the
- * convention itself, matching the second idiom exactly and the Airtable/Feishu "first field is the
- * primary field" convention; callers needing a text VALUE (not just the field) still guard on
+ * which already used the field at position 0) — all of them now delegate here, so there is ONE
+ * definition of the rule ("position 0 of the array you hand me", the Airtable/Feishu "first field is
+ * the primary field" convention). Callers needing a text VALUE (not just the field) still guard on
  * `typeof value === 'string'` themselves, same discipline `bulkFillRecordName` already applied.
+ *
+ * F1 correction (2026-09-05, round 3 — an earlier version of this comment claimed every call site
+ * "read the exact same field"; that overclaimed). One RULE does not mean one FIELD, because the
+ * callers hand this helper DIFFERENT arrays:
+ *   - MetaRecordInspector.vue's title reads `resolvePrimaryField(props.fields)`, and the workbench
+ *     binds `:fields="scopedAllFields"` — SHEET order, with view-hidden fields still present (only
+ *     per-subject field-permission-hidden fields are filtered out). The title is sheet-order field 0.
+ *   - `bulkFillRecordName` / `captureSelectionLabels` / `batchRecordLabel` (MultitableWorkbench.vue)
+ *     read `resolvePrimaryField(grid.visibleFields.value)` — VIEW order, view-hidden fields removed.
+ * The two agree whenever the active view shows field 0 first (the common case), and DIVERGE whenever
+ * a view hides or reorders sheet-field 0: the inspector titles the record by a field the user may not
+ * even see in the grid, while the bulk/label sites name it by the view's first visible field. Pinned
+ * by multitable-record-inspector-header.spec.ts ("F1: title reads the sheet-order first field") so
+ * the divergence is documented behavior, not an assumption; reconciling it (a single primary-field
+ * source both sides read) is a follow-up — deliberately NOT changed here, since either direction is a
+ * user-visible contract change that needs its own decision.
  */
 export function resolvePrimaryField(fields: MetaField[] | null | undefined): MetaField | undefined {
   return fields?.[0]

@@ -124,8 +124,38 @@ function mountDrawer(options: HarnessOptions = {}) {
 // found inside `container` with no menu interaction, unchanged from before.
 async function openKebabMenu(root: HTMLElement) {
   const trigger = root.querySelector<HTMLButtonElement>('[data-testid="record-inspector-menu"]')
-  trigger?.click()
+  // N3 (2026-09-05, round 3): fail HERE, by name, if the kebab is missing — not later as a null-deref
+  // on whichever menu-item helper the calling test happens to read next.
+  expect(trigger).not.toBeNull()
+  // N3 root cause (2026-09-05, round 3). Symptom: "delete button renders as an MtMenuItem row" failed
+  // 1/8 sibling-set runs; with the strict settle below in place the SAME failure reproduced ~1 in 5
+  // full-file runs as "menu never opened" — in `duplicate button > hides when there is no record`,
+  // which the old lenient helper (`trigger?.click(); await flushUi()`) let pass VACUOUSLY, since
+  // `dupBtn()` is trivially null when the menu never opened at all. Nothing in the open path is
+  // timer-driven (MtPopover / MtMenu / the inspector use no setTimeout or rAF; ResizeObserver is
+  // absent in jsdom), so there was no "missing await" to add. The only millisecond-resolution
+  // nondeterminism on the path is Vue's own DOM event invoker (@vue/runtime-dom `createInvoker`,
+  // Vue 3.5.24): each handler is stamped `attached = Date.now()` when patched; the FIRST Vue handler
+  // an event meets stamps the event `_vts = Date.now()`; any OUTER handler then DROPS the event when
+  // `_vts <= attached`. The kebab is MtIconButton → MtButton, whose root `<button @click>` is that
+  // first handler, and MtPopover's `.mt-popover__trigger` `@click` — the one that actually opens the
+  // menu — is the outer one. So whenever `mountDrawer` + `flushUi()` + this click all land inside ONE
+  // millisecond (routine once the JIT is warm, i.e. for the late tests in this file), the opening
+  // click is silently discarded. (The overlays spec's plain `<button>` trigger has no inner Vue
+  // handler, so it never hits this.) Reproduced deterministically with a Date.now()-pinned
+  // micro-repro (same stamp → outer handler skipped while the inner one runs; +1ms → both run; run
+  // and deleted, see the round-3 commit body). Fix: let ≥1ms of REAL time elapse after mount before
+  // the click, so `Date.now()` has moved past every `attached` stamp. (No test in this file uses fake
+  // timers, so a real-timer wait is safe here.)
+  await new Promise<void>((resolve) => setTimeout(resolve, 2))
+  trigger!.click()
   await flushUi()
+  // Bounded settle, kept alongside the fix: wait until the Teleported `.mt-menu` is actually in
+  // `document.body` (hard cap of 10 further rounds), then ASSERT it is — so any future "menu never
+  // opened" reports by name HERE, not as a downstream null-deref, and can never again pass a
+  // `hides when …` test vacuously.
+  for (let i = 0; i < 10 && !document.querySelector('.mt-menu'); i += 1) await flushUi()
+  expect(document.querySelector('.mt-menu')).not.toBeNull()
 }
 const watchBtn = () => document.querySelector('.meta-record-drawer__btn--watch') as HTMLButtonElement | null
 const workflowBtn = () => document.querySelector('button[title="Open workflow designer"]') as HTMLButtonElement | null

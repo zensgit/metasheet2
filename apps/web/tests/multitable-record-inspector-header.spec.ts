@@ -16,12 +16,13 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick, type App } from 'vue'
+import { createApp, h, nextTick, ref, type App, type VNodeChild } from 'vue'
 import MetaRecordInspector from '../src/multitable/components/MetaRecordInspector.vue'
 import type { MetaField, MetaRecord } from '../src/multitable/types'
 import { useLocale } from '../src/composables/useLocale'
 import { recordLabel } from '../src/multitable/utils/meta-record-labels'
 import { metaCoreLabel } from '../src/multitable/utils/meta-core-labels'
+import { formatRecordFieldValue, resolvePrimaryField } from '../src/multitable/utils/recordDisplay'
 
 async function flushUi(cycles = 4) {
   for (let i = 0; i < cycles; i += 1) {
@@ -77,36 +78,45 @@ interface HarnessOptions {
 // once per file makes correct teardown load-bearing here in a way most single-mount specs never hit.
 const mountedApps: App[] = []
 
-function mountInspector(options: HarnessOptions = {}): { container: HTMLElement; app: App } {
+// F3 (2026-09-05, round 3): the ONE `createApp({ render })` in this file. `vue/one-component-per-file`
+// counts every `createApp({...})` / `defineComponent({...})` object literal as a component and reports
+// ALL of them once a file holds more than one — this file held three (mountInspector,
+// mountToggleableInspector, and the record-prop re-sync test's inline app). Every mount now routes
+// through this single factory with a render CLOSURE; reactive harness state lives in `ref`s the
+// closure reads (so a later `someRef.value = …` re-renders exactly as the old `data()`-based inline
+// component did). One component definition per file — no disable comment needed.
+function mountApp(render: () => VNodeChild): { container: HTMLElement; app: App } {
   const container = document.createElement('div')
   document.body.appendChild(container)
-  const app = createApp({
-    render() {
-      return h(MetaRecordInspector, {
-        visible: true,
-        record: 'record' in options ? options.record : RECORD,
-        fields: options.fields ?? FIELDS,
-        canEdit: options.canEdit ?? true,
-        canComment: options.canComment ?? false,
-        canDelete: options.canDelete ?? false,
-        canCreate: options.canCreate ?? false,
-        canManageAutomation: options.canManageAutomation ?? false,
-        canManageRecordPermissions: options.canManageRecordPermissions ?? false,
-        recordIds: options.recordIds ?? ['rec_1'],
-        rowActions: options.rowActions as any,
-        fieldPermissions: options.fieldPermissions as any,
-        sheetId: 'sheet_1',
-        apiClient: fakeApiClient() as any,
-        openerEl: options.openerEl,
-        ...(options.onClose ? { onClose: options.onClose } : {}),
-        ...(options.onNavigate ? { onNavigate: options.onNavigate } : {}),
-        ...(options.onPatch ? { onPatch: options.onPatch } : {}),
-      })
-    },
-  })
+  const app = createApp({ render })
   app.mount(container)
   mountedApps.push(app)
   return { container, app }
+}
+
+function mountInspector(options: HarnessOptions = {}): { container: HTMLElement; app: App } {
+  return mountApp(() =>
+    h(MetaRecordInspector, {
+      visible: true,
+      record: 'record' in options ? options.record : RECORD,
+      fields: options.fields ?? FIELDS,
+      canEdit: options.canEdit ?? true,
+      canComment: options.canComment ?? false,
+      canDelete: options.canDelete ?? false,
+      canCreate: options.canCreate ?? false,
+      canManageAutomation: options.canManageAutomation ?? false,
+      canManageRecordPermissions: options.canManageRecordPermissions ?? false,
+      recordIds: options.recordIds ?? ['rec_1'],
+      rowActions: options.rowActions as any,
+      fieldPermissions: options.fieldPermissions as any,
+      sheetId: 'sheet_1',
+      apiClient: fakeApiClient() as any,
+      openerEl: options.openerEl,
+      ...(options.onClose ? { onClose: options.onClose } : {}),
+      ...(options.onNavigate ? { onNavigate: options.onNavigate } : {}),
+      ...(options.onPatch ? { onPatch: options.onPatch } : {}),
+    }),
+  )
 }
 
 // P1 (2026-09-05, focus capture/restore fix): the REAL workbench mounts this component's instance
@@ -118,36 +128,34 @@ function mountInspector(options: HarnessOptions = {}): { container: HTMLElement;
 // persistent component instance, `visible` and `openerEl` both reactive so a test can drive the
 // exact false→true→false→true sequence the finding names.
 function mountToggleableInspector(): { container: HTMLElement; app: App; setVisible: (v: boolean) => void; setOpener: (el: HTMLElement | null) => void } {
-  const container = document.createElement('div')
-  document.body.appendChild(container)
-  let setVisible: (v: boolean) => void = () => {}
-  let setOpener: (el: HTMLElement | null) => void = () => {}
-  const app = createApp({
-    data() {
-      return { visible: false, openerEl: null as HTMLElement | null }
-    },
-    created() {
-      setVisible = (v: boolean) => { this.visible = v }
-      setOpener = (el: HTMLElement | null) => { this.openerEl = el }
-    },
-    render() {
-      return h(MetaRecordInspector, {
-        visible: this.visible,
-        record: RECORD,
-        fields: FIELDS,
-        canEdit: true,
-        canComment: false,
-        canDelete: false,
-        recordIds: ['rec_1'],
-        sheetId: 'sheet_1',
-        apiClient: fakeApiClient() as any,
-        openerEl: this.openerEl,
-      })
-    },
-  })
-  app.mount(container)
-  mountedApps.push(app)
-  return { container, app, setVisible, setOpener }
+  // F3 (round 3): `ref`s read inside the render closure replace the previous inline component's
+  // `data()` — same reactivity (a write re-renders the ONE persistent MetaRecordInspector instance),
+  // without a second `createApp({...})` object literal in this file. `apiClient` is created once here
+  // rather than per render so its identity stays stable across the visible/opener toggles, matching
+  // how the real workbench passes a single long-lived client.
+  const visible = ref(false)
+  const openerEl = ref<HTMLElement | null>(null)
+  const apiClient = fakeApiClient() as any
+  const { container, app } = mountApp(() =>
+    h(MetaRecordInspector, {
+      visible: visible.value,
+      record: RECORD,
+      fields: FIELDS,
+      canEdit: true,
+      canComment: false,
+      canDelete: false,
+      recordIds: ['rec_1'],
+      sheetId: 'sheet_1',
+      apiClient,
+      openerEl: openerEl.value,
+    }),
+  )
+  return {
+    container,
+    app,
+    setVisible: (v: boolean) => { visible.value = v },
+    setOpener: (el: HTMLElement | null) => { openerEl.value = el },
+  }
 }
 
 afterEach(() => {
@@ -169,6 +177,14 @@ async function openKebab(root: HTMLElement) {
   // logic (see that file's own comment) depends on.
   const trigger = kebabTrigger(root)
   trigger.focus()
+  // N3 (2026-09-05, round 3): identical exposure to the race fixed in
+  // multitable-record-drawer-t5-migration.spec.ts's `openKebabMenu` (see its comment for the full
+  // mechanism and the Date.now()-pinned proof): Vue's DOM event invoker drops the click at MtPopover's
+  // OUTER trigger handler whenever the click lands in the same millisecond that handler was attached,
+  // because the inner MtButton `@click` stamps the event first. Not yet observed failing in THIS file,
+  // but every kebab-opening test here mounts the same component and clicks the same MtIconButton the
+  // same way, so the latent flake is closed here too: let ≥1ms of real time elapse before clicking.
+  await new Promise<void>((resolve) => setTimeout(resolve, 2))
   trigger.click()
   await flushUi()
 }
@@ -195,6 +211,33 @@ function assertToolbarChildSetIsClosed(toolbar: Element) {
   }
 }
 
+// G1 (2026-09-05, round 3): the DIRECT-child allow-list above bounds which boxes sit in the toolbar
+// row, but a labelled control NESTED inside an allowed container (e.g. a stray `<button>` inside
+// `.meta-record-drawer__nav`) sails through it. This closes that hole: EVERY interactive descendant
+// of the toolbar (`button`, `a`, `[role="button"]`, at any depth) must be one of the seven known
+// controls — identified by data-testid / class, or, for the two nav MtIconButtons (which carry
+// neither), by their `aria-label` read through `recordLabel` so the pin follows the label table.
+// `expectedCount` pins the set's SIZE too, so a duplicate of an allowed control is also caught.
+// Mutation: add `<button aria-label="x">` inside `.meta-record-drawer__nav` in the component template
+// → `offenders` is non-empty here (and the count is off by one) → red.
+function allowedToolbarControlSelector(): string {
+  return [
+    `.meta-record-drawer__nav > button[aria-label="${recordLabel('record.previous', false)}"]`,
+    `.meta-record-drawer__nav > button[aria-label="${recordLabel('record.next', false)}"]`,
+    '.meta-record-drawer__btn--comment',
+    '[data-testid="record-inspector-copy-link"]',
+    '[data-testid="record-inspector-expand-toggle"]',
+    '[data-testid="record-inspector-menu"]',
+    '.meta-record-drawer__close',
+  ].join(', ')
+}
+function assertToolbarControlSetIsClosed(toolbar: Element, expectedCount: number) {
+  const controls = Array.from(toolbar.querySelectorAll<HTMLElement>('button, a, [role="button"]'))
+  const offenders = controls.filter((el) => !el.matches(allowedToolbarControlSelector())).map((el) => el.outerHTML)
+  expect(offenders).toEqual([])
+  expect(controls).toHaveLength(expectedCount)
+}
+
 describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
   describe('Row A toolbar structure', () => {
     it('renders exactly one .meta-record-drawer__toolbar row', async () => {
@@ -213,6 +256,9 @@ describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
       expect(toolbar.querySelector('[data-testid="record-inspector-expand-toggle"]')).toBeTruthy()
       expect(toolbar.querySelector('[data-testid="record-inspector-menu"]')).toBeTruthy()
       expect(toolbar.querySelector('.meta-record-drawer__close')).toBeTruthy()
+      // G1: with canComment false the interactive descendant set is exactly {prev, next, copy-link,
+      // expand, kebab, close} — six, at any depth, nothing else.
+      assertToolbarControlSetIsClosed(toolbar, 6)
     })
 
     // [source] jsdom performs no layout, so an actual overflow/wrap can't be observed here — this
@@ -246,6 +292,10 @@ describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
       expect(toolbar.querySelector('.meta-record-drawer__btn--comment')).toBeTruthy()
       expect(toolbar.children.length).toBeGreaterThanOrEqual(6)
       assertToolbarChildSetIsClosed(toolbar)
+      // G1: every gate on → the interactive descendant set is exactly the seven known controls
+      // (prev, next, comment chip, copy-link, expand, kebab, close), at any depth — a labelled
+      // control smuggled INSIDE an allowed container (the direct-child check's blind spot) reds here.
+      assertToolbarControlSetIsClosed(toolbar, 7)
     })
 
     // P3-1 (2026-09-05): the allow-list test above bounds WHICH elements the toolbar may contain
@@ -263,8 +313,38 @@ describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
       const navPosRule = src.match(/\.meta-record-drawer__nav-pos\s*\{[^}]*\}/)?.[0] ?? ''
       expect(navPosRule).toMatch(/max-width:\s*64px/)
       expect(navPosRule).toMatch(/text-overflow:\s*ellipsis/)
+      // G2 (2026-09-05, round 3): `text-overflow: ellipsis` is inert without BOTH `overflow: hidden`
+      // (the box must actually clip) and `white-space: nowrap` (the text must stay on the one line
+      // that overflows) — pinning `max-width` + `text-overflow` alone would let either be dropped
+      // with every assertion here still green. Mutation: delete `overflow: hidden` from the
+      // `.meta-record-drawer__nav-pos` rule → the first line below reds.
+      expect(navPosRule).toMatch(/overflow:\s*hidden/)
+      expect(navPosRule).toMatch(/white-space:\s*nowrap/)
       const commentBtnRule = src.match(/\.meta-record-drawer__btn--comment\s*\{[^}]*\}/)?.[0] ?? ''
       expect(commentBtnRule).toMatch(/max-width:\s*140px/)
+    })
+
+    // N2 (2026-09-05, round 3; real-browser measured by the reviewer — Chromium, 560px panel, long
+    // label injected: the chip's inline-flex root grew to the label's 239px while the 140px button
+    // clipped it, so the label never overflowed ITSELF and `text-overflow: ellipsis` never rendered).
+    // The fix lives entirely in this component's scoped `:deep()` rules (MetaCommentActionChip.vue is
+    // comment-affordance-locked and untouched): the chip root becomes a block-level `flex` box capped
+    // at `max-width: 100%` of the button's content box, and the label a `flex: 1 1 auto; min-width: 0`
+    // item that overflows itself — the box the ellipsis renders on. Source-text pin ONLY: jsdom cannot
+    // lay out, so the rendered ellipsis (label clientWidth < scrollWidth, button ≤ 140px, toolbar one
+    // row) is re-measured in a real browser by the reviewer, not by this test.
+    it('[source] the comment-chip :deep() rules bound the chip root (flex, min-width 0, max-width 100%) and make the label an overflowing flex item (jsdom cannot verify the rendered ellipsis)', () => {
+      const src = readSrc('src/multitable/components/MetaRecordInspector.vue')
+      const rootRule = src.match(/\.meta-record-drawer__btn--comment :deep\(\.meta-comment-action-chip\)\s*\{[^}]*\}/)?.[0] ?? ''
+      expect(rootRule).toMatch(/display:\s*flex/)
+      expect(rootRule).toMatch(/min-width:\s*0/)
+      expect(rootRule).toMatch(/max-width:\s*100%/)
+      const labelRule = src.match(/\.meta-record-drawer__btn--comment :deep\(\.meta-comment-action-chip__label\)\s*\{[^}]*\}/)?.[0] ?? ''
+      expect(labelRule).toMatch(/flex:\s*1 1 auto/)
+      expect(labelRule).toMatch(/min-width:\s*0/)
+      expect(labelRule).toMatch(/overflow:\s*hidden/)
+      expect(labelRule).toMatch(/text-overflow:\s*ellipsis/)
+      expect(labelRule).toMatch(/white-space:\s*nowrap/)
     })
 
     // P2-A (2026-09-05, design brief §1.3): `.meta-record-drawer__tabs-bar` is the container-query
@@ -374,6 +454,42 @@ describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
       expect(onClose).not.toHaveBeenCalled()
     })
 
+    // Round 3 (2026-09-05, refuter finding on round 2): the COMMON real-world Escape path — focus on a
+    // menu ITEM (MtMenu auto-focused it on open), not on the trigger — was asserted for "menu closed +
+    // focus back on the trigger" on MtMenu in isolation (multitable-ui-p2-1b-overlays.spec.ts) and in
+    // this file's `MtMenu roving + Escape` block, but never together with (c) "the REAL inspector did
+    // NOT emit close". Mechanism as implemented (read before writing this): the menu content is
+    // Teleported to `document.body`, so this keydown never bubbles into `.meta-record-drawer` and
+    // never reaches the root `onInspectorKeydown` at all — MtMenu's own `.mt-menu` handler consumes
+    // it (`preventDefault` + `isOpen=false` + a nextTick refocus of the trigger it captured at open);
+    // the root handler's `defaultPrevented` early-return is an independent second guard for a
+    // non-Teleported Escape. `defaultPrevented` is asserted below so the MECHANISM is pinned, not
+    // just the outcome. Mutation: delete the `trigger.focus()` refocus in MtMenu.vue's Escape branch
+    // → assertion (b) reds (activeElement is `body`, not the kebab) while the menu still closes.
+    it('Escape dispatched on the FOCUSED MENU ITEM closes the menu, returns focus to the kebab trigger, and emits NO close (real MetaRecordInspector)', async () => {
+      const onClose = vi.fn()
+      const { container } = mountInspector({ onClose })
+      const trigger = kebabTrigger(container)
+      await flushUi() // settle the subscription fetch before opening — see the roving test's own comment
+      await openKebab(container)
+      const items = menuItems()
+      expect(items.length).toBeGreaterThan(0)
+      const focusedItem = document.activeElement as HTMLElement
+      expect(items).toContain(focusedItem) // discriminating setup: focus IS on a menu item…
+      expect(focusedItem).not.toBe(trigger) // …not on the trigger (the sibling test above covers that)
+
+      const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+      focusedItem.dispatchEvent(escape)
+      expect(escape.defaultPrevented).toBe(true) // MtMenu consumed it — the mechanism itself
+      await flushUi()
+
+      expect(menuItems()).toHaveLength(0) // (a) menu closed — Teleported panel removed
+      expect(trigger.getAttribute('aria-expanded')).toBe('false')
+      expect(document.activeElement).toBe(trigger) // (b) focus returned to the kebab trigger
+      expect(onClose).not.toHaveBeenCalled() // (c) the PANEL did not close
+      expect(container.querySelector('.meta-record-drawer')).toBeTruthy() // still rendered
+    })
+
     it('positive control: Escape with the menu CLOSED emits close exactly once', async () => {
       const onClose = vi.fn()
       const { container } = mountInspector({ onClose })
@@ -433,33 +549,25 @@ describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
     })
 
     it('prop change (record.data) re-syncs the input value (server-rejection revert)', async () => {
-      const container = document.createElement('div')
-      document.body.appendChild(container)
-      let setRecord: (r: MetaRecord) => void = () => {}
-      const app = createApp({
-        data() {
-          return { record: RECORD }
-        },
-        created() {
-          setRecord = (r: MetaRecord) => { this.record = r }
-        },
-        render() {
-          return h(MetaRecordInspector, {
-            visible: true,
-            record: this.record,
-            fields: FIELDS,
-            canEdit: true,
-            canComment: false,
-            canDelete: false,
-            recordIds: ['rec_1'],
-            sheetId: 'sheet_1',
-            apiClient: fakeApiClient() as any,
-          })
-        },
-      })
-      app.mount(container)
+      // F3 (round 3): a `ref` read by the render closure replaces this test's former inline
+      // `data()`/`created()` component (see `mountApp`'s own comment) — identical reactivity.
+      const record = ref<MetaRecord>(RECORD)
+      const apiClient = fakeApiClient() as any
+      const { container, app } = mountApp(() =>
+        h(MetaRecordInspector, {
+          visible: true,
+          record: record.value,
+          fields: FIELDS,
+          canEdit: true,
+          canComment: false,
+          canDelete: false,
+          recordIds: ['rec_1'],
+          sheetId: 'sheet_1',
+          apiClient,
+        }),
+      )
       await flushUi()
-      setRecord({ id: 'rec_1', version: 2, data: { fld_title: 'Reverted', fld_notes: '' } } as MetaRecord)
+      record.value = { id: 'rec_1', version: 2, data: { fld_title: 'Reverted', fld_notes: '' } } as MetaRecord
       await flushUi()
       const input = container.querySelector<HTMLInputElement>('.meta-record-drawer__title-input')!
       expect(input.value).toBe('Reverted')
@@ -656,6 +764,39 @@ describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
 
       opener1.remove()
       opener2.remove()
+    })
+  })
+
+  // F1 (2026-09-05, round 3): `resolvePrimaryField(fields)` is literally `fields[0]` — and THIS
+  // component reads it over its `fields` PROP, which the workbench binds as `scopedAllFields` (SHEET
+  // order, view-hidden fields still present; only per-subject field-permission-hidden fields removed).
+  // The three WB label call sites (`bulkFillRecordName` / `captureSelectionLabels` / `batchRecordLabel`)
+  // read the SAME helper over `grid.visibleFields` (VIEW order, view-hidden removed) — so the two
+  // answers diverge whenever a view hides or reorders sheet-field 0. This pins what the inspector
+  // actually does today (sheet-order field 0, even a hidden, non-text one), so the divergence is
+  // documented behavior with a test attached (see recordDisplay.ts's F1 comment), not an assumption.
+  describe('F1: title reads the sheet-order first field (fields[0]) — not the first view-visible text field', () => {
+    it('with fields[0] a property-hidden number field, the title shows ITS formatted value, not the string field a hidden-filtered (view) order would pick', async () => {
+      const HIDDEN_NUMBER = { id: 'fld_amount', name: 'Amount', type: 'number', property: { hidden: true } } as unknown as MetaField
+      const fields: MetaField[] = [HIDDEN_NUMBER, TITLE_FIELD, NOTES_FIELD]
+      const record = { id: 'rec_1', version: 1, data: { fld_amount: 42, fld_title: 'Alpha', fld_notes: '' } } as unknown as MetaRecord
+
+      // The helper itself: position 0 — no type filter, no hidden filter.
+      expect(resolvePrimaryField(fields)?.id).toBe('fld_amount')
+      // What a view that hides field 0 hands the WB label call sites instead — the divergence F1 names.
+      const viewVisible = fields.filter((f) => !(f as { property?: { hidden?: boolean } }).property?.hidden)
+      expect(resolvePrimaryField(viewVisible)?.id).toBe('fld_title')
+
+      const { container } = mountInspector({ fields, record })
+      await flushUi()
+      // `number` is not `string` → no editable title input; the read-only title text renders field 0's
+      // value through the SAME formatter the component uses.
+      expect(container.querySelector('.meta-record-drawer__title-input')).toBeNull()
+      const title = container.querySelector('.meta-record-drawer__title-text')!
+      expect(title).toBeTruthy()
+      expect(title.textContent).toBe(formatRecordFieldValue(HIDDEN_NUMBER, 42, { isZh: false }))
+      expect(title.textContent).toContain('42')
+      expect(title.textContent).not.toBe('Alpha') // NOT the first view-visible string field
     })
   })
 

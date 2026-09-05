@@ -90,14 +90,22 @@ function onMenuKeydown(event: KeyboardEvent) {
   if (items.length === 0) return
   const active = document.activeElement as HTMLElement | null
   const currentIndex = active ? items.indexOf(active) : -1
+  // Round 3 (2026-09-05, refuter finding): `currentIndex === -1` means NO item is focused yet — focus
+  // is still on the trigger / the `role="menu"` container / body (the window between the menu
+  // rendering and the `watch(isOpen)` auto-focus above landing a nextTick later, or after focus was
+  // moved off the items). The pre-fix branches fed -1 straight into the wrap arithmetic: ArrowDown's
+  // `(-1 + 1) % n === 0` was right only by accident, and ArrowUp's `(-1 - 1 + n) % n === n - 2`
+  // landed on the SECOND-TO-LAST item, silently skipping the last one. Both entry points are now
+  // named explicitly; the wrap math below runs only when an item really is focused.
+  const noItemFocused = currentIndex < 0
   switch (event.key) {
     case 'ArrowDown':
       event.preventDefault()
-      items[(currentIndex + 1 + items.length) % items.length]?.focus()
+      items[noItemFocused ? 0 : (currentIndex + 1) % items.length]?.focus()
       break
     case 'ArrowUp':
       event.preventDefault()
-      items[(currentIndex - 1 + items.length) % items.length]?.focus()
+      items[noItemFocused ? items.length - 1 : (currentIndex - 1 + items.length) % items.length]?.focus()
       break
     case 'Home':
       event.preventDefault()

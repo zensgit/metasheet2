@@ -1489,11 +1489,30 @@ async function toggleRecordSubscription() {
    state dot + the text label this file already hides below 480px container width, see the
    `:deep(.meta-comment-action-chip__label)` rule above) — so the bound lives on THIS button, the
    chip's own container, instead: `max-width` caps how wide the chip can ever push this flex item, and
-   the `:deep()` ellipsis rule just below (same established deep-into-a-locked-component idiom as the
-   <480px label-hide rule above — the LOCKED component's own <style> is untouched either way) keeps an
-   unexpectedly long label truncating rather than visually overflowing this cap. */
+   the `:deep()` rules just below (same established deep-into-a-locked-component idiom as the <480px
+   label-hide rule above — the LOCKED component's own <style> is untouched either way) keep an
+   unexpectedly long label truncating rather than visually overflowing this cap.
+   N2 (2026-09-05, round 3 — real-browser measured by the reviewer, Chromium, 560px panel, long label
+   injected): the ORIGINAL label-only ellipsis rule was inert. The chip's own root
+   (`.meta-comment-action-chip`, `display: inline-flex` in its locked stylesheet) is shrink-to-fit,
+   and shrink-to-fit never goes below its min-content width — which, with the label's own `white-
+   space: nowrap`, IS the full label width. So the chip grew to the label (239px measured), the label
+   never overflowed ITSELF (scrollWidth === clientWidth), `text-overflow: ellipsis` had nothing to
+   render, and the 140px BUTTON did the clipping (scrollWidth 270 vs clientWidth 138) with a hard cut.
+   Fix, kept inside this component's scoped `:deep()` rules: make the chip root a BLOCK-level flex box
+   (`display: flex` — a block box's used width is fill-available, NOT clamped by min-content the way
+   shrink-to-fit is) capped at `max-width: 100%` of this button's content box, and make the label a
+   `flex: 1 1 auto; min-width: 0` flex ITEM so it is the box that shrinks and overflows itself — that
+   is the box `text-overflow: ellipsis` renders on. `white-space: nowrap` is restated here (the chip's
+   own rule already sets it) so this rule is self-sufficient for the one-line ellipsis. For a SHORT
+   label nothing visibly changes: this button is a flex item of the toolbar with `flex-basis: auto`,
+   so it still hugs the chip's max-content and the chip fills exactly that. jsdom cannot lay any of
+   this out — the header spec pins these declarations as source text only; the rendered ellipsis
+   (label clientWidth < scrollWidth, button ≤ 140px, toolbar one row) is re-measured in a real
+   browser by the reviewer, not by the test suite. */
 .meta-record-drawer__btn--comment { border-radius: 999px; padding: 3px 8px; max-width: 140px; overflow: hidden; }
-.meta-record-drawer__btn--comment :deep(.meta-comment-action-chip__label) { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.meta-record-drawer__btn--comment :deep(.meta-comment-action-chip) { display: flex; min-width: 0; max-width: 100%; }
+.meta-record-drawer__btn--comment :deep(.meta-comment-action-chip__label) { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta-record-drawer__btn--comment.meta-record-drawer__btn--comment--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
 .meta-record-drawer__btn--comment.meta-record-drawer__btn--comment--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 /* W2 S4: inbox link + badge moved verbatim (same values) from MetaCommentsDrawer.vue's own header
@@ -1631,17 +1650,26 @@ async function toggleRecordSubscription() {
    is exactly the "pill look" this change is required to keep. */
 .meta-record-drawer__tabs { display: inline-flex; flex-wrap: wrap; row-gap: 4px; column-gap: 4px; padding: 3px; border: 1px solid #e5e7eb; border-radius: 999px; background: #f8fafc; }
 .meta-record-drawer__tab { min-width: 76px; padding: 5px 12px; border: none; border-radius: 999px; background: transparent; color: #64748b; cursor: pointer; font-size: 12px; font-weight: 600; }
-/* P2-A (2026-09-05, PR-A §1.3): below 420px container width the pill grows to fill
-   `.meta-record-drawer__tabs-bar`'s full width instead of staying shrink-to-fit (`flex: 1` on this
-   ALREADY-`display: inline-flex` pill, see the base rule above -- measured to reach the SAME rendered
-   width with or without `display: flex` on the bar itself for the shipped label set, see that rule's
-   own comment for the measured result and its stated, deliberately narrow scope), and `min-width: 0`
-   lets it shrink past its own children's combined natural width; each tab ALSO
-   gets `flex: 1; min-width: 0` (its parent, this pill, is ALREADY `display: inline-flex` at any
-   width, so this half needs no extra parent change) so the row's width divides evenly across all
-   four instead of every tab holding at its own `min-width:
-   76px` floor -- 4 x 76px + gaps alone exceeds the panel's content width at the 360px floor, which is
-   exactly what forced the `flex-wrap: wrap` fallback above to engage there before this query existed.
+/* P2-A (2026-09-05, PR-A §1.3): below 420px container width the four tabs stay on ONE row at the
+   360px panel floor. N1 correction (2026-09-05, round 3): an earlier version of this comment
+   attributed the pill's width to `flex: 1` on `.meta-record-drawer__tabs` itself -- that declaration
+   is INERT. `flex` only applies to flex ITEMS, and this pill's parent, `.meta-record-drawer__tabs-bar`
+   (see its rule above), is a block-level box, not a flex container, so the pill is never a flex item
+   and `flex: 1` / `min-width: 0` on it have no effect at any width. (The bar's own comment records
+   that adding `display: flex` to the bar -- which WOULD have activated this `flex: 1` -- measured as a
+   no-op for the shipped label set; that is consistent with this correction: at the 360px floor the
+   pill already lands at the available width by the mechanism below, so activating `flex: 1` had
+   nothing left to add.) The REAL one-row mechanism is two-part: (a) the pill is `display: inline-flex`
+   (base rule above), i.e. shrink-to-fit = min(max-content, available width), so once the tabs'
+   combined natural width exceeds the panel's content width the pill is clamped to the available
+   width -- it does not "grow to fill", it stops growing; and (b) each TAB gets `flex: 1; min-width:
+   0` -- the tabs ARE flex items of the pill -- so the tabs shrink evenly to share that clamped width
+   instead of each holding its own `min-width: 76px` floor (4 x 76px + gaps alone exceeds the panel's
+   content width at the 360px floor, which is exactly what forced the `flex-wrap: wrap` fallback above
+   to engage there before this query existed). The pill's `flex: 1; min-width: 0` declarations are
+   deliberately LEFT IN PLACE (harmless, inert): the design brief §1.3 and the header spec's source
+   pin both name them, and removing them is a separate, visible change to that pin -- not a layout
+   fix. The one-row OUTCOME is unchanged by this correction (comment-only).
    PLACEMENT (real-browser-verified defect, caught and fixed before landing): this block must come
    AFTER both `.meta-record-drawer__tabs` and `.meta-record-drawer__tab`'s own base rules above, not
    between them -- an earlier draft placed it right after `.tabs` and before `.tab`, and the tab's own
