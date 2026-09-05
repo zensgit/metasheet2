@@ -316,6 +316,10 @@ on:
       - 'apps/web/tests/approval-explanation-field.test.ts'
       - 'apps/web/tests/approval-explanation-inline-editor.spec.ts'
       - 'apps/web/tests/approval-lock8-field-type-census.test.ts'
+      - 'apps/web/src/approvals/components/ApprovalDepartmentPicker.vue'
+      - 'apps/web/tests/approval-department-field.test.ts'
+      - 'apps/web/tests/approvalDepartmentPicker.spec.ts'
+      - 'apps/web/tests/searchApprovalDirectoryDepartments.spec.ts'
       # Lock-5 (approval-lock5-node-operation-policy-20260817.md §1.1/§2.2) — per-node 操作权限.
       - 'apps/web/src/approvals/nodeOperationPolicyEdit.ts'
       - 'apps/web/src/approvals/approvalCapabilityRegistry.ts'
@@ -622,6 +626,10 @@ on:
       - 'apps/web/tests/approval-explanation-field.test.ts'
       - 'apps/web/tests/approval-explanation-inline-editor.spec.ts'
       - 'apps/web/tests/approval-lock8-field-type-census.test.ts'
+      - 'apps/web/src/approvals/components/ApprovalDepartmentPicker.vue'
+      - 'apps/web/tests/approval-department-field.test.ts'
+      - 'apps/web/tests/approvalDepartmentPicker.spec.ts'
+      - 'apps/web/tests/searchApprovalDirectoryDepartments.spec.ts'
       # Lock-5 (approval-lock5-node-operation-policy-20260817.md §1.1/§2.2) — per-node 操作权限.
       - 'apps/web/src/approvals/nodeOperationPolicyEdit.ts'
       - 'apps/web/src/approvals/approvalCapabilityRegistry.ts'
@@ -715,6 +723,9 @@ jobs:
             approval-explanation-field \
             approval-explanation-inline-editor \
             approval-lock8-field-type-census \
+            approval-department-field \
+            approvalDepartmentPicker \
+            searchApprovalDirectoryDepartments \
             approval-node-operation-policy \
             --reporter=dot
 

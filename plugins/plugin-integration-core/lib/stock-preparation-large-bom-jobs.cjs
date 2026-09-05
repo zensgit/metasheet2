@@ -293,6 +293,12 @@ async function createLargeBomBackgroundExpansionJob(input = {}) {
   const storage = ensureDurableJobStorage(input.storage)
   const scope = requiredJobScope(input)
   const principal = requiredPrincipal(input.principal)
+  // WHO ASKED, recorded apart from WHOSE CREDENTIALS ANSWER. `principal` is the identity the source
+  // read is performed under — for the stock-prep pull that is the server-held binding owner, not the
+  // caller (see resolveTableActionReadPrincipal) — while `actor` is the human who started this job.
+  // Conflating them let any caller who could reach the run route drive a stored job under somebody
+  // else's data-source ownership simply by naming its id.
+  const actor = optionalString(input.actor) || principal
   const action = isPlainObject(input.action) ? input.action : {}
   const actionId = safeEvidenceToken(action.actionId || input.actionId, 'actionId')
   if (!actionId) {
@@ -314,6 +320,7 @@ async function createLargeBomBackgroundExpansionJob(input = {}) {
     projectNoPresent: optionalString(parameters.projectNo) !== '',
     parameters,
     principal,
+    actor,
     actionSnapshot: cloneJson(action),
     sourceKind: safeEvidenceToken(action.source && action.source.kind, 'sourceKind') || undefined,
     progress: {

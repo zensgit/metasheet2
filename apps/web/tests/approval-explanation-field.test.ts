@@ -189,7 +189,13 @@ describe('Lock-8 L8-A MS-9: FE selectable-dependency predicate + retype dependen
 
   it('positive control: every OTHER authorable type stays selectable (the exclusion is type-selected)', () => {
     for (const type of AUTHORABLE_FIELD_TYPES) {
-      if (type === 'explanation' || type === 'record-link' || type === 'detail' || type === 'date_range') continue
+      if (
+        type === 'explanation'
+        || type === 'record-link'
+        || type === 'detail'
+        || type === 'date_range'
+        || type === 'department'
+      ) continue
       expect(isSelectableConditionOrVisibilityDependencyType(type)).toBe(true)
     }
   })

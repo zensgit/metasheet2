@@ -9,6 +9,7 @@ const path = require('node:path')
 
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  HUMAN_PRESERVED_FIELD_IDS,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
 const {
   SANDBOX_FIELD_MAP_MODE,
@@ -20,6 +21,7 @@ const {
   ensureStockPreparationCanonicalTarget,
   ensureStockPreparationSandboxTarget,
   repairStockPreparationCanonicalTarget,
+  assertRepairableFieldOwnership,
   assertSandboxObjectId,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-target-provisioning.cjs'))
 
@@ -168,6 +170,17 @@ function createContext({
   }
 }
 
+// Sync twin of rejectsWith: returns the thrown error so a caller can assert on its
+// closed `code`. `assert.throws` does not hand the error back.
+function throwsWith(fn) {
+  try {
+    fn()
+  } catch (error) {
+    return error
+  }
+  return null
+}
+
 async function rejectsWith(fn, code) {
   let err = null
   try {
@@ -280,7 +293,12 @@ async function main() {
   assert.deepEqual(bound.evidence.missingFields, [])
   assert.equal(bound.evidence.target.fieldIdMapEmpty, false)
   assert.equal(bindCalls.findObjectSheet.length, 1)
-  assert.equal(bindCalls.resolveFieldIds.length, 1)
+  // The bind path probes field EXISTENCE against meta_fields, not the compute-only derivation.
+  // `resolveFieldIds` never omits a field, so a drifted sheet used to bind `ready` with a fieldIdMap
+  // naming columns that do not exist; `resolveExistingObjectFieldIds` is what makes the verdict real.
+  assert.equal(bindCalls.resolveExistingObjectFieldIds.length, 1, 'bind probes DB-backed field existence')
+  assert.equal(bindCalls.resolveFieldIds.length, 0, 'bind no longer trusts the compute-only derivation')
+  assert.equal(bound.evidence.fieldExistenceMode, 'db', 'evidence names the probe that answered')
   assert.equal(bindCalls.ensureObject.length, 0, 'existing target bind does not create/repair')
   assert.equal(bindCalls.records.length, 0, 'bind path never uses records API')
 
@@ -310,6 +328,62 @@ async function main() {
   assert.equal(incompleteError.details.targetObjectId, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId)
   assert.equal(JSON.stringify(incompleteError.details).includes('sheet_private_stock_target'), false, 'error is values-free')
   assert.equal(incompleteCalls.ensureObject.length, 0, 'incomplete existing target is not repaired in place')
+
+  // REGRESSION (2026-09-04, 222 rehearsal): a host whose ONLY field resolver is the compute-only
+  // derivation cannot see drift at all. `resolveFieldIds` returns an id for every requested field,
+  // so `missingLogicalFields` came back empty and a sheet provisioned by an older template bound
+  // `ready` with a fieldIdMap naming columns that do not exist in meta_fields — the drift only
+  // surfaced later as an opaque host `Unknown fieldId` when a write addressed one of them.
+  // Two things are pinned here: (1) with the DB-backed probe the SAME drifted sheet is now caught at
+  // inspect time and names the missing fields, and (2) a host without that probe still answers
+  // (no hard dependency) but must SAY the verdict came from the compute-only derivation, so a
+  // deployment can tell "no drift" apart from "cannot see drift".
+  const computedOnlyCtx = createContext({ sheetExists: true, missingFields: ['path', 'makeOrBuy'] })
+  delete computedOnlyCtx.context.api.multitable.provisioning.resolveExistingObjectFieldIds
+  const computedOnlyInspect = await inspectStockPreparationCanonicalTarget({
+    context: computedOnlyCtx.context,
+    projectId: 'tenant:proj',
+    permission: 'admin',
+  })
+  assert.equal(
+    computedOnlyInspect.evidence.fieldExistenceMode,
+    'computed',
+    'a host without the DB-backed probe still answers, and says which probe answered',
+  )
+
+  // A host that refuses the scoped read (the object was never claimed in the plugin object
+  // registry — a hand-made or dump-restored sheet) must DEGRADE to today's behaviour, not turn a
+  // working readiness read into an opaque failure. The distinct mode keeps that observable.
+  const scopeDeniedCtx = createContext({ sheetExists: true })
+  scopeDeniedCtx.context.api.multitable.provisioning.resolveExistingObjectFieldIds = async () => {
+    const error = new Error('Plugin cannot claim multitable object; owned by unclaimed')
+    error.name = 'MultitableObjectScopeError'
+    error.code = 'MULTITABLE_OBJECT_SCOPE_FORBIDDEN'
+    throw error
+  }
+  const scopeDeniedInspect = await inspectStockPreparationCanonicalTarget({
+    context: scopeDeniedCtx.context,
+    projectId: 'tenant:proj',
+    permission: 'admin',
+  })
+  assert.equal(scopeDeniedInspect.ready, true, 'a scope refusal degrades to the compute-only probe')
+  assert.equal(scopeDeniedInspect.evidence.fieldExistenceMode, 'computed_scope_unavailable')
+
+  // A non-scope failure from the DB probe is NOT swallowed — degrading on every error would hide
+  // real host faults behind a verdict that cannot see drift.
+  const probeBrokenCtx = createContext({ sheetExists: true })
+  probeBrokenCtx.context.api.multitable.provisioning.resolveExistingObjectFieldIds = async () => {
+    throw new Error('connection terminated unexpectedly')
+  }
+  await assert.rejects(
+    () => inspectStockPreparationCanonicalTarget({
+      context: probeBrokenCtx.context,
+      projectId: 'tenant:proj',
+      permission: 'admin',
+    }),
+    /connection terminated unexpectedly/,
+    'only an object-scope refusal degrades; other probe failures propagate',
+  )
   assert.equal(incompleteCalls.records.length, 0, 'incomplete path never uses records API')
 
   // Missing target creates metadata only, then verifies logical fields by
@@ -500,18 +574,81 @@ async function main() {
     assert.equal(already.mode, 'canonical_already_ready')
     assert.equal(already.evidence.addedFieldCount, 0)
 
-    // (b) LOAD-BEARING: repair REJECTS a missing human_preserved field. The main table's
-    //     8 human fields must never grow via a repair back door.
-    const humanCtx = createContext({ sheetExists: true, missingFields: ['materialType'] })
-    let humanErr = null
-    try {
-      await repairStockPreparationCanonicalTarget({ context: humanCtx.context, projectId: 'proj_x', permission: 'admin' })
-    } catch (error) {
-      humanErr = error
-    }
-    assert.ok(humanErr instanceof StockPreparationTargetProvisioningError, 'human-field repair rejected')
-    assert.equal(humanErr.code, 'REPAIR_HUMAN_FIELD_FORBIDDEN')
-    assert.equal((humanCtx.calls.ensureMissingObjectFields || []).length, 0, 'no additive write when a human field is in the repair set')
+    // (b) THE HEAL PATH FOR THE HUMAN BAND. A human column that the frozen template and
+    //     the design-gated HUMAN_PRESERVED_FIELD_IDS whitelist AGREE about is healed
+    //     additively. Without this an existing install could never gain the five columns
+    //     added in this change: `ensure` throws TARGET_SCHEMA_INCOMPLETE the moment the
+    //     template outgrows the sheet, and repair is the only additive verb there is.
+    const humanCtx = createContext({ sheetExists: true, missingFields: ['procurementDone'] })
+    const humanRepaired = await repairStockPreparationCanonicalTarget({
+      context: humanCtx.context, projectId: 'proj_x', permission: 'admin',
+    })
+    assert.equal(humanRepaired.mode, 'canonical_repaired', 'a whitelisted human column heals')
+    assert.equal(humanRepaired.evidence.addedFieldCount, 1)
+    assert.equal(
+      (humanCtx.calls.ensureMissingObjectFields || []).length, 1,
+      'the human heal still goes through the additive-only primitive',
+    )
+
+    // (b2) THE BACK DOOR IS STILL SHUT -- the RED witness for the narrowed rule. The
+    //      predicate is exercised directly because the loosening lives THERE; going
+    //      through repair could only ever present ids the frozen template already
+    //      agrees with, so it cannot reach three of these four cases at all.
+    //
+    //      human in the template but NOT in the whitelist => refused. This is precisely
+    //      the "grow the human whitelist through the repair back door" attempt that the
+    //      original unconditional guard existed to stop, and it still fails closed.
+    const backDoor = throwsWith(() => assertRepairableFieldOwnership({
+      fieldId: 'smuggledHumanColumn',
+      ownership: 'human_preserved',
+      isWhitelisted: false,
+      templateFieldIds: ['projectNo'],
+      objectId: 'plm_stock_preparation_main',
+    }))
+    assert.equal(backDoor.code, 'REPAIR_HUMAN_FIELD_FORBIDDEN')
+    assert.match(backDoor.message, /design gate/)
+
+    //      DRIFT, the reverse disagreement: whitelisted but not human in the template.
+    //      Guessing which authority is right is how a load-bearing wall gets holed.
+    const drift = throwsWith(() => assertRepairableFieldOwnership({
+      fieldId: 'notes',
+      ownership: 'plm_system',
+      isWhitelisted: true,
+      templateFieldIds: ['projectNo'],
+      objectId: 'plm_stock_preparation_main',
+    }))
+    assert.equal(drift.code, 'REPAIR_HUMAN_FIELD_FORBIDDEN')
+
+    //      AGREEMENT in both directions is admitted, and the plm_system band is
+    //      completely unchanged by the narrowing.
+    assert.doesNotThrow(() => assertRepairableFieldOwnership({
+      fieldId: 'procurementDone', ownership: 'human_preserved', isWhitelisted: true,
+      templateFieldIds: ['projectNo'], objectId: 'plm_stock_preparation_main',
+    }), 'template + whitelist agree => healable')
+    assert.doesNotThrow(() => assertRepairableFieldOwnership({
+      fieldId: 'path', ownership: 'plm_system', isWhitelisted: false,
+      templateFieldIds: ['projectNo'], objectId: 'plm_stock_preparation_main',
+    }), 'the plm_system band is unaffected')
+
+    //      A non-human, non-plm id must still be a valid tenant `ext_` id -- the
+    //      namespace check the narrowing must not have bypassed.
+    assert.ok(
+      throwsWith(() => assertRepairableFieldOwnership({
+        fieldId: 'notAnExtensionId', ownership: 'tenant_extension', isWhitelisted: false,
+        templateFieldIds: ['projectNo'], objectId: 'plm_stock_preparation_main',
+      })),
+      'a bare id is still rejected by the extension-namespace check',
+    )
+
+    //      STRUCTURAL: for the frozen template the two authorities agree EXACTLY, so
+    //      the refusal branches above are unreachable through the public repair verb.
+    //      That is the guarantee; the direct witnesses prove the rule behind it.
+    assert.deepEqual(
+      STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields
+        .filter((f) => f.ownership === 'human_preserved').map((f) => f.id).sort(),
+      [...HUMAN_PRESERVED_FIELD_IDS].sort(),
+      'frozen template human band === the design-gated whitelist',
+    )
 
     // (b2) POST-WRITE completeness re-verify: if the additive write does NOT actually
     //      leave the schema complete (a field still missing on re-read), repair must

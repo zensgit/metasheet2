@@ -10,6 +10,16 @@
 //   R5 the audit entry the route appends is values-free (counts/enums only — never a seeded material
 //      name, spec or quantity)
 //
+// PLUS (W2-3 / #5447 follow-up) the five departmental completion columns 采购完成/采购回复日期/
+// 仓库完成/实际到货日期/自制外购, appended after the original twelve:
+//   R12 the workbook carries all SEVENTEEN columns, in the agreed order, for a seeded project
+//   R13 procurementDone/warehouseDone render 是/否 text, never a native boolean, and an unset flag
+//       is a blank cell rather than 否
+//   R14 procurementReplyDate/actualArrivalDate pass through unchanged, exactly like the pre-existing
+//       demandDate column
+//   R15 a sheet whose target predates #5447 (no bindings for the five columns) still exports the
+//       original twelve, with the five reported in unresolvedColumns — never a 500
+//
 // plus the module-level (no HTTP) equivalents of R1/R2/R3/R4, and the unknown-project 404 edge case
 // (R1..R5 above are all driven through the mounted route; the module suite drives
 // exportStockPreparationPrepLines directly, so a route-layer regression and a module-layer regression
@@ -26,6 +36,7 @@ const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
 
+const { createStockPreparationAuditStore } = require(path.join(LIB, 'stock-preparation-audit-store.cjs'))
 const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
 const { STOCK_PREP_OPERATE, STOCK_PREP_READ } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
@@ -50,6 +61,7 @@ const MAIN_OBJECT_ID = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
 const MAIN_SHEET = 'sheet_main'
 
 const PROJECT_A = 'PRJ-A'
+const PROJECT_FREE_TEXT = '注射水缓冲罐 / RY2-2023'
 const PROJECT_B = 'PRJ-B'
 const PROJECT_EMPTY = 'PRJ-EMPTY-ACTIVE'
 const PROJECT_UNKNOWN = 'PRJ-NEVER-SYNCED'
@@ -81,14 +93,30 @@ function mainRow(projectNo, overrides = {}, id) {
     ext_pickingNode: '10 - 示例节点一',
     ext_stockPrepDate: '2026-09-02',
     ext_blankLength: 1250,
+    // The five #5447 human_preserved completion columns (W2-3). Booleans and dates so R12-R14 have
+    // real typed values to assert formatting on, not just presence.
+    makeOrBuy: '外购',
+    procurementDone: true,
+    procurementReplyDate: '2026-09-05',
+    warehouseDone: false,
+    actualArrivalDate: '2026-09-12',
   }
   return physicalRow(STAGING, MAIN_OBJECT_ID, { ...base, ...overrides }, id)
 }
 
 function seededRows() {
   return [
+    // A project whose NUMBER is free text — Chinese, a space and a slash, i.e. outside the audit
+    // store's enum/handle pattern. It has real rows, so the export reaches its audit append: this is
+    // the row that turns a shape gate on `project_id` into a refused workbook (R5b).
+    mainRow(PROJECT_FREE_TEXT, { componentCode: 'DWG-F1', componentName: '自由文本项目部件', totalQuantity: 1 }, 'rec_f1'),
     mainRow(PROJECT_A, { componentCode: 'DWG-A1', componentName: 'A项目部件一', totalQuantity: 3 }, 'rec_a1'),
-    mainRow(PROJECT_A, { componentCode: 'DWG-A2', componentName: 'A项目部件二', totalQuantity: 5 }, 'rec_a2'),
+    // rec_a2 deliberately leaves the two completion flags UNSET (never assigned, not merely false) —
+    // R13's blank-cell witness: a flag nobody has touched must render as an empty cell, never 否.
+    mainRow(PROJECT_A, {
+      componentCode: 'DWG-A2', componentName: 'A项目部件二', totalQuantity: 5,
+      procurementDone: undefined, warehouseDone: undefined,
+    }, 'rec_a2'),
     // A's own inactive row: must be excluded from the active projection but still counts toward "this
     // project is known" (totalRowCount) so it never masquerades as PROJECT_UNKNOWN.
     mainRow(PROJECT_A, { componentCode: 'DWG-A3-OLD', componentName: 'A项目部件三(已停用)', active: false }, 'rec_a3'),
@@ -199,7 +227,7 @@ async function moduleReturnsExactAgreedColumnsForASeededProject() {
     permission: 'admin',
   })
   assert.deepEqual(result.headers, EXPORT_COLUMNS.map((c) => c.label), 'R1: headers are exactly EXPORT_COLUMNS, in order')
-  assert.equal(result.headers.length, 12, 'R1: exactly twelve columns')
+  assert.equal(result.headers.length, 17, 'R1/R12: seventeen columns (#5447 added five completion columns after the original twelve)')
   assert.equal(result.totalRowCount, 3, 'PROJECT_A has 3 rows total (2 active + 1 inactive)')
   assert.equal(result.activeRowCount, 2, 'PROJECT_A has 2 active rows')
   assert.equal(result.rows.length, 2)
@@ -368,7 +396,7 @@ function tableActionConfigFor(target) {
   }
 }
 
-function mount({ boundSheet = SANDBOX_SHEET } = {}) {
+function mount({ boundSheet = SANDBOX_SHEET, realAuditStore = false } = {}) {
   const { records, target } = moduleSubstrate({ boundSheet })
   const routes = new Map()
   const auditAppends = []
@@ -396,19 +424,45 @@ function mount({ boundSheet = SANDBOX_SHEET } = {}) {
     config: { stockPreparationTableActions: [tableActionConfigFor(target)] },
   }
   const services = baseServices()
-  services.stockPreparationAuditStore = {
-    async append(entry) {
-      auditAppends.push(entry)
-      return { ok: true }
+  // THE REAL STORE, OPTIONALLY. The stub below records what the route MEANT to write; it cannot see
+  // what the store would REFUSE. A shape gate on a caller-supplied column is exactly the class of
+  // bug a stub hides — the route looks fine and the deployment 422s — so the free-text case drives
+  // the production store over an in-memory db instead.
+  const auditRows = []
+  services.stockPreparationAuditStore = realAuditStore
+    ? createStockPreparationAuditStore({
+      db: {
+        async insertOne(table, row) { auditRows.push({ table, row: { ...row } }); return { ...row } },
+        async select() { return [] },
+      },
+      idGenerator: () => `audit_${auditRows.length + 1}`,
+    })
+    : {
+      async append(entry) {
+        auditAppends.push(entry)
+        return { ok: true }
+      },
+    }
+  services.stockPreparationXlsxExport = xlsxExport
+  // The HOST TENANT PRINCIPAL DIRECTORY. This export is VALUE-BEARING (material names, quantities),
+  // so it now derives its tenant from `stock-preparation-operator-scope.cjs` rather than from
+  // `resolveTenantId` — which on a token-without-tenant-claim deployment compared the request's
+  // tenant against a `user.tenantId` the auth middleware had filled from the `x-tenant-id` HEADER.
+  // The scope makes the host vouch for the (user, tenant) pairing and is NOT fail-open, so without
+  // this seam every case below would 501 for a reason unrelated to what it is measuring. The
+  // cross-tenant behaviour itself is asserted in stock-preparation-operator-value-read-scope.test.cjs
+  // against a seam that models a REAL membership relation; here it simply admits.
+  services.tenantPrincipalDirectory = {
+    async verifyTenantMembership() {
+      return { member: true }
     },
   }
-  services.stockPreparationXlsxExport = xlsxExport
   httpRoutes.registerIntegrationRoutes({
     context,
     services,
     logger: { info() {}, warn() {}, error() {} },
   })
-  return { routes, auditAppends, xlsxExport, hostReads }
+  return { routes, auditAppends, auditRows, xlsxExport, hostReads }
 }
 
 function createResponse() {
@@ -508,6 +562,75 @@ async function routeAuditEntryIsValuesFree() {
   for (const forbidden of ['DWG-A1', 'DWG-A2', 'A项目部件一', 'A项目部件二', 'Q235B', 'DN100', 'TZ-A0', 'A项目主体']) {
     assert.ok(!flat.includes(forbidden), `R5: audit entry must not carry ${forbidden}`)
   }
+}
+
+// ---------------------------------------------------------------------------
+// R5b — THE AUDIT GATE MUST NOT REFUSE THE CUSTOMER'S OWN PROJECT NUMBER
+// ---------------------------------------------------------------------------
+//
+// This route stamps the customer's projectNo into the audit row's `project_id` deliberately — it is
+// this route's subject, and the board's last-export lookup reads it back by that key. A round of
+// hardening applied an enum/handle SHAPE gate to every nullable TEXT column on that table, which
+// made the store refuse any project number outside [A-Za-z0-9@._:|-]. A number with a Chinese
+// character, a space or a slash is ordinary in this customer's PLM; with that gate, their export
+// 422s — the workbook they came for refused in order to protect the trail from a value the trail
+// exists to carry.
+//
+// Driven against the REAL store, because the stub in every other case here cannot see a refusal.
+async function routeExportsAndAuditsAFreeTextProjectNumber() {
+  const { routes, auditRows } = mount({ realAuditStore: true })
+  const res = await call(routes, 'GET', EXPORT_PATH, {
+    user: OPERATOR,
+    query: { tenantId: TENANT_ID, projectNo: PROJECT_FREE_TEXT },
+  })
+  assert.equal(
+    res.statusCode,
+    200,
+    `R5b: an export whose project NUMBER is free text must still be delivered (got ${res.statusCode} ${JSON.stringify(res.body)})`,
+  )
+  assert.ok(res.sentBuffer, 'R5b: the workbook really was streamed')
+  assert.equal(auditRows.length, 1, 'R5b: and the export really was audited')
+  assert.equal(
+    auditRows[0].row.project_id,
+    PROJECT_FREE_TEXT,
+    'R5b: the customer project number is the audit row SUBJECT and is stored verbatim',
+  )
+
+  // The ordinary shape still works against the real store too.
+  const seeded = mount({ realAuditStore: true })
+  const ok = await call(seeded.routes, 'GET', EXPORT_PATH, {
+    user: OPERATOR,
+    query: { tenantId: TENANT_ID, projectNo: PROJECT_A },
+  })
+  assert.equal(ok.statusCode, 200, 'R5b: the ordinary export still succeeds against the real store')
+  assert.equal(seeded.auditRows.length, 1, 'R5b: and it really wrote one audit row')
+  assert.equal(seeded.auditRows[0].row.project_id, PROJECT_A)
+}
+
+// ---------------------------------------------------------------------------
+// R5c — `?workspaceId` IS NOT A CHANNEL ONTO THE TRAIL
+// ---------------------------------------------------------------------------
+//
+// The board and directory routes stopped forwarding the caller's raw `?workspaceId` into
+// `workspace_id`; the export did not, so the same one-parameter channel onto a values-free trail was
+// still open here. There is no workspace registry in this plugin to validate one against, so the
+// route selects nothing from it — the key stays accepted for shape compatibility and steers nothing.
+async function routeNeverPutsTheCallersWorkspaceIdOnTheTrail() {
+  const { routes, auditAppends } = mount()
+  const res = await call(routes, 'GET', EXPORT_PATH, {
+    user: OPERATOR,
+    query: { tenantId: TENANT_ID, projectNo: PROJECT_A, workspaceId: 'DWG-A1' },
+  })
+  assert.equal(res.statusCode, 200, 'R5c: a caller-supplied workspaceId is still accepted, not 400')
+  assert.equal(auditAppends.length, 1)
+  assert.ok(
+    !JSON.stringify(auditAppends[0]).includes('DWG-A1'),
+    'R5c: whatever the caller puts in ?workspaceId must not reach the audit row',
+  )
+  assert.ok(
+    auditAppends[0].workspaceId === undefined || auditAppends[0].workspaceId === null,
+    'R5c: the route forwards no workspace at all',
+  )
 }
 
 async function routeRefusedCallerAppendsNoAuditRow() {
@@ -771,6 +894,103 @@ async function routeGateRefusesBeforeAnyHostIo() {
   assert.ok(hostReads.length > 0, 'the operator DOES reach the host — the gate is a gate, not a wall')
 }
 
+// ---------------------------------------------------------------------------
+// W2-3 (#5447 follow-up): the five departmental completion columns join the export
+//
+// R12 the exact 17-column header set, in order, as a LITERAL array — independent of EXPORT_COLUMNS
+//     itself, so a bug in the projection's own definition cannot pass by circularity.
+// R13 procurementDone/warehouseDone render 是/否 text (never a native boolean); a flag nobody has
+//     set yet is a blank cell, never 否.
+// R14 procurementReplyDate/actualArrivalDate pass through unchanged — exactly like the pre-existing
+//     demandDate column, which gets no special formatting either.
+// R15 a target that predates #5447 (no bindings for the five new logical ids — the shape of a
+//     deployment provisioned before this change) still exports the original twelve columns, with
+//     the five reported in unresolvedColumns. Never a 500.
+// ---------------------------------------------------------------------------
+
+const SEVENTEEN_HEADERS_IN_ORDER = Object.freeze([
+  '父组件图号', '父组件名称', '图号', '名称', '规格', '材料', '总数量',
+  '备料情况', '需求日期', '领料节点', '备料日期', '毛胚长度',
+  '自制/外购', '采购完成', '采购回复日期', '仓库完成', '实际到货日期',
+])
+
+async function moduleExactSeventeenColumnHeaderOrder() {
+  const { records, target } = moduleSubstrate()
+  const result = await exportStockPreparationPrepLines({
+    recordsApi: records,
+    target,
+    projectNo: PROJECT_A,
+    permission: 'admin',
+  })
+  assert.deepEqual(result.headers, SEVENTEEN_HEADERS_IN_ORDER, 'R12: the exact 17 headers, in the agreed order')
+  assert.deepEqual(EXPORT_COLUMNS.map((c) => c.label), SEVENTEEN_HEADERS_IN_ORDER, 'R12: EXPORT_COLUMNS itself matches the literal agreed order')
+}
+
+async function moduleCompletionFlagsRenderYesNoTextAndBlankWhenUnset() {
+  const { records, target } = moduleSubstrate()
+  const result = await exportStockPreparationPrepLines({
+    recordsApi: records,
+    target,
+    projectNo: PROJECT_A,
+    permission: 'admin',
+  })
+  const doneRow = result.rows.find((cells) => cells[columnIndex('componentCode')] === 'DWG-A1')
+  const unsetRow = result.rows.find((cells) => cells[columnIndex('componentCode')] === 'DWG-A2')
+
+  assert.equal(doneRow[columnIndex('procurementDone')], '是', 'R13: procurementDone=true renders 是')
+  assert.equal(doneRow[columnIndex('warehouseDone')], '否', 'R13: warehouseDone=false renders 否')
+  assert.equal(typeof doneRow[columnIndex('procurementDone')], 'string', 'R13: never a native boolean cell')
+
+  assert.equal(unsetRow[columnIndex('procurementDone')], null, 'R13: an unset flag is a blank cell, not 否')
+  assert.equal(unsetRow[columnIndex('warehouseDone')], null, 'R13: an unset flag is a blank cell, not 否')
+}
+
+async function moduleDateCompletionColumnsPassThroughLikeDemandDate() {
+  const { records, target } = moduleSubstrate()
+  const result = await exportStockPreparationPrepLines({
+    recordsApi: records,
+    target,
+    projectNo: PROJECT_A,
+    permission: 'admin',
+  })
+  const row = result.rows.find((cells) => cells[columnIndex('componentCode')] === 'DWG-A1')
+  assert.equal(row[columnIndex('procurementReplyDate')], '2026-09-05', 'R14: 采购回复日期 passes through unchanged')
+  assert.equal(row[columnIndex('actualArrivalDate')], '2026-09-12', 'R14: 实际到货日期 passes through unchanged')
+  // Same formatting rule as the pre-existing demandDate column: a stored string comes out untouched.
+  assert.equal(row[columnIndex('demandDate')], '2026-09-10', 'R14: demandDate — the existing convention these two new date columns follow')
+  assert.equal(row[columnIndex('makeOrBuy')], '外购', 'the select column (自制/外购) also passes through as its stored string')
+}
+
+async function moduleTargetPredatingPR5447StillExportsAndReportsTheFive() {
+  // Models a deployment provisioned before #5447: its bound target's fieldIdMap simply has no entry
+  // for the five new logical ids (the shape assertTargetFieldMapCompleteness allows — these are
+  // human_preserved display columns, never required). This must NOT 500.
+  const { records, target } = moduleSubstrate()
+  const legacyTarget = targetWithout(target, ['makeOrBuy', 'procurementDone', 'procurementReplyDate', 'warehouseDone', 'actualArrivalDate'])
+  const result = await exportStockPreparationPrepLines({
+    recordsApi: records,
+    target: legacyTarget,
+    projectNo: PROJECT_A,
+    permission: 'admin',
+  })
+  assert.deepEqual(result.headers, SEVENTEEN_HEADERS_IN_ORDER, 'R15: the header set never shrinks — all 17 headers still appear')
+  assert.deepEqual(
+    result.unresolvedColumns.slice().sort(),
+    ['actualArrivalDate', 'makeOrBuy', 'procurementDone', 'procurementReplyDate', 'warehouseDone'],
+    'R15: exactly the five new columns are reported as unresolved',
+  )
+  const row = result.rows.find((cells) => cells[columnIndex('componentCode')] === 'DWG-A1')
+  assert.equal(row[columnIndex('procurementDone')], null, 'R15: an unbound boolean column is a blank cell, not 否')
+  assert.equal(row[columnIndex('warehouseDone')], null, 'R15: an unbound boolean column is a blank cell, not 是')
+  assert.equal(row[columnIndex('procurementReplyDate')], null, 'R15: an unbound date column is a blank cell')
+  assert.equal(row[columnIndex('actualArrivalDate')], null, 'R15: an unbound date column is a blank cell')
+  assert.equal(row[columnIndex('makeOrBuy')], null, 'R15: an unbound select column is a blank cell')
+  // The original twelve are completely unaffected — the fix is additive only.
+  assert.equal(row[columnIndex('componentCode')], 'DWG-A1')
+  assert.equal(row[columnIndex('material')], 'Q235B')
+  assert.equal(result.rows.length, 2, 'R15: the workbook is still produced (not an error)')
+}
+
 async function main() {
   await moduleReturnsExactAgreedColumnsForASeededProject()
   await moduleNeverLeaksOtherProjectsRows()
@@ -784,12 +1004,19 @@ async function main() {
   await modulePacklessDeploymentStillExports()
   await moduleRefusesWhenTheSCOPEFieldsAreUnbound()
 
+  await moduleExactSeventeenColumnHeaderOrder()
+  await moduleCompletionFlagsRenderYesNoTextAndBlankWhenUnset()
+  await moduleDateCompletionColumnsPassThroughLikeDemandDate()
+  await moduleTargetPredatingPR5447StillExportsAndReportsTheFive()
+
   await routeReturnsExactColumnsForSeededProject()
   await routeScopingProofOtherProjectRowsNeverAppear()
   await routeRefusesUnderPrivilegedPrincipals()
   await routeZeroActiveRowsYieldsHeadersOnlyNotAnError()
   await routeUnknownProjectIsTheFamiliarNotFoundShape()
   await routeAuditEntryIsValuesFree()
+  await routeExportsAndAuditsAFreeTextProjectNumber()
+  await routeNeverPutsTheCallersWorkspaceIdOnTheTrail()
   await routeRefusedCallerAppendsNoAuditRow()
 
   await routeReadsTheSandboxTwinOnADefaultInstall()

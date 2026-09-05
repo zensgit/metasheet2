@@ -152,23 +152,39 @@ describe('StockPreparationProjectSyncPanel', () => {
     expect(root.querySelector('[data-testid="stock-prep-project-sync-denied"]')).toBeNull()
   })
 
-  it('P-01: the stock-prep OPERATOR tier gets no sync control, and is told who runs it', () => {
-    // The exact grant a customer operator holds: R-11's mapping is zero-automatic, so this principal
-    // has no `integration:*` code at all and the server refuses them at the first call.
+  // 一线自己拉数据: the owner ruled a floor operator may self-serve the pull, and the server split the
+  // two routes that DO it (dry-run, apply) onto the operator tier while reconcile and mvp-persist
+  // stayed platform-admin. The control follows the server, not the other way round — the plugin
+  // suite stock-preparation-operator-pull-gate.test.cjs is what proves the server actually admits it.
+  it('P-01: the stock-prep OPERATOR tier gets the sync control', () => {
     h.permissions = ['stock-prep:read', 'stock-prep:operate']
     const root = mountPanel({ api: api() })
-    expect(root.querySelector('[data-testid="stock-prep-project-sync-run"]')).toBeNull()
-    const denied = root.querySelector('[data-testid="stock-prep-project-sync-denied"]') as HTMLElement
-    expect(denied).not.toBeNull()
-    expect(denied.textContent).toContain('平台管理员')
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-run"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-denied"]')).toBeNull()
   })
 
-  it('P-01: neither the workbench-admin nor the integration:write tier gets it either', () => {
-    for (const permissions of [['stock-prep:admin'], ['integration:write'], ['integration:read'], []]) {
+  it('P-01: the operate tier is a CONJUNCTION — operate WITHOUT read still gets nothing', () => {
+    h.permissions = ['stock-prep:operate']
+    const root = mountPanel({ api: api() })
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-run"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-denied"]')).not.toBeNull()
+  })
+
+  it('P-01: neither the integration:write nor the read-only tier gets it, and both are told who does', () => {
+    // NOTE the probe this suite injects is an EXACT-match one, so `stock-prep:admin` does not satisfy
+    // `stock-prep:operate` here the way the real `useAuth` ladder would. That is deliberate: this
+    // assertion is about the codes the panel asks for, and the ladder itself is pinned by
+    // stockPrepPermissionMatrix.spec.ts against the live plugin module.
+    for (const permissions of [['integration:write'], ['integration:read'], ['stock-prep:read'], []]) {
       h.permissions = permissions
       const root = mountPanel({ api: api() })
       expect(root.querySelector('[data-testid="stock-prep-project-sync-run"]')).toBeNull()
-      expect(root.querySelector('[data-testid="stock-prep-project-sync-denied"]')).not.toBeNull()
+      const denied = root.querySelector('[data-testid="stock-prep-project-sync-denied"]') as HTMLElement
+      expect(denied).not.toBeNull()
+      // The reason names BOTH tiers that can run it — sending someone to the wrong person is its own
+      // kind of dead end.
+      expect(denied.textContent).toContain('平台管理员')
+      expect(denied.textContent).toContain('备料操作权限')
       app?.unmount()
       app = null
       container!.innerHTML = ''

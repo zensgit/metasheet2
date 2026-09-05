@@ -1,0 +1,222 @@
+# 备料(stock-preparation)客户交付说明(2026-09-04)
+
+> 读者:客户 IT + 我方现场实施。
+> 值面纪律:本文**不含任何账号 / 密码 / token / 内部 IP**。测试 PLM 地址仅保留 `10.10.52.16`(客户已知悉的测试库),其余主机一律用占位符 `<部署主机>` / `<PLM主机>`。账号、密码全部由客户/实施在界面当场输入,本文不记录。
+> 来源纪律:本文每一步均核对自 `222-deploy-window-runbook-20260901.md`(含文末"2026-09-03 r7 实际执行记录与订正"一节,**订正优先于正文**)、`222-rehearsal-full-run-20260904.md`、`222-rehearsal-day-checklist-20260903.md`、`scripts/ops/multitable-onprem-package-upgrade-inplace.ps1`、`scripts/ops/stock-preparation-sandbox-add-missing-template-fields.cjs`,以及 `plugins/plugin-integration-core/lib/http-routes.cjs`、`packages/core-backend/src/routes/{admin-users,permissions}.ts` 的路由定义。不确定处标"待核对",不猜测、不编造。
+
+---
+
+## 1. 交付物
+
+| 交付物 | 说明 |
+|---|---|
+| 部署包(`.zip` + `.zip.sha256` + `SHA256SUMS`) | 由 CI workflow `multitable-onprem-package-build.yml` 打包(**不要用本地检出打包**,尤其 Windows 检出会在包校验的 provenance 步骤失败)。**本次交付**:`metasheet-multitable-onprem-v2.5.0-r8-20260904.zip`,SHA256 `1fe052fcc92be512f5d41081d156e7accaed359ac4c6584bde89f95a7838a922`,钉在 main `45cca21eec86f15a565e10745cb443d1bf308213`(CI run 33880564195);已于 2026-09-04 就地升级到 222 并复验通过。**包标签与 SHA256 由本次实施填写**:标签 `<PACKAGE_TAG>`,SHA256 `<PACKAGE_SHA256>`,对应源码提交 `<SOURCE_COMMIT>`。 |
+| `deploy-bootstrap`(`.ps1` / `.bat`) | 与部署包同一次 CI run 的产物(本次为 `metasheet-multitable-onprem-v2.5.0-r8-20260904-deploy-bootstrap.ps1` / `.bat`,各带 `.sha256`),用于全新环境的引导安装;用法见 `.ps1` 文件头注释。**本次未在客户环境验证其具体用法,标记待核对**——已验证的路径是"已有 222 就地升级"(见 §2.1)。 |
+| 就地升级脚本 `scripts/ops/multitable-onprem-package-upgrade-inplace.ps1` | **不在部署包内**,需从与部署包同一提交的仓库检出单独复制到部署主机;调用时必须显式传 `-RootDir`(默认值指向脚本自身所在目录,不是部署根目录)。 |
+| 补字段脚本 `scripts/ops/stock-preparation-sandbox-add-missing-template-fields.cjs` | 旧模板建的沙箱表缺新增模板字段时,用它增量补字段(只增不改不删,幂等)。 |
+| 本说明文档 | `docs/development/takeover-beiliao-20260821/customer-delivery-guide-20260904.md` |
+
+---
+
+## 2. 部署 / 升级步骤
+
+### 2.1 已有 222 类部署:就地升级(已验证路径)
+
+**Step A ‒ 备份**(SSH 到部署主机后;交互式会话内 `$` 不用转义,一次性 `ssh host "..."` 单条命令要转义):
+
+```powershell
+$l = (pm2 env 0 | Select-String '^DATABASE_URL:').Line
+$env:DATABASE_URL = $l -replace '^DATABASE_URL:\s*',''
+$ts = Get-Date -Format 'yyyyMMdd-HHmmss'
+$backupDir = "<部署根目录>\output\backups\upgrade-backup-$ts"
+New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
+& '<PostgreSQL bin 目录>\pg_dump.exe' $env:DATABASE_URL -Fc -f "$backupDir\pre-upgrade-db.dump"
+```
+
+- PATH 里若没有 `pg_dump`/`psql`,用完整路径(222 上是 `C:\Program Files\PostgreSQL\17\bin\pg_dump.exe`,本地环境路径以实际安装为准)。
+- `postgresql-x64-17` 之类服务在服务列表里显示 Stopped 属正常(外部管理的实例仍在监听),不要去"启动"它——先用 `psql`/`pg_dump` 实测连通性再下结论。
+- 记下 `$backupDir`;升级脚本自己会**另打印**一个 `BACKUP_PATH=...`(代码/插件/dist 备份),两个都要记进操作报告。
+
+**Step B ‒ 执行原地升级脚本**(它已编排:校验包 → 停服 → 备份 → 替换 → F22 断言 → 迁移 → 重启 → 健康检查):
+
+```powershell
+.\scripts\ops\multitable-onprem-package-upgrade-inplace.ps1 `
+  -PackageArchive <path-to-package>.zip `
+  -RootDir '<部署根目录>' `
+  -Pm2AppName metasheet-backend
+```
+
+8 步(脚本全部打印到终端):① SHA-256 校验(不匹配直接拒绝)② 停 pm2 ③ 备份(打印 `BACKUP_PATH=`)④ 解包并逐文件替换(不用 `-Exclude`,这是既有 F22 教训的修复)⑤ 必存在文件断言 + 逐文件哈希核对 + node_modules 泄漏检查 ⑥ 从 `docker\app.env` 加载 env 后跑迁移(pm2 不会自动重读 env)⑦ `pm2 restart --update-env` + 轮询健康检查(默认 `http://127.0.0.1/api/health`,12 次 × 5 秒)⑧ 打印最终报告。
+
+**健康检查**:
+
+| 检查项 | 期望 |
+|---|---|
+| 脚本"final report" | `health: OK` |
+| `pm2 list` | `metasheet-backend` 为 `online` |
+| `Invoke-RestMethod http://127.0.0.1/api/health` | 正常返回 |
+| 版本号 | `node -e "console.log(require('<部署根目录>/packages/core-backend/dist/src/version.js'))"` 对应这次打包的提交,不是升级前旧值(没变说明升级没真正生效) |
+
+**失败处理**:脚本第 4-7 步之间任何异常,会**自动**停 pm2、打印"RESTORE REQUIRED"框(备份路径 + 每个被替换路径的精确恢复命令),照抄执行即可,不用自己回忆回退步骤。若尚未开始执行就失败(如 SHA-256 校验不过),说明包传输损坏,重新传一次,不要跳过校验。
+
+**升级后必做**:①`BUILD_PROVENANCE.json` 不会被脚本自动刷新,需要手动从包根目录拷到部署根目录;②确认备料所在 base 能正常打开、四张受管表都能点开(零默认视图的表会拖累整个 base 打不开);③挑 1-2 张与备料无关的既有业务表(如考勤/审批)比对升级前后行数,必须一致,不一致立即停止并评估数据库级回滚。
+
+### 2.2 全新安装(无既有部署)
+
+**本节步骤待核对** ——本次核对的源文档只完整验证了"已有 222 就地升级"这条路径(§2.1);全新安装应使用 §1 交付物里的 `deploy-bootstrap`(`.ps1`/`.bat`),但其具体调用方式、前置依赖(如是否需要先建库、是否自带迁移)未在本次复核的源文档中找到逐步记录。建议实施前先联系我方工程师确认,或以 CI 产物里 `deploy-bootstrap` 脚本自身的帮助输出为准。全新安装完成后,§2.1 的"健康检查"标准同样适用,随后直接进入 §3(接入客户 PLM)。
+
+---
+
+## 3. 接入客户 PLM
+
+**前提**:映射与读取计划**不用改**。读取链已核实与客户给的 SQL 逐跳一致:
+
+```
+PathExAttrInfo.FileCode(NodeType=2 项目节点) → PathInfo → OrderHeadInfo → OrderDetailInfo → PartLibraryInfo → BomHeadInfo → BomDetailsInfo
+```
+
+| # | 步骤 | 动作 |
+|---|---|---|
+| 1 | 新建外接数据源(SQL Server 只读) | 顶部导航「**外接数据源**」页新建一个只读 SQL Server 连接,地址、账号、密码**由客户/实施在界面当场输入**,本文不记录、不留存。测试库地址为 `10.10.52.16`(生产库地址由客户提供,现场输入,不写入任何文档)。**具体菜单入口待核对**(本次复核的源文档未截图此界面,只核实了其后端约束,见下一步)。 |
+| 2 | 外部系统绑定该连接 | 该连接对应的"外部系统"记录,`kind` 必须是 `data-source:sql-readonly`,且其 `connectionId` 必须非空并指向第 1 步新建的连接(#5452 起的约束)。若沿用一条历史遗留的外部系统记录(未打 `dataSourceOwnerId` 标记),source-preflight 会报 `CONNECTION_LEGACY_FALLBACK_DENIED`;修法:`GET /api/integration/external-systems/:id` 取出原样公开字段(`id`/`tenantId`/`name`/`kind`/`role`/`status`/`config`/`capabilities`),补上 `connectionId = config.dataSourceId` 后 `POST /api/integration/external-systems` 回写(需 admin token + `x-tenant-id` 请求头)。 |
+| 3 | 源绑定切换 | `POST /api/integration/stock-preparation/source-binding`,body 只能带一个字段:<br>`{ "externalSystemId": "<第 2 步的外部系统 id>" }`<br>需要 `integration:admin` 权限。响应 `takesEffectWithoutRestart: true`,**不需要 `pm2 restart`**,立即生效。 |
+| 4 | 验证绑定生效 | `GET /api/integration/stock-preparation/source-binding` 应读到新值;`GET /api/integration/stock-preparation/audit` 应能看到一条 `action: 'source_binding_set'` 的记录。 |
+| 5 | 源预检 | `GET /api/integration/stock-preparation/source-preflight?externalSystemId=<同上>`,期望 `verdict: 'go'`、`blockers: []`。 |
+
+**source-binding 请求体的窄接口纪律**:body 只接受 `externalSystemId` 一个键,不能带 `kind`/`readPlan`/`target` 等字段(400 `SOURCE_BINDING_REQUEST_INVALID`)——选源只能换"读哪个源",不能顺带改"怎么读"。绑定目标必须是**已存在、kind 落在只读集合**(`data-source:sql-readonly` / `bridge:legacy-sql-readonly`)的外部系统。
+
+**源预检结果解读**:
+
+| `checks.*` | 期望 |
+|---|---|
+| `reachability` | 能连上 |
+| `projectData` | 项目号入口表非空,`NodeType=2` 采样行存在 |
+| `bomData` | BOM 头 / 明细非空 |
+| `topology` | 实测桥接与配置的读取计划一致(`matchesConfigured=true`) |
+| `presetMatch` | 命中厂商字段字典 preset |
+| `quantityField` | 数量槽位与配置一致 |
+
+已知 blocker code(任一出现即 `no-go`):`source_unreachable`、`entry_table_missing`、`no_project_numbers`、`no_bom_rows`、`no_bom_bridge`、`bridge_ambiguous`、`topology_mismatch`。看到 `topology_mismatch` 或任何"无数据"类 blocker,**先停下核对配置,不要往下一步走**。
+
+---
+
+## 4. 数据前置(客户侧必做)
+
+**测试库现状**(2026-09-03 现场核实):`10.10.52.16` 上的测试库只有 1 张订单,其明细指向的零件全部不在物料表(`PartLibraryInfo`)——这不是映射或配置问题,是测试库数据本身残缺:该库里另有几个零件挂着完整 BOM 树(例如某零件有 2 张 BOM 表头、118 行明细),但没有任何订单引用它们。因此**任何项目号在测试库上现状都走不完整链**,第 2 步(从 PLM 拉取)演不出效果。
+
+客户在测试环境验证前,需二选一:
+
+**(a)在测试库插入一张订单,指向已有 BOM 的零件**(推荐,风险最低,不涉及生产数据):
+
+```sql
+-- 项目 230920006 的节点 15014156;零件 600028853 有 2 个 BOM 表头、118 行明细
+INSERT INTO DN_PDM_OrderHeadInfo (OBJ_ID, path_id) VALUES (<新订单ID>, 15014156);
+INSERT INTO DN_PDM_OrderDetailInfo (order_id, part_id, quantity, sort_id) VALUES (<新订单ID>, 600028853, 1, 1);
+```
+
+**表头可能还有其它非空列,以客户实际表结构为准,上面两条 INSERT 只给出本方案必须的最小字段集。**
+
+插入后对项目号 `230920006` 跑一次拉取(§6),预计能展开出该 BOM 下的行。**预告**:2026-09-03 对测试库的只读枚举显示,该零件的一张 BOM(bom_id 15013572)59 行明细里有 33 行的子件不在测试库物料表(其它有 BOM 的根零件也普遍缺 40–60%),拉取后这些行会被系统**挂起待人工确认**(`manual_confirm_required`),这是**设计行为,不是故障**——系统对拿不准的行选择停下来问人,不自己猜。具体挂起的子件笔数(任务书口径为"59 个子件里 33 个不在测试库物料表")**待核对**:本次复核的源文档中未找到这一具体计数的逐字出处,已核实的是同一零件"2 张 BOM 表头 / 118 行明细"这组数字(见 `222-deploy-window-runbook-20260901.md` 第 116 条)。
+
+**(b)提供生产 PLM 只读账号**:凭据由客户/实施在界面当场输入,用后按客户内部安全策略轮换;本文及其他任何交付文档都不记录凭据。选这条需要客户明确同意接入生产库。
+
+**无论选哪条**,第 3、4 步(多维表填报、导出)都在已有的备料行上验证,不依赖这次新拉的数据。
+
+---
+
+## 5. 账号与权限
+
+**5-1 两个权限码**(由平台管理员通过 `POST /api/permissions/grant` 授予,`stock-prep:operate` **不隐含** `stock-prep:read`,两个都要单独授予):
+
+```
+POST /api/permissions/grant
+{ "userId": "<用户 id>", "permission": "stock-prep:read" }
+```
+```
+POST /api/permissions/grant
+{ "userId": "<用户 id>", "permission": "stock-prep:operate" }
+```
+
+需要请求方本身是管理员(`isAdmin` 校验),否则 403。
+
+**5-2 命名空间准入**(少这一步,权限授了也会被过滤掉——fail-closed):
+
+```
+PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
+{ "enabled": true }
+```
+
+**5-3 管理员与一线操作员各自能做的事**
+
+| 角色 | 能做 | 不能做(留给 `integration:admin`) |
+|---|---|---|
+| 一线操作员(`stock-prep:operate` **且** `stock-prep:read`,已开命名空间准入) | 搜自己租户的项目、开项目备料页;跑拉取(试算/写入,含大 BOM 后台通道);确认队列的 `confirmation-decisions/reconcile`;在多维表填人工列;导出 Excel;"通知下一步"推进 | 落快照批次(`mvp-persist`);装表/装 pack/`sandbox-target/ensure`;选源(`source-binding`);跨租户读任何东西;生产写 canonical(本期任何角色都不能,见 §7④) |
+| 平台管理员(`role:admin` / `integration:admin`) | 上述"不能做"里的全部;授权限、开命名空间准入 | — |
+
+**5-4 项目备料页 tab 的落地行为**:登录后访问 `/stock-prep`(路由不带 tab 参数)。一线操作员账号自动落在"项目备料"tab;平台管理员账号自动落在"确认队列"tab,需手动点开"项目备料"。也可以直接带 `?projectNo=<项目号>` 深链到某个项目。
+
+---
+
+## 6. 验收路径(客户自测)
+
+一线操作员用自己账号登录 → `/stock-prep`(自动落在"项目备料"tab,也可用 `?projectNo=<项目号>` 深链)。
+
+| # | 操作 | 期望 |
+|---|---|---|
+| 1 | 搜索框输项目号 → 点"打开这个项目" | 新项目出现空状态提示 + 下方"项目接入"面板 |
+| 2 | 点"同步这个项目(可以重复点,不会重复写)" | 四行逐行翻成成功/跳过/失败:①试算:看看会写入什么 ②确认:拿不准的交给人 ③写入:BOM 落到多维表 ④批次存档:留一份这次的样子(**这一行对一线正常是"跳过"**,存档是管理员的动作,不是故障)。有需要人工确认的行时,顶部结论会写"还差一步:有几行需要您先拿个主意"——这也不是故障。 |
+| 3 | 点"到多维表填写这个项目" → 在多维表里填人工列(材料类型、备料状态、需求日期、提前周期、自制/外购、领料节点、备料日期、毛坯长度、采购完成/回复日期、仓库完成/到货日期、备注等) | 记录更新成功;人工列由人填,系统的拉取/写入从不覆盖它们 |
+| 4 | 点"导出物料清单(Excel)" | 直接下载 xlsx(下载即成功,无额外提示) |
+
+**导出的 17 列表头(顺序固定)**:
+
+1. 父组件图号 2. 父组件名称 3. 图号 4. 名称 5. 规格 6. 材料 7. 总数量 8. 备料情况 9. 需求日期 10. 领料节点 11. 备料日期 12. 毛坯长度 13. 自制/外购 14. 采购完成 15. 采购回复日期 16. 仓库完成 17. 实际到货日期
+
+---
+
+## 7. 已知问题与注意
+
+| # | 问题 | 说明 |
+|---|---|---|
+| ① | HTTP 站点下载导出文件被 Chrome 标"未确认" | 站点若是 HTTP(非 HTTPS),浏览器会把导出的 xlsx 拦在下载栏并标"未确认",需点"保留"。演示/验收前先告知客户这个提示是正常的,或给部署主机配 HTTPS 以避免。 |
+| ② | 旧模板建的表缺新字段 | 用旧模板(早期版本)建的沙箱备料表,遇到新版本模板新增字段时,`sandbox-target/ensure` 只解析已有字段、不补新增字段,会在写入子件行时报"未知字段"类错误。**用补字段脚本修**(`scripts/ops/stock-preparation-sandbox-add-missing-template-fields.cjs`,先不带 `--execute` 看计划,确认无误后再加 `--execute`),**不要手工建列**(手工建的列 id 与系统生成的稳定 id 不一致,会导致写入器仍然找不到字段)。 |
+| ③ | `x-tenant-id` 请求头在无租户声明 token 下可定租户 | 部分早期 token 不带租户声明时,系统会用请求头 `x-tenant-id` 来判定租户身份,理论上存在跨租户泄漏风险。系统性修复正在推进中。**单租户内网部署下该风险可控**(部署内只有一个租户,请求头无论传什么都落在同一个租户),但仍建议客户环境按最小暴露原则配置(不对外网开放管理类接口),交付时应向客户说明这一状态,不隐瞒。 |
+| ④ | 钉钉待办、宜搭推送、"通知下一步"接力链的通知投递本期不交付 | "通知下一步"按钮本身若配置了接力链(可选功能)可以推进"轮到谁"的状态,但钉钉待办、宜搭消息推送、以及接力链更完整的通知下一环功能均**不在本期交付范围**,客户若需要这类集成需另行排期。若不配置接力链,"通知下一步"按钮直接不出现,不影响拉取/填报/导出主线。 |
+
+---
+
+## 8. 回退
+
+**优先(代码/插件级,覆盖绝大多数失败——构建坏、健康检查不过、文件丢失)**:升级脚本失败时会**自动**逐路径打印精确恢复命令,照抄执行即可:
+
+```powershell
+Remove-Item -LiteralPath <live-path> -Recurse -Force -ErrorAction SilentlyContinue
+Copy-Item -LiteralPath (Join-Path $BACKUP_PATH <rel-path>) -Destination <live-path> -Recurse -Force
+pm2 restart metasheet-backend --update-env
+```
+
+**迁移可以留着不回滚**:本期迁移都是纯新增(建表、放宽某条 CHECK 约束的取值清单),单事务、失败即整体回滚,不残留半迁移状态,旧构建照常跑——代码级回滚**不需要动数据库**。
+
+**顺手清理的配置**:`STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS` 这份 env 允许清单**没有过期机制**,回退或窗口结束后需要人工从 `app.env` 里清理;接力链回退就是把对应的 env 路径键从 `app.env` 里拿掉后重启。**env 类回退同样要 `pm2 restart --update-env` 才生效**。
+
+**最后手段(数据库级,慎用)**:只在"迁移本身跑成功了,但之后发现数据被破坏"这种场景使用,**必须先经 owner/客户方确认**——若该部署上同时运行其他业务模块(如考勤、审批),`pg_restore --clean` 类操作会把备份时间点之后**所有模块**的新数据一并抹掉:
+
+```powershell
+pg_restore --clean --if-exists -d $env:DATABASE_URL "$backupDir\pre-upgrade-db.dump"
+```
+
+---
+
+## 待核对条目汇总
+
+初稿标了 4 条,2026-09-04 晚复核后只剩 1 条:
+
+1. **§1 / §2.2:`deploy-bootstrap`(`.ps1`/`.bat`)全新安装的具体调用方式与前置依赖** —— 本次只实跑并验证了"已有部署就地升级"(§2.1,222 上 r8 已按此升级并复验通过);全新安装路径未在任何环境实跑,交付前若客户是全新装机,须先在一台干净机器上把 §2.2 走一遍再交。
+
+已补实的三条:§1 的包标签/SHA256/钉住提交(r8-20260904,见 §1 表);§3 步骤 1 的界面入口(顶部导航「外接数据源」);§4 的 59/33 计数出处(2026-09-03 对测试库的只读枚举,记录在 `222-rehearsal-full-run-20260904.md` §1 与 memory)。
+
+历史记录(初稿原文,已处理):
+1. §1:部署包的具体包标签与 SHA256(占位 `<PACKAGE_TAG>` / `<PACKAGE_SHA256>`),由本次实施填写。
+2. §1 / §2.2:`deploy-bootstrap`(`.ps1`/`.bat`)全新安装的具体调用方式与前置依赖,本次复核的源文档未记录逐步流程。
+3. §3 步骤 1:新建外接数据源的具体界面菜单入口,本次复核的源文档未截图/记录此界面,只核实了其后端约束。
+4. §4:任务书口径"该 BOM 的 59 个子件里 33 个不在测试库物料表"这一具体计数,本次复核的源文档中未找到逐字出处(已核实的是同一零件"2 张 BOM 表头 / 118 行明细"这组数字)。

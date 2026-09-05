@@ -411,6 +411,36 @@ describe('DingTalkGroupDestinationService', () => {
     expect(setArg?.last_test_error).toBeNull()
   })
 
+  /**
+   * P3 pin (unpinned guard): `testSend` must file its delivery as `source_type: 'manual_test'` and
+   * as `initiated_by: <the user who pressed the button>`.
+   *
+   * Nothing above asserted either field, so mutating the `dispatchToDestinationRow` call to
+   * `'automation'` — or dropping `initiatedBy` — left the whole suite green. Both matter: the
+   * delivery ledger is how an operator tells "I tested this" apart from "the server sent one", and
+   * `sendToDestination` deliberately files the OPPOSITE pair (see the handoff-notifier suite), so
+   * the two paths staying distinguishable is the entire point of `sourceType` existing.
+   */
+  test('testSend files the delivery as a manual test attributed to the caller', async () => {
+    const { db, roots } = createMockDb()
+    const fetchFn = vi.fn(async () => new Response(
+      JSON.stringify({ errcode: 0, errmsg: 'ok' }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ))
+    const service = new DingTalkGroupDestinationService(db, fetchFn as typeof fetch)
+
+    // `created_by` matches the caller so `loadAuthorizedDestination`'s private-row branch admits
+    // them; the id is deliberately NOT the fixture default, so `initiated_by` proves the CALLER was
+    // carried through rather than some constant that happens to match.
+    executeTakeFirstQueue.push(destinationRow({ created_by: 'user_7' }))
+    await expect(service.testSend('dt_1', 'user_7', {})).resolves.toEqual({ ok: true })
+
+    const insertChain = roots.insertInto.mock.results[0]?.value as MockChain | undefined
+    const deliveryValues = insertChain?.values?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
+    expect(deliveryValues?.source_type).toBe('manual_test')
+    expect(deliveryValues?.initiated_by).toBe('user_7')
+  })
+
   test('testSend rejects legacy invalid webhook URL without fetch', async () => {
     const { db, roots } = createMockDb()
     const fetchFn = vi.fn(async () => new Response(

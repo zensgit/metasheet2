@@ -83,8 +83,19 @@ function main() {
     assert.equal(byId[fieldId].labelZh, labelZh, `${fieldId} carries its agreed Chinese header`)
     assert.notEqual(byId[fieldId].preserveOnRefresh, true, `${fieldId} is refreshed by the pull, not preserved`)
   }
-  // THE WALL: the human band did not move. Adding PLM columns must be invisible to it.
-  assert.equal(HUMAN_PRESERVED_FIELD_IDS.length, 8, 'the human-preserved whitelist is still exactly 8 columns')
+  // THE WALL: adding PLM columns must be invisible to the human band. The band itself grew
+  // 8 -> 13 in a SEPARATE, design-gated step (自制/外购 + the departmental response band:
+  // makeOrBuy / procurementDone / procurementReplyDate / warehouseDone / actualArrivalDate);
+  // what this pin defends is that the ORIGINAL eight are untouched and that the three PLM
+  // columns above did not leak into the whitelist. Both are asserted explicitly.
+  assert.equal(HUMAN_PRESERVED_FIELD_IDS.length, 13, 'the human-preserved whitelist is exactly 13 columns')
+  assert.deepEqual(HUMAN_PRESERVED_FIELD_IDS.slice(0, 8), [
+    'materialType', 'blankType', 'stockPreparationStatus', 'demandDate', 'leadTimeDays', 'notes',
+    'procurementReply', 'warehouseConfirmation',
+  ], 'the original eight human columns are unchanged, in order')
+  for (const plmId of ['parentComponentCode', 'parentComponentName', 'componentSpec']) {
+    assert.equal(HUMAN_PRESERVED_FIELD_IDS.includes(plmId), false, `${plmId} must never enter the human whitelist`)
+  }
   for (const fieldId of ['parentComponentCode', 'parentComponentName', 'componentSpec']) {
     assert.equal(HUMAN_PRESERVED_FIELD_IDS.includes(fieldId), false, `${fieldId} is not on the human whitelist`)
   }

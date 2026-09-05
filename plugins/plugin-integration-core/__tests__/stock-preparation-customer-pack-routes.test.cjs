@@ -16,6 +16,10 @@
 //   4. DRY RUN = ZERO WRITES, asserted against a fake that records EVERY provisioning call, not
 //      merely the ones we remembered to look for.
 //   5. VALUES-FREE responses.
+//   6. THE HOST FIELD-PERMISSION PORT IS ACTUALLY WIRED. A pack that declares fieldWritePolicies
+//      must reach `services.stockPreparationFieldPermissions` THROUGH the route, with the physical
+//      (fieldId, roleId) rows and nothing else; and a declared policy with NO port must be a coded
+//      503 that leaves the sheet untouched.
 //
 // Hermetic: no DB, no network. The service stubs below are inert on purpose — any route that
 // touched one would fail loudly rather than pass silently.
@@ -203,7 +207,7 @@ function baseServices() {
   }
 }
 
-function mount({ packs, provisioning, packInstallStore } = {}) {
+function mount({ packs, provisioning, packInstallStore, fieldPermissions } = {}) {
   const routes = new Map()
   const context = {
     api: {
@@ -223,6 +227,9 @@ function mount({ packs, provisioning, packInstallStore } = {}) {
   }
   const services = baseServices()
   if (packInstallStore) services.stockPreparationPackInstallStore = packInstallStore
+  // The host capability, injected exactly the way core-backend injects it (index.ts gives it only
+  // to plugin-integration-core). Absent by default, so every existing case here is unchanged.
+  if (fieldPermissions) services.stockPreparationFieldPermissions = fieldPermissions
   httpRoutes.registerIntegrationRoutes({
     context,
     services,
@@ -244,7 +251,21 @@ async function call(routes, method, routePath, req = {}) {
   const handler = routes.get(`${method.toUpperCase()} ${routePath}`)
   assert.ok(handler, `route ${method} ${routePath} is registered`)
   const res = createResponse()
-  await handler({ user: req.user, body: req.body || {}, query: req.query || {}, params: req.params || {} }, res)
+  // `authenticatedTenantId` is what auth/jwt-middleware.ts sets from the VERIFIED TOKEN CLAIM, and
+  // only from there — unlike `user.tenantId`, which the same middleware back-fills from the
+  // `x-tenant-id` REQUEST HEADER when the token carries no claim. Modelling both separately is what
+  // lets this suite tell "the token said so" from "the request said so"; a caller that passes
+  // `authenticatedTenantId: null` is a claimless principal whose `user.tenantId` came from a header.
+  const authenticatedTenantId = Object.prototype.hasOwnProperty.call(req, 'authenticatedTenantId')
+    ? req.authenticatedTenantId
+    : (req.user && req.user.tenantId)
+  await handler({
+    user: req.user,
+    authenticatedTenantId,
+    body: req.body || {},
+    query: req.query || {},
+    params: req.params || {},
+  }, res)
   assert.notEqual(res.body, undefined, `${method} ${routePath} produced a body`)
   return res
 }
@@ -341,6 +362,63 @@ async function requestCannotSupplyAPackOrSteerTheTarget() {
 }
 
 // ---------------------------------------------------------------------------
+// THE HEADER MAY NOT CHOOSE WHOSE PERMISSIONS GET RETIRED.
+//
+// `auth/jwt-middleware.ts` copies the `x-tenant-id` REQUEST HEADER onto `user.tenantId` whenever the
+// verified token carries no tenant claim. Every route that derived its tenant from `user.tenantId`
+// was therefore steerable by a header for a claimless platform admin. That was survivable while this
+// install was purely additive; it is not survivable now that it issues a bounded DELETE against
+// `field_permissions`, because the sheet that delete is aimed at is a pure function of the tenant.
+//
+// Both write routes now resolve from `req.authenticatedTenantId` — set ONLY from the verified token
+// — and refuse a claimless principal outright rather than falling back to the header's value.
+// ---------------------------------------------------------------------------
+async function aTenantlessAdminCannotSteerTheInstallWithAHeader() {
+  const provisioning = createFakeProvisioning()
+  const store = createStockPreparationPackInstallStore({ db: createFakeDb(), idGenerator: () => 'ledger_1' })
+  const { routes } = mount({ packs: { [PACK_ID]: SUITE_PACK }, provisioning, packInstallStore: store })
+
+  // A platform admin whose token carries NO tenant claim. The middleware has already copied
+  // `x-tenant-id: tenant-victim` onto user.tenantId — which is exactly the shape of the hole.
+  const CLAIMLESS_ADMIN = Object.freeze({ id: 'u_platform', roles: ['admin'], tenantId: 'tenant-victim' })
+
+  for (const routePath of [
+    '/api/integration/stock-preparation/customer-packs/:packId/dry-run',
+    '/api/integration/stock-preparation/customer-packs/:packId/install',
+  ]) {
+    const res = await call(routes, 'POST', routePath, {
+      user: CLAIMLESS_ADMIN,
+      authenticatedTenantId: null, // the verified token said nothing
+      params: { packId: PACK_ID },
+      body: {},
+    })
+    assert.equal(res.statusCode, 403, `${routePath} refuses a header-derived tenant`)
+    assert.equal(res.body.error.code, 'TENANT_CLAIM_REQUIRED')
+  }
+  // Fail-closed all the way down: the host was never touched and no ledger row exists.
+  assert.deepEqual(provisioning.calls, [], 'zero host calls — refused before any work')
+
+  // A CONTRADICTING header is refused too: the claim wins, it does not merely take precedence.
+  const contradicted = await call(routes, 'POST', '/api/integration/stock-preparation/customer-packs/:packId/install', {
+    user: Object.freeze({ id: 'u_admin', roles: ['admin'], tenantId: 'tenant-victim' }),
+    authenticatedTenantId: TENANT_ID,
+    params: { packId: PACK_ID },
+    body: {},
+  })
+  assert.equal(contradicted.statusCode, 403)
+  assert.equal(contradicted.body.error.code, 'TENANT_MISMATCH')
+
+  // POSITIVE CONTROL — the assertions above are not vacuous: a tenant-BOUND admin still installs.
+  const okRes = await call(routes, 'POST', '/api/integration/stock-preparation/customer-packs/:packId/install', {
+    user: ADMIN,
+    params: { packId: PACK_ID },
+    body: {},
+  })
+  assert.equal(okRes.body.ok, true)
+  assert.equal(okRes.body.data.projectId, PROJECT_ID)
+}
+
+// ---------------------------------------------------------------------------
 // 2. dry run: zero writes
 // ---------------------------------------------------------------------------
 
@@ -398,7 +476,21 @@ async function dryRunPerformsZeroWrites() {
   assert.deepEqual(plan.conflictingFieldIds, [])
   assert.deepEqual(plan.counts, {
     extensionFields: 2, willCreate: 2, willStamp: 0, alreadyStamped: 0, conflicting: 0, optionSets: 0, roleViews: 1,
+    // This pack declares no fieldWritePolicies, so the write-scope preview is empty on every axis:
+    // nothing to deny, nothing found stale, and — since a pack that governs no region can request
+    // no reconcile — nothing this install would retire and nothing left for an operator either.
+    fieldWriteDenials: 0,
+    willRemoveWriteScopes: 0, operatorMustClearWriteScopes: 0,
+    // Nobody else holds anything here either, because nothing was classified at all.
+    operatorHeldInRegion: 0, governedByOtherPacks: 0,
+    // No governed rectangle either — which is the same fact that makes the delete unrequestable,
+    // and therefore also the fact that makes both invariant refusals impossible here.
+    writeScopeRegionFields: 0, writeScopeRegionRoles: 0,
+    packConflictWriteScopes: 0, legacyUnattributedWriteScopes: 0,
   })
+  // NULL, not an empty rectangle: "this pack governs nothing" is a different statement from "this
+  // pack governs an empty region", and only the first one makes a delete structurally impossible.
+  assert.equal(plan.writeScopeRegion, null)
   // The derived hidden ids the role view would ship, in the pack's own logical vocabulary.
   assert.equal(plan.roleViews.length, 1)
   assert.equal(plan.roleViews[0].roleViewId, 'production')
@@ -540,15 +632,189 @@ async function everyResponseIsValuesFree() {
   assert.ok(serialized.includes(EXT_PLM) && serialized.includes(EXT_HUMAN))
 }
 
+
+// ---------------------------------------------------------------------------
+// 5. the field-permission port, END TO END THROUGH THE ROUTE
+// ---------------------------------------------------------------------------
+//
+// F5(a) of the adversarial review: every earlier witness for the write-scoping wiring calls
+// `installCustomerPack` directly. That leaves the ONE line that actually connects the two —
+// `fieldPermissions: stockPreparationFieldPermissions` inside the route handler — proven by nothing
+// but a source read. These two cases exercise the real registerIntegrationRoutes -> handler ->
+// installer -> port path, so deleting that line turns them RED.
+
+const PORT_PACK_ID = 'routes-pack-scoped'
+const PORT_PACK = Object.freeze({
+  ...SUITE_PACK,
+  packId: PORT_PACK_ID,
+  // Both columns are on the frozen main template, so the declaration needs no extra ext_ column.
+  fieldWritePolicies: [
+    { roleId: 'routes:purchasing', ownsFieldIds: ['procurementReply', 'procurementDone'] },
+    { roleId: 'routes:warehouse', ownsFieldIds: ['warehouseConfirmation', 'warehouseDone'] },
+  ],
+})
+
+function createRecordingFieldPermissionsPort() {
+  const applyCalls = []
+  const listCalls = []
+  const classifyCalls = []
+  const roleCalls = []
+  const fieldCalls = []
+  const emptyClassification = {
+    willRetire: [],
+    packConflicts: [],
+    legacyUnattributed: [],
+    operatorHeldInRegion: [],
+    governedByOtherPacks: [],
+    operatorMustClear: [],
+  }
+  return {
+    applyCalls,
+    listCalls,
+    classifyCalls,
+    roleCalls,
+    fieldCalls,
+    // The host declares that it HONOURS a reconcile region. Without this the install refuses with a
+    // coded 501 rather than writing rows a later revision could never retire — so the flag is part
+    // of the wiring this route test is about, not decoration.
+    supportsWriteScopeReconcile: true,
+    async applyRoleWriteScopes(input) {
+      applyCalls.push(input)
+      return {
+        applied: input.entries.length,
+        entries: input.entries,
+        removed: [],
+        operatorHeld: [],
+        governedByOtherPacks: [],
+      }
+    },
+    // THE CLASSIFIER the route must reach. An empty sheet classifies to empty everything — which is
+    // a different answer from "this host cannot classify", and the route test's job is to prove the
+    // capability is WIRED, so the method's presence is what matters here.
+    async classifyRoleWriteScopeRegion(input) {
+      classifyCalls.push(input)
+      return {
+        sheetId: input.sheetId,
+        packId: input.packId,
+        legacyAdoptable: input.legacyAdoptable === true,
+        ...emptyClassification,
+      }
+    },
+    async listRoleWriteScopes(input) {
+      listCalls.push(input)
+      return { sheetId: input.sheetId, entries: [], foreignEntries: [] }
+    },
+    async findMissingRoleIds(input) {
+      roleCalls.push(input)
+      return { missing: [] }
+    },
+    async findMissingFieldIds(input) {
+      fieldCalls.push(input)
+      return { missing: [] }
+    },
+  }
+}
+
+async function theInstallRouteHandsThePackToTheHostPort() {
+  const port = createRecordingFieldPermissionsPort()
+  const store = createStockPreparationPackInstallStore({ db: createFakeDb(), idGenerator: () => 'ledger_1' })
+  const { routes } = mount({
+    packs: { [PORT_PACK_ID]: PORT_PACK },
+    provisioning: createFakeProvisioning(),
+    packInstallStore: store,
+    fieldPermissions: port,
+  })
+
+  const res = await call(routes, 'POST', '/api/integration/stock-preparation/customer-packs/:packId/install', {
+    user: ADMIN,
+    params: { packId: PORT_PACK_ID },
+  })
+  assert.ok([200, 201].includes(res.statusCode), `install succeeded (${res.statusCode})`)
+
+  // THE ASSERTION THAT MATTERS: the port was reached, once, through the route.
+  assert.equal(port.applyCalls.length, 1, 'the route wired the host port into the install')
+  const applied = port.applyCalls[0]
+  assert.equal(applied.sheetId, `sheet_${OBJECT_ID}`, 'addressed by the sheet the route resolved')
+  assert.equal(applied.entries.length, 4, 'each of the 4 claimed columns denies the one role that does not own it')
+  for (const entry of applied.entries) {
+    assert.deepEqual(Object.keys(entry).sort(), ['fieldId', 'roleId'], 'nothing but the port shape reaches the port')
+    assert.equal(entry.fieldId, physicalFieldId(PROJECT_ID, OBJECT_ID, entry.fieldId.split(`${OBJECT_ID}_`)[1]))
+  }
+  const deniedFor = (roleId) => applied.entries
+    .filter((entry) => entry.roleId === roleId)
+    .map((entry) => entry.fieldId.replace(`fld_${PROJECT_ID}_${OBJECT_ID}_`, ''))
+    .sort()
+  assert.deepEqual(deniedFor('routes:warehouse'), ['procurementDone', 'procurementReply'])
+  assert.deepEqual(deniedFor('routes:purchasing'), ['warehouseConfirmation', 'warehouseDone'])
+
+  // The pre-flight went through the route too. ONE classification read per install, taken BEFORE the
+  // first schema write so the two invariant refusals land over an untouched sheet — and the write
+  // path re-runs the SAME classification inside its own transaction under the row lock, which is
+  // what makes two concurrent installs unable to both pass and then merge.
+  assert.equal(port.classifyCalls.length, 1, 'one classification read per install, in the pre-flight')
+  assert.equal(port.fieldCalls.length, 1, 'and the field-existence pre-flight ran too')
+  assert.deepEqual(port.roleCalls, [{ roleIds: ['routes:purchasing', 'routes:warehouse'] }])
+  assert.equal(res.body.data.writeScopeCheck, 'checked')
+  assert.deepEqual(res.body.data.operatorMustClearWriteScopes, [])
+  assert.equal(res.body.data.appliedWriteScopes, 4)
+
+  // And the DRY RUN previews the same plan without touching the port's write half.
+  const dry = await call(routes, 'POST', '/api/integration/stock-preparation/customer-packs/:packId/dry-run', {
+    user: ADMIN,
+    params: { packId: PORT_PACK_ID },
+  })
+  assert.equal(dry.statusCode, 200)
+  assert.equal(dry.body.data.fieldPermissionsPortAvailable, true)
+  assert.equal(dry.body.data.counts.fieldWriteDenials, 4)
+  assert.equal(port.applyCalls.length, 1, 'the dry-run wrote no permission row')
+}
+
+async function aDeclaredPolicyWithNoHostPortIsACoded503() {
+  // The inverse. Mounting WITHOUT the capability must refuse the install rather than report it
+  // complete while the declared scoping would silently not be enforced.
+  const store = createStockPreparationPackInstallStore({ db: createFakeDb(), idGenerator: () => 'ledger_2' })
+  const provisioning = createFakeProvisioning()
+  const { routes } = mount({
+    packs: { [PORT_PACK_ID]: PORT_PACK },
+    provisioning,
+    packInstallStore: store,
+    // no fieldPermissions
+  })
+
+  const res = await call(routes, 'POST', '/api/integration/stock-preparation/customer-packs/:packId/install', {
+    user: ADMIN,
+    params: { packId: PORT_PACK_ID },
+  })
+  assert.equal(res.body.ok, false)
+  assert.equal(res.statusCode, 503)
+  assert.equal(res.body.error.code, 'CUSTOMER_PACK_FIELD_PERMISSIONS_UNAVAILABLE')
+  // FAIL-CLOSED BEFORE THE FIRST SCHEMA WRITE: the refusal must leave the sheet untouched.
+  for (const method of WRITE_METHODS) {
+    assert.equal(provisioning.calls.includes(method), false, `${method} was never reached`)
+  }
+  // The dry-run says the same thing without throwing — that is its whole posture.
+  const dry = await call(routes, 'POST', '/api/integration/stock-preparation/customer-packs/:packId/dry-run', {
+    user: ADMIN,
+    params: { packId: PORT_PACK_ID },
+  })
+  assert.equal(dry.statusCode, 200)
+  assert.equal(dry.body.data.fieldPermissionsPortAvailable, false)
+  assert.equal(dry.body.data.writeScopeCheck, 'port_absent')
+  assert.equal(dry.body.data.canInstall, false)
+}
+
 async function main() {
   await everyRouteIsAdminGated()
   await unlistedPackIdIsRefusedBeforeAnyHostCall()
   await requestCannotSupplyAPackOrSteerTheTarget()
+  await aTenantlessAdminCannotSteerTheInstallWithAHeader()
   await dryRunPerformsZeroWrites()
   await dryRunReportsConflictsInsteadOfThrowing()
   await absentCanonicalTargetIsATwoStepSignal()
   await installWritesTheLedgerAndTheReadRouteShowsIt()
   await everyResponseIsValuesFree()
+  await theInstallRouteHandsThePackToTheHostPort()
+  await aDeclaredPolicyWithNoHostPortIsACoded503()
 }
 
 main().then(
