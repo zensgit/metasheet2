@@ -63,6 +63,12 @@ const BACKGROUND_BUDGET_FIELDS = Object.freeze([
   'maxArtifactChunks',
 ])
 
+// A FAILED READ IS A DIAGNOSTIC, NOT A LOG. Twenty is enough to see the shape
+// of a failure (one object, one error code, or a scatter across several) and
+// small enough that a run whose every read failed cannot turn one job row into
+// an unbounded array. Whatever the cap costs is reported: see `attachDetailList`.
+const LARGE_BOM_READ_FAILURE_DETAIL_LIMIT = 20
+
 const APPLY_COUNT_FIELDS = Object.freeze([
   'created',
   'updated',
@@ -141,6 +147,137 @@ function safeTokenList(value, field) {
     if (token && !out.includes(token)) out.push(token)
   }
   return out
+}
+
+/**
+ * DROP-INSTEAD-OF-THROW twin of `safeEvidenceToken`, for the read-failure
+ * diagnostics below.
+ *
+ * `safeEvidenceToken` is right where a caller supplied the token and a bad one
+ * is a bug worth refusing. It is WRONG on the failure path: these tokens come
+ * from the driver (`error.code`) and from adapter metadata, so an unsafe one is
+ * an ordinary Tuesday — and throwing there would replace the diagnostic we are
+ * trying to persist with a second, less informative failure. Same safety rules,
+ * different verdict: unsafe => the FIELD disappears, the rest of the diagnostic
+ * survives.
+ */
+function evidenceTokenOrUndefined(value) {
+  if (typeof value !== 'string') return undefined
+  try {
+    return safeEvidenceToken(value, 'readFailure') || undefined
+  } catch {
+    return undefined
+  }
+}
+
+function evidenceTokenListOrEmpty(value) {
+  if (!Array.isArray(value)) return []
+  const out = []
+  for (const entry of value) {
+    const token = evidenceTokenOrUndefined(entry)
+    if (token && !out.includes(token)) out.push(token)
+  }
+  return out
+}
+
+function positiveIntegerOr(value, fallback) {
+  const number = Number(value)
+  return Number.isInteger(number) && number >= 0 ? number : fallback
+}
+
+/**
+ * ONE FAILED READ, VALUES-FREE. The allowed key set is closed and enumerated
+ * here rather than filtered out of the diagnostic, because the diagnostic grows
+ * over time and a deny-list would leak the next field somebody adds.
+ *
+ * `cursor` is deliberately NOT on the list: the expander's cursor is whatever
+ * the adapter handed back, which for the PLM binding is an offset today and
+ * could be an encoded key tomorrow — i.e. it is the one field in the stanza
+ * that can carry a row value. `message` is not on the list either, and never
+ * will be: it is the driver's free text and routinely quotes the part number
+ * that failed.
+ */
+function readFailureEntry(entry) {
+  if (!isPlainObject(entry)) return {}
+  const failure = {}
+  const object = evidenceTokenOrUndefined(entry.object)
+  if (object) failure.object = object
+  const errorCode = evidenceTokenOrUndefined(entry.errorCode)
+  if (errorCode) failure.errorCode = errorCode
+  const filterFields = evidenceTokenListOrEmpty(entry.filterFields)
+  if (filterFields.length > 0) failure.filterFields = filterFields
+  if (entry.filtersApplied !== undefined) failure.filtersApplied = entry.filtersApplied === true
+  const source = evidenceTokenOrUndefined(entry.source)
+  if (source) failure.source = source
+  return failure
+}
+
+function readFailuresFromDiagnostics(readDiagnostics) {
+  if (!Array.isArray(readDiagnostics)) return []
+  return readDiagnostics
+    .filter((entry) => isPlainObject(entry) && entry.status === 'failed')
+    .map(readFailureEntry)
+    .filter((entry) => Object.keys(entry).length > 0)
+}
+
+/**
+ * ONE EXPANSION ERROR, VALUES-FREE. `expansion.errors[]` carries
+ * `{ type, object?, causeClass?, message? }` — `causeClass` is the symbolic
+ * `error.code || error.name` the expander deliberately kept beside the message
+ * precisely so a downstream seam could classify without the message. This is
+ * that seam: type + object + causeClass in, message out.
+ */
+function errorDetailEntry(entry) {
+  if (!isPlainObject(entry)) return {}
+  const detail = {}
+  const type = evidenceTokenOrUndefined(entry.type)
+  if (type) detail.type = type
+  const object = evidenceTokenOrUndefined(entry.object)
+  if (object) detail.object = object
+  const causeClass = evidenceTokenOrUndefined(entry.causeClass)
+  if (causeClass) detail.causeClass = causeClass
+  return detail
+}
+
+function errorDetailsFromErrors(errors) {
+  if (!Array.isArray(errors)) return []
+  return errors.map(errorDetailEntry).filter((entry) => Object.keys(entry).length > 0)
+}
+
+/**
+ * CONDITIONAL MOUNT, so a run with nothing to report keeps a byte-identical
+ * evidence key set. `<key>Total` reports the REAL count and `<key>Truncated`
+ * says whether the array was cut — the cap can cost an operator the 21st failed
+ * object, never a wrong answer to "how many reads failed".
+ */
+function attachDetailList(evidence, key, items) {
+  if (!Array.isArray(items) || items.length === 0) return evidence
+  evidence[key] = items.slice(0, LARGE_BOM_READ_FAILURE_DETAIL_LIMIT)
+  evidence[`${key}Total`] = items.length
+  evidence[`${key}Truncated`] = items.length > LARGE_BOM_READ_FAILURE_DETAIL_LIMIT
+  return evidence
+}
+
+function attachReadFailureEvidence(evidence, { readDiagnostics, errors } = {}) {
+  attachDetailList(evidence, 'readFailures', readFailuresFromDiagnostics(readDiagnostics))
+  attachDetailList(evidence, 'errorDetails', errorDetailsFromErrors(errors))
+  return evidence
+}
+
+/**
+ * The same two stanzas re-projected on the way OUT of storage. A stored job can
+ * predate this feature, or have been written by a build that projected more
+ * than this one does, so the public projection re-runs the values-free filter
+ * instead of trusting what it reads back.
+ */
+function attachStoredDetailEvidence(publicEvidence, evidence, key, projectEntry) {
+  const stored = Array.isArray(evidence[key]) ? evidence[key] : []
+  const items = stored.map(projectEntry).filter((entry) => Object.keys(entry).length > 0)
+  if (items.length === 0) return publicEvidence
+  publicEvidence[key] = items.slice(0, LARGE_BOM_READ_FAILURE_DETAIL_LIMIT)
+  publicEvidence[`${key}Total`] = positiveIntegerOr(evidence[`${key}Total`], items.length)
+  publicEvidence[`${key}Truncated`] = evidence[`${key}Truncated`] === true
+  return publicEvidence
 }
 
 function nonNegativeInteger(value, field) {
@@ -508,12 +645,15 @@ function updateJobFromExpansion(job, expansion, now) {
   })
   job.progress = progress
   job.budgets = budgets
-  job.evidence = {
+  // `readDiagnosticShapePresent` STAYS, byte-identical: it is a boolean other
+  // guards may pin, and it answers a different question ("did the expander
+  // produce diagnostics at all") from the stanzas below ("which reads failed").
+  job.evidence = attachReadFailureEvidence({
     sourceKind: job.sourceKind,
     readObjects: evidence.readObjects || [],
     errorTypes: evidence.errorTypes || [],
     readDiagnosticShapePresent: Array.isArray(evidence.readDiagnostics) && evidence.readDiagnostics.length > 0,
-  }
+  }, { readDiagnostics: evidence.readDiagnostics, errors: expansion.errors })
   job.updatedAt = now
   if (expansion.valid === true) {
     const revision = expansionArtifactRevision({ job, expansion })
@@ -540,6 +680,22 @@ function safeErrorType(error) {
     return safeEvidenceToken(error && (error.code || error.name), 'errorType') || 'read_failed'
   } catch {
     return 'read_failed'
+  }
+}
+
+/**
+ * The escaped throw rendered in `expansion.errors[]`'s shape, so both projection
+ * points feed `errorDetailEntry` and the stored stanza means the same thing on
+ * either path. `details` is the expander's own error bag
+ * (`StockPreparationBomExpansionError`); a raw driver error has neither and
+ * contributes only its cause class.
+ */
+function thrownErrorDetail(error) {
+  const details = isPlainObject(error && error.details) ? error.details : {}
+  return {
+    type: safeErrorType(error),
+    object: details.object,
+    causeClass: (error && (error.code || error.name)) || undefined,
   }
 }
 
@@ -595,12 +751,17 @@ async function runLargeBomBackgroundExpansionJob(input = {}) {
       frontierRemaining: 0,
       completedChunks: 0,
     }
-    job.evidence = {
+    // NO EXPANSION, so no `readDiagnostics` to project — but the throw itself
+    // still names an object and a cause class, and losing those is exactly the
+    // hole this change closes. `readFailures` stays absent here (there is no
+    // per-read record to report), which is itself the signal that the run died
+    // before the expander could summarize.
+    job.evidence = attachReadFailureEvidence({
       sourceKind: job.sourceKind,
       readObjects: [],
       errorTypes: [safeErrorType(error)],
       readDiagnosticShapePresent: false,
-    }
+    }, { errors: [thrownErrorDetail(error)] })
     job.updatedAt = failedAt
     await storage.set(key, job)
     return cloneJson(job)
@@ -1036,6 +1197,12 @@ function summarizeLargeBomBackgroundExpansionJobForEvidence(job = {}) {
     scaleErrorTypes: errorTypes.filter((errorType) => LARGE_BOM_BOUNDED_ERROR_TYPES.includes(errorType)),
     readDiagnosticShapePresent: evidence.readDiagnosticShapePresent === true || job.readDiagnosticShapePresent === true,
   }
+  // Conditional, like the stored stanza: a run with no failed read produces a
+  // public evidence object whose key set is byte-identical to the pre-feature
+  // one. The route (`publicBackgroundExpansionJob` -> `largeBomJobResponse`)
+  // spreads whatever this returns, so nothing outside this module gates them.
+  attachStoredDetailEvidence(publicEvidence, evidence, 'readFailures', readFailureEntry)
+  attachStoredDetailEvidence(publicEvidence, evidence, 'errorDetails', errorDetailEntry)
   if (isPlainObject(job.planEvidence)) publicEvidence.plan = cloneJson(job.planEvidence)
   return {
     jobIdPresent: Boolean(optionalString(job.jobId)),
@@ -1126,7 +1293,9 @@ module.exports = {
     checkpointApplyJobKey,
     effectiveExpansionBudgets,
     ensureDurableJobStorage,
+    attachReadFailureEvidence,
     hashJson,
+    LARGE_BOM_READ_FAILURE_DETAIL_LIMIT,
     safeEvidenceToken,
     safeTokenList,
     nonNegativeInteger,
