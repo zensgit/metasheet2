@@ -38,6 +38,10 @@ if grep -qE \
 fi
 
 # attendance-admin surface: distinguish "missing endpoint" from "schema/runtime failure".
+if grep -qE 'USER_SCOPE_REQUIRED' "$log_path"; then
+  echo "ADMIN_USER_SCOPE_REQUIRED"
+  exit 0
+fi
 if grep -qE 'attendance-admin API missing \(404\)' "$log_path"; then
   echo "ADMIN_API_MISSING"
   exit 0

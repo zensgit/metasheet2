@@ -33,15 +33,15 @@ function refresh_token_if_needed() {
     --max-time 30 \
     -X POST "${API_BASE}/auth/refresh-token" \
     -H "Content-Type: application/json" \
-    --data "{\"token\":\"${AUTH_TOKEN}\"}" || true)"
+    --data "$(jq -nc --arg token "$AUTH_TOKEN" '{token: $token}')" 2>/dev/null || true)"
   code="${result##*$'\n'}"
   body="${result%$'\n'*}"
   if [[ "$code" != "200" ]]; then
     info "WARN: token refresh failed (HTTP ${code}); using provided token"
     return 0
   fi
-  next="$(printf '%s' "$body" | sed -nE 's/.*"token":"([^"]+)".*/\1/p' | head -n 1)"
-  if [[ -n "$next" && ${#next} -gt 20 ]]; then
+  next="$(jq -r '.data.token // empty' <<<"$body" 2>/dev/null || true)"
+  if [[ "$next" =~ ^[A-Za-z0-9._-]+$ && ${#next} -gt 20 ]]; then
     AUTH_TOKEN="$next"
     info "Token refreshed"
     return 0
@@ -58,7 +58,8 @@ Usage:
 
 Notes:
   - This script prefers POST /api/admin/users/:userId/roles/assign with attendance roles.
-  - It falls back to POST /api/permissions/grant for older environments.
+  - A proven missing route can fall back to legacy grants; missing users/roles cannot.
+  - Every successful assignment is independently read back before reporting success.
   - It requires an ADMIN token.
 EOF
 }
@@ -71,11 +72,10 @@ EOF
 # Normalize API_BASE to not end with "/".
 API_BASE="${API_BASE%/}"
 
-if ! command -v curl >/dev/null 2>&1; then
-  die "curl is required"
-fi
-
-refresh_token_if_needed
+command -v curl >/dev/null 2>&1 || die "curl is required"
+command -v jq >/dev/null 2>&1 || die "jq is required"
+[[ "$AUTH_TOKEN" =~ ^[A-Za-z0-9._-]+$ ]] || die "AUTH_TOKEN_INVALID"
+user_path="$(jq -rn --arg id "$USER_ID" '$id | @uri')"
 
 permissions=()
 role_id=""
@@ -94,12 +94,18 @@ case "$ROLE" in
     ;;
   *)
     usage
-    die "Invalid ROLE '${ROLE}'. Expected employee|approver|admin."
+    die "ROLE_INVALID"
     ;;
 esac
 
-function compact_body() {
-  printf '%s' "${1:-}" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//'
+function response_reason() {
+  local code
+  code="$(jq -r '.error.code // empty' <<<"$HTTP_BODY" 2>/dev/null || true)"
+  case "$code" in
+    ROLE_NOT_FOUND|NOT_FOUND|USER_TARGET_NOT_FOUND|FEATURE_DISABLED|USER_SCOPE_REQUIRED)
+      printf '%s' "$code" ;;
+    *) printf 'PROVISION_REQUEST_FAILED' ;;
+  esac
 }
 
 function post_json() {
@@ -116,48 +122,46 @@ function post_json() {
     -X POST "${API_BASE}${path}" \
     -H "Authorization: Bearer ${AUTH_TOKEN}" \
     -H "Content-Type: application/json" \
-    --data "${payload}" || true)"
+    --data "${payload}" 2>/dev/null || true)"
 
   HTTP_CODE="${result##*$'\n'}"
   HTTP_BODY="${result%$'\n'*}"
 }
 
 function try_assign_role() {
-  info "Assigning role via admin route: role=${ROLE} roleId=${role_id} userId=${USER_ID}"
-  post_json "/admin/users/${USER_ID}/roles/assign" "{\"roleId\":\"${role_id}\"}"
+  info "Assigning attendance role"
+  post_json "/admin/users/${user_path}/roles/assign" "$(jq -nc --arg roleId "$role_id" '{roleId: $roleId}')"
 
   case "${HTTP_CODE}" in
     200|201)
       info "Assigned role ${role_id}"
       return 0
       ;;
-    400)
-      if printf '%s' "${HTTP_BODY}" | grep -qE 'ROLE_NOT_FOUND|role not found'; then
-        info "WARN: role ${role_id} missing; falling back to legacy permission grants"
+    404)
+      # Express' absent-route response is distinct from every structured product error.
+      if ! jq -e . >/dev/null 2>&1 <<<"$HTTP_BODY" \
+        && [[ "$HTTP_BODY" == *"<pre>Cannot POST /api/admin/users/${user_path}/roles/assign</pre>"* ]]; then
+        info "ENDPOINT_MISSING: using legacy permission grants"
         return 10
       fi
       ;;
-    404)
-      info "WARN: admin role assignment endpoint missing; falling back to legacy permission grants"
-      return 10
-      ;;
   esac
 
-  info "error: ${HTTP_CODE} $(compact_body "${HTTP_BODY}")"
+  info "error: ${HTTP_CODE} $(response_reason)"
   return 1
 }
 
 function grant_permissions_legacy() {
   local perm
-  info "Granting permissions via legacy route: role=${ROLE} userId=${USER_ID} count=${#permissions[@]}"
+  info "Granting legacy permissions: count=${#permissions[@]}"
   for perm in "${permissions[@]}"; do
     info "Granting ${perm}"
-    post_json "/permissions/grant" "{\"userId\":\"${USER_ID}\",\"permission\":\"${perm}\"}"
+    post_json "/permissions/grant" "$(jq -nc --arg userId "$USER_ID" --arg permission "$perm" '{userId: $userId, permission: $permission}')"
     case "${HTTP_CODE}" in
       200|201)
         ;;
       *)
-        info "error: ${HTTP_CODE} $(compact_body "${HTTP_BODY}")"
+        info "error: ${HTTP_CODE} $(response_reason)"
         return 1
         ;;
     esac
@@ -165,12 +169,56 @@ function grant_permissions_legacy() {
   return 0
 }
 
+function verify_access() {
+  local mode="$1" route result code body expected
+  route="/attendance-admin/users/${user_path}/access?scope=global"
+  [[ "$mode" != "legacy" ]] || route="/permissions/user/${user_path}"
+  result="$(curl -sS -w '\n%{http_code}' --connect-timeout 10 --max-time 30 \
+    -H "Authorization: Bearer ${AUTH_TOKEN}" "${API_BASE}${route}" 2>/dev/null || true)"
+  code="${result##*$'\n'}"
+  body="${result%$'\n'*}"
+  [[ "$code" == "200" ]] || die "PROVISION_READBACK_FAILED"
+  expected="$(printf '%s\n' "${permissions[@]}" | jq -R . | jq -s .)"
+  if ! jq -e --arg mode "$mode" --arg id "$USER_ID" --arg role "$role_id" --argjson expected "$expected" '
+    (if $mode == "legacy" then
+      select(.userId == $id and .degraded != true)
+    else
+      select(.ok == true) | .data |
+      select(.user.id == $id and (.roles | type == "array" and index($role) != null))
+    end) |
+    .permissions | select(type == "array") |
+    ($expected - . | length == 0)
+  ' <<<"$body" >/dev/null 2>&1; then
+    die "PROVISION_READBACK_FAILED"
+  fi
+}
+
+function verify_token_tenant() {
+  local expected="${AUTH_EXPECTED_TENANT_ID:-}" result code body
+  [[ -n "$expected" ]] || return 0
+  result="$(curl -sS -w '\n%{http_code}' --connect-timeout 10 --max-time 30 \
+    -H "Authorization: Bearer ${AUTH_TOKEN}" "${API_BASE}/auth/me" 2>/dev/null || true)"
+  code="${result##*$'\n'}"
+  body="${result%$'\n'*}"
+  if [[ "$code" != "200" ]] || ! jq -e --arg expected "$expected" '
+    .success == true and (.data.user.tenantId | type == "string")
+    and .data.user.tenantId == $expected
+  ' <<<"$body" >/dev/null 2>&1; then
+    die "PROVISION_TENANT_MISMATCH"
+  fi
+}
+
+refresh_token_if_needed
+verify_token_tenant
 status=0
 try_assign_role || status=$?
 if [[ "${status}" -eq 10 ]]; then
   grant_permissions_legacy
+  verify_access legacy
 elif [[ "${status}" -ne 0 ]]; then
   exit "${status}"
+else
+  verify_access modern
 fi
 
 info "OK"
