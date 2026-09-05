@@ -600,6 +600,22 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainText> = Object
     zh: '这个账号不在这家工厂的名单里,看不到这里的数据。请找管理员确认账号归属。',
     en: 'This account is not on this factory’s roster, so it cannot see the data here. Ask an administrator to check which factory the account belongs to.',
   }),
+  // W4 — THE OTHER TWO TENANCY REFUSALS, WHICH HAD NO WORDS OF THEIR OWN.
+  //
+  // The scope has raised these three as a family since #5445, but only TENANT_REQUIRED had a row
+  // here; the other two fell through to the generic 「这一步没有保存成功,数据没有变化。」 — which is
+  // a WRITE sentence, wrong on a read, and (worse) says nothing a person can act on. Both of these
+  // have a specific, different remedy, and the copy is worth nothing if it does not name it: one is
+  // fixed by signing in again, the other by asking for the right factory. Neither is fixed by
+  // retrying, and neither is a fault to report to us.
+  OPERATOR_SCOPE_TENANT_CONTRADICTED: Object.freeze({
+    zh: '登录令牌里的工厂与请求里的不一致,请重新登录后再试。',
+    en: 'The factory in your sign-in token does not match the one in the request — sign in again and retry.',
+  }),
+  OPERATOR_SCOPE_TENANT_MISMATCH: Object.freeze({
+    zh: '请求指定的工厂与您的账号不一致,请切回您所属的工厂。',
+    en: 'The request names a different factory from the one your account belongs to — switch back to your own factory.',
+  }),
   // The 503 the audit-vocabulary gate raises. It is a DEPLOYMENT state with a named fix, and the one
   // refusal on these routes that a retry genuinely does clear — after somebody runs the migration.
   STOCK_PREPARATION_AUDIT_VOCABULARY_UNAVAILABLE: Object.freeze({

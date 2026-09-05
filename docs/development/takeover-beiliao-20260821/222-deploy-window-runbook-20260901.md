@@ -806,3 +806,35 @@ schtasks /Create ^
   功、每天都报"没有变化",这一列显示的仍然是一周前那次真正改了行的时间——**不能把它当成"定时任务
   是否还在正常跑"的证据**,更不能当成失败次数的替代品。真正的"上一次拉取(不论是否有变化)"需要一
   条专门的审计动作,这次改动没有做(owner 待决策,是否值得为此新增一条审计动作 + 数据库约束迁移)。
+
+---
+
+## flag 开启记录(待执行)
+
+`MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED=true` —— 对**无租户声明的令牌**一律 403。默认关,本窗口**不开**。
+开启的完整前置顺序、校验方式与回滚,写在 `customer-delivery-guide-20260904.md` §5-5;这里只留执行记录,
+开的那天逐格填。
+
+**先看清楚它管多大范围**:门装在 integration 插件的三个共享入口上(`requireTableActionAccess` 的 legacy
+分支、`resolveTenantId`、`resolveAuthUserTenantId`),所以它管的**不只是备料**——同样走这三个入口的外接系统、
+数据源、模板、管道等 integration 路由也一并要求租户声明。222 只跑备料线,所以这个范围可接受;**如果这台机器
+以后还跑别的 integration 能力,这个 flag 就应当保持关闭**。
+
+**开之前必须四条全绿(顺序不可换)**:
+
+| # | 前置 | 校验方式(填"证据"列时照这个做) | 状态 | 执行人 / 时间 | 证据 |
+|---|---|---|---|---|---|
+| 1 | `user_orgs` 补齐:每个在用账号恰好 1 条活跃行(0 条与 ≥2 条都签不出租户声明) | 逐账号查 `user_orgs`,行数必须恰好为 1 | ☐ 待执行 | | |
+| 2 | 运维/脚本令牌用 `--tenant-id` 重新换发 | 按本文《2026-09-03 r7 实际执行记录与订正》第 7 条:`node <mint 脚本> --mint --user-id <id> --roles admin --expires-in 3600 --tenant-id default`;把新令牌的 payload 解开,必须有非空租户字段 | ☐ 待执行 | | |
+| 3 | 全员重新登录(旧令牌不会自己长出声明) | 抽查:把重登后拿到的令牌 payload 解开(JWT 中段 base64),必须有非空租户字段。**不要用"调个接口通不通"来验**——flag 还没写入时,有声明和没声明的令牌都会通,那是一次空校验 | ☐ 待执行 | | |
+| 4 | 写入 env、`pm2 restart metasheet-backend --update-env` | 两条都要:①`pm2 env 0` 里看到 `MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED=true`;②用一个**没有**租户声明的旧令牌打 `GET /api/integration/stock-preparation/confirmation-decisions/readiness`,得到 403 `OPERATOR_SCOPE_TENANT_REQUIRED` | ☐ 待执行 | | |
+
+**开完当场验两条**(两条都过才算开成功):
+
+| # | 验证 | 期望 | 实测 |
+|---|---|---|---|
+| A | 拿一个**没有**租户声明的旧令牌调 `GET /api/integration/stock-preparation/confirmation-decisions/readiness` | 403 `OPERATOR_SCOPE_TENANT_REQUIRED` | |
+| B | 拿一个 `--tenant-id` 新签的令牌调同一个接口 | 200(或该账号今天本来的结果) | |
+
+**回滚**(任何一条不过就回滚,不要就地调):删掉 env 里那一行 → `pm2 restart metasheet-backend --update-env`。
+没有迁移、没有落库状态,回滚即刻恢复关闭前的行为。
