@@ -38,7 +38,9 @@ export interface StartAuditLogPartitionEnsureOptions {
  *    timer is unref'd so it never keeps the process alive on its own.
  *
  * Never throws and never rejects the caller's startup sequence: the underlying
- * repository call already swallows and logs its own errors.
+ * repository call already swallows and logs its own errors, and constructing the
+ * default AuditRepository (which throws synchronously if the pg pool isn't
+ * initialized yet — see AuditRepository's constructor) is itself guarded below.
  */
 export function startAuditLogPartitionEnsure(options: StartAuditLogPartitionEnsureOptions = {}): () => void {
   const mode = options.mode ?? resolveAuditPartitionEnsureMode(process.env.AUDIT_LOG_PARTITION_ENSURE);
@@ -48,7 +50,19 @@ export function startAuditLogPartitionEnsure(options: StartAuditLogPartitionEnsu
   }
 
   const logger = options.logger ?? new Logger('AuditLogPartitionEnsure');
-  const repository = options.repository ?? new AuditRepository();
+
+  let repository: AuditPartitionEnsureRepository;
+  try {
+    repository = options.repository ?? new AuditRepository();
+  } catch (error) {
+    // e.g. `new AuditRepository()` throws synchronously when the pg pool hasn't been
+    // initialized yet (pool === null at import time). This must never take down startup.
+    logger.warn(
+      'Audit log partition ensure disabled: repository unavailable',
+      error instanceof Error ? error : new Error(String(error)),
+    );
+    return () => {};
+  }
 
   void repository.ensurePartitionsForCurrentAndNextMonth();
 

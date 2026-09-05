@@ -141,3 +141,39 @@ describe('startAuditLogPartitionEnsure (AUDIT_LOG_PARTITION_ENSURE startup hook)
     }
   })
 })
+
+describe('startAuditLogPartitionEnsure — default-repository construction failure', () => {
+  afterEach(() => {
+    vi.doUnmock('../../src/db/pg')
+    vi.resetModules()
+  })
+
+  // AuditRepository's constructor throws synchronously ("Database pool not initialized")
+  // when the pg pool isn't ready yet (default param `pool!` with pool === null). That must
+  // never propagate out of the startup hook. Reuses the SAME db/pg mock shape as every other
+  // test in this file — just with `pool: null` instead of `pool: {}` — via vi.doMock +
+  // vi.resetModules() + a dynamic import, so the real (unmocked) AuditRepository constructor
+  // runs against a null pool and genuinely throws.
+  it('never throws when constructing the default AuditRepository fails: warns once and returns a no-op stop function', async () => {
+    vi.resetModules()
+    vi.doMock('../../src/db/pg', () => ({ pool: null, query: queryMock }))
+
+    const { startAuditLogPartitionEnsure: freshStart } = await import('../../src/audit/audit-partition-schedule')
+
+    queryMock.mockReset()
+    warnMock.mockReset()
+    infoMock.mockReset()
+
+    let stop: (() => void) | undefined
+    expect(() => {
+      stop = freshStart({ mode: 'startup' })
+    }).not.toThrow()
+
+    expect(typeof stop).toBe('function')
+    expect(queryMock).not.toHaveBeenCalled()
+    expect(warnMock).toHaveBeenCalledTimes(1)
+    expect(String(warnMock.mock.calls[0][0])).toContain('repository unavailable')
+
+    stop?.()
+  })
+})
