@@ -63,6 +63,24 @@ const BACKGROUND_BUDGET_FIELDS = Object.freeze([
   'maxArtifactChunks',
 ])
 
+// A FAILED READ IS A DIAGNOSTIC, NOT A LOG. Twenty is enough to see the shape
+// of a failure (one object, one error code, or a scatter across several) and
+// small enough that a run whose every read failed cannot turn one job row into
+// an unbounded array. Whatever the cap costs is reported: see `attachDetailList`.
+const LARGE_BOM_READ_FAILURE_DETAIL_LIMIT = 20
+
+// The per-entry bound. `filterFields` is the only variable-length field that
+// survives projection, and its length is adapter-supplied (`metadata.filterFields`),
+// so a hostile or broken adapter could otherwise make ONE diagnostic unbounded
+// while every other cap here counted it as a single item.
+const LARGE_BOM_READ_FAILURE_FILTER_FIELD_LIMIT = 32
+
+// The ceiling on a counter read back OUT of storage. The stored `<key>Total` is
+// written by this module today, but a job row is durable state that outlives the
+// build that wrote it — so on the way out it is treated as a claim to be bounded,
+// not a fact. DON'T TRUST CONTENT AND THEN TRUST ITS COUNTER.
+const LARGE_BOM_EVIDENCE_COUNTER_CEILING = 1000000
+
 const APPLY_COUNT_FIELDS = Object.freeze([
   'created',
   'updated',
@@ -141,6 +159,241 @@ function safeTokenList(value, field) {
     if (token && !out.includes(token)) out.push(token)
   }
   return out
+}
+
+/**
+ * DROP-INSTEAD-OF-THROW twin of `safeEvidenceToken`, for the read-failure
+ * diagnostics below.
+ *
+ * `safeEvidenceToken` is right where a caller supplied the token and a bad one
+ * is a bug worth refusing. It is WRONG on the failure path: these tokens come
+ * from the driver (`error.code`) and from adapter metadata, so an unsafe one is
+ * an ordinary Tuesday — and throwing there would replace the diagnostic we are
+ * trying to persist with a second, less informative failure. Same safety rules,
+ * different verdict: unsafe => the FIELD disappears, the rest of the diagnostic
+ * survives.
+ */
+function evidenceTokenOrUndefined(value) {
+  if (typeof value !== 'string') return undefined
+  try {
+    return safeEvidenceToken(value, 'readFailure') || undefined
+  } catch {
+    return undefined
+  }
+}
+
+function evidenceTokenListOrEmpty(value) {
+  if (!Array.isArray(value)) return []
+  const out = []
+  for (const entry of value) {
+    const token = evidenceTokenOrUndefined(entry)
+    if (token && !out.includes(token)) out.push(token)
+  }
+  return out
+}
+
+/**
+ * A COUNTER READ BACK FROM STORAGE IS A CLAIM, NOT A FACT.
+ *
+ * `attachStoredDetailEvidence` already refuses to trust the stored ARRAY — it
+ * re-projects every entry through the values-free filter. Trusting the stored
+ * COUNT while distrusting the content it counts would be the same mistake one
+ * field over: a row written by another build (or hand-edited) could report
+ * `readFailuresTotal: 1e12` next to a two-element array, and the public
+ * projection would repeat it.
+ *
+ * So: non-integers and negatives fall back to the floor, absurd values are
+ * clamped to the ceiling, and a total that claims FEWER items than we actually
+ * projected is raised to what we can see. The result is never smaller than the
+ * array it describes.
+ */
+function clampStoredTotal(value, floor) {
+  const number = Number(value)
+  const claimed = Number.isInteger(number) && number >= 0
+    ? Math.min(number, LARGE_BOM_EVIDENCE_COUNTER_CEILING)
+    : floor
+  return Math.max(claimed, floor)
+}
+
+/**
+ * ONE FAILED READ, VALUES-FREE. The allowed key set is closed and enumerated
+ * here rather than filtered out of the diagnostic, because the diagnostic grows
+ * over time and a deny-list would leak the next field somebody adds.
+ *
+ * `cursor` is deliberately NOT on the list. It is the one field here whose whole
+ * PURPOSE is to carry adapter-opaque state — an offset for the PLM binding
+ * today, an encoded key tomorrow — so no token filter can be trusted to vet it,
+ * and it is excluded outright rather than filtered. The rest are named things
+ * (table names, field names, symbolic codes) that CAN be vetted, and are: every
+ * one goes through `evidenceTokenOrUndefined`, because `errorCode` and `source`
+ * also arrive from outside this module and a driver is free to put anything in
+ * them. `message` is on neither list and never will be: it is the driver's free
+ * text and routinely quotes the part number that failed.
+ */
+function readFailureEntry(entry) {
+  if (!isPlainObject(entry)) return {}
+  const failure = {}
+  const object = evidenceTokenOrUndefined(entry.object)
+  if (object) failure.object = object
+  const errorCode = evidenceTokenOrUndefined(entry.errorCode)
+  if (errorCode) failure.errorCode = errorCode
+  const filterFields = evidenceTokenListOrEmpty(entry.filterFields)
+    .slice(0, LARGE_BOM_READ_FAILURE_FILTER_FIELD_LIMIT)
+  if (filterFields.length > 0) failure.filterFields = filterFields
+  if (entry.filtersApplied !== undefined) failure.filtersApplied = entry.filtersApplied === true
+  const source = evidenceTokenOrUndefined(entry.source)
+  if (source) failure.source = source
+  return failure
+}
+
+function hasAnyKey(entry) {
+  return Object.keys(entry).length > 0
+}
+
+/**
+ * THE CANDIDATE SET, chosen by a values-free predicate that does not depend on
+ * what survives projection. `<key>Total` counts THESE — see `attachDetailList`
+ * for why the count is taken here and not after the filter.
+ */
+function readFailureCandidates(readDiagnostics) {
+  if (!Array.isArray(readDiagnostics)) return []
+  return readDiagnostics.filter((entry) => isPlainObject(entry) && entry.status === 'failed')
+}
+
+/**
+ * ONE EXPANSION ERROR, VALUES-FREE. `expansion.errors[]` carries
+ * `{ type, object?, causeClass?, message? }` — `causeClass` is the symbolic
+ * `error.code || error.name` the expander deliberately kept beside the message
+ * precisely so a downstream seam could classify without the message. This is
+ * that seam: type + object + causeClass in, message out.
+ */
+function errorDetailEntry(entry) {
+  if (!isPlainObject(entry)) return {}
+  const detail = {}
+  const type = evidenceTokenOrUndefined(entry.type)
+  if (type) detail.type = type
+  const object = evidenceTokenOrUndefined(entry.object)
+  if (object) detail.object = object
+  const causeClass = evidenceTokenOrUndefined(entry.causeClass)
+  if (causeClass) detail.causeClass = causeClass
+  return detail
+}
+
+/**
+ * A DETAIL MUST ADD SOMETHING `errorTypes` DOES NOT.
+ *
+ * The first cut of this projection kept every entry that produced any key at
+ * all, which meant `{ type }` alone qualified — and the bounded expansions whose
+ * errors carry no object (`max_rows_exceeded` `{maxRows}`, `max_depth_exceeded`
+ * `{maxDepth, parentDepth}`, `cycle_detected` `{depth}`) mounted three extra
+ * evidence keys holding a verbatim copy of `errorTypes`. That is pure noise on
+ * a path with zero failed reads, and it broke the "nothing to report => key set
+ * unchanged" promise this feature is supposed to keep.
+ *
+ * The bar is therefore an OBJECT or a CAUSE CLASS: the two things `errorTypes`
+ * cannot express. Note what this does NOT claim — a bounded error that names its
+ * object (`read_count_exceeded`, `read_page_limit_exceeded`,
+ * `read_time_limit_exceeded`, the three subtree limits) still mounts, and should:
+ * "the read budget blew while reading WHICH object" is exactly the question
+ * `errorTypes` leaves unanswered.
+ */
+function carriesObjectOrCauseClass(entry) {
+  return entry.object !== undefined || entry.causeClass !== undefined
+}
+
+function isNamed(value) {
+  return value !== undefined && value !== null && value !== ''
+}
+
+/**
+ * THE CANDIDATE SET, tested on the RAW error rather than on what survived
+ * projection — the same discipline as `readFailureCandidates`, and for the same
+ * reason.
+ *
+ * Counting survivors instead was a real bug, caught in review: two
+ * `read_count_exceeded` errors whose objects differ only in that one contains a
+ * space (unsafe => the field is dropped) reported `1 / 1 / false` — one detail
+ * silently gone while the stanza claimed nothing was missing. An error that
+ * NAMES an object or a cause class is a detail we meant to report; whether its
+ * token then passed the values-free filter decides if it is LISTED, never
+ * whether it is COUNTED.
+ */
+function errorDetailCandidates(errors) {
+  if (!Array.isArray(errors)) return []
+  return errors.filter((entry) => isPlainObject(entry) && (isNamed(entry.object) || isNamed(entry.causeClass)))
+}
+
+/**
+ * CONDITIONAL MOUNT, so a run with nothing to report keeps a byte-identical
+ * evidence key set.
+ *
+ * `total` is the size of the CANDIDATE set, counted before projection — not the
+ * length of what survived it. The difference is the whole point: three reads
+ * that failed with driver codes too unsafe to project are still three failed
+ * reads, and reporting `readFailuresTotal: 0` there would be a wrong answer to
+ * the one question this stanza exists to answer. BOTH call sites obey this:
+ * `readFailureCandidates` and `errorDetailCandidates` each pick the candidate
+ * set off the raw input, and only then is projection allowed to thin the list.
+ *
+ * `<key>Truncated` is therefore derived as "the array does not list everything
+ * counted" (`shown < total`) rather than "the cap fired" — exactly true whether
+ * an entry went missing to the cap or to unprojectable content.
+ */
+function attachDetailList(evidence, key, { items, total }) {
+  if (!Number.isInteger(total) || total <= 0) return evidence
+  const shown = items.slice(0, LARGE_BOM_READ_FAILURE_DETAIL_LIMIT)
+  evidence[key] = shown
+  evidence[`${key}Total`] = total
+  evidence[`${key}Truncated`] = shown.length < total
+  return evidence
+}
+
+function attachReadFailureEvidence(evidence, { readDiagnostics, errors } = {}) {
+  const failedReads = readFailureCandidates(readDiagnostics)
+  attachDetailList(evidence, 'readFailures', {
+    items: failedReads.map(readFailureEntry).filter(hasAnyKey),
+    total: failedReads.length,
+  })
+  const namedErrors = errorDetailCandidates(errors)
+  attachDetailList(evidence, 'errorDetails', {
+    items: namedErrors.map(errorDetailEntry).filter(carriesObjectOrCauseClass),
+    total: namedErrors.length,
+  })
+  return evidence
+}
+
+/**
+ * The same two stanzas re-projected on the way OUT of storage. A stored job can
+ * predate this feature, or have been written by a build that projected more
+ * than this one does, so the public projection re-runs the values-free filter
+ * instead of trusting what it reads back.
+ *
+ * KNOWN ASYMMETRY, currently unreachable. The storage side mounts on
+ * `total > 0`, so a run whose candidates were ALL unprojectable persists
+ * `readFailures: [] / Total: N / Truncated: true` — an honest "N reads failed,
+ * none of them yielded a safe field". This function mounts on `items.length`
+ * instead and early-returns on an empty list, so it would drop that row's
+ * counters rather than republish them. Not a live divergence: every entry this
+ * module STORES has already passed the values-free filter, so a stored array is
+ * empty here only if the row came from elsewhere. Left as-is deliberately —
+ * mounting a bare counter with no array is a public-shape change that wants its
+ * own decision, not a side effect of this one.
+ */
+function attachStoredDetailEvidence(publicEvidence, evidence, key, projectEntry, keepEntry) {
+  const stored = Array.isArray(evidence[key]) ? evidence[key] : []
+  const items = stored.map(projectEntry).filter(keepEntry)
+  if (items.length === 0) return publicEvidence
+  const shown = items.slice(0, LARGE_BOM_READ_FAILURE_DETAIL_LIMIT)
+  const total = clampStoredTotal(evidence[`${key}Total`], items.length)
+  publicEvidence[key] = shown
+  publicEvidence[`${key}Total`] = total
+  // DERIVED, NEVER COPIED. The stored flag is not consulted: a row could carry
+  // `Truncated: false` beside a 40-element array, or a non-boolean like
+  // `'maybe'`. `shown < total` is computed from the two numbers this projection
+  // just established, so it is a boolean, and it is forced true whenever the
+  // slice above actually dropped something.
+  publicEvidence[`${key}Truncated`] = shown.length < total
+  return publicEvidence
 }
 
 function nonNegativeInteger(value, field) {
@@ -508,12 +761,21 @@ function updateJobFromExpansion(job, expansion, now) {
   })
   job.progress = progress
   job.budgets = budgets
-  job.evidence = {
+  // `readDiagnosticShapePresent` STAYS, byte-identical: it is a boolean other
+  // guards may pin, and it answers a different question ("did the expander
+  // produce diagnostics at all") from the stanzas below ("which reads failed").
+  //
+  // Both stanzas are conditionally mounted, so a run with no failed read and no
+  // object-bearing error keeps the pre-feature four-key evidence set. That
+  // covers the clean path and the object-less bounded ones (`max_rows_exceeded`,
+  // `max_depth_exceeded`, `cycle_detected`); see `carriesObjectOrCauseClass` for
+  // the bounded errors that DO mount, on purpose.
+  job.evidence = attachReadFailureEvidence({
     sourceKind: job.sourceKind,
     readObjects: evidence.readObjects || [],
     errorTypes: evidence.errorTypes || [],
     readDiagnosticShapePresent: Array.isArray(evidence.readDiagnostics) && evidence.readDiagnostics.length > 0,
-  }
+  }, { readDiagnostics: evidence.readDiagnostics, errors: expansion.errors })
   job.updatedAt = now
   if (expansion.valid === true) {
     const revision = expansionArtifactRevision({ job, expansion })
@@ -540,6 +802,22 @@ function safeErrorType(error) {
     return safeEvidenceToken(error && (error.code || error.name), 'errorType') || 'read_failed'
   } catch {
     return 'read_failed'
+  }
+}
+
+/**
+ * The escaped throw rendered in `expansion.errors[]`'s shape, so both projection
+ * points feed `errorDetailEntry` and the stored stanza means the same thing on
+ * either path. `details` is the expander's own error bag
+ * (`StockPreparationBomExpansionError`); a raw driver error has neither and
+ * contributes only its cause class.
+ */
+function thrownErrorDetail(error) {
+  const details = isPlainObject(error && error.details) ? error.details : {}
+  return {
+    type: safeErrorType(error),
+    object: details.object,
+    causeClass: (error && (error.code || error.name)) || undefined,
   }
 }
 
@@ -595,12 +873,17 @@ async function runLargeBomBackgroundExpansionJob(input = {}) {
       frontierRemaining: 0,
       completedChunks: 0,
     }
-    job.evidence = {
+    // NO EXPANSION, so no `readDiagnostics` to project — but the throw itself
+    // still names an object and a cause class, and losing those is exactly the
+    // hole this change closes. `readFailures` stays absent here (there is no
+    // per-read record to report), which is itself the signal that the run died
+    // before the expander could summarize.
+    job.evidence = attachReadFailureEvidence({
       sourceKind: job.sourceKind,
       readObjects: [],
       errorTypes: [safeErrorType(error)],
       readDiagnosticShapePresent: false,
-    }
+    }, { errors: [thrownErrorDetail(error)] })
     job.updatedAt = failedAt
     await storage.set(key, job)
     return cloneJson(job)
@@ -1036,6 +1319,12 @@ function summarizeLargeBomBackgroundExpansionJobForEvidence(job = {}) {
     scaleErrorTypes: errorTypes.filter((errorType) => LARGE_BOM_BOUNDED_ERROR_TYPES.includes(errorType)),
     readDiagnosticShapePresent: evidence.readDiagnosticShapePresent === true || job.readDiagnosticShapePresent === true,
   }
+  // Conditional on the same rule as the stored stanza, so an evidence object
+  // with neither stanza projects to the pre-feature key set. The route
+  // (`publicBackgroundExpansionJob` -> `largeBomJobResponse`) spreads whatever
+  // this returns, so nothing outside this module gates these keys.
+  attachStoredDetailEvidence(publicEvidence, evidence, 'readFailures', readFailureEntry, hasAnyKey)
+  attachStoredDetailEvidence(publicEvidence, evidence, 'errorDetails', errorDetailEntry, carriesObjectOrCauseClass)
   if (isPlainObject(job.planEvidence)) publicEvidence.plan = cloneJson(job.planEvidence)
   return {
     jobIdPresent: Boolean(optionalString(job.jobId)),
@@ -1126,7 +1415,9 @@ module.exports = {
     checkpointApplyJobKey,
     effectiveExpansionBudgets,
     ensureDurableJobStorage,
+    attachReadFailureEvidence,
     hashJson,
+    LARGE_BOM_READ_FAILURE_DETAIL_LIMIT,
     safeEvidenceToken,
     safeTokenList,
     nonNegativeInteger,
