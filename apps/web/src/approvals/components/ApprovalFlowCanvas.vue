@@ -380,6 +380,19 @@ function canvasNodeAccName(nodeKey: string): string {
                   抄送人
                 </button>
                 <button
+                  v-if="canInsertHandlerOnEdge(line.key)"
+                  type="button"
+                  role="menuitem"
+                  aria-label="插入办理节点"
+                  data-testid="approval-canvas-edge-insert-handler"
+                  @click.stop="emit('edge-insert-handler', line.key)"
+                >
+                  <span class="template-authoring__canvas-edge-insert-icon is-handler" aria-hidden="true">
+                    <el-icon><Tickets /></el-icon>
+                  </span>
+                  办理人
+                </button>
+                <button
                   type="button"
                   role="menuitem"
                   aria-label="插入条件分支"
@@ -403,19 +416,6 @@ function canvasNodeAccName(nodeKey: string): string {
                     <el-icon><Connection /></el-icon>
                   </span>
                   并行分支
-                </button>
-                <button
-                  v-if="canInsertHandlerOnEdge(line.key)"
-                  type="button"
-                  role="menuitem"
-                  aria-label="插入办理节点"
-                  data-testid="approval-canvas-edge-insert-handler"
-                  @click.stop="emit('edge-insert-handler', line.key)"
-                >
-                  <span class="template-authoring__canvas-edge-insert-icon is-handler" aria-hidden="true">
-                    <el-icon><Tickets /></el-icon>
-                  </span>
-                  办理人
                 </button>
               </div>
             </div>
@@ -753,6 +753,9 @@ function canvasNodeAccName(nodeKey: string): string {
   background: var(--el-color-success);
 }
 .template-authoring__canvas-edge-insert-icon.is-parallel {
+  background: var(--el-color-info);
+}
+.template-authoring__canvas-edge-insert-icon.is-handler {
   background: var(--el-color-info);
 }
 .template-authoring__canvas-move-target {
