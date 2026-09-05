@@ -23,8 +23,19 @@ const { buildXlsxBufferMock } = vi.hoisted(() => ({ buildXlsxBufferMock: vi.fn((
 // assertion can prove the stub really re-rendered rather than the holder simply being stale — into
 // this hoisted holder. `vi.hoisted` for the same reason as `buildXlsxBufferMock` above. Reset per
 // test in `beforeEach`.
-const { inspectorStubSeen } = vi.hoisted(() => ({
-  inspectorStubSeen: { openerEl: null as HTMLElement | null, renders: 0 },
+// Record inspector v3 PR-B1 round 2 (2026-09-05, refuter P2 "WB producer + WB→INS wiring untested"):
+// the same holder also records the LATEST `inspectorFieldLayout` and `fetchRecord` props the stub was
+// rendered with, and `gridStubSeen.fetchRecord` records what the MetaGridTable stub received on its
+// own `:fetch-record` binding — so the HI-1 "same function the grid already receives" claim is
+// asserted by IDENTITY between the two stubs, not by a stringified attr or a source-text regex.
+const { inspectorStubSeen, gridStubSeen } = vi.hoisted(() => ({
+  inspectorStubSeen: {
+    openerEl: null as HTMLElement | null,
+    renders: 0,
+    fieldLayout: undefined as { ordered: Array<{ id: string }>; hiddenInView: Array<{ id: string }> } | null | undefined,
+    fetchRecord: undefined as ((recordId: string) => Promise<unknown>) | undefined,
+  },
+  gridStubSeen: { fetchRecord: undefined as ((recordId: string) => Promise<unknown>) | undefined },
 }))
 vi.mock('../src/multitable/import/xlsx-mapping', async () => {
   const actual = await vi.importActual<any>('../src/multitable/import/xlsx-mapping')
@@ -322,6 +333,9 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
       columnWidths: { type: Object, default: () => ({}) },
       collapsedGroupKeys: { type: Array, default: () => [] },
       rowDensity: { type: String, default: undefined },
+      // PR-B1 round 2: the grid's own `:fetch-record="fetchLinkedRecordFn"` binding, recorded into
+      // `gridStubSeen` so the inspector's binding can be asserted IDENTICAL to it (HI-1).
+      fetchRecord: { type: Function, default: undefined },
     },
     // Record inspector v3 (2026-09-05, PR-A §1.1): `expand-record` added to this stub's emits —
     // `select-record` alone is now a plain cursor move (W2 lock §3.1 erratum) and no longer opens
@@ -329,6 +343,7 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
     // (mirrors the real grid's row-number icon → `expand-record`).
     emits: ['select-record', 'expand-record', 'open-comments', 'open-field-comments', 'resize-column', 'toggle-group', 'bulk-edit', 'selection-change'],
     render() {
+      gridStubSeen.fetchRecord = this.$props.fetchRecord as typeof gridStubSeen.fetchRecord
       return h('div', {
         'data-grid-column-widths': JSON.stringify(this.$props.columnWidths ?? {}),
         'data-grid-collapsed-keys': JSON.stringify(this.$props.collapsedGroupKeys ?? []),
@@ -478,6 +493,12 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
       // prop (recorded into `inspectorStubSeen` in `render` below) instead of a stringified
       // fallthrough attr — see the holder's own comment near the top of this file.
       openerEl: { type: Object as PropType<HTMLElement | null>, default: null },
+      // PR-B1 round 2 (refuter P2): the two headline B1 bindings on `<MetaRecordInspector>` —
+      // `:inspector-field-layout="inspectorFieldLayout"` (the WB producer's `{ ordered, hiddenInView }`)
+      // and `:fetch-record="fetchLinkedRecordFn"` — declared so they arrive typed and are recorded
+      // into `inspectorStubSeen` on every render (see the holder's comment near the top of this file).
+      inspectorFieldLayout: { type: Object as PropType<{ ordered: Array<{ id: string }>; hiddenInView: Array<{ id: string }> } | null>, default: undefined },
+      fetchRecord: { type: Function, default: undefined },
       commentTargetFieldId: { type: String, default: null },
       highlightedCommentId: { type: String, default: null },
       mentionSuggestions: { type: Array, default: () => [] },
@@ -496,6 +517,8 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
       // prop keeps flowing to it after `visible` drops back to false too.
       inspectorStubSeen.openerEl = (this.$props.openerEl as HTMLElement | null) ?? null
       inspectorStubSeen.renders += 1
+      inspectorStubSeen.fieldLayout = this.$props.inspectorFieldLayout as typeof inspectorStubSeen.fieldLayout
+      inspectorStubSeen.fetchRecord = this.$props.fetchRecord as typeof inspectorStubSeen.fetchRecord
       if (!this.$props.visible) return null
       const recordId = (this.$props.record as { id?: string } | null)?.id ?? ''
       return h('div', {
@@ -1239,6 +1262,9 @@ describe('MultitableWorkbench view wiring', () => {
     gridMock = createGridMock()
     inspectorStubSeen.openerEl = null
     inspectorStubSeen.renders = 0
+    inspectorStubSeen.fieldLayout = undefined
+    inspectorStubSeen.fetchRecord = undefined
+    gridStubSeen.fetchRecord = undefined
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -3494,6 +3520,84 @@ describe('MultitableWorkbench view wiring', () => {
       await flushUi()
       expect(container!.querySelector('[data-record-drawer]')).toBeNull() // panel closed
       expect(gridSelectedRecordId()).toBe('rec_1') // row STAYS selected — the P2-B assertion itself
+    })
+  })
+
+  // Record inspector v3 PR-B1 round 2 (2026-09-05, refuter P2): the WB PRODUCER `inspectorFieldLayout`
+  // (view order ∩ layer-2 ∩ layer-3; `hiddenInView` = the two-layer-visible remainder) and the two
+  // `<MetaRecordInspector>` bindings `:inspector-field-layout` / `:fetch-record` had zero coverage —
+  // dropping either binding, or replacing view order with sheet order, left tests/multitable green
+  // (round-1 refuter probes M16/M17/M18b). The stub records both props on every render (holder near
+  // the top of this file); these tests pin the producer's SHAPE against a fixture that exercises all
+  // three layers and the `fetchRecord` binding by IDENTITY with the grid's own.
+  describe('inspectorFieldLayout producer + fetchRecord wiring reach <MetaRecordInspector> (§1.3 PR-B1, round 2)', () => {
+    // Sheet order (grid.fields): a, b, c, secret(layer-2 property-hidden), denied(layer-3), d.
+    // Active view (grid.visibleFields): HIDES field 0 (`fld_a`) and REORDERS the rest — d, b, c — while
+    // still listing the property-hidden and the permission-denied field (the producer must strike both).
+    const SHEET_FIELDS = [
+      { id: 'fld_a', name: 'A', type: 'string' },
+      { id: 'fld_b', name: 'B', type: 'string' },
+      { id: 'fld_c', name: 'C', type: 'string' },
+      { id: 'fld_secret', name: 'Secret', type: 'string', property: { hidden: true } },
+      { id: 'fld_denied', name: 'Denied', type: 'string' },
+      { id: 'fld_d', name: 'D', type: 'string' },
+    ]
+    const VIEW_ORDER = [SHEET_FIELDS[5], SHEET_FIELDS[1], SHEET_FIELDS[2], SHEET_FIELDS[3], SHEET_FIELDS[4]]
+    function arrangeThreeLayerFixture() {
+      workbenchMock.fields.value = [...SHEET_FIELDS]
+      gridMock.fields.value = [...SHEET_FIELDS]
+      // `createGridMock` aliases visibleFields to the SAME ref as fields; give the view its own order.
+      gridMock.visibleFields = ref([...VIEW_ORDER])
+      gridMock.hiddenFieldIds.value = ['fld_a']
+      // grid.fieldPermissions stays {} so `effectiveFieldPermissions` falls through to the workbench's
+      workbenchMock.fieldPermissions.value = {
+        fld_denied: { visible: false, readOnly: false },
+      }
+    }
+    const ids = (fields: Array<{ id: string }> | undefined) => (fields ?? []).map((field) => field.id)
+
+    it('`ordered` follows the VIEW order intersected with layer-2 and layer-3 (not sheet order); `hiddenInView` is the two-layer-visible remainder', async () => {
+      arrangeThreeLayerFixture()
+      mountWorkbench()
+      await flushUi()
+      expect(inspectorStubSeen.renders).toBeGreaterThan(0)
+      const layout = inspectorStubSeen.fieldLayout
+      expect(layout).toBeTruthy() // the binding is present — an absent prop would leave `undefined`
+      // view order d, b, c — secret (layer-2) and denied (layer-3) struck; `fld_a` is view-hidden
+      expect(ids(layout!.ordered)).toEqual(['fld_d', 'fld_b', 'fld_c'])
+      // NOT the sheet-order two-layer list (what `twoLayerVisibleFields` alone would hand over)
+      expect(ids(layout!.ordered)).not.toEqual(['fld_a', 'fld_b', 'fld_c', 'fld_d'])
+      // §2 = fields this viewer may see (layer-2 ∩ layer-3) that the view hides: only `fld_a`
+      expect(ids(layout!.hiddenInView)).toEqual(['fld_a'])
+      // disjoint by construction, and neither list leaks a masked field
+      const all = [...ids(layout!.ordered), ...ids(layout!.hiddenInView)]
+      expect(new Set(all).size).toBe(all.length)
+      expect(all).not.toContain('fld_secret')
+      expect(all).not.toContain('fld_denied')
+    })
+
+    it('positive control for the fixture: with a view that hides nothing and reorders nothing, `ordered` equals the two-layer sheet order and `hiddenInView` is empty', async () => {
+      arrangeThreeLayerFixture()
+      gridMock.visibleFields = ref([...SHEET_FIELDS])
+      gridMock.hiddenFieldIds.value = []
+      mountWorkbench()
+      await flushUi()
+      expect(ids(inspectorStubSeen.fieldLayout!.ordered)).toEqual(['fld_a', 'fld_b', 'fld_c', 'fld_d'])
+      expect(ids(inspectorStubSeen.fieldLayout!.hiddenInView)).toEqual([])
+    })
+
+    it('`fetchRecord` reaches the inspector as the SAME function object the grid receives (`fetchLinkedRecordFn`, HI-1) and it calls client.getRecord once with the id', async () => {
+      workbenchMock.client.getRecord.mockResolvedValue({ record: { id: 'rec_x', data: {} } })
+      mountWorkbench()
+      await flushUi()
+      expect(typeof inspectorStubSeen.fetchRecord).toBe('function')
+      expect(typeof gridStubSeen.fetchRecord).toBe('function')
+      // IDENTITY: one `fetchLinkedRecordFn` bound at both call sites, not two wrappers
+      expect(inspectorStubSeen.fetchRecord).toBe(gridStubSeen.fetchRecord)
+      workbenchMock.client.getRecord.mockClear()
+      await inspectorStubSeen.fetchRecord!('rec_x')
+      expect(workbenchMock.client.getRecord).toHaveBeenCalledTimes(1)
+      expect(workbenchMock.client.getRecord).toHaveBeenCalledWith('rec_x')
     })
   })
 

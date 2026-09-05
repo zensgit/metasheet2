@@ -287,9 +287,12 @@
         <!-- Record inspector v3 (PR-B1 §1.3 "Tabs bar"): right-aligned hide-empty toggle, details tab
              only. Session-only state (`hideEmpty`, this component's own ref — NO storage read/write,
              OD-W2-2; a remount starts unpressed), forwarded to MetaRecordFieldsPanel as a prop, which
-             owns the predicate/snapshot/exemptions. DOM position = after the tablist, before the
-             tabpanel: Tab order tabs → hide-empty → tabpanel → field controls → splitter (design
-             §1.5, "ahead of the field controls"), so the splitter stays the LAST focusable. -->
+             owns the predicate/snapshot/exemptions. APG toggle-button shape (round 2, refuter NIT):
+             a CONSTANT visible label (`record.hideEmpty`) with `aria-pressed` carrying the state —
+             round 1 flipped the label to a "show" copy while pressed, which reads as two different
+             controls to AT. DOM position = after the tablist, before the tabpanel: Tab order tabs →
+             hide-empty → tabpanel → field controls → splitter (design §1.5, "ahead of the field
+             controls"), so the splitter stays the LAST focusable. -->
         <MtButton
           v-if="activeTab === 'details'"
           size="sm"
@@ -297,7 +300,7 @@
           :aria-pressed="hideEmpty"
           data-testid="record-inspector-hide-empty"
           @click="hideEmpty = !hideEmpty"
-        >{{ l(hideEmpty ? 'record.showEmpty' : 'record.hideEmpty') }}</MtButton>
+        >{{ l('record.hideEmpty') }}</MtButton>
       </div>
       <div v-if="subscriptionError" class="meta-record-drawer__watch-error">{{ subscriptionError }}</div>
       <div v-if="record?.locked" class="meta-record-drawer__lock-banner" data-test="record-lock-banner">

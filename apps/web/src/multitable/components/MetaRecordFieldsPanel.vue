@@ -22,8 +22,9 @@
   Record inspector v3 (design 2026-09-05, docs/development/multitable-record-inspector-v3-design-20260905.md
   §1.3 body, PR-B1) — additive, all prop-gated or FP-local:
   - SECTIONS: when the optional `inspectorFieldLayout` prop is present the field list renders as two
-    `MetaRecordFieldSection`s — §1 `ordered` (view order ∩ layer-2 ∩ layer-3, expanded, headerless
-    when §2 is empty) and §2 `hiddenInView` (collapsed by default, `recordHiddenFieldsHeading(n)`).
+    `MetaRecordFieldSection`s — §1 `ordered` (view order ∩ layer-2 ∩ layer-3; ALWAYS headerless and
+    always expanded — the §1.6 mocks show the in-view fields directly under the tabs bar, round 2) and
+    §2 `hiddenInView` (the ONLY headed section: collapsed by default, `recordHiddenFieldsHeading(n)`).
     Both lists are re-filtered here through BOTH visibility layers (`filterPropertyVisibleFields` ∩
     `fieldPermissions[id].visible !== false`) — the same mask contract MetaRecordAttachmentsPanel.vue
     applies, negative golden N3: a property-hidden field present in `fields` never renders on this
@@ -32,11 +33,14 @@
     MetaRecordDrawer shell and every router-less spec keep rendering exactly what they did.
   - HIDE EMPTY (`hideEmpty` prop, state owned by the inspector, session-only): predicate = the ONE
     exported `isEmptyValue` (conditional-formatting.ts) that field-display.ts's empty glyph also
-    calls, so "renders '—'" and "hidden by the toggle" are the same set by construction. The empty
-    set is SNAPSHOTTED on record-id / toggle change (`emptySnapshot`), never recomputed live, so a
-    value being cleared mid-edit cannot vanish under the cursor. Five exemptions are evaluated live
-    (see `isHideEmptyExempt`, each names its exact predicate): primary field, focused field, field
-    with AI status/output, field with comment presence, field with a pending server error.
+    calls, so "renders '—'" and "hidden by the toggle" are the same set by construction. A field is
+    hidden iff it was empty at the SNAPSHOT (`emptySnapshot`, retaken on record-id / toggle change)
+    AND is empty NOW (round 2, refuter P3): a field that gains a value becomes visible immediately and
+    stays visible; a field that loses its value stays visible until the next snapshot, so a value
+    being cleared mid-edit cannot vanish under the cursor and a value just typed cannot vanish on
+    blur. Five exemptions are evaluated live (see `isHideEmptyExempt`, each names its exact
+    predicate): primary field, focused field, field with AI status/output, field with comment
+    presence, field with a pending server error.
   - LINK CHIPS: the read-only comma-joined link summary is now `MetaCellRenderer` (the grid's own
     chip host) with `fetchRecord` threaded WB → INS → here; chips are clickable and open the existing
     `MetaLinkedRecordPopover` iff the host supplied `fetchRecord` (HI-1: same `getRecord` read the
@@ -487,9 +491,11 @@ interface FieldGroup {
 }
 // The template's ONE `v-for` source: a list of sections, each carrying the fields it renders (after
 // the hide-empty filter). Legacy path = a single headerless group over `visibleFields`. Sections path
-// = §1 `ordered` (headerless while §2 is empty, headed + collapsible otherwise) and, only when
-// non-empty, §2 `hidden-in-view` (collapsed by default; the heading count is the number of fields
-// the section will show when expanded).
+// = §1 `ordered` (ALWAYS headerless and always expanded — no disclosure button, no collapse state,
+// the design's §1.6 mocks put the in-view fields directly under the tabs bar; round 2 struck the
+// round-1 "Fields in this view" heading) and, only when non-empty, §2 `hidden-in-view` (the only
+// headed section: collapsed by default; the heading count is the number of fields the section will
+// show when expanded).
 const fieldGroups = computed<FieldGroup[]>(() => {
   if (!props.inspectorFieldLayout) {
     return [{ key: 'flat', heading: null, defaultExpanded: true, fields: applyHideEmpty(visibleFields.value) }]
@@ -498,7 +504,7 @@ const fieldGroups = computed<FieldGroup[]>(() => {
   const hidden = applyHideEmpty(sectionHiddenInViewFields.value)
   const groups: FieldGroup[] = [{
     key: 'ordered',
-    heading: hidden.length > 0 ? l('record.fieldsInView') : null,
+    heading: null,
     defaultExpanded: true,
     fields: ordered,
   }]
@@ -514,9 +520,14 @@ const fieldGroups = computed<FieldGroup[]>(() => {
 })
 
 // --- Record inspector v3 (PR-B1 §1.3 hide-empty) ---------------------------------------------------
-// SNAPSHOT, not live: the set of field ids whose value satisfied `isEmptyValue` at the moment the
-// record id or the toggle last changed. A value cleared while the toggle is on is NOT in the snapshot,
-// so the field stays rendered mid-edit; the next record (or a toggle off→on) re-snapshots.
+// SNAPSHOT ∩ NOW: `emptySnapshot` is the set of field ids whose value satisfied `isEmptyValue` at the
+// moment the record id or the toggle last changed; `applyHideEmpty` hides a field only when it is in
+// that snapshot AND `isEmptyValue` holds for its CURRENT value. Consequences (round 2, refuter P3 —
+// round 1 hid on the snapshot alone, so a field the user had just filled vanished on blur once the
+// focused-field exemption lifted): a value cleared while the toggle is on is NOT in the snapshot, so
+// the field stays rendered mid-edit until the next record (or a toggle off→on) re-snapshots; a value
+// GAINED after the snapshot makes the field visible immediately and it stays visible (the snapshot
+// may only hide, never override a present value).
 // `watch` takes an ARRAY OF SOURCES (compared element-wise), deliberately not a single getter
 // returning a tuple — that form would re-fire on every same-id record object replacement and turn
 // the snapshot back into a live filter.
@@ -557,7 +568,11 @@ function isHideEmptyExempt(field: MetaField): boolean {
 }
 function applyHideEmpty(fields: MetaField[]): MetaField[] {
   if (!props.hideEmpty) return fields
-  return fields.filter((field) => !emptySnapshot.value.has(field.id) || isHideEmptyExempt(field))
+  const data = props.record?.data ?? {}
+  return fields.filter((field) =>
+    !emptySnapshot.value.has(field.id)
+    || !isEmptyValue(data[field.id])
+    || isHideEmptyExempt(field))
 }
 
 // Focused-field tracking (exemption 2). `focusout` only clears when focus leaves to somewhere that is
@@ -580,7 +595,12 @@ function onFieldsFocusOut(event: FocusEvent) {
 // (`onInspectorKeydown`, which inspects no Enter at all) and structurally unreachable from
 // MetaGridTable.onKeydown (a sibling subtree). Only two targets are inspected, both matched by the
 // classes this template gives them — every other control (checkbox, file input, `<select>`, the rich
-// editor's contenteditable, MetaCellRenderer chips) falls through untouched.
+// editor's contenteditable, MetaCellRenderer chips) falls through untouched. Once a branch HANDLES
+// the key it calls `stopPropagation()` right after `preventDefault()` (round 2, refuter NIT): the
+// event is consumed here and never reaches the inspector root or the workbench root, so a future
+// Enter branch on either dispatcher cannot double-handle a commit this panel already performed.
+// Unhandled keys (bare Enter in a textarea, Enter on a `<select>`, mod+Enter on an input) still
+// bubble exactly as before.
 const SINGLE_LINE_INPUT_TYPES: ReadonlySet<string> = new Set(['text', 'number', 'date', 'datetime-local'])
 function onFieldsKeydown(event: KeyboardEvent) {
   if (event.key !== 'Enter' || event.isComposing || event.altKey) return
@@ -593,6 +613,7 @@ function onFieldsKeydown(event: KeyboardEvent) {
     // Bare / Shift+Enter = newline, untouched.
     if (!mod) return
     event.preventDefault()
+    event.stopPropagation()
     target.blur()
     return
   }
@@ -606,6 +627,7 @@ function onFieldsKeydown(event: KeyboardEvent) {
     // panel (Shift+Enter: previous). Moving focus blurs the current input, so its native `change`
     // fires exactly once — again no `emit` here. No neighbour → just blur (commit, stay put).
     event.preventDefault()
+    event.stopPropagation()
     const controls = editableControls()
     const index = controls.indexOf(target)
     const next = index === -1 ? undefined : controls[index + (event.shiftKey ? -1 : 1)]

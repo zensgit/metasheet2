@@ -96,6 +96,12 @@ const TARGET_FILES = [
   // IU-4 (docs/development/integration-iu4-composition-wizard-design-lock-20260707.md, #3803):
   // sibling wizard, same "clean from the start" rule.
   'src/components/integration/IntegrationCompositionWizard.vue',
+  // Record inspector v3 PR-B1 (docs/development/multitable-record-inspector-v3-design-20260905.md
+  // §4 item 9, round 2): the NEW details-tab section wrapper joins in its introducing slice, born
+  // token-only (`--ms-*` exclusively, no `var(--x, #hex)` fallbacks). The five pre-existing record
+  // inspector files named in the same §4 item (INS / FP / History / Attachments / Provenance) are
+  // PR-B3's migration and enrol there, not here.
+  'src/multitable/components/MetaRecordFieldSection.vue',
 ] as const
 
 // Per-file allowlist for counts that are legitimately un-clearable. Keep this EMPTY unless a

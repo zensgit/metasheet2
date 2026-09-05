@@ -4,15 +4,19 @@
  * B1 test list:
  *   - SECTIONS via the optional `inspectorFieldLayout` prop: order follows `ordered` (not `fields`);
  *     "hidden in this view" collapsed by default, heading count through `recordHiddenFieldsHeading`,
- *     `aria-expanded` toggles + `aria-controls` resolves; §1 headerless while §2 is empty; the N3
+ *     `aria-expanded` toggles + `aria-controls` resolves, its body is a labelled `role="region"`; §1 is
+ *     ALWAYS headerless and always expanded (round 2 — no disclosure even while §2 is non-empty); the N3
  *     negative golden (a property-hidden field present in `fields` does NOT render on this path, with a
  *     positive control proving the assertion is not vacuous); the layer-3 mask and the ordered/hidden
  *     de-duplication on the same path; absent prop → rendered ids identical to `fields` (legacy path).
  *   - HIDE EMPTY: hides exactly the `isEmptyValue`-empty fields; five exemption positive controls
  *     (`<exemption> + empty value + hide-empty ON ⇒ still rendered`), each paired with the control that
- *     proves the clause is load-bearing; the snapshot semantic (a value cleared mid-edit stays; a
- *     record-id change re-snapshots; toggle off shows everything); inspector-owned state resets on
- *     remount and the toggle exists on the details tab only.
+ *     proves the clause is load-bearing; the SNAPSHOT ∩ NOW semantic (round 2: a value cleared mid-edit
+ *     stays until the next snapshot; a value GAINED after the snapshot — including the refuter's
+ *     "focus → fill → blur" path — becomes visible at once and stays; a record-id change re-snapshots;
+ *     toggle off shows everything); the inspector-owned toggle has a CONSTANT label with `aria-pressed`
+ *     carrying the state (APG toggle button), reads zh through the helper, resets on remount and exists
+ *     on the details tab only.
  *   - GLYPH ⇔ PREDICATE agreement over the full value × field-type fixture set (one definition).
  *   - LINK CHIPS (HI-1): clickable iff `fetchRecord` is passed and the click opens the popover with the
  *     SAME record id; dropping the prop → non-clickable chips and zero fetches; INS threads the prop
@@ -24,7 +28,9 @@
  *   - KEYBOARD (FP-local): plain textarea mod+Enter blurs (the native `change` that follows is the ONE
  *     patch — the handler itself emits nothing); bare Enter in the textarea is untouched; Enter on a
  *     single-line control advances focus to the next editable control, Shift+Enter to the previous;
- *     `<select>` is untouched; the last control just blurs.
+ *     `<select>` is untouched; the last control just blurs. A HANDLED Enter / mod+Enter is also
+ *     `stopPropagation()`ed (round 2): it never reaches a keydown listener on the inspector root or on
+ *     a workbench-like ancestor, while an UNHANDLED one (bare Enter in the textarea) still bubbles.
  *   - GALLERY: the 3-up `@container (min-width: 480px)` rule exists on the attachments wrapper
  *     (source-text provision — jsdom has no container-query layout; the design's real-browser line
  *     owns the layout check).
@@ -175,7 +181,7 @@ describe('sections — inspectorFieldLayout (§1.3 "Sections")', () => {
     expect(container.querySelector('[data-section="hidden-in-view"]')).toBeNull()
   })
 
-  it('"hidden in this view" is collapsed by default, headed by recordHiddenFieldsHeading(count), and aria-expanded/aria-controls drive its body', async () => {
+  it('"hidden in this view" is collapsed by default, headed by recordHiddenFieldsHeading(count), aria-expanded/aria-controls drive its labelled region body — and §1 stays HEADERLESS beside it', async () => {
     const { container } = mountPanel({
       record: record('rec_1', { fld_title: 'a', fld_notes: 'b', fld_qty: 3 }),
       fields: [F_TITLE, F_NOTES, F_QTY],
@@ -192,13 +198,24 @@ describe('sections — inspectorFieldLayout (§1.3 "Sections")', () => {
     const body = document.getElementById(bodyId) as HTMLElement
     expect(body).not.toBeNull()
     expect(body.hidden).toBe(true)
+    // the headed body is a landmark the heading labels (round 2: role="region" + aria-labelledby → the
+    // toggle's id; round 1 had aria-labelledby on a role-less div, inert for AT)
+    expect(body.getAttribute('role')).toBe('region')
+    expect(toggle.id).toBeTruthy()
+    expect(body.getAttribute('aria-labelledby')).toBe(toggle.id)
     // collapsed content is NOT in the DOM (not merely display:none) — only §1's field renders
     expect(renderedFieldIds(container)).toEqual(['fld_title'])
-    // §2 non-empty → §1 gets its own heading (expanded by default)
-    const orderedToggle = sectionToggle(container, 'ordered')!
-    expect(orderedToggle).not.toBeNull()
-    expect(orderedToggle.textContent).toContain(recordLabel('record.fieldsInView', false))
-    expect(orderedToggle.getAttribute('aria-expanded')).toBe('true')
+    // §1 is ALWAYS headerless (round 2, design §1.3 / §1.6 mocks): even with §2 non-empty there is no
+    // §1 disclosure button, no `--headed` modifier, and its body is a plain (role-less, unlabelled) div
+    expect(sectionToggle(container, 'ordered')).toBeNull()
+    const orderedSection = container.querySelector<HTMLElement>('[data-section="ordered"]')!
+    expect(orderedSection).not.toBeNull()
+    expect(orderedSection.classList.contains('meta-record-field-section--headed')).toBe(false)
+    expect(orderedSection.querySelector('.meta-record-field-section__toggle')).toBeNull()
+    const orderedBody = orderedSection.querySelector<HTMLElement>('.meta-record-field-section__body')!
+    expect(orderedBody.hasAttribute('role')).toBe(false)
+    expect(orderedBody.hasAttribute('aria-labelledby')).toBe(false)
+    expect(orderedBody.hidden).toBe(false)
 
     toggle.click()
     await flushUi()
@@ -212,7 +229,7 @@ describe('sections — inspectorFieldLayout (§1.3 "Sections")', () => {
     expect(renderedFieldIds(container)).toEqual(['fld_title'])
   })
 
-  it('zh heading reads through the same helper', async () => {
+  it('zh heading reads through the same helper (and §1 has no heading in zh either)', async () => {
     useLocale().setLocale('zh-CN')
     const { container } = mountPanel({
       record: record('rec_1', { fld_title: 'a', fld_notes: 'b' }),
@@ -221,7 +238,23 @@ describe('sections — inspectorFieldLayout (§1.3 "Sections")', () => {
     })
     await flushUi()
     expect(sectionToggle(container, 'hidden-in-view')!.textContent).toContain(recordHiddenFieldsHeading(1, true))
-    expect(sectionToggle(container, 'ordered')!.textContent).toContain(recordLabel('record.fieldsInView', true))
+    expect(sectionToggle(container, 'ordered')).toBeNull()
+  })
+
+  it('§1 is always expanded: every ordered field renders with §2 non-empty AND collapsed, and the only disclosure button in the panel is §2\'s', async () => {
+    const { container } = mountPanel({
+      record: record('rec_1', { fld_title: 'a', fld_notes: 'b', fld_qty: 3, fld_status: 'todo' }),
+      fields: [F_TITLE, F_NOTES, F_QTY, F_STATUS],
+      inspectorFieldLayout: { ordered: [F_STATUS, F_TITLE, F_NOTES], hiddenInView: [F_QTY] },
+    })
+    await flushUi()
+    // §1's three fields all render, in view order, with nothing to expand first
+    expect(renderedFieldIds(container)).toEqual(['fld_status', 'fld_title', 'fld_notes'])
+    const toggles = Array.from(container.querySelectorAll<HTMLButtonElement>('.meta-record-field-section__toggle'))
+    expect(toggles).toHaveLength(1)
+    expect(toggles[0].getAttribute('data-testid')).toBe('record-field-section-toggle-hidden-in-view')
+    // the §1 wrapper exists (data-section anchor) but is a headerless section
+    expect(container.querySelector('[data-section="ordered"] h4')).toBeNull()
   })
 
   it('N3 negative golden: a property-hidden field present in `fields` (and in `ordered`) does NOT render on the sections path', async () => {
@@ -422,9 +455,55 @@ describe('hide-empty (§1.3 "Hide empty")', () => {
     expect(renderedFieldIds(container)).toEqual(['fld_title'])
   })
 
-  // ---- snapshot semantic ----
+  // ---- snapshot ∩ now semantic (round 2) ----
 
-  it('snapshot: a value cleared while the toggle is on does NOT vanish; a record-id change re-snapshots', async () => {
+  it('gain: a field that was empty at the snapshot and GAINS a value (same record id) becomes visible immediately and stays visible', async () => {
+    const { container, set } = mountPanel({ record: record('rec_1', { fld_title: 'a', fld_notes: '', fld_qty: null }), fields: [F_TITLE, F_NOTES, F_QTY], hideEmpty: true })
+    await flushUi()
+    expect(renderedFieldIds(container)).toEqual(['fld_title'])
+    // same record id, a value arrives (an optimistic patch from another surface, or a realtime merge)
+    set({ record: record('rec_1', { fld_title: 'a', fld_notes: 'filled', fld_qty: null }) })
+    await flushUi()
+    expect(renderedFieldIds(container)).toEqual(['fld_title', 'fld_notes'])
+    // the still-empty sibling stays hidden — the snapshot is not discarded, only overridden per present value
+    expect(renderedFieldIds(container)).not.toContain('fld_qty')
+    // and it stays visible on the next snapshot too (it is simply not empty any more)
+    set({ record: record('rec_1', { fld_title: 'a', fld_notes: 'filled', fld_qty: null }), hideEmpty: false })
+    await flushUi()
+    set({ hideEmpty: true })
+    await flushUi()
+    expect(renderedFieldIds(container)).toEqual(['fld_title', 'fld_notes'])
+  })
+
+  it('fill-then-blur (refuter P3 path): hide-empty ON, caret in an empty field (focus-exempt), user types (same-id patch), blur → the just-filled field is STILL rendered', async () => {
+    const onPatch = vi.fn()
+    const { container, set } = mountPanel({ record: record('rec_1', { fld_title: 'a', fld_notes: '', fld_qty: null }), fields: [F_TITLE, F_NOTES, F_QTY], hideEmpty: false, onPatch })
+    await flushUi()
+    const textarea = container.querySelector<HTMLTextAreaElement>('#drawer_field_fld_notes')!
+    textarea.focus()
+    expect(document.activeElement).toBe(textarea)
+    // toggle on while focused: notes is empty AND in the snapshot, kept only by the focus exemption
+    set({ hideEmpty: true })
+    await flushUi()
+    expect(renderedFieldIds(container)).toEqual(['fld_title', 'fld_notes'])
+    // the user types and commits (change on blur → one patch → the host applies it optimistically)
+    textarea.value = 'typed'
+    textarea.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(onPatch).toHaveBeenCalledTimes(1)
+    expect(onPatch).toHaveBeenCalledWith('fld_notes', 'typed')
+    set({ record: record('rec_1', { fld_title: 'a', fld_notes: 'typed', fld_qty: null }) })
+    await flushUi()
+    textarea.blur()
+    await flushUi()
+    // round 1 hid it here (snapshot-only + exemption lifted); round 2 keeps it: it is not empty NOW
+    expect(renderedFieldIds(container)).toEqual(['fld_title', 'fld_notes'])
+    expect(document.activeElement).not.toBe(textarea)
+    // control: the never-filled, never-focused sibling is still hidden after the same blur
+    expect(renderedFieldIds(container)).not.toContain('fld_qty')
+  })
+
+  it('lose: a value cleared while the toggle is on does NOT vanish (not in the snapshot); it hides only at the next snapshot — a record-id change', async () => {
     const { container, set } = mountPanel({ record: record('rec_1', { fld_title: 'a', fld_notes: 'draft' }), fields: [F_TITLE, F_NOTES], hideEmpty: true })
     await flushUi()
     expect(renderedFieldIds(container)).toEqual(['fld_title', 'fld_notes'])
@@ -453,18 +532,19 @@ describe('hide-empty (§1.3 "Hide empty")', () => {
 
   // ---- inspector-owned toggle ----
 
-  it('inspector: the toggle is aria-pressed, flips its label, forwards to the fields panel, and resets on remount (session-only, no storage)', async () => {
+  it('inspector: the toggle is an APG toggle button — CONSTANT label, aria-pressed carries the state — forwards to the fields panel, and resets on remount (session-only, no storage)', async () => {
     const a = mountInspector()
     await flushUi()
     const toggle = a.container.querySelector<HTMLButtonElement>('[data-testid="record-inspector-hide-empty"]')!
     expect(toggle).not.toBeNull()
     expect(toggle.getAttribute('aria-pressed')).toBe('false')
-    expect(toggle.textContent).toContain(recordLabel('record.hideEmpty', false))
+    expect(toggle.textContent?.trim()).toBe(recordLabel('record.hideEmpty', false))
     expect(renderedFieldIds(a.container)).toEqual(['fld_title', 'fld_notes'])
     toggle.click()
     await flushUi()
     expect(toggle.getAttribute('aria-pressed')).toBe('true')
-    expect(toggle.textContent).toContain(recordLabel('record.showEmpty', false))
+    // round 2: the label does NOT flip to a "show" copy — same string pressed and unpressed
+    expect(toggle.textContent?.trim()).toBe(recordLabel('record.hideEmpty', false))
     expect(renderedFieldIds(a.container)).toEqual(['fld_title'])
     expect(localStorage.length).toBe(0)
     a.app.unmount()
@@ -472,6 +552,19 @@ describe('hide-empty (§1.3 "Hide empty")', () => {
     await flushUi()
     expect(b.container.querySelector('[data-testid="record-inspector-hide-empty"]')!.getAttribute('aria-pressed')).toBe('false')
     expect(renderedFieldIds(b.container)).toEqual(['fld_title', 'fld_notes'])
+  })
+
+  it('inspector zh: the toggle label reads through the same helper in zh, pressed and unpressed (no hardcoded English)', async () => {
+    useLocale().setLocale('zh-CN')
+    const { container } = mountInspector()
+    await flushUi()
+    const toggle = container.querySelector<HTMLButtonElement>('[data-testid="record-inspector-hide-empty"]')!
+    expect(toggle.textContent?.trim()).toBe(recordLabel('record.hideEmpty', true))
+    expect(toggle.textContent).not.toContain(recordLabel('record.hideEmpty', false))
+    toggle.click()
+    await flushUi()
+    expect(toggle.getAttribute('aria-pressed')).toBe('true')
+    expect(toggle.textContent?.trim()).toBe(recordLabel('record.hideEmpty', true))
   })
 
   it('inspector: the toggle exists on the details tab only', async () => {
@@ -571,6 +664,16 @@ describe('link chips (§1.3 "Link chips", HI-1)', () => {
     // the picker button is still there, now reading record.editLinks (chips carry the names/count)
     const btn = container.querySelector<HTMLButtonElement>('.meta-record-drawer__link-btn')!
     expect(btn.textContent?.trim()).toBe(recordLabel('record.editLinks', false))
+  })
+
+  it('zh: the edit-links button beside the chips reads through the same helper in zh (no hardcoded English)', async () => {
+    useLocale().setLocale('zh-CN')
+    const { container } = mountPanel({ record: LINK_RECORD, fields: [F_TITLE, F_VENDOR], linkSummariesByField: LINK_SUMMARIES })
+    await flushUi()
+    const btn = container.querySelector<HTMLButtonElement>('.meta-record-drawer__link-btn')!
+    expect(btn).not.toBeNull()
+    expect(btn.textContent?.trim()).toBe(recordLabel('record.editLinks', true))
+    expect(btn.textContent).not.toContain(recordLabel('record.editLinks', false))
   })
 
   it('without fetchRecord: chips render as plain text (no button), no popover can open, and NOTHING is fetched', async () => {
@@ -769,6 +872,56 @@ describe('keyboard (§1.5 FP-local)', () => {
     expect(keydown(qty, { key: 'Enter' }).defaultPrevented).toBe(true)
     expect(document.activeElement).not.toBe(qty)
     expect(onPatch).not.toHaveBeenCalled()
+  })
+
+  it('a HANDLED Enter / mod+Enter inside an FP control is stopped at the panel root: it reaches neither a spy on the inspector root nor a workbench-like ancestor, and closes nothing; an UNHANDLED bare Enter still bubbles (positive control)', async () => {
+    const onClose = vi.fn()
+    const { container } = mountInspector({
+      record: record('rec_1', { fld_title: 'Alpha', fld_qty: 1, fld_notes: 'n' }),
+      fields: [F_TITLE, F_QTY, F_NOTES],
+      recordIds: ['rec_1'],
+      onClose,
+    })
+    await flushUi()
+    const inspectorRoot = container.querySelector<HTMLElement>('.meta-record-drawer')!
+    expect(inspectorRoot).not.toBeNull()
+    // `container` stands in for the workbench root (`.mt-workbench`) — an ancestor of the inspector
+    const inspectorSpy = vi.fn()
+    const ancestorSpy = vi.fn()
+    inspectorRoot.addEventListener('keydown', inspectorSpy)
+    container.addEventListener('keydown', ancestorSpy)
+    try {
+      const title = container.querySelector<HTMLInputElement>('#drawer_field_fld_title')!
+      const qty = container.querySelector<HTMLInputElement>('#drawer_field_fld_qty')!
+      const textarea = container.querySelector<HTMLTextAreaElement>('#drawer_field_fld_notes')!
+      // handled: Enter-advance on a single-line control
+      title.focus()
+      const enter = keydown(title, { key: 'Enter' })
+      expect(enter.defaultPrevented).toBe(true)
+      expect(document.activeElement).toBe(qty)
+      expect(inspectorSpy).not.toHaveBeenCalled()
+      expect(ancestorSpy).not.toHaveBeenCalled()
+      // handled: mod+Enter commit on the plain textarea
+      textarea.focus()
+      const modEnter = keydown(textarea, { key: 'Enter', metaKey: true })
+      expect(modEnter.defaultPrevented).toBe(true)
+      expect(document.activeElement).not.toBe(textarea)
+      expect(inspectorSpy).not.toHaveBeenCalled()
+      expect(ancestorSpy).not.toHaveBeenCalled()
+      // nothing closed, panel still there
+      expect(onClose).not.toHaveBeenCalled()
+      expect(container.querySelector('.meta-record-drawer')).toBe(inspectorRoot)
+      // positive control: an UNHANDLED key (bare Enter = newline in the textarea) bubbles to both spies
+      textarea.focus()
+      const bare = keydown(textarea, { key: 'Enter' })
+      expect(bare.defaultPrevented).toBe(false)
+      expect(inspectorSpy).toHaveBeenCalledTimes(1)
+      expect(ancestorSpy).toHaveBeenCalledTimes(1)
+      expect(onClose).not.toHaveBeenCalled()
+    } finally {
+      inspectorRoot.removeEventListener('keydown', inspectorSpy)
+      container.removeEventListener('keydown', ancestorSpy)
+    }
   })
 
   it('source: the Enter/mod+Enter handling is FP-local (root-delegated) — MetaGridTable.onKeydown and MetaCellEditor are untouched by this slice, and the inspector root dispatcher inspects no Enter', () => {

@@ -130,13 +130,13 @@ export type MetaRecordLabelKey =
   // done/failed keys are declared here now (reserved) so B1 needs no new i18n PR.
   | 'record.copyLink' | 'record.copyLinkDone' | 'record.copyLinkFailed'
   | 'record.titleFieldAria'
-  // --- Record inspector v3 (design 2026-09-05, PR-B1 §1.3 body): details-tab hide-empty toggle
-  //     (pressed/unpressed copy), the "fields in this view" section heading (rendered only when the
-  //     "hidden in this view" section is non-empty — see `recordHiddenFieldsHeading` below for that
-  //     one's count-interpolated heading), and the link-field "edit links" button copy shown beside
-  //     the linked-record chips. ---
-  | 'record.hideEmpty' | 'record.showEmpty'
-  | 'record.fieldsInView'
+  // --- Record inspector v3 (design 2026-09-05, PR-B1 §1.3 body): the details-tab hide-empty toggle's
+  //     CONSTANT label (APG toggle button — `aria-pressed` carries the state; round 2 removed the
+  //     round-1 `record.showEmpty` pressed copy) and the link-field "edit links" button copy shown
+  //     beside the linked-record chips. The "hidden in this view" section heading is the
+  //     count-interpolated `recordHiddenFieldsHeading` below; §1 has no heading (round 2 removed the
+  //     round-1 `record.fieldsInView` key). ---
+  | 'record.hideEmpty'
   | 'record.editLinks'
 
 const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }> = {
@@ -382,8 +382,6 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.copyLinkFailed': { en: 'Could not copy link', zh: '链接复制失败' },
   'record.titleFieldAria': { en: 'Record title', zh: '记录标题' },
   'record.hideEmpty': { en: 'Hide empty fields', zh: '隐藏空字段' },
-  'record.showEmpty': { en: 'Show empty fields', zh: '显示空字段' },
-  'record.fieldsInView': { en: 'Fields in this view', zh: '本视图字段' },
   'record.editLinks': { en: 'Edit links', zh: '编辑关联' },
 }
 
