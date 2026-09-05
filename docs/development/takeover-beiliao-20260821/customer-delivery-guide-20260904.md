@@ -126,6 +126,38 @@ INSERT INTO DN_PDM_OrderDetailInfo (order_id, part_id, quantity, sort_id) VALUES
 
 ## 5. 账号与权限
 
+> **2026-09-05 实测订正(重要,照旧文档做会让一线全部 403)**
+>
+> **①权限必须通过「角色」授予,直接授给个人无效。** 备料权限受「命名空间准入」约束,而准入过滤器判定一个用户是否"受控于 stock-prep 命名空间"时,**只看该用户的角色**(`user_roles` → `role_permissions`),不看直接授予个人的权限。所以只调 `POST /api/permissions/grant` 把 `stock-prep:operate`/`stock-prep:read` 授给某个人,权限确实入库、也确实被读出来,但随后被准入过滤器丢弃,该用户在所有备料接口上得到 403。**正确做法**:建一个备料角色、把两个权限码挂到角色上、再把用户指派到该角色,最后开启命名空间准入。三个权限码(`stock-prep:read`/`stock-prep:operate`/`stock-prep:admin`)由迁移预置为可授予项,但**故意不预绑任何角色**(设计要求"零自动",角色绑定必须是一次显式的运维动作)。
+>
+> ```sql
+> -- 一次性:建角色并挂权限(角色名可自定)
+> INSERT INTO roles (id, name) VALUES ('stock_prep_operator', '备料一线操作员') ON CONFLICT (id) DO NOTHING;
+> INSERT INTO role_permissions (role_id, permission_code) VALUES
+>   ('stock_prep_operator', 'stock-prep:operate'),
+>   ('stock_prep_operator', 'stock-prep:read') ON CONFLICT DO NOTHING;
+> -- 每个一线人员:指派角色
+> INSERT INTO user_roles (user_id, role_id) VALUES ('<用户 id>', 'stock_prep_operator') ON CONFLICT DO NOTHING;
+> ```
+> 随后仍需开启命名空间准入(见 5-2)。核对方式:以该用户身份调 `GET /api/auth/me`,返回的 `permissions` 里必须能看到这两个码;看不到就是角色没挂上或准入没开。
+>
+> **②"从 PLM 拉取"只能由管理员执行,一线做不了。** 数据源的访问判定是**属主或平台管理员二选一**(`DataSourceManager.assertAccess`),存储里的作用域字段不参与判定;PLM 连接由管理员创建,因此一线人员调拉取会得到 `400 CONNECTION_CANONICAL_UNAVAILABLE`。这是刻意的按源属主鉴权设计,不是配置问题。
+>
+> **实测确定的可行运作模式(2026-09-05 在 222 上以真实非管理员账号逐条验证)**:
+>
+> | 环节 | 一线操作员 | 管理员 |
+> |---|---|---|
+> | 从 PLM 拉取(试算/写入) | ✗ 400 | ✓ |
+> | 我的项目目录 | ✓ 200 | ✓ |
+> | 项目看板 | ✓ 200 | ✓ |
+> | 确认队列(查看) | ✓ 200 | ✓ |
+> | 到多维表填报 | ✓ | ✓ |
+> | 导出物料清单 | ✓ 200 | ✓ |
+> | 交接链状态 / 通知下一步 | ✓ 200 | ✓ |
+> | 建确认账本 / 重新扫描对账 / 切换数据源 | ✗ 403(正确拒绝) | ✓ |
+>
+> 即:**管理员负责"把 BOM 拉进来",一线负责其余全部环节**。请按这个分工安排人员与培训。
+
 **5-1 两个权限码**(由平台管理员通过 `POST /api/permissions/grant` 授予,`stock-prep:operate` **不隐含** `stock-prep:read`,两个都要单独授予):
 
 ```
