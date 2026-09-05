@@ -14,6 +14,8 @@
   },
   "include": [
     "src/cache/**/*.ts",
+    "src/middleware/api-token-auth.ts",
+    "src/types/express.d.ts",
     "types/**/*.ts"
   ],
   "exclude": [

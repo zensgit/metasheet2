@@ -28,22 +28,46 @@ function base64url(input) {
 }
 
 function parseArgs(argv) {
-  const opts = { mode: '', userId: '', roles: 'user', perms: '', expiresInSeconds: 7200 }
+  const opts = {
+    mode: '',
+    userId: '',
+    roles: 'user',
+    perms: '',
+    expiresInSeconds: 7200,
+    tenantId: '',
+    tenantIdProvided: false,
+  }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
     if (arg === '--find-admin') opts.mode = 'find-admin'
     else if (arg === '--mint') opts.mode = 'mint'
+    else if (arg === '--help' || arg === '-h') opts.mode = 'help'
     else if (arg === '--user-id') opts.userId = argv[++i] || ''
     else if (arg === '--roles') opts.roles = argv[++i] || ''
     else if (arg === '--perms') opts.perms = argv[++i] || ''
     else if (arg === '--expires-in') opts.expiresInSeconds = Number.parseInt(argv[++i] || '7200', 10)
-    else {
+    else if (arg === '--tenant-id') {
+      opts.tenantId = argv[++i] || ''
+      opts.tenantIdProvided = true
+    } else {
       console.error(`unknown argument: ${arg}`)
       process.exit(2)
     }
   }
   return opts
 }
+
+const HELP_TEXT = `usage: attendance-window-runner-mint-token.mjs --find-admin | --mint --user-id <id> [--roles a,b] [--perms p,q] [--expires-in <seconds>] [--tenant-id <id>]
+
+  --find-admin              Print the id of an existing ACTIVE admin user (read-only).
+  --mint --user-id <id>     Mint an HS256 JWT signed with JWT_SECRET.
+    [--roles a,b]           Comma-separated roles (default: user).
+    [--perms p,q]           Comma-separated permissions (default: none).
+    [--expires-in <secs>]   Token lifetime in seconds (default: 7200, max: 86400).
+    [--tenant-id <id>]      Tenant claim to embed in the token payload as "tenantId".
+                            备料/集成路由要求租户声明;不带此参数签出的令牌在
+                            MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED=true 的部署上会被 403。
+`
 
 async function findAdmin() {
   let pg
@@ -90,12 +114,21 @@ function mint(opts) {
     console.error('FAIL: --expires-in must be a positive number of seconds (max 86400).')
     process.exit(2)
   }
+  let tenantId
+  if (opts.tenantIdProvided) {
+    tenantId = opts.tenantId.trim()
+    if (!tenantId) {
+      console.error('FAIL: --tenant-id, when provided, must not be empty.')
+      process.exit(2)
+    }
+  }
   const now = Math.floor(Date.now() / 1000)
   const header = { alg: 'HS256', typ: 'JWT' }
   const payload = {
     id: opts.userId,
     roles: opts.roles.split(',').map((v) => v.trim()).filter(Boolean),
     perms: opts.perms.split(',').map((v) => v.trim()).filter(Boolean),
+    ...(tenantId !== undefined ? { tenantId } : {}),
     iat: now,
     exp: now + opts.expiresInSeconds,
   }
@@ -115,6 +148,9 @@ if (opts.mode === 'find-admin') {
   await findAdmin()
 } else if (opts.mode === 'mint') {
   mint(opts)
+} else if (opts.mode === 'help') {
+  console.log(HELP_TEXT)
+  process.exit(0)
 } else {
   console.error('usage: attendance-window-runner-mint-token.mjs --find-admin | --mint --user-id <id> [--roles a,b] [--perms p,q] [--expires-in <seconds>]')
   process.exit(2)

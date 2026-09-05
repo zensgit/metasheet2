@@ -4,6 +4,7 @@ const assert = require('node:assert/strict')
 const path = require('node:path')
 
 const {
+  LARGE_BOM_ARTIFACT_CHUNK_COUNT,
   LARGE_BOM_BACKGROUND_EXPANSION_STATUSES,
   LARGE_BOM_CHECKPOINT_APPLY_STATUSES,
   StockPreparationLargeBomJobError,
@@ -23,6 +24,13 @@ const {
   summarizeLargeBomBackgroundExpansionJobForEvidence,
   summarizeLargeBomCheckpointApplyJobForEvidence,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-large-bom-jobs.cjs'))
+// The background lane's caps live with the action config that declares them.
+const {
+  LARGE_BOM_BACKGROUND_CAP_CEILINGS,
+  LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS,
+  largeBomBackgroundExpansionCaps,
+  normalizeStockPreparationActionConfig,
+} = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
 
 const RAW_MARKERS = Object.freeze([
   'PROJECT_VALUE_SHOULD_NOT_APPEAR',
@@ -757,9 +765,100 @@ async function testBackgroundWorkerCompletesAuthoritativeArtifactWithoutPublicVa
   assert.equal(source.calls.length, callCountAfterCompletion, 'completed job retry does not re-read source')
 }
 
-async function testBackgroundWorkerFailsNonAuthoritativeOnScaleBudget() {
+async function runBackgroundJobUnderActionCaps({ action, jobId, source }) {
   const storage = createStorage()
+  await createLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    action,
+    parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
+    principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
+    createJobId: () => jobId,
+    now: () => '2026-06-08T00:00:00.000Z',
+  })
+  return runLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId: action.actionId,
+    jobId,
+    sourceAdapter: source.adapter,
+    // The route's own composition (http-routes `largeBomExpansionOptionsForAction`):
+    // background caps, NOT the interactive ones.
+    expansionOptions: largeBomBackgroundExpansionCaps(action),
+    now: () => '2026-06-08T00:01:00.000Z',
+  })
+}
+
+// REGRESSION PIN for the 2026-09-05 field failure. This test used to hand the
+// worker `expansionOptions: { maxRows: 1 }` and call the resulting `failed` the
+// expected outcome — which pinned the bug: the background lane was handed the
+// SAME cap that sent the caller into it, so every project big enough to need
+// the lane failed in it. What is expected now is the pair: an interactive cap
+// of N lets the background lane reach N x LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS
+// .maxRows, and only exceeding THAT cap fails non-authoritative.
+async function testBackgroundWorkerScalesPastTheInteractiveScaleBudget() {
   const source = createSourceAdapter(plmData())
+  // Interactive maxRows = 1: the dry-run that sent the operator here bounded at
+  // one row. The fixture expands to two, so the pre-fix worker failed here.
+  const completed = await runBackgroundJobUnderActionCaps({
+    action: {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { kind: 'data-source:sql-readonly' },
+      maxRows: 1,
+    },
+    jobId: 'job-scaled-1',
+    source,
+  })
+  assert.equal(completed.status, 'completed', 'background lane must not re-hit the interactive maxRows')
+  assert.equal(completed.authoritative, true)
+  assert.equal(completed.artifact.rows.length, 2)
+  assert.equal(
+    completed.budgets.maxRows,
+    1 * LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS.maxRows,
+    'budgets report the background cap that actually ran',
+  )
+  assert.equal(completed.budgets.maxArtifactChunks, LARGE_BOM_ARTIFACT_CHUNK_COUNT)
+  // UNBOUNDED IS `null`, NOT 0. This action names no `maxReadCount`/
+  // `maxElapsedMs`, the expander has no default for either, so the background
+  // lane inherits "no bound" — and a projection of 0 would say the opposite.
+  const publicJob = publicBackgroundExpansionJob(completed)
+  assert.equal(publicJob.budgets.maxReadCount, null, 'an unbounded read budget must not read as zero')
+  assert.equal(publicJob.budgets.maxElapsedMs, null, 'an unbounded time budget must not read as zero')
+  assert.equal(publicJob.budgets.maxRows, 1 * LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS.maxRows)
+  assertValuesFree(publicJob)
+}
+
+async function testBackgroundWorkerFailsNonAuthoritativeOnScaleBudget() {
+  const source = createSourceAdapter(plmData())
+  // Explicit background cap of 1 — the ONLY way to fail on rows now.
+  const failed = await runBackgroundJobUnderActionCaps({
+    action: {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { kind: 'data-source:sql-readonly' },
+      maxRows: 1,
+      largeBom: { maxRows: 1 },
+    },
+    jobId: 'job-failed-1',
+    source,
+  })
+
+  assert.equal(failed.status, 'failed')
+  assert.equal(failed.authoritative, false)
+  assert.equal(failed.artifact, undefined)
+  assert.equal(failed.budgets.maxRows, 1, 'the failed run reports the background cap it hit')
+  const publicJob = publicBackgroundExpansionJob(failed)
+  assert.equal(publicJob.authoritative, false)
+  assert.equal(publicJob.artifactRevisionPresent, false)
+  assert.equal(publicJob.budgets.maxRows, 1)
+  assert.ok(publicJob.evidence.errorTypes.includes('max_rows_exceeded'))
+  assert.ok(publicJob.evidence.scaleErrorTypes.includes('max_rows_exceeded'))
+  assertValuesFree(publicJob)
+}
+
+// The caps a run enforces are written down BEFORE the first source read, so a
+// run that dies in the adapter still says which numbers were in force.
+async function testBackgroundBudgetsAreRecordedBeforeTheSourceRead() {
+  const storage = createStorage()
   await createLargeBomBackgroundExpansionJob({
     storage,
     ...TEST_SCOPE,
@@ -769,7 +868,7 @@ async function testBackgroundWorkerFailsNonAuthoritativeOnScaleBudget() {
     },
     parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
     principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
-    createJobId: () => 'job-failed-1',
+    createJobId: () => 'job-budget-evidence-1',
     now: () => '2026-06-08T00:00:00.000Z',
   })
 
@@ -777,21 +876,106 @@ async function testBackgroundWorkerFailsNonAuthoritativeOnScaleBudget() {
     storage,
     ...TEST_SCOPE,
     actionId: 'plm.stock-preparation.pull-bom.v1',
-    jobId: 'job-failed-1',
-    sourceAdapter: source.adapter,
-    expansionOptions: { maxRows: 1 },
+    jobId: 'job-budget-evidence-1',
+    sourceAdapter: {
+      async read() {
+        throw new Error('PROJECT_VALUE_SHOULD_NOT_APPEAR')
+      },
+    },
+    expansionOptions: { maxRows: 200000, maxPages: 1000, maxReadCount: 600000, maxElapsedMs: 3600000 },
     now: () => '2026-06-08T00:01:00.000Z',
   })
 
   assert.equal(failed.status, 'failed')
-  assert.equal(failed.authoritative, false)
-  assert.equal(failed.artifact, undefined)
   const publicJob = publicBackgroundExpansionJob(failed)
-  assert.equal(publicJob.authoritative, false)
-  assert.equal(publicJob.artifactRevisionPresent, false)
-  assert.ok(publicJob.evidence.errorTypes.includes('max_rows_exceeded'))
-  assert.ok(publicJob.evidence.scaleErrorTypes.includes('max_rows_exceeded'))
+  assert.deepEqual(publicJob.budgets, {
+    maxRows: 200000,
+    maxPages: 1000,
+    maxReadCount: 600000,
+    maxElapsedMs: 3600000,
+    maxDepth: 20,
+    maxArtifactChunks: LARGE_BOM_ARTIFACT_CHUNK_COUNT,
+  })
   assertValuesFree(publicJob)
+}
+
+function testBackgroundCapDerivationAndCeilings() {
+  const base = {
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    source: { kind: 'data-source:sql-readonly' },
+  }
+  // Nothing configured: the expander's own interactive defaults are the base.
+  assert.deepEqual(largeBomBackgroundExpansionCaps(base), {
+    maxRows: 10000 * LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS.maxRows,
+    maxPages: 100 * LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS.maxPages,
+  })
+  // The 222 shape: maxReadCount/maxElapsedMs configured interactively scale too.
+  assert.deepEqual(
+    largeBomBackgroundExpansionCaps({ ...base, maxRows: 10000, maxReadCount: 30000, maxElapsedMs: 600000 }),
+    {
+      maxRows: 200000,
+      maxPages: 1000,
+      maxReadCount: 600000,
+      maxElapsedMs: 3600000,
+    },
+  )
+  // An explicit block overrides the derived value, cap by cap.
+  assert.deepEqual(
+    largeBomBackgroundExpansionCaps({ ...base, maxRows: 10000, largeBom: { maxRows: 50000 } }),
+    { maxRows: 50000, maxPages: 1000 },
+  )
+  // A derived value is clamped by the ceiling rather than running away.
+  assert.equal(
+    largeBomBackgroundExpansionCaps({ ...base, maxRows: 900000 }).maxRows,
+    LARGE_BOM_BACKGROUND_CAP_CEILINGS.maxRows,
+  )
+}
+
+function testBackgroundCapConfigBlockParsing() {
+  const base = {
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    source: { kind: 'data-source:sql-readonly', externalSystemId: 'sys-1' },
+    target: { sheetId: 'sheet_stock_preparation' },
+  }
+  const withBlock = normalizeStockPreparationActionConfig({
+    ...base,
+    largeBom: { maxRows: 200000, maxPages: 1000, maxReadCount: 600000, maxElapsedMs: 3600000 },
+  })
+  assert.deepEqual(withBlock.largeBom, {
+    maxRows: 200000,
+    maxPages: 1000,
+    maxReadCount: 600000,
+    maxElapsedMs: 3600000,
+  })
+  // Absent => the key is not added at all, so legacy config snapshots and their
+  // hashes are byte-identical.
+  assert.equal(Object.prototype.hasOwnProperty.call(normalizeStockPreparationActionConfig(base), 'largeBom'), false)
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(normalizeStockPreparationActionConfig({ ...base, largeBom: {} }), 'largeBom'),
+    false,
+  )
+
+  const rejected = [
+    { largeBom: 5 },
+    { largeBom: { maxRows: '200000' } },
+    { largeBom: { maxRows: 0 } },
+    { largeBom: { maxRows: -1 } },
+    { largeBom: { maxRows: 1.5 } },
+    { largeBom: { maxDepth: 40 } },
+    { largeBom: { maxRows: LARGE_BOM_BACKGROUND_CAP_CEILINGS.maxRows + 1 } },
+    { largeBom: { maxElapsedMs: LARGE_BOM_BACKGROUND_CAP_CEILINGS.maxElapsedMs + 1 } },
+  ]
+  for (const overrides of rejected) {
+    let caught = null
+    try {
+      normalizeStockPreparationActionConfig({ ...base, ...overrides })
+    } catch (error) {
+      caught = error
+    }
+    assert.ok(caught, `expected a refusal for ${JSON.stringify(overrides)}`)
+    assert.equal(caught.code, 'TABLE_ACTION_CONFIG_INVALID')
+    assert.equal(caught.status, 422)
+  }
 }
 
 async function testBackgroundWorkerStoresFailedJobWhenErrorTokenIsUnsafe() {
@@ -836,6 +1020,429 @@ async function testBackgroundWorkerStoresFailedJobWhenErrorTokenIsUnsafe() {
   })
   assert.equal(loaded.status, 'failed')
   assert.deepEqual(loaded.evidence.errorTypes, ['read_failed'])
+}
+
+// REGRESSION PIN for the 222 field failure: a background job that ended
+// `status: failed` with `errorTypes: ['read_failed']` persisted a BOOLEAN
+// (`readDiagnosticShapePresent`) and nothing else, so nobody could say which
+// object failed or with what driver code. What is expected now is the object
+// and the code — and STILL not one byte of row data.
+async function testBackgroundWorkerPersistsValuesFreeReadFailureDiagnostics() {
+  const storage = createStorage()
+  await createLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    action: {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { kind: 'data-source:sql-readonly' },
+    },
+    parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
+    principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
+    createJobId: () => 'job-read-diagnostics-1',
+    now: () => '2026-06-08T00:00:00.000Z',
+  })
+
+  // The driver's message quotes the part it choked on. That literal is the
+  // thing this test exists to keep OUT of the job row.
+  const leakyMessage = `mssql read failed for ${RAW_MARKERS[1]}`
+  const failed = await runLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    jobId: 'job-read-diagnostics-1',
+    sourceAdapter: {
+      async read() {
+        const error = new Error(leakyMessage)
+        error.code = 'ECONNRESET'
+        throw error
+      },
+    },
+    now: () => '2026-06-08T00:01:00.000Z',
+  })
+
+  assert.equal(failed.status, 'failed')
+  assert.deepEqual(failed.evidence.errorTypes, ['read_failed'])
+  assert.equal(failed.evidence.readDiagnosticShapePresent, true, 'the pre-existing boolean is unchanged')
+
+  assert.equal(Array.isArray(failed.evidence.readFailures), true)
+  assert.equal(failed.evidence.readFailures.length, 1)
+  assert.equal(failed.evidence.readFailures[0].object, 'DN_PDM_PathExAttrInfo')
+  assert.equal(failed.evidence.readFailures[0].errorCode, 'ECONNRESET')
+  assert.equal('cursor' in failed.evidence.readFailures[0], false, 'cursor can carry a row value and is never projected')
+  assert.equal('message' in failed.evidence.readFailures[0], false)
+  assert.equal(failed.evidence.readFailuresTotal, 1)
+  assert.equal(failed.evidence.readFailuresTruncated, false)
+
+  assert.equal(failed.evidence.errorDetails.length, 1)
+  assert.equal(failed.evidence.errorDetails[0].type, 'read_failed')
+  assert.equal(failed.evidence.errorDetails[0].object, 'DN_PDM_PathExAttrInfo')
+  assert.equal(failed.evidence.errorDetails[0].causeClass, 'ECONNRESET')
+  assert.equal('message' in failed.evidence.errorDetails[0], false)
+
+  // THE WHOLE PERSISTED OBJECT, not just the public projection: the diagnostic
+  // is stored, so the storage row is what has to be clean.
+  const stored = JSON.stringify(failed)
+  assert.equal(stored.includes(RAW_MARKERS[1]), false, 'the part number in the driver message never reaches the job row')
+  assert.equal(stored.includes('mssql read failed for'), false, 'the driver message text never reaches the job row')
+  assertValuesFree(failed.evidence)
+
+  const loaded = await loadLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    jobId: 'job-read-diagnostics-1',
+  })
+  assert.equal(JSON.stringify(loaded).includes(RAW_MARKERS[1]), false)
+
+  const publicJob = publicBackgroundExpansionJob(loaded)
+  assert.equal(publicJob.evidence.readFailures[0].object, 'DN_PDM_PathExAttrInfo')
+  assert.equal(publicJob.evidence.readFailures[0].errorCode, 'ECONNRESET')
+  assert.equal(publicJob.evidence.errorDetails[0].causeClass, 'ECONNRESET')
+  assertValuesFree(publicJob)
+}
+
+// The throw that escapes the expander entirely (no summary, so no
+// `readDiagnostics`). `readFailures` must stay ABSENT there — its absence is
+// how a reader tells "the run died before the expander summarized" from "these
+// reads failed" — while `errorDetails` still names the cause class.
+async function testEscapedThrowKeepsCauseClassWithoutReadFailures() {
+  const storage = createStorage()
+  await createLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    action: { actionId: 'plm.stock-preparation.pull-bom.v1', source: { kind: 'data-source:sql-readonly' } },
+    parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
+    principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
+    createJobId: () => 'job-escaped-throw-1',
+    now: () => '2026-06-08T00:00:00.000Z',
+  })
+
+  const failed = await runLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    jobId: 'job-escaped-throw-1',
+    // `projectNo` is required by the expander, so an empty one throws BEFORE
+    // any read — the one reliable way to reach the catch branch.
+    sourceAdapter: { async read() { throw new Error(RAW_MARKERS[1]) } },
+    expansionOptions: { projectNo: '' },
+    now: () => '2026-06-08T00:01:00.000Z',
+  })
+
+  assert.equal(failed.status, 'failed')
+  assert.equal(failed.evidence.readDiagnosticShapePresent, false)
+  assert.equal('readFailures' in failed.evidence, false, 'no per-read record exists on this path')
+  assert.equal(Array.isArray(failed.evidence.errorDetails), true)
+  assert.equal(failed.evidence.errorDetails[0].type, failed.evidence.errorTypes[0])
+  // The name of this test promises a cause class, so pin it: without one the
+  // entry would carry only `{ type }` and `carriesObjectOrCauseClass` would drop
+  // it, leaving this path with no detail stanza at all.
+  assert.equal(typeof failed.evidence.errorDetails[0].causeClass, 'string')
+  assert.equal(failed.evidence.errorDetails[0].causeClass.length > 0, true)
+  assert.equal(JSON.stringify(failed).includes(RAW_MARKERS[1]), false)
+  assertValuesFree(publicBackgroundExpansionJob(failed))
+}
+
+// C, FOUND IN ADVERSARIAL REVIEW OF #5507. The first cut fed `expansion.errors[]`
+// to the projection unconditionally, so a bounded expansion with ZERO failed
+// reads still grew three evidence keys whose content was a verbatim copy of
+// `errorTypes`. `max_rows_exceeded` carries `{maxRows}` and nothing else, so it
+// is the exact case that must come out key-for-key identical to pre-feature main.
+async function testObjectLessBoundedExpansionKeepsThePreFeatureKeySet() {
+  const source = createSourceAdapter(plmData())
+  const failed = await runBackgroundJobUnderActionCaps({
+    action: {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { kind: 'data-source:sql-readonly' },
+      maxRows: 1,
+      largeBom: { maxRows: 1 },
+    },
+    jobId: 'job-bounded-keyset-1',
+    source,
+  })
+
+  assert.equal(failed.status, 'failed')
+  assert.deepEqual(failed.evidence.errorTypes, ['max_rows_exceeded'])
+  assert.deepEqual(Object.keys(failed.evidence), [
+    'sourceKind',
+    'readObjects',
+    'errorTypes',
+    'readDiagnosticShapePresent',
+  ], 'an object-less bounded failure adds no detail keys')
+  assert.deepEqual(Object.keys(publicBackgroundExpansionJob(failed).evidence), [
+    'sourceKind',
+    'readObjects',
+    'errorTypes',
+    'scaleErrorTypes',
+    'readDiagnosticShapePresent',
+  ])
+}
+
+// THE OTHER SIDE OF THE SAME BOUNDARY, so the narrowing is a rule and not a
+// coincidence. A bounded error that NAMES ITS OBJECT still mounts, because
+// "the read budget blew while reading which object" is the one thing
+// `errorTypes` cannot say.
+function testBoundedErrorsThatNameAnObjectStillMount() {
+  const withoutObject = __internals.attachReadFailureEvidence(
+    { errorTypes: ['max_rows_exceeded'] },
+    { errors: [{ type: 'max_rows_exceeded', maxRows: 1 }] },
+  )
+  assert.deepEqual(Object.keys(withoutObject), ['errorTypes'])
+
+  const withObject = __internals.attachReadFailureEvidence(
+    { errorTypes: ['read_count_exceeded'] },
+    { errors: [{ type: 'read_count_exceeded', object: 'DN_PDM_OrderHeadInfo', maxReadCount: 2 }] },
+  )
+  assert.deepEqual(withObject.errorDetails, [
+    { type: 'read_count_exceeded', object: 'DN_PDM_OrderHeadInfo' },
+  ])
+  assert.equal(withObject.errorDetailsTotal, 1)
+  assert.equal(withObject.errorDetailsTruncated, false)
+}
+
+// THE CAP'S EXACT EDGE. Off-by-one here would either hide the 20th failure or
+// claim truncation that did not happen.
+function testDetailCapBoundaryIsExact() {
+  const limit = __internals.LARGE_BOM_READ_FAILURE_DETAIL_LIMIT
+  const diagnosticsOf = (count) => Array.from({ length: count }, (_, index) => ({
+    object: `DN_PDM_Object_${index}`,
+    filterFields: ['FileCode'],
+    cursor: null,
+    status: 'failed',
+    errorCode: 'ECONNRESET',
+  }))
+
+  const atCap = __internals.attachReadFailureEvidence({}, { readDiagnostics: diagnosticsOf(limit) })
+  assert.equal(atCap.readFailures.length, limit)
+  assert.equal(atCap.readFailuresTotal, limit)
+  assert.equal(atCap.readFailuresTruncated, false, 'exactly at the cap is not truncated')
+
+  const overCap = __internals.attachReadFailureEvidence({}, { readDiagnostics: diagnosticsOf(limit + 1) })
+  assert.equal(overCap.readFailures.length, limit)
+  assert.equal(overCap.readFailuresTotal, limit + 1)
+  assert.equal(overCap.readFailuresTruncated, true, 'one over the cap is truncated')
+}
+
+// `<key>Total` COUNTS CANDIDATES, NOT SURVIVORS. Three reads that failed with
+// driver codes too unsafe to project are still three failed reads; reporting 0
+// would be a wrong answer to the question this stanza exists to answer.
+function testTotalCountsCandidatesNotSurvivors() {
+  const evidence = __internals.attachReadFailureEvidence({}, {
+    readDiagnostics: [
+      { object: 'DN_PDM_PathExAttrInfo', status: 'failed', errorCode: 'ECONNRESET' },
+      // Every projectable field unsafe => an empty entry that is still a failed read.
+      { object: `bad object ${RAW_MARKERS[0]}`, status: 'failed', errorCode: `bad code ${RAW_MARKERS[1]}`, filterFields: [] },
+      { object: 'DN_PDM_Ok', status: 'ok', count: 3 },
+    ],
+  })
+  assert.equal(evidence.readFailures.length, 1, 'only the projectable entry is listed')
+  assert.equal(evidence.readFailuresTotal, 2, 'both failed reads are counted; the ok read is not')
+  assert.equal(evidence.readFailuresTruncated, true, 'the array does not list everything counted')
+  assertValuesFree(evidence)
+}
+
+// THE SAME RULE ON THE OTHER STANZA, found in review of dda3ede93: `errorDetails`
+// used to count SURVIVORS, so two `read_count_exceeded` errors differing only in
+// that one object contains a space reported `1 / 1 / false` — one detail gone
+// while the stanza claimed nothing was missing. Counting candidates makes the
+// two stanzas obey one rule.
+function testErrorDetailTotalCountsCandidatesNotSurvivors() {
+  const evidence = __internals.attachReadFailureEvidence({}, {
+    errors: [
+      { type: 'read_count_exceeded', object: 'DN_PDM_OrderHeadInfo', maxReadCount: 2 },
+      // Names an object, but the token is unsafe => listed nowhere, counted here.
+      { type: 'read_count_exceeded', object: `bad object ${RAW_MARKERS[0]}`, maxReadCount: 2 },
+    ],
+  })
+  assert.equal(evidence.errorDetails.length, 1, 'only the projectable detail is listed')
+  assert.equal(evidence.errorDetailsTotal, 2, 'both errors that named an object are counted')
+  assert.equal(evidence.errorDetailsTruncated, true, 'the array does not list everything counted')
+  assertValuesFree(evidence)
+
+  // The narrowing still holds: an error that names NEITHER is not a candidate at
+  // all, so an object-less bounded failure mounts nothing (the C regression pin).
+  const objectLess = __internals.attachReadFailureEvidence({}, {
+    errors: [{ type: 'max_rows_exceeded', maxRows: 1 }, { type: 'cycle_detected', depth: 3 }],
+  })
+  assert.deepEqual(Object.keys(objectLess), [])
+}
+
+// A STORED COUNTER IS A CLAIM. The public projection already refuses to trust
+// the stored array; this pins that it does not then trust the number beside it.
+function testPublicProjectionRepairsIncoherentStoredCounters() {
+  const publicJob = summarizeLargeBomBackgroundExpansionJobForEvidence({
+    jobId: 'job-incoherent-1',
+    status: 'failed',
+    evidence: {
+      sourceKind: 'data-source:sql-readonly',
+      readObjects: [],
+      errorTypes: ['read_failed'],
+      readDiagnosticShapePresent: true,
+      readFailures: [{ object: 'DN_PDM_PathExAttrInfo', errorCode: 'ECONNRESET' }],
+      readFailuresTotal: 999,
+      readFailuresTruncated: 'maybe',
+    },
+  })
+
+  assert.equal(publicJob.evidence.readFailures.length, 1)
+  assert.equal(publicJob.evidence.readFailuresTotal >= publicJob.evidence.readFailures.length, true)
+  assert.equal(typeof publicJob.evidence.readFailuresTruncated, 'boolean', 'a non-boolean stored flag is never copied through')
+  assert.equal(publicJob.evidence.readFailuresTruncated, true, 'one shown out of 999 counted is truncated')
+  assertValuesFree(publicJob)
+
+  // A total that claims FEWER items than we can see is raised to what we see,
+  // and an absurd one is clamped rather than repeated.
+  const understated = summarizeLargeBomBackgroundExpansionJobForEvidence({
+    status: 'failed',
+    evidence: {
+      readFailures: [
+        { object: 'DN_PDM_A', errorCode: 'ECONNRESET' },
+        { object: 'DN_PDM_B', errorCode: 'ECONNRESET' },
+      ],
+      readFailuresTotal: 0,
+      readFailuresTruncated: true,
+    },
+  })
+  assert.equal(understated.evidence.readFailuresTotal, 2)
+  assert.equal(understated.evidence.readFailuresTruncated, false, 'nothing is missing, so nothing is truncated')
+
+  const absurd = summarizeLargeBomBackgroundExpansionJobForEvidence({
+    status: 'failed',
+    evidence: {
+      readFailures: [{ object: 'DN_PDM_A', errorCode: 'ECONNRESET' }],
+      readFailuresTotal: Number.MAX_SAFE_INTEGER,
+    },
+  })
+  assert.equal(absurd.evidence.readFailuresTotal, 1000000, 'an absurd stored counter is clamped to the ceiling')
+
+  // The stored array is sliced no matter what the row claims, and the flag
+  // follows the slice rather than the claim.
+  const oversized = summarizeLargeBomBackgroundExpansionJobForEvidence({
+    status: 'failed',
+    evidence: {
+      readFailures: Array.from({ length: 40 }, (_, index) => ({ object: `DN_PDM_Object_${index}`, errorCode: 'ECONNRESET' })),
+      readFailuresTruncated: false,
+    },
+  })
+  assert.equal(oversized.evidence.readFailures.length, __internals.LARGE_BOM_READ_FAILURE_DETAIL_LIMIT)
+  assert.equal(oversized.evidence.readFailuresTotal, 40)
+  assert.equal(oversized.evidence.readFailuresTruncated, true, 'an actual slice forces the flag true')
+}
+
+// The per-entry bound: `filterFields` is adapter-supplied, so one diagnostic
+// must not be able to grow without limit while the item cap counts it as one.
+function testFilterFieldsAreBoundedPerEntry() {
+  const evidence = __internals.attachReadFailureEvidence({}, {
+    readDiagnostics: [{
+      object: 'DN_PDM_PathExAttrInfo',
+      status: 'failed',
+      errorCode: 'ECONNRESET',
+      filterFields: Array.from({ length: 200 }, (_, index) => `Field_${index}`),
+    }],
+  })
+  assert.equal(evidence.readFailures[0].filterFields.length, 32)
+}
+
+// The cap has to be a CAP, not a silent truncation: 20 entries out, the real
+// count still reported. Driven through the same helper `updateJobFromExpansion`
+// uses, because the expander abandons an expansion on its FIRST failed read and
+// therefore cannot itself produce 21 of them.
+function testReadFailureDetailsAreCappedAndReportTheRealTotal() {
+  const limit = __internals.LARGE_BOM_READ_FAILURE_DETAIL_LIMIT
+  assert.equal(limit, 20)
+  const overCap = limit + 5
+  const readDiagnostics = Array.from({ length: overCap }, (_, index) => ({
+    object: `DN_PDM_Object_${index}`,
+    filterFields: ['FileCode'],
+    cursor: RAW_MARKERS[3],
+    status: 'failed',
+    filtersSent: true,
+    errorCode: 'ECONNRESET',
+  }))
+  // One OK read in the middle: the projection filters on status, so this must
+  // not be counted and must not consume a slot.
+  readDiagnostics.push({ object: 'DN_PDM_Ok', filterFields: [], cursor: null, status: 'ok', count: 3 })
+  const errors = Array.from({ length: overCap }, (_, index) => ({
+    type: 'read_failed',
+    object: `DN_PDM_Object_${index}`,
+    causeClass: 'ECONNRESET',
+    message: RAW_MARKERS[1],
+  }))
+
+  const evidence = __internals.attachReadFailureEvidence({
+    sourceKind: 'data-source:sql-readonly',
+    readObjects: [],
+    errorTypes: ['read_failed'],
+    readDiagnosticShapePresent: true,
+  }, { readDiagnostics, errors })
+
+  assert.equal(evidence.readFailures.length, limit)
+  assert.equal(evidence.readFailuresTotal, overCap)
+  assert.equal(evidence.readFailuresTruncated, true)
+  assert.equal(evidence.errorDetails.length, limit)
+  assert.equal(evidence.errorDetailsTotal, overCap)
+  assert.equal(evidence.errorDetailsTruncated, true)
+  assert.equal(JSON.stringify(evidence).includes(RAW_MARKERS[3]), false, 'cursor is never projected')
+  assert.equal(JSON.stringify(evidence).includes(RAW_MARKERS[1]), false, 'message is never projected')
+  assertValuesFree(evidence)
+
+  // Same cap and same real total on the way back out of storage.
+  const publicJob = summarizeLargeBomBackgroundExpansionJobForEvidence({
+    jobId: 'job-capped-1',
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    status: 'failed',
+    evidence,
+  })
+  assert.equal(publicJob.evidence.readFailures.length, limit)
+  assert.equal(publicJob.evidence.readFailuresTotal, overCap)
+  assert.equal(publicJob.evidence.readFailuresTruncated, true)
+  assert.equal(publicJob.evidence.errorDetailsTotal, overCap)
+  assertValuesFree(publicJob)
+}
+
+// SUCCESS PATH BYTE-IDENTICAL. Both stanzas are conditionally mounted, so a run
+// with no failed read must produce the same evidence key set as before this
+// change — no empty arrays, no zero counters.
+async function testSuccessfulRunHasNoReadFailureKeys() {
+  const storage = createStorage()
+  const source = createSourceAdapter(plmData())
+  await createLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    action: {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { kind: 'data-source:sql-readonly' },
+      target: { sheetId: 'TARGET_RECORD_VALUE_SHOULD_NOT_APPEAR' },
+    },
+    parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
+    principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
+    createJobId: () => 'job-no-read-failures-1',
+    now: () => '2026-06-08T00:00:00.000Z',
+  })
+
+  const completed = await runLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    jobId: 'job-no-read-failures-1',
+    sourceAdapter: source.adapter,
+    now: () => '2026-06-08T00:01:00.000Z',
+  })
+
+  assert.equal(completed.status, 'completed')
+  assert.deepEqual(Object.keys(completed.evidence), [
+    'sourceKind',
+    'readObjects',
+    'errorTypes',
+    'readDiagnosticShapePresent',
+  ])
+  assert.deepEqual(Object.keys(publicBackgroundExpansionJob(completed).evidence), [
+    'sourceKind',
+    'readObjects',
+    'errorTypes',
+    'scaleErrorTypes',
+    'readDiagnosticShapePresent',
+  ])
 }
 
 async function completedJobWithArtifact({ storage = createStorage(), jobId = 'job-plan-1' } = {}) {
@@ -1280,8 +1887,23 @@ async function main() {
   await testBackgroundJobStoreRequiresDurableStorageAndPrincipal()
   await testBackgroundJobLifecycleIsValuesFree()
   await testBackgroundWorkerCompletesAuthoritativeArtifactWithoutPublicValues()
+  testBackgroundCapDerivationAndCeilings()
+  testBackgroundCapConfigBlockParsing()
+  await testBackgroundWorkerScalesPastTheInteractiveScaleBudget()
   await testBackgroundWorkerFailsNonAuthoritativeOnScaleBudget()
+  await testBackgroundBudgetsAreRecordedBeforeTheSourceRead()
   await testBackgroundWorkerStoresFailedJobWhenErrorTokenIsUnsafe()
+  await testBackgroundWorkerPersistsValuesFreeReadFailureDiagnostics()
+  await testEscapedThrowKeepsCauseClassWithoutReadFailures()
+  await testObjectLessBoundedExpansionKeepsThePreFeatureKeySet()
+  testBoundedErrorsThatNameAnObjectStillMount()
+  testReadFailureDetailsAreCappedAndReportTheRealTotal()
+  testDetailCapBoundaryIsExact()
+  testTotalCountsCandidatesNotSurvivors()
+  testErrorDetailTotalCountsCandidatesNotSurvivors()
+  testPublicProjectionRepairsIncoherentStoredCounters()
+  testFilterFieldsAreBoundedPerEntry()
+  await testSuccessfulRunHasNoReadFailureKeys()
   await testPlannerHandoffRequiresAuthoritativeArtifact()
   await testPlannerHandoffRejectsMalformedExistingRows()
   await testPlannerHandoffStoresValuesFreePlanEvidence()

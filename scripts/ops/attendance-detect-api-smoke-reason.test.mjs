@@ -69,3 +69,12 @@ test('keeps unmatched API smoke failures explicitly unknown', () => {
   assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`)
   assert.equal(result.stdout.trim(), 'UNKNOWN')
 })
+
+test('classifies an explicit attendance-admin directory scope failure without values', () => {
+  const result = detectReason(
+    '[attendance-smoke-api] Failed: GET /attendance-admin/users/search: HTTP 400 {"ok":false,"error":{"code":"USER_SCOPE_REQUIRED"}}\n',
+  )
+
+  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`)
+  assert.equal(result.stdout.trim(), 'ADMIN_USER_SCOPE_REQUIRED')
+})

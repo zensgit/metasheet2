@@ -15,6 +15,17 @@
     "gateReasons"
   ],
   "properties": {
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["checkoutSha", "expectedDeploymentSha", "observedDeploymentSha", "source"],
+      "properties": {
+        "checkoutSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "expectedDeploymentSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "observedDeploymentSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "source": { "const": "backend_health_build_commit" }
+      }
+    },
     "schemaVersion": {
       "type": "integer",
       "minimum": 1
@@ -110,6 +121,10 @@
       }
     }
   },
+  "allOf": [{
+    "if": { "properties": { "schemaVersion": { "minimum": 2 } } },
+    "then": { "required": ["provenance"] }
+  }],
   "definitions": {
     "gateStatus": {
       "type": "string",
