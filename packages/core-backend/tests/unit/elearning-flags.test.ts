@@ -5,8 +5,10 @@ import {
   isElearningAnalyticsSurfaceEnabled,
   isElearningAssessmentSurfaceEnabled,
   isElearningEnabled,
+  isElearningEnrollmentSurfaceEnabled,
   isElearningExamSurfaceEnabled,
   isElearningFlagEnabled,
+  isElearningWatchChallengeSurfaceEnabled,
   resolveElearningCatalogFeature,
   type ElearningFlagName,
 } from '../../src/elearning/feature-flags'
@@ -35,7 +37,7 @@ describe('elearning V0.1 flags', () => {
     vi.resetModules()
   })
 
-  it('canonical list is exactly the seven contract names and has no TASKS/STATS aliases', () => {
+  it('canonical list is exactly the nine contract names and has no TASKS/STATS aliases', () => {
     expect([...ELEARNING_FLAG_NAMES]).toEqual([
       'ELEARNING_ENABLED',
       'ELEARNING_CONTENT_ENABLED',
@@ -44,6 +46,8 @@ describe('elearning V0.1 flags', () => {
       'ELEARNING_INCENTIVE_ENABLED',
       'ELEARNING_ANALYTICS_ENABLED',
       'ELEARNING_MEDIA_ENABLED',
+      'ELEARNING_WATCH_CHALLENGE_ENABLED',
+      'ELEARNING_ENROLLMENT_ENABLED',
     ])
     const joined = ELEARNING_FLAG_NAMES.join(' ')
     expect(joined).not.toMatch(/TASKS|STATS/)
@@ -101,7 +105,44 @@ describe('elearning V0.1 flags', () => {
     } as NodeJS.ProcessEnv)).toBe(false)
   })
 
-  it('FEATURE_FLAGS registers the seven names, default OFF, exact true only', async () => {
+  it('gates watch challenge with master, content, media, and exact challenge true', () => {
+    const enabled = {
+      ELEARNING_ENABLED: 'true',
+      ELEARNING_CONTENT_ENABLED: 'true',
+      ELEARNING_MEDIA_ENABLED: 'true',
+      ELEARNING_WATCH_CHALLENGE_ENABLED: 'true',
+    } as NodeJS.ProcessEnv
+    expect(isElearningWatchChallengeSurfaceEnabled(enabled)).toBe(true)
+    for (const name of [
+      'ELEARNING_ENABLED',
+      'ELEARNING_CONTENT_ENABLED',
+      'ELEARNING_MEDIA_ENABLED',
+      'ELEARNING_WATCH_CHALLENGE_ENABLED',
+    ]) {
+      expect(isElearningWatchChallengeSurfaceEnabled({
+        ...enabled,
+        [name]: 'TRUE',
+      })).toBe(false)
+    }
+  })
+
+  it('gates online enrollment with master, content, and exact enrollment true', () => {
+    const enabled = {
+      ELEARNING_ENABLED: 'true',
+      ELEARNING_CONTENT_ENABLED: 'true',
+      ELEARNING_ENROLLMENT_ENABLED: 'true',
+    } as NodeJS.ProcessEnv
+    expect(isElearningEnrollmentSurfaceEnabled(enabled)).toBe(true)
+    for (const name of [
+      'ELEARNING_ENABLED',
+      'ELEARNING_CONTENT_ENABLED',
+      'ELEARNING_ENROLLMENT_ENABLED',
+    ]) {
+      expect(isElearningEnrollmentSurfaceEnabled({ ...enabled, [name]: 'TRUE' })).toBe(false)
+    }
+  })
+
+  it('FEATURE_FLAGS registers the nine names, default OFF, exact true only', async () => {
     for (const name of ELEARNING_FLAG_NAMES) {
       delete process.env[name]
     }

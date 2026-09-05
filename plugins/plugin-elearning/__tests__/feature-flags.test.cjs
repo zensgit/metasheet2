@@ -38,9 +38,10 @@ assert.deepEqual(
     'ELEARNING_INCENTIVE_ENABLED',
     'ELEARNING_ANALYTICS_ENABLED',
     'ELEARNING_MEDIA_ENABLED',
+    'ELEARNING_ENROLLMENT_ENABLED',
   ],
 )
-assert.equal(FLAG_NAMES.length, 7)
+assert.equal(FLAG_NAMES.length, 8)
 assert.equal(MASTER_FLAG, 'ELEARNING_ENABLED')
 assert.ok(!FLAG_NAMES.join(' ').includes('TASKS'))
 assert.ok(!FLAG_NAMES.join(' ').includes('STATS'))
@@ -52,6 +53,7 @@ assert.deepEqual(CAPABILITY_PERMISSIONS, {
   incentive: ['elearning:read', 'elearning:write', 'elearning:admin'],
   analytics: ['elearning:stats', 'elearning:admin'],
   media: ['elearning:read', 'elearning:write', 'elearning:admin'],
+  enrollment: ['elearning:read', 'elearning:write', 'elearning:admin'],
 })
 assert.deepEqual(Object.keys(CAPABILITY_PERMISSIONS), [...CAPABILITY_KEYS])
 
@@ -201,6 +203,7 @@ for (const key of CAPABILITY_KEYS) {
     ELEARNING_INCENTIVE_ENABLED: '1',
     ELEARNING_ANALYTICS_ENABLED: 'yes',
     ELEARNING_MEDIA_ENABLED: 'true',
+    ELEARNING_ENROLLMENT_ENABLED: 'false',
     ELEARNING_TASKS_ENABLED: 'true',
     ELEARNING_STATS_ENABLED: 'true',
     PRODUCT_MODE: 'platform',
@@ -216,6 +219,7 @@ for (const key of CAPABILITY_KEYS) {
       incentive: false,
       analytics: false,
       media: true,
+      enrollment: false,
     },
   })
   assert.equal(Object.keys(payload).join(','), 'enabled,capabilities')
@@ -230,6 +234,7 @@ for (const key of CAPABILITY_KEYS) {
     ELEARNING_INCENTIVE_ENABLED: 'true',
     ELEARNING_ANALYTICS_ENABLED: 'true',
     ELEARNING_MEDIA_ENABLED: 'true',
+    ELEARNING_ENROLLMENT_ENABLED: 'true',
   }
   const payload = getCapabilitiesPayload(env, PRIVILEGED_CALLER)
   assert.equal(payload.enabled, false)
@@ -290,6 +295,7 @@ assertCaps({ permissions: ['*:*'] }, allCapabilities(true))
     incentive: true,
     analytics: false,
     media: true,
+    enrollment: true,
   }
   assertCaps({ permissions: ['elearning:read'] }, learner)
   assertCaps({ permissions: ['elearning:write'] }, learner)
@@ -303,6 +309,7 @@ assertCaps({ permissions: ['elearning:grade'] }, {
   incentive: false,
   analytics: false,
   media: false,
+  enrollment: false,
 })
 
 assertCaps({ permissions: ['elearning:stats'] }, {
@@ -312,6 +319,7 @@ assertCaps({ permissions: ['elearning:stats'] }, {
   incentive: false,
   analytics: true,
   media: false,
+  enrollment: false,
 })
 
 assertCaps({ permissions: ['elearning:read', 'elearning:stats'] }, {
@@ -321,6 +329,7 @@ assertCaps({ permissions: ['elearning:read', 'elearning:stats'] }, {
   incentive: true,
   analytics: true,
   media: true,
+  enrollment: true,
 })
 
 assertCaps({ permissions: ['elearning:grade', 'elearning:stats'] }, {
@@ -330,6 +339,7 @@ assertCaps({ permissions: ['elearning:grade', 'elearning:stats'] }, {
   incentive: false,
   analytics: true,
   media: false,
+  enrollment: false,
 })
 
 {
@@ -361,6 +371,7 @@ assertCaps({ permissions: ['elearning:Admin'] }, allCapabilities(false))
     incentive: false,
     analytics: false,
     media: false,
+    enrollment: false,
   })
 }
 

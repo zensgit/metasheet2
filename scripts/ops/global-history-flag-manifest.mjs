@@ -524,6 +524,35 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
       'E-learning media capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
     source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
   },
+  {
+    key: 'ELEARNING_WATCH_CHALLENGE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [
+      'ELEARNING_ENABLED',
+      'ELEARNING_CONTENT_ENABLED',
+      'ELEARNING_MEDIA_ENABLED',
+    ],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'L6 watch-challenge gate. Default OFF; exact literal \'true\' only. The route and runtime additionally require the master, content, and media gates, and disabled mode remains byte-compatible with ordinary verified watch progress.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts#ELEARNING_WATCH_CHALLENGE_ENABLED',
+  },
+  {
+    key: 'ELEARNING_ENROLLMENT_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [
+      'ELEARNING_ENABLED',
+      'ELEARNING_CONTENT_ENABLED',
+    ],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'Online self-study enrollment gate. Default OFF; exact literal \'true\' only. Enrollment records learner intent but never grants course access or creates assignment effects.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts#ELEARNING_ENROLLMENT_ENABLED',
+  },
 ])
 
 /** Flat lookup by key, built once. */

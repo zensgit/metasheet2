@@ -7545,7 +7545,8 @@
           "assessment",
           "incentive",
           "analytics",
-          "media"
+          "media",
+          "enrollment"
         ],
         "properties": {
           "content": {
@@ -7567,6 +7568,10 @@
           },
           "media": {
             "type": "boolean"
+          },
+          "enrollment": {
+            "type": "boolean",
+            "description": "Reported from ELEARNING_ENROLLMENT_ENABLED. Requires content and gates audit-only self-study registration."
           }
         }
       },
@@ -11137,6 +11142,70 @@
           }
         }
       },
+      "ElearningLearnerEnrollment": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "enrolledAt"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "enrolled"
+            ]
+          },
+          "enrolledAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ElearningCourseEnrollmentRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "requestId"
+        ],
+        "properties": {
+          "requestId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          }
+        }
+      },
+      "ElearningCourseEnrollmentResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "enrollmentId",
+          "courseId",
+          "courseVersionId",
+          "status",
+          "enrolledAt"
+        ],
+        "properties": {
+          "enrollmentId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "courseId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "courseVersionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "enrolled"
+            ]
+          },
+          "enrolledAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "ElearningLearnerAccess": {
         "type": "object",
         "additionalProperties": false,
@@ -11292,6 +11361,7 @@
           "title",
           "access",
           "assignment",
+          "enrollment",
           "video",
           "exam",
           "completed"
@@ -11314,6 +11384,14 @@
             "allOf": [
               {
                 "$ref": "#/components/schemas/ElearningLearnerAssignment"
+              }
+            ],
+            "nullable": true
+          },
+          "enrollment": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ElearningLearnerEnrollment"
               }
             ],
             "nullable": true
@@ -11434,6 +11512,7 @@
           "title",
           "access",
           "assignment",
+          "enrollment",
           "items",
           "completed"
         ],
@@ -11456,6 +11535,14 @@
             "allOf": [
               {
                 "$ref": "#/components/schemas/ElearningLearnerAssignment"
+              }
+            ],
+            "nullable": true
+          },
+          "enrollment": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ElearningLearnerEnrollment"
               }
             ],
             "nullable": true
@@ -11555,6 +11642,141 @@
           },
           "duplicate": {
             "type": "boolean"
+          },
+          "challenge": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ElearningWatchChallenge"
+              }
+            ],
+            "nullable": true
+          }
+        }
+      },
+      "ElearningWatchChallenge": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "challengeId",
+          "deadlineAt",
+          "ordinal",
+          "status",
+          "promptVersion",
+          "imagePngBase64",
+          "imageWidth",
+          "imageHeight",
+          "options"
+        ],
+        "properties": {
+          "challengeId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "deadlineAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "ordinal": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "challenged",
+              "paused"
+            ]
+          },
+          "promptVersion": {
+            "type": "string",
+            "enum": [
+              "raster-position-v2"
+            ]
+          },
+          "imagePngBase64": {
+            "type": "string",
+            "format": "byte",
+            "minLength": 12,
+            "maxLength": 88000,
+            "pattern": "^iVBORw0KGgo[A-Za-z0-9+/]*={0,2}$"
+          },
+          "imageWidth": {
+            "type": "integer",
+            "enum": [
+              360
+            ]
+          },
+          "imageHeight": {
+            "type": "integer",
+            "enum": [
+              260
+            ]
+          },
+          "options": {
+            "type": "array",
+            "minItems": 6,
+            "maxItems": 6,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/ElearningWatchChallengeOption"
+            }
+          }
+        }
+      },
+      "ElearningWatchChallengeOption": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "optionId",
+          "x",
+          "y",
+          "width",
+          "height"
+        ],
+        "properties": {
+          "optionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "x": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 359
+          },
+          "y": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 259
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 360
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 260
+          }
+        }
+      },
+      "ElearningWatchChallengeAckRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "requestId",
+          "selections"
+        ],
+        "properties": {
+          "requestId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "selections": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
           }
         }
       },
@@ -27045,7 +27267,7 @@
       "get": {
         "operationId": "getElearningCapabilities",
         "summary": "Report e-learning master and capability flags",
-        "description": "Plugin route. JWT session is required by the global `/api` gate.\nReturns `{ enabled, capabilities }` with keys content, assignment,\nassessment, incentive, analytics, media. V0.1 readiness is enabled\nplus content/assignment/assessment/media only; incentive and analytics\nstay parked. Secondary master-off after registration is a values-free\n404 FEATURE_DISABLED (no flag names, no capabilities object).\n",
+        "description": "Plugin route. JWT session is required by the global `/api` gate.\nReturns `{ enabled, capabilities }` with keys content, assignment,\nassessment, incentive, analytics, media, enrollment. V0.1 readiness is enabled\nplus content/assignment/assessment/media only; incentive and analytics\nstay parked. Secondary master-off after registration is a values-free\n404 FEATURE_DISABLED (no flag names, no capabilities object).\n",
         "security": [
           {
             "bearerAuth": []
@@ -30076,6 +30298,74 @@
         }
       }
     },
+    "/api/elearning/me/courses/{courseId}/enrollments": {
+      "post": {
+        "operationId": "enrollMyElearningCourse",
+        "summary": "Register the current learner for one visible self-study course",
+        "description": "Requires master, content, and enrollment flags to each equal exact\n`true`, plus learner read RBAC. Organization and learner are derived\nfrom the authenticated session. Registration appends immutable audit\nevidence only: it never creates an assignment, grants access, assigns\na deadline, awards credit, or records completion. Current active\nvisibility is rechecked by the existing course-access authority.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "courseId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningCourseEnrollmentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "New registration, exact request replay, or existing course registration.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningCourseEnrollmentResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED, not_enrollable, or insufficient read permission",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Course not found or enrollment surface flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "already_assigned or requestId conflict",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
     "/api/elearning/watch/items/{itemId}/start": {
       "post": {
         "operationId": "startElearningWatch",
@@ -30207,6 +30497,86 @@
           },
           "409": {
             "description": "course_withdrawn, conflict, sequence_gap, or session_inactive",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/watch/sessions/{sessionId}/challenges/{challengeId}/ack": {
+      "post": {
+        "operationId": "acknowledgeElearningWatchChallenge",
+        "summary": "Confirm an active or timed-out watch challenge",
+        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires the master, content, media,\nand watch-challenge flags to equal the exact literal `true`. The server derives organization and actor.\nThe server issues an immutable PNG prompt with six randomly bound hit regions. The response exposes only\nraster pixels, region geometry, and opaque option identifiers; target symbols, option labels, and the\nexpected selection are never returned as structured fields. The client submits exactly two distinct opaque\noption identifiers. An on-time correct acknowledgement commits only the provisional eligible watch interval; a late acknowledgement\ndiscards that interval and resumes the existing watch session. Same requestId and logical payload replay\nthe stored result; a different payload with the same requestId returns a values-free conflict.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sessionId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          },
+          {
+            "in": "path",
+            "name": "challengeId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningWatchChallengeAckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated server-derived watch state; challenge is null after acknowledgement.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningWatchState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input or unsupported policy",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "not_found or watch-challenge flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "challenge_incorrect, challenge_mismatch, challenge_stale, conflict, course_withdrawn, or session_inactive",
             "$ref": "#/components/responses/ElearningError"
           },
           "500": {

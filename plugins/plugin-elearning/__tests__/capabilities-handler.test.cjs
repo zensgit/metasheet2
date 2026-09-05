@@ -128,6 +128,7 @@ async function main() {
       ELEARNING_INCENTIVE_ENABLED: undefined,
       ELEARNING_ANALYTICS_ENABLED: '1',
       ELEARNING_MEDIA_ENABLED: 'true',
+      ELEARNING_ENROLLMENT_ENABLED: 'true',
     }, boundReq(PRIVILEGED_CALLER))
     assert.equal(result.status, 200)
     assertCanonicalPayload(result.body, {
@@ -139,6 +140,7 @@ async function main() {
         incentive: false,
         analytics: false,
         media: true,
+        enrollment: true,
       },
     })
   }
@@ -170,6 +172,7 @@ async function main() {
       ELEARNING_INCENTIVE_ENABLED: 'true',
       ELEARNING_ANALYTICS_ENABLED: 'true',
       ELEARNING_MEDIA_ENABLED: 'true',
+      ELEARNING_ENROLLMENT_ENABLED: 'true',
       PRODUCT_MODE: 'platform',
     }, { user: { role: 'admin' } })
     assertFeatureDisabled(result)
@@ -257,6 +260,7 @@ async function main() {
         incentive: true,
         analytics: false,
         media: true,
+        enrollment: true,
       },
     })
   }
@@ -287,6 +291,7 @@ async function main() {
         incentive: false,
         analytics: false,
         media: false,
+        enrollment: false,
       },
     })
   }
@@ -306,6 +311,7 @@ async function main() {
         incentive: false,
         analytics: true,
         media: false,
+        enrollment: false,
       },
     })
   }

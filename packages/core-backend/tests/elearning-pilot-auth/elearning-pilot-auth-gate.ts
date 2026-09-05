@@ -103,6 +103,7 @@ const READER_CAPABILITIES = {
     incentive: false,
     analytics: false,
     media: true,
+    enrollment: false,
   },
 } as const
 
@@ -115,6 +116,7 @@ const CLOSED_CAPABILITIES = {
     incentive: false,
     analytics: false,
     media: false,
+    enrollment: false,
   },
 } as const
 

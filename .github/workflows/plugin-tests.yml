@@ -918,6 +918,7 @@ jobs:
             tests/unit/elearning-content-revision-postgres.test.ts \
             tests/unit/elearning-content-routes.test.ts \
             tests/unit/elearning-content-runtime-migration-contract.test.ts \
+            tests/unit/elearning-course-enrollment.test.ts \
             tests/unit/elearning-course-lifecycle-policy.test.ts \
             tests/unit/elearning-course-progress-policy.test.ts \
             tests/unit/elearning-course-publish-readiness-policy.test.ts \
@@ -939,6 +940,7 @@ jobs:
             tests/unit/elearning-document-media-authority.test.ts \
             tests/unit/elearning-document-progress.test.ts \
             tests/unit/elearning-document-session.test.ts \
+            tests/unit/elearning-enrollment-routes.test.ts \
             tests/unit/elearning-exam-review.test.ts \
             tests/unit/elearning-exam.test.ts \
             tests/unit/elearning-flags.test.ts \
@@ -982,6 +984,11 @@ jobs:
             tests/unit/elearning-training-plan-assignment.test.ts \
             tests/unit/elearning-training-plan-revocation.test.ts \
             tests/unit/elearning-v01-content-assessment-migration-contract.test.ts \
+            tests/unit/elearning-watch-challenge-migration-contract.test.ts \
+            tests/unit/elearning-watch-challenge-policy.test.ts \
+            tests/unit/elearning-watch-challenge-postgres.test.ts \
+            tests/unit/elearning-watch-challenge-routes.test.ts \
+            tests/unit/elearning-watch-challenge-schedule.test.ts \
             tests/unit/elearning-watch-progress.test.ts \
             --reporter=dot
           pnpm --dir packages/openapi/dist-sdk exec vitest run \
@@ -1059,9 +1066,11 @@ jobs:
             tests/integration/elearning-exam-attempt-item-migration.db.test.ts \
             tests/integration/elearning-v01-watch-progress-schema.db.test.ts \
             tests/integration/elearning-watch-progress-service.db.test.ts \
+            tests/integration/elearning-watch-challenge.db.test.ts \
             tests/integration/elearning-direct-assignment.db.test.ts \
             tests/integration/elearning-course-publish.db.test.ts \
             tests/integration/elearning-content-runtime.db.test.ts \
+            tests/integration/elearning-course-enrollment.db.test.ts \
             tests/integration/elearning-credit-ledger-authority.db.test.ts \
             tests/integration/elearning-credit-rules-wallet.db.test.ts \
             tests/integration/elearning-credit-adjustment.db.test.ts \

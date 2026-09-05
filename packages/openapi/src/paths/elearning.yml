@@ -13,7 +13,7 @@ paths:
       description: |
         Plugin route. JWT session is required by the global `/api` gate.
         Returns `{ enabled, capabilities }` with keys content, assignment,
-        assessment, incentive, analytics, media. V0.1 readiness is enabled
+        assessment, incentive, analytics, media, enrollment. V0.1 readiness is enabled
         plus content/assignment/assessment/media only; incentive and analytics
         stay parked. Secondary master-off after registration is a values-free
         404 FEATURE_DISABLED (no flag names, no capabilities object).
@@ -2227,6 +2227,56 @@ paths:
           description: unavailable
           $ref: '#/components/responses/ElearningError'
 
+  /api/elearning/me/courses/{courseId}/enrollments:
+    post:
+      operationId: enrollMyElearningCourse
+      summary: Register the current learner for one visible self-study course
+      description: |
+        Requires master, content, and enrollment flags to each equal exact
+        `true`, plus learner read RBAC. Organization and learner are derived
+        from the authenticated session. Registration appends immutable audit
+        evidence only: it never creates an assignment, grants access, assigns
+        a deadline, awards credit, or records completion. Current active
+        visibility is rechecked by the existing course-access authority.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: courseId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningCourseEnrollmentRequest'
+      responses:
+        '201':
+          description: New registration, exact request replay, or existing course registration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningCourseEnrollmentResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED, not_enrollable, or insufficient read permission
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Course not found or enrollment surface flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: already_assigned or requestId conflict
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
   /api/elearning/watch/items/{itemId}/start:
     post:
       operationId: startElearningWatch
@@ -2317,6 +2367,66 @@ paths:
           $ref: '#/components/responses/ElearningError'
         '409':
           description: course_withdrawn, conflict, sequence_gap, or session_inactive
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/watch/sessions/{sessionId}/challenges/{challengeId}/ack:
+    post:
+      operationId: acknowledgeElearningWatchChallenge
+      summary: Confirm an active or timed-out watch challenge
+      description: |
+        RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires the master, content, media,
+        and watch-challenge flags to equal the exact literal `true`. The server derives organization and actor.
+        The server issues an immutable PNG prompt with six randomly bound hit regions. The response exposes only
+        raster pixels, region geometry, and opaque option identifiers; target symbols, option labels, and the
+        expected selection are never returned as structured fields. The client submits exactly two distinct opaque
+        option identifiers. An on-time correct acknowledgement commits only the provisional eligible watch interval; a late acknowledgement
+        discards that interval and resumes the existing watch session. Same requestId and logical payload replay
+        the stored result; a different payload with the same requestId returns a values-free conflict.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: sessionId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+        - in: path
+          name: challengeId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningWatchChallengeAckRequest'
+      responses:
+        '200':
+          description: Updated server-derived watch state; challenge is null after acknowledgement.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningWatchState'
+        '400':
+          description: invalid_input or unsupported policy
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or watch-challenge flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: challenge_incorrect, challenge_mismatch, challenge_stale, conflict, course_withdrawn, or session_inactive
           $ref: '#/components/responses/ElearningError'
         '500':
           description: internal_error
