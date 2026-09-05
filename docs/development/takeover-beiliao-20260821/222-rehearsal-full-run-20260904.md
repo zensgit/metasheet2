@@ -190,3 +190,13 @@ SYN-A-1000              2     true   add       10 - Q235B   10 - 待备料  2026
 | 复验 | dry-run 200(skip 7)/ apply 200 / mvp-persist 201 / 导出 200(20681 B) |
 
 两条备注:①升级脚本报 `plugin lib/ file count` 包 178 vs 部署 342 的差异,这是就地升级**不删除**包里已不再发布的旧文件所致,`index.cjs` 不引用它们,不影响运行;②#5455 的回填脚本是 TS、引用 `../src/`,而部署机只有 `dist`,本次用 esbuild 转成 CJS 并把引用改指 `../dist/src/` 后放到 `packages/core-backend/scripts/` 下运行——交付说明已按此写。
+
+## 9. 2026-09-05 配置变更记录:拉取动作补上真实读预算
+
+**为什么**:对抗审查核实,`maxReadCount`/`maxElapsedMs` 是可选项,222 的 `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON` 只设了 `maxRows`/`maxDepth`;`maxPages` 是每次 `readAll` 内部归零的分页数,不是总量。也就是说一次拉取对 PLM 的总读次数与总耗时**没有任何上限**,唯一刹车是 `maxRows`。
+
+**改了什么**:在 `plm.stock-preparation.pull-bom.v1` 上增加 `maxPages:100`(与代码默认相同,显式化)、`maxReadCount:30000`(约 3 次读/行 × 10000 行上限)、`maxElapsedMs:600000`。按精确字符串替换只改这一行,改后 JSON 重新解析校验;备份在 `output\backups\app.env.pre-readbudget-20260905-215838`。
+
+**踩坑**:`pm2 restart --update-env` 从**当前 shell 的环境**更新,而不是重读 `app.env`;第一次重启后进程仍带旧 JSON(`pm2 env 0` 可见)。正确做法是升级脚本第 7 步的写法:先把 `app.env` 逐行 `SetEnvironmentVariable(...,'Process')` 装进当前进程,再 `pm2 restart <name> --update-env`。
+
+**验证**:重启后 `pm2 env 0` 含新键;对客户测试 PLM 项目 `2-20231625` 试算一次,证据 `expansion.summary` 出现 `maxReadCount:30000`、`maxElapsedMs:600000`(此前不出现);该项目无订单,`readCount:3`、`rowsExpanded:0`、`status:ready`,与之前行为一致。
