@@ -1,13 +1,24 @@
 # Attendance Acceptance Tooling Hardening Verification
 
 Status: local verification; publication and remote exact-head CI not yet claimed.
-Baseline: `fdee94dc4997f68ab7cfb0b06b11b6364a05f3aa`.
+Publication baseline: `177cafd3e34f30b5fc2682b3d392684c92fe67fe`.
+Initial implementation baseline: `fdee94dc4997f68ab7cfb0b06b11b6364a05f3aa`.
 Branch: `codex/attendance-prod-acceptance-hardening-20260902`.
 Verified code checkpoint: `959ce7d3eeb9afb8392c72a95b57f0ab2a59b037`.
 Code tree: `474e660c1a6774f5c4beebfcc8e042c884b39862`.
 Code parent: `39bf9ac6d705a21b59cc43c3ddc130608e88f1ef`.
 The report-only child changes no tested code, test, schema, or workflow bytes.
 Design/development: `attendance-acceptance-tooling-hardening-design-20260905.md`.
+
+## Current-Main Replay
+
+Replay head `51f5c5aecd8d16c9d14ed0a30395a7a23117ff90`, tree
+`a4522e18c6c104e3a44a965723bc313c50ac6dca`, has ordered parents
+`0d506e426411e89cb69659787b7e6c36fc1305d2` and
+`177cafd3e34f30b5fc2682b3d392684c92fe67fe`. The merge was conflict-free;
+the only first-parent delta is main's delivery-guide documentation. `scripts`,
+`.github`, and `schemas` are byte-identical to the verified code checkpoint.
+The same local gates below were rerun on this replay tree before publication.
 
 ## Local Gates
 

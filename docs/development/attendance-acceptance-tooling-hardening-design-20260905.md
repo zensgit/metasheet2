@@ -1,11 +1,15 @@
 # Attendance Acceptance Tooling Hardening
 
 Status: implementation under standing development authorization; Draft/HOLD.
-Authoritative baseline: `fdee94dc4997f68ab7cfb0b06b11b6364a05f3aa`.
+Authoritative publication baseline: `177cafd3e34f30b5fc2682b3d392684c92fe67fe`.
+Initial implementation baseline: `fdee94dc4997f68ab7cfb0b06b11b6364a05f3aa`.
 Scope: existing acceptance tooling, hermetic tests, and its CI wiring.
 Implemented code checkpoint: `959ce7d3eeb9afb8392c72a95b57f0ab2a59b037`.
 Code tree: `474e660c1a6774f5c4beebfcc8e042c884b39862`.
 Code delta: 28 files, 1698 insertions / 120 deletions; this report pair is separate.
+Current-main replay: `51f5c5aecd8d16c9d14ed0a30395a7a23117ff90`, tree
+`a4522e18c6c104e3a44a965723bc313c50ac6dca`. Its first-parent delta is only
+main's unrelated delivery-guide documentation; all tested code is unchanged.
 
 ## Contract
 
