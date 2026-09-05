@@ -94,6 +94,16 @@
 //           is then checked against the bound sheet's own registry ownership
 //           (`isSheetOwnedByProject`) before any records IO — see http-routes.cjs
 //           `assertCarryTargetBelongsToTenant`.
+//        9. POST …/confirmation-decisions/confirm     `stockPreparationConfirmationDecisionsConfirm`
+//           THE WRITE HALF OF (1), and the last member of that family to be enrolled. It is listed
+//           under B rather than A because its RESPONSE is values-free (the patched row's ids, status
+//           and fingerprint), but it is the surface through which the values (1) reads back are
+//           AUTHORED, and it is a write: the tenant it resolves picks the staging project whose
+//           ledger row is patched and stamps the audit row that records who resolved the exception.
+//           It kept `resolveAuthUserTenantId` when #5445 converted (1) and (2), which left the odd
+//           arrangement where reading an entered value was proven and writing one was not — on a
+//           claimless deployment the `x-tenant-id` header decided both the row and the trail. The
+//           scope is resolved BEFORE the audit append, so a refused caller leaves no audit row.
 //
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins

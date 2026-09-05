@@ -289,8 +289,10 @@ check('stockPreparationHandoffAdvance: checks the configured chain belongs to th
 
 // ── The VALUE-BEARING READS: the same tripwire, pointed the other way ────────────────────────────
 //
-// The four reads below are the ONLY stock-prep GETs that carry customer values to the caller (project
-// numbers and names, material names and quantities, an author's own entered value). They do NOT use
+// The GETs below are the ONLY stock-prep reads that carry customer values to the caller (project
+// numbers and names, material names and quantities, an author's own entered value), and the POSTs
+// beside them are the writes that AUTHOR those same values or move the chain that carries them. They
+// are one set here because they answer one question — whose data is this — and they do NOT use
 // `resolveAuthUserTenantId` — they use `resolveOperatorValueScope`, which is stricter still: it
 // prefers a VERIFIED token claim, refuses a request-carried tenant, refuses a header that
 // contradicts the claim, refuses a principal with no tenant of its own, and makes the HOST vouch for
@@ -328,6 +330,11 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   // so the DERIVED scan picked it up the moment that PR landed — which is exactly what deriving the
   // set is for: a surface joined this tripwire without anyone remembering to enrol it.
   'stockPreparationCarryConfirm',
+  // W4 (F3). The confirm is the WRITE half of the value-entry read directly below it, and it kept
+  // `resolveAuthUserTenantId` when #5445 converted its two siblings — so reading an entered value was
+  // proven and writing one was not, on the same three-route family. Converting it puts it in the
+  // DERIVED scan, which is why it appears here: the pin is how a reviewer sees the family closed.
+  'stockPreparationConfirmationDecisionsConfirm',
   'stockPreparationConfirmationDecisionsValueEntry',
   // 通知下一步 (#5442). The two handoff faces derive their tenant through the same host-vouched
   // operator scope, so the DERIVED set picked them up the moment that PR landed — which is the point
@@ -373,6 +380,10 @@ check('the derived set equals the pinned set (a new value-bearing read must be p
 // verified tenant does and does not decide there.)
 const VALUE_BEARING_READS_WITH_INLINE_STAGING = new Set([
   'stockPreparationConfirmationDecisionsValueEntry',
+  // The confirm derives its staging project inline too, and it WRITES into it — so the check that
+  // the project comes from the resolved scope with no request projectId matters more here than on
+  // any read in this set.
+  'stockPreparationConfirmationDecisionsConfirm',
   'stockPreparationOperatorProjectDirectory',
   'stockPreparationOperatorProjectBoard',
 ])

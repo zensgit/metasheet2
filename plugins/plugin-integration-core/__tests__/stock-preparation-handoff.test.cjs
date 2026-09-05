@@ -2970,10 +2970,12 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   )
   const callSites = (read('lib', 'http-routes.cjs').match(/resolveOperatorValueScope\(\{/g) || []).length
   // 项目备料页 added two: the board read and the project directory read. W3a added a ninth — the
-  // dry-run's opt-in missing-component list. The count is the whole point of the assertion — a new
-  // surface deciding tenancy on its own must show up HERE, as a failure, rather than quietly
-  // becoming the nth thing the header does not mention.
-  assert.equal(callSites, 9, 'G9: nine call sites — if this changes, the header list must too')
+  // dry-run's opt-in missing-component list. W4 added a TENTH, the confirmation-decision CONFIRM — the
+  // write half of the value-entry read, which had kept `resolveAuthUserTenantId` while its two
+  // siblings were converted. The count is the whole point of the assertion — a new surface deciding
+  // tenancy on its own must show up HERE, as a failure, rather than quietly becoming the nth thing
+  // the header does not mention.
+  assert.equal(callSites, 10, 'G9: ten call sites — if this changes, the header list must too')
   for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun']) {
     assert.ok(scope.includes(marker), `G9: the header enumerates ${marker}`)
   }
