@@ -1,7 +1,7 @@
 # Time Machine D8 operational observability development report
 
-**Status:** DRAFT-HOLD / MAIN@`177cafd3e34f...` LOCAL REPLAY VERIFIED / LATER
-MAIN DRIFT PENDING. This report is not
+**Status:** DRAFT-HOLD / MAIN@`70dc72d7671c...` LOCAL REPLAY VERIFIED. This
+report is not
 Ready, remote exact-head CI, merge, staging, flag, deployment, production, or
 tenant-UAT evidence. Historical remote proofs remain explicitly bound to their
 historical heads. The commit that updates this report is a report-only child of
@@ -21,18 +21,23 @@ configuration.
 - Code-bearing tree: `e49d1348ab8cc3602e9c9158fb60196b5e190c05`
 - Historical report carrier: `6791bc7de4d3a543f7dfb940f03857256d2c6c1e`
 - Historical report-carrier tree: `e9ccd921569d79254c753736c9b22d3b07ca9495`
-- Observed-and-tested main replay parent: `177cafd3e34f30b5fc2682b3d392684c92fe67fe`
-- Later live GitHub main ref reported by coordinator:
-  `70dc72d7671cad9cea1925ed93f90d3d9c746aeb`; NOT FETCHED, AUDITED, MERGED,
-  OR TESTED in this worktree; coordinator delta packet pending
-- True merge: `f2ba2ea40c56b350382f2c2a3187a02aff3d24fd`
-- True-merge ordered parents: `6791bc7de4d3a543f7dfb940f03857256d2c6c1e`,
+- Prior tested main replay parent: `177cafd3e34f30b5fc2682b3d392684c92fe67fe`
+- Prior true merge: `f2ba2ea40c56b350382f2c2a3187a02aff3d24fd`
+- Prior true-merge ordered parents: `6791bc7de4d3a543f7dfb940f03857256d2c6c1e`,
   `177cafd3e34f30b5fc2682b3d392684c92fe67fe`
-- True-merge tree: `a04be3100a6fcd4787e0cd8a646c50458194aecc`
+- Prior true-merge tree: `a04be3100a6fcd4787e0cd8a646c50458194aecc`
 - Prior evidence code head: `8ac37f707f2c40a437ae644d91ac77574d873e0d`
 - Prior evidence code tree: `0fb61fce3bbf45471ee36aa1d8e23ab7f1965abd`
-- Corrective current evidence code head: `57fc9d592622f94864b6334712dc882d4137188b`
-- Corrective current evidence code tree: `e209c4924b8c1eb3f96dad08f27eb98cb7db8549`
+- Corrective main@177 evidence code head: `57fc9d592622f94864b6334712dc882d4137188b`
+- Corrective main@177 evidence code tree: `e209c4924b8c1eb3f96dad08f27eb98cb7db8549`
+- Accepted main@177 report carrier: `68c178d8713f717ed52f09c57cefb6b9ce53a38f`
+- Accepted main@177 report tree: `21dc68d2e7d57be6de470b9b9303a4a42b0a94b7`
+- Current main: `70dc72d7671cad9cea1925ed93f90d3d9c746aeb`
+- Current main sole parent: `177cafd3e34f30b5fc2682b3d392684c92fe67fe`
+- Current mechanical no-ff merge: `1a69704b0dfeda7aea85edadf731ca254d9840fc`
+- Current merge ordered parents: `68c178d8713f717ed52f09c57cefb6b9ce53a38f`,
+  `70dc72d7671cad9cea1925ed93f90d3d9c746aeb`
+- Current evidence code tree: `1572669ffb375936471fdbdbdd84595adb554d3d`
 - Branch: `codex/tm-d8-closeout-replay-20260905`
 - Scope including this development report and its verification report: 12 files,
   729 insertions, 2 deletions at the code-bearing remote head
@@ -40,9 +45,10 @@ configuration.
 - Historical remote exact-head CI: `25 SUCCESS / 1 intentional SKIPPED / 0
   failure / 0 pending` at both `666e01474980...` and the report-only
   `6791bc7de4...` carrier
-- Corrective evidence code-head remote CI: NOT RUN; no push was performed
+- Current evidence code-head remote CI: NOT RUN; no push was performed
 - Corrective evidence code-head delta from tested main replay parent: 13 files,
   858 insertions, 2 deletions
+- Current merge-head delta from main@70: 13 files, 922 insertions, 2 deletions
 
 The contract is
 `multitable-timemachine-d8-operational-observability-design-lock-20260831.md`.
@@ -150,10 +156,10 @@ code-bearing candidate. A fresh Terra high replay review returned
 18, Node 20, Web Tests, and `core-backend-cache`.
 
 The 2026-09-05 local replay true-merged observed main `177cafd3e34f...` without
-conflict. The
-post-merge delta retained the original 12 PR paths byte-for-byte except for the
-automatic `src/index.ts` composition with that tested main. The prior evidence-only
-code child at `8ac37f707f2c...` changed exactly three existing unit-test files:
+conflict. The post-merge delta retained the original 12 PR paths byte-for-byte
+except for the automatic `src/index.ts` composition with that tested main. The
+prior evidence-only code child at `8ac37f707f2c...` changed exactly three
+existing unit-test files:
 it made run-observer and lifecycle-observer exceptions throw, proved
 worker/application outcomes remain unchanged, and enumerated all 12
 zero-initialized worker outcome series.
@@ -176,8 +182,26 @@ was restored byte-exact. Final local gates at `57fc9d592622...` are 6 focused
 files / 47 tests PASS, core-backend typecheck PASS, cache build/tests 3 files /
 16 tests PASS, `git diff --check` PASS, and scoped source ESLint `0 errors / 22
 warnings`. All 22 warnings are the historical `src/index.ts` baseline; the
-three D8 production modules add none. No fresh independent model review was run
-for the corrective code child.
+three D8 production modules add none. Luna's final frozen bounded review of the
+six-file range `f2ba2ea40c56b350382f2c2a3187a02aff3d24fd..68c178d8713f717ed52f09c57cefb6b9ce53a38f` completed with terminal
+status `0` and `P1=0 / P2=0 / P3=0`. The review required no runtime changes and
+is closed.
+
+After main advanced by one commit, the bounded mechanical replay merged
+main@`70dc72d7671c...` at `1a69704b0dfe...`, tree `1572669ffb37...`, with
+ordered parents `68c178d8713f...` and `70dc72d7671c...`. The merge had zero
+conflicts and no manual resolution. Its four incoming files are byte-identical
+to main@70, all 13 TM-owned blobs are byte-identical to the accepted main@177
+checkpoint, and its relative-main delta is still exactly 13 TM paths. The four
+main files are required-web test wiring, stock-confirmation Vue/client product
+code, and the StockPreparation unconfirmable-hold test; they are not docs-only.
+At that merge head the focused suite is 6 files / 47 tests PASS, core-backend
+typecheck PASS, cache build/tests are 3 files / 16 tests PASS, and
+`git diff --check` passes. Scoped lint was not rerun: all four scoped production
+blobs match `57fc9d592622...` exactly, so the prior `0 errors / 22 historical
+src/index.ts warnings` result carries mechanically. Luna's closed frozen review
+also carries across main@70 because every TM-owned blob at the merge is exactly
+equal to `68c178d8713f...`. Current exact-head remote CI is NOT RUN.
 
 ## 7. Honest completion boundary
 

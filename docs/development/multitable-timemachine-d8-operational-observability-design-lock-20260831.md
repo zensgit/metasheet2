@@ -29,10 +29,23 @@ local only; remote exact-head CI is NOT RUN. The historical remote proof above
 remains evidence for its historical head and is not inherited by either local
 code head.
 
-After these local gates completed, the coordinator reported that the live GitHub
-main ref had advanced to `70dc72d7671cad9cea1925ed93f90d3d9c746aeb`.
-That newer ref was not fetched, audited, merged, or tested in this worktree; its
-delta and any bounded replay decision remain pending the coordinator packet.
+**2026-09-05 main@70 mechanical replay binding:** current main
+`70dc72d7671cad9cea1925ed93f90d3d9c746aeb`, whose sole parent is
+`177cafd3e34f30b5fc2682b3d392684c92fe67fe`; true no-ff merge
+`1a69704b0dfeda7aea85edadf731ca254d9840fc` with ordered parents
+`68c178d8713f717ed52f09c57cefb6b9ce53a38f` and
+`70dc72d7671cad9cea1925ed93f90d3d9c746aeb`; code tree
+`1572669ffb375936471fdbdbdd84595adb554d3d`. The merge had no conflict or
+manual resolution. All 13 TM-owned blobs match accepted checkpoint
+`68c178d8713f...`; all four incoming main blobs match main@70; and the
+relative-main delta remains exactly 13 TM paths. The four main files are stock
+confirmation product/client code, its unconfirmable-hold test, and required-web
+test wiring; they are not a docs-only delta. Local focused tests, typecheck,
+cache tests, and diff check pass at this merge head. Luna's frozen bounded
+six-file review of `f2ba2ea40c56b350382f2c2a3187a02aff3d24fd..68c178d8713f717ed52f09c57cefb6b9ce53a38f` completed with terminal
+status `0` and `P1=0 / P2=0 / P3=0`, with no runtime changes. That result
+carries to the main@70 merge through the exact 13-path blob-equivalence proof.
+Remote exact-head CI is NOT RUN and no publication action is authorized.
 
 ## 1. Objective
 

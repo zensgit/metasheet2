@@ -1,7 +1,6 @@
 # Time Machine D8 operational observability verification report
 
-**Status:** MAIN@`177cafd3e34f...` LOCAL REPLAY VERIFIED / LATER MAIN DRIFT
-PENDING / DRAFT-HOLD. Historical remote
+**Status:** MAIN@`70dc72d7671c...` LOCAL REPLAY VERIFIED / DRAFT-HOLD. Historical remote
 exact-head evidence remains bound to its historical heads. Current remote CI,
 Ready, PR merge, staging, flags, deployment, production, and tenant UAT are not
 claimed. The commit that updates this report is report-only and does not alter
@@ -19,22 +18,27 @@ the current verified code tree.
 - Code-bearing remote head: `666e01474980d5e16ff9ebdc49f686c5afb23fb5`
 - Code-bearing tree: `e49d1348ab8cc3602e9c9158fb60196b5e190c05`
 - Historical report carrier: `6791bc7de4d3a543f7dfb940f03857256d2c6c1e`
-- Observed-and-tested main replay parent: `177cafd3e34f30b5fc2682b3d392684c92fe67fe`
-- Later live GitHub main ref reported by coordinator:
-  `70dc72d7671cad9cea1925ed93f90d3d9c746aeb`; NOT FETCHED, AUDITED, MERGED,
-  OR TESTED in this worktree; coordinator delta packet pending
-- True merge: `f2ba2ea40c56b350382f2c2a3187a02aff3d24fd`
-- True-merge ordered parents: `6791bc7de4d3a543f7dfb940f03857256d2c6c1e`,
+- Prior tested main replay parent: `177cafd3e34f30b5fc2682b3d392684c92fe67fe`
+- Prior true merge: `f2ba2ea40c56b350382f2c2a3187a02aff3d24fd`
+- Prior true-merge ordered parents: `6791bc7de4d3a543f7dfb940f03857256d2c6c1e`,
   `177cafd3e34f30b5fc2682b3d392684c92fe67fe`
 - Prior evidence code head: `8ac37f707f2c40a437ae644d91ac77574d873e0d`
 - Prior evidence code tree: `0fb61fce3bbf45471ee36aa1d8e23ab7f1965abd`
-- Corrective current evidence code head: `57fc9d592622f94864b6334712dc882d4137188b`
-- Corrective current evidence code tree: `e209c4924b8c1eb3f96dad08f27eb98cb7db8549`
+- Corrective main@177 evidence code head: `57fc9d592622f94864b6334712dc882d4137188b`
+- Corrective main@177 evidence code tree: `e209c4924b8c1eb3f96dad08f27eb98cb7db8549`
+- Accepted main@177 report carrier: `68c178d8713f717ed52f09c57cefb6b9ce53a38f`
+- Accepted main@177 report tree: `21dc68d2e7d57be6de470b9b9303a4a42b0a94b7`
+- Current main: `70dc72d7671cad9cea1925ed93f90d3d9c746aeb`
+- Current main sole parent: `177cafd3e34f30b5fc2682b3d392684c92fe67fe`
+- Current mechanical no-ff merge: `1a69704b0dfeda7aea85edadf731ca254d9840fc`
+- Current merge ordered parents: `68c178d8713f717ed52f09c57cefb6b9ce53a38f`,
+  `70dc72d7671cad9cea1925ed93f90d3d9c746aeb`
+- Current evidence code tree: `1572669ffb375936471fdbdbdd84595adb554d3d`
 - Worktree: `/private/tmp/codex-tm-d8-closeout-replay-20260905`
 - Remote PR: `#5393`
 - Historical remote exact-head result: `25 SUCCESS / 1 intentional SKIPPED / 0
   failure / 0 pending` at both `666e01474980...` and `6791bc7de4...`
-- Corrective evidence code-head remote result: NOT RUN; no push was performed
+- Current evidence code-head remote result: NOT RUN; no push was performed
 - Merged-main SHA: `NOT AVAILABLE`
 
 ## 2. Local gates
@@ -42,9 +46,9 @@ the current verified code tree.
 | Gate | Result |
 |---|---|
 | Observability, metrics, application, restore-worker, server-wiring, and metrics-endpoint tests | Historical 6 files / 46 tests PASS; current local replay 6 files / 47 tests PASS |
-| Final main@`177cafd3e34f...` replay focused D8 tests | 6 files / 47 tests PASS at `57fc9d592622...` |
+| Final main@`70dc72d7671c...` replay focused D8 tests | 6 files / 47 tests PASS at `1a69704b0dfe...` |
 | `pnpm --filter @metasheet/core-backend type-check` | PASS |
-| Scoped source ESLint | PASS with 0 errors and the same 22 historical `src/index.ts` warnings; the three D8 production modules add none |
+| Scoped source ESLint | Not rerun; all four production blobs exactly match `57fc9d592622...`, carrying its 0 errors and 22 historical `src/index.ts` warnings |
 | Cache build and tests | 3 files / 16 tests PASS |
 | `git diff --check` | PASS |
 | Database/migration | NOT RUN; no DB or migration change |
@@ -92,8 +96,11 @@ prior and corrective evidence code trees:
 The prior exception-containment and 12-run-series evidence remains bound to
 `8ac37f707f2c...`, tree `0fb61fce3bbf...`. The pre-event drain-series census
 and its independent success/failure mutations are bound to corrective code head
-`57fc9d592622...`, tree `e209c4924b8c...`. No fresh independent model review
-was run for the corrective code head.
+`57fc9d592622...`, tree `e209c4924b8c...`. Luna's final frozen bounded review
+of `f2ba2ea40c56b350382f2c2a3187a02aff3d24fd..68c178d8713f717ed52f09c57cefb6b9ce53a38f` completed with terminal status `0` and
+`P1=0 / P2=0 / P3=0`, required no runtime changes, and is closed. Exact equality
+of all 13 TM-owned blobs carries that result to merge `1a69704b0dfe...` on
+main@70. The report child itself changes only these three assigned documents.
 
 The initial observability test also failed before implementation because the
 production module did not exist. The metrics test failed before registry wiring
@@ -115,12 +122,13 @@ because the production observer export was absent.
 
 | Level | State |
 |---|---|
-| Source and local focused tests | Current local replay PASS at `57fc9d592622...` (6 files / 47 tests) |
-| Local typecheck/lint/diff | Current typecheck and diff check PASS; scoped lint has 0 errors and the same 22 historical `src/index.ts` warnings |
-| Independent exact-range model review | Terra high `P1=0 / P2=0 / P3=0` after the bounded exhaustiveness fix-forward; fresh replay review at `666e01474980...` also returned `0 / 0 / 0` |
+| Source and local focused tests | Current main@70 replay PASS at `1a69704b0dfe...` (6 files / 47 tests) |
+| Local typecheck/lint/diff | Current typecheck and diff check PASS; exact production-blob equality carries the prior scoped-lint result of 0 errors and 22 historical `src/index.ts` warnings |
+| Independent exact-range model review | Historical Terra reviews returned `P1=0 / P2=0 / P3=0`; Luna's final frozen `f2ba2ea40c56b350382f2c2a3187a02aff3d24fd..68c178d8713f717ed52f09c57cefb6b9ce53a38f` review exited 0 with `P1=0 / P2=0 / P3=0` and carries to main@70 by exact TM-blob equality |
 | Draft PR exact-head CI | Historical heads `666e01474980...` and `6791bc7de4...` reached `25 SUCCESS / 1 intentional SKIPPED / 0 failure / 0 pending`; current local code head remote CI is NOT RUN |
 | Ready / merge | NOT AUTHORIZED by this report |
-| Merged-main rerun | NOT RUN |
+| Local main@70 merge rerun | PASS; remote exact-head CI remains NOT RUN |
+| Incoming main@70 delta | Four stock product/test/required-web files, all byte-identical to main@70; not docs-only |
 | D7 staging | NOT RUN / OWNER GATE |
 | Flags / dispatch / deployment / production | Source-default gate OFF; live environment NOT PROBED; dispatch, deployment, and production NOT RUN / OWNER GATE |
 | Real tenant UAT | NOT RUN |
