@@ -588,14 +588,17 @@ describe('源就绪预检 + 拓扑自测 (source readiness panel)', () => {
 
     const rows = Array.from(root.querySelectorAll('[data-testid="stock-prep-source-preflight-check"]'))
     expect(rows).toHaveLength(6)
-    // Literal expectations for THIS payload — reachable yes, data yes, store yes, topology NO, preset yes.
+    // Literal expectations for THIS payload — SIX lines: reachable yes, data yes, store yes,
+    // topology NO, preset yes, pull-delegation yes (the binding half, P-10's line, which this
+    // fixture stamps as available).
     expect(rows.map((row) => row.getAttribute('data-check')))
       .toEqual(['reachable', 'has-data', 'bom-store', 'topology', 'preset', 'pull-delegation'])
     expect(rows.map((row) => row.getAttribute('data-ok'))).toEqual(['yes', 'yes', 'yes', 'no', 'yes', 'yes'])
-    // And the service's projection agrees with the same literals, so the two cannot drift apart while
-    // both stay green.
+    // And the service's projection agrees with the same SIX literals, so the two cannot drift apart
+    // while both stay green — which is exactly how the sixth line got added to the DOM half of this
+    // assertion without being added here.
     expect(stockPrepSourceCheckRows(customerShapedPayload()).map((row) => row.ok))
-      .toEqual([true, true, true, false, true])
+      .toEqual([true, true, true, false, true, true])
   })
 
   // P-01b ----------------------------------------------------------------
