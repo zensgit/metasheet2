@@ -66,6 +66,7 @@ node __tests__/stock-preparation-audit-store.test.cjs
 node __tests__/stock-preparation-audit-migration.test.cjs
 node __tests__/stock-preparation-option-sync.test.cjs
 node __tests__/stock-preparation-bom-expansion.test.cjs
+node __tests__/stock-preparation-project-subtree-bridge.test.cjs
 node __tests__/stock-preparation-large-bom-jobs.test.cjs
 node __tests__/stock-preparation-conflict-planner.test.cjs
 node __tests__/stock-preparation-conflict-policies.test.cjs

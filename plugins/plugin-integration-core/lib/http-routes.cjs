@@ -6131,7 +6131,11 @@ function requireStockPreparationAudit() {
         throw new HttpRouteError(
           400,
           'STOCK_PREPARATION_SOURCE_PREFLIGHT_REQUEST_INVALID',
-          'declaredBridge must name one of the two bridge candidates',
+          // DERIVED from the vocabulary, never restated. The text used to hardcode "one of the two
+          // bridge candidates" beside an `allowed` list built from `DECLARABLE_BRIDGES`; the moment
+          // that list grew a third declarable topology the sentence an operator reads became false
+          // while the machine-readable half stayed right. One source, both halves.
+          `declaredBridge must name one of: ${DECLARABLE_BRIDGES.join(', ')}`,
           { field: 'declaredBridge', allowed: [...DECLARABLE_BRIDGES] },
         )
       }
