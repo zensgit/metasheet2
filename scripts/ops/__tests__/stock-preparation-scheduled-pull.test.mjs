@@ -547,6 +547,22 @@ test('MS_TIMEOUT_MS must be a positive integer, or readConfig refuses (no HTTP c
   assert.equal(requests.length, 0)
 })
 
+test('an invalid MS_TIMEOUT_MS is never echoed into stderr, even if it looks like a credential', async () => {
+  // `positiveIntEnv`'s refusal runs INSIDE `readConfig`, before `activeSecret` is set (see `main`) —
+  // so if a misconfigured wrapper script ever put a token-shaped string in MS_TIMEOUT_MS by mistake
+  // (a copy-paste swap between two env var slots), neither of `redact()`'s two nets is armed yet.
+  // The refusal must therefore never echo the RECEIVED value at all — naming the env var is enough
+  // for an operator to fix a real misconfiguration.
+  const looksLikeAToken = TENANT_TOKEN
+  const result = runScript([], {
+    MS_API: 'http://127.0.0.1:1', MS_TOKEN: TENANT_TOKEN, MS_TENANT_ID: 'tenant-a', MS_PROJECT_NOS: 'P-1',
+    MS_TIMEOUT_MS: looksLikeAToken,
+  })
+  assert.notEqual(result.status, 0, `${result.stdout}\n${result.stderr}`)
+  assert.match(result.stderr, /MS_TIMEOUT_MS/)
+  assert.doesNotMatch(result.stderr, new RegExp(TENANT_TOKEN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+})
+
 test('the whole run has a wall-clock budget (MS_TOTAL_TIMEOUT_MS): once exceeded, remaining projects fail without an HTTP call', async () => {
   const { requests, result } = await withMockFetch(
     async (record) => {

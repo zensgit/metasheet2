@@ -50,12 +50,22 @@
 // OUTPUT IS VALUES-FREE, ON THE ASSUMPTION THE SERVER RESPONSE IS TRUSTED. One JSON line per project
 // (project number — a config identifier the operator already typed into MS_PROJECT_NOS, not a row
 // value — status, counts, what happened, how long it took), one summary line at the end. Never a
-// response's ROW data. Never the token, in any form, in any output. That guarantee is over THIS
-// SCRIPT'S OWN paths — thrown JS errors, argv, MS_TOKEN — not over the server: on a non-2xx or a
-// dry-run/apply response, `error.code` / `httpStatus` / `counts` are relayed VERBATIM from whatever
-// the server sent, with no length cap or re-sanitization of this script's own. If a server response
-// ever violated ITS OWN values-free contract (table-actions.cjs's own discipline), this script would
-// not catch that — it is not re-auditing the server, only refusing to be a second leak of its own.
+// response's ROW data. That guarantee is over THIS SCRIPT'S OWN paths — thrown JS errors, argv — not
+// over the server: on a non-2xx or a dry-run/apply response, `error.code` / `httpStatus` / `counts`
+// are relayed VERBATIM from whatever the server sent, with no length cap or re-sanitization of this
+// script's own. If a server response ever violated ITS OWN values-free contract (table-actions.cjs's
+// own discipline), this script would not catch that — it is not re-auditing the server, only
+// refusing to be a second leak of its own.
+//
+// THE TOKEN: BOUNDED, NOT ABSOLUTE. `redact()` (below) is the ACTUAL MS_TOKEN this run configured —
+// caught EXACTLY, any length, via a plain substring match (and its `JSON.stringify`-escaped form) —
+// PLUS a generic `Bearer <...>`-shaped pattern net for anything ELSE that merely looks like a token.
+// That second net has real limits, named here rather than implied: it only matches the base64url/JWT
+// alphabet (no quotes, no spaces) and only at 16-plus characters (see
+// `MIN_REDACTED_BEARER_VALUE_LENGTH` for why — the floor exists so this script's OWN --help text does
+// not get mangled). A credential that is NOT this run's actual MS_TOKEN, is under 16 characters, or
+// is quoted/spaced in a way the pattern does not cover, is outside what the generic net catches — the
+// exact-match layer is what carries the guarantee for the one secret this script actually holds.
 //
 // INPUTS ARE ENVIRONMENT VARIABLES ONLY — nothing is read from a file, so there is no token-bearing
 // file for this script to leak or for a stray `git add` to catch:
@@ -129,8 +139,10 @@ Exit code is non-zero if any project's dry-run (or apply) failed outright — ne
 was simply skipped as manual_confirm_required, large_bom_bounded, not_found, or (without --apply)
 ready-but-not-applied.
 
-Prints exactly one JSON line per project, then one summary JSON line. Never prints MS_TOKEN, any
-decoded token claim, or any row value from a response.
+Prints exactly one JSON line per project, then one summary JSON line. Never prints any decoded token
+claim or any row value from a response. MS_TOKEN itself is redacted from all output by an exact match
+(any length) plus a generic Bearer-token pattern net (16+ base64url/JWT characters) — see the module
+header for what that pattern net does not cover.
 `
 
 export class UsageError extends Error {}
@@ -161,15 +173,21 @@ const CONTROL_CHAR_PATTERN = /[\x00-\x1f]/
 
 /**
  * Parses a positive-integer environment variable, or returns `defaultValue` when unset/blank.
- * Throws `ConfigError` (naming the ENV VAR and the value — never a secret, always an operational
- * number the ops team itself supplied) for anything else: negative, zero, non-integer, non-numeric.
+ * Throws `ConfigError` naming ONLY the env var — NEVER the value it received. `MS_TIMEOUT_MS` and
+ * `MS_TOTAL_TIMEOUT_MS` are meant to be plain numbers, but this runs INSIDE `readConfig`, before
+ * `activeSecret` is set (see `main`) — so if an operator's automation ever mismapped a variable (a
+ * secret manager template that put MS_TOKEN's value in the wrong slot, a copy-paste swap in a
+ * wrapper script) and this function received that string instead, echoing it back via
+ * `JSON.stringify(raw)` would put it in stderr with NEITHER of `redact()`'s two nets available yet.
+ * Naming only the env var is enough to fix a real misconfiguration (an operator knows what they put
+ * in MS_TIMEOUT_MS) without ever risking a value this function was never meant to see.
  */
 function positiveIntEnv(env, name, defaultValue) {
   const raw = env[name]
   if (raw === undefined || raw === null || String(raw).trim() === '') return defaultValue
   const parsed = Number(String(raw).trim())
   if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0) {
-    throw new ConfigError(`${name} must be a positive integer in milliseconds, got ${JSON.stringify(raw)}`)
+    throw new ConfigError(`${name} must be a positive integer in milliseconds (its value is not echoed here)`)
   }
   return parsed
 }
