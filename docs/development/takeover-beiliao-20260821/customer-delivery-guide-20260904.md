@@ -205,6 +205,31 @@ PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
 
 **5-4 项目备料页 tab 的落地行为**:登录后访问 `/stock-prep`(路由不带 tab 参数)。一线操作员账号自动落在"项目备料"tab;平台管理员账号自动落在"确认队列"tab,需手动点开"项目备料"。也可以直接带 `?projectNo=<项目号>` 深链到某个项目。
 
+**5-5 租户声明硬门(feature flag,默认关)**
+
+`MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED=true` 打开后,令牌里没有租户声明、靠 `x-tenant-id` 请求头补出来的租户,一律 403(`OPERATOR_SCOPE_TENANT_REQUIRED` / `_CONTRADICTED` / `_MISMATCH`)。默认关闭。
+
+**覆盖面比"备料"大,这一点必须说清楚**:门装在 integration 插件的三个共享入口上(`requireTableActionAccess` 的 legacy 分支、`resolveTenantId`、`resolveAuthUserTenantId`),所以它覆盖的是**整个 integration 插件面**——备料的四十多条路由,以及同样走这三个入口的外接系统、数据源、模板、管道等路由,都一并要求租户声明。222 上只跑备料线,这个范围可接受;**跑了其它 integration 能力的通用部署应当保持 flag 关闭**,否则那些路由也会对无声明令牌 403。
+
+**关闭时是今天的行为**,逐字节相同 —— **一处例外**:确认写接口(`confirmation-decisions/confirm`)在同一次改动里换成了与其读半边一致的 operator-scope(要求宿主为"账号属于该工厂"背书),这是**无条件**的修复,关 flag 也不回到旧行为;它比旧行为更严,不会放宽任何人。
+
+**它解决什么**:登录中间件在令牌**没有**租户声明时,会把请求头 `x-tenant-id` 的值抄到 `user.tenantId` 上。于是所有拿 `user.tenantId` 判租户的地方,比较的其实是"请求头 vs 请求头"——调用方自己写的值。开了这个门,路由取到的租户**只可能来自验签后的令牌载荷,或来自宿主已证明该主体所属的租户**(operator-scope 的成员校验)——两者都不是请求头。后一种是设计上的:已经走 operator-scope 的那几条路由(值面读、结转确认、交接、确认写)对"没有声明但有自己的租户、且宿主背书"的账号本来就放行,这个 flag 不改变它。
+
+**它不解决什么**:握有 JWT 签名密钥的人可以自己签一个带任意租户声明的令牌,这个门信它。这一层挡的是"请求头冒充租户",不是"密钥泄露"。
+
+**开启前置(顺序不可换,少一步就是全员 403)**:
+
+| # | 动作 | 校验方式 |
+|---|---|---|
+| 1 | 补 `user_orgs`:每个要用系统的账号,恰好 **1 条活跃行**(0 条不会回填、≥2 条也不会回填,两种情况签发出来的令牌都没有租户声明) | 逐账号查 `user_orgs`;签发链见 `AuthService.resolveSessionTenantId` |
+| 2 | 运维/脚本令牌用 `--tenant-id` 重新换发(`scripts/ops/attendance-window-runner-mint-token.mjs`);订正 runbook 与彩排表里"靠 `x-tenant-id: default`"的说法 | 解开新令牌的 payload,里面必须有租户字段 |
+| 3 | **全员重新登录**(旧令牌不会自己长出声明,重登才会) | 抽查:把重登后拿到的令牌 payload 解开(JWT 中段 base64),里面必须有非空租户字段。**不要用"调个接口通不通"来验**——flag 还没开的时候,有声明和没声明的令牌都会通,那是一次空校验 |
+| 4 | 最后才写入 env 并重载重启 | 两条都要:①`pm2 env 0` 里看到 `MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED=true`;②用一个**没有**租户声明的旧令牌打 `GET /api/integration/stock-preparation/confirmation-decisions/readiness`,得到 403 `OPERATOR_SCOPE_TENANT_REQUIRED` |
+
+**回滚**:删掉 env 里那一行 → 重载/重启。没有数据迁移、没有落库状态,回滚即刻恢复今天的行为。
+
+**开了之后一线会看到什么**:如果某个账号的令牌仍然没有租户声明,页面上是一句专门写给它的话——「当前账号不属于任何一家工厂,所以看不到具体项目的数据。这不是故障,再试也一样 —— 请用您工厂的账号登录。」——**不要让人反复刷新**,重试不会变好,要么补 `user_orgs` 要么换账号重登。
+
 ---
 
 ## 6. 验收路径(客户自测)
