@@ -635,6 +635,22 @@ async function theBudgetAndCeilingsAreEnforcedAtNormalization() {
     }
   }
 
+  // `readPlan.maxReadCount` is held to the SAME no-coercion rule as the three ceilings. It is the
+  // key the block is refused without, so accepting `true` as "1 read" would make the mandatory
+  // budget the easiest thing in the plan to get wrong.
+  for (const bogus of [true, [200], '200', 200.5, 0, -1]) {
+    assert.throws(
+      () => normalizeStockPreparationBomReadPlan(subtreePlan({ maxReadCount: bogus })),
+      (error) => error.details && error.details.field === 'readPlan.maxReadCount',
+      `readPlan.maxReadCount = ${JSON.stringify(bogus)} must be refused, not coerced`,
+    )
+  }
+  assert.equal(
+    normalizeStockPreparationBomReadPlan({ ...PLM_STOCK_PREPARATION_BOM_READ_PLAN }).maxReadCount,
+    undefined,
+    'absent still means absent — the strictness is about what a PRESENT value may be',
+  )
+
   // Required members are required; the forbidden-key sweep reaches inside the new block.
   assert.throws(
     () => normalizeStockPreparationBomReadPlan(subtreePlan({ projectSubtree: { pathInfo: {} } })),
@@ -757,6 +773,37 @@ async function ancestorSeedsAndDagMergesAreSkippedNotRefused() {
   assert.deepEqual(componentIds(merged.result), ['SUBTREE-ROOT', 'SUBTREE-LEAF'])
   assert.equal(merged.result.summary.subtree.nodesSkippedAlreadyVisited, 1)
   assert.equal(merged.result.summary.subtree.rootsDiscovered, 1)
+
+  // (c) MANY PARENT EDGES AT ONE NODE. 500 pathInfo rows all naming the same child under the same
+  // parent — duplicates, or a wide DAG. Membership is decided at ENQUEUE, so the node takes one
+  // queue slot and one visit; deciding it at dequeue instead would put 500 entries in the array
+  // before recognizing 499 of them.
+  //
+  // HONEST ABOUT WHAT THIS WITNESSES: the queue's length is not exposed in any result, so this
+  // pins the EFFECT (bounded visits, bounded reads, correct roots) rather than the array. The two
+  // implementations agree on every number below; what they disagree about is peak memory, and no
+  // observable in this module reports it.
+  const wide = baseCatalog({ DN_PDM_OrderHeadInfo: [], DN_PDM_OrderDetailInfo: [] })
+  wide.DN_PDM_PathInfo = [
+    { OBJ_ID: 'NODE-ROOT', Parent_OBJ_ID: null },
+    ...Array.from({ length: 500 }, () => ({ OBJ_ID: 'NODE-CHILD', Parent_OBJ_ID: 'NODE-ROOT' })),
+  ]
+  const fanned = await expand(wide, { readPlan: subtreePlan() })
+
+  assert.deepEqual(fanned.result.errors, [], '500 duplicate parent edges are not a cycle')
+  assert.equal(fanned.result.summary.subtree.nodesVisited, 2, 'the child is VISITED once, not 500 times')
+  assert.equal(fanned.result.summary.subtree.nodesSkippedAlreadyVisited, 499)
+  assert.equal(fanned.result.summary.subtree.rootsDiscovered, 1)
+  assert.deepEqual(componentIds(fanned.result), ['SUBTREE-ROOT', 'SUBTREE-LEAF'])
+  // One child-node read per VISITED node, not per edge.
+  assert.equal(
+    fanned.adapter.calls.filter((call) => (
+      call.object === PLM_STOCK_PREPARATION_BOM_READ_PLAN.pathInfo.object
+      && call.filters.Parent_OBJ_ID !== undefined
+    )).length,
+    1,
+    'only the one node below the depth ceiling is asked for children',
+  )
 }
 
 async function aFolderCycleIsRefusedBoundedly() {
