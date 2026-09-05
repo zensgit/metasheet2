@@ -4,6 +4,7 @@ const assert = require('node:assert/strict')
 const path = require('node:path')
 
 const {
+  LARGE_BOM_ARTIFACT_CHUNK_COUNT,
   LARGE_BOM_BACKGROUND_EXPANSION_STATUSES,
   LARGE_BOM_CHECKPOINT_APPLY_STATUSES,
   StockPreparationLargeBomJobError,
@@ -23,6 +24,13 @@ const {
   summarizeLargeBomBackgroundExpansionJobForEvidence,
   summarizeLargeBomCheckpointApplyJobForEvidence,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-large-bom-jobs.cjs'))
+// The background lane's caps live with the action config that declares them.
+const {
+  LARGE_BOM_BACKGROUND_CAP_CEILINGS,
+  LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS,
+  largeBomBackgroundExpansionCaps,
+  normalizeStockPreparationActionConfig,
+} = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
 
 const RAW_MARKERS = Object.freeze([
   'PROJECT_VALUE_SHOULD_NOT_APPEAR',
@@ -757,9 +765,100 @@ async function testBackgroundWorkerCompletesAuthoritativeArtifactWithoutPublicVa
   assert.equal(source.calls.length, callCountAfterCompletion, 'completed job retry does not re-read source')
 }
 
-async function testBackgroundWorkerFailsNonAuthoritativeOnScaleBudget() {
+async function runBackgroundJobUnderActionCaps({ action, jobId, source }) {
   const storage = createStorage()
+  await createLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    action,
+    parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
+    principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
+    createJobId: () => jobId,
+    now: () => '2026-06-08T00:00:00.000Z',
+  })
+  return runLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId: action.actionId,
+    jobId,
+    sourceAdapter: source.adapter,
+    // The route's own composition (http-routes `largeBomExpansionOptionsForAction`):
+    // background caps, NOT the interactive ones.
+    expansionOptions: largeBomBackgroundExpansionCaps(action),
+    now: () => '2026-06-08T00:01:00.000Z',
+  })
+}
+
+// REGRESSION PIN for the 2026-09-05 field failure. This test used to hand the
+// worker `expansionOptions: { maxRows: 1 }` and call the resulting `failed` the
+// expected outcome — which pinned the bug: the background lane was handed the
+// SAME cap that sent the caller into it, so every project big enough to need
+// the lane failed in it. What is expected now is the pair: an interactive cap
+// of N lets the background lane reach N x LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS
+// .maxRows, and only exceeding THAT cap fails non-authoritative.
+async function testBackgroundWorkerScalesPastTheInteractiveScaleBudget() {
   const source = createSourceAdapter(plmData())
+  // Interactive maxRows = 1: the dry-run that sent the operator here bounded at
+  // one row. The fixture expands to two, so the pre-fix worker failed here.
+  const completed = await runBackgroundJobUnderActionCaps({
+    action: {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { kind: 'data-source:sql-readonly' },
+      maxRows: 1,
+    },
+    jobId: 'job-scaled-1',
+    source,
+  })
+  assert.equal(completed.status, 'completed', 'background lane must not re-hit the interactive maxRows')
+  assert.equal(completed.authoritative, true)
+  assert.equal(completed.artifact.rows.length, 2)
+  assert.equal(
+    completed.budgets.maxRows,
+    1 * LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS.maxRows,
+    'budgets report the background cap that actually ran',
+  )
+  assert.equal(completed.budgets.maxArtifactChunks, LARGE_BOM_ARTIFACT_CHUNK_COUNT)
+  // UNBOUNDED IS `null`, NOT 0. This action names no `maxReadCount`/
+  // `maxElapsedMs`, the expander has no default for either, so the background
+  // lane inherits "no bound" — and a projection of 0 would say the opposite.
+  const publicJob = publicBackgroundExpansionJob(completed)
+  assert.equal(publicJob.budgets.maxReadCount, null, 'an unbounded read budget must not read as zero')
+  assert.equal(publicJob.budgets.maxElapsedMs, null, 'an unbounded time budget must not read as zero')
+  assert.equal(publicJob.budgets.maxRows, 1 * LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS.maxRows)
+  assertValuesFree(publicJob)
+}
+
+async function testBackgroundWorkerFailsNonAuthoritativeOnScaleBudget() {
+  const source = createSourceAdapter(plmData())
+  // Explicit background cap of 1 — the ONLY way to fail on rows now.
+  const failed = await runBackgroundJobUnderActionCaps({
+    action: {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { kind: 'data-source:sql-readonly' },
+      maxRows: 1,
+      largeBom: { maxRows: 1 },
+    },
+    jobId: 'job-failed-1',
+    source,
+  })
+
+  assert.equal(failed.status, 'failed')
+  assert.equal(failed.authoritative, false)
+  assert.equal(failed.artifact, undefined)
+  assert.equal(failed.budgets.maxRows, 1, 'the failed run reports the background cap it hit')
+  const publicJob = publicBackgroundExpansionJob(failed)
+  assert.equal(publicJob.authoritative, false)
+  assert.equal(publicJob.artifactRevisionPresent, false)
+  assert.equal(publicJob.budgets.maxRows, 1)
+  assert.ok(publicJob.evidence.errorTypes.includes('max_rows_exceeded'))
+  assert.ok(publicJob.evidence.scaleErrorTypes.includes('max_rows_exceeded'))
+  assertValuesFree(publicJob)
+}
+
+// The caps a run enforces are written down BEFORE the first source read, so a
+// run that dies in the adapter still says which numbers were in force.
+async function testBackgroundBudgetsAreRecordedBeforeTheSourceRead() {
+  const storage = createStorage()
   await createLargeBomBackgroundExpansionJob({
     storage,
     ...TEST_SCOPE,
@@ -769,7 +868,7 @@ async function testBackgroundWorkerFailsNonAuthoritativeOnScaleBudget() {
     },
     parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
     principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
-    createJobId: () => 'job-failed-1',
+    createJobId: () => 'job-budget-evidence-1',
     now: () => '2026-06-08T00:00:00.000Z',
   })
 
@@ -777,21 +876,106 @@ async function testBackgroundWorkerFailsNonAuthoritativeOnScaleBudget() {
     storage,
     ...TEST_SCOPE,
     actionId: 'plm.stock-preparation.pull-bom.v1',
-    jobId: 'job-failed-1',
-    sourceAdapter: source.adapter,
-    expansionOptions: { maxRows: 1 },
+    jobId: 'job-budget-evidence-1',
+    sourceAdapter: {
+      async read() {
+        throw new Error('PROJECT_VALUE_SHOULD_NOT_APPEAR')
+      },
+    },
+    expansionOptions: { maxRows: 200000, maxPages: 1000, maxReadCount: 600000, maxElapsedMs: 3600000 },
     now: () => '2026-06-08T00:01:00.000Z',
   })
 
   assert.equal(failed.status, 'failed')
-  assert.equal(failed.authoritative, false)
-  assert.equal(failed.artifact, undefined)
   const publicJob = publicBackgroundExpansionJob(failed)
-  assert.equal(publicJob.authoritative, false)
-  assert.equal(publicJob.artifactRevisionPresent, false)
-  assert.ok(publicJob.evidence.errorTypes.includes('max_rows_exceeded'))
-  assert.ok(publicJob.evidence.scaleErrorTypes.includes('max_rows_exceeded'))
+  assert.deepEqual(publicJob.budgets, {
+    maxRows: 200000,
+    maxPages: 1000,
+    maxReadCount: 600000,
+    maxElapsedMs: 3600000,
+    maxDepth: 20,
+    maxArtifactChunks: LARGE_BOM_ARTIFACT_CHUNK_COUNT,
+  })
   assertValuesFree(publicJob)
+}
+
+function testBackgroundCapDerivationAndCeilings() {
+  const base = {
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    source: { kind: 'data-source:sql-readonly' },
+  }
+  // Nothing configured: the expander's own interactive defaults are the base.
+  assert.deepEqual(largeBomBackgroundExpansionCaps(base), {
+    maxRows: 10000 * LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS.maxRows,
+    maxPages: 100 * LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS.maxPages,
+  })
+  // The 222 shape: maxReadCount/maxElapsedMs configured interactively scale too.
+  assert.deepEqual(
+    largeBomBackgroundExpansionCaps({ ...base, maxRows: 10000, maxReadCount: 30000, maxElapsedMs: 600000 }),
+    {
+      maxRows: 200000,
+      maxPages: 1000,
+      maxReadCount: 600000,
+      maxElapsedMs: 3600000,
+    },
+  )
+  // An explicit block overrides the derived value, cap by cap.
+  assert.deepEqual(
+    largeBomBackgroundExpansionCaps({ ...base, maxRows: 10000, largeBom: { maxRows: 50000 } }),
+    { maxRows: 50000, maxPages: 1000 },
+  )
+  // A derived value is clamped by the ceiling rather than running away.
+  assert.equal(
+    largeBomBackgroundExpansionCaps({ ...base, maxRows: 900000 }).maxRows,
+    LARGE_BOM_BACKGROUND_CAP_CEILINGS.maxRows,
+  )
+}
+
+function testBackgroundCapConfigBlockParsing() {
+  const base = {
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    source: { kind: 'data-source:sql-readonly', externalSystemId: 'sys-1' },
+    target: { sheetId: 'sheet_stock_preparation' },
+  }
+  const withBlock = normalizeStockPreparationActionConfig({
+    ...base,
+    largeBom: { maxRows: 200000, maxPages: 1000, maxReadCount: 600000, maxElapsedMs: 3600000 },
+  })
+  assert.deepEqual(withBlock.largeBom, {
+    maxRows: 200000,
+    maxPages: 1000,
+    maxReadCount: 600000,
+    maxElapsedMs: 3600000,
+  })
+  // Absent => the key is not added at all, so legacy config snapshots and their
+  // hashes are byte-identical.
+  assert.equal(Object.prototype.hasOwnProperty.call(normalizeStockPreparationActionConfig(base), 'largeBom'), false)
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(normalizeStockPreparationActionConfig({ ...base, largeBom: {} }), 'largeBom'),
+    false,
+  )
+
+  const rejected = [
+    { largeBom: 5 },
+    { largeBom: { maxRows: '200000' } },
+    { largeBom: { maxRows: 0 } },
+    { largeBom: { maxRows: -1 } },
+    { largeBom: { maxRows: 1.5 } },
+    { largeBom: { maxDepth: 40 } },
+    { largeBom: { maxRows: LARGE_BOM_BACKGROUND_CAP_CEILINGS.maxRows + 1 } },
+    { largeBom: { maxElapsedMs: LARGE_BOM_BACKGROUND_CAP_CEILINGS.maxElapsedMs + 1 } },
+  ]
+  for (const overrides of rejected) {
+    let caught = null
+    try {
+      normalizeStockPreparationActionConfig({ ...base, ...overrides })
+    } catch (error) {
+      caught = error
+    }
+    assert.ok(caught, `expected a refusal for ${JSON.stringify(overrides)}`)
+    assert.equal(caught.code, 'TABLE_ACTION_CONFIG_INVALID')
+    assert.equal(caught.status, 422)
+  }
 }
 
 async function testBackgroundWorkerStoresFailedJobWhenErrorTokenIsUnsafe() {
@@ -1280,7 +1464,11 @@ async function main() {
   await testBackgroundJobStoreRequiresDurableStorageAndPrincipal()
   await testBackgroundJobLifecycleIsValuesFree()
   await testBackgroundWorkerCompletesAuthoritativeArtifactWithoutPublicValues()
+  testBackgroundCapDerivationAndCeilings()
+  testBackgroundCapConfigBlockParsing()
+  await testBackgroundWorkerScalesPastTheInteractiveScaleBudget()
   await testBackgroundWorkerFailsNonAuthoritativeOnScaleBudget()
+  await testBackgroundBudgetsAreRecordedBeforeTheSourceRead()
   await testBackgroundWorkerStoresFailedJobWhenErrorTokenIsUnsafe()
   await testPlannerHandoffRequiresAuthoritativeArtifact()
   await testPlannerHandoffRejectsMalformedExistingRows()

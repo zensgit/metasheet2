@@ -289,3 +289,109 @@ isActiveBomHead 实为 :451-461(方案写 :383);rowFromPart 实为 :612(写 :679
 
 ## 5. 实测依据(222 → 客户测试 PLM,2026-09-05 只读)
 项目 `2-20231625` → 节点 15013536,子树 14 节点(深度 0/1/2 = 1/9/4),6 个 BOM 表头全在深度 1,6 个根件全在物料表。逐张(bom_id/明细/缺子件):600028990/15013551 10 行缺 1;600029067/15013552 9 行缺 1;600029077/15013553 4 行缺 2;600029048/15013573 13 行缺 7;600028853/15013572 59 行缺 33;600029083/15013550 14 行全缺。全库 143 表头中 137 挂在无项目祖先节点下(共享零件库)——子树遍历必须限定在项目节点后代内。
+
+## 6. 实现后的审查与实证记录(2026-09-05/06)
+
+### #5492 对抗审查(2026-09-06 00:20)
+**审查结论**:22 项发现中 15 条推翻、7 条确认为实现前必修缺陷,均已裁决方向。
+
+**确认缺陷与裁定**:
+- D1 major:子树种子来自 pathExAttr 入口读(唯一无后置过滤),源说谎(filtersApplied:false)导致外项目 BOM 落成本项目行。**裁定**:后置过滤提升到入口读,订单与子树路径共用。
+- D2 major:seen 预载全部种子 + 二次到达即判环,导致祖先/后代混淆而杀掉整个拉取。**裁定**:环检测改基于路径(祖先链而非全局 visited),DAG 合流/已访问节点静默跳过并计数 nodesSkippedAlreadyVisited。
+- D3 major:G-04 夹具单行,性质由夹具定义。**裁定**:补双行夹具 G-10/G-11。
+- D4 minor:rootQuantitySource.orderDetail 在子树段未跑时恒 0,ceilingBoundedPositiveInteger 放过 true/[3]。**裁定**:补强类型检查。
+
+**被推翻但值得跟进**:共享子装配在不同父件下各出一行(既有 BOM 语义);banner 措辞;plan/action 级 maxReadCount 覆盖方向;maxSubtreeNodes 与 frontier;read_count_exceeded 路由;重复 PathInfo 行判环(规格修订后统一变跳过)。
+
+**教训**:大规模对抗审查中不要信单一测试层的守卫报告,必须覆盖多个决策点与回归断言。
+
+### #5493 对抗审查(2026-09-06 00:45)
+**审查结论**:16 项发现中 12 条推翻、4 条确认,核心:令牌泄漏、超时挂死、字段命名、CI 覆盖缺口。
+
+**确认缺陷与裁定**:
+- D1 major:fetch 拒绝分包报错但泄漏整个 Bearer 令牌。**裁定**:不透传 message(仅 name/code),输出前脱敏,readConfig 拒绝控制字符。
+- D2 major:无 AbortSignal,慢滴答后端让定时任务永挂。**裁定**:每请求 AbortSignal.timeout(120s),整轮 30 分钟兜底。
+- D3 major:lastPulledAt 字段用法混淆(只在 runPatch 时写=稳定行永不更新)。**裁定**:改名 lastChangedFromPlmAt;真正的"上次拉取"须走审计动作(owner 决策)。
+- D4 major:scripts/ops 测试无 CI 通道。**裁定**:core-backend 单测 workflow 加 `node --test scripts/ops/__tests__/*.test.mjs`。
+
+**被推翻但值得跟进**:exit code 分级,argv 回显,MS_TENANT_ID 默认,schtasks 续行,bounded 提示,运行目录,Windows stdout 异步。
+
+**教训**:本机 Node 25 ≠ CI Node 18/20;定时器 ref 语义差异会变假绿;subagent 若用 CRLF 转 LF 别自动做,让 git 的 autocrlf 处理。
+
+### #5497 源绑定回退对抗审查(2026-09-06 03:00)
+**审查结论**:5 向变异未打穿核心逻辑,确认 11 条、4 条必修(横向隔离/字段剥离/预检/回退 hint)。
+
+**确认缺陷与裁定**:
+- F1 横向隔离守卫零覆盖(删掉全绿)。**裁定**:补充。
+- F2 7 字段剥离零覆盖。**裁定**:补充。
+- F4 "preflight 受益"假声称(不带 tenantId 的既有 bug)。**裁定**:拆分验证。
+- F3 绑定侧加宽/外接源侧不加宽方向不一致。**裁定**:请求无 workspace 且经回退命中时用 matchedWorkspaceId 作外接源查找 hint。
+
+**被推翻但值得跟进**:命中路径键改口,竞态用例,构造反例,≥2 候选静默(需事件或文档),limit 2,§10 措辞。
+
+**教训**:「守卫没接线/边界无强制」类缺陷,表现为"守卫在、测试不在"。
+
+### #5499 前端审查(2026-09-06 00:05)
+**审查结论**:成立,classifyPlanStep 逐字节未动,值面三处处理无 v-html,clamp 严格,vue-tsc 绿。但 3 个 blocker 需修。
+
+**确认缺陷与裁定**:
+- Blocker 1:单独合并 main 上所有试算 400(标志无条件带)。**裁定**:自动无标志重试。
+- Blocker 2:"导出取全量"空话(客户端最多 200,设计 §5.2 原文错)。**裁定**:文案改口。
+- Blocker 3:OPERATOR_SCOPE_ 403 让无租户/legacy read 主体失去整个同步;垃圾 distinctCount。**裁定**:防护 opt-in;渲染门改 items.length||distinctCount。
+
+**被推翻但值得跟进**:无。
+
+**教训**:UI 与后端错误分类必须一致;导出行为文档与代码要保持。
+
+### #5500 W3a 服务端对抗审查(2026-09-06 00:10/04:45)
+**审查结论**:42 条 verifiedOk,确认 2 条(distinctCount 采集端截断、脚注行号漂移)。rebase 复核可合。
+
+**确认缺陷与裁定**:
+- W3A-01:采集端按探测封顶 → occurrenceCount/distinctCount 只数保留的 200 条。**裁定**:采集端按 componentSourceId 键控,distinctCount 用全量 Set。
+- W3A-06/07 脚注行号漂移。**裁定**:改函数名引用。
+
+**被推翻但值得跟进**:含"#5492 合并后子树 readPart 调用点缺 locus"(合并时需补),path 多余,B2a 租户与 PLM 绑定租户可能不同,无审计行。
+
+**教训**:多 PR 同改共享文件时合并顺序很关键;合并最重的先,轻的跟。
+
+### #5501 两路对抗审查(2026-09-06 00:42)
+**审查结论**:0 确认、15 推翻、25 verifiedOk。四键严格解析、块内未知键 422、222 配置推导、倍数作用于动作值、有/无块 deepEqual、变异回交互值红、硬顶钉住、pin 相符。
+
+**确认缺陷与裁定**:无。
+
+**被推翻但值得跟进**:existing-rows 读 100 页×1000 既有上限(>100k 行部署要一起放),budgets 无界写 0,explicit 低于交互值被接受(知情即可),两文档口径,§7.1 核对方法。已让实现者顺手改三处。
+
+**教训**:规格中的"默认"与"最大"要用代码常量定义,文档口径要机制化。
+
+### W2 222 实证(2026-09-06 00:15–00:20)
+**过程**:222 升 r10(pg_dump 2.13MB 备份),升级脚本 8 步全过(440 文件哈希 OK,迁移 0,健康 200)。开启子树:readPlan 插入 maxReadCount 30000 + projectSubtree 块。
+
+**实证结果**:试算 2-20231625 status manual_confirm_required,rowsExpanded 135,readCount 399,7.0s,subtree nodesVisited 10/rootsDiscovered 6/rootsExpanded 6/rootsWithoutChildren 1。开子树前 0 行。
+
+**教训**:实测走通了基本路径,但后续需走一遍完整链(导出,cron 定时)。
+
+### W3c 实测(2026-09-05 23:48)
+**过程**:222 合成 13151 行,dry-run large_bom_bounded(10000 行/20502 读/8.9s) → 后台作业 run failed max_rows_exceeded。
+
+**根因与裁定**:largeBomExpansionOptionsForAction 与 computeDryRun 共用 action.maxRows;设计三套上限只实现一套。**裁定**:action.largeBom 独立上限 + 倍数缺省 + 硬顶。
+
+**教训**:大 BOM 路径的预期与后台任务的上限必须独立参数化。
+
+### #5503 W4 交出(2026-09-06 00:57)
+**交付**:PR #5503(基于 4e509b614),assertVerifiedTenantClaim + flag MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED(默认关) + P1/P2/P3。F3 confirm 改 resolveOperatorValueScope 并进 operator-scope 清单与 tenant-scoped-write-guard。P-10a–g、M-11 分区断言。前端 spec 未本地跑(worktree 无 junction),交 CI web-tests。
+
+**下一步**:rebase 到最新 main(G9 应为 10) → 三路对抗审查 → 合并 → r11 部署。
+
+**教训**:W4 租户验证必须在门的入口强制,不能只靠 runbook 说明。
+
+### 待 owner 拍板(来自设计 §4 与实证)
+1. **子树桥接定位**:正式功能还是仅演示/测试手段?改变的是业务定义,不是实现细节。
+2. **无订单时根数量**:rawQuantity=1 是否被业务接受?替代方案:整单失败(222 上一行都拉不出)或手工补数量。
+3. **两路出根去重**:允许同一零件同时经订单与子树出根吗?建议订单优先。
+4. **配置翻转**:接受「关掉子树配置=下一次拉取把子树来的行全部置为无效」吗?还是需要迁移方案?
+5. **默认深度与目录**:maxSubtreeDepth 默认 1、includeSelf 默认 true 是否符合客户目录习惯?
+6. **缺料容限**:222 测试库 40–60% 子件缺料,这样的结果可以演示吗?还是等客户补数据?
+7. **预检声明权**:允许人声明 project-subtree(实测可佐证前提下)还是只允许实测得出?
+8. **定时应用**:只定时 dry-run(只读、提醒)还是允许无人值守 apply(直接写)?
+9. **服务账号**:用哪个租户内服务账号?token 谁保管、多久轮换?
+10. **同步时间审计**:新增审计动作+数据库迁移来记录拉取行为,还是先用 lastPlmRefreshAt 最大值(只能记成功)?

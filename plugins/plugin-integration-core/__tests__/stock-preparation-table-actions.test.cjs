@@ -868,6 +868,47 @@ async function testLargeBomBoundedDryRunBlocksApplyToken() {
   assert.equal(JSON.stringify(dryRun.evidence).includes('PART-B'), false, 'bounded evidence hides component source id')
 }
 
+// THE INTERACTIVE LANE IS UNTOUCHED BY THE BACKGROUND CAPS. The `largeBom`
+// block only supplies numbers to the background full-expansion worker, so a
+// dry-run against an action that carries one must be byte-identical to a
+// dry-run against the same action without it — same status, same
+// `boundedPreview`, and the same `revision`, which is what an apply token is
+// bound to. If this ever drifts, adding a background cap would silently
+// invalidate every outstanding dry-run token.
+async function testLargeBomCapsDoNotMoveTheInteractiveDryRun() {
+  async function dryRunWith(actionOverrides) {
+    const source = createSourceAdapter(childBomPlmData())
+    const records = createRecordsApi()
+    return dryRunStockPreparationAction({
+      action: baseAction(actionOverrides),
+      parameters: { projectNo: 'P-001' },
+      sourceAdapter: source.adapter,
+      recordsApi: records.recordsApi,
+      tokenStore: createMemoryStorage(),
+      plannedAt: '2026-06-04T09:00:00.000Z',
+    })
+  }
+
+  const bounded = await dryRunWith({ maxRows: 1 })
+  const boundedWithCaps = await dryRunWith({
+    maxRows: 1,
+    largeBom: { maxRows: 200000, maxPages: 1000, maxReadCount: 600000, maxElapsedMs: 3600000 },
+  })
+  assert.equal(bounded.status, 'large_bom_bounded')
+  assert.deepEqual(boundedWithCaps, bounded, 'a background cap block does not move the bounded dry-run')
+
+  // And the same on the path that DOES issue a token: everything but the token
+  // itself (a fresh random string each call) must match.
+  const ready = await dryRunWith({})
+  const readyWithCaps = await dryRunWith({ largeBom: { maxRows: 200000 } })
+  assert.equal(ready.status, 'ready')
+  assert.equal(typeof ready.dryRunToken, 'string')
+  const { dryRunToken: _a, ...readyRest } = ready
+  const { dryRunToken: _b, ...readyWithCapsRest } = readyWithCaps
+  assert.deepEqual(readyWithCapsRest, readyRest, 'a background cap block does not move the ready dry-run')
+  assert.equal(readyWithCaps.revision, ready.revision, 'and it does not move the revision an apply token binds')
+}
+
 async function testLargeBomBoundedApplyRejectsMatchingTokenBeforeWrites() {
   const records = createRecordsApi()
   const storage = createMemoryStorage()
@@ -1197,6 +1238,7 @@ async function main() {
   await testStoredUnimplementedTableScopePolicyStillDryRunsAndApplies()
   await testStoredDryRunTokenPolicyIsNotRevalidatedAsASelection()
   await testLargeBomBoundedDryRunBlocksApplyToken()
+  await testLargeBomCapsDoNotMoveTheInteractiveDryRun()
   await testLargeBomBoundedApplyRejectsMatchingTokenBeforeWrites()
   await testMissingChildBomDryRunBlocksApplyTokenAndWrites()
   await testReadPageLimitBoundedDryRunAndDepthHardFailureStayDistinct()

@@ -184,6 +184,172 @@ export interface StockPreparationProjectSyncStepResult {
   detail: Record<string, string | number>
 }
 
+// ---------------------------------------------------------------------------
+// 缺件清单 (missing components) — W3a
+//
+// THE ONE DELIBERATE EXCEPTION to values-free carried past `classifyPlanStep`. Everywhere else on
+// this surface a step's `detail` is counts, HTTP statuses and closed tokens — never a value read back
+// from a response — because `step.detail` is what the technical disclosure prints verbatim. The
+// dry-run response can now carry a SEPARATE, OPT-IN key, `missingComponents`, whose entire purpose is
+// to show the operator the customer's own part numbers that block the whole project from writing
+// (server-side design: W3a §2–§4, `expansion.missingComponents` — a bypass array kept off the
+// rowError/revision/identity/ledger/evidence paths so this feature cannot reopen the anonymous-hold
+// contract). `classifyPlanStep` ITSELF IS NOT TOUCHED — this list is read out of the plan by a
+// SEPARATE pure function and carried on the report as its own field, never folded into a step's
+// `detail` map, so a part number can never reach the technical disclosure's `key=value` dump.
+export interface StockPreparationMissingComponent {
+  componentSourceId: string
+  parentSourceId: string
+  bomId: string
+  /**
+   * Human-readable, ALREADY DECODED. The server sends `path` as `JSON.stringify(pathTokens)`
+   * (e.g. `["PART-A","PART-Z"]`); `formatMissingComponentPath` parses it and joins it with `' / '`
+   * before this field is ever populated — nothing downstream (panel, export) parses JSON.
+   */
+  path: string
+  depth: number
+  occurrenceCount: number
+  /** How many DISTINCT parents this component is missing under — >1 means "wanted in more than one place". */
+  parentCount: number
+}
+
+export interface StockPreparationMissingComponentList {
+  distinctCount: number
+  probeCount: number
+  /** True when the server's own 200-item cap cut the list short; `distinctCount` is still the real total. */
+  truncated: boolean
+  items: StockPreparationMissingComponent[]
+}
+
+/**
+ * B1 — why the dry run's `missingComponents` came back empty even though the panel ASKED for it
+ * (`includeMissingComponents: true`). Closed, values-free vocabulary; never a server message.
+ *
+ *   'server_unsupported' — the deployment does not know the `includeMissingComponents` request key
+ *      yet (main without the server-side W3a PR merged answers 400 `TABLE_ACTION_REQUEST_INVALID`
+ *      for an unrecognized body key). The panel says NOTHING for this — it is a deployment-version
+ *      fact, not something an operator can act on.
+ *   'scope_denied' — the request was understood, but this caller failed the opt-in's operator-scope
+ *      check (403, an `OPERATOR_SCOPE_*` code): no tenant claim, or a platform-admin caller with no
+ *      tenant at all. The panel DOES say something here — see `missingComponentsUnavailableReason`
+ *      in the panel component — because it is actionable ("ask someone with the right account").
+ *
+ * Either way `createStockPreparationProjectSyncApi`'s `dryRun` retries the SAME request once without
+ * the flag, so this add-on feature failing never sinks the sync itself (B1/M4).
+ */
+export const STOCK_PREPARATION_MISSING_COMPONENTS_UNAVAILABLE_REASONS = ['server_unsupported', 'scope_denied'] as const
+export type StockPreparationMissingComponentsUnavailableReason =
+  (typeof STOCK_PREPARATION_MISSING_COMPONENTS_UNAVAILABLE_REASONS)[number]
+
+function missingComponentsUnavailableReasonOf(value: unknown): StockPreparationMissingComponentsUnavailableReason | null {
+  return typeof value === 'string'
+    && (STOCK_PREPARATION_MISSING_COMPONENTS_UNAVAILABLE_REASONS as readonly string[]).includes(value)
+    ? (value as StockPreparationMissingComponentsUnavailableReason)
+    : null
+}
+
+const MISSING_COMPONENT_FIELD_MAX_LEN = 128
+const MISSING_COMPONENT_ITEMS_MAX = 200
+
+function clampMissingComponentField(value: unknown): string {
+  if (value === undefined || value === null) return ''
+  const text = typeof value === 'string' ? value : String(value)
+  return text.slice(0, MISSING_COMPONENT_FIELD_MAX_LEN)
+}
+
+/**
+ * `path` is NOT a plain string field — the server (W3a #5500) sends it as `JSON.stringify(pathTokens)`
+ * (e.g. `["PART-A","PART-Z"]`), not a pre-joined `A/B` string. Decode it into the human-readable form
+ * this file hands the panel: parse, and if the result is an array, join it with `' / '`; anything that
+ * fails to parse, or parses to something other than an array, falls back to the raw string unparsed
+ * (never thrown — this is still the strict-clamp boundary, not a place to crash on bad JSON).
+ *
+ * TRUNCATION HAPPENS AFTER THE JOIN, not before. Truncating the RAW JSON string to 128 chars first (the
+ * way every other field clamps) would cut valid JSON off mid-token for any BOM deep enough to produce
+ * a >128-char encoded array, and `JSON.parse` on that fragment throws — silently DEMOTING a perfectly
+ * good path into the "couldn't parse it" fallback branch, and displaying a chopped JSON fragment
+ * (`["PART-A","PAR`) instead of a chopped human-readable path. Joining first and clamping the RESULT
+ * keeps the 128-char cap meaningful regardless of how deep the BOM path is.
+ */
+function formatMissingComponentPath(value: unknown): string {
+  if (value === undefined || value === null) return ''
+  const raw = typeof value === 'string' ? value : String(value)
+  let joined = raw
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (Array.isArray(parsed)) {
+      joined = parsed
+        .map((token) => (token === undefined || token === null ? '' : String(token)))
+        .join(' / ')
+    }
+  } catch {
+    // Not JSON at all — keep the raw string. A bare, human-typed path (or a future server change)
+    // must still show SOMETHING rather than going blank.
+  }
+  return joined.slice(0, MISSING_COMPONENT_FIELD_MAX_LEN)
+}
+
+/**
+ * True for a value `clampMissingComponentField` can turn into a MEANINGFUL string: absent, or an
+ * actual scalar. An object/array in a string field's slot is not a value to `String()`-coerce — that
+ * produces `"[object Object]"`, which is not the customer's data, it is a rendering artifact this
+ * boundary must not manufacture and show as though it were real.
+ */
+function isScalarOrAbsent(value: unknown): boolean {
+  return value === undefined || value === null
+    || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+}
+
+/** A raw item worth keeping: an object (not an array), whose four string-typed fields are scalar-or-absent. */
+function isUsableRawItem(entry: unknown): entry is Record<string, unknown> {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false
+  const source = entry as Record<string, unknown>
+  return isScalarOrAbsent(source.componentSourceId)
+    && isScalarOrAbsent(source.parentSourceId)
+    && isScalarOrAbsent(source.bomId)
+    && isScalarOrAbsent(source.path)
+}
+
+/**
+ * STRICT CLAMP, not best-effort coercion. `plan.missingComponents` arrives as untyped JSON from an
+ * opt-in server response this file does not control; a malformed shape is reported as ABSENT
+ * (`null`) rather than rendered partially, the same posture `classifyPlanStep` takes toward a
+ * malformed plan. `items` is capped at 200 defensively even though the server already caps it there
+ * (§3 of the design) — this boundary does not trust the server to have applied its own limit.
+ */
+export function missingComponentsOf(
+  plan: { missingComponents?: unknown } | null | undefined,
+): StockPreparationMissingComponentList | null {
+  const raw = plan && typeof plan === 'object' ? (plan as { missingComponents?: unknown }).missingComponents : null
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const rawItems = (raw as { items?: unknown }).items
+  // 非数组丢弃: a `missingComponents` whose `items` is not an array is not a partially-usable payload
+  // — it is malformed, and the whole key is treated as though the server never sent it.
+  if (!Array.isArray(rawItems)) return null
+
+  const items: StockPreparationMissingComponent[] = rawItems
+    // DROP, don't paper over: an entry that is not an object, or whose id/parent/bom/path field is
+    // itself an object/array, is discarded outright rather than mapped into a blank/garbage row.
+    .filter(isUsableRawItem)
+    .slice(0, MISSING_COMPONENT_ITEMS_MAX)
+    .map((source) => ({
+      componentSourceId: clampMissingComponentField(source.componentSourceId),
+      parentSourceId: clampMissingComponentField(source.parentSourceId),
+      bomId: clampMissingComponentField(source.bomId),
+      path: formatMissingComponentPath(source.path),
+      depth: intOf(source.depth),
+      occurrenceCount: intOf(source.occurrenceCount),
+      parentCount: intOf(source.parentCount),
+    }))
+
+  return {
+    distinctCount: intOf((raw as { distinctCount?: unknown }).distinctCount),
+    probeCount: intOf((raw as { probeCount?: unknown }).probeCount),
+    truncated: (raw as { truncated?: unknown }).truncated === true,
+    items,
+  }
+}
+
 /**
  * What actually happened, in the terms the panel's first sentence is written from.
  *
@@ -221,6 +387,15 @@ export interface StockPreparationProjectSyncReport {
   planned: { add: number; update: number; skip: number; inactive: number; manualConfirm: number } | null
   /** What the write actually did. Null unless the write ran. */
   written: { created: number; updated: number; inactive: number; skipped: number; held: number; failed: number } | null
+  /**
+   * 缺件清单. `null` whenever the dry run did not (or could not) hand one back — the server omits the
+   * key entirely when the plan hit no `missing_component` rows, and `missingComponentsOf` also
+   * returns `null` for a malformed payload. Never derived from `steps` — it comes straight off the
+   * plan, alongside `planned`.
+   */
+  missingComponents: StockPreparationMissingComponentList | null
+  /** B1: why `missingComponents` is null even though it was requested. `null` when it is not — either it was never asked for, or it landed fine (present or genuinely empty). */
+  missingComponentsUnavailableReason: StockPreparationMissingComponentsUnavailableReason | null
   /** True when no step FAILed. A run of OK + SKIP passes — held is not broken. */
   pass: boolean
   failedStepId: StockPreparationProjectSyncStepId | null
@@ -334,6 +509,8 @@ export function summarizeProjectSync(
     queuedDecisionCount: number
     planned: StockPreparationProjectSyncReport['planned']
     written: StockPreparationProjectSyncReport['written']
+    missingComponents: StockPreparationProjectSyncReport['missingComponents']
+    missingComponentsUnavailableReason: StockPreparationProjectSyncReport['missingComponentsUnavailableReason']
   },
 ): StockPreparationProjectSyncReport {
   const failed = steps.find((step) => step.status === 'fail') ?? null
@@ -362,6 +539,8 @@ export function summarizeProjectSync(
     queuedDecisionCount: context.queuedDecisionCount,
     planned: context.planned,
     written: context.written,
+    missingComponents: context.missingComponents,
+    missingComponentsUnavailableReason: context.missingComponentsUnavailableReason,
     pass: failed === null,
     failedStepId: failed ? failed.id : null,
   }
@@ -376,6 +555,20 @@ export interface StockPreparationProjectSyncPlan {
   canApply?: boolean
   dryRunToken?: string | null
   counts?: Record<string, number>
+  /**
+   * Present ONLY when the request asked for it (`includeMissingComponents: true`) AND the plan hit at
+   * least one `missing_component` row — the server omits the key rather than sending an empty one.
+   * Untyped on purpose: this is the boundary `missingComponentsOf` clamps, not a shape this file
+   * trusts.
+   */
+  missingComponents?: unknown
+  /**
+   * B1 — set ONLY by `createStockPreparationProjectSyncApi`'s `dryRun` itself, after it retried the
+   * request without `includeMissingComponents` because the flagged request was refused. Not a server
+   * field; a caller-supplied `StockPreparationProjectSyncApi` double in a test may set it directly to
+   * exercise the report's handling of it without going through the retry.
+   */
+  missingComponentsUnavailableReason?: StockPreparationMissingComponentsUnavailableReason
 }
 
 export interface StockPreparationProjectSyncApplyResult {
@@ -430,6 +623,29 @@ function isMalformed(error: unknown): boolean {
 /** The flag-off answer from mvp-persist. A correct deployment state, not a fault. */
 export const BATCH_ARCHIVE_DISABLED_CODE = 'STOCK_PREPARATION_TABLE_ACTION_MVP_PERSIST_DISABLED'
 
+/** The exact 400 code `normalizeTableActionBody` answers for an unrecognized dry-run body key (http-routes.cjs:1743-1753). */
+export const MISSING_COMPONENTS_UNSUPPORTED_CODE = 'TABLE_ACTION_REQUEST_INVALID'
+
+/**
+ * B1 — does this dry-run failure mean "the `includeMissingComponents` flag itself was refused",
+ * as opposed to an ordinary dry-run failure (bad project number, transport error, …) that a retry
+ * without the flag would not fix either? Two, and only two, cases:
+ *
+ *   400 `TABLE_ACTION_REQUEST_INVALID` — this deployment's `VALID_TABLE_ACTION_DRY_RUN_BODY_KEYS`
+ *     does not list `includeMissingComponents` yet (the server-side W3a PR has not merged here).
+ *   403 with an `OPERATOR_SCOPE_*` code — the opt-in's own operator-scope gate refused this caller
+ *     (no tenant claim, or a platform-admin with none at all).
+ *
+ * Anything else (a 404 project-not-found, a 500, a malformed envelope, …) is a REAL dry-run failure
+ * and must surface as one, not be swallowed into a silent flag-less retry.
+ */
+function missingComponentsFallbackReason(error: unknown): StockPreparationMissingComponentsUnavailableReason | null {
+  if (!(error instanceof StockPreparationProjectSyncCallError)) return null
+  if (error.status === 400 && error.code === MISSING_COMPONENTS_UNSUPPORTED_CODE) return 'server_unsupported'
+  if (error.status === 403 && typeof error.code === 'string' && error.code.startsWith('OPERATOR_SCOPE_')) return 'scope_denied'
+  return null
+}
+
 // ---------------------------------------------------------------------------
 // the run
 // ---------------------------------------------------------------------------
@@ -451,6 +667,8 @@ export async function runStockPreparationProjectSync(
   let queuedDecisionCount = 0
   let planned: StockPreparationProjectSyncReport['planned'] = null
   let written: StockPreparationProjectSyncReport['written'] = null
+  let missingComponents: StockPreparationProjectSyncReport['missingComponents'] = null
+  let missingComponentsUnavailableReason: StockPreparationProjectSyncReport['missingComponentsUnavailableReason'] = null
 
   function record(step: StockPreparationProjectSyncStepResult): StockPreparationProjectSyncStepResult {
     steps.push(step)
@@ -459,7 +677,14 @@ export async function runStockPreparationProjectSync(
   }
 
   function done(): StockPreparationProjectSyncReport {
-    return summarizeProjectSync(steps, { pendingConfirmCount, queuedDecisionCount, planned, written })
+    return summarizeProjectSync(steps, {
+      pendingConfirmCount,
+      queuedDecisionCount,
+      planned,
+      written,
+      missingComponents,
+      missingComponentsUnavailableReason,
+    })
   }
 
   // ---- 1. 试算 -------------------------------------------------------------
@@ -469,6 +694,12 @@ export async function runStockPreparationProjectSync(
     plan = await api.dryRun(projectNo)
     planned = plannedCountsOf(plan?.counts)
     pendingConfirmCount = planned.manualConfirm
+    // Read straight off the plan, NOT off `classifyPlanStep`'s result — see the type's doc comment.
+    missingComponents = missingComponentsOf(plan)
+    // B1: `dryRun`'s own retry-without-the-flag fallback marks the plan it hands back, if it had to
+    // use it. `missingComponents` is `null` in that branch by construction (the retried request never
+    // asked for the key), so this reason is the ONLY signal the panel has for WHY.
+    missingComponentsUnavailableReason = missingComponentsUnavailableReasonOf(plan?.missingComponentsUnavailableReason)
     planStep = record(classifyPlanStep(1, plan))
   } catch (error) {
     planStep = record(classifyPlanStep(1, null, {
@@ -656,12 +887,33 @@ export function createStockPreparationProjectSyncApi(
   return {
     async dryRun(projectNo: string) {
       const route = `${base}/dry-run`
-      const response = await apiFetch(`${route}${suffix}`, {
-        method: 'POST',
-        headers: json,
-        body: JSON.stringify({ parameters: { projectNo } }),
-      })
-      return readEnvelope<StockPreparationProjectSyncPlan>(response, route)
+      // `includeMissingComponents` is a REQUEST FLAG, not an action parameter — it sits alongside
+      // `parameters` rather than inside it (W3a §4.1/§4.2: the server's own opt-in gate reads it
+      // off the body root and, only when it is `true`, does the extra operator-scope check that
+      // lets the response's `missingComponents` key carry real part numbers).
+      try {
+        const response = await apiFetch(`${route}${suffix}`, {
+          method: 'POST',
+          headers: json,
+          body: JSON.stringify({ parameters: { projectNo }, includeMissingComponents: true }),
+        })
+        return await readEnvelope<StockPreparationProjectSyncPlan>(response, route)
+      } catch (error) {
+        // B1 — SINGLE, AUTOMATIC FALLBACK. Merging this PR before the server-side W3a PR (#5500 as
+        // of writing) must not 400 every dry run on main: if the flagged request was refused for
+        // exactly one of the two reasons that mean "the flag itself is the problem" (not "the plan
+        // failed"), retry ONCE, plainly, without it. A genuine dry-run failure (bad project number,
+        // transport error, …) is NOT one of those two reasons and re-throws unchanged below.
+        const reason = missingComponentsFallbackReason(error)
+        if (!reason) throw error
+        const response = await apiFetch(`${route}${suffix}`, {
+          method: 'POST',
+          headers: json,
+          body: JSON.stringify({ parameters: { projectNo } }),
+        })
+        const plan = await readEnvelope<StockPreparationProjectSyncPlan>(response, route)
+        return { ...plan, missingComponentsUnavailableReason: reason }
+      }
     },
 
     async reconcile(projectNo: string) {

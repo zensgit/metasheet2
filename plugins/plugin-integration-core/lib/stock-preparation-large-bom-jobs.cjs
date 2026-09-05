@@ -10,6 +10,9 @@ const crypto = require('node:crypto')
 
 const { scrubSecretStringValue } = require('./payload-redaction.cjs')
 const {
+  DEFAULT_MAX_DEPTH,
+  DEFAULT_MAX_PAGES,
+  DEFAULT_MAX_ROWS,
   expandPlmProjectBom,
   LARGE_BOM_BOUNDED_ERROR_TYPES,
   summarizeBomExpansionForEvidence,
@@ -69,6 +72,13 @@ const APPLY_COUNT_FIELDS = Object.freeze([
   'failed',
 ])
 
+// `maxArtifactChunks` is a DESCRIPTION of the artifact's shape, not a budget
+// that bounds anything. A background expansion is one `expandPlmProjectBom`
+// pass sealed into one `job.artifact`, so the count is 1 and raising it would
+// mean nothing until a chunked expander exists. Row VOLUME is paced on the
+// apply side instead (LARGE_BOM_APPLY_DEFAULT_CHUNK_SIZE below), which is why
+// widening the expansion caps does not require widening this.
+const LARGE_BOM_ARTIFACT_CHUNK_COUNT = 1
 const LARGE_BOM_APPLY_PERMISSIONS = Object.freeze(['write', 'admin'])
 const LARGE_BOM_APPLY_DEFAULT_CHUNK_SIZE = 100
 const LARGE_BOM_APPLY_MAX_CHUNK_SIZE = 1000
@@ -150,6 +160,27 @@ function nonNegativeInteger(value, field) {
 function nonNegativeProjection(input, fields) {
   const value = isPlainObject(input) ? input : {}
   return Object.fromEntries(fields.map((field) => [field, nonNegativeInteger(value[field], field)]))
+}
+
+/**
+ * BUDGETS ARE NOT COUNTERS, so they do not share the projection above.
+ * `nonNegativeProjection` reports an absent field as 0, which is right for
+ * `progress` (nothing has happened yet) and actively WRONG for `budgets`:
+ * `maxReadCount` and `maxElapsedMs` have no expander default, so absent means
+ * THERE IS NO BOUND — and `maxReadCount: 0` reads as "the bound is zero", the
+ * exact opposite. Absent is therefore `null`.
+ *
+ * The KEY SET stays fixed (every BACKGROUND_BUDGET_FIELDS member is present) so
+ * a reader can tell "this budget is unbounded" from "this build does not report
+ * that budget at all". Values-free either way: budgets are configured integers.
+ */
+function budgetProjection(input, fields) {
+  const value = isPlainObject(input) ? input : {}
+  return Object.fromEntries(fields.map((field) => {
+    const raw = value[field]
+    if (raw === undefined || raw === null || raw === '') return [field, null]
+    return [field, nonNegativeInteger(raw, field)]
+  }))
 }
 
 function normalizeStatus(value, allowed, field) {
@@ -412,6 +443,53 @@ function expansionArtifactRevision({ job, expansion }) {
   })
 }
 
+function dropEmptyBudgets(budgets) {
+  for (const key of Object.keys(budgets)) {
+    if (budgets[key] === undefined || budgets[key] === null || budgets[key] === '') delete budgets[key]
+  }
+  return budgets
+}
+
+/**
+ * The caps THIS RUN will actually enforce, written down before the first source
+ * read rather than only after the expansion returns. Two reasons: a run that
+ * dies in the adapter (or is still `running` when an operator looks) used to
+ * report `budgets: {}`, which is exactly when a deployer needs to know whether
+ * the background lane got its own numbers; and an issue report should be able
+ * to distinguish "the background cap was too small" from "the background cap
+ * was never applied". Values-free — these are configured integers, never
+ * customer data.
+ *
+ * Mirrors the expander's own defaulting so the pre-run and post-run stanzas
+ * agree: `maxRows`/`maxPages`/`maxDepth` fall back to the expander defaults,
+ * `maxReadCount`/`maxElapsedMs` stay absent when nothing bounds them.
+ */
+function effectiveExpansionBudgets(expansionOptions) {
+  const options = isPlainObject(expansionOptions) ? expansionOptions : {}
+  return dropEmptyBudgets({
+    maxRows: positiveBudget(options.maxRows) || DEFAULT_MAX_ROWS,
+    maxPages: positiveBudget(options.maxPages) || DEFAULT_MAX_PAGES,
+    maxReadCount: positiveBudget(options.maxReadCount),
+    maxElapsedMs: positiveBudget(options.maxElapsedMs),
+    maxDepth: nonNegativeBudget(options.maxDepth, DEFAULT_MAX_DEPTH),
+    maxArtifactChunks: LARGE_BOM_ARTIFACT_CHUNK_COUNT,
+  })
+}
+
+function positiveBudget(value) {
+  if (value === undefined || value === null || value === '') return undefined
+  const number = Number(value)
+  return Number.isInteger(number) && number > 0 ? number : undefined
+}
+
+// `maxDepth` alone admits 0 (the expander's `nonNegativeInteger`), so it cannot
+// share `positiveBudget`'s truthiness fallback.
+function nonNegativeBudget(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback
+  const number = Number(value)
+  return Number.isInteger(number) && number >= 0 ? number : fallback
+}
+
 function updateJobFromExpansion(job, expansion, now) {
   const evidence = summarizeBomExpansionForEvidence(expansion)
   const progress = {
@@ -420,17 +498,14 @@ function updateJobFromExpansion(job, expansion, now) {
     frontierRemaining: 0,
     completedChunks: expansion.valid === true ? 1 : 0,
   }
-  const budgets = {
+  const budgets = dropEmptyBudgets({
     maxRows: evidence.maxRows,
     maxPages: evidence.maxPages,
     maxReadCount: evidence.maxReadCount,
     maxElapsedMs: evidence.maxElapsedMs,
     maxDepth: evidence.maxDepth,
-    maxArtifactChunks: 1,
-  }
-  for (const key of Object.keys(budgets)) {
-    if (budgets[key] === undefined || budgets[key] === null || budgets[key] === '') delete budgets[key]
-  }
+    maxArtifactChunks: LARGE_BOM_ARTIFACT_CHUNK_COUNT,
+  })
   job.progress = progress
   job.budgets = budgets
   job.evidence = {
@@ -491,9 +566,15 @@ async function runLargeBomBackgroundExpansionJob(input = {}) {
     )
   }
   requiredPrincipal(job.principal)
+  const expansionOptions = isPlainObject(input.expansionOptions) ? input.expansionOptions : {}
   const runningAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
   job.status = 'running'
   job.authoritative = false
+  // The caps this run enforces, recorded BEFORE the first source read — see
+  // `effectiveExpansionBudgets`. `updateJobFromExpansion` rewrites the same
+  // stanza from the expansion summary afterwards; the two agree by
+  // construction, and this one is what survives an adapter throw.
+  job.budgets = effectiveExpansionBudgets(expansionOptions)
   job.updatedAt = runningAt
   await storage.set(key, job)
 
@@ -502,7 +583,7 @@ async function runLargeBomBackgroundExpansionJob(input = {}) {
     expansion = await expandPlmProjectBom({
       sourceAdapter,
       projectNo: job.parameters && job.parameters.projectNo,
-      ...(isPlainObject(input.expansionOptions) ? input.expansionOptions : {}),
+      ...expansionOptions,
     })
   } catch (error) {
     const failedAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
@@ -966,7 +1047,7 @@ function summarizeLargeBomBackgroundExpansionJobForEvidence(job = {}) {
     planRevisionPresent: Boolean(optionalString(job.planRevision || (job.planArtifact && job.planArtifact.revision))),
     projectNoPresent: job.projectNoPresent === true,
     progress: nonNegativeProjection(job.progress, BACKGROUND_PROGRESS_FIELDS),
-    budgets: nonNegativeProjection(job.budgets, BACKGROUND_BUDGET_FIELDS),
+    budgets: budgetProjection(job.budgets, BACKGROUND_BUDGET_FIELDS),
     evidence: publicEvidence,
   }
 }
@@ -1020,6 +1101,7 @@ function summarizeLargeBomCheckpointApplyJobForEvidence(job = {}) {
 }
 
 module.exports = {
+  LARGE_BOM_ARTIFACT_CHUNK_COUNT,
   LARGE_BOM_BACKGROUND_EXPANSION_STATUSES,
   LARGE_BOM_CHECKPOINT_APPLY_STATUSES,
   StockPreparationLargeBomJobError,
@@ -1042,6 +1124,7 @@ module.exports = {
   __internals: {
     backgroundJobKey,
     checkpointApplyJobKey,
+    effectiveExpansionBudgets,
     ensureDurableJobStorage,
     hashJson,
     safeEvidenceToken,
