@@ -22,6 +22,9 @@ import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vu
 //        DOM; the ≤2 liveness project numbers are the one thing that does, and only there
 //   P-08 a failed read renders a status and nothing else — no server message on screen
 //   P-09 the deployment preflight and the source preflight do not clobber each other
+//   P-10 THE BINDING HALF: a source only its binder can pull through renders as a refused line AND a
+//        plain-language blocker with the fix in it — never a bare code; a server that does not answer
+//        the question renders a THIRD state rather than borrowing either verdict
 //
 // The mocked route double answers this API's envelope; a 2xx that is not the envelope reads as a
 // failure, exactly as the sibling install spec requires.
@@ -235,6 +238,8 @@ function customerShapedPayload(overrides: Partial<StockPrepSourcePreflight> = {}
         matchesConfigured: true,
         numericDensityFloor: 0.8,
       },
+      // The binding half: this fixture's source CAN be pulled by the floor. P-10 varies it.
+      pullDelegation: { evaluated: true, available: true, bindingShape: 'canonical', reason: null },
     },
     blockers: [
       {
@@ -582,11 +587,11 @@ describe('源就绪预检 + 拓扑自测 (source readiness panel)', () => {
     expect(sourceCalls[0]).not.toContain('declaredBridge')
 
     const rows = Array.from(root.querySelectorAll('[data-testid="stock-prep-source-preflight-check"]'))
-    expect(rows).toHaveLength(5)
+    expect(rows).toHaveLength(6)
     // Literal expectations for THIS payload — reachable yes, data yes, store yes, topology NO, preset yes.
     expect(rows.map((row) => row.getAttribute('data-check')))
-      .toEqual(['reachable', 'has-data', 'bom-store', 'topology', 'preset'])
-    expect(rows.map((row) => row.getAttribute('data-ok'))).toEqual(['yes', 'yes', 'yes', 'no', 'yes'])
+      .toEqual(['reachable', 'has-data', 'bom-store', 'topology', 'preset', 'pull-delegation'])
+    expect(rows.map((row) => row.getAttribute('data-ok'))).toEqual(['yes', 'yes', 'yes', 'no', 'yes', 'yes'])
     // And the service's projection agrees with the same literals, so the two cannot drift apart while
     // both stay green.
     expect(stockPrepSourceCheckRows(customerShapedPayload()).map((row) => row.ok))
@@ -655,7 +660,10 @@ describe('源就绪预检 + 拓扑自测 (source readiness panel)', () => {
 
     expect(root.querySelector('[data-testid="stock-prep-source-preflight-verdict"]')?.textContent).toContain('可以接')
     const rows = Array.from(root.querySelectorAll('[data-testid="stock-prep-source-preflight-check"]'))
-    expect(rows.map((row) => row.getAttribute('data-ok'))).toEqual(['yes', 'yes', 'yes', 'yes', 'yes'])
+    expect(rows.map((row) => row.getAttribute('data-ok'))).toEqual(['yes', 'yes', 'yes', 'yes', 'yes', 'yes'])
+    expect(rows.map((row) => row.getAttribute('data-check'))).toEqual([
+      'reachable', 'has-data', 'bom-store', 'topology', 'preset', 'pull-delegation',
+    ])
     expect(root.querySelectorAll('[data-testid="stock-prep-source-preflight-blocker"]')).toHaveLength(0)
   })
 
@@ -673,8 +681,9 @@ describe('源就绪预检 + 拓扑自测 (source readiness panel)', () => {
 
     // Literal, for this payload: reachable yes, data NO, topology NO, preset yes.
     const rows = Array.from(root.querySelectorAll('[data-testid="stock-prep-source-preflight-check"]'))
-    expect(rows.map((row) => row.getAttribute('data-ok'))).toEqual(['yes', 'no', 'yes', 'no', 'yes'])
-    expect(stockPrepSourceCheckRows(emptyPayload()).map((row) => row.ok)).toEqual([true, false, true, false, true])
+    expect(rows.map((row) => row.getAttribute('data-ok'))).toEqual(['yes', 'no', 'yes', 'no', 'yes', 'yes'])
+    expect(stockPrepSourceCheckRows(emptyPayload()).map((row) => row.ok))
+      .toEqual([true, false, true, false, true, true])
   })
 
   // P-05 -----------------------------------------------------------------
@@ -710,7 +719,7 @@ describe('源就绪预检 + 拓扑自测 (source readiness panel)', () => {
     expect(root.querySelector('[data-testid="stock-prep-source-preflight-verdict"]')?.textContent).toContain('可以接')
     // Reachable yes, data yes, topology yes, preset NO — the honest fourth line for an unknown vendor.
     const rows = Array.from(root.querySelectorAll('[data-testid="stock-prep-source-preflight-check"]'))
-    expect(rows.map((row) => row.getAttribute('data-ok'))).toEqual(['yes', 'yes', 'yes', 'yes', 'no'])
+    expect(rows.map((row) => row.getAttribute('data-ok'))).toEqual(['yes', 'yes', 'yes', 'yes', 'no', 'yes'])
     expect(rows[4].textContent).toContain('NO_PRESET_MATCHED')
   })
 
@@ -941,6 +950,78 @@ describe('源就绪预检 + 拓扑自测 (source readiness panel)', () => {
     expect(htmlError).toBeTruthy()
     expect(htmlError?.textContent).toContain('200')
     expect(root.querySelector('[data-testid="stock-prep-source-preflight-verdict"]')).toBeNull()
+  })
+
+  // P-10 — THE BINDING HALF -----------------------------------------------
+  //
+  // A source can pass every check above and still be readable by exactly ONE person: `data-source:*`
+  // bindings are authorized on strict owner equality, so with no server-held owner stamp the floor
+  // and every scheduled job get a 400. Before this line existed the panel said `go` about exactly
+  // that source, and the implementer's next clue was a bare English code in a blocker list.
+  it('says a source only its binder can pull through out loud, with the fix in it', async () => {
+    const base = readyPayload()
+    installRoutes({
+      sourcePayload: {
+        ...base,
+        ok: false,
+        verdict: 'no-go',
+        checks: {
+          ...base.checks,
+          pullDelegation: {
+            evaluated: true,
+            available: false,
+            bindingShape: 'canonical',
+            reason: 'binding_owner_unstamped',
+          },
+        },
+        blockers: [
+          {
+            code: 'pull_principal_delegation_unavailable',
+            detail: { bindingShape: 'canonical', reason: 'binding_owner_unstamped' },
+          },
+        ],
+      },
+    })
+    const root = await mountView()
+    await runSourceCheck(root)
+
+    // The line itself refuses, and names the shape it measured.
+    const rows = Array.from(root.querySelectorAll('[data-testid="stock-prep-source-preflight-check"]'))
+    const delegation = rows.find((row) => row.getAttribute('data-check') === 'pull-delegation')
+    expect(delegation, 'the binding half must render as its own line').toBeTruthy()
+    expect(delegation?.getAttribute('data-ok')).toBe('no')
+    expect(delegation?.getAttribute('data-state')).toBe('no')
+    expect(delegation?.textContent).toContain('unavailable')
+    expect(delegation?.textContent).toContain('canonical')
+
+    // And the blocker is a SENTENCE, not a bare code — with the fix and the way to confirm it.
+    const blockers = textOf(root, '[data-testid="stock-prep-source-preflight-blocker"]')
+    expect(blockers).toContain('绑定')
+    expect(blockers).toContain('400')
+    expect(blockers).toContain('pull_principal_delegation_unavailable')
+    const next = textOf(root, '[data-testid="stock-prep-source-preflight-blocker-next"]')
+    expect(next).toContain('重新保存')
+    expect(next).toContain('checks.pullDelegation')
+  })
+
+  // …and a server that does not answer the question renders a THIRD state. Rendering it as 是 would
+  // claim a check nobody ran; rendering it as 否 would refuse a deployment on a question that may not
+  // even apply to its source kind.
+  it('renders an unanswered binding half as neither yes nor no', async () => {
+    const base = readyPayload()
+    const checks = { ...base.checks }
+    delete checks.pullDelegation
+    installRoutes({ sourcePayload: { ...base, checks } })
+    const root = await mountView()
+    await runSourceCheck(root)
+
+    const rows = Array.from(root.querySelectorAll('[data-testid="stock-prep-source-preflight-check"]'))
+    const delegation = rows.find((row) => row.getAttribute('data-check') === 'pull-delegation')
+    expect(delegation?.getAttribute('data-state')).toBe('unknown')
+    expect(delegation?.textContent).toContain('未评估')
+    expect(delegation?.textContent).toContain('not-evaluated')
+    // Still a go: an unevaluated check is not a refusal, and the server raised no blocker for it.
+    expect(root.querySelector('[data-testid="stock-prep-source-preflight-verdict"]')?.textContent).toContain('可以接')
   })
 
   // P-09 -----------------------------------------------------------------

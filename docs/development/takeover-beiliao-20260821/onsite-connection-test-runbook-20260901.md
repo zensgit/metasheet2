@@ -114,25 +114,48 @@ GET /api/integration/stock-preparation/source-preflight
 重新提交一次该外接源的绑定，把 `connectionId` 显式带上。服务端会重新走一遍
 `resolveConnectionRegistration` → `assertAccess` 的属主校验，通过后把该账号写成归属戳。
 
+> **先 GET，再 POST——这个更新接口不是纯粹的 PATCH。** `upsertExternalSystem` 的更新分支只对
+> `config` / `capabilities` / `role` / `status` 做"未提交即保留"（external-systems.cjs 更新分支的 config/capabilities 保留段）；
+> 其余列走 `baseRow`，取的是归一化后的默认值（`projectId` / `lastTestedAt` / `lastError` 未提交
+> 即为 `null`，见 `normalizeExternalSystemInput` 的 projectId / lastTestedAt / lastError 三行），而 `db.updateRow` 无条件写入。**所以只带 `connectionId` 的一次
+> 提交会把 `project_id` / `last_tested_at` / `last_error` 清成 null。** 这是既有行为，不在本 PR
+> 修；照下面做即可避开。
+
+**步骤 1 — 读回现有行**（用同一个账号）：
+
+```
+GET /api/integration/external-systems/<external system id>
+→ 记下 name / projectId / lastTestedAt / lastError（下一步原样带回）
+```
+
+**步骤 2 — 带着这些字段重新提交绑定**：
+
 ```
 POST /api/integration/external-systems
 {
   "id": "<external system id>",
-  "name": "<原名，原样回填>",
+  "name": "<步骤 1 的 name，原样回填>",
   "kind": "data-source:sql-readonly",
   "role": "source",
-  "connectionId": "<该外接源当前的 connectionId>"
+  "connectionId": "<该外接源当前的 connectionId>",
+  "projectId": "<步骤 1 的 projectId；本来就是 null 就省略>",
+  "lastTestedAt": "<步骤 1 的 lastTestedAt；省略则清空>",
+  "lastError": "<步骤 1 的 lastError；本来就是 null 就省略>"
 }
 ```
 
 要点：
 
 * **必须由绑定者本人调**。换个人调会被主机以同一句 "not found" 拒掉（属主等值，同时不泄露
-  存在性），戳不会写错人。
+  存在性），戳不会写错人；被拒的这次更新不落库，三列也不会被清。
+* **`projectId` / `lastTestedAt` / `lastError` 必须原样带回**，否则这次更新会把它们清成 null
+  （见上面的框）。`lastTestedAt` / `lastError` 只是页面上"上次连接测试"的显示，清掉之后再跑一次
+  `POST /api/integration/external-systems/<id>/test` 就会重新写上；`projectId` 没有别的地方能
+  补回来，务必带上。
 * 请求体里写 `dataSourceOwnerId` 无效——它是服务端独占字段，在归一化处就被剥掉。
 * 不带 `config` 的更新原样继承已存 config；带 `config` 是**打补丁**，不会清掉未提交的键。
 * 复核：再跑一次源就绪预检，`checks.pullDelegation.available` 应为 `true`、blocker 消失；
-  然后用一线账号跑一次试算，应当 200。
+  同时核对 `projectId` 还在；然后用一线账号跑一次试算，应当 200。
 
 **做完之后审计怎么读**：每次委派打一条 values-free 日志（`{ actionId, delegated: true }`，
 两个身份都不写进去）。审计行里的 `actor` 始终是**发起人**（一线），不会被改写成属主；
