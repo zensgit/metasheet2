@@ -616,11 +616,19 @@ GET /api/multitable/... (该 sheet 的记录列表,sheetId 取自 Step 0-7 actio
 
 ## 大 BOM 分批路径实测(准备)
 
-> **地位**:这一节只覆盖"把超过 `maxRows` 的合成数据灌进 222 的合成 PLM 库"这一步准备工作,不是完整的 dry-run/apply 验收程序——那一段仍然照 §3-§8 的既有步骤走,唯一区别是这次源里的项目号展开后 >10000 行,预期会走 `largeBom: true` 的分批预览分支(`isLargeBomBoundedExpansion`,
+> **地位**:这一节只覆盖"把超过 `maxRows` 的合成数据灌进 222 上 `synthetic-plm` 数据源实际读取的那套表"这一步准备工作,不是完整的 dry-run/apply 验收程序——那一段仍然照 §3-§8 的既有步骤走,唯一区别是这次源里的项目号展开后 >10000 行,预期会走 `largeBom: true` 的分批预览分支(`isLargeBomBoundedExpansion`,
 > `plugins/plugin-integration-core/lib/stock-preparation-bom-expansion.cjs:514-518`),而不是 §3 描述的一次性 `expanded` 结果。这条路径此前**从未实测过**——见
 > `plugins/plugin-integration-core/fixtures/stock-preparation-synthetic-sql-source/README.md`
 > "what it deliberately does not cover" 一节:该目录下的合成夹具"tens of rows by design",明确不覆盖
 > `max_rows_exceeded` / large-BOM bounded path。本节的生成器就是补这个洞用的。
+>
+> **222 上没有独立的"合成 PLM 库"**——只读核实过:Postgres 实例上只有 `metasheet` 与 `postgres` 两个库,
+> 合成 PLM 表就在**应用库 `metasheet` 的 `public` schema**里,而且现场存在**两套并存**的同名表:一套带
+> 双引号、保留大小写的 `"DN_PDM_*"`(空表,遗留),一套不带引号、被 Postgres 折成全小写的 `dn_pdm_*`
+> (有数据——7 零件/7 明细/1 订单行/1 项目,`synthetic-plm` 数据源真正读的是这一套)。本生成器输出的
+> `INSERT`/`DELETE` 语句里的表名/列名全部不加引号(与
+> `stock-preparation-synthetic-sql-source/01-schema.sql` 的既有约定一致),会被 Postgres 折成小写,
+> 正好落在**有数据、被实际读取**的那一套,不会误伤空的遗留表。
 
 ### 怎么生成
 
@@ -632,24 +640,30 @@ node scripts/ops/stock-preparation-synth-large-bom.mjs \
 ```
 
 `--fanout` 省略时就是默认的 `25,25,20`(根件下 25 个一级子件,每个一级子件下 25 个二级子件,每个二级
-子件下 20 个三级子件),展开行数按层相乘:`25 + 625 + 12500 = 13150`(三层子件之和,超过默认
-`maxRows` 10000);算上根件自己那一行(真实 dry-run 的 `evidence.expansion.rowsExpanded` 口径),
-合计 13151 行。命令结束会在 stdout 打印每张表的行数、按公式算出的预期展开行数(两种口径都打印,见脚本
-内注释)、以及预期的总数量之和(数量在每个父级下按 1→2→3 循环,便于手工核对滚算结果)。
+子件下 20 个三级子件)。**以"含根件"为主口径**:根件自己的订单行也会被展开器 push 进结果
+(`lib/stock-preparation-bom-expansion.cjs:946-966`),所以真实 dry-run 的
+`evidence.expansion.rowsExpanded` 应为 `1(根件) + 25 + 625 + 12500 = 13151`,这才是要拿去和默认
+`maxRows` 10000 比较、判定是否触发大 BOM 分批的数字。三层子件本身的乘积之和(不含根件那一行)是
+`25 + 625 + 12500 = 13150`,对应 `DN_PDM_BomDetailsInfo` 的行数,是另一个辅助口径,脚本 stdout 里两个
+数字都会打印、并标注各自含义,不会只给一个数混淆。命令结束还会打印每张表的行数以及预期的总数量之和
+(数量在每个父级下按 1→2→3 循环,便于手工核对滚算结果)。
 
 所有由该生成器创建的对象 id(路径 id、订单 id、零件 `OBJ_ID`、BOM id)一律带 `SYNL-` 前缀——与
 `stock-preparation-synthetic-sql-source/` 目录下既有夹具用的 `SYN-` 前缀**刻意不同**,两者可以同时
 灌进同一个库互不干扰、互不清空。生成的 SQL 本身是幂等的:每张表先按 `SYNL-` 前缀 `DELETE`,再
 `INSERT`,同名参数重跑、或换一组 `--fanout`/`--project` 重跑,都会先清掉上一次这个生成器留下的行。
 
-### 怎么灌进 `synth_plm`
+### 怎么灌进应用库(`metasheet`)
+
+合成 PLM 表就在应用库里,不是单独的库——用 app.env 里的 `DATABASE_URL` 直接连应用库执行:
 
 ```
-psql -h <222-HOST> -d synth_plm -v ON_ERROR_STOP=1 -f /tmp/stock-prep-synth-large-bom.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f /tmp/stock-prep-synth-large-bom.sql
 ```
 
-（沿用 `stock-preparation-synthetic-sql-source/README.md` §1 同样的加载约定;这里不重复连接参数,
-照现场既有的 `synth_plm` 连接方式来,本文不记录主机名/账号/密码。)
+（连接串来自现场 app.env,本文不记录其值,也不记录主机名/账号/密码。生成器输出的语句全部不加引号,
+落在 `public.dn_pdm_*` 那一套折成小写、有数据、被 `synthetic-plm` 数据源实际读取的表上,不会碰到
+`"DN_PDM_*"` 那套带引号、空的遗留表。)
 
 ### 灌完怎么确认(三条 SELECT count)
 
@@ -675,6 +689,6 @@ SELECT count(*) FROM DN_PDM_PathExAttrInfo WHERE Parent_OBJ_ID LIKE 'SYNL-%';
 ### 实测后怎么清
 
 生成的 SQL 文件开头有 `-- ==== CLEANUP-START ====` 到 `-- ==== CLEANUP-END ====` 之间的一段 —— 就是
-那 7 条按 `SYNL-%` 前缀过滤的 `DELETE`,单独摘出来对 `synth_plm` 跑一遍即可清空这次生成的全部行,不影响
-`stock-preparation-synthetic-sql-source/` 目录下 `SYN-` 前缀的既有夹具数据。也可以直接用同一份文件重新
-跑一次完整生成命令(脚本本身先删后插,天然幂等),效果等价。
+那 7 条按 `SYNL-%` 前缀过滤的 `DELETE`,单独摘出来用同一个 `DATABASE_URL` 对应用库跑一遍即可清空这次
+生成的全部行,不影响 `stock-preparation-synthetic-sql-source/` 目录下 `SYN-` 前缀的既有夹具数据。也可以
+直接用同一份文件重新跑一次完整生成命令(脚本本身先删后插,天然幂等),效果等价。
