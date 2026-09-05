@@ -1241,6 +1241,32 @@ function testTotalCountsCandidatesNotSurvivors() {
   assertValuesFree(evidence)
 }
 
+// THE SAME RULE ON THE OTHER STANZA, found in review of dda3ede93: `errorDetails`
+// used to count SURVIVORS, so two `read_count_exceeded` errors differing only in
+// that one object contains a space reported `1 / 1 / false` — one detail gone
+// while the stanza claimed nothing was missing. Counting candidates makes the
+// two stanzas obey one rule.
+function testErrorDetailTotalCountsCandidatesNotSurvivors() {
+  const evidence = __internals.attachReadFailureEvidence({}, {
+    errors: [
+      { type: 'read_count_exceeded', object: 'DN_PDM_OrderHeadInfo', maxReadCount: 2 },
+      // Names an object, but the token is unsafe => listed nowhere, counted here.
+      { type: 'read_count_exceeded', object: `bad object ${RAW_MARKERS[0]}`, maxReadCount: 2 },
+    ],
+  })
+  assert.equal(evidence.errorDetails.length, 1, 'only the projectable detail is listed')
+  assert.equal(evidence.errorDetailsTotal, 2, 'both errors that named an object are counted')
+  assert.equal(evidence.errorDetailsTruncated, true, 'the array does not list everything counted')
+  assertValuesFree(evidence)
+
+  // The narrowing still holds: an error that names NEITHER is not a candidate at
+  // all, so an object-less bounded failure mounts nothing (the C regression pin).
+  const objectLess = __internals.attachReadFailureEvidence({}, {
+    errors: [{ type: 'max_rows_exceeded', maxRows: 1 }, { type: 'cycle_detected', depth: 3 }],
+  })
+  assert.deepEqual(Object.keys(objectLess), [])
+}
+
 // A STORED COUNTER IS A CLAIM. The public projection already refuses to trust
 // the stored array; this pins that it does not then trust the number beside it.
 function testPublicProjectionRepairsIncoherentStoredCounters() {
@@ -1874,6 +1900,7 @@ async function main() {
   testReadFailureDetailsAreCappedAndReportTheRealTotal()
   testDetailCapBoundaryIsExact()
   testTotalCountsCandidatesNotSurvivors()
+  testErrorDetailTotalCountsCandidatesNotSurvivors()
   testPublicProjectionRepairsIncoherentStoredCounters()
   testFilterFieldsAreBoundedPerEntry()
   await testSuccessfulRunHasNoReadFailureKeys()

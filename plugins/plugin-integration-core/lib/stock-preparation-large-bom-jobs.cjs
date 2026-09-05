@@ -220,12 +220,15 @@ function clampStoredTotal(value, floor) {
  * here rather than filtered out of the diagnostic, because the diagnostic grows
  * over time and a deny-list would leak the next field somebody adds.
  *
- * `cursor` is deliberately NOT on the list: the expander's cursor is whatever
- * the adapter handed back, which for the PLM binding is an offset today and
- * could be an encoded key tomorrow — i.e. it is the one field in the stanza
- * that can carry a row value. `message` is not on the list either, and never
- * will be: it is the driver's free text and routinely quotes the part number
- * that failed.
+ * `cursor` is deliberately NOT on the list. It is the one field here whose whole
+ * PURPOSE is to carry adapter-opaque state — an offset for the PLM binding
+ * today, an encoded key tomorrow — so no token filter can be trusted to vet it,
+ * and it is excluded outright rather than filtered. The rest are named things
+ * (table names, field names, symbolic codes) that CAN be vetted, and are: every
+ * one goes through `evidenceTokenOrUndefined`, because `errorCode` and `source`
+ * also arrive from outside this module and a driver is free to put anything in
+ * them. `message` is on neither list and never will be: it is the driver's free
+ * text and routinely quotes the part number that failed.
  */
 function readFailureEntry(entry) {
   if (!isPlainObject(entry)) return {}
@@ -298,9 +301,26 @@ function carriesObjectOrCauseClass(entry) {
   return entry.object !== undefined || entry.causeClass !== undefined
 }
 
-function errorDetailsFromErrors(errors) {
+function isNamed(value) {
+  return value !== undefined && value !== null && value !== ''
+}
+
+/**
+ * THE CANDIDATE SET, tested on the RAW error rather than on what survived
+ * projection — the same discipline as `readFailureCandidates`, and for the same
+ * reason.
+ *
+ * Counting survivors instead was a real bug, caught in review: two
+ * `read_count_exceeded` errors whose objects differ only in that one contains a
+ * space (unsafe => the field is dropped) reported `1 / 1 / false` — one detail
+ * silently gone while the stanza claimed nothing was missing. An error that
+ * NAMES an object or a cause class is a detail we meant to report; whether its
+ * token then passed the values-free filter decides if it is LISTED, never
+ * whether it is COUNTED.
+ */
+function errorDetailCandidates(errors) {
   if (!Array.isArray(errors)) return []
-  return errors.map(errorDetailEntry).filter(carriesObjectOrCauseClass)
+  return errors.filter((entry) => isPlainObject(entry) && (isNamed(entry.object) || isNamed(entry.causeClass)))
 }
 
 /**
@@ -311,11 +331,13 @@ function errorDetailsFromErrors(errors) {
  * length of what survived it. The difference is the whole point: three reads
  * that failed with driver codes too unsafe to project are still three failed
  * reads, and reporting `readFailuresTotal: 0` there would be a wrong answer to
- * the one question this stanza exists to answer.
+ * the one question this stanza exists to answer. BOTH call sites obey this:
+ * `readFailureCandidates` and `errorDetailCandidates` each pick the candidate
+ * set off the raw input, and only then is projection allowed to thin the list.
  *
  * `<key>Truncated` is therefore derived as "the array does not list everything
- * counted" (`shown < total`) rather than "the cap fired". Always exactly true,
- * whichever way an entry went missing — cap, or unprojectable content.
+ * counted" (`shown < total`) rather than "the cap fired" — exactly true whether
+ * an entry went missing to the cap or to unprojectable content.
  */
 function attachDetailList(evidence, key, { items, total }) {
   if (!Number.isInteger(total) || total <= 0) return evidence
@@ -332,8 +354,11 @@ function attachReadFailureEvidence(evidence, { readDiagnostics, errors } = {}) {
     items: failedReads.map(readFailureEntry).filter(hasAnyKey),
     total: failedReads.length,
   })
-  const details = errorDetailsFromErrors(errors)
-  attachDetailList(evidence, 'errorDetails', { items: details, total: details.length })
+  const namedErrors = errorDetailCandidates(errors)
+  attachDetailList(evidence, 'errorDetails', {
+    items: namedErrors.map(errorDetailEntry).filter(carriesObjectOrCauseClass),
+    total: namedErrors.length,
+  })
   return evidence
 }
 
@@ -342,6 +367,17 @@ function attachReadFailureEvidence(evidence, { readDiagnostics, errors } = {}) {
  * predate this feature, or have been written by a build that projected more
  * than this one does, so the public projection re-runs the values-free filter
  * instead of trusting what it reads back.
+ *
+ * KNOWN ASYMMETRY, currently unreachable. The storage side mounts on
+ * `total > 0`, so a run whose candidates were ALL unprojectable persists
+ * `readFailures: [] / Total: N / Truncated: true` — an honest "N reads failed,
+ * none of them yielded a safe field". This function mounts on `items.length`
+ * instead and early-returns on an empty list, so it would drop that row's
+ * counters rather than republish them. Not a live divergence: every entry this
+ * module STORES has already passed the values-free filter, so a stored array is
+ * empty here only if the row came from elsewhere. Left as-is deliberately —
+ * mounting a bare counter with no array is a public-shape change that wants its
+ * own decision, not a side effect of this one.
  */
 function attachStoredDetailEvidence(publicEvidence, evidence, key, projectEntry, keepEntry) {
   const stored = Array.isArray(evidence[key]) ? evidence[key] : []
