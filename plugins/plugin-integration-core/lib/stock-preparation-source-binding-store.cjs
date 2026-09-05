@@ -97,10 +97,17 @@ function firstRow(result) {
   return null
 }
 
+function allRows(result) {
+  if (Array.isArray(result)) return result
+  if (result && Array.isArray(result.rows)) return result.rows
+  return []
+}
+
 function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.randomUUID } = {}) {
   if (
     !db ||
     typeof db.selectOne !== 'function' ||
+    typeof db.select !== 'function' ||
     typeof db.insertOne !== 'function' ||
     typeof db.updateRow !== 'function' ||
     typeof db.transaction !== 'function'
@@ -108,7 +115,9 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
     // `transaction` is REQUIRED, not nice-to-have: read-then-write on a single row races, and the
     // caller needs the PREVIOUS value back to audit the change. Reading it in one statement and
     // writing in another would let a concurrent rebind make the audit trail name a source that was
-    // never actually replaced.
+    // never actually replaced. `select` (plural) is required too: `get()`'s null-workspace scope
+    // fallback below has to enumerate this (tenant, action)'s OTHER rows, which a single-row
+    // `selectOne` cannot do.
     throw new Error('createStockPreparationSourceBindingStore: scoped db helper (incl. transaction) is required')
   }
 
@@ -120,10 +129,51 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
     }
   }
 
-  /** The persisted override, or `null` when this scope has never bound one. */
+  /**
+   * The persisted override, or `null` when this scope has never bound one.
+   *
+   * SCOPE FALLBACK for a null-workspace caller (direction B — the mirror image of
+   * external-systems.cjs's `selectScopedRow`, deliberately: that helper widens a MISSING hint by
+   * falling back to the tenant-wide row when a SPECIFIC hint misses; this widens the opposite way,
+   * because here the specific (workspace-scoped) row is the one an admin actually wrote via the
+   * workbench picker, and `workspace_id IS NULL` is the row nothing writes on its own).
+   *
+   * Several call sites (reconcile, mvp-persist, source preflight, carry, export, handoff, the
+   * project board) invoke this WITHOUT a `workspaceId` at all, so their lookup is always
+   * `workspace_id IS NULL` — and a binding an admin saved under the UI's own `workspaceId=default`
+   * query hint is invisible to them even though it is the only binding that exists. When the exact
+   * null-workspace row is ABSENT and there is EXACTLY ONE workspace-scoped row for this
+   * `(tenant_id, action_id)`, that row is the only thing a human could have meant, so it is returned
+   * — annotated with `matchedWorkspaceId` (the workspace the returned row actually belongs to) and
+   * `scopeFallback: 'single_workspace_binding'`, so a caller that cares can tell a resolved fallback
+   * from an exact hit. An EXACT hit (null-workspace row present, or a non-null hint that matched) is
+   * annotated too, with `matchedWorkspaceId` echoing the input and `scopeFallback: null`, so the
+   * returned shape is uniform regardless of which path produced it.
+   *
+   * Two or more workspace-scoped rows is refused exactly like zero — `null` — rather than guessed:
+   * fail-closed, not "pick the newest" or "pick alphabetically first". And a caller that named a
+   * SPECIFIC non-null workspace and missed still gets `null` with no widening at all: only the
+   * caller that supplied no hint is asking "what does this tenant actually have", so only that
+   * caller's miss is worth widening.
+   */
   async function get(input = {}) {
     const scope = normalizeScope(input)
-    return rowToPublicBinding(await db.selectOne(BINDING_TABLE, scopeWhere(scope)))
+    const exact = await db.selectOne(BINDING_TABLE, scopeWhere(scope))
+    if (exact) {
+      return { ...rowToPublicBinding(exact), matchedWorkspaceId: scope.workspaceId, scopeFallback: null }
+    }
+    if (scope.workspaceId !== null) return null
+
+    const siblings = allRows(await db.select(BINDING_TABLE, {
+      where: { tenant_id: scope.tenantId, action_id: scope.actionId },
+    })).filter((row) => row && row.workspace_id !== null && row.workspace_id !== undefined)
+    if (siblings.length !== 1) return null
+    const [only] = siblings
+    return {
+      ...rowToPublicBinding(only),
+      matchedWorkspaceId: only.workspace_id,
+      scopeFallback: 'single_workspace_binding',
+    }
   }
 
   /**
