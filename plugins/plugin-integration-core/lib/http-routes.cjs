@@ -7479,12 +7479,22 @@ function requireStockPreparationAudit() {
         externalSystems.listExternalSystems({ ...listScope, limit: SOURCE_BINDING_CANDIDATE_LIMIT }),
       ])
       // `store.get()` may annotate a non-null return with `matchedWorkspaceId` / `scopeFallback`,
-      // internal resolution metadata for the null-workspace scope-fallback (reconcile, mvp-persist,
-      // carry, export, handoff and the project board all call the registry with no workspace hint at
-      // all, so that fallback is who those two fields exist for — `stockPreparationSourcePreflight`
-      // does NOT benefit: it calls `getTableAction({ actionId })` with no `tenantId` either, at
-      // :6163, so `applyPersistedSourceBinding` throws and the route's own `catch` swallows it before
-      // the fallback is ever reached; that is a separate, pre-existing bug this line does not fix).
+      // internal resolution metadata for the null-workspace scope-fallback. TWO DIFFERENT things
+      // benefit from it, and they are not the same call sites:
+      //   * BINDING RESOLUTION — `getTableAction`/`store.get()` resolving the right `externalSystemId`
+      //     at all. reconcile, mvp-persist, carry, export, handoff and the project board all call the
+      //     registry with no workspace hint, so all six read the fallback-resolved binding.
+      //   * SOURCE LOADING (F3) — `loadTableActionSourceAdapter`'s OWN re-query, which uses
+      //     `matchedWorkspaceId` as the external-SYSTEM lookup hint so the row that id names is
+      //     actually reachable. Only the FIVE call sites of `loadTableActionSourceAdapter` benefit
+      //     from this half: dry-run, reconcile, mvp-persist, apply, and the large-BOM background run.
+      //     carry/export/handoff/the project board never call `loadTableActionSourceAdapter` at all —
+      //     they stop at knowing WHICH id is bound, never load it, so F3 is not theirs to benefit
+      //     from.
+      // (`stockPreparationSourcePreflight` benefits from NEITHER half: it calls
+      // `getTableAction({ actionId })` with no `tenantId` either, at :6163, so
+      // `applyPersistedSourceBinding` throws and the route's own `catch` swallows it before either
+      // fallback path is ever reached; that is a separate, pre-existing bug this line does not fix.)
       // The picker's own wire contract is the 7-field shape the web client already types as
       // StockPreparationPersistedBinding; strip the two extra keys here so that contract stays
       // exactly what it always was rather than growing as a side effect of a store-internal

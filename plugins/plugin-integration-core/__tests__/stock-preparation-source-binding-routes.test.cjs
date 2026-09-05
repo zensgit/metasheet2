@@ -744,6 +744,47 @@ async function main() {
     assert.deepEqual(mounted.adapterCalls.slice(before), [CUSTOMER_PLM], 'an explicit workspace hint is unaffected by the fallback fix')
   })
 
+  // -------------------------------------------------------------------------
+  // R-23 — the `!resolveWorkspaceId(req, {})` precondition on F3's re-query, fenced. F3's fix in
+  // `loadTableActionSourceAdapter` re-queries the binding store for the null-workspace scope fallback
+  // ONLY when the caller itself carries no workspace hint — deleting that precondition (keeping the
+  // rest of the fix) stayed green under R-22 alone, because R-22 never drives a request that BOTH
+  // carries its own hint AND happens to produce a fallback whose externalSystemId coincides with what
+  // that hint's own (unrelated) resolution already settled on.
+  //
+  // Constructed here: the external system lives ONLY at workspace 'ws_a' (never at null), and its id
+  // IS the deploy-time default (`ENV_DEFAULT_SOURCE`) — the coincidence the guard has to survive. A
+  // request hinting 'ws_b' misses its OWN binding lookup (no ws_b row exists) and so degrades to that
+  // SAME-id deploy default — and if the precondition is gone, the re-query's null-hint fallback (one
+  // sibling, at 'ws_a', same id) reads as "confirmed", overriding the caller's OWN 'ws_b' hint with
+  // 'ws_a'. That would let a request scoped to 'ws_b' be silently served a system that lives only at
+  // 'ws_a' — a cross-workspace leak this specific caller never asked to widen. With the precondition
+  // intact, 'ws_b' governs, the system genuinely is not there, and the read refuses exactly as any
+  // mismatched-hint request always has (TABLE_ACTION_SOURCE_INVALID) — nothing new, nothing silent.
+  // -------------------------------------------------------------------------
+  await run("R-23 a caller's own workspace hint is never overridden by the fallback, even when it coincides with the deploy default", async () => {
+    const wsAOnlySystem = system({ id: ENV_DEFAULT_SOURCE, workspaceId: 'ws_a' })
+    const mounted = mount({ systems: [wsAOnlySystem] })
+
+    const saved = await call(mounted.routes, 'POST', SET_ROUTE, {
+      user: ADMIN,
+      query: { workspaceId: 'ws_a' },
+      body: { externalSystemId: ENV_DEFAULT_SOURCE },
+    })
+    assert.equal(saved.statusCode, 200, 'the bind at ws_a succeeds (same id as the deploy default, by construction)')
+
+    const before = mounted.adapterCalls.length
+    const res = await call(mounted.routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+      user: ADMIN,
+      params: { actionId: ACTION_ID },
+      query: { workspaceId: 'ws_b' },
+      body: { parameters: { projectNo: 'P-1' } },
+    })
+    assert.equal(res.body.ok, false, "a request hinting 'ws_b' must NOT be silently served the ws_a-only system")
+    assert.equal(res.statusCode, 422, 'the SAME refusal a mismatched hint has always produced (TABLE_ACTION_SOURCE_INVALID) — nothing new')
+    assert.deepEqual(mounted.adapterCalls.slice(before), [], 'no adapter is built for a system outside the requested scope')
+  })
+
   const total = passed + failed
   console.log(`\nstock-preparation-source-binding-routes: ${passed}/${total} passed`)
   if (failed > 0) {
