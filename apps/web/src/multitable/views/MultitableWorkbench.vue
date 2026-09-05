@@ -331,6 +331,8 @@
       <MetaRecordInspector
         :class="{ 'meta-record-drawer--overlay': isInspectorOverlay }"
         :visible="inspectorOpen && !!selectedRecordId" :record="selectedRecordResolved" :fields="scopedAllFields"
+        :inspector-field-layout="inspectorFieldLayout"
+        :fetch-record="fetchLinkedRecordFn"
         :opener-el="inspectorOpenerEl"
         :sheet-id="workbench.activeSheetId.value ?? undefined"
         :api-client="workbench.client"
@@ -369,6 +371,7 @@
         :comment-composer-initial-mentions="commentComposerInitialMentions"
         :open-comments="showComments"
         @close="onCloseDrawer" @delete="onDeleteRecord" @duplicate="onDuplicateRecord(selectedRecordId)" @patch="onDrawerPatch"
+        @copy-link="onCopyRecordLink"
         @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker" @open-person-picker="openPersonPicker"
         @toggle-lock="onToggleRecordLock"
         @navigate="onDrawerNavigate"
@@ -640,6 +643,7 @@ import {
 } from '../utils/workbench-labels'
 import { recordLabel } from '../utils/meta-record-labels'
 import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
+import type { MetaRecordInspectorFieldLayout } from '../utils/recordDisplay'
 import { resolveButtonFieldProperty } from '../utils/field-config'
 import {
   bulkFailure as fmtBulkFailure,
@@ -1570,6 +1574,24 @@ const twoLayerVisibleFields = computed(() => filterPropertyVisibleFields(scopedA
 const scopedGridFields = computed(() =>
   grid.visibleFields.value.filter((field) => effectiveFieldPermissions.value[field.id]?.visible !== false),
 )
+// Record inspector v3 (design 2026-09-05, PR-B1 §1.3 "Sections"): the details tab's two-section field
+// layout. §1 `ordered` = view order ∩ layer-2 ∩ layer-3 — `scopedGridFields` is `grid.visibleFields`
+// (the active view's resolved `fieldOrder`, fail-soft on stale ids, minus the view's hidden ids and
+// property-hidden fields, useMultitableGrid.ts `visibleFields`) re-filtered through THIS file's
+// `effectiveFieldPermissions` (layer-3 with the deep-link/standalone-form overrides the grid's own
+// permission ref does not carry); `filterPropertyVisibleFields` is applied again explicitly so the
+// layer-2 conjunct is stated here, not inherited from the grid computed's internals. §2 `hiddenInView`
+// = the rest of `twoLayerVisibleFields` (layer-2 ∩ layer-3, sheet order) — fields this viewer may see
+// but the active view hides. Disjoint by construction; MetaRecordFieldsPanel re-applies both layers
+// anyway (negative golden N3). Applying layer-2 to the details tab is a declared behaviour change
+// (design §4 item 4): it previously received `scopedAllFields` (layer-3 only) and rendered
+// property-hidden fields.
+const inspectorFieldLayout = computed<MetaRecordInspectorFieldLayout>(() => {
+  const ordered = filterPropertyVisibleFields(scopedGridFields.value)
+  const orderedIds = new Set(ordered.map((field) => field.id))
+  const hiddenInView = twoLayerVisibleFields.value.filter((field) => !orderedIds.has(field.id))
+  return { ordered, hiddenInView }
+})
 const conditionalFormattingRules = computed(() =>
   extractRulesFromConfig(workbench.activeView.value?.config),
 )
@@ -2604,6 +2626,26 @@ async function onDrawerPatch(fieldId: string, value: unknown) {
     }
   }
   showSuccess(wb('toast.recordUpdated', isZh.value), historyLinkAction(grid.lastBatchId.value))
+}
+
+// Record inspector v3 (design 2026-09-05, PR-B1 §1.3 "Copy link"): the inspector's copy-link icon only
+// EMITS; this is the one clipboard write. `window.location.href` already carries `#recordId=<id>`
+// while the panel is open (the PR-A hash watcher), so the copied URL reopens this record. Status goes
+// through MetaToast's existing `aria-live="polite"` / `role="status"` region via the reserved
+// `record.copyLinkDone` / `record.copyLinkFailed` keys; a missing Clipboard API (the inspector also
+// disables its button in that case) or a rejected write both land on the failed copy — never a throw.
+async function onCopyRecordLink() {
+  const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined
+  if (!clipboard || typeof clipboard.writeText !== 'function') {
+    showError(recordLabel('record.copyLinkFailed', isZh.value))
+    return
+  }
+  try {
+    await clipboard.writeText(window.location.href)
+    showSuccess(recordLabel('record.copyLinkDone', isZh.value))
+  } catch {
+    showError(recordLabel('record.copyLinkFailed', isZh.value))
+  }
 }
 
 async function onFormSubmit(data: Record<string, unknown>) {

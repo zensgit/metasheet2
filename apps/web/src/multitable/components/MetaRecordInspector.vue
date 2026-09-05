@@ -152,11 +152,13 @@
         >
           <MetaCommentActionChip :label="l('record.comments')" :state="drawerCommentAffordance" />
         </button>
-        <!-- Copy-link icon: PR-A scope is the button + `copy-link` emit only (§3 PR-A file line);
-             the clipboard write, the disabled-when-absent gate, and the copied/failed live region
-             are PR-B1 (§3 PR-B1 WB line names the copy-link handler) — WB has no listener for this
-             emit yet, by design, until that slice lands. -->
-        <MtIconButton size="sm" :aria-label="l('record.copyLink')" :title="l('record.copyLink')" data-testid="record-inspector-copy-link" @click="emit('copy-link')">&#x1F517;</MtIconButton>
+        <!-- Copy-link icon: PR-A shipped the button + `copy-link` emit; record inspector v3 PR-B1
+             (§1.3 "Copy link") adds the disabled-when-absent gate here (`copyLinkAvailable`, read once
+             at setup — the Clipboard API is a page-lifetime capability, not a live signal) and, in the
+             workbench, the `navigator.clipboard.writeText(window.location.href)` write plus the
+             `record.copyLinkDone` / `record.copyLinkFailed` status through MetaToast's existing
+             `aria-live="polite"` region. This component still only EMITS — no clipboard access here. -->
+        <MtIconButton size="sm" :disabled="!copyLinkAvailable" :aria-label="l('record.copyLink')" :title="l('record.copyLink')" data-testid="record-inspector-copy-link" @click="emit('copy-link')">&#x1F517;</MtIconButton>
         <button
           type="button"
           class="meta-record-drawer__btn meta-record-drawer__expand"
@@ -282,6 +284,20 @@
             @click="selectTab(tab.id)"
           >{{ tab.label }}</button>
         </div>
+        <!-- Record inspector v3 (PR-B1 §1.3 "Tabs bar"): right-aligned hide-empty toggle, details tab
+             only. Session-only state (`hideEmpty`, this component's own ref — NO storage read/write,
+             OD-W2-2; a remount starts unpressed), forwarded to MetaRecordFieldsPanel as a prop, which
+             owns the predicate/snapshot/exemptions. DOM position = after the tablist, before the
+             tabpanel: Tab order tabs → hide-empty → tabpanel → field controls → splitter (design
+             §1.5, "ahead of the field controls"), so the splitter stays the LAST focusable. -->
+        <MtButton
+          v-if="activeTab === 'details'"
+          size="sm"
+          class="meta-record-drawer__hide-empty"
+          :aria-pressed="hideEmpty"
+          data-testid="record-inspector-hide-empty"
+          @click="hideEmpty = !hideEmpty"
+        >{{ l(hideEmpty ? 'record.showEmpty' : 'record.hideEmpty') }}</MtButton>
       </div>
       <div v-if="subscriptionError" class="meta-record-drawer__watch-error">{{ subscriptionError }}</div>
       <div v-if="record?.locked" class="meta-record-drawer__lock-banner" data-test="record-lock-banner">
@@ -307,6 +323,9 @@
         <MetaRecordFieldsPanel
           :record="record"
           :fields="fields"
+          :inspector-field-layout="inspectorFieldLayout"
+          :hide-empty="hideEmpty"
+          :fetch-record="fetchRecord"
           :can-edit="canEdit"
           :can-comment="canComment"
           :field-permissions="fieldPermissions"
@@ -467,6 +486,7 @@ import type {
   MetaFieldPermission,
   MetaField,
   MetaRecord,
+  MetaRecordContext,
   MetaRecordSubscriptionStatus,
   MetaRowActions,
 } from '../types'
@@ -493,9 +513,14 @@ import {
 } from '../utils/meta-record-labels'
 import { commentLabel } from '../utils/meta-comment-labels'
 import type { AiShortcutState } from '../composables/useAiShortcut'
-import { formatRecordFieldValue, resolveCanComment, resolvePrimaryField, textControlValue } from '../utils/recordDisplay'
-import { isFieldAlwaysReadOnly } from '../utils/field-permissions'
-import { isSystemField } from '../utils/system-fields'
+import {
+  canEditField,
+  formatRecordFieldValue,
+  resolveCanComment,
+  resolvePrimaryField,
+  textControlValue,
+  type MetaRecordInspectorFieldLayout,
+} from '../utils/recordDisplay'
 
 const props = withDefaults(defineProps<{
   visible: boolean
@@ -572,6 +597,15 @@ const props = withDefaults(defineProps<{
    *  between the gesture and mount — see `onMounted` below for the fallback when this prop is
    *  absent, e.g. a deep-link mount with no interactive opener at all). */
   openerEl?: HTMLElement | null
+  /** Record inspector v3 (PR-B1 §1.3 sections): workbench-computed `{ ordered, hiddenInView }` field
+   *  layout, passed through UNCHANGED to MetaRecordFieldsPanel. Absent → the panel's legacy flat
+   *  `fields` path (the deprecated MetaRecordDrawer shell never sets it). */
+  inspectorFieldLayout?: MetaRecordInspectorFieldLayout | null
+  /** Record inspector v3 (PR-B1 §1.3 link chips, HI-1): the workbench's existing `fetchLinkedRecordFn`
+   *  (the SAME `client.getRecord` closure MetaGridTable receives), passed through UNCHANGED to
+   *  MetaRecordFieldsPanel → MetaCellRenderer. This shell never calls it (see the HI-1 source scan in
+   *  multitable-record-inspector.spec.ts). */
+  fetchRecord?: (recordId: string) => Promise<MetaRecordContext>
 }>(), {
   recordIds: () => [],
   buttonRunPending: () => [],
@@ -595,6 +629,8 @@ const props = withDefaults(defineProps<{
   commentComposerInitialMentions: () => [],
   openComments: false,
   openerEl: null,
+  inspectorFieldLayout: null,
+  fetchRecord: undefined,
 })
 
 const emit = defineEmits<{
@@ -1243,21 +1279,30 @@ const recordPositionText = computed(() => recordPosition(currentRecordIndex.valu
 // `resolvePrimaryField` (utils/recordDisplay.ts) is the single hoisted definition WB's own
 // `bulkFillRecordName`/`captureSelectionLabels` now also read — see that helper's own comment.
 const primaryField = computed(() => resolvePrimaryField(props.fields))
-// PR-A-local editability check for the title ONLY — deliberately not exported as a second
-// `canEditField`: MetaRecordFieldsPanel.vue's own `canEditField` (the per-field-loop predicate,
-// identical logic) is hoisted to `utils/recordDisplay.ts` in PR-B1 per the design's own file list;
-// duplicating the four-clause body here (rather than pre-emptively naming a shared symbol PR-A
-// does not own) avoids a second GLOBAL name that could drift from the real one before that hoist
-// lands.
+// Title editability = `canEditField(primary) && type === 'string'` (design §1.2). PR-A carried an
+// inline copy of the four-clause body; record inspector v3 PR-B1 hoisted it to
+// `utils/recordDisplay.ts` (`canEditField`, the design's own file list) so this title input and
+// MetaRecordFieldsPanel.vue's per-field rows read ONE rule and cannot drift.
 const canEditPrimaryTitle = computed(() => {
   const field = primaryField.value
   if (!field || field.type !== 'string') return false
-  return props.canEdit
-    && props.rowActions?.canEdit !== false
-    && props.fieldPermissions?.[field.id]?.readOnly !== true
-    && !isSystemField(field)
-    && !isFieldAlwaysReadOnly(field)
+  return canEditField(field, {
+    canEdit: props.canEdit,
+    rowActions: props.rowActions,
+    fieldPermissions: props.fieldPermissions,
+  })
 })
+
+// --- Record inspector v3 (PR-B1 §1.3) -------------------------------------------------------------
+// Hide-empty toggle state: session-only, this component's own ref (OD-W2-2 — no storage). Lives here
+// (not in the fields panel) because the control sits in the tabs bar, outside the details tabpanel,
+// and must survive tab switches + record navigation within one open panel; a remount resets it.
+const hideEmpty = ref(false)
+// Copy-link availability: `navigator.clipboard.writeText` is a page-lifetime capability (secure
+// context + browser support), read ONCE at setup; the icon is disabled when it is absent (design
+// §1.3 "item disabled when clipboard API absent"). The write itself lives in the workbench.
+const copyLinkAvailable = typeof navigator !== 'undefined'
+  && typeof navigator.clipboard?.writeText === 'function'
 const primaryFieldRawValue = computed(() => {
   const field = primaryField.value
   return field && props.record ? props.record.data[field.id] : undefined
@@ -1635,7 +1680,12 @@ async function toggleRecordSubscription() {
    `.meta-record-drawer__body` below) -- `barRect.top === bodyRect.top` held at `scrollTop` 0 and 300
    alike, matching the P3-A comment's own established verification idiom just above; this half of the
    repro's finding IS general (it does not depend on tab-label content). */
-.meta-record-drawer__tabs-bar { position: sticky; top: 0; z-index: 2; margin: 0 -16px; padding: 12px 16px 14px; background: #fff; container-type: inline-size; }
+.meta-record-drawer__tabs-bar { position: sticky; top: 0; z-index: 2; margin: 0 -16px; padding: 12px 16px 14px; background: #fff; container-type: inline-size; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 8px; }
+/* Record inspector v3 (PR-B1 §1.3 tabs bar): the hide-empty toggle sits right-aligned beside the tab
+   pill; `.meta-record-drawer__tabs-bar` is now a wrapping flex row (`space-between`) so at the 360px
+   floor the toggle wraps UNDER the pill (design §1.6 mock: "wraps under pill only at 360") instead of
+   squeezing the four tabs. `margin-left: auto` keeps it on the right whenever it shares the row. */
+.meta-record-drawer__hide-empty { margin-left: auto; flex: 0 0 auto; }
 /* P2 (2026-09-05 follow-up, verifier P2): was `inline-flex` with no wrapping -- at the (then-320px,
    now 360px) panel minimum the 4-tab pill's un-wrapped content width (355px measured in Chromium) ran
    PAST the panel's own content box, forcing a page-level horizontal scrollbar (the pill's right edge
@@ -1671,6 +1721,13 @@ async function toggleRecordSubscription() {
    deliberately LEFT IN PLACE (harmless, inert): the design brief §1.3 and the header spec's source
    pin both name them, and removing them is a separate, visible change to that pin -- not a layout
    fix. The one-row OUTCOME is unchanged by this correction (comment-only).
+   PR-B1 update (record inspector v3, 2026-09-05): `.meta-record-drawer__tabs-bar` IS now a wrapping
+   flex row (it hosts the hide-empty toggle beside the pill — see its own rule/comment above), so the
+   pill IS a flex item and this block's `flex: 1; min-width: 0` on it is no longer inert below 420px:
+   the pill fills the row there and the toggle wraps under it — the design's own 360px mock ("wraps
+   under pill only at 360"). At >=420px the pill keeps its shrink-to-fit width (default `flex: 0 1
+   auto`), so the "pill look" at normal/wide widths is unchanged. The four-tabs-on-one-row outcome is
+   unchanged either way; still jsdom-unverifiable, same caveat as below.
    PLACEMENT (real-browser-verified defect, caught and fixed before landing): this block must come
    AFTER both `.meta-record-drawer__tabs` and `.meta-record-drawer__tab`'s own base rules above, not
    between them -- an earlier draft placed it right after `.tabs` and before `.tab`, and the tab's own

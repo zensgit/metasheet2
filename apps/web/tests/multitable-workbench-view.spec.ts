@@ -5,6 +5,7 @@ import { computed, createApp, defineComponent, h, nextTick, reactive, ref, type 
 // P3-2 (2026-09-05): pure-function coverage for the mentionDisplayFieldId unification lives here,
 // beside the WB `mentionDisplayFieldId` computed it replaces — see that describe block below.
 import { resolveMentionDisplayField, resolvePrimaryField } from '../src/multitable/utils/recordDisplay'
+import { recordLabel } from '../src/multitable/utils/meta-record-labels'
 import type { MetaField } from '../src/multitable/types'
 
 const showErrorSpy = vi.fn()
@@ -484,6 +485,10 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
     emits: [
       'close', 'toggle-comments', 'comment-field', 'navigate', 'delete', 'patch',
       'comment-submit', 'comment-reply', 'comment-cancel-reply', 'update:comment-draft',
+      // Record inspector v3 (2026-09-05, PR-B1 §1.3 "Copy link"): the real inspector's copy-link icon
+      // emits `copy-link`; the workbench owns the clipboard write (`onCopyRecordLink`). The
+      // `data-copy-link` button below is this stub's stand-in for that icon.
+      'copy-link',
     ],
     render() {
       // Round 3 (2026-09-05): record what THIS render was given, visible or not — the real component
@@ -514,6 +519,14 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
             onClick: () => this.$emit('toggle-comments'),
           },
           'toggle-comments',
+        ),
+        h(
+          'button',
+          {
+            'data-copy-link': 'true',
+            onClick: () => this.$emit('copy-link'),
+          },
+          'copy-link',
         ),
         h(
           'button',
@@ -3337,6 +3350,82 @@ describe('MultitableWorkbench view wiring', () => {
       container!.querySelector<HTMLButtonElement>('[data-close-drawer="true"]')!.click()
       await flushUi()
       expect(hash()).toBe('')
+    })
+  })
+
+  // Record inspector v3 (2026-09-05, PR-B1 §1.3 "Copy link"): the inspector only emits `copy-link`;
+  // the workbench writes `window.location.href` — which carries `#recordId=<id>` while the panel is
+  // open (hash lifecycle above) — via `navigator.clipboard.writeText`, and reports the outcome through
+  // MetaToast (the `aria-live="polite"` / `role="status"` region, stubbed here as `showSuccessSpy` /
+  // `showErrorSpy`) with the reserved `record.copyLinkDone` / `record.copyLinkFailed` keys. The
+  // inspector-side "button disabled when the Clipboard API is absent" gate is pinned in
+  // multitable-record-fields-sections.spec.ts (it needs the REAL inspector, stubbed out here).
+  describe('copy link (§1.3 PR-B1)', () => {
+    // jsdom has no `navigator.clipboard`; each test installs exactly the shape it needs and restores
+    // the original descriptor (absent → deleted again) so no test sees another's stub.
+    function stubClipboard(clipboard: { writeText: (text: string) => Promise<void> } | undefined): () => void {
+      const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+      Object.defineProperty(navigator, 'clipboard', { value: clipboard, configurable: true })
+      return () => {
+        if (original) Object.defineProperty(navigator, 'clipboard', original)
+        else delete (navigator as unknown as Record<string, unknown>).clipboard
+      }
+    }
+
+    it('writes window.location.href (carrying #recordId=<id>) to the clipboard and reports record.copyLinkDone', async () => {
+      const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined)
+      const restore = stubClipboard({ writeText })
+      try {
+        mountWorkbench()
+        await flushUi()
+        container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+        await flushUi()
+        expect(window.location.hash).toBe('#recordId=rec_1')
+        container!.querySelector<HTMLButtonElement>('[data-copy-link="true"]')!.click()
+        await flushUi()
+        expect(writeText).toHaveBeenCalledTimes(1)
+        expect(writeText.mock.calls[0][0]).toBe(window.location.href)
+        expect(writeText.mock.calls[0][0]).toContain('#recordId=rec_1')
+        expect(showSuccessSpy).toHaveBeenCalledWith(recordLabel('record.copyLinkDone', false), undefined)
+        expect(showErrorSpy).not.toHaveBeenCalled()
+      } finally {
+        restore()
+      }
+    })
+
+    it('a rejected clipboard write reports record.copyLinkFailed (never copyLinkDone) and does not throw', async () => {
+      const writeText = vi.fn<(text: string) => Promise<void>>().mockRejectedValue(new Error('denied'))
+      const restore = stubClipboard({ writeText })
+      try {
+        mountWorkbench()
+        await flushUi()
+        container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+        await flushUi()
+        container!.querySelector<HTMLButtonElement>('[data-copy-link="true"]')!.click()
+        await flushUi()
+        expect(writeText).toHaveBeenCalledTimes(1)
+        expect(showErrorSpy).toHaveBeenCalledWith(recordLabel('record.copyLinkFailed', false))
+        expect(showSuccessSpy).not.toHaveBeenCalledWith(recordLabel('record.copyLinkDone', false), undefined)
+      } finally {
+        restore()
+      }
+    })
+
+    it('with no Clipboard API at all the handler reports record.copyLinkFailed instead of throwing (positive control for the absent-API branch)', async () => {
+      const restore = stubClipboard(undefined)
+      try {
+        expect((navigator as unknown as { clipboard?: unknown }).clipboard).toBeUndefined()
+        mountWorkbench()
+        await flushUi()
+        container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+        await flushUi()
+        container!.querySelector<HTMLButtonElement>('[data-copy-link="true"]')!.click()
+        await flushUi()
+        expect(showErrorSpy).toHaveBeenCalledWith(recordLabel('record.copyLinkFailed', false))
+        expect(showSuccessSpy).not.toHaveBeenCalledWith(recordLabel('record.copyLinkDone', false), undefined)
+      } finally {
+        restore()
+      }
     })
   })
 
