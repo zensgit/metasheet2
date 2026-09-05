@@ -203,11 +203,13 @@ SYN-A-1000              2     true   add       10 - Q235B   10 - 待备料  2026
 
 ## 10. 源绑定作用域回退(方向 B)
 
+> 这一节是**设计规则**的记录,不是彩排流水账——先落在这份运行记录里是为了不新开一份文档就能让 owner 看到上下文;W5 阶段会把它挪进正式设计文档,这里到时候只留一个指针。
+
 ### 为什么方向和 #5471 相反
 
 §7.1 修的是 `integration_external_systems`:UI 带 `workspaceId=default` 精确查询,而**建源**时挂在 `workspace_id IS NULL`(租户级)——精确命中不了,所以 #5471 让"**具体 hint 未命中**"回退到"**租户级 null 行**"(`selectScopedRow`,`external-systems.cjs:606-615`)。
 
-`integration_stock_prep_source_binding` 是反过来的现象:唯一索引 `(tenant_id, COALESCE(workspace_id,''), action_id)`(migration 079)允许 `workspace_id IS NULL` 与 `workspace_id='default'` 两行并存;**UI 写绑定**走 `POST /source-binding`,带的是 `workspaceId=default` 这个 query hint,所以真实写入的是 `'default'` 那一行,而不是 null 行。麻烦出在**读**这一侧:reconcile、mvp-persist、source preflight、carry、export、handoff、project board 这些调用点从来不传 `workspaceId`(`applyPersistedSourceBinding` 里 `optionalString(undefined) → null`),于是它们的查询永远是 `workspace_id IS NULL`,天然读不到 `'default'` 那一行。
+`integration_stock_prep_source_binding` 是反过来的现象:唯一索引 `(tenant_id, COALESCE(workspace_id,''), action_id)`(migration 079)允许 `workspace_id IS NULL` 与 `workspace_id='default'` 两行并存;**UI 写绑定**走 `POST /source-binding`,带的是 `workspaceId=default` 这个 query hint,所以真实写入的是 `'default'` 那一行,而不是 null 行。麻烦出在**读**这一侧:reconcile、mvp-persist、carry、export、handoff、project board 这些调用点从来不传 `workspaceId`(`applyPersistedSourceBinding` 里 `optionalString(undefined) → null`),于是它们的查询永远是 `workspace_id IS NULL`,天然读不到 `'default'` 那一行。(`stockPreparationSourcePreflight` 不在受益名单里——它在 `http-routes.cjs:6163` 调 `getTableAction({ actionId })` 时**连 tenantId 都没传**,`applyPersistedSourceBinding` 因此直接抛错,被路由自己的 `catch` 吞掉,这个回退它从来碰不到;这是一个独立的既有 bug,本次不修,只是澄清受益范围。)
 
 也就是说:#5471 是"**具体 hint 缺行 → 退到 null 行**";这里恰好相反,是"**null hint 缺行 → 找具体 workspace 行**"。两者是同一类"作用域没对齐"问题在两张表上的镜像表现,但回退方向不能互换——照抄 `selectScopedRow` 解决不了这里(它只在具体 hint 未命中时才查 null 行,null hint 本身从不加宽)。
 
@@ -215,12 +217,14 @@ SYN-A-1000              2     true   add       10 - Q235B   10 - 待备料  2026
 
 改动只在 `plugins/plugin-integration-core/lib/stock-preparation-source-binding-store.cjs` 的 `get()` 里(唯一读口):
 
-- 调用方传 `workspaceId: null`,精确匹配(`workspace_id IS NULL` 那一行)未命中时,查同 `(tenant_id, action_id)` 下 `workspace_id IS NOT NULL` 的所有行:
-  - **恰好一条** → 返回它,并在返回对象上附 `matchedWorkspaceId: <那条的 workspace_id>` 与 `scopeFallback: 'single_workspace_binding'`;
-  - **零条或两条及以上** → 返回 `null`,不猜测(fail-closed,和今天行为一致)。
-- 调用方传了**非 null** 的 `workspaceId` 但未命中 → 仍然只返回 `null`,**不**回退(这条行为是既有测试 `stock-preparation-source-binding.test.cjs:482` 钉住的,新增的 `stock-preparation-source-binding-scope-fallback.test.cjs` 的 F-04 又镜像复核了一遍)。
-- `workspace_id IS NULL` 那一行**存在**时精确优先,不看其它行(即使同时存在 `'default'` 行也不受影响)。
-- HTTP 层:`GET /source-binding`(选源弹窗)直接透传过 `store.get()` 的行,`http-routes.cjs` 里加了 `publicPersistedBinding()` 把 `matchedWorkspaceId`/`scopeFallback` 这两个新字段剥掉,保持 `persistedBinding` 的 7 字段线上契约(`apps/web/src/services/integration/stockPreparation/sourceBinding.ts` 里 `StockPreparationPersistedBinding` 的形状)不变;`resolveSourceBinding` 解析器(`http-routes.cjs` 里喂给 `createStockPreparationTableActionRegistry` 的那个)和 `POST /source-binding` 的响应都只取 `externalSystemId`,新字段本来就流不到那两处。
+- 调用方传 `workspaceId: null`,精确匹配(`workspace_id IS NULL` 那一行)未命中时,查同 `(tenant_id, action_id)` 下的所有行(`limit: 2` ——唯一索引保证 null 行最多一条,2 条已经足够判定"不止一条"):
+  - 若这次扫描里**又看到了** `workspace_id IS NULL` 的行(精确查询与这次扫描不是同一条语句,中间可能夹进一次并发写入)→ 返回 `null`,不贴 `scopeFallback` 标签——两次读互相矛盾时,宁可拒绝也不去猜哪次读是对的;
+  - 排除 null 行后**恰好一条** `workspace_id IS NOT NULL` 的行 → 返回它,并在返回对象上附 `matchedWorkspaceId: <那条的 workspace_id>` 与 `scopeFallback: 'single_workspace_binding'`;
+  - **零条或两条及以上** → 返回 `null`,不猜测(fail-closed,和今天行为一致)。**这意味着如果之后有人在第二个 workspace 下也给这个 action 绑了源,这条回退会悄悄失效**——退回今天(回退功能上线前)的行为,没有报错也没有日志:store 没有接 logger/onEvent,没地方发这条通知。运维记住这一条:同一 `(tenant_id, action_id)` 下只应该存在一条 workspace 绑定,第二条一出现,没传 workspace 的调用方就又读不到了。
+- 调用方传了**非 null** 的 `workspaceId` 但未命中 → 仍然只返回 `null`,**不**回退,即使此时同一 `(tenant_id, action_id)` 下存在另一个 workspace 的单条绑定(这条行为是既有测试 `stock-preparation-source-binding.test.cjs:482` 钉住的;新增的 `stock-preparation-source-binding-scope-fallback.test.cjs` 里 F-07 是真正钉住"不猜到别的 workspace"这条的用例——F-04 只种了 null 行,删掉守卫也不会让它变红,F-07 才会)。
+- `workspace_id IS NULL` 那一行**命中**时精确优先,不看其它行(即使同时存在 `'default'` 行也不受影响)。
+- HTTP 层:`GET /source-binding`(选源弹窗)直接透传过 `store.get()` 的行,`http-routes.cjs` 里加了 `publicPersistedBinding()` 把 `matchedWorkspaceId`/`scopeFallback` 这两个新字段剥掉,保持 `persistedBinding` 的 7 字段线上契约(`apps/web/src/services/integration/stockPreparation/sourceBinding.ts` 里 `StockPreparationPersistedBinding` 的形状)不变;`resolveSourceBinding` 解析器(`http-routes.cjs` 里喂给 `createStockPreparationTableActionRegistry` 的那个)和 `POST /source-binding` 的响应都只取 `externalSystemId`,新字段本来就流不到那两处。**注意口径**:这只是"未命中路径"逐字节不变——命中路径(不管是精确命中还是回退命中)本身多了 `matchedWorkspaceId`/`scopeFallback` 这两个内部注解键,只是它们的消费方目前只有两处(见下一条),都已经处理过。
+- **真正消费 `matchedWorkspaceId` 的地方**:`http-routes.cjs` 的 `loadTableActionSourceAdapter`。回退把 `action.source.externalSystemId` 解到了一个可能只存在于**别的 workspace** 下的外接源行,但这个函数原来取外接源用的还是**请求自己的** workspace hint(null)——而 `external-systems.cjs` 的 `selectScopedRow` 对 null hint 从不加宽,于是绑定明明解出来了,取外接源那一步照样 404。修法:仅当"请求本身没带 workspace hint"且"回退确实是这次解析的原因"(重新问一次 store,`scopeFallback==='single_workspace_binding'` 且 `externalSystemId` 对得上)时,把 `matchedWorkspaceId` 作为取外接源的 workspace hint——这样无论外接源本身建在 `'default'` 还是建在 null,都能取到(非 null hint 未命中会退到 null 行,两种布局都覆盖)。测试见 `stock-preparation-source-binding-routes.test.cjs` 的 R-22。
 
 ### 222 上线后的清理步骤
 
@@ -241,4 +245,4 @@ WHERE tenant_id = '<TENANT_ID>'
   AND workspace_id IS NULL;
 ```
 
-若两行 `external_system_id` **不一致**,先别删——说明有人分别在两个 scope 下点过"保存",需要先确认哪个是当前应生效的源,再决定删哪条或是否需要 owner 介入;这张表没有改字段的 UPDATE 入口(store 头注释 "NO DELETE SURFACE" 说的是不建模"解绑",不是不能删错行),清理只能走这条 SQL。
+若两行 `external_system_id` **不一致**,先别删——说明有人分别在两个 scope 下点过"保存",需要先确认哪个是当前应生效的源,再决定删哪条或是否需要 owner 介入。**更正**:这张表并非没有 UPDATE 入口——`POST /source-binding` 重新绑定同一 scope 时,store 的 `set()` 就是走 `updateRow` 改写那一行的 `external_system_id`(`stock-preparation-source-binding-store.cjs` 的 `set()` 函数,rebind 分支);没有的是**跨 scope 的编辑入口**——没有 API 能把一条已存在的行从一个 `workspace_id` 改挂到另一个,也没有"解绑"(store 头注释 "NO DELETE SURFACE" 说的正是这个,不是"不能删错行")。跨 scope 的合并/清理因此只能走上面这条直接 SQL,不是绕过了什么本该用的入口。

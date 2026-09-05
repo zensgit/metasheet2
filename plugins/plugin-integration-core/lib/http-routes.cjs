@@ -4184,13 +4184,55 @@ function requireStockPreparationAudit() {
     throw new HttpRouteError(403, 'LARGE_BOM_JOB_ACTOR_MISMATCH', 'this large-BOM job belongs to another user')
   }
 
+  /**
+   * F3 — the scope-fallback's real consumer.
+   *
+   * `stock-preparation-source-binding-store.cjs`'s `get()` can resolve `action.source.externalSystemId`
+   * via its null-workspace scope fallback: the caller passed NO workspace hint at all, the exact
+   * `workspace_id IS NULL` binding row was absent, and exactly one OTHER workspace's binding row
+   * existed, so that row's `externalSystemId` was used. Fine for the BINDING lookup — but the
+   * external-SYSTEM row that id names can itself live at that other workspace, never at null. Load it
+   * with the SAME null hint the caller carried and `external-systems.cjs`'s `selectScopedRow` will
+   * not widen it — a null hint never falls back to anything (only a non-null hint that misses falls
+   * back to the tenant-wide null row) — so the read 404s with `TABLE_ACTION_SOURCE_INVALID` even
+   * though the binding step just found the source a moment ago.
+   *
+   * The fix: when this caller carries NO workspace hint of its own, ask the binding store again for
+   * the SAME scope. If it says the SAME `externalSystemId` came from that fallback, use its
+   * `matchedWorkspaceId` as the workspace hint for the external-system lookup instead of the caller's
+   * (null) one. That succeeds whichever way the deployment provisioned the row: `selectScopedRow`
+   * matches it directly if it lives at `matchedWorkspaceId`, or (a non-null hint that misses DOES
+   * widen) falls back to the tenant-wide null row if it lives there instead.
+   *
+   * Re-querying the store here is a second read, not a shared one with `applyPersistedSourceBinding`
+   * — deliberately: this function receives the already-resolved `action`, not the binding object, and
+   * changing that contract would let the fallback's two annotation keys leak into
+   * `stock-preparation-table-actions.cjs`'s R-05 "no key outside `source` moves" guarantee. The
+   * `externalSystemId` equality check below guards the (narrow) race where the binding changed
+   * between the two reads: on a mismatch this simply does nothing extra, which is exactly today's
+   * (pre-F3) behaviour — no new failure mode, just the old one, in an already-rare window.
+   */
   async function loadTableActionSourceAdapter(req, action, options = {}) {
     const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
       ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       : externalSystems.getExternalSystem.bind(externalSystems)
     const sourceScope = { id: action.source.externalSystemId }
     if (options.tenantId) sourceScope.tenantId = options.tenantId
-    if (action.source.workspaceId) sourceScope.workspaceId = action.source.workspaceId
+    if (action.source.workspaceId) {
+      sourceScope.workspaceId = action.source.workspaceId
+    } else if (stockPreparationSourceBinding && typeof stockPreparationSourceBinding.get === 'function' && !resolveWorkspaceId(req, {})) {
+      const fallbackTenantId = options.tenantId || resolveTenantId(req, {})
+      const binding = fallbackTenantId
+        ? await stockPreparationSourceBinding.get({ tenantId: fallbackTenantId, workspaceId: null, actionId: action.actionId })
+        : null
+      if (
+        binding
+        && binding.scopeFallback === 'single_workspace_binding'
+        && binding.externalSystemId === action.source.externalSystemId
+      ) {
+        sourceScope.workspaceId = binding.matchedWorkspaceId
+      }
+    }
     const system = await loadSystem(scopedAdapterInput(req, sourceScope))
     if (options.requireActive === true && (!system || system.status !== 'active')) {
       throw new HttpRouteError(409, 'TABLE_ACTION_SOURCE_NOT_ACTIVE', 'configured table action source is not active')
@@ -7438,9 +7480,12 @@ function requireStockPreparationAudit() {
       ])
       // `store.get()` may annotate a non-null return with `matchedWorkspaceId` / `scopeFallback`,
       // internal resolution metadata for the null-workspace scope-fallback (reconcile, mvp-persist,
-      // source preflight, carry, export, handoff and the project board all call the registry with no
-      // workspace hint at all, so that fallback is who those two fields exist for). The picker's own
-      // wire contract is the 7-field shape the web client already types as
+      // carry, export, handoff and the project board all call the registry with no workspace hint at
+      // all, so that fallback is who those two fields exist for — `stockPreparationSourcePreflight`
+      // does NOT benefit: it calls `getTableAction({ actionId })` with no `tenantId` either, at
+      // :6163, so `applyPersistedSourceBinding` throws and the route's own `catch` swallows it before
+      // the fallback is ever reached; that is a separate, pre-existing bug this line does not fix).
+      // The picker's own wire contract is the 7-field shape the web client already types as
       // StockPreparationPersistedBinding; strip the two extra keys here so that contract stays
       // exactly what it always was rather than growing as a side effect of a store-internal
       // resolution detail nothing on this screen renders.
