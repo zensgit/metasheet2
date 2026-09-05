@@ -74,6 +74,26 @@ export interface GridConflictState {
   nextLinkSummaries?: LinkedRecordSummary[]
 }
 
+/**
+ * Record inspector v3 PR-B2 (docs/development/multitable-record-inspector-v3-design-20260905.md §1.3
+ * "Field-anchored server errors", §4 item 11): the most recent patchCell REJECTION, kept with the
+ * HTTP status / error code / server `fieldErrors` map that `client.ts`'s parseJson already attaches to
+ * the thrown MultitableApiError but that the composable used to flatten into the single `error.value`
+ * string. A caller (the workbench's `onDrawerPatch`) reads this to decide toast-vs-inline routing.
+ * `fieldErrors` is whatever the server sent, normalised by client.ts (`normalizeFieldErrors`) — this
+ * composable never synthesises a map from `message` text (the /patch route on this head emits none;
+ * see the PR body pre-check).
+ */
+export interface GridPatchFailure {
+  recordId: string
+  fieldId: string
+  attemptedValue: unknown
+  status?: number
+  code?: string
+  message: string
+  fieldErrors?: Record<string, string>
+}
+
 type RemoteRecordMergeOptions = {
   linkSummaries?: Record<string, LinkedRecordSummary[]>
   personSummaries?: Record<string, PersonSummary[]>
@@ -498,6 +518,11 @@ export function useMultitableGrid(opts: {
   const accumulationCapped = ref(false)
   const error = ref<string | null>(null)
   const conflict = ref<GridConflictState | null>(null)
+  // PR-B2 (§1.3): ADDITIVE read-side companion to `error` for patchCell rejections — see the
+  // `GridPatchFailure` doc comment. Reset at the start of every patchCell (a success leaves it null,
+  // so it never points at a PRIOR failure); the rollback, `conflict` and `error` writes in patchCell's
+  // catch are byte-for-byte what they were before this ref existed.
+  const lastPatchFailure = ref<GridPatchFailure | null>(null)
   // W3-5: the batchId of the most recent successful commit (patchCell / bulkPatch), so a caller can
   // surface a "view in history" deep-link without re-deriving it. Cleared on a failed commit (never
   // stale-points at a PRIOR successful batch after a later failure); null before any commit this session.
@@ -1057,6 +1082,7 @@ export function useMultitableGrid(opts: {
   ) {
     error.value = null
     conflict.value = null
+    lastPatchFailure.value = null
     if (resolveRowActions(recordId)?.canEdit === false) return rejectRowEdit()
     const row = rows.value.find((r) => r.id === recordId)
     const oldValue = row?.data[fieldId]
@@ -1099,6 +1125,17 @@ export function useMultitableGrid(opts: {
           previousLinkSummaries: oldLinkSummaries,
           nextLinkSummaries,
         }
+      }
+      // PR-B2 (§1.3): additive — records status/code/fieldErrors for the caller's routing decision.
+      // Nothing above or below this block changed (rollback + conflict + error.value stay as-is).
+      lastPatchFailure.value = {
+        recordId,
+        fieldId,
+        attemptedValue: value,
+        status: typeof e?.status === 'number' ? e.status : undefined,
+        code: typeof e?.code === 'string' ? e.code : undefined,
+        message: e?.message ?? fallback('grid.errorPatchCell'),
+        fieldErrors: e?.fieldErrors && typeof e.fieldErrors === 'object' ? { ...(e.fieldErrors as Record<string, string>) } : undefined,
       }
       error.value = e.message ?? fallback('grid.errorPatchCell')
     }
@@ -1390,7 +1427,7 @@ export function useMultitableGrid(opts: {
 
   return {
     // State
-    fields, rows, linkSummaries, personSummaries, attachmentSummaries, fieldPermissions, viewPermission, capabilityOrigin, rowActions, rowActionOverrides, loading, error, conflict, lastBatchId, page, hiddenFieldIds, fieldOrder, visibleFields, readOnlyFieldIds,
+    fields, rows, linkSummaries, personSummaries, attachmentSummaries, fieldPermissions, viewPermission, capabilityOrigin, rowActions, rowActionOverrides, loading, error, conflict, lastPatchFailure, lastBatchId, page, hiddenFieldIds, fieldOrder, visibleFields, readOnlyFieldIds,
     // A1 infinite-scroll accumulation state
     loadingMore, accumulationCapped,
     sortRules, filterRules, filterConjunction, nestedFilterNodes, filterGroups, sortFilterDirty,
