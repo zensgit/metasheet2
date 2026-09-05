@@ -407,7 +407,7 @@ import {
 } from '../utils/comment-affordance'
 import { isSystemField } from '../utils/system-fields'
 import { isFieldAlwaysReadOnly } from '../utils/field-permissions'
-import { isYjsTextEligible } from '../utils/yjs-text-eligibility'
+import { isDateLikeStringField, isYjsTextEligible } from '../utils/yjs-text-eligibility'
 import { isYjsCollabEnabled } from '../composables/useYjsCellBinding'
 import { useLocale } from '../../composables/useLocale'
 import { frozenPrefixCount } from '../utils/frozen-columns'
@@ -1334,7 +1334,21 @@ function confirmEdit() {
     // the edit for this exact cell. If the Yjs path was not active (flag
     // off, timeout, error) we stay on REST unchanged.
     const handledViaYjs = yjsHandledCellKey.value === cellKey(recordId, fieldId)
-    if (!handledViaYjs && value !== row.data[fieldId]) {
+    // P3-2 (round 5): normalize ONLY the null/undefined distinction before
+    // comparing — not '' or any other falsy value. `startEdit` stages a
+    // never-before-set cell as `row.data[field.id] ?? null` (line above,
+    // `?? null`), so an untouched edit session on a field that is `undefined`
+    // in `row.data` (never written, vs. explicitly written `null`) staged
+    // `null` while `row.data[fieldId]` itself stays `undefined` — the strict
+    // `!==` below used to read that as a genuine change and emit
+    // `patch-cell(..., null, ...)` on a plain type-to-edit-then-close-with-
+    // no-typing, for a cell nothing about the user's session actually
+    // touched. `''` must stay distinct from both (an explicit empty string is
+    // a real, different value from "never set") — so this normalizes ONLY
+    // `undefined -> null` on each side, not a general nullish/falsy
+    // collapse.
+    const normalize = (v: unknown): unknown => (v === undefined ? null : v)
+    if (!handledViaYjs && normalize(value) !== normalize(row.data[fieldId])) {
       emit('patch-cell', recordId, fieldId, value, row.version)
     }
   }
@@ -1559,6 +1573,23 @@ function onKeydown(e: KeyboardEvent) {
   //     seeded — a checkbox/date/dropdown/picker has no meaningful "replace
   //     with one printable character" semantics.
   //
+  //   P2 (round 5): a `string` field that renders as the date-like
+  //     `<input type="date">` branch (`isDateLikeStringField` — by field-name
+  //     convention, e.g. "Due Date", or because the current value already
+  //     looks like an ISO date; the SAME predicate MetaCellEditor's own
+  //     `isDateLike` uses to choose that branch) is excluded from the string
+  //     seed above and falls through to `undefined`/not-seeded — treated
+  //     exactly like the real `date` field type just above: a date picker has
+  //     no meaningful "replace with one printable character" semantics
+  //     either, seeded or not. Before this exclusion, seeding a bare
+  //     character (e.g. '5') into `modelValue` opened a `type="date"` input
+  //     whose `:value` binding can't parse a single digit — it rendered
+  //     EMPTY — while blur-commit (D2) would still commit that raw character
+  //     verbatim over the cell's real value on click-away: a picker showing
+  //     nothing, committing something. Checked against `r.data[f.id]`
+  //     (matching `isDateLike`'s own `props.modelValue` read at render time),
+  //     not the yet-to-be-typed seed character.
+  //
   //   P1 (round 4, superseding P3-1/round 3): a Yjs-eligible `string` cell
   //   (`isYjsTextEligible` — the SAME condition MetaCellEditor uses to decide
   //   whether to CONSTRUCT a live binding at all) is a carve-out from the
@@ -1574,9 +1605,16 @@ function onKeydown(e: KeyboardEvent) {
   //   straight through to the normal string-seed branch below, byte-
   //   identical to a non-eligible string cell.
   //
-  //   Flag ON + eligible: still preventDefault (no Space-scroll, no Firefox
-  //   quick-find on '/', no workbench '?' shortcut) and still open the
-  //   editor immediately — but stage the ROW'S CURRENT VALUE, never the
+  //   Flag ON + eligible: still preventDefault AND stopPropagation (P3-1,
+  //   round 5 — preventDefault alone stops the browser's OWN default action
+  //   for the key, e.g. Space-scroll or Firefox quick-find on '/', but does
+  //   NOT stop the keydown from continuing to bubble; an ancestor listener
+  //   that never reads `defaultPrevented` — e.g. the workbench's own
+  //   shortcuts-overlay '?' handler — still observes it. A round-4 version of
+  //   this comment claimed preventDefault alone was sufficient; it was not:
+  //   without stopPropagation, seeding '?' both opened this editor AND
+  //   toggled the workbench's shortcuts overlay from the same keydown) and
+  //   still open the editor immediately — but stage the ROW'S CURRENT VALUE, never the
   //   typed character and never ''. This is exactly `startEdit`'s own seed
   //   (`row.data[field.id] ?? null`, see that function) minus the keystroke:
   //   type-to-edit on a Yjs-eligible cell degrades to "open the editor as if
@@ -1597,16 +1635,18 @@ function onKeydown(e: KeyboardEvent) {
     if (r && f && isEditable(r.id, f)) {
       if (isYjsCollabEnabled() && isYjsTextEligible(f, groupedRows.value ? null : r.id, r.data[f.id])) {
         e.preventDefault()
+        e.stopPropagation()
         yjsHandledCellKey.value = null
         editCell.value = { recordId: r.id, fieldId: f.id, value: r.data[f.id] ?? null }
         return
       }
       const seedValue: unknown =
-        f.type === 'string' ? e.key
+        f.type === 'string' && !isDateLikeStringField(f, r.data[f.id]) ? e.key
         : f.type === 'number' && /^[0-9]$/.test(e.key) ? Number(e.key)
         : undefined
       if (seedValue !== undefined) {
         e.preventDefault()
+        e.stopPropagation()
         yjsHandledCellKey.value = null
         editCell.value = { recordId: r.id, fieldId: f.id, value: seedValue }
         return

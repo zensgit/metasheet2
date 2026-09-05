@@ -487,6 +487,17 @@ const emit = defineEmits<{
    * unaffected (there is nothing focusable BEFORE it to reach).
    *
    * Payload is `event.shiftKey` (true = move backward).
+   *
+   * KNOWN RESIDUAL (round 5, scoped out — see P3-4 on `blur-commit` above):
+   * `onAiRunTab` (Tab FROM the AI-run button) is reachable on a `longText`
+   * cell too (`aiRunVisible` admits `longText`, same as `blur-commit`'s
+   * button), but — unlike `onAiRunBlur`, gated this round — it has NO
+   * `field.type === 'longText'` exclusion, so it still emits `tab-commit`
+   * there, contradicting "the SAME four branches" for THIS event
+   * specifically. The verified finding this round named `blur-commit` only;
+   * left as a named, deliberate gap rather than silently drifting further —
+   * a follow-up should either gate `onAiRunTab` the same way or amend this
+   * doc.
    */
   (e: 'tab-commit', shiftKey: boolean): void
 }>()
@@ -882,8 +893,30 @@ function onAiRunTab(e: KeyboardEvent) {
 // the editor (e.g. Shift+Tab from the button returns to the input — an
 // in-editor focus move, not a click-away), same yjs-commit-before-
 // blur-commit order as every other blur handler here.
+//
+// P3-4 (round 5): `blur-commit`'s own emit-doc comment above says it is
+// emitted "ONLY by the plain scalar/text/number/date branches" — but
+// `aiRunVisible` renders this button for BOTH `string` AND `longText` fields
+// (see that computed), so this handler is reachable from a `longText` cell
+// too, where it contradicted that contract: `longText` uses Cmd/Ctrl+Enter
+// to confirm (see the plain-textarea/rich-longText branches' own
+// `@keydown.*.enter`), not blur — a blur-triggered commit there would fire
+// on an ordinary click into the AI-run button mid-edit, surprising for an
+// editor whose whole confirm story is "you must press Cmd/Ctrl+Enter".
+// Gated HERE (field-type check) rather than by editing the doc, so
+// `blur-commit`'s own "same four branches" claim stays true without
+// amendment. (`tab-commit`'s OWN doc, which merely points at this same
+// enumeration, is NOT restored to true by this fix alone — `onAiRunTab` has
+// no matching gate; see the "KNOWN RESIDUAL" note on that emit's own doc
+// comment above for why that is a deliberately scoped-out, named gap rather
+// than a silent one.) Order:
+// `hostCommitPolicy` stays the FIRST check (this file's P2-1 doctrine — a
+// `'none'`-policy host, e.g. MetaBulkEditDialog, must see this as a true
+// no-op before anything else runs), then the `longText` gate, then
+// `shouldIgnoreBlur`.
 function onAiRunBlur(e: FocusEvent) {
   if (props.hostCommitPolicy !== 'grid') return
+  if (props.field.type === 'longText') return
   if (shouldIgnoreBlur(e)) return
   if (yjsActive.value) emit('yjs-commit')
   emit('blur-commit')

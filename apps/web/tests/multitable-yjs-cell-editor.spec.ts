@@ -319,4 +319,181 @@ describe('MetaCellEditor Yjs binding eligibility', () => {
       expect(evt.defaultPrevented).toBe(false)
     })
   })
+
+  // ── round 5, P3-3: onAiRunBlur's three guards (shouldIgnoreBlur, the yjs-commit-before-
+  //             blur-commit emit, hostCommitPolicy) had zero discriminating coverage — each test
+  //             below reds under removing exactly the one guard it names. ────────────────────────
+  describe('round 5 (P3-3): onAiRunBlur guard coverage', () => {
+    const AI_STRING_FIELD = {
+      id: 'fld_title',
+      name: 'Title',
+      type: 'string' as const,
+      property: { aiShortcut: { kind: 'summarize', sourceFieldIds: ['fld_title'] } },
+    }
+
+    it('guard A (shouldIgnoreBlur): blur FROM the AI-run button back INTO the editor input is an in-editor focus move, not a commit', async () => {
+      // MUTATION: removing `if (shouldIgnoreBlur(e)) return` from onAiRunBlur reds this —
+      // onBlurCommit would fire even though focus never left the editor.
+      const onBlurCommit = vi.fn()
+      const onYjsCommit = vi.fn()
+      const root = await mountEditor({
+        field: AI_STRING_FIELD,
+        aiRunState: { pending: false, busy: false },
+        hostCommitPolicy: 'grid',
+        onAiRun: vi.fn(),
+        onBlurCommit,
+        onYjsCommit,
+      })
+
+      const input = root.querySelector('.meta-cell-editor__input') as HTMLInputElement
+      const button = root.querySelector('[data-test="cell-ai-run"]') as HTMLButtonElement
+      expect(button).toBeTruthy() // sanity: the button IS rendered in this session
+
+      // Shift+Tab from the button natively returns focus to the input — simulated directly as the
+      // blur event the browser would fire, `relatedTarget` pointing back INTO the editor.
+      button.dispatchEvent(new FocusEvent('blur', { relatedTarget: input, bubbles: true }))
+
+      expect(onBlurCommit).not.toHaveBeenCalled()
+      expect(onYjsCommit).not.toHaveBeenCalled()
+    })
+
+    it('guard B (yjs-commit-before-blur-commit order): a genuine click-away emits yjs-commit BEFORE blur-commit when the text binding is active', async () => {
+      // MUTATION: swapping the two emit statements in onAiRunBlur (or dropping the `yjsActive.value`
+      // check so yjs-commit fires even when inactive) reds the `order` assertion below; deleting the
+      // `if (yjsActive.value) emit('yjs-commit')` line entirely reds the count assertion too.
+      const order: string[] = []
+      const onYjsCommit = vi.fn(() => order.push('yjs-commit'))
+      const onBlurCommit = vi.fn(() => order.push('blur-commit'))
+      const root = await mountEditor({
+        field: AI_STRING_FIELD,
+        aiRunState: { pending: false, busy: false },
+        hostCommitPolicy: 'grid',
+        onAiRun: vi.fn(),
+        onYjsCommit,
+        onBlurCommit,
+      })
+
+      const binding = useYjsCellBindingMock.mock.results[0]!.value as { active: { value: boolean } }
+      binding.active.value = true // connection completes — the text path is now live
+
+      const button = root.querySelector('[data-test="cell-ai-run"]') as HTMLButtonElement
+      const outside = document.createElement('button')
+      document.body.appendChild(outside)
+      button.dispatchEvent(new FocusEvent('blur', { relatedTarget: outside, bubbles: true }))
+
+      expect(onYjsCommit).toHaveBeenCalledTimes(1)
+      expect(onBlurCommit).toHaveBeenCalledTimes(1)
+      expect(order).toEqual(['yjs-commit', 'blur-commit'])
+      outside.remove()
+    })
+
+    it('guard B negative control: the identical click-away when the binding is inactive does not emit yjs-commit', async () => {
+      const onYjsCommit = vi.fn()
+      const onBlurCommit = vi.fn()
+      const root = await mountEditor({
+        field: AI_STRING_FIELD,
+        aiRunState: { pending: false, busy: false },
+        hostCommitPolicy: 'grid',
+        onAiRun: vi.fn(),
+        onYjsCommit,
+        onBlurCommit,
+      })
+
+      const button = root.querySelector('[data-test="cell-ai-run"]') as HTMLButtonElement
+      const outside = document.createElement('button')
+      document.body.appendChild(outside)
+      button.dispatchEvent(new FocusEvent('blur', { relatedTarget: outside, bubbles: true }))
+
+      expect(onYjsCommit).not.toHaveBeenCalled()
+      expect(onBlurCommit).toHaveBeenCalledTimes(1)
+      outside.remove()
+    })
+
+    it('guard C (hostCommitPolicy): policy \'none\' on the AI-run button\'s own blur is a true no-op — no blur-commit, no yjs-commit', async () => {
+      // MUTATION: removing `if (props.hostCommitPolicy !== 'grid') return` from the TOP of
+      // onAiRunBlur reds this — MetaBulkEditDialog (which never sets hostCommitPolicy) would see a
+      // stray blur-commit from this button that it never asked for and has no listener prepared for.
+      const onBlurCommit = vi.fn()
+      const onYjsCommit = vi.fn()
+      const root = await mountEditor({
+        field: AI_STRING_FIELD,
+        aiRunState: { pending: false, busy: false },
+        hostCommitPolicy: undefined, // 'none'
+        onAiRun: vi.fn(),
+        onBlurCommit,
+        onYjsCommit,
+      })
+
+      const button = root.querySelector('[data-test="cell-ai-run"]') as HTMLButtonElement
+      const outside = document.createElement('button')
+      document.body.appendChild(outside)
+      button.dispatchEvent(new FocusEvent('blur', { relatedTarget: outside, bubbles: true }))
+
+      expect(onBlurCommit).not.toHaveBeenCalled()
+      expect(onYjsCommit).not.toHaveBeenCalled()
+      outside.remove()
+    })
+  })
+
+  // ── round 5, P3-4: blur-commit's own emit-doc says it is emitted "ONLY by the plain
+  //             scalar/text/number/date branches" — but the AI-run button renders for `longText`
+  //             fields too (`aiRunVisible`), so onAiRunBlur must exclude that field type to keep the
+  //             contract true. ─────────────────────────────────────────────────────────────────────
+  describe('round 5 (P3-4): onAiRunBlur excludes longText — that contract stays "ONLY the four scalar/text/number/date branches"', () => {
+    it('a click-away from the AI-run button on a plain longText cell does NOT emit blur-commit (Cmd/Ctrl+Enter is that editor\'s own confirm story)', async () => {
+      // MUTATION: removing `if (props.field.type === 'longText') return` from onAiRunBlur reds this
+      // — the button is reachable (aiRunVisible admits `longText`), so without the gate this would
+      // emit blur-commit exactly like the `string` case the positive control below re-confirms.
+      const onBlurCommit = vi.fn()
+      const root = await mountEditor({
+        field: {
+          id: 'fld_notes',
+          name: 'Notes',
+          type: 'longText',
+          property: { aiShortcut: { kind: 'summarize', sourceFieldIds: ['fld_notes'] } },
+        },
+        modelValue: 'some notes',
+        aiRunState: { pending: false, busy: false },
+        hostCommitPolicy: 'grid',
+        onAiRun: vi.fn(),
+        onBlurCommit,
+      })
+
+      // Sanity: the plain (non-rich) longText branch actually rendered — no `property.rich`.
+      expect(root.querySelector('.meta-cell-editor__textarea')).toBeTruthy()
+      const button = root.querySelector('[data-test="cell-ai-run"]') as HTMLButtonElement
+      expect(button).toBeTruthy() // sanity: aiRunVisible DOES admit longText
+
+      const outside = document.createElement('button')
+      document.body.appendChild(outside)
+      button.dispatchEvent(new FocusEvent('blur', { relatedTarget: outside, bubbles: true }))
+
+      expect(onBlurCommit).not.toHaveBeenCalled()
+      outside.remove()
+    })
+
+    it('positive control: the identical click-away on a `string` field (same AI-run button) still emits blur-commit', async () => {
+      const onBlurCommit = vi.fn()
+      const root = await mountEditor({
+        field: {
+          id: 'fld_title',
+          name: 'Title',
+          type: 'string',
+          property: { aiShortcut: { kind: 'summarize', sourceFieldIds: ['fld_title'] } },
+        },
+        aiRunState: { pending: false, busy: false },
+        hostCommitPolicy: 'grid',
+        onAiRun: vi.fn(),
+        onBlurCommit,
+      })
+
+      const button = root.querySelector('[data-test="cell-ai-run"]') as HTMLButtonElement
+      const outside = document.createElement('button')
+      document.body.appendChild(outside)
+      button.dispatchEvent(new FocusEvent('blur', { relatedTarget: outside, bubbles: true }))
+
+      expect(onBlurCommit).toHaveBeenCalledTimes(1)
+      outside.remove()
+    })
+  })
 })

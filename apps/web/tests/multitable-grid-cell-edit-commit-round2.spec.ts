@@ -260,9 +260,17 @@ describe('MetaGridTable cell-edit commit reliability round 2 (P1, P3-A..D)', () 
   //          REAL (spread from `importOriginal`) so the flag stub below exercises production gating
   //          logic, not a test-authored reimplementation of it. ─────────────────────────────────
   describe('P1: the Yjs carve-out only applies when the build flag is actually on', () => {
+    // Test-infra fix (round 5, discovered while adding the P2/P3-1 suites below): `vi.stubEnv`
+    // captures process.env's CURRENT value as "the original" to restore on `unstubAllEnvs()`. The
+    // three "flag ON" tests below set the raw `process.env.VITE_ENABLE_YJS_COLLAB = 'true'` BEFORE
+    // calling `vi.stubEnv(..., 'true')`, so the captured "original" is already 'true' — the OLD
+    // order here (`delete` THEN `unstubAllEnvs()`) deleted it and then immediately restored it back
+    // to 'true', leaking the flag ON into every test that ran afterward in this file. `unstubAllEnvs`
+    // now runs FIRST (restoring to that same polluted 'true'), and `delete` runs second so it always
+    // wins — the next test starts with the var genuinely absent regardless of stubEnv's own record.
     afterEach(() => {
-      delete process.env.VITE_ENABLE_YJS_COLLAB
       vi.unstubAllEnvs()
+      delete process.env.VITE_ENABLE_YJS_COLLAB
     })
 
     it('flag OFF (default): a Yjs-eligible cell seeds normally like any other string cell — editor opens with the typed character, defaultPrevented true, and click-away patches that typed character (NEVER \'\')', async () => {
@@ -1054,5 +1062,216 @@ describe('MetaGridTable cell-edit commit reliability round 2 (P1, P3-A..D)', () 
     // MetaCellEditor directly, asserting `cancel` vs `blur-commit` — see that file for why the
     // grid-level `patchSpy` assertion alone cannot discriminate the relevant mutation here) rather
     // than duplicating another `h(MetaCellEditor, ...)` literal into this MetaGridTable-only file.
+  })
+
+  // ── round 5, P2: a date-like-by-name `string` cell is picker-shaped (renders MetaCellEditor's
+  //             `<input type="date">` branch) — D1's seed-with-e.key rule must exclude it, the same
+  //             way it already excludes boolean/date/select/link/attachment. Uses `visibleFields`
+  //             propsOverride (not a change to the shared module-level `FIELDS`/`makeRows` — see the
+  //             round-3 `groupFields` precedent above for why: `FIELDS`/column-index assumptions in
+  //             OTHER describe blocks in this file are keyed to exactly [title, score]). ───────────
+  describe('P2 (round 5): type-to-edit never seeds a date-like-by-name string cell', () => {
+    const DATE_LIKE_FIELD: MetaField = { id: 'due', name: 'Due Date', type: 'string' }
+    function makeDateRows(): MetaRecord[] {
+      return [{ id: 'r0', version: 1, data: { due: '2024-05-01' } }]
+    }
+
+    it('a printable key on a focused date-like string cell opens NO editor, is not defaultPrevented, and emits no patch — matches boolean/date\'s "not seeded" rule exactly', async () => {
+      // MUTATION: dropping the `!isDateLikeStringField(f, r.data[f.id])` conjunct from the seedValue
+      // ternary reds this — the editor would open seeded with the RAW character '5' inside a
+      // `type="date"` input, which can't parse it (renders empty) while blur-commit would still
+      // persist that raw '5' over the real value on click-away.
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeDateRows(), patchSpy, { visibleFields: [DATE_LIKE_FIELD] })
+      await flushUi()
+
+      cellAt(root, 0, 0).click()
+      await flushUi()
+
+      const evt = new KeyboardEvent('keydown', { key: '5', bubbles: true, cancelable: true })
+      gridEl(root).dispatchEvent(evt)
+      await flushUi()
+
+      expect(editorInput(root)).toBeNull()
+      expect(evt.defaultPrevented).toBe(false)
+      expect(patchSpy).not.toHaveBeenCalled()
+    })
+
+    it('dblclick still opens the SAME cell normally, seeded with its CURRENT value (only type-to-edit SEEDING is excluded, not editing outright)', async () => {
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeDateRows(), patchSpy, { visibleFields: [DATE_LIKE_FIELD] })
+      await flushUi()
+
+      cellAt(root, 0, 0).dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+      await flushUi()
+
+      const input = editorInput(root)
+      expect(input).toBeTruthy()
+      expect(input!.type).toBe('date') // the date-like string branch (MetaCellEditor's `isDateLike`)
+      expect(input!.value).toBe('2024-05-01') // the row's real current value — never '5', never empty
+    })
+
+    it('regression guard: the identical printable key on a NON-date-like string cell (this file\'s own `title` column) still seeds normally', async () => {
+      // Proves the P2 exclusion is scoped to isDateLikeStringField, not a blanket regression of D1's
+      // string-seed branch.
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeRows(), patchSpy) // default FIELDS: title (plain string), score (number)
+      await flushUi()
+
+      cellAt(root, 0, 0).click()
+      await flushUi()
+
+      const evt = new KeyboardEvent('keydown', { key: '5', bubbles: true, cancelable: true })
+      gridEl(root).dispatchEvent(evt)
+      await flushUi()
+
+      expect(editorInput(root)).toBeTruthy()
+      expect(editorInput(root)!.value).toBe('5')
+      expect(evt.defaultPrevented).toBe(true)
+    })
+  })
+
+  // ── round 5, P3-1: D1's seeded keydown must not bubble past the grid to an ancestor
+  //             "workbench" keydown listener (e.g. a shortcuts-overlay toggle on '?') — preventDefault
+  //             alone does not stop propagation. Listener attached on `container` (an ancestor of
+  //             `.meta-grid`, bubble phase — NOT `document` with `capture: true`, which would fire
+  //             BEFORE the grid's own handler and prove nothing about propagation). ──────────────────
+  describe('P3-1 (round 5): the seeded keydown does not reach an ancestor keydown listener', () => {
+    // `afterEach` (not a manual cleanup at the end of the flag-ON test body) so the env var is
+    // restored even if an assertion above throws first — see the reordering fix + comment on the
+    // round-4 "P1: the Yjs carve-out only applies..." describe's own `afterEach` above for why
+    // `unstubAllEnvs()` must run BEFORE `delete`, not after.
+    afterEach(() => {
+      vi.unstubAllEnvs()
+      delete process.env.VITE_ENABLE_YJS_COLLAB
+    })
+
+    it('"?" on a focused string cell seeds the editor but is NOT observed by an ancestor keydown listener', async () => {
+      // MUTATION: removing either `e.stopPropagation()` call added to D1's seed branches reds this —
+      // the ancestor spy would be called once.
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeRows(), patchSpy)
+      await flushUi()
+
+      const ancestorSpy = vi.fn()
+      container!.addEventListener('keydown', ancestorSpy)
+
+      cellAt(root, 0, 0).click() // title — plain string cell
+      await flushUi()
+
+      const evt = new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true })
+      gridEl(root).dispatchEvent(evt)
+      await flushUi()
+
+      // The fix itself: still seeds AND still preventDefaults (a mutation that killed the whole
+      // branch, rather than just stopPropagation, cannot pass this test either).
+      expect(editorInput(root)).toBeTruthy()
+      expect(editorInput(root)!.value).toBe('?')
+      expect(evt.defaultPrevented).toBe(true)
+      expect(ancestorSpy).not.toHaveBeenCalled()
+    })
+
+    it('flag-ON Yjs carve-out branch: the SAME ancestor listener also does not observe a seeded keydown on a Yjs-eligible cell', async () => {
+      // Covers the OTHER stopPropagation call site (the isYjsCollabEnabled+isYjsTextEligible
+      // carve-out just above the normal seed branch) — independent of the test above; removing THIS
+      // occurrence's stopPropagation does not affect the one above, and vice versa.
+      process.env.VITE_ENABLE_YJS_COLLAB = 'true'
+      vi.stubEnv('VITE_ENABLE_YJS_COLLAB', 'true')
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeRows(), patchSpy)
+      await flushUi()
+
+      const ancestorSpy = vi.fn()
+      container!.addEventListener('keydown', ancestorSpy)
+
+      cellAt(root, 0, 0).click() // title — Yjs-eligible with the flag on (see the P1/round-4 suite above)
+
+      const evt = new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true })
+      gridEl(root).dispatchEvent(evt)
+      await flushUi()
+
+      expect(editorInput(root)).toBeTruthy() // opened, staged with the row's current value (P1/round 4)
+      expect(evt.defaultPrevented).toBe(true)
+      expect(ancestorSpy).not.toHaveBeenCalled()
+    })
+  })
+
+  // ── round 5, P3-2: confirmEdit's strict `value !== row.data[fieldId]` treats a staged `null`
+  //             (startEdit's own `row.data[field.id] ?? null` seed) against a genuinely-absent
+  //             (`undefined`) `row.data[fieldId]` as a change — a type-to-edit-then-close-with-no-
+  //             typing on a cell nothing about the session touched still emitted `patch-cell(null)`.
+  //             Fixture uses `data: {}` (the key genuinely ABSENT), not `title: ''` — `''` is a real,
+  //             different value from "never set" and must stay distinct (see the positive control). ──
+  describe('P3-2 (round 5): confirmEdit normalizes null vs undefined only — not any other falsy value', () => {
+    function makeSparseRows(): MetaRecord[] {
+      return [{ id: 'r0', version: 1, data: {} }] // 'title' genuinely absent from row.data
+    }
+
+    it('Enter stages null (row.data[field.id] ?? null); a blur with no typing emits ZERO patch-cell', async () => {
+      // MUTATION: reverting confirmEdit's normalize() back to the bare `value !== row.data[fieldId]`
+      // reds this — `null !== undefined` is true, so a stray `patch-cell('r0', 'title', null, 1)`
+      // would fire even though the session never typed anything.
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeSparseRows(), patchSpy)
+      await flushUi()
+
+      cellAt(root, 0, 0).click()
+      await flushUi()
+      gridEl(root).dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+      await flushUi()
+
+      const input = editorInput(root)!
+      expect(input.value).toBe('') // (modelValue ?? '') renders null as '' — the staged value IS null
+
+      const outside = document.createElement('button')
+      document.body.appendChild(outside)
+      input.dispatchEvent(new FocusEvent('blur', { relatedTarget: outside, bubbles: true }))
+      await flushUi()
+
+      expect(patchSpy).not.toHaveBeenCalled()
+      expect(editorInput(root)).toBeNull()
+      outside.remove()
+    })
+
+    it('positive control: typing "x" into the SAME never-set cell still patches normally (the normalize does not suppress real changes)', async () => {
+      const patchSpy = vi.fn()
+      const root = mountGrid(makeSparseRows(), patchSpy)
+      await flushUi()
+
+      clickThenDblclick(cellAt(root, 0, 0))
+      await flushUi()
+      typeInto(editorInput(root)!, 'x')
+      await flushUi()
+
+      const outside = document.createElement('button')
+      document.body.appendChild(outside)
+      editorInput(root)!.dispatchEvent(new FocusEvent('blur', { relatedTarget: outside, bubbles: true }))
+      await flushUi()
+
+      expect(patchSpy).toHaveBeenCalledTimes(1)
+      expect(patchSpy).toHaveBeenCalledWith('r0', 'title', 'x', 1)
+      outside.remove()
+    })
+
+    it('discriminator: an explicit empty string ("") stays distinct from "never set" — a never-typed cell whose row value IS \'\' still emits no patch, and a cell CHANGED from \'\' to \'\' is likewise a no-op', async () => {
+      // Proves the normalize is null/undefined-only, not a general falsy/empty collapse: a field
+      // ALREADY holding '' (not absent) must not be conflated with the sparse-row case above.
+      const patchSpy = vi.fn()
+      const root = mountGrid([{ id: 'r0', version: 1, data: { title: '' } }], patchSpy)
+      await flushUi()
+
+      cellAt(root, 0, 0).click()
+      await flushUi()
+      gridEl(root).dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+      await flushUi()
+
+      const outside = document.createElement('button')
+      document.body.appendChild(outside)
+      editorInput(root)!.dispatchEvent(new FocusEvent('blur', { relatedTarget: outside, bubbles: true }))
+      await flushUi()
+
+      expect(patchSpy).not.toHaveBeenCalled() // '' staged against '' current — unchanged, no patch
+      outside.remove()
+    })
   })
 })
