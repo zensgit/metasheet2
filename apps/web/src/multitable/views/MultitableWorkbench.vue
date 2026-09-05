@@ -332,6 +332,7 @@
         :class="{ 'meta-record-drawer--overlay': isInspectorOverlay }"
         :visible="inspectorOpen && !!selectedRecordId" :record="selectedRecordResolved" :fields="scopedAllFields"
         :opener-el="inspectorOpenerEl"
+        :field-errors="inspectorFieldErrors"
         :sheet-id="workbench.activeSheetId.value ?? undefined"
         :api-client="workbench.client"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
@@ -674,6 +675,7 @@ import type { MultitableRole } from '../composables/useMultitableCapabilities'
 import type { SortRule, FilterConjunction } from '../composables/useMultitableGrid'
 import { useMultitableWorkbench } from '../composables/useMultitableWorkbench'
 import { useMultitableGrid } from '../composables/useMultitableGrid'
+import { fieldAnchoredPatchMessage, resolvePatchFailureRoute } from '../utils/patch-failure-routing'
 import { useMultitableCapabilities } from '../composables/useMultitableCapabilities'
 import { usePersonalViewToggle } from '../composables/usePersonalViewToggle'
 import { reorderViewFields } from '../utils/reorder-view-fields'
@@ -1370,6 +1372,13 @@ const formSubmitting = ref(false)
 const formSuccessMessage = ref<string | null>(null)
 const formErrorMessage = ref<string | null>(null)
 const formFieldErrors = ref<Record<string, string>>({})
+// Record inspector v3 PR-B2 (docs/development/multitable-record-inspector-v3-design-20260905.md §1.3
+// "Field-anchored server errors", §4 item 11): per-field server rejections for the OPEN inspector
+// record, keyed by fieldId — the inspector-side twin of `formFieldErrors` above (same shape, same
+// `:field-errors` prop idiom, WB → MetaRecordInspector → MetaRecordFieldsPanel). Written only by
+// `onDrawerPatch` (field / conflict routes), cleared per field on that field's next successful
+// patch, wholesale on record/view change, and for the conflict marker when `grid.conflict` clears.
+const inspectorFieldErrors = ref<Record<string, string>>({})
 const deepLinkedRecordLinkSummaries = ref<Record<string, LinkedRecordSummary[]>>({})
 const deepLinkedRecordPersonSummaries = ref<Record<string, PersonSummary[]>>({})
 const deepLinkedRecordAttachmentSummaries = ref<Record<string, MetaAttachment[]>>({})
@@ -2587,15 +2596,52 @@ async function onRetryConflict() {
   if (grid.error.value) showError(grid.error.value)
 }
 
+// PR-B2 (§1.3): immutable per-key writes so MetaRecordFieldsPanel's shallow `fieldErrors` watch sees a
+// prev/next pair (it prunes a rejected-value draft exactly when that field's error goes set → unset).
+function setInspectorFieldError(fieldId: string, message: string) {
+  inspectorFieldErrors.value = { ...inspectorFieldErrors.value, [fieldId]: message }
+}
+function clearInspectorFieldError(fieldId: string) {
+  if (!(fieldId in inspectorFieldErrors.value)) return
+  const next = { ...inspectorFieldErrors.value }
+  delete next[fieldId]
+  inspectorFieldErrors.value = next
+}
+
 async function onDrawerPatch(fieldId: string, value: unknown) {
   if (!selectedRecordResolved.value) return
   const record = selectedRecordResolved.value
   if (!ensureCanEditRecord(record.id)) return
   await grid.patchCell(record.id, fieldId, value, record.version)
   if (grid.error.value) {
+    // PR-B2 (§1.3 "Field-anchored server errors", §4 item 11): route by the failure the composable
+    // recorded for THIS patch — guarded on record + field so an entry left by some other call can
+    // never be attributed to this control. `resolvePatchFailureRoute` holds the one rule (its doc
+    // comment states the matrix); a null failure (the composable's LOCAL row-action refusal never
+    // reaches the server and records none) falls through to today's toast unchanged.
+    const failure = grid.lastPatchFailure.value
+    const route = failure && failure.recordId === record.id && failure.fieldId === fieldId
+      ? resolvePatchFailureRoute(failure)
+      : 'toast'
+    if (route === 'field' && failure) {
+      setInspectorFieldError(fieldId, fieldAnchoredPatchMessage(failure))
+      return
+    }
+    if (route === 'conflict' && failure) {
+      // The conflict banner is already up (root template `v-if="grid.conflict.value"`, set by the
+      // composable — unchanged). Add the field marker under the control with the SAME text the banner
+      // shows, and do NOT also toast: before PR-B2 a drawer-originated VERSION_CONFLICT fired both the
+      // banner and the toast (declared behaviour change). The marker clears with the conflict
+      // (reload / retry / dismiss) — see the `grid.conflict` watch beside the record-change watch.
+      setInspectorFieldError(fieldId, conflictMessage.value || failure.message)
+      return
+    }
     showError(grid.error.value)
     return
   }
+  // A successful patch of a field clears that field's error (and, via the panel's watch, its draft).
+  // Other fields' errors are untouched.
+  clearInspectorFieldError(fieldId)
   if (deepLinkedRecord.value?.id === record.id) {
     deepLinkedRecord.value = {
       ...deepLinkedRecord.value,
@@ -4065,6 +4111,19 @@ watch([selectedRecordId, () => workbench.activeViewId.value], () => {
   formSuccessMessage.value = null
   formErrorMessage.value = null
   formFieldErrors.value = {}
+})
+
+// PR-B2 (§1.3): field-anchored errors belong to the record they were raised on — the same
+// record/view edge that resets the form-field errors above discards them (MetaRecordFieldsPanel drops
+// its rejected-value drafts on the record-id edge on its side, so control and alert reset together).
+watch([selectedRecordId, () => workbench.activeViewId.value], () => {
+  inspectorFieldErrors.value = {}
+})
+// PR-B2 (§1.3): the VERSION_CONFLICT field marker lives exactly as long as the conflict it mirrors —
+// reload / retry / dismiss (and any later patchCell, which resets `conflict` first) all clear
+// `grid.conflict` in the composable (unchanged); the marker for that field follows.
+watch(() => grid.conflict.value, (current, previous) => {
+  if (!current && previous) clearInspectorFieldError(previous.fieldId)
 })
 
 async function refreshDialogMeta() {

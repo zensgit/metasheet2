@@ -320,6 +320,7 @@
           :ai-shortcut="aiShortcut"
           :button-run-pending="buttonRunPending"
           :mention-suggestions="mentionSuggestions"
+          :field-errors="fieldErrors"
           @patch="(fieldId, value) => emit('patch', fieldId, value)"
           @ai-preview="(field) => emit('ai-preview', field)"
           @ai-run="(field) => emit('ai-run', field)"
@@ -572,6 +573,14 @@ const props = withDefaults(defineProps<{
    *  between the gesture and mount — see `onMounted` below for the fallback when this prop is
    *  absent, e.g. a deep-link mount with no interactive opener at all). */
   openerEl?: HTMLElement | null
+  /** Record inspector v3 PR-B2 (2026-09-05, §1.3 "Field-anchored server errors"): per-field server
+   *  rejection messages keyed by fieldId, OWNED by the workbench (`inspectorFieldErrors`, written by
+   *  its `onDrawerPatch` routing) and passed through to MetaRecordFieldsPanel unchanged — this shell
+   *  neither writes nor interprets it (same pass-through shape as `fieldPermissions`). The header
+   *  title input above deliberately does NOT read it: it keeps its uncontrolled snap-back-on-prop-
+   *  change behaviour (pinned in multitable-record-inspector-header.spec.ts); a title-originated
+   *  rejection surfaces under the primary field's row in the details tab like any other field. */
+  fieldErrors?: Record<string, string> | null
 }>(), {
   recordIds: () => [],
   buttonRunPending: () => [],
@@ -595,6 +604,7 @@ const props = withDefaults(defineProps<{
   commentComposerInitialMentions: () => [],
   openComments: false,
   openerEl: null,
+  fieldErrors: null,
 })
 
 const emit = defineEmits<{
