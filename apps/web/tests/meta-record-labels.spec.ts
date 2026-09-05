@@ -5,6 +5,7 @@ import {
   historyActor,
   requiredField,
   restoredFromVersionBadge,
+  recordPosition,
 } from '../src/multitable/utils/meta-record-labels'
 
 describe('meta-record-labels static keys', () => {
@@ -126,5 +127,23 @@ describe('meta-record-labels helpers', () => {
     // the version is interpolated raw (data), not a fixed literal
     expect(restoredFromVersionBadge(17, false)).toBe('Restored from v17')
     expect(restoredFromVersionBadge(17, true)).toBe('从版本 17 恢复')
+  })
+
+  // P3-1 (2026-09-05, record inspector v3 header-overflow-bound follow-up):
+  // docs/development/multitable-record-inspector-v3-design-20260905.md — "position text... a compact
+  // form for large totals". Every ordinary record-list size (well under 1000) must render byte-
+  // identical to before this fix; only past that does the compaction change the string at all.
+  it('recordPosition renders the ordinary "n/N" (zh) / "n / N" (en) form unchanged for any total under 1000', () => {
+    expect(recordPosition(3, 12, true)).toBe('3/12')
+    expect(recordPosition(3, 12, false)).toBe('3 / 12')
+    expect(recordPosition(1, 999, false)).toBe('1 / 999')
+    expect(recordPosition(1, 999, true)).toBe('1/999')
+  })
+
+  it('recordPosition compacts a total of 1000 or more (a huge record list must not force the header wider)', () => {
+    expect(recordPosition(1, 12345, false)).toBe('1 / 12.3K')
+    expect(recordPosition(1, 12345, true)).toBe('1/1.2万')
+    // both the current index AND the total compact independently, past the SAME 1000 threshold
+    expect(recordPosition(12345, 20000, false)).toBe('12.3K / 20K')
   })
 })

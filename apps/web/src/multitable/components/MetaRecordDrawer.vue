@@ -37,9 +37,11 @@
     :ai-shortcut="aiShortcut"
     :button-run-pending="buttonRunPending"
     :mention-suggestions="mentionSuggestions"
+    :opener-el="openerEl"
     @close="emit('close')"
     @delete="emit('delete')"
     @duplicate="emit('duplicate')"
+    @copy-link="emit('copy-link')"
     @patch="(fieldId: string, value: unknown) => emit('patch', fieldId, value)"
     @toggle-lock="(payload: { recordId: string; locked: boolean }) => emit('toggle-lock', payload)"
     @toggle-comments="emit('toggle-comments')"
@@ -109,15 +111,21 @@ withDefaults(defineProps<{
   /** B5: people-mention candidates for rich-`longText` field editing in the drawer.
    *  Fed by the workbench's already-loaded commentMentionSuggestions (no re-fetch). */
   mentionSuggestions?: MetaCommentMentionSuggestion[]
+  /** Record inspector v3 (2026-09-05, PR-A §1.1): forwarded 1:1 to MetaRecordInspector's own
+   *  `openerEl` prop — see that component's doc comment. Optional; a caller that never opens this
+   *  deprecated shell via a workbench-owned `openRecord(id, opener)` simply omits it. */
+  openerEl?: HTMLElement | null
 }>(), {
   recordIds: () => [],
   buttonRunPending: () => [],
+  openerEl: null,
 })
 
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'delete'): void
   (e: 'duplicate'): void
+  (e: 'copy-link'): void
   (e: 'patch', fieldId: string, value: unknown): void
   (e: 'toggle-lock', payload: { recordId: string; locked: boolean }): void
   (e: 'toggle-comments'): void

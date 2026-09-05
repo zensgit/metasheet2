@@ -64,23 +64,34 @@
         </button>
       </div>
       <div class="meta-record-drawer__value">
+        <!-- PR-B2 (§1.3 "Field-anchored server errors"): every editable scalar control below reads its
+             value through `controlValue(field.id)` (the rejected draft while this field carries a server
+             error, else `record.data[field.id]` exactly as before), emits through `emitPatch` (records the
+             draft, then the SAME `patch(fieldId, value)` event as before — payload shape unchanged), and
+             carries `aria-invalid="true"` + `aria-describedby` → the `role="alert"` node further down while
+             the error is shown (both `undefined`, i.e. absent, otherwise). -->
         <input
           v-if="canEditField(field.id) && field.type === 'string'"
           :id="`drawer_field_${field.id}`"
           class="meta-record-drawer__input"
           type="text"
-          :value="textControlValue(record.data[field.id])"
-          @change="emit('patch', field.id, ($event.target as HTMLInputElement).value)"
+          :value="textControlValue(controlValue(field.id))"
+          :aria-invalid="fieldAriaInvalid(field.id)"
+          :aria-describedby="fieldAriaDescribedBy(field.id)"
+          @change="emitPatch(field.id, ($event.target as HTMLInputElement).value)"
         />
         <!-- rich longText: minimal rich editor (server re-sanitizes on write).
              Patch on `change` (blur) only — mirrors the plain textarea's @change so
-             the drawer issues ONE server PATCH per edit, never one per keystroke. -->
+             the drawer issues ONE server PATCH per edit, never one per keystroke.
+             PR-B2: no aria-invalid/aria-describedby here — this is a component whose root is a plain
+             wrapper `<div>` (toolbar + contenteditable), so the attributes would land on a non-control;
+             the alert node below still renders under it. -->
         <MetaRichLongTextEditor
           v-else-if="canEditField(field.id) && field.type === 'longText' && isRichLongTextField(field)"
-          :model-value="record.data[field.id]"
+          :model-value="controlValue(field.id)"
           :is-zh="isZh"
           :mention-suggestions="mentionSuggestions"
-          @change="emit('patch', field.id, $event)"
+          @change="emitPatch(field.id, $event)"
         />
         <!-- plain longText: same textarea, same @change-only commit (record inspector resizable-panel
              slice, 2026-09-05) -- `rows="6"` (was 5) is a comfort bump now that the panel itself can be
@@ -90,9 +101,11 @@
           v-else-if="canEditField(field.id) && field.type === 'longText'"
           :id="`drawer_field_${field.id}`"
           class="meta-record-drawer__textarea"
-          :value="textControlValue(record.data[field.id])"
+          :value="textControlValue(controlValue(field.id))"
           rows="6"
-          @change="emit('patch', field.id, ($event.target as HTMLTextAreaElement).value)"
+          :aria-invalid="fieldAriaInvalid(field.id)"
+          :aria-describedby="fieldAriaDescribedBy(field.id)"
+          @change="emitPatch(field.id, ($event.target as HTMLTextAreaElement).value)"
         />
         <input
           v-else-if="canEditField(field.id) && field.type === 'barcode'"
@@ -101,8 +114,10 @@
           type="text"
           inputmode="text"
           :placeholder="lc('cell.barcodePlaceholder')"
-          :value="textControlValue(record.data[field.id])"
-          @change="emit('patch', field.id, ($event.target as HTMLInputElement).value)"
+          :value="textControlValue(controlValue(field.id))"
+          :aria-invalid="fieldAriaInvalid(field.id)"
+          :aria-describedby="fieldAriaDescribedBy(field.id)"
+          @change="emitPatch(field.id, ($event.target as HTMLInputElement).value)"
         />
         <input
           v-else-if="canEditField(field.id) && field.type === 'qrcode'"
@@ -111,8 +126,10 @@
           type="text"
           inputmode="text"
           :placeholder="lc('cell.qrcodePlaceholder')"
-          :value="textControlValue(record.data[field.id])"
-          @change="emit('patch', field.id, ($event.target as HTMLInputElement).value)"
+          :value="textControlValue(controlValue(field.id))"
+          :aria-invalid="fieldAriaInvalid(field.id)"
+          :aria-describedby="fieldAriaDescribedBy(field.id)"
+          @change="emitPatch(field.id, ($event.target as HTMLInputElement).value)"
         />
         <input
           v-else-if="canEditField(field.id) && field.type === 'location'"
@@ -120,42 +137,58 @@
           class="meta-record-drawer__input"
           type="text"
           :placeholder="lc('cell.locationPlaceholder')"
-          :value="locationAddressValue(record.data[field.id])"
-          @change="emit('patch', field.id, locationValueFromAddress(($event.target as HTMLInputElement).value))"
+          :value="locationAddressValue(controlValue(field.id))"
+          :aria-invalid="fieldAriaInvalid(field.id)"
+          :aria-describedby="fieldAriaDescribedBy(field.id)"
+          @change="emitPatch(field.id, locationValueFromAddress(($event.target as HTMLInputElement).value))"
         />
         <input
           v-else-if="canEditField(field.id) && field.type === 'number'"
           :id="`drawer_field_${field.id}`"
           class="meta-record-drawer__input"
           type="number"
-          :value="record.data[field.id] ?? ''"
-          @change="emit('patch', field.id, ($event.target as HTMLInputElement).value === '' ? null : Number(($event.target as HTMLInputElement).value))"
+          :value="controlValue(field.id) ?? ''"
+          :aria-invalid="fieldAriaInvalid(field.id)"
+          :aria-describedby="fieldAriaDescribedBy(field.id)"
+          @change="emitPatch(field.id, ($event.target as HTMLInputElement).value === '' ? null : Number(($event.target as HTMLInputElement).value))"
         />
         <input
           v-else-if="canEditField(field.id) && field.type === 'date'"
           :id="`drawer_field_${field.id}`"
           class="meta-record-drawer__input"
           type="date"
-          :value="record.data[field.id] ?? ''"
-          @change="emit('patch', field.id, ($event.target as HTMLInputElement).value)"
+          :value="controlValue(field.id) ?? ''"
+          :aria-invalid="fieldAriaInvalid(field.id)"
+          :aria-describedby="fieldAriaDescribedBy(field.id)"
+          @change="emitPatch(field.id, ($event.target as HTMLInputElement).value)"
         />
         <input
           v-else-if="canEditField(field.id) && field.type === 'dateTime'"
           :id="`drawer_field_${field.id}`"
           class="meta-record-drawer__input"
           type="datetime-local"
-          :value="dateTimeInputValue(record.data[field.id])"
-          @change="emit('patch', field.id, dateTimeValueFromLocalInput(($event.target as HTMLInputElement).value))"
+          :value="dateTimeInputValue(controlValue(field.id))"
+          :aria-invalid="fieldAriaInvalid(field.id)"
+          :aria-describedby="fieldAriaDescribedBy(field.id)"
+          @change="emitPatch(field.id, dateTimeValueFromLocalInput(($event.target as HTMLInputElement).value))"
         />
         <label v-else-if="canEditField(field.id) && field.type === 'boolean'" class="meta-record-drawer__check">
-          <input type="checkbox" :checked="!!record.data[field.id]" @change="emit('patch', field.id, ($event.target as HTMLInputElement).checked)" />
+          <input
+            type="checkbox"
+            :checked="!!controlValue(field.id)"
+            :aria-invalid="fieldAriaInvalid(field.id)"
+            :aria-describedby="fieldAriaDescribedBy(field.id)"
+            @change="emitPatch(field.id, ($event.target as HTMLInputElement).checked)"
+          />
         </label>
         <select
           v-else-if="canEditField(field.id) && field.type === 'select'"
           :id="`drawer_field_${field.id}`"
           class="meta-record-drawer__input"
-          :value="record.data[field.id] ?? ''"
-          @change="emit('patch', field.id, ($event.target as HTMLSelectElement).value)"
+          :value="controlValue(field.id) ?? ''"
+          :aria-invalid="fieldAriaInvalid(field.id)"
+          :aria-describedby="fieldAriaDescribedBy(field.id)"
+          @change="emitPatch(field.id, ($event.target as HTMLSelectElement).value)"
         >
           <option value="">—</option>
           <option v-for="opt in field.options ?? []" :key="opt.value" :value="opt.value">{{ opt.value }}</option>
@@ -166,7 +199,9 @@
           class="meta-record-drawer__input meta-record-drawer__input--multi"
           multiple
           :value="multiSelectValue(field.id)"
-          @change="emit('patch', field.id, multiSelectEventValue($event))"
+          :aria-invalid="fieldAriaInvalid(field.id)"
+          :aria-describedby="fieldAriaDescribedBy(field.id)"
+          @change="emitPatch(field.id, multiSelectEventValue($event))"
         >
           <option v-for="opt in field.options ?? []" :key="opt.value" :value="opt.value">{{ opt.value }}</option>
         </select>
@@ -236,6 +271,24 @@
           @click.stop="emit('run-button', { recordId: record.id, field })"
         >{{ buttonLabel(field) }}</button>
         <span v-else class="meta-record-drawer__text">{{ formatValue(field, record.data[field.id]) }}</span>
+        <!-- PR-B2 (§1.3 "Field-anchored server errors"): the server's rejection for THIS field, anchored
+             directly under its control. `role="alert"` so assistive tech announces it on insertion; the
+             control above names it via aria-describedby (same id) and carries aria-invalid="true" while
+             it shows. The text is the server's own message passed through VERBATIM (client.ts parseJson →
+             `patchCell`'s returned GridPatchFailure → WB `inspectorFieldErrors`) — it is NOT localised
+             client-side (the backend's validation messages are English literals, exactly what the pre-B2
+             toast showed), and there is no client-side copy to translate here, hence no label key.
+             Visibility is prop-driven (WB owns the map: set on a routed rejection that CAN render here,
+             cleared on that field's next successful patch, on record change, and — for the
+             VERSION_CONFLICT marker only — when the conflict clears). -->
+        <div
+          v-if="fieldError(field.id)"
+          :id="fieldErrorId(field.id)"
+          class="meta-record-drawer__field-error"
+          role="alert"
+          data-test="drawer-field-error"
+          :data-field-id="field.id"
+        >{{ fieldError(field.id) }}</div>
         <div
           v-if="field.type === 'qrcode' && drawerQrSvg(record.data[field.id])"
           class="meta-record-drawer__qrcode"
@@ -317,6 +370,7 @@ import {
   formatRecordFieldValue,
   resolveCanComment,
   textControlValue as textControlValueShared,
+  visibleRecordFields,
 } from '../utils/recordDisplay'
 
 const props = withDefaults(defineProps<{
@@ -342,8 +396,14 @@ const props = withDefaults(defineProps<{
   /** B5: people-mention candidates for rich-`longText` field editing.
    *  Fed by the workbench's already-loaded commentMentionSuggestions (no re-fetch). */
   mentionSuggestions?: MetaCommentMentionSuggestion[]
+  /** PR-B2 (§1.3 "Field-anchored server errors"): per-field server rejection messages keyed by
+   *  fieldId, owned by the workbench (`inspectorFieldErrors`) and relayed through MetaRecordInspector
+   *  unchanged. Drives the `role="alert"` node + aria wiring under the field's control, and gates
+   *  whether `controlValue` shows the rejected draft (see the PR-B2 block in the script below). */
+  fieldErrors?: Record<string, string> | null
 }>(), {
   buttonRunPending: () => [],
+  fieldErrors: null,
 })
 
 const emit = defineEmits<{
@@ -375,7 +435,77 @@ watch(() => props.record, () => {
   localAttachmentSummaries.value = {}
 })
 
-const visibleFields = computed(() => props.fields.filter((field) => props.fieldPermissions?.[field.id]?.visible !== false))
+// --- PR-B2 (§1.3 "Field-anchored server errors"): rejected-value drafts + alert wiring ---
+// `rejectedDrafts[fieldId]` = the LAST value this panel emitted as `patch` for that field. It is read
+// ONLY while `props.fieldErrors[fieldId]` is set — i.e. the server rejected that value and the
+// composable rolled `record.data[fieldId]` back — so the control keeps showing what the user typed
+// instead of snapping to the reverted prop (which is what the uncontrolled `:value` idiom does on its
+// own, and what the header title input in MetaRecordInspector.vue deliberately still does). A draft is
+// dropped when that field's error goes set → unset (its next patch succeeded: WB deletes the key and
+// the control falls back to the now-updated record value) and wholesale on record change. Drafts for
+// OTHER fields are never touched by either edge. Not a data path (HI-1): a draft only ever holds what
+// the user just entered in this panel — nothing is fetched or derived.
+const rejectedDrafts = ref<Record<string, unknown>>({})
+
+function emitPatch(fieldId: string, value: unknown) {
+  rejectedDrafts.value = { ...rejectedDrafts.value, [fieldId]: value }
+  emit('patch', fieldId, value)
+}
+
+function fieldError(fieldId: string): string | null {
+  const message = props.fieldErrors?.[fieldId]
+  return typeof message === 'string' && message.length > 0 ? message : null
+}
+
+function fieldErrorId(fieldId: string): string {
+  return `drawer_field_error_${fieldId}`
+}
+
+// String `'true'` / absent (not boolean) — the same convention MetaFormView.vue uses for the form's
+// per-field errors, and what the design brief's test line pins (`aria-invalid="true"`).
+function fieldAriaInvalid(fieldId: string): 'true' | undefined {
+  return fieldError(fieldId) ? 'true' : undefined
+}
+
+function fieldAriaDescribedBy(fieldId: string): string | undefined {
+  return fieldError(fieldId) ? fieldErrorId(fieldId) : undefined
+}
+
+/** The value a control renders: the rejected draft while this field carries a server error AND this
+ *  panel has a draft for it (a rejection that originated elsewhere — e.g. the header title input — has
+ *  no draft here and shows the record value under the alert), else the record value as before. */
+function controlValue(fieldId: string): unknown {
+  if (fieldError(fieldId) && Object.prototype.hasOwnProperty.call(rejectedDrafts.value, fieldId)) {
+    return rejectedDrafts.value[fieldId]
+  }
+  return props.record?.data[fieldId]
+}
+
+// Record change → every draft is stale (they were typed against the previous record).
+watch(() => props.record?.id, () => {
+  rejectedDrafts.value = {}
+})
+// A field's error went set → unset (its next patch succeeded) → drop THAT draft only. Compares prev vs
+// next rather than pruning every error-less draft, so a draft recorded for an in-flight patch is not
+// lost if some OTHER field's error happens to clear before this one's rejection lands. WB writes the
+// map immutably (see `setInspectorFieldError`), so prev/next are distinct snapshots here.
+watch(() => props.fieldErrors, (next, previous) => {
+  if (!previous) return
+  let changed = false
+  const keep: Record<string, unknown> = { ...rejectedDrafts.value }
+  for (const fieldId of Object.keys(previous)) {
+    if (previous[fieldId] && !next?.[fieldId] && Object.prototype.hasOwnProperty.call(keep, fieldId)) {
+      delete keep[fieldId]
+      changed = true
+    }
+  }
+  if (changed) rejectedDrafts.value = keep
+})
+
+// PR-B2 round 2: the field-mask predicate is the shared `visibleRecordFields` (utils/recordDisplay.ts) so
+// MetaRecordInspector's `canAnchorFieldError` answers "does this panel render a row for that field" from
+// the same rule — a field-anchored server error for a field NOT in this list falls back to the toast.
+const visibleFields = computed(() => visibleRecordFields(props.fields, props.fieldPermissions))
 const resolvedCanComment = computed(() => resolveCanComment(props.rowActions, props.canComment))
 
 // B4 (W2 re-port, refs #4267 continuation): `!isFieldAlwaysReadOnly(field)` is ADDITIVE to
@@ -489,7 +619,8 @@ function drawerQrSvg(value: unknown): string | null {
 }
 
 function multiSelectValue(fieldId: string): string[] {
-  const value = props.record?.data[fieldId]
+  // PR-B2: through `controlValue` so a rejected multi-select draft stays selected like every other control.
+  const value = controlValue(fieldId)
   return Array.isArray(value) ? value.map(String) : []
 }
 
@@ -759,5 +890,10 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 .meta-record-drawer__attachment-clear:disabled { opacity: 0.5; cursor: not-allowed; }
 .meta-record-drawer__uploading { font-size: 12px; color: #409eff; }
 .meta-record-drawer__error { color: #f56c6c; font-size: 12px; }
+/* PR-B2 (§1.3): field-anchored server rejection under its control. Same error red as
+   `__ai-status--error` above (this file's literals are PR-B3's token-migration target, not new tokens). */
+.meta-record-drawer__field-error { margin-top: 4px; font-size: 12px; line-height: 1.4; color: #b91c1c; white-space: pre-wrap; word-break: break-word; }
+.meta-record-drawer__input[aria-invalid="true"],
+.meta-record-drawer__textarea[aria-invalid="true"] { border-color: #b91c1c; }
 .meta-record-drawer__text { font-size: 13px; color: #333; white-space: pre-wrap; word-break: break-word; }
 </style>
