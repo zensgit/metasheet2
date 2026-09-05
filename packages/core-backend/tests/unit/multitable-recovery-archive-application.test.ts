@@ -301,8 +301,12 @@ describe('recovery archive application composition', () => {
       runOnce: vi.fn().mockResolvedValue(runResult),
     })
     const observability: RecoveryArchiveObservability = {
-      recordRun: vi.fn(),
-      recordLifecycle: vi.fn(),
+      recordRun: vi.fn(() => {
+        throw new Error('run observer unavailable')
+      }),
+      recordLifecycle: vi.fn(() => {
+        throw new Error('lifecycle observer unavailable')
+      }),
     }
     const application = createRecoveryArchiveApplication(
       () => fakeComposition(fakeProviders()),
@@ -326,7 +330,9 @@ describe('recovery archive application composition', () => {
     workerMocks.createRecoveryArchiveRestoreWorker.mockReturnValue({ runOnce: () => chunk.promise })
     const observability: RecoveryArchiveObservability = {
       recordRun: vi.fn(),
-      recordLifecycle: vi.fn(),
+      recordLifecycle: vi.fn((event) => {
+        if (event === 'drain_failed') throw new Error('lifecycle observer unavailable')
+      }),
     }
     const application = createRecoveryArchiveApplication(
       () => fakeComposition(fakeProviders()),

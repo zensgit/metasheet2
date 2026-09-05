@@ -4,6 +4,7 @@ import {
   recoveryArchiveObservability,
   registry,
 } from '../../src/metrics/metrics'
+import { RECOVERY_ARCHIVE_WORKER_RUN_KINDS } from '../../src/multitable/recovery-archive-observability'
 
 describe('recovery archive Prometheus metrics', () => {
   it('exports fixed-cardinality worker and drain evidence', async () => {
@@ -12,9 +13,15 @@ describe('recovery archive Prometheus metrics', () => {
     recoveryArchiveObservability.recordLifecycle('drained')
 
     const exposition = await registry.metrics()
-    expect(exposition).toContain(
-      'metasheet_recovery_archive_worker_runs_total{outcome="completed"} 1',
-    )
+    const runLines = exposition.split('\n').filter((line) => (
+      line.startsWith('metasheet_recovery_archive_worker_runs_total{')
+    ))
+    expect(runLines).toHaveLength(RECOVERY_ARCHIVE_WORKER_RUN_KINDS.length)
+    for (const outcome of RECOVERY_ARCHIVE_WORKER_RUN_KINDS) {
+      expect(runLines).toContain(
+        `metasheet_recovery_archive_worker_runs_total{outcome="${outcome}"} ${outcome === 'completed' ? 1 : 0}`,
+      )
+    }
     expect(exposition).toContain('metasheet_recovery_archive_worker_swept_total 2')
     expect(exposition).toContain('metasheet_recovery_archive_worker_chunks_total 3')
     expect(exposition).toContain('metasheet_recovery_archive_worker_running 0')
