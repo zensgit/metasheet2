@@ -296,11 +296,22 @@
               v-if="can('confirmationQueue.confirm')"
               type="button"
               data-testid="stock-prep-confirmation-select"
-              :disabled="busy || !row.decisionId"
+              :disabled="busy || !row.decisionId || !isConfirmableConflictType(row.conflictType)"
+              :title="rowUnconfirmableReason(row) || undefined"
               @click="selectRow(row)"
             >
               {{ bi('我来定…', 'I\'ll decide…') }}
             </button>
+            <!-- SAY WHY, AND SAY WHAT WOULD WORK. A disabled button with no reason sends the
+                 operator to support; this row's whole problem is that the answer is not in this
+                 page at all. -->
+            <p
+              v-if="rowUnconfirmableReason(row)"
+              class="stock-prep-confirm__row-hint"
+              data-testid="stock-prep-confirmation-unconfirmable-hint"
+            >
+              {{ rowUnconfirmableReason(row) }}
+            </p>
           </td>
         </tr>
       </tbody>
@@ -446,6 +457,7 @@ import {
   type StockPreparationOperatorDirectory,
   type StockPreparationOperatorProject,
   type StockPreparationResolutionAction,
+  isConfirmableConflictType,
 } from '../../../services/integration/stockPreparation/confirmationQueue'
 import {
   STOCK_PREP_WORKBENCH_CAPABILITIES,
@@ -881,7 +893,34 @@ async function advanceHandoff(): Promise<void> {
   })
 }
 
+/**
+ * Why this row cannot be decided here, in the operator's own words — or `''` when it can.
+ *
+ * The confirm endpoint implements exactly one conflict type today; every other row answers 409 with
+ * "resolutionAction is not valid for this conflict type", which reads like "pick a different
+ * option" when in fact no option on this page will ever work. Observed against the customer's own
+ * PLM on 2026-09-04: BOM lines pointing at parts absent from the parts library hold as
+ * `missing_component`, land in this queue as pending, and cannot be cleared from here at all — the
+ * only way out is repairing the source, after which the next sync closes these entries by itself.
+ * So the row says that, instead of offering three buttons that all fail.
+ */
+function rowUnconfirmableReason(row: StockPreparationDecisionRow): string {
+  if (!row.decisionId) return ''
+  if (isConfirmableConflictType(row.conflictType)) return ''
+  if (row.conflictType === 'missing_component') {
+    return bi(
+      '这条在这一页处理不了:BOM 里引用的零件在源系统的物料表里找不到。请到源系统补上该零件(或修正它的编号),下次同步会自动关掉这一条。',
+      'This one cannot be settled here: the BOM line points at a part that is not in the source system\'s parts library. Add the part there (or correct its id) and the next sync closes this entry by itself.',
+    )
+  }
+  return bi(
+    '这一类目前还不能在这一页确认,系统会拒绝。请联系我们,或先到源系统修正数据后重新同步。',
+    'This kind cannot be confirmed here yet — the server refuses it. Contact us, or fix the data in the source system and sync again.',
+  )
+}
+
 function selectRow(row: StockPreparationDecisionRow): void {
+  if (!isConfirmableConflictType(row.conflictType)) return
   selected.value = row
   resolvedValue.value = ''
   resolvedAuxValue.value = ''
@@ -954,6 +993,15 @@ defineExpose({ can })
   color: var(--ms-text-3);
   font-size: 12px;
   line-height: 1.6;
+}
+
+/* The per-row reason a decision cannot be settled on this page. Same muted treatment as the
+   other hints; it sits under a disabled button, so it must not compete with live controls. */
+.stock-prep-confirm__row-hint {
+  margin: 0.25rem 0 0;
+  font-size: 0.85em;
+  opacity: 0.85;
+  max-width: 34rem;
 }
 
 /* 一线看得见自己工厂的项目 — the worklist. Deliberately the widest, plainest thing on the page after
