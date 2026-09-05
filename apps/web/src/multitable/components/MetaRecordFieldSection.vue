@@ -4,8 +4,11 @@
   disclosure WRAPPER around whatever field rows the parent slots in. It owns exactly three things:
     1. the heading button (`aria-expanded` / `aria-controls`, ids minted by `useId()` so two
        sections in the same panel — or two inspectors on one page — never collide),
-    2. the expanded/collapsed state (component-LOCAL `ref`, session-only: nothing is persisted and
-       nothing is read from storage, OD-W2-2 discipline; a remount starts from `defaultExpanded`),
+    2. the expanded/collapsed state — either CONTROLLED by the parent (`expanded` prop +
+       `update:expanded` emit; MetaRecordFieldsPanel holds it keyed by section key so §2's disclosure
+       survives the section being unmounted while hide-empty leaves it empty — PR-B1 round 3) or, when
+       the parent binds nothing, a component-LOCAL `ref` seeded from `defaultExpanded`. Either way
+       session-only: nothing is persisted and nothing is read from storage (OD-W2-2 discipline),
     3. the body container the heading controls (rendered even while collapsed, `hidden`, so
        `aria-controls` always resolves to a real element; the slot CONTENT is `v-if`-gated so
        collapsed field controls are not in the DOM — not merely display:none — and therefore never
@@ -38,7 +41,7 @@
         :aria-expanded="expanded"
         :aria-controls="bodyId"
         :data-testid="`record-field-section-toggle-${sectionKey}`"
-        @click="expanded = !expanded"
+        @click="toggleExpanded"
       >
         <span class="meta-record-field-section__chevron" aria-hidden="true">{{ expanded ? '▾' : '▸' }}</span>
         <span class="meta-record-field-section__title">{{ heading }}</span>
@@ -64,16 +67,30 @@ const props = withDefaults(defineProps<{
   sectionKey: string
   /** Heading text. Absent/null → headerless: no button, no collapse state, slot always rendered. */
   heading?: string | null
-  /** Initial expanded state for a headed section (component-local, session-only). */
+  /** Initial expanded state for a headed section when the parent does NOT control `expanded`. */
   defaultExpanded?: boolean
+  /**
+   * Controlled expanded state (PR-B1 round 3). Bound → the parent owns the state and this component
+   * only reports toggles through `update:expanded`; absent/null → component-local state.
+   */
+  expanded?: boolean | null
 }>(), {
   heading: null,
   defaultExpanded: true,
+  expanded: null,
 })
+const emit = defineEmits<{ (e: 'update:expanded', value: boolean): void }>()
 
 const hasHeading = computed(() => typeof props.heading === 'string' && props.heading.length > 0)
-// Component-local, session-only (OD-W2-2): no storage read/write anywhere in this file.
-const expanded = ref(props.defaultExpanded)
+// Session-only (OD-W2-2): no storage read/write anywhere in this file. The local ref is the fallback
+// for an uncontrolled section; a controlled one reads the prop.
+const localExpanded = ref(props.defaultExpanded)
+const expanded = computed(() => props.expanded ?? localExpanded.value)
+function toggleExpanded() {
+  const next = !expanded.value
+  localExpanded.value = next
+  emit('update:expanded', next)
+}
 const uid = useId()
 const toggleId = `${uid}-toggle`
 const bodyId = `${uid}-body`

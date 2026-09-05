@@ -69,6 +69,8 @@
       :section-key="group.key"
       :heading="group.heading"
       :default-expanded="group.defaultExpanded"
+      :expanded="sectionExpanded[group.key] ?? group.defaultExpanded"
+      @update:expanded="sectionExpanded[group.key] = $event"
     >
       <div v-for="field in group.fields" :key="field.id" class="meta-record-drawer__field" :data-field-id="field.id">
         <div class="meta-record-drawer__field-header">
@@ -329,7 +331,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import type {
   LinkedRecordSummary,
   PersonSummary,
@@ -519,15 +521,26 @@ const fieldGroups = computed<FieldGroup[]>(() => {
   return groups
 })
 
+// Round 3 (round-2 refuter F2): the §2 disclosure state lives HERE, keyed by section key, not inside
+// MetaRecordFieldSection — when hide-empty leaves §2 with zero fields the group drops out of
+// `fieldGroups` and its section UNMOUNTS; a section-local ref would come back collapsed when the group
+// returns. Still component-local (to this panel) and session-only (OD-W2-2): nothing is persisted, a
+// panel remount starts every headed section from its `defaultExpanded` again.
+const sectionExpanded = reactive<Record<string, boolean>>({})
+
 // --- Record inspector v3 (PR-B1 §1.3 hide-empty) ---------------------------------------------------
-// SNAPSHOT ∩ NOW: `emptySnapshot` is the set of field ids whose value satisfied `isEmptyValue` at the
-// moment the record id or the toggle last changed; `applyHideEmpty` hides a field only when it is in
-// that snapshot AND `isEmptyValue` holds for its CURRENT value. Consequences (round 2, refuter P3 —
-// round 1 hid on the snapshot alone, so a field the user had just filled vanished on blur once the
-// focused-field exemption lifted): a value cleared while the toggle is on is NOT in the snapshot, so
-// the field stays rendered mid-edit until the next record (or a toggle off→on) re-snapshots; a value
-// GAINED after the snapshot makes the field visible immediately and it stays visible (the snapshot
-// may only hide, never override a present value).
+// SNAPSHOT ∩ NOW ∩ NOT-EXEMPT: `emptySnapshot` is the set of field ids whose value satisfied
+// `isEmptyValue` at the moment the record id or the toggle last changed; `applyHideEmpty` hides a
+// field only when it is in that snapshot AND `isEmptyValue` holds for its CURRENT value AND no live
+// exemption applies. Only the snapshot decides, never the edit history (round 3 precision — the
+// round-2 comment "a value gained … stays visible; a value lost … stays visible until the next
+// snapshot" was over-general):
+//   - a field NON-EMPTY at the snapshot is not in the set, so it is never hidden until the next
+//     record (or a toggle off→on) re-snapshots, whatever happens to its value meanwhile — a value
+//     cleared mid-edit cannot vanish (round 2, refuter P3: round 1 hid on the snapshot alone, so a
+//     field the user had just filled vanished on blur once the focused-field exemption lifted);
+//   - a field EMPTY at the snapshot is shown while it holds a value and RE-HIDES when it is emptied
+//     again — immediately if it is not focused, on blur if it is (the exemptions below are live).
 // `watch` takes an ARRAY OF SOURCES (compared element-wise), deliberately not a single getter
 // returning a tuple — that form would re-fire on every same-id record object replacement and turn
 // the snapshot back into a live filter.

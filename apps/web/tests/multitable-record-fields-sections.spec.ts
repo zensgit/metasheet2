@@ -11,10 +11,15 @@
  *     de-duplication on the same path; absent prop → rendered ids identical to `fields` (legacy path).
  *   - HIDE EMPTY: hides exactly the `isEmptyValue`-empty fields; five exemption positive controls
  *     (`<exemption> + empty value + hide-empty ON ⇒ still rendered`), each paired with the control that
- *     proves the clause is load-bearing; the SNAPSHOT ∩ NOW semantic (round 2: a value cleared mid-edit
- *     stays until the next snapshot; a value GAINED after the snapshot — including the refuter's
- *     "focus → fill → blur" path — becomes visible at once and stays; a record-id change re-snapshots;
- *     toggle off shows everything); the inspector-owned toggle has a CONSTANT label with `aria-pressed`
+ *     proves the clause is load-bearing; the SNAPSHOT ∩ NOW ∩ NOT-EXEMPT semantic (round 2: a value
+ *     cleared mid-edit stays until the next snapshot; a value GAINED after the snapshot — including the
+ *     refuter's "focus → fill → blur" path — becomes visible at once; a record-id change re-snapshots;
+ *     toggle off shows everything. Round 3 precision: only the snapshot decides — a field NON-EMPTY at
+ *     the snapshot never hides until the next snapshot, a snapshot-EMPTY field shows while it holds a
+ *     value and RE-HIDES when emptied again, at once when unfocused / on blur when focused; the headline
+ *     fixture carries whitespace-only / `[]` / `{}` values so a naive null/'' predicate is caught there;
+ *     and §2's disclosure state survives a hide-empty round-trip that unmounted it); the inspector-owned
+ *     toggle has a CONSTANT label with `aria-pressed`
  *     carrying the state (APG toggle button), reads zh through the helper, resets on remount and exists
  *     on the details tab only.
  *   - GLYPH ⇔ PREDICATE agreement over the full value × field-type fixture set (one definition).
@@ -81,6 +86,12 @@ const F_SECRET_HIDDEN = { id: 'fld_secret', name: 'Secret', type: 'string', prop
 const F_SECRET_SHOWN = { id: 'fld_secret', name: 'Secret', type: 'string', property: {} } as unknown as MetaField
 const F_VENDOR = { id: 'fld_vendor', name: 'Vendor', type: 'link' } as MetaField
 const F_FILES = { id: 'fld_files', name: 'Files', type: 'attachment' } as MetaField
+// Hide-empty predicate fixtures (round 3): values that are `isEmptyValue`-empty but NOT null/'' — a
+// naive `v == null || v === ''` check calls all three non-empty. Non-attachment types on purpose
+// (exemption (5)'s `[]` attachment already diverges; the headline test must diverge on its own).
+const F_MEMO = { id: 'fld_memo', name: 'Memo', type: 'string' } as MetaField
+const F_TAGS = { id: 'fld_tags', name: 'Tags', type: 'multiSelect', options: [{ value: 'a' }, { value: 'b' }] } as unknown as MetaField
+const F_WHERE = { id: 'fld_where', name: 'Where', type: 'location' } as MetaField
 
 function record(id: string, data: Record<string, unknown>): MetaRecord {
   return { id, version: 1, data } as MetaRecord
@@ -340,22 +351,29 @@ describe('sections — inspectorFieldLayout (§1.3 "Sections")', () => {
 
 // =====================================================================================================
 describe('hide-empty (§1.3 "Hide empty")', () => {
-  const FIELDS = [F_TITLE, F_NOTES, F_QTY, F_STATUS]
-  const DATA = { fld_title: 'Alpha', fld_notes: '', fld_qty: null, fld_status: 'todo' }
+  const FIELDS = [F_TITLE, F_NOTES, F_QTY, F_STATUS, F_MEMO, F_TAGS, F_WHERE]
+  // '' and null are empty under ANY predicate; the last three are empty ONLY under `isEmptyValue`
+  // (whitespace-only string, empty array, empty plain object) — the naive-predicate probe's targets.
+  const DATA = { fld_title: 'Alpha', fld_notes: '', fld_qty: null, fld_status: 'todo', fld_memo: '  \t ', fld_tags: [], fld_where: {} }
 
-  it('hides exactly the isEmptyValue-empty fields (primary exempt), and the toggle OFF shows every field', async () => {
+  it('hides exactly the isEmptyValue-empty fields (primary exempt) — including whitespace-only / [] / {} on non-attachment fields, which a naive null/"" check would keep — and the toggle OFF shows every field', async () => {
     const { container, set } = mountPanel({ record: record('rec_1', DATA), fields: FIELDS, hideEmpty: true })
     await flushUi()
     const rendered = renderedFieldIds(container)
     expect(rendered).toEqual(['fld_title', 'fld_status'])
+    // the three predicate-discriminating values are each hidden (a `v == null || v === ''` predicate at
+    // either FP call site — snapshot or filter — renders all three)
+    expect(rendered).not.toContain('fld_memo')
+    expect(rendered).not.toContain('fld_tags')
+    expect(rendered).not.toContain('fld_where')
     // mechanical tie to the shared predicate: rendered ⇔ (!isEmptyValue(value) || primary)
     for (const field of FIELDS) {
       const expected = !isEmptyValue((DATA as Record<string, unknown>)[field.id]) || field.id === FIELDS[0].id
-      expect(rendered.includes(field.id)).toBe(expected)
+      expect(rendered.includes(field.id), field.id).toBe(expected)
     }
     set({ hideEmpty: false })
     await flushUi()
-    expect(renderedFieldIds(container)).toEqual(['fld_title', 'fld_notes', 'fld_qty', 'fld_status'])
+    expect(renderedFieldIds(container)).toEqual(['fld_title', 'fld_notes', 'fld_qty', 'fld_status', 'fld_memo', 'fld_tags', 'fld_where'])
   })
 
   it('applies on the sections path too, and the hidden-section heading count follows the filtered set', async () => {
@@ -363,10 +381,10 @@ describe('hide-empty (§1.3 "Hide empty")', () => {
       record: record('rec_1', DATA),
       fields: FIELDS,
       hideEmpty: true,
-      inspectorFieldLayout: { ordered: [F_TITLE, F_NOTES], hiddenInView: [F_QTY, F_STATUS] },
+      inspectorFieldLayout: { ordered: [F_TITLE, F_NOTES], hiddenInView: [F_QTY, F_STATUS, F_MEMO, F_TAGS, F_WHERE] },
     })
     await flushUi()
-    // §2 keeps only the non-empty status field → count 1
+    // §2 keeps only the non-empty status field → count 1 (null, whitespace-only, [] and {} all filtered)
     expect(sectionToggle(container, 'hidden-in-view')!.textContent).toContain(recordHiddenFieldsHeading(1, false))
     sectionToggle(container, 'hidden-in-view')!.click()
     await flushUi()
@@ -517,6 +535,48 @@ describe('hide-empty (§1.3 "Hide empty")', () => {
     expect(renderedFieldIds(container)).toEqual(['fld_title'])
   })
 
+  it('re-hide (round 3 precision): a field EMPTY at the snapshot that gains a value and is then emptied again RE-HIDES — at once when unfocused, on blur when focused — while the sibling NON-EMPTY at the snapshot survives the same clearing', async () => {
+    const onPatch = vi.fn()
+    const { container, set } = mountPanel({ record: record('rec_1', { fld_title: 'a', fld_notes: '', fld_qty: 7 }), fields: [F_TITLE, F_NOTES, F_QTY], hideEmpty: true, onPatch })
+    await flushUi()
+    // snapshot: notes EMPTY (hidden), qty NON-EMPTY (shown)
+    expect(renderedFieldIds(container)).toEqual(['fld_title', 'fld_qty'])
+
+    // leg 1 — UNFOCUSED: a same-id value arrives for the snapshot-empty field → shown; emptied again → hidden at once
+    set({ record: record('rec_1', { fld_title: 'a', fld_notes: 'from elsewhere', fld_qty: 7 }) })
+    await flushUi()
+    expect(renderedFieldIds(container)).toEqual(['fld_title', 'fld_notes', 'fld_qty'])
+    set({ record: record('rec_1', { fld_title: 'a', fld_notes: '', fld_qty: 7 }) })
+    await flushUi()
+    expect(renderedFieldIds(container)).toEqual(['fld_title', 'fld_qty'])
+
+    // leg 2 — FOCUSED: shown again, caret inside, the user clears it through the control (one patch),
+    // the host applies '' → still rendered while focused (exemption 2 is live) → blur → re-hidden
+    set({ record: record('rec_1', { fld_title: 'a', fld_notes: 'typed', fld_qty: 7 }) })
+    await flushUi()
+    const textarea = container.querySelector<HTMLTextAreaElement>('#drawer_field_fld_notes')!
+    textarea.focus()
+    expect(document.activeElement).toBe(textarea)
+    textarea.value = ''
+    textarea.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(onPatch).toHaveBeenCalledTimes(1)
+    expect(onPatch).toHaveBeenCalledWith('fld_notes', '')
+    set({ record: record('rec_1', { fld_title: 'a', fld_notes: '', fld_qty: 7 }) })
+    await flushUi()
+    expect(renderedFieldIds(container)).toEqual(['fld_title', 'fld_notes', 'fld_qty'])
+    expect(document.activeElement).toBe(textarea)
+    textarea.blur()
+    await flushUi()
+    expect(renderedFieldIds(container)).toEqual(['fld_title', 'fld_qty'])
+
+    // contrast — the field NON-EMPTY at the snapshot (qty), cleared the same way and unfocused, stays
+    // rendered: the snapshot decides, not the edit history (this is the "lose" rule above)
+    set({ record: record('rec_1', { fld_title: 'a', fld_notes: '', fld_qty: null }) })
+    await flushUi()
+    expect(renderedFieldIds(container)).toEqual(['fld_title', 'fld_qty'])
+  })
+
   it('snapshot: a toggle off→on re-snapshots (a field emptied while off is hidden once on again)', async () => {
     const { container, set } = mountPanel({ record: record('rec_1', { fld_title: 'a', fld_notes: 'draft' }), fields: [F_TITLE, F_NOTES], hideEmpty: true })
     await flushUi()
@@ -528,6 +588,50 @@ describe('hide-empty (§1.3 "Hide empty")', () => {
     set({ hideEmpty: true })
     await flushUi()
     expect(renderedFieldIds(container)).toEqual(['fld_title'])
+  })
+
+  it('§2 disclosure state survives a hide-empty ON→OFF round-trip that emptied the section (round 3, round-2 refuter F2): expanded comes back expanded on a FRESH section instance, collapsed comes back collapsed; still nothing in storage', async () => {
+    const { container, set } = mountPanel({
+      record: record('rec_1', { fld_title: 'a', fld_notes: '', fld_qty: null }),
+      fields: [F_TITLE, F_NOTES, F_QTY],
+      hideEmpty: false,
+      inspectorFieldLayout: { ordered: [F_TITLE], hiddenInView: [F_NOTES, F_QTY] },
+    })
+    await flushUi()
+    const toggle = sectionToggle(container, 'hidden-in-view')!
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    toggle.click()
+    await flushUi()
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(renderedFieldIds(container)).toEqual(['fld_title', 'fld_notes', 'fld_qty'])
+    // ON: both §2 fields are empty → §2 has nothing to show → the group (button included) leaves the DOM
+    set({ hideEmpty: true })
+    await flushUi()
+    expect(sectionToggle(container, 'hidden-in-view')).toBeNull()
+    expect(container.querySelector('[data-section="hidden-in-view"]')).toBeNull()
+    expect(renderedFieldIds(container)).toEqual(['fld_title'])
+    // OFF: §2 returns EXPANDED — a different button element (the section was remounted), the same state
+    set({ hideEmpty: false })
+    await flushUi()
+    const back = sectionToggle(container, 'hidden-in-view')!
+    expect(back).not.toBeNull()
+    expect(back).not.toBe(toggle)
+    expect(toggle.isConnected).toBe(false)
+    expect(back.getAttribute('aria-expanded')).toBe('true')
+    expect(renderedFieldIds(container)).toEqual(['fld_title', 'fld_notes', 'fld_qty'])
+    // control: collapse, round-trip again → comes back COLLAPSED (remembered, not forced open)
+    back.click()
+    await flushUi()
+    expect(back.getAttribute('aria-expanded')).toBe('false')
+    set({ hideEmpty: true })
+    await flushUi()
+    expect(sectionToggle(container, 'hidden-in-view')).toBeNull()
+    set({ hideEmpty: false })
+    await flushUi()
+    expect(sectionToggle(container, 'hidden-in-view')!.getAttribute('aria-expanded')).toBe('false')
+    expect(renderedFieldIds(container)).toEqual(['fld_title'])
+    // session-only (OD-W2-2): the lifted state wrote nothing
+    expect(localStorage.length).toBe(0)
   })
 
   // ---- inspector-owned toggle ----
