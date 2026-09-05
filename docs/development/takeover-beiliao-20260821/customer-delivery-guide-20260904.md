@@ -6,6 +6,19 @@
 
 ---
 
+## v2(2026-09-06)变更摘要
+
+本次更新基于 48 小时自主开发窗口(W2–W4)在 222 上的实证与随后的对抗审查、r11 部署,新增/订正以下六项。逐条详情见文中对应小节,这里只列摘要,不重复正文。
+
+1. **子树桥接(§3.1,已有,本次核对无遗漏)**:项目没有订单时,靠"项目目录子树"找根件的机制与 222 实测数字(6 张表头 / 135 行展开 / 225 项挂起)已在 §3.1,本次复核未发现需要订正之处。
+2. **每日 06:00 只试算计划任务(新增 §3.2)**:此前本文未记录这条计划任务,本次补上——账号策略、令牌租户声明要求、日志 values-free、退出码、以及用 `Start-ScheduledTask` 触发验证的方法。
+3. **缺件清单(§6.2,已有,本次核对无遗漏)**:试算卡在 `manual_confirm_required` 时怎么拿到缺件清单、怎么处理,已在 §6.2。
+4. **租户声明硬门(§5-5,已有)**:补一句总纲——**运维 mint 令牌必须带 `--tenant-id`,UI 账号需要恰好一条活跃 `user_orgs` 记录**,否则签发出的令牌不带租户声明,flag 打开后会被相关路由 403。详细前置顺序见 §5-5 表格。
+5. **源绑定 workspace 回退(新增 §3.3,W3b)**:无 workspace 参数的调用方(典型如定时任务)在租户下若恰好存在一条非 null 绑定,现在会回退取用该绑定;存在 ≥2 条候选时拒绝(fail-closed),精确匹配优先,带 workspace 提示但未命中时不回退。
+6. **拉取委派修复(#5505)**:§5-② 已按此修复改写——一线操作员、定时任务服务账号能否拉取 PLM 数据,取决于外接源上有没有服务端归属戳,不再是"一线一律不能拉取"。**222 现状(截至本文核对时)是两条外接源都还没有归属戳,一线拉取仍会 400**,需要绑定者重新保存一次绑定补写(修法见现场连接测试 runbook §1.1)。PR 正文(`gh pr view 5505`)记录了完整根因(读身份委派顺序错误 + canonical 绑定结构上不可能带戳)与裁定;**注意契约变更**——"canonical 绑定不保留归属戳"是此前的既有不变式,#5505 有意将其反转为"canonical 绑定在校验通过后由服务端写入归属戳",不是缺陷修复的副作用。
+
+---
+
 ## 1. 交付物
 
 | 交付物 | 说明 |
@@ -117,6 +130,35 @@ PathExAttrInfo.FileCode(NodeType=2 项目节点) → PathInfo → OrderHeadInfo 
 - 改完按 §7.1 的写法重载 env 再重启;试算证据里出现 `expansion.summary.subtree`(nodesVisited / rootsDiscovered / rootsExpanded)即生效。
 - 222 实测(2026-09-06,项目 2-20231625):开启前 0 行,开启后 6 张表头全部发现、135 行展开、225 项因缺件挂起。详见 `222-w2-subtree-evidence-20260906.md`。
 - 关闭方法:删掉该块并重启,行为与 r9 逐字节相同。
+
+### 3.2 每日定时拉取(只试算,不写入)
+
+W2 起 222 上注册了一个每日 **06:00** 的 Windows 计划任务 `metasheet-stock-prep-scheduled-dry-run`,只做 **dry-run(试算)**,不带 `--apply`,不写沙箱表——发现"有变化"由人工看日志/看板决定要不要真正点一次同步。
+
+**账号策略**:计划任务本身在 Windows 任务计划程序里以 `SYSTEM` 身份运行(操作系统层面),但它调用的备料接口用的是一个**应用层 bearer 令牌**,该令牌属于哪个账号是关键:
+- **设计意图是专用服务账号**(`svc-stockprep-scheduler`,`role=admin`,登录禁用哨兵 hash,`user_orgs` 恰一条 `default`)——已在 222 建好,但截至本文核对时**尚未启用**,原因见下条。
+- **当前实际使用绑定者本人的管理员令牌**:W2 执行期间发现拉取的读身份委派机制(`resolveTableActionReadPrincipal` 委派给外接系统 `config.dataSourceOwnerId`)对 canonical 绑定从未生效,专用服务账号不是绑定者本人,调用一律 `400 CONNECTION_CANONICAL_UNAVAILABLE`;临时改签给绑定者 admin 的令牌后计划任务才跑通。**#5505 已修复委派机制本身**(见 v2 摘要第 6 条与 §5-②),但 222 上的外接源目前还没有归属戳,修复生效前还需绑定者重新保存一次绑定——因此"计划任务切回专用服务账号"是否已具备条件,需要在归属戳补齐后重新验证,已记入 `48h-autonomous-run-record-20260906.md` 的待拍板清单。
+- **令牌须带租户声明**:不论用哪个账号,签发令牌都必须用 `--tenant-id`(`scripts/ops/attendance-window-runner-mint-token.mjs`),否则打开 §5-5 的租户声明硬门后计划任务会被 403。222 上验证过的令牌 claims 含 `tenantId`(与脚本读取的 `MS_TENANT_ID` 一致),到期时间写入文件供轮换参考。
+
+**日志与退出码**:
+- 脚本日志 **values-free**——不打印令牌、不打印任何凭据,只打印结构化结果(状态码、`rowsExpanded`/`add`/`manual_confirm` 等计数)。
+- 包装脚本(`.cmd`)首次生成时因路径被自动换行拆成多行,执行报 `exit 255` 且不留日志;改成路径不换行的字面单行写法后恢复正常。
+- 进程正常退出应为 `exit 0`;此前存在一个与本任务无关的通用问题——Node 进程退出时偶发 `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`(表现为 `exit 0xC0000409`),根因是用了 `process.exit` 而未清理定时器句柄,已在 #5493 修复(改用 `AbortController` 清理、补真实子进程验证退出码)。**升级到含 #5493 的构建之后再核对这条计划任务**,若仍看到该断言退出码,说明构建版本不对,不是配置问题。
+
+**验证方式(不等到第二天 06:00)**:用 `Start-ScheduledTask` 手动触发一次,而不是靠"调个接口通不通"来验:
+```powershell
+Start-ScheduledTask -TaskName 'metasheet-stock-prep-scheduled-dry-run'
+```
+核对两件事:①`(Get-ScheduledTaskInfo -TaskName 'metasheet-stock-prep-scheduled-dry-run').LastTaskResult` 必须是 `0`;②脚本日志新增的那几行必须是 values-free 的试算结果(如 `200 manual_confirm_required`、`add`/`manual_confirm` 计数、`summary failed 0`),不是错误堆栈。222 上按此方法验证通过:`LastTaskResult=0`,日志新增两行,试算 200、`add 135 / manual_confirm 225`、`summary failed 0`。
+
+### 3.3 源绑定切换后,定时任务/无工作区参数的调用能不能读到同一条绑定(W3b)
+
+§7 已知问题 ⑥ 描述的"切源必须写两次"问题(界面切源带工作区参数,对账/定时任务这类不带参数的调用方推出 `workspace=null`,两边读不到同一条绑定)有了修复方向 B:
+
+- **回退规则**:调用方**没有带工作区提示**(`workspace=null`,典型场景是定时任务、对账)时,若该租户下**恰好存在一条**非 null 的源绑定,系统回退取用这一条;若存在 **≥2 条**候选,拒绝回退(fail-closed,不猜);带工作区提示且精确命中的绑定优先于回退结果;带工作区提示但**未命中**任何绑定时,不触发回退(保住既有测试的边界)。
+- **对下游的影响**:同一次回退命中时,外接系统查找也会以回退命中的 `matchedWorkspaceId` 作为 hint,不需要额外配置。
+- **222 落地(2026-09-06)**:清理了历史遗留的 `workspace_id IS NULL` 那条绑定(备份表 `integration_stock_prep_source_binding_bak_20260906-030732`),现在只剩一条 `default` 作用域绑定指向客户 PLM(`104e9bad`)。管理员带工作区提示试算:200(135 行 / 6 张表头 / 6 个根)。定时任务(无工作区提示)靠单候选回退命中同一条绑定:200(`add 135 / manual_confirm 225`,`summary failed 0`)。W3b 的判据(只写一处、两边都读到同一条绑定)在 222 上已满足。
+- 根因(为什么会有两套推导)记为 owner 决策项:Web 端把"租户"当"工作区"来推导绑定作用域,是设计遗留,不是这次改动引入的新问题。
 
 ## 4. 数据前置(客户侧必做)
 
@@ -297,11 +339,14 @@ PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
 | Excel 导出上限 | 20000 行 | 代码常量 |
 | 超过 `maxRows` 时 | **不报错、不截断**,转入"大 BOM 分批"路径 | 界面有专门面板;后端按每批 100–1000 行写入 |
 
-**必须如实告知的一点**:上限以内走的是本说明 §6 描述、且已实测验证的那条路径。**超过上限后的"大 BOM 分批"路径,2026-09-05 在 222 上首次实测,结论是走不通;修复已实现(#5501),222 上的复测(13151 行合成项目走通后台作业 → plan → 分批 apply)待 r11 部署后进行,结论届时补记。**
+**必须如实告知的一点(2026-09-06 更新为实测结论,不再是"未实测")**:上限以内走的是本说明 §6 描述、且已实测验证的那条路径。**超过上限后的"大 BOM 分批"路径,2026-09-05 在 222 上首次实测走不通;修复(#5501)落地并升级到 r11 后,2026-09-06 用同一个 13151 行合成项目复测,走通了完整链路(试算 → 后台展开 → 规划 → 分批写入)。**
 
-- **实测**(222,合成 13151 行项目):试算返回 `large_bom_bounded`(`rowsExpanded=10000`、`readCount=20502`、`errorTypes=[max_rows_exceeded]`)→ 创建后台展开作业 → run 返回 `status=failed`、`errorTypes=[max_rows_exceeded]`、`authoritative=false`,`budgets={maxRows:10000, maxPages:100, maxReadCount:30000, maxElapsedMs:600000, maxDepth:20, maxArtifactChunks:1}` → plan 必然 422 `LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE`。
-- **根因**:后台展开作业复用了交互试算的**同一套上限**。进入这条路径的唯一方式就是超过交互上限,后台再撞同一个数字,于是任何大到需要这条路径的项目都必然在这条路径里失败——按构造不可能成功。
-- **修法**(#5501):后台展开作业改用自己的一套上限,交互试算行为**不变**。
+- **首次实测(2026-09-05,修复前)**:试算返回 `large_bom_bounded`(`rowsExpanded=10000`、`readCount=20502`、`errorTypes=[max_rows_exceeded]`)→ 创建后台展开作业 → run 返回 `status=failed`、`errorTypes=[max_rows_exceeded]`、`authoritative=false`,`budgets={maxRows:10000, maxPages:100, maxReadCount:30000, maxElapsedMs:600000, maxDepth:20, maxArtifactChunks:1}` → plan 必然 422 `LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE`。
+- **根因**:后台展开作业当时复用了交互试算的**同一套上限**。进入这条路径的唯一方式就是超过交互上限,后台再撞同一个数字,于是任何大到需要这条路径的项目都必然在这条路径里失败——按构造不可能成功。
+- **修法**(#5501):后台展开作业改用自己的一套独立上限,交互试算行为**不变**。
+- **复测通过(2026-09-06,r11,合成 13151 行项目)**:交互试算 `large_bom_bounded`(10000 行封顶,`readCount=20502`,`canApply=false`)→ 后台展开作业 `completed`(`rowsExpanded=13151`、`readCount=26959`、`frontierRemaining=0`,预算 `maxRows=200000`/`maxPages=1000`/`maxReadCount=600000`/`maxElapsedMs=3600000`,`errorTypes` 为空)→ 规划 `valid`(`add=13151`、`existingRows=0`、`manual_confirm=0`)→ 分批写入作业 `succeeded`:132 批 × 100,`created=13151`、`failed=0`,`hitGuardLimit=false`。用时:试算 6.7s、展开 8.5s、规划 2.3s、写入循环 453.6s(≈3.4s/批,主要是 HTTP 往返 + 每批落库),驱动脚本总耗时 472.8s。
+- **唯一的坑,必须提前check**:动作配置里的 `projectSubtree` 块(§3.1)是**为客户 PLM 的列名写的**(`pathInfo.parentIdField=Parent_OBJ_ID`、`bomHead.pathIdField=path_id`)。如果切到的源(例如验证用的合成源)**没有这两列**,订单展开完成后一进入子树阶段,第一次读 `bomHead` 就会 SQL 报错,整份后台作业判 `status=failed`、`errorTypes=[read_failed]`(**不是规模类错误**),`authoritative=false`,plan 同样 422——现象和"规模超限"很像,但根因完全不同,不能按 §7.1 的预算表去调。2026-09-05 首次实测大 BOM 时就踩了这个坑(合成源当时缺这两列),交互试算的 10000 行上限在进入子树阶段之前就已经 `large_bom_bounded` 早退,所以这个坑此前从未暴露。**接手排查时先看是不是切换到了缺这两列的源**,不要先怀疑预算配置。
+- **诊断缺口(#5507,截至本文核对时对抗核验已判可合,仅剩注释措辞未收尾)**:此前作业证据把 `readDiagnostics` 砍成布尔值、失败对象与错误码不落库也不打日志,任何 `read_failed` 都无法事后诊断,只能翻 PG 服务端日志(见新增的"运维排障"一节)。#5507 合入后,`GET` 作业记录会带上 `evidence.readFailures` / `errorDetails`(至多 20 条,**只含对象名、错误码、原因类**,永不含原始 `message`,保持 values-free)。
 
 ### 后台上限:缺省推导公式与 222 现行值
 
@@ -364,6 +409,41 @@ pm2 restart metasheet-backend --update-env
 ```powershell
 pg_restore --clean --if-exists -d $env:DATABASE_URL "$backupDir\pre-upgrade-db.dump"
 ```
+
+---
+
+## 9. 运维排障
+
+**9.1 PG 服务端日志:位置与编码**
+
+222 的 PostgreSQL 17 服务端日志在 `C:\Program Files\PostgreSQL\17\data\log\`。**应用连接用的数据库账号没有 `SHOW data_directory` 权限**(不是应用账号该有的权限),这个路径要靠运维直接在机器上确认,不能指望从应用侧的连接查出来。
+
+日志文件在中文 locale 下是 **GBK 编码**,直接用 `Get-Content` 按默认编码读会出现乱码,正确做法:
+
+```powershell
+[IO.File]::ReadAllLines('C:\Program Files\PostgreSQL\17\data\log\<当天日志文件名>', [Text.Encoding]::GetEncoding(936))
+```
+
+排查任何"作业莫名其妙失败""SQL 报错但接口只给了一个笼统错误码"的场景,先按上面的方法把当天日志翻出来,搜时间戳附近的条目——2026-09-06 W3c 复测时,后台展开作业失败的真正原因(合成源缺 `path_id`/`Parent_OBJ_ID` 两列,见 §7.1)就是靠这条日志里一条"字段 \"path_id\" 不存在"的中文报错定位的,应用层的作业记录当时只给了一个 `read_failed` 的类型码。
+
+**9.2 `audit_logs` 按月分区:自愈在中文 locale 下会失效**
+
+`audit_logs` 表按月分区(`audit_logs_YYYY_MM`),数据库里有一个 `create_audit_partition()` 函数负责建**下个月**的分区,应用代码里还有一段自愈逻辑(`AuditRepository.ensureCurrentMonthPartition`)——写入时如果撞上"当月分区不存在",会自动尝试建当月分区再重试一次。
+
+**这个自愈逻辑在中文 locale 的部署上从未真正触发过**:它靠一段英文正则(`/no partition of relation "audit_logs" found/i`)匹配 PostgreSQL 抛出的错误信息来判断"是不是缺分区这个原因",但中文 locale 下 PostgreSQL 返回的是中文报错文案,英文正则永远不命中,于是每一条本该触发自愈的写入都直接失败退出,不会自动建分区。**产品修复 PR #5506**:改成按 PostgreSQL 的 SQLSTATE(`23514`)识别"缺分区"这类错误,不再依赖报错文案的语言,中英文正则作为兜底(截至本文核对时状态为 OPEN,9 例测试绿)。
+
+另外,`create_audit_partition()` 这个函数**目前没有任何调用者**——不在应用启动流程里,也没有接到每日调度上,纯手工才会被执行到;是否要把它接到启动检查或每日调度,记入 `48h-autonomous-run-record-20260906.md` 的待拍板清单。
+
+**手工补分区的 SQL**(在自愈没接好、或需要提前把未来月份的分区建出来时用,`FOR VALUES FROM`/`TO` 按需改成对应月份的第一天):
+
+```sql
+CREATE TABLE IF NOT EXISTS audit_logs_2026_09 PARTITION OF audit_logs FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
+CREATE TABLE IF NOT EXISTS audit_logs_2026_10 PARTITION OF audit_logs FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+```
+
+**已在 222 上实证有效**(2026-09-06):手工建好 2026_09/2026_10 两个分区后,重跑一次会写 `audit_logs` 的操作(两次 RBAC 授权 + 命名空间准入),`audit_logs_2026_09` 从 0 行变成 3 行,PG 服务端日志从此再没有新的 `audit_logs` 相关报错;补分区之前的两个时间点(当天 03:06:59 / 03:18:10)各有 3 条报错,与同一类授权写入一一对应。
+
+**运维建议**:不论 #5506 合入与否,建议**每月检查一次下一个月的分区是否已存在**(`SELECT to_regclass('audit_logs_<下月 YYYY_MM>')` 不为空即已存在),提前手工建好,不要等到写入失败才发现——尤其在自愈逻辑修复上线前,这是唯一的保险手段。
 
 ---
 
