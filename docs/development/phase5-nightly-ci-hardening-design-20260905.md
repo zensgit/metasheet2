@@ -5,12 +5,22 @@ Status: LOCAL VERIFIED; publication is Draft/HOLD only.
 
 ## Exact Scope
 
-- Base: `177cafd3e34f30b5fc2682b3d392684c92fe67fe`.
+- Original code/publication base: `177cafd3e34f30b5fc2682b3d392684c92fe67fe`.
+- Current replay base: `70dc72d7671cad9cea1925ed93f90d3d9c746aeb`.
 - Code commit: `49a0aa5713b1cb5c2f619257d58fe536f9bc66bf`.
 - Code tree: `326ef51d315e5f573193466506012f7d0e04e3a4`.
 - Branch: `codex/phase5-nightly-ci-hardening-20260905`.
 - Four code/workflow files, 118 insertions and 6 deletions; these two reports are separate documentation children.
 - Authority: standing bounded development/CI repair and Draft publication. No Ready, merge, dispatch, flag, deployment, production, or customer-data authorization is inferred.
+
+The current-main true merge is `206d9c15f166f3f5de04e53ac5a41c9790eca33c`,
+tree `c915350e88f0dcf7d898189d51ab7299ef5b87be`, ordered parents
+`da8fd3660f62260a29645cccc5bb38874c862daa` and the current replay base.
+All six owned code/report paths are unchanged across this merge. Main's four
+stock-preparation source/test/required-Web changes were an automatic union;
+there was no conflict or manual resolution. The 48 local contracts, workflow
+and Node syntax checks passed again, as did eight focused stock-preparation
+tests. This subsequent report child changes no code.
 
 ## Observed Failure Classes
 

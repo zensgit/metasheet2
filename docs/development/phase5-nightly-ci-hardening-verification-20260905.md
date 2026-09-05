@@ -5,10 +5,35 @@ Status: LOCAL VERIFIED / remote and operational evidence separate.
 
 ## Evidence Binding
 
-- Base: `177cafd3e34f30b5fc2682b3d392684c92fe67fe`.
+- Original base: `177cafd3e34f30b5fc2682b3d392684c92fe67fe`.
+- Current replay base: `70dc72d7671cad9cea1925ed93f90d3d9c746aeb`.
 - Exact code head: `49a0aa5713b1cb5c2f619257d58fe536f9bc66bf`.
 - Code tree: `326ef51d315e5f573193466506012f7d0e04e3a4`.
 - Only the four files declared in [the design report](phase5-nightly-ci-hardening-design-20260905.md) constitute the code delta. Documentation is a subsequent commit, not a different code implementation.
+
+## Current-Main Replay
+
+True merge `206d9c15f166f3f5de04e53ac5a41c9790eca33c`, tree
+`c915350e88f0dcf7d898189d51ab7299ef5b87be`, has ordered parents
+`da8fd3660f62260a29645cccc5bb38874c862daa` and `70dc72d7671cad9cea1925ed93f90d3d9c746aeb`.
+The six candidate-owned paths are byte-equivalent to the previous published
+head. The only first-parent delta is the four main stock-preparation files;
+there is no conflict or manual resolution. The required-Web addition is retained.
+The 48 contracts, three-workflow actionlint, Node syntax and diff-check were
+rerun successfully. The new main's `StockPreparationUnconfirmableHold.spec.ts`
+and adjacent `stockPreparationConfirmationQueue.spec.ts` passed 8/8 using
+temporary links to already-installed dependencies; those exact links were
+removed afterward. No installation or shared-checkout edit occurred.
+
+## Historical Remote Execution
+
+[PR #5485](https://github.com/zensgit/metasheet2/pull/5485), previous exact
+head `da8fd3660f62260a29645cccc5bb38874c862daa`, ran protected SSH contract
+job `101238845518` in run `33941198406` successfully. Its actual log contains
+12 existing source-census tests, 14 resolver tests, and all 16 expanded Phase 5
+tests passing with zero skips. This verifies required-lane execution, not a
+scheduled nightly run. The whole old-head matrix was still pending at the
+recorded snapshot; the new replay requires its own complete remote matrix.
 
 ## Local Results
 
