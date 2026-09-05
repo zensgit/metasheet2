@@ -2969,11 +2969,12 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
     'G9: nor forbids the exact use the advance route now makes of it',
   )
   const callSites = (read('lib', 'http-routes.cjs').match(/resolveOperatorValueScope\(\{/g) || []).length
-  // 项目备料页 added two: the board read and the project directory read. The count is the whole
-  // point of the assertion — a new surface deciding tenancy on its own must show up HERE, as a
-  // failure, rather than quietly becoming the eighth thing the header does not mention.
-  assert.equal(callSites, 8, 'G9: eight call sites — if this changes, the header list must too')
-  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard']) {
+  // 项目备料页 added two: the board read and the project directory read. W3a added a ninth — the
+  // dry-run's opt-in missing-component list. The count is the whole point of the assertion — a new
+  // surface deciding tenancy on its own must show up HERE, as a failure, rather than quietly
+  // becoming the nth thing the header does not mention.
+  assert.equal(callSites, 9, 'G9: nine call sites — if this changes, the header list must too')
+  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun']) {
     assert.ok(scope.includes(marker), `G9: the header enumerates ${marker}`)
   }
 }
