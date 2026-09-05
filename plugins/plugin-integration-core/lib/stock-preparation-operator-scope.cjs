@@ -64,18 +64,27 @@
 //           proven twice over: the scope resolved here decides which staging project is read, and the
 //           bound sheet is then checked against the registry's own ownership record
 //           (`isSheetOwnedByProject`) before the fill deep link is composed.
+//        5. POST …/table-actions/:actionId/dry-run   `tableActionDryRun`
+//           the trial's MISSING-COMPONENT LIST (W3a) — PLM part numbers, their parents, their BOM
+//           ids. It is the odd one out on this list and the shape is deliberate: the route itself is
+//           a `read` route and STAYS one (a supervisor holding `integration:read` has always been
+//           able to run a trial and see the counts), so the scope is resolved ONLY on the explicit
+//           `includeMissingComponents: true` opt-in. That branch — and only that branch — also takes
+//           its tenant from `scope.tenantId` rather than from `resolveTenantId`, because the tenant
+//           chosen there is the tenant whose PLM binding is opened and whose part numbers therefore
+//           come back. Without the flag the handler is byte-for-byte the values-free route it was.
 //      (1) and (2) predate this module and were left on `resolveTenantId` when it landed, which was a
 //      live cross-tenant leak on a claimless deployment rather than a stylistic gap — see the routes.
 //
 //   B. TENANT-PROOF-ONLY SURFACES — values-free, but the tenant still may not come from a header.
-//        5. GET  …/stock-preparation/handoff          `stockPreparationHandoffStatus`
+//        6. GET  …/stock-preparation/handoff          `stockPreparationHandoffStatus`
 //           whose turn it is (通知下一步), values-free:
 //           step keys from a closed vocabulary, cursor integers, booleans, handler COUNTS. It rides
 //           the broad READ tier (`requiredTier: STOCK_PREP_READ`) because a supervisor is meant to
 //           see whose turn it is — but WHOSE turn is still a tenant fact.
-//        6. POST …/stock-preparation/handoff/advance  `stockPreparationHandoffAdvance`
+//        7. POST …/stock-preparation/handoff/advance  `stockPreparationHandoffAdvance`
 //           the advance itself: a WRITE (see below).
-//        7. POST …/stock-preparation/carry/confirm    `stockPreparationCarryConfirm`
+//        8. POST …/stock-preparation/carry/confirm    `stockPreparationCarryConfirm`
 //           the K2 结转 confirm: a WRITE, values-free in its response (modes, counts, field NAMES).
 //           It joins this list for a reason specific to it — the tenant string does not merely scope
 //           what it reads, it decides WHICH SHEET IT WRITES. The bound table action is deploy-global
@@ -107,7 +116,7 @@
 //     tenant it is writing to. An earlier version of this line said writes keep
 //     `resolveAuthenticatedWriteTenantId`; that helper reads `user.tenantId`, which the auth
 //     middleware fills from the x-tenant-id HEADER whenever the verified token carries no tenant
-//     claim, so on a claimless deployment it decides nothing at all. `POST …/handoff/advance` (5
+//     claim, so on a claimless deployment it decides nothing at all. `POST …/handoff/advance` (7
 //     above) therefore resolves its tenant HERE and adds, on top, the two things a write owes and a
 //     read does not: its own handler gate (only a configured handler of the step may advance it) and
 //     its own append-only audit row. That is the rule for the next write: this module proves whose

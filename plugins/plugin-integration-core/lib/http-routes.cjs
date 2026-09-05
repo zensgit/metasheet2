@@ -1378,9 +1378,14 @@ function publicRunInput(body = {}) {
   return input
 }
 
-const VALID_TABLE_ACTION_DRY_RUN_BODY_KEYS = new Set(['parameters', 'conflictPolicyReview'])
-// Confirmation-decision reconcile accepts EXACTLY the dry-run inputs: the plan/revision the ledger
-// binds to are recomputed server-side and can never be request-supplied.
+// `includeMissingComponents` (W3a) is an OPT-IN for the one value-bearing key the dry-run response
+// can carry. It is registered here because `normalizeTableActionBody` refuses any key not on this
+// list — but registering it is only half of it: the handler ALSO runs `resolveOperatorValueScope`
+// before honouring it, so the flag buys nothing without operate ∧ a proven tenant. Deliberately NOT
+// added to the reconcile list below: the ledger lane must stay values-free.
+const VALID_TABLE_ACTION_DRY_RUN_BODY_KEYS = new Set(['parameters', 'conflictPolicyReview', 'includeMissingComponents'])
+// Confirmation-decision reconcile accepts EXACTLY the dry-run inputs MINUS the value-bearing opt-in:
+// the plan/revision the ledger binds to are recomputed server-side and can never be request-supplied.
 const VALID_TABLE_ACTION_CONFIRMATION_DECISION_RECONCILE_BODY_KEYS = new Set(['parameters', 'conflictPolicyReview'])
 const VALID_TABLE_ACTION_MVP_PERSIST_BODY_KEYS = new Set(['parameters'])
 const VALID_TABLE_ACTION_APPLY_BODY_KEYS = new Set(['parameters', 'confirm'])
@@ -5422,8 +5427,52 @@ function requireStockPreparationAudit() {
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
       const body = normalizeTableActionBody(requestBody(req))
+      /*
+       * W3a — THE OPT-IN FOR THE MISSING-COMPONENT LIST, AND WHY IT NEEDS ITS OWN GATE.
+       *
+       * This route is a `read` route, and it must stay one: a supervisor holding `integration:read`
+       * has always been able to run a trial and see the counts, and taking that away to ship a list
+       * would be a worse trade than not shipping it. But the list carries REAL PART NUMBERS, and
+       * `requireTableActionAccess`'s legacy branch RETURNS BEFORE the operator scope — a caller with
+       * `integration:read` never meets `resolveOperatorValueScope` at all. On a deployment whose
+       * tokens carry no tenant claim that branch's tenant comes from the `x-tenant-id` REQUEST
+       * HEADER (see the function's header), and a tenantless platform admin may steer `?tenantId=`
+       * across tenants outright. Handing either of them a part number would turn a values-free
+       * header hole into a VALUE leak.
+       *
+       * So the flag — and only the flag — carries its own gate, the same one every other
+       * value-bearing operator read in this plugin uses. Placed HERE: after the body is validated so
+       * an unknown key still 400s first, and before the action lookup, the B2a claim, the credential
+       * reload and the source read, so a refused caller costs none of them. A caller who does not
+       * set the flag walks the identical path they always did — not one extra check, not one extra
+       * key in the response.
+       */
+      let includeMissingComponents = false
+      if ('includeMissingComponents' in body) {
+        if (typeof body.includeMissingComponents !== 'boolean') {
+          throw new HttpRouteError(400, 'TABLE_ACTION_REQUEST_INVALID', 'includeMissingComponents must be a boolean', { field: 'includeMissingComponents' })
+        }
+        includeMissingComponents = body.includeMissingComponents
+      }
+      const valueScope = includeMissingComponents
+        ? await resolveOperatorValueScope({
+          user: getUser(req),
+          authenticatedTenantId: req.authenticatedTenantId,
+          explicitTenantIds: collectExplicitTenantIds(req, {}),
+          tenantPrincipalDirectory,
+        })
+        : null
       const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
-      const dryRunTenantId = resolveTenantId(req, {})
+      // ON THE VALUE PATH THE TENANT IS THE PROVEN ONE. `resolveTenantId` is right for the
+      // values-free trial and stays exactly where it was for it — but it accepts `user.tenantId`,
+      // which is header-fillable, and lets a tenantless platform admin steer `?tenantId=`. Since the
+      // tenant chosen here is the tenant whose PLM binding is opened, and the part numbers in the
+      // response come out of that PLM, the value path must not derive it from anything the request
+      // can move. `scope.tenantId` cannot differ from what `resolveTenantId` would have returned for
+      // any caller who reached this line — the scope has already refused every input that could make
+      // them differ — so this is not a behaviour change; it is the derivation being made unable to
+      // drift from the proof.
+      const dryRunTenantId = valueScope ? valueScope.tenantId : resolveTenantId(req, {})
       const dryRunB2aRunId = b2aRunId('table-action-dry-run')
       // B2a entry point (1), ahead of the credential reload inside the adapter load below.
       const dryRunB2aAuthorization = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
@@ -5443,6 +5492,10 @@ function requireStockPreparationAudit() {
         tokenStore: context.storage,
         policyStore: context.storage,
         conflictPolicyReview: body.conflictPolicyReview,
+        // W3a. `false` for every caller who did not opt in — and it can only be `true` here if the
+        // operator-scope gate above returned without throwing, which is what makes "operate ∧ proven
+        // tenant" a property of the code rather than of the caller's good manners.
+        includeMissingComponents,
         // Pack-aware bands, from the install ledger + a live per-field read. undefined (no ledger,
         // no pack, or a read failure) omits the parameter and the planner takes its legacy path.
         // The apply route below resolves it the SAME way so the two agree on the plan revision.

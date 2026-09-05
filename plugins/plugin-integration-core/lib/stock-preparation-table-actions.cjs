@@ -3,6 +3,29 @@
 // #2253 C5-1: backend parameterized table action contract for PLM project BOM
 // -> stock-preparation. This module wires the already-landed C2/C3/C4 helpers
 // without adding UI, migrations, external DB writes, or K3 paths.
+//
+// ---------------------------------------------------------------------------
+// THE ONE VALUE-BEARING KEY IN THIS MODULE'S RESPONSES (W3a) — register it here
+// ---------------------------------------------------------------------------
+//
+// The dry-run response is otherwise values-free by construction: statuses, counts, hashes, frozen
+// error-type tokens and field ids, and an `evidence` stanza whose every branch is a projection that
+// drops customer cells. This module is NOT covered by the `assertValuesFree*` self-checks (those
+// live on the audit store, the pack-install store and the GIP read observability seam), so the
+// registration is this comment plus the tests that pin it.
+//
+//   `missingComponents` — the ONLY key in any response this module produces that carries real
+//   customer values (PLM part numbers, their parents, their BOM ids and paths). It is:
+//     * OPT-IN: `dryRunStockPreparationAction({ includeMissingComponents: true })`, and nothing else
+//       in this module sets it — the large-BOM lane and the confirmation-decision lane never do.
+//     * CONDITIONAL: absent entirely when the flag is off OR the list is empty, so a caller that did
+//       not ask, and a project with nothing missing, get byte-identical responses to before W3a.
+//     * GATED at the route: operate ∧ a PROVEN tenant. `http-routes.cjs`'s dry-run handler calls
+//       `resolveOperatorValueScope` before it will pass the flag down — the legacy `integration:read`
+//       tier and the tenantless platform admin are refused there, 403.
+//     * OUT of everything durable: it is not in `buildRevision`'s expansion projection, not in
+//       `evidenceForDryRun`, not in the dry-run token, not in the ledger, not in the audit row.
+//       Four negative guards pin those four.
 
 const crypto = require('node:crypto')
 
@@ -12,6 +35,8 @@ const {
   expandPlmProjectBom,
   isLargeBomBoundedExpansion,
   summarizeBomExpansionForEvidence,
+  // Values-BEARING (see the module header). The only import in this file that is.
+  summarizeMissingComponents,
 } = require('./stock-preparation-bom-expansion.cjs')
 const {
   DECISIONS,
@@ -1353,6 +1378,13 @@ async function dryRunStockPreparationAction(input = {}) {
       conflictPolicyReview: runOnlyReview,
     })
   }
+  // W3a. Computed ONLY when the caller explicitly asked and the route's operator-scope gate let the
+  // flag through (http-routes.cjs `tableActionDryRun`) — see the module header. Note the position:
+  // AFTER the token was minted from `dryRun.revision`, so it is structurally impossible for this to
+  // influence what the token promises.
+  const missingComponents = input.includeMissingComponents === true
+    ? summarizeMissingComponents(dryRun.expansion)
+    : null
   return {
     action: publicActionMetadata(action),
     status: dryRunStatus(dryRun),
@@ -1385,6 +1417,14 @@ async function dryRunStockPreparationAction(input = {}) {
       // no key, so its evidence stays byte-identical to what it produced before R-06 existed.
       ...(dryRun.b2aSchemaContract ? { b2aSchemaContract: b2aSchemaContractEvidence(dryRun.b2aSchemaContract) } : {}),
     },
+    // W3a — THE VALUE-BEARING KEY, and the only one. Top-level and AFTER `evidence`, never inside
+    // it: `evidence` is what gets stored, compared and shipped to an audit row, and this must not
+    // ride along into any of that. Conditional in the same style as the two stanzas above, on BOTH
+    // the opt-in and a non-empty list, so:
+    //   * a caller that did not ask gets a byte-identical response to the pre-W3a one, and
+    //   * a project with nothing missing gets no key either, so the frontend's "render no node when
+    //     the list is empty" rule needs no special case.
+    ...(missingComponents && missingComponents.distinctCount > 0 ? { missingComponents } : {}),
   }
 }
 

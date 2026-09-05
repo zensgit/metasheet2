@@ -65,6 +65,8 @@ const {
   isLargeBomBoundedExpansion,
   normalizeStockPreparationBomReadPlan,
   summarizeBomExpansionForEvidence,
+  // W3a: this segment has its own readPart call, so it owes its own missing-component guard (G-12).
+  summarizeMissingComponents,
 } = require(path.join(LIB, 'stock-preparation-bom-expansion.cjs'))
 const {
   duplicateExpandedKeyDiagnosticsForRows,
@@ -1120,6 +1122,49 @@ async function theCarrierAxisJudgementsAreUnchanged() {
 }
 
 // ---------------------------------------------------------------------------
+// G-12 — W3a: A MISSING SUBTREE ROOT REACHES THE OPERATOR'S LIST, AS A ROOT
+// ---------------------------------------------------------------------------
+//
+// This segment has its own `readPart` call, and a `readPart` call without W3a's locus argument is
+// the silent failure mode of the missing-component list: the part number would still be collected
+// (it is `readPart`'s first argument) but with no `path`, so the operator's list would show a blank
+// where the other two call sites show a lineage. It is a ROOT in exactly the sense an order root is —
+// the folder walk found it, no parent above it and no BOM head that named it — so it must read
+// identically: `parentSourceId: null`, `bomId: null`, `depth: 0`, `path` = the one-token path.
+async function aMissingSubtreeRootIsListedAsARoot() {
+  const catalog = baseCatalog()
+  // SUBTREE-ROOT is discovered by the folder walk but is NOT in the part library. The order path is
+  // untouched, so this isolates the subtree segment's own probe.
+  catalog.DN_PDM_PartLibraryInfo = catalog.DN_PDM_PartLibraryInfo.filter((row) => row.OBJ_ID !== 'SUBTREE-ROOT')
+  const { result } = await expand(catalog, { readPlan: subtreePlan() })
+
+  assert.ok(
+    result.rowErrors.some((entry) => entry.type === 'missing_component'),
+    'G-12: the missing subtree root still holds the run, exactly as before W3a',
+  )
+  const listed = result.missingComponents.find((entry) => entry.componentSourceId === 'SUBTREE-ROOT')
+  assert.ok(listed, 'G-12: and the operator is told WHICH part to create')
+  assert.equal(listed.parentSourceId, null, 'G-12: a subtree root has no parent')
+  assert.equal(listed.bomId, null, 'G-12: …and no BOM head named it — the folder walk did')
+  assert.equal(listed.depth, 0, 'G-12: it is a root, at depth 0')
+  assert.deepEqual(JSON.parse(listed.path), ['SUBTREE-ROOT'], 'G-12: the one-token path, same as an order root')
+  assert.equal(listed.occurrenceCount, 1)
+  assert.equal(listed.parentCount, 1)
+
+  const summary = summarizeMissingComponents(result)
+  assert.equal(summary.distinctCount, 1)
+  assert.equal(summary.items[0].componentSourceId, 'SUBTREE-ROOT')
+
+  // The values-free surfaces stay values-free on this path too.
+  assert.equal(
+    JSON.stringify(result.rowErrors).includes('SUBTREE-ROOT'),
+    false,
+    'G-12: no part number reaches the rowError payload from the subtree segment either',
+  )
+  assert.equal(JSON.stringify(summarizeBomExpansionForEvidence(result)).includes('SUBTREE-ROOT'), false)
+}
+
+// ---------------------------------------------------------------------------
 
 async function main() {
   await offIsStructural()
@@ -1145,6 +1190,8 @@ async function main() {
   console.log('  ✓ G-07/G-11 a real loop is refused; an ancestor seed or a DAG merge is skipped and counted')
   await anAlreadyFailedRunNeverStartsTheSegment()
   console.log('  ✓ G-08 an already-failed order path never starts the subtree segment')
+  await aMissingSubtreeRootIsListedAsARoot()
+  console.log('  ✓ G-12 W3a: a missing subtree root reaches the operator list with a root`s lineage')
 
   await theSubtreeAxisIsDeclarableAndMeasured()
   await aSubtreeDeclarationTheDataDeniesIsBlocked()

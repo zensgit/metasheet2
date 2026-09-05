@@ -100,6 +100,24 @@ PathExAttrInfo.FileCode(NodeType=2 项目节点) → PathInfo → OrderHeadInfo 
 
 ---
 
+### 3.1 项目没有订单时:开启"项目目录子树"找根(r10 起)
+
+客户测试 PLM 里大多数项目没有订单头,拉取结果为 0 行。r10 起可在拉取动作的 `source.readPlan` 里加一个可选块,让系统沿项目目录节点向下找挂在子目录上的 BOM 表头作为根件(根件数量按 1 计;有订单的项目仍以订单为准,重复的根只算一次):
+
+```json
+"maxReadCount": 30000,
+"projectSubtree": {
+  "pathInfo": { "parentIdField": "Parent_OBJ_ID" },
+  "bomHead":  { "pathIdField": "path_id" },
+  "maxSubtreeDepth": 1, "maxSubtreeNodes": 200, "maxSubtreeRoots": 200, "includeSelf": true
+}
+```
+
+- `maxReadCount` 在启用该块时必填,否则后端拒绝整份动作配置;三个 `maxSubtree*` 有代码硬顶(深度 4、节点 2000、根 500)。
+- 改完按 §7.1 的写法重载 env 再重启;试算证据里出现 `expansion.summary.subtree`(nodesVisited / rootsDiscovered / rootsExpanded)即生效。
+- 222 实测(2026-09-06,项目 2-20231625):开启前 0 行,开启后 6 张表头全部发现、135 行展开、225 项因缺件挂起。详见 `222-w2-subtree-evidence-20260906.md`。
+- 关闭方法:删掉该块并重启,行为与 r9 逐字节相同。
+
 ## 4. 数据前置(客户侧必做)
 
 **测试库现状**(2026-09-03 现场核实):`10.10.52.16` 上的测试库只有 1 张订单,其明细指向的零件全部不在物料表(`PartLibraryInfo`)——这不是映射或配置问题,是测试库数据本身残缺:该库里另有几个零件挂着完整 BOM 树(例如某零件有 2 张 BOM 表头、118 行明细),但没有任何订单引用它们。因此**任何项目号在测试库上现状都走不完整链**,第 2 步(从 PLM 拉取)演不出效果。
