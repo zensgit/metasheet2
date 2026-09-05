@@ -1,7 +1,7 @@
 # Time Machine D5 expiry fixture verification
 
-Status: local gates PASS; no push or PR metadata action. This report is a
-docs-only child of the tested code and does not extend runtime authority.
+Status: local gates PASS; publication and remote CI pending at this checkpoint.
+The report-only commits do not change the tested code or extend runtime authority.
 
 ## Exact binding
 
@@ -96,12 +96,26 @@ test without a typed project: `pnpm exec eslint --no-ignore --parser-options
 Baseline lint used `git show <base>:<test>` through ESLint stdin with the same
 filename and options. No ESLint or TypeScript configuration was edited.
 
+## Independent review
+
+Fresh Terra high read-only review covered exact range
+`70dc72d7671cad9cea1925ed93f90d3d9c746aeb..97577a66e355ff733f9771829d8d1e8b6e24fecb`:
+P1=0, P2=0, P3=0. It checked preservation of expiry, live-job, zero/partial-sweep,
+retention, legal-hold, and legacy-burn oracles, the polling/test timeout budget,
+and the documented remote-timing limitations. It ran no tests, made no writes,
+and was closed after its terminal verdict. This is session-local review evidence,
+not a GitHub approval or remote CI result.
+
+The coordinator separately checked the original and fixed probe logs, original
+test inventory equality, three-file scope, unchanged production bytes and existing
+whole-file CI wiring. This report-only follow-up changes no tested code.
+
 ## Cleanup and limits
 
 After the audit passed, PG15 was stopped normally, its listener was confirmed
 absent, and only the owned PGDATA was removed. Both dependency links were removed.
 The DB slot is released; logs and the audit/probe artifacts remain in the private
-evidence directory. Remote CI and independent review of this D5 repair are NOT
-RUN. Existing/production/customer databases, external providers, KMS, staging,
+evidence directory. Remote CI of this D5 repair is NOT RUN at this checkpoint.
+Existing/production/customer databases, external providers, KMS, staging,
 real tenants, deployment, flags, dispatch, Ready, and PR merge were not exercised.
 The published D8 checkout remains untouched; whole-sheet recovery is PARKED.
