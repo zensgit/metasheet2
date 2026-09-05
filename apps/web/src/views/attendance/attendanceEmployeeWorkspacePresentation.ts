@@ -34,6 +34,46 @@ export function formatWorkDurationMinutes(
   return tr(`${hours}h ${rest}m`, `${hours}小时${rest}分`)
 }
 
+/**
+ * Display-only leave-day length for the employee self-balance card.
+ *
+ * The `/me` balance summary is minutes-only (no per-type day length on that
+ * wire). This matches the existing attendance web default already used as:
+ * - leave-type `defaultMinutesPerDay` seed (`AttendanceView.vue`)
+ * - annual policy `standardDayMinutes` seed
+ * - calendar chip `normalizeFullDayMinutes` fallback
+ * - half-day helper fixtures (`computeLeaveMinutesDaysEquivalent(..., 480)`)
+ *
+ * Backend minutes stay the source of truth. Do not use this to change punch,
+ * policy, approval, or API contracts.
+ */
+export const ATTENDANCE_LEAVE_DAY_MINUTES = 480
+
+/**
+ * Format a leave-balance minute total as days plus leftover hours/minutes.
+ * Leftover hours and minutes reuse `formatWorkDurationMinutes` so the
+ * employee workspace does not grow a second duration dialect.
+ */
+export function formatLeaveBalanceMinutes(
+  minutes: number | null | undefined,
+  tr: WorkspaceTranslateFn,
+  minutesPerDay: number = ATTENDANCE_LEAVE_DAY_MINUTES,
+): string {
+  if (minutes == null || !Number.isFinite(minutes) || minutes < 0) return '—'
+  const perDay = Number.isFinite(minutesPerDay) && minutesPerDay > 0
+    ? minutesPerDay
+    : ATTENDANCE_LEAVE_DAY_MINUTES
+  const rounded = Math.round(minutes)
+  if (rounded === 0) return tr('0 days', '0天')
+
+  const days = Math.floor(rounded / perDay)
+  const leftover = rounded % perDay
+  const leftoverLabel = leftover > 0 ? formatWorkDurationMinutes(leftover, tr) : ''
+  if (days === 0) return leftoverLabel
+  const daysLabel = days === 1 ? tr('1 day', '1天') : tr(`${days} days`, `${days}天`)
+  return leftoverLabel ? `${daysLabel} ${leftoverLabel}` : daysLabel
+}
+
 export function formatMinuteCount(minutes: number, tr: WorkspaceTranslateFn): string {
   if (!Number.isFinite(minutes) || minutes < 0) return '—'
   const rounded = Math.round(minutes)

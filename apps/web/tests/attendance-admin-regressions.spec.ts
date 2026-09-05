@@ -1573,7 +1573,7 @@ describe('Attendance admin regressions', () => {
     await flushUi(10)
     const card = container!.querySelector('[data-selfservice-card="annual-balance"]')
     expect(card).toBeTruthy()
-    expect(card!.querySelector('[data-annual-self-balance]')?.textContent).toContain('1800') // remaining
+    expect(card!.querySelector('[data-annual-self-balance]')?.textContent).toContain('3 days 6h') // remaining 1800 min → 3d 6h
     // the request hits the token-locked /me endpoint and carries NO userId param (self-service, server-forced subject)
     const meCall = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).find(u => u.includes('/leave-balances/me'))
     expect(meCall).toBeTruthy()
