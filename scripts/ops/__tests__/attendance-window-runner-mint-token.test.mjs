@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // attendance-window-runner-mint-token.test.mjs
 //
-// Proof for the --tenant-id addition to scripts/ops/attendance-window-runner-mint-token.mjs
+// Proof for the --tenant-id addition to ../attendance-window-runner-mint-token.mjs
 // (W4 lead-in: a feature flag will make the tenant-scoped stock-prep/integration routes
 // 403 tokens that carry no tenantId claim, so the ops mint helper must be able to embed
 // one). Covers:
@@ -20,7 +20,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const SCRIPT = join(HERE, 'attendance-window-runner-mint-token.mjs')
+const SCRIPT = join(HERE, '..', 'attendance-window-runner-mint-token.mjs')
 const TEST_SECRET = 'test-only-secret-not-a-real-jwt-secret-0000'
 
 function runMint(args, env = {}) {
