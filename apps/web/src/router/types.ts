@@ -285,6 +285,8 @@ export interface RouteMeta {
   // Layout settings
   layout?: 'default' | 'empty' | 'admin'
   hideNavbar?: boolean
+  /** Compact 40px sheet title strip + lock `.app-main` scroll (grid workbench). */
+  sheetChrome?: boolean
   hideSidebar?: boolean
   skipShellBootstrap?: boolean
 

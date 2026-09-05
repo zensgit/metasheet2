@@ -141,3 +141,18 @@
   --ms-shadow-card: 0 1px 2px rgba(17,24,39,.04), 0 8px 24px rgba(17,24,39,.06);
   --ms-shadow-pop: 0 6px 20px rgba(17,24,39,.12);
 }
+
+/* Sheet workbench grammar — scoped so attendance / admin EP pages keep UF-1 14/16.
+ * Type + density + icon size for the spreadsheet surface only (not a brand clone). */
+.mt-workbench,
+.meta-toolbar,
+.meta-grid,
+.app-sheet-chrome {
+  --ms-sheet-font-body: 13px;
+  --ms-sheet-font-header: 12px;
+  --ms-sheet-icon-size: 16px;
+  --ms-sheet-toolbar-height: 38px;
+  --ms-sheet-row-height: 36px;
+  --ms-sheet-hairline: #ebebeb;
+  --ms-sheet-icon-color: var(--ms-color-info);
+}

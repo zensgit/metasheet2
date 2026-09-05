@@ -558,7 +558,7 @@ function onQuickCreate() {
 </script>
 
 <style scoped>
-.meta-gantt { display: flex; flex-direction: column; flex: 1; min-height: 0; background: #f8fafc; color: #334155; }
+.meta-gantt { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: auto; background: #f8fafc; color: #334155; }
 .meta-gantt__loading, .meta-gantt__placeholder { margin: 24px; padding: 28px; border: 1px dashed #cbd5e1; border-radius: 10px; background: #fff; color: #64748b; text-align: center; }
 .meta-gantt__toolbar { display: flex; flex-wrap: wrap; gap: 10px; padding: 12px 16px; border-bottom: 1px solid #e2e8f0; background: #fff; }
 .meta-gantt__control { display: flex; flex-direction: column; gap: 4px; min-width: 118px; font-size: 11px; color: #64748b; }

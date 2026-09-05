@@ -44,7 +44,7 @@ function mountToolbar(props: Record<string, unknown> = {}) {
 }
 
 const groupTrigger = (root: HTMLElement) =>
-  Array.from(root.querySelectorAll('button')).find((b) => b.textContent?.includes('Group')) as HTMLButtonElement
+  root.querySelector('button[title="Group"], button[aria-label="Group"]') as HTMLButtonElement
 const panel = () => document.querySelector('.meta-toolbar__panel--group') as HTMLElement | null
 
 describe('MetaToolbar group picker — MtPopover migration (UI-P2-1c slice-6)', () => {

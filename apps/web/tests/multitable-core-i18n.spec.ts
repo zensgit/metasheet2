@@ -21,6 +21,8 @@ describe('meta-core-labels static keys', () => {
     expect(metaCoreLabel('grid.aria', true)).toBe('数据表')
     expect(metaCoreLabel('grid.aria', false)).toBe('Data grid')
     expect(metaCoreLabel('toolbar.aria', true)).toBe('表格工具栏')
+    expect(metaCoreLabel('toolbar.more', true)).toBe('更多')
+    expect(metaCoreLabel('toolbar.more', false)).toBe('More')
     expect(metaCoreLabel('grid.errorLoadViewData', true)).toBe('加载视图数据失败')
     expect(metaCoreLabel('grid.errorPatchCell', false)).toBe('Failed to patch cell')
     expect(metaCoreLabel('grid.errorPatchFailed', true)).toBe('更新失败')
