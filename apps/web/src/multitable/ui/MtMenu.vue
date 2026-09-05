@@ -3,7 +3,7 @@
     <template #trigger="slotProps">
       <slot name="trigger" v-bind="slotProps" />
     </template>
-    <div class="mt-menu" role="menu">
+    <div ref="menuRef" class="mt-menu" role="menu" @keydown="onMenuKeydown">
       <slot />
     </div>
   </MtPopover>
@@ -20,7 +20,16 @@
 // children, same as any other menu-of-rows component. Selecting an item (its `select` emit)
 // closes the menu automatically via the MT_MENU_CLOSE_KEY provide/inject contract in
 // `menuContext.ts` — MtMenu never inspects its slotted vnodes to do this.
-import { provide, ref } from 'vue'
+//
+// Record inspector v3 (2026-09-05, PR-A §1.2/§3 "MtMenu additive-only" acknowledgement, §4 item 10):
+// arrow-key roving + Escape-returns-focus-to-trigger, added ADDITIVELY — no new prop, no changed
+// emit, every existing consumer (MetaToolbar's density menu, this file's own pre-existing specs)
+// gets the new keyboard behavior with zero markup changes on their side. Items are found by
+// `[role^="menuitem"]` (matches both `menuitem` and a fallthrough-overridden `menuitemcheckbox`,
+// see MtMenuItem.vue's own comment on attrs passthrough) rather than a class, so a non-MtMenuItem
+// row (e.g. the kebab menu's RouterLink inbox entry) participates in roving as long as it carries
+// the right role — no dependency on every row being an actual MtMenuItem instance.
+import { nextTick, provide, ref, watch } from 'vue'
 import MtPopover, { type MtPopoverPlacement } from './MtPopover.vue'
 import { MT_MENU_CLOSE_KEY } from './menuContext'
 
@@ -31,12 +40,80 @@ withDefaults(defineProps<{
 })
 
 const isOpen = ref(false)
+const menuRef = ref<HTMLElement | null>(null)
 
 provide(MT_MENU_CLOSE_KEY, () => {
   isOpen.value = false
 })
 
-defineExpose({ isOpen })
+// Captured at the moment the menu opens (== `document.activeElement` at that instant), which in
+// every real open path (click or Enter/Space on the trigger) IS the trigger itself — the click that
+// flips `isOpen` true leaves the clicked element focused before this watcher runs. Used ONLY to
+// restore focus on an Escape-driven close (see `onMenuKeydown` below); a selection-driven close
+// (MtMenuItem's own `closeMenu()` call) leaves focus wherever the browser puts it after the click,
+// unchanged from pre-roving behavior.
+let capturedTrigger: HTMLElement | null = null
+
+function menuItems(): HTMLElement[] {
+  if (!menuRef.value) return []
+  return Array.from(menuRef.value.querySelectorAll<HTMLElement>('[role^="menuitem"]:not(:disabled)'))
+}
+
+watch(isOpen, (open) => {
+  if (!open) return
+  capturedTrigger = document.activeElement as HTMLElement | null
+  void nextTick(() => {
+    menuItems()[0]?.focus()
+  })
+})
+
+function onMenuKeydown(event: KeyboardEvent) {
+  const items = menuItems()
+  if (items.length === 0) return
+  const active = document.activeElement as HTMLElement | null
+  const currentIndex = active ? items.indexOf(active) : -1
+  switch (event.key) {
+    case 'ArrowDown':
+      event.preventDefault()
+      items[(currentIndex + 1 + items.length) % items.length]?.focus()
+      break
+    case 'ArrowUp':
+      event.preventDefault()
+      items[(currentIndex - 1 + items.length) % items.length]?.focus()
+      break
+    case 'Home':
+      event.preventDefault()
+      items[0]?.focus()
+      break
+    case 'End':
+      event.preventDefault()
+      items[items.length - 1]?.focus()
+      break
+    case 'Escape': {
+      event.preventDefault()
+      isOpen.value = false
+      const trigger = capturedTrigger
+      void nextTick(() => {
+        if (trigger?.isConnected) trigger.focus()
+      })
+      break
+    }
+    default:
+      break
+  }
+}
+
+// `close()` (alongside the pre-existing `isOpen` exposure) is for a host that owns a SINGLE
+// root-level keydown dispatcher elsewhere (record inspector v3, 2026-09-05, PR-A §1.5) and needs to
+// close this menu from outside without racing Vue's expose-proxy semantics for a bare ref (reading
+// an exposed ref through a template ref auto-unwraps; writing one does not reliably reach the
+// SAME ref this component's own template reads, since the expose proxy assigns onto the exposed
+// object rather than through the ref's own setter) — a plain method avoids that trap entirely.
+function close() {
+  isOpen.value = false
+}
+
+defineExpose({ isOpen, close })
 </script>
 
 <style scoped>

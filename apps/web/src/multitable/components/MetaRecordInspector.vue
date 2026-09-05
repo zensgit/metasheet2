@@ -123,78 +123,40 @@
     @keydown="onInspectorKeydown"
     @keyup="onInspectorKeyup"
   >
-    <div
-      class="meta-record-drawer__splitter"
-      role="separator"
-      aria-orientation="vertical"
-      :aria-valuenow="Math.round(panelWidth)"
-      :aria-valuemin="MIN_PANEL_WIDTH"
-      :aria-valuemax="Math.round(maxPanelWidth)"
-      :aria-label="l('record.resizeHandle')"
-      tabindex="0"
-      data-testid="record-inspector-splitter"
-      @pointerdown="onSplitterPointerDown"
-    ></div>
     <div class="meta-record-drawer__header">
-      <h3 class="meta-record-drawer__title">{{ l('record.title') }}</h3>
-      <div class="meta-record-drawer__nav" v-if="recordIds.length > 1">
-        <button class="meta-record-drawer__nav-btn" :disabled="currentRecordIndex <= 0" :aria-label="l('record.previous')" @click="navigatePrev">&lsaquo;</button>
-        <span class="meta-record-drawer__nav-pos">{{ currentRecordIndex + 1 }} / {{ recordIds.length }}</span>
-        <button class="meta-record-drawer__nav-btn" :disabled="currentRecordIndex >= recordIds.length - 1" :aria-label="l('record.next')" @click="navigateNext">&rsaquo;</button>
-      </div>
-      <div class="meta-record-drawer__actions">
-        <MtButton
-          v-if="record && canLoadSubscription"
-          class="meta-record-drawer__btn meta-record-drawer__btn--watch"
-          :class="{ 'meta-record-drawer__btn--watching': recordSubscribed }"
-          :disabled="subscriptionLoading"
-          :title="l(recordSubscribed ? 'record.unwatchTitle' : 'record.watchTitle')"
-          :aria-pressed="recordSubscribed"
-          @click="toggleRecordSubscription"
-        >
-          {{ l(recordSubscribed ? 'record.watching' : 'record.watch') }}
-        </MtButton>
+      <!-- Record inspector v3 (2026-09-05, PR-A §1.2): Row A, a single non-wrapping toolbar. The
+           only non-shrinking items are the 28px icon buttons + nav — every action that used to be
+           its own labeled button (watch / comment-inbox / automation / permissions / duplicate /
+           delete) now lives inside the kebab menu below, so this row can never overflow by
+           construction (the design's own framing: "Header can no longer overflow"). -->
+      <div class="meta-record-drawer__toolbar">
+        <div class="meta-record-drawer__nav" v-if="recordIds.length > 1">
+          <MtIconButton size="sm" :disabled="currentRecordIndex <= 0" :aria-label="l('record.previous')" :title="l('record.previous')" @click="navigatePrev">&lsaquo;</MtIconButton>
+          <span class="meta-record-drawer__nav-pos">{{ recordPositionText }}</span>
+          <MtIconButton size="sm" :disabled="currentRecordIndex >= recordIds.length - 1" :aria-label="l('record.next')" :title="l('record.next')" @click="navigateNext">&rsaquo;</MtIconButton>
+        </div>
+        <div class="meta-record-drawer__toolbar-spacer"></div>
+        <!-- Comment-affordance lock (§4 item 8 acknowledgement): bespoke <button> + MetaCommentActionChip
+             kept byte-identical (same three comment-active rules/tokens, unmoved from the kebab). Only
+             the TEXT LABEL is hidden below a 480px CONTAINER width (`.meta-record-drawer__toolbar` is
+             the `container-type: inline-size` ancestor, see the style block) — `aria-label` stays on the
+             button unconditionally, so the affordance is never announced as unlabeled. -->
         <button
           v-if="resolvedCanComment"
           class="meta-record-drawer__btn meta-record-drawer__btn--comment"
           :class="drawerCommentButtonClass"
+          :aria-label="l('record.comments')"
           :title="l('record.comments')"
           type="button"
           @click="emit('toggle-comments')"
         >
           <MetaCommentActionChip :label="l('record.comments')" :state="drawerCommentAffordance" />
         </button>
-        <!-- W2 S4 (lock §2 评论面板 row: "MetaCommentsDrawer 的 inbox RouterLink...上移到检查器头部"):
-             moved verbatim from MetaCommentsDrawer.vue's own header (same route name, same badge
-             rule) -- the drawer's own copy stays too (its header is unchanged, deprecated-shell
-             compat), this is a second, independent instance now living at the shell level, gated
-             the same way the comment-toggle button next to it already is.
-             `&& hasRouter`: this shell (unlike MetaCommentsDrawer) is mounted by several PRE-EXISTING
-             frozen specs (multitable-record-drawer*.spec.ts, meta-record-drawer-*.spec.ts) with no
-             vue-router plugin installed at all -- `<RouterLink>`'s own `useLink()` unconditionally
-             dereferences the injected router and throws if it is absent (verified: those specs crashed
-             under this exact failure before this guard was added). `useRouter()` itself never throws
-             (a plain `inject()`, returns undefined when absent) so the guard is safe; `v-if` false means
-             `<RouterLink>` is never even instantiated, so `useLink()` never runs. Every REAL app mount
-             always has a router (this is a route-driven SPA), so this only ever changes rendering in
-             router-less test harnesses -- proven working WITH a router in
-             multitable-record-inspector.spec.ts's own dedicated router-mounted test. -->
-        <RouterLink
-          v-if="resolvedCanComment && hasRouter"
-          class="meta-record-drawer__inbox-link"
-          :to="{ name: 'multitable-comment-inbox' }"
-        >
-          {{ inboxLabel }}
-          <span v-if="commentUnreadCount > 0" class="meta-record-drawer__inbox-badge">{{ commentUnreadCount }}</span>
-        </RouterLink>
-        <MtButton v-if="canManageAutomation" class="meta-record-drawer__btn" :title="l('record.workflowTitle')" @click="emit('open-automation')">&#x2699; {{ l('record.workflow') }}</MtButton>
-        <MtButton v-if="canManageRecordPermissions" class="meta-record-drawer__btn" :title="l('record.permissionsTitle')" @click="showRecordPermissions = true">&#x1F512; {{ l('record.permissions') }}</MtButton>
-        <MtButton v-if="record && canCreate" class="meta-record-drawer__btn meta-record-drawer__btn--duplicate" :title="l('record.duplicateTitle')" @click="emit('duplicate')">{{ l('record.duplicate') }}</MtButton>
-        <!-- gate P2: the retained `meta-record-drawer__btn` base rule (background:#fff, later-injected,
-             specificity tie) beat `.mt-button--danger`'s red background while danger's white text stayed
-             → white-on-white "Delete". The danger variant must own the cascade, so the base class is
-             dropped HERE ONLY; `--danger` stays as a stable spec/test anchor (its bespoke rule is gone). -->
-        <MtButton v-if="resolvedCanDelete" variant="danger" class="meta-record-drawer__btn--danger" @click="emit('delete')">{{ l('record.delete') }}</MtButton>
+        <!-- Copy-link icon: PR-A scope is the button + `copy-link` emit only (§3 PR-A file line);
+             the clipboard write, the disabled-when-absent gate, and the copied/failed live region
+             are PR-B1 (§3 PR-B1 WB line names the copy-link handler) — WB has no listener for this
+             emit yet, by design, until that slice lands. -->
+        <MtIconButton size="sm" :aria-label="l('record.copyLink')" :title="l('record.copyLink')" data-testid="record-inspector-copy-link" @click="emit('copy-link')">&#x1F517;</MtIconButton>
         <button
           type="button"
           class="meta-record-drawer__btn meta-record-drawer__expand"
@@ -205,7 +167,76 @@
           data-testid="record-inspector-expand-toggle"
           @click="toggleExpand"
         >{{ isExpanded ? '⤡' : '⤢' }}</button>
+        <!-- Kebab menu (§1.2): watch / comment-inbox / automation / permissions / duplicate / delete —
+             every existing v-if/emit/handler preserved verbatim, just re-hosted. `MtMenu` roving +
+             Escape-refocus is an additive kit change (§4 item 10); `MtMenuItem` passes `role`/
+             `aria-checked` through via normal Vue attrs fallthrough (verified: its root is a native
+             `<button>` with no `inheritAttrs: false`, so a fallthrough `role` OVERRIDES its own
+             template-declared `role="menuitem"` — no MtMenuItem/kit change needed for the watch row's
+             `menuitemcheckbox`; the bespoke MetaRecordActionMenu.vue fallback named in the design was
+             not needed). -->
+        <MtMenu ref="kebabMenuRef" placement="bottom-end">
+          <template #trigger="{ open }">
+            <MtIconButton
+              size="sm"
+              aria-haspopup="menu"
+              :aria-expanded="open"
+              data-testid="record-inspector-menu"
+              :aria-label="l('record.moreActions')"
+              :title="l('record.moreActions')"
+            >&#x22EF;</MtIconButton>
+          </template>
+          <MtMenuItem
+            v-if="record && canLoadSubscription"
+            class="meta-record-drawer__btn meta-record-drawer__btn--watch"
+            :class="{ 'meta-record-drawer__btn--watching': recordSubscribed }"
+            role="menuitemcheckbox"
+            :aria-checked="recordSubscribed"
+            :disabled="subscriptionLoading"
+            :title="l(recordSubscribed ? 'record.unwatchTitle' : 'record.watchTitle')"
+            @select="toggleRecordSubscription"
+          >{{ l(recordSubscribed ? 'record.watching' : 'record.watch') }}</MtMenuItem>
+          <!-- W2 S4 (lock §2 评论面板 row): moved verbatim from MetaCommentsDrawer.vue's own header
+               (same route name, same badge rule) into the kebab (PR-A re-host). `&& hasRouter`: see
+               this component's own file-header comment on router-less test harnesses. -->
+          <RouterLink
+            v-if="resolvedCanComment && hasRouter"
+            class="meta-record-drawer__inbox-link"
+            role="menuitem"
+            :to="{ name: 'multitable-comment-inbox' }"
+          >
+            {{ inboxLabel }}
+            <span v-if="commentUnreadCount > 0" class="meta-record-drawer__inbox-badge">{{ commentUnreadCount }}</span>
+          </RouterLink>
+          <MtMenuItem v-if="canManageAutomation" class="meta-record-drawer__btn" :title="l('record.workflowTitle')" @select="emit('open-automation')">&#x2699; {{ l('record.workflow') }}</MtMenuItem>
+          <MtMenuItem v-if="canManageRecordPermissions" class="meta-record-drawer__btn" :title="l('record.permissionsTitle')" @select="showRecordPermissions = true">&#x1F512; {{ l('record.permissions') }}</MtMenuItem>
+          <MtMenuItem v-if="record && canCreate" class="meta-record-drawer__btn meta-record-drawer__btn--duplicate" :title="l('record.duplicateTitle')" @select="emit('duplicate')">{{ l('record.duplicate') }}</MtMenuItem>
+          <!-- gate P2 (kept verbatim): the danger class anchor stays a stable spec/test anchor even
+               though the bespoke `--danger` background rule it once fought is gone in this MtMenuItem
+               host — see this class's own style rule below for the current (menu-row) styling. -->
+          <hr v-if="resolvedCanDelete" class="meta-record-drawer__menu-separator" />
+          <MtMenuItem v-if="resolvedCanDelete" class="meta-record-drawer__btn--danger" @select="emit('delete')">{{ l('record.delete') }}</MtMenuItem>
+        </MtMenu>
         <button class="meta-record-drawer__close" :aria-label="l('record.close')" @click="emit('close')">&times;</button>
+      </div>
+      <!-- Row B: title block. Eyebrow renders the SAME `record.title` key the pre-PR-A `<h3>` used
+           (keeps `meta-record-drawer-i18n.spec.ts`'s text pins honest with no visually-hidden trick,
+           graft from P3 §2) — primary-field value sits below it, editable when the primary field is
+           an editable `string`. -->
+      <div class="meta-record-drawer__titleblock">
+        <p class="meta-record-drawer__eyebrow">{{ l('record.title') }}</p>
+        <input
+          v-if="canEditPrimaryTitle"
+          ref="titleInputRef"
+          class="meta-record-drawer__title-input"
+          type="text"
+          :value="primaryFieldTextValue"
+          :aria-label="l('record.titleFieldAria')"
+          @change="onTitleChange"
+          @keydown.enter.prevent="onTitleEnter"
+          @keydown.esc.prevent="onTitleEscape"
+        />
+        <div v-else ref="titleTextRef" class="meta-record-drawer__title-text" tabindex="-1">{{ primaryFieldDisplayText }}</div>
       </div>
     </div>
     <div
@@ -400,6 +431,24 @@
       @close="showRecordPermissions = false"
       @updated="emit('navigate', record!.id)"
     />
+    <!-- Record inspector v3 (2026-09-05, PR-A §1.2): moved from the FIRST child (pre-PR-A) to the
+         LAST — absolute positioning (unchanged, see this element's own style rule) keeps it
+         visually pinned to the panel's left edge either way, but DOM order also drives Tab order,
+         and a splitter reachable BEFORE any header control was a confusing first stop. Splitter
+         keydown/pointerdown handling is unchanged (still dispatched from `onInspectorKeydown` by
+         target — see that function's own comment for why). -->
+    <div
+      class="meta-record-drawer__splitter"
+      role="separator"
+      aria-orientation="vertical"
+      :aria-valuenow="Math.round(panelWidth)"
+      :aria-valuemin="MIN_PANEL_WIDTH"
+      :aria-valuemax="Math.round(maxPanelWidth)"
+      :aria-label="l('record.resizeHandle')"
+      tabindex="0"
+      data-testid="record-inspector-splitter"
+      @pointerdown="onSplitterPointerDown"
+    ></div>
   </div>
 </template>
 
@@ -422,7 +471,7 @@ import type {
   MetaRowActions,
 } from '../types'
 import type { MultitableApiClient } from '../api/client'
-import { MtButton } from '../ui'
+import { MtButton, MtIconButton, MtMenu, MtMenuItem } from '../ui'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaRecordPermissionManager from './MetaRecordPermissionManager.vue'
 import MetaRecordFieldsPanel from './MetaRecordFieldsPanel.vue'
@@ -439,11 +488,14 @@ import {
 import { useLocale } from '../../composables/useLocale'
 import {
   recordLabel,
+  recordPosition,
   type MetaRecordLabelKey,
 } from '../utils/meta-record-labels'
 import { commentLabel } from '../utils/meta-comment-labels'
 import type { AiShortcutState } from '../composables/useAiShortcut'
-import { resolveCanComment } from '../utils/recordDisplay'
+import { formatRecordFieldValue, resolveCanComment, resolvePrimaryField, textControlValue } from '../utils/recordDisplay'
+import { isFieldAlwaysReadOnly } from '../utils/field-permissions'
+import { isSystemField } from '../utils/system-fields'
 
 const props = withDefaults(defineProps<{
   visible: boolean
@@ -540,6 +592,10 @@ const emit = defineEmits<{
   (e: 'close'): void
   (e: 'delete'): void
   (e: 'duplicate'): void
+  /** Record inspector v3 (2026-09-05, PR-A §1.2 Row A): copy-link icon. PR-A scope is this emit
+   *  only — the clipboard write + copied/failed live-region text are PR-B1 (see the button's own
+   *  template comment); WB has no listener for it yet. */
+  (e: 'copy-link'): void
   (e: 'patch', fieldId: string, value: unknown): void
   (e: 'toggle-lock', payload: { recordId: string; locked: boolean }): void
   (e: 'toggle-comments'): void
@@ -592,6 +648,9 @@ const inboxLabel = computed(() => commentLabel('comment.inbox', isZh.value))
 const hasRouter = !!useRouter()
 
 const showRecordPermissions = ref(false)
+const kebabMenuRef = ref<InstanceType<typeof MtMenu> | null>(null)
+const titleInputRef = ref<HTMLInputElement | null>(null)
+const titleTextRef = ref<HTMLDivElement | null>(null)
 
 // --- OD-W2-1 (tabs, lock §6bis): extensible union -- S3 shipped 'details' (fields) + 'history'
 // (activity); S4 added 'comments'; S5 (this slice) adds 'attachments', the 4th and final tab per lock
@@ -688,8 +747,19 @@ async function moveTabFocusTo(tab: InspectorTab) {
 //      §3.3 "Esc 从 panel 回到关闭/grid"), guarded so it never fires when a descendant already
 //      consumed Escape (defaultPrevented) and never inspects any other key -- mod+z / mod+y / `?`
 //      are untouched here and bubble to MultitableWorkbench's own `onGlobalKeydown` unmodified.
+// Record inspector v3 (2026-09-05, PR-A §1.2/§4 item 10): Escape's own first clause (kebab open →
+// close the menu, not the panel) is the one addition to an otherwise-unchanged clause; see
+// `kebabMenuRef`'s own template comment for why this is a defensive top-of-branch check rather than
+// the primary mechanism (MtMenu's own internal Escape handling — see that file's comment — is what
+// actually fires for the common case, since its open content is Teleported to `document.body` and
+// never reaches this listener via bubbling at all).
 function onInspectorKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
+    if (kebabMenuRef.value?.isOpen) {
+      event.preventDefault()
+      kebabMenuRef.value.close()
+      return
+    }
     if (event.metaKey || event.ctrlKey || event.altKey) return
     if (event.defaultPrevented) return
     event.preventDefault()
@@ -1058,6 +1128,64 @@ const drawerCommentAffordance = computed(() => resolveRecordCommentAffordance(pr
 const drawerCommentButtonClass = computed(() =>
   resolveCommentAffordanceStateClass('meta-record-drawer__btn--comment', drawerCommentAffordance.value),
 )
+const recordPositionText = computed(() => recordPosition(currentRecordIndex.value + 1, props.recordIds.length, isZh.value))
+
+// --- Row B title block (2026-09-05, PR-A §1.2) ---
+// `resolvePrimaryField` (utils/recordDisplay.ts) is the single hoisted definition WB's own
+// `bulkFillRecordName`/`captureSelectionLabels` now also read — see that helper's own comment.
+const primaryField = computed(() => resolvePrimaryField(props.fields))
+// PR-A-local editability check for the title ONLY — deliberately not exported as a second
+// `canEditField`: MetaRecordFieldsPanel.vue's own `canEditField` (the per-field-loop predicate,
+// identical logic) is hoisted to `utils/recordDisplay.ts` in PR-B1 per the design's own file list;
+// duplicating the four-clause body here (rather than pre-emptively naming a shared symbol PR-A
+// does not own) avoids a second GLOBAL name that could drift from the real one before that hoist
+// lands.
+const canEditPrimaryTitle = computed(() => {
+  const field = primaryField.value
+  if (!field || field.type !== 'string') return false
+  return props.canEdit
+    && props.rowActions?.canEdit !== false
+    && props.fieldPermissions?.[field.id]?.readOnly !== true
+    && !isSystemField(field)
+    && !isFieldAlwaysReadOnly(field)
+})
+const primaryFieldRawValue = computed(() => {
+  const field = primaryField.value
+  return field && props.record ? props.record.data[field.id] : undefined
+})
+// Uncontrolled `:value` bound straight to the prop (same idiom as MetaRecordFieldsPanel.vue's own
+// string-field input) — Vue re-applies the DOM value whenever `record.data` actually changes (e.g.
+// a server rejection reverting an optimistic edit), which is exactly the "re-syncs on prop change"
+// behavior the design calls for, with no extra watcher needed.
+const primaryFieldTextValue = computed(() => textControlValue(primaryFieldRawValue.value))
+const primaryFieldDisplayText = computed(() => {
+  const field = primaryField.value
+  if (!field) return '—'
+  return formatRecordFieldValue(field, primaryFieldRawValue.value, {
+    linkSummariesByField: props.linkSummariesByField,
+    personSummariesByField: props.personSummariesByField,
+    attachmentSummariesByField: props.attachmentSummariesByField,
+    isZh: isZh.value,
+  })
+})
+
+function onTitleChange(event: Event) {
+  const field = primaryField.value
+  if (!field) return
+  emit('patch', field.id, (event.target as HTMLInputElement).value)
+}
+function onTitleEnter(event: KeyboardEvent) {
+  // Mirrors `flushActiveFieldEdit`'s discipline elsewhere in this line: blurring a text-like control
+  // fires its native `change`, which is this input's own commit path — no second code path needed.
+  ;(event.target as HTMLInputElement).blur()
+}
+function onTitleEscape(event: KeyboardEvent) {
+  // Revert the DISPLAYED value only (no `patch` emitted) — `.prevent` (bound in the template) stops
+  // this Escape from also reaching `onInspectorKeydown` (its own Escape branch already returns early
+  // on `event.defaultPrevented`), so a title-edit Escape never closes the whole panel.
+  const input = event.target as HTMLInputElement
+  input.value = primaryFieldTextValue.value
+}
 
 function navigatePrev() {
   const idx = currentRecordIndex.value
@@ -1197,17 +1325,34 @@ async function toggleRecordSubscription() {
    needing `position: sticky` of its own; `flex: 0 0 auto` just keeps it from ever being squeezed by
    `.meta-record-drawer__body`'s `flex: 1` on a very tall field list -- the body scrolls internally
    long before that could happen. */
-/* P3-3 (header overflow at the panel minimum, then 320px): title + nav + actions no longer fit on one
-   row at the minimum width once several action buttons (watch/comment/workflow/permissions/duplicate/
-   delete/expand/close) are all visible -- true at the original 320px floor this rule was written
-   against, and unchanged in kind now that P2 (2026-09-05 follow-up) raised the floor to 360px: more
-   room helps, but does not on its own guarantee every combination of enabled action buttons fits
-   un-wrapped, so this rule stays. `flex-wrap: wrap` lets the row break onto a second line instead of
-   overflowing the panel horizontally (the page-level no-horizontal-scroll contract this file's other
-   rules already protect, see e.g. the overlay-mode width comment). `.meta-record-drawer__actions`
-   gets its own `flex-wrap: wrap` too, so a still-too-narrow action group wraps internally rather than
-   pushing the row wider than the panel. */
-.meta-record-drawer__header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #eee; flex: 0 0 auto; flex-wrap: wrap; row-gap: 6px; }
+/* Record inspector v3 (2026-09-05, PR-A §1.2): superseded the P3-3 wrap-to-fit mitigation below —
+   moving every labeled action button (watch/workflow/permissions/duplicate/delete/comment-inbox)
+   into the kebab menu means Row A's only remaining items are 28px icon buttons + the nav group, so
+   the row CANNOT overflow at any width this panel supports (360-720px) and no longer needs to wrap.
+   The header is now a two-row COLUMN: Row A (`__toolbar`) + Row B (`__titleblock`), each managing
+   its own layout. */
+.meta-record-drawer__header { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; border-bottom: 1px solid #eee; flex: 0 0 auto; }
+/* Row A: `container-type: inline-size` makes this the query container for the comment chip's
+   text-label hide below 480px (comment-affordance lock §4 item 8 — see `.meta-comment-action-chip__label`'s
+   own rule below; the three comment-active rules/tokens above are untouched). `flex-wrap: nowrap` is
+   the P3-3 replacement noted above — this row is built ONLY from non-shrinking 28px icon buttons plus
+   the nav group, so it never needs to wrap. */
+.meta-record-drawer__toolbar { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; container-type: inline-size; }
+.meta-record-drawer__toolbar-spacer { flex: 1 1 auto; }
+@container (width < 480px) {
+  .meta-record-drawer__toolbar :deep(.meta-comment-action-chip__label) { display: none; }
+}
+.meta-record-drawer__titleblock { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.meta-record-drawer__eyebrow { margin: 0; font-size: 11px; line-height: 1.3; color: var(--ms-text-3, #999); text-transform: uppercase; letter-spacing: 0.02em; }
+.meta-record-drawer__title-input, .meta-record-drawer__title-text {
+  font-size: 18px; font-weight: 600; line-height: 1.3; min-width: 0; box-sizing: border-box;
+}
+.meta-record-drawer__title-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 4px 0; }
+.meta-record-drawer__title-input {
+  width: 100%; padding: 6px 8px; border: 1px solid #e5e7eb; border-radius: 4px; background: #fff; font: inherit;
+}
+.meta-record-drawer__title-input:focus-visible { outline: 2px solid var(--ms-color-primary); outline-offset: -1px; }
+.meta-record-drawer__menu-separator { margin: var(--ms-space-1, 4px) 0; border: none; border-top: 1px solid var(--ms-border, #e5e7eb); }
 /* Resizable panel (2026-09-05): the drag/keyboard splitter on the panel's left edge (see the
    component's `onSplitterPointerDown`/`onSplitterKeydown`). Absolutely positioned against
    `.meta-record-drawer`'s own `position: relative` (added above) so it never participates in the
@@ -1228,11 +1373,6 @@ async function toggleRecordSubscription() {
 .meta-record-drawer__splitter:focus-visible { outline: 2px solid var(--ms-color-primary); outline-offset: -2px; }
 .meta-record-drawer__expand { font-size: 13px; line-height: 1; }
 .meta-record-drawer__expand--active { border-color: var(--ms-color-primary); color: var(--ms-color-primary); }
-/* P3-3: `min-width: 0` is the standard flex-item fix that lets `text-overflow: ellipsis` actually
-   engage on a flex child -- without it the title's automatic min-width is its own text length, so it
-   would push the row wider instead of truncating. */
-.meta-record-drawer__title { font-size: 15px; font-weight: 600; margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.meta-record-drawer__actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .meta-record-drawer__btn { padding: 4px 10px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 12px; }
 .meta-record-drawer__btn--comment { border-radius: 999px; padding: 3px 8px; }
 .meta-record-drawer__btn--comment.meta-record-drawer__btn--comment--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
@@ -1247,18 +1387,17 @@ async function toggleRecordSubscription() {
    are relocated verbatim from the deprecated drawer and have no design-system token yet (docket, not blind-mapped). */
 .meta-record-drawer__inbox-badge { margin-left: 6px; padding: 2px 6px; border-radius: 999px; background: #eff6ff; color: var(--ms-color-primary); font-size: 11px; }
 /* UI-P2-1c T5-safe (owner-ratified 2026-07-13): watch/workflow/permissions/duplicate/delete/unlock
-   are now <MtButton> — token-styled, no longer needs bespoke hardcoded-hex. --danger's sole sharer
-   (delete) now uses MtButton's own `variant="danger"`; --watch's sole sharer (watch, non-active
-   state) now uses MtButton's default ghost styling — both bespoke rules removed (orphaned, no other
-   sharer). --watching stays: it is the watch toggle's ACTIVE-state visual (OD-T5a option A) — MtButton
-   has no built-in pressed/active variant (adding one is a primitive-contract change, out of scope),
-   so the toggle's active affordance still comes from this class, now paired with `aria-pressed`. The
-   base .meta-record-drawer__btn rule above and the three --comment* rules stay untouched: the comment
-   button (OD-T5b) is deliberately NOT migrated this round — it remains bespoke, styled by these rules. */
-.meta-record-drawer__btn--watching { border-color: #0f766e; color: #0f766e; background: #ecfdf5; }
+   were <MtButton>, token-styled. Record inspector v3 (2026-09-05, PR-A §1.2) re-hosts watch/
+   workflow/permissions/duplicate/delete inside the kebab as <MtMenuItem> rows (unlock stays on the
+   lock banner, untouched, still <MtButton>) — --watching stays as the watch row's ACTIVE-state
+   visual (OD-T5a option A; MtMenuItem, like MtButton before it, has no built-in pressed variant),
+   now paired with `aria-checked` (menuitemcheckbox) instead of `aria-pressed`. --danger gets its OWN
+   color rule below now that there is no `MtButton variant="danger"` supplying it. */
+.meta-record-drawer__btn--watching { border-color: #0f766e; color: #0f766e; background: #ecfdf5; font-weight: 600; }
+.meta-record-drawer__btn--danger { color: var(--ms-color-danger); }
 .meta-record-drawer__btn:disabled { opacity: 0.55; cursor: not-allowed; }
 .meta-record-drawer__close { border: none; background: none; font-size: 20px; cursor: pointer; color: #999; }
-.meta-record-drawer__nav { display: flex; align-items: center; gap: 4px; margin-right: auto; margin-left: 8px; }
+.meta-record-drawer__nav { display: flex; align-items: center; gap: 4px; }
 .meta-record-drawer__nav-btn { width: 24px; height: 24px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 14px; display: flex; align-items: center; justify-content: center; }
 .meta-record-drawer__nav-btn:hover:not(:disabled) { background: #f5f5f5; }
 .meta-record-drawer__nav-btn:disabled { opacity: 0.35; cursor: not-allowed; }

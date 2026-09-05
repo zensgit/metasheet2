@@ -47,3 +47,20 @@ export function textControlValue(value: unknown): string {
 export function resolveCanComment(rowActions: MetaRowActions | null | undefined, canComment: boolean): boolean {
   return rowActions?.canComment ?? canComment
 }
+
+/**
+ * Record inspector v3 (design 2026-09-05, PR-A §1.2 header / §2 graft table): the record's
+ * "primary field" — the one whose value doubles as the record's title in the inspector's Row B and
+ * as the human label everywhere else a record needs a short display name. Hoisted here to replace
+ * two WB idioms that had quietly diverged (MultitableWorkbench.vue's `bulkFillRecordName`, which
+ * preferred the first `string`/`longText` field, and `captureSelectionLabels`/`batchRecordLabel`,
+ * which already used the field at position 0) — both now delegate here so the inspector title and
+ * every other "what should we call this record" call site read the exact same field. Position 0 in
+ * the caller's own field-ordering (the grid's `visibleFields`, already view-ordered) is the
+ * convention itself, matching the second idiom exactly and the Airtable/Feishu "first field is the
+ * primary field" convention; callers needing a text VALUE (not just the field) still guard on
+ * `typeof value === 'string'` themselves, same discipline `bulkFillRecordName` already applied.
+ */
+export function resolvePrimaryField(fields: MetaField[] | null | undefined): MetaField | undefined {
+  return fields?.[0]
+}

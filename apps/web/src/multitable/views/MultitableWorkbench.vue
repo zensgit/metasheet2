@@ -635,6 +635,7 @@ import {
   recordNotFound as fmtRecordNotFound,
 } from '../utils/workbench-labels'
 import { recordLabel } from '../utils/meta-record-labels'
+import { resolvePrimaryField } from '../utils/recordDisplay'
 import { resolveButtonFieldProperty } from '../utils/field-config'
 import {
   bulkFailure as fmtBulkFailure,
@@ -1009,9 +1010,12 @@ function bulkFillFieldName(fieldId: string): string {
 function bulkFillRecordName(recordId: string): string {
   const row = grid.rows.value.find((r) => r.id === recordId)
   if (!row) return recordId
-  // Prefer the first readable text field's value as a human label; fall back to the id.
-  const primaryFieldId = grid.visibleFields.value.find((f) => f.type === 'string' || f.type === 'longText')?.id
-  const label = primaryFieldId ? row.data[primaryFieldId] : undefined
+  // Record inspector v3 (2026-09-05): resolvePrimaryField (utils/recordDisplay.ts) replaces this
+  // function's own field-picking — previously the first `string`/`longText` field, now the same
+  // primary-field convention the inspector title uses (fields[0]). Falls back to the id when that
+  // field's value isn't a non-empty string (unchanged discipline).
+  const primary = resolvePrimaryField(grid.visibleFields.value)
+  const label = primary ? row.data[primary.id] : undefined
   return typeof label === 'string' && label.trim().length > 0 ? label : recordId
 }
 
@@ -2382,7 +2386,9 @@ const batchRestore = ref<{
 // later scrolling off / a view reset — the batch dialog then shows a real title instead of the bare recordId.
 const gridSelectionLabels = ref<Record<string, string>>({})
 function captureSelectionLabels(recordIds: string[]): void {
-  const pf = grid.visibleFields.value[0] as { id: string } | undefined
+  // Record inspector v3 (2026-09-05): resolvePrimaryField (utils/recordDisplay.ts) replaces the
+  // inline `visibleFields[0]` read — same field (position 0), now the single shared definition.
+  const pf = resolvePrimaryField(grid.visibleFields.value)
   gridSelectionLabels.value = resolveSelectionLabels(recordIds, grid.rows.value as ReadonlyArray<{ id: string; data?: Record<string, unknown> }>, pf?.id, gridSelectionLabels.value)
 }
 const batchRecordLabel = (recordId: string): string => {
@@ -2390,7 +2396,7 @@ const batchRecordLabel = (recordId: string): string => {
   if (captured) return captured
   // belt-and-suspenders live lookup (dialog opened without a fresh capture); else the bare id
   const row = grid.rows.value.find((r: { id: string }) => r.id === recordId) as { data?: Record<string, unknown> } | undefined
-  const pf = grid.visibleFields.value[0] as { id: string } | undefined
+  const pf = resolvePrimaryField(grid.visibleFields.value)
   const val = row && pf ? row.data?.[pf.id] : undefined
   return val != null && val !== '' ? String(val) : recordId
 }

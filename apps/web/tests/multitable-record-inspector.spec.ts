@@ -629,11 +629,17 @@ describe('MetaRecordInspector (W2 S3 shell)', () => {
     it('with a router installed (real-app parity), renders the inbox link + unread badge and resolves to the comment-inbox route', async () => {
       const { container, app } = await mountInspectorWithRouter()
       await flushUi()
-      const link = container.querySelector<HTMLAnchorElement>('.meta-record-drawer__inbox-link')
+      // Record inspector v3 (2026-09-05, PR-A §1.2): the inbox link moved into the kebab menu, which
+      // Teleports its open content to `document.body` — open it and query `document.body`, not
+      // `container`.
+      const trigger = container.querySelector<HTMLButtonElement>('[data-testid="record-inspector-menu"]')
+      trigger?.click()
+      await flushUi()
+      const link = document.querySelector<HTMLAnchorElement>('.meta-record-drawer__inbox-link')
       expect(link).toBeTruthy()
       expect(link!.textContent).toContain('Inbox')
       expect(link!.getAttribute('href')).toBe('/multitable/comments/inbox')
-      expect(container.querySelector('.meta-record-drawer__inbox-badge')?.textContent).toBe('3')
+      expect(document.querySelector('.meta-record-drawer__inbox-badge')?.textContent).toBe('3')
       app.unmount()
     })
   })

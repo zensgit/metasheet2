@@ -1,17 +1,29 @@
 // UI-P2-1c · T5-safe (owner-ratified 2026-07-13, docs/development/multitable-ui-p2-1c-t5-recorddrawer-decision-brief-20260712.md):
-// migrates MetaRecordDrawer's watch / workflow / permissions / duplicate / delete / unlock buttons
-// from bespoke `<button class="meta-record-drawer__btn ...">` to the shared `<MtButton>` primitive.
+// originally migrated MetaRecordDrawer's watch / workflow / permissions / duplicate / delete /
+// unlock buttons from bespoke `<button class="meta-record-drawer__btn ...">` to the shared
+// `<MtButton>` primitive.
+//
+// Record inspector v3 (2026-09-05, PR-A §1.2) re-hosts watch / workflow / permissions / duplicate /
+// delete a SECOND time — from standalone `<MtButton>` header buttons into `<MtMenuItem>` rows inside
+// the new kebab menu (`data-testid="record-inspector-menu"`, `<MtMenu>` on `<MtPopover>`, which
+// Teleports its open content to `document.body`). Unlock is UNCHANGED (lock banner, still
+// `<MtButton>`, no menu involved). Every gate/emit/payload/class-anchor this file originally pinned
+// is still asserted below — only (a) each helper now opens the kebab first and queries
+// `document.body` instead of `container`, and (b) watch's `aria-pressed` became `aria-checked` +
+// `role="menuitemcheckbox"` (a menu item has no native `pressed` state; a toggleable menu item is
+// exactly what `menuitemcheckbox` is for, per APG).
 //
 // Deliberately OUT of scope (OD-T5b, split to its own governance ticket): the COMMENT button. It
-// stays a bespoke `<button>` wrapping `<MetaCommentActionChip>`, byte-identical. This file's last
-// test proves that boundary empirically (comment button carries no `mt-button` class).
+// stays a bespoke `<button>` wrapping `<MetaCommentActionChip>`, byte-identical, in the toolbar (NOT
+// moved into the kebab — comment-affordance lock, §4 item 8). This file's last test proves that
+// boundary empirically (comment button carries no `mt-button` class).
 //
-// The one new a11y surface this migration adds is `aria-pressed` on the watch/watching toggle
-// (OD-T5a option A) — MtButton has no built-in pressed/active variant, so the pre-existing
-// `--watching` CSS class is kept as the toggle's active-state visual, now paired with the new
-// aria-pressed binding. Every other button here is a plain-text action (OD-T5c/T5d): the glyph
-// prefixes on workflow/&#x2699; and permissions/&#x1F512; stay inline text in the MtButton slot
-// (same convention as T1's × glyph) — no new icon component/contract introduced.
+// The one new a11y surface the ORIGINAL T5 migration added was `aria-pressed` on the watch toggle
+// (OD-T5a option A); PR-A's re-host supersedes it with `aria-checked` (see above). The
+// `--watching`/`--danger` CSS class anchors are kept as stable spec/test anchors across BOTH
+// migrations, even though neither carries the bespoke background rule it originally fought (T5
+// removed that fight for `--danger`; PR-A's `.meta-record-drawer__btn--danger`/`--watching` rules —
+// see MetaRecordInspector.vue's own `<style>` — are now this file's sole source of that styling).
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, type App } from 'vue'
 import MetaRecordDrawer from '../src/multitable/components/MetaRecordDrawer.vue'
@@ -104,72 +116,103 @@ function mountDrawer(options: HarnessOptions = {}) {
   return container
 }
 
-const watchBtn = (root: HTMLElement) => root.querySelector('.meta-record-drawer__btn--watch') as HTMLButtonElement | null
-const workflowBtn = (root: HTMLElement) => root.querySelector('button[title="Open workflow designer"]') as HTMLButtonElement | null
-const permissionsBtn = (root: HTMLElement) => root.querySelector('button[title="Record Permissions"]') as HTMLButtonElement | null
-const dupBtn = (root: HTMLElement) => root.querySelector('.meta-record-drawer__btn--duplicate') as HTMLButtonElement | null
-const deleteBtn = (root: HTMLElement) => root.querySelector('.meta-record-drawer__btn--danger') as HTMLButtonElement | null
+// Record inspector v3 (2026-09-05, PR-A §1.2): watch/workflow/permissions/duplicate/delete moved
+// from standalone header buttons into the kebab menu (`data-testid="record-inspector-menu"`), which
+// is `<MtMenu>`-on-`<MtPopover>` and Teleports its open content to `document.body` — NOT a
+// descendant of `container` — so every helper below (a) opens the menu first and (b) queries
+// `document.body`, not `root`/`container`. Unlock stays on the lock banner (untouched) and is still
+// found inside `container` with no menu interaction, unchanged from before.
+async function openKebabMenu(root: HTMLElement) {
+  const trigger = root.querySelector<HTMLButtonElement>('[data-testid="record-inspector-menu"]')
+  trigger?.click()
+  await flushUi()
+}
+const watchBtn = () => document.querySelector('.meta-record-drawer__btn--watch') as HTMLButtonElement | null
+const workflowBtn = () => document.querySelector('button[title="Open workflow designer"]') as HTMLButtonElement | null
+const permissionsBtn = () => document.querySelector('button[title="Record Permissions"]') as HTMLButtonElement | null
+const dupBtn = () => document.querySelector('.meta-record-drawer__btn--duplicate') as HTMLButtonElement | null
+const deleteBtn = () => document.querySelector('.meta-record-drawer__btn--danger') as HTMLButtonElement | null
 const unlockBtn = (root: HTMLElement) => root.querySelector('[data-test="record-unlock-action"]') as HTMLButtonElement | null
 
 describe('MetaRecordDrawer T5-safe MtButton migration', () => {
   // ---- watch / watching (OD-T5a) ----
   describe('watch button', () => {
     it('renders as a native <button class="mt-button ..."> carrying the old classes, aria-pressed=false, not disabled once loaded', async () => {
-      const client = fakeApiClient()
+      // A manually-controlled promise (not fakeApiClient's default mockResolvedValue) so the
+      // "still loading" assertion below can be observed deterministically — opening the kebab
+      // itself needs an `await flushUi()` for MtMenu's Teleport to paint (see `openKebabMenu`'s own
+      // comment), which would otherwise race the mocked fetch's own microtask resolution.
+      let resolveStatus: ((v: { subscribed: boolean; subscription: null }) => void) | undefined
+      const client = fakeApiClient({
+        getRecordSubscriptionStatus: vi.fn(() => new Promise((resolve) => { resolveStatus = resolve })),
+      })
       mountDrawer({ sheetId: 'sheet_1', apiClient: client })
-      const btnDuringLoad = watchBtn(container!)
+      await openKebabMenu(container!)
+      const btnDuringLoad = watchBtn()
       expect(btnDuringLoad).not.toBeNull()
       expect(btnDuringLoad!.disabled).toBe(true) // subscriptionLoading starts true while the status fetch is in flight
+
+      resolveStatus!({ subscribed: false, subscription: null })
       await flushUi()
 
-      const btn = watchBtn(container!)!
+      const btn = watchBtn()!
       expect(btn.tagName).toBe('BUTTON')
-      expect(btn.classList.contains('mt-button')).toBe(true)
+      expect(btn.classList.contains('mt-menu-item')).toBe(true)
       expect(btn.classList.contains('meta-record-drawer__btn')).toBe(true)
       expect(btn.classList.contains('meta-record-drawer__btn--watch')).toBe(true)
       expect(btn.classList.contains('meta-record-drawer__btn--watching')).toBe(false)
       expect(btn.disabled).toBe(false)
-      expect(btn.getAttribute('aria-pressed')).toBe('false')
+      expect(btn.getAttribute('aria-pressed')).toBeNull() // menuitemcheckbox now — see aria-checked below
+      expect(btn.getAttribute('role')).toBe('menuitemcheckbox')
+      expect(btn.getAttribute('aria-checked')).toBe('false')
       expect(btn.getAttribute('title')).toBe('Watch this record')
       expect(btn.textContent?.trim()).toBe('Watch')
     })
 
-    it('click subscribes via the SAME apiClient call, flips aria-pressed to true, adds --watching, swaps label to Watching', async () => {
+    it('click subscribes via the SAME apiClient call, flips aria-checked to true, adds --watching, swaps label to Watching', async () => {
       const client = fakeApiClient()
       mountDrawer({ sheetId: 'sheet_1', apiClient: client })
       await flushUi()
+      await openKebabMenu(container!)
 
-      watchBtn(container!)!.click()
+      watchBtn()!.click()
       await flushUi()
 
       expect(client.subscribeRecord).toHaveBeenCalledWith('sheet_1', 'rec_1')
-      const btn = watchBtn(container!)!
-      expect(btn.getAttribute('aria-pressed')).toBe('true')
+      // Selecting a menu item auto-closes the menu (MtMenuItem's own `closeMenu()` call) — reopen to
+      // read the post-click state.
+      await openKebabMenu(container!)
+      const btn = watchBtn()!
+      expect(btn.getAttribute('aria-checked')).toBe('true')
       expect(btn.classList.contains('meta-record-drawer__btn--watching')).toBe(true)
       expect(btn.getAttribute('title')).toBe('Unwatch this record')
       expect(btn.textContent?.trim()).toBe('Watching')
     })
 
-    it('click again unsubscribes via the SAME apiClient call and aria-pressed reverts to false', async () => {
+    it('click again unsubscribes via the SAME apiClient call and aria-checked reverts to false', async () => {
       const client = fakeApiClient()
       mountDrawer({ sheetId: 'sheet_1', apiClient: client })
       await flushUi()
-      watchBtn(container!)!.click()
+      await openKebabMenu(container!)
+      watchBtn()!.click()
       await flushUi()
 
-      watchBtn(container!)!.click()
+      await openKebabMenu(container!)
+      watchBtn()!.click()
       await flushUi()
 
       expect(client.unsubscribeRecord).toHaveBeenCalledWith('sheet_1', 'rec_1')
-      const btn = watchBtn(container!)!
-      expect(btn.getAttribute('aria-pressed')).toBe('false')
+      await openKebabMenu(container!)
+      const btn = watchBtn()!
+      expect(btn.getAttribute('aria-checked')).toBe('false')
       expect(btn.classList.contains('meta-record-drawer__btn--watching')).toBe(false)
     })
 
     it('hides when there is nothing to subscribe to (no apiClient/sheetId) — v-if survives the swap', async () => {
       mountDrawer({})
       await flushUi()
-      expect(watchBtn(container!)).toBeNull()
+      await openKebabMenu(container!)
+      expect(watchBtn()).toBeNull()
     })
   })
 
@@ -179,10 +222,11 @@ describe('MetaRecordDrawer T5-safe MtButton migration', () => {
       const onOpenAutomation = vi.fn()
       mountDrawer({ canManageAutomation: true, onOpenAutomation })
       await flushUi()
+      await openKebabMenu(container!)
 
-      const btn = workflowBtn(container!)!
+      const btn = workflowBtn()!
       expect(btn).not.toBeNull()
-      expect(btn.classList.contains('mt-button')).toBe(true)
+      expect(btn.classList.contains('mt-menu-item')).toBe(true)
       expect(btn.textContent?.trim()).toBe('⚙ Workflow')
 
       btn.click()
@@ -193,7 +237,8 @@ describe('MetaRecordDrawer T5-safe MtButton migration', () => {
     it('hides when canManageAutomation is false', async () => {
       mountDrawer({ canManageAutomation: false })
       await flushUi()
-      expect(workflowBtn(container!)).toBeNull()
+      await openKebabMenu(container!)
+      expect(workflowBtn()).toBeNull()
     })
   })
 
@@ -202,10 +247,11 @@ describe('MetaRecordDrawer T5-safe MtButton migration', () => {
       const client = fakeApiClient()
       mountDrawer({ canManageRecordPermissions: true, sheetId: 'sheet_1', apiClient: client })
       await flushUi()
+      await openKebabMenu(container!)
 
-      const btn = permissionsBtn(container!)!
+      const btn = permissionsBtn()!
       expect(btn).not.toBeNull()
-      expect(btn.classList.contains('mt-button')).toBe(true)
+      expect(btn.classList.contains('mt-menu-item')).toBe(true)
       expect(btn.textContent?.trim()).toBe('\u{1F512} Permissions')
       expect(container!.querySelector('.meta-record-perm__overlay')).toBeNull()
 
@@ -217,7 +263,8 @@ describe('MetaRecordDrawer T5-safe MtButton migration', () => {
     it('hides when canManageRecordPermissions is false', async () => {
       mountDrawer({ canManageRecordPermissions: false })
       await flushUi()
-      expect(permissionsBtn(container!)).toBeNull()
+      await openKebabMenu(container!)
+      expect(permissionsBtn()).toBeNull()
     })
   })
 
@@ -227,10 +274,11 @@ describe('MetaRecordDrawer T5-safe MtButton migration', () => {
       const onDuplicate = vi.fn()
       mountDrawer({ canCreate: true, onDuplicate })
       await flushUi()
+      await openKebabMenu(container!)
 
-      const btn = dupBtn(container!)!
+      const btn = dupBtn()!
       expect(btn).not.toBeNull()
-      expect(btn.classList.contains('mt-button')).toBe(true)
+      expect(btn.classList.contains('mt-menu-item')).toBe(true)
       expect(btn.textContent?.trim()).toBe('Duplicate')
 
       btn.click()
@@ -240,26 +288,28 @@ describe('MetaRecordDrawer T5-safe MtButton migration', () => {
     it('hides when canCreate is false', async () => {
       mountDrawer({ canCreate: false })
       await flushUi()
-      expect(dupBtn(container!)).toBeNull()
+      await openKebabMenu(container!)
+      expect(dupBtn()).toBeNull()
     })
 
     it('hides when there is no record', async () => {
       mountDrawer({ canCreate: true, record: null })
       await flushUi()
-      expect(dupBtn(container!)).toBeNull()
+      await openKebabMenu(container!)
+      expect(dupBtn()).toBeNull()
     })
   })
 
   describe('delete button', () => {
-    it('renders as the MtButton danger variant, carries the old --danger class, emits delete on click', async () => {
+    it('renders as an MtMenuItem row, carries the old --danger class, emits delete on click', async () => {
       const onDelete = vi.fn()
       mountDrawer({ canDelete: true, onDelete })
       await flushUi()
+      await openKebabMenu(container!)
 
-      const btn = deleteBtn(container!)!
+      const btn = deleteBtn()!
       expect(btn).not.toBeNull()
-      expect(btn.classList.contains('mt-button')).toBe(true)
-      expect(btn.classList.contains('mt-button--danger')).toBe(true)
+      expect(btn.classList.contains('mt-menu-item')).toBe(true)
       expect(btn.classList.contains('meta-record-drawer__btn--danger')).toBe(true)
       expect(btn.textContent?.trim()).toBe('Delete')
 
@@ -270,7 +320,8 @@ describe('MetaRecordDrawer T5-safe MtButton migration', () => {
     it('hides when canDelete is false', async () => {
       mountDrawer({ canDelete: false })
       await flushUi()
-      expect(deleteBtn(container!)).toBeNull()
+      await openKebabMenu(container!)
+      expect(deleteBtn()).toBeNull()
     })
   })
 

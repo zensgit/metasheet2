@@ -123,6 +123,13 @@ export type MetaRecordLabelKey =
   | 'record.resetConfirmWarnResetWord' | 'record.resetConfirmWarnNotWord' | 'record.resetConfirmRevertWord'
   | 'record.resetConfirmWarnBeforeNot' | 'record.resetConfirmWarnInstead'
   | 'record.resetConfirmTypePrefix' | 'record.resetConfirmTypeSuffix' | 'record.resetConfirmTypeAria'
+  // --- Record inspector v3 (design 2026-09-05, PR-A §1.2 header) ---
+  | 'record.moreActions'
+  // Row A copy-link icon: emit only in PR-A (§3 PR-A file line); the clipboard write + the
+  // done/failed live-region text are PR-B1 (§3 PR-B1 WB line names the copy-link handler) — the
+  // done/failed keys are declared here now (reserved) so B1 needs no new i18n PR.
+  | 'record.copyLink' | 'record.copyLinkDone' | 'record.copyLinkFailed'
+  | 'record.titleFieldAria'
 
 const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }> = {
   'notification.bell': { en: 'Notifications', zh: '通知' },
@@ -361,6 +368,11 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.resetConfirmTypePrefix': { en: 'Type', zh: '输入' },
   'record.resetConfirmTypeSuffix': { en: 'to confirm:', zh: '以确认：' },
   'record.resetConfirmTypeAria': { en: 'type reset to confirm', zh: '输入 reset 以确认' },
+  'record.moreActions': { en: 'More actions', zh: '更多操作' },
+  'record.copyLink': { en: 'Copy link', zh: '复制链接' },
+  'record.copyLinkDone': { en: 'Link copied', zh: '链接已复制' },
+  'record.copyLinkFailed': { en: 'Could not copy link', zh: '链接复制失败' },
+  'record.titleFieldAria': { en: 'Record title', zh: '记录标题' },
 }
 
 export function recordLabel(key: MetaRecordLabelKey, isZh: boolean): string {
@@ -416,6 +428,14 @@ export function requiredField(fieldName: string, isZh: boolean): string {
 // (A4). Numbers are not translated; the surrounding copy is.
 export function formPageIndicator(current: number, total: number, isZh: boolean): string {
   return isZh ? `第 ${current} / ${total} 页` : `Page ${current} of ${total}`
+}
+
+// recordPosition: inspector Row A "n/N" record-list position indicator (design 2026-09-05, PR-A
+// §1.2). The 360px toolbar floor has no room for surrounding words (see the design's own ASCII
+// mock), so only the separator's spacing differs by locale — zh keeps the tight "n/N" convention,
+// en gets a little breathing room ("n / N").
+export function recordPosition(current: number, total: number, isZh: boolean): string {
+  return isZh ? `${current}/${total}` : `${current} / ${total}`
 }
 
 // configRestoreTypedConfirm: the T9-W destructive-tier typed-confirm input prompt
