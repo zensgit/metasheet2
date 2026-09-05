@@ -128,13 +128,16 @@
 # token already matches it too) — added anyway, explicit and named, same discipline.
 #
 # Record inspector v3 PR-B2 (2026-09-05, §1.3 "Field-anchored server errors", same design doc):
-# `multitable-record-inspector-field-errors` — the new spec for the composable's additive
-# `lastPatchFailure` ref (rollback + error.value unchanged), the `resolvePatchFailureRoute` matrix, and
-# MetaRecordFieldsPanel's rejected-value draft + role=alert + aria-invalid/aria-describedby wiring
-# (+ MetaRecordInspector's `fieldErrors` pass-through). The workbench routing half lives in the
-# already-gated `multitable-workbench-view` spec. Same incidental-substring caveat as `-header` above
-# (the bare `multitable-record-inspector` token matches this file too) — added anyway, explicit and
-# named. Collision-checked: `npx vitest run multitable-record-inspector-field-errors` → exactly 1 file.
+# `multitable-record-inspector-field-errors` — the new spec for `patchCell`'s additive per-call
+# `GridPatchFailure | null` return (rollback + error.value unchanged; round 2 replaced the round-1
+# shared ref), the code-keyed `resolvePatchFailureRoute` matrix (fieldErrors / 422 / VALIDATION_ERROR →
+# field; a plain 400 with any other code → toast), MetaRecordFieldsPanel's rejected-value draft +
+# role=alert + aria-invalid/aria-describedby wiring, MetaRecordInspector's `fieldErrors` pass-through
+# and its exposed `canAnchorFieldError` predicate (round 2: inline only when the alert can render). The
+# workbench routing half lives in the already-gated `multitable-workbench-view` spec. Same
+# incidental-substring caveat as `-header` above (the bare `multitable-record-inspector` token matches
+# this file too) — added anyway, explicit and named. Collision-checked:
+# `npx vitest run multitable-record-inspector-field-errors` → exactly 1 file.
 #
 # OD-W2-5a (2026-07-16, docket #74, owner ruling OD-W2-5=(a) a-read-through):
 # `multitable-record-history-client-restored-from` — the client-tier golden proving BOTH history read
