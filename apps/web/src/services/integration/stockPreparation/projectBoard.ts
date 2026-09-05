@@ -63,6 +63,25 @@ export interface StockPreparationProjectBoard {
   activePulledRowCount: number
   /** True when the count stopped at the scan bound — the real number is at least `pulledRowCount`. */
   pulledRowCountBounded: boolean
+  /**
+   * The latest `lastPlmRefreshAt` seen across this project's pulled rows — 「最近变更(来自 PLM)」,
+   * NOT 「上次同步」. `lastPlmRefreshAt` is written only by an add/update/inactive DECISION
+   * (plugins/plugin-integration-core/lib/stock-preparation-conflict-planner.cjs `runPatch`, called from
+   * `makeAddDecision` / `makeUpdateDecision` / `makeInactiveDecision`); an UNCHANGED row's sync goes
+   * through `makeSkipDecision`, which never touches this column. So a project that has been stable and
+   * pulled daily for a week shows a week-old value here even though every one of those daily pulls
+   * ran and reported "nothing changed". NULL when the bound target does not bind that (optional)
+   * column, there are no rows yet, OR the scan was truncated (see `lastChangedFromPlmBounded`) — never
+   * a computed value the server is not sure of.
+   */
+  lastChangedFromPlmAt: string | null
+  /**
+   * True when `lastChangedFromPlmAt` is null BECAUSE the row scan hit its page bound, not because no
+   * row has ever changed. A truncated, unordered scan cannot safely report a max — a row past the
+   * bound could carry a newer stamp — so the server reports "don't know" via this flag instead of a
+   * possibly-stale number. The view must render this differently from "never changed".
+   */
+  lastChangedFromPlmBounded: boolean
   pendingDecisionCount: number
   /** ISO timestamp of the last materials export for this project, from the audit trail. */
   lastExportAt: string | null

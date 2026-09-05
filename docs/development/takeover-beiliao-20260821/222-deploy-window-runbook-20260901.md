@@ -692,3 +692,117 @@ SELECT count(*) FROM DN_PDM_PathExAttrInfo WHERE Parent_OBJ_ID LIKE 'SYNL-%';
 那 7 条按 `SYNL-%` 前缀过滤的 `DELETE`,单独摘出来用同一个 `DATABASE_URL` 对应用库跑一遍即可清空这次
 生成的全部行,不影响 `stock-preparation-synthetic-sql-source/` 目录下 `SYN-` 前缀的既有夹具数据。也可以
 直接用同一份文件重新跑一次完整生成命令(脚本本身先删后插,天然幂等),效果等价。
+
+---
+
+## 定时拉取(系统级)
+
+**背景**:「从 PLM 拉取」目前只能由数据源属主或平台管理员在页面上点(`DataSourceManager.assertAccess`
+只放行这两类身份),一线操作员点不了 §7.2b 的 dry-run/apply 按钮。产品内也没有能驱动这两个路由的调度
+器——整个插件里字符串 `'cron'` 只在 `pipelines.cjs` 的词表里出现一次,没有任何代码产出
+`triggeredBy: 'cron'`;平台侧的 `automation-scheduler.ts` 确有 cron + leader lock,但它的动作类型表
+(`automation-actions.ts`)里没有「调用插件路由」这一项。给它加一项是核心改动,不是运维脚本能做的事,
+也不在这次改动范围内。
+
+**因此这里采用系统级定时任务(Windows 任务计划程序 / Linux cron)+ 一个运维脚本**,按人工点击 dry-run
+→ apply 同样的两枪 HTTP 调用,只是换成一个租户绑定的管理员服务账号令牌在打:
+
+```
+scripts/ops/stock-preparation-scheduled-pull.mjs
+```
+
+用法与环境变量见脚本自带的 `--help`;这里只给注册方式与两条纪律。
+
+### 令牌:必须是租户绑定的管理员服务账号,不能是无租户平台管理员
+
+`requireTableActionAccess`(`plugins/plugin-integration-core/lib/http-routes.cjs`)在调用者持有该动作
+的 legacy `read`/`write`/`admin` 权限时**直接放行**,不经过 `resolveOperatorValueScope` 的租户校验;
+随后 `resolveTenantId` 对没有自带 `tenantId` 声明的主体(即「无租户平台管理员」)会直接采信请求里的
+`tenantId` 查询参数 / `x-tenant-id` 请求头。一个用无租户平台管理员身份签发、又被脚本自己控制的
+`tenantId=`/`x-tenant-id` 决定目标租户的令牌,等于把「任意租户可读可写」交给一个没有人盯着的定时任务
+——这正是 operator-scope 那批改动要关掉的跨租户洞,被一个 cron job 重新打开。
+
+所以:
+- **签发令牌时,必须用一个绑定到目标租户的管理员服务账号**,不能用平台级、不挂任何租户的管理员账号。
+- 脚本自己也会做一道兜底检查:启动时**解码(不验签)** `MS_TOKEN` 的 JWT payload,只看
+  `tenantId` 这一个声明**是否存在**且非空——存在才继续,不存在就非零退出并说明原因,除非显式传
+  `--allow-tenantless`(默认关,不建议使用)。这道检查只读这一个字段的存在性,从不打印它的值,更不
+  是身份验证的替代品——它防的是「拿错了令牌种类」这一类配置失误,不是伪造令牌。
+
+### 建议:第一波只定时 dry-run,apply 由人点
+
+无人值守的 `apply` 会真的把行写进沙箱表(`plm_stock_preparation_sandbox*`,或已配置生产策略时更远)。
+PLM 那边删了一行,对应备料行就会被置为无效(`missingFromPlmPolicy` 恒为 `mark_inactive`)——人工填的
+列会保留,但备料状态会在没人知情的情况下变。这不是 bug,是语义,但不该在无人盯着的时候发生。所以:
+
+- **定时任务只跑 dry-run**(不传 `--apply`),把"有变化"当提醒;`apply` 由人在看到 dry-run 结果后,
+  自己在交互环境里手动加 `--apply` 跑一次。
+- 若某个项目 dry-run 报 `large_bom_bounded`,脚本会记录并跳过——那条路径要靠人一步步 POST 推进后台
+  大 BOM 任务(`http-routes.cjs` 里的 large-BOM job 路由),定时任务不会替你重试。
+- 若确有项目需要定时 `apply`(例如已经稳定运行、owner 认可无人值守写沙箱表的项目),那是超出这次改
+  动默认姿态的一个更高风险的选择,请先与 owner 过一遍上面这段风险再决定要不要传 `--apply`。
+
+### Windows:任务计划程序注册示例
+
+日常运行不要在 `schtasks` 命令行里明文写令牌——用一个只有运行该任务的服务账号能读、其它账号读不到的
+包装脚本,由它去你们自己的密钥管理系统里取令牌、设好环境变量,再调用 node。下面是骨架(路径、账号、
+密钥来源全部替换成你们自己环境里的值):
+
+```powershell
+# C:\ops\stock-prep-pull\run.ps1 —— 客户环境自备,不进本仓库,请把这个文件的读权限锁给运行任务的账号
+$env:MS_API = 'http://127.0.0.1:8900'
+$env:MS_TENANT_ID = '<target-tenant-id>'
+$env:MS_PROJECT_NOS = '<project-no-1>,<project-no-2>'
+# MS_TOKEN 从你们自己的密钥管理系统 / 凭据保管库读取,不要明文写在这个文件里,
+# 也不要把它落到一个所有人都能读的文件——下面这行只是示例,换成你们自己的取密方式:
+$env:MS_TOKEN = (Get-Secret -Name 'metasheet-stock-prep-pull-token' -AsPlainText)
+
+node "C:\path\to\metasheet\scripts\ops\stock-preparation-scheduled-pull.mjs"
+exit $LASTEXITCODE
+```
+
+注册一个每日 06:00 运行的任务,以一个专门的、权限最小化的服务账号执行(不是运行 222 上其它服务的那个
+账号,也不是任何平台管理员账号):
+
+```
+schtasks /Create ^
+  /TN "MetaSheet-StockPrep-ScheduledPull" ^
+  /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\ops\stock-prep-pull\run.ps1" ^
+  /SC DAILY /ST 06:00 ^
+  /RU "<service-account>" /RP * ^
+  /RL LIMITED
+```
+
+`/RU` 这里指的是**运行这个 Windows 任务的操作系统账号**,和 `MS_TOKEN` 所属的 MetaSheet 租户绑定管理
+员服务账号是两回事——不要把两者混为一谈,也不要图省事让同一个高权限账号兼两个身份。
+
+### Linux:cron 一行示例
+
+同样不要把令牌明文写进 crontab(`crontab -l` 任何能登录这台机器的人都能看)。令牌放一个只有运行 cron
+的账号能读的文件(`chmod 600`,属主是那个账号),cron 行里现取:
+
+```cron
+0 6 * * * MS_API=http://127.0.0.1:8900 MS_TENANT_ID=<target-tenant-id> MS_PROJECT_NOS=<project-no-1>,<project-no-2> MS_TOKEN="$(cat /etc/metasheet/stock-prep-pull.token)" node /opt/metasheet/scripts/ops/stock-preparation-scheduled-pull.mjs >> /var/log/metasheet/stock-prep-pull.log 2>&1
+```
+
+### 令牌的保管与轮换:客户运维职责,本仓库不提供任何默认值
+
+上面两个例子里的密钥管理系统调用、令牌文件路径、`<service-account>`、`<target-tenant-id>` 全部是占位
+符——本仓库不内置任何令牌、任何默认密钥来源、任何具体的密钥管理系统集成。谁签发这个服务账号令牌、存
+在哪里、多久轮换一次、泄漏了怎么办,是客户运维团队自己的决定,需要 owner 与客户运维一起过一遍再定,
+不是这次改动能替你们决定的事。
+
+**已知限制,写在这里供 owner 与客户运维评估**:
+- 每次 dry-run 都会在插件的 KV 存储里留一条一次性 token 记录(`integration:table-action:dry-run-token:
+  <token>`),过期靠 30 分钟 TTL,但目前只在被 `apply` 消费时才删除——纯 dry-run 的定时任务不会消费
+  它。高频率定时 dry-run(例如每 5 分钟一次)会让这类记录持续累积,目前没有清扫器。按日调度(如上面
+  06:00 的示例)量级很小,但若要调得更频繁,请先跟 owner 确认这条清扫缺口是否需要先补上。
+- 产品内目前没有专门记录"这次定时拉取本身"的审计动作,失败次数、失败原因只能从这个脚本自己的日志
+  (`>> ... 2>&1` 重定向到的文件,或 Windows 任务计划程序自己的历史记录)里查。
+- **项目看板上的字段叫"最近变更(来自 PLM)",不是"上次同步"**,这个区别是故意的:该时间戳只在某一
+  次拉取真的改了行(新增/更新/失效)时才更新——`lastPlmRefreshAt` 只由冲突规划器的 `runPatch` 写入
+  (`stock-preparation-conflict-planner.cjs`,只挂在 add/update/inactive 三种决策上),行没变化走的
+  `makeSkipDecision` 完全不碰这一列。也就是说:一个 BOM 已经稳定一周、这一周每天都定时 dry-run 成
+  功、每天都报"没有变化",这一列显示的仍然是一周前那次真正改了行的时间——**不能把它当成"定时任务
+  是否还在正常跑"的证据**,更不能当成失败次数的替代品。真正的"上一次拉取(不论是否有变化)"需要一
+  条专门的审计动作,这次改动没有做(owner 待决策,是否值得为此新增一条审计动作 + 数据库约束迁移)。
