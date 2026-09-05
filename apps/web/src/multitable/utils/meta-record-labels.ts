@@ -123,6 +123,21 @@ export type MetaRecordLabelKey =
   | 'record.resetConfirmWarnResetWord' | 'record.resetConfirmWarnNotWord' | 'record.resetConfirmRevertWord'
   | 'record.resetConfirmWarnBeforeNot' | 'record.resetConfirmWarnInstead'
   | 'record.resetConfirmTypePrefix' | 'record.resetConfirmTypeSuffix' | 'record.resetConfirmTypeAria'
+  // --- Record inspector v3 (design 2026-09-05, PR-A §1.2 header) ---
+  | 'record.moreActions'
+  // Row A copy-link icon: emit only in PR-A (§3 PR-A file line); the clipboard write + the
+  // done/failed live-region text are PR-B1 (§3 PR-B1 WB line names the copy-link handler) — the
+  // done/failed keys are declared here now (reserved) so B1 needs no new i18n PR.
+  | 'record.copyLink' | 'record.copyLinkDone' | 'record.copyLinkFailed'
+  | 'record.titleFieldAria'
+  // --- Record inspector v3 (design 2026-09-05, PR-B1 §1.3 body): the details-tab hide-empty toggle's
+  //     CONSTANT label (APG toggle button — `aria-pressed` carries the state; round 2 removed the
+  //     round-1 `record.showEmpty` pressed copy) and the link-field "edit links" button copy shown
+  //     beside the linked-record chips. The "hidden in this view" section heading is the
+  //     count-interpolated `recordHiddenFieldsHeading` below; §1 has no heading (round 2 removed the
+  //     round-1 `record.fieldsInView` key). ---
+  | 'record.hideEmpty'
+  | 'record.editLinks'
 
 const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }> = {
   'notification.bell': { en: 'Notifications', zh: '通知' },
@@ -361,6 +376,13 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.resetConfirmTypePrefix': { en: 'Type', zh: '输入' },
   'record.resetConfirmTypeSuffix': { en: 'to confirm:', zh: '以确认：' },
   'record.resetConfirmTypeAria': { en: 'type reset to confirm', zh: '输入 reset 以确认' },
+  'record.moreActions': { en: 'More actions', zh: '更多操作' },
+  'record.copyLink': { en: 'Copy link', zh: '复制链接' },
+  'record.copyLinkDone': { en: 'Link copied', zh: '链接已复制' },
+  'record.copyLinkFailed': { en: 'Could not copy link', zh: '链接复制失败' },
+  'record.titleFieldAria': { en: 'Record title', zh: '记录标题' },
+  'record.hideEmpty': { en: 'Hide empty fields', zh: '隐藏空字段' },
+  'record.editLinks': { en: 'Edit links', zh: '编辑关联' },
 }
 
 export function recordLabel(key: MetaRecordLabelKey, isZh: boolean): string {
@@ -416,6 +438,46 @@ export function requiredField(fieldName: string, isZh: boolean): string {
 // (A4). Numbers are not translated; the surrounding copy is.
 export function formPageIndicator(current: number, total: number, isZh: boolean): string {
   return isZh ? `第 ${current} / ${total} 页` : `Page ${current} of ${total}`
+}
+
+// recordCompactCount (P3-1, 2026-09-05 follow-up): a plain integer renders as-is up to 999; past
+// that it switches to `Intl.NumberFormat`'s compact notation ("1.2K", "1万" in zh — CLDR's own
+// compact forms, not a hand-rolled "k" suffix) so a huge record-list total cannot, by itself, make
+// `recordPosition`'s string arbitrarily long. This is ONE of the two header-overflow-bound layers
+// named by the P3-1 finding — the other is the CSS `max-width`/ellipsis backstop on
+// `.meta-record-drawer__nav-pos` (MetaRecordInspector.vue's own style comment) for whatever this
+// compaction still leaves too wide (or an environment without full ICU compact-notation support).
+// An explicit locale (not `undefined`, which reads the runtime's own default and would make this
+// helper's output ENVIRONMENT-dependent) keeps the two locales' output deterministic across Node
+// versions/CI runners the same way this file's other locale-branched helpers already are.
+function recordCompactCount(n: number, isZh: boolean): string {
+  if (!Number.isFinite(n) || Math.abs(n) < 1000) return String(n)
+  try {
+    return new Intl.NumberFormat(isZh ? 'zh-CN' : 'en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(n)
+  } catch {
+    return String(n)
+  }
+}
+
+// recordPosition: inspector Row A "n/N" record-list position indicator (design 2026-09-05, PR-A
+// §1.2). The 360px toolbar floor has no room for surrounding words (see the design's own ASCII
+// mock), so only the separator's spacing differs by locale — zh keeps the tight "n/N" convention,
+// en gets a little breathing room ("n / N"). P3-1 (2026-09-05 follow-up): both numbers route through
+// `recordCompactCount` above — a no-op for every value this file's own tests exercise (all well
+// under 1000), so no existing text pin changes; see that function's own comment for what changes
+// past that.
+export function recordPosition(current: number, total: number, isZh: boolean): string {
+  const c = recordCompactCount(current, isZh)
+  const t = recordCompactCount(total, isZh)
+  return isZh ? `${c}/${t}` : `${c} / ${t}`
+}
+
+// recordHiddenFieldsHeading: the record inspector's "hidden in this view" section heading (record
+// inspector v3, design 2026-09-05, PR-B1 §1.3 body) — the count is the number of fields the active
+// view hides that the viewer is nonetheless allowed to see (layer-2 ∩ layer-3 visible, view-hidden).
+// Same interpolated-helper shape as `recordPosition` above; the count is data, rendered raw.
+export function recordHiddenFieldsHeading(count: number, isZh: boolean): string {
+  return isZh ? `本视图中隐藏的字段 (${count})` : `Hidden in this view (${count})`
 }
 
 // configRestoreTypedConfirm: the T9-W destructive-tier typed-confirm input prompt

@@ -11,6 +11,7 @@ import {
   resolveRatingFieldProperty,
 } from './field-config'
 import { isSystemFieldType } from './system-fields'
+import { isEmptyValue } from './conditional-formatting'
 
 function formatDate(value: unknown): string {
   if (value === null || value === undefined || value === '') return '—'
@@ -112,7 +113,14 @@ export function formatFieldDisplay(params: {
   isZh?: boolean
 }): string {
   const { field, value, linkSummaries, personSummaries, attachmentSummaries, isZh = false } = params
-  if (value === null || value === undefined || value === '') return '—'
+  // Empty glyph: the SAME `isEmptyValue` predicate conditional-formatting.ts's is_empty operator and
+  // MetaRecordFieldsPanel.vue's hide-empty filter use (record inspector v3, PR-B1 §1.3 — single
+  // emptiness definition). Widened from the previous bare null/undefined/'' check: a whitespace-only
+  // string, an empty array and an empty plain object now render '—' on every field type (the
+  // per-type branches below already produced '—' for their own type's empty array/object, so the
+  // observable change is confined to whitespace-only strings and to arrays/objects on types that
+  // had no such branch, e.g. `[]` on a `string` field, which used to render as '').
+  if (isEmptyValue(value)) return '—'
 
   // Native person (人员): value = userId[]; resolve display from personSummaries (userId →
   // display), falling back to the raw userId. (Legacy link-backed person is type='link' below.)

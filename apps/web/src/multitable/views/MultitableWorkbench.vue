@@ -325,11 +325,15 @@
           @ai-run="onGridAiRun"
           @run-button="onRunButton"
           @selection-change="onGridSelectionChange"
+          @expand-record="onExpandRecord"
         />
       </div>
       <MetaRecordInspector
         :class="{ 'meta-record-drawer--overlay': isInspectorOverlay }"
-        :visible="!!selectedRecordId" :record="selectedRecordResolved" :fields="scopedAllFields"
+        :visible="inspectorOpen && !!selectedRecordId" :record="selectedRecordResolved" :fields="scopedAllFields"
+        :inspector-field-layout="inspectorFieldLayout"
+        :fetch-record="fetchLinkedRecordFn"
+        :opener-el="inspectorOpenerEl"
         :sheet-id="workbench.activeSheetId.value ?? undefined"
         :api-client="workbench.client"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
@@ -367,6 +371,7 @@
         :comment-composer-initial-mentions="commentComposerInitialMentions"
         :open-comments="showComments"
         @close="onCloseDrawer" @delete="onDeleteRecord" @duplicate="onDuplicateRecord(selectedRecordId)" @patch="onDrawerPatch"
+        @copy-link="onCopyRecordLink"
         @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker" @open-person-picker="openPersonPicker"
         @toggle-lock="onToggleRecordLock"
         @navigate="onDrawerNavigate"
@@ -391,6 +396,8 @@
           <div class="mt-workbench__shortcut"><kbd>Ctrl+V</kbd><span>{{ wb('kbd.paste', isZh) }}</span></div>
           <div class="mt-workbench__shortcut"><kbd>Ctrl+Z</kbd><span>{{ wb('kbd.undo', isZh) }}</span></div>
           <div class="mt-workbench__shortcut"><kbd>Ctrl+Y</kbd><span>{{ wb('kbd.redo', isZh) }}</span></div>
+          <div class="mt-workbench__shortcut"><kbd>Ctrl+Shift+,</kbd><span>{{ wb('kbd.recordPrev', isZh) }}</span></div>
+          <div class="mt-workbench__shortcut"><kbd>Ctrl+Shift+.</kbd><span>{{ wb('kbd.recordNext', isZh) }}</span></div>
           <div class="mt-workbench__shortcut"><kbd>?</kbd><span>{{ wb('kbd.toggleHelp', isZh) }}</span></div>
         </div>
       </div>
@@ -635,6 +642,8 @@ import {
   recordNotFound as fmtRecordNotFound,
 } from '../utils/workbench-labels'
 import { recordLabel } from '../utils/meta-record-labels'
+import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
+import type { MetaRecordInspectorFieldLayout } from '../utils/recordDisplay'
 import { resolveButtonFieldProperty } from '../utils/field-config'
 import {
   bulkFailure as fmtBulkFailure,
@@ -943,6 +952,71 @@ const sheetPresenceState = useMultitableSheetPresence({
 })
 
 const selectedRecordId = ref<string | null>(null)
+// Record inspector v3 (2026-09-05, PR-A §1.1 explicit-open erratum): `selectedRecordId` stays the
+// grid CURSOR (row highlight, collab presence, comment scope, `aria-selected`) — every one of its
+// 69 pre-existing consumers is untouched by this line. `inspectorOpen` is the NEW, second axis: the
+// panel is visible only while BOTH are true (`:visible="inspectorOpen && !!selectedRecordId"` on
+// `<MetaRecordInspector>` below). Session-only (no storage, OD-W2-2 discipline) — a fresh mount
+// always starts closed regardless of what a previous tab session left it at.
+const inspectorOpen = ref(false)
+// Captured by `openRecord` below (see its own comment), written by `selectRecord`'s open branch, and
+// forwarded to the inspector's `openerEl` prop for focus-restore-on-close; `null` for a caller that
+// has no natural opener element (a deep-link/comment-click-through open) — the inspector itself
+// falls back to the element focused at the moment it becomes visible in that case (see
+// MetaRecordInspector.vue's `captureOpenerAndFocusTitle`). Round 4 (2026-09-05, refuter P2): this
+// ref describes the CURRENT open only — `onCloseDrawer` clears it, and a fresh open reached without
+// an opener resets it to `null` inside `selectRecord` — so an opener from an earlier, already-closed
+// open can never be handed to a later open that did not come from that element (expand-icon open →
+// close → comment click-through open used to restore focus to the expand icon on Escape).
+const inspectorOpenerEl = ref<HTMLElement | null>(null)
+
+/** Record inspector v3 (2026-09-05, PR-A §1.1): the SINGLE explicit-open entry point — every
+ *  trigger that should OPEN the panel (not just move the cursor) routes through this, per the
+ *  design's own enumeration: (i) the grid row-number expand icon, (ii) Shift+Space on a focused
+ *  grid row, (iv) `resolveDeepLink` (see that function's own comment), (v) every
+ *  `selectRecord(..., { openComments: true })` caller. `opener` names the element that triggered
+ *  this open (when the caller has one to hand — the grid handlers below read
+ *  `document.activeElement` themselves, which at the moment their synchronous handler runs IS the
+ *  element the user just interacted with); omitted for a deep-link/programmatic open.
+ *  `inspectorOpen` itself is set INSIDE `selectRecord` (via `{ open: true }`), AFTER that
+ *  function's own discard-guard passes — not here, eagerly — so a DECLINED discard-changes prompt
+ *  (navigating away from an unsaved edit on a different record) cancels the open too, instead of
+ *  opening the panel on the record that was never actually navigated away from. Round 4
+ *  (2026-09-05, refuter P2): the resolved opener is now THREADED through `selectRecord`'s opts (not
+ *  written eagerly here) so the single open branch there is the ONE writer of `inspectorOpenerEl`
+ *  and can tell "this open has an opener" (this caller) from "this open has none" (deep-link /
+ *  comment click-through) — the latter must not inherit a stale opener from an earlier open. A
+ *  consequence: a DECLINED discard prompt now leaves the opener untouched too (the panel it kept
+ *  open was opened by something else, and that is what Escape should restore focus to). Round 5
+ *  (2026-09-05, refuter P3): the resolved candidate — explicit or `document.activeElement` — goes
+ *  through `resolveOpenerEl` below, so `document.body` (what `activeElement` IS at the instant the
+ *  expand handler runs in Safari and Firefox/macOS, where a mouse click does not focus a `<button>`,
+ *  and after any programmatic `.click()`), a disconnected element and `null` all reach `selectRecord`
+ *  as `opener: null` — the "this open has no opener" value the inspector already handles — never as
+ *  an element whose close-time `.focus()` would be a no-op that also pre-empts the inspector's
+ *  `.meta-grid` last resort. */
+function openRecord(recordId: string, opener?: HTMLElement | null) {
+  const candidate = opener ?? (typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null)
+  void selectRecord(recordId, { open: true, opener: resolveOpenerEl(candidate) })
+}
+
+/** Round 5 (2026-09-05, refuter P3): the ONE filter `openRecord` applies to whatever opener it
+ *  resolved. `document.body` is what `document.activeElement` reports when NOTHING is focused — it is
+ *  not an element the user interacted with, and restoring focus to it on close is a no-op that (in
+ *  the inspector) also pre-empted the `.meta-grid` fallback. A disconnected element can never be
+ *  refocused either. Both collapse to `null` here so the inspector's own fallbacks (pre-open
+ *  activeElement, then `.meta-grid`) run. The inspector applies the same predicate to its `openerEl`
+ *  prop on its side too (`isRestorableOpener` in MetaRecordInspector.vue) — each side guards
+ *  independently, so neither relies on the other having done it. */
+function resolveOpenerEl(candidate: HTMLElement | null | undefined): HTMLElement | null {
+  if (!candidate || !candidate.isConnected) return null
+  if (typeof document !== 'undefined' && candidate === document.body) return null
+  return candidate
+}
+
+function onExpandRecord(recordId: string) {
+  openRecord(recordId)
+}
 
 // --- A3: AI field shortcut — ONE instance drives all three trigger surfaces
 // (drawer preview/run, cell-editor run, field-manager config-time preview) so
@@ -1009,9 +1083,12 @@ function bulkFillFieldName(fieldId: string): string {
 function bulkFillRecordName(recordId: string): string {
   const row = grid.rows.value.find((r) => r.id === recordId)
   if (!row) return recordId
-  // Prefer the first readable text field's value as a human label; fall back to the id.
-  const primaryFieldId = grid.visibleFields.value.find((f) => f.type === 'string' || f.type === 'longText')?.id
-  const label = primaryFieldId ? row.data[primaryFieldId] : undefined
+  // Record inspector v3 (2026-09-05): resolvePrimaryField (utils/recordDisplay.ts) replaces this
+  // function's own field-picking — previously the first `string`/`longText` field, now the same
+  // primary-field convention the inspector title uses (fields[0]). Falls back to the id when that
+  // field's value isn't a non-empty string (unchanged discipline).
+  const primary = resolvePrimaryField(grid.visibleFields.value)
+  const label = primary ? row.data[primary.id] : undefined
   return typeof label === 'string' && label.trim().length > 0 ? label : recordId
 }
 
@@ -1135,13 +1212,20 @@ function syncRailViewportState(): void {
 // sets), so NEITHER watch ever writes state at desktop — reusing that existing P2-2c invariant rather
 // than re-proving it, so desktop behavior (both rail and inspector may be open together, push layout,
 // OD-W2-3=a) stays a byte-for-byte no-op versus pre-S7 code.
-watch(selectedRecordId, (rid) => {
-  // Opening the inspector (a record just got selected) while the rail drawer is open: close the drawer.
-  if (rid && isRailDrawerOpen.value) railCollapsed.value = true
+// Record inspector v3 (2026-09-05, PR-A §1.1): both watches below keyed on `selectedRecordId`
+// alone pre-PR-A, back when that ref WAS the inspector's own visibility (`visible="!!selectedRecordId"`).
+// Now that a selected record can exist with the panel CLOSED, "the inspector opened" means
+// `inspectorOpen && selectedRecordId` together — watching `selectedRecordId` alone would collapse
+// the rail on a plain cursor move that never opened anything.
+watch([selectedRecordId, inspectorOpen], ([rid, open]) => {
+  // Opening the inspector (not just moving the cursor) while the rail drawer is open: close the drawer.
+  if (rid && open && isRailDrawerOpen.value) railCollapsed.value = true
 })
 watch(isRailDrawerOpen, (open) => {
-  // Opening the rail drawer while the inspector is open: close the inspector.
-  if (open && selectedRecordId.value) selectedRecordId.value = null
+  // Opening the rail drawer while the inspector is open: close the inspector — `inspectorOpen=false`
+  // (unified close semantics with `onCloseDrawer`/Esc/×), NOT clearing `selectedRecordId` (the
+  // cursor survives a close exactly like every other close path now does).
+  if (open && inspectorOpen.value) inspectorOpen.value = false
 })
 
 const showDashboardView = ref(false)
@@ -1407,9 +1491,14 @@ const currentViewPermission = computed<MetaViewPermission | null>(() => {
   const activeViewId = workbench.activeViewId.value
   return activeViewId ? effectiveViewPermissions.value[activeViewId] ?? null : null
 })
+// P3-2 (2026-09-05, record inspector v3 header follow-up): routed through the SAME
+// `resolveMentionDisplayField` (utils/recordDisplay.ts) that hoists this idiom — see that
+// function's own comment for why "prefer the primary field, fall back to the first text field" is
+// byte-identical to the plain `.find()` this replaces for every input, and unifies with the
+// inspector title / bulk-fill idioms whenever the sheet's primary field is itself text.
 const mentionDisplayFieldId = computed(() =>
-  grid.visibleFields.value.find((field) => field.type === 'string' || field.type === 'longText')?.id
-  ?? grid.fields.value.find((field) => field.type === 'string' || field.type === 'longText')?.id
+  resolveMentionDisplayField(grid.visibleFields.value)?.id
+  ?? resolveMentionDisplayField(grid.fields.value)?.id
   ?? null,
 )
 const canConfigureCurrentView = computed(() => currentViewPermission.value?.canConfigure ?? true)
@@ -1506,6 +1595,24 @@ const twoLayerVisibleFields = computed(() => filterPropertyVisibleFields(scopedA
 const scopedGridFields = computed(() =>
   grid.visibleFields.value.filter((field) => effectiveFieldPermissions.value[field.id]?.visible !== false),
 )
+// Record inspector v3 (design 2026-09-05, PR-B1 §1.3 "Sections"): the details tab's two-section field
+// layout. §1 `ordered` = view order ∩ layer-2 ∩ layer-3 — `scopedGridFields` is `grid.visibleFields`
+// (the active view's resolved `fieldOrder`, fail-soft on stale ids, minus the view's hidden ids and
+// property-hidden fields, useMultitableGrid.ts `visibleFields`) re-filtered through THIS file's
+// `effectiveFieldPermissions` (layer-3 with the deep-link/standalone-form overrides the grid's own
+// permission ref does not carry); `filterPropertyVisibleFields` is applied again explicitly so the
+// layer-2 conjunct is stated here, not inherited from the grid computed's internals. §2 `hiddenInView`
+// = the rest of `twoLayerVisibleFields` (layer-2 ∩ layer-3, sheet order) — fields this viewer may see
+// but the active view hides. Disjoint by construction; MetaRecordFieldsPanel re-applies both layers
+// anyway (negative golden N3). Applying layer-2 to the details tab is a declared behaviour change
+// (design §4 item 4): it previously received `scopedAllFields` (layer-3 only) and rendered
+// property-hidden fields.
+const inspectorFieldLayout = computed<MetaRecordInspectorFieldLayout>(() => {
+  const ordered = filterPropertyVisibleFields(scopedGridFields.value)
+  const orderedIds = new Set(ordered.map((field) => field.id))
+  const hiddenInView = twoLayerVisibleFields.value.filter((field) => !orderedIds.has(field.id))
+  return { ordered, hiddenInView }
+})
 const conditionalFormattingRules = computed(() =>
   extractRulesFromConfig(workbench.activeView.value?.config),
 )
@@ -2127,9 +2234,39 @@ async function ensureCommentMentionSuggestions(force = false) {
   }
 }
 
-async function selectRecord(recordId: string, opts?: { openComments?: boolean; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null }) {
+// Record inspector v3 (2026-09-05, PR-A §1.1, §3 PR-A file line "every selectRecord(...,
+// { openComments: true }) caller"): rather than touching each such call site individually
+// (onMentionPopoverSelect, onOpenRecordComments, onOpenGridFieldComments — all named in the
+// design's own enumeration), the `openComments: true` transition is detected once, HERE, since
+// every one of those callers already threads it through this single function. `select-record` from
+// the grid (plain click/arrow navigation, `openComments` absent) is UNCHANGED — it still only moves
+// the cursor (see `onSelectRecord` below), never this branch.
+async function selectRecord(recordId: string, opts?: { openComments?: boolean; open?: boolean; opener?: HTMLElement | null; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null }) {
   if (recordId !== selectedRecordId.value && !confirmDiscardRecordChanges()) return
   selectedRecordId.value = recordId
+  // `open` (from `openRecord`/`resolveDeepLink`) or `openComments` — set ONLY after the discard
+  // guard above has already passed (not before calling this function): setting it earlier let a
+  // DECLINED discard leave `inspectorOpen=true` with the navigation itself cancelled, opening the
+  // panel on the PREVIOUS record instead of the one the user actually navigated away from. See
+  // `openRecord`'s own comment for the two callers this fixes.
+  if (opts?.open || opts?.openComments) {
+    // Round 4 (2026-09-05, refuter P2 — stale opener): this is the ONLY place `inspectorOpen` flips
+    // to true, so it is also the one place that can keep `inspectorOpenerEl` honest for every open
+    // path. A caller that has an opener (`openRecord`, via `opts.opener` — possibly `null` when it
+    // could not resolve one) always writes it, open or already-open alike, exactly as before. A
+    // caller with NO opener (`resolveDeepLink`, the `openComments: true` click-through callers) on a
+    // FRESH open (panel currently closed) resets it to `null`, so the inspector's own
+    // pre-open-activeElement fallback runs instead of restoring focus to whatever element opened
+    // some EARLIER, already-closed panel. `onCloseDrawer` clears it on close as well, but two close
+    // paths bypass `onCloseDrawer` (the rail-drawer watcher and the `selectedRecordId → null`
+    // force-close watcher, both below), so a close-side reset alone is not sufficient — this
+    // open-side check covers those too. An opener-less call while the panel is ALREADY open (e.g. a
+    // comment click-through on another row from inside an open panel) leaves the current open's
+    // opener in place, unchanged from before.
+    if (opts.opener !== undefined) inspectorOpenerEl.value = opts.opener
+    else if (!inspectorOpen.value) inspectorOpenerEl.value = null
+    inspectorOpen.value = true
+  }
   commentDraft.value = ''
   if (!opts?.openComments) {
     selectedCommentFieldId.value = null
@@ -2141,10 +2278,24 @@ async function selectRecord(recordId: string, opts?: { openComments?: boolean; h
     selectedEditingCommentId.value = null
   }
   showComments.value = opts?.openComments === true
-  await loadCommentsForRecord(recordId, {
-    highlightCommentId: opts?.openComments ? (opts.highlightCommentId ?? null) : null,
-    markReadCommentId: opts?.markReadCommentId ?? null,
-  })
+  // Comment fetch moved out of the general "cursor moved" path (P12, §1.1/§2 graft table): a
+  // closed-panel `select-record` (arrowing/clicking through the grid with the inspector closed)
+  // must make ZERO comment requests — pre-check (grep `commentsState`/`loadCommentsForRecord`
+  // consumers) found the grid's OWN comment indicators read a separate, independent
+  // `commentPresenceState` (useMultitableCommentPresence), never `commentsState`/
+  // `loadCommentsForRecord`, so there is no closed-panel consumer of this fetch to preserve. Firing
+  // it here, gated on the panel actually being open (this call's own `openComments: true` sets
+  // `inspectorOpen` above before this check runs; OR `inspectorOpen` is already true from a prior
+  // `openRecord`/deep-link open, which every such caller sets synchronously before invoking THIS
+  // function), replaces the old unconditional fetch. "Follow while open" (arrowing through an
+  // ALREADY-open panel) hits this same branch on every later `select-record`, since `inspectorOpen`
+  // stays true until the panel is explicitly closed.
+  if (inspectorOpen.value) {
+    await loadCommentsForRecord(recordId, {
+      highlightCommentId: opts?.openComments ? (opts.highlightCommentId ?? null) : null,
+      markReadCommentId: opts?.markReadCommentId ?? null,
+    })
+  }
 }
 
 function onSelectRecord(recordId: string) {
@@ -2382,7 +2533,9 @@ const batchRestore = ref<{
 // later scrolling off / a view reset — the batch dialog then shows a real title instead of the bare recordId.
 const gridSelectionLabels = ref<Record<string, string>>({})
 function captureSelectionLabels(recordIds: string[]): void {
-  const pf = grid.visibleFields.value[0] as { id: string } | undefined
+  // Record inspector v3 (2026-09-05): resolvePrimaryField (utils/recordDisplay.ts) replaces the
+  // inline `visibleFields[0]` read — same field (position 0), now the single shared definition.
+  const pf = resolvePrimaryField(grid.visibleFields.value)
   gridSelectionLabels.value = resolveSelectionLabels(recordIds, grid.rows.value as ReadonlyArray<{ id: string; data?: Record<string, unknown> }>, pf?.id, gridSelectionLabels.value)
 }
 const batchRecordLabel = (recordId: string): string => {
@@ -2390,7 +2543,7 @@ const batchRecordLabel = (recordId: string): string => {
   if (captured) return captured
   // belt-and-suspenders live lookup (dialog opened without a fresh capture); else the bare id
   const row = grid.rows.value.find((r: { id: string }) => r.id === recordId) as { data?: Record<string, unknown> } | undefined
-  const pf = grid.visibleFields.value[0] as { id: string } | undefined
+  const pf = resolvePrimaryField(grid.visibleFields.value)
   const val = row && pf ? row.data?.[pf.id] : undefined
   return val != null && val !== '' ? String(val) : recordId
 }
@@ -2494,6 +2647,26 @@ async function onDrawerPatch(fieldId: string, value: unknown) {
     }
   }
   showSuccess(wb('toast.recordUpdated', isZh.value), historyLinkAction(grid.lastBatchId.value))
+}
+
+// Record inspector v3 (design 2026-09-05, PR-B1 §1.3 "Copy link"): the inspector's copy-link icon only
+// EMITS; this is the one clipboard write. `window.location.href` already carries `#recordId=<id>`
+// while the panel is open (the PR-A hash watcher), so the copied URL reopens this record. Status goes
+// through MetaToast's existing `aria-live="polite"` / `role="status"` region via the reserved
+// `record.copyLinkDone` / `record.copyLinkFailed` keys; a missing Clipboard API (the inspector also
+// disables its button in that case) or a rejected write both land on the failed copy — never a throw.
+async function onCopyRecordLink() {
+  const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined
+  if (!clipboard || typeof clipboard.writeText !== 'function') {
+    showError(recordLabel('record.copyLinkFailed', isZh.value))
+    return
+  }
+  try {
+    await clipboard.writeText(window.location.href)
+    showSuccess(recordLabel('record.copyLinkDone', isZh.value))
+  } catch {
+    showError(recordLabel('record.copyLinkFailed', isZh.value))
+  }
 }
 
 async function onFormSubmit(data: Record<string, unknown>) {
@@ -3221,12 +3394,22 @@ function flushActiveFieldEdit() {
   if (el && typeof el.blur === 'function') el.blur()
 }
 
+// Record inspector v3 (2026-09-05, PR-A §1.1, W2 lock §3.1 erratum W2-E2 / §4 item 2): close
+// (× or Esc, routed through `onInspectorKeydown` → this same `close` emit) now sets
+// `inspectorOpen=false` and RETAINS `selectedRecordId` — a graft from P2/P3 (row highlight/collab
+// cursor survive; Shift+Space reopens instantly). The `flushActiveFieldEdit` → discard-guard →
+// `showComments=false` → `resetCommentInteractionState` order is unchanged. Round 4 (2026-09-05,
+// refuter P2): the opener is consumed by this close — the inspector restores focus from the target it
+// captured on ITS open edge, not from the prop at close time — so it is cleared here, last, and can
+// no longer be inherited by a later open that did not come from that element (see `selectRecord`'s
+// open branch for the open-side half of the same fix).
 function onCloseDrawer() {
   flushActiveFieldEdit()
   if (!confirmDiscardRecordChanges()) return
-  selectedRecordId.value = null
+  inspectorOpen.value = false
   showComments.value = false
   resetCommentInteractionState()
+  inspectorOpenerEl.value = null
 }
 
 // W2 S4 (OD-W2-7=b, lock "收编 showComments 分支"): comments is now a tab inside the single
@@ -3917,12 +4100,28 @@ async function applyCommentDeepLink(recordId: string, options?: {
   })
 }
 
-// Update URL hash when a record is selected
-watch(selectedRecordId, (rid) => {
+// Update URL hash — record inspector v3 (2026-09-05, PR-A §1.1, W2 lock §3.1 erratum W2-E2): the
+// hash means "this record is EXPANDED", so it is written only while `inspectorOpen &&
+// selectedRecordId` (both, not `selectedRecordId` alone) and stripped the moment either goes
+// false — a reload must not resurrect a panel the user explicitly closed (`selectedRecordId` alone
+// now survives close, per `onCloseDrawer` above, so it can no longer be the sole hash trigger).
+watch([selectedRecordId, inspectorOpen], ([rid, open]) => {
   try {
-    if (rid) window.history.replaceState(null, '', `#recordId=${encodeURIComponent(rid)}`)
+    if (rid && open) window.history.replaceState(null, '', `#recordId=${encodeURIComponent(rid)}`)
     else if (window.location.hash.includes('recordId=')) window.history.replaceState(null, '', window.location.pathname + window.location.search)
   } catch { /* */ }
+})
+
+// Record inspector v3 (2026-09-05, PR-A §1.1): several PRE-EXISTING paths clear `selectedRecordId`
+// outright (record deleted, bulk-delete removed it, an external-context switch, a merge finding it
+// gone) — every one of them relied, pre-PR-A, on `selectedRecordId` alone gating the panel's
+// visibility, so clearing it was sufficient to close the panel too. Now that visibility is
+// `inspectorOpen && selectedRecordId`, a stale `inspectorOpen=true` left behind by any of those
+// paths would silently reopen the panel the moment `selectedRecordId` is set again by an ordinary
+// cursor move (e.g. a plain grid click) — a real, not merely stale-state, bug. One watcher here
+// closes that loop for every current AND future such call site, rather than patching each one.
+watch(selectedRecordId, (rid) => {
+  if (!rid) inspectorOpen.value = false
 })
 
 watch([selectedRecordId, () => workbench.activeViewId.value], () => {
@@ -4054,11 +4253,23 @@ async function onBulkEditApply(payload: { mode: 'set' | 'clear'; fieldId: string
 
 // --- Deep-link record fetch (when record not in current page) ---
 
+// Record inspector v3 (2026-09-05, PR-A §1.1, §3 PR-A file line names `resolveDeepLink` as an
+// open trigger): every call here opens the inspector, including its two pre-existing "refresh an
+// ALREADY-selected/open record" call sites (onTimelinePatchDates/onHierarchyReparentRecord, guarded
+// there on `selectedRecordId.value === payload.recordId`, and onReloadConflict/onRetryConflict) —
+// in every one of those the panel was already open for that exact record (the conflict banner and
+// the timeline/hierarchy edit surfaces are themselves only reachable with the record already
+// selected in an open inspector), so this is a no-op re-assertion there, not a surprise reopen of a
+// panel the user had deliberately closed for some OTHER record.
 async function resolveDeepLink(recordId: string, options?: { openComments?: boolean; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null }) {
+  // `open: true` is merged into whatever `selectRecord` opts this call already builds — NOT set on
+  // `inspectorOpen` directly here — so a declined discard-changes prompt inside `selectRecord`'s own
+  // guard cancels the open too (see that function's own comment; same fix as `openRecord`).
+  const selectOpts = { ...options, open: true }
   // First check if it's in the current rows
   const inPage = grid.rows.value.find((r) => r.id === recordId)
   if (inPage) {
-    await selectRecord(recordId, options)
+    await selectRecord(recordId, selectOpts)
     return
   }
   // Fetch from server
@@ -4075,7 +4286,7 @@ async function resolveDeepLink(recordId: string, options?: { openComments?: bool
     deepLinkedRecordFieldPermissions.value = ctx.fieldPermissions ?? {}
     deepLinkedRecordViewPermissions.value = ctx.viewPermissions ?? {}
     deepLinkedRecordRowActions.value = ctx.rowActions ?? null
-    await selectRecord(recordId, options)
+    await selectRecord(recordId, selectOpts)
   } catch (e: any) {
     showError(fmtRecordNotFound(recordId, isZh.value))
   }
