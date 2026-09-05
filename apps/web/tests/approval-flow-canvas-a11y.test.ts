@@ -111,7 +111,7 @@ describe('ApprovalFlowCanvas a11y (structural)', () => {
     )
   })
 
-  it('flow cards expose type chrome, summary, a circular edge +, and the 办理人 edge-insert item (Lock-3 §1.5)', () => {
+  it('flow cards expose type chrome, summary, a circular edge +, and a visible 办理人 item after 抄送人 (Lock-3 §1.5)', () => {
     expect(CANVAS_SRC).toMatch(/template-authoring__canvas-node-kind/)
     expect(CANVAS_SRC).toMatch(/canvasNodeSummary\(pos\.key\)/)
     expect(CANVAS_SRC).toMatch(/template-authoring__canvas-edge-insert-btn/)
@@ -122,6 +122,16 @@ describe('ApprovalFlowCanvas a11y (structural)', () => {
     // hidden on edges inside a parallel region (`canInsertHandlerOnEdge`).
     expect(CANVAS_SRC).toMatch(/data-testid="approval-canvas-edge-insert-handler"/)
     expect(CANVAS_SRC).toMatch(/插入办理节点/)
+    expect(CANVAS_SRC).toMatch(/<el-icon><Tickets \/><\/el-icon>/)
+    expect(CANVAS_SRC).toMatch(
+      /\.template-authoring__canvas-edge-insert-icon\.is-handler\s*\{\s*background:\s*var\(--el-color-info\);\s*\}/,
+    )
+    const ccInsertIdx = CANVAS_SRC.indexOf('data-testid="approval-canvas-edge-insert-cc"')
+    const handlerInsertIdx = CANVAS_SRC.indexOf('data-testid="approval-canvas-edge-insert-handler"')
+    const conditionInsertIdx = CANVAS_SRC.indexOf('data-testid="approval-canvas-edge-insert-condition"')
+    expect(ccInsertIdx).toBeGreaterThan(0)
+    expect(handlerInsertIdx).toBeGreaterThan(ccInsertIdx)
+    expect(conditionInsertIdx).toBeGreaterThan(handlerInsertIdx)
     // Insert chrome is painted after node cards so the open menu receives the click.
     const nodeIdx = CANVAS_SRC.indexOf('data-testid="approval-canvas-node"')
     const insertIdx = CANVAS_SRC.lastIndexOf('data-testid="approval-canvas-edge-insert"')
