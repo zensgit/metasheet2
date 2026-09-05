@@ -229,13 +229,26 @@ PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
 |---|---|---|
 | 单次拉取展开上限 | **10000 行**(222 已于 2026-09-04 由 5000 上调) | 部署配置项 `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON` 的 `maxRows`;代码默认值即 10000,无硬上限,可继续上调 |
 | BOM 层数上限 | 20 层 | 同上,配置项 `maxDepth` |
-| 单次拉取翻页上限 | 100 页 | 代码默认 |
+| 单次拉取翻页上限 | 100 页 | **每次读表内部**的分页数,每次调用归零,不是总量;222 已显式写入配置 `maxPages:100` |
+| 单次拉取总读次数上限 | **30000 次**(222 于 2026-09-05 写入) | 配置项 `maxReadCount`;**不设即无上限**——代码默认 undefined,预算检查直接跳过 |
+| 单次拉取总耗时上限 | **600000 毫秒**(222 于 2026-09-05 写入) | 配置项 `maxElapsedMs`;同上,不设即无上限 |
 | Excel 导出上限 | 20000 行 | 代码常量 |
 | 超过 `maxRows` 时 | **不报错、不截断**,转入"大 BOM 分批"路径 | 界面有专门面板;后端按每批 100–1000 行写入 |
 
 **必须如实告知的一点**:上限以内走的是本说明 §6 描述、且已实测验证的那条路径。**超过上限后的"大 BOM 分批"路径,代码与界面都具备,但我方尚未实测。**若客户单个项目展开后可能超过 10000 行,请在正式使用前告知我方,由我方先行验证该路径,或据实际规模继续上调 `maxRows`。
 
-调整方法(需重启后端,约一分钟):改 `dockerpp.env` 中该 JSON 的 `maxRows`,`pm2 restart metasheet-backend --update-env`。生效核对:任跑一次试算,响应 `evidence.expansion.maxRows` 即为当前生效值。
+调整方法(需重启后端,约一分钟):改 `dockerpp.env` 中该 JSON 的对应键(`maxRows`/`maxReadCount`/`maxElapsedMs`),然后重启。**注意 `pm2 restart --update-env` 不会重读 `app.env`**,它只把当前 shell 的环境合并进去;直接 restart 进程仍带旧值(2026-09-05 实测踩坑)。正确做法是在**同一个 PowerShell 进程**里先装载再重启:
+
+```powershell
+Get-Content 'C:\metasheet\dockerpp.env' | Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*=' } | ForEach-Object {
+  $kv = $_ -split '=', 2; [System.Environment]::SetEnvironmentVariable($kv[0], $kv[1], 'Process')
+}
+pm2 restart metasheet-backend --update-env
+```
+
+生效核对:`pm2 env 0` 里该 JSON 已含新值;再任跑一次试算,响应 `evidence.expansion.summary` 的 `maxRows`/`maxReadCount`/`maxElapsedMs` 即为当前生效值(未设的键不会出现)。
+
+**新装部署请一开始就把这三个预算键写进配置**:不写等于对 PLM 的总读次数与总耗时没有任何刹车,唯一止损是 `maxRows`。
 
 ---
 
@@ -251,7 +264,7 @@ pm2 restart metasheet-backend --update-env
 
 **迁移可以留着不回滚**:本期迁移都是纯新增(建表、放宽某条 CHECK 约束的取值清单),单事务、失败即整体回滚,不残留半迁移状态,旧构建照常跑——代码级回滚**不需要动数据库**。
 
-**顺手清理的配置**:`STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS` 这份 env 允许清单**没有过期机制**,回退或窗口结束后需要人工从 `app.env` 里清理;接力链回退就是把对应的 env 路径键从 `app.env` 里拿掉后重启。**env 类回退同样要 `pm2 restart --update-env` 才生效**。
+**顺手清理的配置**:`STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS` 这份 env 允许清单**没有过期机制**,回退或窗口结束后需要人工从 `app.env` 里清理;接力链回退就是把对应的 env 路径键从 `app.env` 里拿掉后重启。**env 类回退同样要重启才生效,且必须按 §7.1 的写法先把 `app.env` 装进当前 shell 再 `pm2 restart --update-env`**,否则进程继续带着旧值。
 
 **最后手段(数据库级,慎用)**:只在"迁移本身跑成功了,但之后发现数据被破坏"这种场景使用,**必须先经 owner/客户方确认**——若该部署上同时运行其他业务模块(如考勤、审批),`pg_restore --clean` 类操作会把备份时间点之后**所有模块**的新数据一并抹掉:
 
