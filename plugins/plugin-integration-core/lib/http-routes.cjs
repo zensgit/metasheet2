@@ -403,6 +403,7 @@ const {
   createStockPreparationTableActionRegistry,
   createTargetScopedRecordsApi,
   dryRunStockPreparationAction,
+  largeBomBackgroundExpansionCaps,
   prepareStockPreparationConfirmationDecisions,
   prepareStockPreparationMvpSnapshot,
   normalizeActionParameters,
@@ -2624,16 +2625,21 @@ function sandboxTargetRouteError(error) {
   )
 }
 
+// THE BACKGROUND LANE'S OWN CAPS, not the interactive dry-run's. This used to
+// copy `action.maxRows` / `maxPages` / `maxReadCount` / `maxElapsedMs`
+// verbatim, which meant the background job re-hit the very cap that sent the
+// caller here — `max_rows_exceeded`, `authoritative: false`, and the plan route
+// then refusing with LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE. `pageLimit` and
+// `maxDepth` stay interactive on purpose: a page SIZE and the BOM tree's depth
+// are not scale budgets. See `largeBomBackgroundExpansionCaps` in
+// stock-preparation-table-actions.cjs for the precedence and the ceilings.
 function largeBomExpansionOptionsForAction(action = {}) {
   const source = isPlainObject(action.source) ? action.source : {}
   const options = {
     readPlan: source.readPlan,
     pageLimit: action.pageLimit,
-    maxPages: action.maxPages,
-    maxReadCount: action.maxReadCount,
-    maxElapsedMs: action.maxElapsedMs,
     maxDepth: action.maxDepth,
-    maxRows: action.maxRows,
+    ...largeBomBackgroundExpansionCaps(action),
   }
   for (const key of Object.keys(options)) {
     if (options[key] === undefined || options[key] === null || options[key] === '') delete options[key]

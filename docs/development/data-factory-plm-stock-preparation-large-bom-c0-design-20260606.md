@@ -181,6 +181,17 @@ C0 separates three caps:
 The cap must be server-side action config or server-side policy. Browser input
 must not raise `maxRows`, `maxPages`, `maxDepth`, or Apply mode.
 
+**实现状态(2026-09-05)**:第三行"Background full-expansion limit"此前未实现——后台
+worker 复用交互试算的同一组 `action.maxRows/maxPages/maxReadCount/maxElapsedMs`,导致
+任何大到需要这条路径的项目都必然在这条路径里 `max_rows_exceeded` → `authoritative:
+false` → plan 422(222 实测,见 `takeover-beiliao-20260821/222-rehearsal-full-run-20260904.md`
+§10)。现已分离:后台上限缺省 = 交互上限 × 倍数(`maxRows` ×20 / `maxReadCount` ×20 /
+`maxElapsedMs` ×6 / `maxPages` ×10),可由动作配置的可选 `largeBom` 块显式指定,两者都被
+代码硬顶钳制;交互试算路径未改动。倍数、硬顶与优先级见
+`plugins/plugin-integration-core/lib/stock-preparation-table-actions.cjs`
+`largeBomBackgroundExpansionCaps`。`pageLimit`/`maxDepth` 仍取交互值(页大小与树深度不是
+规模预算)。
+
 ## Apply contract
 
 For large BOMs, Apply must not run from a bounded dry-run.

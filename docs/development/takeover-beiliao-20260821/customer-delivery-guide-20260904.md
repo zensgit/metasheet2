@@ -235,7 +235,17 @@ PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
 | Excel 导出上限 | 20000 行 | 代码常量 |
 | 超过 `maxRows` 时 | **不报错、不截断**,转入"大 BOM 分批"路径 | 界面有专门面板;后端按每批 100–1000 行写入 |
 
-**必须如实告知的一点**:上限以内走的是本说明 §6 描述、且已实测验证的那条路径。**超过上限后的"大 BOM 分批"路径,代码与界面都具备,但我方尚未实测。**若客户单个项目展开后可能超过 10000 行,请在正式使用前告知我方,由我方先行验证该路径,或据实际规模继续上调 `maxRows`。
+**必须如实告知的一点**:上限以内走的是本说明 §6 描述、且已实测验证的那条路径。**超过上限后的"大 BOM 分批"路径,2026-09-05 在 222 上首次实测,结论是走不通;本 PR 修复。**
+
+- **实测**(222,合成 13151 行项目):试算返回 `large_bom_bounded`(`rowsExpanded=10000`、`readCount=20502`、`errorTypes=[max_rows_exceeded]`)→ 创建后台展开作业 → run 返回 `status=failed`、`errorTypes=[max_rows_exceeded]`、`authoritative=false`,`budgets={maxRows:10000, maxPages:100, maxReadCount:30000, maxElapsedMs:600000, maxDepth:20, maxArtifactChunks:1}` → plan 必然 422 `LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE`。
+- **根因**:后台展开作业复用了交互试算的**同一套上限**。进入这条路径的唯一方式就是超过交互上限,后台再撞同一个数字,于是任何大到需要这条路径的项目都必然在这条路径里失败——按构造不可能成功。
+- **修法**(本 PR):后台展开作业改用自己的一套上限。不写配置时,后台上限 = 交互上限 × 倍数(行 ×20、读次数 ×20、耗时 ×6、翻页 ×10),并有代码硬顶;交互试算行为**不变**。需要另行指定时,在动作配置里加可选的 `largeBom` 块(仅这四个键,值必须是正整数,超硬顶直接拒绝配置):
+
+```json
+{ "largeBom": { "maxRows": 200000, "maxPages": 1000, "maxReadCount": 600000, "maxElapsedMs": 3600000 } }
+```
+
+若客户单个项目展开后可能超过 10000 行,请在正式使用前告知我方,由我方按上述配置先行验证该路径,或据实际规模继续上调 `maxRows`。
 
 调整方法(需重启后端,约一分钟):改 `dockerpp.env` 中该 JSON 的对应键(`maxRows`/`maxReadCount`/`maxElapsedMs`),然后重启。**注意 `pm2 restart --update-env` 不会重读 `app.env`**,它只把当前 shell 的环境合并进去;直接 restart 进程仍带旧值(2026-09-05 实测踩坑)。正确做法是在**同一个 PowerShell 进程**里先装载再重启:
 

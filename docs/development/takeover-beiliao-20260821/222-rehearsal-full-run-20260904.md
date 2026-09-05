@@ -200,3 +200,23 @@ SYN-A-1000              2     true   add       10 - Q235B   10 - 待备料  2026
 **踩坑**:`pm2 restart --update-env` 从**当前 shell 的环境**更新,而不是重读 `app.env`;第一次重启后进程仍带旧 JSON(`pm2 env 0` 可见)。正确做法是升级脚本第 7 步的写法:先把 `app.env` 逐行 `SetEnvironmentVariable(...,'Process')` 装进当前进程,再 `pm2 restart <name> --update-env`。
 
 **验证**:重启后 `pm2 env 0` 含新键;对客户测试 PLM 项目 `2-20231625` 试算一次,证据 `expansion.summary` 出现 `maxReadCount:30000`、`maxElapsedMs:600000`(此前不出现);该项目无订单,`readCount:3`、`rowsExpanded:0`、`status:ready`,与之前行为一致。
+
+## 10. 2026-09-05 大 BOM 分批路径实测(第一次:不通)
+
+交付说明 §7.1 一直写着"超过上限后的大 BOM 分批路径,代码与界面都具备,但我方尚未实测"。这次在 222 上用合成的 13151 行项目走了一遍完整链路,**结论是走不通**。
+
+**实测数据**(222 测试机,2026-09-05 23:48):
+
+| 步骤 | 结果 |
+|---|---|
+| 试算 dry-run | `large_bom_bounded`;`rowsExpanded=10000`、`readCount=20502`、`errorTypes=[max_rows_exceeded]` |
+| 创建后台展开作业 | 202,`status=queued` |
+| 运行作业 run | **`status=failed`**;`errorTypes=[max_rows_exceeded]`;`authoritative=false` |
+| 作业 `budgets` | `{maxRows:10000, maxPages:100, maxReadCount:30000, maxElapsedMs:600000, maxDepth:20, maxArtifactChunks:1}` |
+| plan | 必然 422 `LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE` |
+
+**根因**:后台展开作业复用了交互试算的**同一个** `action.maxRows`。`http-routes.cjs` 的 `largeBomExpansionOptionsForAction` 把 `action.maxRows/maxPages/maxReadCount/maxElapsedMs` 原样抄给后台 worker,而 `computeDryRun` 读的是同一组键。进入这条路径的唯一方式就是超过交互上限,后台再撞同一个数字——**按构造不可能成功**。单测 `stock-preparation-large-bom-jobs.test.cjs` 当时甚至把"后台撞 maxRows → failed"钉成了预期,所以这个洞在测试里是"绿"的。
+
+设计文档 `docs/development/data-factory-plm-stock-preparation-large-bom-c0-design-20260606.md` 的 "Cap policy" 本来就要求**三套独立上限**(smoke / 交互试算 / 后台全量),实现里只有一套。
+
+**修法**:后台展开作业改用自己的一套上限——不写配置时 = 交互上限 × 倍数(行 ×20、读次数 ×20、耗时 ×6、翻页 ×10),有代码硬顶;需要另行指定时用动作配置的可选 `largeBom` 块。交互试算行为字节级不变。222 上按上表的配置,后台可展开到 20 万行、60 万次读、1 小时——足够覆盖这个 13151 行项目。**修完后需在 222 上重跑一次本节的链路,把结论改成"通"再交付。**

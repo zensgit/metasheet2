@@ -30,6 +30,8 @@
 const crypto = require('node:crypto')
 
 const {
+  DEFAULT_MAX_PAGES,
+  DEFAULT_MAX_ROWS,
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
   STOCK_PREPARATION_BOM_SOURCE_KINDS,
   expandPlmProjectBom,
@@ -281,6 +283,145 @@ function normalizeActionCarryPolicy(input) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Large-BOM BACKGROUND caps (C0 "Cap policy", third row).
+//
+// The C0 design asks for THREE independent caps — smoke / reviewed synchronous
+// dry-run / background full expansion — and only ONE was ever implemented: the
+// background worker was handed the SAME `action.maxRows` the interactive
+// dry-run uses. That made the whole large-BOM lane unreachable BY
+// CONSTRUCTION: the only way to enter it is to exceed the interactive cap, and
+// the background job then re-hit the identical cap, failed with
+// `max_rows_exceeded`, and left `authoritative: false` — so the plan route
+// refused with LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE and no large project could
+// ever be planned. Measured end to end on the 222 box, 2026-09-05, on a 13151-
+// row synthetic project.
+//
+// THE INTERACTIVE LANE IS NOT TOUCHED. `computeDryRun` still reads
+// `action.maxRows` / `action.maxPages` / `action.maxReadCount` /
+// `action.maxElapsedMs` directly, so a dry-run response is byte-identical
+// whether or not a `largeBom` block exists. This block supplies the background
+// lane's own numbers and nothing else.
+//
+// Precedence, per cap:
+//   1. explicit `action.largeBom.<cap>` (deploy-time config), clamped to the
+//      ceiling below;
+//   2. otherwise the INTERACTIVE cap x the multiplier below, clamped to the
+//      ceiling. For `maxRows`/`maxPages` the interactive cap is the expander's
+//      own default when config named none (10000 / 100), because that default
+//      is what the dry-run actually enforced.
+//   3. `maxReadCount`/`maxElapsedMs` have NO expander default: absent in the
+//      interactive lane means "no bound at all", and the background lane
+//      INHERITS that rather than inventing one. A deployer who wants the
+//      background lane bounded on those says so in the `largeBom` block.
+//
+// The ceilings are the "config cannot say infinite" half: a `largeBom` value
+// above one is a 422 at config-load time (not a silent clamp — a deployer who
+// typed 10_000_000 should be told), and a DERIVED value is clamped silently
+// because it is arithmetic, not a statement of intent.
+//
+// `maxArtifactChunks` is deliberately NOT a member of this family — see
+// stock-preparation-large-bom-jobs.cjs `LARGE_BOM_ARTIFACT_CHUNK_COUNT`.
+const LARGE_BOM_BACKGROUND_CAP_FIELDS = Object.freeze(['maxRows', 'maxPages', 'maxReadCount', 'maxElapsedMs'])
+
+const LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS = Object.freeze({
+  maxRows: 20,
+  maxPages: 10,
+  maxReadCount: 20,
+  maxElapsedMs: 6,
+})
+
+const LARGE_BOM_BACKGROUND_CAP_CEILINGS = Object.freeze({
+  maxRows: 1000000,
+  maxPages: 100000,
+  maxReadCount: 5000000,
+  maxElapsedMs: 21600000,
+})
+
+/**
+ * Deploy-time `largeBom` cap block. STRICTER than the sibling `maxRows` family
+ * above on purpose: those coerce (`Number(value)`) because legacy configs ship
+ * numeric strings and moving them would be a behaviour change, while this block
+ * is new and can refuse a string outright. Absent => null => the key is not
+ * added to the normalized action at all (conditional spread, like
+ * `carryPolicy`), so every existing config snapshot and hash stays
+ * byte-identical.
+ */
+function normalizeActionLargeBomCaps(input) {
+  if (input === undefined || input === null) return null
+  if (!isPlainObject(input)) {
+    throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'largeBom must be an object', { field: 'largeBom' })
+  }
+  for (const key of Object.keys(input)) {
+    if (!LARGE_BOM_BACKGROUND_CAP_FIELDS.includes(key)) {
+      throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', `unsupported largeBom cap: ${key}`, { field: `largeBom.${key}` })
+    }
+  }
+  const caps = {}
+  for (const field of LARGE_BOM_BACKGROUND_CAP_FIELDS) {
+    const value = input[field]
+    if (value === undefined || value === null || value === '') continue
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new StockPreparationTableActionError(
+        422,
+        'TABLE_ACTION_CONFIG_INVALID',
+        `largeBom.${field} must be a positive integer`,
+        { field: `largeBom.${field}` },
+      )
+    }
+    const ceiling = LARGE_BOM_BACKGROUND_CAP_CEILINGS[field]
+    if (value > ceiling) {
+      throw new StockPreparationTableActionError(
+        422,
+        'TABLE_ACTION_CONFIG_INVALID',
+        `largeBom.${field} exceeds the background expansion ceiling`,
+        { field: `largeBom.${field}`, ceiling },
+      )
+    }
+    caps[field] = value
+  }
+  return Object.keys(caps).length ? caps : null
+}
+
+// An interactive cap only counts as a scaling base if it is a usable positive
+// integer. The sibling `maxRows`/`maxDepth` keys are raw pass-throughs on the
+// normalized action, so this has to tolerate whatever config wrote there.
+function backgroundCapBase(value) {
+  if (value === undefined || value === null || value === '') return undefined
+  const number = Number(value)
+  return Number.isInteger(number) && number > 0 ? number : undefined
+}
+
+/**
+ * THE ONE definition of what the background full-expansion lane is allowed to
+ * read. Returns only the four scale caps; `pageLimit` (a page SIZE, not a
+ * bound) and `maxDepth` (a structural property of the BOM tree, not a scale
+ * budget) stay on the interactive values, because widening them would change
+ * WHAT is read rather than HOW MUCH.
+ */
+function largeBomBackgroundExpansionCaps(action = {}) {
+  const configured = isPlainObject(action) && isPlainObject(action.largeBom) ? action.largeBom : {}
+  const interactiveBase = {
+    maxRows: backgroundCapBase(action && action.maxRows) || DEFAULT_MAX_ROWS,
+    maxPages: backgroundCapBase(action && action.maxPages) || DEFAULT_MAX_PAGES,
+    maxReadCount: backgroundCapBase(action && action.maxReadCount),
+    maxElapsedMs: backgroundCapBase(action && action.maxElapsedMs),
+  }
+  const caps = {}
+  for (const field of LARGE_BOM_BACKGROUND_CAP_FIELDS) {
+    const ceiling = LARGE_BOM_BACKGROUND_CAP_CEILINGS[field]
+    const explicit = configured[field]
+    if (Number.isInteger(explicit) && explicit > 0) {
+      caps[field] = Math.min(explicit, ceiling)
+      continue
+    }
+    const base = interactiveBase[field]
+    if (base === undefined) continue
+    caps[field] = Math.min(base * LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS[field], ceiling)
+  }
+  return caps
+}
+
 function normalizeStockPreparationActionConfig(input = {}) {
   if (!isPlainObject(input)) {
     throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'action config must be an object', { field: 'action' })
@@ -296,6 +437,7 @@ function normalizeStockPreparationActionConfig(input = {}) {
   const template = normalizeStockPreparationTemplate(input.template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE)
   const extensionFieldIds = normalizeActionExtensionFieldIds(input.extensionFieldIds, template)
   const carryPolicy = normalizeActionCarryPolicy(input.carryPolicy)
+  const largeBom = normalizeActionLargeBomCaps(input.largeBom)
   return {
     actionId,
     kind,
@@ -309,6 +451,9 @@ function normalizeStockPreparationActionConfig(input = {}) {
     // for a feature that config did not ask for.
     ...(extensionFieldIds.length ? { extensionFieldIds } : {}),
     ...(carryPolicy ? { carryPolicy } : {}),
+    // Background-lane caps only. Read by `largeBomBackgroundExpansionCaps`
+    // (route -> background worker); `computeDryRun` never looks at it.
+    ...(largeBom ? { largeBom } : {}),
     conflictStrategy: isPlainObject(input.conflictStrategy) ? cloneJson(input.conflictStrategy) : {},
     pageLimit: positiveInteger(input.pageLimit, 'pageLimit', undefined),
     maxPages: positiveInteger(input.maxPages, 'maxPages', undefined),
@@ -1770,6 +1915,9 @@ async function applyStockPreparationAction(input = {}) {
 module.exports = {
   DEFAULT_DRY_RUN_TOKEN_TTL_MS,
   GENERIC_TABLE_ACTION_KIND,
+  LARGE_BOM_BACKGROUND_CAP_CEILINGS,
+  LARGE_BOM_BACKGROUND_CAP_FIELDS,
+  LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS,
   PLM_STOCK_PREPARATION_ACTION_ID,
   TABLE_ACTION_KIND,
   StockPreparationTableActionError,
@@ -1784,6 +1932,7 @@ module.exports = {
   resolveTargetFieldIds,
   createTargetScopedRecordsApi,
   dryRunStockPreparationAction,
+  largeBomBackgroundExpansionCaps,
   prepareStockPreparationConfirmationDecisions,
   prepareStockPreparationMvpSnapshot,
   normalizeActionParameters,
@@ -1796,6 +1945,7 @@ module.exports = {
     buildRevision,
     confirmationDecisionEvidence,
     mergeTableScopeConflictPolicyReviews,
+    normalizeActionLargeBomCaps,
     consumeDryRunToken,
     createDryRunToken,
     hashJson,
