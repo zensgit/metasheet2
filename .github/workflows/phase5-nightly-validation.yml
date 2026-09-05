@@ -13,6 +13,8 @@ jobs:
   nightly:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      SLACK_WEBHOOK_CONFIGURED: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -127,7 +129,7 @@ jobs:
           fi
 
       - name: Notify Slack on failure
-        if: failure() && steps.probe.outputs.metrics_url != ''
+        if: failure() && env.SLACK_WEBHOOK_CONFIGURED == 'true' && steps.probe.outputs.metrics_url != ''
         uses: slackapi/slack-github-action@v1.24.0
         with:
           payload: '{"text":"Phase 5 Nightly Validation FAILED for ${{ github.ref }} (status: ${{ job.status }})"}'
