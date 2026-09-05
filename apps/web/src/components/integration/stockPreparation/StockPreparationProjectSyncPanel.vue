@@ -77,6 +77,66 @@
       {{ countsSentence }}
     </p>
 
+    <!-- 缺件清单 (W3a) — THE BLOCKING EXPLANATION. Renders only when the dry run actually hit at
+         least one missing_component row; an empty/absent list renders nothing here at all. This is
+         not "extra detail" the way the technical disclosure below is — it is the answer to "why did
+         the whole project not write", so it stays open by default rather than collapsed. -->
+    <details
+      v-if="report && report.missingComponents && report.missingComponents.distinctCount > 0"
+      class="sp-sync__missing"
+      data-testid="stock-prep-project-sync-missing-components"
+      open
+    >
+      <summary class="sp-sync__missing-summary">{{ missingComponentsSummary }}</summary>
+      <div class="sp-sync__missing-body">
+        <table ref="missingComponentsTableEl" class="sp-sync__missing-table">
+          <thead>
+            <tr>
+              <th v-for="header in missingComponentHeaders" :key="header">{{ header }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="(item, idx) in report.missingComponents.items"
+              :key="`${item.componentSourceId}-${item.bomId}-${idx}`"
+              data-testid="stock-prep-project-sync-missing-components-row"
+            >
+              <td>{{ item.componentSourceId }}</td>
+              <td>{{ missingComponentParentCell(item) }}</td>
+              <td>{{ item.bomId }}</td>
+              <td>{{ item.depth }}</td>
+              <td>{{ item.occurrenceCount }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p
+          v-if="report.missingComponents.truncated"
+          class="sp-sync__missing-truncated"
+          data-testid="stock-prep-project-sync-missing-components-truncated"
+        >
+          {{ missingComponentsTruncatedNote }}
+        </p>
+        <div class="sp-sync__missing-actions">
+          <button
+            type="button"
+            class="sp-sync__link"
+            data-testid="stock-prep-project-sync-missing-components-copy"
+            @click="onCopyMissingComponents"
+          >
+            {{ missingComponentsCopyLabel }}
+          </button>
+          <button
+            type="button"
+            class="sp-sync__link"
+            data-testid="stock-prep-project-sync-missing-components-export"
+            @click="onExportMissingComponents"
+          >
+            {{ bi('导出 CSV', 'Export CSV') }}
+          </button>
+        </div>
+      </div>
+    </details>
+
     <!-- Where to go next. Both are navigation inside this same workbench; neither is a new route. -->
     <div v-if="report" class="sp-sync__next">
       <!-- SHOWN whenever rows are actually in the sheet — which INCLUDES a partial write. Hiding it
@@ -207,6 +267,7 @@ import {
   STOCK_PREPARATION_PROJECT_SYNC_STEPS,
   createStockPreparationProjectSyncApi,
   runStockPreparationProjectSync,
+  type StockPreparationMissingComponent,
   type StockPreparationProjectSyncApi,
   type StockPreparationProjectSyncReport,
   type StockPreparationProjectSyncStepResult,
@@ -219,6 +280,7 @@ import {
   stockPrepSyncReasonPlain,
   stockPrepSyncVerdictPlain,
 } from '../../../services/integration/stockPreparation/plainLanguage'
+import { downloadCsvFile, escapeTsvCell } from '../../../services/integration/stockPreparation/stockPrepCsv'
 
 const props = withDefaults(
   defineProps<{
@@ -310,6 +372,12 @@ const projectNoEl = ref<HTMLInputElement | null>(null)
  */
 const submittedProjectNo = ref('')
 
+/** The `<table>` DOM node the 缺件清单 "复制" button selects into when the Clipboard API is unavailable. */
+const missingComponentsTableEl = ref<HTMLTableElement | null>(null)
+
+/** Idle → the button's default label. Reset on every new run so a stale "已复制" never survives it. */
+const missingComponentsCopyState = ref<'idle' | 'copied' | 'manual'>('idle')
+
 const canSubmit = computed(() => canRun.value && !busy.value && projectNo.value.trim().length > 0)
 
 // 项目备料页: follow the seed when the PARENT changes which project this panel is about. It never
@@ -337,6 +405,7 @@ async function onRun(): Promise<void> {
   submittedProjectNo.value = target
   results.value = []
   report.value = null
+  missingComponentsCopyState.value = 'idle'
   busy.value = true
   try {
     const api = props.api ?? createStockPreparationProjectSyncApi(props.scope)
@@ -436,6 +505,119 @@ const countsSentence = computed<string>(() => {
   if (parts.length === 0) return bi('这次试算没有需要改动的行。', 'The plan found nothing to change.')
   return bi(`这次试算:${parts.join('、')}。`, `This plan: ${parts.join(', ')}.`)
 })
+
+// ---------------------------------------------------------------------------
+// 缺件清单 (W3a) — the ONE place on this panel that renders a business value (a customer part number)
+// straight from a response. Everything below is presentation over `report.missingComponents`, which
+// `missingComponentsOf` in projectSync.ts already strict-clamped at the API boundary.
+// ---------------------------------------------------------------------------
+
+const missingComponentHeaders = computed<string[]>(() => [
+  bi('零件号', 'Component'),
+  bi('父件', 'Parent'),
+  bi('所在 BOM', 'BOM'),
+  bi('层级', 'Depth'),
+  bi('次数', 'Occurrences'),
+])
+
+const missingComponentsSummary = computed<string>(() => {
+  const list = report.value?.missingComponents
+  if (!list) return ''
+  return bi(
+    `缺件 ${list.distinctCount} 种(共 ${list.probeCount} 处引用)—— 这些零件在物料表里不存在,整个项目在补齐前一行都写不进去。`,
+    `${list.distinctCount} missing part(s) (${list.probeCount} reference(s)) — these parts do not exist `
+    + 'in the materials table, and not one row of this project can be written until they are added.',
+  )
+})
+
+const missingComponentsTruncatedNote = computed<string>(() => {
+  const list = report.value?.missingComponents
+  if (!list) return ''
+  return bi(
+    `仅显示前 200 种,共 ${list.distinctCount} 种,请用导出取全量。`,
+    `Showing the first 200 of ${list.distinctCount} distinct parts — use export for the full list.`,
+  )
+})
+
+/** The parent cell's text: the parent id, plus a "(+N 处)" badge when the part is missing under MORE than one parent. */
+function missingComponentParentCell(item: StockPreparationMissingComponent): string {
+  if (item.parentCount > 1) {
+    return `${item.parentSourceId} ${bi(`(+${item.parentCount} 处)`, `(+${item.parentCount} more)`)}`
+  }
+  return item.parentSourceId
+}
+
+/** The table's rows, in column order — shared by the on-screen table, the TSV copy, and the CSV export. */
+function missingComponentRows(items: StockPreparationMissingComponent[]): Array<Array<string | number>> {
+  return items.map((item) => [
+    item.componentSourceId,
+    missingComponentParentCell(item),
+    item.bomId,
+    item.depth,
+    item.occurrenceCount,
+  ])
+}
+
+const missingComponentsCopyLabel = computed<string>(() => {
+  if (missingComponentsCopyState.value === 'copied') return bi('已复制', 'Copied')
+  if (missingComponentsCopyState.value === 'manual') {
+    return bi('已为您选中,请按 Ctrl/Cmd+C 复制', 'Selected — press Ctrl/Cmd+C to copy')
+  }
+  return bi('复制', 'Copy')
+})
+
+/**
+ * Clipboard-unavailable fallback: select the table's own text so the operator can copy it by hand.
+ * Best-effort only — a test/jsdom environment or an old browser without Selection/Range support gets
+ * the same "nothing happened" it would have gotten without this, and the label change is still true.
+ */
+function selectMissingComponentsTable(): void {
+  try {
+    const table = missingComponentsTableEl.value
+    const selection = typeof window !== 'undefined' ? window.getSelection?.() : null
+    if (!table || !selection || typeof document.createRange !== 'function') return
+    const range = document.createRange()
+    range.selectNodeContents(table)
+    selection.removeAllRanges()
+    selection.addRange(range)
+  } catch {
+    // See above — a failed selection still gets the "手动复制" label, which is the honest state.
+  }
+}
+
+async function onCopyMissingComponents(): Promise<void> {
+  const list = report.value?.missingComponents
+  if (!list) return
+  const tsv = [missingComponentHeaders.value, ...missingComponentRows(list.items)]
+    .map((row) => row.map((cell) => escapeTsvCell(cell)).join('\t'))
+    .join('\n')
+  const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined
+  try {
+    if (!clipboard || typeof clipboard.writeText !== 'function') throw new Error('clipboard unavailable')
+    await clipboard.writeText(tsv)
+    missingComponentsCopyState.value = 'copied'
+  } catch {
+    // Clipboard API missing, refused, or throwing (insecure context, no permission, …): select the
+    // table for a manual copy and SAY SO — a silent failure here reads as "复制 did nothing".
+    selectMissingComponentsTable()
+    missingComponentsCopyState.value = 'manual'
+  }
+}
+
+function missingComponentsCsvFilename(): string {
+  const now = new Date()
+  const yyyy = now.getFullYear()
+  const mm = String(now.getMonth() + 1).padStart(2, '0')
+  const dd = String(now.getDate()).padStart(2, '0')
+  const projectToken = submittedProjectNo.value.trim() || 'project'
+  return `missing-components-${projectToken}-${yyyy}${mm}${dd}.csv`
+}
+
+function onExportMissingComponents(): void {
+  const list = report.value?.missingComponents
+  if (!list) return
+  downloadCsvFile(missingComponentsCsvFilename(), missingComponentHeaders.value, missingComponentRows(list.items))
+}
 </script>
 
 <style scoped>
@@ -649,5 +831,69 @@ const countsSentence = computed<string>(() => {
   color: var(--ms-text-3);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+}
+
+/* 缺件清单 (W3a) — deliberately louder than .sp-tech: this is the blocking explanation, not a
+   collapsed technical aside, so it gets a border of its own rather than sp-tech's quiet hairline. */
+.sp-sync__missing {
+  border: 1px solid var(--ms-color-warning, #b8860b);
+  border-radius: 6px;
+  padding: var(--ms-space-2) var(--ms-space-3);
+  background: var(--ms-bg-page);
+}
+
+.sp-sync__missing-summary {
+  cursor: pointer;
+  color: var(--ms-text-1);
+  font-size: 13px;
+  line-height: 1.6;
+  list-style: none;
+}
+
+.sp-sync__missing-summary::-webkit-details-marker {
+  display: none;
+}
+
+.sp-sync__missing-summary:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
+}
+
+.sp-sync__missing-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-2);
+  margin-top: var(--ms-space-2);
+}
+
+.sp-sync__missing-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.sp-sync__missing-table th,
+.sp-sync__missing-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--ms-border-light);
+  text-align: left;
+  color: var(--ms-text-1);
+}
+
+.sp-sync__missing-table th {
+  color: var(--ms-text-3);
+  font-weight: var(--ms-font-weight-title);
+  font-size: 12px;
+}
+
+.sp-sync__missing-truncated {
+  margin: 0;
+  color: var(--ms-text-3);
+  font-size: 12px;
+}
+
+.sp-sync__missing-actions {
+  display: flex;
+  gap: var(--ms-space-2);
 }
 </style>
