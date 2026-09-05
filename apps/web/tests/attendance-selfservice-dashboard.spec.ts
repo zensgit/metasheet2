@@ -63,7 +63,23 @@ function findButton(container: HTMLElement, label: string): HTMLButtonElement {
   return button as HTMLButtonElement
 }
 
-function installOverviewMock(): void {
+const DEFAULT_OVERVIEW_ANOMALY = {
+  recordId: 'record-today',
+  workDate: '2026-04-15',
+  status: 'late_early',
+  isWorkday: true,
+  firstInAt: '2026-04-15T09:18:00+08:00',
+  lastOutAt: '2026-04-15T17:42:00+08:00',
+  workMinutes: 444,
+  lateMinutes: 18,
+  earlyLeaveMinutes: 18,
+  warnings: ['missing punch review'],
+  state: 'open',
+  request: null,
+  suggestedRequestType: 'missed_check_in',
+}
+
+function installOverviewMock(options?: { anomalyItems?: Array<Record<string, unknown>> }): void {
   vi.mocked(apiFetch).mockImplementation(async (input) => {
     const url = typeof input === 'string' ? input : input.url
 
@@ -191,23 +207,7 @@ function installOverviewMock(): void {
       return jsonResponse(200, {
         ok: true,
         data: {
-          items: [
-            {
-              recordId: 'record-today',
-              workDate: '2026-04-15',
-              status: 'late_early',
-              isWorkday: true,
-              firstInAt: '2026-04-15T09:18:00+08:00',
-              lastOutAt: '2026-04-15T17:42:00+08:00',
-              workMinutes: 444,
-              lateMinutes: 18,
-              earlyLeaveMinutes: 18,
-              warnings: ['missing punch review'],
-              state: 'open',
-              request: null,
-              suggestedRequestType: 'missed_check_in',
-            },
-          ],
+          items: options?.anomalyItems ?? [DEFAULT_OVERVIEW_ANOMALY],
         },
       })
     }
@@ -993,7 +993,7 @@ describe('Attendance self-service dashboard', () => {
     expect(container!.querySelector('#attendance-overview-requests')).toBeTruthy()
   })
 
-  it('below-fold IA: a quick action opens the request/makeup disclosure without a second form', async () => {
+  it('below-fold IA: a non-makeup quick action opens the request/makeup disclosure without a second form', async () => {
     app = createApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi()
@@ -1007,6 +1007,30 @@ describe('Attendance self-service dashboard', () => {
     expect(requestTools.open).toBe(true)
     expect(container!.querySelectorAll('#attendance-request-work-date')).toHaveLength(1)
     expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('leave')
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull()
+  })
+
+  it('makeup tile opens the dedicated makeup card below 常用 and leaves the shared disclosure closed', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const requestTools = container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement
+    expect(requestTools.open).toBe(false)
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
+    await flushUi(3)
+
+    const card = container!.querySelector('[data-attendance-makeup-request-card]')
+    const common = container!.querySelector('[data-selfservice-card="actions"]')
+    expect(card).toBeTruthy()
+    expect(common?.nextElementSibling).toBe(card)
+    expect(card?.querySelector('#attendance-makeup-card-title')?.textContent).toContain('Makeup punch request')
+    expect(card?.querySelector<HTMLSelectElement>('[data-makeup-card-anomaly]')?.value).toBe('record-today::2026-04-15')
+    expect(card?.querySelector('[data-makeup-card-anomaly]')?.textContent).toContain('Today · Missing check-in')
+    expect(requestTools.open).toBe(false)
+    expect(container!.querySelectorAll('#attendance-request-work-date')).toHaveLength(1)
+    expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('missed_check_in')
   })
 
   it('below-fold overflow contract: history surfaces stay within 1440 and 390', async () => {
@@ -1108,6 +1132,7 @@ describe('Attendance self-service dashboard', () => {
     expect(primary!.querySelector('[data-selfservice-card="requests"]')).toBeTruthy()
     expect(primary!.querySelector('[data-selfservice-card="actions"]')).toBeNull()
     expect(primary!.querySelector('[data-attendance-history-filters]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull()
 
     const aside = container!.querySelector('[data-attendance-overview-header-aside]')
     expect(aside).toBeTruthy()
@@ -1653,11 +1678,13 @@ describe('Attendance self-service dashboard', () => {
     await flushUi(3)
     expect(requestType?.value).toBe('leave')
     expect(workDate?.value).toBe('2026-04-15')
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull()
 
     missingPunchButton!.click()
     await flushUi(3)
     expect(requestType?.value).toBe('missed_check_in')
     expect(workDate?.value).toBe('2026-04-15')
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeTruthy()
   })
 
   it('loads active leave and overtime policies into self-service request selectors', async () => {
@@ -2062,16 +2089,21 @@ describe('Attendance self-service dashboard', () => {
 
     container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
     await flushUi(3)
+    const card = container!.querySelector<HTMLElement>('[data-attendance-makeup-request-card]')
+    expect(card).toBeTruthy()
     expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('missed_check_in')
     expect(requestPostCount()).toBe(0)
 
-    setFormValue(container!, '#attendance-request-in', '2026-04-15T09:00')
-    findButton(container!, 'Submit request').click()
-    await flushUi(4)
+    setFormValue(card!, '[data-makeup-card-time]', '2026-04-15T09:00')
+    card!.querySelector<HTMLButtonElement>('[data-makeup-card-submit]')!.click()
+    await flushUi(8)
 
     expect(requestPostCount()).toBe(1)
     expect(createBodies).toHaveLength(1)
     expect(createBodies[0].requestType).toBe('missed_check_in')
+    expect(createBodies[0].requestedInAt).toBe('2026-04-15T09:00')
+    expect(createBodies[0].workDate).toBe('2026-04-15')
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull()
   })
 
   it('MP-5 shared path: missing-punch quick action with no anomaly still posts one request', async () => {
@@ -2093,16 +2125,23 @@ describe('Attendance self-service dashboard', () => {
 
     container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
     await flushUi(3)
+    const card = container!.querySelector<HTMLElement>('[data-attendance-makeup-request-card]')
+    expect(card).toBeTruthy()
     expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('missed_check_in')
     expect(container!.querySelector<HTMLInputElement>('#attendance-request-work-date')?.value).toBeTruthy()
+    expect(card!.querySelector<HTMLSelectElement>('[data-makeup-card-anomaly]')?.disabled).toBe(true)
+    expect(card!.querySelector<HTMLInputElement>('[data-makeup-card-time]')?.value).toBe('')
+    expect(card!.querySelector<HTMLInputElement>('[data-makeup-card-reason]')?.value).toBe('')
     expect(requestPostCount()).toBe(0)
 
-    setFormValue(container!, '#attendance-request-in', '2026-04-15T09:00')
-    findButton(container!, 'Submit request').click()
+    setFormValue(card!, '[data-makeup-card-time]', '2026-04-15T09:00')
+    card!.querySelector<HTMLButtonElement>('[data-makeup-card-submit]')!.click()
     await flushUi(4)
 
     expect(requestPostCount()).toBe(1)
     expect(createBodies).toHaveLength(1)
+    expect(createBodies[0].requestType).toBe('missed_check_in')
+    expect(createBodies[0].requestedInAt).toBe('2026-04-15T09:00')
   })
 
   it('MP-5 no settings leak: the employee MP-5 flow makes no GET /api/attendance/settings', async () => {
@@ -2303,5 +2342,65 @@ describe('Attendance self-service dashboard', () => {
     const filterFields = container!.querySelectorAll('.attendance__filters .attendance__field')
     expect(filterFields.length, 'filter fields present').toBeGreaterThan(0)
     expect(container!.querySelector('.attendance__hero-timeline'), 'hero timeline present').toBeTruthy()
+  })
+
+  it('pending-only anomalies stay hand-fill and do not invent a makeup type', async () => {
+    installOverviewMock({
+      anomalyItems: [{
+        ...DEFAULT_OVERVIEW_ANOMALY,
+        state: 'pending',
+        suggestedRequestType: 'missed_check_out',
+        request: { id: 'req-pending', status: 'pending', requestType: 'missed_check_out' },
+      }],
+    })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
+    await flushUi(3)
+
+    const card = container!.querySelector<HTMLElement>('[data-attendance-makeup-request-card]')
+    expect(card).toBeTruthy()
+    expect(card!.querySelector<HTMLSelectElement>('[data-makeup-card-anomaly]')?.disabled).toBe(true)
+    expect(card!.querySelector<HTMLSelectElement>('[data-makeup-card-anomaly]')?.querySelectorAll('option:not([disabled])')).toHaveLength(0)
+    expect(card!.querySelector<HTMLInputElement>('[data-makeup-card-time]')?.value).toBe('')
+    expect(card!.querySelector<HTMLInputElement>('[data-makeup-card-reason]')?.value).toBe('')
+    expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('missed_check_in')
+    expect(card!.querySelector('[data-makeup-card-hint]')?.textContent).toContain('Pending requests are not prefilled')
+  })
+
+  it('header cancel closes the makeup card without opening the shared disclosure', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
+    await flushUi(3)
+    const requestTools = container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeTruthy()
+    expect(requestTools.open).toBe(false)
+
+    container!.querySelector<HTMLButtonElement>('[data-makeup-card-cancel="header"]')!.click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull()
+    expect(requestTools.open).toBe(false)
+  })
+
+  it('opening leave or overtime closes the dedicated makeup card', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
+    await flushUi(3)
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeTruthy()
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="leave"]')!.click()
+    await flushUi(3)
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull()
+    expect((container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement).open).toBe(true)
+    expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('leave')
   })
 })

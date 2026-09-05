@@ -67,6 +67,8 @@ describe('employee quick-action icons (admin-only)', () => {
     expect(container.querySelector('[data-selfservice-action="leave"]')?.getAttribute('data-attendance-ew-icon')).toBe('calendar')
     expect(container.querySelector('[data-selfservice-action="overtime"]')?.getAttribute('data-attendance-ew-icon')).toBe('moon')
     expect(container.querySelector('[data-selfservice-action="shift-swap"]')?.getAttribute('data-attendance-ew-icon')).toBe('swap')
+    expect(container.querySelector('[data-attendance-makeup-request-card]')).toBeNull()
+    expect(container.querySelector('[data-selfservice-card="actions"]')?.querySelector('h3')?.textContent).toContain('常用')
 
     app.unmount()
     container.remove()
