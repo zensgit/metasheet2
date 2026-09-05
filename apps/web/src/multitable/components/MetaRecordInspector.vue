@@ -682,16 +682,30 @@ const titleTextRef = ref<HTMLDivElement | null>(null)
 let restoreFocusTarget: HTMLElement | null = null
 
 // `props.openerEl` (WB's `openRecord(id, opener)`, see that prop's own doc comment) wins when
-// given; falling back to `document.activeElement` covers an open WB doesn't drive an opener for
-// (a deep-link/comment-click-through open, or a router-less spec mounting this shell directly)
-// and also naturally captures a context-menu-item opener when WB passes none — see MtMenu's own
-// comment on the identical "capture what's focused right now" idiom for why this is reliable.
-// `document.body` (or no active element at all) means nothing was actually focused — treated the
-// SAME as "no opener" so the close-time restore below reaches `.meta-grid`, not a no-op
-// `body.focus()`. Called on every OPEN edge (see the `watch` below), not just the first.
+// given AND usable; falling back to `document.activeElement` covers an open WB doesn't drive an
+// opener for (a deep-link/comment-click-through open, or a router-less spec mounting this shell
+// directly) and also naturally captures a context-menu-item opener when WB passes none — see
+// MtMenu's own comment on the identical "capture what's focused right now" idiom for why this is
+// reliable. `document.body` (or no active element at all) means nothing was actually focused —
+// treated the SAME as "no opener" so the close-time restore below reaches `.meta-grid`, not a no-op
+// `body.focus()`. Round 5 (2026-09-05, refuter P3): until this round that body filter was applied to
+// the FALLBACK operand only — a `body` arriving AS `props.openerEl` (WB used to forward
+// `document.activeElement` unfiltered, and that IS `body` in Safari and Firefox/macOS, where a mouse
+// click does not focus a `<button>`, and after any programmatic `.click()`) went straight through to
+// `restoreFocusToOpener`, whose connected-check `body` passes, so close called `body.focus()` and
+// never reached the `.meta-grid` last resort. Both operands now pass through `isRestorableOpener`:
+// a `body` (or disconnected) opener falls back to the pre-open active element, then to `.meta-grid`
+// — i.e. body is "no opener", not a lower-priority one. WB filters on its side as well
+// (`resolveOpenerEl` in MultitableWorkbench.vue); each side guards independently. Called on every
+// OPEN edge (see the `watch` below), not just the first.
+function isRestorableOpener(el: HTMLElement | null | undefined): el is HTMLElement {
+  return !!el && el !== document.body && el.isConnected
+}
 function captureOpenerAndFocusTitle() {
   const active = document.activeElement as HTMLElement | null
-  restoreFocusTarget = props.openerEl ?? (active && active !== document.body ? active : null)
+  if (isRestorableOpener(props.openerEl)) restoreFocusTarget = props.openerEl
+  else if (isRestorableOpener(active)) restoreFocusTarget = active
+  else restoreFocusTarget = null
   void nextTick(() => {
     ;(titleInputRef.value ?? titleTextRef.value)?.focus()
   })
