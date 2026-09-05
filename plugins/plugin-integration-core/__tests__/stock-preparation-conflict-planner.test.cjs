@@ -1102,7 +1102,78 @@ function testTheHumanFieldWallIsUnaffected() {
   )
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// W3a M-03 / M-04 — THE MISSING-COMPONENT SIDE CHANNEL DOES NOT REACH THE PLANNER
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// W3a gives the expander a second, VALUE-BEARING output — `expansion.missingComponents`, carrying
+// real PLM part numbers — so an operator can be told which parts to create. The planner's two
+// durable surfaces must not be able to see it:
+//
+//   M-03 THE ANONYMOUS-HOLD IDENTITY. `ANONYMOUS_LOCUS_IDENTITY_FIELDS` reads {field, depth,
+//        relation} off the ROWERROR, and the rowError did not change. Pinned against HARD-CODED
+//        baselines rather than against a re-derivation: a re-derivation moves with the recipe and
+//        would stay green through exactly the change that supersedes every pending hold in the
+//        customer's ledger.
+//   M-04 THE LEDGER PROJECTION. `details` is {field, depth, relation}, and `conflictSummary` is what
+//        the confirmation ledger's `inputFingerprint` is computed over. Asserted as an absence of the
+//        part-number literals over the WHOLE plan, not just over `details`.
+function testW3aMissingComponentDetailNeverReachesTheHoldOrTheLedger() {
+  // M-03: the recipe, frozen. These two strings were computed on the pre-W3a tree.
+  assert.equal(
+    __internals.anonymousRowErrorIdentity('missing_component', { type: 'missing_component', field: 'OBJ_ID', depth: 2 }),
+    'anon-hold:v1:locus:sha256:71f697ebef98612c8b12ef96093b7e01',
+    'M-03: the missing_component locus identity is byte-for-byte what it was before W3a',
+  )
+  assert.equal(
+    __internals.anonymousRowErrorIdentity('missing_component', { type: 'missing_component', field: 'OBJ_ID', depth: 0 }),
+    'anon-hold:v1:locus:sha256:6cbfb57eb7057856c257b2012e73796e',
+    'M-03: depth 0 (the BOM root) too',
+  )
+
+  // The expansion the route would hold at this point: BOTH arrays populated, exactly as
+  // `expandPlmProjectBom` now returns them. The planner is handed `expansion.rowErrors` — which is
+  // the only thing table-actions passes it — so the side channel is structurally out of reach.
+  const expansion = {
+    rowErrors: [
+      { type: 'missing_component', field: 'OBJ_ID', depth: 1 },
+      { type: 'missing_component', field: 'OBJ_ID', depth: 1 },
+    ],
+    missingComponents: [
+      { componentSourceId: 'ZZPARTZZ', parentSourceId: 'ZZPARENTZZ', bomId: 'ZZBOMZZ', path: '["ZZPARENTZZ","ZZPARTZZ"]', depth: 1 },
+      { componentSourceId: 'ZZPARTZZ', parentSourceId: 'ZZOTHERPARENTZZ', bomId: 'ZZBOM2ZZ', path: '["ZZOTHERPARENTZZ","ZZPARTZZ"]', depth: 1 },
+    ],
+  }
+  const plan = planStockPreparationConflicts({
+    expandedRows: [row({ componentSourceId: 'PART-OK' })],
+    existingRows: [],
+    rowErrors: expansion.rowErrors,
+    runId: 'run-w3a',
+    plannedAt: '2026-09-05T00:00:00.000Z',
+  })
+
+  const holds = plan.decisions.filter((entry) => entry.decision === DECISIONS.MANUAL_CONFIRM)
+  assert.equal(holds.length, 2, 'both missing-component rowErrors still hold the run')
+  for (const hold of holds) {
+    assert.deepEqual(
+      Object.keys(hold.conflictSummary),
+      ['type', 'field', 'depth'],
+      'M-04: the ledger projection is the same key set it always was',
+    )
+  }
+
+  // M-04, stated the way it matters: not one of these literals appears ANYWHERE in the plan — not in
+  // details, not in a summary, not in an identity, not in the evidence projection.
+  const planText = JSON.stringify(plan)
+  const evidenceText = JSON.stringify(summarizeConflictPlanForEvidence(plan))
+  for (const literal of ['ZZPARTZZ', 'ZZPARENTZZ', 'ZZOTHERPARENTZZ', 'ZZBOMZZ', 'ZZBOM2ZZ']) {
+    assert.equal(planText.includes(literal), false, `M-04: the plan carries no ${literal}`)
+    assert.equal(evidenceText.includes(literal), false, `M-04: the plan evidence carries no ${literal}`)
+  }
+}
+
 function main() {
+  testW3aMissingComponentDetailNeverReachesTheHoldOrTheLedger()
   testAddUpdateSkipInactive()
   testRowErrorsDoNotAbortGoodRows()
   testDuplicatesAndConflictsFailClosed()

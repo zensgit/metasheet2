@@ -132,6 +132,28 @@ const STOCK_PREPARATION_BOM_SOURCE_KINDS = Object.freeze([
   'bridge:legacy-sql-readonly',
 ])
 
+// W3a — THE ONE VALUE-BEARING SIDE CHANNEL THIS MODULE PRODUCES, and the cap on it.
+//
+// A `missing_component` rowError says "a part the BOM points at is not in the part library". That
+// blocks the WHOLE project (one such rowError makes the plan invalid, and apply refuses without an
+// explicit manual-confirm hold), so an operator cannot act on it without knowing WHICH part numbers
+// to create. The part number is a real customer value, and the rowError payload is emphatically NOT
+// where it may travel: `expansion.rowErrors` is hashed whole into the dry-run revision
+// (stock-preparation-table-actions.cjs buildRevision) and feeds the anonymous-hold identity and the
+// confirmation ledger. Adding a key there would move every stored revision, supersede every pending
+// hold on a project that has a missing component, and put a part number in the ledger.
+//
+// So the detail travels BESIDE the rowErrors, in its own top-level array, and `rowErrors` keeps the
+// exact `{type, field, depth}` shape it has always had. `expansion.missingComponents` is projected
+// by NOTHING that hashes, stores or evidences — it is read only by `summarizeMissingComponents`
+// below, for the dry-run response's opt-in `missingComponents` key (gated operate ∧ proven tenant).
+//
+// The cap is on the COLLECTOR, not just on the summary: a 10k-row BOM against an empty part library
+// would otherwise accumulate 10k part numbers in memory on a read that is supposed to be bounded.
+// Past the cap the probes are still counted (every one still emits its rowError), they just stop
+// carrying a value — which is what `truncated` on the summary reports.
+const MISSING_COMPONENT_DETAIL_LIMIT = 200
+
 const FORBIDDEN_PLAN_KEYS = Object.freeze([
   'sql',
   'rawSql',
@@ -869,13 +891,17 @@ function rowFromPart(plan, { projectNo, parentSourceId, pathTokens, depth, partR
   }
 }
 
-function failureResult({ projectNoPresent, matchField, status = 'failed', rows, errors, rowErrors, readStats, rootMatches, maxDepth, maxRows, maxPages, maxReadCount, maxElapsedMs, subtree }) {
+function failureResult({ projectNoPresent, matchField, status = 'failed', rows, errors, rowErrors, missingComponents = [], readStats, rootMatches, maxDepth, maxRows, maxPages, maxReadCount, maxElapsedMs, subtree }) {
   return {
     valid: false,
     status,
     rows,
     errors,
     rowErrors,
+    // Present on EVERY return path (see the constant's header), so a consumer never has to ask
+    // whether this particular expansion has the key. It is deliberately NOT passed to makeSummary:
+    // `summary` is the values-free projection and stays that way.
+    missingComponents,
     summary: makeSummary({
       projectNoPresent,
       matchField,
@@ -955,6 +981,10 @@ async function expandPlmProjectBom(input = {}) {
       rootQuantitySource: { orderDetail: 0, subtreeDefault: 0 },
     }
     : undefined
+  // The side channel. Bounded at MISSING_COMPONENT_DETAIL_LIMIT entries; every probe past that is
+  // still counted by its rowError, so the summary can report a truthful total while carrying no
+  // more than `limit` part numbers.
+  const missingComponents = []
 
   const read = (object, filters) => readAll(sourceAdapter, object, filters, options, readStats)
   const addGlobalError = (type, details = {}) => {
@@ -975,6 +1005,12 @@ async function expandPlmProjectBom(input = {}) {
   }
   const addRowError = (error) => {
     rowErrors.push(error)
+  }
+  // Deliberately separate from `addRowError`: the two payloads have different audiences and
+  // different rules, and merging them is exactly the mistake this design exists to prevent.
+  const addMissingComponent = (entry) => {
+    if (missingComponents.length >= MISSING_COMPONENT_DETAIL_LIMIT) return
+    missingComponents.push(entry)
   }
   const pushRow = (row) => {
     if (rows.length + 1 > options.maxRows) {
@@ -1014,6 +1050,7 @@ async function expandPlmProjectBom(input = {}) {
       rows,
       errors,
       rowErrors,
+      missingComponents,
       readStats,
       rootMatches: 0,
       maxDepth: options.maxDepth,
@@ -1032,6 +1069,7 @@ async function expandPlmProjectBom(input = {}) {
       rows: [],
       errors: [],
       rowErrors: [],
+      missingComponents: [],
       summary: makeSummary({
         projectNoPresent: true,
         matchField: plan.matchField,
@@ -1051,7 +1089,15 @@ async function expandPlmProjectBom(input = {}) {
     }
   }
 
-  async function readPart(componentSourceId, depth) {
+  // `locus` is the W3a context for the missing-component side channel ONLY: the parent, the BOM head
+  // and the path this probe happened under. It never reaches `addRowError` — the rowError payload is
+  // frozen at `{type, field, depth}` and a test pins its `Object.keys()`.
+  //
+  // `ambiguous_component` gets NO such channel, deliberately. Two candidate rows for one part id is a
+  // SOURCE DATA defect nobody on the floor can fix by creating a part, so naming the part would put a
+  // customer value on the wire for no operator action — and every value-bearing key is a leak surface
+  // that has to earn its keep.
+  async function readPart(componentSourceId, depth, locus = {}) {
     const matches = await read(plan.part.object, { [plan.part.idField]: componentSourceId })
     const candidates = matchesByField(matches, plan.part.idField, componentSourceId)
     if (candidates.length > 1) {
@@ -1061,6 +1107,13 @@ async function expandPlmProjectBom(input = {}) {
     const row = candidates[0]
     if (!row) {
       addRowError({ type: 'missing_component', field: plan.part.idField, depth })
+      addMissingComponent({
+        componentSourceId,
+        parentSourceId: locus.parentSourceId === undefined ? null : locus.parentSourceId,
+        bomId: locus.bomId === undefined ? null : locus.bomId,
+        path: locus.path === undefined ? null : locus.path,
+        depth,
+      })
       return undefined
     }
     return row
@@ -1127,9 +1180,13 @@ async function expandPlmProjectBom(input = {}) {
           addRowError(qty.error)
           continue
         }
-        const partRow = await readPart(childSourceId, nextDepth)
-        if (!partRow) continue
         const childTokens = pathTokens.concat(childSourceId)
+        const partRow = await readPart(childSourceId, nextDepth, {
+          parentSourceId,
+          bomId,
+          path: makePath(childTokens),
+        })
+        if (!partRow) continue
         const rowResult = rowFromPart(plan, {
           projectNo,
           parentSourceId,
@@ -1312,9 +1369,15 @@ async function expandPlmProjectBom(input = {}) {
             addRowError(qty.error)
             continue
           }
-          const partRow = await readPart(componentSourceId, 0)
-          if (!partRow) continue
           const pathTokens = [componentSourceId]
+          // The BOM root: the order detail names the part directly, so there is no parent and no BOM
+          // head above it. Both are null rather than absent — the shape is uniform for the UI.
+          const partRow = await readPart(componentSourceId, 0, {
+            parentSourceId: null,
+            bomId: null,
+            path: makePath(pathTokens),
+          })
+          if (!partRow) continue
           const rowResult = rowFromPart(plan, {
             projectNo,
             parentSourceId: null,
@@ -1390,9 +1453,19 @@ async function expandPlmProjectBom(input = {}) {
             subtreeCounters.rootsSkippedAlreadyExpanded += 1
             continue
           }
-          const partRow = await readPart(rootSourceId, 0)
-          if (!partRow) continue
           const pathTokens = [rootSourceId]
+          // W3a: the SUBTREE root, and it is a root in exactly the sense the order path's root is —
+          // no parent above it, no BOM head that named it (the folder walk found it, not a BOM). Same
+          // locus shape as the order root, so a missing subtree root reads identically in the
+          // operator's list to a missing order root. Without this argument the sidecar would carry
+          // the part number with a silently `null` parent/bom/path anyway, but by accident rather
+          // than by statement — and `path` would be missing, which the UI's column expects.
+          const partRow = await readPart(rootSourceId, 0, {
+            parentSourceId: null,
+            bomId: null,
+            path: makePath(pathTokens),
+          })
+          if (!partRow) continue
           const rowResult = rowFromPart(plan, {
             projectNo,
             parentSourceId: null,
@@ -1438,6 +1511,9 @@ async function expandPlmProjectBom(input = {}) {
     rows,
     errors,
     rowErrors,
+    // Same on the bounded (large-BOM) path, which reaches this return with its scale error in
+    // `errors`: the key is always present, empty when nothing was missing.
+    missingComponents,
     summary: makeSummary({
       projectNoPresent: true,
       matchField: plan.matchField,
@@ -1454,6 +1530,88 @@ async function expandPlmProjectBom(input = {}) {
       rowErrors,
       subtree: subtreeCounters,
     }),
+  }
+}
+
+/**
+ * W3a — THE OPERATOR-FACING MISSING-COMPONENT LIST. Values-BEARING, and the only function in this
+ * module that is.
+ *
+ * Deliberately NOT built on `summarizeBomExpansionForEvidence`, and deliberately not called by it:
+ * that one is the values-free projection every evidence stanza, audit row and ledger entry rides on,
+ * and the single most valuable property it has is that no part number can reach it. Sharing code
+ * between the two is how that property gets lost in a later refactor, so they share none.
+ *
+ * ONE ROW PER PART NUMBER, not per probe. Creating a part in PLM is a per-part job, so a list that
+ * repeated a part once per BOM position would be a worklist with the same work written out fifty
+ * times. The parent / BOM / path / depth reported are the FIRST place the part was wanted;
+ * `parentCount` says how many distinct parents wanted it, which is the "this one is holding up
+ * several assemblies" signal.
+ *
+ * ORDER: `occurrenceCount` descending (do the most-blocking part first), ties broken by
+ * `componentSourceId` ascending — total, so the same expansion always summarizes identically.
+ *
+ * TOTALS ARE TRUE TOTALS. `probeCount` counts every missing-component probe the expansion made,
+ * taken from the rowErrors (one per probe, uncapped) rather than from the capped detail array, so a
+ * BOM that overran MISSING_COMPONENT_DETAIL_LIMIT still reports how bad it really is.
+ * `distinctCount` is the number of distinct part numbers among the details that were RETAINED.
+ * `truncated` is true whenever either cap bit: details were dropped at collection, or `limit` cut the
+ * item list here. A truncated list is a "use the export / fix these first" signal, not a total.
+ */
+function summarizeMissingComponents(expansion = {}, { limit = MISSING_COMPONENT_DETAIL_LIMIT } = {}) {
+  const entries = Array.isArray(expansion.missingComponents) ? expansion.missingComponents : []
+  const rowErrors = Array.isArray(expansion.rowErrors) ? expansion.rowErrors : []
+  const boundedLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : MISSING_COMPONENT_DETAIL_LIMIT
+
+  const byComponent = new Map()
+  const parentsByComponent = new Map()
+  let retainedProbes = 0
+  for (const entry of entries) {
+    if (!isPlainObject(entry)) continue
+    const componentSourceId = toKey(entry.componentSourceId)
+    if (componentSourceId === null) continue
+    retainedProbes += 1
+    let item = byComponent.get(componentSourceId)
+    if (!item) {
+      item = {
+        componentSourceId,
+        parentSourceId: entry.parentSourceId === undefined ? null : entry.parentSourceId,
+        bomId: entry.bomId === undefined ? null : entry.bomId,
+        path: entry.path === undefined ? null : entry.path,
+        depth: Number.isFinite(entry.depth) ? Number(entry.depth) : null,
+        occurrenceCount: 0,
+        parentCount: 0,
+      }
+      byComponent.set(componentSourceId, item)
+      parentsByComponent.set(componentSourceId, new Set())
+    }
+    item.occurrenceCount += 1
+    // The ROOT case (`parentSourceId: null`) is a distinct parent too — "wanted directly by the
+    // order" is one of the places a part is wanted — so it is counted rather than skipped.
+    parentsByComponent.get(componentSourceId).add(entry.parentSourceId === null || entry.parentSourceId === undefined ? null : String(entry.parentSourceId))
+  }
+  for (const [componentSourceId, item] of byComponent) {
+    item.parentCount = parentsByComponent.get(componentSourceId).size
+  }
+
+  const ranked = [...byComponent.values()].sort((a, b) => {
+    if (b.occurrenceCount !== a.occurrenceCount) return b.occurrenceCount - a.occurrenceCount
+    return a.componentSourceId < b.componentSourceId ? -1 : a.componentSourceId > b.componentSourceId ? 1 : 0
+  })
+
+  let probeCount = 0
+  for (const rowError of rowErrors) {
+    if (isPlainObject(rowError) && rowError.type === 'missing_component') probeCount += 1
+  }
+  // A caller may hand this function a bare `{ missingComponents }` with no rowErrors at all (the
+  // frontend clamp tests do). Never report fewer probes than details actually seen.
+  if (retainedProbes > probeCount) probeCount = retainedProbes
+
+  return {
+    distinctCount: ranked.length,
+    probeCount,
+    truncated: ranked.length > boundedLimit || probeCount > retainedProbes,
+    items: ranked.slice(0, boundedLimit),
   }
 }
 
@@ -1493,6 +1651,7 @@ module.exports = {
   DEFAULT_MAX_ROWS,
   LARGE_BOM_BOUNDED_ERROR_TYPES,
   INCOMPLETE_READ_ERROR_TYPES,
+  MISSING_COMPONENT_DETAIL_LIMIT,
   READ_CURSOR_BROKEN_ERROR_TYPE,
   SUBTREE_CYCLE_DETECTED_ERROR_TYPE,
   SUBTREE_NODE_LIMIT_EXCEEDED_ERROR_TYPE,
@@ -1508,6 +1667,9 @@ module.exports = {
   expandPlmProjectBom,
   isLargeBomBoundedExpansion,
   summarizeBomExpansionForEvidence,
+  // Values-BEARING — see its header. Exported separately from the evidence summary so a reader of
+  // this list can see at a glance which of the two carries customer values.
+  summarizeMissingComponents,
   __internals: {
     isBlank,
     isActiveBomHead,

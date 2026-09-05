@@ -339,6 +339,13 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   'stockPreparationOperatorProjectBoard',
   'stockPreparationOperatorProjectDirectory',
   'stockPreparationPrepLineExport',
+  // 缺件清单 (W3a). THE ONE MEMBER OF THIS SET THAT IS NOT A VALUE-BEARING ROUTE — it is a
+  // values-free route with a value-bearing OPT-IN, and that difference is why it needs the carve-out
+  // spelled out in VALUE_BEARING_READS_WITH_GATED_LEGACY_TENANT below rather than a quiet edit to
+  // the blanket check. Without `includeMissingComponents: true` this handler is byte-for-byte the
+  // `read`-tier trial it has always been, counts and hashes only, and it must stay reachable by the
+  // legacy `integration:read` tier that has always run it.
+  'tableActionDryRun',
 ].sort()
 
 const VALUE_BEARING_READ_HANDLERS = handlersCallingOperatorValueScope(ROUTES_SRC)
@@ -370,16 +377,52 @@ const VALUE_BEARING_READS_WITH_INLINE_STAGING = new Set([
   'stockPreparationOperatorProjectBoard',
 ])
 
+/**
+ * THE ONE CARVE-OUT, and the stricter assertion that replaces the blanket one.
+ *
+ * `tableActionDryRun` is a values-free `read` route with a value-bearing OPT-IN. It cannot drop
+ * `resolveTenantId` outright: the legacy `integration:read` tier has always been able to run a trial
+ * and see the counts, that path derives its tenant exactly as it always did, and taking it away to
+ * ship a part-number list would break a surface nobody asked to break.
+ *
+ * So the rule for this handler is narrower AND stronger than "never mentions resolveTenantId": the
+ * VALUE path must not be able to reach it. That is asserted as an exact source form —
+ *
+ *     const dryRunTenantId = valueScope ? valueScope.tenantId : resolveTenantId(req, {})
+ *
+ * — plus "there is exactly ONE resolveTenantId call in the handler", so a second, ungated derivation
+ * cannot be slipped in beside it. A handler that stopped honouring the ternary, or grew a second
+ * call, fails here. Nothing else is exempt: adding a name to this set is a visible, reviewable edit.
+ */
+const VALUE_BEARING_READS_WITH_GATED_LEGACY_TENANT = new Map([
+  ['tableActionDryRun', 'const dryRunTenantId = valueScope ? valueScope.tenantId : resolveTenantId(req, {})'],
+])
+
 for (const name of VALUE_BEARING_READ_HANDLERS) {
   const body = handlerBody(ROUTES_SRC, name)
 
-  check(`${name}: does NOT derive tenant via the request-steerable resolveTenantId`, () => {
-    assert.equal(
-      /resolveTenantId\(/.test(body),
-      false,
-      `${name} calls resolveTenantId(...) — a VALUE-BEARING read must derive its tenant from resolveOperatorValueScope, which is the sole tenancy authority on this plane`,
-    )
-  })
+  if (VALUE_BEARING_READS_WITH_GATED_LEGACY_TENANT.has(name)) {
+    const gatedForm = VALUE_BEARING_READS_WITH_GATED_LEGACY_TENANT.get(name)
+    check(`${name}: the request-steerable resolveTenantId is unreachable on the VALUE path`, () => {
+      assert.ok(
+        body.includes(gatedForm),
+        `${name} must derive its tenant as \`${gatedForm}\` — the proven scope on the value path, the legacy derivation only without it`,
+      )
+      assert.equal(
+        (body.match(/resolveTenantId\(/g) || []).length,
+        1,
+        `${name} must call resolveTenantId exactly once, inside the gated ternary — a second call would be an ungated derivation`,
+      )
+    })
+  } else {
+    check(`${name}: does NOT derive tenant via the request-steerable resolveTenantId`, () => {
+      assert.equal(
+        /resolveTenantId\(/.test(body),
+        false,
+        `${name} calls resolveTenantId(...) — a VALUE-BEARING read must derive its tenant from resolveOperatorValueScope, which is the sole tenancy authority on this plane`,
+      )
+    })
+  }
 
   check(`${name}: does NOT read user.tenantId directly`, () => {
     assert.equal(
