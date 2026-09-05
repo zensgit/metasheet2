@@ -3544,6 +3544,30 @@ describe('MultitableWorkbench view wiring', () => {
       opener.remove()
     })
 
+    // Round 5 (2026-09-05, refuter P3 — `body` handed through as the opener): the test above focuses
+    // its opener first because jsdom's `.click()` does not move focus — but "nothing focused at the
+    // expand click" is exactly the production state in Safari and Firefox/macOS (a mouse click does
+    // NOT focus a `<button>`) and after ANY programmatic `.click()`: `document.activeElement` is
+    // `document.body` when the grid's synchronous expand handler runs. `openRecord` used to forward
+    // that `body` verbatim as the opener; the inspector's body filter covered only ITS OWN
+    // activeElement fallback, so the `body` reached `restoreFocusToOpener`, passed its connected check,
+    // and close called `body.focus()` — never falling through to the `.meta-grid` root. `openRecord`
+    // now resolves body (and a disconnected element) to `null` via `resolveOpenerEl`. Mutation: drop
+    // the `candidate === document.body` clause there → this reds at `toBeNull()` (the stub is handed
+    // `<body>`); the identity test above stays green, so the red is the filter's, not the wiring's.
+    it('expand-open while document.activeElement is body (nothing focused) hands the inspector openerEl === null, not document.body', async () => {
+      mountWorkbench()
+      await flushUi()
+      ;(document.activeElement as HTMLElement | null)?.blur()
+      expect(document.activeElement).toBe(document.body)
+
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy() // panel open
+      expect(inspectorStubSeen.openerEl).toBeNull() // body is "no opener", not an opener
+      expect(inspectorStubSeen.openerEl).not.toBe(document.body)
+    })
+
     // Round 4 (2026-09-05, refuter P2, reproduced in Chromium on the round-3 head): expand-icon open
     // (opener A) → Escape → focus back on A (correct) → focus + click row 2's grid comment button C
     // (`.meta-grid__comment-action`) → panel opens on record 2 via `onOpenRecordComments` →
