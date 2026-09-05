@@ -47,3 +47,59 @@ export function textControlValue(value: unknown): string {
 export function resolveCanComment(rowActions: MetaRowActions | null | undefined, canComment: boolean): boolean {
   return rowActions?.canComment ?? canComment
 }
+
+/**
+ * Record inspector v3 (design 2026-09-05, PR-A §1.2 header / §2 graft table): the record's
+ * "primary field" — the one whose value doubles as the record's title in the inspector's Row B and
+ * as the human label everywhere else a record needs a short display name. Hoisted here to replace
+ * two WB idioms that had quietly diverged (MultitableWorkbench.vue's `bulkFillRecordName`, which
+ * preferred the first `string`/`longText` field, and `captureSelectionLabels`/`batchRecordLabel`,
+ * which already used the field at position 0) — all of them now delegate here, so there is ONE
+ * definition of the rule ("position 0 of the array you hand me", the Airtable/Feishu "first field is
+ * the primary field" convention). Callers needing a text VALUE (not just the field) still guard on
+ * `typeof value === 'string'` themselves, same discipline `bulkFillRecordName` already applied.
+ *
+ * F1 correction (2026-09-05, round 3 — an earlier version of this comment claimed every call site
+ * "read the exact same field"; that overclaimed). One RULE does not mean one FIELD, because the
+ * callers hand this helper DIFFERENT arrays:
+ *   - MetaRecordInspector.vue's title reads `resolvePrimaryField(props.fields)`, and the workbench
+ *     binds `:fields="scopedAllFields"` — SHEET order, with view-hidden fields still present (only
+ *     per-subject field-permission-hidden fields are filtered out). The title is sheet-order field 0.
+ *   - `bulkFillRecordName` / `captureSelectionLabels` / `batchRecordLabel` (MultitableWorkbench.vue)
+ *     read `resolvePrimaryField(grid.visibleFields.value)` — VIEW order, view-hidden fields removed.
+ * The two agree whenever the active view shows field 0 first (the common case), and DIVERGE whenever
+ * a view hides or reorders sheet-field 0: the inspector titles the record by a field the user may not
+ * even see in the grid, while the bulk/label sites name it by the view's first visible field. Pinned
+ * by multitable-record-inspector-header.spec.ts ("F1: title reads the sheet-order first field") so
+ * the divergence is documented behavior, not an assumption; reconciling it (a single primary-field
+ * source both sides read) is a follow-up — deliberately NOT changed here, since either direction is a
+ * user-visible contract change that needs its own decision.
+ */
+export function resolvePrimaryField(fields: MetaField[] | null | undefined): MetaField | undefined {
+  return fields?.[0]
+}
+
+/**
+ * P3-2 (2026-09-05, record inspector v3 header follow-up): a THIRD "what should we call this
+ * record" idiom survived the `resolvePrimaryField` unification above —
+ * `MultitableWorkbench.vue`'s own `mentionDisplayFieldId`, which needs a field whose VALUE renders
+ * as readable text inside an `@mention` chip (a `string`/`longText` field specifically), not just
+ * "the record's primary field" — the primary field can legitimately be a `number`/`date`/`select`/…
+ * field, which would make a poor (or unreadable) mention label. Rather than leave that a fourth,
+ * independently-diverging idiom (or forcibly re-point mentions at a non-text primary field, a real
+ * behavior regression), this hoists ONE rule that PREFERS the primary field and only falls back to
+ * "first string/longText field" when the primary field itself is not text-shaped — so the two
+ * call sites read the SAME field whenever the sheet's primary field IS text (the common case), and
+ * only diverge for the genuinely different question ("what names this record" vs. "what text value
+ * can a mention chip render") when the primary field cannot answer the second one at all. Byte-
+ * identical to the pre-unification `mentionDisplayFieldId` idiom for every input: when `fields[0]`
+ * is itself `string`/`longText`, `.find()` over the SAME array returns that same first element
+ * either way; the two orderings differ only in which field wins when `fields[0]` is NOT text, and in
+ * that case both this function's fallback and the old code fall through to the identical
+ * `.find(...)` call.
+ */
+export function resolveMentionDisplayField(fields: MetaField[] | null | undefined): MetaField | undefined {
+  const primary = resolvePrimaryField(fields)
+  if (primary && (primary.type === 'string' || primary.type === 'longText')) return primary
+  return fields?.find((field) => field.type === 'string' || field.type === 'longText')
+}

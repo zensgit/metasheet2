@@ -123,78 +123,40 @@
     @keydown="onInspectorKeydown"
     @keyup="onInspectorKeyup"
   >
-    <div
-      class="meta-record-drawer__splitter"
-      role="separator"
-      aria-orientation="vertical"
-      :aria-valuenow="Math.round(panelWidth)"
-      :aria-valuemin="MIN_PANEL_WIDTH"
-      :aria-valuemax="Math.round(maxPanelWidth)"
-      :aria-label="l('record.resizeHandle')"
-      tabindex="0"
-      data-testid="record-inspector-splitter"
-      @pointerdown="onSplitterPointerDown"
-    ></div>
     <div class="meta-record-drawer__header">
-      <h3 class="meta-record-drawer__title">{{ l('record.title') }}</h3>
-      <div class="meta-record-drawer__nav" v-if="recordIds.length > 1">
-        <button class="meta-record-drawer__nav-btn" :disabled="currentRecordIndex <= 0" :aria-label="l('record.previous')" @click="navigatePrev">&lsaquo;</button>
-        <span class="meta-record-drawer__nav-pos">{{ currentRecordIndex + 1 }} / {{ recordIds.length }}</span>
-        <button class="meta-record-drawer__nav-btn" :disabled="currentRecordIndex >= recordIds.length - 1" :aria-label="l('record.next')" @click="navigateNext">&rsaquo;</button>
-      </div>
-      <div class="meta-record-drawer__actions">
-        <MtButton
-          v-if="record && canLoadSubscription"
-          class="meta-record-drawer__btn meta-record-drawer__btn--watch"
-          :class="{ 'meta-record-drawer__btn--watching': recordSubscribed }"
-          :disabled="subscriptionLoading"
-          :title="l(recordSubscribed ? 'record.unwatchTitle' : 'record.watchTitle')"
-          :aria-pressed="recordSubscribed"
-          @click="toggleRecordSubscription"
-        >
-          {{ l(recordSubscribed ? 'record.watching' : 'record.watch') }}
-        </MtButton>
+      <!-- Record inspector v3 (2026-09-05, PR-A §1.2): Row A, a single non-wrapping toolbar. The
+           only non-shrinking items are the 28px icon buttons + nav — every action that used to be
+           its own labeled button (watch / comment-inbox / automation / permissions / duplicate /
+           delete) now lives inside the kebab menu below, so this row can never overflow by
+           construction (the design's own framing: "Header can no longer overflow"). -->
+      <div class="meta-record-drawer__toolbar">
+        <div class="meta-record-drawer__nav" v-if="recordIds.length > 1">
+          <MtIconButton size="sm" :disabled="currentRecordIndex <= 0" :aria-label="l('record.previous')" :title="l('record.previous')" @click="navigatePrev">&lsaquo;</MtIconButton>
+          <span class="meta-record-drawer__nav-pos">{{ recordPositionText }}</span>
+          <MtIconButton size="sm" :disabled="currentRecordIndex >= recordIds.length - 1" :aria-label="l('record.next')" :title="l('record.next')" @click="navigateNext">&rsaquo;</MtIconButton>
+        </div>
+        <div class="meta-record-drawer__toolbar-spacer"></div>
+        <!-- Comment-affordance lock (§4 item 8 acknowledgement): bespoke <button> + MetaCommentActionChip
+             kept byte-identical (same three comment-active rules/tokens, unmoved from the kebab). Only
+             the TEXT LABEL is hidden below a 480px CONTAINER width (`.meta-record-drawer__toolbar` is
+             the `container-type: inline-size` ancestor, see the style block) — `aria-label` stays on the
+             button unconditionally, so the affordance is never announced as unlabeled. -->
         <button
           v-if="resolvedCanComment"
           class="meta-record-drawer__btn meta-record-drawer__btn--comment"
           :class="drawerCommentButtonClass"
+          :aria-label="l('record.comments')"
           :title="l('record.comments')"
           type="button"
           @click="emit('toggle-comments')"
         >
           <MetaCommentActionChip :label="l('record.comments')" :state="drawerCommentAffordance" />
         </button>
-        <!-- W2 S4 (lock §2 评论面板 row: "MetaCommentsDrawer 的 inbox RouterLink...上移到检查器头部"):
-             moved verbatim from MetaCommentsDrawer.vue's own header (same route name, same badge
-             rule) -- the drawer's own copy stays too (its header is unchanged, deprecated-shell
-             compat), this is a second, independent instance now living at the shell level, gated
-             the same way the comment-toggle button next to it already is.
-             `&& hasRouter`: this shell (unlike MetaCommentsDrawer) is mounted by several PRE-EXISTING
-             frozen specs (multitable-record-drawer*.spec.ts, meta-record-drawer-*.spec.ts) with no
-             vue-router plugin installed at all -- `<RouterLink>`'s own `useLink()` unconditionally
-             dereferences the injected router and throws if it is absent (verified: those specs crashed
-             under this exact failure before this guard was added). `useRouter()` itself never throws
-             (a plain `inject()`, returns undefined when absent) so the guard is safe; `v-if` false means
-             `<RouterLink>` is never even instantiated, so `useLink()` never runs. Every REAL app mount
-             always has a router (this is a route-driven SPA), so this only ever changes rendering in
-             router-less test harnesses -- proven working WITH a router in
-             multitable-record-inspector.spec.ts's own dedicated router-mounted test. -->
-        <RouterLink
-          v-if="resolvedCanComment && hasRouter"
-          class="meta-record-drawer__inbox-link"
-          :to="{ name: 'multitable-comment-inbox' }"
-        >
-          {{ inboxLabel }}
-          <span v-if="commentUnreadCount > 0" class="meta-record-drawer__inbox-badge">{{ commentUnreadCount }}</span>
-        </RouterLink>
-        <MtButton v-if="canManageAutomation" class="meta-record-drawer__btn" :title="l('record.workflowTitle')" @click="emit('open-automation')">&#x2699; {{ l('record.workflow') }}</MtButton>
-        <MtButton v-if="canManageRecordPermissions" class="meta-record-drawer__btn" :title="l('record.permissionsTitle')" @click="showRecordPermissions = true">&#x1F512; {{ l('record.permissions') }}</MtButton>
-        <MtButton v-if="record && canCreate" class="meta-record-drawer__btn meta-record-drawer__btn--duplicate" :title="l('record.duplicateTitle')" @click="emit('duplicate')">{{ l('record.duplicate') }}</MtButton>
-        <!-- gate P2: the retained `meta-record-drawer__btn` base rule (background:#fff, later-injected,
-             specificity tie) beat `.mt-button--danger`'s red background while danger's white text stayed
-             → white-on-white "Delete". The danger variant must own the cascade, so the base class is
-             dropped HERE ONLY; `--danger` stays as a stable spec/test anchor (its bespoke rule is gone). -->
-        <MtButton v-if="resolvedCanDelete" variant="danger" class="meta-record-drawer__btn--danger" @click="emit('delete')">{{ l('record.delete') }}</MtButton>
+        <!-- Copy-link icon: PR-A scope is the button + `copy-link` emit only (§3 PR-A file line);
+             the clipboard write, the disabled-when-absent gate, and the copied/failed live region
+             are PR-B1 (§3 PR-B1 WB line names the copy-link handler) — WB has no listener for this
+             emit yet, by design, until that slice lands. -->
+        <MtIconButton size="sm" :aria-label="l('record.copyLink')" :title="l('record.copyLink')" data-testid="record-inspector-copy-link" @click="emit('copy-link')">&#x1F517;</MtIconButton>
         <button
           type="button"
           class="meta-record-drawer__btn meta-record-drawer__expand"
@@ -205,7 +167,76 @@
           data-testid="record-inspector-expand-toggle"
           @click="toggleExpand"
         >{{ isExpanded ? '⤡' : '⤢' }}</button>
+        <!-- Kebab menu (§1.2): watch / comment-inbox / automation / permissions / duplicate / delete —
+             every existing v-if/emit/handler preserved verbatim, just re-hosted. `MtMenu` roving +
+             Escape-refocus is an additive kit change (§4 item 10); `MtMenuItem` passes `role`/
+             `aria-checked` through via normal Vue attrs fallthrough (verified: its root is a native
+             `<button>` with no `inheritAttrs: false`, so a fallthrough `role` OVERRIDES its own
+             template-declared `role="menuitem"` — no MtMenuItem/kit change needed for the watch row's
+             `menuitemcheckbox`; the bespoke MetaRecordActionMenu.vue fallback named in the design was
+             not needed). -->
+        <MtMenu ref="kebabMenuRef" placement="bottom-end">
+          <template #trigger="{ open }">
+            <MtIconButton
+              size="sm"
+              aria-haspopup="menu"
+              :aria-expanded="open"
+              data-testid="record-inspector-menu"
+              :aria-label="l('record.moreActions')"
+              :title="l('record.moreActions')"
+            >&#x22EF;</MtIconButton>
+          </template>
+          <MtMenuItem
+            v-if="record && canLoadSubscription"
+            class="meta-record-drawer__btn meta-record-drawer__btn--watch"
+            :class="{ 'meta-record-drawer__btn--watching': recordSubscribed }"
+            role="menuitemcheckbox"
+            :aria-checked="recordSubscribed"
+            :disabled="subscriptionLoading"
+            :title="l(recordSubscribed ? 'record.unwatchTitle' : 'record.watchTitle')"
+            @select="toggleRecordSubscription"
+          >{{ l(recordSubscribed ? 'record.watching' : 'record.watch') }}</MtMenuItem>
+          <!-- W2 S4 (lock §2 评论面板 row): moved verbatim from MetaCommentsDrawer.vue's own header
+               (same route name, same badge rule) into the kebab (PR-A re-host). `&& hasRouter`: see
+               this component's own file-header comment on router-less test harnesses. -->
+          <RouterLink
+            v-if="resolvedCanComment && hasRouter"
+            class="meta-record-drawer__inbox-link"
+            role="menuitem"
+            :to="{ name: 'multitable-comment-inbox' }"
+          >
+            {{ inboxLabel }}
+            <span v-if="commentUnreadCount > 0" class="meta-record-drawer__inbox-badge">{{ commentUnreadCount }}</span>
+          </RouterLink>
+          <MtMenuItem v-if="canManageAutomation" class="meta-record-drawer__btn" :title="l('record.workflowTitle')" @select="emit('open-automation')">&#x2699; {{ l('record.workflow') }}</MtMenuItem>
+          <MtMenuItem v-if="canManageRecordPermissions" class="meta-record-drawer__btn" :title="l('record.permissionsTitle')" @select="showRecordPermissions = true">&#x1F512; {{ l('record.permissions') }}</MtMenuItem>
+          <MtMenuItem v-if="record && canCreate" class="meta-record-drawer__btn meta-record-drawer__btn--duplicate" :title="l('record.duplicateTitle')" @select="emit('duplicate')">{{ l('record.duplicate') }}</MtMenuItem>
+          <!-- gate P2 (kept verbatim): the danger class anchor stays a stable spec/test anchor even
+               though the bespoke `--danger` background rule it once fought is gone in this MtMenuItem
+               host — see this class's own style rule below for the current (menu-row) styling. -->
+          <hr v-if="resolvedCanDelete" class="meta-record-drawer__menu-separator" />
+          <MtMenuItem v-if="resolvedCanDelete" class="meta-record-drawer__btn--danger" @select="emit('delete')">{{ l('record.delete') }}</MtMenuItem>
+        </MtMenu>
         <button class="meta-record-drawer__close" :aria-label="l('record.close')" @click="emit('close')">&times;</button>
+      </div>
+      <!-- Row B: title block. Eyebrow renders the SAME `record.title` key the pre-PR-A `<h3>` used
+           (keeps `meta-record-drawer-i18n.spec.ts`'s text pins honest with no visually-hidden trick,
+           graft from P3 §2) — primary-field value sits below it, editable when the primary field is
+           an editable `string`. -->
+      <div class="meta-record-drawer__titleblock">
+        <p class="meta-record-drawer__eyebrow">{{ l('record.title') }}</p>
+        <input
+          v-if="canEditPrimaryTitle"
+          ref="titleInputRef"
+          class="meta-record-drawer__title-input"
+          type="text"
+          :value="primaryFieldTextValue"
+          :aria-label="l('record.titleFieldAria')"
+          @change="onTitleChange"
+          @keydown.enter.prevent="onTitleEnter"
+          @keydown.esc.prevent="onTitleEscape"
+        />
+        <div v-else ref="titleTextRef" class="meta-record-drawer__title-text" tabindex="-1">{{ primaryFieldDisplayText }}</div>
       </div>
     </div>
     <div
@@ -400,6 +431,24 @@
       @close="showRecordPermissions = false"
       @updated="emit('navigate', record!.id)"
     />
+    <!-- Record inspector v3 (2026-09-05, PR-A §1.2): moved from the FIRST child (pre-PR-A) to the
+         LAST — absolute positioning (unchanged, see this element's own style rule) keeps it
+         visually pinned to the panel's left edge either way, but DOM order also drives Tab order,
+         and a splitter reachable BEFORE any header control was a confusing first stop. Splitter
+         keydown/pointerdown handling is unchanged (still dispatched from `onInspectorKeydown` by
+         target — see that function's own comment for why). -->
+    <div
+      class="meta-record-drawer__splitter"
+      role="separator"
+      aria-orientation="vertical"
+      :aria-valuenow="Math.round(panelWidth)"
+      :aria-valuemin="MIN_PANEL_WIDTH"
+      :aria-valuemax="Math.round(maxPanelWidth)"
+      :aria-label="l('record.resizeHandle')"
+      tabindex="0"
+      data-testid="record-inspector-splitter"
+      @pointerdown="onSplitterPointerDown"
+    ></div>
   </div>
 </template>
 
@@ -422,7 +471,7 @@ import type {
   MetaRowActions,
 } from '../types'
 import type { MultitableApiClient } from '../api/client'
-import { MtButton } from '../ui'
+import { MtButton, MtIconButton, MtMenu, MtMenuItem } from '../ui'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaRecordPermissionManager from './MetaRecordPermissionManager.vue'
 import MetaRecordFieldsPanel from './MetaRecordFieldsPanel.vue'
@@ -439,11 +488,14 @@ import {
 import { useLocale } from '../../composables/useLocale'
 import {
   recordLabel,
+  recordPosition,
   type MetaRecordLabelKey,
 } from '../utils/meta-record-labels'
 import { commentLabel } from '../utils/meta-comment-labels'
 import type { AiShortcutState } from '../composables/useAiShortcut'
-import { resolveCanComment } from '../utils/recordDisplay'
+import { formatRecordFieldValue, resolveCanComment, resolvePrimaryField, textControlValue } from '../utils/recordDisplay'
+import { isFieldAlwaysReadOnly } from '../utils/field-permissions'
+import { isSystemField } from '../utils/system-fields'
 
 const props = withDefaults(defineProps<{
   visible: boolean
@@ -512,6 +564,14 @@ const props = withDefaults(defineProps<{
    *  intentionally NOT treated as "switch away from comments" -- tab selection is otherwise sticky
    *  across record navigation already (S3 behavior, unchanged), and this stays consistent with it. */
   openComments?: boolean
+  /** Record inspector v3 (2026-09-05, PR-A §1.1 "captured at mount"): the element the workbench's
+   *  `openRecord(id, opener)` captured as the trigger of THIS open — an explicit signature
+   *  handoff so a WB-level caller (row-number icon click, Shift+Space on the grid, a context-menu
+   *  item) can name its own opener precisely, rather than this component guessing from
+   *  `document.activeElement` at mount (which is only reliable when nothing else moved focus
+   *  between the gesture and mount — see `onMounted` below for the fallback when this prop is
+   *  absent, e.g. a deep-link mount with no interactive opener at all). */
+  openerEl?: HTMLElement | null
 }>(), {
   recordIds: () => [],
   buttonRunPending: () => [],
@@ -534,12 +594,17 @@ const props = withDefaults(defineProps<{
   currentUserId: null,
   commentComposerInitialMentions: () => [],
   openComments: false,
+  openerEl: null,
 })
 
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'delete'): void
   (e: 'duplicate'): void
+  /** Record inspector v3 (2026-09-05, PR-A §1.2 Row A): copy-link icon. PR-A scope is this emit
+   *  only — the clipboard write + copied/failed live-region text are PR-B1 (see the button's own
+   *  template comment); WB has no listener for it yet. */
+  (e: 'copy-link'): void
   (e: 'patch', fieldId: string, value: unknown): void
   (e: 'toggle-lock', payload: { recordId: string; locked: boolean }): void
   (e: 'toggle-comments'): void
@@ -592,6 +657,94 @@ const inboxLabel = computed(() => commentLabel('comment.inbox', isZh.value))
 const hasRouter = !!useRouter()
 
 const showRecordPermissions = ref(false)
+const kebabMenuRef = ref<InstanceType<typeof MtMenu> | null>(null)
+const titleInputRef = ref<HTMLInputElement | null>(null)
+const titleTextRef = ref<HTMLDivElement | null>(null)
+
+// --- Open/focus (2026-09-05, PR-A §1.1/§1.5; P1 fix 2026-09-05 follow-up) ---
+// This shell is mounted UNCONDITIONALLY by MultitableWorkbench.vue (no `v-if` at the CALL site —
+// only this file's OWN root carries `v-if="visible"`), so the component INSTANCE mounts exactly
+// ONCE, whenever the workbench itself mounts, and stays mounted for the workbench's entire life —
+// `visible` toggling false→true→true→false→… over and over is what actually drives every real
+// open/close cycle. `onMounted`/`onBeforeUnmount` therefore fire once EACH, ever: putting the
+// capture/focus/restore logic there (the pre-fix shape) meant it ran, at most, on whichever single
+// instant the instance happened to first exist — for the ordinary case (workbench starts with
+// nothing selected, `visible` starts false) that instant finds no title control to focus and a
+// worthless `document.activeElement` to remember, so NO real open/close ever got the behavior this
+// section's own name promises. The fix: drive both halves from a `watch` on `props.visible` itself,
+// which — unlike the lifecycle hooks — re-fires on every single false→true and true→false edge for
+// as long as this instance lives, i.e. on every real open and every real close. `onMounted` /
+// `onBeforeUnmount` are kept below as narrow FALLBACKS ONLY, for a harness that mounts this
+// component directly with `visible` already `true` (no false→true edge for the watch to observe —
+// several pre-existing specs in this file's own test suite do exactly this) or unmounts it directly
+// while still visible (ditto) — neither happens in the real workbench, where this instance never
+// actually unmounts.
+let restoreFocusTarget: HTMLElement | null = null
+
+// `props.openerEl` (WB's `openRecord(id, opener)`, see that prop's own doc comment) wins when
+// given AND usable; falling back to `document.activeElement` covers an open WB doesn't drive an
+// opener for (a deep-link/comment-click-through open, or a router-less spec mounting this shell
+// directly) and also naturally captures a context-menu-item opener when WB passes none — see
+// MtMenu's own comment on the identical "capture what's focused right now" idiom for why this is
+// reliable. `document.body` (or no active element at all) means nothing was actually focused —
+// treated the SAME as "no opener" so the close-time restore below reaches `.meta-grid`, not a no-op
+// `body.focus()`. Round 5 (2026-09-05, refuter P3): until this round that body filter was applied to
+// the FALLBACK operand only — a `body` arriving AS `props.openerEl` (WB used to forward
+// `document.activeElement` unfiltered, and that IS `body` in Safari and Firefox/macOS, where a mouse
+// click does not focus a `<button>`, and after any programmatic `.click()`) went straight through to
+// `restoreFocusToOpener`, whose connected-check `body` passes, so close called `body.focus()` and
+// never reached the `.meta-grid` last resort. Both operands now pass through `isRestorableOpener`:
+// a `body` (or disconnected) opener falls back to the pre-open active element, then to `.meta-grid`
+// — i.e. body is "no opener", not a lower-priority one. WB filters on its side as well
+// (`resolveOpenerEl` in MultitableWorkbench.vue); each side guards independently. Called on every
+// OPEN edge (see the `watch` below), not just the first.
+function isRestorableOpener(el: HTMLElement | null | undefined): el is HTMLElement {
+  return !!el && el !== document.body && el.isConnected
+}
+function captureOpenerAndFocusTitle() {
+  const active = document.activeElement as HTMLElement | null
+  if (isRestorableOpener(props.openerEl)) restoreFocusTarget = props.openerEl
+  else if (isRestorableOpener(active)) restoreFocusTarget = active
+  else restoreFocusTarget = null
+  void nextTick(() => {
+    ;(titleInputRef.value ?? titleTextRef.value)?.focus()
+  })
+}
+// Called on every CLOSE edge (see the `watch` below), not just a real unmount.
+function restoreFocusToOpener() {
+  const target = restoreFocusTarget
+  if (target && target.isConnected && typeof target.focus === 'function') {
+    target.focus()
+    return
+  }
+  document.querySelector<HTMLElement>('.meta-grid')?.focus()
+}
+
+// The live mechanism (P1 fix): every false→true edge captures a FRESH opener (WB's `selectRecord`
+// open branch writes `inspectorOpenerEl` for every open — the caller's opener when it has one, `null`
+// on a fresh open without one — and `onCloseDrawer` clears it on close, so a second open's opener is
+// never the first open's stale value; round 4, 2026-09-05) and refocuses the title; every true→false
+// edge restores focus to whichever opener THAT open captured. No `immediate` — the mount-time
+// fallback below covers the initial value instead, so the two never both fire for the same edge.
+watch(() => props.visible, (isVisible, wasVisible) => {
+  if (isVisible && !wasVisible) captureOpenerAndFocusTitle()
+  else if (!isVisible && wasVisible) restoreFocusToOpener()
+})
+
+onMounted(() => {
+  // First-mount fallback ONLY: a caller that mounts this component with `visible` already `true`
+  // (several pre-existing specs in this file's own suite do this) gets no false→true edge for the
+  // `watch` above to observe — this substitutes for that ONE edge. The real workbench always mounts
+  // with `visible` false (nothing selected yet), so this is a no-op there.
+  if (props.visible) captureOpenerAndFocusTitle()
+})
+onBeforeUnmount(() => {
+  // Teardown fallback ONLY: a caller that unmounts this component directly while still `visible`
+  // (ditto — several pre-existing specs do this via `app.unmount()`) gets no true→false PROP edge —
+  // `visible` never actually changes, the whole instance just goes away. The real workbench never
+  // unmounts this instance (see the file-header comment above), so this never fires there either.
+  if (props.visible) restoreFocusToOpener()
+})
 
 // --- OD-W2-1 (tabs, lock §6bis): extensible union -- S3 shipped 'details' (fields) + 'history'
 // (activity); S4 added 'comments'; S5 (this slice) adds 'attachments', the 4th and final tab per lock
@@ -651,8 +804,22 @@ function setTabRef(tab: InspectorTab, el: HTMLButtonElement | null) {
   tabRefs.value[tab] = el
 }
 
-function selectTab(tab: InspectorTab) {
+// §3.3 tab-switch focus (2026-09-05, PR-A §1.5; W2 lock §3.3, unimplemented until now): pointer
+// activation moves focus INTO the new tabpanel's first focusable control (else the panel itself,
+// which already carries `tabindex="0"` — see the panel div's own template attribute, unchanged);
+// arrow activation (`moveTabFocusTo` below) keeps focus ON the tab, per APG.
+const FOCUSABLE_SELECTOR = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+function focusFirstInPanel(tab: InspectorTab) {
+  const panel = document.getElementById(tabPanelId(tab))
+  if (!panel) return
+  const first = panel.querySelector<HTMLElement>(FOCUSABLE_SELECTOR)
+  ;(first ?? panel).focus()
+}
+
+async function selectTab(tab: InspectorTab) {
   activeTab.value = tab
+  await nextTick()
+  focusFirstInPanel(tab)
 }
 
 async function moveTabFocusTo(tab: InspectorTab) {
@@ -688,8 +855,20 @@ async function moveTabFocusTo(tab: InspectorTab) {
 //      §3.3 "Esc 从 panel 回到关闭/grid"), guarded so it never fires when a descendant already
 //      consumed Escape (defaultPrevented) and never inspects any other key -- mod+z / mod+y / `?`
 //      are untouched here and bubble to MultitableWorkbench's own `onGlobalKeydown` unmodified.
+// Record inspector v3 (2026-09-05, PR-A §1.5): dispatch order is (1) Escape, (2) splitter, (3)
+// prev/next chord, (4) tablist — the design's own numbering. Escape's own first clause (kebab open
+// → close the menu, not the panel) is the one addition to an otherwise-unchanged clause; see
+// `kebabMenuRef`'s own template comment for why this is a defensive top-of-branch check rather than
+// the primary mechanism (MtMenu's own internal Escape handling — see that file's comment — is what
+// actually fires for the common case, since its open content is Teleported to `document.body` and
+// never reaches this listener via bubbling at all).
 function onInspectorKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
+    if (kebabMenuRef.value?.isOpen) {
+      event.preventDefault()
+      kebabMenuRef.value.close()
+      return
+    }
     if (event.metaKey || event.ctrlKey || event.altKey) return
     if (event.defaultPrevented) return
     event.preventDefault()
@@ -700,6 +879,20 @@ function onInspectorKeydown(event: KeyboardEvent) {
   const target = event.target as HTMLElement | null
   if (target?.closest('[role="separator"]') != null) {
     onSplitterKeydown(event)
+    return
+  }
+
+  // Prev/next chord (graft from P2, §1.5/§2): `(meta|ctrl)+shift` + `event.code === 'Comma'|'Period'`
+  // — `event.code` (the physical key), not `event.key` (which shift already remaps to `<`/`>` on a
+  // US layout), and layout-independent; works with the caret inside a text control since it never
+  // collides with a printable character or a native caret-movement chord. Alt+Arrow was rejected
+  // (macOS Option+Arrow has caret/word-jump semantics); `j`/`k` was rejected (IME hazard, no
+  // `isComposing` handling exists in this file or the workbench).
+  const mod = event.metaKey || event.ctrlKey
+  if (mod && event.shiftKey && (event.code === 'Comma' || event.code === 'Period')) {
+    event.preventDefault()
+    if (event.code === 'Comma') navigatePrev()
+    else navigateNext()
     return
   }
 
@@ -1058,6 +1251,64 @@ const drawerCommentAffordance = computed(() => resolveRecordCommentAffordance(pr
 const drawerCommentButtonClass = computed(() =>
   resolveCommentAffordanceStateClass('meta-record-drawer__btn--comment', drawerCommentAffordance.value),
 )
+const recordPositionText = computed(() => recordPosition(currentRecordIndex.value + 1, props.recordIds.length, isZh.value))
+
+// --- Row B title block (2026-09-05, PR-A §1.2) ---
+// `resolvePrimaryField` (utils/recordDisplay.ts) is the single hoisted definition WB's own
+// `bulkFillRecordName`/`captureSelectionLabels` now also read — see that helper's own comment.
+const primaryField = computed(() => resolvePrimaryField(props.fields))
+// PR-A-local editability check for the title ONLY — deliberately not exported as a second
+// `canEditField`: MetaRecordFieldsPanel.vue's own `canEditField` (the per-field-loop predicate,
+// identical logic) is hoisted to `utils/recordDisplay.ts` in PR-B1 per the design's own file list;
+// duplicating the four-clause body here (rather than pre-emptively naming a shared symbol PR-A
+// does not own) avoids a second GLOBAL name that could drift from the real one before that hoist
+// lands.
+const canEditPrimaryTitle = computed(() => {
+  const field = primaryField.value
+  if (!field || field.type !== 'string') return false
+  return props.canEdit
+    && props.rowActions?.canEdit !== false
+    && props.fieldPermissions?.[field.id]?.readOnly !== true
+    && !isSystemField(field)
+    && !isFieldAlwaysReadOnly(field)
+})
+const primaryFieldRawValue = computed(() => {
+  const field = primaryField.value
+  return field && props.record ? props.record.data[field.id] : undefined
+})
+// Uncontrolled `:value` bound straight to the prop (same idiom as MetaRecordFieldsPanel.vue's own
+// string-field input) — Vue re-applies the DOM value whenever `record.data` actually changes (e.g.
+// a server rejection reverting an optimistic edit), which is exactly the "re-syncs on prop change"
+// behavior the design calls for, with no extra watcher needed.
+const primaryFieldTextValue = computed(() => textControlValue(primaryFieldRawValue.value))
+const primaryFieldDisplayText = computed(() => {
+  const field = primaryField.value
+  if (!field) return '—'
+  return formatRecordFieldValue(field, primaryFieldRawValue.value, {
+    linkSummariesByField: props.linkSummariesByField,
+    personSummariesByField: props.personSummariesByField,
+    attachmentSummariesByField: props.attachmentSummariesByField,
+    isZh: isZh.value,
+  })
+})
+
+function onTitleChange(event: Event) {
+  const field = primaryField.value
+  if (!field) return
+  emit('patch', field.id, (event.target as HTMLInputElement).value)
+}
+function onTitleEnter(event: KeyboardEvent) {
+  // Mirrors `flushActiveFieldEdit`'s discipline elsewhere in this line: blurring a text-like control
+  // fires its native `change`, which is this input's own commit path — no second code path needed.
+  ;(event.target as HTMLInputElement).blur()
+}
+function onTitleEscape(event: KeyboardEvent) {
+  // Revert the DISPLAYED value only (no `patch` emitted) — `.prevent` (bound in the template) stops
+  // this Escape from also reaching `onInspectorKeydown` (its own Escape branch already returns early
+  // on `event.defaultPrevented`), so a title-edit Escape never closes the whole panel.
+  const input = event.target as HTMLInputElement
+  input.value = primaryFieldTextValue.value
+}
 
 function navigatePrev() {
   const idx = currentRecordIndex.value
@@ -1197,17 +1448,34 @@ async function toggleRecordSubscription() {
    needing `position: sticky` of its own; `flex: 0 0 auto` just keeps it from ever being squeezed by
    `.meta-record-drawer__body`'s `flex: 1` on a very tall field list -- the body scrolls internally
    long before that could happen. */
-/* P3-3 (header overflow at the panel minimum, then 320px): title + nav + actions no longer fit on one
-   row at the minimum width once several action buttons (watch/comment/workflow/permissions/duplicate/
-   delete/expand/close) are all visible -- true at the original 320px floor this rule was written
-   against, and unchanged in kind now that P2 (2026-09-05 follow-up) raised the floor to 360px: more
-   room helps, but does not on its own guarantee every combination of enabled action buttons fits
-   un-wrapped, so this rule stays. `flex-wrap: wrap` lets the row break onto a second line instead of
-   overflowing the panel horizontally (the page-level no-horizontal-scroll contract this file's other
-   rules already protect, see e.g. the overlay-mode width comment). `.meta-record-drawer__actions`
-   gets its own `flex-wrap: wrap` too, so a still-too-narrow action group wraps internally rather than
-   pushing the row wider than the panel. */
-.meta-record-drawer__header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #eee; flex: 0 0 auto; flex-wrap: wrap; row-gap: 6px; }
+/* Record inspector v3 (2026-09-05, PR-A §1.2): superseded the P3-3 wrap-to-fit mitigation below —
+   moving every labeled action button (watch/workflow/permissions/duplicate/delete/comment-inbox)
+   into the kebab menu means Row A's only remaining items are 28px icon buttons + the nav group, so
+   the row CANNOT overflow at any width this panel supports (360-720px) and no longer needs to wrap.
+   The header is now a two-row COLUMN: Row A (`__toolbar`) + Row B (`__titleblock`), each managing
+   its own layout. */
+.meta-record-drawer__header { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; border-bottom: 1px solid #eee; flex: 0 0 auto; }
+/* Row A: `container-type: inline-size` makes this the query container for the comment chip's
+   text-label hide below 480px (comment-affordance lock §4 item 8 — see `.meta-comment-action-chip__label`'s
+   own rule below; the three comment-active rules/tokens above are untouched). `flex-wrap: nowrap` is
+   the P3-3 replacement noted above — this row is built ONLY from non-shrinking 28px icon buttons plus
+   the nav group, so it never needs to wrap. */
+.meta-record-drawer__toolbar { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; container-type: inline-size; }
+.meta-record-drawer__toolbar-spacer { flex: 1 1 auto; }
+@container (width < 480px) {
+  .meta-record-drawer__toolbar :deep(.meta-comment-action-chip__label) { display: none; }
+}
+.meta-record-drawer__titleblock { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.meta-record-drawer__eyebrow { margin: 0; font-size: 11px; line-height: 1.3; color: var(--ms-text-3, #999); text-transform: uppercase; letter-spacing: 0.02em; }
+.meta-record-drawer__title-input, .meta-record-drawer__title-text {
+  font-size: 18px; font-weight: 600; line-height: 1.3; min-width: 0; box-sizing: border-box;
+}
+.meta-record-drawer__title-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 4px 0; }
+.meta-record-drawer__title-input {
+  width: 100%; padding: 6px 8px; border: 1px solid #e5e7eb; border-radius: 4px; background: #fff; font: inherit;
+}
+.meta-record-drawer__title-input:focus-visible { outline: 2px solid var(--ms-color-primary); outline-offset: -1px; }
+.meta-record-drawer__menu-separator { margin: var(--ms-space-1, 4px) 0; border: none; border-top: 1px solid var(--ms-border, #e5e7eb); }
 /* Resizable panel (2026-09-05): the drag/keyboard splitter on the panel's left edge (see the
    component's `onSplitterPointerDown`/`onSplitterKeydown`). Absolutely positioned against
    `.meta-record-drawer`'s own `position: relative` (added above) so it never participates in the
@@ -1228,13 +1496,38 @@ async function toggleRecordSubscription() {
 .meta-record-drawer__splitter:focus-visible { outline: 2px solid var(--ms-color-primary); outline-offset: -2px; }
 .meta-record-drawer__expand { font-size: 13px; line-height: 1; }
 .meta-record-drawer__expand--active { border-color: var(--ms-color-primary); color: var(--ms-color-primary); }
-/* P3-3: `min-width: 0` is the standard flex-item fix that lets `text-overflow: ellipsis` actually
-   engage on a flex child -- without it the title's automatic min-width is its own text length, so it
-   would push the row wider instead of truncating. */
-.meta-record-drawer__title { font-size: 15px; font-weight: 600; margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.meta-record-drawer__actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .meta-record-drawer__btn { padding: 4px 10px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 12px; }
-.meta-record-drawer__btn--comment { border-radius: 999px; padding: 3px 8px; }
+/* P3-1 (2026-09-05, header-overflow-bound follow-up): `max-width` + `overflow: hidden` here are the
+   "header cannot overflow by construction" claim's bound for THIS contributor. `MetaCommentActionChip`
+   (the locked comment-affordance component rendered inside — three comment-active rules/tokens
+   byte-untouched, §4 item 8) has no unread-COUNT badge of its own to cap (checked: it renders only a
+   state dot + the text label this file already hides below 480px container width, see the
+   `:deep(.meta-comment-action-chip__label)` rule above) — so the bound lives on THIS button, the
+   chip's own container, instead: `max-width` caps how wide the chip can ever push this flex item, and
+   the `:deep()` rules just below (same established deep-into-a-locked-component idiom as the <480px
+   label-hide rule above — the LOCKED component's own <style> is untouched either way) keep an
+   unexpectedly long label truncating rather than visually overflowing this cap.
+   N2 (2026-09-05, round 3 — real-browser measured by the reviewer, Chromium, 560px panel, long label
+   injected): the ORIGINAL label-only ellipsis rule was inert. The chip's own root
+   (`.meta-comment-action-chip`, `display: inline-flex` in its locked stylesheet) is shrink-to-fit,
+   and shrink-to-fit never goes below its min-content width — which, with the label's own `white-
+   space: nowrap`, IS the full label width. So the chip grew to the label (239px measured), the label
+   never overflowed ITSELF (scrollWidth === clientWidth), `text-overflow: ellipsis` had nothing to
+   render, and the 140px BUTTON did the clipping (scrollWidth 270 vs clientWidth 138) with a hard cut.
+   Fix, kept inside this component's scoped `:deep()` rules: make the chip root a BLOCK-level flex box
+   (`display: flex` — a block box's used width is fill-available, NOT clamped by min-content the way
+   shrink-to-fit is) capped at `max-width: 100%` of this button's content box, and make the label a
+   `flex: 1 1 auto; min-width: 0` flex ITEM so it is the box that shrinks and overflows itself — that
+   is the box `text-overflow: ellipsis` renders on. `white-space: nowrap` is restated here (the chip's
+   own rule already sets it) so this rule is self-sufficient for the one-line ellipsis. For a SHORT
+   label nothing visibly changes: this button is a flex item of the toolbar with `flex-basis: auto`,
+   so it still hugs the chip's max-content and the chip fills exactly that. jsdom cannot lay any of
+   this out — the header spec pins these declarations as source text only; the rendered ellipsis
+   (label clientWidth < scrollWidth, button ≤ 140px, toolbar one row) is re-measured in a real
+   browser by the reviewer, not by the test suite. */
+.meta-record-drawer__btn--comment { border-radius: 999px; padding: 3px 8px; max-width: 140px; overflow: hidden; }
+.meta-record-drawer__btn--comment :deep(.meta-comment-action-chip) { display: flex; min-width: 0; max-width: 100%; }
+.meta-record-drawer__btn--comment :deep(.meta-comment-action-chip__label) { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta-record-drawer__btn--comment.meta-record-drawer__btn--comment--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
 .meta-record-drawer__btn--comment.meta-record-drawer__btn--comment--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 /* W2 S4: inbox link + badge moved verbatim (same values) from MetaCommentsDrawer.vue's own header
@@ -1247,22 +1540,31 @@ async function toggleRecordSubscription() {
    are relocated verbatim from the deprecated drawer and have no design-system token yet (docket, not blind-mapped). */
 .meta-record-drawer__inbox-badge { margin-left: 6px; padding: 2px 6px; border-radius: 999px; background: #eff6ff; color: var(--ms-color-primary); font-size: 11px; }
 /* UI-P2-1c T5-safe (owner-ratified 2026-07-13): watch/workflow/permissions/duplicate/delete/unlock
-   are now <MtButton> — token-styled, no longer needs bespoke hardcoded-hex. --danger's sole sharer
-   (delete) now uses MtButton's own `variant="danger"`; --watch's sole sharer (watch, non-active
-   state) now uses MtButton's default ghost styling — both bespoke rules removed (orphaned, no other
-   sharer). --watching stays: it is the watch toggle's ACTIVE-state visual (OD-T5a option A) — MtButton
-   has no built-in pressed/active variant (adding one is a primitive-contract change, out of scope),
-   so the toggle's active affordance still comes from this class, now paired with `aria-pressed`. The
-   base .meta-record-drawer__btn rule above and the three --comment* rules stay untouched: the comment
-   button (OD-T5b) is deliberately NOT migrated this round — it remains bespoke, styled by these rules. */
-.meta-record-drawer__btn--watching { border-color: #0f766e; color: #0f766e; background: #ecfdf5; }
+   were <MtButton>, token-styled. Record inspector v3 (2026-09-05, PR-A §1.2) re-hosts watch/
+   workflow/permissions/duplicate/delete inside the kebab as <MtMenuItem> rows (unlock stays on the
+   lock banner, untouched, still <MtButton>) — --watching stays as the watch row's ACTIVE-state
+   visual (OD-T5a option A; MtMenuItem, like MtButton before it, has no built-in pressed variant),
+   now paired with `aria-checked` (menuitemcheckbox) instead of `aria-pressed`. --danger gets its OWN
+   color rule below now that there is no `MtButton variant="danger"` supplying it. */
+.meta-record-drawer__btn--watching { border-color: #0f766e; color: #0f766e; background: #ecfdf5; font-weight: 600; }
+.meta-record-drawer__btn--danger { color: var(--ms-color-danger); }
 .meta-record-drawer__btn:disabled { opacity: 0.55; cursor: not-allowed; }
 .meta-record-drawer__close { border: none; background: none; font-size: 20px; cursor: pointer; color: #999; }
-.meta-record-drawer__nav { display: flex; align-items: center; gap: 4px; margin-right: auto; margin-left: 8px; }
+.meta-record-drawer__nav { display: flex; align-items: center; gap: 4px; }
 .meta-record-drawer__nav-btn { width: 24px; height: 24px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 14px; display: flex; align-items: center; justify-content: center; }
 .meta-record-drawer__nav-btn:hover:not(:disabled) { background: #f5f5f5; }
 .meta-record-drawer__nav-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-.meta-record-drawer__nav-pos { font-size: 11px; color: #999; min-width: 36px; text-align: center; }
+/* P3-1 (2026-09-05, header-overflow-bound follow-up): the OTHER header-overflow contributor named by
+   that finding — `recordPosition()` (meta-record-labels.ts) already renders huge totals in a
+   COMPACT form (`Intl.NumberFormat` compact notation past 1000, see that function's own comment), but
+   a compact string is still not a HARD bound (a pathological locale/number-format combination is not
+   provably bounded in px), so this rule adds the actual CSS backstop: `min-width: 0` (was a fixed
+   `36px` floor — dropped so this span can actually shrink below it, matching the finding's own
+   wording) lets the flex item shrink inside `.meta-record-drawer__nav` (a flex row), and `max-width` +
+   `overflow: hidden` + `text-overflow: ellipsis` cap how far it can grow past that, so even a
+   pathological value ellipsizes instead of pushing the (non-shrinking, `flex-wrap: nowrap`) toolbar
+   row wider than the panel. */
+.meta-record-drawer__nav-pos { font-size: 11px; color: #999; min-width: 0; max-width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; }
 /* Item 1: the inner scroll body. `flex: 1` + `min-height: 0` is the standard flexbox fix for a
    scrolling flex child (without `min-height: 0` a flex item's automatic minimum size is its content
    size, so it would grow to fit everything instead of shrinking to the column's remaining space and
@@ -1322,7 +1624,32 @@ async function toggleRecordSubscription() {
    WITH the bar instead of staying behind it. See `.meta-record-drawer__body` below for the matching
    `scroll-padding-top` fallback bump (58px bar height measured live in Chromium at 1512px, see that
    rule's own comment). */
-.meta-record-drawer__tabs-bar { position: sticky; top: 0; z-index: 2; margin: 0 -16px; padding: 12px 16px 14px; background: #fff; }
+/* P2-A (2026-09-05, PR-A §1.3, follow-up to the P2 flex-wrap fallback below): `container-type:
+   inline-size` (added here) turns this bar into the CSS Container Queries container the rule below
+   measures. This bar's OWN inline size tracks the PANEL's full width (it spans the panel's whole
+   content box via the negative-margin/re-padding idiom below, not the pill's own shrink-to-fit width
+   -- see that idiom's own comment above), so the query engages reliably at the 360px panel floor
+   regardless of locale string length, independent of the pill's own content width.
+   `display: flex` was tried here first (reasoning: `.meta-record-drawer__tabs`'s own `flex: 1` --
+   see the query below -- looked like it needed a flex PARENT to size against) and then REMOVED after
+   an isolated Chromium repro measured it to be a no-op FOR THE SHIPPED LABEL SET: with the four
+   English tab labels (Details/History/Comments/Attachments) at the 360px panel floor,
+   `pillWidth`/`tabWidths`/row count were BYTE-IDENTICAL with and without `display: flex` on this
+   element, so it was dropped rather than kept as unverified, load-bearing-looking clutter. This is
+   NOT a claim that an unconstrained `flex-grow: 1` inline-flex box generally ignores its immediate
+   parent's `display` for shrink-to-fit sizing -- only that box's shrink-to-fit width, for THAT label
+   set at THAT width, landed at the same value either way; a longer future label (a longer locale, or
+   the zh set 详情/动态/评论/附件, which is actually SHORTER and was not separately re-checked here)
+   was not re-measured against this specific claim. If tab-label overflow is ever reported at the
+   360px floor, re-verify this no-op claim with the actual label set in play before assuming
+   `display: flex` is still safe to leave off. `position: sticky` (this rule's own pre-existing
+   property) was ALSO verified unaffected by adding `container-type: inline-size` alone in the same
+   repro (`contain: layout inline-size`, which a `container-type` other than `normal` implies, does
+   NOT break `position: sticky` sticking behavior against this element's own scrolling ancestor,
+   `.meta-record-drawer__body` below) -- `barRect.top === bodyRect.top` held at `scrollTop` 0 and 300
+   alike, matching the P3-A comment's own established verification idiom just above; this half of the
+   repro's finding IS general (it does not depend on tab-label content). */
+.meta-record-drawer__tabs-bar { position: sticky; top: 0; z-index: 2; margin: 0 -16px; padding: 12px 16px 14px; background: #fff; container-type: inline-size; }
 /* P2 (2026-09-05 follow-up, verifier P2): was `inline-flex` with no wrapping -- at the (then-320px,
    now 360px) panel minimum the 4-tab pill's un-wrapped content width (355px measured in Chromium) ran
    PAST the panel's own content box, forcing a page-level horizontal scrollbar (the pill's right edge
@@ -1338,6 +1665,46 @@ async function toggleRecordSubscription() {
    is exactly the "pill look" this change is required to keep. */
 .meta-record-drawer__tabs { display: inline-flex; flex-wrap: wrap; row-gap: 4px; column-gap: 4px; padding: 3px; border: 1px solid #e5e7eb; border-radius: 999px; background: #f8fafc; }
 .meta-record-drawer__tab { min-width: 76px; padding: 5px 12px; border: none; border-radius: 999px; background: transparent; color: #64748b; cursor: pointer; font-size: 12px; font-weight: 600; }
+/* P2-A (2026-09-05, PR-A §1.3): below 420px container width the four tabs stay on ONE row at the
+   360px panel floor. N1 correction (2026-09-05, round 3): an earlier version of this comment
+   attributed the pill's width to `flex: 1` on `.meta-record-drawer__tabs` itself -- that declaration
+   is INERT. `flex` only applies to flex ITEMS, and this pill's parent, `.meta-record-drawer__tabs-bar`
+   (see its rule above), is a block-level box, not a flex container, so the pill is never a flex item
+   and `flex: 1` / `min-width: 0` on it have no effect at any width. (The bar's own comment records
+   that adding `display: flex` to the bar -- which WOULD have activated this `flex: 1` -- measured as a
+   no-op for the shipped label set; that is consistent with this correction: at the 360px floor the
+   pill already lands at the available width by the mechanism below, so activating `flex: 1` had
+   nothing left to add.) The REAL one-row mechanism is two-part: (a) the pill is `display: inline-flex`
+   (base rule above), i.e. shrink-to-fit = min(max-content, available width), so once the tabs'
+   combined natural width exceeds the panel's content width the pill is clamped to the available
+   width -- it does not "grow to fill", it stops growing; and (b) each TAB gets `flex: 1; min-width:
+   0` -- the tabs ARE flex items of the pill -- so the tabs shrink evenly to share that clamped width
+   instead of each holding its own `min-width: 76px` floor (4 x 76px + gaps alone exceeds the panel's
+   content width at the 360px floor, which is exactly what forced the `flex-wrap: wrap` fallback above
+   to engage there before this query existed). The pill's `flex: 1; min-width: 0` declarations are
+   deliberately LEFT IN PLACE (harmless, inert): the design brief §1.3 and the header spec's source
+   pin both name them, and removing them is a separate, visible change to that pin -- not a layout
+   fix. The one-row OUTCOME is unchanged by this correction (comment-only).
+   PLACEMENT (real-browser-verified defect, caught and fixed before landing): this block must come
+   AFTER both `.meta-record-drawer__tabs` and `.meta-record-drawer__tab`'s own base rules above, not
+   between them -- an earlier draft placed it right after `.tabs` and before `.tab`, and the tab's own
+   UNCONDITIONAL `min-width: 76px` (same specificity, later in source) then won the cascade over this
+   block's conditional `min-width: 0` at EVERY width, container query match or not (a `@container`
+   wrapper adds no specificity of its own -- only normal cascade order decides ties, exactly the same
+   way `@media` does). Verified with an isolated Chromium repro (identical markup/CSS, `min-width`
+   observed via `getComputedStyle` before/after reordering): 76px unconditionally with the old
+   placement, 0px (query matching) here. `flex-wrap: wrap` on the `.tabs` rule above is UNCHANGED and
+   stays the fallback for a `@container`-less browser (every evergreen target this app supports has
+   shipped Container Queries since 2023 -- this fallback is expected to matter only in the
+   jsdom-can't-render-CSS test suite, per the P2 comment's own framing, not in production). The
+   REMAINING layout claim -- that this actually renders as one row inside the real component, not just
+   in the isolated repro -- is NOT verified in this PR; same jsdom-can't-render-CSS caveat as every
+   other layout claim in this file; see the PR's real-browser checklist item "four tabs on one row at
+   360". */
+@container (width < 420px) {
+  .meta-record-drawer__tabs { flex: 1; min-width: 0; }
+  .meta-record-drawer__tab { flex: 1; min-width: 0; }
+}
 .meta-record-drawer__tab--active { background: #111827; color: #fff; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.16); }
 /* W2 S3 (lock §3.3 focus ring convention, H4-2/#4281 lineage, same token as MetaSheetViewRail.vue).
    Not real-browser-verified in this PR — jsdom can't render CSS; §8.3 real-browser sweep lands with
