@@ -28,6 +28,7 @@ on:
       - '.github/workflows/**'
       - 'scripts/ops/ssh-hostkey-pin-family-contract.test.mjs'
       - 'scripts/ops/ssh-hostkey-pin-family-behavior.test.mjs'
+      - 'scripts/ops/phase5-metrics-auth-fallback-workflow-contract.test.mjs'
       - 'scripts/ops/resolve-attendance-smoke-token.sh'
       - 'scripts/ops/resolve-k3wise-smoke-token.sh'
       - 'scripts/ops/resolve-metrics-scrape-token.sh'
@@ -50,3 +51,5 @@ jobs:
         run: node --test scripts/ops/ssh-hostkey-pin-family-contract.test.mjs
       - name: Behaviour-prove the resolver scripts fail closed before ssh (PATH-shadow stub)
         run: node --test scripts/ops/ssh-hostkey-pin-family-behavior.test.mjs
+      - name: Assert scheduled metrics bootstrap and failure reporting
+        run: node --test scripts/ops/phase5-metrics-auth-fallback-workflow-contract.test.mjs

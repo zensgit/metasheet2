@@ -12,6 +12,8 @@ on:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    env:
+      SLACK_WEBHOOK_CONFIGURED: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -95,12 +97,17 @@ jobs:
         if: steps.config.outputs.skip != 'true' && steps.probe.outputs.skip != 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
+
+      - name: Set up pnpm
+        if: steps.config.outputs.skip != 'true' && steps.probe.outputs.skip != 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
 
       - name: Install deps
         if: steps.config.outputs.skip != 'true' && steps.probe.outputs.skip != 'true'
-        run: |
-          npm ci || pnpm i || yarn install
+        run: pnpm install --frozen-lockfile
 
       - name: Run Phase 5 validation
         if: steps.config.outputs.skip != 'true' && steps.probe.outputs.skip != 'true'
@@ -131,7 +138,7 @@ jobs:
           fi
 
       - name: Slack notify on failure
-        if: failure()
+        if: failure() && env.SLACK_WEBHOOK_CONFIGURED == 'true'
         uses: rtCamp/action-slack-notify@v2
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
