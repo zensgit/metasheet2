@@ -248,11 +248,16 @@ export interface ElearningWatchChallenge {
   deadlineAt: string
   ordinal: number
   status: 'challenged' | 'paused'
-  promptVersion: 'symbol-number-v1'
-  targets: [string, string]
+  promptVersion: 'raster-position-v2'
+  imagePngBase64: string
+  imageWidth: 360
+  imageHeight: 260
   options: Array<{
     optionId: string
-    label: string
+    x: number
+    y: number
+    width: number
+    height: number
   }>
 }
 
@@ -618,42 +623,62 @@ function parseWatchState(value: unknown, status: number): ElearningWatchState {
         'ordinal',
         'status',
         'promptVersion',
-        'targets',
+        'imagePngBase64',
+        'imageWidth',
+        'imageHeight',
         'options',
       ])) failShape(status)
       if (value.challenge.status !== 'challenged' && value.challenge.status !== 'paused') {
         failShape(status)
       }
       if (
-        value.challenge.promptVersion !== 'symbol-number-v1'
-        || !Array.isArray(value.challenge.targets)
-        || value.challenge.targets.length !== 2
+        value.challenge.promptVersion !== 'raster-position-v2'
+        || value.challenge.imageWidth !== 360
+        || value.challenge.imageHeight !== 260
+        || typeof value.challenge.imagePngBase64 !== 'string'
+        || value.challenge.imagePngBase64.length === 0
+        || value.challenge.imagePngBase64.length > 88_000
+        || !/^iVBORw0KGgo[A-Za-z0-9+/]*={0,2}$/.test(value.challenge.imagePngBase64)
+        || value.challenge.imagePngBase64.length % 4 !== 0
         || !Array.isArray(value.challenge.options)
         || value.challenge.options.length !== 6
       ) failShape(status)
-      const targets = value.challenge.targets.map((target) => requireNonEmptyString(target, status))
       const options = value.challenge.options.map((option) => {
-        if (!isPlainObject(option) || !exactKeys(option, ['optionId', 'label'])) failShape(status)
+        if (!isPlainObject(option) || !exactKeys(option, [
+          'optionId', 'x', 'y', 'width', 'height',
+        ])) failShape(status)
+        const x = requireSafeInt(option.x, status, 0)
+        const y = requireSafeInt(option.y, status, 0)
+        const width = requireSafeInt(option.width, status, 1)
+        const height = requireSafeInt(option.height, status, 1)
+        if (x + width > 360 || y + height > 260) failShape(status)
         return {
           optionId: requireUuid(option.optionId, status),
-          label: requireNonEmptyString(option.label, status),
+          x,
+          y,
+          width,
+          height,
         }
       })
       const optionIds = options.map((option) => option.optionId)
-      const optionLabels = options.map((option) => option.label)
-      if (
-        targets[0] === targets[1]
-        || new Set(optionIds).size !== 6
-        || new Set(optionLabels).size !== 6
-        || targets.some((target) => !optionLabels.includes(target))
-      ) failShape(status)
+      if (new Set(optionIds).size !== 6) failShape(status)
+      for (let left = 0; left < options.length; left += 1) {
+        for (let right = left + 1; right < options.length; right += 1) {
+          const a = options[left]!
+          const b = options[right]!
+          if (a.x < b.x + b.width && b.x < a.x + a.width
+            && a.y < b.y + b.height && b.y < a.y + a.height) failShape(status)
+        }
+      }
       result.challenge = {
         challengeId: requireUuid(value.challenge.challengeId, status),
         deadlineAt: requireCanonicalIsoInstant(value.challenge.deadlineAt, status),
         ordinal: requireSafeInt(value.challenge.ordinal, status, 1),
         status: value.challenge.status,
         promptVersion: value.challenge.promptVersion,
-        targets: targets as [string, string],
+        imagePngBase64: value.challenge.imagePngBase64,
+        imageWidth: value.challenge.imageWidth,
+        imageHeight: value.challenge.imageHeight,
         options,
       }
     }

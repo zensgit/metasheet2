@@ -208,15 +208,18 @@ async function issueChallenge(seedRow: Seed) {
   throw new Error('challenge was not issued')
 }
 
-function challengeSelections(challenge: {
-  targets: [string, string]
-  options: Array<{ optionId: string; label: string }>
-}): [string, string] {
-  const byLabel = new Map(challenge.options.map((option) => [option.label, option.optionId]))
-  const first = byLabel.get(challenge.targets[0])
-  const second = byLabel.get(challenge.targets[1])
-  if (!first || !second || first === second) throw new Error('invalid challenge prompt')
-  return [first, second]
+async function challengeSelections(challenge: { challengeId: string }): Promise<[string, string]> {
+  const result = await pool.query<{ expected_selection: string[] }>(
+    `SELECT expected_selection
+       FROM elearning_watch_challenge_events
+      WHERE org_id = $1 AND challenge_id = $2 AND kind = 'issue'`,
+    [ORG, challenge.challengeId],
+  )
+  const selections = result.rows[0]?.expected_selection
+  if (!selections || selections.length !== 2 || selections[0] === selections[1]) {
+    throw new Error('invalid challenge authority')
+  }
+  return selections as [string, string]
 }
 
 async function pinFirstCheckpoint(sessionId: string): Promise<void> {
@@ -480,7 +483,7 @@ describe.sequential('elearning watch challenge PostgreSQL authority', () => {
       sessionId: seeded.sessionId,
       challengeId: challenge.challengeId,
       requestId,
-      selections: challengeSelections(challenge),
+      selections: await challengeSelections(challenge),
     })
     expect(ack.challenge).toBeNull()
     expect(ack.effectiveMs).toBeGreaterThan(before)
@@ -498,7 +501,7 @@ describe.sequential('elearning watch challenge PostgreSQL authority', () => {
       sessionId: seeded.sessionId,
       challengeId: challenge.challengeId,
       requestId,
-      selections: challengeSelections(challenge),
+      selections: await challengeSelections(challenge),
     })
     expect(replay).toEqual({ ...ack, duplicate: true })
     await expect(acknowledgeElearningWatchChallenge(db, {
@@ -507,7 +510,7 @@ describe.sequential('elearning watch challenge PostgreSQL authority', () => {
       sessionId: seeded.sessionId,
       challengeId: challenge.challengeId,
       requestId,
-      selections: challengeSelections(challenge).reverse() as [string, string],
+      selections: (await challengeSelections(challenge)).reverse() as [string, string],
     })).rejects.toSatisfy((error: unknown) => {
       expectCode(error, 'conflict')
       return true
@@ -520,10 +523,17 @@ describe.sequential('elearning watch challenge PostgreSQL authority', () => {
     await pinFirstCheckpoint(seeded.sessionId)
     const issued = await issueChallenge(seeded)
     const challenge = issued.state.challenge!
-    expect(challenge.promptVersion).toBe('symbol-number-v1')
+    expect(challenge.promptVersion).toBe('raster-position-v2')
     expect(challenge.options).toHaveLength(6)
     expect(new Set(challenge.options.map((option) => option.optionId)).size).toBe(6)
-    expect(challenge.targets).toHaveLength(2)
+    expect(Object.keys(challenge).sort()).toEqual([
+      'challengeId', 'deadlineAt', 'imageHeight', 'imagePngBase64', 'imageWidth',
+      'options', 'ordinal', 'promptVersion', 'status',
+    ])
+    expect(JSON.stringify(challenge)).not.toContain('targets')
+    expect(JSON.stringify(challenge)).not.toContain('label')
+    expect(Buffer.from(challenge.imagePngBase64, 'base64').subarray(0, 8))
+      .toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
 
     const event = await pool.query(
       `SELECT prompt_version, prompt_option_ids, prompt_option_labels, expected_selection
@@ -532,12 +542,13 @@ describe.sequential('elearning watch challenge PostgreSQL authority', () => {
       [ORG, seeded.sessionId, challenge.challengeId],
     )
     expect(event.rows).toHaveLength(1)
-    expect(event.rows[0]?.prompt_version).toBe('symbol-number-v1')
+    expect(event.rows[0]?.prompt_version).toBe('raster-position-v2')
     expect(event.rows[0]?.prompt_option_ids).toEqual(challenge.options.map((option) => option.optionId))
-    expect(event.rows[0]?.prompt_option_labels).toEqual(challenge.options.map((option) => option.label))
-    expect(event.rows[0]?.expected_selection).toEqual(challengeSelections(challenge))
+    expect(event.rows[0]?.prompt_option_labels).toHaveLength(6)
+    expect(new Set(event.rows[0]?.prompt_option_labels as string[]).size).toBe(6)
+    expect(event.rows[0]?.expected_selection).toEqual(await challengeSelections(challenge))
 
-    const correct = challengeSelections(challenge)
+    const correct = await challengeSelections(challenge)
     for (const selections of [
       [correct[1], correct[0]] as [string, string],
       [correct[0], randomUUID()] as [string, string],
@@ -602,7 +613,7 @@ describe.sequential('elearning watch challenge PostgreSQL authority', () => {
     const firstAck = await acknowledgeElearningWatchChallenge(db, {
       orgId: ORG, userId: USER, sessionId: seeded.sessionId,
       challengeId: first.challenge!.challengeId, requestId: randomUUID(),
-      selections: challengeSelections(first.challenge!),
+      selections: await challengeSelections(first.challenge!),
     })
     expect(firstAck.status).toBe('in_progress')
     const second = await heartbeat(seeded, 2, 0)
@@ -610,7 +621,7 @@ describe.sequential('elearning watch challenge PostgreSQL authority', () => {
     const secondAck = await acknowledgeElearningWatchChallenge(db, {
       orgId: ORG, userId: USER, sessionId: seeded.sessionId,
       challengeId: second.challenge!.challengeId, requestId: randomUUID(),
-      selections: challengeSelections(second.challenge!),
+      selections: await challengeSelections(second.challenge!),
     })
     expect(secondAck.status).toBe('in_progress')
     const completed = await heartbeat(seeded, 3, 100_000)
@@ -653,7 +664,7 @@ describe.sequential('elearning watch challenge PostgreSQL authority', () => {
     const completed = await acknowledgeElearningWatchChallenge(db, {
       orgId: ORG, userId: USER, sessionId: seeded.sessionId,
       challengeId: issued.challenge!.challengeId, requestId: randomUUID(),
-      selections: challengeSelections(issued.challenge!),
+      selections: await challengeSelections(issued.challenge!),
     })
     expect(completed.status).toBe('completed')
   })
@@ -707,7 +718,7 @@ describe.sequential('elearning watch challenge PostgreSQL authority', () => {
       sessionId: seeded.sessionId,
       challengeId: challenge.challengeId,
       requestId: randomUUID(),
-      selections: challengeSelections(challenge),
+      selections: await challengeSelections(challenge),
     })
     expect(late.creditedMs).toBe(0)
     expect(late.challenge).toBeNull()
@@ -732,13 +743,13 @@ describe.sequential('elearning watch challenge PostgreSQL authority', () => {
     const firstPromise = acknowledgeElearningWatchChallenge(barrierDb, {
       orgId: ORG, userId: USER, sessionId: seeded.sessionId,
       challengeId, requestId: randomUUID(),
-      selections: challengeSelections(challenge),
+      selections: await challengeSelections(challenge),
     })
     await firstRead.promise
     const secondPromise = acknowledgeElearningWatchChallenge(barrierDb, {
       orgId: ORG, userId: USER, sessionId: seeded.sessionId,
       challengeId, requestId: randomUUID(),
-      selections: challengeSelections(challenge),
+      selections: await challengeSelections(challenge),
     })
     try {
       const secondPassedAuthorityBarrier = await Promise.race([
@@ -756,7 +767,7 @@ describe.sequential('elearning watch challenge PostgreSQL authority', () => {
     await expect(acknowledgeElearningWatchChallenge(db, {
       orgId: OTHER_ORG, userId: USER, sessionId: seeded.sessionId,
       challengeId, requestId: randomUUID(),
-      selections: challengeSelections(challenge),
+      selections: await challengeSelections(challenge),
     })).rejects.toSatisfy((error: unknown) => {
       expectCode(error, 'not_found')
       return true
@@ -776,13 +787,13 @@ describe.sequential('elearning watch challenge PostgreSQL authority', () => {
     const firstPromise = acknowledgeElearningWatchChallenge(barrierDb, {
       orgId: ORG, userId: USER, sessionId: firstSeed.sessionId,
       challengeId: firstIssued.state.challenge!.challengeId, requestId,
-      selections: challengeSelections(firstIssued.state.challenge!),
+      selections: await challengeSelections(firstIssued.state.challenge!),
     })
     await firstRead.promise
     const secondPromise = acknowledgeElearningWatchChallenge(barrierDb, {
       orgId: ORG, userId: USER, sessionId: secondSeed.sessionId,
       challengeId: secondIssued.state.challenge!.challengeId, requestId,
-      selections: challengeSelections(secondIssued.state.challenge!),
+      selections: await challengeSelections(secondIssued.state.challenge!),
     })
     try {
       const secondPassedRequestLock = await Promise.race([
@@ -859,7 +870,7 @@ describe.sequential('elearning watch challenge PostgreSQL authority', () => {
     await acknowledgeElearningWatchChallenge(db, {
       orgId: ORG, userId: USER, sessionId: seeded.sessionId,
       challengeId, requestId: randomUUID(),
-      selections: challengeSelections(challenge),
+      selections: await challengeSelections(challenge),
     })
     await expect(pool.query(
       `DELETE FROM elearning_watch_challenge_events WHERE org_id = $1`,

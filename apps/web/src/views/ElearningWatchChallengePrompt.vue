@@ -22,29 +22,31 @@
     >
       {{ elearningChallengeCountdown(remainingMs, isZh) }}
     </p>
-    <p class="elearning-watch-challenge__targets" data-testid="elearning-watch-challenge-targets">
-      <strong>1. {{ challenge.targets[0] }}</strong>
-      <span aria-hidden="true">→</span>
-      <strong>2. {{ challenge.targets[1] }}</strong>
-    </p>
     <div
       class="elearning-watch-challenge__grid"
       role="group"
       :aria-label="elearningLabel('learner.challengePrompt', isZh)"
     >
+      <img
+        class="elearning-watch-challenge__image"
+        :src="challengeImageSrc"
+        alt=""
+        aria-hidden="true"
+        draggable="false"
+      >
       <button
-        v-for="option in challenge.options"
+        v-for="(option, index) in challenge.options"
         :key="option.optionId"
         type="button"
         class="elearning-watch-challenge__option"
         :class="{ 'elearning-watch-challenge__option--selected': selectionOrder(option.optionId) > 0 }"
-        :data-option-id="option.optionId"
         :data-selection-order="selectionOrder(option.optionId) || undefined"
+        :style="optionStyle(option)"
+        :aria-label="isZh ? `第 ${index + 1} 个位置` : `Position ${index + 1}`"
         :aria-pressed="selectionOrder(option.optionId) > 0"
         :disabled="busy || selectionOrder(option.optionId) > 0 || selections.length === 2"
         @click="selectOption(option.optionId)"
       >
-        <span>{{ option.label }}</span>
         <small v-if="selectionOrder(option.optionId) > 0">
           {{ selectionOrder(option.optionId) }}
         </small>
@@ -99,6 +101,7 @@ let timer: number | null = null
 
 const remainingMs = computed(() => Math.max(0, Date.parse(props.challenge.deadlineAt) - nowMs.value))
 const timedOut = computed(() => props.challenge.status === 'paused' || remainingMs.value === 0)
+const challengeImageSrc = computed(() => `data:image/png;base64,${props.challenge.imagePngBase64}`)
 
 function refreshClock(): void {
   nowMs.value = Date.now()
@@ -107,6 +110,15 @@ function refreshClock(): void {
 function selectionOrder(optionId: string): number {
   const index = selections.value.indexOf(optionId)
   return index < 0 ? 0 : index + 1
+}
+
+function optionStyle(option: ElearningWatchChallenge['options'][number]): Record<string, string> {
+  return {
+    left: `${option.x / props.challenge.imageWidth * 100}%`,
+    top: `${option.y / props.challenge.imageHeight * 100}%`,
+    width: `${option.width / props.challenge.imageWidth * 100}%`,
+    height: `${option.height / props.challenge.imageHeight * 100}%`,
+  }
 }
 
 function selectOption(optionId: string): void {
@@ -164,38 +176,39 @@ onUnmounted(() => {
   color: #b45309;
 }
 
-.elearning-watch-challenge__targets {
-  display: flex;
-  gap: 0.75rem;
-  align-items: center;
-  justify-content: center;
-  font-size: 1.2rem;
+.elearning-watch-challenge__grid {
+  position: relative;
+  width: min(100%, 360px);
+  aspect-ratio: 360 / 260;
+  margin: 0 auto 1rem;
 }
 
-.elearning-watch-challenge__grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.75rem;
-  margin-bottom: 1rem;
+.elearning-watch-challenge__image {
+  width: 100%;
+  height: 100%;
+  user-select: none;
 }
 
 .elearning-watch-challenge__option {
-  min-height: 3.5rem;
+  position: absolute;
   border: 1px solid #cbd5e1;
   border-radius: 0.5rem;
-  background: #fff;
-  font-size: 1.25rem;
+  background: transparent;
   cursor: pointer;
 }
 
 .elearning-watch-challenge__option--selected {
-  border-color: #2563eb;
-  background: #dbeafe;
+  border: 3px solid #2563eb;
+  background: rgb(219 234 254 / 35%);
 }
 
 .elearning-watch-challenge__option small {
-  display: block;
+  position: absolute;
+  top: 0.2rem;
+  right: 0.35rem;
   color: #1d4ed8;
+  font-size: 0.75rem;
+  font-weight: 700;
 }
 
 .elearning-watch-challenge__actions {

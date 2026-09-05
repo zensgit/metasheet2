@@ -25,7 +25,7 @@ describe('elearning watch challenge migration contract', () => {
     expect(source).toContain('BEFORE UPDATE OR DELETE ON ${table}')
     expect(source).toContain('BEFORE TRUNCATE ON ${table}')
     expect(source).toContain('request_hash_version = 2')
-    expect(source).toContain("prompt_version = 'symbol-number-v1'")
+    expect(source).toContain("prompt_version = 'raster-position-v2'")
     expect(source).toContain('expected_selection <@ prompt_option_ids')
     expect(source).toContain('UNIQUE (org_id, schedule_id, challenge_id, kind)')
   })

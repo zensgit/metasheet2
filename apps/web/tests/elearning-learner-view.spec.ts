@@ -104,13 +104,14 @@ const SESSION_B = '99999999-9999-4999-8999-999999999999'
 const CHALLENGE = 'abababab-abab-4bab-8bab-abababababab'
 const CHALLENGE_B = 'acacacac-acac-4cac-8cac-acacacacacac'
 const CHALLENGE_OPTIONS = [
-  { optionId: '10101010-1010-4010-8010-101010101010', label: '●1' },
-  { optionId: '20202020-2020-4020-8020-202020202020', label: '▲2' },
-  { optionId: '30303030-3030-4030-8030-303030303030', label: '■3' },
-  { optionId: '40404040-4040-4040-8040-404040404040', label: '◆4' },
-  { optionId: '50505050-5050-4050-8050-505050505050', label: '★5' },
-  { optionId: '60606060-6060-4060-8060-606060606060', label: '♥6' },
+  { optionId: '10101010-1010-4010-8010-101010101010', x: 24, y: 112, width: 92, height: 62 },
+  { optionId: '20202020-2020-4020-8020-202020202020', x: 134, y: 112, width: 92, height: 62 },
+  { optionId: '30303030-3030-4030-8030-303030303030', x: 244, y: 112, width: 92, height: 62 },
+  { optionId: '40404040-4040-4040-8040-404040404040', x: 24, y: 186, width: 92, height: 62 },
+  { optionId: '50505050-5050-4050-8050-505050505050', x: 134, y: 186, width: 92, height: 62 },
+  { optionId: '60606060-6060-4060-8060-606060606060', x: 244, y: 186, width: 92, height: 62 },
 ] as const
+const CHALLENGE_IMAGE = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR42mP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC'
 const CHALLENGE_SELECTIONS = [
   CHALLENGE_OPTIONS[1].optionId,
   CHALLENGE_OPTIONS[4].optionId,
@@ -309,8 +310,10 @@ function watchChallenge(
     deadlineAt: new Date(Date.now() + 120_000).toISOString(),
     ordinal: challengeId === CHALLENGE ? 1 : 2,
     status: 'challenged',
-    promptVersion: 'symbol-number-v1',
-    targets: [CHALLENGE_OPTIONS[1].label, CHALLENGE_OPTIONS[4].label],
+    promptVersion: 'raster-position-v2',
+    imagePngBase64: CHALLENGE_IMAGE,
+    imageWidth: 360,
+    imageHeight: 260,
     options: CHALLENGE_OPTIONS,
     ...over,
   }
@@ -321,7 +324,8 @@ async function selectWatchChallenge(
   selections: readonly string[] = CHALLENGE_SELECTIONS,
 ): Promise<void> {
   for (const optionId of selections) {
-    ;(root.querySelector(`[data-option-id="${optionId}"]`) as HTMLButtonElement).click()
+    const index = CHALLENGE_OPTIONS.findIndex((option) => option.optionId === optionId)
+    ;(root.querySelectorAll('.elearning-watch-challenge__option')[index] as HTMLButtonElement).click()
     await flushUi()
   }
 }
@@ -795,9 +799,13 @@ describe('ElearningLearnerView', () => {
     expect(pause).toHaveBeenCalledTimes(1)
     expect(root.querySelector('[data-testid="elearning-watch-challenge"]')).toBeTruthy()
     expect(root.querySelector('[data-testid="elearning-watch-challenge-countdown"]')?.textContent).toContain('秒')
-    expect(root.querySelectorAll('[data-option-id]')).toHaveLength(6)
-    expect([...root.querySelectorAll<HTMLElement>('[data-option-id]')].map((option) => option.dataset.optionId))
-      .toEqual(CHALLENGE_OPTIONS.map((option) => option.optionId))
+    const challengeButtons = root.querySelectorAll('.elearning-watch-challenge__option')
+    expect(challengeButtons).toHaveLength(6)
+    expect([...challengeButtons].map((option) => option.getAttribute('aria-label')))
+      .toEqual(['第 1 个位置', '第 2 个位置', '第 3 个位置', '第 4 个位置', '第 5 个位置', '第 6 个位置'])
+    expect(root.textContent).not.toMatch(/[●▲■◆★♥][1-9]/u)
+    expect(root.querySelector('.elearning-watch-challenge__image')?.getAttribute('src'))
+      .toBe(`data:image/png;base64,${CHALLENGE_IMAGE}`)
     expect((root.querySelector('[data-testid="elearning-watch-challenge-confirm"]') as HTMLButtonElement).disabled)
       .toBe(true)
 
