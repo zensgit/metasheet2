@@ -39,6 +39,30 @@ export const STOCK_PREPARATION_RESOLUTION_ACTIONS: readonly StockPreparationReso
   'manual_hold',
 ]
 
+/**
+ * The ONE conflict type the server can currently act on.
+ *
+ * The confirm endpoint refuses any other conflict type outright — see `FIRST_CUT_CONFLICT_TYPE` in
+ * `plugins/plugin-integration-core/lib/stock-preparation-confirmation-decisions.cjs`, which answers
+ * 409 `CONFIRMATION_DECISION_ACTION_CONFLICT_MISMATCH` for everything else. A second, structural
+ * wall sits behind it: the readback that turns a confirmed decision into a planner policy only ever
+ * consumes the duplicate-group candidates, so an anonymous-family row could not release its hold
+ * even if the runtime check let it through.
+ *
+ * WHY THE UI NEEDS THIS CONSTANT: without it the queue offered "I'll decide…" and all three actions
+ * on every row. Observed 2026-09-04 against the customer's own PLM — a project whose BOM lines
+ * reference parts absent from the parts library holds its rows as `missing_component`, they appear
+ * in the queue as pending, and every action an operator picks fails with a message that reads like
+ * "wrong option, try another one". There is no other option: the only way out is fixing the source
+ * data. Naming the confirmable type here lets the queue say that instead of inviting a dead end.
+ */
+export const STOCK_PREPARATION_CONFIRMABLE_CONFLICT_TYPE = 'duplicate_expanded_key'
+
+/** Whether the confirm endpoint can act on this row's conflict type at all. */
+export function isConfirmableConflictType(conflictType: string | null | undefined): boolean {
+  return conflictType === STOCK_PREPARATION_CONFIRMABLE_CONFLICT_TYPE
+}
+
 /** One values-free queue row. Value/notes are PRESENCE booleans; contents never cross here. */
 export interface StockPreparationDecisionRow {
   decisionId: string | null
