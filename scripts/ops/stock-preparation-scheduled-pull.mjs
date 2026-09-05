@@ -98,6 +98,24 @@
 //       text-level `redact()`, matching the raw token, ITS OWN `JSON.stringify(...).slice(1, -1)`
 //       (escaped) form, and any `Bearer <token>`-shaped substring — a last-resort net for whatever
 //       the structured pass does not cover (plain text like --help output or a usage error).
+//
+// WINDOWS: NEVER `process.exit()`, AND NEVER `AbortSignal.timeout()`. A 222 run on real Windows
+// (Node 24, launched by a scheduled task's wrapper .cmd) completed EVERY line of its own output
+// successfully — every project's JSON line, values-free, no token — and then crashed on the way out:
+//   Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\win\async.c, line 76
+// exit code -1073740791 (0xC0000409), which reported the run as FAILED to the scheduler even though
+// it had already succeeded. That assertion is libuv refusing to let the process die while a handle it
+// owns is still in the middle of closing. Two choices in the earlier version of this script fed it
+// directly: `process.exit(code)` tears the process down immediately, without waiting for libuv to
+// finish whatever close was already in flight; and `AbortSignal.timeout(timeoutMs)` creates a timer
+// with NO EXPOSED HANDLE — nothing this script could ever `clearTimeout` — so even a fast, fully
+// successful request could leave that timer's own close mid-flight when `process.exit()` then fired
+// on top of it. Fixed on both sides: `postJson` now uses a manual `AbortController` + `setTimeout`
+// that IS `clearTimeout`'d in a `finally` on every exit path (see `postJson`), and the bottom of this
+// file never calls `process.exit()` — it sets `process.exitCode` and returns, letting the event loop
+// drain on its own (confirmed directly against this repo's Node runtime: a script that does one
+// `fetch()` and returns, with no other ref'd handle, exits in well under a second on its own, keep-alive
+// socket or not — there was nothing for `process.exit()` to have been rescuing this script from).
 
 import { pathToFileURL } from 'node:url'
 
@@ -355,22 +373,7 @@ function applyUrl(apiBase, tenantId) {
   return `${apiBase}/api/integration/table-actions/${PULL_ACTION_ID}/apply?tenantId=${encodeURIComponent(tenantId)}`
 }
 
-/**
- * POSTs one request. `timeoutMs` bounds the WHOLE request (connect + send + await response) via
- * `AbortSignal.timeout` — undici's own body/idle timeouts reset on every byte received, so a backend
- * that dribbles bytes (or never closes the connection) would otherwise hang this forever without one.
- *
- * ERROR REPORTING IS A CLOSED VOCABULARY, ON PURPOSE. Neither branch below ever puts `error.message`
- * into the result. That is the direct fix for the scenario the module header documents: `fetch`'s own
- * `Headers.append` throws a `TypeError` whose `.message` embeds the FULL (invalid) header value —
- * `Bearer <token...>` and all — when a header value contains a disallowed character. `readConfig`
- * refuses a control-character `MS_TOKEN` before this function is ever called, which should make that
- * specific error unreachable; this is the second, independent layer for whatever this repo has not
- * thought of — `error.name` / `error.code` are the ONLY fields relayed, both closed, short,
- * machine-generated vocabularies (`TypeError`, `TimeoutError`, `ECONNREFUSED`, …) that cannot embed
- * arbitrary request data.
- */
-/** True for the two names Node/undici use for an `AbortSignal.timeout` firing mid-request. */
+/** True for the two names Node/undici (and `makeTimeoutAbortReason` below) use for an abort. */
 function isAbortLikeError(error) {
   return Boolean(error && (error.name === 'AbortError' || error.name === 'TimeoutError'))
 }
@@ -386,40 +389,85 @@ function networkErrorResult(error, startedAt) {
   }
 }
 
+/**
+ * A named error indistinguishable, on the receiving end, from what `AbortSignal.timeout()` itself
+ * would have produced — `fetch` rejects (or `response.json()` rejects) with EXACTLY the `reason`
+ * passed to `AbortController#abort()`, verified directly against this repo's own Node runtime rather
+ * than assumed. Keeping the SAME `.name` here is what lets `isAbortLikeError` / `networkErrorMessage`
+ * stay unchanged below — this function is a drop-in replacement for the timer, not a new error shape.
+ */
+function makeTimeoutAbortReason() {
+  const error = new Error('AbortSignal.timeout')
+  error.name = 'TimeoutError'
+  return error
+}
+
+/**
+ * POSTs one request. `timeoutMs` bounds the WHOLE request (connect + send + await response) —
+ * undici's own body/idle timeouts reset on every byte received, so a backend that dribbles bytes (or
+ * never closes the connection) would otherwise hang this forever without one.
+ *
+ * NOT `AbortSignal.timeout(timeoutMs)`, on purpose — see the module header's Windows note. This is a
+ * manual `AbortController` + `setTimeout`, UNREF'd AND explicitly `clearTimeout`'d in `finally` below,
+ * so no timer this function creates outlives the call that created it — `AbortSignal.timeout()`
+ * exposes no handle a caller can ever cancel, which is exactly the gap that let a successful run's
+ * own internal timer still be mid-close when the process later exited.
+ *
+ * ERROR REPORTING IS A CLOSED VOCABULARY, ON PURPOSE. Neither catch branch below ever puts
+ * `error.message` into the result. That is the direct fix for the scenario the module header
+ * documents: `fetch`'s own `Headers.append` throws a `TypeError` whose `.message` embeds the FULL
+ * (invalid) header value — `Bearer <token...>` and all — when a header value contains a disallowed
+ * character. `readConfig` refuses a control-character `MS_TOKEN` before this function is ever called,
+ * which should make that specific error unreachable; this is the second, independent layer for
+ * whatever this repo has not thought of — `error.name` / `error.code` are the ONLY fields relayed,
+ * both closed, short, machine-generated vocabularies (`TypeError`, `ECONNREFUSED`, …) that cannot
+ * embed arbitrary request data.
+ */
 async function postJson(url, { token, tenantId, body, timeoutMs }) {
   const startedAt = Date.now()
-  let response
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(makeTimeoutAbortReason()), timeoutMs)
+  if (typeof timer.unref === 'function') timer.unref()
   try {
-    response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${token}`,
-        'x-tenant-id': tenantId,
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
-    })
-  } catch (error) {
-    return networkErrorResult(error, startedAt)
+    let response
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${token}`,
+          'x-tenant-id': tenantId,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      })
+    } catch (error) {
+      return networkErrorResult(error, startedAt)
+    }
+    let json = null
+    let parseError = false
+    try {
+      json = await response.json()
+    } catch (error) {
+      // The abort can fire AFTER `fetch` has already resolved with a `response` (headers arrived,
+      // then the body trickled in too slowly) — `response.json()` is what actually rejects in that
+      // case, not the `fetch(...)` call above. Reported the SAME way as a connect-phase timeout
+      // (`networkError: true, timedOut: true` -> `networkErrorMessage` -> the fixed string
+      // `'timeout'`) rather than falling into the generic `parseError` branch below, which would
+      // otherwise mislabel a real timeout as e.g. `"dry-run failed with HTTP 200"` — technically the
+      // status line DID arrive, but the body never did, and "failed with HTTP 200" reads as a
+      // server-side failure that this was not.
+      if (isAbortLikeError(error)) return networkErrorResult(error, startedAt)
+      parseError = true
+    }
+    return { ok: response.ok, httpStatus: response.status, json, parseError, durationMs: Date.now() - startedAt }
+  } finally {
+    // Runs on EVERY exit path — success, connect-phase error, body-phase error/timeout — so the timer
+    // this call created is always cancelled before the call returns. This is the fix, not a nicety:
+    // `clearTimeout` actually releases the underlying handle, where `AbortSignal.timeout()`'s
+    // internal timer has no equivalent release short of waiting for it to fire on its own schedule.
+    clearTimeout(timer)
   }
-  let json = null
-  let parseError = false
-  try {
-    json = await response.json()
-  } catch (error) {
-    // The `AbortSignal` can fire AFTER `fetch` has already resolved with a `response` (headers
-    // arrived, then the body trickled in too slowly) — `response.json()` is what actually rejects in
-    // that case, not the `fetch(...)` call above. Reported the SAME way as a connect-phase timeout
-    // (`networkError: true, timedOut: true` -> `networkErrorMessage` -> the fixed string `'timeout'`)
-    // rather than falling into the generic `parseError` branch below, which would otherwise mislabel
-    // a real timeout as e.g. `"dry-run failed with HTTP 200"` — technically the status line DID
-    // arrive, but the body never did, and "failed with HTTP 200" reads as a server-side failure that
-    // this was not.
-    if (isAbortLikeError(error)) return networkErrorResult(error, startedAt)
-    parseError = true
-  }
-  return { ok: response.ok, httpStatus: response.status, json, parseError, durationMs: Date.now() - startedAt }
 }
 
 function errorCodeOf(envelope) {
@@ -654,16 +702,28 @@ export async function main(argv, env) {
 const isEntryPoint = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
 
 if (isEntryPoint) {
-  // `process.exit(code)` rather than only `process.exitCode = code`: Node's built-in `fetch` pools
-  // keep-alive HTTP/1.1 connections, and a server that does not close its end (every ordinary Express-
-  // style server, including this repo's) leaves a socket the event loop waits on — the process would
-  // otherwise hang past its last line of output until that socket times out. Every write above this
-  // point uses `writeOut`/`writeErr` (redacted, and synchronous), so nothing is dropped by exiting
-  // immediately once the exit code is known.
+  // NEVER `process.exit(code)` here — see the module header's Windows note. `process.exitCode = code`
+  // plus a plain `return` lets the event loop drain NATURALLY: every timer this script starts is
+  // UNREF'd and `clearTimeout`'d the moment it is done with (`postJson`'s `finally`), and a bare
+  // client-side `fetch` was checked directly against this repo's own Node runtime to confirm it does
+  // NOT keep the process alive waiting for a keep-alive socket to be reused (a script that fetches
+  // once and returns exits in well under a second, live server or not) — so there is nothing left for
+  // `process.exit()` to have been rescuing this script FROM. What it was actually doing is forcing an
+  // IMMEDIATE, uncooperative shutdown that does not wait for libuv to finish closing whatever handles
+  // (undici's internal timers included) were still mid-close at that exact instant — which is
+  // precisely what 222's real run hit: `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING) …
+  // src\win\async.c, line 76`, crashing with exit code -1073740791 even though every line of this
+  // script's own output had already been written successfully. The extra `setImmediate` tick below
+  // costs nothing (this script exits either way, usually within milliseconds of `main` resolving) and
+  // gives libuv one more turn of the loop to finish any close that was already in flight, as a second,
+  // cheap margin under the real fix (removing `process.exit()` itself).
   main(process.argv.slice(2), process.env)
-    .then((code) => { process.exit(code) })
+    .then(async (code) => {
+      process.exitCode = code
+      await new Promise((resolve) => { setImmediate(resolve) })
+    })
     .catch((error) => {
       writeErr(`${error && error.stack ? error.stack : String(error)}\n`)
-      process.exit(1)
+      process.exitCode = 1
     })
 }

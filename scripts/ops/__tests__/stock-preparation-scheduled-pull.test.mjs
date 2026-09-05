@@ -40,7 +40,7 @@
 import assert from 'node:assert/strict'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import test from 'node:test'
 
 // `fileURLToPath`, not `new URL(...).pathname` — on Windows the latter yields `/C:/Users/...` (a
@@ -712,4 +712,86 @@ test('in-process: a token WITH a tenantId claim runs normally, no refusal', asyn
   assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`)
   assert.doesNotMatch(result.stderr, /tenantId claim/)
   assert.equal(requests.length, 1)
+})
+
+// ---------------------------------------------------------------------------
+// (c) A REAL SUBPROCESS AGAINST A REAL, SEPARATE SERVER — the Windows libuv-crash regression.
+// ---------------------------------------------------------------------------
+//
+// A 222 run on real Windows (Node 24, launched by a scheduled task's wrapper .cmd) wrote every line
+// of its own output successfully and then crashed on the way out:
+//   Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\win\async.c, line 76
+// exit code -1073740791 (0xC0000409) — reporting a fully successful run as FAILED to the scheduler.
+// `process.exit()` and `AbortSignal.timeout()`'s uncancellable timer fed it directly (see the
+// script's own module header). This is the one test in this file that drives the ACTUAL SCRIPT FILE
+// as an ACTUAL CHILD PROCESS all the way to its own real exit — every other HTTP-round-trip test
+// above is in-process specifically BECAUSE a mocked `fetch` cannot reproduce a real libuv handle at
+// all, and this failure mode is entirely about what libuv does on the way out.
+//
+// THE SERVER IS ITS OWN SEPARATE `node` CHILD PROCESS — not `http.createServer` inside THIS test
+// process. Hosting the server here and `spawnSync`-ing the script as a child that fetches back into
+// ITS OWN PARENT is the "two-level process nesting" this file's own header names as a LOCAL
+// (Windows-workstation-only) block unrelated to the script — spawnSync itself hangs (ETIMEDOUT)
+// regardless of what the script does. A genuinely separate server process sidesteps that local
+// limitation entirely, and is also the more faithful reproduction of the real 222 shape: two
+// independent OS processes talking over a real socket, exactly like the scheduled task and the
+// MetaSheet API it calls.
+async function realSubprocessAgainstARealServerExitsCleanly({ status, expectedExitCode }) {
+  const serverScript = [
+    "const http = require('node:http');",
+    'const server = http.createServer((req, res) => {',
+    `  res.writeHead(${status}, { 'content-type': 'application/json' });`,
+    "  res.end(JSON.stringify({ ok: " + (status < 300 ? 'true' : 'false') + ', ' +
+      (status < 300 ? "data: { status: 'not_found', canApply: false, counts: {} }" : "error: { code: 'BAD_REQUEST' }")
+      + ' }));',
+    '});',
+    "server.listen(0, '127.0.0.1', () => { process.stdout.write(String(server.address().port)); });",
+  ].join('\n')
+  const serverProc = spawn('node', ['-e', serverScript], { stdio: ['ignore', 'pipe', 'pipe'] })
+  let serverStderr = ''
+  serverProc.stderr.on('data', (chunk) => { serverStderr += chunk.toString() })
+  const port = await new Promise((resolve, reject) => {
+    let out = ''
+    const timer = setTimeout(() => reject(new Error(`server did not report a port in time; stderr: ${serverStderr}`)), 10000)
+    serverProc.stdout.on('data', (chunk) => {
+      out += chunk.toString()
+      const parsedPort = Number(out.trim())
+      if (Number.isInteger(parsedPort) && parsedPort > 0) {
+        clearTimeout(timer)
+        resolve(parsedPort)
+      }
+    })
+    serverProc.on('error', reject)
+  })
+  try {
+    const result = runScript([], {
+      MS_API: `http://127.0.0.1:${port}`,
+      MS_TOKEN: TENANT_TOKEN,
+      MS_TENANT_ID: 'tenant-a',
+      MS_PROJECT_NOS: 'P-1',
+      MS_TIMEOUT_MS: '5000',
+    })
+    assert.equal(result.status, expectedExitCode, `${result.stdout}\n${result.stderr}`)
+    assert.doesNotMatch(result.stderr, /Assertion failed/, 'no libuv assertion on the way out')
+    assert.doesNotMatch(result.stderr, /UV_HANDLE_CLOSING/, 'no libuv handle-closing assertion on the way out')
+    assert.equal(result.stderr, '', 'a clean run writes NOTHING to stderr')
+    const lines = jsonLines(result.stdout)
+    assert.equal(lines.length, 2, 'one project line + one summary line, and nothing else')
+    return lines
+  } finally {
+    serverProc.kill()
+  }
+}
+
+test('a real subprocess run against a real (separate-process) HTTP 400 server exits 1 with clean stderr — no libuv Assertion', async () => {
+  const lines = await realSubprocessAgainstARealServerExitsCleanly({ status: 400, expectedExitCode: 1 })
+  assert.equal(lines[0].action, 'error')
+  assert.equal(lines[0].failed, true)
+  assert.equal(lines[1].summary.failed, 1)
+})
+
+test('a real subprocess run against a real (separate-process) HTTP 200/not_found server exits 0 with clean stderr — no libuv Assertion', async () => {
+  const lines = await realSubprocessAgainstARealServerExitsCleanly({ status: 200, expectedExitCode: 0 })
+  assert.equal(lines[0].action, 'skipped_not_found')
+  assert.equal(lines[1].summary.failed, 0)
 })
