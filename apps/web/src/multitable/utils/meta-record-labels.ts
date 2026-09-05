@@ -130,6 +130,14 @@ export type MetaRecordLabelKey =
   // done/failed keys are declared here now (reserved) so B1 needs no new i18n PR.
   | 'record.copyLink' | 'record.copyLinkDone' | 'record.copyLinkFailed'
   | 'record.titleFieldAria'
+  // --- Record inspector v3 (design 2026-09-05, PR-B1 §1.3 body): details-tab hide-empty toggle
+  //     (pressed/unpressed copy), the "fields in this view" section heading (rendered only when the
+  //     "hidden in this view" section is non-empty — see `recordHiddenFieldsHeading` below for that
+  //     one's count-interpolated heading), and the link-field "edit links" button copy shown beside
+  //     the linked-record chips. ---
+  | 'record.hideEmpty' | 'record.showEmpty'
+  | 'record.fieldsInView'
+  | 'record.editLinks'
 
 const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }> = {
   'notification.bell': { en: 'Notifications', zh: '通知' },
@@ -373,6 +381,10 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.copyLinkDone': { en: 'Link copied', zh: '链接已复制' },
   'record.copyLinkFailed': { en: 'Could not copy link', zh: '链接复制失败' },
   'record.titleFieldAria': { en: 'Record title', zh: '记录标题' },
+  'record.hideEmpty': { en: 'Hide empty fields', zh: '隐藏空字段' },
+  'record.showEmpty': { en: 'Show empty fields', zh: '显示空字段' },
+  'record.fieldsInView': { en: 'Fields in this view', zh: '本视图字段' },
+  'record.editLinks': { en: 'Edit links', zh: '编辑关联' },
 }
 
 export function recordLabel(key: MetaRecordLabelKey, isZh: boolean): string {
@@ -460,6 +472,14 @@ export function recordPosition(current: number, total: number, isZh: boolean): s
   const c = recordCompactCount(current, isZh)
   const t = recordCompactCount(total, isZh)
   return isZh ? `${c}/${t}` : `${c} / ${t}`
+}
+
+// recordHiddenFieldsHeading: the record inspector's "hidden in this view" section heading (record
+// inspector v3, design 2026-09-05, PR-B1 §1.3 body) — the count is the number of fields the active
+// view hides that the viewer is nonetheless allowed to see (layer-2 ∩ layer-3 visible, view-hidden).
+// Same interpolated-helper shape as `recordPosition` above; the count is data, rendered raw.
+export function recordHiddenFieldsHeading(count: number, isZh: boolean): string {
+  return isZh ? `本视图中隐藏的字段 (${count})` : `Hidden in this view (${count})`
 }
 
 // configRestoreTypedConfirm: the T9-W destructive-tier typed-confirm input prompt

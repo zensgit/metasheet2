@@ -13,8 +13,10 @@
  * + textControlValue, for the before/after diff), MetaRecordDrawer.vue (resolveCanComment, for its own
  * header comment-toggle button — the drawer no longer renders field values itself post-S2).
  */
-import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaRowActions, PersonSummary } from '../types'
+import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaFieldPermission, MetaRowActions, PersonSummary } from '../types'
 import { formatFieldDisplay } from './field-display'
+import { isFieldAlwaysReadOnly } from './field-permissions'
+import { isSystemField } from './system-fields'
 
 export interface RecordFieldDisplayContext {
   linkSummariesByField?: Record<string, LinkedRecordSummary[]>
@@ -102,4 +104,46 @@ export function resolveMentionDisplayField(fields: MetaField[] | null | undefine
   const primary = resolvePrimaryField(fields)
   if (primary && (primary.type === 'string' || primary.type === 'longText')) return primary
   return fields?.find((field) => field.type === 'string' || field.type === 'longText')
+}
+
+/**
+ * Record inspector v3 (design 2026-09-05, PR-B1 §3 file list "`canEditField` hoisted"): the per-field
+ * editability predicate MetaRecordFieldsPanel.vue's `canEditField` (moved VERBATIM from
+ * MetaRecordDrawer.vue at W2 S1) and MetaRecordInspector.vue's PR-A `canEditPrimaryTitle` (an
+ * inline copy of the same four clauses, see its own comment) both evaluated — hoisted here so the
+ * title input and the field row can never disagree about whether the same field is editable. Byte-
+ * identical clause set, in the same order: sheet-level `canEdit` ∧ row-level `rowActions.canEdit`
+ * not false ∧ per-field `fieldPermissions[id].readOnly` not true ∧ not a system field ∧ not
+ * always-read-only (B4 defense-in-depth mirror of the server predicate, see field-permissions.ts).
+ * A `null`/`undefined` field is not editable (the fields-panel caller resolved it by id and may miss).
+ */
+export function canEditField(
+  field: MetaField | null | undefined,
+  ctx: {
+    canEdit: boolean
+    rowActions?: MetaRowActions | null
+    fieldPermissions?: Record<string, MetaFieldPermission> | null
+  },
+): boolean {
+  if (!field) return false
+  return ctx.canEdit
+    && ctx.rowActions?.canEdit !== false
+    && ctx.fieldPermissions?.[field.id]?.readOnly !== true
+    && !isSystemField(field)
+    && !isFieldAlwaysReadOnly(field)
+}
+
+/**
+ * Record inspector v3 (design 2026-09-05, PR-B1 §1.3 "Sections"): the workbench-computed field
+ * layout the inspector's details tab renders as two sections. `ordered` = the active view's field
+ * order ∩ layer-2 (property-hidden) ∩ layer-3 (per-subject field permissions) — what the grid shows,
+ * in the order it shows it; `hiddenInView` = every other field the viewer is allowed to see at both
+ * layers but the active view hides (rendered collapsed under `recordHiddenFieldsHeading`). The two
+ * lists are disjoint by construction at the producer (MultitableWorkbench.vue); the consumer
+ * (MetaRecordFieldsPanel.vue) re-applies both visibility layers to each list anyway (mask contract,
+ * negative golden N3) and treats a missing prop as "render the flat `fields` list" (legacy path).
+ */
+export interface MetaRecordInspectorFieldLayout {
+  ordered: MetaField[]
+  hiddenInView: MetaField[]
 }
