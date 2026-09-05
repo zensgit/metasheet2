@@ -41,7 +41,7 @@ pg_dump $env:DATABASE_URL -Fc -f "$backupDir\pre-upgrade-db.dump"
 | 平台管理员(`role:admin` / `integration:admin`) | §3 授权限+命名空间准入;`mvp-persist`;`confirmation-decisions/reconcile` |
 | 客户一线操作员(`stock-prep:operate` **且** `stock-prep:read`) | §4 四步 |
 
-> r7 订正:§2/§3 的 admin API 调用用的 token 由宿主内 `scripts/ops/attendance-window-runner-mint-token.mjs`(复制到 `packages/core-backend/scripts/` 下再跑,`--find-admin` 找已存在的 admin,`--mint --user-id <id> --roles admin --expires-in 3600`,用完删掉)现签,不碰密码;**这枚 token 不带 tenant claim,所有调用都要带 `x-tenant-id: default`**,否则 400 `TENANT_REQUIRED`。
+> r7 订正:§2/§3 的 admin API 调用用的 token 由宿主内 `scripts/ops/attendance-window-runner-mint-token.mjs`(复制到 `packages/core-backend/scripts/` 下再跑,`--find-admin` 找已存在的 admin,`--mint --user-id <id> --roles admin --expires-in 3600 --tenant-id default`,用完删掉)现签,不碰密码;**用 `--tenant-id default` 签发后令牌自带 tenant claim**,`x-tenant-id` 头可以继续带但不再是租户来源;flag 开启后不带 tenant claim 的令牌会被 403。
 | owner | 全程在场 —— 半生产机,考勤/审批是真实在跑的业务数据 |
 
 **客户必须提前给的三件事**
@@ -289,7 +289,7 @@ POST /api/integration/table-actions/plm.stock-preparation.pull-bom.v1/mvp-persis
 
 | 一线念出的码 / 现象 | 意思 | 怎么办 |
 |---|---|---|
-| `OPERATOR_SCOPE_TENANT_REQUIRED` | token 不带租户声明(多 org 用户 / 服务 token),值面路由拒绝按请求头定租户。**页面只显示通用句 + 这个码** | 让账号只属于**一个**活跃 org 后重新登录;**不要**靠 `x-tenant-id` 头绕过 |
+| `OPERATOR_SCOPE_TENANT_REQUIRED` | token 不带租户声明(多 org 用户 / 服务 token),值面路由拒绝按请求头定租户。**页面只显示通用句 + 这个码** | 让账号只属于**一个**活跃 org 后重新登录;**不要**靠 `x-tenant-id` 头绕过。管理员页也可能出现该码,修法是用带 `--tenant-id` 的令牌(见 `attendance-window-runner-mint-token.mjs`) |
 | 空状态「这个项目号在您这里还没有数据。」**且无横幅** | 就是 404 `STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND`,横幅被刻意抑制 | 项目号打错、**或**本租户不拥有绑定表 —— 两者响应逐字节相同(故意不做存在性预言机)。先核号码,再核 §2 的绑定是不是本租户 ensure 出来的 |
 | 空状态多一句「**而拉取数据不是您能做的一步**」 | 账号缺 `stock-prep:operate`,或命名空间准入没开 | 回 §3-1 / §3-2 |
 | **打开页面就 500** | 审计 CHECK 缺 `project_board_read` | 跑 §1-3 那条查询;缺就补 086 迁移。**这是本次最可能踩的雷**,且**不会**降级成友好的 503(脚注 [1]) |

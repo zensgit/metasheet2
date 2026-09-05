@@ -106,7 +106,7 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
 4. **时间线与验收**:停机 14:06:18 → 健康检查 OK 14:08:55(约 2.5 分钟);F22 must-exist 清单 OK,插件 hash 校验 OK(436 个文件),node_modules 泄漏检查 OK;执行的迁移:`079`、`080`、`081`、`082`、`084`、`085`、`086`,以及 `zzzz20260830200000`/`211000`/`220000`/`230000`、`zzzz20260831090000`、`zzzz20260902120000`;audit CHECK 现在列出 `handoff_advance` 和 `project_board_read`;`integration_stock_prep_handoff` 表存在;`attendance_records`/`approval_instances` 行数不变(0/0)。**in-place 脚本不会刷新 `C:\metasheet\BUILD_PROVENANCE.json`**——升级完成后要手动从包根目录把新的 `BUILD_PROVENANCE.json` 拷过去(旧的已存到备份目录,存为 `BUILD_PROVENANCE.r6.json`),否则 Step 3-1 读到的还是旧提交。
 5. **远程执行注意事项**:一次性 `ssh 192.168.1.222 powershell -Command "..."` 遇到引号会出问题;改用 `powershell -NoProfile -EncodedCommand <脚本的 UTF-16LE base64>`(例如用 Node 生成:`Buffer.from(script,'utf16le').toString('base64')`)。
 6. **升级完成后待办(需要 admin Bearer token;preflight 路由在没有 token 时返回 401 UNAUTHORIZED)**:针对**已存在**的 objectId `plm_stock_preparation_sandbox_r6_trial` 重新推导沙箱绑定——调用 `POST /api/integration/stock-preparation/sandbox-target/ensure`(当前绑定的 `sheet_32df959afa3cecfa564e5486` 缺少 #5447 新增的五个部门列 `makeOrBuy`/`procurementDone`/`procurementReplyDate`/`warehouseDone`/`actualArrivalDate`),把返回的 `data.targetBinding` 贴进 `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON`,`pm2 restart metasheet-backend --update-env`,再用 `GET /api/integration/stock-preparation/preflight` 确认 `ready:true`。222 上已有一个做这件事的辅助脚本(token 从文件读取,不会回显):`C:\metasheet\output\releases\incoming\222-rebind-sandbox-target.ps1`。
-7. **管理员 token 怎么来的**:用仓库自带的 `scripts/ops/attendance-window-runner-mint-token.mjs`(需复制到 `C:\metasheet\packages\core-backend\scripts\` 下,`import('pg')` 才能解析)——先 `node <它> --find-admin` 找到已存在的活跃 admin 账号,再 `node <它> --mint --user-id <id> --roles admin --expires-in 3600` 用宿主机自己的 `JWT_SECRET` 现签一份 HS256 token(用完删掉这个脚本副本);全程不碰密码,secret 也不离开宿主机。**这枚 token 不带任何 tenant claim**,所以所有备料相关的 admin 路由调用都必须带上请求头 `x-tenant-id: default`(本次部署的唯一 org id),不带就是 400 `TENANT_REQUIRED`。
+7. **管理员 token 怎么来的**:用仓库自带的 `scripts/ops/attendance-window-runner-mint-token.mjs`(需复制到 `C:\metasheet\packages\core-backend\scripts\` 下,`import('pg')` 才能解析)——先 `node <它> --find-admin` 找到已存在的活跃 admin 账号,再 `node <它> --mint --user-id <id> --roles admin --expires-in 3600 --tenant-id default` 用宿主机自己的 `JWT_SECRET` 现签一份 HS256 token(用完删掉这个脚本副本);全程不碰密码,secret 也不离开宿主机。**用 `--tenant-id default` 签发后,令牌自带 tenant claim**(本次部署的唯一 org id);请求头 `x-tenant-id` 仍可以继续带,但不再是租户来源。等 flag 开启后,不带 tenant claim 的令牌会被备料相关 admin 路由直接 403。
 8. **Step 0-7 订正**:`POST /api/integration/stock-preparation/sandbox-target/ensure` 返回的 `targetBinding` **只有 33 个 TEMPLATE 字段**(20 个 `plm_system` + 13 个人工列,含 #5447 的部门列),**不带** customer pack 的 21 个 `ext_` 列。把它"整段"贴进去会**替换掉**原有 action 配置里的 `fieldIdMap`,`ext_` 列(领料节点/备料日期/毛胚尺寸等)静默变成无法解析。**正确做法是合并**:ensure 返回的映射 + 旧配置里的 `ext_*` 条目(同一张 sheet/objectId ⇒ 旧的物理列 id 依然有效;今天是 33 + 21 = 54)。今天用了一次性 node 脚本做合并(`output/releases/incoming/tools-r7/merge-ext.cjs`);动手前先备份 `app.env`(今天存了两份:`app.env.before-rebind-20260903-143232` 与 `app.env.before-extmerge-20260903063616`)。合并后:`pm2 restart --update-env`,预检确认 `ready:true`、`checks.carryTargetBinding.ownershipState=owned_by_this_project`、没有 `missingHumanFields`。
 9. **#5452(统一 SQL 连接绑定,2026-09-03 已合入)带来一个新 blocker**:`data-source:sql-readonly` 外部系统现在要求 `integration_external_systems.connection_id` 非空;该迁移只回填了 `config` 里带服务端打上的 `dataSourceOwnerId` 那些行——r6 时代的两条(`Customer PLM readonly` `104e9bad`、`Synthetic PLM readonly` `7130b124`)都没有这个标记,于是 source-preflight 报 `CONNECTION_LEGACY_FALLBACK_DENIED`。**修法(走认可路径,带 admin token + `x-tenant-id`)**:先 `GET /api/integration/external-systems/:id`,再用同样的公开字段(`id`/`tenantId`/`name`/`kind`/`role`/`status`/`config`/`capabilities`)加上 `connectionId = config.dataSourceId`(分别是 `customer-plm-test` / `synthetic-plm`)调 `POST /api/integration/external-systems`。用 `select id, connection_id from integration_external_systems` 核验。
 10. **今天 Step 4/5 的结果**:对 `104e9bad` 的 source-binding `POST` 免重启即生效。对客户测试 PLM 的 source-preflight:可达(13 个对象里 12 个通),`BomHeadInfo` 143 行,`BomDetailsInfo` ≥200 行,`projectData.hasProjectNumbers=true`(样例 FileCode 如 `14-2022817`)但 `projectNodeRows=0`(取样范围内没有 `NodeType=2` 的项目节点);结论是 no-go,唯一 blocker 是 `bom_store_signals_conflict`,原因 `volume-undecidable-at-cap`(权威性+结构都指向 BomDetails——也就是当前配置的方案——但 200 行的取样量无法给出量级排序)。**这个僵局没有声明参数可用**(`declaredBridge` 只覆盖 order-module/DesignBom 这条桥,不覆盖这里);operator 按"旧系统口径"规则裁决(`BomHeadInfo`/`BomDetailsInfo` 权威,`DesignBom` 不用),然后继续走 dry-run。
@@ -611,3 +611,240 @@ GET /api/multitable/... (该 sheet 的记录列表,sheetId 取自 Step 0-7 actio
 - 打包脚本 / 包校验脚本(Step 0):`scripts/ops/multitable-onprem-package-build.sh`、`scripts/ops/multitable-onprem-package-verify.sh`
 - 既有部署预检 / 验收脚本(Step 3):`plugins/plugin-integration-core/lib/stock-preparation-preflight.cjs`、`scripts/ops/stock-prep-acceptance-bootstrap.mjs`
 - r6/r7 既有升级执行单(本文延续同一批约定):`r6-upgrade-222-runbook.md`、`r7-build-manifest.md`
+
+---
+
+## 大 BOM 分批路径实测(准备)
+
+> **地位**:这一节只覆盖"把超过 `maxRows` 的合成数据灌进 222 上 `synthetic-plm` 数据源实际读取的那套表"这一步准备工作,不是完整的 dry-run/apply 验收程序——那一段仍然照 §3-§8 的既有步骤走,唯一区别是这次源里的项目号展开后 >10000 行,预期会走 `largeBom: true` 的分批预览分支(`isLargeBomBoundedExpansion`,
+> `plugins/plugin-integration-core/lib/stock-preparation-bom-expansion.cjs:514-518`),而不是 §3 描述的一次性 `expanded` 结果。这条路径此前**从未实测过**——见
+> `plugins/plugin-integration-core/fixtures/stock-preparation-synthetic-sql-source/README.md`
+> "what it deliberately does not cover" 一节:该目录下的合成夹具"tens of rows by design",明确不覆盖
+> `max_rows_exceeded` / large-BOM bounded path。本节的生成器就是补这个洞用的。
+>
+> **222 上没有独立的"合成 PLM 库"**——只读核实过:Postgres 实例上只有 `metasheet` 与 `postgres` 两个库,
+> 合成 PLM 表就在**应用库 `metasheet` 的 `public` schema**里,而且现场存在**两套并存**的同名表:一套带
+> 双引号、保留大小写的 `"DN_PDM_*"`(空表,遗留),一套不带引号、被 Postgres 折成全小写的 `dn_pdm_*`
+> (有数据——7 零件/7 明细/1 订单行/1 项目,`synthetic-plm` 数据源真正读的是这一套)。本生成器输出的
+> `INSERT`/`DELETE` 语句里的表名/列名全部不加引号(与
+> `stock-preparation-synthetic-sql-source/01-schema.sql` 的既有约定一致),会被 Postgres 折成小写,
+> 正好落在**有数据、被实际读取**的那一套,不会误伤空的遗留表。
+>
+> **两个 projectSubtree 桥接列**:222 的客户动作配置带了 OPTIONAL `readPlan.projectSubtree` 块
+> (`dn_pdm_bomheadinfo.path_id` 定位表头挂在哪个文件夹节点、`dn_pdm_pathinfo.parent_obj_id` 折叠文件夹
+> 树找子节点),而这两列此前不在这套 `dn_pdm_*` 表上——第一次子树读就报 PG「字段 "path_id" 不存在」,
+> 升级为全局 `read_failed`,整个大 BOM 作业判 `failed`,13151 行白展开。**222 上已于 2026-09-06 手工
+> `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` 补齐**;本生成器现在也在生成的 SQL 开头无条件带同样的
+> `ADD COLUMN IF NOT EXISTS` 语句(幂等,值默认 NULL,不影响本节其余各段描述的行数/展开结果),这样它
+> 对任何一套预置在这两列之前的旧表都能自愈,不必再手工补。
+
+### 怎么生成
+
+```
+node scripts/ops/stock-preparation-synth-large-bom.mjs \
+  --out /tmp/stock-prep-synth-large-bom.sql \
+  --fanout 25,25,20 \
+  --project SYN-PROJ-LARGE-0001
+```
+
+`--fanout` 省略时就是默认的 `25,25,20`(根件下 25 个一级子件,每个一级子件下 25 个二级子件,每个二级
+子件下 20 个三级子件)。**以"含根件"为主口径**:根件自己的订单行也会被展开器 push 进结果
+(`lib/stock-preparation-bom-expansion.cjs:946-966`),所以真实 dry-run 的
+`evidence.expansion.rowsExpanded` 应为 `1(根件) + 25 + 625 + 12500 = 13151`,这才是要拿去和默认
+`maxRows` 10000 比较、判定是否触发大 BOM 分批的数字。三层子件本身的乘积之和(不含根件那一行)是
+`25 + 625 + 12500 = 13150`,对应 `DN_PDM_BomDetailsInfo` 的行数,是另一个辅助口径,脚本 stdout 里两个
+数字都会打印、并标注各自含义,不会只给一个数混淆。命令结束还会打印每张表的行数以及预期的总数量之和
+(数量在每个父级下按 1→2→3 循环,便于手工核对滚算结果)。
+
+所有由该生成器创建的对象 id(路径 id、订单 id、零件 `OBJ_ID`、BOM id)一律带 `SYNL-` 前缀——与
+`stock-preparation-synthetic-sql-source/` 目录下既有夹具用的 `SYN-` 前缀**刻意不同**,两者可以同时
+灌进同一个库互不干扰、互不清空。生成的 SQL 本身是幂等的:每张表先按 `SYNL-` 前缀 `DELETE`,再
+`INSERT`,同名参数重跑、或换一组 `--fanout`/`--project` 重跑,都会先清掉上一次这个生成器留下的行。
+
+### 怎么灌进应用库(`metasheet`)
+
+合成 PLM 表就在应用库里,不是单独的库——用 app.env 里的 `DATABASE_URL` 直接连应用库执行:
+
+```
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f /tmp/stock-prep-synth-large-bom.sql
+```
+
+（连接串来自现场 app.env,本文不记录其值,也不记录主机名/账号/密码。生成器输出的语句全部不加引号,
+落在 `public.dn_pdm_*` 那一套折成小写、有数据、被 `synthetic-plm` 数据源实际读取的表上,不会碰到
+`"DN_PDM_*"` 那套带引号、空的遗留表。)
+
+### 灌完怎么确认(三条 SELECT count)
+
+```sql
+-- 期望 = 生成时打印的 part 行数(默认 fanout 下是 13151)
+SELECT count(*) FROM DN_PDM_PartLibraryInfo WHERE OBJ_ID LIKE 'SYNL-%';
+
+-- 期望 = 生成时打印的 bomDetail 行数(默认 fanout 下是 13150,即 25+625+12500)
+SELECT count(*) FROM DN_PDM_BomDetailsInfo WHERE bom_pid LIKE 'SYNL-%';
+
+-- 期望 = 1(只有一个项目入口:DN_PDM_PathExAttrInfo.FileCode = 本次 --project 的值)
+SELECT count(*) FROM DN_PDM_PathExAttrInfo WHERE Parent_OBJ_ID LIKE 'SYNL-%';
+```
+
+三条都对得上生成器 stdout 打印的数字,再按 §5-§6 选源、按 §6 对本次 `--project` 的值跑 dry-run。这份数据
+是干净的(不缺件、不歧义、版本号统一),所以预期看到的不是别的守卫,恰好是 `max_rows_exceeded`:
+展开在推到第 10001 行时停止(`pushRow`,`lib/stock-preparation-bom-expansion.cjs:746-753`),顶层
+`status` 变成 `failed`(有一条全局错误即失败,`:977`),`largeBom` 为 `true`
+(`isLargeBomBoundedExpansion`,`:514-518`)、附带 `boundedPreview`,`canApply` 为 `false`、不签发
+`dryRunToken`(有全局错误就不可 apply,`stock-preparation-table-actions.cjs:1251`)——而不是 §3 描述的
+`canApply: true` 干净结果。这正是本节要实测、此前从未跑过的分支。
+
+### 实测后怎么清
+
+生成的 SQL 文件开头有 `-- ==== CLEANUP-START ====` 到 `-- ==== CLEANUP-END ====` 之间的一段 —— 就是
+那 7 条按 `SYNL-%` 前缀过滤的 `DELETE`,单独摘出来用同一个 `DATABASE_URL` 对应用库跑一遍即可清空这次
+生成的全部行,不影响 `stock-preparation-synthetic-sql-source/` 目录下 `SYN-` 前缀的既有夹具数据。也可以
+直接用同一份文件重新跑一次完整生成命令(脚本本身先删后插,天然幂等),效果等价。
+
+---
+
+## 定时拉取(系统级)
+
+**背景**:「从 PLM 拉取」目前只能由数据源属主或平台管理员在页面上点(`DataSourceManager.assertAccess`
+只放行这两类身份),一线操作员点不了 §7.2b 的 dry-run/apply 按钮。产品内也没有能驱动这两个路由的调度
+器——整个插件里字符串 `'cron'` 只在 `pipelines.cjs` 的词表里出现一次,没有任何代码产出
+`triggeredBy: 'cron'`;平台侧的 `automation-scheduler.ts` 确有 cron + leader lock,但它的动作类型表
+(`automation-actions.ts`)里没有「调用插件路由」这一项。给它加一项是核心改动,不是运维脚本能做的事,
+也不在这次改动范围内。
+
+**因此这里采用系统级定时任务(Windows 任务计划程序 / Linux cron)+ 一个运维脚本**,按人工点击 dry-run
+→ apply 同样的两枪 HTTP 调用,只是换成一个租户绑定的管理员服务账号令牌在打:
+
+```
+scripts/ops/stock-preparation-scheduled-pull.mjs
+```
+
+用法与环境变量见脚本自带的 `--help`;这里只给注册方式与两条纪律。
+
+### 令牌:必须是租户绑定的管理员服务账号,不能是无租户平台管理员
+
+`requireTableActionAccess`(`plugins/plugin-integration-core/lib/http-routes.cjs`)在调用者持有该动作
+的 legacy `read`/`write`/`admin` 权限时**直接放行**,不经过 `resolveOperatorValueScope` 的租户校验;
+随后 `resolveTenantId` 对没有自带 `tenantId` 声明的主体(即「无租户平台管理员」)会直接采信请求里的
+`tenantId` 查询参数 / `x-tenant-id` 请求头。一个用无租户平台管理员身份签发、又被脚本自己控制的
+`tenantId=`/`x-tenant-id` 决定目标租户的令牌,等于把「任意租户可读可写」交给一个没有人盯着的定时任务
+——这正是 operator-scope 那批改动要关掉的跨租户洞,被一个 cron job 重新打开。
+
+所以:
+- **签发令牌时,必须用一个绑定到目标租户的管理员服务账号**,不能用平台级、不挂任何租户的管理员账号。
+- 脚本自己也会做一道兜底检查:启动时**解码(不验签)** `MS_TOKEN` 的 JWT payload,只看
+  `tenantId` 这一个声明**是否存在**且非空——存在才继续,不存在就非零退出并说明原因,除非显式传
+  `--allow-tenantless`(默认关,不建议使用)。这道检查只读这一个字段的存在性,从不打印它的值,更不
+  是身份验证的替代品——它防的是「拿错了令牌种类」这一类配置失误,不是伪造令牌。
+
+### 建议:第一波只定时 dry-run,apply 由人点
+
+无人值守的 `apply` 会真的把行写进沙箱表(`plm_stock_preparation_sandbox*`,或已配置生产策略时更远)。
+PLM 那边删了一行,对应备料行就会被置为无效(`missingFromPlmPolicy` 恒为 `mark_inactive`)——人工填的
+列会保留,但备料状态会在没人知情的情况下变。这不是 bug,是语义,但不该在无人盯着的时候发生。所以:
+
+- **定时任务只跑 dry-run**(不传 `--apply`),把"有变化"当提醒;`apply` 由人在看到 dry-run 结果后,
+  自己在交互环境里手动加 `--apply` 跑一次。
+- 若某个项目 dry-run 报 `large_bom_bounded`,脚本会记录并跳过——那条路径要靠人一步步 POST 推进后台
+  大 BOM 任务(`http-routes.cjs` 里的 large-BOM job 路由),定时任务不会替你重试。
+- 若确有项目需要定时 `apply`(例如已经稳定运行、owner 认可无人值守写沙箱表的项目),那是超出这次改
+  动默认姿态的一个更高风险的选择,请先与 owner 过一遍上面这段风险再决定要不要传 `--apply`。
+
+### Windows:任务计划程序注册示例
+
+日常运行不要在 `schtasks` 命令行里明文写令牌——用一个只有运行该任务的服务账号能读、其它账号读不到的
+包装脚本,由它去你们自己的密钥管理系统里取令牌、设好环境变量,再调用 node。下面是骨架(路径、账号、
+密钥来源全部替换成你们自己环境里的值):
+
+```powershell
+# C:\ops\stock-prep-pull\run.ps1 —— 客户环境自备,不进本仓库,请把这个文件的读权限锁给运行任务的账号
+$env:MS_API = 'http://127.0.0.1:8900'
+$env:MS_TENANT_ID = '<target-tenant-id>'
+$env:MS_PROJECT_NOS = '<project-no-1>,<project-no-2>'
+# MS_TOKEN 从你们自己的密钥管理系统 / 凭据保管库读取,不要明文写在这个文件里,
+# 也不要把它落到一个所有人都能读的文件——下面这行只是示例,换成你们自己的取密方式:
+$env:MS_TOKEN = (Get-Secret -Name 'metasheet-stock-prep-pull-token' -AsPlainText)
+
+node "C:\path\to\metasheet\scripts\ops\stock-preparation-scheduled-pull.mjs"
+exit $LASTEXITCODE
+```
+
+注册一个每日 06:00 运行的任务,以一个专门的、权限最小化的服务账号执行(不是运行 222 上其它服务的那个
+账号,也不是任何平台管理员账号):
+
+```
+schtasks /Create ^
+  /TN "MetaSheet-StockPrep-ScheduledPull" ^
+  /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\ops\stock-prep-pull\run.ps1" ^
+  /SC DAILY /ST 06:00 ^
+  /RU "<service-account>" /RP * ^
+  /RL LIMITED
+```
+
+`/RU` 这里指的是**运行这个 Windows 任务的操作系统账号**,和 `MS_TOKEN` 所属的 MetaSheet 租户绑定管理
+员服务账号是两回事——不要把两者混为一谈,也不要图省事让同一个高权限账号兼两个身份。
+
+### Linux:cron 一行示例
+
+同样不要把令牌明文写进 crontab(`crontab -l` 任何能登录这台机器的人都能看)。令牌放一个只有运行 cron
+的账号能读的文件(`chmod 600`,属主是那个账号),cron 行里现取:
+
+```cron
+0 6 * * * MS_API=http://127.0.0.1:8900 MS_TENANT_ID=<target-tenant-id> MS_PROJECT_NOS=<project-no-1>,<project-no-2> MS_TOKEN="$(cat /etc/metasheet/stock-prep-pull.token)" node /opt/metasheet/scripts/ops/stock-preparation-scheduled-pull.mjs >> /var/log/metasheet/stock-prep-pull.log 2>&1
+```
+
+### 令牌的保管与轮换:客户运维职责,本仓库不提供任何默认值
+
+上面两个例子里的密钥管理系统调用、令牌文件路径、`<service-account>`、`<target-tenant-id>` 全部是占位
+符——本仓库不内置任何令牌、任何默认密钥来源、任何具体的密钥管理系统集成。谁签发这个服务账号令牌、存
+在哪里、多久轮换一次、泄漏了怎么办,是客户运维团队自己的决定,需要 owner 与客户运维一起过一遍再定,
+不是这次改动能替你们决定的事。
+
+**已知限制,写在这里供 owner 与客户运维评估**:
+- 每次 dry-run 都会在插件的 KV 存储里留一条一次性 token 记录(`integration:table-action:dry-run-token:
+  <token>`),过期靠 30 分钟 TTL,但目前只在被 `apply` 消费时才删除——纯 dry-run 的定时任务不会消费
+  它。高频率定时 dry-run(例如每 5 分钟一次)会让这类记录持续累积,目前没有清扫器。按日调度(如上面
+  06:00 的示例)量级很小,但若要调得更频繁,请先跟 owner 确认这条清扫缺口是否需要先补上。
+- 产品内目前没有专门记录"这次定时拉取本身"的审计动作,失败次数、失败原因只能从这个脚本自己的日志
+  (`>> ... 2>&1` 重定向到的文件,或 Windows 任务计划程序自己的历史记录)里查。
+- **项目看板上的字段叫"最近变更(来自 PLM)",不是"上次同步"**,这个区别是故意的:该时间戳只在某一
+  次拉取真的改了行(新增/更新/失效)时才更新——`lastPlmRefreshAt` 只由冲突规划器的 `runPatch` 写入
+  (`stock-preparation-conflict-planner.cjs`,只挂在 add/update/inactive 三种决策上),行没变化走的
+  `makeSkipDecision` 完全不碰这一列。也就是说:一个 BOM 已经稳定一周、这一周每天都定时 dry-run 成
+  功、每天都报"没有变化",这一列显示的仍然是一周前那次真正改了行的时间——**不能把它当成"定时任务
+  是否还在正常跑"的证据**,更不能当成失败次数的替代品。真正的"上一次拉取(不论是否有变化)"需要一
+  条专门的审计动作,这次改动没有做(owner 待决策,是否值得为此新增一条审计动作 + 数据库约束迁移)。
+
+---
+
+## flag 开启记录(待执行)
+
+`MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED=true` —— 对**无租户声明的令牌**一律 403。默认关,本窗口**不开**。
+开启的完整前置顺序、校验方式与回滚,写在 `customer-delivery-guide-20260904.md` §5-5;这里只留执行记录,
+开的那天逐格填。
+
+**先看清楚它管多大范围**:门装在 integration 插件的三个共享入口上(`requireTableActionAccess` 的 legacy
+分支、`resolveTenantId`、`resolveAuthUserTenantId`),所以它管的**不只是备料**——同样走这三个入口的外接系统、
+数据源、模板、管道等 integration 路由也一并要求租户声明。222 只跑备料线,所以这个范围可接受;**如果这台机器
+以后还跑别的 integration 能力,这个 flag 就应当保持关闭**。
+
+**开之前必须四条全绿(顺序不可换)**:
+
+| # | 前置 | 校验方式(填"证据"列时照这个做) | 状态 | 执行人 / 时间 | 证据 |
+|---|---|---|---|---|---|
+| 1 | `user_orgs` 补齐:每个在用账号恰好 1 条活跃行(0 条与 ≥2 条都签不出租户声明) | 逐账号查 `user_orgs`,行数必须恰好为 1 | ☐ 待执行 | | |
+| 2 | 运维/脚本令牌用 `--tenant-id` 重新换发 | 按本文《2026-09-03 r7 实际执行记录与订正》第 7 条:`node <mint 脚本> --mint --user-id <id> --roles admin --expires-in 3600 --tenant-id default`;把新令牌的 payload 解开,必须有非空租户字段 | ☐ 待执行 | | |
+| 3 | 全员重新登录(旧令牌不会自己长出声明) | 抽查:把重登后拿到的令牌 payload 解开(JWT 中段 base64),必须有非空租户字段。**不要用"调个接口通不通"来验**——flag 还没写入时,有声明和没声明的令牌都会通,那是一次空校验 | ☐ 待执行 | | |
+| 4 | 写入 env、`pm2 restart metasheet-backend --update-env` | 两条都要:①`pm2 env 0` 里看到 `MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED=true`;②用一个**没有**租户声明的旧令牌打 `GET /api/integration/stock-preparation/confirmation-decisions/readiness`,得到 403 `OPERATOR_SCOPE_TENANT_REQUIRED` | ☐ 待执行 | | |
+
+**开完当场验两条**(两条都过才算开成功):
+
+| # | 验证 | 期望 | 实测 |
+|---|---|---|---|
+| A | 拿一个**没有**租户声明的旧令牌调 `GET /api/integration/stock-preparation/confirmation-decisions/readiness` | 403 `OPERATOR_SCOPE_TENANT_REQUIRED` | |
+| B | 拿一个 `--tenant-id` 新签的令牌调同一个接口 | 200(或该账号今天本来的结果) | |
+
+**升级后(不论是否顺带开 flag)按此顺序再跑两个脚本,不要跳步**:先 `claim-flag-probe.cjs`(单次探测,判定 flag 是否真的生效:无声明令牌应 403,带声明令牌应 200),确认 flag 状态符合预期后,再跑 `w4-regression-222.ps1` 做管理员链 + 操作员链的全量回归,并与升级前保存的基线日志逐行 diff(去掉时间戳/UUID/时间字段后应为空)——2026-09-06 在 222 上就是按这个顺序验证的(先探针后回归),不要反过来,回归脚本跑得慢,先用探针快速判定 flag 本身对不对,能省一次无谓的完整回归。
+
+**回滚**(任何一条不过就回滚,不要就地调):删掉 env 里那一行 → `pm2 restart metasheet-backend --update-env`。
+没有迁移、没有落库状态,回滚即刻恢复关闭前的行为。

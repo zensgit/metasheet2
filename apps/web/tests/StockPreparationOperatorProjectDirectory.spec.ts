@@ -73,6 +73,8 @@ import {
 } from '../src/services/integration/stockPreparation/workbenchAccess'
 import {
   STOCK_PREP_DIRECTORY_EMPTY_PLAIN,
+  STOCK_PREP_ERROR_GENERIC,
+  STOCK_PREP_ERROR_PLAIN,
   stockPrepDirectoryEmptyState,
 } from '../src/services/integration/stockPreparation/plainLanguage'
 
@@ -144,6 +146,13 @@ function routeFetch(options: {
   directory?: Record<string, unknown> | null
   /** A named server refusal for the directory read, e.g. the tenantless-principal 403. */
   directoryError?: { status: number; code: string }
+  /**
+   * A named server refusal for the QUEUE read. Separate from `directoryError` on purpose: the two
+   * reads are refused for different reasons and MUST be narrated differently — the directory load
+   * is unprompted, so a by-design refusal there is silent, whereas the queue read is something the
+   * person just asked for, so a refusal there owes them a sentence. See W-13.
+   */
+  queueError?: { status: number; code: string }
   queueRows?: unknown[]
 } = {}) {
   h.apiFetch.mockImplementation(async (url: string) => {
@@ -158,6 +167,12 @@ function routeFetch(options: {
       return new Response(JSON.stringify({ ok: true, data: options.directory ?? directoryPayload() }), { status: 200 })
     }
     if (String(url).includes(QUEUE_URL)) {
+      if (options.queueError) {
+        return new Response(
+          JSON.stringify({ ok: false, error: { code: options.queueError.code, message: 'refused' } }),
+          { status: options.queueError.status },
+        )
+      }
       return new Response(JSON.stringify({ ok: true, data: queuePayload(options.queueRows ?? []) }), { status: 200 })
     }
     return new Response(JSON.stringify({ ok: true, data: {} }), { status: 200 })
@@ -447,6 +462,68 @@ describe('一线看得见自己工厂的项目 — the operator project director
     const root = mountView()
     await flush()
     expect(q(root, 'stock-prep-confirmation-error')).not.toBeNull()
+  })
+
+  // W-13 — W4: the tenant-claim hard door, as the person at the screen experiences it.
+  //
+  // Server side, `MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED` makes the whole tenant-facing surface
+  // refuse a principal whose tenant was CARRIED in an `x-tenant-id` header rather than PROVEN by the
+  // verified token. On the 222 deployment that is, on day one, every administrator — which is why
+  // the rollout order re-issues tokens before the flag is set.
+  //
+  // The refusal must not arrive as 「这一步没有保存成功」. That generic is a WRITE sentence, it is
+  // wrong about a read, and worst of all it invites a retry that will never work: a token without a
+  // tenant claim will still have none on the next click. The dedicated row says the account is the
+  // reason and that waiting is not the fix, and this pins that the page actually reaches for it.
+  //
+  // NOTE THE CONTRAST WITH W-12, which is the same code on the same page: on the UNPROMPTED directory
+  // load it is deliberately silent, because narrating an unasked-for refusal is noise. Here the person
+  // just pressed 刷新列表, so silence would be a lie about what happened to their request.
+  // ALL THREE, not just the first. The door raises three codes and they have three different
+  // remedies — sign in with a factory account / sign in again / switch back to your own factory. Two
+  // of them had no row in the table at all and fell through to the generic until W4 added them, so
+  // the loop is the guard: a fourth refusal added without copy fails here rather than in front of an
+  // operator. `STOCK_PREP_ERROR_PLAIN[code]` is read from the SHIPPED table, so this cannot pass by
+  // agreeing with a sentence retyped in the test.
+  const TENANT_DOOR_CODES = [
+    'OPERATOR_SCOPE_TENANT_REQUIRED',
+    'OPERATOR_SCOPE_TENANT_CONTRADICTED',
+    'OPERATOR_SCOPE_TENANT_MISMATCH',
+  ] as const
+
+  it.each([...TENANT_DOOR_CODES])(
+    'W-13 an admin refused by the tenant-claim door with %s reads the sentence written for it, not the write generic',
+    async (code) => {
+      h.roles = ['admin']
+      h.permissions = ['integration:admin']
+      routeFetch({ queueError: { status: 403, code } })
+      const root = mountView()
+      await flush()
+      ;(q(root, 'stock-prep-confirmation-queue-refresh') as HTMLButtonElement).click()
+      await flush()
+
+      const line = q(root, 'stock-prep-confirmation-error')
+      expect(line, 'a refusal of something the person just asked for is always reported').not.toBeNull()
+      const text = line!.textContent ?? ''
+      const plain = STOCK_PREP_ERROR_PLAIN[code]
+      expect(plain, `${code} must have a row in the shipped plain-language table`).toBeTruthy()
+      expect(plain.zh, 'and it must not be empty').not.toBe('')
+      expect(text, 'the dedicated sentence, read out of the shipped table rather than retyped here')
+        .toContain(plain.zh)
+      expect(text, 'and NOT the write-flavoured generic, which would be wrong twice over')
+        .not.toContain(STOCK_PREP_ERROR_GENERIC.zh)
+      expect(text, 'the enum stays on screen — it is what a person quotes when they ask us for help')
+        .toContain(code)
+    },
+  )
+
+  it('W-13d the three door codes say three DIFFERENT things — one shared sentence would be no copy at all', () => {
+    const sentences = TENANT_DOOR_CODES.map((code) => STOCK_PREP_ERROR_PLAIN[code].zh)
+    expect(new Set(sentences).size, '每条拒绝有各自的补救方式,句子就必须各不相同').toBe(TENANT_DOOR_CODES.length)
+    for (const code of TENANT_DOOR_CODES) {
+      expect(STOCK_PREP_ERROR_PLAIN[code].en, `${code} needs the English half too`).not.toBe('')
+      expect(STOCK_PREP_ERROR_PLAIN[code].en).not.toBe(STOCK_PREP_ERROR_GENERIC.en)
+    }
   })
 
   it('W-09 a degraded payload degrades conservatively — no crash, and never a false “all clear”', async () => {

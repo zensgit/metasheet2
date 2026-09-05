@@ -17,7 +17,10 @@ function publicTargetView(system) {
 const HTTP_ROUTES_PATH = path.join(__dirname, '..', 'lib', 'http-routes.cjs')
 const httpRoutes = require(HTTP_ROUTES_PATH)
 const { MAX_LIST_LIMIT } = httpRoutes
-const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
+const {
+  LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS,
+  PLM_STOCK_PREPARATION_ACTION_ID,
+} = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
 const { validateReadSourceConfig } = require(path.join(__dirname, '..', 'lib', 'read-source-config.cjs'))
 const { READ_SMOKE_LIST_REQUEST_MARKER } = require(path.join(__dirname, '..', 'lib', 'read-smoke-marker.cjs'))
@@ -5394,6 +5397,22 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
   assert.equal(res.body.data.authoritative, true)
   assert.equal(res.body.data.artifactRevisionPresent, true)
   assert.equal(res.body.data.progress.rowsExpanded, 1)
+  // THE BACKGROUND LANE GOT ITS OWN CAPS. This action names no caps, so the
+  // background numbers are the expander's interactive defaults (10000 rows /
+  // 100 pages) times the background multipliers — NOT the interactive defaults
+  // themselves, which is what shipped before and made every project large
+  // enough to need this lane fail inside it.
+  assert.deepEqual(res.body.data.budgets, {
+    maxRows: 10000 * LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS.maxRows,
+    maxPages: 100 * LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS.maxPages,
+    // `null`, not 0: this action bounds neither reads nor elapsed time
+    // interactively, so the background lane inherits "no bound" — and a 0 here
+    // would read as "the bound is zero".
+    maxReadCount: null,
+    maxElapsedMs: null,
+    maxDepth: 20,
+    maxArtifactChunks: 1,
+  }, 'the run route hands the worker the background caps, not the interactive ones')
   assert.equal(JSON.stringify(res.body.data).includes('P-001'), false, 'run response is values-free')
   assert.equal(JSON.stringify(res.body.data).includes('A-001'), false, 'run response hides component code')
   const adapterCall = findCalls(calls, 'createAdapter').at(-1)

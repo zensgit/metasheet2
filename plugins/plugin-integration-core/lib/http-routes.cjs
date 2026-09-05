@@ -403,6 +403,7 @@ const {
   createStockPreparationTableActionRegistry,
   createTargetScopedRecordsApi,
   dryRunStockPreparationAction,
+  largeBomBackgroundExpansionCaps,
   prepareStockPreparationConfirmationDecisions,
   prepareStockPreparationMvpSnapshot,
   normalizeActionParameters,
@@ -988,7 +989,14 @@ async function requireTableActionAccess(req, actionId, legacyGate, tenantPrincip
   if (!user) {
     throw new HttpRouteError(401, 'UNAUTHENTICATED', 'Authentication required')
   }
-  if (hasPermission(user, legacyGate)) return user
+  if (hasPermission(user, legacyGate)) {
+    // W4 P1. The legacy branch returns BEFORE the operator scope, so it is the one door on this
+    // function that a header-filled tenant could still walk through. The guard is a no-op unless
+    // MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED is on; when it is on, the `integration:*` tiers owe
+    // the same proof of provenance the operator branch below already owes.
+    assertVerifiedTenantClaim(req)
+    return user
+  }
   if (!operatorMayRunStockPrepPull(listUserPermissions(user), actionId)) {
     throw new HttpRouteError(403, 'FORBIDDEN', 'Insufficient integration permissions')
   }
@@ -1028,6 +1036,12 @@ function resolveTenantId(req, input = {}) {
       throw new HttpRouteError(403, 'TENANT_MISMATCH', 'tenant scope mismatch')
     }
   }
+  // W4 P2. Everything above compares the request's tenant against `user.tenantId` — which the auth
+  // middleware fills from the `x-tenant-id` HEADER when the verified token carries no tenant claim,
+  // so on a claimless deployment those comparisons can be header against header. This adds the one
+  // thing they cannot ask: was the tenant PROVEN. No-op unless the flag is on, and placed AFTER the
+  // existing checks so that nothing above it changes order or verdict when it is off.
+  assertVerifiedTenantClaim(req, tenantId)
   return tenantId
 }
 
@@ -1063,6 +1077,11 @@ function resolveAuthUserTenantId(req) {
   if (!tenantId) {
     throw new HttpRouteError(400, 'TENANT_REQUIRED', 'authenticated tenant context is required')
   }
+  // W4 P3. This helper's own header says `user.tenantId` is the authenticated principal — and the
+  // comment two functions down says plainly that it is not, because the middleware fills it from the
+  // `x-tenant-id` header on a claimless token. This is where the two are reconciled: with the flag on,
+  // the field must agree with the verified claim or the request ends here. No-op when the flag is off.
+  assertVerifiedTenantClaim(req, tenantId)
   return tenantId
 }
 
@@ -1133,6 +1152,93 @@ function resolveVerifiedClaimTenantId(req, input = {}) {
   return claimed
 }
 
+// W4 — THE TENANT-CLAIM HARD DOOR. Staged behind a flag, default OFF.
+//
+// WHAT IT IS. `resolveVerifiedClaimTenantId` above is the same posture applied to ONE route (the
+// customer-pack install, because it deletes). This is that posture made available to the WHOLE
+// tenant-facing surface of this file, as a guard rather than as a resolver: it returns nothing and
+// changes no tenant derivation — it only refuses a request whose tenant cannot be traced to the
+// VERIFIED token payload. Every route keeps the resolver it already had; this either lets the
+// request through unchanged or ends it with a 403.
+//
+// WHY A SEPARATE FUNCTION AND NOT A CALL TO `requireAccess`. It answers a different question.
+// `requireAccess` asks "may this principal call this route" and knows nothing about tenancy; this
+// asks "is this principal's tenant PROVEN, or merely carried". Writing it as a `requireAccess(req,
+// …)` call would also put a non-permission token into the gate-expression scan that
+// stock-preparation-permission-matrix's M-08 pins, which is precisely the kind of vocabulary drift
+// that check exists to catch.
+//
+// WHY NOT `resolveOperatorValueScope`. That module's FIRST check is `holdsOperatorValueTier`, so
+// routing the legacy `integration:read` / `integration:write` tiers through it would refuse them for
+// lacking a stock-prep tier they were never asked to hold — a permission change wearing the costume
+// of a tenancy one. And it would not stop there: it requires the host membership seam, so every
+// deployment without a `tenantPrincipalDirectory` would start answering 501 on routes that have
+// nothing to do with the operator plane. This guard therefore checks ONE thing, the provenance of
+// the tenant, and leaves both permission and membership exactly where they are today.
+//
+// WHY NOT `verifyTenantMembership`. Membership is the SECOND rung and it needs the host seam this
+// plugin cannot assume (501 OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE when absent). The login side
+// already proves membership before it mints a tenant claim (`AuthService.resolveSessionTenantId`
+// checks `user_orgs`), so a VERIFIED claim is a membership statement the host made at sign-in. What
+// this guard adds is that the statement must come from the signed payload rather than from a
+// request header the caller wrote.
+//
+// WHAT IT DOES NOT PROMISE. It is not a defence against someone holding the signing secret: a
+// hand-minted token can carry any tenant claim it likes and this guard will believe it, exactly as
+// every other verified-claim check in this file does. The guarantee is narrower and stateable: on a
+// deployment with this flag on, the tenant a route acts under came from the VERIFIED TOKEN PAYLOAD,
+// or from a tenant the HOST has vouched the principal belongs to (the operator scope's membership
+// check) — and never from the `x-tenant-id` REQUEST HEADER.
+//
+// THAT SECOND CLAUSE IS NOT A HEDGE, IT IS THE OTHER HALF OF THE SURFACE. The seven routes already
+// on `resolveOperatorValueScope` admit a principal that has a tenant of its own and no verified
+// claim, PROVIDED the host says the pairing is real. That is deliberate (#5445: on a claimless
+// deployment the membership check is what makes the pairing safe), this flag does not change it, and
+// stock-preparation-permission-matrix's M-11 pins that it does not — it asserts the armed/disarmed
+// DIFFERENCE is exactly the helper-plane capabilities and nothing else. Writing the guarantee as
+// "the claim or nothing" would describe a stricter system than the one that ships.
+//
+// THE VOCABULARY IS BORROWED, DELIBERATELY. These are the operator-scope codes
+// (stock-preparation-operator-scope.cjs), not new ones: the front end already has a plain-language
+// sentence for OPERATOR_SCOPE_TENANT_REQUIRED, the rehearsal troubleshooting card already teaches
+// them, and the pull-gate suite already classifies them as gate refusals. A fourth spelling of the
+// same refusal would have needed all three taught again for no gain.
+//
+// The refusals carry a code and a fixed English sentence and NOTHING else — in particular no tenant
+// id, neither the claimed one nor the carried one. A refusal that echoed both would tell an
+// unauthorised caller which two tenants it had just been caught between.
+//
+// @param {object} req
+// @param {string} [resolvedTenantId] the tenant the route's own resolver arrived at, when there is
+//        one. Passing it turns the guard into an agreement check as well; omitting it (the
+//        table-action legacy branch, which resolves its tenant later) checks provenance only.
+function assertVerifiedTenantClaim(req, resolvedTenantId) {
+  // OFF is the default and OFF must be a no-op — see the flag's own comment. Checked HERE, once, so
+  // that the three call sites cannot drift into disagreeing about when the door is shut.
+  if (!stockPreparationTenantClaimRequired()) return
+  const claimed = typeof req.authenticatedTenantId === 'string' ? req.authenticatedTenantId.trim() : ''
+  if (!claimed) {
+    throw new HttpRouteError(
+      403,
+      'OPERATOR_SCOPE_TENANT_REQUIRED',
+      'this deployment requires a tenant claim in the verified token; a request header cannot supply one',
+    )
+  }
+  const user = getUser(req)
+  const carried = typeof (user && user.tenantId) === 'string' ? user.tenantId.trim() : ''
+  if (carried && carried !== claimed) {
+    throw new HttpRouteError(
+      403,
+      'OPERATOR_SCOPE_TENANT_CONTRADICTED',
+      'the carried tenant contradicts the verified tenant claim',
+    )
+  }
+  const resolved = typeof resolvedTenantId === 'string' ? resolvedTenantId.trim() : ''
+  if (resolved && resolved !== claimed) {
+    throw new HttpRouteError(403, 'OPERATOR_SCOPE_TENANT_MISMATCH', 'tenant scope mismatch')
+  }
+}
+
 function resolveWorkspaceId(req, input = {}) {
   return firstString(input.workspaceId, req.query && req.query.workspaceId, req.params && req.params.workspaceId)
 }
@@ -1180,6 +1286,30 @@ function resolveIntegrationStagingProjectId(tenantId, requestedProjectId) {
 // keeps the source-run read-only; on wires its intake into T2 persist within the same request.
 function stockPreparationErpAutoPersistEnabled() {
   return String(process.env.MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED ?? '').trim().toLowerCase() === 'true'
+}
+
+// W4: the tenant-claim hard door (see `assertVerifiedTenantClaim`). Default OFF, same idiom as every
+// other MULTITABLE_ gate — truthy ONLY when the env var is exactly 'true' (trimmed, case-insensitive).
+//
+// IT IS OFF BY DEFAULT BECAUSE TURNING IT ON IS A DEPLOYMENT EVENT, NOT A CODE ONE. On a deployment
+// whose tokens carry no tenant claim — which is every deployment that ever relied on `x-tenant-id`,
+// including the 222 ops runner before it learned `--tenant-id` — flipping this refuses the entire
+// tenant-facing surface at once. The order that makes it safe is written down in
+// docs/development/takeover-beiliao-20260821/customer-delivery-guide-20260904.md §5-5: fill `user_orgs`
+// so every account has exactly one active row, re-issue tokens (`--tenant-id` for the ops runner),
+// have everyone sign in again so their tokens carry the claim, and only then set this. Rolling back
+// is deleting the line and restarting; nothing persists.
+//
+// ONE EXCEPTION TO "OFF CHANGES NOTHING", NAMED HERE SO NOBODY HAS TO DISCOVER IT. The PR that added
+// this flag also moved `stockPreparationConfirmationDecisionsConfirm` from `resolveAuthUserTenantId`
+// to `resolveOperatorValueScope` (F3). That change is UNCONDITIONAL — it is a fix, not a staged
+// narrowing, and turning this flag off does not restore the old derivation. It is strictly stricter
+// on that one route (a contradicting header 403s, a tenantless principal 403s, a deployment with no
+// host membership seam 501s) and it is the write half of a read that was converted in #5445, so the
+// two halves of one surface finally agree about whose queue is being confirmed. Everything the flag
+// itself gates is a no-op when this returns false.
+function stockPreparationTenantClaimRequired() {
+  return String(process.env.MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED ?? '').trim().toLowerCase() === 'true'
 }
 
 // T3a OD-2: with auto-persist ON the ERP source-run has a write side-effect, so an explicit request
@@ -1320,6 +1450,17 @@ const SOURCE_BINDING_CANDIDATE_LIMIT = HUB_OVERVIEW_SYSTEM_LIMIT
 // never whose.
 const VALID_SOURCE_BINDING_BODY_KEYS = new Set(['externalSystemId'])
 
+// `store.get()`'s public wire shape: the 7 columns `stock-preparation-source-binding-store.cjs`'s
+// `rowToPublicBinding` produces. The store may additionally return `matchedWorkspaceId` /
+// `scopeFallback` on a non-null result (its null-workspace scope-fallback), which is resolution
+// metadata for callers that never pass a workspace hint at all — not something this picker screen
+// was built to show. `publicPersistedBinding` is the one seam that decides what crosses the wire.
+function publicPersistedBinding(binding) {
+  if (!binding) return null
+  const { tenantId, workspaceId, actionId, externalSystemId, updatedBy, createdAt, updatedAt } = binding
+  return { tenantId, workspaceId, actionId, externalSystemId, updatedBy, createdAt, updatedAt }
+}
+
 function asPositiveInt(value) {
   if (value === undefined || value === null || value === '') return undefined
   const numeric = Number(value)
@@ -1378,9 +1519,14 @@ function publicRunInput(body = {}) {
   return input
 }
 
-const VALID_TABLE_ACTION_DRY_RUN_BODY_KEYS = new Set(['parameters', 'conflictPolicyReview'])
-// Confirmation-decision reconcile accepts EXACTLY the dry-run inputs: the plan/revision the ledger
-// binds to are recomputed server-side and can never be request-supplied.
+// `includeMissingComponents` (W3a) is an OPT-IN for the one value-bearing key the dry-run response
+// can carry. It is registered here because `normalizeTableActionBody` refuses any key not on this
+// list — but registering it is only half of it: the handler ALSO runs `resolveOperatorValueScope`
+// before honouring it, so the flag buys nothing without operate ∧ a proven tenant. Deliberately NOT
+// added to the reconcile list below: the ledger lane must stay values-free.
+const VALID_TABLE_ACTION_DRY_RUN_BODY_KEYS = new Set(['parameters', 'conflictPolicyReview', 'includeMissingComponents'])
+// Confirmation-decision reconcile accepts EXACTLY the dry-run inputs MINUS the value-bearing opt-in:
+// the plan/revision the ledger binds to are recomputed server-side and can never be request-supplied.
 const VALID_TABLE_ACTION_CONFIRMATION_DECISION_RECONCILE_BODY_KEYS = new Set(['parameters', 'conflictPolicyReview'])
 const VALID_TABLE_ACTION_MVP_PERSIST_BODY_KEYS = new Set(['parameters'])
 const VALID_TABLE_ACTION_APPLY_BODY_KEYS = new Set(['parameters', 'confirm'])
@@ -2619,16 +2765,21 @@ function sandboxTargetRouteError(error) {
   )
 }
 
+// THE BACKGROUND LANE'S OWN CAPS, not the interactive dry-run's. This used to
+// copy `action.maxRows` / `maxPages` / `maxReadCount` / `maxElapsedMs`
+// verbatim, which meant the background job re-hit the very cap that sent the
+// caller here — `max_rows_exceeded`, `authoritative: false`, and the plan route
+// then refusing with LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE. `pageLimit` and
+// `maxDepth` stay interactive on purpose: a page SIZE and the BOM tree's depth
+// are not scale budgets. See `largeBomBackgroundExpansionCaps` in
+// stock-preparation-table-actions.cjs for the precedence and the ceilings.
 function largeBomExpansionOptionsForAction(action = {}) {
   const source = isPlainObject(action.source) ? action.source : {}
   const options = {
     readPlan: source.readPlan,
     pageLimit: action.pageLimit,
-    maxPages: action.maxPages,
-    maxReadCount: action.maxReadCount,
-    maxElapsedMs: action.maxElapsedMs,
     maxDepth: action.maxDepth,
-    maxRows: action.maxRows,
+    ...largeBomBackgroundExpansionCaps(action),
   }
   for (const key of Object.keys(options)) {
     if (options[key] === undefined || options[key] === null || options[key] === '') delete options[key]
@@ -4131,27 +4282,104 @@ function requireStockPreparationAudit() {
    *     is identical; where no owner is stamped there is nothing to delegate to and the request
    *     principal stands. It cannot widen a read to a source the deployment did not bind to this
    *     action — the action's `source.externalSystemId` is deploy-time config, not a request input.
-   *   * it is AUDITED AS A DELEGATION: the run's audit row carries the operator as `actor` and the
-   *     owner as the read `principal`, so "who asked" and "whose credentials answered" are two
-   *     recorded facts rather than one conflated one.
+   *   * the ACTOR is never rewritten. Every audit row this pull writes still carries the requester
+   *     (`actor: requestPrincipal(req)` / `user.id`), and the stored large-BOM job records its
+   *     creator on both `actor` and `principal` at creation time; only the READ identity resolved
+   *     here moves. "Who asked" and "whose credentials answered" stay two separate facts. (The
+   *     dry-run and apply routes write no audit row of their own — see the delegation log below,
+   *     which is the values-free record that a delegation happened at all.)
    *
    * WHAT IT IS NOT. It is not a grant to the operator: they never learn the owner's identity, cannot
    * name it, and cannot point it at anything else. A first-class share on the data source would be a
    * better long-term answer and needs a core change; this is the smallest thing that makes the
    * owner's own ruling — that a floor operator may self-serve the pull — actually true.
+   *
+   * ===========================================================================================
+   * WHY THIS RESOLVES BEFORE THE SYSTEM IS LOADED — the defect that made all of the above INERT
+   * ===========================================================================================
+   *
+   * The first cut of this delegation read `config.dataSourceOwnerId` off an ALREADY-LOADED system
+   * and handed the result to `adapterRegistry.createAdapter`. On the DEFAULT source kind that is
+   * one step too late to matter, and the step it misses is the one that refuses:
+   * `getExternalSystemForAdapter` resolves the canonical/legacy Connection ITSELF, inside the load,
+   * through `connection-resolver` -> the host facade -> `DataSourceManager.assertAccess`. Loading
+   * with the requester's identity therefore threw `CONNECTION_CANONICAL_UNAVAILABLE` (or
+   * `CONNECTION_LEGACY_UNAVAILABLE`) BEFORE any owner stamp was ever read — a 400 for every
+   * non-owner, in BOTH binding shapes, with the delegated principal only ever reaching an adapter
+   * that was never constructed. The suite missed it because its registry stub exposes only
+   * `getExternalSystem` (no connection resolution at all), so it measured the hand-off to
+   * `createAdapter` and nothing under it.
+   *
+   * So the identity is resolved FIRST, from a peek that decrypts nothing and resolves no connection
+   * (`getExternalSystemAdapterConfig`), and then drives BOTH halves — the connection resolution
+   * inside the load AND the adapter — as one value. The peek is scoped to the frozen action id, so
+   * no other table action pays a second row read; it is wrapped fail-open to the request principal,
+   * so a missing/unreadable row still surfaces the SAME error from the SAME load it always did.
    */
-  function resolveTableActionReadPrincipal(req, action, system, storedPrincipal) {
+  async function resolveTableActionReadPrincipal(req, action, sourceScope, storedPrincipal) {
     // The fallback, in order of decreasing authority: an explicitly supplied principal (a STORED
     // job's, which is what keeps a background run from switching data-source scope to whoever
     // triggered it), then the requester.
     const fallback = firstString(storedPrincipal) || requestPrincipal(req)
     const actionId = action && action.actionId ? String(action.actionId) : ''
     if (actionId !== STOCK_PREP_OPERATOR_PULL_ACTION_ID) return fallback
-    const config = system && isPlainObject(system.config) ? system.config : {}
+    const binding = await peekTableActionSourceBinding(sourceScope)
+    const config = binding && isPlainObject(binding.config) ? binding.config : {}
     const bindingOwner = firstString(config.dataSourceOwnerId)
     // The binding owner OVERRIDES even a stored principal, and that is the point: on this one action
     // the read must run as the identity the host will actually authorize, whoever queued the job.
     return bindingOwner || fallback
+  }
+
+  /**
+   * The values-free, credential-free, connection-free look at ONE external system row.
+   *
+   * Preference order is deliberate: `getExternalSystemAdapterConfig` is the accessor built for
+   * guards that must run before a credential reload, and it is the only one that returns the FULL
+   * config without decrypting. `getExternalSystem` is the fallback because its public projection
+   * deletes only each kind's private subtree (`lookupProjection` for `data-source:sql-readonly`)
+   * and keeps the server-owned attribution stamp, so the answer is the same one.
+   *
+   * FAIL-OPEN, ON PURPOSE. Every refusal this can produce — missing row, wrong scope, a registry
+   * that predates the accessor — is re-produced verbatim by the adapter load a few lines later,
+   * under the SAME scope. Swallowing it here keeps the route's error surface byte-identical to
+   * what it was; raising it would move a 404/422 to a new place for no gain.
+   */
+  async function peekTableActionSourceBinding(sourceScope) {
+    const peek = typeof externalSystems.getExternalSystemAdapterConfig === 'function'
+      ? externalSystems.getExternalSystemAdapterConfig.bind(externalSystems)
+      : (typeof externalSystems.getExternalSystem === 'function'
+        ? externalSystems.getExternalSystem.bind(externalSystems)
+        : null)
+    if (!peek) return null
+    try {
+      return await peek(sourceScope)
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * IS THE PULL'S READ-IDENTITY DELEGATION USABLE ON THIS BINDING — the preflight's input.
+   *
+   * A `data-source:*` binding is read through the host facade, which authorizes by strict owner
+   * equality; without a server-held owner stamp there is nothing to delegate to, so every caller
+   * who is not the binder gets a 400 and no message anywhere says why. This turns that into a
+   * named, values-free finding. Every field is a boolean or a word from a closed vocabulary — no
+   * id, no name, no principal.
+   *
+   * `null` means "not applicable": a source kind that carries no data-source binding has no owner
+   * to delegate to and never needed one.
+   */
+  function describeTableActionReadDelegation(binding) {
+    if (!binding || typeof binding.kind !== 'string') return null
+    if (describeConnectorKind(binding.kind).connectionModel !== 'data-source') return null
+    const config = isPlainObject(binding.config) ? binding.config : {}
+    const bindingShape = firstString(binding.connectionId)
+      ? 'canonical'
+      : (firstString(config.dataSourceId) ? 'legacy' : 'unbound')
+    if (firstString(config.dataSourceOwnerId)) return { available: true, bindingShape, reason: null }
+    return { available: false, bindingShape, reason: 'binding_owner_unstamped' }
   }
 
   /**
@@ -4168,14 +4396,68 @@ function requireStockPreparationAudit() {
     throw new HttpRouteError(403, 'LARGE_BOM_JOB_ACTOR_MISMATCH', 'this large-BOM job belongs to another user')
   }
 
+  /**
+   * F3 — the scope-fallback's real consumer.
+   *
+   * `stock-preparation-source-binding-store.cjs`'s `get()` can resolve `action.source.externalSystemId`
+   * via its null-workspace scope fallback: the caller passed NO workspace hint at all, the exact
+   * `workspace_id IS NULL` binding row was absent, and exactly one OTHER workspace's binding row
+   * existed, so that row's `externalSystemId` was used. Fine for the BINDING lookup — but the
+   * external-SYSTEM row that id names can itself live at that other workspace, never at null. Load it
+   * with the SAME null hint the caller carried and `external-systems.cjs`'s `selectScopedRow` will
+   * not widen it — a null hint never falls back to anything (only a non-null hint that misses falls
+   * back to the tenant-wide null row) — so the read 404s with `TABLE_ACTION_SOURCE_INVALID` even
+   * though the binding step just found the source a moment ago.
+   *
+   * The fix: when this caller carries NO workspace hint of its own, ask the binding store again for
+   * the SAME scope. If it says the SAME `externalSystemId` came from that fallback, use its
+   * `matchedWorkspaceId` as the workspace hint for the external-system lookup instead of the caller's
+   * (null) one. That succeeds whichever way the deployment provisioned the row: `selectScopedRow`
+   * matches it directly if it lives at `matchedWorkspaceId`, or (a non-null hint that misses DOES
+   * widen) falls back to the tenant-wide null row if it lives there instead.
+   *
+   * Re-querying the store here is a second read, not a shared one with `applyPersistedSourceBinding`
+   * — deliberately: this function receives the already-resolved `action`, not the binding object, and
+   * changing that contract would let the fallback's two annotation keys leak into
+   * `stock-preparation-table-actions.cjs`'s R-05 "no key outside `source` moves" guarantee. The
+   * `externalSystemId` equality check below guards the (narrow) race where the binding changed
+   * between the two reads: on a mismatch this simply does nothing extra, which is exactly today's
+   * (pre-F3) behaviour — no new failure mode, just the old one, in an already-rare window.
+   */
   async function loadTableActionSourceAdapter(req, action, options = {}) {
     const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
       ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       : externalSystems.getExternalSystem.bind(externalSystems)
     const sourceScope = { id: action.source.externalSystemId }
     if (options.tenantId) sourceScope.tenantId = options.tenantId
-    if (action.source.workspaceId) sourceScope.workspaceId = action.source.workspaceId
-    const system = await loadSystem(scopedAdapterInput(req, sourceScope))
+    if (action.source.workspaceId) {
+      sourceScope.workspaceId = action.source.workspaceId
+    } else if (stockPreparationSourceBinding && typeof stockPreparationSourceBinding.get === 'function' && !resolveWorkspaceId(req, {})) {
+      const fallbackTenantId = options.tenantId || resolveTenantId(req, {})
+      const binding = fallbackTenantId
+        ? await stockPreparationSourceBinding.get({ tenantId: fallbackTenantId, workspaceId: null, actionId: action.actionId })
+        : null
+      if (
+        binding
+        && binding.scopeFallback === 'single_workspace_binding'
+        && binding.externalSystemId === action.source.externalSystemId
+      ) {
+        sourceScope.workspaceId = binding.matchedWorkspaceId
+      }
+    }
+    // ORDER, and all four steps matter: sourceScope -> F3 workspace hint (above) -> the delegated
+    // identity (here) -> ONE real load (below). The peek must run AFTER the F3 hint is settled, so
+    // that the row it reads the owner stamp off is the SAME row the load will resolve; and it must
+    // run BEFORE the load, because `getExternalSystemForAdapter` resolves the bound Connection under
+    // whatever principal it is handed — deciding the identity after the load would decide it after
+    // the refusal. See resolveTableActionReadPrincipal.
+    const principal = await resolveTableActionReadPrincipal(
+      req,
+      action,
+      scopedInput(req, sourceScope),
+      Object.prototype.hasOwnProperty.call(options, 'principal') ? options.principal : null,
+    )
+    const system = await loadSystem(scopedAdapterInput(req, sourceScope, principal))
     if (options.requireActive === true && (!system || system.status !== 'active')) {
       throw new HttpRouteError(409, 'TABLE_ACTION_SOURCE_NOT_ACTIVE', 'configured table action source is not active')
     }
@@ -4186,12 +4468,15 @@ function requireStockPreparationAudit() {
         actualKind: system && system.kind,
       })
     }
-    const principal = resolveTableActionReadPrincipal(
-      req,
-      action,
-      system,
-      Object.prototype.hasOwnProperty.call(options, 'principal') ? options.principal : null,
-    )
+    // The delegation, recorded. VALUES-FREE by construction: a boolean and the frozen action id,
+    // never the operator's id and never the owner's — the point of the delegation is that the
+    // caller does not learn who the owner is, and a log line that named them would undo it.
+    if (principal !== requestPrincipal(req) && routeLogger && typeof routeLogger.info === 'function') {
+      routeLogger.info('table action source read runs as the server-held binding owner', {
+        actionId: action.actionId,
+        delegated: true,
+      })
+    }
     // W-5: forwards the B2a authorization stanza the caller already computed (dormant/unauthorized
     // omits it entirely — no key at all, not even `undefined` — so a factory that doesn't know this
     // dep sees exactly the same `deps` object it always has). Only `data-source:sql-readonly`
@@ -5422,8 +5707,52 @@ function requireStockPreparationAudit() {
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
       const body = normalizeTableActionBody(requestBody(req))
+      /*
+       * W3a — THE OPT-IN FOR THE MISSING-COMPONENT LIST, AND WHY IT NEEDS ITS OWN GATE.
+       *
+       * This route is a `read` route, and it must stay one: a supervisor holding `integration:read`
+       * has always been able to run a trial and see the counts, and taking that away to ship a list
+       * would be a worse trade than not shipping it. But the list carries REAL PART NUMBERS, and
+       * `requireTableActionAccess`'s legacy branch RETURNS BEFORE the operator scope — a caller with
+       * `integration:read` never meets `resolveOperatorValueScope` at all. On a deployment whose
+       * tokens carry no tenant claim that branch's tenant comes from the `x-tenant-id` REQUEST
+       * HEADER (see the function's header), and a tenantless platform admin may steer `?tenantId=`
+       * across tenants outright. Handing either of them a part number would turn a values-free
+       * header hole into a VALUE leak.
+       *
+       * So the flag — and only the flag — carries its own gate, the same one every other
+       * value-bearing operator read in this plugin uses. Placed HERE: after the body is validated so
+       * an unknown key still 400s first, and before the action lookup, the B2a claim, the credential
+       * reload and the source read, so a refused caller costs none of them. A caller who does not
+       * set the flag walks the identical path they always did — not one extra check, not one extra
+       * key in the response.
+       */
+      let includeMissingComponents = false
+      if ('includeMissingComponents' in body) {
+        if (typeof body.includeMissingComponents !== 'boolean') {
+          throw new HttpRouteError(400, 'TABLE_ACTION_REQUEST_INVALID', 'includeMissingComponents must be a boolean', { field: 'includeMissingComponents' })
+        }
+        includeMissingComponents = body.includeMissingComponents
+      }
+      const valueScope = includeMissingComponents
+        ? await resolveOperatorValueScope({
+          user: getUser(req),
+          authenticatedTenantId: req.authenticatedTenantId,
+          explicitTenantIds: collectExplicitTenantIds(req, {}),
+          tenantPrincipalDirectory,
+        })
+        : null
       const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
-      const dryRunTenantId = resolveTenantId(req, {})
+      // ON THE VALUE PATH THE TENANT IS THE PROVEN ONE. `resolveTenantId` is right for the
+      // values-free trial and stays exactly where it was for it — but it accepts `user.tenantId`,
+      // which is header-fillable, and lets a tenantless platform admin steer `?tenantId=`. Since the
+      // tenant chosen here is the tenant whose PLM binding is opened, and the part numbers in the
+      // response come out of that PLM, the value path must not derive it from anything the request
+      // can move. `scope.tenantId` cannot differ from what `resolveTenantId` would have returned for
+      // any caller who reached this line — the scope has already refused every input that could make
+      // them differ — so this is not a behaviour change; it is the derivation being made unable to
+      // drift from the proof.
+      const dryRunTenantId = valueScope ? valueScope.tenantId : resolveTenantId(req, {})
       const dryRunB2aRunId = b2aRunId('table-action-dry-run')
       // B2a entry point (1), ahead of the credential reload inside the adapter load below.
       const dryRunB2aAuthorization = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
@@ -5443,6 +5772,10 @@ function requireStockPreparationAudit() {
         tokenStore: context.storage,
         policyStore: context.storage,
         conflictPolicyReview: body.conflictPolicyReview,
+        // W3a. `false` for every caller who did not opt in — and it can only be `true` here if the
+        // operator-scope gate above returned without throwing, which is what makes "operate ∧ proven
+        // tenant" a property of the code rather than of the caller's good manners.
+        includeMissingComponents,
         // Pack-aware bands, from the install ledger + a live per-field read. undefined (no ledger,
         // no pack, or a read failure) omits the parameter and the planner takes its legacy path.
         // The apply route below resolves it the SAME way so the two agree on the plan revision.
@@ -6131,7 +6464,11 @@ function requireStockPreparationAudit() {
         throw new HttpRouteError(
           400,
           'STOCK_PREPARATION_SOURCE_PREFLIGHT_REQUEST_INVALID',
-          'declaredBridge must name one of the two bridge candidates',
+          // DERIVED from the vocabulary, never restated. The text used to hardcode "one of the two
+          // bridge candidates" beside an `allowed` list built from `DECLARABLE_BRIDGES`; the moment
+          // that list grew a third declarable topology the sentence an operator reads became false
+          // while the machine-readable half stayed right. One source, both halves.
+          `declaredBridge must name one of: ${DECLARABLE_BRIDGES.join(', ')}`,
           { field: 'declaredBridge', allowed: [...DECLARABLE_BRIDGES] },
         )
       }
@@ -6146,6 +6483,13 @@ function requireStockPreparationAudit() {
           externalSystemId,
         })
       }
+      // THE BINDING HALF, computed here because only this layer can: the probe module holds no
+      // registry capability by design. Read off the SAME row the adapter was built from, through
+      // the guard accessor that decrypts nothing, and reduced to a boolean plus two closed
+      // vocabulary words before it goes anywhere near the report.
+      const pullDelegation = describeTableActionReadDelegation(
+        await peekTableActionSourceBinding(scopedInput(req, { id: externalSystemId })),
+      )
 
       try {
         return sendOk(res, await runStockPreparationSourcePreflight({
@@ -6154,6 +6498,7 @@ function requireStockPreparationAudit() {
           readPlan: action && action.source ? action.source.readPlan : undefined,
           externalSystemId,
           declaredBridge,
+          ...(pullDelegation ? { pullDelegation } : {}),
         }))
       } catch (error) {
         if (error instanceof SourcePreflightError) {
@@ -7364,10 +7709,32 @@ function requireStockPreparationAudit() {
       const listScope = { tenantId: scope.tenantId, workspaceId: scope.workspaceId }
       const store = requireStockPreparationSourceBinding()
 
-      const [binding, systems] = await Promise.all([
+      const [rawBinding, systems] = await Promise.all([
         store.get({ ...listScope, actionId: PLM_STOCK_PREPARATION_ACTION_ID }),
         externalSystems.listExternalSystems({ ...listScope, limit: SOURCE_BINDING_CANDIDATE_LIMIT }),
       ])
+      // `store.get()` may annotate a non-null return with `matchedWorkspaceId` / `scopeFallback`,
+      // internal resolution metadata for the null-workspace scope-fallback. TWO DIFFERENT things
+      // benefit from it, and they are not the same call sites:
+      //   * BINDING RESOLUTION — `getTableAction`/`store.get()` resolving the right `externalSystemId`
+      //     at all. reconcile, mvp-persist, carry, export, handoff and the project board all call the
+      //     registry with no workspace hint, so all six read the fallback-resolved binding.
+      //   * SOURCE LOADING (F3) — `loadTableActionSourceAdapter`'s OWN re-query, which uses
+      //     `matchedWorkspaceId` as the external-SYSTEM lookup hint so the row that id names is
+      //     actually reachable. Only the FIVE call sites of `loadTableActionSourceAdapter` benefit
+      //     from this half: dry-run, reconcile, mvp-persist, apply, and the large-BOM background run.
+      //     carry/export/handoff/the project board never call `loadTableActionSourceAdapter` at all —
+      //     they stop at knowing WHICH id is bound, never load it, so F3 is not theirs to benefit
+      //     from.
+      // (`stockPreparationSourcePreflight` benefits from NEITHER half: it calls
+      // `getTableAction({ actionId })` with no `tenantId` either, at :6163, so
+      // `applyPersistedSourceBinding` throws and the route's own `catch` swallows it before either
+      // fallback path is ever reached; that is a separate, pre-existing bug this line does not fix.)
+      // The picker's own wire contract is the 7-field shape the web client already types as
+      // StockPreparationPersistedBinding; strip the two extra keys here so that contract stays
+      // exactly what it always was rather than growing as a side effect of a store-internal
+      // resolution detail nothing on this screen renders.
+      const binding = publicPersistedBinding(rawBinding)
 
       const dataSourceAccessibility = await resolveDataSourceAccessibility(req, systems)
       const effective = await tableActions
@@ -7654,7 +8021,26 @@ function requireStockPreparationAudit() {
         VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_CONFIRM_BODY_KEYS,
         'CONFIRMATION_DECISION_CONFIRM_REQUEST_INVALID',
       )
-      const tenantId = resolveAuthUserTenantId(req)
+      // WHOSE QUEUE IS THIS — the same host-vouched operator scope the value-entry read (two
+      // handlers up) and the export (one handler down) resolve, and for a stronger reason than
+      // either: this one WRITES. It was left on `resolveAuthUserTenantId` when #5445 converted its
+      // two siblings, which made this the odd member of a family of three — the read of a value was
+      // proven, the write of that same value was not. `resolveAuthUserTenantId` reads
+      // `user.tenantId`, and the auth middleware fills that field from the `x-tenant-id` REQUEST
+      // HEADER whenever the verified token carries no tenant claim, so on a claimless deployment a
+      // header was choosing which tenant's ledger row got confirmed and which tenant's audit trail
+      // recorded it. The scope prefers the verified claim, refuses a carrier that contradicts it,
+      // refuses a principal with no tenant of its own, and makes the host vouch for the pairing.
+      //
+      // It resolves BEFORE the audit append below, so a refused caller writes no audit row — the
+      // refusal costs nothing and leaves no trace claiming an attempt was legitimate enough to log.
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
       // A confirmation resolves a planner exception, so it rides the existing exception_resolve
       // audit action with a fixed operation subtype (the audit vocabulary is migration-frozen).
       // Record intent FIRST: if the SQL audit store is unavailable or refuses the payload, no
@@ -7675,7 +8061,7 @@ function requireStockPreparationAudit() {
       const result = await confirmConfirmationDecision({
         recordsApi: getMultitableRecordsApi(),
         provisioning: getMultitableProvisioning(),
-        targetProjectId: resolveIntegrationStagingProjectId(tenantId, undefined),
+        targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
         permission: 'admin',
         decisionId: input.decisionId,
         inputFingerprint: input.inputFingerprint,
@@ -9074,6 +9460,8 @@ module.exports = {
     resolveTenantId,
     resolveAuthUserTenantId,
     resolveVerifiedClaimTenantId,
+    assertVerifiedTenantClaim,
+    stockPreparationTenantClaimRequired,
     resolveAuthenticatedWriteTenantId,
     scopedAuthenticatedWriteInput,
     scopedInput,

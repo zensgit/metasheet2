@@ -1527,8 +1527,13 @@ async function E3_02_aTruncatedBackgroundExpansionNeverBecomesAPlan() {
     purpose: B2A_PURPOSE_STOCK_PREPARATION_LARGE_BOM,
   })]
   const records = createRecordsApi()
+  // The bound has to be on the BACKGROUND lane's own cap, not the interactive
+  // one: since the background caps became independent, `maxReadCount: 1`
+  // interactively derives a background cap of 20 and this expansion completes.
+  // What is being pinned here is the truncated-background-expansion property,
+  // so the config says so directly.
   const { routes } = mount({
-    registrations, records, source: createRecordingSourceAdapter(), action: { maxReadCount: 1 },
+    registrations, records, source: createRecordingSourceAdapter(), action: { largeBom: { maxReadCount: 1 } },
   })
   const started = await call(routes, 'POST', LARGE_BOM_START_ROUTE, {
     user: READ_USER, params: ACTION_PARAMS, body: { parameters: { projectNo: PROJECT_NO } },
