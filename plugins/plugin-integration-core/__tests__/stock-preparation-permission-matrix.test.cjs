@@ -36,6 +36,12 @@
 //        tier for ONE frozen action id; reconcile and mvp-persist did not move and refuse it; the
 //        split is not a wildcard over the table-action namespace; and every refusal still costs no
 //        host work
+//   M-11 W4 THE TENANT-CLAIM HARD DOOR, over the whole manifest: with
+//        MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED armed, the capabilities whose tenancy the shared
+//        helpers decide refuse a CARRIED tenant (403 OPERATOR_SCOPE_TENANT_REQUIRED, zero host work,
+//        zero audit rows), the capabilities already on the host-vouched operator scope are unchanged,
+//        and the DIFFERENCE between armed and disarmed is exactly that pinned split — which is also
+//        the F3 witness, since converting the confirm write moved it from one side to the other
 //
 // Hermetic: no DB, no network. Every service the route module requires that these routes must NOT
 // touch is stubbed to throw.
@@ -150,7 +156,10 @@ function pendingRow() {
   return row
 }
 
-function mount() {
+// `tenantPrincipalDirectory` is a PARAMETER because "the host cannot vouch" is a real deployment
+// state with its own fail-closed answer (501), and a suite that could only mount the vouching case
+// could never tell a route that requires the seam from one that merely happens to have it.
+function mount({ tenantPrincipalDirectory = { async verifyTenantMembership() { return { member: true } } } } = {}) {
   const routes = new Map()
   const provisioning = {
     ...makeFakeProvisioning({
@@ -219,11 +228,7 @@ function mount() {
   // project-directory route reaches its READ for a permitted actor — otherwise every 'pass' cell for
   // that capability would be a 501 for a reason unrelated to the permission gate, and the matrix
   // would be measuring the wrong thing. The gate cells are unaffected: they refuse before this.
-  services.tenantPrincipalDirectory = {
-    async verifyTenantMembership() {
-      return { member: true }
-    },
-  }
+  if (tenantPrincipalDirectory) services.tenantPrincipalDirectory = tenantPrincipalDirectory
   services.stockPreparationConfirmationReconcileLease = {
     async acquire() {
       return { leaseId: 'lease_1' }
@@ -260,7 +265,14 @@ async function call(routes, method, routePath, req = {}) {
   const handler = routes.get(`${method.toUpperCase()} ${routePath}`)
   assert.ok(handler, `route ${method} ${routePath} is registered`)
   const res = createResponse()
-  await handler({ user: req.user, body: req.body || {}, query: req.query || {}, params: req.params || {} }, res)
+  // `authenticatedTenantId` is the host's VERIFIED token claim, and it is set ONLY when a case asks
+  // for one. Every actor above therefore models the deployment this plugin actually ships to: tokens
+  // with no tenant claim, whose `user.tenantId` the auth middleware filled from the `x-tenant-id`
+  // REQUEST HEADER. That is not a convenience of the harness — it is the condition under which the
+  // tenancy assertions below mean anything.
+  const request = { user: req.user, body: req.body || {}, query: req.query || {}, params: req.params || {} }
+  if (req.authenticatedTenantId !== undefined) request.authenticatedTenantId = req.authenticatedTenantId
+  await handler(request, res)
   assert.notEqual(res.body, undefined, `${method} ${routePath} produced a body`)
   return res
 }
@@ -316,10 +328,10 @@ const REQUEST_BY_CAPABILITY = Object.freeze({
   'confirmationQueue.projectBoard': () => ({ params: { projectNo: PROJECT_NO } }),
 })
 
-async function callCapability(routes, capability, user) {
+async function callCapability(routes, capability, user, extra = {}) {
   const build = REQUEST_BY_CAPABILITY[capability.capability]
   assert.ok(build, `capability ${capability.capability} has a request shape`)
-  return call(routes, capability.method, capability.path, { ...build(), user })
+  return call(routes, capability.method, capability.path, { ...build(), user, ...extra })
 }
 
 /** The capability ids the BACK END actually answers for this user (i.e. does not refuse at the gate). */
@@ -1056,6 +1068,210 @@ async function projectSyncRefusesTheTiersItAlwaysRefused() {
 
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// M-11 — W4: THE TENANT-CLAIM HARD DOOR, ACROSS THE WHOLE MANIFEST
+// ---------------------------------------------------------------------------
+//
+// NUMBERING: M-09 and M-10 are taken above, so this is M-11.
+//
+// THE CONDITION EVERY OTHER ASSERTION IN THIS FILE RUNS UNDER. `call()` sets no
+// `authenticatedTenantId`, i.e. every actor in this suite models a token with NO tenant claim, whose
+// `user.tenantId` the host's auth middleware filled from the `x-tenant-id` REQUEST HEADER. That is
+// the real 222 deployment, and it is the hole W4 closes: on such a deployment the tenant a route acts
+// under is a value the caller wrote.
+//
+// WHAT THIS PINS, AND THE PART THAT IS NOT A SLOGAN. "Arming the flag refuses everything" is not
+// true and must not be asserted, because it would be asserting something the code does not do. The
+// manifest splits in two, and the SPLIT is the interesting fact:
+//
+//   * The capabilities whose tenancy runs through the shared helpers (`resolveTenantId`,
+//     `resolveAuthUserTenantId`, `requireTableActionAccess`'s legacy branch) are refused once the
+//     door is armed, with OPERATOR_SCOPE_TENANT_REQUIRED, before any host work and before any audit
+//     row. These are the ones a header could steer today.
+//   * The capabilities already on `resolveOperatorValueScope` are UNCHANGED by the flag, because the
+//     scope already answers the question the door asks — it prefers the verified claim, refuses a
+//     contradicting carrier, refuses a tenantless principal, and makes the host vouch for the
+//     pairing. A claimless principal with a tenant of its own and a vouching host is admitted there
+//     BY DESIGN, and the flag must not quietly change that: if it did, the door would be shadowing
+//     the scope instead of backing it.
+//
+// The membership of those two sets is written out, not derived, so moving a route from one to the
+// other is a visible edit here. That is also what makes this block the F3 witness: before this PR
+// `confirmationQueue.confirm` derived its tenant with `resolveAuthUserTenantId` and belonged in the
+// FIRST set; converting it to the operator scope moved it to the second, and the move cannot happen
+// silently.
+const TENANT_CLAIM_FLAG = 'MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED'
+
+async function withTenantClaimFlag(value, fn) {
+  const had = Object.prototype.hasOwnProperty.call(process.env, TENANT_CLAIM_FLAG)
+  const previous = process.env[TENANT_CLAIM_FLAG]
+  if (value === null) delete process.env[TENANT_CLAIM_FLAG]
+  else process.env[TENANT_CLAIM_FLAG] = value
+  try {
+    return await fn()
+  } finally {
+    if (had) process.env[TENANT_CLAIM_FLAG] = previous
+    else delete process.env[TENANT_CLAIM_FLAG]
+  }
+}
+
+/** The capabilities whose tenancy the shared helpers decide — the ones the door closes. */
+const TENANT_CLAIM_DOOR_CLOSES = Object.freeze([
+  'confirmationQueue.readiness',   // resolveTenantId
+  'confirmationQueue.list',        // resolveTenantId
+  'confirmationQueue.ensure',      // resolveAuthUserTenantId
+  'confirmationQueue.reconcile',   // requireTableActionAccess, legacy branch
+])
+
+/** The capabilities the host-vouched operator scope already decides — the door adds nothing. */
+const TENANT_CLAIM_DOOR_LEAVES_ALONE = Object.freeze([
+  'confirmationQueue.valueEntry',
+  // F3, this PR. It was in the list ABOVE until now.
+  'confirmationQueue.confirm',
+  'confirmationQueue.export',
+  'confirmationQueue.projectDirectory',
+  'confirmationQueue.projectBoard',
+  'handoff.read',
+  'handoff.advance',
+])
+
+function outcomeOf(res) {
+  return `${res.statusCode}:${(res.body && res.body.error && res.body.error.code) || 'ok'}`
+}
+
+async function theTenantClaimDoorClosesTheHelperPlaneAndOnlyThat() {
+  // Anti-vacuity: the two pinned sets must together be EXACTLY the manifest. A capability added to
+  // the workbench and forgotten here would otherwise be asserted about by neither half.
+  assert.deepEqual(
+    [...TENANT_CLAIM_DOOR_CLOSES, ...TENANT_CLAIM_DOOR_LEAVES_ALONE].sort(),
+    STOCK_PREP_WORKBENCH_CAPABILITIES.map((capability) => capability.capability).sort(),
+    'M-11: every workbench capability must be on exactly one side of the door',
+  )
+
+  // THE ACTOR: a platform admin whose tenant was CARRIED, not proven — which is every admin on a
+  // claimless deployment, including the 222 ops runner before it learned `--tenant-id`.
+  const HEADER_FILLED_ADMIN = PLATFORM_ADMIN
+
+  const disarmed = new Map()
+  const armed = new Map()
+  for (const capability of STOCK_PREP_WORKBENCH_CAPABILITIES) {
+    await withTenantClaimFlag(null, async () => {
+      const { routes } = mount()
+      disarmed.set(capability.capability, outcomeOf(await callCapability(routes, capability, HEADER_FILLED_ADMIN)))
+    })
+    await withTenantClaimFlag('true', async () => {
+      // A fresh mount per call: confirm mutates the seeded row, and the audit assertion below must
+      // be about THIS request only.
+      const harness = mount()
+      const res = await callCapability(harness.routes, capability, HEADER_FILLED_ADMIN)
+      armed.set(capability.capability, outcomeOf(res))
+      if (TENANT_CLAIM_DOOR_CLOSES.includes(capability.capability)) {
+        assert.equal(
+          outcomeOf(res),
+          '403:OPERATOR_SCOPE_TENANT_REQUIRED',
+          `M-11: ${capability.capability} must refuse a tenant that was carried rather than proven`,
+        )
+        assert.equal(
+          harness.hostCallCount(),
+          0,
+          `M-11: ${capability.capability} must refuse BEFORE any host work — no sheet, no record`,
+        )
+        assert.deepEqual(
+          harness.auditAppends,
+          [],
+          `M-11: ${capability.capability} must write no audit row for a refused request`,
+        )
+      }
+    })
+  }
+
+  // The DIFFERENCE between the two runs is exactly the pinned set. Asserting the difference rather
+  // than each half separately is what makes "the flag changes nothing else" checkable: a route that
+  // started refusing as a side effect shows up here even though nobody wrote an expectation for it.
+  const changed = STOCK_PREP_WORKBENCH_CAPABILITIES
+    .map((capability) => capability.capability)
+    .filter((id) => disarmed.get(id) !== armed.get(id))
+    .sort()
+  assert.deepEqual(
+    changed,
+    [...TENANT_CLAIM_DOOR_CLOSES].sort(),
+    'M-11: arming the flag changes exactly the helper-plane capabilities and nothing else',
+  )
+  for (const id of TENANT_CLAIM_DOOR_LEAVES_ALONE) {
+    assert.equal(
+      disarmed.get(id),
+      armed.get(id),
+      `M-11: ${id} already proves its tenant through the host-vouched scope, so the door must not change it`,
+    )
+  }
+  // …and the four it closes really were OPEN before, or "the door closed them" would be a claim about
+  // a door that was never in front of anything.
+  for (const id of TENANT_CLAIM_DOOR_CLOSES) {
+    assert.notEqual(
+      disarmed.get(id),
+      '403:OPERATOR_SCOPE_TENANT_REQUIRED',
+      `M-11: ${id} admits this principal today — that is the hole, and it is why the flag exists`,
+    )
+  }
+}
+
+// ── F3, dynamically ──────────────────────────────────────────────────────────────────────────────
+// The confirm is the WRITE half of the value-entry read and kept `resolveAuthUserTenantId` when
+// #5445 converted its two siblings. These two witnesses are FLAG-INDEPENDENT: they are true with the
+// door shut, which is the point — F3 is a fix, not a staged narrowing.
+async function theConfirmWriteProvesItsTenantLikeItsSiblings() {
+  // (a) A header that CONTRADICTS the verified claim is refused. Before F3 this request confirmed a
+  // row in the header's tenant and stamped the header's tenant on the audit trail, with a 200.
+  {
+    const harness = mount()
+    const res = await call(harness.routes, 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', {
+      user: OPERATOR_CONFIRM,               // user.tenantId === TENANT_ID, header-filled
+      authenticatedTenantId: 'tenant-other', // …and the VERIFIED claim says otherwise
+      body: {
+        decisionId: DECISION_ID,
+        inputFingerprint: FINGERPRINT,
+        resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+      },
+    })
+    assert.equal(outcomeOf(res), '403:OPERATOR_SCOPE_TENANT_CONTRADICTED', 'F3: a contradicted tenant cannot confirm')
+    assert.deepEqual(harness.auditAppends, [], 'F3: and the refusal precedes the audit append, so it leaves no trace claiming otherwise')
+    assert.equal(harness.hostCallCount(), 0, 'F3: nor does it touch the ledger')
+  }
+
+  // (b) A TENANTLESS platform admin — the principal the value face has refused since #5445 — is now
+  // refused the write too. It used to answer 400 TENANT_REQUIRED from `resolveAuthUserTenantId`,
+  // which was the right outcome for the wrong reason: a 400 says "you forgot something", and this is
+  // a 403 that says "there is no tenant whose queue is yours".
+  {
+    const harness = mount()
+    const res = await call(harness.routes, 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', {
+      user: { id: 'u_tenantless_admin', roles: ['admin'], permissions: ['integration:admin'] },
+      body: {
+        decisionId: DECISION_ID,
+        inputFingerprint: FINGERPRINT,
+        resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+      },
+    })
+    assert.equal(outcomeOf(res), '403:OPERATOR_SCOPE_TENANT_REQUIRED', 'F3: a tenantless principal has no queue to confirm')
+    assert.deepEqual(harness.auditAppends, [], 'F3: and writes no audit row')
+  }
+
+  // (c) The host must vouch: no membership seam is a fail-CLOSED 501, exactly as on the sibling read.
+  {
+    const harness = mount({ tenantPrincipalDirectory: null })
+    const res = await call(harness.routes, 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', {
+      user: OPERATOR_CONFIRM,
+      body: {
+        decisionId: DECISION_ID,
+        inputFingerprint: FINGERPRINT,
+        resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+      },
+    })
+    assert.equal(outcomeOf(res), '501:OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE', 'F3: no seam, no write')
+    assert.deepEqual(harness.auditAppends, [], 'F3: and no audit row')
+  }
+}
+
 async function main() {
   await matrixGoldenHolds()
   await authorizedOperatorGetsRealResponses()
@@ -1069,6 +1285,8 @@ async function main() {
   await refusedRequestsPerformNoHostWork()
   vocabularyIsFrozenAndRoutesAreRegistered()
   await valueEntryIsOperateNotRead()
+  await theTenantClaimDoorClosesTheHelperPlaneAndOnlyThat()
+  await theConfirmWriteProvesItsTenantLikeItsSiblings()
   // The RUNTIME refusal first: it is the claim that matters, and the source check below only
   // corroborates it. Running the source check first would let it short-circuit a real relaxation.
   await projectSyncRefusesTheTiersItAlwaysRefused()

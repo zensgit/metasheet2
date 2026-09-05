@@ -988,7 +988,14 @@ async function requireTableActionAccess(req, actionId, legacyGate, tenantPrincip
   if (!user) {
     throw new HttpRouteError(401, 'UNAUTHENTICATED', 'Authentication required')
   }
-  if (hasPermission(user, legacyGate)) return user
+  if (hasPermission(user, legacyGate)) {
+    // W4 P1. The legacy branch returns BEFORE the operator scope, so it is the one door on this
+    // function that a header-filled tenant could still walk through. The guard is a no-op unless
+    // MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED is on; when it is on, the `integration:*` tiers owe
+    // the same proof of provenance the operator branch below already owes.
+    assertVerifiedTenantClaim(req)
+    return user
+  }
   if (!operatorMayRunStockPrepPull(listUserPermissions(user), actionId)) {
     throw new HttpRouteError(403, 'FORBIDDEN', 'Insufficient integration permissions')
   }
@@ -1028,6 +1035,12 @@ function resolveTenantId(req, input = {}) {
       throw new HttpRouteError(403, 'TENANT_MISMATCH', 'tenant scope mismatch')
     }
   }
+  // W4 P2. Everything above compares the request's tenant against `user.tenantId` — which the auth
+  // middleware fills from the `x-tenant-id` HEADER when the verified token carries no tenant claim,
+  // so on a claimless deployment those comparisons can be header against header. This adds the one
+  // thing they cannot ask: was the tenant PROVEN. No-op unless the flag is on, and placed AFTER the
+  // existing checks so that nothing above it changes order or verdict when it is off.
+  assertVerifiedTenantClaim(req, tenantId)
   return tenantId
 }
 
@@ -1063,6 +1076,11 @@ function resolveAuthUserTenantId(req) {
   if (!tenantId) {
     throw new HttpRouteError(400, 'TENANT_REQUIRED', 'authenticated tenant context is required')
   }
+  // W4 P3. This helper's own header says `user.tenantId` is the authenticated principal — and the
+  // comment two functions down says plainly that it is not, because the middleware fills it from the
+  // `x-tenant-id` header on a claimless token. This is where the two are reconciled: with the flag on,
+  // the field must agree with the verified claim or the request ends here. No-op when the flag is off.
+  assertVerifiedTenantClaim(req, tenantId)
   return tenantId
 }
 
@@ -1133,6 +1151,84 @@ function resolveVerifiedClaimTenantId(req, input = {}) {
   return claimed
 }
 
+// W4 — THE TENANT-CLAIM HARD DOOR. Staged behind a flag, default OFF.
+//
+// WHAT IT IS. `resolveVerifiedClaimTenantId` above is the same posture applied to ONE route (the
+// customer-pack install, because it deletes). This is that posture made available to the WHOLE
+// tenant-facing surface of this file, as a guard rather than as a resolver: it returns nothing and
+// changes no tenant derivation — it only refuses a request whose tenant cannot be traced to the
+// VERIFIED token payload. Every route keeps the resolver it already had; this either lets the
+// request through unchanged or ends it with a 403.
+//
+// WHY A SEPARATE FUNCTION AND NOT A CALL TO `requireAccess`. It answers a different question.
+// `requireAccess` asks "may this principal call this route" and knows nothing about tenancy; this
+// asks "is this principal's tenant PROVEN, or merely carried". Writing it as a `requireAccess(req,
+// …)` call would also put a non-permission token into the gate-expression scan that
+// stock-preparation-permission-matrix's M-08 pins, which is precisely the kind of vocabulary drift
+// that check exists to catch.
+//
+// WHY NOT `resolveOperatorValueScope`. That module's FIRST check is `holdsOperatorValueTier`, so
+// routing the legacy `integration:read` / `integration:write` tiers through it would refuse them for
+// lacking a stock-prep tier they were never asked to hold — a permission change wearing the costume
+// of a tenancy one. And it would not stop there: it requires the host membership seam, so every
+// deployment without a `tenantPrincipalDirectory` would start answering 501 on routes that have
+// nothing to do with the operator plane. This guard therefore checks ONE thing, the provenance of
+// the tenant, and leaves both permission and membership exactly where they are today.
+//
+// WHY NOT `verifyTenantMembership`. Membership is the SECOND rung and it needs the host seam this
+// plugin cannot assume (501 OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE when absent). The login side
+// already proves membership before it mints a tenant claim (`AuthService.resolveSessionTenantId`
+// checks `user_orgs`), so a VERIFIED claim is a membership statement the host made at sign-in. What
+// this guard adds is that the statement must come from the signed payload rather than from a
+// request header the caller wrote.
+//
+// WHAT IT DOES NOT PROMISE. It is not a defence against someone holding the signing secret: a
+// hand-minted token can carry any tenant claim it likes and this guard will believe it, exactly as
+// every other verified-claim check in this file does. The guarantee is narrower and stateable: on a
+// deployment with this flag on, the tenant a route acts under came from the VERIFIED TOKEN PAYLOAD
+// and never from the `x-tenant-id` REQUEST HEADER.
+//
+// THE VOCABULARY IS BORROWED, DELIBERATELY. These are the operator-scope codes
+// (stock-preparation-operator-scope.cjs), not new ones: the front end already has a plain-language
+// sentence for OPERATOR_SCOPE_TENANT_REQUIRED, the rehearsal troubleshooting card already teaches
+// them, and the pull-gate suite already classifies them as gate refusals. A fourth spelling of the
+// same refusal would have needed all three taught again for no gain.
+//
+// The refusals carry a code and a fixed English sentence and NOTHING else — in particular no tenant
+// id, neither the claimed one nor the carried one. A refusal that echoed both would tell an
+// unauthorised caller which two tenants it had just been caught between.
+//
+// @param {object} req
+// @param {string} [resolvedTenantId] the tenant the route's own resolver arrived at, when there is
+//        one. Passing it turns the guard into an agreement check as well; omitting it (the
+//        table-action legacy branch, which resolves its tenant later) checks provenance only.
+function assertVerifiedTenantClaim(req, resolvedTenantId) {
+  // OFF is the default and OFF must be a no-op — see the flag's own comment. Checked HERE, once, so
+  // that the three call sites cannot drift into disagreeing about when the door is shut.
+  if (!stockPreparationTenantClaimRequired()) return
+  const claimed = typeof req.authenticatedTenantId === 'string' ? req.authenticatedTenantId.trim() : ''
+  if (!claimed) {
+    throw new HttpRouteError(
+      403,
+      'OPERATOR_SCOPE_TENANT_REQUIRED',
+      'this deployment requires a tenant claim in the verified token; a request header cannot supply one',
+    )
+  }
+  const user = getUser(req)
+  const carried = typeof (user && user.tenantId) === 'string' ? user.tenantId.trim() : ''
+  if (carried && carried !== claimed) {
+    throw new HttpRouteError(
+      403,
+      'OPERATOR_SCOPE_TENANT_CONTRADICTED',
+      'the carried tenant contradicts the verified tenant claim',
+    )
+  }
+  const resolved = typeof resolvedTenantId === 'string' ? resolvedTenantId.trim() : ''
+  if (resolved && resolved !== claimed) {
+    throw new HttpRouteError(403, 'OPERATOR_SCOPE_TENANT_MISMATCH', 'tenant scope mismatch')
+  }
+}
+
 function resolveWorkspaceId(req, input = {}) {
   return firstString(input.workspaceId, req.query && req.query.workspaceId, req.params && req.params.workspaceId)
 }
@@ -1180,6 +1276,21 @@ function resolveIntegrationStagingProjectId(tenantId, requestedProjectId) {
 // keeps the source-run read-only; on wires its intake into T2 persist within the same request.
 function stockPreparationErpAutoPersistEnabled() {
   return String(process.env.MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED ?? '').trim().toLowerCase() === 'true'
+}
+
+// W4: the tenant-claim hard door (see `assertVerifiedTenantClaim`). Default OFF, same idiom as every
+// other MULTITABLE_ gate — truthy ONLY when the env var is exactly 'true' (trimmed, case-insensitive).
+//
+// IT IS OFF BY DEFAULT BECAUSE TURNING IT ON IS A DEPLOYMENT EVENT, NOT A CODE ONE. On a deployment
+// whose tokens carry no tenant claim — which is every deployment that ever relied on `x-tenant-id`,
+// including the 222 ops runner before it learned `--tenant-id` — flipping this refuses the entire
+// tenant-facing surface at once. The order that makes it safe is written down in
+// docs/development/takeover-beiliao-20260821/customer-delivery-guide-20260904.md §5-5: fill `user_orgs`
+// so every account has exactly one active row, re-issue tokens (`--tenant-id` for the ops runner),
+// have everyone sign in again so their tokens carry the claim, and only then set this. Rolling back
+// is deleting the line and restarting; nothing persists.
+function stockPreparationTenantClaimRequired() {
+  return String(process.env.MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED ?? '').trim().toLowerCase() === 'true'
 }
 
 // T3a OD-2: with auto-persist ON the ERP source-run has a write side-effect, so an explicit request
@@ -7711,7 +7822,26 @@ function requireStockPreparationAudit() {
         VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_CONFIRM_BODY_KEYS,
         'CONFIRMATION_DECISION_CONFIRM_REQUEST_INVALID',
       )
-      const tenantId = resolveAuthUserTenantId(req)
+      // WHOSE QUEUE IS THIS — the same host-vouched operator scope the value-entry read (two
+      // handlers up) and the export (one handler down) resolve, and for a stronger reason than
+      // either: this one WRITES. It was left on `resolveAuthUserTenantId` when #5445 converted its
+      // two siblings, which made this the odd member of a family of three — the read of a value was
+      // proven, the write of that same value was not. `resolveAuthUserTenantId` reads
+      // `user.tenantId`, and the auth middleware fills that field from the `x-tenant-id` REQUEST
+      // HEADER whenever the verified token carries no tenant claim, so on a claimless deployment a
+      // header was choosing which tenant's ledger row got confirmed and which tenant's audit trail
+      // recorded it. The scope prefers the verified claim, refuses a carrier that contradicts it,
+      // refuses a principal with no tenant of its own, and makes the host vouch for the pairing.
+      //
+      // It resolves BEFORE the audit append below, so a refused caller writes no audit row — the
+      // refusal costs nothing and leaves no trace claiming an attempt was legitimate enough to log.
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
       // A confirmation resolves a planner exception, so it rides the existing exception_resolve
       // audit action with a fixed operation subtype (the audit vocabulary is migration-frozen).
       // Record intent FIRST: if the SQL audit store is unavailable or refuses the payload, no
@@ -7732,7 +7862,7 @@ function requireStockPreparationAudit() {
       const result = await confirmConfirmationDecision({
         recordsApi: getMultitableRecordsApi(),
         provisioning: getMultitableProvisioning(),
-        targetProjectId: resolveIntegrationStagingProjectId(tenantId, undefined),
+        targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
         permission: 'admin',
         decisionId: input.decisionId,
         inputFingerprint: input.inputFingerprint,
@@ -9131,6 +9261,8 @@ module.exports = {
     resolveTenantId,
     resolveAuthUserTenantId,
     resolveVerifiedClaimTenantId,
+    assertVerifiedTenantClaim,
+    stockPreparationTenantClaimRequired,
     resolveAuthenticatedWriteTenantId,
     scopedAuthenticatedWriteInput,
     scopedInput,

@@ -692,3 +692,28 @@ SELECT count(*) FROM DN_PDM_PathExAttrInfo WHERE Parent_OBJ_ID LIKE 'SYNL-%';
 那 7 条按 `SYNL-%` 前缀过滤的 `DELETE`,单独摘出来用同一个 `DATABASE_URL` 对应用库跑一遍即可清空这次
 生成的全部行,不影响 `stock-preparation-synthetic-sql-source/` 目录下 `SYN-` 前缀的既有夹具数据。也可以
 直接用同一份文件重新跑一次完整生成命令(脚本本身先删后插,天然幂等),效果等价。
+
+## flag 开启记录(待执行)
+
+`MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED=true` —— 备料租户面路由对**无租户声明的令牌**一律 403。默认关,
+本窗口**不开**。开启的完整前置顺序、校验方式与回滚,写在
+`customer-delivery-guide-20260904.md` §5-5;这里只留执行记录,开的那天逐格填。
+
+**开之前必须四条全绿(顺序不可换)**:
+
+| # | 前置 | 状态 | 执行人 / 时间 | 证据 |
+|---|---|---|---|---|
+| 1 | `user_orgs` 补齐:每个在用账号恰好 1 条活跃行(0 条与 ≥2 条都签不出租户声明) | ☐ 待执行 | | |
+| 2 | 运维/脚本令牌用 `--tenant-id` 重新换发(见本文 Step 0 第 7 条) | ☐ 待执行 | | |
+| 3 | 全员重新登录(旧令牌不会自己长出声明) | ☐ 待执行 | | |
+| 4 | 写入 env、`pm2 restart metasheet-backend --update-env` | ☐ 待执行 | | |
+
+**开完当场验两条**(两条都过才算开成功):
+
+| # | 验证 | 期望 | 实测 |
+|---|---|---|---|
+| A | 拿一个**没有**租户声明的旧令牌调 `GET /api/integration/stock-preparation/confirmation-decisions/readiness` | 403 `OPERATOR_SCOPE_TENANT_REQUIRED` | |
+| B | 拿一个 `--tenant-id` 新签的令牌调同一个接口 | 200(或该账号今天本来的结果) | |
+
+**回滚**(任何一条不过就回滚,不要就地调):删掉 env 里那一行 → `pm2 restart metasheet-backend --update-env`。
+没有迁移、没有落库状态,回滚即刻恢复关闭前的行为。
