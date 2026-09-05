@@ -480,6 +480,10 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
       commentTargetFieldId: { type: String, default: null },
       highlightedCommentId: { type: String, default: null },
       mentionSuggestions: { type: Array, default: () => [] },
+      // PR-B2 (2026-09-05, record inspector v3 §1.3): declared so the workbench's `:field-errors`
+      // binding arrives as a typed prop and is rendered below as the same `[data-test=
+      // drawer-field-error][data-field-id]` node the real MetaRecordFieldsPanel renders.
+      fieldErrors: { type: Object as PropType<Record<string, string> | null>, default: null },
     },
     emits: [
       'close', 'toggle-comments', 'comment-field', 'navigate', 'delete', 'patch',
@@ -499,6 +503,12 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
         'data-highlighted-comment': this.$props.highlightedCommentId ?? '',
         'data-mention-suggestions-count': String((this.$props.mentionSuggestions as unknown[]).length),
       }, [
+        // PR-B2 (2026-09-05): one node per `fieldErrors` entry, mirroring the real panel's markup, so the
+        // `onDrawerPatch` routing tests can assert "inline under THAT field" through this stub. The real
+        // panel's alert/aria/draft behaviour is pinned in multitable-record-inspector-field-errors.spec.ts.
+        ...Object.entries((this.$props.fieldErrors as Record<string, string> | null) ?? {}).map(([fieldId, message]) =>
+          h('div', { 'data-test': 'drawer-field-error', 'data-field-id': fieldId, role: 'alert' }, message),
+        ),
         h(
           'button',
           {
@@ -1155,6 +1165,13 @@ function createGridMock() {
     rowActions: ref(null),
     rowActionOverrides: ref<Record<string, { canEdit: boolean; canDelete: boolean; canComment: boolean }>>({}),
     conflict: ref(null),
+    // PR-B2 (2026-09-05): the composable's additive `lastPatchFailure` ref the workbench routes on.
+    lastPatchFailure: ref(null),
+    // PR-B2 (2026-09-05): `lastBatchId` is what the real composable exposes for the success toast's
+    // "view in history" action (`historyLinkAction(grid.lastBatchId.value)` in onDrawerPatch). It was
+    // missing from this mock because, until PR-B2, no test in this file ever drove `onDrawerPatch` to its
+    // SUCCESS branch — the stub's `data-patch-record` button existed but was never clicked.
+    lastBatchId: ref<string | null>(null),
     error: ref<string | null>(null),
     sortFilterDirty: ref(false),
     toggleFieldVisibility: vi.fn(),
@@ -3629,6 +3646,138 @@ describe('MultitableWorkbench view wiring', () => {
       const block = src.match(/const mentionDisplayFieldId = computed\(\(\) =>[\s\S]*?\n\)/)?.[0] ?? ''
       expect(block).toMatch(/resolveMentionDisplayField\(grid\.visibleFields\.value\)/)
       expect(block).toMatch(/resolveMentionDisplayField\(grid\.fields\.value\)/)
+    })
+  })
+
+  // Record inspector v3 PR-B2 (2026-09-05, docs/development/multitable-record-inspector-v3-design-20260905.md
+  // §1.3 "Field-anchored server errors", §3 B2 "workbench" tests, §4 item 11). The composable is mocked
+  // (`gridMock`), so each test plays the composable: it sets `error.value` exactly as the real
+  // `patchCell` would, plus the additive `lastPatchFailure` the routing reads — and, for the conflict
+  // case, `conflict.value` (the banner's own driver, unchanged by B2). The inline node is the
+  // MetaRecordInspector stub's rendering of the `fieldErrors` prop (see the stub); the real panel's
+  // alert/aria/draft behaviour is pinned in multitable-record-inspector-field-errors.spec.ts.
+  describe('onDrawerPatch — field-anchored server errors (PR-B2 §1.3)', () => {
+    const ATTEMPTED = 'Patched title' // what the stub's `data-patch-record` button emits for fld_title
+
+    async function openRec1() {
+      mountWorkbench()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy()
+    }
+    function fieldErrorEl(fieldId: string): HTMLElement | null {
+      return container!.querySelector<HTMLElement>(`[data-test="drawer-field-error"][data-field-id="${fieldId}"]`)
+    }
+    async function patchTitle() {
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
+      await flushUi()
+    }
+    /** The composable's observable state after a REJECTED patchCell (rollback is internal to it). */
+    function rejectNextPatch(message: string, failure: Record<string, unknown>) {
+      gridMock.patchCell.mockImplementation(async () => {
+        gridMock.error.value = message
+        gridMock.lastPatchFailure.value = { recordId: 'rec_1', fieldId: 'fld_title', attemptedValue: ATTEMPTED, message, ...failure }
+      })
+    }
+    function acceptNextPatch() {
+      gridMock.patchCell.mockImplementation(async () => {
+        gridMock.error.value = null
+        gridMock.lastPatchFailure.value = null
+      })
+    }
+
+    it('422 with fieldErrors → NO toast, inline error under that field (no success toast either)', async () => {
+      await openRec1()
+      rejectNextPatch('Title is too long', { status: 422, code: 'VALIDATION_ERROR', fieldErrors: { fld_title: 'Title is too long' } })
+      await patchTitle()
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', ATTEMPTED, 1)
+      expect(showErrorSpy).not.toHaveBeenCalled()
+      expect(showSuccessSpy).not.toHaveBeenCalled()
+      expect(fieldErrorEl('fld_title')?.textContent).toBe('Title is too long')
+    })
+
+    it('400 VALIDATION_ERROR with NO fieldErrors (the shape /patch actually sends) → inline too, message = the server message', async () => {
+      await openRec1()
+      rejectNextPatch('Select value must be string: fld_title', { status: 400, code: 'VALIDATION_ERROR' })
+      await patchTitle()
+      expect(showErrorSpy).not.toHaveBeenCalled()
+      expect(fieldErrorEl('fld_title')?.textContent).toBe('Select value must be string: fld_title')
+    })
+
+    it('403 still toasts (positive control for "no toast") and renders NO inline error', async () => {
+      await openRec1()
+      rejectNextPatch('Insufficient permissions', { status: 403, code: 'FORBIDDEN' })
+      await patchTitle()
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('Insufficient permissions')
+      expect(fieldErrorEl('fld_title')).toBeNull()
+    })
+
+    it('a failure recorded for a DIFFERENT record/field is never attributed to this control — toast as before', async () => {
+      await openRec1()
+      rejectNextPatch('Title is too long', { recordId: 'rec_9', fieldId: 'fld_other', status: 422, code: 'VALIDATION_ERROR' })
+      await patchTitle()
+      expect(showErrorSpy).toHaveBeenCalledWith('Title is too long')
+      expect(container!.querySelector('[data-test="drawer-field-error"]')).toBeNull()
+    })
+
+    it('the LOCAL row-action refusal (error.value set, no lastPatchFailure) keeps today\'s toast', async () => {
+      await openRec1()
+      gridMock.patchCell.mockImplementation(async () => {
+        gridMock.error.value = 'Record editing is not allowed for this row.'
+        gridMock.lastPatchFailure.value = null
+      })
+      await patchTitle()
+      expect(showErrorSpy).toHaveBeenCalledWith('Record editing is not allowed for this row.')
+      expect(container!.querySelector('[data-test="drawer-field-error"]')).toBeNull()
+    })
+
+    it('VERSION_CONFLICT → the existing conflict banner + a field marker carrying the banner text, NO toast; marker clears with the conflict', async () => {
+      await openRec1()
+      gridMock.patchCell.mockImplementation(async () => {
+        gridMock.error.value = 'Row changed elsewhere'
+        gridMock.conflict.value = { recordId: 'rec_1', fieldId: 'fld_title', attemptedValue: ATTEMPTED, message: 'Row changed elsewhere', serverVersion: 8 }
+        gridMock.lastPatchFailure.value = { recordId: 'rec_1', fieldId: 'fld_title', attemptedValue: ATTEMPTED, message: 'Row changed elsewhere', status: 409, code: 'VERSION_CONFLICT' }
+      })
+      await patchTitle()
+      // Banner: exactly the pre-B2 text pinned by 'renders conflict recovery actions…' above.
+      expect(container!.textContent).toContain('Update conflict')
+      expect(container!.textContent).toContain('Title changed elsewhere. Latest version is 8.')
+      // Pre-B2 this path ALSO toasted (double signal); B2 suppresses the toast for this code.
+      expect(showErrorSpy).not.toHaveBeenCalled()
+      // Field marker with the SAME text as the banner — compared against the banner's own text node, not a
+      // literal, so the two can never drift (the banner copy is `fmtConflictMessage`'s full sentence).
+      const bannerText = container!.querySelector('.mt-workbench__conflict-copy span')?.textContent
+      expect(bannerText).toContain('Title changed elsewhere. Latest version is 8.')
+      expect(fieldErrorEl('fld_title')?.textContent).toBe(bannerText)
+      // Reload / retry / dismiss all null `conflict` in the real composable; the marker follows it.
+      gridMock.conflict.value = null
+      await flushUi()
+      expect(fieldErrorEl('fld_title')).toBeNull()
+    })
+
+    it('a later SUCCESSFUL patch of the same field clears its inline error and toasts success as before', async () => {
+      await openRec1()
+      rejectNextPatch('Title is too long', { status: 422, code: 'VALIDATION_ERROR', fieldErrors: { fld_title: 'Title is too long' } })
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')).toBeTruthy()
+      acceptNextPatch()
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')).toBeNull()
+      expect(showSuccessSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).not.toHaveBeenCalled()
+    })
+
+    it('record change clears inline errors (navigate to another record from the inspector)', async () => {
+      await openRec1()
+      rejectNextPatch('Title is too long', { status: 422, code: 'VALIDATION_ERROR', fieldErrors: { fld_title: 'Title is too long' } })
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')).toBeTruthy()
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+      expect(container!.querySelector('[data-test="drawer-field-error"]')).toBeNull()
     })
   })
 })
