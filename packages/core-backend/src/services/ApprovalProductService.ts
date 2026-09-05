@@ -667,15 +667,72 @@ export const USER_FIELD_ALLOWED_PROP_KEYS = new Set([
 // either way), so THIS filter is the sole, independently mutation-provable rejection site for a
 // nested explanation column — no pre-emption ambiguity to correct later.
 //
+// CORRECTION (approval-detail-leaf-attachment-pin-20260904): `attachment` also joins the
+// exclusion set, and — unlike every sibling exclusion above — UNCONDITIONALLY, not behind
+// `isApprovalAttachmentsEnabled()`. A prior version of this filter admitted `attachment` here
+// and relied solely on the flag-gated sweep inside `assertFormSchema`
+// (`if (isApprovalAttachmentsEnabled()) { … field.columns?.some(column => column.type ===
+// 'attachment') … }`) to reject it — which meant that with the flag OFF (the shipped default),
+// `createTemplate`/`updateTemplate` SILENTLY ACCEPTED an attachment column inside a `detail`
+// group (mutation-verified: `DETAIL_LEAF_FIELD_TYPES.has('attachment')` was `true`, and
+// `normalizeDetailFieldParts`'s leaf check at the map callback below is the ONLY place that can
+// reject a column type before the flag-gated sweep runs). The web author-time literal
+// (`apps/web/src/approvals/detailField.ts`'s `DETAIL_LEAF_FIELD_TYPES`) never offered attachment
+// as a detail-column type to begin with, so this was reachable only via direct API calls or a
+// hand-crafted formSchema, not the shipped editor UI — but attachment v1 (design lock) requires
+// attachment fields to stay top-level-only regardless of entry path, and a template saved this
+// way while the flag was OFF would go on to 500 (`APPROVAL_TEMPLATE_SCHEMA_INVALID`) at publish/
+// read/instance-create once the flag was turned ON (those paths re-run `assertFormSchema` via
+// `asFormSchema` against the SAME now-tightened set). Excluding it here, independent of the flag,
+// makes `normalizeDetailFieldParts`'s leaf check (below) the sole rejection site for the WRITE
+// path (REQUEST_VALIDATION_CONTEXT) in both flag states.
+//
+// FURTHER CORRECTION (same date, gate F1): making this exclusion *unconditional* also reaches
+// STORED_FORM_SCHEMA_CONTEXT (`asFormSchema`, used by getTemplate/getTemplateVersion/publish/
+// instance-create/frozen-schema load) — which would flip an ALREADY-STORED template containing
+// this shape (reachable pre-fix via flag-OFF createTemplate) from "readable" to "500s on every
+// read," at the shipped default, for data nobody touched. That is a blast-radius change to
+// stored data this fix must not make. `normalizeDetailFieldParts` therefore carries a narrow,
+// STORED_FORM_SCHEMA_CONTEXT-only tolerance for a stored `attachment` leaf (see its own comment
+// at the leaf-check call site) so the flag-gated sweep below — NOT this Set — remains the
+// rejection site for stored data, matching main's pre-fix read-path behavior exactly in both
+// flag states. The sweep is kept as defense in depth for stored data and is reachable again
+// (not dead) for that one case; it is only unreachable, as before, on the WRITE path.
+//
+// ROUND-3 CONTRACT (gate finding R1, same branch): F1's tolerance is scoped to
+// STORED_FORM_SCHEMA_CONTEXT, but "STORED_FORM_SCHEMA_CONTEXT" is a call-site choice, not a
+// property of the data — a caller that re-validates stored `form_schema` under
+// REQUEST_VALIDATION_CONTEXT instead still gets rejected, tolerance or no tolerance. The full
+// contract, enforced by which context each call site passes:
+//   WRITE (PRODUCES a new `approval_template_versions` row) → REQUEST_VALIDATION_CONTEXT →
+//     rejects in BOTH flag states: createTemplate, updateTemplate (incl. the graph-only
+//     carry-forward — see the comment at its call site below), cloneTemplate,
+//     restoreTemplateVersion. `publishTemplate` does NOT belong here: it only flips the existing
+//     version row's status and freezes a `runtime_graph` built from the (already-stored, unchanged)
+//     approval_graph — it never INSERTs a new form_schema, so it stays classified as READ below.
+//   READ (only CONSUMES an already-stored version, mints nothing) → STORED_FORM_SCHEMA_CONTEXT
+//     (via `asFormSchema`) → tolerates: getTemplate/getTemplateVersion/template detail DTO mapping
+//     (`toApprovalTemplateDetailDTO`/`toApprovalTemplateVersionDetailDTO`), publishTemplate,
+//     instance-create's frozen-schema load (`assembleCreationContext`), and runtime frozen-schema
+//     load (`getApproval`/dispatch) — readable at flag OFF, 500 via the flag-gated sweep at flag
+//     ON, byte-identical to origin/main's pre-fix read-path behavior.
+// A legacy template holding this shape can therefore still be READ and even PUBLISHED as-is, but
+// cannot be used to MINT a new version (update/clone/restore) until the author removes the column
+// — the web authoring surface already flags such a column as 类型不支持 on edit, so a repair path
+// exists. See tests/unit/approval-detail-attachment-write-path-legacy.test.ts.
+//
 // EXPORTED (mirrors FORM_FIELD_TYPES) so a census test can assert this DERIVED set is exactly
-// FORM_FIELD_TYPES minus {detail, record-link, date_range, explanation, department} rather than re-declaring it.
+// FORM_FIELD_TYPES minus {detail, record-link, date_range, explanation, department, attachment}
+// rather than re-declaring it. Also mirrored (as a set, cross-package) against the web literal in
+// `approval-detail-leaf-set-mirror.test.ts`.
 export const DETAIL_LEAF_FIELD_TYPES = new Set(
   [...FORM_FIELD_TYPES].filter(
     (type) => type !== 'detail'
       && type !== 'record-link'
       && type !== 'date_range'
       && type !== 'explanation'
-      && type !== 'department',
+      && type !== 'department'
+      && type !== 'attachment',
   ),
 )
 
@@ -1745,7 +1802,25 @@ function normalizeDetailFieldParts(
   }
   const columns = value.columns.map((column, columnIndex) => {
     const normalized = normalizeFormField(column, columnIndex, context, true)
-    if (!DETAIL_LEAF_FIELD_TYPES.has(normalized.type)) {
+    // CORRECTION (approval-detail-leaf-attachment-pin-20260904, F1): `DETAIL_LEAF_FIELD_TYPES`
+    // above excludes `attachment` unconditionally, which is correct for the WRITE path
+    // (REQUEST_VALIDATION_CONTEXT: createTemplate/updateTemplate must reject a new attachment
+    // detail column in both flag states). But `assertFormSchema` is also called as `asFormSchema`
+    // against STORED_FORM_SCHEMA_CONTEXT to re-validate form_schema that is ALREADY PERSISTED
+    // (getTemplate, getTemplateVersion, publish, instance-create, frozen-schema runtime load) —
+    // and because flag-OFF createTemplate historically accepted an attachment column inside detail
+    // (the bug this branch's earlier commit fixed going forward), a template saved under that
+    // window can exist in the DB today. Rejecting it unconditionally here would make an
+    // already-stored, previously-readable template start 500ing on read — a blast-radius change
+    // to STORED data that this fix must not make. So: tolerate a stored `attachment` leaf ONLY in
+    // STORED_FORM_SCHEMA_CONTEXT, leaving the pre-existing flag-gated sweep below (inside
+    // `assertFormSchema`) as the sole thing that still rejects it — exactly main's pre-fix
+    // behavior for stored data (flag OFF: readable; flag ON: 500 via that sweep). This is legacy
+    // tolerance for a shape the write path no longer produces, not a re-opening of the leaf set;
+    // cleanup (removing this tolerance once no stored template needs it) is census-driven — see
+    // scripts/ops/approval-detail-attachment-census.sql.
+    const isLegacyStoredAttachmentColumn = normalized.type === 'attachment' && context === STORED_FORM_SCHEMA_CONTEXT
+    if (!DETAIL_LEAF_FIELD_TYPES.has(normalized.type) && !isLegacyStoredAttachmentColumn) {
       failValidation(context, `formSchema.fields[${index}].columns[${columnIndex}].type is not a valid leaf sub-field`)
     }
     return normalized
@@ -5852,6 +5927,11 @@ export class ApprovalProductService {
 
       // Revalidate the historical snapshot against today's authoring contract before copying it.
       // The new row is always a draft; publishing remains a separate, explicit operation.
+      // R1 (approval-detail-leaf-attachment-pin-20260904): this call already passes
+      // REQUEST_VALIDATION_CONTEXT (the default) rather than STORED_FORM_SCHEMA_CONTEXT — restore
+      // PRODUCES a new `approval_template_versions` row, so it is a WRITE path per the contract at
+      // DETAIL_LEAF_FIELD_TYPES's definition and correctly rejects an attachment-in-detail column
+      // in both flag states, even for an already-stored legacy template.
       const formSchema = assertFormSchema(source.form_schema)
       const approvalGraph = assertApprovalGraph(source.approval_graph)
       validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
@@ -6081,7 +6161,40 @@ export class ApprovalProductService {
         )
         const nextVersion = Number.parseInt(maxVersionResult.rows[0]?.max_version || '0', 10) + 1
 
-        const nextFormSchema = formSchema ?? asFormSchema(latestVersion.form_schema)
+        // R1 gate fix (approval-detail-leaf-attachment-pin-20260904, round 3): a graph-only edit
+        // (formSchema omitted from the request) carries the STORED form_schema forward into a
+        // NEW `approval_template_versions` row. Validate it directly under
+        // REQUEST_VALIDATION_CONTEXT — the SAME pattern cloneTemplate/restoreTemplateVersion
+        // already use on stored data (`assertFormSchema(source.form_schema)`, REQUEST is the
+        // default context) — so a legacy template with an attachment-in-detail column cannot mint
+        // a new version until the author removes it, in both flag states.
+        //
+        // DELIBERATELY NOT `assertFormSchema(asFormSchema(latestVersion.form_schema),
+        // REQUEST_VALIDATION_CONTEXT)`: that would run `asFormSchema`'s STORED_FORM_SCHEMA_CONTEXT
+        // pass FIRST, and at flag ON the flag-gated sweep inside THAT inner call fires (it is
+        // unconditional on the flag, not context-gated) and throws the STORED shape's error (500
+        // APPROVAL_TEMPLATE_SCHEMA_INVALID) before the outer REQUEST-context call is ever reached
+        // — wrong status for a write path (verified: this nested form was tried and its flag-ON
+        // case red the write-path-legacy test with 500 instead of 400). Validating the RAW stored
+        // value once, directly under REQUEST_VALIDATION_CONTEXT, is both correct and simpler.
+        //
+        // DISCLOSED SCOPE (not attachment-only): switching this call's context from STORED_FORM_
+        // SCHEMA_CONTEXT to REQUEST_VALIDATION_CONTEXT changes failValidation's thrown status/code
+        // for ANY validation defect in the carried-forward stored schema, not only an attachment-
+        // in-detail column: ValidationContext carries {status, code} directly (STORED: 500 /
+        // APPROVAL_TEMPLATE_SCHEMA_INVALID; REQUEST: 400 / VALIDATION_ERROR), and the attachment
+        // tolerance at normalizeDetailFieldParts's leaf check is the ONLY other context-sensitive
+        // acceptance branch reachable from assertFormSchema (verified: every other `context ===`
+        // comparison in this file belongs to STORED_RUNTIME_CONTEXT, reachable only from
+        // assertApprovalGraph, never from assertFormSchema). This is not a new inconsistency
+        // introduced here: cloneTemplate and restoreTemplateVersion already re-validate stored
+        // data under REQUEST_VALIDATION_CONTEXT for every defect, not only this one (see their own
+        // call sites above). Before this fix, updateTemplate's graph-only path was the ONE write
+        // path still using the STORED, tolerant context; this change makes all four write paths
+        // (create/update/clone/restore) consistent for every schema defect, not only the
+        // attachment case that motivated this fix — see tests/unit/approval-detail-attachment-
+        // write-path-legacy.test.ts's non-attachment-defect case.
+        const nextFormSchema = formSchema ?? assertFormSchema(latestVersion.form_schema)
         // A form-only edit still creates a NEW template version. Re-validate the
         // copied historical graph under current authoring rules before writing it;
         // ordinary reads remain on asApprovalGraph's compatibility path.
@@ -6203,6 +6316,11 @@ export class ApprovalProductService {
         [id],
       )
 
+      // R1 (approval-detail-leaf-attachment-pin-20260904): `asFormSchema` (STORED_FORM_SCHEMA_
+      // CONTEXT) is correct here — publish flips THIS version row's status and freezes a
+      // `runtime_graph` derived from the approval_graph below; it never INSERTs a new form_schema,
+      // so it is classified READ, not WRITE, and tolerates a legacy stored attachment-in-detail
+      // column exactly like getTemplate (flag OFF: publishable; flag ON: the sweep still 500s).
       const formSchema = asFormSchema(version.form_schema)
       const storedApprovalGraph = asApprovalGraph(version.approval_graph)
       // Publishing is a write choke point: historical drafts stay readable, but
@@ -6534,6 +6652,10 @@ export class ApprovalProductService {
 
     // Stored versions remain readable under the historical compatibility rules, but
     // cloning creates a new draft version and must satisfy the current authoring gate.
+    // R1 (approval-detail-leaf-attachment-pin-20260904): this call already passes
+    // REQUEST_VALIDATION_CONTEXT (the default) — clone PRODUCES a new `approval_template_versions`
+    // row, so it correctly rejects an attachment-in-detail column in both flag states, even for a
+    // source template that itself remains readable under STORED_FORM_SCHEMA_CONTEXT.
     const formSchema = assertFormSchema(source.version.form_schema)
     const approvalGraph = assertApprovalGraph(source.version.approval_graph)
     validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)

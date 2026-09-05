@@ -1299,14 +1299,31 @@ describe('ApprovalProductService', () => {
       }))).rejects.toThrow(/detail cannot be nested inside a detail group/)
     })
 
-    it('rejects attachment fields inside detail rows (attachment v1 is top-level only)', async () => {
+    it('rejects attachment fields inside detail rows (attachment v1 is top-level only) — flag OFF', async () => {
+      // approval-detail-leaf-attachment-pin-20260904: DETAIL_LEAF_FIELD_TYPES excludes
+      // 'attachment' UNCONDITIONALLY now, so this is rejected by normalizeDetailFieldParts's
+      // leaf-type check (a generic message) BEFORE assertFormSchema's later flag-gated sweep is
+      // even reached — with the flag at its shipped-default OFF state (previously this case was
+      // SILENTLY ACCEPTED; see approval-detail-leaf-set-mirror.test.ts / approval-detail-
+      // attachment-leaf-probe.test.ts for the full before/after).
+      await expect(create(wrap({
+        id: 'items', type: 'detail', label: '明细',
+        columns: [{ id: 'proof', type: 'attachment', label: '附件' }],
+      }))).rejects.toThrow(/columns\[0\]\.type is not a valid leaf sub-field/)
+    })
+
+    it('rejects attachment fields inside detail rows (attachment v1 is top-level only) — flag ON', async () => {
+      // Same rejection, same (leaf-check) message, with the flag ON — proving the unconditional
+      // exclusion pre-empts the flag-gated sweep at assertFormSchema (:1785-ish) rather than
+      // depending on it. That sweep is retained as defense in depth but is unreachable through
+      // this path now.
       const previous = process.env.APPROVAL_ATTACHMENTS_ENABLED
       process.env.APPROVAL_ATTACHMENTS_ENABLED = 'true'
       try {
         await expect(create(wrap({
           id: 'items', type: 'detail', label: '明细',
           columns: [{ id: 'proof', type: 'attachment', label: '附件' }],
-        }))).rejects.toThrow(/attachment fields are not allowed inside detail groups/)
+        }))).rejects.toThrow(/columns\[0\]\.type is not a valid leaf sub-field/)
       } finally {
         if (previous === undefined) delete process.env.APPROVAL_ATTACHMENTS_ENABLED
         else process.env.APPROVAL_ATTACHMENTS_ENABLED = previous

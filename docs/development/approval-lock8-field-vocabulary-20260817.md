@@ -59,6 +59,20 @@ slice. Master M11 governs the language: "the reference corpus did not evidence",
 | `AuthorableFieldType` is the authorable gate | the **type** `Exclude<FormFieldType,'attachment'>` (`templateAuthoring.ts:72`) auto-widens; the gate consulted is the **runtime literal** `AUTHORABLE_FIELD_TYPES` (`:81-92`, 10 members) via `isAuthorableFieldType` (`:371-373`). `approvalFormCommands.ts:134-136` derives a *second, independent* set from its own label map, gated `:256` | type and both literals drift silently; that drift produces §2.2's fail-closed behavior |
 | the compiler catches a new member | only presentation maps error (five expected, one confirmed directly — N-3 establishes the set), and **none of the erroring sites validates a value** (§0.3) | the census gate is not optional |
 
+> **ERRATUM (2026-09-04, `approval-detail-leaf-attachment-pin-20260904`, not a rewrite of the row
+> above — that row remains an accurate point-in-time record of the baseline this document audited):**
+> the BE 9-member flag-OFF-accepting `DETAIL_LEAF_FIELD_TYPES` described in the row above is now
+> **fixed**. The derivation filter excludes `attachment` **unconditionally** (not behind the flag),
+> so BE and FE now agree — both an 8-member set — for the WRITE path
+> (`REQUEST_VALIDATION_CONTEXT`, i.e. `createTemplate`/`updateTemplate`) in both flag states. A
+> narrow, read-path-only tolerance was added for `STORED_FORM_SCHEMA_CONTEXT` (`asFormSchema`,
+> covering `getTemplate`/`getTemplateVersion`/publish/instance-create/frozen-schema load) so an
+> already-persisted template carrying the old, no-longer-writable shape does not start 500ing on
+> read — see the comment at `normalizeDetailFieldParts`'s leaf-check call site in
+> `ApprovalProductService.ts` and `tests/unit/approval-detail-attachment-stored-context.test.ts`.
+> The flag-gated sweep this row describes is therefore no longer dead for every case — it is the
+> read-path rejection site again, just for stored data.
+
 Union anchors also moved: FE `apps/web/src/types/approval.ts:35-47`, BE `types/approval-product.ts:59-71`,
 member-for-member identical (11 members, same order, same doc comment). The interface is `FormField`
 (`approval.ts:171-187`; BE `:279-295`) with `props?: Record<string, unknown>` — one untyped bag shared by
