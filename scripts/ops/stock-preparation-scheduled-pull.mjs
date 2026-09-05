@@ -47,10 +47,15 @@
 // its value, and never any other claim — and nothing decoded is ever printed, logged, or included in
 // any output line this script produces.
 //
-// OUTPUT IS VALUES-FREE. One JSON line per project (project number — a config identifier the operator
-// already typed into MS_PROJECT_NOS, not a row value — status, counts, what happened, how long it
-// took), one summary line at the end. Never a response's row data. Never the token, in any form, in
-// any output.
+// OUTPUT IS VALUES-FREE, ON THE ASSUMPTION THE SERVER RESPONSE IS TRUSTED. One JSON line per project
+// (project number — a config identifier the operator already typed into MS_PROJECT_NOS, not a row
+// value — status, counts, what happened, how long it took), one summary line at the end. Never a
+// response's ROW data. Never the token, in any form, in any output. That guarantee is over THIS
+// SCRIPT'S OWN paths — thrown JS errors, argv, MS_TOKEN — not over the server: on a non-2xx or a
+// dry-run/apply response, `error.code` / `httpStatus` / `counts` are relayed VERBATIM from whatever
+// the server sent, with no length cap or re-sanitization of this script's own. If a server response
+// ever violated ITS OWN values-free contract (table-actions.cjs's own discipline), this script would
+// not catch that — it is not re-auditing the server, only refusing to be a second leak of its own.
 //
 // INPUTS ARE ENVIRONMENT VARIABLES ONLY — nothing is read from a file, so there is no token-bearing
 // file for this script to leak or for a stray `git add` to catch:
@@ -59,21 +64,30 @@
 //   MS_TENANT_ID        tenant id to operate on                        (optional, default 'default')
 //   MS_PROJECT_NOS      comma-separated project numbers                (required)
 //   MS_TIMEOUT_MS       per-HTTP-call timeout, ms                      (optional, default 120000)
-//   MS_TOTAL_TIMEOUT_MS whole-run wall-clock budget, ms                (optional, default 1800000)
+//   MS_TOTAL_TIMEOUT_MS stop STARTING new projects past this budget, ms (optional, default 1800000)
 //
-// NEVER PUT THE TOKEN WHERE OUTPUT CAN QUOTE IT BACK. Two independent things enforce that:
-//   (1) `readConfig` REJECTS an `MS_TOKEN` containing a control character (\x00-\x1f — a stray
-//       newline is the common real-world cause: a token file that got word-wrapped or pasted across
-//       lines) before a single HTTP call is attempted. A control character in a header VALUE is
-//       exactly what makes `fetch`'s own `Headers.append` throw a `TypeError` whose `.message`
-//       EMBEDS THE FULL, INVALID VALUE — `Bearer <token...>` and all — so refusing it up front closes
-//       the one path this repo could find that would otherwise put the token in a thrown error.
+// NEVER PUT THE TOKEN WHERE OUTPUT CAN QUOTE IT BACK. Three complementary layers enforce that:
+//   (1) `readConfig` TRIMS `MS_TOKEN` and then REJECTS a value containing a control character
+//       (\x00-\x1f — a stray newline is the common real-world cause: a token file that got
+//       word-wrapped or pasted across lines) before a single HTTP call is attempted. The trim matters
+//       for redaction, not just validation: it is what makes the token THIS SCRIPT REDACTS AGAINST
+//       byte-identical to the token it actually SENDS in the `Authorization` header — an untrimmed
+//       secret would let a server that echoes the clean (trimmed) token back in an error body walk
+//       straight past a naive substring check. The control-character refusal closes the one path
+//       this repo could find that would otherwise put the token in a THROWN error: a control
+//       character in a header VALUE is exactly what makes `fetch`'s own `Headers.append` throw a
+//       `TypeError` whose `.message` EMBEDS THE FULL, INVALID VALUE — `Bearer <token...>` and all.
 //   (2) every network-layer failure below is reported by a FIXED string plus the error's `.name` /
 //       `.code` ONLY — never `.message`, which is not on any whitelist here precisely because the
-//       failure above proves a JS runtime's own error message is not a safe surface to relay. And
-//       every string this script writes to stdout/stderr passes through `redact()` first, which
-//       strips the token verbatim (once `MS_TOKEN` is known) and any `Bearer <token>` shape besides,
-//       as a second, independent net under the first.
+//       failure above proves a JS runtime's own error message is not a safe surface to relay.
+//   (3) OUTPUT REDACTION RUNS ON THE OBJECT, BEFORE `JSON.stringify` — not only on the final text.
+//       `redactDeep` walks a per-project result field by field and strips the token from each STRING
+//       value while it is still a plain string, before `JSON.stringify` can turn a `"` or `\` inside
+//       the token into `\"` / `\\` — which would make a raw substring match against the UNESCAPED
+//       token silently fail against the ESCAPED text. The rendered line then ALSO passes through the
+//       text-level `redact()`, matching the raw token, ITS OWN `JSON.stringify(...).slice(1, -1)`
+//       (escaped) form, and any `Bearer <token>`-shaped substring — a last-resort net for whatever
+//       the structured pass does not cover (plain text like --help output or a usage error).
 
 import { pathToFileURL } from 'node:url'
 
@@ -95,9 +109,11 @@ Required environment variables:
 Optional environment variables:
   MS_TENANT_ID         tenant id to operate on (default: "default")
   MS_TIMEOUT_MS        per-HTTP-call timeout in ms, positive integer (default: 120000)
-  MS_TOTAL_TIMEOUT_MS  whole-run wall-clock budget in ms, positive integer (default: 1800000) — once
-                       elapsed, remaining projects are recorded as failed ("total run timeout
-                       exceeded") without making further HTTP calls
+  MS_TOTAL_TIMEOUT_MS  positive integer, ms (default: 1800000) — once elapsed, NO NEW project is
+                       started (each is recorded as failed, "total run timeout exceeded", without an
+                       HTTP call); a project already in flight still finishes, so worst-case total
+                       run time is this budget PLUS up to 2 x MS_TIMEOUT_MS (its dry-run and, if
+                       applicable, its apply)
 
 Flags:
   --dry-run-only      only POST dry-run for every project (this is the default even with no flags)
@@ -122,12 +138,17 @@ export class ConfigError extends Error {}
 
 export function parseArgs(argv) {
   const flags = { apply: false, dryRunOnly: false, allowTenantless: false, help: false }
-  for (const arg of argv) {
+  for (const [index, arg] of argv.entries()) {
     if (arg === '--help' || arg === '-h') flags.help = true
     else if (arg === '--apply') flags.apply = true
     else if (arg === '--dry-run-only') flags.dryRunOnly = true
     else if (arg === '--allow-tenantless') flags.allowTenantless = true
-    else throw new UsageError(`unknown argument: ${arg} (see --help)`)
+    // Deliberately does NOT echo `arg` itself: this script takes flags only, never a positional
+    // value, so there is no legitimate argument whose content is worth quoting back — and a
+    // credential that lands in argv by mistake (a token pasted where a flag was meant) must not be
+    // echoed into stderr before `readConfig`/`redact` are even in the picture. The POSITION is enough
+    // to find the offending argument in whatever invoked this script.
+    else throw new UsageError(`unrecognized argument at position ${index} (see --help); its value is not echoed here in case a credential landed in argv by mistake`)
   }
   return flags
 }
@@ -159,10 +180,15 @@ export function readConfig(env) {
     throw new ConfigError(`missing required environment variable(s): ${missing.join(', ')}`)
   }
   const apiBase = String(env.MS_API).trim().replace(/\/+$/, '')
-  const token = String(env.MS_TOKEN)
-  // Refuse BEFORE the token is used for anything — not even placed in a header — so a word-wrapped
-  // or copy-pasted-across-lines token file can never reach `fetch`'s own header validation. The
-  // refusal message names no part of the token, only the fact that it was rejected.
+  // TRIMMED — not just for hygiene. This is the exact string sent as `Bearer ${token}` (see
+  // `postJson`) AND the exact string `redact()` matches against (see `activeSecret`, set from
+  // `config.token` in `main`); an untrimmed secret would make those two diverge from whatever a
+  // server actually echoes back (typically the clean, trimmed value), defeating the redaction match.
+  const token = String(env.MS_TOKEN).trim()
+  // Refuse BEFORE the token is used for anything — not even placed in a header — so a token with an
+  // EMBEDDED (not merely leading/trailing, which `.trim()` above already removed) control character
+  // can never reach `fetch`'s own header validation. The refusal message names no part of the token,
+  // only the fact that it was rejected.
   if (CONTROL_CHAR_PATTERN.test(token)) {
     throw new ConfigError(
       'MS_TOKEN contains a control character (e.g. a newline) and was refused. This usually means the '
@@ -220,17 +246,56 @@ export function jwtHasTenantClaim(token) {
 // OUTPUT — every write goes through here, and every write is redacted first.
 // ---------------------------------------------------------------------------
 //
-// `activeSecret` is set to `MS_TOKEN` the moment `readConfig` returns successfully (see `main`), and
-// is the SECOND, INDEPENDENT layer under the "never pass `.message` through" rule below: even if some
-// future code path (a library upgrade, a different error shape) ever put the literal token into a
-// string, that string still cannot leave this process without being redacted here first.
+// `activeSecret` is set to `config.token` (already trimmed by `readConfig`) the moment `readConfig`
+// returns successfully (see `main`). It is the text-level LAST-RESORT layer — see the module header's
+// layer (3) — under the structured, pre-serialization `redactDeep` pass that runs on every JSON line.
 let activeSecret = null
 
-/** Strips the current run's token (once known) and any `Bearer <token>`-shaped substring. */
+// A REAL bearer token (opaque or JWT) runs to dozens of characters at an absolute minimum; this repo's
+// own JWTs are 100+. 16 is deliberately far below that floor — comfortably catching any real token —
+// while staying safely above ordinary English: this script's own --help text contains the literal
+// phrase "a Bearer token for an admin service account", and an unbounded `[...]+` here would redact
+// the WORD "token" (5 characters) right out of its own usage text. The floor is what tells a leaked
+// secret apart from a sentence that happens to use the word "Bearer".
+const MIN_REDACTED_BEARER_VALUE_LENGTH = 16
+
+/**
+ * Strips the current run's token from a plain string — both its RAW form and its JSON-STRING-ESCAPED
+ * form (`"` -> `\"`, `\` -> `\\`, control characters -> `\n`/`\t`/etc, per `JSON.stringify`), since a
+ * token containing any of those characters looks different once it has passed through
+ * `JSON.stringify` than it does raw, and a naive substring check against only the raw form would miss
+ * it in already-serialized text. Also strips any `Bearer <token>`-shaped substring at least
+ * `MIN_REDACTED_BEARER_VALUE_LENGTH` characters long, using a CLOSED charset for the token half
+ * (`[A-Za-z0-9._~+/=-]`, the base64url/JWT alphabet) — deliberately NOT `\S+`, which would consume
+ * everything up to the next whitespace, including the rest of a COMPACT (single-line) JSON payload
+ * past the token — closing braces and all — and leave behind a line this script's own "one JSON line
+ * per project" contract can no longer parse.
+ */
 function redact(text) {
   let out = String(text)
-  if (activeSecret) out = out.split(activeSecret).join('<redacted>')
-  return out.replace(/Bearer\s+\S+/g, 'Bearer <redacted>')
+  if (activeSecret) {
+    out = out.split(activeSecret).join('<redacted>')
+    const escaped = JSON.stringify(activeSecret).slice(1, -1)
+    if (escaped && escaped !== activeSecret) out = out.split(escaped).join('<redacted>')
+  }
+  const bearerPattern = new RegExp(`Bearer\\s+[A-Za-z0-9._~+/=-]{${MIN_REDACTED_BEARER_VALUE_LENGTH},}`, 'g')
+  return out.replace(bearerPattern, 'Bearer <redacted>')
+}
+
+/**
+ * Redacts every STRING leaf of a plain object/array BEFORE it is handed to `JSON.stringify` — see the
+ * module header's layer (3) for why this runs AHEAD of serialization rather than only after it.
+ * Returns a redacted deep copy; `value` itself is never mutated. Numbers/booleans/null pass through.
+ */
+function redactDeep(value) {
+  if (typeof value === 'string') return redact(value)
+  if (Array.isArray(value)) return value.map(redactDeep)
+  if (value && typeof value === 'object') {
+    const out = {}
+    for (const [key, entry] of Object.entries(value)) out[key] = redactDeep(entry)
+    return out
+  }
+  return value
 }
 
 // Indirection, not a direct `process.stdout.write` call — so a test can redirect output WITHOUT
@@ -287,6 +352,22 @@ function applyUrl(apiBase, tenantId) {
  * machine-generated vocabularies (`TypeError`, `TimeoutError`, `ECONNREFUSED`, …) that cannot embed
  * arbitrary request data.
  */
+/** True for the two names Node/undici use for an `AbortSignal.timeout` firing mid-request. */
+function isAbortLikeError(error) {
+  return Boolean(error && (error.name === 'AbortError' || error.name === 'TimeoutError'))
+}
+
+function networkErrorResult(error, startedAt) {
+  return {
+    ok: false,
+    networkError: true,
+    timedOut: Boolean(error && error.name === 'TimeoutError'),
+    errorName: error && error.name ? String(error.name) : null,
+    errorCode: error && error.code !== undefined && error.code !== null ? String(error.code) : null,
+    durationMs: Date.now() - startedAt,
+  }
+}
+
 async function postJson(url, { token, tenantId, body, timeoutMs }) {
   const startedAt = Date.now()
   let response
@@ -302,20 +383,22 @@ async function postJson(url, { token, tenantId, body, timeoutMs }) {
       signal: AbortSignal.timeout(timeoutMs),
     })
   } catch (error) {
-    return {
-      ok: false,
-      networkError: true,
-      timedOut: Boolean(error && error.name === 'TimeoutError'),
-      errorName: error && error.name ? String(error.name) : null,
-      errorCode: error && error.code !== undefined && error.code !== null ? String(error.code) : null,
-      durationMs: Date.now() - startedAt,
-    }
+    return networkErrorResult(error, startedAt)
   }
   let json = null
   let parseError = false
   try {
     json = await response.json()
-  } catch {
+  } catch (error) {
+    // The `AbortSignal` can fire AFTER `fetch` has already resolved with a `response` (headers
+    // arrived, then the body trickled in too slowly) — `response.json()` is what actually rejects in
+    // that case, not the `fetch(...)` call above. Reported the SAME way as a connect-phase timeout
+    // (`networkError: true, timedOut: true` -> `networkErrorMessage` -> the fixed string `'timeout'`)
+    // rather than falling into the generic `parseError` branch below, which would otherwise mislabel
+    // a real timeout as e.g. `"dry-run failed with HTTP 200"` — technically the status line DID
+    // arrive, but the body never did, and "failed with HTTP 200" reads as a server-side failure that
+    // this was not.
+    if (isAbortLikeError(error)) return networkErrorResult(error, startedAt)
     parseError = true
   }
   return { ok: response.ok, httpStatus: response.status, json, parseError, durationMs: Date.now() - startedAt }
@@ -509,17 +592,25 @@ export async function main(argv, env) {
 
   const applyFlag = flags.apply === true && flags.dryRunOnly !== true
   const results = []
+  // Redaction runs on the OBJECT, before it becomes a JSON string — see the module header's layer
+  // (3) for why a text-only pass over the already-serialized line is not enough on its own.
+  function writeResultLine(result) {
+    writeOut(`${JSON.stringify(redactDeep(result))}\n`)
+  }
   // A per-request timeout (`MS_TIMEOUT_MS`, see `postJson`) bounds each individual HTTP call, but a
   // long enough project list — or enough of them each running right up to that bound — could still
   // keep this process alive far longer than anyone scheduled it for. This is the backstop across the
-  // WHOLE run: once the deadline passes, every remaining project is recorded as failed WITHOUT making
-  // another HTTP call, rather than silently taking as long as the project list needs to.
+  // WHOLE run: once the deadline passes, this loop stops STARTING new projects — every remaining one
+  // is recorded as failed WITHOUT another HTTP call. A project already in flight when the deadline
+  // passes still runs to completion (its own `MS_TIMEOUT_MS` bounds it), so the worst-case total run
+  // time is this budget PLUS up to 2 x MS_TIMEOUT_MS — the in-flight project's dry-run and, if it
+  // gets that far, its apply — not a hard ceiling on the process's own lifetime.
   const runDeadlineAt = Date.now() + config.totalTimeoutMs
   for (const projectNo of config.projectNos) {
     if (Date.now() > runDeadlineAt) {
       const result = { projectNo, action: 'error', error: 'total run timeout exceeded', failed: true, durationMs: 0 }
       results.push(result)
-      writeOut(`${JSON.stringify(result)}\n`)
+      writeResultLine(result)
       continue
     }
     const result = await pullOneProject({
@@ -531,11 +622,11 @@ export async function main(argv, env) {
       timeoutMs: config.timeoutMs,
     })
     results.push(result)
-    writeOut(`${JSON.stringify(result)}\n`)
+    writeResultLine(result)
   }
 
   const summary = summarize(results, applyFlag)
-  writeOut(`${JSON.stringify({ summary })}\n`)
+  writeOut(`${JSON.stringify(redactDeep({ summary }))}\n`)
   return summary.failed > 0 ? 1 : 0
 }
 

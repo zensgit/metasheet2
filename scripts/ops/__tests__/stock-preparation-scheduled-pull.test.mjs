@@ -117,10 +117,28 @@ test('--help prints usage and exits 0 without any env vars', () => {
   assert.match(result.stdout, /Usage:/)
 })
 
-test('an unknown flag is refused with a non-zero exit', () => {
+test('an unknown flag is refused with a non-zero exit, and its VALUE is never echoed', () => {
   const result = runScript(['--nonsense'], { MS_API: 'http://127.0.0.1:1', MS_TOKEN: TENANT_TOKEN, MS_TENANT_ID: 'tenant-a', MS_PROJECT_NOS: 'P-1' })
   assert.notEqual(result.status, 0, `${result.stdout}\n${result.stderr}`)
-  assert.match(result.stderr, /--nonsense/)
+  // The POSITION is reported (useful for finding the offending argument), the VALUE is not — see the
+  // next test for why: an accidentally-passed credential must never land in stderr just because it
+  // showed up where a flag was expected.
+  assert.match(result.stderr, /position 0/)
+  assert.doesNotMatch(result.stderr, /--nonsense/)
+})
+
+test('a credential accidentally passed as a CLI argument (not an env var) is never echoed', () => {
+  // Simulates the exact mistake this refusal exists to be safe under: someone runs the script with
+  // the token as a bare positional argument (e.g. copy-pasted the wrong line from a runbook) instead
+  // of setting MS_TOKEN. `parseArgs` rejects it as an unrecognized argument — correctly, it is not a
+  // flag — and must not put it in stderr on the way out.
+  const looksLikeATokenButIsNot = TENANT_TOKEN
+  const result = runScript([looksLikeATokenButIsNot], {
+    MS_API: 'http://127.0.0.1:1', MS_TOKEN: TENANT_TOKEN, MS_TENANT_ID: 'tenant-a', MS_PROJECT_NOS: 'P-1',
+  })
+  assert.notEqual(result.status, 0, `${result.stdout}\n${result.stderr}`)
+  assert.doesNotMatch(result.stderr, new RegExp(TENANT_TOKEN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.match(result.stderr, /position 0/)
 })
 
 // ---------------------------------------------------------------------------
@@ -137,8 +155,13 @@ test('an unknown flag is refused with a non-zero exit', () => {
  *   - `{ throw: error }` — the fetch call itself rejects with `error`, simulating a network/client-side
  *     failure (used to reproduce the exact `Headers.append` `TypeError` shape the redaction tests
  *     below are pinned against).
- *   - a promise that never settles — simulating a hung backend, to exercise the script's own
- *     `AbortSignal.timeout` handling below.
+ *   - `{ hangBody: true, status }` — `fetch(...)` itself resolves promptly (status line/headers
+ *     "arrived"), but the returned response's `.json()` never resolves on its own — only the SAME
+ *     `AbortSignal` races it down. This is what distinguishes a CONNECT-phase timeout (the top-level
+ *     `fetch()` call never resolves) from a BODY-phase one (headers arrived, the body then trickled
+ *     too slowly) — `postJson` must classify both as `'timeout'`, not just the first.
+ *   - a promise that never settles — simulating a hung backend at the connect phase, to exercise the
+ *     script's own `AbortSignal.timeout` handling below.
  *
  * THE MOCK HONOURS `init.signal`, deliberately: `postJson` passes a REAL `AbortSignal.timeout(...)`
  * (not a mock — timers/abort are native, this file never stubs them), so a handler that hangs forever
@@ -154,8 +177,9 @@ async function withMockFetch(handler, run) {
     const settleReject = (error) => { if (!settled) { settled = true; reject(error) } }
 
     const signal = init.signal
+    const abortErrorFor = () => (signal && signal.reason instanceof Error ? signal.reason : new Error('aborted'))
     if (signal) {
-      const onAbort = () => settleReject(signal.reason instanceof Error ? signal.reason : new Error('aborted'))
+      const onAbort = () => settleReject(abortErrorFor())
       if (signal.aborted) onAbort()
       else signal.addEventListener('abort', onAbort, { once: true })
     }
@@ -168,6 +192,20 @@ async function withMockFetch(handler, run) {
       const outcome = await handler(record)
       if (outcome && outcome.throw) {
         settleReject(outcome.throw)
+        return
+      }
+      if (outcome && outcome.hangBody) {
+        // The OUTER promise settles now (headers "arrived"); `.json()` below is its own promise that
+        // only the abort signal can ever settle — nothing else resolves it, by design.
+        settleResolve({
+          ok: true,
+          status: outcome.status || 200,
+          json: () => new Promise((_bodyResolve, bodyReject) => {
+            if (!signal) return // would hang forever — every caller here passes a real timeout signal
+            if (signal.aborted) { bodyReject(abortErrorFor()); return }
+            signal.addEventListener('abort', () => bodyReject(abortErrorFor()), { once: true })
+          }),
+        })
         return
       }
       const result = outcome || {}
@@ -526,6 +564,90 @@ test('MS_TOTAL_TIMEOUT_MS must be a positive integer, or readConfig refuses (no 
   assert.notEqual(result.code, 0, `${result.stdout}\n${result.stderr}`)
   assert.match(result.stderr, /MS_TOTAL_TIMEOUT_MS/)
   assert.equal(requests.length, 0)
+})
+
+test('a body that arrives too slowly (headers OK, .json() hangs) is ALSO classified as "timeout", never a mislabeled HTTP failure', async () => {
+  // Distinguishes the body-phase timeout `postJson` now catches from the connect-phase one the
+  // earlier test above already covers. Before this fix, `response.json()` rejecting with an
+  // AbortError fell into the generic `parseError` branch, and the project was reported as
+  // `"dry-run failed with HTTP 200"` — technically true (the status line DID arrive) but misleading:
+  // the request timed out, it did not fail server-side.
+  const { result } = await withMockFetch(
+    () => ({ hangBody: true, status: 200 }),
+    () => runMain([], { ...BASE_ENV, MS_TIMEOUT_MS: '60' }),
+  )
+  assert.notEqual(result.code, 0, `${result.stdout}\n${result.stderr}`)
+  const lines = jsonLines(result.stdout)
+  assert.equal(lines[0].action, 'error')
+  assert.equal(lines[0].error, 'timeout', 'a body-phase timeout reports the SAME fixed string as a connect-phase one')
+  assert.doesNotMatch(lines[0].error, /HTTP 200/, 'never mislabeled as an HTTP-level failure')
+})
+
+// ---------------------------------------------------------------------------
+// D1 follow-up: redaction must survive whitespace-padded env vars and JSON-string escaping —
+// not just the raw, already-clean token used by every test above.
+// ---------------------------------------------------------------------------
+
+test('MS_TOKEN with leading/trailing whitespace is trimmed, matches what is actually sent, and a server response echoing it back is fully redacted', async () => {
+  const paddedToken = `  ${TENANT_TOKEN}\n`
+  const { requests, result } = await withMockFetch(
+    (record) => {
+      // A server that echoes exactly what it received in the Authorization header — the scenario
+      // this test pins: if `readConfig` did NOT trim, `activeSecret` (untrimmed) would never match
+      // this echoed (trimmed, because that is what was actually sent) token, and it would leak.
+      const sentToken = (record.headers.authorization || '').replace(/^Bearer\s+/, '')
+      return { status: 401, json: { ok: false, error: { code: `unauthorized for token ${sentToken}` } } }
+    },
+    () => runMain([], { ...BASE_ENV, MS_TOKEN: paddedToken }),
+  )
+  assert.notEqual(result.code, 0, `${result.stdout}\n${result.stderr}`)
+  assert.equal(requests[0].headers.authorization, `Bearer ${TENANT_TOKEN}`, 'the header carries the TRIMMED token, not the padded env var')
+  assertNoTokenSubstring(TENANT_TOKEN, result.stdout, 'stdout')
+  assertNoTokenSubstring(TENANT_TOKEN, result.stderr, 'stderr')
+  // jsonLines() itself JSON.parses every line — a throw here means redaction corrupted the payload.
+  const lines = jsonLines(result.stdout)
+  assert.equal(lines[0].failed, true)
+  assert.match(lines[0].error, /unauthorized for token <redacted>/)
+})
+
+test('a token containing characters JSON.stringify escapes (quote, backslash) is still redacted from the serialized line', async () => {
+  // A token shape `readConfig`'s control-character check does NOT reject (no \x00-\x1f in it) but
+  // whose JSON-STRING-ESCAPED form differs from its raw form — proving `redact()`'s second substring
+  // pass (`JSON.stringify(activeSecret).slice(1, -1)`) is load-bearing, not redundant with the first.
+  // Reuses TENANT_TOKEN's header+payload (so `jwtHasTenantClaim` still sees a valid tenantId claim
+  // and this run reaches `postJson` at all) with a "signature" segment carrying the quirky
+  // characters — `jwtHasTenantClaim` never inspects that segment, only decodes `parts[1]`.
+  const [tokenHeader, tokenPayload] = TENANT_TOKEN.split('.')
+  const quirkyToken = `${tokenHeader}.${tokenPayload}.tok"with\\quirks_0123456789ABCDEF`
+  const { result } = await withMockFetch(
+    (record) => {
+      const sentToken = (record.headers.authorization || '').replace(/^Bearer\s+/, '')
+      return { status: 401, json: { ok: false, error: { code: `rejected: ${sentToken}` } } }
+    },
+    () => runMain([], { ...BASE_ENV, MS_TOKEN: quirkyToken }),
+  )
+  assert.notEqual(result.code, 0, `${result.stdout}\n${result.stderr}`)
+  const lines = jsonLines(result.stdout) // throws if redaction broke JSON validity
+  assert.doesNotMatch(lines[0].error, /quirks_0123456789ABCDEF/, 'the escaped form of the token is redacted too')
+  assert.doesNotMatch(result.stdout, /quirks_0123456789ABCDEF/)
+})
+
+test('a "Bearer <token>" substring inside a compact JSON error is redacted WITHOUT swallowing the rest of the line', async () => {
+  // Pins the over-eating fix directly: the old `/Bearer\s+\S+/g` pattern would consume everything up
+  // to the next whitespace, including the closing `"` / `}` of a compact (single-line) JSON payload —
+  // corrupting the "one JSON line per project" contract. The tightened pattern stops at the token's
+  // own alphabet, leaving the text (and JSON structure) AFTER it intact.
+  const { result } = await withMockFetch(
+    () => ({
+      status: 401,
+      json: { ok: false, error: { code: `token invalid: Bearer ${TENANT_TOKEN} please retry with a fresh one` } },
+    }),
+    () => runMain([], BASE_ENV),
+  )
+  assert.notEqual(result.code, 0, `${result.stdout}\n${result.stderr}`)
+  const lines = jsonLines(result.stdout) // throws if the line no longer parses
+  assert.match(lines[0].error, /please retry with a fresh one/, 'text AFTER the token survives redaction intact')
+  assertNoTokenSubstring(TENANT_TOKEN, result.stdout, 'stdout')
 })
 
 // ---------------------------------------------------------------------------

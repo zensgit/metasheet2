@@ -155,7 +155,7 @@ const STOCK_PREPARATION_PROJECT_BOARD_KEYS = Object.freeze([
   'pulledRowCountBounded',
   // The max `lastPlmRefreshAt` seen across this project's rows in the SAME scan that produces the
   // counts above — no second read, no new write. NAMED `lastChangedFromPlmAt`, deliberately NOT
-  // `lastChangedFromPlmAt` / 「上次同步」: `lastPlmRefreshAt` is written ONLY by `runPatch`
+  // `lastPulledAt` / 「上次同步」: `lastPlmRefreshAt` is written ONLY by `runPatch`
   // (stock-preparation-conflict-planner.cjs), which rides along an add/update/inactive DECISION
   // (`makeAddDecision` / `makeUpdateDecision` / `makeInactiveDecision`). `makeSkipDecision` — the
   // decision an UNCHANGED row gets on every ordinary re-pull — calls no `runPatch` at all, so a run

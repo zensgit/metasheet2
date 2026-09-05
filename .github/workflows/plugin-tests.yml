@@ -854,9 +854,35 @@ jobs:
       # source named in this repo's own plugin-test-chain-pin friction notes). The directory holds
       # only `.test.mjs`/`.tests.ps1` today; `node --test` ignores the `.ps1` files it is not asked
       # for, so this only ever runs the `.mjs` suites the glob matches.
+      #
+      # An EXACT subtest count, same reasoning and same shape as the W7-3 step above: `node --test`
+      # treats a child that exits 0 as a PASSING FILE, so a collection-time abort (a syntax error, a
+      # glob that silently matched zero files because the directory was emptied/renamed) before any
+      # subtest body runs would report a green ZERO-test step. `--test-reporter=tap` is used
+      # specifically for a STABLE, uncoloured `# tests N` summary line to parse — the default "spec"
+      # reporter emits ANSI colour codes even when stdout is not a TTY, which is fragile to grep.
+      # Bump EXPECTED_OPS_TESTS_COUNT in the SAME PR that adds or removes a test in this directory.
       - name: Run scripts/ops/__tests__ node:test suites
+        shell: bash
         run: |
-          node --test scripts/ops/__tests__/*.test.mjs
+          set -euo pipefail
+          EXPECTED_OPS_TESTS_COUNT=28
+          if ! ops_out="$(node --test --test-reporter=tap scripts/ops/__tests__/*.test.mjs 2>&1)"; then
+            printf '%s\n' "$ops_out"
+            echo "scripts/ops/__tests__ suites: node --test exited non-zero (output above)" >&2
+            exit 1
+          fi
+          printf '%s\n' "$ops_out"
+          ops_tests="$(printf '%s\n' "$ops_out" | grep -Eo '^# tests [0-9]+$' | tail -n 1 | grep -Eo '[0-9]+$' || true)"
+          if [ -z "$ops_tests" ]; then
+            echo "scripts/ops/__tests__ suites: no '# tests <N>' TAP summary line found — refusing to report green" >&2
+            exit 1
+          fi
+          if [ "$ops_tests" -ne "$EXPECTED_OPS_TESTS_COUNT" ]; then
+            echo "scripts/ops/__tests__ suites: $ops_tests subtests ran, expected exactly $EXPECTED_OPS_TESTS_COUNT" >&2
+            exit 1
+          fi
+          echo "scripts/ops/__tests__ suites: exactly $ops_tests subtests ran."
 
       - name: Run rich-text longText XSS write-sanitizer canaries
         # Security-critical: the write-path sanitizer is the authoritative XSS defense
