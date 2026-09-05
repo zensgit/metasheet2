@@ -41,6 +41,8 @@ export type MetaRecordLabelKey =
   // --- W2 S5 (design-lock multitable-w2-unified-record-inspector-design-lock-20260714.md §2 附件面板
   //     row, §7 S5): the 4th inspector tab label (G-10 term 附件). ---
   | 'record.attachments'
+  // --- Resizable panel (2026-09-05): drag-resize splitter + expand toggle on the panel's left edge. ---
+  | 'record.resizeHandle' | 'record.expand' | 'record.collapse'
   | 'record.historyLoading' | 'record.historyUnavailable' | 'record.historyEmpty'
   | 'record.historyActionCreated' | 'record.historyActionDeleted' | 'record.historyActionUpdated'
   // --- Layer 1 record-level restore (Slice 3) ---
@@ -156,6 +158,9 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.details': { en: 'Details', zh: '详情' },
   'record.history': { en: 'History', zh: '历史' },
   'record.attachments': { en: 'Attachments', zh: '附件' },
+  'record.resizeHandle': { en: 'Resize record panel', zh: '调整记录面板宽度' },
+  'record.expand': { en: 'Expand panel', zh: '展开面板' },
+  'record.collapse': { en: 'Collapse panel', zh: '收起面板' },
   'record.historyLoading': { en: 'Loading history...', zh: '正在加载历史...' },
   'record.historyUnavailable': { en: 'History unavailable for this record.', zh: '此记录的历史不可用。' },
   'record.historyEmpty': { en: 'No history yet.', zh: '暂无历史。' },
