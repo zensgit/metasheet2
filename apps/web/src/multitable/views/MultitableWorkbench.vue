@@ -985,10 +985,31 @@ const inspectorOpenerEl = ref<HTMLElement | null>(null)
  *  and can tell "this open has an opener" (this caller) from "this open has none" (deep-link /
  *  comment click-through) — the latter must not inherit a stale opener from an earlier open. A
  *  consequence: a DECLINED discard prompt now leaves the opener untouched too (the panel it kept
- *  open was opened by something else, and that is what Escape should restore focus to). */
+ *  open was opened by something else, and that is what Escape should restore focus to). Round 5
+ *  (2026-09-05, refuter P3): the resolved candidate — explicit or `document.activeElement` — goes
+ *  through `resolveOpenerEl` below, so `document.body` (what `activeElement` IS at the instant the
+ *  expand handler runs in Safari and Firefox/macOS, where a mouse click does not focus a `<button>`,
+ *  and after any programmatic `.click()`), a disconnected element and `null` all reach `selectRecord`
+ *  as `opener: null` — the "this open has no opener" value the inspector already handles — never as
+ *  an element whose close-time `.focus()` would be a no-op that also pre-empts the inspector's
+ *  `.meta-grid` last resort. */
 function openRecord(recordId: string, opener?: HTMLElement | null) {
-  const openerEl = opener ?? (typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null)
-  void selectRecord(recordId, { open: true, opener: openerEl })
+  const candidate = opener ?? (typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null)
+  void selectRecord(recordId, { open: true, opener: resolveOpenerEl(candidate) })
+}
+
+/** Round 5 (2026-09-05, refuter P3): the ONE filter `openRecord` applies to whatever opener it
+ *  resolved. `document.body` is what `document.activeElement` reports when NOTHING is focused — it is
+ *  not an element the user interacted with, and restoring focus to it on close is a no-op that (in
+ *  the inspector) also pre-empted the `.meta-grid` fallback. A disconnected element can never be
+ *  refocused either. Both collapse to `null` here so the inspector's own fallbacks (pre-open
+ *  activeElement, then `.meta-grid`) run. The inspector applies the same predicate to its `openerEl`
+ *  prop on its side too (`isRestorableOpener` in MetaRecordInspector.vue) — each side guards
+ *  independently, so neither relies on the other having done it. */
+function resolveOpenerEl(candidate: HTMLElement | null | undefined): HTMLElement | null {
+  if (!candidate || !candidate.isConnected) return null
+  if (typeof document !== 'undefined' && candidate === document.body) return null
+  return candidate
 }
 
 function onExpandRecord(recordId: string) {

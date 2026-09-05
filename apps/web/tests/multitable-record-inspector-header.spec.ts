@@ -191,6 +191,12 @@ async function openKebab(root: HTMLElement) {
   for (let i = 0; i < 50 && Date.now() <= start; i += 1) await new Promise<void>((resolve) => setTimeout(resolve, 1))
   trigger.click()
   await flushUi()
+  // Round 5 (2026-09-05, refuter NIT): assert the menu actually OPENED — the same bounded settle +
+  // assertion the t5 spec's `openKebabMenu` already carries — so a caller whose only expectation is
+  // an ABSENCE (`.meta-record-drawer__inbox-link` is null; `onClose` was not called) can never pass
+  // vacuously against a menu that never opened. Reports by name HERE, not as a downstream null-deref.
+  for (let i = 0; i < 10 && !document.querySelector('.mt-menu'); i += 1) await flushUi()
+  expect(document.querySelector('.mt-menu')).not.toBeNull()
 }
 function menuItems(): HTMLElement[] {
   return Array.from(document.querySelectorAll<HTMLElement>('.mt-menu [role^="menuitem"]'))
@@ -852,6 +858,75 @@ describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
       expect(document.activeElement).toBe(gridRoot)
 
       gridRoot.remove()
+    })
+
+    // Round 5 (2026-09-05, refuter P3 — `body` handed through AS the opener): the two tests above
+    // cover `openerEl === null`; this one covers `openerEl === document.body`, which the workbench
+    // used to forward verbatim whenever nothing was focused at the expand click (Safari and
+    // Firefox/macOS mouse clicks, any programmatic `.click()`). The pre-fix capture
+    // `props.openerEl ?? (active && active !== document.body ? active : null)` filtered body from the
+    // FALLBACK operand only, so a body OPENER was kept, passed `restoreFocusToOpener`'s connected
+    // check, and close called `body.focus()` — never reaching `.meta-grid`. Mutation: revert the
+    // `isRestorableOpener(props.openerEl)` guard to a bare `props.openerEl ??` preference → phase (1)
+    // reds (activeElement stays `body`, not `.meta-grid`) and phase (2) reds (body, not C); the
+    // positive control (3) stays green, so the red is the guard's, not the harness's.
+    it('openerEl === document.body is treated as NO opener: close falls back to the pre-open activeElement, then to .meta-grid — never body.focus(); positive control: a real opener A is still restored', async () => {
+      const gridRoot = document.createElement('div')
+      gridRoot.className = 'meta-grid'
+      gridRoot.tabIndex = -1
+      document.body.appendChild(gridRoot)
+      const commentBtnC = document.createElement('button')
+      commentBtnC.textContent = 'row-2-comment-button'
+      document.body.appendChild(commentBtnC)
+      const decoy = document.createElement('button')
+      decoy.textContent = 'decoy-focused-at-open-3'
+      document.body.appendChild(decoy)
+      const openerA = document.createElement('button')
+      openerA.textContent = 'row-1-expand-icon'
+      document.body.appendChild(openerA)
+
+      const { container, setVisible, setOpener } = mountToggleableInspector()
+      await flushUi()
+      expect(container.querySelector('.meta-record-drawer')).toBeNull() // starts closed
+
+      // (1) body opener, NOTHING focused at the open edge → the P3 itself: must land on `.meta-grid`.
+      ;(document.activeElement as HTMLElement | null)?.blur()
+      expect(document.activeElement).toBe(document.body)
+      setOpener(document.body)
+      setVisible(true)
+      await flushUi()
+      expect(document.activeElement).toBe(container.querySelector('.meta-record-drawer__title-input')) // autofocus still happens
+      setVisible(false)
+      await flushUi()
+      expect(document.activeElement).toBe(gridRoot) // the last resort IS reached…
+      expect(document.activeElement).not.toBe(document.body) // …instead of a no-op body.focus()
+
+      // (2) body opener, C focused at the open edge → the captured pre-open target wins, exactly as it
+      // does for `openerEl === null` (body IS "no opener", not a lower-priority opener).
+      commentBtnC.focus()
+      expect(document.activeElement).toBe(commentBtnC)
+      setOpener(document.body)
+      setVisible(true)
+      await flushUi()
+      setVisible(false)
+      await flushUi()
+      expect(document.activeElement).toBe(commentBtnC)
+      expect(document.activeElement).not.toBe(gridRoot)
+
+      // (3) positive control: a real, connected opener A is still preferred over the focused decoy.
+      decoy.focus()
+      expect(document.activeElement).toBe(decoy)
+      setOpener(openerA)
+      setVisible(true)
+      await flushUi()
+      setVisible(false)
+      await flushUi()
+      expect(document.activeElement).toBe(openerA)
+
+      gridRoot.remove()
+      commentBtnC.remove()
+      decoy.remove()
+      openerA.remove()
     })
   })
 
