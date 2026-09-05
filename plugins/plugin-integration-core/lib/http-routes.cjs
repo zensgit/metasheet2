@@ -1320,6 +1320,17 @@ const SOURCE_BINDING_CANDIDATE_LIMIT = HUB_OVERVIEW_SYSTEM_LIMIT
 // never whose.
 const VALID_SOURCE_BINDING_BODY_KEYS = new Set(['externalSystemId'])
 
+// `store.get()`'s public wire shape: the 7 columns `stock-preparation-source-binding-store.cjs`'s
+// `rowToPublicBinding` produces. The store may additionally return `matchedWorkspaceId` /
+// `scopeFallback` on a non-null result (its null-workspace scope-fallback), which is resolution
+// metadata for callers that never pass a workspace hint at all — not something this picker screen
+// was built to show. `publicPersistedBinding` is the one seam that decides what crosses the wire.
+function publicPersistedBinding(binding) {
+  if (!binding) return null
+  const { tenantId, workspaceId, actionId, externalSystemId, updatedBy, createdAt, updatedAt } = binding
+  return { tenantId, workspaceId, actionId, externalSystemId, updatedBy, createdAt, updatedAt }
+}
+
 function asPositiveInt(value) {
   if (value === undefined || value === null || value === '') return undefined
   const numeric = Number(value)
@@ -7421,10 +7432,19 @@ function requireStockPreparationAudit() {
       const listScope = { tenantId: scope.tenantId, workspaceId: scope.workspaceId }
       const store = requireStockPreparationSourceBinding()
 
-      const [binding, systems] = await Promise.all([
+      const [rawBinding, systems] = await Promise.all([
         store.get({ ...listScope, actionId: PLM_STOCK_PREPARATION_ACTION_ID }),
         externalSystems.listExternalSystems({ ...listScope, limit: SOURCE_BINDING_CANDIDATE_LIMIT }),
       ])
+      // `store.get()` may annotate a non-null return with `matchedWorkspaceId` / `scopeFallback`,
+      // internal resolution metadata for the null-workspace scope-fallback (reconcile, mvp-persist,
+      // source preflight, carry, export, handoff and the project board all call the registry with no
+      // workspace hint at all, so that fallback is who those two fields exist for). The picker's own
+      // wire contract is the 7-field shape the web client already types as
+      // StockPreparationPersistedBinding; strip the two extra keys here so that contract stays
+      // exactly what it always was rather than growing as a side effect of a store-internal
+      // resolution detail nothing on this screen renders.
+      const binding = publicPersistedBinding(rawBinding)
 
       const dataSourceAccessibility = await resolveDataSourceAccessibility(req, systems)
       const effective = await tableActions

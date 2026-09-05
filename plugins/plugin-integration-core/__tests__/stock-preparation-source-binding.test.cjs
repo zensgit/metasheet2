@@ -138,6 +138,10 @@ function makeDb({ seed = [], failInsertOnce = false } = {}) {
       calls.push({ op: 'selectOne', table, where })
       return rows.find((row) => row.__table === table && matches(row, where)) || null
     },
+    async select(table, { where } = {}) {
+      calls.push({ op: 'select', table, where })
+      return rows.filter((row) => row.__table === table && matches(row, where || {}))
+    },
     async insertOne(table, row) {
       calls.push({ op: 'insertOne', table, row })
       if (pendingInsertFailure) {

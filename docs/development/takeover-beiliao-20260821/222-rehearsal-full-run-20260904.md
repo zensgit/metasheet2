@@ -200,3 +200,45 @@ SYN-A-1000              2     true   add       10 - Q235B   10 - 待备料  2026
 **踩坑**:`pm2 restart --update-env` 从**当前 shell 的环境**更新,而不是重读 `app.env`;第一次重启后进程仍带旧 JSON(`pm2 env 0` 可见)。正确做法是升级脚本第 7 步的写法:先把 `app.env` 逐行 `SetEnvironmentVariable(...,'Process')` 装进当前进程,再 `pm2 restart <name> --update-env`。
 
 **验证**:重启后 `pm2 env 0` 含新键;对客户测试 PLM 项目 `2-20231625` 试算一次,证据 `expansion.summary` 出现 `maxReadCount:30000`、`maxElapsedMs:600000`(此前不出现);该项目无订单,`readCount:3`、`rowsExpanded:0`、`status:ready`,与之前行为一致。
+
+## 10. 源绑定作用域回退(方向 B)
+
+### 为什么方向和 #5471 相反
+
+§7.1 修的是 `integration_external_systems`:UI 带 `workspaceId=default` 精确查询,而**建源**时挂在 `workspace_id IS NULL`(租户级)——精确命中不了,所以 #5471 让"**具体 hint 未命中**"回退到"**租户级 null 行**"(`selectScopedRow`,`external-systems.cjs:606-615`)。
+
+`integration_stock_prep_source_binding` 是反过来的现象:唯一索引 `(tenant_id, COALESCE(workspace_id,''), action_id)`(migration 079)允许 `workspace_id IS NULL` 与 `workspace_id='default'` 两行并存;**UI 写绑定**走 `POST /source-binding`,带的是 `workspaceId=default` 这个 query hint,所以真实写入的是 `'default'` 那一行,而不是 null 行。麻烦出在**读**这一侧:reconcile、mvp-persist、source preflight、carry、export、handoff、project board 这些调用点从来不传 `workspaceId`(`applyPersistedSourceBinding` 里 `optionalString(undefined) → null`),于是它们的查询永远是 `workspace_id IS NULL`,天然读不到 `'default'` 那一行。
+
+也就是说:#5471 是"**具体 hint 缺行 → 退到 null 行**";这里恰好相反,是"**null hint 缺行 → 找具体 workspace 行**"。两者是同一类"作用域没对齐"问题在两张表上的镜像表现,但回退方向不能互换——照抄 `selectScopedRow` 解决不了这里(它只在具体 hint 未命中时才查 null 行,null hint 本身从不加宽)。
+
+### 规则
+
+改动只在 `plugins/plugin-integration-core/lib/stock-preparation-source-binding-store.cjs` 的 `get()` 里(唯一读口):
+
+- 调用方传 `workspaceId: null`,精确匹配(`workspace_id IS NULL` 那一行)未命中时,查同 `(tenant_id, action_id)` 下 `workspace_id IS NOT NULL` 的所有行:
+  - **恰好一条** → 返回它,并在返回对象上附 `matchedWorkspaceId: <那条的 workspace_id>` 与 `scopeFallback: 'single_workspace_binding'`;
+  - **零条或两条及以上** → 返回 `null`,不猜测(fail-closed,和今天行为一致)。
+- 调用方传了**非 null** 的 `workspaceId` 但未命中 → 仍然只返回 `null`,**不**回退(这条行为是既有测试 `stock-preparation-source-binding.test.cjs:482` 钉住的,新增的 `stock-preparation-source-binding-scope-fallback.test.cjs` 的 F-04 又镜像复核了一遍)。
+- `workspace_id IS NULL` 那一行**存在**时精确优先,不看其它行(即使同时存在 `'default'` 行也不受影响)。
+- HTTP 层:`GET /source-binding`(选源弹窗)直接透传过 `store.get()` 的行,`http-routes.cjs` 里加了 `publicPersistedBinding()` 把 `matchedWorkspaceId`/`scopeFallback` 这两个新字段剥掉,保持 `persistedBinding` 的 7 字段线上契约(`apps/web/src/services/integration/stockPreparation/sourceBinding.ts` 里 `StockPreparationPersistedBinding` 的形状)不变;`resolveSourceBinding` 解析器(`http-routes.cjs` 里喂给 `createStockPreparationTableActionRegistry` 的那个)和 `POST /source-binding` 的响应都只取 `externalSystemId`,新字段本来就流不到那两处。
+
+### 222 上线后的清理步骤
+
+回退只是让"读不到"变成"读得到",不会自动清掉冗余的那一行——`'default'` 与 null 两行会一直并存,直到有人手工清理。上线新代码、确认拉取/reconcile 等路径都正常读到源之后,按下面顺序清:
+
+```sql
+-- 1) 先核对两行绑定的是同一个外接源(占位租户,替换为实际 tenant_id 再执行)
+SELECT workspace_id, external_system_id, updated_at
+FROM integration_stock_prep_source_binding
+WHERE tenant_id = '<TENANT_ID>'
+  AND action_id = 'plm.stock-preparation.pull-bom.v1';
+
+-- 2) 两行 external_system_id 一致时,只删 workspace_id IS NULL 那条
+--    (workspace_id = 'default' 那条留着 —— 它才是 UI 和大多数调用点实际认的)
+DELETE FROM integration_stock_prep_source_binding
+WHERE tenant_id = '<TENANT_ID>'
+  AND action_id = 'plm.stock-preparation.pull-bom.v1'
+  AND workspace_id IS NULL;
+```
+
+若两行 `external_system_id` **不一致**,先别删——说明有人分别在两个 scope 下点过"保存",需要先确认哪个是当前应生效的源,再决定删哪条或是否需要 owner 介入;这张表没有改字段的 UPDATE 入口(store 头注释 "NO DELETE SURFACE" 说的是不建模"解绑",不是不能删错行),清理只能走这条 SQL。
