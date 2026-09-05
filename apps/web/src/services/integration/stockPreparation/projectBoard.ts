@@ -63,6 +63,19 @@ export interface StockPreparationProjectBoard {
   activePulledRowCount: number
   /** True when the count stopped at the scan bound — the real number is at least `pulledRowCount`. */
   pulledRowCountBounded: boolean
+  /**
+   * The latest `lastPlmRefreshAt` seen across this project's pulled rows — 「上次同步」. NULL when the
+   * bound target does not bind that (optional) column, there are no rows yet, OR the scan was
+   * truncated (see `lastPulledAtBounded`) — never a computed value the server is not sure of.
+   */
+  lastPulledAt: string | null
+  /**
+   * True when `lastPulledAt` is null BECAUSE the row scan hit its page bound, not because nothing was
+   * ever pulled. A truncated, unordered scan cannot safely report a max — a row past the bound could
+   * carry a newer stamp — so the server reports "don't know" via this flag instead of a possibly-stale
+   * number. The view must render this differently from "never synced".
+   */
+  lastPulledAtBounded: boolean
   pendingDecisionCount: number
   /** ISO timestamp of the last materials export for this project, from the audit trail. */
   lastExportAt: string | null

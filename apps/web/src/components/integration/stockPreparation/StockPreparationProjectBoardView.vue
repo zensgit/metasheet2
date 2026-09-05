@@ -118,6 +118,10 @@
             <dt>{{ bi('轮到谁', 'Whose turn') }}</dt>
             <dd>{{ turnText }}</dd>
           </div>
+          <div class="sp-board__fact" data-testid="stock-prep-project-board-last-pulled">
+            <dt>{{ bi('上次同步', 'Last synced') }}</dt>
+            <dd>{{ lastPullText }}</dd>
+          </div>
           <div class="sp-board__fact" data-testid="stock-prep-project-board-last-export">
             <dt>{{ bi('最近导出', 'Last export') }}</dt>
             <dd>{{ lastExportText }}</dd>
@@ -530,6 +534,35 @@ const lastExportText = computed<string>(() => {
   if (!at) return bi('还没导出过', 'Never exported')
   const parsed = new Date(at)
   if (Number.isNaN(parsed.getTime())) return bi('还没导出过', 'Never exported')
+  return parsed.toLocaleString(locale.value === 'zh-CN' ? 'zh-CN' : 'en-US')
+})
+
+/**
+ * 上次同步 — the latest `lastPlmRefreshAt` the board saw across this project's pulled rows.
+ *
+ * THREE STATES, and the middle one exists only because the scan behind it can be TRUNCATED:
+ *   * `lastPulledAtBounded` — the row scan hit its page bound before it could see every row, and an
+ *     unordered, offset-paged scan cannot safely report a partial max (a row past the bound could
+ *     carry a NEWER stamp than anything seen). This is deliberately NOT the same message as "never
+ *     synced" — the data may be perfectly fresh, the page just could not prove it.
+ *   * `lastPulledAt === null` (not bounded) — no rows carry the stamp yet, or the bound target does
+ *     not bind the (optional) `lastPlmRefreshAt` column. `—`, same as every other absent timestamp on
+ *     this card.
+ *   * otherwise — the timestamp, formatted exactly like `lastExportText`.
+ */
+const lastPullText = computed<string>(() => {
+  const current = board.value
+  if (!current) return '—'
+  if (current.lastPulledAtBounded) {
+    return bi(
+      '行数超过看板上限,未统计',
+      'Row count exceeds the board scan limit — not counted',
+    )
+  }
+  const at = current.lastPulledAt
+  if (!at) return '—'
+  const parsed = new Date(at)
+  if (Number.isNaN(parsed.getTime())) return '—'
   return parsed.toLocaleString(locale.value === 'zh-CN' ? 'zh-CN' : 'en-US')
 })
 

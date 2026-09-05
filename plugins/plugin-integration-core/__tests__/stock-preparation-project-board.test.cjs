@@ -58,8 +58,12 @@ const {
   STOCK_PREPARATION_PROJECT_BOARD_KEYS,
   STOCK_PREPARATION_PROJECT_BOARD_MODES,
   readOperatorProjectBoard,
+  __internals: BOARD_INTERNALS,
 } = require(path.join(LIB, 'stock-preparation-project-board.cjs'))
 const { STOCK_PREP_AUDIT_ACTIONS } = require(path.join(LIB, 'stock-preparation-audit-store.cjs'))
+const {
+  __internals: PREP_LINE_EXPORT_INTERNALS,
+} = require(path.join(LIB, 'stock-preparation-prep-line-export.cjs'))
 const {
   makeFakeProvisioning,
   makeStrictRecordsApi,
@@ -259,6 +263,9 @@ function mount({
           path: `/${index}`,
           totalQuantity: 1,
           active: row.active !== false,
+          // Only present when a scenario asks for it (lastPulledAt fixtures) — omitted otherwise, so
+          // every row shape that predates this key is unaffected.
+          ...(row.lastPlmRefreshAt !== undefined ? { lastPlmRefreshAt: row.lastPlmRefreshAt } : {}),
         },
       )),
       // THE ADMINISTRATOR'S ARCHIVED SNAPSHOT for this project — one persisted batch, one open
@@ -642,6 +649,12 @@ async function theBoardAnswersWithHandlesCountsAndTheProjectsOwnNameOnly() {
   assert.equal(typeof board.heldLineCount, 'number')
   assert.equal(typeof board.readyLineCount, 'number')
   assert.equal(board.pendingDecisionCount, 1, 'B-03: the one pending decision on this project is counted')
+  assert.equal(
+    board.lastPulledAt,
+    null,
+    'B-03: the fixture\'s bound target does not bind lastPlmRefreshAt, so lastPulledAt degrades to null',
+  )
+  assert.equal(board.lastPulledAtBounded, false, 'B-03: an ordinary, unbounded scan is not truncated')
   assert.equal(board.lastExportAt, EXPORT_AT, 'B-03: the last export timestamp comes from the values-free audit trail')
   assert.equal(board.directoryReady, true)
   assert.equal(board.ledgerReady, true)
@@ -795,6 +808,142 @@ async function anAuditStoreWithoutListStillAnswersTheBoard() {
   const res = await callBoard(mount({ omitAuditList: true }).routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
   assert.equal(res.statusCode, 200, 'a store without list() is a degraded read, not a failed one')
   assert.equal(res.body.data.lastExportAt, null)
+}
+
+// ---------------------------------------------------------------------------
+// lastPulledAt — the max lastPlmRefreshAt seen in the SAME pull-target scan
+// ---------------------------------------------------------------------------
+//
+// Answers 「上次从 PLM 拉过是什么时候」 for the flow readPullTargetRowFacts already exists for: an
+// operator's own pull, which mvp-persist never touches. No second read, no new write — the max is
+// taken across the same rows the pull-target row count already scans.
+async function theBoardReportsLastPulledAtFromTheBoundLastPlmRefreshColumn() {
+  const OLDER = '2026-08-30T01:00:00.000Z'
+  const NEWEST = '2026-09-02T03:04:05.000Z'
+  const MIDDLE = '2026-09-01T00:00:00.000Z'
+  const withLastPlmRefreshBinding = {
+    sheetId: ownSheetIdFor(STAGING_A, MAIN_OBJECT_ID),
+    objectId: MAIN_OBJECT_ID,
+    fieldIdMap: {
+      ...MAIN_FIELD_ID_MAP,
+      lastPlmRefreshAt: physicalFieldId(STAGING_A, MAIN_OBJECT_ID, 'lastPlmRefreshAt'),
+    },
+  }
+
+  // 1. THE ORDINARY CASE: the bound target binds lastPlmRefreshAt, rows carry different stamps ->
+  //    the board reports the MAX, not the last row read or the first.
+  {
+    const res = await callBoard(mount({
+      boundTarget: withLastPlmRefreshBinding,
+      mainTableRows: [
+        { projectNo: PROJECT_A_NO, lastPlmRefreshAt: OLDER },
+        { projectNo: PROJECT_A_NO, lastPlmRefreshAt: NEWEST },
+        { projectNo: PROJECT_A_NO, lastPlmRefreshAt: MIDDLE, active: false },
+      ],
+    }).routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.lastPulledAt, NEWEST, 'lastPulledAt is the MAX lastPlmRefreshAt across this project\'s rows')
+  }
+
+  // 2. THE FIELD IS UNBOUND (the default fixture's fieldIdMap, matching REQUIRED_EXPORT_FIELD_IDS's
+  //    scope-only pair): degrades to null, and — the part that matters — the rest of the pull-target
+  //    facts are UNAFFECTED. lastPlmRefreshAt must never behave like a missing SCOPE binding, which
+  //    turns the whole target PULL_TARGET_NOT_READY.
+  {
+    const res = await callBoard(mount({
+      mainTableRows: [
+        { projectNo: PROJECT_A_NO, lastPlmRefreshAt: NEWEST },
+        { projectNo: PROJECT_A_NO, lastPlmRefreshAt: OLDER },
+      ],
+    }).routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.pullTargetReady, true, 'an unbound lastPlmRefreshAt does not block readiness')
+    assert.equal(res.body.data.pulledRowCount, 2)
+    assert.equal(res.body.data.lastPulledAt, null, 'an unbound column can never be read, so lastPulledAt stays null')
+  }
+
+  // 3. THE FIELD IS BOUND BUT NO ROW CARRIES IT YET — an install that just turned the binding on.
+  //    Never an error; null, the same as "no rows at all".
+  {
+    const res = await callBoard(mount({
+      boundTarget: withLastPlmRefreshBinding,
+      mainTableRows: [{ projectNo: PROJECT_A_NO }, { projectNo: PROJECT_A_NO }],
+    }).routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.pulledRowCount, 2)
+    assert.equal(res.body.data.lastPulledAt, null, 'bound but absent on every row -> null, not an error')
+  }
+
+  // 4. A TARGET THAT IS NOT READY AT ALL (nothing bound) -> lastPulledAt is null right alongside
+  //    every other pull-target fact, via the same PULL_TARGET_NOT_READY shape.
+  {
+    const res = await callBoard(mount({ actionConfigured: false }).routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.pullTargetReady, false)
+    assert.equal(res.body.data.lastPulledAt, null)
+  }
+
+  // 5. A garbage/unparseable stamp on one row must not crash the scan or poison the max — it simply
+  //    does not vote, the same posture `parsePlmRefreshTimestampMs` documents.
+  {
+    const res = await callBoard(mount({
+      boundTarget: withLastPlmRefreshBinding,
+      mainTableRows: [
+        { projectNo: PROJECT_A_NO, lastPlmRefreshAt: 'not-a-date' },
+        { projectNo: PROJECT_A_NO, lastPlmRefreshAt: NEWEST },
+      ],
+    }).routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.lastPulledAt, NEWEST, 'an unparseable cell on another row does not poison the max')
+  }
+}
+
+// ---------------------------------------------------------------------------
+// lastPulledAtBounded — a TRUNCATED scan must not report a possibly-wrong max
+// ---------------------------------------------------------------------------
+//
+// readPullTargetRowFacts pages by OFFSET, unordered by lastPlmRefreshAt. Past PULL_TARGET_MAX_PAGES
+// the row COUNT is still a safe floor (bounded:true already says "at least this many"), but a MAX
+// computed only over the pages actually read is not safe the same way: a row past the bound could
+// carry the true latest stamp, so reporting the partial max would silently UNDERSTATE freshness with
+// no way for a reader to tell "really is stale" apart from "the scan gave up". This is tested directly
+// against `readPullTargetRowFacts` (not through the full route) because forcing the bound through the
+// route's fixtures would mean materializing PULL_TARGET_MAX_PAGES * PULL_TARGET_PAGE_LIMIT physical
+// rows through the strict multitable fake for no benefit — the scan loop itself is what is under test.
+async function lastPulledAtIsNeverReportedFromATruncatedScan() {
+  const { readPullTargetRowFacts } = BOARD_INTERNALS
+  const PAGE_LIMIT = PREP_LINE_EXPORT_INTERNALS.READ_PAGE_LIMIT
+  const MAX_PAGES = PREP_LINE_EXPORT_INTERNALS.READ_MAX_PAGES
+  const ownSheet = { sheetId: 'sheet_bounded_scan', objectId: MAIN_OBJECT_ID }
+  const boundTarget = {
+    sheetId: 'sheet_bounded_scan',
+    objectId: MAIN_OBJECT_ID,
+    fieldIdMap: { projectNo: 'projectNo', active: 'active', lastPlmRefreshAt: 'lastPlmRefreshAt' },
+  }
+  let calls = 0
+  const recordsApi = {
+    async queryRecords() {
+      calls += 1
+      // EVERY page comes back exactly full, so the scan never sees a short final page and runs the
+      // full MAX_PAGES. The LAST readable page plants the NEWEST stamp of the whole (synthetic)
+      // dataset — proof that a partial max, had it been reported, would have been wrong.
+      const isLastReadablePage = calls === MAX_PAGES
+      return Array.from({ length: PAGE_LIMIT }, (_unused, i) => ({
+        data: {
+          projectNo: PROJECT_A_NO,
+          active: true,
+          lastPlmRefreshAt: isLastReadablePage && i === 0 ? '2099-01-01T00:00:00.000Z' : '2020-01-01T00:00:00.000Z',
+        },
+      }))
+    },
+  }
+  const facts = await readPullTargetRowFacts(recordsApi, ownSheet, boundTarget, PROJECT_A_NO)
+  assert.equal(facts.ready, true)
+  assert.equal(facts.bounded, true, 'the row-count scan is truncated, exactly like pulledRowCountBounded')
+  assert.equal(facts.rowCount, PAGE_LIMIT * MAX_PAGES)
+  assert.equal(calls, MAX_PAGES, 'the scan reads exactly the page bound and no further')
+  assert.equal(facts.lastPulledAt, null, 'a truncated scan must report null, never a possibly-wrong max')
+  assert.equal(facts.lastPulledAtBounded, true, 'and say WHY it is null — truncation, not "no rows carry the stamp"')
 }
 
 // ---------------------------------------------------------------------------
@@ -1312,6 +1461,8 @@ async function main() {
   await theModuleRefusesToProjectAValueWithoutAScope()
   theFillViewIdMirrorsTheHostsDefaultViewId()
   await anAuditStoreWithoutListStillAnswersTheBoard()
+  await theBoardReportsLastPulledAtFromTheBoundLastPlmRefreshColumn()
+  await lastPulledAtIsNeverReportedFromATruncatedScan()
   await theBoardRefusesBeforeItsAuditActionCanBeStored()
   console.log('✓ stock-preparation-project-board')
 }

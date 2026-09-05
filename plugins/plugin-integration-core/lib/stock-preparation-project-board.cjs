@@ -153,6 +153,23 @@ const STOCK_PREPARATION_PROJECT_BOARD_KEYS = Object.freeze([
   'pulledRowCount',
   'activePulledRowCount',
   'pulledRowCountBounded',
+  // The max `lastPlmRefreshAt` seen across this project's rows in the SAME scan that produces the
+  // counts above — no second read, no new write. `lastPlmRefreshAt` is the conflict planner's own
+  // per-row refresh stamp (stock-preparation-conflict-planner.cjs runPatch); reusing it here answers
+  // 「上次拉过是什么时候」 for an operator's own pull, which — like the pull-target counts themselves
+  // — a run through mvp-persist never touches. NULL when the bound target does not bind
+  // `lastPlmRefreshAt` (an OPTIONAL column, unlike the two SCOPE fields), has no rows yet, OR the scan
+  // hit `PULL_TARGET_MAX_PAGES` (see `lastPulledAtBounded`) — never a thrown error.
+  'lastPulledAt',
+  // TRUE exactly when `lastPulledAt` is a max over a TRUNCATED subset rather than the whole project —
+  // the same `PULL_TARGET_MAX_PAGES` bound `pulledRowCountBounded` already reports for the row counts.
+  // A max computed over a prefix of an UNORDERED page scan is not a floor the way a truncated COUNT
+  // is: rows past the bound could easily carry a NEWER `lastPlmRefreshAt` than anything seen, so
+  // reporting the partial max as `lastPulledAt` would silently understate how fresh the data is — the
+  // exact "cron ran fine, page just says it looks stale" failure this field exists to prevent. So the
+  // bounded case reports `lastPulledAt: null` INSTEAD of a number that could quietly be wrong, and
+  // this flag is how a reader tells "we don't know" apart from "no rows carry the stamp".
+  'lastPulledAtBounded',
   'pendingDecisionCount',
   'lastExportAt',
   'fillTarget',
@@ -338,7 +355,26 @@ const PULL_TARGET_NOT_READY = Object.freeze({
   rowCount: 0,
   activeRowCount: 0,
   bounded: false,
+  lastPulledAt: null,
+  lastPulledAtBounded: false,
 })
+
+/**
+ * Best-effort timestamp parse for a `lastPlmRefreshAt` cell. The planner writes an ISO string
+ * (`normalizeIsoTime`), but a row is somebody else's data by the time this reads it back, so this
+ * accepts a `Date` too and rejects everything else — never throws, since one unparsable cell must not
+ * cost the whole board its `lastPulledAt`, only that cell's vote toward the max.
+ */
+function parsePlmRefreshTimestampMs(value) {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value.getTime()
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const ms = Date.parse(value)
+    return Number.isNaN(ms) ? null : ms
+  }
+  return null
+}
 
 /**
  * HOW MANY ROWS DID THE PULL ACTUALLY PUT THERE — counted in the bound table-action target.
@@ -385,12 +421,20 @@ async function readPullTargetRowFacts(recordsApi, ownSheet, boundTarget, project
       // count that cannot scope is worth exactly as little. Not ready.
       else return PULL_TARGET_NOT_READY
     }
+    // `lastPlmRefreshAt` is OPTIONAL, unlike the two SCOPE columns above: it never gates readiness.
+    // An explicit map that simply does not bind it leaves `bindings.lastPlmRefreshAt` undefined —
+    // `lastPulledAt` degrades to null below, exactly like an unprovisioned fill table degrades
+    // `fillTarget` to null, never PULL_TARGET_NOT_READY.
+    const lastPlmRefreshPhysical = target.fieldIdMap.lastPlmRefreshAt
+    if (lastPlmRefreshPhysical) bindings.lastPlmRefreshAt = lastPlmRefreshPhysical
+    else if (!explicit) bindings.lastPlmRefreshAt = 'lastPlmRefreshAt'
   } catch {
     return PULL_TARGET_NOT_READY
   }
 
   let rowCount = 0
   let activeRowCount = 0
+  let lastPulledAtMs = null
   try {
     for (let page = 0; page < PULL_TARGET_MAX_PAGES; page += 1) {
       const pageRows = await recordsApi.queryRecords({
@@ -404,17 +448,45 @@ async function readPullTargetRowFacts(recordsApi, ownSheet, boundTarget, project
         rowCount += 1
         const data = row && typeof row === 'object' && row.data && typeof row.data === 'object' ? row.data : (row || {})
         if (data[bindings.active] !== false) activeRowCount += 1
+        if (bindings.lastPlmRefreshAt) {
+          const ms = parsePlmRefreshTimestampMs(data[bindings.lastPlmRefreshAt])
+          if (ms !== null && (lastPulledAtMs === null || ms > lastPulledAtMs)) lastPulledAtMs = ms
+        }
       }
       if (pageRows.length < PULL_TARGET_PAGE_LIMIT) {
-        return { ready: true, rowCount, activeRowCount, bounded: false }
+        return {
+          ready: true,
+          rowCount,
+          activeRowCount,
+          bounded: false,
+          lastPulledAt: lastPulledAtMs === null ? null : new Date(lastPulledAtMs).toISOString(),
+          lastPulledAtBounded: false,
+        }
       }
     }
   } catch {
     return PULL_TARGET_NOT_READY
   }
-  // Past the scan bound. The numbers so far are a floor, not a total, and `bounded` says so rather
-  // than letting a truncated count read as an exact one.
-  return { ready: true, rowCount, activeRowCount, bounded: true }
+  // Past the scan bound. The row COUNTS so far are a floor, not a total, and `bounded` says so rather
+  // than letting a truncated count read as an exact one — that caveat is fine for a count, which can
+  // only be an undercount.
+  //
+  // A MAX is different, and unsafe to report the same way: this loop walks pages in whatever order
+  // the records API returns them, not ordered by `lastPlmRefreshAt`, so the rows past the bound are
+  // NOT necessarily older than the ones already seen — one of them could easily carry the actual
+  // latest refresh. Reporting `lastPulledAtMs` here would silently UNDERSTATE freshness with no way
+  // for a reader to tell "this project's data really is old" apart from "the scan gave up before
+  // finding the recent row" — precisely the "cron is fine, the page just looks stale" failure this
+  // field exists to head off. So the bounded case reports `lastPulledAt: null` — an honest "cannot
+  // say" — and `lastPulledAtBounded: true` is the flag a caller reads instead.
+  return {
+    ready: true,
+    rowCount,
+    activeRowCount,
+    bounded: true,
+    lastPulledAt: null,
+    lastPulledAtBounded: true,
+  }
 }
 
 /**
@@ -572,6 +644,8 @@ async function readOperatorProjectBoard({
     pulledRowCount: pullTarget.rowCount,
     activePulledRowCount: pullTarget.activeRowCount,
     pulledRowCountBounded: pullTarget.bounded,
+    lastPulledAt: pullTarget.lastPulledAt,
+    lastPulledAtBounded: pullTarget.lastPulledAtBounded === true,
     // KEYED BY THE BUSINESS NUMBER, so it survives an absent archive row. Reading this off the
     // archive row made the board answer 「没有要您拿主意的事」 for precisely the flow this page
     // exists for — an operator's own pull, which queues decisions but writes no MVP project row —
@@ -605,6 +679,7 @@ module.exports = {
   __internals: {
     lastExportAtFor,
     notFound,
+    parsePlmRefreshTimestampMs,
     readPullTargetRowFacts,
     resolveFillTarget,
     resolveOwnBoundSheet,

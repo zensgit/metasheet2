@@ -104,6 +104,8 @@ function boardPayload(overrides: Record<string, unknown> = {}): Record<string, u
     pulledRowCount: 47,
     activePulledRowCount: 47,
     pulledRowCountBounded: false,
+    lastPulledAt: null,
+    lastPulledAtBounded: false,
     pendingDecisionCount: 0,
     lastExportAt: '2026-09-01T02:03:04.000Z',
     fillTarget: { sheetId: SHEET_ID, viewId: VIEW_ID },
@@ -690,6 +692,31 @@ describe('项目备料页 — the operator project board', () => {
     // No internal handle is ever rendered — the projectId and the runId are state, not copy.
     expect(status.textContent).not.toContain('stockprep_project_a1')
     expect(status.textContent).not.toContain('run_a1')
+  })
+
+  // 上次同步 — three states, and the middle one exists only because the row scan behind it can be
+  // TRUNCATED (see stock-preparation-project-board.cjs `lastPulledAtBounded`). The message for that
+  // state must say "we could not count", not "never synced" — those are different facts.
+  it('B-04: 上次同步 shows the last PLM refresh, a truncation notice, or a dash — never the same text for all three', async () => {
+    routeApi({ board: () => ok(boardPayload({ lastPulledAt: null, lastPulledAtBounded: false })) })
+    const noneYet = await mountBoard()
+    const dash = (noneYet.querySelector('[data-testid="stock-prep-project-board-last-pulled"]') as HTMLElement).textContent
+    expect(dash).toContain('—')
+    remount()
+
+    routeApi({ board: () => ok(boardPayload({ lastPulledAt: null, lastPulledAtBounded: true })) })
+    const truncated = await mountBoard()
+    const truncatedText = (truncated.querySelector('[data-testid="stock-prep-project-board-last-pulled"]') as HTMLElement).textContent ?? ''
+    expect(truncatedText).toContain('未统计')
+    expect(truncatedText).not.toContain('—')
+    remount()
+
+    routeApi({ board: () => ok(boardPayload({ lastPulledAt: '2026-09-04T08:00:00.000Z', lastPulledAtBounded: false })) })
+    const synced = await mountBoard()
+    const syncedText = (synced.querySelector('[data-testid="stock-prep-project-board-last-pulled"]') as HTMLElement).textContent ?? ''
+    expect(syncedText).not.toContain('—')
+    expect(syncedText).not.toContain('未统计')
+    expect(syncedText.trim().length).toBeGreaterThan(0)
   })
 
   it('B-04: 推送宜搭 is a disabled placeholder that says so in words', async () => {
