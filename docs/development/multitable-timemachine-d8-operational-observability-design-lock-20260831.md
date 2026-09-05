@@ -14,6 +14,16 @@ completed `25 SUCCESS / 1 intentional SKIPPED / 0 failure / 0 pending`.
 This binding does not change the ratification baseline or authorize Ready,
 merge, flags, dispatch, staging, deployment, production, or tenant UAT.
 
+**2026-09-05 bounded local replay binding:** current-main parent
+`177cafd3e34f30b5fc2682b3d392684c92fe67fe`; true merge
+`f2ba2ea40c56b350382f2c2a3187a02aff3d24fd` with ordered parents
+`6791bc7de4d3a543f7dfb940f03857256d2c6c1e` and
+`177cafd3e34f30b5fc2682b3d392684c92fe67fe`; evidence code head
+`8ac37f707f2c40a437ae644d91ac77574d873e0d`; code tree
+`0fb61fce3bbf45471ee36aa1d8e23ab7f1965abd`. The replay is local only;
+remote exact-head CI is NOT RUN. The historical remote proof above remains
+evidence for its historical head and is not inherited by this code head.
+
 ## 1. Objective
 
 Make the existing recovery archive restore worker and its bounded shutdown drain
@@ -92,6 +102,7 @@ Tests:
 - `packages/core-backend/tests/unit/multitable-recovery-archive-observability.test.ts`
 - `packages/core-backend/tests/unit/multitable-recovery-archive-metrics.test.ts`
 - `packages/core-backend/tests/unit/multitable-recovery-archive-application.test.ts`
+- `packages/core-backend/tests/unit/multitable-recovery-archive-restore-worker.test.ts`
 - `packages/core-backend/tests/unit/metasheet-recovery-archive-wiring.test.ts`
 
 Docs:
@@ -110,8 +121,11 @@ file is a scope stop.
 - Core-backend typecheck and scoped ESLint.
 - `git diff --check` and exact file census.
 - Mutation: remove `onResult` forwarding; the producer test must fail.
+- Mutation: remove either observer-exception containment boundary; the worker
+  or application test must fail without replacing canonical lifecycle results.
 - Mutation: remove drain-failure lifecycle recording; the shutdown test must fail.
 - Mutation: allow an extra run-result key; the values-free closed-shape test must fail.
+- Mutation: omit one zero-initialized run outcome; the registry census must fail.
 - Flags-OFF proof that factory, DB, worker, timer, and observer remain untouched.
 - Exact-head remote CI before any Ready request.
 

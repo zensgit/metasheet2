@@ -1,9 +1,11 @@
 # Time Machine D8 operational observability development report
 
-**Status:** DRAFT-HOLD / CODE-BEARING EXACT HEAD REMOTE-GREEN. This report is
-not Ready, merge, staging, flag, deployment, production, or tenant-UAT
-evidence. The commit that updates this report is a report-only child of the
-verified code-bearing head and changes no implementation or CI configuration.
+**Status:** DRAFT-HOLD / CURRENT-MAIN LOCAL REPLAY VERIFIED. This report is not
+Ready, remote exact-head CI, merge, staging, flag, deployment, production, or
+tenant-UAT evidence. Historical remote proofs remain explicitly bound to their
+historical heads. The commit that updates this report is a report-only child of
+the current verified code head and changes no implementation or CI
+configuration.
 
 ## 1. Exact binding
 
@@ -16,12 +18,25 @@ verified code-bearing head and changes no implementation or CI configuration.
 - Cache-CI config fix-forward: `e85616da1007eca3664f686d8e19563814970d82`
 - Code-bearing remote head: `666e01474980d5e16ff9ebdc49f686c5afb23fb5`
 - Code-bearing tree: `e49d1348ab8cc3602e9c9158fb60196b5e190c05`
-- Branch: `codex/tm-d8-operational-observability-20260831`
+- Historical report carrier: `6791bc7de4d3a543f7dfb940f03857256d2c6c1e`
+- Historical report-carrier tree: `e9ccd921569d79254c753736c9b22d3b07ca9495`
+- Current-main replay parent: `177cafd3e34f30b5fc2682b3d392684c92fe67fe`
+- True merge: `f2ba2ea40c56b350382f2c2a3187a02aff3d24fd`
+- True-merge ordered parents: `6791bc7de4d3a543f7dfb940f03857256d2c6c1e`,
+  `177cafd3e34f30b5fc2682b3d392684c92fe67fe`
+- True-merge tree: `a04be3100a6fcd4787e0cd8a646c50458194aecc`
+- Current evidence code head: `8ac37f707f2c40a437ae644d91ac77574d873e0d`
+- Current evidence code tree: `0fb61fce3bbf45471ee36aa1d8e23ab7f1965abd`
+- Branch: `codex/tm-d8-closeout-replay-20260905`
 - Scope including this development report and its verification report: 12 files,
   729 insertions, 2 deletions at the code-bearing remote head
 - Remote PR: `#5393`
-- Remote exact-head CI: `25 SUCCESS / 1 intentional SKIPPED / 0 failure /
-  0 pending` at `666e01474980...`
+- Historical remote exact-head CI: `25 SUCCESS / 1 intentional SKIPPED / 0
+  failure / 0 pending` at both `666e01474980...` and the report-only
+  `6791bc7de4...` carrier
+- Current evidence code-head remote CI: NOT RUN; no push was performed
+- Current evidence code-head delta from replay parent: 13 files, 774 insertions,
+  2 deletions
 
 The contract is
 `multitable-timemachine-d8-operational-observability-design-lock-20260831.md`.
@@ -87,6 +102,7 @@ Tests:
 - `packages/core-backend/tests/unit/multitable-recovery-archive-observability.test.ts`
 - `packages/core-backend/tests/unit/multitable-recovery-archive-metrics.test.ts`
 - `packages/core-backend/tests/unit/multitable-recovery-archive-application.test.ts`
+- `packages/core-backend/tests/unit/multitable-recovery-archive-restore-worker.test.ts`
 - `packages/core-backend/tests/unit/metasheet-recovery-archive-wiring.test.ts`
 
 CI configuration:
@@ -126,6 +142,15 @@ code-bearing candidate. A fresh Terra high replay review returned
 `25 SUCCESS / 1 intentional SKIPPED / 0 failure / 0 pending`, including Node
 18, Node 20, Web Tests, and `core-backend-cache`.
 
+The 2026-09-05 local replay true-merged current main without conflict. The
+post-merge delta retained the original 12 PR paths byte-for-byte except for the
+automatic `src/index.ts` composition with current main. The evidence-only code
+child changed exactly three existing unit-test files: it made run-observer and
+lifecycle-observer exceptions throw, proved worker/application outcomes remain
+unchanged, and enumerated all 12 zero-initialized worker outcome series. The
+final local gates at `8ac37f707f2c...` are 6 focused files / 47 tests PASS,
+core-backend typecheck PASS, and cache build/tests 3 files / 16 tests PASS.
+
 ## 7. Honest completion boundary
 
 This checkpoint improves operational visibility for the already implemented
@@ -140,6 +165,9 @@ Still owner-gated or not implemented:
 - alert thresholds, receivers, dashboards, and on-call routing;
 - D7 staging fault/scale execution;
 - flags, dispatch, deployment, production, and tenant UAT.
+
+Production provider/KMS, staging, real-tenant, deployment, and production proof
+were NOT RUN and are not claimed by the current local replay.
 
 Deleted whole-sheet resurrection remains explicitly PARKED. Record history,
 record restore, record trash restore, config undelete, and live-sheet archive
