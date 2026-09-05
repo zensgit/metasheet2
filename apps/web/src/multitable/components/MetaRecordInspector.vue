@@ -494,7 +494,7 @@ import {
 } from '../utils/meta-record-labels'
 import { commentLabel } from '../utils/meta-comment-labels'
 import type { AiShortcutState } from '../composables/useAiShortcut'
-import { formatRecordFieldValue, resolveCanComment, resolvePrimaryField, textControlValue } from '../utils/recordDisplay'
+import { formatRecordFieldValue, resolveCanComment, resolvePrimaryField, textControlValue, visibleRecordFields } from '../utils/recordDisplay'
 import { isFieldAlwaysReadOnly } from '../utils/field-permissions'
 import { isSystemField } from '../utils/system-fields'
 
@@ -579,7 +579,9 @@ const props = withDefaults(defineProps<{
    *  neither writes nor interprets it (same pass-through shape as `fieldPermissions`). The header
    *  title input above deliberately does NOT read it: it keeps its uncontrolled snap-back-on-prop-
    *  change behaviour (pinned in multitable-record-inspector-header.spec.ts); a title-originated
-   *  rejection surfaces under the primary field's row in the details tab like any other field. */
+   *  rejection surfaces under the primary field's row in the details tab like any other field —
+   *  IF that row is rendered right now: the workbench asks `canAnchorFieldError` (exposed below)
+   *  before writing an entry and toasts instead when the answer is no (round 2). */
   fieldErrors?: Record<string, string> | null
 }>(), {
   recordIds: () => [],
@@ -1381,6 +1383,34 @@ async function toggleRecordSubscription() {
     if (requestId === subscriptionRequestId) subscriptionLoading.value = false
   }
 }
+
+// --- Record inspector v3 PR-B2 round 2 (2026-09-05, §1.3 "Field-anchored server errors") ---
+// The details tabpanel is `v-if="activeTab === 'details'"` (mutually exclusive with the other three), and
+// MetaRecordFieldsPanel renders a row only for `visibleRecordFields(fields, fieldPermissions)`. So a
+// `fieldErrors` entry written while another tab is active (a `patch` re-emitted from the attachments
+// panel; the header title input, which is visible on EVERY tab), or for a field the panel does not
+// render, has NO node in the DOM — nothing for sighted users, nothing for AT — until the user happens
+// to open the details tab. Round-1 verification graded that a P2 (a user action failing with zero
+// feedback; pre-B2 it toasted). This is the ONE place that knows both facts, so it answers the
+// question synchronously for the workbench's `onDrawerPatch`, which asks it through a template ref
+// (the same imperative-query idiom the workbench already uses for `toastRef.showError`) right after
+// resolving the `field` / `conflict` route and BEFORE writing the entry: `false` → the workbench keeps
+// today's toast and writes nothing. Asking-before-writing (rather than watching `fieldErrors` and
+// emitting back) means no round trip, no prev/next diffing of the map, and no way to report the same
+// rejection twice (e.g. when the user later opens the details tab).
+const renderedDetailFieldIds = computed(() => new Set(visibleRecordFields(props.fields, props.fieldPermissions).map((field) => field.id)))
+
+/** Can a server rejection for (`recordId`, `fieldId`) render as the details-tab `role=alert` RIGHT NOW?
+ *  True only when this inspector is visible, showing THAT record, on the details tab, and the panel
+ *  renders a row for that field. Pure read of current state — no side effects, no caching. */
+function canAnchorFieldError(recordId: string, fieldId: string): boolean {
+  return props.visible
+    && props.record?.id === recordId
+    && activeTab.value === 'details'
+    && renderedDetailFieldIds.value.has(fieldId)
+}
+
+defineExpose({ canAnchorFieldError })
 
 </script>
 

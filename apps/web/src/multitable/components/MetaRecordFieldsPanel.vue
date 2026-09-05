@@ -274,11 +274,13 @@
         <!-- PR-B2 (§1.3 "Field-anchored server errors"): the server's rejection for THIS field, anchored
              directly under its control. `role="alert"` so assistive tech announces it on insertion; the
              control above names it via aria-describedby (same id) and carries aria-invalid="true" while
-             it shows. The text is the already-localised server message that reached the workbench
-             (client.ts parseJson → composable `lastPatchFailure` → WB `inspectorFieldErrors`) — there is
-             no client-side copy to translate here, hence no label key. Visibility is prop-driven (WB owns
-             the map: set on a routed rejection, cleared on that field's next successful patch, on record
-             change, and — for the VERSION_CONFLICT marker — when the conflict clears). -->
+             it shows. The text is the server's own message passed through VERBATIM (client.ts parseJson →
+             `patchCell`'s returned GridPatchFailure → WB `inspectorFieldErrors`) — it is NOT localised
+             client-side (the backend's validation messages are English literals, exactly what the pre-B2
+             toast showed), and there is no client-side copy to translate here, hence no label key.
+             Visibility is prop-driven (WB owns the map: set on a routed rejection that CAN render here,
+             cleared on that field's next successful patch, on record change, and — for the
+             VERSION_CONFLICT marker only — when the conflict clears). -->
         <div
           v-if="fieldError(field.id)"
           :id="fieldErrorId(field.id)"
@@ -368,6 +370,7 @@ import {
   formatRecordFieldValue,
   resolveCanComment,
   textControlValue as textControlValueShared,
+  visibleRecordFields,
 } from '../utils/recordDisplay'
 
 const props = withDefaults(defineProps<{
@@ -499,7 +502,10 @@ watch(() => props.fieldErrors, (next, previous) => {
   if (changed) rejectedDrafts.value = keep
 })
 
-const visibleFields = computed(() => props.fields.filter((field) => props.fieldPermissions?.[field.id]?.visible !== false))
+// PR-B2 round 2: the field-mask predicate is the shared `visibleRecordFields` (utils/recordDisplay.ts) so
+// MetaRecordInspector's `canAnchorFieldError` answers "does this panel render a row for that field" from
+// the same rule — a field-anchored server error for a field NOT in this list falls back to the toast.
+const visibleFields = computed(() => visibleRecordFields(props.fields, props.fieldPermissions))
 const resolvedCanComment = computed(() => resolveCanComment(props.rowActions, props.canComment))
 
 // B4 (W2 re-port, refs #4267 continuation): `!isFieldAlwaysReadOnly(field)` is ADDITIVE to

@@ -76,13 +76,16 @@ export interface GridConflictState {
 
 /**
  * Record inspector v3 PR-B2 (docs/development/multitable-record-inspector-v3-design-20260905.md §1.3
- * "Field-anchored server errors", §4 item 11): the most recent patchCell REJECTION, kept with the
- * HTTP status / error code / server `fieldErrors` map that `client.ts`'s parseJson already attaches to
- * the thrown MultitableApiError but that the composable used to flatten into the single `error.value`
- * string. A caller (the workbench's `onDrawerPatch`) reads this to decide toast-vs-inline routing.
- * `fieldErrors` is whatever the server sent, normalised by client.ts (`normalizeFieldErrors`) — this
- * composable never synthesises a map from `message` text (the /patch route on this head emits none;
- * see the PR body pre-check).
+ * "Field-anchored server errors", §4 item 11): a patchCell REJECTION, kept with the HTTP status / error
+ * code / server `fieldErrors` map that `client.ts`'s parseJson already attaches to the thrown
+ * MultitableApiError but that the composable used to flatten into the single `error.value` string.
+ * `patchCell` RETURNS it (round 2: per call — `null` on success and on the local row-action refusal),
+ * so a caller (the workbench's `onDrawerPatch`) routes on exactly ITS OWN call's outcome; two in-flight
+ * patches can never read each other's failure, which a shared "last failure" ref read after `await`
+ * allowed. `fieldErrors` is whatever the server sent, normalised by client.ts (`normalizeFieldErrors`)
+ * — this composable never synthesises a map from `message` text (the /patch route on this head emits
+ * none; see the PR body pre-check). `message` is the server's text verbatim (may be '' if the server
+ * sent none — the caller decides what to show then).
  */
 export interface GridPatchFailure {
   recordId: string
@@ -518,11 +521,6 @@ export function useMultitableGrid(opts: {
   const accumulationCapped = ref(false)
   const error = ref<string | null>(null)
   const conflict = ref<GridConflictState | null>(null)
-  // PR-B2 (§1.3): ADDITIVE read-side companion to `error` for patchCell rejections — see the
-  // `GridPatchFailure` doc comment. Reset at the start of every patchCell (a success leaves it null,
-  // so it never points at a PRIOR failure); the rollback, `conflict` and `error` writes in patchCell's
-  // catch are byte-for-byte what they were before this ref existed.
-  const lastPatchFailure = ref<GridPatchFailure | null>(null)
   // W3-5: the batchId of the most recent successful commit (patchCell / bulkPatch), so a caller can
   // surface a "view in history" deep-link without re-deriving it. Cleared on a failed commit (never
   // stale-points at a PRIOR successful batch after a later failure); null before any commit this session.
@@ -1079,11 +1077,15 @@ export function useMultitableGrid(opts: {
       previousLinkSummaries?: LinkedRecordSummary[]
       nextLinkSummaries?: LinkedRecordSummary[]
     },
-  ) {
+  ): Promise<GridPatchFailure | null> {
     error.value = null
     conflict.value = null
-    lastPatchFailure.value = null
-    if (resolveRowActions(recordId)?.canEdit === false) return rejectRowEdit()
+    // PR-B2 (§1.3): the LOCAL row-action refusal never reaches the server and yields no structured
+    // failure — `error.value` is set exactly as before (rejectRowEdit) and the caller toasts it.
+    if (resolveRowActions(recordId)?.canEdit === false) {
+      rejectRowEdit()
+      return null
+    }
     const row = rows.value.find((r) => r.id === recordId)
     const oldValue = row?.data[fieldId]
     const oldLinkSummaries = options?.previousLinkSummaries ?? linkSummaries.value[recordId]?.[fieldId]
@@ -1126,9 +1128,10 @@ export function useMultitableGrid(opts: {
           nextLinkSummaries,
         }
       }
-      // PR-B2 (§1.3): additive — records status/code/fieldErrors for the caller's routing decision.
-      // Nothing above or below this block changed (rollback + conflict + error.value stay as-is).
-      lastPatchFailure.value = {
+      error.value = e.message ?? fallback('grid.errorPatchCell')
+      // PR-B2 (§1.3): additive — return status/code/fieldErrors for THIS call's routing decision.
+      // Nothing above this line changed (rollback + conflict + error.value stay as-is).
+      return {
         recordId,
         fieldId,
         attemptedValue: value,
@@ -1137,8 +1140,8 @@ export function useMultitableGrid(opts: {
         message: e?.message ?? fallback('grid.errorPatchCell'),
         fieldErrors: e?.fieldErrors && typeof e.fieldErrors === 'object' ? { ...(e.fieldErrors as Record<string, string>) } : undefined,
       }
-      error.value = e.message ?? fallback('grid.errorPatchCell')
     }
+    return null
   }
 
   // --- Undo / Redo ---
@@ -1427,7 +1430,7 @@ export function useMultitableGrid(opts: {
 
   return {
     // State
-    fields, rows, linkSummaries, personSummaries, attachmentSummaries, fieldPermissions, viewPermission, capabilityOrigin, rowActions, rowActionOverrides, loading, error, conflict, lastPatchFailure, lastBatchId, page, hiddenFieldIds, fieldOrder, visibleFields, readOnlyFieldIds,
+    fields, rows, linkSummaries, personSummaries, attachmentSummaries, fieldPermissions, viewPermission, capabilityOrigin, rowActions, rowActionOverrides, loading, error, conflict, lastBatchId, page, hiddenFieldIds, fieldOrder, visibleFields, readOnlyFieldIds,
     // A1 infinite-scroll accumulation state
     loadingMore, accumulationCapped,
     sortRules, filterRules, filterConjunction, nestedFilterNodes, filterGroups, sortFilterDirty,

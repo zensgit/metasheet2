@@ -13,7 +13,7 @@
  * + textControlValue, for the before/after diff), MetaRecordDrawer.vue (resolveCanComment, for its own
  * header comment-toggle button — the drawer no longer renders field values itself post-S2).
  */
-import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaRowActions, PersonSummary } from '../types'
+import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaFieldPermission, MetaRowActions, PersonSummary } from '../types'
 import { formatFieldDisplay } from './field-display'
 
 export interface RecordFieldDisplayContext {
@@ -102,4 +102,19 @@ export function resolveMentionDisplayField(fields: MetaField[] | null | undefine
   const primary = resolvePrimaryField(fields)
   if (primary && (primary.type === 'string' || primary.type === 'longText')) return primary
   return fields?.find((field) => field.type === 'string' || field.type === 'longText')
+}
+
+/**
+ * Record inspector v3 PR-B2 round 2 (2026-09-05, §1.3 "Field-anchored server errors"): the ONE
+ * predicate for "which of `fields` does MetaRecordFieldsPanel render a row for" — the layer-3 RBAC
+ * field-mask (`fieldPermissions[id].visible !== false`; an absent map hides nothing). Hoisted out of the
+ * panel's `visibleFields` computed so MetaRecordInspector's `canAnchorFieldError` (which decides whether a
+ * field-anchored server error CAN render, or must fall back to the workbench toast) reads the exact same
+ * rule instead of a second, drift-prone copy. Byte-identical to the prior inline filter.
+ */
+export function visibleRecordFields(
+  fields: MetaField[] | null | undefined,
+  fieldPermissions: Record<string, MetaFieldPermission> | null | undefined,
+): MetaField[] {
+  return (fields ?? []).filter((field) => fieldPermissions?.[field.id]?.visible !== false)
 }
