@@ -251,7 +251,21 @@ async function call(routes, method, routePath, req = {}) {
   const handler = routes.get(`${method.toUpperCase()} ${routePath}`)
   assert.ok(handler, `route ${method} ${routePath} is registered`)
   const res = createResponse()
-  await handler({ user: req.user, body: req.body || {}, query: req.query || {}, params: req.params || {} }, res)
+  // `authenticatedTenantId` is what auth/jwt-middleware.ts sets from the VERIFIED TOKEN CLAIM, and
+  // only from there — unlike `user.tenantId`, which the same middleware back-fills from the
+  // `x-tenant-id` REQUEST HEADER when the token carries no claim. Modelling both separately is what
+  // lets this suite tell "the token said so" from "the request said so"; a caller that passes
+  // `authenticatedTenantId: null` is a claimless principal whose `user.tenantId` came from a header.
+  const authenticatedTenantId = Object.prototype.hasOwnProperty.call(req, 'authenticatedTenantId')
+    ? req.authenticatedTenantId
+    : (req.user && req.user.tenantId)
+  await handler({
+    user: req.user,
+    authenticatedTenantId,
+    body: req.body || {},
+    query: req.query || {},
+    params: req.params || {},
+  }, res)
   assert.notEqual(res.body, undefined, `${method} ${routePath} produced a body`)
   return res
 }
@@ -348,6 +362,63 @@ async function requestCannotSupplyAPackOrSteerTheTarget() {
 }
 
 // ---------------------------------------------------------------------------
+// THE HEADER MAY NOT CHOOSE WHOSE PERMISSIONS GET RETIRED.
+//
+// `auth/jwt-middleware.ts` copies the `x-tenant-id` REQUEST HEADER onto `user.tenantId` whenever the
+// verified token carries no tenant claim. Every route that derived its tenant from `user.tenantId`
+// was therefore steerable by a header for a claimless platform admin. That was survivable while this
+// install was purely additive; it is not survivable now that it issues a bounded DELETE against
+// `field_permissions`, because the sheet that delete is aimed at is a pure function of the tenant.
+//
+// Both write routes now resolve from `req.authenticatedTenantId` — set ONLY from the verified token
+// — and refuse a claimless principal outright rather than falling back to the header's value.
+// ---------------------------------------------------------------------------
+async function aTenantlessAdminCannotSteerTheInstallWithAHeader() {
+  const provisioning = createFakeProvisioning()
+  const store = createStockPreparationPackInstallStore({ db: createFakeDb(), idGenerator: () => 'ledger_1' })
+  const { routes } = mount({ packs: { [PACK_ID]: SUITE_PACK }, provisioning, packInstallStore: store })
+
+  // A platform admin whose token carries NO tenant claim. The middleware has already copied
+  // `x-tenant-id: tenant-victim` onto user.tenantId — which is exactly the shape of the hole.
+  const CLAIMLESS_ADMIN = Object.freeze({ id: 'u_platform', roles: ['admin'], tenantId: 'tenant-victim' })
+
+  for (const routePath of [
+    '/api/integration/stock-preparation/customer-packs/:packId/dry-run',
+    '/api/integration/stock-preparation/customer-packs/:packId/install',
+  ]) {
+    const res = await call(routes, 'POST', routePath, {
+      user: CLAIMLESS_ADMIN,
+      authenticatedTenantId: null, // the verified token said nothing
+      params: { packId: PACK_ID },
+      body: {},
+    })
+    assert.equal(res.statusCode, 403, `${routePath} refuses a header-derived tenant`)
+    assert.equal(res.body.error.code, 'TENANT_CLAIM_REQUIRED')
+  }
+  // Fail-closed all the way down: the host was never touched and no ledger row exists.
+  assert.deepEqual(provisioning.calls, [], 'zero host calls — refused before any work')
+
+  // A CONTRADICTING header is refused too: the claim wins, it does not merely take precedence.
+  const contradicted = await call(routes, 'POST', '/api/integration/stock-preparation/customer-packs/:packId/install', {
+    user: Object.freeze({ id: 'u_admin', roles: ['admin'], tenantId: 'tenant-victim' }),
+    authenticatedTenantId: TENANT_ID,
+    params: { packId: PACK_ID },
+    body: {},
+  })
+  assert.equal(contradicted.statusCode, 403)
+  assert.equal(contradicted.body.error.code, 'TENANT_MISMATCH')
+
+  // POSITIVE CONTROL — the assertions above are not vacuous: a tenant-BOUND admin still installs.
+  const okRes = await call(routes, 'POST', '/api/integration/stock-preparation/customer-packs/:packId/install', {
+    user: ADMIN,
+    params: { packId: PACK_ID },
+    body: {},
+  })
+  assert.equal(okRes.body.ok, true)
+  assert.equal(okRes.body.data.projectId, PROJECT_ID)
+}
+
+// ---------------------------------------------------------------------------
 // 2. dry run: zero writes
 // ---------------------------------------------------------------------------
 
@@ -405,9 +476,21 @@ async function dryRunPerformsZeroWrites() {
   assert.deepEqual(plan.conflictingFieldIds, [])
   assert.deepEqual(plan.counts, {
     extensionFields: 2, willCreate: 2, willStamp: 0, alreadyStamped: 0, conflicting: 0, optionSets: 0, roleViews: 1,
-    // This pack declares no fieldWritePolicies, so the write-scope preview is empty on both axes.
-    fieldWriteDenials: 0, staleWriteScopes: 0,
+    // This pack declares no fieldWritePolicies, so the write-scope preview is empty on every axis:
+    // nothing to deny, nothing found stale, and — since a pack that governs no region can request
+    // no reconcile — nothing this install would retire and nothing left for an operator either.
+    fieldWriteDenials: 0,
+    willRemoveWriteScopes: 0, operatorMustClearWriteScopes: 0,
+    // Nobody else holds anything here either, because nothing was classified at all.
+    operatorHeldInRegion: 0, governedByOtherPacks: 0,
+    // No governed rectangle either — which is the same fact that makes the delete unrequestable,
+    // and therefore also the fact that makes both invariant refusals impossible here.
+    writeScopeRegionFields: 0, writeScopeRegionRoles: 0,
+    packConflictWriteScopes: 0, legacyUnattributedWriteScopes: 0,
   })
+  // NULL, not an empty rectangle: "this pack governs nothing" is a different statement from "this
+  // pack governs an empty region", and only the first one makes a delete structurally impossible.
+  assert.equal(plan.writeScopeRegion, null)
   // The derived hidden ids the role view would ship, in the pack's own logical vocabulary.
   assert.equal(plan.roleViews.length, 1)
   assert.equal(plan.roleViews[0].roleViewId, 'production')
@@ -574,21 +657,59 @@ const PORT_PACK = Object.freeze({
 function createRecordingFieldPermissionsPort() {
   const applyCalls = []
   const listCalls = []
+  const classifyCalls = []
   const roleCalls = []
+  const fieldCalls = []
+  const emptyClassification = {
+    willRetire: [],
+    packConflicts: [],
+    legacyUnattributed: [],
+    operatorHeldInRegion: [],
+    governedByOtherPacks: [],
+    operatorMustClear: [],
+  }
   return {
     applyCalls,
     listCalls,
+    classifyCalls,
     roleCalls,
+    fieldCalls,
+    // The host declares that it HONOURS a reconcile region. Without this the install refuses with a
+    // coded 501 rather than writing rows a later revision could never retire — so the flag is part
+    // of the wiring this route test is about, not decoration.
+    supportsWriteScopeReconcile: true,
     async applyRoleWriteScopes(input) {
       applyCalls.push(input)
-      return { applied: input.entries.length, entries: input.entries }
+      return {
+        applied: input.entries.length,
+        entries: input.entries,
+        removed: [],
+        operatorHeld: [],
+        governedByOtherPacks: [],
+      }
+    },
+    // THE CLASSIFIER the route must reach. An empty sheet classifies to empty everything — which is
+    // a different answer from "this host cannot classify", and the route test's job is to prove the
+    // capability is WIRED, so the method's presence is what matters here.
+    async classifyRoleWriteScopeRegion(input) {
+      classifyCalls.push(input)
+      return {
+        sheetId: input.sheetId,
+        packId: input.packId,
+        legacyAdoptable: input.legacyAdoptable === true,
+        ...emptyClassification,
+      }
     },
     async listRoleWriteScopes(input) {
       listCalls.push(input)
-      return { sheetId: input.sheetId, entries: [] }
+      return { sheetId: input.sheetId, entries: [], foreignEntries: [] }
     },
     async findMissingRoleIds(input) {
       roleCalls.push(input)
+      return { missing: [] }
+    },
+    async findMissingFieldIds(input) {
+      fieldCalls.push(input)
       return { missing: [] }
     },
   }
@@ -626,11 +747,15 @@ async function theInstallRouteHandsThePackToTheHostPort() {
   assert.deepEqual(deniedFor('routes:warehouse'), ['procurementDone', 'procurementReply'])
   assert.deepEqual(deniedFor('routes:purchasing'), ['warehouseConfirmation', 'warehouseDone'])
 
-  // The pre-flight and the stale census went through the route too.
+  // The pre-flight went through the route too. ONE classification read per install, taken BEFORE the
+  // first schema write so the two invariant refusals land over an untouched sheet — and the write
+  // path re-runs the SAME classification inside its own transaction under the row lock, which is
+  // what makes two concurrent installs unable to both pass and then merge.
+  assert.equal(port.classifyCalls.length, 1, 'one classification read per install, in the pre-flight')
+  assert.equal(port.fieldCalls.length, 1, 'and the field-existence pre-flight ran too')
   assert.deepEqual(port.roleCalls, [{ roleIds: ['routes:purchasing', 'routes:warehouse'] }])
-  assert.equal(port.listCalls.length, 1)
   assert.equal(res.body.data.writeScopeCheck, 'checked')
-  assert.deepEqual(res.body.data.staleWriteScopes, [])
+  assert.deepEqual(res.body.data.operatorMustClearWriteScopes, [])
   assert.equal(res.body.data.appliedWriteScopes, 4)
 
   // And the DRY RUN previews the same plan without touching the port's write half.
@@ -682,6 +807,7 @@ async function main() {
   await everyRouteIsAdminGated()
   await unlistedPackIdIsRefusedBeforeAnyHostCall()
   await requestCannotSupplyAPackOrSteerTheTarget()
+  await aTenantlessAdminCannotSteerTheInstallWithAHeader()
   await dryRunPerformsZeroWrites()
   await dryRunReportsConflictsInsteadOfThrowing()
   await absentCanonicalTargetIsATwoStepSignal()

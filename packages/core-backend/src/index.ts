@@ -2953,9 +2953,23 @@ export class MetaSheetServer {
         // plugin declares "this ROLE may NOT WRITE this column" and the host writes the ONE table the
         // grid's write gate actually reads (`field_permissions`). WRITE-only by construction — it
         // cannot restrict READ, because 采购 and 仓库 must keep seeing the production band and each
-        // other's responses (see the service file's load-bearing property). Purely additive: removal
-        // is an operator action on PUT /sheets/:sheetId/field-permissions. Absent for every other
-        // plugin.
+        // other's responses (see the service file's load-bearing property).
+        //
+        // THIS CAPABILITY CAN DELETE A PERMISSION ROW. Additive by default — with no `reconcile`
+        // region the call only upserts and emits no DELETE at all. With one, the same transaction
+        // also retires this PACK's own still-denying rows inside the declared (columns × roles)
+        // rectangle, bounded five ways: the target sheet only; this pack's provenance marker, PLUS
+        // the pack-less legacy marker ONLY when the caller proves (from the install ledger) that
+        // this pack is the sheet's only pack — a row an operator authored and a sibling pack's row
+        // are outside the predicate either way; `read_only = true` only; inside the declared region
+        // only; and never a row the same call just wrote. The statement's row set is then CHECKED
+        // against the same classification the rehearsal ran, and a mismatch aborts the transaction.
+        // It exists because upsert-only silently locks a column for EVERY declared role the moment a
+        // revision moves that column's owner. Removals are returned, never silent. Broad removal
+        // remains an operator action on PUT /sheets/:sheetId/field-permissions. The one thing it
+        // cannot see: an operator edit made BEFORE that route started stamping `operator:<actorId>`
+        // left the pack's marker on the row, so such a row is indistinguishable from installer
+        // output. Absent for every other plugin.
         stockPreparationFieldPermissions: manifest.name === 'plugin-integration-core'
           ? new StockPreparationFieldPermissionsService()
           : undefined,

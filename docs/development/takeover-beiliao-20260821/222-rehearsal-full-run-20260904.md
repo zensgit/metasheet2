@@ -124,3 +124,69 @@ SYN-A-1000              2     true   add       10 - Q235B   10 - 待备料  2026
 2. 模板字段 `parentComponentCode/Name`、`componentSpec` 的中文名与租户扩展字段 `ext_parentDrawingNo/ext_parentName/ext_spec` 同名(父组件图号/父组件名称/规格),表上会出现两列同名;导出已用 fallback 合并,UI 侧需要 owner 裁决保留哪一套。
 3. 新 select 字段(makeOrBuy)不带选项,`options/sync` 路由不认 `objectId`,沙箱只能靠 ensure 的 `optionSets`;建议 ensure 在 `sandbox_existing` 时也返回 fieldIdMap(现在返回 0 项)。
 4. 写入器把主机"未知字段 id"归为 `target_record_validation_failed`(`VALIDATION_ERROR` 分支先于 `/unknown field/` 正则),应归为 `field_mapping_failed` 才能一眼定位。
+
+
+---
+
+## 7. 2026-09-04 下午追加:UI 点"从PLM拉取"失败的排障与修复
+
+演示前实点按钮仍失败,排障结果如下(与 §2 的两处修复叠加,四步才全绿)。
+
+### 7.1 根因 A —— workspace 作用域不一致(报 404)
+
+`POST table-actions/plm.stock-preparation.pull-bom.v1/dry-run` 返回 **404 `ExternalSystemNotFoundError`**,详情 `{id: 7130b124…, tenantId: default, workspaceId: default}`。
+
+- Web 端 `persistTenantHint` 把登录租户提示**同时**写进 localStorage `tenantId` 与 `workspaceId`,因此 UI 每个请求都带 `?tenantId=default&workspaceId=default`。
+- `integration_external_systems` 按 `workspace_id` **精确**匹配(`scopeWhere: workspace_id = workspaceId ?? null`),而 provisioning 把源建在 `workspace_id = null`(租户级)→ 匹配不到 → 404。看板/交接/项目目录不查外接源,所以那几条都 200,只有拉取炸。
+- 更隐蔽:同一次拉取里 `dry-run`/`apply` 从请求取 workspace(=default),而**不接受 steering** 的 `mvp-persist` 从登录身份推出 workspace=**null**(token 不带 workspace claim)。外接源主键只有 `id`,同一 id 不能同时挂两个 workspace,所以**纯数据搬移永远补不平**:挪到 default 则 mvp-persist 炸,留在 null 则 dry-run 炸。
+
+**修法**:外接源按 id 读取时,workspace 精确未命中则回退到**同租户**的租户级(`workspace_id IS NULL`)行,并把实际命中的 workspace 传给连接解析器。租户隔离不变(`tenant_id` 仍须匹配)。已由 **#5471** 合入 main(`5133df1c5`),抽出公共 `selectScopedRow`,同时覆盖 `getExternalSystemForAdapter` 与 `getExternalSystemForSealedSnapshot`。222 已同步为该版本并重启复验。
+
+> 本会话曾并行开出 #5472 做同一修复,发现与 #5471 撞车后已关闭;#5471 是其超集。
+
+### 7.2 根因 B —— MVP 快照行表缺 5 个字段(报 500)
+
+404 修好后,`mvp-persist` 转为 **500 `VALIDATION_ERROR: Unknown fieldId: fld_65a7cff06badc0d8fdb9e5ee`**。
+
+用 `getObjectFieldId` 反查稳定 id,定位到 `plm_stock_preparation_bom_snapshot_line`(projectId `default:integration-core`,sheet `sheet_9ef3c4fcf62fa33a2bed67a8`)缺 5 个字段:`parentName` `childName` `material` `spec` `totalQuantity`。其余 9 张 MVP 表字段完整。用主机 `ensureMissingObjectFields` 补齐后该表 17 字段齐全,`mvp-persist` 返回 **201**(batch 1 / lines 7 / run 1)。
+
+### 7.3 浏览器实操复核(四步全绿)
+
+| 步骤 | 结果 |
+|---|---|
+| 试算:看看会写入什么 | 成功 |
+| 确认:拿不准的交给人 | 跳过(没有需要确认的事) |
+| 写入:BOM 落到多维表 | 成功 |
+| 批次存档:留一份这次的样子 | 成功 |
+
+汇总 `OK 3 · SKIP 1 · FAIL 0`;项目卡:7 行、已拉进来 7 行可用。
+
+随后在多维表里给 `SYN-F-3200` 填"备料状态 = 10 - 待备料",页面提示"记录已更新";回工作台点"导出物料清单(Excel)"接口 200,导出文件第 3 行的"备料情况"即为刚填的值 —— 拉取 → 填报 → 导出闭环成立。
+
+### 7.4 演示注意
+
+- **Chrome 会拦下载**:站点是 HTTP,导出的 xlsx 被标为"未确认",需在下载栏点"保留"。演示前先说明,或给 222 配 HTTPS。
+- **表内有旧测试数据**:备料表里除本项目 7 行,另有 8 月的 `SYNTH-P001`/`SYNTH-P002` 共 5 行;演示前建议清理(删数据需 owner 确认)。
+
+### 7.5 由此立项的系统性问题
+
+§2.2 的沙箱表缺 8 字段与 §7.2 的快照行表缺 5 字段是**同一个根因**:各 ensure 路径遇到"表已存在但缺模板新增字段"时,只解析已有字段、不补新增字段,把错误推迟到写入期才以"未知 fieldId"的面目出现。目前靠脚本手工补(`scripts/ops/stock-preparation-sandbox-add-missing-template-fields.cjs`)。应有一支系统性 PR 让 ensure 侧安全地自动补齐(纯增量、幂等、不改不删已有字段),该方案正在评估中。
+
+
+---
+
+## 8. 2026-09-04 晚:r8 就地升级 222(交付版)
+
+演示通过、客户要求尽快交付后,把今天合进 main 的修复打成正式包并升级 222。
+
+| 项 | 值 |
+|---|---|
+| 包 | `metasheet-multitable-onprem-v2.5.0-r8-20260904.zip`,SHA256 `1fe052fc…38a922`,CI run 33880564195 |
+| 钉住的提交 | main `45cca21eec86f15a565e10745cb443d1bf308213`(含 #5471 workspace 回退、#5474 记录、#5475 漂移检测、#5455 列级写权限对账) |
+| 升级前备份 | `C:\metasheet\outputackups\pre-r8-20260904-215941.dump`(pg_dump 自定义格式,2 MB)+ 升级脚本自带 `upgrade-backup-20260904-215944` |
+| 升级 | must-exist 清单 OK;插件哈希 438 文件 OK;node_modules 泄漏 0;迁移退出 0;pm2 重启后健康 OK(第 3 次探测) |
+| `app.env` | 34 行原样保留,`TABLE_ACTIONS_JSON` 在 |
+| #5455 回填 | dry-run:0 行需打标、0 行无主、扫描 1 个账本目标 → **无需 `--apply`** |
+| 复验 | dry-run 200(skip 7)/ apply 200 / mvp-persist 201 / 导出 200(20681 B) |
+
+两条备注:①升级脚本报 `plugin lib/ file count` 包 178 vs 部署 342 的差异,这是就地升级**不删除**包里已不再发布的旧文件所致,`index.cjs` 不引用它们,不影响运行;②#5455 的回填脚本是 TS、引用 `../src/`,而部署机只有 `dist`,本次用 esbuild 转成 CJS 并把引用改指 `../dist/src/` 后放到 `packages/core-backend/scripts/` 下运行——交付说明已按此写。

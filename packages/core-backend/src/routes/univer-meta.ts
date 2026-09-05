@@ -94,6 +94,10 @@ import {
 } from '../services/approval-record-link-txn-auth'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail, estimateHistoryHasMore } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
+// The `operator:` provenance stamp for the two field_permission writers below. It lives with the
+// stock-preparation port because that port is the only reader that has to tell an operator's row
+// from a pack's — but the stamp itself is about THIS route owning what it writes.
+import { operatorFieldPermissionCreatedBy } from '../services/stock-preparation-field-permissions'
 import { SYSTEM_PEOPLE_SHEET_DESCRIPTION, isSystemPeopleSheetDescription } from '../multitable/system-sheet-predicate'
 import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, verifyExactAnchorRecoveryIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
 import {
@@ -7053,7 +7057,9 @@ async function applyPermissionDeEscalation(query: TxnQuery, opts: { scope: Permi
   if (scope === 'field') {
     const [fieldId, subjectType, subjectId] = parts
     if (!target) await query('DELETE FROM field_permissions WHERE sheet_id = $1 AND field_id = $2 AND subject_type = $3 AND subject_id = $4', [sheetId, fieldId, subjectType, subjectId])
-    else await query('INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (sheet_id, field_id, subject_type, subject_id) DO UPDATE SET visible = EXCLUDED.visible, read_only = EXCLUDED.read_only', [sheetId, fieldId, subjectType, subjectId, target.visible !== false, target.readOnly === true])
+    // Stamped for the same reason as the forward authoring write above: a restored grant is an
+    // operator decision too, and leaving it unattributed would make it retirable by a pack reconcile.
+    else await query('INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (sheet_id, field_id, subject_type, subject_id) DO UPDATE SET visible = EXCLUDED.visible, read_only = EXCLUDED.read_only, created_by = EXCLUDED.created_by', [sheetId, fieldId, subjectType, subjectId, target.visible !== false, target.readOnly === true, operatorFieldPermissionCreatedBy(actorId)])
   } else if (scope === 'view') {
     const [viewId, subjectType, subjectId] = parts
     await query('DELETE FROM meta_view_permissions WHERE view_id = $1 AND subject_type = $2 AND subject_id = $3', [viewId, subjectType, subjectId])
@@ -8526,12 +8532,30 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             [sheetId, fieldId, subjectType, subjectId],
           )
         } else {
+          // PROVENANCE: an operator decision is STAMPED, on the INSERT and on the DO UPDATE alike.
+          //
+          // Until this line every row this route wrote carried `created_by = NULL`, so a deliberate
+          // human decision was indistinguishable from an unattributed row — and, worse, an operator
+          // edit LAYERED ON TOP of a row a customer pack had created kept the PACK's marker, which
+          // made the operator's decision look like installer debris to the next pack revision's
+          // reconcile. Stamping here is what makes
+          // stock-preparation-field-permissions.ts's `operator` classification a property of the
+          // data. Rows written before this shipped stay NULL, which that classifier also treats as
+          // an operator row — that is the fallback, not the design.
           await query(
-            `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only)
-             VALUES ($1, $2, $3, $4, $5, $6)
+            `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (sheet_id, field_id, subject_type, subject_id)
-             DO UPDATE SET visible = EXCLUDED.visible, read_only = EXCLUDED.read_only`,
-            [sheetId, fieldId, subjectType, subjectId, parsed.data.visible ?? true, parsed.data.readOnly ?? false],
+             DO UPDATE SET visible = EXCLUDED.visible, read_only = EXCLUDED.read_only, created_by = EXCLUDED.created_by`,
+            [
+              sheetId,
+              fieldId,
+              subjectType,
+              subjectId,
+              parsed.data.visible ?? true,
+              parsed.data.readOnly ?? false,
+              operatorFieldPermissionCreatedBy(getRequestActorId(req)),
+            ],
           )
         }
 
