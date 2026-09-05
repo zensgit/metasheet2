@@ -402,12 +402,54 @@ function createExternalSystemRegistry({
     return merged
   }
 
-  function withoutLegacyDataSourceReference(config) {
+  // Drops the LEGACY POINTER only. It used to drop the attribution stamp with it, and that was the
+  // first of the two reasons the stock-prep pull's read-identity delegation never fired on a
+  // canonical binding: every canonical insert/update ran through here, so a row bound by
+  // `connection_id` could not carry a `dataSourceOwnerId` even in principle. The stamp is NOT a
+  // property of the legacy pointer — it is the answer to "who did the host authorize as this
+  // connection's owner at bind time", which a canonical binding proves exactly as strongly (see
+  // `resolveCanonicalBindingOwner`). Attribution is re-decided by that function immediately after
+  // every call here, so nothing survives from a payload merely because this stopped deleting it.
+  function withoutLegacyDataSourcePointer(config) {
     if (!isPlainObject(config)) return config
     const cleaned = { ...config }
     delete cleaned.dataSourceId
-    delete cleaned.dataSourceOwnerId
     return cleaned
+  }
+
+  /**
+   * THE SERVER-HELD OWNER OF A CANONICAL (`connection_id`) BINDING.
+   *
+   * WHY THIS IS AS TRUSTWORTHY AS THE LEGACY STAMP. `withValidatedDataSourceBinding` stamps the
+   * legacy pointer's owner only after `dataSourceBinder.assertReferenceable(id, principal)` returns
+   * — i.e. after `DataSourceManager.assertAccess` accepted that principal as the source's owner by
+   * STRICT EQUALITY. A canonical bind proves the identical fact through the identical choke point:
+   * `validateCanonicalConnectionBinding` -> `connectionResolver.resolve` -> the host facade's
+   * `resolveConnectionRegistration` -> the same `assertAccess`. So `proven === true` here means the
+   * principal WAS the connection's owner a few lines ago, on the host's own authority.
+   *
+   * WHAT IT WILL NOT DO:
+   *   * it never reads an owner out of the payload — `SERVER_OWNED_CONFIG_KEYS` already stripped
+   *     `dataSourceOwnerId` at the normalize choke point, and this function only ever writes either
+   *     the just-proven principal or the value already in STORAGE;
+   *   * an update that does NOT re-assert the connection inherits the stored stamp verbatim, so a
+   *     colleague renaming a bridge neither steals nor destroys the attribution;
+   *   * with nothing proven and nothing stored it writes NOTHING, leaving the row exactly as it was.
+   */
+  function resolveCanonicalBindingOwner({ config, storedConfig, principal, proven }) {
+    if (!isPlainObject(config)) return config
+    const provenOwner = proven && typeof principal === 'string' ? principal.trim() : ''
+    if (provenOwner) return { ...config, dataSourceOwnerId: provenOwner }
+    const stored = isPlainObject(storedConfig) && typeof storedConfig.dataSourceOwnerId === 'string'
+      ? storedConfig.dataSourceOwnerId.trim()
+      : ''
+    if (stored) return { ...config, dataSourceOwnerId: stored }
+    if (Object.prototype.hasOwnProperty.call(config, 'dataSourceOwnerId')) {
+      const cleaned = { ...config }
+      delete cleaned.dataSourceOwnerId
+      return cleaned
+    }
+    return config
   }
 
   function requestedConnectionId(normalized, existing) {
@@ -547,8 +589,17 @@ function createExternalSystemRegistry({
         // compatibility alias, but it must not re-introduce the legacy storage shape. Migrated
         // rows keep their pointer because the explicit fallback marker is their rollback proof.
         if (existing.legacy_connection_fallback_eligible !== true) {
-          updateRow.config = withoutLegacyDataSourceReference(updateRow.config)
+          updateRow.config = withoutLegacyDataSourcePointer(updateRow.config)
         }
+        // ATTRIBUTION LAST, on the whole canonical branch (migrated rows included — they resolve
+        // through the same facade). Re-asserting the connection re-proves the owner; not
+        // re-asserting inherits what storage already holds.
+        updateRow.config = resolveCanonicalBindingOwner({
+          config: updateRow.config,
+          storedConfig: existing.config,
+          principal: input && typeof input.principal === 'string' ? input.principal : '',
+          proven: reassertsConnection,
+        })
       }
       if (credentialsEncrypted !== undefined) {
         updateRow.credentials_encrypted = credentialsEncrypted
@@ -578,7 +629,14 @@ function createExternalSystemRegistry({
         connectionId,
         config: insertConfig,
       }, input)
-      insertConfig = withoutLegacyDataSourceReference(insertConfig)
+      insertConfig = withoutLegacyDataSourcePointer(insertConfig)
+      // The insert branch ALWAYS validated the binding a line above, so the principal is proven.
+      insertConfig = resolveCanonicalBindingOwner({
+        config: insertConfig,
+        storedConfig: null,
+        principal: input && typeof input.principal === 'string' ? input.principal : '',
+        proven: true,
+      })
     } else {
       insertConfig = await withValidatedDataSourceBinding(insertConfig, input)
     }
@@ -648,9 +706,12 @@ function createExternalSystemRegistry({
    *     B2a read fence is contracted to land before any credential reload, and its tests assert that
    *     accessor was called exactly zero times on a refusal, so a guard may not use it.
    *
-   * So: the same row, the full config, and no `parseAdapterCredentials` call. It returns the config
-   * and the kind ONLY — never the credentials, never the ciphertext, never a fingerprint — because
-   * the one caller (the B2a object-scope resolver) needs exactly that and nothing else.
+   * So: the same row, the full config, and no `parseAdapterCredentials` call. It returns the kind,
+   * the canonical `connectionId` and the config ONLY — never the credentials, never the ciphertext,
+   * never a fingerprint — because its two callers (the B2a object-scope resolver, and the
+   * stock-prep pull's read-identity resolution) need exactly that and nothing else. Both are
+   * GUARDS that must run BEFORE the credential/connection resolution they gate, which is precisely
+   * why neither may use `getExternalSystemForAdapter`.
    */
   async function getExternalSystemAdapterConfig(input) {
     const tenantId = requiredString(input?.tenantId, 'tenantId')
@@ -663,6 +724,11 @@ function createExternalSystemRegistry({
     return {
       id: row.id,
       kind: row.kind,
+      // The canonical Connection reference, so a guard can tell a canonical binding from a legacy
+      // one WITHOUT resolving either. `publicRow` already returns this field, so it discloses
+      // nothing new; what it buys is that the stock-prep pull's read-identity resolution can read
+      // the binding SHAPE before the connection resolution that the shape decides the outcome of.
+      connectionId: row.connection_id ?? null,
       config: row.config ?? {},
     }
   }

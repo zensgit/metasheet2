@@ -5,7 +5,10 @@ import { fileURLToPath } from 'node:url'
 
 import {
   STOCK_PREP_POSTURE_PLAIN,
+  STOCK_PREP_SOURCE_BLOCKER_PLAIN,
+  STOCK_PREP_SOURCE_WARNING_PLAIN,
   stockPrepPosturePlain,
+  stockPrepSourceBlockerPlain,
 } from '../src/services/integration/stockPreparation/plainLanguage'
 
 // THE FOURTH SITE OF THE POSTURE FENCE, made mechanical.
@@ -36,6 +39,45 @@ const MANIFEST_PATH = path.resolve(
   'app.manifest.json',
 )
 
+// The SOURCE preflight's own closed vocabularies, read from the module that emits them. Same
+// discipline as the manifest read above and for the same reason: the register below is the fourth
+// site of a fact declared elsewhere, and a hand-kept copy cannot notice its own omissions. This
+// guard exists because it did not: `pull_principal_delegation_unavailable` shipped server-side while
+// this table had no entry, so the install page would have rendered a bare English code to an
+// implementer mid-deploy — exactly the failure the posture guard above was written to stop.
+const SOURCE_PREFLIGHT_PATH = path.resolve(
+  HERE,
+  '..',
+  '..',
+  '..',
+  'plugins',
+  'plugin-integration-core',
+  'lib',
+  'stock-preparation-source-preflight.cjs',
+)
+
+/**
+ * The string literals of one `Object.freeze({ … })` register in that module.
+ *
+ * Deliberately a TEXT read rather than a `require`: the module pulls the vendor-preset catalog and
+ * the BOM read plan behind it, and a spec that had to load all of that to learn six words would be
+ * a spec nobody could keep hermetic. The line shape (`NAME: 'value',`) is narrow enough that a
+ * comment — which is where every quote and CJK character in that file lives — cannot match it.
+ */
+function sourcePreflightCodes(constName: string): string[] {
+  const text = fs.readFileSync(SOURCE_PREFLIGHT_PATH, 'utf8')
+  const start = text.indexOf(`const ${constName} = Object.freeze({`)
+  if (start === -1) throw new Error(`${constName} not found in stock-preparation-source-preflight.cjs`)
+  // The register body holds only `NAME: 'value',` lines, so the first `})` after the declaration
+  // is its own close.
+  const end = text.indexOf('})', start)
+  if (end === -1) throw new Error(`${constName} is not closed`)
+  const body = text.slice(start, end)
+  // Two literal spaces, and a tolerated CR: the file ships LF but checks out CRLF on Windows, and
+  // a bare \s class would happily eat the newline itself.
+  return [...body.matchAll(/^ {2}[A-Z0-9_]+: '([a-z0-9_]+)',\r?$/gm)].map((match) => match[1]).sort()
+}
+
 interface PostureEntry {
   id: string
   expectedState?: string
@@ -65,6 +107,50 @@ describe('stock-prep posture plain language', () => {
         + 'Add an entry to STOCK_PREP_POSTURE_PLAIN — an operator reading a deploy window should never '
         + 'meet a bare state token.',
     ).toEqual([])
+  })
+
+  // THE SAME GUARANTEE, ON THE SOURCE PREFLIGHT'S REGISTERS.
+  //
+  // These are the fourth site of a fact declared in the plugin, and they had no guardrail at all —
+  // which is how `pull_principal_delegation_unavailable` shipped server-side with no line here, and
+  // how `declared_subtree_contradicts_measurement` had been missing since the folder-tree axis
+  // landed. `stockPrepSourceBlockerPlain` returns null rather than throwing, so the failure mode is
+  // silent: a bare English code on the install page, mid-deploy, to an on-site implementer.
+  it('reads the shipped source-preflight vocabularies (anti-vacuity)', () => {
+    expect(sourcePreflightCodes('SOURCE_PREFLIGHT_BLOCKER_CODES').length).toBeGreaterThan(5)
+    expect(sourcePreflightCodes('SOURCE_PREFLIGHT_WARNING_CODES').length).toBeGreaterThan(5)
+    // The code this PR added must really be in the register the guard reads, or the guard below is
+    // asserting about a vocabulary that does not contain the thing it was written for.
+    expect(sourcePreflightCodes('SOURCE_PREFLIGHT_BLOCKER_CODES'))
+      .toContain('pull_principal_delegation_unavailable')
+  })
+
+  it('carries a plain-language line for EVERY source blocker and warning the server can emit', () => {
+    const blockers = sourcePreflightCodes('SOURCE_PREFLIGHT_BLOCKER_CODES')
+    const missingBlockers = blockers.filter((code) => !(code in STOCK_PREP_SOURCE_BLOCKER_PLAIN))
+    expect(
+      missingBlockers,
+      `these source blockers reach the install page with no plain-language line: ${missingBlockers.join(', ')}. `
+        + 'Add an entry to STOCK_PREP_SOURCE_BLOCKER_PLAIN — an implementer meeting a refusal should '
+        + 'never be handed a bare code with no next step.',
+    ).toEqual([])
+
+    const warnings = sourcePreflightCodes('SOURCE_PREFLIGHT_WARNING_CODES')
+    const missingWarnings = warnings.filter((code) => !(code in STOCK_PREP_SOURCE_WARNING_PLAIN))
+    expect(missingWarnings, `source warnings with no plain-language line: ${missingWarnings.join(', ')}`).toEqual([])
+  })
+
+  it('every source blocker resolves through the lookup, in both languages, with a next step', () => {
+    for (const code of sourcePreflightCodes('SOURCE_PREFLIGHT_BLOCKER_CODES')) {
+      const plain = stockPrepSourceBlockerPlain(code)
+      expect(plain, `stockPrepSourceBlockerPlain('${code}') must resolve`).toBeTruthy()
+      expect(String(plain?.zh ?? '').trim().length, `${code}.zh`).toBeGreaterThan(0)
+      expect(String(plain?.en ?? '').trim().length, `${code}.en`).toBeGreaterThan(0)
+      // A source blocker without a NEXT line is the failure this whole register exists to prevent:
+      // it names a problem on somebody else's machine and stops.
+      expect(String(plain?.zhNext ?? '').trim().length, `${code}.zhNext`).toBeGreaterThan(0)
+      expect(String(plain?.enNext ?? '').trim().length, `${code}.enNext`).toBeGreaterThan(0)
+    }
   })
 
   it('every declared fence resolves through the lookup, in both languages', () => {

@@ -404,11 +404,30 @@ export const STOCK_PREP_SOURCE_BLOCKER_PLAIN: Record<string, StockPrepPlainEntry
     zhNext: '实测是有数据支撑的,所以这里以实测为准、不采纳指定。要么指定改成实测那条,要么先跟对方核对 —— 很可能是连错了库。',
     enNext: 'The measurement has data behind it, so it stands and the declaration is not applied. Either declare the measured route instead, or check with them first — this is often a sign of the wrong database.',
   }),
+  // PRE-EXISTING GAP, found by the register-completeness guard this PR adds rather than by a
+  // reviewer: the folder-tree root-discovery axis shipped a blocker with no plain-language line, so
+  // an implementer who declared `project-subtree` against BOM heads that carry no folder-node column
+  // met a bare English code.
+  declared_subtree_contradicts_measurement: Object.freeze({
+    zh: '你指定了「按项目目录树找根」,但这家的 BOM 头上没有(或没人填)目录节点那一列',
+    en: 'You declared folder-tree root discovery, but this source’s BOM heads carry no folder-node column — or nothing populates it',
+    zhNext: '下面写了看的是哪张表、哪一列、抽样里有几行填了。要么撤掉这个指定,要么请对方确认他们的 BOM 到底怎么挂到项目目录上。',
+    enNext: 'Below it says which table and column were inspected and how many sampled rows populate it. Either withdraw the declaration, or ask them how their BOM actually hangs off the project folder tree.',
+  }),
   topology_mismatch: Object.freeze({
     zh: '配置走的路,和这家实际的形状对不上 —— 照现在配置跑,会拉到 0 行',
     en: 'The configured route does not match this source’s actual shape — as configured, the run will return 0 rows',
     zhNext: '下面写了配置走哪条、实测是哪条。把读取配置改到实测那条上,再预检一次。',
     enNext: 'Below it says which route is configured and which one was measured. Point the read configuration at the measured one and check again.',
+  }),
+  // NOT a fact about the customer's system — the one blocker in this register that is about OUR
+  // binding. A source can pass every check above and still be readable by exactly one person, which
+  // is what "一线自助拉取" quietly stopped being true of. Said out loud, with the fix.
+  pull_principal_delegation_unavailable: Object.freeze({
+    zh: '这条数据源目前只有「当初绑定它的那个人」能拉 —— 一线和定时任务会 400',
+    en: 'Only the person who originally bound this connection can pull through it — everyone else gets a 400',
+    zhNext: '请由当初绑定该连接的管理员在外接系统页重新保存一次绑定;修好后 checks.pullDelegation 应为 available。',
+    enNext: 'Ask the administrator who originally bound this connection to re-save the binding on the external systems page; once fixed, checks.pullDelegation should read available.',
   }),
 })
 
@@ -484,7 +503,7 @@ export function stockPrepSourceWarningPlain(code: string): StockPrepPlainEntry |
   return lookup(STOCK_PREP_SOURCE_WARNING_PLAIN, code)
 }
 
-/** The four lines the panel leads with, and the words for each verdict. */
+/** The lines the panel leads with, and the words for each verdict. */
 export const STOCK_PREP_SOURCE_CHECK_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
   reachable: Object.freeze({
     zh: '能连上、能读到表',
@@ -505,6 +524,10 @@ export const STOCK_PREP_SOURCE_CHECK_PLAIN: Record<string, StockPrepPlainEntry> 
   preset: Object.freeze({
     zh: '认出了这是哪一家的 schema(按表名指纹,不是按公司名)',
     en: 'Recognised whose schema this is — by table-name fingerprint, not by company name',
+  }),
+  'pull-delegation': Object.freeze({
+    zh: '一线和定时任务也能拉(不只有绑定这条连接的那个人)',
+    en: 'The floor and scheduled jobs can pull too — not only whoever bound this connection',
   }),
 })
 

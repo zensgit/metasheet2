@@ -4282,27 +4282,104 @@ function requireStockPreparationAudit() {
    *     is identical; where no owner is stamped there is nothing to delegate to and the request
    *     principal stands. It cannot widen a read to a source the deployment did not bind to this
    *     action — the action's `source.externalSystemId` is deploy-time config, not a request input.
-   *   * it is AUDITED AS A DELEGATION: the run's audit row carries the operator as `actor` and the
-   *     owner as the read `principal`, so "who asked" and "whose credentials answered" are two
-   *     recorded facts rather than one conflated one.
+   *   * the ACTOR is never rewritten. Every audit row this pull writes still carries the requester
+   *     (`actor: requestPrincipal(req)` / `user.id`), and the stored large-BOM job records its
+   *     creator on both `actor` and `principal` at creation time; only the READ identity resolved
+   *     here moves. "Who asked" and "whose credentials answered" stay two separate facts. (The
+   *     dry-run and apply routes write no audit row of their own — see the delegation log below,
+   *     which is the values-free record that a delegation happened at all.)
    *
    * WHAT IT IS NOT. It is not a grant to the operator: they never learn the owner's identity, cannot
    * name it, and cannot point it at anything else. A first-class share on the data source would be a
    * better long-term answer and needs a core change; this is the smallest thing that makes the
    * owner's own ruling — that a floor operator may self-serve the pull — actually true.
+   *
+   * ===========================================================================================
+   * WHY THIS RESOLVES BEFORE THE SYSTEM IS LOADED — the defect that made all of the above INERT
+   * ===========================================================================================
+   *
+   * The first cut of this delegation read `config.dataSourceOwnerId` off an ALREADY-LOADED system
+   * and handed the result to `adapterRegistry.createAdapter`. On the DEFAULT source kind that is
+   * one step too late to matter, and the step it misses is the one that refuses:
+   * `getExternalSystemForAdapter` resolves the canonical/legacy Connection ITSELF, inside the load,
+   * through `connection-resolver` -> the host facade -> `DataSourceManager.assertAccess`. Loading
+   * with the requester's identity therefore threw `CONNECTION_CANONICAL_UNAVAILABLE` (or
+   * `CONNECTION_LEGACY_UNAVAILABLE`) BEFORE any owner stamp was ever read — a 400 for every
+   * non-owner, in BOTH binding shapes, with the delegated principal only ever reaching an adapter
+   * that was never constructed. The suite missed it because its registry stub exposes only
+   * `getExternalSystem` (no connection resolution at all), so it measured the hand-off to
+   * `createAdapter` and nothing under it.
+   *
+   * So the identity is resolved FIRST, from a peek that decrypts nothing and resolves no connection
+   * (`getExternalSystemAdapterConfig`), and then drives BOTH halves — the connection resolution
+   * inside the load AND the adapter — as one value. The peek is scoped to the frozen action id, so
+   * no other table action pays a second row read; it is wrapped fail-open to the request principal,
+   * so a missing/unreadable row still surfaces the SAME error from the SAME load it always did.
    */
-  function resolveTableActionReadPrincipal(req, action, system, storedPrincipal) {
+  async function resolveTableActionReadPrincipal(req, action, sourceScope, storedPrincipal) {
     // The fallback, in order of decreasing authority: an explicitly supplied principal (a STORED
     // job's, which is what keeps a background run from switching data-source scope to whoever
     // triggered it), then the requester.
     const fallback = firstString(storedPrincipal) || requestPrincipal(req)
     const actionId = action && action.actionId ? String(action.actionId) : ''
     if (actionId !== STOCK_PREP_OPERATOR_PULL_ACTION_ID) return fallback
-    const config = system && isPlainObject(system.config) ? system.config : {}
+    const binding = await peekTableActionSourceBinding(sourceScope)
+    const config = binding && isPlainObject(binding.config) ? binding.config : {}
     const bindingOwner = firstString(config.dataSourceOwnerId)
     // The binding owner OVERRIDES even a stored principal, and that is the point: on this one action
     // the read must run as the identity the host will actually authorize, whoever queued the job.
     return bindingOwner || fallback
+  }
+
+  /**
+   * The values-free, credential-free, connection-free look at ONE external system row.
+   *
+   * Preference order is deliberate: `getExternalSystemAdapterConfig` is the accessor built for
+   * guards that must run before a credential reload, and it is the only one that returns the FULL
+   * config without decrypting. `getExternalSystem` is the fallback because its public projection
+   * deletes only each kind's private subtree (`lookupProjection` for `data-source:sql-readonly`)
+   * and keeps the server-owned attribution stamp, so the answer is the same one.
+   *
+   * FAIL-OPEN, ON PURPOSE. Every refusal this can produce — missing row, wrong scope, a registry
+   * that predates the accessor — is re-produced verbatim by the adapter load a few lines later,
+   * under the SAME scope. Swallowing it here keeps the route's error surface byte-identical to
+   * what it was; raising it would move a 404/422 to a new place for no gain.
+   */
+  async function peekTableActionSourceBinding(sourceScope) {
+    const peek = typeof externalSystems.getExternalSystemAdapterConfig === 'function'
+      ? externalSystems.getExternalSystemAdapterConfig.bind(externalSystems)
+      : (typeof externalSystems.getExternalSystem === 'function'
+        ? externalSystems.getExternalSystem.bind(externalSystems)
+        : null)
+    if (!peek) return null
+    try {
+      return await peek(sourceScope)
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * IS THE PULL'S READ-IDENTITY DELEGATION USABLE ON THIS BINDING — the preflight's input.
+   *
+   * A `data-source:*` binding is read through the host facade, which authorizes by strict owner
+   * equality; without a server-held owner stamp there is nothing to delegate to, so every caller
+   * who is not the binder gets a 400 and no message anywhere says why. This turns that into a
+   * named, values-free finding. Every field is a boolean or a word from a closed vocabulary — no
+   * id, no name, no principal.
+   *
+   * `null` means "not applicable": a source kind that carries no data-source binding has no owner
+   * to delegate to and never needed one.
+   */
+  function describeTableActionReadDelegation(binding) {
+    if (!binding || typeof binding.kind !== 'string') return null
+    if (describeConnectorKind(binding.kind).connectionModel !== 'data-source') return null
+    const config = isPlainObject(binding.config) ? binding.config : {}
+    const bindingShape = firstString(binding.connectionId)
+      ? 'canonical'
+      : (firstString(config.dataSourceId) ? 'legacy' : 'unbound')
+    if (firstString(config.dataSourceOwnerId)) return { available: true, bindingShape, reason: null }
+    return { available: false, bindingShape, reason: 'binding_owner_unstamped' }
   }
 
   /**
@@ -4368,7 +4445,19 @@ function requireStockPreparationAudit() {
         sourceScope.workspaceId = binding.matchedWorkspaceId
       }
     }
-    const system = await loadSystem(scopedAdapterInput(req, sourceScope))
+    // ORDER, and all four steps matter: sourceScope -> F3 workspace hint (above) -> the delegated
+    // identity (here) -> ONE real load (below). The peek must run AFTER the F3 hint is settled, so
+    // that the row it reads the owner stamp off is the SAME row the load will resolve; and it must
+    // run BEFORE the load, because `getExternalSystemForAdapter` resolves the bound Connection under
+    // whatever principal it is handed — deciding the identity after the load would decide it after
+    // the refusal. See resolveTableActionReadPrincipal.
+    const principal = await resolveTableActionReadPrincipal(
+      req,
+      action,
+      scopedInput(req, sourceScope),
+      Object.prototype.hasOwnProperty.call(options, 'principal') ? options.principal : null,
+    )
+    const system = await loadSystem(scopedAdapterInput(req, sourceScope, principal))
     if (options.requireActive === true && (!system || system.status !== 'active')) {
       throw new HttpRouteError(409, 'TABLE_ACTION_SOURCE_NOT_ACTIVE', 'configured table action source is not active')
     }
@@ -4379,12 +4468,15 @@ function requireStockPreparationAudit() {
         actualKind: system && system.kind,
       })
     }
-    const principal = resolveTableActionReadPrincipal(
-      req,
-      action,
-      system,
-      Object.prototype.hasOwnProperty.call(options, 'principal') ? options.principal : null,
-    )
+    // The delegation, recorded. VALUES-FREE by construction: a boolean and the frozen action id,
+    // never the operator's id and never the owner's — the point of the delegation is that the
+    // caller does not learn who the owner is, and a log line that named them would undo it.
+    if (principal !== requestPrincipal(req) && routeLogger && typeof routeLogger.info === 'function') {
+      routeLogger.info('table action source read runs as the server-held binding owner', {
+        actionId: action.actionId,
+        delegated: true,
+      })
+    }
     // W-5: forwards the B2a authorization stanza the caller already computed (dormant/unauthorized
     // omits it entirely — no key at all, not even `undefined` — so a factory that doesn't know this
     // dep sees exactly the same `deps` object it always has). Only `data-source:sql-readonly`
@@ -6391,6 +6483,13 @@ function requireStockPreparationAudit() {
           externalSystemId,
         })
       }
+      // THE BINDING HALF, computed here because only this layer can: the probe module holds no
+      // registry capability by design. Read off the SAME row the adapter was built from, through
+      // the guard accessor that decrypts nothing, and reduced to a boolean plus two closed
+      // vocabulary words before it goes anywhere near the report.
+      const pullDelegation = describeTableActionReadDelegation(
+        await peekTableActionSourceBinding(scopedInput(req, { id: externalSystemId })),
+      )
 
       try {
         return sendOk(res, await runStockPreparationSourcePreflight({
@@ -6399,6 +6498,7 @@ function requireStockPreparationAudit() {
           readPlan: action && action.source ? action.source.readPlan : undefined,
           externalSystemId,
           declaredBridge,
+          ...(pullDelegation ? { pullDelegation } : {}),
         }))
       } catch (error) {
         if (error instanceof SourcePreflightError) {

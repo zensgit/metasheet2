@@ -415,7 +415,7 @@
           <strong>{{ sourceVerdictText }}</strong>
         </p>
 
-        <!-- The four lines, each a SERVER measurement rendered — never a judgement made here. -->
+        <!-- Each line a SERVER measurement rendered — never a judgement made here. -->
         <ul class="stock-prep-install__list stock-prep-install__list--plain">
           <li
             v-for="row in sourceCheckRows"
@@ -423,11 +423,17 @@
             data-testid="stock-prep-source-preflight-check"
             :data-check="row.id"
             :data-ok="row.ok ? 'yes' : 'no'"
+            :data-state="row.unknown ? 'unknown' : (row.ok ? 'yes' : 'no')"
           >
+            <!-- Three states, not two: a check the SERVER did not evaluate renders as 未评估 rather
+                 than borrowing either verdict. `data-ok` keeps its two values so existing selectors
+                 read unchanged; `data-state` is where the third one lives. -->
             <span
               class="stock-prep-install__status"
-              :class="row.ok ? 'stock-prep-install__status--ok' : 'stock-prep-install__status--fail'"
-            >{{ row.ok ? bi('是', 'yes') : bi('否', 'no') }}</span>
+              :class="row.unknown
+                ? 'stock-prep-install__status--pending'
+                : (row.ok ? 'stock-prep-install__status--ok' : 'stock-prep-install__status--fail')"
+            >{{ row.unknown ? bi('未评估', 'not checked') : (row.ok ? bi('是', 'yes') : bi('否', 'no')) }}</span>
             <span v-if="sourceCheckPlain(row.id)">{{ bi(sourceCheckPlain(row.id)!.zh, sourceCheckPlain(row.id)!.en) }}</span>
             <span v-else><code>{{ row.id }}</code></span>
             <code class="stock-prep-install__token">{{ row.token }}</code>

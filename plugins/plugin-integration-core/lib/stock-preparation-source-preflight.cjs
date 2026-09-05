@@ -332,8 +332,27 @@ const DECLARABLE_BRIDGES = Object.freeze([...EXCLUSIVE_CARRIER_BRIDGES, BRIDGES.
 // so a SQL Server catalog's own spelling is what gets reported back.
 const PROJECT_SUBTREE_PATH_ID_CANDIDATES = Object.freeze(['path_id'])
 
+// THE BINDING SHAPES the pull's read-identity delegation has to work across. Values-free by
+// construction: a shape word, never the connection id or the data source's name.
+const BINDING_SHAPES = Object.freeze({
+  CANONICAL: 'canonical',
+  LEGACY: 'legacy',
+  UNBOUND: 'unbound',
+})
+const SOURCE_PREFLIGHT_BINDING_SHAPES = Object.freeze(Object.values(BINDING_SHAPES))
+
+// Why the delegation cannot be performed. One entry today, and it is a closed set so a second one
+// cannot arrive as free text.
+const PULL_DELEGATION_REASONS = Object.freeze(['binding_owner_unstamped'])
+
 const SOURCE_PREFLIGHT_BLOCKER_CODES = Object.freeze({
   SOURCE_UNREACHABLE: 'source_unreachable',
+  // 一线自助拉取 is a claim about WHOSE IDENTITY the pull reads under, and it is false unless the
+  // bound source carries a server-held owner stamp: `data-source:*` kinds are authorized by the
+  // host facade on STRICT OWNER EQUALITY, so with nothing to delegate to, every caller who is not
+  // the person who bound the connection gets a 400 and no screen anywhere says why. Measured from
+  // the BINDING, not from a read — which is why it is judged whether or not the source answered.
+  PULL_PRINCIPAL_DELEGATION_UNAVAILABLE: 'pull_principal_delegation_unavailable',
   ENTRY_TABLE_MISSING: 'entry_table_missing',
   NO_PROJECT_NUMBERS: 'no_project_numbers',
   NO_BOM_ROWS: 'no_bom_rows',
@@ -384,6 +403,10 @@ const SOURCE_PREFLIGHT_WARNING_CODES = Object.freeze({
 // source — it is the finding you can only make once everything before it passed.
 const SOURCE_PREFLIGHT_BLOCKER_CODE_ORDER = Object.freeze([
   SOURCE_PREFLIGHT_BLOCKER_CODES.SOURCE_UNREACHABLE,
+  // Directly under it, and above every finding about the source's SHAPE: a source whose shape is
+  // perfect is still unusable by the tier the delivery promises it to. The report that measured a
+  // flawless catalog and said nothing about this is how "一线自助拉取" shipped as prose.
+  SOURCE_PREFLIGHT_BLOCKER_CODES.PULL_PRINCIPAL_DELEGATION_UNAVAILABLE,
   SOURCE_PREFLIGHT_BLOCKER_CODES.ENTRY_TABLE_MISSING,
   SOURCE_PREFLIGHT_BLOCKER_CODES.NO_PROJECT_NUMBERS,
   SOURCE_PREFLIGHT_BLOCKER_CODES.NO_BOM_ROWS,
@@ -427,6 +450,8 @@ const CLOSED_VOCABULARY_LEAF_FIELDS = Object.freeze(new Set([
   // CLOSED and not server-authored: it is validated against DECLARABLE_BRIDGES here too, so a request
   // cannot use it as a free-text channel into the report.
   'measuredBridge', 'declaredBridge', 'bridgeSource', 'declarableBridges',
+  // The read-identity delegation's one word. A SHAPE, never a connection id and never a principal.
+  'bindingShape',
   // The BOM-store decision's vocabulary: which store, which signal favoured which, what shape each
   // store's slots are in, and where the authority reading came from.
   'store', 'carrierStore', 'favours', 'signal', 'signals', 'strongSignals',
@@ -1139,6 +1164,33 @@ function blockerOrder(code) {
 }
 
 /**
+ * THE ONE FINDING THIS MODULE DOES NOT MEASURE ITSELF — and why it is still here.
+ *
+ * Every other check reads the customer's catalog through `readObject`. This one is about the
+ * BINDING: does the pull's read-identity delegation have a server-held owner to delegate to. The
+ * module holds no registry capability and must not grow one (its whole guarantee is that the only
+ * thing it can do is read), so the caller — which already loaded the binding to build the adapter —
+ * hands the answer in, pre-reduced to a boolean and two closed-vocabulary words.
+ *
+ * FAIL-QUIET, not fail-closed: an absent/garbled stanza means NOT EVALUATED, and an unevaluated
+ * check raises no blocker. A caller that never heard of this input gets byte-identical reports.
+ * That is the right default because the fact is the CALLER's to know: a source kind with no
+ * data-source binding has no owner to stamp and never needed one, and treating "no stanza" as a
+ * refusal would turn every such deployment no-go on a question that does not apply to it.
+ */
+function normalizePullDelegation(value) {
+  const absent = { evaluated: false, available: null, bindingShape: null, reason: null }
+  if (!isPlainObject(value)) return absent
+  if (typeof value.available !== 'boolean') return absent
+  const bindingShape = SOURCE_PREFLIGHT_BINDING_SHAPES.includes(value.bindingShape)
+    ? value.bindingShape
+    : null
+  const reason = PULL_DELEGATION_REASONS.includes(value.reason) ? value.reason : null
+  if (value.available) return { evaluated: true, available: true, bindingShape, reason: null }
+  return { evaluated: true, available: false, bindingShape, reason }
+}
+
+/**
  * Run the source preflight.
  *
  * @param {object}   input
@@ -1147,6 +1199,10 @@ function blockerOrder(code) {
  * @param {object}  [input.readPlan]   the deployment's configured plan; defaults to the shipped one.
  * @param {Array}   [input.presets]    vendor presets; defaults to the shipped catalog directory.
  * @param {string}  [input.externalSystemId] echoed for correlation. An id, never a connection.
+ * @param {object}  [input.pullDelegation] `{available, bindingShape, reason}` — the caller's already
+ *                                     computed answer to "can the pull delegate its read identity
+ *                                     to the server-held binding owner". See
+ *                                     `normalizePullDelegation`. Omitted = not evaluated.
  */
 async function runStockPreparationSourcePreflight(input = {}) {
   if (typeof input.readObject !== 'function') {
@@ -1159,6 +1215,8 @@ async function runStockPreparationSourcePreflight(input = {}) {
   const presets = Array.isArray(input.presets)
     ? input.presets
     : loadVendorPresetsFromDir(VENDOR_PRESETS_DIR).map((entry) => entry.preset)
+  // Normalized BEFORE any read, so a malformed stanza can never be mistaken for a measurement.
+  const pullDelegation = normalizePullDelegation(input.pullDelegation)
 
   const roster = buildProbeRoster(plan, presets)
   const observations = []
@@ -1610,6 +1668,17 @@ async function runStockPreparationSourcePreflight(input = {}) {
   const B = SOURCE_PREFLIGHT_BLOCKER_CODES
   const W = SOURCE_PREFLIGHT_WARNING_CODES
 
+  // JUDGED OUTSIDE the reachability branch, deliberately. "Only the person who bound this
+  // connection can pull through it" is true of a source that answered every probe perfectly, and a
+  // report that hid it behind a successful read is exactly the report that let the delivery keep
+  // claiming 一线自助拉取.
+  if (pullDelegation.evaluated && pullDelegation.available === false) {
+    blockers.push({
+      code: B.PULL_PRINCIPAL_DELEGATION_UNAVAILABLE,
+      detail: { bindingShape: pullDelegation.bindingShape, reason: pullDelegation.reason },
+    })
+  }
+
   if (!reachable) {
     blockers.push({ code: B.SOURCE_UNREACHABLE, detail: { failureCode: reachability.failureCode } })
   } else {
@@ -1796,6 +1865,8 @@ async function runStockPreparationSourcePreflight(input = {}) {
       topology,
       presetMatch,
       quantityField,
+      // The binding half. Every leaf is a boolean, a null, or a closed-vocabulary word.
+      pullDelegation,
     },
     blockers,
     warnings,
@@ -1911,7 +1982,13 @@ function assertSourcePreflightValuesFree(report, { observedValues = new Set(), i
       ...Object.values(SOURCE_PREFLIGHT_BLOCKER_CODES),
       ...Object.values(SOURCE_PREFLIGHT_WARNING_CODES),
     ])],
-    ['reason', new Set([...BRIDGE_DECISION_REASONS, ...PRESET_SELECTION_REASONS, ...BOM_STORE_DECISION_REASONS])],
+    ['reason', new Set([
+      ...BRIDGE_DECISION_REASONS,
+      ...PRESET_SELECTION_REASONS,
+      ...BOM_STORE_DECISION_REASONS,
+      ...PULL_DELEGATION_REASONS,
+    ])],
+    ['bindingShape', new Set(SOURCE_PREFLIGHT_BINDING_SHAPES)],
     ['errorCode', new Set(SOURCE_PREFLIGHT_READ_ERROR_CODES)],
     ['failureCode', new Set(SOURCE_PREFLIGHT_READ_ERROR_CODES)],
     ['bridge', new Set(SOURCE_PREFLIGHT_BRIDGES)],
@@ -1987,6 +2064,8 @@ module.exports = {
   SOURCE_PREFLIGHT_ROW_CAP,
   IDENTITY_PROBE_MAX,
   SOURCE_PREFLIGHT_BRIDGES,
+  SOURCE_PREFLIGHT_BINDING_SHAPES,
+  PULL_DELEGATION_REASONS,
   SOURCE_PREFLIGHT_BOM_STORES,
   SOURCE_PREFLIGHT_CARRIER_SHAPES,
   BOM_STORE_SIGNALS,
@@ -2018,6 +2097,7 @@ module.exports = {
     decodeQuantitySlotFromDictionary,
     measureNumericSlots,
     measureProjectSubtreeCarrier,
+    normalizePullDelegation,
     projectSubtreePathIdField,
     planAssumedBridge,
     probeObject,
