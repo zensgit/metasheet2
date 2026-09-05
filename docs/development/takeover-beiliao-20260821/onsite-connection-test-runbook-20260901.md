@@ -86,6 +86,60 @@ MS_DS_SCHEMA=<schema，如 dbo>
 
 ---
 
+## 1.1 委派缺失的修法（一线拉取 `400 CONNECTION_CANONICAL_UNAVAILABLE`）
+
+**症状**：建连接的那个管理员拉取正常；换成任何别人——一线操作员、定时任务服务账号、
+另一个管理员——试算/写入一律 `400 CONNECTION_CANONICAL_UNAVAILABLE`。
+
+**机制**：数据源按**属主等值**鉴权（`DataSourceManager.assertAccess`，数据面没有管理员旁路）。
+拉取这一个冻结动作（`plm.stock-preparation.pull-bom.v1`）为此有**读身份委派**——读以外接源上
+**服务端写入的绑定者**身份进行。委派要成立，外接源必须带 `config.dataSourceOwnerId`，
+而这个戳只在**绑定被断言并通过主机校验**时由服务端写入。cutover 之后建的 canonical 行
+（只有 `connection_id`，`config` 里只有 `schema`）在 2026-09-06 之前拿不到这个戳，
+所以委派一直没有可委派的身份。
+
+**一眼确认**：跑源就绪预检，看 blockers 里有没有这一条
+
+```
+GET /api/integration/stock-preparation/source-preflight
+→ blockers[].code == "pull_principal_delegation_unavailable"
+   detail = { "bindingShape": "canonical" | "legacy" | "unbound",
+              "reason": "binding_owner_unstamped" }
+   checks.pullDelegation = { evaluated, available, bindingShape, reason }
+```
+
+报文里**不含**连接 id、也不含属主 id——只有形态词和原因词。
+
+**修法（由绑定者本人执行一次，不需要脚本、不需要动数据库）**：用**建这条连接的那个账号**
+重新提交一次该外接源的绑定，把 `connectionId` 显式带上。服务端会重新走一遍
+`resolveConnectionRegistration` → `assertAccess` 的属主校验，通过后把该账号写成归属戳。
+
+```
+POST /api/integration/external-systems
+{
+  "id": "<external system id>",
+  "name": "<原名，原样回填>",
+  "kind": "data-source:sql-readonly",
+  "role": "source",
+  "connectionId": "<该外接源当前的 connectionId>"
+}
+```
+
+要点：
+
+* **必须由绑定者本人调**。换个人调会被主机以同一句 "not found" 拒掉（属主等值，同时不泄露
+  存在性），戳不会写错人。
+* 请求体里写 `dataSourceOwnerId` 无效——它是服务端独占字段，在归一化处就被剥掉。
+* 不带 `config` 的更新原样继承已存 config；带 `config` 是**打补丁**，不会清掉未提交的键。
+* 复核：再跑一次源就绪预检，`checks.pullDelegation.available` 应为 `true`、blocker 消失；
+  然后用一线账号跑一次试算，应当 200。
+
+**做完之后审计怎么读**：每次委派打一条 values-free 日志（`{ actionId, delegated: true }`，
+两个身份都不写进去）。审计行里的 `actor` 始终是**发起人**（一线），不会被改写成属主；
+大 BOM 后台作业另外记录创建者，run 路由只允许创建者本人跑。
+
+---
+
 ## 2. 上场前 30 秒数据体检（先跑，再演）
 
 **在演示任何东西之前**，用只读账号连客户 PLM 跑下面的 SQL。目标是在

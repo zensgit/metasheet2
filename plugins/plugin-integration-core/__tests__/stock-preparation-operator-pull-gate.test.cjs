@@ -265,9 +265,25 @@ function mountWithSource({
   sourceKind = 'data-source:sql-readonly',
   dataSourceOwnerId = DATA_SOURCE_OWNER,
   actionId = STOCK_PREP_OPERATOR_PULL_ACTION_ID,
+  // THE HALF THE ORIGINAL HARNESS DID NOT MODEL, and therefore could not see (P-12).
+  //
+  // A real `data-source:sql-readonly` registry does not hand back a row: `getExternalSystemForAdapter`
+  // RESOLVES the bound Connection first, under whatever principal it is given, and the host facade
+  // refuses anyone but the owner. Set `connectionOwner` to model that refusal; leave it null to keep
+  // the original no-connection stub (which is what every case before P-12 exercises).
+  connectionOwner = null,
+  // `canonical` -> the row names its Connection in `connection_id` and its config carries no legacy
+  // pointer, which is the 222 shape. `legacy` -> the pre-cutover `config.dataSourceId` shape.
+  bindingShape = 'canonical',
 } = {}) {
   const routes = new Map()
   const adapterPrincipals = []
+  // The principal the CONNECTION RESOLUTION ran under — the thing the delegation has to reach, and
+  // the thing the first cut never changed.
+  const loadPrincipals = []
+  // The scopes the pre-load identity peek asked for, so "it does not peek for other actions" is
+  // observable rather than asserted by reading the source.
+  const peeks = []
   const context = {
     api: {
       http: {
@@ -299,26 +315,51 @@ function mountWithSource({
       }],
     },
   }
+  // The SERVER-STAMPED binding owner. external-systems.cjs writes this on every upsert that asserts
+  // a binding — legacy `config.dataSourceId` and canonical `connection_id` alike — discarding
+  // whatever the client sent, so it is the one trustworthy answer to "who may read through this
+  // connection".
+  const storedConfig = {
+    ...(bindingShape === 'legacy' ? { dataSourceId: 'ds_1' } : { schema: 'dbo' }),
+    ...(dataSourceOwnerId ? { dataSourceOwnerId } : {}),
+  }
+  const storedRow = {
+    id: SOURCE_SYSTEM_ID,
+    kind: sourceKind,
+    status: 'active',
+    connectionId: bindingShape === 'legacy' ? null : 'conn_1',
+    config: storedConfig,
+  }
+  const registry = {
+    async getExternalSystem() { return storedRow },
+    async upsertExternalSystem() { throw new Error('unexpected') },
+    async deleteExternalSystem() { throw new Error('unexpected') },
+    async listExternalSystems() { return { items: [] } },
+  }
+  if (connectionOwner) {
+    // The NON-DECRYPTING guard accessor the identity peek is contracted to use. It resolves no
+    // connection, so it answers for every caller — which is the whole reason the peek can precede
+    // the load.
+    registry.getExternalSystemAdapterConfig = async (input) => {
+      peeks.push(input)
+      return { id: storedRow.id, kind: storedRow.kind, connectionId: storedRow.connectionId, config: storedRow.config }
+    }
+    // The REAL accessor's shape: resolve the Connection under the supplied principal, and refuse
+    // anyone but its owner exactly the way the host facade does.
+    registry.getExternalSystemForAdapter = async (input) => {
+      loadPrincipals.push(input && input.principal !== undefined ? input.principal : null)
+      if (!input || input.principal !== connectionOwner) {
+        const error = new Error('canonical connection is unavailable')
+        error.name = 'ExternalSystemValidationError'
+        error.code = bindingShape === 'legacy' ? 'CONNECTION_LEGACY_UNAVAILABLE' : 'CONNECTION_CANONICAL_UNAVAILABLE'
+        error.details = { field: 'connectionId', code: error.code }
+        throw error
+      }
+      return storedRow
+    }
+  }
   const services = {
-    externalSystemRegistry: {
-      async getExternalSystem() {
-        return {
-          id: SOURCE_SYSTEM_ID,
-          kind: sourceKind,
-          status: 'active',
-          // The SERVER-STAMPED binding owner. external-systems.cjs writes this on every upsert that
-          // asserts a dataSourceId binding, discarding whatever the client sent, so it is the one
-          // trustworthy answer to "who may read through this connection".
-          config: {
-            dataSourceId: 'ds_1',
-            ...(dataSourceOwnerId ? { dataSourceOwnerId } : {}),
-          },
-        }
-      },
-      async upsertExternalSystem() { throw new Error('unexpected') },
-      async deleteExternalSystem() { throw new Error('unexpected') },
-      async listExternalSystems() { return { items: [] } },
-    },
+    externalSystemRegistry: registry,
     // RECORDS the principal each adapter is built for, then refuses the read — this suite is about
     // WHOSE identity the read runs as, not about what the source returns.
     adapterRegistry: {
@@ -342,12 +383,16 @@ function mountWithSource({
     stockPreparationAuditStore: { async append() { return { ok: true } } },
     tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
   }
+  // The values-free delegation record. It carries a boolean and the frozen action id and NOTHING
+  // else — naming either identity here would hand the operator the owner id the delegation exists
+  // to keep from them.
+  const logLines = []
   httpRoutes.registerIntegrationRoutes({
     context,
     services,
-    logger: { info() {}, warn() {}, error() {} },
+    logger: { info(message, detail) { logLines.push({ message, detail }) }, warn() {}, error() {} },
   })
-  return { routes, adapterPrincipals }
+  return { routes, adapterPrincipals, loadPrincipals, peeks, logLines }
 }
 
 // ---------------------------------------------------------------------------
@@ -543,6 +588,120 @@ async function theOperatorPullReadsAsTheBindingOwner() {
       adapterPrincipals,
       [OPERATOR.id],
       'P-09: with no server-held owner there is nothing to delegate to, so nothing changes',
+    )
+  }
+}
+
+// ---------------------------------------------------------------------------
+// P-12 — THE DELEGATION HAS TO REACH THE CONNECTION RESOLUTION, NOT JUST THE ADAPTER
+// ---------------------------------------------------------------------------
+//
+// WHAT P-09 PROVED, AND WHAT IT COULD NOT. P-09 asserts the principal handed to
+// `adapterRegistry.createAdapter`. Its registry stub exposes only `getExternalSystem`, which returns
+// a row and resolves nothing — so the step that actually refuses a non-owner was not in the harness
+// at all. In production `getExternalSystemForAdapter` RESOLVES the bound Connection itself, inside
+// the load, under whatever principal it is handed, and the host facade refuses anyone but the owner
+// (`DataSourceManager.assertAccess`, strict equality, no admin bypass on the data plane). The first
+// cut resolved the delegated identity AFTER that load. So on the default source kind the sequence
+// was: load as the OPERATOR -> `CONNECTION_CANONICAL_UNAVAILABLE` -> 400 -> the delegated principal
+// handed to an adapter that was never constructed. The delegation was inert in BOTH binding shapes,
+// for every caller who was not the binder, from the day it shipped.
+//
+// So this case models the resolving accessor and asserts the identity at the step that refuses.
+async function theDelegationReachesTheConnectionResolution() {
+  const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
+
+  // 1. CANONICAL BINDING (`connection_id`, no legacy pointer — the 222 shape), requester is NOT the
+  //    owner. The connection resolution must run as the owner, and so must the adapter.
+  {
+    const { routes, adapterPrincipals, loadPrincipals } = mountWithSource({ connectionOwner: DATA_SOURCE_OWNER })
+    await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull })
+    assert.deepEqual(
+      loadPrincipals,
+      [DATA_SOURCE_OWNER],
+      'P-12: the CONNECTION RESOLUTION runs as the binding owner — resolving it as the requester is '
+      + 'the 400 every operator got',
+    )
+    assert.deepEqual(adapterPrincipals, [DATA_SOURCE_OWNER], 'P-12: and so does the adapter, as one value')
+    assert.notEqual(DATA_SOURCE_OWNER, OPERATOR.id, 'P-12: the case is only meaningful while the two differ')
+  }
+
+  // 2. THE LEGACY POINTER SHAPE BEHAVES IDENTICALLY — it was equally broken, for the same reason,
+  //    and it is fixed by the same ordering rather than by a second code path.
+  {
+    const { routes, adapterPrincipals, loadPrincipals } = mountWithSource({
+      connectionOwner: DATA_SOURCE_OWNER,
+      bindingShape: 'legacy',
+    })
+    await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull })
+    assert.deepEqual(loadPrincipals, [DATA_SOURCE_OWNER], 'P-12: legacy pointer, same resolution identity')
+    assert.deepEqual(adapterPrincipals, [DATA_SOURCE_OWNER], 'P-12: legacy pointer, same adapter identity')
+  }
+
+  // 3. APPLY re-expands the source in its own right, so it takes the same path.
+  {
+    const { routes, loadPrincipals } = mountWithSource({ connectionOwner: DATA_SOURCE_OWNER })
+    await gateVerdict(routes, { ...APPLY, user: OPERATOR, actionId: pull })
+    assert.deepEqual(loadPrincipals, [DATA_SOURCE_OWNER], 'P-12: apply too')
+  }
+
+  // 4. NO STAMP -> NOTHING TO DELEGATE TO, and the behaviour is byte-identical to before: the load
+  //    runs as the requester and the facade refuses them. The fix removes a guaranteed failure; it
+  //    never invents an identity to remove one.
+  {
+    const { routes, adapterPrincipals, loadPrincipals } = mountWithSource({
+      connectionOwner: DATA_SOURCE_OWNER,
+      dataSourceOwnerId: null,
+    })
+    await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull })
+    assert.deepEqual(loadPrincipals, [OPERATOR.id], 'P-12: with no stamp the load is the requester`s, as before')
+    assert.deepEqual(adapterPrincipals, [], 'P-12: and the refusal happens in the load, so no adapter is built')
+  }
+
+  // 5. THE OWNER READS AS THEMSELVES. Identical value, so identical behaviour — the delegation is
+  //    invisible on the one path that already worked.
+  {
+    const { routes, loadPrincipals } = mountWithSource({
+      connectionOwner: PLATFORM_ADMIN.id,
+      dataSourceOwnerId: PLATFORM_ADMIN.id,
+    })
+    await gateVerdict(routes, { ...DRY_RUN, user: PLATFORM_ADMIN, actionId: pull })
+    assert.deepEqual(loadPrincipals, [PLATFORM_ADMIN.id], 'P-12: the owner still reads as themselves')
+  }
+
+  // 6. NO OTHER ACTION ID PAYS FOR THIS — not even the extra row read. The peek is inside the
+  //    equality check, so a request naming another action never asks the registry anything.
+  {
+    const { routes, peeks, loadPrincipals } = mountWithSource({ connectionOwner: DATA_SOURCE_OWNER })
+    await gateVerdict(routes, { ...DRY_RUN, user: INTEGRATION_READER, actionId: OTHER_ACTION_ID })
+    assert.deepEqual(peeks, [], 'P-12: another action id costs no identity peek')
+    assert.deepEqual(loadPrincipals, [], 'P-12: and never reaches a source load in this harness')
+  }
+
+  // 7. THE DELEGATION IS RECORDED, VALUES-FREE. A boolean and the frozen action id — never the
+  //    operator's id and never the owner's, because the operator must not learn who the owner is.
+  {
+    const { routes, logLines } = mountWithSource({ connectionOwner: DATA_SOURCE_OWNER })
+    await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull })
+    const delegated = logLines.filter((entry) => entry.detail && entry.detail.delegated === true)
+    assert.equal(delegated.length, 1, 'P-12: the delegation is logged exactly once per read')
+    assert.deepEqual(delegated[0].detail, { actionId: pull, delegated: true })
+    const serialized = JSON.stringify(logLines)
+    assert.equal(serialized.includes(DATA_SOURCE_OWNER), false, 'P-12: the owner id is not in the record')
+    assert.equal(serialized.includes(OPERATOR.id), false, 'P-12: nor the operator id')
+  }
+
+  // 8. …AND NOTHING IS LOGGED WHEN NOTHING IS DELEGATED.
+  {
+    const { routes, logLines } = mountWithSource({
+      connectionOwner: PLATFORM_ADMIN.id,
+      dataSourceOwnerId: PLATFORM_ADMIN.id,
+    })
+    await gateVerdict(routes, { ...DRY_RUN, user: PLATFORM_ADMIN, actionId: pull })
+    assert.deepEqual(
+      logLines.filter((entry) => entry.detail && entry.detail.delegated === true),
+      [],
+      'P-12: reading as yourself is not a delegation and is not recorded as one',
     )
   }
 }
@@ -1264,6 +1423,7 @@ async function main() {
   await theOperatorPullsButNeitherReconcilesNorArchives()
   await theHumanConfirmLoopIsReachableByTheOperator()
   await theOperatorPullReadsAsTheBindingOwner()
+  await theDelegationReachesTheConnectionResolution()
   await aStoredLargeBomJobIsRunOnlyByItsCreator()
   await theOperatorReachesTheBoundedBackgroundChannel()
   everyLargeBomRouteIsInTheSplit()
