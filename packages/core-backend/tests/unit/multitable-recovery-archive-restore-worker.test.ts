@@ -300,4 +300,31 @@ describe('recovery archive restore worker boot', () => {
     expect(onResult).toHaveBeenCalledWith({ kind: 'idle', swept: 0, chunks: 0 })
     await expect(loop!.tick()).resolves.toBeNull()
   })
+
+  it('contains observer failures without changing tick or drain results', async () => {
+    const outcome = { kind: 'idle', swept: 0, chunks: 0 } as const
+    const runOnce = vi.fn().mockResolvedValue(outcome)
+    const cancel = vi.fn()
+    const onResult = vi.fn(() => {
+      throw new Error('observer unavailable')
+    })
+    const loop = bootRecoveryArchiveRestoreWorker({
+      env: {
+        MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'true',
+        MULTITABLE_ENABLE_WRITER_FENCE: 'true',
+      },
+      intervalMs: 1000,
+      createWorker: () => ({ runOnce }),
+      schedule: () => 'timer',
+      cancel,
+      onResult,
+    })
+
+    await vi.waitFor(() => expect(onResult).toHaveBeenCalledTimes(1))
+    await expect(loop!.tick()).resolves.toEqual(outcome)
+    await expect(loop!.stop()).resolves.toBeUndefined()
+
+    expect(onResult).toHaveBeenCalledTimes(2)
+    expect(cancel).toHaveBeenCalledWith('timer')
+  })
 })
