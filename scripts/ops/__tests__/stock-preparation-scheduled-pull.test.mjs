@@ -52,7 +52,7 @@ const SCRIPT_PATH = path.join(ROOT_DIR, 'scripts', 'ops', 'stock-preparation-sch
 // Dynamic `import()` (not a static one) so the module's `isEntryPoint` guard sees `process.argv[1]`
 // as THIS test file, never the script — a static import would behave identically here, but dynamic
 // keeps the intent explicit: this is a plain module load, not "run the CLI".
-const { main } = await import(pathToFileURL(SCRIPT_PATH).href)
+const { main, __setOutputSinksForTesting } = await import(pathToFileURL(SCRIPT_PATH).href)
 
 function base64Url(input) {
   return Buffer.from(input, 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
@@ -130,25 +130,56 @@ test('an unknown flag is refused with a non-zero exit', () => {
 /**
  * Installs a recording `fetch` stub for the duration of `run(...)`, restoring the real (absent, in
  * this test process — Node's global fetch is left untouched otherwise) one afterwards regardless of
- * whether `run` throws. `handler(url, init)` returns `{ status, json }` (status defaults to 200).
+ * whether `run` throws.
+ *
+ * `handler(record)` returns one of:
+ *   - `{ status, json }` (status defaults to 200) — an ordinary response.
+ *   - `{ throw: error }` — the fetch call itself rejects with `error`, simulating a network/client-side
+ *     failure (used to reproduce the exact `Headers.append` `TypeError` shape the redaction tests
+ *     below are pinned against).
+ *   - a promise that never settles — simulating a hung backend, to exercise the script's own
+ *     `AbortSignal.timeout` handling below.
+ *
+ * THE MOCK HONOURS `init.signal`, deliberately: `postJson` passes a REAL `AbortSignal.timeout(...)`
+ * (not a mock — timers/abort are native, this file never stubs them), so a handler that hangs forever
+ * must still be racing against that real signal exactly as the real `fetch` would, or the timeout
+ * tests below would not be testing anything.
  */
 async function withMockFetch(handler, run) {
   const requests = []
   const original = globalThis.fetch
-  globalThis.fetch = async (url, init = {}) => {
-    let body = null
-    try { body = init.body ? JSON.parse(init.body) : null } catch { body = null }
-    const record = { url: String(url), method: init.method, headers: init.headers || {}, body }
-    requests.push(record)
-    const result = (await handler(record)) || {}
-    const status = result.status || 200
-    const json = result.json !== undefined ? result.json : { ok: true, data: {} }
-    return {
-      ok: status >= 200 && status < 300,
-      status,
-      async json() { return json },
+  globalThis.fetch = (url, init = {}) => new Promise((resolve, reject) => {
+    let settled = false
+    const settleResolve = (value) => { if (!settled) { settled = true; resolve(value) } }
+    const settleReject = (error) => { if (!settled) { settled = true; reject(error) } }
+
+    const signal = init.signal
+    if (signal) {
+      const onAbort = () => settleReject(signal.reason instanceof Error ? signal.reason : new Error('aborted'))
+      if (signal.aborted) onAbort()
+      else signal.addEventListener('abort', onAbort, { once: true })
     }
-  }
+
+    ;(async () => {
+      let body = null
+      try { body = init.body ? JSON.parse(init.body) : null } catch { body = null }
+      const record = { url: String(url), method: init.method, headers: init.headers || {}, body }
+      requests.push(record)
+      const outcome = await handler(record)
+      if (outcome && outcome.throw) {
+        settleReject(outcome.throw)
+        return
+      }
+      const result = outcome || {}
+      const status = result.status || 200
+      const json = result.json !== undefined ? result.json : { ok: true, data: {} }
+      settleResolve({
+        ok: status >= 200 && status < 300,
+        status,
+        async json() { return json },
+      })
+    })().catch(settleReject)
+  })
   try {
     return { requests, result: await run() }
   } finally {
@@ -157,15 +188,23 @@ async function withMockFetch(handler, run) {
 }
 
 /** Captures everything `process.stdout.write` / `process.stderr.write` would have sent. */
+// Uses the module's OWN `__setOutputSinksForTesting` seam — NOT a global monkey-patch of
+// `process.stdout.write` — precisely because a global patch races with Node's own `node:test` runner:
+// several tests below span a REAL timer wait (the script's `AbortSignal.timeout`, or a mock racing
+// against it), and the runner flushes a PREVIOUS test's own reporter line through that same
+// process-wide stream during that window. A global patch captures the runner's output right along
+// with the script's, corrupting the captured text non-deterministically. Swapping the script's sinks
+// instead never touches the real stream, so there is nothing for the runner's own output to collide
+// with. (This was found the hard way — see the module's own header comment for the seam's rationale.)
 function captureOutput() {
   const stdout = []
   const stderr = []
-  const originalOut = process.stdout.write.bind(process.stdout)
-  const originalErr = process.stderr.write.bind(process.stderr)
-  process.stdout.write = (chunk, ...rest) => { stdout.push(String(chunk)); return true }
-  process.stderr.write = (chunk, ...rest) => { stderr.push(String(chunk)); return true }
+  const restore = __setOutputSinksForTesting({
+    stdout: (text) => { stdout.push(String(text)) },
+    stderr: (text) => { stderr.push(String(text)) },
+  })
   return {
-    restore() { process.stdout.write = originalOut; process.stderr.write = originalErr },
+    restore,
     stdoutText: () => stdout.join(''),
     stderrText: () => stderr.join(''),
   }
@@ -371,6 +410,122 @@ test('MS_TOKEN never appears in stdout or stderr, across every scenario', async 
     assert.doesNotMatch(result.stderr, tokenPattern)
     assert.doesNotMatch(result.stdout, /Bearer /, 'the header VALUE must never be echoed either')
   }
+})
+
+/** No 16-character (or longer) substring of `token` may appear anywhere in `text`. */
+function assertNoTokenSubstring(token, text, label) {
+  const WINDOW = 16
+  for (let i = 0; i + WINDOW <= token.length; i += 1) {
+    const chunk = token.slice(i, i + WINDOW)
+    assert.ok(!text.includes(chunk), `${label}: output contains a ${WINDOW}-char token substring "${chunk}"`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// D1 — a control-character MS_TOKEN is refused BEFORE it ever reaches a header,
+// and even a fetch-level error whose OWN message embeds "Bearer <token>" never reaches output.
+// ---------------------------------------------------------------------------
+
+test('a three-segment token with an embedded LF is refused by readConfig, before any HTTP call', async () => {
+  // A JWT-shaped token (three dot-separated segments) whose middle segment payload decodes fine, but
+  // the raw string itself carries an embedded newline — the real-world cause named in the module
+  // header (a token file that got word-wrapped, or pasted across lines).
+  const tokenWithLf = `${TENANT_TOKEN.slice(0, 20)}\n${TENANT_TOKEN.slice(20)}`
+  const { requests, result } = await withMockFetch(
+    () => ({ json: { ok: true, data: { status: 'not_found' } } }),
+    () => runMain([], { ...BASE_ENV, MS_TOKEN: tokenWithLf }),
+  )
+  assert.notEqual(result.code, 0, `${result.stdout}\n${result.stderr}`)
+  assert.match(result.stderr, /control character/)
+  assert.equal(requests.length, 0, 'refusing at config time costs zero HTTP calls')
+  assertNoTokenSubstring(TENANT_TOKEN, result.stdout, 'stdout')
+  assertNoTokenSubstring(TENANT_TOKEN, result.stderr, 'stderr')
+})
+
+test(
+  'a fetch-level error whose .message embeds "Bearer <token>" (the real Headers.append shape) never reaches stdout/stderr',
+  async () => {
+    // Reproduces, verbatim, the exact failure the design record's D1 finding named:
+    //   TypeError: Headers.append: "Bearer <token>" is an invalid header value.
+    // This token has NO control characters, so it passes `readConfig` and reaches `postJson` — the
+    // point is to prove the SECOND, independent layer (postJson relaying only `.name`/`.code`, plus
+    // `redact()` as a belt-and-braces net) holds even when the thrown error's own `.message` embeds
+    // the token, regardless of what upstream cause produced that shape.
+    const embeddingError = new TypeError(`Headers.append: "Bearer ${TENANT_TOKEN}" is an invalid header value.`)
+    const { result } = await withMockFetch(
+      () => ({ throw: embeddingError }),
+      () => runMain([], BASE_ENV),
+    )
+    assert.notEqual(result.code, 0, `${result.stdout}\n${result.stderr}`)
+    assertNoTokenSubstring(TENANT_TOKEN, result.stdout, 'stdout')
+    assertNoTokenSubstring(TENANT_TOKEN, result.stderr, 'stderr')
+    assert.doesNotMatch(result.stdout, /Bearer /)
+    assert.doesNotMatch(result.stderr, /Bearer /)
+    const lines = jsonLines(result.stdout)
+    assert.equal(lines[0].failed, true)
+    // The reported error is the safe, closed vocabulary (name/code) — never the raw `.message`.
+    assert.match(lines[0].error, /TypeError/)
+    assert.doesNotMatch(lines[0].error, /Bearer/)
+  },
+)
+
+// ---------------------------------------------------------------------------
+// D2 — every HTTP call is bounded, and so is the whole run
+// ---------------------------------------------------------------------------
+
+test('a dry-run that never responds times out (MS_TIMEOUT_MS) and is recorded as "timeout"', async () => {
+  const { result } = await withMockFetch(
+    () => new Promise(() => {}), // never settles — only the AbortSignal.timeout races it down
+    () => runMain([], { ...BASE_ENV, MS_TIMEOUT_MS: '50' }),
+  )
+  assert.notEqual(result.code, 0, `${result.stdout}\n${result.stderr}`)
+  const lines = jsonLines(result.stdout)
+  assert.equal(lines[0].action, 'error')
+  assert.equal(lines[0].failed, true)
+  assert.equal(lines[0].error, 'timeout', 'the timeout case reports the fixed string "timeout", nothing composed')
+})
+
+test('MS_TIMEOUT_MS must be a positive integer, or readConfig refuses (no HTTP call)', async () => {
+  const { requests, result } = await withMockFetch(
+    () => ({ json: { ok: true, data: { status: 'not_found' } } }),
+    () => runMain([], { ...BASE_ENV, MS_TIMEOUT_MS: '-5' }),
+  )
+  assert.notEqual(result.code, 0, `${result.stdout}\n${result.stderr}`)
+  assert.match(result.stderr, /MS_TIMEOUT_MS/)
+  assert.equal(requests.length, 0)
+})
+
+test('the whole run has a wall-clock budget (MS_TOTAL_TIMEOUT_MS): once exceeded, remaining projects fail without an HTTP call', async () => {
+  const { requests, result } = await withMockFetch(
+    async (record) => {
+      // The FIRST project's dry-run takes just long enough that the (tiny) total budget has expired
+      // by the time the loop reaches the second project.
+      if (record.body.parameters.projectNo === 'P-SLOW') {
+        await new Promise((done) => { setTimeout(done, 40) })
+      }
+      return { json: { ok: true, data: { status: 'not_found', canApply: false, counts: {} } } }
+    },
+    () => runMain([], { ...BASE_ENV, MS_PROJECT_NOS: 'P-SLOW,P-NEVER-CALLED', MS_TOTAL_TIMEOUT_MS: '10' }),
+  )
+  assert.notEqual(result.code, 0, `${result.stdout}\n${result.stderr}`)
+  assert.equal(requests.length, 1, 'only the first (slow) project ever made an HTTP call')
+  const lines = jsonLines(result.stdout)
+  assert.equal(lines.length, 3, 'two project lines + one summary line')
+  assert.equal(lines[0].projectNo, 'P-SLOW')
+  assert.equal(lines[1].projectNo, 'P-NEVER-CALLED')
+  assert.equal(lines[1].action, 'error')
+  assert.equal(lines[1].error, 'total run timeout exceeded')
+  assert.equal(lines[1].failed, true)
+})
+
+test('MS_TOTAL_TIMEOUT_MS must be a positive integer, or readConfig refuses (no HTTP call)', async () => {
+  const { requests, result } = await withMockFetch(
+    () => ({ json: { ok: true, data: { status: 'not_found' } } }),
+    () => runMain([], { ...BASE_ENV, MS_TOTAL_TIMEOUT_MS: 'not-a-number' }),
+  )
+  assert.notEqual(result.code, 0, `${result.stdout}\n${result.stderr}`)
+  assert.match(result.stderr, /MS_TOTAL_TIMEOUT_MS/)
+  assert.equal(requests.length, 0)
 })
 
 // ---------------------------------------------------------------------------

@@ -104,8 +104,8 @@ function boardPayload(overrides: Record<string, unknown> = {}): Record<string, u
     pulledRowCount: 47,
     activePulledRowCount: 47,
     pulledRowCountBounded: false,
-    lastPulledAt: null,
-    lastPulledAtBounded: false,
+    lastChangedFromPlmAt: null,
+    lastChangedFromPlmBounded: false,
     pendingDecisionCount: 0,
     lastExportAt: '2026-09-01T02:03:04.000Z',
     fillTarget: { sheetId: SHEET_ID, viewId: VIEW_ID },
@@ -694,26 +694,29 @@ describe('项目备料页 — the operator project board', () => {
     expect(status.textContent).not.toContain('run_a1')
   })
 
-  // 上次同步 — three states, and the middle one exists only because the row scan behind it can be
-  // TRUNCATED (see stock-preparation-project-board.cjs `lastPulledAtBounded`). The message for that
-  // state must say "we could not count", not "never synced" — those are different facts.
-  it('B-04: 上次同步 shows the last PLM refresh, a truncation notice, or a dash — never the same text for all three', async () => {
-    routeApi({ board: () => ok(boardPayload({ lastPulledAt: null, lastPulledAtBounded: false })) })
+  // 最近变更(来自 PLM) — three states, and the middle one exists only because the row scan behind it
+  // can be TRUNCATED (see stock-preparation-project-board.cjs `lastChangedFromPlmBounded`). The
+  // message for that state must say "we could not count", not "never changed" — those are different
+  // facts. NOTE: this is deliberately NOT labelled 上次同步/last sync — `lastPlmRefreshAt` is only
+  // written on an add/update/inactive decision, never on a no-op sync (makeSkipDecision), so it can
+  // sit unchanged across many successful pulls that found nothing new.
+  it('B-04: 最近变更(来自 PLM) shows the last change, a truncation notice, or a dash — never the same text for all three', async () => {
+    routeApi({ board: () => ok(boardPayload({ lastChangedFromPlmAt: null, lastChangedFromPlmBounded: false })) })
     const noneYet = await mountBoard()
-    const dash = (noneYet.querySelector('[data-testid="stock-prep-project-board-last-pulled"]') as HTMLElement).textContent
+    const dash = (noneYet.querySelector('[data-testid="stock-prep-project-board-last-changed-from-plm"]') as HTMLElement).textContent
     expect(dash).toContain('—')
     remount()
 
-    routeApi({ board: () => ok(boardPayload({ lastPulledAt: null, lastPulledAtBounded: true })) })
+    routeApi({ board: () => ok(boardPayload({ lastChangedFromPlmAt: null, lastChangedFromPlmBounded: true })) })
     const truncated = await mountBoard()
-    const truncatedText = (truncated.querySelector('[data-testid="stock-prep-project-board-last-pulled"]') as HTMLElement).textContent ?? ''
+    const truncatedText = (truncated.querySelector('[data-testid="stock-prep-project-board-last-changed-from-plm"]') as HTMLElement).textContent ?? ''
     expect(truncatedText).toContain('未统计')
     expect(truncatedText).not.toContain('—')
     remount()
 
-    routeApi({ board: () => ok(boardPayload({ lastPulledAt: '2026-09-04T08:00:00.000Z', lastPulledAtBounded: false })) })
+    routeApi({ board: () => ok(boardPayload({ lastChangedFromPlmAt: '2026-09-04T08:00:00.000Z', lastChangedFromPlmBounded: false })) })
     const synced = await mountBoard()
-    const syncedText = (synced.querySelector('[data-testid="stock-prep-project-board-last-pulled"]') as HTMLElement).textContent ?? ''
+    const syncedText = (synced.querySelector('[data-testid="stock-prep-project-board-last-changed-from-plm"]') as HTMLElement).textContent ?? ''
     expect(syncedText).not.toContain('—')
     expect(syncedText).not.toContain('未统计')
     expect(syncedText.trim().length).toBeGreaterThan(0)
