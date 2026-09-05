@@ -171,16 +171,43 @@ export interface AuditLogRow {
 
 type QueryValue = string | number | boolean | Date | string[] | null | undefined;
 
+// Message-text fallbacks. PostgreSQL's own wording is locale-dependent (see
+// lc_messages), so these only cover the English original and the Chinese
+// translation observed in production; they must not be relied on as the
+// primary signal.
+const MISSING_PARTITION_MESSAGE_PATTERNS = [
+  /no partition of relation "audit_logs" found/i,
+  /没有为关系\s*"audit_logs"\s*找到分区/,
+];
+
+function matchesMissingPartitionMessage(message: unknown): boolean {
+  return typeof message === 'string' && MISSING_PARTITION_MESSAGE_PATTERNS.some((pattern) => pattern.test(message));
+}
+
 function isMissingAuditLogPartitionError(error: unknown): boolean {
-  if (error instanceof Error) {
-    return /no partition of relation "audit_logs" found/i.test(error.message);
+  if (typeof error !== 'object' || error === null) {
+    return false;
   }
 
-  if (typeof error === 'object' && error !== null && 'message' in error) {
-    return /no partition of relation "audit_logs" found/i.test(String(error.message));
+  const err = error as { code?: unknown; table?: unknown; constraint?: unknown; message?: unknown };
+
+  // Primary, locale-independent signal: PostgreSQL's ExecFindPartition
+  // (src/backend/executor/execPartition.c) raises "no partition of relation
+  // ... found for row" with errcode(ERRCODE_CHECK_VIOLATION) — SQLSTATE
+  // 23514 — plus errtable(rel), but no errconstraint(). node-postgres
+  // surfaces those as DatabaseError#code / #table / #constraint (see
+  // pg-protocol's messages.d.ts). A genuine CHECK constraint violation on
+  // audit_logs always carries a constraint name, so excluding rows with
+  // `constraint` set keeps this from misclassifying real 23514 violations
+  // as missing-partition errors.
+  const table = err.table;
+  const tableIsAuditLogsOrEmpty = table === undefined || table === null || table === '' || table === 'audit_logs';
+  if (err.code === '23514' && !err.constraint && tableIsAuditLogsOrEmpty) {
+    return true;
   }
 
-  return false;
+  // Fallback for drivers/environments that don't surface SQLSTATE codes.
+  return matchesMissingPartitionMessage(err.message);
 }
 
 export class AuditRepository {
