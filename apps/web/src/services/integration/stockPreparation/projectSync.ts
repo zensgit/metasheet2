@@ -201,6 +201,11 @@ export interface StockPreparationMissingComponent {
   componentSourceId: string
   parentSourceId: string
   bomId: string
+  /**
+   * Human-readable, ALREADY DECODED. The server sends `path` as `JSON.stringify(pathTokens)`
+   * (e.g. `["PART-A","PART-Z"]`); `formatMissingComponentPath` parses it and joins it with `' / '`
+   * before this field is ever populated — nothing downstream (panel, export) parses JSON.
+   */
   path: string
   depth: number
   occurrenceCount: number
@@ -253,6 +258,38 @@ function clampMissingComponentField(value: unknown): string {
 }
 
 /**
+ * `path` is NOT a plain string field — the server (W3a #5500) sends it as `JSON.stringify(pathTokens)`
+ * (e.g. `["PART-A","PART-Z"]`), not a pre-joined `A/B` string. Decode it into the human-readable form
+ * this file hands the panel: parse, and if the result is an array, join it with `' / '`; anything that
+ * fails to parse, or parses to something other than an array, falls back to the raw string unparsed
+ * (never thrown — this is still the strict-clamp boundary, not a place to crash on bad JSON).
+ *
+ * TRUNCATION HAPPENS AFTER THE JOIN, not before. Truncating the RAW JSON string to 128 chars first (the
+ * way every other field clamps) would cut valid JSON off mid-token for any BOM deep enough to produce
+ * a >128-char encoded array, and `JSON.parse` on that fragment throws — silently DEMOTING a perfectly
+ * good path into the "couldn't parse it" fallback branch, and displaying a chopped JSON fragment
+ * (`["PART-A","PAR`) instead of a chopped human-readable path. Joining first and clamping the RESULT
+ * keeps the 128-char cap meaningful regardless of how deep the BOM path is.
+ */
+function formatMissingComponentPath(value: unknown): string {
+  if (value === undefined || value === null) return ''
+  const raw = typeof value === 'string' ? value : String(value)
+  let joined = raw
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (Array.isArray(parsed)) {
+      joined = parsed
+        .map((token) => (token === undefined || token === null ? '' : String(token)))
+        .join(' / ')
+    }
+  } catch {
+    // Not JSON at all — keep the raw string. A bare, human-typed path (or a future server change)
+    // must still show SOMETHING rather than going blank.
+  }
+  return joined.slice(0, MISSING_COMPONENT_FIELD_MAX_LEN)
+}
+
+/**
  * True for a value `clampMissingComponentField` can turn into a MEANINGFUL string: absent, or an
  * actual scalar. An object/array in a string field's slot is not a value to `String()`-coerce — that
  * produces `"[object Object]"`, which is not the customer's data, it is a rendering artifact this
@@ -299,7 +336,7 @@ export function missingComponentsOf(
       componentSourceId: clampMissingComponentField(source.componentSourceId),
       parentSourceId: clampMissingComponentField(source.parentSourceId),
       bomId: clampMissingComponentField(source.bomId),
-      path: clampMissingComponentField(source.path),
+      path: formatMissingComponentPath(source.path),
       depth: intOf(source.depth),
       occurrenceCount: intOf(source.occurrenceCount),
       parentCount: intOf(source.parentCount),

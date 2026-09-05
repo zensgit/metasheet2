@@ -12,6 +12,10 @@ import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vu
 //               the literal boolean `true`.
 //   C-08        a non-object entry, or one whose id/parent/bom/path field is itself an object, is
 //               DROPPED, never mapped into a blank/garbage row (adversarial-review fix #6).
+//   C-09        `path` is the server's `JSON.stringify(pathTokens)` wire shape, NOT a pre-joined
+//               "A/B" string (fix #2): `missingComponentsOf` decodes it and joins with " / ", falls
+//               back to the raw string when it isn't valid JSON, and truncates to 128 chars AFTER
+//               joining rather than cutting the raw JSON off mid-token.
 //   G-01/G-02   the CSV/formula-injection guard (stockPrepCsv.ts) is OPT-IN (`{ guardFormulas: true
 //               }`, adversarial-review fix B3) and prefixes a leading =, +, -, @ or tab with an
 //               apostrophe; a leading CR gets the same prefix AND is quote-wrapped (fix #5 — `\r` now
@@ -38,11 +42,15 @@ import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vu
 //               file named `missing-components-{projectNo}-{YYYYMMDD}.csv`, 7 columns, guard live.
 //   E-02        a project number containing filesystem-hostile characters is sanitized in the
 //               downloaded filename (fix #9).
-//   B1-01/02/03 `createStockPreparationProjectSyncApi`'s dry run retries ONCE without
+//   B1 line    the `-unavailable` hint line (fix #3) renders ONLY for `scope_denied` (actionable);
+//               `server_unsupported` renders nothing.
+//   B1-01/02/03/04/05 `createStockPreparationProjectSyncApi`'s dry run retries ONCE without
 //               `includeMissingComponents` on exactly the two failures that mean "the flag itself was
 //               refused" (400 TABLE_ACTION_REQUEST_INVALID, 403 OPERATOR_SCOPE_*) — merging this PR
-//               alone (server-side W3a PR not yet merged) must not 400 every sync on main — and does
-//               NOT retry an ordinary dry-run failure.
+//               alone (server-side W3a PR not yet merged) must not 400 every sync on main. Does NOT
+//               retry an ordinary dry-run failure (B1-03), a SECOND failure of the retry itself
+//               (B1-04 — exactly one retry, never a loop), or a 403 outside the OPERATOR_SCOPE_*
+//               vocabulary (B1-05).
 //
 // Same mock/flush idiom as the sibling suite in this directory (StockPreparationUnconfirmableHold.
 // spec.ts): useLocale/useAuth mocked via vi.hoisted state, and a single `setTimeout(0) → nextTick()`
@@ -89,12 +97,18 @@ import { escapeCsvCell, escapeTsvCell } from '../src/services/integration/stockP
 
 const PROJECT_NO = 'P2026-777'
 
+/**
+ * `path` defaults to the SERVER'S actual wire shape (fix #2): `JSON.stringify(pathTokens)`, e.g.
+ * `["ASM-100","PN-0001"]` — NOT a pre-joined `A/B` string. `missingComponentsOf` decodes this into
+ * `'ASM-100 / PN-0001'` (see `formatMissingComponentPath` / C-09 below); every assertion in this file
+ * that checks a rendered/exported path value checks the JOINED form, never the raw JSON.
+ */
 function rawItem(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     componentSourceId: 'PN-0001',
     parentSourceId: 'ASM-100',
     bomId: 'BOM-1',
-    path: 'ASM-100/PN-0001',
+    path: JSON.stringify(['ASM-100', 'PN-0001']),
     depth: 2,
     occurrenceCount: 3,
     parentCount: 1,
@@ -254,6 +268,42 @@ describe('missingComponentsOf — strict clamp at the API boundary', () => {
     // rendering artifact, not the customer's data, so the whole entry is discarded rather than kept
     // with a garbage id.
     expect(result?.items.length).toBe(0)
+  })
+
+  it('C-09 (fix #2): path is JSON.parse\'d and joined with " / " when it decodes to an array; falls back to the raw string otherwise; truncates to 128 AFTER joining, not mid-JSON', () => {
+    // The server's actual wire shape: JSON.stringify(pathTokens), not a pre-joined "A/B" string.
+    const arrayPath = JSON.stringify(['ASM-100', 'PN-0001'])
+    const decoded = missingComponentsOf({
+      missingComponents: { distinctCount: 1, probeCount: 1, truncated: false, items: [rawItem({ path: arrayPath })] },
+    })
+    expect(decoded?.items[0].path).toBe('ASM-100 / PN-0001')
+
+    // Not valid JSON at all — falls back to the raw string, unparsed, rather than going blank.
+    const fallback = missingComponentsOf({
+      missingComponents: { distinctCount: 1, probeCount: 1, truncated: false, items: [rawItem({ path: 'not-json-at-all' })] },
+    })
+    expect(fallback?.items[0].path).toBe('not-json-at-all')
+
+    // Valid JSON that decodes to something OTHER than an array (e.g. a bare string) also falls back
+    // to the raw (still-JSON) text rather than being force-unwrapped.
+    const nonArrayJson = missingComponentsOf({
+      missingComponents: { distinctCount: 1, probeCount: 1, truncated: false, items: [rawItem({ path: '"just-a-string"' })] },
+    })
+    expect(nonArrayJson?.items[0].path).toBe('"just-a-string"')
+
+    // A path array whose JSON-STRING form is well over 128 chars must still decode/join correctly —
+    // truncating the RAW JSON at char 128 first would cut it mid-token and either break JSON.parse or
+    // hand back a stray fragment. The cap applies to the JOINED text instead.
+    const longTokens = Array.from({ length: 20 }, (_, i) => `PART-${i}-${'X'.repeat(10)}`)
+    const longArrayPath = JSON.stringify(longTokens)
+    expect(longArrayPath.length).toBeGreaterThan(128)
+    const longResult = missingComponentsOf({
+      missingComponents: { distinctCount: 1, probeCount: 1, truncated: false, items: [rawItem({ path: longArrayPath })] },
+    })
+    const expectedJoined = longTokens.join(' / ')
+    expect(expectedJoined.length).toBeGreaterThan(128) // the joined text itself still needs the cap
+    expect(longResult?.items[0].path).toBe(expectedJoined.slice(0, 128))
+    expect(longResult?.items[0].path.length).toBe(128)
   })
 })
 
@@ -428,6 +478,31 @@ describe('StockPreparationProjectSyncPanel — 缺件清单 rendering', () => {
     const tech = q(root, 'stock-prep-project-sync-tech')
     expect(tech!.textContent).not.toContain('PLANTED-SECRET-PN-9911')
   })
+
+  it('B1 line (fix #3): scope_denied renders the -unavailable hint line', async () => {
+    const readyCounts = { add: 0, update: 0, skip: 0, inactive: 0, manual_confirm: 0 }
+    // scope_denied is ACTIONABLE (wrong account/tenant) — the line renders.
+    const root = await runWithDryRun(
+      planWithMissing(null, { status: 'ready', counts: readyCounts, missingComponentsUnavailableReason: 'scope_denied' }),
+    )
+    const hint = q(root, 'stock-prep-project-sync-missing-components-unavailable')
+    expect(hint, 'scope_denied must render the hint line').not.toBeNull()
+    expect(hint!.textContent).toContain('操作员权限')
+    // The missing-components disclosure itself must NOT render — there is nothing to show.
+    expect(q(root, 'stock-prep-project-sync-missing-components')).toBeNull()
+  })
+
+  it('B1 line (fix #3): server_unsupported renders NOTHING (no -unavailable hint)', async () => {
+    const readyCounts = { add: 0, update: 0, skip: 0, inactive: 0, manual_confirm: 0 }
+    // server_unsupported is a DEPLOYMENT-VERSION fact, not something an operator can act on — silent.
+    const root = await runWithDryRun(
+      planWithMissing(null, { status: 'ready', counts: readyCounts, missingComponentsUnavailableReason: 'server_unsupported' }),
+    )
+    expect(
+      q(root, 'stock-prep-project-sync-missing-components-unavailable'),
+      'server_unsupported must render NOTHING',
+    ).toBeNull()
+  })
 })
 
 // =============================================================================================
@@ -463,7 +538,7 @@ describe('StockPreparationProjectSyncPanel — 缺件清单复制', () => {
         componentSourceId: '=cmd|A1',
         parentSourceId: 'ASM-A',
         bomId: 'BOM-1',
-        path: 'ASM-A/=cmd|A1',
+        path: JSON.stringify(['ASM-A', '=cmd|A1']), // server's actual wire shape — see rawItem()'s comment
         depth: 1,
         occurrenceCount: 1,
         parentCount: 3, // > 1 — would show the "(+3 处)" badge ON SCREEN; must NOT appear in the copy.
@@ -487,7 +562,8 @@ describe('StockPreparationProjectSyncPanel — 缺件清单复制', () => {
     expect(cells[3]).toBe('1')
     expect(cells[4]).toBe('1')
     expect(cells[5]).toBe('3') // parentCount as its OWN column
-    expect(cells[6]).toBe('ASM-A/=cmd|A1') // path, screen-invisible, present in the export
+    // path is JSON.parse'd and joined with ' / ' — never the raw ["ASM-A","=cmd|A1"] JSON text.
+    expect(cells[6]).toBe('ASM-A / =cmd|A1')
     expect(tsv).not.toContain('处')
 
     const button = q(root, 'stock-prep-project-sync-missing-components-copy') as HTMLButtonElement
@@ -612,7 +688,9 @@ describe('StockPreparationProjectSyncPanel — 缺件清单导出 CSV', () => {
     // The injection guard fired on the exported file too.
     expect(csvText).toContain("'=cmd|A1")
     // Full row check: RAW parent id (no badge), plus the parentCount/path columns the table hides.
-    expect(csvText).toContain("'=cmd|A1,ASM-A,BOM-1,2,3,1,ASM-100/PN-0001")
+    // path is the DECODED/JOINED form (fix #2) — the default fixture's raw wire value is
+    // `["ASM-100","PN-0001"]`, which becomes "ASM-100 / PN-0001", never the raw JSON text.
+    expect(csvText).toContain("'=cmd|A1,ASM-A,BOM-1,2,3,1,ASM-100 / PN-0001")
     expect(revokeObjectURLMock).toHaveBeenCalledTimes(1)
   })
 
@@ -738,6 +816,40 @@ describe('createStockPreparationProjectSyncApi — dry-run flag fallback (B1)', 
 
     const dryRunCalls = calls.filter((call) => String(call[0]).includes('/dry-run'))
     expect(dryRunCalls.length, 'no silent retry for a REAL failure').toBe(1)
+    expect(report.pass).toBe(false)
+    expect(report.missingComponentsUnavailableReason).toBeNull()
+  })
+
+  it('B1-04: a SECOND dry-run failure (still 400) is NOT retried again — exactly one retry, no loop', async () => {
+    const calls = wireApi([
+      new Response(JSON.stringify({ ok: false, error: { code: 'TABLE_ACTION_REQUEST_INVALID' } }), { status: 400 }),
+      new Response(JSON.stringify({ ok: false, error: { code: 'TABLE_ACTION_REQUEST_INVALID' } }), { status: 400 }),
+      // A THIRD response — if the implementation looped, it would be consumed here. It must never be
+      // reached: the dry-run-calls count below is what actually proves that, regardless of what this
+      // response says.
+      new Response(JSON.stringify({ ok: true, data: { status: 'ready', canApply: true, dryRunToken: 'tok', counts: {} } }), { status: 200 }),
+    ])
+    const apiClient = createStockPreparationProjectSyncApi({})
+    const report = await runStockPreparationProjectSync(apiClient, 'P1')
+
+    const dryRunCalls = calls.filter((call) => String(call[0]).includes('/dry-run'))
+    expect(dryRunCalls.length, 'exactly one retry, never a third call').toBe(2)
+    // The retry's OWN failure surfaces as a real failure — it does not silently succeed by falling
+    // through to whatever the (never-reached) third mock response would have said.
+    expect(report.pass).toBe(false)
+    expect(report.steps[0].status).toBe('fail')
+    expect(report.missingComponentsUnavailableReason).toBeNull()
+  })
+
+  it('B1-05: a 403 that is NOT an OPERATOR_SCOPE_* code (e.g. a plain FORBIDDEN) is not retried', async () => {
+    const calls = wireApi([
+      new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN' } }), { status: 403 }),
+    ])
+    const apiClient = createStockPreparationProjectSyncApi({})
+    const report = await runStockPreparationProjectSync(apiClient, 'P1')
+
+    const dryRunCalls = calls.filter((call) => String(call[0]).includes('/dry-run'))
+    expect(dryRunCalls.length, 'no retry for a 403 outside the OPERATOR_SCOPE_* vocabulary').toBe(1)
     expect(report.pass).toBe(false)
     expect(report.missingComponentsUnavailableReason).toBeNull()
   })
