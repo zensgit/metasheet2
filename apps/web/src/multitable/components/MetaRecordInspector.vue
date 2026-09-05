@@ -564,6 +564,14 @@ const props = withDefaults(defineProps<{
    *  intentionally NOT treated as "switch away from comments" -- tab selection is otherwise sticky
    *  across record navigation already (S3 behavior, unchanged), and this stays consistent with it. */
   openComments?: boolean
+  /** Record inspector v3 (2026-09-05, PR-A §1.1 "captured at mount"): the element the workbench's
+   *  `openRecord(id, opener)` captured as the trigger of THIS open — an explicit signature
+   *  handoff so a WB-level caller (row-number icon click, Shift+Space on the grid, a context-menu
+   *  item) can name its own opener precisely, rather than this component guessing from
+   *  `document.activeElement` at mount (which is only reliable when nothing else moved focus
+   *  between the gesture and mount — see `onMounted` below for the fallback when this prop is
+   *  absent, e.g. a deep-link mount with no interactive opener at all). */
+  openerEl?: HTMLElement | null
 }>(), {
   recordIds: () => [],
   buttonRunPending: () => [],
@@ -586,6 +594,7 @@ const props = withDefaults(defineProps<{
   currentUserId: null,
   commentComposerInitialMentions: () => [],
   openComments: false,
+  openerEl: null,
 })
 
 const emit = defineEmits<{
@@ -652,6 +661,37 @@ const kebabMenuRef = ref<InstanceType<typeof MtMenu> | null>(null)
 const titleInputRef = ref<HTMLInputElement | null>(null)
 const titleTextRef = ref<HTMLDivElement | null>(null)
 
+// --- Open/focus (2026-09-05, PR-A §1.1/§1.5) ---
+// This shell mounts (`v-if="visible"`) EXACTLY when the workbench flips `inspectorOpen` true — see
+// MultitableWorkbench.vue's `openRecord`/hash-watcher comments — so `onMounted` here IS "the open
+// transition" the design describes, with no separate WB-side `focusTitle()` call needed: capturing
+// the opener and moving focus to the title both happen exactly once per open, never on a record
+// switch while already open (this component stays mounted throughout "follow while open" — only its
+// `record`/tab content change, not this lifecycle hook).
+let restoreFocusTarget: HTMLElement | null = null
+onMounted(() => {
+  // `props.openerEl` (WB's `openRecord(id, opener)`, see that prop's own doc comment) wins when
+  // given; falling back to `document.activeElement` covers mounts WB doesn't drive an opener for
+  // (a deep-link/comment-click-through open, or a router-less spec mounting this shell directly)
+  // and also naturally captures a context-menu-item opener when WB passes none — see MtMenu's own
+  // comment on the identical "capture what's focused right now" idiom for why this is reliable.
+  // `document.body` (or no active element at all) means nothing was actually focused — treated the
+  // SAME as "no opener" so the unmount fallback below reaches `.meta-grid`, not a no-op `body.focus()`.
+  const active = document.activeElement as HTMLElement | null
+  restoreFocusTarget = props.openerEl ?? (active && active !== document.body ? active : null)
+  void nextTick(() => {
+    ;(titleInputRef.value ?? titleTextRef.value)?.focus()
+  })
+})
+onBeforeUnmount(() => {
+  const target = restoreFocusTarget
+  if (target && target.isConnected && typeof target.focus === 'function') {
+    target.focus()
+    return
+  }
+  document.querySelector<HTMLElement>('.meta-grid')?.focus()
+})
+
 // --- OD-W2-1 (tabs, lock §6bis): extensible union -- S3 shipped 'details' (fields) + 'history'
 // (activity); S4 added 'comments'; S5 (this slice) adds 'attachments', the 4th and final tab per lock
 // §2's information architecture (字段/动态/评论/附件). TAB_ORDER drives roving-tabindex + arrow-key nav
@@ -710,8 +750,22 @@ function setTabRef(tab: InspectorTab, el: HTMLButtonElement | null) {
   tabRefs.value[tab] = el
 }
 
-function selectTab(tab: InspectorTab) {
+// §3.3 tab-switch focus (2026-09-05, PR-A §1.5; W2 lock §3.3, unimplemented until now): pointer
+// activation moves focus INTO the new tabpanel's first focusable control (else the panel itself,
+// which already carries `tabindex="0"` — see the panel div's own template attribute, unchanged);
+// arrow activation (`moveTabFocusTo` below) keeps focus ON the tab, per APG.
+const FOCUSABLE_SELECTOR = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+function focusFirstInPanel(tab: InspectorTab) {
+  const panel = document.getElementById(tabPanelId(tab))
+  if (!panel) return
+  const first = panel.querySelector<HTMLElement>(FOCUSABLE_SELECTOR)
+  ;(first ?? panel).focus()
+}
+
+async function selectTab(tab: InspectorTab) {
   activeTab.value = tab
+  await nextTick()
+  focusFirstInPanel(tab)
 }
 
 async function moveTabFocusTo(tab: InspectorTab) {
@@ -747,8 +801,9 @@ async function moveTabFocusTo(tab: InspectorTab) {
 //      §3.3 "Esc 从 panel 回到关闭/grid"), guarded so it never fires when a descendant already
 //      consumed Escape (defaultPrevented) and never inspects any other key -- mod+z / mod+y / `?`
 //      are untouched here and bubble to MultitableWorkbench's own `onGlobalKeydown` unmodified.
-// Record inspector v3 (2026-09-05, PR-A §1.2/§4 item 10): Escape's own first clause (kebab open →
-// close the menu, not the panel) is the one addition to an otherwise-unchanged clause; see
+// Record inspector v3 (2026-09-05, PR-A §1.5): dispatch order is (1) Escape, (2) splitter, (3)
+// prev/next chord, (4) tablist — the design's own numbering. Escape's own first clause (kebab open
+// → close the menu, not the panel) is the one addition to an otherwise-unchanged clause; see
 // `kebabMenuRef`'s own template comment for why this is a defensive top-of-branch check rather than
 // the primary mechanism (MtMenu's own internal Escape handling — see that file's comment — is what
 // actually fires for the common case, since its open content is Teleported to `document.body` and
@@ -770,6 +825,20 @@ function onInspectorKeydown(event: KeyboardEvent) {
   const target = event.target as HTMLElement | null
   if (target?.closest('[role="separator"]') != null) {
     onSplitterKeydown(event)
+    return
+  }
+
+  // Prev/next chord (graft from P2, §1.5/§2): `(meta|ctrl)+shift` + `event.code === 'Comma'|'Period'`
+  // — `event.code` (the physical key), not `event.key` (which shift already remaps to `<`/`>` on a
+  // US layout), and layout-independent; works with the caret inside a text control since it never
+  // collides with a printable character or a native caret-movement chord. Alt+Arrow was rejected
+  // (macOS Option+Arrow has caret/word-jump semantics); `j`/`k` was rejected (IME hazard, no
+  // `isComposing` handling exists in this file or the workbench).
+  const mod = event.metaKey || event.ctrlKey
+  if (mod && event.shiftKey && (event.code === 'Comma' || event.code === 'Period')) {
+    event.preventDefault()
+    if (event.code === 'Comma') navigatePrev()
+    else navigateNext()
     return
   }
 

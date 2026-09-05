@@ -1,20 +1,17 @@
 /**
  * Record inspector v3 (2026-09-05, docs/development/multitable-record-inspector-v3-design-20260905.md,
- * PR-A §1.2 header — commit 1 of 2, "header/title first"). New header surface this commit adds to
- * MetaRecordInspector.vue: the Row A toolbar (icon-only, never wraps) + kebab menu, the Row B title
- * block (eyebrow + primary-field value, editable when permitted), and the splitter's move to the
- * end of the DOM. Pre-existing header/menu-item-gate/click-emit coverage already rewritten in
- * multitable-record-drawer-t5-migration.spec.ts (opens the kebab, asserts gates/classes/clicks per
- * item) is NOT duplicated here — this file's job is the NEW behaviors that spec never asserted:
- * toolbar structure, kebab a11y wiring + roving + Escape-refocus, and title editing.
+ * PR-A §1.2 header + §1.5 keyboard). New surface this PR-A slice adds to MetaRecordInspector.vue:
+ * the Row A toolbar (icon-only, never wraps) + kebab menu, the Row B title block (eyebrow +
+ * primary-field value, editable when permitted), the prev/next keyboard chord, and the §3.3
+ * tab-switch focus split. Pre-existing header/menu-item-gate/click-emit coverage already rewritten
+ * in multitable-record-drawer-t5-migration.spec.ts (opens the kebab, asserts gates/classes/clicks
+ * per item) is NOT duplicated here — this file's job is the NEW behaviors that spec never asserted:
+ * toolbar structure, kebab a11y wiring + roving + Escape-refocus, title editing, the chord, and
+ * tab-switch focus.
  *
- * Commit 2 ("open-close/focus") appends: the prev/next keyboard chord, §3.3 tab-switch focus, the
- * opener focus-capture/restore describe block, and a label-sourcing sanity check for `grid.openRecord`
- * (that key does not exist until commit 2's grid changes land).
- *
- * i18n discipline: every string assertion below reads through `recordLabel` (the SAME helper the
- * component itself calls), never a hardcoded copy literal — so this file can never drift from the
- * label table it is meant to test against.
+ * i18n discipline: every string assertion below reads through `recordLabel`/`metaCoreLabel` (the
+ * SAME helpers the component itself calls), never a hardcoded copy literal — so this file can never
+ * drift from the label tables it is meant to test against.
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -24,6 +21,7 @@ import MetaRecordInspector from '../src/multitable/components/MetaRecordInspecto
 import type { MetaField, MetaRecord } from '../src/multitable/types'
 import { useLocale } from '../src/composables/useLocale'
 import { recordLabel } from '../src/multitable/utils/meta-record-labels'
+import { metaCoreLabel } from '../src/multitable/utils/meta-core-labels'
 
 async function flushUi(cycles = 4) {
   for (let i = 0; i < cycles; i += 1) {
@@ -323,6 +321,94 @@ describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
     })
   })
 
+  describe('prev/next chord (§1.5 item 3)', () => {
+    it('mod+shift+Comma/Period from inside a text control emits navigate with the neighbour id', async () => {
+      const onNavigate = vi.fn()
+      const { container } = mountInspector({ recordIds: ['rec_0', 'rec_1', 'rec_2'], onNavigate })
+      await flushUi()
+      const textarea = container.querySelector('.meta-record-drawer__textarea') as HTMLTextAreaElement
+      expect(textarea).toBeTruthy()
+      textarea.dispatchEvent(new KeyboardEvent('keydown', {
+        key: '<', code: 'Comma', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true,
+      }))
+      expect(onNavigate).toHaveBeenCalledWith('rec_0')
+      textarea.dispatchEvent(new KeyboardEvent('keydown', {
+        key: '>', code: 'Period', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true,
+      }))
+      expect(onNavigate).toHaveBeenCalledWith('rec_2')
+    })
+
+    it('bounds: chord at the first/last record emits nothing', async () => {
+      const onNavigate = vi.fn()
+      const { container } = mountInspector({ recordIds: ['rec_1'], onNavigate })
+      await flushUi()
+      container.querySelector('.meta-record-drawer')!.dispatchEvent(new KeyboardEvent('keydown', {
+        key: '<', code: 'Comma', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true,
+      }))
+      container.querySelector('.meta-record-drawer')!.dispatchEvent(new KeyboardEvent('keydown', {
+        key: '>', code: 'Period', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true,
+      }))
+      expect(onNavigate).not.toHaveBeenCalled()
+    })
+
+    it('chord without Shift is ignored (not treated as the prev/next chord)', async () => {
+      const onNavigate = vi.fn()
+      const { container } = mountInspector({ recordIds: ['rec_0', 'rec_1', 'rec_2'], onNavigate })
+      await flushUi()
+      container.querySelector('.meta-record-drawer')!.dispatchEvent(new KeyboardEvent('keydown', {
+        key: ',', code: 'Comma', ctrlKey: true, shiftKey: false, bubbles: true, cancelable: true,
+      }))
+      expect(onNavigate).not.toHaveBeenCalled()
+    })
+
+    it('bare ArrowUp/ArrowDown outside the tablist/splitter emit nothing (not hijacked by the chord or tab logic)', async () => {
+      const onNavigate = vi.fn()
+      const { container } = mountInspector({ recordIds: ['rec_0', 'rec_1', 'rec_2'], onNavigate })
+      await flushUi()
+      const input = container.querySelector<HTMLInputElement>('.meta-record-drawer__title-input')!
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }))
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
+      expect(onNavigate).not.toHaveBeenCalled()
+    })
+
+    it('mod+z still bubbles untouched (never defaultPrevented by this root handler)', async () => {
+      const { container } = mountInspector({ recordIds: ['rec_0', 'rec_1', 'rec_2'] })
+      await flushUi()
+      const event = new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true, cancelable: true })
+      container.querySelector('.meta-record-drawer')!.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(false)
+    })
+  })
+
+  describe('§3.3 tab-switch focus', () => {
+    it('pointer activation (click) focuses the first focusable control in the new tabpanel', async () => {
+      const { container } = mountInspector()
+      await flushUi()
+      const historyTab = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
+        .find((b) => b.textContent === recordLabel('record.history', false))!
+      historyTab.click()
+      await flushUi()
+      const panel = container.querySelector('[role="tabpanel"]')!
+      expect(panel.getAttribute('aria-labelledby')).toBe(historyTab.id)
+      // The active element is either a focusable control inside the panel, or the panel itself
+      // (tabindex=0 fallback) — never the tab button that was clicked.
+      expect(document.activeElement).not.toBe(historyTab)
+      expect(panel === document.activeElement || panel.contains(document.activeElement)).toBe(true)
+    })
+
+    it('arrow activation keeps focus ON the tab (APG), not the panel', async () => {
+      const { container } = mountInspector()
+      await flushUi()
+      const [detailsTab] = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
+      detailsTab.focus()
+      detailsTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }))
+      await flushUi()
+      const tabs = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
+      const historyTab = tabs.find((t) => t.getAttribute('aria-selected') === 'true')!
+      expect(document.activeElement).toBe(historyTab)
+    })
+  })
+
   describe('splitter DOM order (§1.2)', () => {
     it('the splitter is the LAST focusable element in DOM order (not the first)', async () => {
       const { container } = mountInspector()
@@ -336,4 +422,48 @@ describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
     })
   })
 
+  describe('focus capture/restore (openerEl)', () => {
+    it('a connected openerEl is refocused when the inspector unmounts', async () => {
+      const opener = document.createElement('button')
+      document.body.appendChild(opener)
+      const { app } = mountInspector({ openerEl: opener })
+      await flushUi()
+      app.unmount()
+      expect(document.activeElement).toBe(opener)
+      opener.remove()
+    })
+
+    it('a detached openerEl does not throw and falls back to .meta-grid', async () => {
+      const gridRoot = document.createElement('div')
+      gridRoot.className = 'meta-grid'
+      gridRoot.tabIndex = -1
+      document.body.appendChild(gridRoot)
+      const opener = document.createElement('button') // never appended -> isConnected === false
+      const { app } = mountInspector({ openerEl: opener })
+      await flushUi()
+      expect(() => app.unmount()).not.toThrow()
+      expect(document.activeElement).toBe(gridRoot)
+      gridRoot.remove()
+    })
+
+    it('no openerEl at all falls back to .meta-grid', async () => {
+      const gridRoot = document.createElement('div')
+      gridRoot.className = 'meta-grid'
+      gridRoot.tabIndex = -1
+      document.body.appendChild(gridRoot)
+      const { app } = mountInspector({ openerEl: null })
+      await flushUi()
+      app.unmount()
+      expect(document.activeElement).toBe(gridRoot)
+      gridRoot.remove()
+    })
+  })
+
+  describe('label sourcing sanity (i18n discipline)', () => {
+    it('grid.openRecord resolves through metaCoreLabel, not a hardcoded literal in this file', () => {
+      expect(metaCoreLabel('grid.openRecord', false)).toBeTruthy()
+      expect(metaCoreLabel('grid.openRecord', true)).toBeTruthy()
+      expect(metaCoreLabel('grid.openRecord', false)).not.toBe(metaCoreLabel('grid.openRecord', true))
+    })
+  })
 })

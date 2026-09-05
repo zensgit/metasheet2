@@ -65,6 +65,14 @@
               <td class="meta-grid__row-num" :style="{ left: `${rowNumLeft}px` }">
                 <span>{{ startIndex + item.navIndex + 1 }}</span>
                 <button
+                  type="button"
+                  class="meta-grid__open-record-btn"
+                  data-test="grid-open-record"
+                  :aria-label="l('grid.openRecord')"
+                  :title="l('grid.openRecord')"
+                  @click.stop="emit('expand-record', item.row.id)"
+                >&#x2197;</button>
+                <button
                   v-if="resolveRowActions(item.row.id).canComment"
                   type="button"
                   class="meta-grid__comment-action"
@@ -188,6 +196,14 @@
               </td>
               <td class="meta-grid__row-num" :style="{ left: `${rowNumLeft}px` }">
                 <button class="meta-grid__expand-btn" :class="{ 'meta-grid__expand-btn--open': expandedRowIds.has(row.id) }" :aria-label="expandedRowIds.has(row.id) ? l('grid.collapseRow') : l('grid.expandRow')" @click.stop="toggleRowExpand(row.id)">&#x25B6;</button>
+                <button
+                  type="button"
+                  class="meta-grid__open-record-btn"
+                  data-test="grid-open-record"
+                  :aria-label="l('grid.openRecord')"
+                  :title="l('grid.openRecord')"
+                  @click.stop="emit('expand-record', row.id)"
+                >&#x2197;</button>
                 <span>{{ startIndex + ri + 1 }}</span>
                 <span
                   v-if="isRowLocked(row.id)"
@@ -548,6 +564,12 @@ const emit = defineEmits<{
   (e: 'run-button', payload: { recordId: string; field: MetaField }): void
   // Live cell-cursors: the local user focused a cell → parent broadcasts it as the active cursor.
   (e: 'cursor-focus', payload: { recordId: string; fieldId: string }): void
+  // Record inspector v3 (2026-09-05, PR-A §1.1 explicit-open): row-number expand icon / Shift+Space
+  // both route here — the workbench's `openRecord(id, opener)` is the single handler for all
+  // explicit-open triggers (see MultitableWorkbench.vue's own comment). Distinct from the
+  // pre-existing `toggle-group`/row-detail `expand`/`collapse` glyph (`meta-grid__expand-btn`,
+  // `toggleRowExpand`), which is unrelated to the inspector panel.
+  (e: 'expand-record', recordId: string): void
 }>()
 
 const { isZh } = useLocale()
@@ -1555,6 +1577,23 @@ function onKeydown(e: KeyboardEvent) {
   if (editCell.value) return
   const navRows = displayRows.value
   const maxR = navRows.length - 1, maxC = props.visibleFields.length - 1
+  // Record inspector v3 (2026-09-05, PR-A §1.1/§1.5): Shift+Space on a focused row opens the
+  // inspector. Dispatched HERE, strictly BEFORE the D1 type-to-edit printable-key branch below —
+  // `e.key === ' '` has `.length === 1`, so without this branch running first, Shift+Space on an
+  // editable string cell would fall into D1 and seed the editor with a literal space character
+  // (verified against this exact head: #5481's D1 branch is gated only on `!mod && !e.altKey`,
+  // which Shift does not set). Bare Space (no Shift) is UNCHANGED — it still reaches D1 below and
+  // types, per #5481 (the design's own grounding-facts note: Proposal 1's bare-Space open was stale
+  // against this head and is replaced by Shift+Space for exactly this reason). Gated on
+  // `focusRow`/`focusCol` (a real focused row), not `editCell` a second time (already returned above).
+  if (e.shiftKey && !mod && !e.altKey && e.key === ' ' && focusRow.value >= 0) {
+    const r = navRows[focusRow.value]
+    if (r) {
+      e.preventDefault()
+      emit('expand-record', r.id)
+    }
+    return
+  }
   // D1: type-to-edit. A printable single character on a focused, editable
   // string/number cell opens the editor with the draft SEEDED (replace, not
   // appended) to that character, consuming the keystroke (preventDefault) so
@@ -1803,6 +1842,22 @@ thead .meta-grid__check-col {
 .meta-grid__expand-btn { border: none; background: none; cursor: pointer; font-size: 8px; color: #bbb; padding: 0 2px; transition: transform 0.15s; display: inline-block; }
 .meta-grid__expand-btn:hover { color: #666; }
 .meta-grid__expand-btn--open { transform: rotate(90deg); color: #409eff; }
+/* Record inspector v3 (2026-09-05, PR-A §1.1): the row-number "open record" icon. `opacity: 0`
+   (not `display: none`/`visibility: hidden`) so it stays keyboard-focusable and IN the a11y tree at
+   all times (design's own requirement) while only being visually revealed on row hover or when a
+   descendant of the row has focus (`:focus-within` covers Tabbing to the icon itself, so it never
+   disappears out from under the focus it just received). */
+.meta-grid__open-record-btn {
+  border: none; background: none; cursor: pointer; font-size: 11px; color: #999; padding: 0 2px;
+  opacity: 0; transition: opacity 0.1s;
+}
+.meta-grid__row:hover .meta-grid__open-record-btn,
+.meta-grid__row:focus-within .meta-grid__open-record-btn,
+.meta-grid__open-record-btn:focus-visible {
+  opacity: 1;
+}
+.meta-grid__open-record-btn:hover { color: var(--ms-color-primary, #409eff); }
+.meta-grid__open-record-btn:focus-visible { outline: 2px solid var(--ms-color-primary, #409eff); outline-offset: 1px; }
 .meta-grid__expand-row td { padding: 0; background: #fafbfc; border-bottom: 1px solid #eee; }
 .meta-grid__expand-detail { padding: 8px 16px 12px !important; }
 .meta-grid__expand-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px 16px; }

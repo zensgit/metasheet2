@@ -305,7 +305,11 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
       collapsedGroupKeys: { type: Array, default: () => [] },
       rowDensity: { type: String, default: undefined },
     },
-    emits: ['select-record', 'open-comments', 'open-field-comments', 'resize-column', 'toggle-group', 'bulk-edit', 'selection-change'],
+    // Record inspector v3 (2026-09-05, PR-A §1.1): `expand-record` added to this stub's emits —
+    // `select-record` alone is now a plain cursor move (W2 lock §3.1 erratum) and no longer opens
+    // the inspector; tests that need the panel OPEN click the new `data-expand-record` button
+    // (mirrors the real grid's row-number icon → `expand-record`).
+    emits: ['select-record', 'expand-record', 'open-comments', 'open-field-comments', 'resize-column', 'toggle-group', 'bulk-edit', 'selection-change'],
     render() {
       return h('div', {
         'data-grid-column-widths': JSON.stringify(this.$props.columnWidths ?? {}),
@@ -327,6 +331,22 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
             onClick: () => this.$emit('select-record', 'rec_2'),
           },
           'select-record-2',
+        ),
+        h(
+          'button',
+          {
+            'data-expand-record': 'rec_1',
+            onClick: () => this.$emit('expand-record', 'rec_1'),
+          },
+          'expand-record-1',
+        ),
+        h(
+          'button',
+          {
+            'data-expand-record': 'rec_2',
+            onClick: () => this.$emit('expand-record', 'rec_2'),
+          },
+          'expand-record-2',
         ),
         h(
           'button',
@@ -2281,7 +2301,10 @@ describe('MultitableWorkbench view wiring', () => {
     mountWorkbench()
     await flushUi()
 
-    container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+    // Record inspector v3 (2026-09-05, PR-A §1.1): plain `select-record` no longer opens the
+    // inspector (W2 lock §3.1 erratum) — `expand-record` (the row-number icon in the real grid) is
+    // this stub's explicit-open equivalent.
+    container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
     await flushUi()
     container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
     await flushUi()
@@ -2485,7 +2508,9 @@ describe('MultitableWorkbench view wiring', () => {
     mountWorkbench()
     await flushUi()
 
-    container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+    // Record inspector v3 (2026-09-05, PR-A §1.1): `expand-record` is this stub's explicit-open
+    // equivalent — plain `select-record` no longer opens the inspector.
+    container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
     await flushUi()
     container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
     await flushUi()
@@ -2506,7 +2531,9 @@ describe('MultitableWorkbench view wiring', () => {
     mountWorkbench()
     await flushUi()
 
-    container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+    // Record inspector v3 (2026-09-05, PR-A §1.1): `expand-record` is this stub's explicit-open
+    // equivalent — plain `select-record` no longer opens the inspector.
+    container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
     await flushUi()
     container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
     await flushUi()
@@ -3117,7 +3144,9 @@ describe('MultitableWorkbench view wiring', () => {
 
       expect(toggleEl().getAttribute('aria-expanded')).toBe('true') // rail starts expanded (pre-S7 default)
 
-      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+      // Record inspector v3 (2026-09-05, PR-A §1.1): `expand-record` (this stub's explicit-open
+      // equivalent) — plain `select-record` no longer opens the inspector (W2 lock §3.1 erratum).
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
       await flushUi()
       expect(inspectorEl()).toBeTruthy() // inspector opened
       expect(inspectorEl()!.classList.contains('meta-record-drawer--overlay')).toBe(false) // push, not overlay
@@ -3140,7 +3169,7 @@ describe('MultitableWorkbench view wiring', () => {
       mountWorkbench()
       await flushUi()
 
-      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
       await flushUi()
       expect(inspectorEl()).toBeTruthy()
       expect(inspectorEl()!.classList.contains('meta-record-drawer--overlay')).toBe(true)
@@ -3166,7 +3195,7 @@ describe('MultitableWorkbench view wiring', () => {
       expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(true)
       expect(inspectorEl()).toBeNull()
 
-      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
       await flushUi()
       expect(inspectorEl()).toBeTruthy() // inspector opened
       expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(false) // rail drawer auto-closed
@@ -3178,7 +3207,7 @@ describe('MultitableWorkbench view wiring', () => {
       mountWorkbench()
       await flushUi()
 
-      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
       await flushUi()
       expect(inspectorEl()).toBeTruthy()
       expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(false)
@@ -3189,23 +3218,112 @@ describe('MultitableWorkbench view wiring', () => {
       expect(inspectorEl()).toBeNull() // inspector auto-closed
     })
 
+    // Regression test (2026-09-05): `openRecord`/`resolveDeepLink` used to set `inspectorOpen=true`
+    // BEFORE calling `selectRecord`, whose OWN discard-guard can still abort the navigation — a
+    // DECLINED confirm then left `inspectorOpen=true` dangling (reopening the panel on the
+    // PREVIOUSLY selected record) even though the navigation itself was cancelled. Repro needs the
+    // panel CLOSED with a genuinely dirty draft still held: the rail-drawer mutual-exclusion watcher
+    // (just above) force-closes the inspector WITHOUT running `confirmDiscardRecordChanges` (a
+    // separate, pre-existing, undisputed behavior) — a dirty comment draft set before that survives
+    // it untouched, unlike `onCloseDrawer`'s own close path, which clears it via its own guard.
+    it('a declined discard-confirm on expand-record (closed panel, dirty draft) leaves the panel closed and the selection unchanged', async () => {
+      setViewportWidth(600)
+      mountWorkbench()
+      await flushUi()
+
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-set-comment-draft="true"]')!.click()
+      await flushUi()
+
+      // Force-close WITHOUT the discard guard (rail-drawer mutual exclusion) — the draft survives.
+      toggleEl().click()
+      await flushUi()
+      expect(inspectorEl()).toBeNull() // panel closed, selectedRecordId (rec_1) retained underneath
+
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_2"]')!.click()
+      await flushUi()
+
+      expect(confirmSpy).toHaveBeenCalledWith('Discard unsaved record changes?')
+      // The navigation was cancelled — the panel must stay CLOSED, not reopen on rec_1.
+      expect(inspectorEl()).toBeNull()
+    })
+
     it('narrow width: switching from one selected record to another while the rail drawer is open still closes the drawer', async () => {
       setViewportWidth(600)
       mountWorkbench()
       await flushUi()
 
-      // Open the inspector on rec_1 first (narrow, no drawer yet), then open the rail drawer —
-      // by the previous test this already closes the inspector; this test instead re-opens the
-      // inspector by switching records while the drawer is open, proving the guard is keyed off
-      // "selectedRecordId changed to non-null", not just "off -> on".
+      // Open the rail drawer first (no inspector open yet), then OPEN the inspector on rec_2 while
+      // it's open — proving the guard fires on "the inspector actually opened", not just "some
+      // record got selected" (record inspector v3, 2026-09-05, PR-A §1.1: `expand-record`, this
+      // stub's explicit-open equivalent, since plain `select-record` no longer opens the panel).
       toggleEl().click()
       await flushUi()
       expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(true)
 
-      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_2"]')!.click()
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_2"]')!.click()
       await flushUi()
       expect(inspectorEl()).toBeTruthy()
       expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(false)
+    })
+  })
+
+  // Record inspector v3 (2026-09-05, PR-A §1.1, W2 lock §3.1 erratum): the `#recordId=` hash means
+  // "this record is EXPANDED" — written only while `inspectorOpen && selectedRecordId`, stripped the
+  // moment either goes false. A plain cursor move (select-record, panel closed) must write nothing.
+  describe('hash lifecycle (§1.1)', () => {
+    function hash(): string {
+      return window.location.hash
+    }
+
+    it('select-record with the panel closed writes no hash', async () => {
+      mountWorkbench()
+      await flushUi()
+      expect(hash()).toBe('')
+      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+      await flushUi()
+      expect(hash()).toBe('')
+    })
+
+    it('expand-record writes #recordId=<id>; close strips it (selectedRecordId itself survives)', async () => {
+      mountWorkbench()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      expect(hash()).toBe('#recordId=rec_1')
+      container!.querySelector<HTMLButtonElement>('[data-close-drawer="true"]')!.click()
+      await flushUi()
+      expect(hash()).toBe('')
+    })
+  })
+
+  // Record inspector v3 (2026-09-05, PR-A §1.1, §2 graft table "comment fetch out of selectRecord
+  // (P12)"): a closed-panel `select-record` (arrow/click cursor move) must make ZERO comment
+  // requests; the positive control proves the fetch-once-opened path is still live (not merely
+  // silenced everywhere).
+  describe('comment fetch gating (§1.1 P12)', () => {
+    it('three closed-panel select-record calls make zero comment fetches; expand-record then fetches exactly once', async () => {
+      mountWorkbench()
+      await flushUi()
+      loadCommentsSpy.mockClear()
+
+      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_2"]')!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+      await flushUi()
+      expect(loadCommentsSpy).not.toHaveBeenCalled()
+
+      // Positive control: the SAME record, now opened, DOES fetch — proving the gate is load-bearing
+      // (not merely a dead branch that never fires under this harness).
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      expect(loadCommentsSpy).toHaveBeenCalledTimes(1)
     })
   })
 })
