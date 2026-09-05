@@ -13,11 +13,12 @@
 //   G2 — a live "≈ N day(s)" hint under the minutes input, converting the typed minutes against
 //        the selected leave type's own `defaultMinutesPerDay` (never an org-level standard).
 //
-// This file has two parts: pure-function unit tests against
+// This file has three parts: pure-function unit tests against
 // ../src/views/attendance/halfDayLeaveHelper.ts (fast, exact arithmetic assertions, including the
-// odd-minute midpoint/rounding cases), and component tests mounting the real inline
-// AttendanceView.vue form (the only active surface per the design-lock's parity note --
-// AttendanceRequestCenterSection.vue is an unmounted twin, out of scope for this slice).
+// odd-minute midpoint/rounding cases), leave-card duration display helpers
+// (0.5-hour steps; backend minutes stay the write path), and component tests
+// mounting AttendanceView.vue — the shared inline form (G1/G2) plus the
+// dedicated 请假申请 card opened from the 常用 leave tile.
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { createApp, nextTick, ref, type App } from 'vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
@@ -28,6 +29,13 @@ import {
   computeLeaveMinutesDaysEquivalent,
   hasValidLeaveQuickFillShiftWindow,
 } from '../src/views/attendance/halfDayLeaveHelper'
+import {
+  formatLeaveDurationHours,
+  hoursFromLeaveMinutes,
+  minutesFromDateTimeRange,
+  snapMinutesToHalfHour,
+  workDateFromDateTimeLocal,
+} from '../src/views/attendance/leaveRequestDurationDisplay'
 
 // ---------------------------------------------------------------------------------------------
 // Part A -- pure-function unit tests (no Vue mounting)
@@ -167,6 +175,37 @@ describe('halfDayLeaveHelper (pure)', () => {
       expect(computeLeaveMinutesDaysEquivalent('240', 0)).toBeNull()
       expect(computeLeaveMinutesDaysEquivalent('240', -480)).toBeNull()
     })
+  })
+})
+
+describe('leaveRequestDurationDisplay (pure)', () => {
+  it('snaps minutes to 0.5-hour steps and converts 8.5 hours as 510 minutes', () => {
+    expect(snapMinutesToHalfHour(480)).toBe(480)
+    expect(snapMinutesToHalfHour(510)).toBe(510)
+    expect(snapMinutesToHalfHour(500)).toBe(510)
+    expect(snapMinutesToHalfHour(495)).toBe(510)
+    expect(hoursFromLeaveMinutes(480)).toBe(8)
+    expect(hoursFromLeaveMinutes(510)).toBe(8.5)
+    expect(hoursFromLeaveMinutes(540)).toBe(9)
+    expect(formatLeaveDurationHours(480)).toBe('8')
+    expect(formatLeaveDurationHours(510)).toBe('8.5')
+    expect(formatLeaveDurationHours(540)).toBe('9')
+    expect(formatLeaveDurationHours(498)).toBe('8.5')
+    expect(formatLeaveDurationHours('')).toBe('')
+  })
+
+  it('derives duration from start/end and never invents a free-form 8.3 hour value', () => {
+    expect(minutesFromDateTimeRange('2026-08-28T09:00', '2026-08-28T18:00')).toBe(540)
+    expect(minutesFromDateTimeRange('2026-08-28T09:00', '2026-08-28T17:30')).toBe(510)
+    expect(minutesFromDateTimeRange('2026-08-28T09:00', '2026-08-28T08:00')).toBeNull()
+    expect(minutesFromDateTimeRange('', '2026-08-28T18:00')).toBeNull()
+    expect(formatLeaveDurationHours(minutesFromDateTimeRange('2026-08-28T09:00', '2026-08-28T17:20'))).toBe('8.5')
+    expect(formatLeaveDurationHours(498)).not.toBe('8.3')
+  })
+
+  it('reads a work date from datetime-local without inventing a day length', () => {
+    expect(workDateFromDateTimeLocal('2026-08-28T09:00')).toBe('2026-08-28')
+    expect(workDateFromDateTimeLocal('')).toBeNull()
   })
 })
 
@@ -510,5 +549,153 @@ describe('Attendance half-day leave helper — inline request form (component)',
       // sanity: the shared minutes input itself is still there for overtime
       expect(minutes).toBeTruthy()
     })
+  })
+})
+
+describe('Attendance dedicated leave-request card (employee overview)', () => {
+  let app: App<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-04-15T08:00:00Z'))
+    window.localStorage.clear()
+    window.localStorage.setItem('metasheet_locale', 'zh-CN')
+    useLocale().setLocale('zh-CN')
+    window.history.replaceState({}, '', '/attendance')
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    useLocale().setLocale('en')
+    vi.useRealTimers()
+    app = null
+    container = null
+  })
+
+  async function mountOverview(): Promise<void> {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+  }
+
+  async function openLeaveCard(): Promise<HTMLElement> {
+    await mountOverview()
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="leave"]')!.click()
+    await flushUi(3)
+    const card = container!.querySelector<HTMLElement>('[data-attendance-leave-request-card]')
+    expect(card, 'expected the dedicated leave card').toBeTruthy()
+    return card!
+  }
+
+  it('opens below 常用 from the leave tile and does not invent leave types', async () => {
+    installOverviewMock()
+    const card = await openLeaveCard()
+
+    const common = container!.querySelector('[data-selfservice-card="actions"]')
+    expect(common, '常用 band stays in place').toBeTruthy()
+    expect(common!.nextElementSibling).toBe(card)
+    expect(card.querySelector('#attendance-leave-card-title')?.textContent).toContain('请假申请')
+    expect(card.querySelector<HTMLSelectElement>('[data-leave-card-type]')?.value).toBe('leave-annual')
+    expect(card.querySelector('[data-leave-card-preset="full_day"]')?.textContent).toContain('全天')
+    expect(card.querySelector('[data-leave-card-preset="morning_half"]')?.textContent).toContain('上午')
+    expect(card.querySelector('[data-leave-card-preset="afternoon_half"]')?.textContent).toContain('下午')
+    expect(card.textContent).not.toMatch(/天\/小时\/分钟|改用天/)
+    expect(card.querySelector('[data-leave-minutes-days-hint]')).toBeNull()
+    expect(card.textContent).not.toContain('480')
+    expect(container!.querySelectorAll('#attendance-request-work-date')).toHaveLength(1)
+  })
+
+  it('seeds start/end/minutes from the existing half-day helper and shows hours by default', async () => {
+    installOverviewMock()
+    const card = await openLeaveCard()
+
+    card.querySelector<HTMLButtonElement>('[data-leave-card-preset="full_day"]')!.click()
+    await flushUi()
+
+    expect(card.querySelector<HTMLInputElement>('[data-leave-card-start]')?.value).toBe('2026-04-15T09:00')
+    expect(card.querySelector<HTMLInputElement>('[data-leave-card-end]')?.value).toBe('2026-04-15T18:00')
+    expect(card.querySelector('[data-leave-card-duration-value]')?.textContent).toMatch(/8\s*小时/)
+    expect(card.querySelector('[data-leave-card-unit-switch]')?.textContent).toContain('改用分钟')
+
+    card.querySelector<HTMLButtonElement>('[data-leave-card-unit-switch]')!.click()
+    await flushUi()
+    expect(card.querySelector('[data-leave-card-duration-value]')?.textContent).toMatch(/480\s*分钟/)
+    expect(card.querySelector('[data-leave-card-unit-switch]')?.textContent).toContain('改用小时')
+  })
+
+  it('recomputes duration from a manual start/end edit in 0.5-hour steps', async () => {
+    installOverviewMock()
+    const card = await openLeaveCard()
+
+    card.querySelector<HTMLButtonElement>('[data-leave-card-preset="full_day"]')!.click()
+    await flushUi()
+
+    const end = card.querySelector<HTMLInputElement>('[data-leave-card-end]')!
+    end.value = '2026-04-15T17:30'
+    end.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    expect(card.querySelector('[data-leave-card-duration-value]')?.textContent).toMatch(/8\.5\s*小时/)
+    expect(card.querySelector('[data-leave-card-preset="full_day"]')?.getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('keeps an empty leave-types list disabled and does not invent options', async () => {
+    installOverviewMock({ leaveTypeItems: [] })
+    const card = await openLeaveCard()
+
+    const select = card.querySelector<HTMLSelectElement>('[data-leave-card-type]')
+    expect(select?.disabled).toBe(true)
+    expect(select?.querySelectorAll('option:not([disabled])')).toHaveLength(0)
+    expect(card.querySelector('[data-leave-card-empty-types]')).toBeTruthy()
+    expect(card.querySelector<HTMLButtonElement>('[data-leave-card-submit]')?.disabled).toBe(true)
+    expect(card.querySelector<HTMLButtonElement>('[data-leave-card-preset="full_day"]')?.disabled).toBe(true)
+  })
+
+  it('submits integer minutes through the existing leave request path', async () => {
+    installOverviewMock()
+    const card = await openLeaveCard()
+
+    card.querySelector<HTMLButtonElement>('[data-leave-card-preset="full_day"]')!.click()
+    await flushUi()
+    const reason = card.querySelector<HTMLTextAreaElement>('[data-leave-card-reason]')!
+    reason.value = '家里有事'
+    reason.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    card.querySelector<HTMLButtonElement>('[data-leave-card-submit]')!.click()
+    await flushUi(6)
+
+    const post = vi.mocked(apiFetch).mock.calls.find(([url, init]) =>
+      String(url).endsWith('/api/attendance/requests')
+      && String((init as RequestInit | undefined)?.method || 'GET').toUpperCase() === 'POST',
+    )
+    expect(post, 'expected POST /api/attendance/requests').toBeTruthy()
+    expect(JSON.parse(String(post?.[1]?.body ?? '{}'))).toMatchObject({
+      requestType: 'leave',
+      leaveTypeId: 'leave-annual',
+      minutes: 480,
+      requestedInAt: '2026-04-15T09:00',
+      requestedOutAt: '2026-04-15T18:00',
+      reason: '家里有事',
+    })
+    expect(container!.querySelector('[data-attendance-leave-request-card]')).toBeNull()
+  })
+
+  it('header cancel closes the card without opening the shared disclosure', async () => {
+    installOverviewMock()
+    const card = await openLeaveCard()
+    const requestTools = container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement
+    expect(requestTools.open).toBe(false)
+
+    card.querySelector<HTMLButtonElement>('[data-leave-card-cancel="header"]')!.click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-attendance-leave-request-card]')).toBeNull()
+    expect(requestTools.open).toBe(false)
   })
 })
