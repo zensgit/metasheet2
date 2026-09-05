@@ -51,6 +51,23 @@
 //                           of each slot column on the BOM-carrying table.
 //   6. PRESET MATCH       — which vendor preset this source is, BY TABLE SIGNATURE (never by company
 //                           name), via the catalog's own `selectVendorPreset`.
+//   4b. ROOT DISCOVERY    — a SECOND, ADDITIVE axis: do this source's BOM heads hang off the project
+//                           FOLDER TREE (`checks.topology.subtree`)? Measured from the same bomHead
+//                           sample — does the folder-node column exist, and do enough sampled heads
+//                           populate it. It is NOT a third value for `detectedBridge`: that field
+//                           keeps its exclusive meaning ("which table holds the production BOM
+//                           lines"), and a deployment can take ROOTS from the folder tree while its
+//                           LINES still come from the measured carrier.
+//
+//                           WHAT DECLARING `project-subtree` CANNOT DO, said here because the
+//                           opposite belief costs a site visit: it does NOT clear
+//                           `bom_store_signals_conflict`, and it does NOT clear
+//                           `bridge_undecidable_at_cap` (the volume-undecidable-at-cap standoff).
+//                           Both are disagreements about which STORE is production; the folder tree
+//                           is not a third answer to that, so those two blockers keep advertising
+//                           only the two exclusive carriers as their way out. What it CAN do is be
+//                           refused: declaring it against BOM heads with no folder-node column
+//                           raises `declared_subtree_contradicts_measurement`.
 //   7. PLAN ALIGNMENT     — the self-validating hook: the configured read plan's assumed bridge and
 //                           quantity field, checked AGAINST 4 and 5. A mismatch is a BLOCKER whose
 //                           text says the thing INCIDENT A never said out loud: "configured for the
@@ -254,6 +271,13 @@ const BOM_STORE_DECISION_REASONS = Object.freeze([
 const BRIDGES = Object.freeze({
   ORDER_MODULE: 'order-module',
   DESIGN_BOM: 'design-bom',
+  // A ROOT-DISCOVERY axis, NOT a third BOM-line carrier. `order-module` and `design-bom` answer
+  // "which table holds the production BOM lines", and exactly one of them can be right.
+  // `project-subtree` answers a different question — "how does a project reach its TOP-LEVEL
+  // components" — and it is ADDITIVE: a deployment can pull roots from the order module and from the
+  // folder tree in the same run. That is why it is declarable but is NOT in
+  // `EXCLUSIVE_CARRIER_BRIDGES`, and why declaring it settles nothing on the carrier axis.
+  PROJECT_SUBTREE: 'project-subtree',
   AMBIGUOUS: 'ambiguous',
   NONE: 'none',
   UNKNOWN: 'unknown',
@@ -281,10 +305,32 @@ const CONNECTIVITY_ERROR_CODES = Object.freeze([
   READ_ERROR_CODES.TIMEOUT,
 ])
 
-// The bridges a HUMAN may declare when the bounded sample cannot decide. Deliberately only the two
-// real carriers: `ambiguous` / `none` / `unknown` are readings, not topologies, and nobody can declare
-// their source into one.
-const DECLARABLE_BRIDGES = Object.freeze([BRIDGES.ORDER_MODULE, BRIDGES.DESIGN_BOM])
+// THE EXCLUSIVE CARRIER AXIS — the two candidates for "which table holds the production BOM lines".
+// Exactly one of them can be true of a source, which is what makes a DECLARATION on this axis
+// capable of CONTRADICTING a measurement, and capable of RESOLVING a cap standoff between them.
+// `ambiguous` / `none` / `unknown` are readings, not topologies, and nobody can declare their source
+// into one.
+const EXCLUSIVE_CARRIER_BRIDGES = Object.freeze([BRIDGES.ORDER_MODULE, BRIDGES.DESIGN_BOM])
+
+// The bridges a HUMAN may declare. A superset of the exclusive axis: `project-subtree` is declarable
+// because it is a real, MEASURABLE topology fact about a source, but it lives on the ROOT-DISCOVERY
+// axis and therefore gets its own counter-evidence (`measureProjectSubtreeCarrier`) and its own
+// blocker rather than being folded into the carrier decision.
+//
+// WHAT DECLARING `project-subtree` DOES NOT DO — stated here because the opposite belief is the
+// expensive one: it does NOT clear `bom_store_signals_conflict`, and it does NOT clear
+// `bridge_undecidable_at_cap`. Those two are standoffs between BomDetails and DesignBom over which
+// store carries production lines; the folder tree is not a third answer to that question, so the two
+// blockers keep advertising only `EXCLUSIVE_CARRIER_BRIDGES` as their way out. Declaring
+// project-subtree against a source whose BOM heads carry no folder-node column is itself a blocker.
+const DECLARABLE_BRIDGES = Object.freeze([...EXCLUSIVE_CARRIER_BRIDGES, BRIDGES.PROJECT_SUBTREE])
+
+// The column that would carry the folder-node id on the BOM head when the configured read plan has
+// not declared one (i.e. the deployment has not enabled `readPlan.projectSubtree`). A candidate
+// ROSTER in the `DESIGN_BOM_BRIDGE_OBJECTS` spirit: presence is decided by READING the sampled
+// columns, never asserted, and an absent column simply reports absent. Matched case-insensitively,
+// so a SQL Server catalog's own spelling is what gets reported back.
+const PROJECT_SUBTREE_PATH_ID_CANDIDATES = Object.freeze(['path_id'])
 
 const SOURCE_PREFLIGHT_BLOCKER_CODES = Object.freeze({
   SOURCE_UNREACHABLE: 'source_unreachable',
@@ -304,6 +350,12 @@ const SOURCE_PREFLIGHT_BLOCKER_CODES = Object.freeze({
   // A declaration may resolve what the sample could not. It may NEVER overrule what the sample did
   // decide — that would turn the one measurement this whole module exists to make into a formality.
   DECLARED_BRIDGE_CONTRADICTS_MEASUREMENT: 'declared_bridge_contradicts_measurement',
+  // The same rule as above, on the ROOT-DISCOVERY axis: an operator may declare that this source's
+  // projects reach their assemblies through the folder tree, but not against a BOM-head table that
+  // carries no folder-node column, or carries one nothing populates. Without this, adding
+  // `project-subtree` to the declarable vocabulary would have created the one thing this module
+  // refuses everywhere else — a declaration with no possible counter-evidence.
+  DECLARED_SUBTREE_CONTRADICTS_MEASUREMENT: 'declared_subtree_contradicts_measurement',
   TOPOLOGY_MISMATCH: 'topology_mismatch',
 })
 
@@ -344,6 +396,10 @@ const SOURCE_PREFLIGHT_BLOCKER_CODE_ORDER = Object.freeze([
   SOURCE_PREFLIGHT_BLOCKER_CODES.DECLARED_BRIDGE_CONTRADICTS_MEASUREMENT,
   SOURCE_PREFLIGHT_BLOCKER_CODES.BRIDGE_AMBIGUOUS,
   SOURCE_PREFLIGHT_BLOCKER_CODES.BRIDGE_UNDECIDABLE_AT_CAP,
+  // After the whole carrier family: the root-discovery axis is a SECOND question about a source
+  // whose carrier question is settled, so a contradicted subtree declaration is worth reading only
+  // once the bridge findings above have been read.
+  SOURCE_PREFLIGHT_BLOCKER_CODES.DECLARED_SUBTREE_CONTRADICTS_MEASUREMENT,
   SOURCE_PREFLIGHT_BLOCKER_CODES.TOPOLOGY_MISMATCH,
 ])
 
@@ -423,6 +479,12 @@ const IDENTIFIER_LEAF_FIELDS = Object.freeze(new Set([
   // Store-shape identifiers: slot columns, the JSON blob column, and the VENDOR slot keys found in it
   // (only keys matching the family pattern are ever named; every other key is counted, not named).
   'familySlotColumns', 'numericSlotColumns', 'jsonSlotColumn', 'jsonFamilySlotKeys',
+  // The root-discovery reading (`checks.topology.subtree`) DELIBERATELY reuses `bomHeadObject` and
+  // `column` rather than minting names of its own, and reports everything else as a boolean or an
+  // integer. `assertSourcePreflightValuesFree` refuses any string leaf in no class, so a new block
+  // whose leaves were called `configured` / `declared` / `measured` and carried STRINGS would fail
+  // the self-check on EVERY preflight — including deployments that never heard of the subtree — and
+  // take the whole route to 500 with it. Booleans and integers are not leaves it inspects at all.
 ]))
 
 // 4. LIVENESS — matched by exact path, above.
@@ -687,6 +749,50 @@ function decideBridge(orderLines, designLines, bomStore) {
 /** The bridge the CONFIGURED plan assumes. The shipped plan reaches components through the order module. */
 function planAssumedBridge(plan) {
   return optionalString(plan.orderDetail.object) ? BRIDGES.ORDER_MODULE : BRIDGES.UNKNOWN
+}
+
+/** The BOM head's folder-node column, from the plan when it declares one, else the candidate. */
+function projectSubtreePathIdField(plan) {
+  const configured = plan.projectSubtree
+    && plan.projectSubtree.bomHead
+    && optionalString(plan.projectSubtree.bomHead.pathIdField)
+  return configured || PROJECT_SUBTREE_PATH_ID_CANDIDATES[0]
+}
+
+/**
+ * THE ROOT-DISCOVERY AXIS'S OWN COUNTER-EVIDENCE.
+ *
+ * `decideBridge` cannot answer this one: it ranks BOM-LINE VOLUME between two carriers, and "do this
+ * source's BOM heads hang off folder nodes" is not a volume question about either of them. So this
+ * is measured separately, from the SAME bounded bomHead sample the rest of the report already read —
+ * no extra probe, no new object, no widening of anything.
+ *
+ * Two readings, both column-level and both values-free:
+ *   PRESENCE   is the folder-node column among the sampled columns at all (case-insensitively, since
+ *              SQL Server preserves case and PostgreSQL folds it)?
+ *   POPULATION how many sampled head rows actually carry a value in it? A column that exists and is
+ *              empty everywhere is a schema leftover, not a topology — which is why the floor is
+ *              `BRIDGE_MIN_LINES`, the same "one row is not evidence" rule the bridge decision uses.
+ *
+ * It never reads a VALUE out: only whether each cell is non-empty.
+ */
+function measureProjectSubtreeCarrier(plan, bomHead, bomHeadRows) {
+  const wanted = projectSubtreePathIdField(plan)
+  const columns = Array.isArray(bomHead.columns) ? bomHead.columns : []
+  const column = columns.find((name) => String(name).toLowerCase() === wanted.toLowerCase()) || null
+  const rows = Array.isArray(bomHeadRows) ? bomHeadRows : []
+  const populatedRows = column
+    ? rows.filter((row) => isNonEmptyValue(readCell(row, column))).length
+    : 0
+  return {
+    // The catalog's own spelling when it has the column; otherwise the name we looked for, so the
+    // report says WHAT was not found instead of just that something was not.
+    column: column || wanted,
+    columnPresent: Boolean(column),
+    rowsSampled: rows.length,
+    populatedRows,
+    measured: Boolean(column) && populatedRows >= BRIDGE_MIN_LINES,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1283,14 +1389,31 @@ async function runStockPreparationSourcePreflight(input = {}) {
   const declaredBridge = DECLARABLE_BRIDGES.includes(optionalString(input.declaredBridge))
     ? optionalString(input.declaredBridge)
     : null
+  // NARROWED TO THE EXCLUSIVE CARRIER AXIS. Both powers a declaration has — contradicting a decisive
+  // measurement and resolving a cap standoff — are statements about WHICH OF TWO STORES carries the
+  // production lines. `project-subtree` makes no claim about that, so it can neither contradict nor
+  // resolve the carrier question, and is judged against its own measurement instead (below).
+  //
+  // For the two carrier values this is BYTE-EQUIVALENT to the previous expression: `declaredBridge`
+  // non-null and in EXCLUSIVE_CARRIER_BRIDGES is exactly `declaredBridge` non-null when those are
+  // the only two declarable values, which is what the pre-existing regressions pin.
+  const declarationIsExclusiveCarrier = Boolean(
+    declaredBridge && EXCLUSIVE_CARRIER_BRIDGES.includes(declaredBridge),
+  )
   const declarationContradicts = Boolean(
-    declaredBridge
+    declarationIsExclusiveCarrier
     && (measured.bridge === BRIDGES.ORDER_MODULE || measured.bridge === BRIDGES.DESIGN_BOM)
     && measured.bridge !== declaredBridge,
   )
-  const declarationResolves = Boolean(declaredBridge && measured.undecidableAtCap)
+  const declarationResolves = Boolean(declarationIsExclusiveCarrier && measured.undecidableAtCap)
   const detectedBridge = declarationResolves ? declaredBridge : measured.bridge
   const bridgeSource = declarationResolves ? 'declared' : 'measured'
+
+  // THE ROOT-DISCOVERY AXIS. Measured on every run — it costs no read, and a report that only
+  // measured it when someone declared it could not tell an operator the option existed.
+  const declaredSubtree = declaredBridge === BRIDGES.PROJECT_SUBTREE
+  const subtreeCarrier = measureProjectSubtreeCarrier(plan, bomHead, rowsOf('bomHead'))
+  const subtreeDeclarationContradicts = Boolean(declaredSubtree && !subtreeCarrier.measured)
 
   const topology = {
     detectedBridge,
@@ -1334,6 +1457,32 @@ async function runStockPreparationSourcePreflight(input = {}) {
         contributingObjects: contributorsOf('designBom'),
       },
     ],
+    // THE SECOND AXIS, reported separately and never folded into `detectedBridge`.
+    //
+    // `detectedBridge` keeps its exclusive meaning — WHICH TABLE HOLDS THE PRODUCTION BOM LINES —
+    // and a consumer that reads it as "where the rows came from" would be wrong here, because a run
+    // with `readPlan.projectSubtree` enabled takes its ROOTS from the folder tree while its LINES
+    // still come from the measured carrier. The two questions get two places in the report.
+    //
+    // EVERY LEAF IS A BOOLEAN, AN INTEGER, OR AN ALREADY-CLASSIFIED IDENTIFIER
+    // (`bomHeadObject`, `column`). See the note in IDENTIFIER_LEAF_FIELDS: a string leaf in no class
+    // fails `assertSourcePreflightValuesFree` and 500s the route for every source, subtree or not.
+    subtree: {
+      // Does the deployment's own read plan enable folder-tree root discovery?
+      configured: Boolean(plan.projectSubtree),
+      // Did this request declare it?
+      declared: declaredSubtree,
+      bomHeadObject: bomHead.object,
+      column: subtreeCarrier.column,
+      columnPresent: subtreeCarrier.columnPresent,
+      rowsSampled: subtreeCarrier.rowsSampled,
+      populatedRows: subtreeCarrier.populatedRows,
+      rowCap: SOURCE_PREFLIGHT_ROW_CAP,
+      minLines: BRIDGE_MIN_LINES,
+      // The measurement itself: the column exists AND enough sampled heads populate it.
+      measured: subtreeCarrier.measured,
+      declarationContradictsMeasurement: subtreeDeclarationContradicts,
+    },
   }
 
   // ---- CHECK 6: quantity slot ------------------------------------------------
@@ -1493,7 +1642,12 @@ async function runStockPreparationSourcePreflight(input = {}) {
             exact: entry.exact,
             shape: entry.shape,
           })),
-          declarableBridges: [...DECLARABLE_BRIDGES],
+          // ONLY THE EXCLUSIVE CARRIERS. This list is a repair instruction an operator reads off the
+          // screen, so it must name the declarations that can actually resolve THIS blocker. A
+          // store conflict is a question about which of two tables holds the production lines;
+          // `project-subtree` is declarable but answers a different question, and listing it here
+          // would advertise a fix that provably does not clear this code.
+          declarableBridges: [...EXCLUSIVE_CARRIER_BRIDGES],
         },
       })
     }
@@ -1523,7 +1677,9 @@ async function runStockPreparationSourcePreflight(input = {}) {
           orderLineObject: orderDetail.object,
           designBomLines: designBom.rowsObserved,
           designBomLineObject: designBom.object,
-          declarableBridges: [...DECLARABLE_BRIDGES],
+          // Same reason as the store conflict above: the way out of a CARRIER standoff is a
+          // declaration on the carrier axis, and only those two are on it.
+          declarableBridges: [...EXCLUSIVE_CARRIER_BRIDGES],
         },
       })
     } else if (detectedBridge === BRIDGES.AMBIGUOUS) {
@@ -1540,6 +1696,25 @@ async function runStockPreparationSourcePreflight(input = {}) {
           detectedBridge,
           configuredLineObject: plan.orderDetail.object,
           detectedLineObject: detectedBridge === BRIDGES.DESIGN_BOM ? designBom.object : orderDetail.object,
+        },
+      })
+    }
+
+    // The root-discovery axis is judged INDEPENDENTLY of the carrier chain above: it is an `if`, not
+    // another `else if`, because "your BOM heads carry no folder-node column" stays true whatever
+    // the carrier question came out as.
+    if (subtreeDeclarationContradicts) {
+      blockers.push({
+        code: B.DECLARED_SUBTREE_CONTRADICTS_MEASUREMENT,
+        detail: {
+          declaredBridge,
+          bomHeadObject: bomHead.object,
+          column: subtreeCarrier.column,
+          columnPresent: subtreeCarrier.columnPresent,
+          rowsSampled: subtreeCarrier.rowsSampled,
+          populatedRows: subtreeCarrier.populatedRows,
+          rowCap: SOURCE_PREFLIGHT_ROW_CAP,
+          minLines: BRIDGE_MIN_LINES,
         },
       })
     }
@@ -1643,7 +1818,13 @@ async function runStockPreparationSourcePreflight(input = {}) {
     if (entry.object) identifiers.add(entry.object)
     for (const column of entry.columns) identifiers.add(column)
   }
-  for (const name of [matchField, configuredQuantityField, plan.pathExAttr.pathIdField, plan.pathInfo.idField]) {
+  for (const name of [
+    matchField, configuredQuantityField, plan.pathExAttr.pathIdField, plan.pathInfo.idField,
+    // The folder-node column the subtree reading looked for. When the source HAS it, it is already
+    // an observed column; when it does not, the report names what was missing, and that name is
+    // plan-authored or module-declared — never read from a row.
+    subtreeCarrier.column,
+  ]) {
     if (name) identifiers.add(name)
   }
   if (matchedPreset) {
@@ -1811,6 +1992,8 @@ module.exports = {
   BOM_STORE_SIGNALS,
   STRONG_BOM_STORE_SIGNALS,
   DECLARABLE_BRIDGES,
+  EXCLUSIVE_CARRIER_BRIDGES,
+  PROJECT_SUBTREE_PATH_ID_CANDIDATES,
   SOURCE_PREFLIGHT_BLOCKER_CODES,
   SOURCE_PREFLIGHT_BLOCKER_CODE_ORDER,
   SOURCE_PREFLIGHT_WARNING_CODES,
@@ -1834,6 +2017,8 @@ module.exports = {
     bomLineQuantityFamily,
     decodeQuantitySlotFromDictionary,
     measureNumericSlots,
+    measureProjectSubtreeCarrier,
+    projectSubtreePathIdField,
     planAssumedBridge,
     probeObject,
   },

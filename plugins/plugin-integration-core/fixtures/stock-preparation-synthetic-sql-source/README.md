@@ -18,6 +18,7 @@ real drawing numbers, no hostnames, no credentials.
 | `02-seed-pull-1.sql` | Pull #1 state (complete refill) |
 | `03-seed-pull-2.sql` | Pull #2 state (complete refill; two PLM-owned edits) |
 | `04-optional-duplicate-expanded-key.sql` | Optional, additive, **makes the plan invalid on purpose** |
+| `05-seed-subtree-roots.sql` | Optional, additive, exercises the **optional** `readPlan.projectSubtree` root discovery |
 
 The guard that keeps all of this honest is
 `plugins/plugin-integration-core/__tests__/stock-preparation-synthetic-sql-fixture.test.cjs`. It
@@ -295,6 +296,55 @@ Two things worth being precise about:
 
 Re-run `02-seed-pull-1.sql` to get back to the clean state.
 
+## 7. Optional: folder-subtree root discovery (`readPlan.projectSubtree`)
+
+```bash
+psql -d syn_plm_bom -v ON_ERROR_STOP=1 -f 02-seed-pull-1.sql
+psql -d syn_plm_bom -v ON_ERROR_STOP=1 -f 05-seed-subtree-roots.sql
+```
+
+This one takes a **configuration** change as well as data, and that is the point: `projectSubtree`
+is not in the shipped read plan, so loading the seed alone changes nothing at all. Add the block to
+the action's `source.readPlan` (via `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON`):
+
+```json
+{
+  "maxReadCount": 500,
+  "projectSubtree": {
+    "pathInfo": { "parentIdField": "Parent_OBJ_ID" },
+    "bomHead":  { "pathIdField": "path_id" }
+  }
+}
+```
+
+`maxReadCount` is **mandatory** here — normalization refuses an enabling plan without one, because
+the folder traversal plus one BOM per discovered root is a real read amplification and the ceiling
+has to be a number somebody chose.
+
+**PASS with the block OFF:** byte-identical to §3 — 7 rows, the same reads in the same order. The
+two columns this seed populates (`DN_PDM_PathInfo.Parent_OBJ_ID`, `DN_PDM_BomHeadInfo.path_id`) are
+read by nothing in the default plan.
+
+**PASS with the block ON:** 10 rows. The extra three are `SYN-PART-SUBTREE-H` (a part in **no**
+order line, discovered through folder node `SYN-PATH-1-SUB`) at depth 0 with
+`rawQuantity = totalQuantity = 1`, plus its two children. `summary.subtree` reads
+`{ nodesVisited: 2, rootsDiscovered: 1, rootsExpanded: 1, rootsSkippedAlreadyExpanded: 0,
+rootsWithoutChildren: 0, rootQuantitySource: { orderDetail: 1, subtreeDefault: 1 } }`, and the plan
+is still valid (`add: 10`).
+
+Two things this seed is shaped to prove:
+
+- **A defaulted root quantity is counted, not disguised.** A folder-discovered root has no order
+  line and therefore no measured quantity. The row carries the neutral multiplier `1`, which in the
+  target table is indistinguishable from a measured `1` — so `rootQuantitySource` in the evidence is
+  the only place that distinction survives. Read it before treating those rows as procurement
+  quantities.
+- **Two BOM heads on one `part_id` are ONE root.** `SYN-PART-SUBTREE-H` has both `SYN-BOM-H` (V1)
+  and the superseded `SYN-BOM-H-V0` on the same folder node. Two roots would carry byte-identical
+  idempotency keys, which the planner groups and holds — the whole plan would go `manual_confirm`.
+
+Re-run `02-seed-pull-1.sql` to get back to the clean state.
+
 ---
 
 ## What this fixture exercises
@@ -310,6 +360,7 @@ Re-run `02-seed-pull-1.sql` to get back to the clean state.
 | Row disappears → `mark_inactive` | yes | pull #2, `SYN-PART-LEAF-F` |
 | Human-preserved cells untouched | yes | asserted in the guard test |
 | Duplicate expanded key → `manual_confirm` | opt-in | `04-…sql` |
+| Folder-subtree root discovery (optional block) | opt-in | `05-…sql` + `projectSubtree` in the plan |
 | Pagination / cursor loop | partly | guard test runs with `pageLimit: 2` |
 
 ## What it deliberately does not cover
