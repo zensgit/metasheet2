@@ -328,7 +328,7 @@ read by nothing in the default plan.
 **PASS with the block ON:** 10 rows. The extra three are `SYN-PART-SUBTREE-H` (a part in **no**
 order line, discovered through folder node `SYN-PATH-1-SUB`) at depth 0 with
 `rawQuantity = totalQuantity = 1`, plus its two children. `summary.subtree` reads
-`{ nodesVisited: 2, rootsDiscovered: 1, rootsExpanded: 1, rootsSkippedAlreadyExpanded: 0,
+`{ nodesVisited: 2, nodesSkippedAlreadyVisited: 0, rootsDiscovered: 1, rootsExpanded: 1, rootsSkippedAlreadyExpanded: 0,
 rootsWithoutChildren: 0, rootQuantitySource: { orderDetail: 1, subtreeDefault: 1 } }`, and the plan
 is still valid (`add: 10`).
 

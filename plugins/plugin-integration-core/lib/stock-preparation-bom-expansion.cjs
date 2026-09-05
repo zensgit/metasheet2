@@ -54,13 +54,15 @@ const INCOMPLETE_READ_ERROR_TYPES = Object.freeze([
 //
 // THE THREE THINGS THAT MAKE IT SAFE (each has a test that fails if it is removed):
 //
-//   1. EVERY subtree read is re-filtered CLIENT-SIDE with `matchesByField`, exactly as the order
-//      path already does for pathInfo and part. `readAll` RECORDS `filtersApplied` and never
-//      ENFORCES it, and `bridge:legacy-sql-readonly` may legally answer `filtersApplied: false`
-//      (i.e. the whole table). Without the second filter one BFS step would take every folder node
-//      in the catalog for a child of this project — and then read other projects' BOM heads under
-//      this project's authorization. `visited` and `maxSubtreeDepth` do not help there: the breach
-//      happens on the first read, at depth 1, on nodes seen once each.
+//   1. Every read the subtree segment issues — AND THE ENTRY READ IT IS SEEDED FROM — is re-filtered
+//      CLIENT-SIDE with `matchesByField`. `readAll` RECORDS `filtersApplied` and never ENFORCES it,
+//      and `bridge:legacy-sql-readonly` may legally answer `filtersApplied: false` (i.e. the whole
+//      table). Without the second filter one BFS step would take every folder node in the catalog
+//      for a child of this project — and then read other projects' BOM heads under this project's
+//      authorization. `visited` and `maxSubtreeDepth` do not help there: the breach happens on the
+//      first read, at depth 1, on nodes seen once each. The SEED is the same problem one level up
+//      and was the same hole, so the filter now sits on the pathExAttr entry read itself, where one
+//      clean `pathMatches` serves the order path and the subtree alike.
 //   2. DE-DUPLICATION COVERS EVERY EXPANDED COMPONENT, not just roots. `makeIdempotencyKey` eats
 //      {projectNo, componentSourceId, parentSourceId, path}; a part that is already an order root's
 //      CHILD and is then re-rooted by the subtree produces a DIFFERENT key, so the conflict planner
@@ -236,7 +238,16 @@ function optionalPositiveInteger(input, field) {
 // A positive integer with a CEILING the configuration cannot argue with. `positiveInteger` alone
 // accepts any integer, which is how "recommended maximum 4" ends up as a comment while a plan
 // carries 100000. Over the ceiling is a refusal at normalization time, before a single read.
+//
+// It is also stricter about the TYPE than `positiveInteger`, which coerces with `Number()` and so
+// accepts `true` (-> 1) and `[3]` (-> 3). These three values are read budgets: the difference
+// between "the operator wrote 3" and "the operator wrote something that happens to coerce to 3" is
+// exactly the difference this module refuses to paper over elsewhere. The plan arrives as JSON, so
+// a real number is always expressible and nothing legitimate is lost.
 function ceilingBoundedPositiveInteger(input, field, defaultValue, ceiling) {
+  if (input !== undefined && input !== null && input !== '' && !Number.isInteger(input)) {
+    throw new StockPreparationBomExpansionError(`${field} must be a positive integer`, { field, value: input })
+  }
   const value = positiveInteger(input, field, defaultValue)
   if (value > ceiling) {
     throw new StockPreparationBomExpansionError(`${field} must not exceed ${ceiling}`, {
@@ -698,6 +709,10 @@ function subtreeSummaryOf(counters) {
   if (!isPlainObject(counters)) return undefined
   return {
     nodesVisited: Number(counters.nodesVisited || 0),
+    // Folder nodes a second branch reached after the first had already walked them — a DAG-shaped
+    // directory, or a project naming both an ancestor and its descendant. Ordinary, counted, never
+    // an error (see the LOOP/RE-VISIT note on `discoverSubtreeRoots`).
+    nodesSkippedAlreadyVisited: Number(counters.nodesSkippedAlreadyVisited || 0),
     rootsDiscovered: Number(counters.rootsDiscovered || 0),
     rootsExpanded: Number(counters.rootsExpanded || 0),
     rootsSkippedAlreadyExpanded: Number(counters.rootsSkippedAlreadyExpanded || 0),
@@ -914,6 +929,7 @@ async function expandPlmProjectBom(input = {}) {
   const subtreeCounters = plan.projectSubtree
     ? {
       nodesVisited: 0,
+      nodesSkippedAlreadyVisited: 0,
       rootsDiscovered: 0,
       rootsExpanded: 0,
       rootsSkippedAlreadyExpanded: 0,
@@ -953,7 +969,25 @@ async function expandPlmProjectBom(input = {}) {
 
   let pathMatches = []
   try {
-    pathMatches = await read(plan.pathExAttr.object, { [plan.pathExAttr.matchField]: projectNo })
+    // THE ENTRY READ, RE-FILTERED CLIENT-SIDE — the one read in this module that was not.
+    //
+    // Every other filtered read whose result decides WHICH PROJECT'S DATA we are looking at already
+    // goes through `matchesByField`, because `readAll` RECORDS `filtersApplied` and never ENFORCES
+    // it, and `bridge:legacy-sql-readonly` may legally answer with the whole table. This read was
+    // the exception, and it is the most load-bearing one of all: its rows ARE the project — they
+    // seed the order loop's folder-node lookups AND the subtree segment's BFS.
+    //
+    // Unfiltered, a single say-anything source turns every other project's directory node into a
+    // depth-0 node of THIS project, and the resulting rows land as this project's stock-preparation
+    // lines with `status: expanded`, `valid: true`, `errors: []` — a clean bill of health on
+    // cross-project data, with `dataScopeRef` still naming the one project the request asked for.
+    //
+    // Filtering HERE rather than in the subtree segment is deliberate: one clean `pathMatches`
+    // serves both root segments, and the order path — which had the identical exposure before this
+    // change — is closed by the same line. Against a source that applies its filters, this is a
+    // no-op; the behaviour only differs against a source that lied.
+    const pathExAttrRows = await read(plan.pathExAttr.object, { [plan.pathExAttr.matchField]: projectNo })
+    pathMatches = matchesByField(pathExAttrRows, plan.pathExAttr.matchField, projectNo)
   } catch (err) {
     addReadError(err, plan.pathExAttr.object)
     return failureResult({
@@ -1114,20 +1148,41 @@ async function expandPlmProjectBom(input = {}) {
    *   A source answering `filtersApplied: false` hands back the WHOLE table; without this line the
    *   first hop would adopt every folder node in the catalog as this project's child and then read
    *   other projects' BOM heads under this project's authorization, with `dataScopeRef` still
-   *   naming the one project the request asked for.
+   *   naming the one project the request asked for. The SEEDS are covered by the same discipline
+   *   one level up: `pathMatches` is re-filtered at the entry read, so a lying source cannot plant
+   *   a foreign project's node in this traversal's queue either.
    *
-   *   SINGLE-VISIT. A folder node may be reached exactly once. A second arrival is a self-loop, a
-   *   parent cycle, or a DAG-shaped directory, and all three are refused rather than traversed —
-   *   fail-closed, because "keep going and hope" on a mis-shaped tree is unbounded by construction.
+   *   TERMINATION, and the difference between a LOOP and a RE-VISIT. These are two different facts
+   *   and they get two different answers:
+   *
+   *     A LOOP is a node that is its own ancestor — the parent chain that led here comes back to
+   *     this node. That is a mis-shaped directory whose traversal cannot terminate on its own, and
+   *     it is refused: `subtree_cycle_detected`, global, fail-closed. Each queue item therefore
+   *     carries its ANCESTOR CHAIN (bounded by `maxSubtreeDepth` <= 4, so it is a 4-element array,
+   *     not a data structure worth optimizing).
+   *
+   *     A RE-VISIT is a node reached a second time by a DIFFERENT branch: a DAG-shaped directory
+   *     where two folders share a child, or — the case that matters most — a project whose
+   *     pathExAttr rows name BOTH an ancestor and one of its descendants, which is an ordinary
+   *     directory shape and not a fault at all. It is SKIPPED (its heads were already collected the
+   *     first time) and COUNTED as `nodesSkippedAlreadyVisited`. Refusing it would kill the entire
+   *     pull — the ALREADY-COMPLETED order path included — over a perfectly well-formed directory.
    */
   async function discoverSubtreeRoots(seedPathIds, subtree, counters) {
-    const seen = new Set(seedPathIds)
+    const visited = new Set()
     const roots = []
     const rootsSeen = new Set()
-    const queue = seedPathIds.map((nodeId) => ({ nodeId, depth: 0 }))
+    const queue = seedPathIds.map((nodeId) => ({ nodeId, depth: 0, ancestors: [] }))
 
     while (queue.length > 0) {
       if (errors.length > 0) return null
+      const { nodeId, depth, ancestors } = queue.shift()
+      // A RE-VISIT, not a loop: another branch (or another seed that is this node's ancestor) has
+      // already walked it. Its heads are already in `roots`; walking it again would only re-read.
+      if (visited.has(nodeId)) {
+        counters.nodesSkippedAlreadyVisited += 1
+        continue
+      }
       if (counters.nodesVisited >= subtree.maxSubtreeNodes) {
         addGlobalError(SUBTREE_NODE_LIMIT_EXCEEDED_ERROR_TYPE, {
           object: plan.pathInfo.object,
@@ -1135,7 +1190,7 @@ async function expandPlmProjectBom(input = {}) {
         })
         return null
       }
-      const { nodeId, depth } = queue.shift()
+      visited.add(nodeId)
       counters.nodesVisited += 1
 
       // The heads hanging off THIS node. `includeSelf` decides whether the project node itself is
@@ -1166,18 +1221,24 @@ async function expandPlmProjectBom(input = {}) {
       if (depth >= subtree.maxSubtreeDepth) continue
       const childRows = await read(plan.pathInfo.object, { [subtree.pathInfo.parentIdField]: nodeId })
       const children = matchesByField(childRows, subtree.pathInfo.parentIdField, nodeId)
+      const childAncestors = ancestors.concat(nodeId)
       for (const child of children) {
         const childId = toKey(readField(child, plan.pathInfo.idField))
         if (childId === null) continue
-        if (seen.has(childId)) {
+        // A LOOP: this child is its own ancestor, so descending would revisit the chain that led
+        // here, forever. `childAncestors` includes `nodeId`, so a self-referencing node (the
+        // simplest and commonest form) is caught by the same test.
+        if (childAncestors.includes(childId)) {
           addGlobalError(SUBTREE_CYCLE_DETECTED_ERROR_TYPE, {
             object: plan.pathInfo.object,
             depth: depth + 1,
           })
           return null
         }
-        seen.add(childId)
-        queue.push({ nodeId: childId, depth: depth + 1 })
+        // Not a loop. It may still already be visited — that is decided at DEQUEUE time, once,
+        // rather than here, so a node enqueued twice by two parents costs one skip and not a
+        // refusal.
+        queue.push({ nodeId: childId, depth: depth + 1, ancestors: childAncestors })
       }
     }
     return roots
@@ -1247,6 +1308,13 @@ async function expandPlmProjectBom(input = {}) {
           }
           if (rowResult.extErrors) rowResult.extErrors.forEach(addRowError)
           if (!pushRow(rowResult.row)) break
+          // The ONLY line the order loop gained, and it is a no-op unless the optional block is
+          // configured. Counted HERE, where an order root is actually produced, rather than
+          // re-derived later from `rows`: the subtree segment does not run on every exit path (an
+          // early failure, a `not_found`), and a count derived there would report 0 order-sourced
+          // roots for a run that produced several — the one number `rootQuantitySource` exists to
+          // get right.
+          if (subtreeCounters) subtreeCounters.rootQuantitySource.orderDetail += 1
           await expandChildren(rowResult.row, pathTokens)
         }
       }
@@ -1270,9 +1338,6 @@ async function expandPlmProjectBom(input = {}) {
   // design depends on.
   if (plan.projectSubtree && errors.length === 0) {
     const subtree = plan.projectSubtree
-    // Depth-0 rows at this instant are exactly the ORDER roots — counted before the segment can add
-    // any of its own.
-    subtreeCounters.rootQuantitySource.orderDetail = rows.filter((row) => row.depth === 0).length
     // EVERY component this run has already expanded — roots AND children. See (2) in the banner:
     // de-duplicating only against order ROOTS leaves the common case (a part that is an order root's
     // child and a subtree root) producing two rows the planner cannot even see as related.

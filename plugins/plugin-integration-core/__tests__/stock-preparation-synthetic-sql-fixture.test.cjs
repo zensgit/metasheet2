@@ -742,6 +742,7 @@ async function testProjectSubtreeSeed(schema) {
 
   assert.deepEqual(on.result.summary.subtree, {
     nodesVisited: 2,
+    nodesSkippedAlreadyVisited: 0,
     rootsDiscovered: 1,
     rootsExpanded: 1,
     rootsSkippedAlreadyExpanded: 0,

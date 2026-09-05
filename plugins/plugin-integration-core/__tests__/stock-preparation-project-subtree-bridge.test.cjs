@@ -113,8 +113,12 @@ function subtreePlan(overrides = {}) {
 // read is the client-side re-filter this suite pins.
 // ---------------------------------------------------------------------------
 
-function createAdapter(catalog, { honourFilters = true } = {}) {
+function createAdapter(catalog, { honourFilters = true, unfilteredObjects = [] } = {}) {
   const calls = []
+  // Per-object lying is the sharper instrument: a source that ignores filters on ONE table (the
+  // project-entry table, say) is both realistic and the only way to isolate which read a guard
+  // actually protects.
+  const lying = new Set(unfilteredObjects.map((name) => String(name).toLowerCase()))
   return {
     calls,
     /** `object:field+field` per read, in order — the shape G-02 compares. */
@@ -127,7 +131,8 @@ function createAdapter(catalog, { honourFilters = true } = {}) {
         (name) => name.toLowerCase() === String(input.object).toLowerCase(),
       )
       const rows = key ? catalog[key] : []
-      const matches = honourFilters
+      const applied = honourFilters && !lying.has(String(input.object).toLowerCase())
+      const matches = applied
         ? rows.filter((row) => Object.entries(input.filters || {}).every(
           ([field, expected]) => String(row[field] === undefined || row[field] === null ? '' : row[field]) === String(expected),
         ))
@@ -137,7 +142,7 @@ function createAdapter(catalog, { honourFilters = true } = {}) {
         done: true,
         metadata: {
           source: 'bridge:legacy-sql-readonly',
-          filtersApplied: honourFilters,
+          filtersApplied: applied,
           filterFields: Object.keys(input.filters || {}).sort(),
         },
       }
@@ -205,8 +210,8 @@ function catalogWithoutSubtreeData() {
   return catalog
 }
 
-async function expand(catalog, { readPlan, honourFilters = true, ...rest } = {}) {
-  const adapter = createAdapter(catalog, { honourFilters })
+async function expand(catalog, { readPlan, honourFilters = true, unfilteredObjects, ...rest } = {}) {
+  const adapter = createAdapter(catalog, { honourFilters, unfilteredObjects })
   const result = await expandPlmProjectBom({
     sourceAdapter: adapter,
     projectNo: PROJECT_NO,
@@ -309,6 +314,7 @@ async function onlyTheSubtreeCanRoot() {
 
   assert.deepEqual(result.summary.subtree, {
     nodesVisited: 2,
+    nodesSkippedAlreadyVisited: 0,
     rootsDiscovered: 1,
     rootsExpanded: 1,
     rootsSkippedAlreadyExpanded: 0,
@@ -362,9 +368,15 @@ async function ignoredFiltersCannotWidenTheTraversal() {
   // FOREIGN-NODE for a child of this project and its BOM head for this project's root.
   const ignored = await expand(catalog, { readPlan: subtreePlan(), honourFilters: false })
 
-  // WHAT IS PINNED HERE, precisely: the ROOT SET. The two reads this feature introduces — folder
-  // children and heads-by-folder-node — are both re-filtered, so an unfiltered source cannot add a
-  // single ROOT beyond the ones the filtered source produced.
+  // WHAT IS PINNED HERE, precisely: the ROOT SET, against a source that lies on EVERY table. The
+  // two reads this feature introduces — folder children and heads-by-folder-node — are both
+  // re-filtered, so an unfiltered source cannot add a single ROOT beyond the ones the filtered
+  // source produced.
+  //
+  // NOTE ON COVERAGE: this fixture's project-entry table holds ONE row, so it cannot by itself
+  // demonstrate anything about the SEED. `foreignProjectRowsCannotSeedTheTraversal` below is the
+  // test that does, with a two-row entry table — without it, this assertion would pass on a build
+  // whose seeds were never filtered at all.
   //
   // WHAT IS NOT PINNED, and deliberately: what `expandChildren` does under an unfiltered source. It
   // re-reads bomHead/bomDetail WITHOUT a client-side re-filter, and it has always done so — the
@@ -411,6 +423,89 @@ async function ignoredFiltersCannotWidenTheTraversal() {
     ignored.result.summary.readDiagnostics.some((entry) => entry.filtersApplied === false),
     'the run must still REPORT that the source did not apply the filters',
   )
+}
+
+/**
+ * G-10 — THE SEED IS THE SAME HOLE ONE LEVEL UP.
+ *
+ * The project-entry read (`pathExAttr` filtered by the project number) was the ONE filtered read in
+ * this module whose result was believed without `matchesByField`. Its rows ARE the project: they
+ * feed the order loop's folder-node lookups and they seed the subtree BFS. A source that ignores
+ * filters on THAT ONE TABLE — and honours them everywhere else, which is why a
+ * lie-about-everything fixture never surfaced it — hands back every project's entry row, and both
+ * root segments then walk another project's directory under this project's authorization.
+ *
+ * The failure it produced was the worst-shaped kind available: `status: 'expanded'`,
+ * `valid: true`, `errors: []`. A clean bill of health on cross-project data.
+ */
+async function foreignProjectRowsCannotSeedTheTraversal() {
+  const catalog = baseCatalog()
+  // A SECOND project's entry row, pointing at a folder node that is no descendant of ours.
+  catalog.DN_PDM_PathExAttrInfo = [
+    { FileCode: PROJECT_NO, Parent_OBJ_ID: 'NODE-ROOT' },
+    { FileCode: 'OTHER-PROJ-9', Parent_OBJ_ID: 'FOREIGN-NODE' },
+  ]
+  // …and an order module hanging off that foreign node, so a breach would show up as ROWS and not
+  // merely as reads. FOREIGN-ROOT already carries a BOM head on FOREIGN-NODE (see baseCatalog).
+  catalog.DN_PDM_OrderHeadInfo = [
+    ...catalog.DN_PDM_OrderHeadInfo,
+    { OBJ_ID: 'ORDER-FOREIGN', path_id: 'FOREIGN-NODE' },
+  ]
+  catalog.DN_PDM_OrderDetailInfo = [
+    ...catalog.DN_PDM_OrderDetailInfo,
+    { order_id: 'ORDER-FOREIGN', part_id: 'FOREIGN-ROOT', quantity: 7, sort_id: 10 },
+  ]
+
+  // The lie is scoped to the entry table alone.
+  const lying = { unfilteredObjects: [PLM_STOCK_PREPARATION_BOM_READ_PLAN.pathExAttr.object] }
+  const honest = await expand(catalog, { readPlan: subtreePlan() })
+  const lied = await expand(catalog, { readPlan: subtreePlan(), ...lying })
+
+  assert.deepEqual(lied.result.errors, [])
+  assert.deepEqual(lied.result.rowErrors, [])
+  assert.deepEqual(
+    componentIds(lied.result),
+    componentIds(honest.result),
+    'a lying project-entry read must not add one row',
+  )
+  assert.equal(
+    lied.result.rows.some((row) => row.componentSourceId === 'FOREIGN-ROOT'),
+    false,
+    'another project`s root must never land as this project`s row',
+  )
+  assert.equal(lied.result.summary.rootMatches, 1, 'rootMatches counts the project`s OWN entry rows')
+  assert.equal(lied.result.summary.subtree.rootsDiscovered, 1)
+
+  // Neither segment may even LOOK at the foreign node. A read issued is the breach, whatever it
+  // returns — the ORDER path is checked here too, because the filter that closes this sits on the
+  // shared entry read and closes the identical hole on the order side.
+  const foreignReads = lied.adapter.calls.filter((call) => (
+    call.filters.path_id === 'FOREIGN-NODE'
+    || call.filters.Parent_OBJ_ID === 'FOREIGN-NODE'
+    || call.filters.OBJ_ID === 'FOREIGN-NODE'
+  ))
+  assert.deepEqual(foreignReads, [], 'no read may name a folder node belonging to another project')
+  assert.equal(
+    lied.adapter.calls.some((call) => call.filters.order_id === 'ORDER-FOREIGN'),
+    false,
+    'and the ORDER path must not reach another project`s order head either',
+  )
+
+  // THE ORDER PATH ALONE, block absent — the pre-existing hole this filter also closes. Without the
+  // fix this run pulls FOREIGN-ROOT in and reports `expanded` / `valid: true` / no errors.
+  const orderOnly = await expand(catalog, { ...lying })
+  assert.equal(orderOnly.result.status, 'expanded')
+  assert.deepEqual(orderOnly.result.errors, [])
+  assert.deepEqual(
+    componentIds(orderOnly.result),
+    ['ORDER-ROOT', 'SHARED-PART'],
+    'the default (subtree-off) plan must not absorb another project`s order lines either',
+  )
+  assert.equal(orderOnly.result.summary.rootMatches, 1)
+
+  // The diagnostics still SAY the source ignored the filters — the guard compensates, it does not
+  // conceal.
+  assert.ok(lied.result.summary.readDiagnostics.some((entry) => entry.filtersApplied === false))
 }
 
 // ---------------------------------------------------------------------------
@@ -528,6 +623,16 @@ async function theBudgetAndCeilingsAreEnforcedAtNormalization() {
       ceiling,
       `${field} AT its ceiling must be accepted — the refusal is a ceiling, not an off-by-one`,
     )
+    // NO COERCION. These three are read budgets, and `Number(true) === 1` / `Number([3]) === 3`
+    // would let a malformed config pass as a deliberate one. The plan arrives as JSON, so a real
+    // number is always expressible and nothing legitimate is refused here.
+    for (const bogus of [true, [3], '3', { valueOf: () => 3 }, 3.5]) {
+      assert.throws(
+        () => normalizeStockPreparationBomReadPlan(subtreePlan({ projectSubtree: { [field]: bogus } })),
+        (error) => error.details && error.details.field === `readPlan.projectSubtree.${field}`,
+        `${field} = ${JSON.stringify(bogus)} must be refused, not coerced`,
+      )
+    }
   }
 
   // Required members are required; the forbidden-key sweep reaches inside the new block.
@@ -601,6 +706,59 @@ async function aBudgetOverrunInsideTheSubtreeIsCaught() {
 // G-07 / G-08 — cycles, and errors stopping the segment
 // ---------------------------------------------------------------------------
 
+/**
+ * G-11 — A RE-VISIT IS NOT A LOOP.
+ *
+ * Refusing every second arrival at a node treats three different situations as one, and two of them
+ * are ordinary:
+ *
+ *   (a) a project whose entry table names BOTH a folder node and one of its descendants — a normal
+ *       directory shape. Under a seen-set seeded with every seed, the descendant seed is "already
+ *       seen" the moment its ancestor's child read returns it, and the whole pull dies:
+ *       `subtree_cycle_detected` is a GLOBAL error, so the ALREADY-COMPLETED order path goes down
+ *       with it.
+ *   (b) a DAG-shaped directory where two folders share a child.
+ *   (c) an actual loop: a node that is its own ancestor.
+ *
+ * Only (c) cannot terminate, and only (c) is refused. (a) and (b) are skipped and counted.
+ */
+async function ancestorSeedsAndDagMergesAreSkippedNotRefused() {
+  // (a) TWO SEEDS, one the other's descendant.
+  const ancestorSeeds = baseCatalog({ DN_PDM_OrderHeadInfo: [], DN_PDM_OrderDetailInfo: [] })
+  ancestorSeeds.DN_PDM_PathExAttrInfo = [
+    { FileCode: PROJECT_NO, Parent_OBJ_ID: 'NODE-ROOT' },
+    { FileCode: PROJECT_NO, Parent_OBJ_ID: 'NODE-CHILD' },
+  ]
+  const seeds = await expand(ancestorSeeds, { readPlan: subtreePlan() })
+
+  assert.deepEqual(seeds.result.errors, [], 'an ancestor/descendant seed pair is a directory, not a fault')
+  assert.deepEqual(seeds.result.rowErrors, [])
+  assert.equal(seeds.result.status, 'expanded')
+  assert.deepEqual(componentIds(seeds.result), ['SUBTREE-ROOT', 'SUBTREE-LEAF'], 'and the roots still come out')
+  assert.equal(seeds.result.summary.subtree.nodesVisited, 2)
+  assert.equal(seeds.result.summary.subtree.nodesSkippedAlreadyVisited, 1)
+  assert.equal(seeds.result.summary.subtree.rootsDiscovered, 1, 'the shared node`s heads are collected ONCE')
+
+  // (b) DAG MERGE: two folders, one shared child.
+  const dag = baseCatalog({ DN_PDM_OrderHeadInfo: [], DN_PDM_OrderDetailInfo: [] })
+  dag.DN_PDM_PathInfo = [
+    { OBJ_ID: 'NODE-ROOT', Parent_OBJ_ID: null },
+    { OBJ_ID: 'NODE-A', Parent_OBJ_ID: 'NODE-ROOT' },
+    { OBJ_ID: 'NODE-B', Parent_OBJ_ID: 'NODE-ROOT' },
+    // Reached from BOTH NODE-A and NODE-B.
+    { OBJ_ID: 'NODE-CHILD', Parent_OBJ_ID: 'NODE-A' },
+    { OBJ_ID: 'NODE-CHILD', Parent_OBJ_ID: 'NODE-B' },
+  ]
+  const merged = await expand(dag, {
+    readPlan: subtreePlan({ projectSubtree: { maxSubtreeDepth: 2 } }),
+  })
+
+  assert.deepEqual(merged.result.errors, [], 'a DAG-shaped directory is traversed, not refused')
+  assert.deepEqual(componentIds(merged.result), ['SUBTREE-ROOT', 'SUBTREE-LEAF'])
+  assert.equal(merged.result.summary.subtree.nodesSkippedAlreadyVisited, 1)
+  assert.equal(merged.result.summary.subtree.rootsDiscovered, 1)
+}
+
 async function aFolderCycleIsRefusedBoundedly() {
   const catalog = baseCatalog({ DN_PDM_OrderHeadInfo: [], DN_PDM_OrderDetailInfo: [] })
   // The project node names ITSELF as its parent.
@@ -614,6 +772,20 @@ async function aFolderCycleIsRefusedBoundedly() {
   assert.equal(result.status, 'failed')
   assert.equal(isLargeBomBoundedExpansion(result), false)
   assert.ok(result.summary.readCount < 10, 'the traversal stops rather than looping: reads stay bounded')
+
+  // A LONGER loop — A -> B -> A — is caught by the same ancestor test, which is the point of
+  // carrying the chain rather than a single parent.
+  const twoStep = baseCatalog({ DN_PDM_OrderHeadInfo: [], DN_PDM_OrderDetailInfo: [] })
+  twoStep.DN_PDM_PathInfo = [
+    { OBJ_ID: 'NODE-ROOT', Parent_OBJ_ID: 'NODE-CHILD' },
+    { OBJ_ID: 'NODE-CHILD', Parent_OBJ_ID: 'NODE-ROOT' },
+  ]
+  const looped = await expand(twoStep, {
+    readPlan: subtreePlan({ projectSubtree: { maxSubtreeDepth: 2 } }),
+  })
+  assert.deepEqual(errorTypes(looped.result), [SUBTREE_CYCLE_DETECTED_ERROR_TYPE])
+  assert.equal(looped.result.valid, false)
+  assert.ok(looped.result.summary.readCount < 12)
 }
 
 async function anAlreadyFailedRunNeverStartsTheSegment() {
@@ -629,11 +801,15 @@ async function anAlreadyFailedRunNeverStartsTheSegment() {
   )
   assert.deepEqual(result.summary.subtree, {
     nodesVisited: 0,
+    nodesSkippedAlreadyVisited: 0,
     rootsDiscovered: 0,
     rootsExpanded: 0,
     rootsSkippedAlreadyExpanded: 0,
     rootsWithoutChildren: 0,
-    rootQuantitySource: { orderDetail: 0, subtreeDefault: 0 },
+    // The order path DID produce a root before it hit the row ceiling, and the count says so.
+    // Deriving this from `rows` inside the subtree segment would report 0 here, because the segment
+    // never runs on this path — the one number this counter exists to get right.
+    rootQuantitySource: { orderDetail: 1, subtreeDefault: 0 },
   })
   // The two reads only the subtree segment ever issues. (`path_id` alone would not do: the ORDER
   // path filters orderHead by a column of the same name.)
@@ -907,6 +1083,8 @@ async function main() {
   console.log('  ✓ G-03 zero order lines still root, at depth 0, with the defaulting COUNTED')
   await ignoredFiltersCannotWidenTheTraversal()
   console.log('  ✓ G-04 必修①: a source that ignores filters cannot pull another project`s BOM in')
+  await foreignProjectRowsCannotSeedTheTraversal()
+  console.log('  ✓ G-10 a lying project-ENTRY read cannot seed either root segment with a foreign project')
   await deduplicationCoversChildrenNotJustRoots()
   await twoHeadsOnOnePartAreOneRoot()
   console.log('  ✓ G-05 必修②: de-dup covers children, and two heads on one part are one root')
@@ -916,7 +1094,8 @@ async function main() {
   await aBudgetOverrunInsideTheSubtreeIsCaught()
   console.log('  ✓ G-09 a budget overrun inside the segment is a refusal, not a rejected promise')
   await aFolderCycleIsRefusedBoundedly()
-  console.log('  ✓ G-07 a self-referencing folder node is refused, and the reads stay bounded')
+  await ancestorSeedsAndDagMergesAreSkippedNotRefused()
+  console.log('  ✓ G-07/G-11 a real loop is refused; an ancestor seed or a DAG merge is skipped and counted')
   await anAlreadyFailedRunNeverStartsTheSegment()
   console.log('  ✓ G-08 an already-failed order path never starts the subtree segment')
 
