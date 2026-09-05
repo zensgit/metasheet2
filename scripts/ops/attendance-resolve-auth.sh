@@ -7,6 +7,7 @@ LOGIN_EMAIL="${LOGIN_EMAIL:-}"
 LOGIN_PASSWORD="${LOGIN_PASSWORD:-}"
 AUTH_RESOLVE_META_FILE="${AUTH_RESOLVE_META_FILE:-}"
 AUTH_RESOLVE_ALLOW_INSECURE_HTTP="${AUTH_RESOLVE_ALLOW_INSECURE_HTTP:-}"
+AUTH_EXPECTED_TENANT_ID="${AUTH_EXPECTED_TENANT_ID:-}"
 
 LAST_AUTH_CODE=""
 LAST_REFRESH_CODE=""
@@ -106,15 +107,15 @@ AUTH_LOGIN_PASSWORD_PRESENT=$(bool_present "$LOGIN_PASSWORD")
 EOF
 }
 
-function request_auth_me_code() {
+function request_auth_me_result() {
   local token="$1"
-  local out_file code
+  local out_file code result
   if [[ -z "$token" ]]; then
-    printf 'invalid-token'
+    printf 'invalid-token:invalid'
     return 0
   fi
   if ! token_is_safe_for_header "$token"; then
-    printf 'invalid-token'
+    printf 'invalid-token:invalid'
     return 0
   fi
   out_file="$(mktemp)"
@@ -122,22 +123,38 @@ function request_auth_me_code() {
     --connect-timeout 8 \
     --max-time 20 \
     -H "Authorization: Bearer ${token}" \
-    "${API_BASE}/auth/me" || true)"
+    "${API_BASE}/auth/me" 2>/dev/null || true)"
+  result="http"
+  if [[ "$code" == "200" ]]; then
+    result="valid"
+    if [[ -n "$AUTH_EXPECTED_TENANT_ID" ]] && ! jq -e --arg expected "$AUTH_EXPECTED_TENANT_ID" '
+      type == "object"
+      and .success == true
+      and (.data | type == "object")
+      and (.data.user | type == "object")
+      and (.data.user.tenantId | type == "string")
+      and .data.user.tenantId == $expected
+    ' "$out_file" >/dev/null 2>&1; then
+      result="tenant-mismatch"
+    fi
+  fi
   rm -f "$out_file" || true
-  printf '%s' "$code"
+  printf '%s:%s' "$code" "$result"
 }
 
 function validate_token_with_retry() {
   local token="$1"
-  local attempt code
+  local attempt code request_result validation_result
   LAST_AUTH_CODE=""
   if [[ -z "$token" ]]; then
     return 1
   fi
   for attempt in 1 2 3; do
-    code="$(request_auth_me_code "$token")"
+    request_result="$(request_auth_me_result "$token")"
+    code="${request_result%%:*}"
+    validation_result="${request_result#*:}"
     LAST_AUTH_CODE="$code"
-    if [[ "$code" == "200" ]]; then
+    if [[ "$code" == "200" && "$validation_result" == "valid" ]]; then
       return 0
     fi
     case "$code" in
@@ -171,13 +188,13 @@ function refresh_token() {
     --max-time 20 \
     -X POST "${API_BASE}/auth/refresh-token" \
     -H 'Content-Type: application/json' \
-    -d "$payload" || true)"
+    -d "$payload" 2>/dev/null || true)"
   LAST_REFRESH_CODE="$code"
   if [[ "$code" != "200" ]]; then
     rm -f "$refresh_json" || true
     return 1
   fi
-  refreshed="$(jq -r '.data.token // empty' "$refresh_json")"
+  refreshed="$(jq -r '.data.token // empty' "$refresh_json" 2>/dev/null || true)"
   rm -f "$refresh_json" || true
   refreshed="$(normalize_safe_token_or_empty "$refreshed")"
   if [[ -z "$refreshed" ]]; then
@@ -195,19 +212,24 @@ function login_token() {
     return 1
   fi
   login_json="$(mktemp)"
-  payload="$(jq -n --arg email "$LOGIN_EMAIL" --arg password "$LOGIN_PASSWORD" '{ email: $email, password: $password }')"
+  payload="$(jq -n \
+    --arg email "$LOGIN_EMAIL" \
+    --arg password "$LOGIN_PASSWORD" \
+    --arg tenant "$AUTH_EXPECTED_TENANT_ID" \
+    '{ email: $email, password: $password }
+      + (if $tenant == "" then {} else { tenantId: $tenant } end)')"
   code="$(curl -sS -o "$login_json" -w '%{http_code}' \
     --connect-timeout 8 \
     --max-time 20 \
     -X POST "${API_BASE}/auth/login" \
     -H 'Content-Type: application/json' \
-    -d "$payload" || true)"
+    -d "$payload" 2>/dev/null || true)"
   LAST_LOGIN_CODE="$code"
   if [[ "$code" != "200" ]]; then
     rm -f "$login_json" || true
     return 1
   fi
-  token="$(jq -r '.data.token // empty' "$login_json")"
+  token="$(jq -r '.data.token // empty' "$login_json" 2>/dev/null || true)"
   rm -f "$login_json" || true
   token="$(normalize_safe_token_or_empty "$token")"
   if [[ -z "$token" ]]; then

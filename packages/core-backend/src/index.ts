@@ -115,7 +115,12 @@ import {
   acquireStockPreparationPersistUnitOfWorkLocks,
   validateStockPreparationPersistUnitOfWorkInput,
 } from './multitable/stock-preparation-persist-unit-of-work'
-import { installMetrics, metrics as promMetrics, requestMetricsMiddleware } from './metrics/metrics'
+import {
+  installMetrics,
+  metrics as promMetrics,
+  recoveryArchiveObservability,
+  requestMetricsMiddleware,
+} from './metrics/metrics'
 import { APIGateway } from './gateway/APIGateway'
 import { getPoolStats } from './db/pg'
 import { getBuildInfo } from './config/build-info'
@@ -585,6 +590,8 @@ export class MetaSheetServer {
     this.recoveryArchiveApplication = createRecoveryArchiveApplication(
       options.createRecoveryArchiveComposition,
       resolveRecoveryArchiveMainPoolRuntime,
+      process.env,
+      recoveryArchiveObservability,
     )
 
     // 创建核心API

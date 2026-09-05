@@ -106,7 +106,7 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
 4. **时间线与验收**:停机 14:06:18 → 健康检查 OK 14:08:55(约 2.5 分钟);F22 must-exist 清单 OK,插件 hash 校验 OK(436 个文件),node_modules 泄漏检查 OK;执行的迁移:`079`、`080`、`081`、`082`、`084`、`085`、`086`,以及 `zzzz20260830200000`/`211000`/`220000`/`230000`、`zzzz20260831090000`、`zzzz20260902120000`;audit CHECK 现在列出 `handoff_advance` 和 `project_board_read`;`integration_stock_prep_handoff` 表存在;`attendance_records`/`approval_instances` 行数不变(0/0)。**in-place 脚本不会刷新 `C:\metasheet\BUILD_PROVENANCE.json`**——升级完成后要手动从包根目录把新的 `BUILD_PROVENANCE.json` 拷过去(旧的已存到备份目录,存为 `BUILD_PROVENANCE.r6.json`),否则 Step 3-1 读到的还是旧提交。
 5. **远程执行注意事项**:一次性 `ssh 192.168.1.222 powershell -Command "..."` 遇到引号会出问题;改用 `powershell -NoProfile -EncodedCommand <脚本的 UTF-16LE base64>`(例如用 Node 生成:`Buffer.from(script,'utf16le').toString('base64')`)。
 6. **升级完成后待办(需要 admin Bearer token;preflight 路由在没有 token 时返回 401 UNAUTHORIZED)**:针对**已存在**的 objectId `plm_stock_preparation_sandbox_r6_trial` 重新推导沙箱绑定——调用 `POST /api/integration/stock-preparation/sandbox-target/ensure`(当前绑定的 `sheet_32df959afa3cecfa564e5486` 缺少 #5447 新增的五个部门列 `makeOrBuy`/`procurementDone`/`procurementReplyDate`/`warehouseDone`/`actualArrivalDate`),把返回的 `data.targetBinding` 贴进 `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON`,`pm2 restart metasheet-backend --update-env`,再用 `GET /api/integration/stock-preparation/preflight` 确认 `ready:true`。222 上已有一个做这件事的辅助脚本(token 从文件读取,不会回显):`C:\metasheet\output\releases\incoming\222-rebind-sandbox-target.ps1`。
-7. **管理员 token 怎么来的**:用仓库自带的 `scripts/ops/attendance-window-runner-mint-token.mjs`(需复制到 `C:\metasheet\packages\core-backend\scripts\` 下,`import('pg')` 才能解析)——先 `node <它> --find-admin` 找到已存在的活跃 admin 账号,再 `node <它> --mint --user-id <id> --roles admin --expires-in 3600` 用宿主机自己的 `JWT_SECRET` 现签一份 HS256 token(用完删掉这个脚本副本);全程不碰密码,secret 也不离开宿主机。**这枚 token 不带任何 tenant claim**,所以所有备料相关的 admin 路由调用都必须带上请求头 `x-tenant-id: default`(本次部署的唯一 org id),不带就是 400 `TENANT_REQUIRED`。
+7. **管理员 token 怎么来的**:用仓库自带的 `scripts/ops/attendance-window-runner-mint-token.mjs`(需复制到 `C:\metasheet\packages\core-backend\scripts\` 下,`import('pg')` 才能解析)——先 `node <它> --find-admin` 找到已存在的活跃 admin 账号,再 `node <它> --mint --user-id <id> --roles admin --expires-in 3600 --tenant-id default` 用宿主机自己的 `JWT_SECRET` 现签一份 HS256 token(用完删掉这个脚本副本);全程不碰密码,secret 也不离开宿主机。**用 `--tenant-id default` 签发后,令牌自带 tenant claim**(本次部署的唯一 org id);请求头 `x-tenant-id` 仍可以继续带,但不再是租户来源。等 flag 开启后,不带 tenant claim 的令牌会被备料相关 admin 路由直接 403。
 8. **Step 0-7 订正**:`POST /api/integration/stock-preparation/sandbox-target/ensure` 返回的 `targetBinding` **只有 33 个 TEMPLATE 字段**(20 个 `plm_system` + 13 个人工列,含 #5447 的部门列),**不带** customer pack 的 21 个 `ext_` 列。把它"整段"贴进去会**替换掉**原有 action 配置里的 `fieldIdMap`,`ext_` 列(领料节点/备料日期/毛胚尺寸等)静默变成无法解析。**正确做法是合并**:ensure 返回的映射 + 旧配置里的 `ext_*` 条目(同一张 sheet/objectId ⇒ 旧的物理列 id 依然有效;今天是 33 + 21 = 54)。今天用了一次性 node 脚本做合并(`output/releases/incoming/tools-r7/merge-ext.cjs`);动手前先备份 `app.env`(今天存了两份:`app.env.before-rebind-20260903-143232` 与 `app.env.before-extmerge-20260903063616`)。合并后:`pm2 restart --update-env`,预检确认 `ready:true`、`checks.carryTargetBinding.ownershipState=owned_by_this_project`、没有 `missingHumanFields`。
 9. **#5452(统一 SQL 连接绑定,2026-09-03 已合入)带来一个新 blocker**:`data-source:sql-readonly` 外部系统现在要求 `integration_external_systems.connection_id` 非空;该迁移只回填了 `config` 里带服务端打上的 `dataSourceOwnerId` 那些行——r6 时代的两条(`Customer PLM readonly` `104e9bad`、`Synthetic PLM readonly` `7130b124`)都没有这个标记,于是 source-preflight 报 `CONNECTION_LEGACY_FALLBACK_DENIED`。**修法(走认可路径,带 admin token + `x-tenant-id`)**:先 `GET /api/integration/external-systems/:id`,再用同样的公开字段(`id`/`tenantId`/`name`/`kind`/`role`/`status`/`config`/`capabilities`)加上 `connectionId = config.dataSourceId`(分别是 `customer-plm-test` / `synthetic-plm`)调 `POST /api/integration/external-systems`。用 `select id, connection_id from integration_external_systems` 核验。
 10. **今天 Step 4/5 的结果**:对 `104e9bad` 的 source-binding `POST` 免重启即生效。对客户测试 PLM 的 source-preflight:可达(13 个对象里 12 个通),`BomHeadInfo` 143 行,`BomDetailsInfo` ≥200 行,`projectData.hasProjectNumbers=true`(样例 FileCode 如 `14-2022817`)但 `projectNodeRows=0`(取样范围内没有 `NodeType=2` 的项目节点);结论是 no-go,唯一 blocker 是 `bom_store_signals_conflict`,原因 `volume-undecidable-at-cap`(权威性+结构都指向 BomDetails——也就是当前配置的方案——但 200 行的取样量无法给出量级排序)。**这个僵局没有声明参数可用**(`declaredBridge` 只覆盖 order-module/DesignBom 这条桥,不覆盖这里);operator 按"旧系统口径"规则裁决(`BomHeadInfo`/`BomDetailsInfo` 权威,`DesignBom` 不用),然后继续走 dry-run。
@@ -611,3 +611,84 @@ GET /api/multitable/... (该 sheet 的记录列表,sheetId 取自 Step 0-7 actio
 - 打包脚本 / 包校验脚本(Step 0):`scripts/ops/multitable-onprem-package-build.sh`、`scripts/ops/multitable-onprem-package-verify.sh`
 - 既有部署预检 / 验收脚本(Step 3):`plugins/plugin-integration-core/lib/stock-preparation-preflight.cjs`、`scripts/ops/stock-prep-acceptance-bootstrap.mjs`
 - r6/r7 既有升级执行单(本文延续同一批约定):`r6-upgrade-222-runbook.md`、`r7-build-manifest.md`
+
+---
+
+## 大 BOM 分批路径实测(准备)
+
+> **地位**:这一节只覆盖"把超过 `maxRows` 的合成数据灌进 222 上 `synthetic-plm` 数据源实际读取的那套表"这一步准备工作,不是完整的 dry-run/apply 验收程序——那一段仍然照 §3-§8 的既有步骤走,唯一区别是这次源里的项目号展开后 >10000 行,预期会走 `largeBom: true` 的分批预览分支(`isLargeBomBoundedExpansion`,
+> `plugins/plugin-integration-core/lib/stock-preparation-bom-expansion.cjs:514-518`),而不是 §3 描述的一次性 `expanded` 结果。这条路径此前**从未实测过**——见
+> `plugins/plugin-integration-core/fixtures/stock-preparation-synthetic-sql-source/README.md`
+> "what it deliberately does not cover" 一节:该目录下的合成夹具"tens of rows by design",明确不覆盖
+> `max_rows_exceeded` / large-BOM bounded path。本节的生成器就是补这个洞用的。
+>
+> **222 上没有独立的"合成 PLM 库"**——只读核实过:Postgres 实例上只有 `metasheet` 与 `postgres` 两个库,
+> 合成 PLM 表就在**应用库 `metasheet` 的 `public` schema**里,而且现场存在**两套并存**的同名表:一套带
+> 双引号、保留大小写的 `"DN_PDM_*"`(空表,遗留),一套不带引号、被 Postgres 折成全小写的 `dn_pdm_*`
+> (有数据——7 零件/7 明细/1 订单行/1 项目,`synthetic-plm` 数据源真正读的是这一套)。本生成器输出的
+> `INSERT`/`DELETE` 语句里的表名/列名全部不加引号(与
+> `stock-preparation-synthetic-sql-source/01-schema.sql` 的既有约定一致),会被 Postgres 折成小写,
+> 正好落在**有数据、被实际读取**的那一套,不会误伤空的遗留表。
+
+### 怎么生成
+
+```
+node scripts/ops/stock-preparation-synth-large-bom.mjs \
+  --out /tmp/stock-prep-synth-large-bom.sql \
+  --fanout 25,25,20 \
+  --project SYN-PROJ-LARGE-0001
+```
+
+`--fanout` 省略时就是默认的 `25,25,20`(根件下 25 个一级子件,每个一级子件下 25 个二级子件,每个二级
+子件下 20 个三级子件)。**以"含根件"为主口径**:根件自己的订单行也会被展开器 push 进结果
+(`lib/stock-preparation-bom-expansion.cjs:946-966`),所以真实 dry-run 的
+`evidence.expansion.rowsExpanded` 应为 `1(根件) + 25 + 625 + 12500 = 13151`,这才是要拿去和默认
+`maxRows` 10000 比较、判定是否触发大 BOM 分批的数字。三层子件本身的乘积之和(不含根件那一行)是
+`25 + 625 + 12500 = 13150`,对应 `DN_PDM_BomDetailsInfo` 的行数,是另一个辅助口径,脚本 stdout 里两个
+数字都会打印、并标注各自含义,不会只给一个数混淆。命令结束还会打印每张表的行数以及预期的总数量之和
+(数量在每个父级下按 1→2→3 循环,便于手工核对滚算结果)。
+
+所有由该生成器创建的对象 id(路径 id、订单 id、零件 `OBJ_ID`、BOM id)一律带 `SYNL-` 前缀——与
+`stock-preparation-synthetic-sql-source/` 目录下既有夹具用的 `SYN-` 前缀**刻意不同**,两者可以同时
+灌进同一个库互不干扰、互不清空。生成的 SQL 本身是幂等的:每张表先按 `SYNL-` 前缀 `DELETE`,再
+`INSERT`,同名参数重跑、或换一组 `--fanout`/`--project` 重跑,都会先清掉上一次这个生成器留下的行。
+
+### 怎么灌进应用库(`metasheet`)
+
+合成 PLM 表就在应用库里,不是单独的库——用 app.env 里的 `DATABASE_URL` 直接连应用库执行:
+
+```
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f /tmp/stock-prep-synth-large-bom.sql
+```
+
+（连接串来自现场 app.env,本文不记录其值,也不记录主机名/账号/密码。生成器输出的语句全部不加引号,
+落在 `public.dn_pdm_*` 那一套折成小写、有数据、被 `synthetic-plm` 数据源实际读取的表上,不会碰到
+`"DN_PDM_*"` 那套带引号、空的遗留表。)
+
+### 灌完怎么确认(三条 SELECT count)
+
+```sql
+-- 期望 = 生成时打印的 part 行数(默认 fanout 下是 13151)
+SELECT count(*) FROM DN_PDM_PartLibraryInfo WHERE OBJ_ID LIKE 'SYNL-%';
+
+-- 期望 = 生成时打印的 bomDetail 行数(默认 fanout 下是 13150,即 25+625+12500)
+SELECT count(*) FROM DN_PDM_BomDetailsInfo WHERE bom_pid LIKE 'SYNL-%';
+
+-- 期望 = 1(只有一个项目入口:DN_PDM_PathExAttrInfo.FileCode = 本次 --project 的值)
+SELECT count(*) FROM DN_PDM_PathExAttrInfo WHERE Parent_OBJ_ID LIKE 'SYNL-%';
+```
+
+三条都对得上生成器 stdout 打印的数字,再按 §5-§6 选源、按 §6 对本次 `--project` 的值跑 dry-run。这份数据
+是干净的(不缺件、不歧义、版本号统一),所以预期看到的不是别的守卫,恰好是 `max_rows_exceeded`:
+展开在推到第 10001 行时停止(`pushRow`,`lib/stock-preparation-bom-expansion.cjs:746-753`),顶层
+`status` 变成 `failed`(有一条全局错误即失败,`:977`),`largeBom` 为 `true`
+(`isLargeBomBoundedExpansion`,`:514-518`)、附带 `boundedPreview`,`canApply` 为 `false`、不签发
+`dryRunToken`(有全局错误就不可 apply,`stock-preparation-table-actions.cjs:1251`)——而不是 §3 描述的
+`canApply: true` 干净结果。这正是本节要实测、此前从未跑过的分支。
+
+### 实测后怎么清
+
+生成的 SQL 文件开头有 `-- ==== CLEANUP-START ====` 到 `-- ==== CLEANUP-END ====` 之间的一段 —— 就是
+那 7 条按 `SYNL-%` 前缀过滤的 `DELETE`,单独摘出来用同一个 `DATABASE_URL` 对应用库跑一遍即可清空这次
+生成的全部行,不影响 `stock-preparation-synthetic-sql-source/` 目录下 `SYN-` 前缀的既有夹具数据。也可以
+直接用同一份文件重新跑一次完整生成命令(脚本本身先删后插,天然幂等),效果等价。

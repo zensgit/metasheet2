@@ -51,8 +51,32 @@ const SCHEMA_FILE = '01-schema.sql'
 const PULL_1_FILE = '02-seed-pull-1.sql'
 const PULL_2_FILE = '03-seed-pull-2.sql'
 const DUPLICATE_FILE = '04-optional-duplicate-expanded-key.sql'
+const SUBTREE_FILE = '05-seed-subtree-roots.sql'
 const README_FILE = 'README.md'
 const PROJECT_NO = 'SYN-PROJ-0001'
+
+/**
+ * The OPTIONAL `readPlan.projectSubtree` block, as a deployment would configure it.
+ *
+ * It exists in this suite for ONE structural reason: the coverage guard below asks the plan which
+ * columns the fixture is allowed to declare, and the shipped default plan deliberately does NOT
+ * carry this block (that is what makes "subtree off" structural rather than a habit). Without an
+ * ENABLED plan to ask, `dn_pdm_pathinfo.parent_obj_id` and `dn_pdm_bomheadinfo.path_id` could only
+ * be admitted through `SCHEMA_COLUMNS_NOT_READ_BY_PLAN` — i.e. the guard would issue those two
+ * columns a permanent certificate saying the plan never reads them, which is the opposite of true.
+ * So the guard asks BOTH plans, and the reverse assertion keeps its full force: a column no plan
+ * reads is still a failure.
+ *
+ * `maxReadCount` is not decoration — the normalizer REFUSES an enabling plan without one.
+ */
+const SUBTREE_READ_PLAN = Object.freeze({
+  ...PLM_STOCK_PREPARATION_BOM_READ_PLAN,
+  maxReadCount: 500,
+  projectSubtree: {
+    pathInfo: { parentIdField: 'Parent_OBJ_ID' },
+    bomHead: { pathIdField: 'path_id' },
+  },
+})
 
 /**
  * `{ 'table.column': reason }`. Empty on purpose: the fixture declares exactly the plan's read
@@ -390,6 +414,36 @@ function testSchemaCoversReadPlan(schema, schemaSql) {
     }
   }
 
+  // THE OPTIONAL BLOCK'S COLUMNS, taken from an ENABLED plan rather than from an exception list.
+  //
+  // `projectSubtree` does not name objects of its own: it reads the folder-node columns of the
+  // pathInfo and bomHead tables the plan already names. So the requirement is recorded against
+  // those objects, and the two columns become "read by a plan" in the same sense as every other
+  // column here — which is what lets the reverse assertion below stay `deepEqual(unused, [])`.
+  const subtreePlan = normalizeStockPreparationBomReadPlan(SUBTREE_READ_PLAN)
+  assert.ok(subtreePlan.projectSubtree, 'the subtree-enabled plan must actually carry the block')
+  const subtreeRequirements = [
+    ['pathInfo', plan.pathInfo.object, subtreePlan.projectSubtree.pathInfo.parentIdField],
+    ['bomHead', plan.bomHead.object, subtreePlan.projectSubtree.bomHead.pathIdField],
+  ]
+  for (const [section, object, column] of subtreeRequirements) {
+    const columns = schema.get(String(object).toLowerCase())
+    assert.ok(
+      columns && columns.has(String(column).toLowerCase()),
+      `fixture DDL table ${object} is missing projectSubtree.${section} column ${column}`,
+    )
+    noteRequirement(object, column)
+  }
+
+  // DEFAULT-OFF, PINNED. Without this the "subtree is off unless configured" property is a fact
+  // about today's constant rather than a guarantee, and the byte-identical-when-disabled claim in
+  // stock-preparation-project-subtree-bridge.test.cjs rests on it.
+  assert.equal(
+    plan.projectSubtree,
+    undefined,
+    'the SHIPPED read plan must not carry projectSubtree — "off" has to be structural, not a habit',
+  )
+
   // The top-level matchField is applied to pathExAttr and is pinned equal to it by the normalizer
   // (lib/stock-preparation-bom-expansion.cjs:229-233); assert the column exists under its own name
   // so a fixture cannot pass by covering only the nested spelling.
@@ -454,7 +508,7 @@ function testSchemaCoversReadPlan(schema, schemaSql) {
 }
 
 /** Deliverable 5 (other half): the seeds only ever touch declared columns — enforced by applySeed. */
-async function expandFrom(schema, files) {
+async function expandFrom(schema, files, readPlan) {
   const state = emptyState(schema)
   for (const file of files) applySeed(state, schema, readFixture(file), file)
   const adapter = createAdapter(state)
@@ -464,6 +518,7 @@ async function expandFrom(schema, files) {
     // Small on purpose: forces the pagination loop in readAll (…-bom-expansion.cjs:305-351) to run
     // more than one page per object, so the cursor contract is exercised, not just assumed.
     pageLimit: 2,
+    ...(readPlan ? { readPlan } : {}),
   })
   return { result, adapter, state }
 }
@@ -642,11 +697,73 @@ async function testOptionalDuplicateFixture(schema) {
   console.log('  optional duplicate fixture: 1 held group (default_hold), plan invalid as designed')
 }
 
+/**
+ * The OPTIONAL subtree seed, proved TWICE — and the second half is the load-bearing one.
+ *
+ *   OFF: the DEFAULT plan over 02 + 05 must produce the SAME 7 rows as 02 alone. The seed adds a
+ *        folder node, a part, two BOM heads and two BOM lines, and the default pull must be
+ *        completely blind to all of it. If it is not, the fixture's new columns have leaked into
+ *        the default read surface and "off is structural" is false.
+ *   ON:  the same data with the block enabled adds exactly ONE root (quantity DEFAULTED to 1) plus
+ *        its two children — and the two heads on that one part_id collapse to that single root
+ *        instead of colliding on a byte-identical idempotencyKey.
+ */
+async function testProjectSubtreeSeed(schema) {
+  const offBaseline = await expandFrom(schema, [PULL_1_FILE])
+  const off = await expandFrom(schema, [PULL_1_FILE, SUBTREE_FILE])
+  assert.deepEqual(off.result.errors, [])
+  assert.deepEqual(off.result.rowErrors, [])
+  assert.equal(off.result.rows.length, 7, 'the subtree seed must be invisible to the DEFAULT plan')
+  assert.deepEqual(
+    off.result.rows.map((row) => row.idempotencyKey),
+    offBaseline.result.rows.map((row) => row.idempotencyKey),
+    'the default pull over 02 + 05 must produce byte-identical rows to the pull over 02 alone',
+  )
+  assert.deepEqual(
+    off.adapter.calls.map((call) => `${call.object}:${Object.keys(call.filters).sort().join('+')}`),
+    offBaseline.adapter.calls.map((call) => `${call.object}:${Object.keys(call.filters).sort().join('+')}`),
+    'and it must not cost one extra read, nor change one filter',
+  )
+  assert.equal(off.result.summary.subtree, undefined, 'a disabled block adds no summary key')
+
+  const on = await expandFrom(schema, [PULL_1_FILE, SUBTREE_FILE], SUBTREE_READ_PLAN)
+  assert.deepEqual(on.result.errors, [], 'the enabled subtree pull must produce no global errors')
+  assert.deepEqual(on.result.rowErrors, [], 'the enabled subtree pull must produce no row errors')
+  assert.equal(on.result.status, 'expanded')
+  assert.equal(on.result.rows.length, 10, 'the order path`s 7 rows plus one subtree root and its 2 children')
+
+  const subtreeRoot = rowByPath(on.result.rows, ['SYN-PART-SUBTREE-H'])
+  assert.equal(subtreeRoot.depth, 0)
+  assert.equal(subtreeRoot.parentSourceId, null)
+  assert.equal(subtreeRoot.rawQuantity, 1, 'a folder-discovered root carries the declared neutral multiplier')
+  assert.equal(subtreeRoot.totalQuantity, 1)
+  assert.equal(rowByPath(on.result.rows, ['SYN-PART-SUBTREE-H', 'SYN-PART-LEAF-J']).totalQuantity, 2)
+  assert.equal(rowByPath(on.result.rows, ['SYN-PART-SUBTREE-H', 'SYN-PART-LEAF-K']).totalQuantity, 3)
+
+  assert.deepEqual(on.result.summary.subtree, {
+    nodesVisited: 2,
+    nodesSkippedAlreadyVisited: 0,
+    rootsDiscovered: 1,
+    rootsExpanded: 1,
+    rootsSkippedAlreadyExpanded: 0,
+    rootsWithoutChildren: 0,
+    rootQuantitySource: { orderDetail: 1, subtreeDefault: 1 },
+  })
+
+  // TWO HEADS, ONE ROOT — pinned on the CONTRACT (the plan is applyable) rather than by reasoning.
+  // Two roots on one part_id would carry byte-identical keys, which the planner groups and holds.
+  const plan = planAgainst(on.result.rows, [])
+  assert.equal(plan.valid, true, 'two BOM heads on one part must not become two colliding roots')
+  assert.deepEqual(plan.counts, { add: 10, update: 0, skip: 0, inactive: 0, manual_confirm: 0 })
+
+  console.log('  optional subtree seed: default plan blind (7 rows), enabled plan +1 root +2 children, plan valid')
+}
+
 function testReadmeStaysAnchored() {
   const readme = readFixture(README_FILE)
   // Cheap anti-rot: the README's operational claims are worth nothing if the files it names or the
   // action id it tells operators to call have moved.
-  for (const needle of [SCHEMA_FILE, PULL_1_FILE, PULL_2_FILE, DUPLICATE_FILE, PROJECT_NO]) {
+  for (const needle of [SCHEMA_FILE, PULL_1_FILE, PULL_2_FILE, DUPLICATE_FILE, SUBTREE_FILE, PROJECT_NO]) {
     assert.ok(readme.includes(needle), `README must mention ${needle}`)
   }
   const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(
@@ -674,6 +791,7 @@ async function main() {
   const pullOne = await testPullOne(schema)
   await testPullTwo(schema, pullOne)
   await testOptionalDuplicateFixture(schema)
+  await testProjectSubtreeSeed(schema)
   testReadmeStaysAnchored()
   console.log('stock-preparation-synthetic-sql-fixture.test.cjs OK')
 }

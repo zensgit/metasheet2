@@ -38,6 +38,95 @@ const INCOMPLETE_READ_ERROR_TYPES = Object.freeze([
   ...LARGE_BOM_BOUNDED_ERROR_TYPES,
   READ_CURSOR_BROKEN_ERROR_TYPE,
 ])
+
+// ---------------------------------------------------------------------------
+// PROJECT-SUBTREE ROOT DISCOVERY — the OPTIONAL second root segment.
+//
+// The shipped plan reaches a project's top-level components through the ORDER MODULE
+// (pathExAttr -> pathInfo -> orderHead -> orderDetail). A deployment whose projects carry their
+// assemblies on the FOLDER TREE instead — BOM heads hanging off a project's directory nodes — has no
+// order line to enter through, and the expansion returns zero rows and calls it a success.
+//
+// `readPlan.projectSubtree` is that second entry, and it is OPTIONAL AND ABSENT BY DEFAULT: the
+// shipped `PLM_STOCK_PREPARATION_BOM_READ_PLAN` does not carry the block, so "off" is STRUCTURAL —
+// the normalizer emits no key, the expander's second segment is one `if` that never runs, and the
+// summary grows no counter. Nothing about the order path changes, in either state.
+//
+// THE THREE THINGS THAT MAKE IT SAFE (each has a test that fails if it is removed):
+//
+//   1. THE THREE READS THAT DECIDE WHICH PROJECT'S DATA THIS IS are re-filtered CLIENT-SIDE with
+//      `matchesByField`: the pathExAttr ENTRY read (whose rows seed both root segments), the
+//      pathInfo CHILD-NODE read, and the bomHead FIND-ROOTS read. `readAll` RECORDS `filtersApplied`
+//      and never ENFORCES it, and `bridge:legacy-sql-readonly` may legally answer
+//      `filtersApplied: false` (i.e. the whole table). Without the second filter one BFS step would
+//      take every folder node in the catalog for a child of this project — and then read other
+//      projects' BOM heads under this project's authorization. `visited` and `maxSubtreeDepth` do
+//      not help there: the breach happens on the first read, at depth 1, on nodes seen once each.
+//
+//      NOT re-filtered, and stated plainly rather than glossed: the two reads `expandChildren`
+//      issues per row (bomHead by part+version, bomDetail by bom id). Those are the ORDER path's
+//      own reads — both root segments call the same function — so their exposure to a lying source
+//      is pre-existing and shared, not something root discovery introduces. Closing it is a change
+//      to the order path with its own regressions, deferred to W4; the test file's "WHAT IS NOT
+//      PINNED" note says the same thing at the same altitude.
+//   2. DE-DUPLICATION COVERS EVERY EXPANDED COMPONENT, not just roots. `makeIdempotencyKey` eats
+//      {projectNo, componentSourceId, parentSourceId, path}; a part that is already an order root's
+//      CHILD and is then re-rooted by the subtree produces a DIFFERENT key, so the conflict planner
+//      cannot group them and the whole sub-assembly lands twice with two different totals. So the
+//      registry holds every componentSourceId this run has expanded, roots and children alike, and a
+//      subtree root that is already in it is skipped and counted. Two BOM heads on one `part_id` (a
+//      measured customer shape) collapse to ONE root for the same reason.
+//   3. THE READ BUDGET REALLY EXISTS. `maxReadCount`/`maxElapsedMs` are OPTIONAL on the expansion
+//      and unset on the measured deployment, and `maxPages` counts pages WITHIN one `readAll`, not
+//      reads overall — so "the subtree reuses the existing budget" would have been a budget of
+//      nothing. Enabling the block therefore REQUIRES the plan to carry `maxReadCount`, and the
+//      three structural bounds below are hard CEILINGS the normalizer refuses to exceed rather than
+//      advisory defaults.
+//
+// The three overrun/loop conditions are GLOBAL errors, never rowErrors: the conflict planner's
+// `missingFromPlmPolicy` is pinned to `mark_inactive`, so a HALF-DISCOVERED root set that "succeeds"
+// would mark the missing half of last pull's rows invalid. A global error means status `failed` and
+// `canApply: false`, which is the only safe posture for a truncated traversal.
+// ---------------------------------------------------------------------------
+const SUBTREE_CYCLE_DETECTED_ERROR_TYPE = 'subtree_cycle_detected'
+const SUBTREE_NODE_LIMIT_EXCEEDED_ERROR_TYPE = 'subtree_node_limit_exceeded'
+const SUBTREE_ROOT_LIMIT_EXCEEDED_ERROR_TYPE = 'subtree_root_limit_exceeded'
+// Deliberately NOT part of `LARGE_BOM_BOUNDED_ERROR_TYPES`, for the same reason
+// `READ_CURSOR_BROKEN_ERROR_TYPE` is not: those four mean "this BOM is too big for the interactive
+// path, take the background job". A folder traversal that hit its own structural ceiling will hit
+// the identical ceiling on the retry, so routing it there tells an operator to re-run a read that
+// cannot end differently.
+const PROJECT_SUBTREE_ERROR_TYPES = Object.freeze([
+  SUBTREE_CYCLE_DETECTED_ERROR_TYPE,
+  SUBTREE_NODE_LIMIT_EXCEEDED_ERROR_TYPE,
+  SUBTREE_ROOT_LIMIT_EXCEEDED_ERROR_TYPE,
+])
+
+// Structural bounds on the folder traversal. `DEFAULT_*` is what an enabling plan gets when it says
+// nothing; `MAX_*` is a CEILING the normalizer refuses to exceed, so a deployment cannot configure
+// `maxSubtreeNodes: 100000` and call it a bound. `maxSubtreeDepth` counts FOLDER levels and has
+// nothing to do with `maxDepth`, which counts BOM levels.
+const DEFAULT_MAX_SUBTREE_DEPTH = 1
+const MAX_SUBTREE_DEPTH_CEILING = 4
+const DEFAULT_MAX_SUBTREE_NODES = 200
+const MAX_SUBTREE_NODES_CEILING = 2000
+const DEFAULT_MAX_SUBTREE_ROOTS = 200
+const MAX_SUBTREE_ROOTS_CEILING = 500
+const PROJECT_SUBTREE_LIMITS = Object.freeze({
+  DEFAULT_MAX_SUBTREE_DEPTH,
+  MAX_SUBTREE_DEPTH_CEILING,
+  DEFAULT_MAX_SUBTREE_NODES,
+  MAX_SUBTREE_NODES_CEILING,
+  DEFAULT_MAX_SUBTREE_ROOTS,
+  MAX_SUBTREE_ROOTS_CEILING,
+})
+// The quantity a subtree root carries. A folder-discovered root has NO order line, so there is no
+// measured quantity to read — and `parseQuantity`'s hold-not-zero rule refuses an absent one rather
+// than letting it become a real 0 that multiplies down. 1 is the declared neutral multiplier, and
+// the summary counts how many roots took it (`rootQuantitySource.subtreeDefault`) against how many
+// came from an order line, so "these rows carry a defaulted quantity" is visible in evidence instead
+// of being indistinguishable from a measured 1.
+const SUBTREE_ROOT_DEFAULT_QUANTITY = 1
 const STOCK_PREPARATION_BOM_SOURCE_KINDS = Object.freeze([
   'data-source:sql-readonly',
   'bridge:legacy-sql-readonly',
@@ -150,6 +239,50 @@ function positiveInteger(input, field, defaultValue) {
 function optionalPositiveInteger(input, field) {
   if (input === undefined || input === null || input === '') return undefined
   return positiveInteger(input, field, undefined)
+}
+
+// A positive integer with a CEILING the configuration cannot argue with. `positiveInteger` alone
+// accepts any integer, which is how "recommended maximum 4" ends up as a comment while a plan
+// carries 100000. Over the ceiling is a refusal at normalization time, before a single read.
+//
+// It is also stricter about the TYPE than `positiveInteger`, which coerces with `Number()` and so
+// accepts `true` (-> 1) and `[3]` (-> 3). These three values are read budgets: the difference
+// between "the operator wrote 3" and "the operator wrote something that happens to coerce to 3" is
+// exactly the difference this module refuses to paper over elsewhere. The plan arrives as JSON, so
+// a real number is always expressible and nothing legitimate is lost.
+function ceilingBoundedPositiveInteger(input, field, defaultValue, ceiling) {
+  if (input !== undefined && input !== null && input !== '' && !Number.isInteger(input)) {
+    throw new StockPreparationBomExpansionError(`${field} must be a positive integer`, { field, value: input })
+  }
+  const value = positiveInteger(input, field, defaultValue)
+  if (value > ceiling) {
+    throw new StockPreparationBomExpansionError(`${field} must not exceed ${ceiling}`, {
+      field,
+      value,
+      ceiling,
+    })
+  }
+  return value
+}
+
+// Same no-coercion rule as `ceilingBoundedPositiveInteger`, for a value that has no ceiling but is
+// just as load-bearing: `readPlan.maxReadCount` is the budget `projectSubtree` is REFUSED without.
+// A key the normalizer insists on should not then accept `true` (-> 1) or `['200']` (-> 200) as if
+// someone had chosen it. Absent stays absent — this is only about what a PRESENT value may be.
+function strictOptionalPositiveInteger(input, field) {
+  if (input === undefined || input === null || input === '') return undefined
+  if (!Number.isInteger(input)) {
+    throw new StockPreparationBomExpansionError(`${field} must be a positive integer`, { field, value: input })
+  }
+  return positiveInteger(input, field, undefined)
+}
+
+function optionalBoolean(input, field, defaultValue) {
+  if (input === undefined || input === null || input === '') return defaultValue
+  if (typeof input !== 'boolean') {
+    throw new StockPreparationBomExpansionError(`${field} must be a boolean`, { field, value: input })
+  }
+  return input
 }
 
 function nonNegativeInteger(input, field, defaultValue) {
@@ -267,6 +400,53 @@ function normalizeStockPreparationBomReadPlan(input = PLM_STOCK_PREPARATION_BOM_
   if (isPlainObject(plan.batchIdentity)) {
     const mode = optionalString(plan.batchIdentity.mode, 'readPlan.batchIdentity.mode', { identifier: false })
     if (mode !== undefined) out.batchIdentity = { mode }
+  }
+  // The plan-level READ BUDGET. Optional, and ABSENT STAYS ABSENT — an existing plan normalizes to
+  // the same object it always did. It exists because `maxReadCount` was reachable only as a
+  // per-invocation input that the measured deployment never set, which made "the subtree reuses the
+  // existing budget" a statement about a budget of nothing (see the projectSubtree banner).
+  const planMaxReadCount = strictOptionalPositiveInteger(plan.maxReadCount, 'readPlan.maxReadCount')
+  if (planMaxReadCount !== undefined) out.maxReadCount = planMaxReadCount
+
+  // THE OPTIONAL PROJECT-SUBTREE BLOCK. Absent (the shipped default) => NO KEY AT ALL, so every
+  // consumer of a normalized plan sees byte-for-byte what it saw before this feature existed.
+  // `assertNoForbiddenPlanKeys` above already walked the raw block, so sql/where/join inside it are
+  // refused exactly as they are anywhere else in the plan.
+  if (plan.projectSubtree !== undefined && plan.projectSubtree !== null) {
+    const block = requiredObject(plan.projectSubtree, 'readPlan.projectSubtree')
+    out.projectSubtree = {
+      // The folder tree's self-reference: PathInfo rows point at their parent node. Read with
+      // `{ [parentIdField]: nodeId }` and then RE-FILTERED client-side, because a source may answer
+      // a filtered read with the whole table.
+      pathInfo: normalizeObjectFields(block.pathInfo, 'readPlan.projectSubtree.pathInfo', ['parentIdField']),
+      // The BOM head's folder-node column: which directory node a head hangs off. Same re-filter.
+      bomHead: normalizeObjectFields(block.bomHead, 'readPlan.projectSubtree.bomHead', ['pathIdField']),
+      maxSubtreeDepth: ceilingBoundedPositiveInteger(
+        block.maxSubtreeDepth, 'readPlan.projectSubtree.maxSubtreeDepth',
+        DEFAULT_MAX_SUBTREE_DEPTH, MAX_SUBTREE_DEPTH_CEILING,
+      ),
+      maxSubtreeNodes: ceilingBoundedPositiveInteger(
+        block.maxSubtreeNodes, 'readPlan.projectSubtree.maxSubtreeNodes',
+        DEFAULT_MAX_SUBTREE_NODES, MAX_SUBTREE_NODES_CEILING,
+      ),
+      maxSubtreeRoots: ceilingBoundedPositiveInteger(
+        block.maxSubtreeRoots, 'readPlan.projectSubtree.maxSubtreeRoots',
+        DEFAULT_MAX_SUBTREE_ROOTS, MAX_SUBTREE_ROOTS_CEILING,
+      ),
+      // The project node itself is queried for heads too. One extra read, and on the measured
+      // catalog the difference between "the project's own heads" and "no roots at all".
+      includeSelf: optionalBoolean(block.includeSelf, 'readPlan.projectSubtree.includeSelf', true),
+    }
+    // MANDATORY READ BUDGET (see (3) in the projectSubtree banner). Refused HERE rather than
+    // defaulted, because a default read ceiling picked by this module would be a number nobody
+    // measured, and the deployments that need the subtree are exactly the ones whose read
+    // amplification has to be a deliberate, reviewed figure.
+    if (out.maxReadCount === undefined) {
+      throw new StockPreparationBomExpansionError(
+        'readPlan.maxReadCount is required when readPlan.projectSubtree is enabled',
+        { field: 'readPlan.maxReadCount', reason: 'PROJECT_SUBTREE_REQUIRES_READ_BUDGET' },
+      )
+    }
   }
   if (out.matchField !== out.pathExAttr.matchField) {
     throw new StockPreparationBomExpansionError('readPlan.matchField must match readPlan.pathExAttr.matchField', {
@@ -533,7 +713,36 @@ function boundedPreviewSummary(summary = {}, errorTypes = []) {
   return out
 }
 
-function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootMatches, maxDepth, maxRows, maxPages, maxReadCount, maxElapsedMs, readStats, errors, rowErrors }) {
+/**
+ * A COUNTS-ONLY projection of the subtree segment. Every member is an integer; not one business
+ * value crosses into it, and the keys exist only when the block is enabled — the same
+ * conditional-key discipline `createRow` applies to `spec`/`sortLine`, so a plan without the block
+ * produces a summary whose key set is byte-identical to the pre-feature one.
+ *
+ * `rootQuantitySource` is the honest half: it says how many depth-0 rows carried a MEASURED order
+ * quantity and how many carried the defaulted `SUBTREE_ROOT_DEFAULT_QUANTITY`. The row itself cannot
+ * say which it is, so the evidence does.
+ */
+function subtreeSummaryOf(counters) {
+  if (!isPlainObject(counters)) return undefined
+  return {
+    nodesVisited: Number(counters.nodesVisited || 0),
+    // Redundant arrivals at a folder node already queued by another branch — a DAG-shaped
+    // directory, a duplicate parent row, or a project naming both an ancestor and its descendant.
+    // Ordinary, counted, never an error (see the LOOP/RE-VISIT note on `discoverSubtreeRoots`).
+    nodesSkippedAlreadyVisited: Number(counters.nodesSkippedAlreadyVisited || 0),
+    rootsDiscovered: Number(counters.rootsDiscovered || 0),
+    rootsExpanded: Number(counters.rootsExpanded || 0),
+    rootsSkippedAlreadyExpanded: Number(counters.rootsSkippedAlreadyExpanded || 0),
+    rootsWithoutChildren: Number(counters.rootsWithoutChildren || 0),
+    rootQuantitySource: {
+      orderDetail: Number((counters.rootQuantitySource || {}).orderDetail || 0),
+      subtreeDefault: Number((counters.rootQuantitySource || {}).subtreeDefault || 0),
+    },
+  }
+}
+
+function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootMatches, maxDepth, maxRows, maxPages, maxReadCount, maxElapsedMs, readStats, errors, rowErrors, subtree }) {
   const summary = {
     projectNoPresent,
     matchField,
@@ -560,6 +769,10 @@ function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootM
       manualConfirm: 0,
     }
   }
+  // CONDITIONAL KEY — present only when the deployment enabled the block. Appended last so the
+  // preceding key order is untouched.
+  const subtreeCounts = subtreeSummaryOf(subtree)
+  if (subtreeCounts) summary.subtree = subtreeCounts
   return summary
 }
 
@@ -656,7 +869,7 @@ function rowFromPart(plan, { projectNo, parentSourceId, pathTokens, depth, partR
   }
 }
 
-function failureResult({ projectNoPresent, matchField, status = 'failed', rows, errors, rowErrors, readStats, rootMatches, maxDepth, maxRows, maxPages, maxReadCount, maxElapsedMs }) {
+function failureResult({ projectNoPresent, matchField, status = 'failed', rows, errors, rowErrors, readStats, rootMatches, maxDepth, maxRows, maxPages, maxReadCount, maxElapsedMs, subtree }) {
   return {
     valid: false,
     status,
@@ -677,6 +890,7 @@ function failureResult({ projectNoPresent, matchField, status = 'failed', rows, 
       readStats,
       errors,
       rowErrors,
+      subtree,
     }),
   }
 }
@@ -710,7 +924,12 @@ async function expandPlmProjectBom(input = {}) {
     maxPages: positiveInteger(input.maxPages, 'maxPages', DEFAULT_MAX_PAGES),
     maxDepth: nonNegativeInteger(input.maxDepth, 'maxDepth', DEFAULT_MAX_DEPTH),
     maxRows: positiveInteger(input.maxRows, 'maxRows', DEFAULT_MAX_ROWS),
-    maxReadCount: optionalPositiveInteger(input.maxReadCount, 'maxReadCount'),
+    // The per-invocation budget still wins where it is given; the PLAN's budget is the floor under
+    // it. Both absent stays both absent, so nothing about an existing caller changes — but a plan
+    // that enabled `projectSubtree` cannot be budget-less, because the normalizer refused it.
+    maxReadCount: optionalPositiveInteger(input.maxReadCount, 'maxReadCount') !== undefined
+      ? optionalPositiveInteger(input.maxReadCount, 'maxReadCount')
+      : plan.maxReadCount,
     maxElapsedMs: optionalPositiveInteger(input.maxElapsedMs, 'maxElapsedMs'),
     startedAtMs: Number.isFinite(input.startedAtMs) ? Number(input.startedAtMs) : Date.now(),
     now: typeof input.now === 'function' ? input.now : Date.now,
@@ -722,6 +941,20 @@ async function expandPlmProjectBom(input = {}) {
   const errors = []
   const rowErrors = []
   const rows = []
+  // Zeroed the moment the block is enabled — so "enabled" and "the summary carries subtree counts"
+  // are the same fact on every exit path, including `not_found` and an entry-read failure. Stays
+  // `undefined` when the block is absent, which is what keeps the disabled summary byte-identical.
+  const subtreeCounters = plan.projectSubtree
+    ? {
+      nodesVisited: 0,
+      nodesSkippedAlreadyVisited: 0,
+      rootsDiscovered: 0,
+      rootsExpanded: 0,
+      rootsSkippedAlreadyExpanded: 0,
+      rootsWithoutChildren: 0,
+      rootQuantitySource: { orderDetail: 0, subtreeDefault: 0 },
+    }
+    : undefined
 
   const read = (object, filters) => readAll(sourceAdapter, object, filters, options, readStats)
   const addGlobalError = (type, details = {}) => {
@@ -754,7 +987,25 @@ async function expandPlmProjectBom(input = {}) {
 
   let pathMatches = []
   try {
-    pathMatches = await read(plan.pathExAttr.object, { [plan.pathExAttr.matchField]: projectNo })
+    // THE ENTRY READ, RE-FILTERED CLIENT-SIDE — the one read in this module that was not.
+    //
+    // Every other filtered read whose result decides WHICH PROJECT'S DATA we are looking at already
+    // goes through `matchesByField`, because `readAll` RECORDS `filtersApplied` and never ENFORCES
+    // it, and `bridge:legacy-sql-readonly` may legally answer with the whole table. This read was
+    // the exception, and it is the most load-bearing one of all: its rows ARE the project — they
+    // seed the order loop's folder-node lookups AND the subtree segment's BFS.
+    //
+    // Unfiltered, a single say-anything source turns every other project's directory node into a
+    // depth-0 node of THIS project, and the resulting rows land as this project's stock-preparation
+    // lines with `status: expanded`, `valid: true`, `errors: []` — a clean bill of health on
+    // cross-project data, with `dataScopeRef` still naming the one project the request asked for.
+    //
+    // Filtering HERE rather than in the subtree segment is deliberate: one clean `pathMatches`
+    // serves both root segments, and the order path — which had the identical exposure before this
+    // change — is closed by the same line. Against a source that applies its filters, this is a
+    // no-op; the behaviour only differs against a source that lied.
+    const pathExAttrRows = await read(plan.pathExAttr.object, { [plan.pathExAttr.matchField]: projectNo })
+    pathMatches = matchesByField(pathExAttrRows, plan.pathExAttr.matchField, projectNo)
   } catch (err) {
     addReadError(err, plan.pathExAttr.object)
     return failureResult({
@@ -770,6 +1021,7 @@ async function expandPlmProjectBom(input = {}) {
       maxPages: options.maxPages,
       maxReadCount: options.maxReadCount,
       maxElapsedMs: options.maxElapsedMs,
+      subtree: subtreeCounters,
     })
   }
 
@@ -794,6 +1046,7 @@ async function expandPlmProjectBom(input = {}) {
         readStats,
         errors: [],
         rowErrors: [],
+        subtree: subtreeCounters,
       }),
     }
   }
@@ -900,6 +1153,122 @@ async function expandPlmProjectBom(input = {}) {
     }
   }
 
+  /**
+   * BREADTH-FIRST over the project's FOLDER subtree, returning the `part_id`s of the BOM heads that
+   * hang off it — in discovery order, de-duplicated.
+   *
+   * Returns `null` when the traversal refused (cycle / node ceiling / root ceiling). A refusal is a
+   * GLOBAL error by then, so the caller must not treat `null` as "no roots".
+   *
+   * Two properties do the safety work, and both are testable by making the source misbehave:
+   *
+   *   RE-FILTERING. Both reads THIS function issues — child nodes by parent, heads by folder node —
+   *   go through `matchesByField` before anything is believed, and the SEEDS are covered by the
+   *   same discipline one level up (`pathMatches` is re-filtered at the entry read). A source
+   *   answering `filtersApplied: false` hands back the WHOLE table; without those filters the first
+   *   hop would adopt every folder node in the catalog as this project's child and then read other
+   *   projects' BOM heads under this project's authorization, with `dataScopeRef` still naming the
+   *   one project the request asked for. The reads `expandChildren` makes for each discovered root
+   *   are NOT re-filtered — see the banner: they are the order path's reads, shared verbatim.
+   *
+   *   TERMINATION, and the difference between a LOOP and a RE-VISIT. These are two different facts
+   *   and they get two different answers:
+   *
+   *     A LOOP is a node that is its own ancestor — the parent chain that led here comes back to
+   *     this node. That is a mis-shaped directory whose traversal cannot terminate on its own, and
+   *     it is refused: `subtree_cycle_detected`, global, fail-closed. Each queue item therefore
+   *     carries its ANCESTOR CHAIN (bounded by `maxSubtreeDepth` <= 4, so it is a 4-element array,
+   *     not a data structure worth optimizing).
+   *
+   *     A RE-VISIT is a node reached a second time by a DIFFERENT branch: a DAG-shaped directory
+   *     where two folders share a child, or — the case that matters most — a project whose
+   *     pathExAttr rows name BOTH an ancestor and one of its descendants, which is an ordinary
+   *     directory shape and not a fault at all. It is SKIPPED (its heads were already collected the
+   *     first time) and COUNTED as `nodesSkippedAlreadyVisited`. Refusing it would kill the entire
+   *     pull — the ALREADY-COMPLETED order path included — over a perfectly well-formed directory.
+   */
+  async function discoverSubtreeRoots(seedPathIds, subtree, counters) {
+    // Membership is decided AT ENQUEUE, not at dequeue. Deciding it at dequeue is functionally
+    // identical but lets one node enter the queue once per PARENT EDGE pointing at it, so a
+    // pathInfo table with many rows naming the same child (duplicates, a wide DAG) inflates the
+    // queue to `pageLimit * maxPages` entries per visited node while doing exactly the same work.
+    // The structural ceilings bound the WORK, not that array. Enqueueing each node at most once
+    // bounds both. BFS is FIFO, so the first enqueue of a node is always its minimum depth and
+    // dropping the later ones cannot cost a child.
+    const queued = new Set(seedPathIds)
+    const roots = []
+    const rootsSeen = new Set()
+    const queue = seedPathIds.map((nodeId) => ({ nodeId, depth: 0, ancestors: [] }))
+
+    while (queue.length > 0) {
+      if (errors.length > 0) return null
+      const { nodeId, depth, ancestors } = queue.shift()
+      if (counters.nodesVisited >= subtree.maxSubtreeNodes) {
+        addGlobalError(SUBTREE_NODE_LIMIT_EXCEEDED_ERROR_TYPE, {
+          object: plan.pathInfo.object,
+          maxSubtreeNodes: subtree.maxSubtreeNodes,
+        })
+        return null
+      }
+      counters.nodesVisited += 1
+
+      // The heads hanging off THIS node. `includeSelf` decides whether the project node itself is
+      // asked; every deeper node always is.
+      if (depth > 0 || subtree.includeSelf) {
+        const headRows = await read(plan.bomHead.object, { [subtree.bomHead.pathIdField]: nodeId })
+        const heads = matchesByField(headRows, subtree.bomHead.pathIdField, nodeId)
+          .filter((head) => isActiveBomHead(head, plan.bomHead.activeField))
+        for (const head of heads) {
+          const rootSourceId = toKey(readField(head, plan.bomHead.parentPartField))
+          if (rootSourceId === null) continue
+          // ONE ROOT PER PART, not one per head. A part with two heads (a measured customer shape)
+          // would otherwise become two roots whose idempotencyKeys are byte-identical, which the
+          // conflict planner groups and HOLDS — turning the whole plan into manual_confirm.
+          if (rootsSeen.has(rootSourceId)) continue
+          rootsSeen.add(rootSourceId)
+          if (roots.length >= subtree.maxSubtreeRoots) {
+            addGlobalError(SUBTREE_ROOT_LIMIT_EXCEEDED_ERROR_TYPE, {
+              object: plan.bomHead.object,
+              maxSubtreeRoots: subtree.maxSubtreeRoots,
+            })
+            return null
+          }
+          roots.push(rootSourceId)
+        }
+      }
+
+      if (depth >= subtree.maxSubtreeDepth) continue
+      const childRows = await read(plan.pathInfo.object, { [subtree.pathInfo.parentIdField]: nodeId })
+      const children = matchesByField(childRows, subtree.pathInfo.parentIdField, nodeId)
+      const childAncestors = ancestors.concat(nodeId)
+      for (const child of children) {
+        const childId = toKey(readField(child, plan.pathInfo.idField))
+        if (childId === null) continue
+        // ORDER MATTERS: the ancestor test comes FIRST. A node on this branch's own chain is a
+        // LOOP — descending would walk that chain forever — and it is refused whether or not some
+        // other branch has already queued it. `childAncestors` includes `nodeId`, so a
+        // self-referencing node (the simplest and commonest form) is caught by the same test.
+        if (childAncestors.includes(childId)) {
+          addGlobalError(SUBTREE_CYCLE_DETECTED_ERROR_TYPE, {
+            object: plan.pathInfo.object,
+            depth: depth + 1,
+          })
+          return null
+        }
+        // Not a loop, but already spoken for: a DAG merge, a duplicate parent row, or a seed that
+        // is this node's ancestor. Counted and dropped — never re-queued, so redundant parent edges
+        // cost a counter increment rather than a queue slot.
+        if (queued.has(childId)) {
+          counters.nodesSkippedAlreadyVisited += 1
+          continue
+        }
+        queued.add(childId)
+        queue.push({ nodeId: childId, depth: depth + 1, ancestors: childAncestors })
+      }
+    }
+    return roots
+  }
+
   try {
     for (const pathRow of pathMatches) {
       if (errors.length > 0) break
@@ -964,6 +1333,13 @@ async function expandPlmProjectBom(input = {}) {
           }
           if (rowResult.extErrors) rowResult.extErrors.forEach(addRowError)
           if (!pushRow(rowResult.row)) break
+          // The ONLY line the order loop gained, and it is a no-op unless the optional block is
+          // configured. Counted HERE, where an order root is actually produced, rather than
+          // re-derived later from `rows`: the subtree segment does not run on every exit path (an
+          // early failure, a `not_found`), and a count derived there would report 0 order-sourced
+          // roots for a run that produced several — the one number `rootQuantitySource` exists to
+          // get right.
+          if (subtreeCounters) subtreeCounters.rootQuantitySource.orderDetail += 1
           await expandChildren(rowResult.row, pathTokens)
         }
       }
@@ -972,6 +1348,87 @@ async function expandPlmProjectBom(input = {}) {
     const bounded = readLimitErrorDetails(err)
     if (bounded) addGlobalError(bounded.type, bounded)
     else addGlobalError('read_failed', { causeClass: safeErrorCode(err), message: err && err.message })
+  }
+
+  // ---- SECOND ROOT SEGMENT: the project's folder subtree (optional, off by default) ------------
+  //
+  // Everything above this line is the order path, unchanged to the character. Everything below runs
+  // only when `plan.projectSubtree` exists, and only when the order path finished clean: after a
+  // `max_rows_exceeded` or a `cycle_detected` the run is already failed, and continuing to read
+  // would burn budget and re-push the same global error once per remaining root.
+  //
+  // Its own try/catch, INSIDE the function, for the reason the order loop has one: a read that
+  // blows `maxReadCount`/`maxElapsedMs` throws, and an uncaught throw here would reject the whole
+  // expansion into a 500 instead of the global error -> `status: failed` -> `canApply: false` this
+  // design depends on.
+  if (plan.projectSubtree && errors.length === 0) {
+    const subtree = plan.projectSubtree
+    // EVERY component this run has already expanded — roots AND children. See (2) in the banner:
+    // de-duplicating only against order ROOTS leaves the common case (a part that is an order root's
+    // child and a subtree root) producing two rows the planner cannot even see as related.
+    const expandedComponentIds = new Set()
+    for (const row of rows) {
+      if (row.componentSourceId !== null && row.componentSourceId !== undefined) {
+        expandedComponentIds.add(row.componentSourceId)
+      }
+    }
+    try {
+      // The project's folder nodes, taken from the pathExAttr rows the entry read ALREADY returned.
+      // No extra read, and the order loop above is not touched to produce them.
+      const seedPathIds = []
+      for (const pathRow of pathMatches) {
+        const pathId = toKey(readField(pathRow, plan.pathExAttr.pathIdField))
+        if (pathId !== null && !seedPathIds.includes(pathId)) seedPathIds.push(pathId)
+      }
+
+      const discovered = await discoverSubtreeRoots(seedPathIds, subtree, subtreeCounters)
+      if (discovered) {
+        subtreeCounters.rootsDiscovered = discovered.length
+        for (const rootSourceId of discovered) {
+          if (errors.length > 0) break
+          if (expandedComponentIds.has(rootSourceId)) {
+            subtreeCounters.rootsSkippedAlreadyExpanded += 1
+            continue
+          }
+          const partRow = await readPart(rootSourceId, 0)
+          if (!partRow) continue
+          const pathTokens = [rootSourceId]
+          const rowResult = rowFromPart(plan, {
+            projectNo,
+            parentSourceId: null,
+            pathTokens,
+            depth: 0,
+            partRow,
+            rawQuantity: SUBTREE_ROOT_DEFAULT_QUANTITY,
+            totalQuantity: SUBTREE_ROOT_DEFAULT_QUANTITY,
+            active: true,
+            extFieldMapping,
+          })
+          if (rowResult.error) {
+            addRowError(rowResult.error)
+            continue
+          }
+          if (rowResult.extErrors) rowResult.extErrors.forEach(addRowError)
+          if (!pushRow(rowResult.row)) break
+          expandedComponentIds.add(rowResult.componentSourceId)
+          subtreeCounters.rootsExpanded += 1
+          subtreeCounters.rootQuantitySource.subtreeDefault += 1
+          const rowsBefore = rows.length
+          await expandChildren(rowResult.row, pathTokens)
+          // A root whose head SysVer does not match its part's SysVer gets NO children, because
+          // `expandChildren` re-reads bomHead filtered by the part's version. Counted rather than
+          // silent, so "we pulled six bare roots" is a number in evidence and not a surprise.
+          if (rows.length === rowsBefore) subtreeCounters.rootsWithoutChildren += 1
+          for (let index = rowsBefore; index < rows.length; index += 1) {
+            expandedComponentIds.add(rows[index].componentSourceId)
+          }
+        }
+      }
+    } catch (err) {
+      const bounded = readLimitErrorDetails(err)
+      if (bounded) addGlobalError(bounded.type, bounded)
+      else addGlobalError('read_failed', { causeClass: safeErrorCode(err), message: err && err.message })
+    }
   }
 
   const status = errors.length > 0 || rowErrors.length > 0 ? 'failed' : 'expanded'
@@ -995,13 +1452,14 @@ async function expandPlmProjectBom(input = {}) {
       readStats,
       errors,
       rowErrors,
+      subtree: subtreeCounters,
     }),
   }
 }
 
 function summarizeBomExpansionForEvidence(result = {}) {
   const summary = isPlainObject(result.summary) ? result.summary : {}
-  return {
+  const evidence = {
     valid: result.valid === true,
     status: typeof result.status === 'string' ? result.status : summary.status,
     projectNoPresent: summary.projectNoPresent === true,
@@ -1021,6 +1479,11 @@ function summarizeBomExpansionForEvidence(result = {}) {
     boundedPreview: isLargeBomBoundedExpansion(result) ? boundedPreviewSummary(summary, scaleErrorTypes(result.errors)) : undefined,
     actions: isPlainObject(summary.actions) ? { ...summary.actions } : undefined,
   }
+  // Same conditional key as the summary's: absent block => absent key => an evidence object whose
+  // key set is byte-identical to the pre-feature one.
+  const subtree = subtreeSummaryOf(summary.subtree)
+  if (subtree) evidence.subtree = subtree
+  return evidence
 }
 
 module.exports = {
@@ -1031,6 +1494,12 @@ module.exports = {
   LARGE_BOM_BOUNDED_ERROR_TYPES,
   INCOMPLETE_READ_ERROR_TYPES,
   READ_CURSOR_BROKEN_ERROR_TYPE,
+  SUBTREE_CYCLE_DETECTED_ERROR_TYPE,
+  SUBTREE_NODE_LIMIT_EXCEEDED_ERROR_TYPE,
+  SUBTREE_ROOT_LIMIT_EXCEEDED_ERROR_TYPE,
+  PROJECT_SUBTREE_ERROR_TYPES,
+  PROJECT_SUBTREE_LIMITS,
+  SUBTREE_ROOT_DEFAULT_QUANTITY,
   FORBIDDEN_PLAN_KEYS,
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
   STOCK_PREPARATION_BOM_SOURCE_KINDS,

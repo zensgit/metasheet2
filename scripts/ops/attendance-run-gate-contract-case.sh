@@ -89,6 +89,15 @@ function expect_fail() {
 }
 
 if [[ "$CASE_ID" == "strict" ]]; then
+  info "running hermetic acceptance identity and permission contracts"
+  node --test \
+    ./scripts/ops/attendance-acceptance-preflight.test.mjs \
+    ./scripts/ops/attendance-acceptance-wiring.test.mjs \
+    ./scripts/ops/attendance-provision-user.test.mjs \
+    ./scripts/ops/attendance-verifier-contract.test.mjs \
+    ./scripts/ops/attendance-auth-scripts.test.mjs \
+    ./scripts/ops/resolve-attendance-smoke-token.test.mjs
+
   info "running strict import advanced-panel contract"
   node --test ./scripts/ops/attendance-strict-import-advanced-contract.test.mjs
 
