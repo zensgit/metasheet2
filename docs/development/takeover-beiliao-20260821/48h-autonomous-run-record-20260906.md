@@ -94,3 +94,7 @@
 16. **后台大 BOM 作业的"后台"目前只是任务契约,不是真正的 worker(记录,暂不改)**:大 BOM 展开作业的 run 路由在一次 HTTP 请求内同步 `await` 完整展开与写入——W3c 复测里 453.6 秒的写入循环就是在同一个请求里跑完的。客户端体验是"提交后长时间挂起等待响应",不是异步轮询进度。是否需要改造成真正的后台 worker + 轮询接口,待拍板。
 
 17. **`audit_logs` 分区的创建时机**:数据库函数 `create_audit_partition()`(建下个月分区)存在但没有任何调用者——不在应用启动流程,也没有接每日调度,分区目前只能靠手工 SQL 或"撞上缺分区错误后自愈"。**#5506 已合入 main**(66d40c2fb,2026-09-06 04:20)只修复了自愈的识别逻辑(改按 SQLSTATE 而不是英文报错文案),没有改变"只能事后自愈、不能提前预建"这个姿态。是否要把 `create_audit_partition()` 接到启动检查或每日调度,待拍板。
+
+18. **确认队列 tab 的管理员 ensure/reconcile 两个按钮在 main 上未接线**:`StockPreparationConfirmationQueueView.vue` 两个按钮只 `emit('admin-action', 'ensure' | 'reconcile')`,`StockPreparationWorkspace.vue:91-93` 渲染该组件时没有监听 `@admin-action`——点了不发任何请求(与 `beiliao-data-map.html` 直言缺口一节所记一致)。要不要接线,待拍板。
+
+19. **reconcile 的 projectNo 由调用者提供、同租户内无按项目 ACL**:`stock-preparation-confirmation-decisions.cjs:1068-1086` 的孤儿清扫按请求携带的 projectNo 圈定既有行范围(不跨租户),但同一租户内任何持有 reconcile 权限的调用者都能对任意 projectNo 发起孤儿清扫,把该项目下别人的 pending 决定行作废(改判 superseded)——校验的是租户归属,不是"这个调用者是否归属这个项目"。要不要为 reconcile 加一道项目归属校验(收的是归属不是权限档位 tier),待拍板。

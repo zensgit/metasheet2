@@ -248,8 +248,8 @@
         <dt>{{ bi('这个面板能做什么、不能做什么', 'What this panel can and cannot do') }}</dt>
         <dd>
           {{ bi(
-            '只驱动四条已有路由,没有新增任何写入权限:dry-run(read)、reconcile(admin)、apply(write)、mvp-persist(admin,受部署开关控制)。不向 ERP/K3 写入,不新建物料,不提供 SQL 入口。',
-            'Drives four EXISTING routes and adds no new write authority: dry-run (read), reconcile (admin), apply (write), mvp-persist (admin, behind a deployment flag). No ERP/K3 write, no material creation, no SQL entry point.',
+            '只驱动四条已有路由,没有新增任何写入权限:dry-run(read)、reconcile(管理员或一线操作员)、apply(write)、mvp-persist(admin,受部署开关控制)。不向 ERP/K3 写入,不新建物料,不提供 SQL 入口。',
+            'Drives four EXISTING routes and adds no new write authority: dry-run (read), reconcile (admin or floor operator), apply (write), mvp-persist (admin, behind a deployment flag). No ERP/K3 write, no material creation, no SQL entry point.',
           ) }}
         </dd>
       </dl>

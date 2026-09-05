@@ -12,6 +12,10 @@
 //   POST …/table-actions/:actionId/apply                            requireAccess(req, 'write')
 //   POST …/table-actions/:actionId/mvp-persist                      requireAccess(req, 'admin') + flag
 //
+// (dry-run, apply and reconcile are each ALSO reachable via the stock-prep operator tier, for the
+// pull-bom action id only, through `requireTableActionAccess` — reconcile joined in round-2 C13,
+// #5460. mvp-persist alone stayed admin-only. See workbenchAccess.canRunStockPrepProjectSync.)
+//
 // — and this file neither widens one nor invents a fifth. The server gates are the enforcement; the
 // panel's own visibility rule (workbenchAccess.canRunStockPrepProjectSync) exists so nobody is shown
 // a button that would 403, which is R-11's rule, not a second gate.
@@ -71,10 +75,14 @@ export type StockPreparationProjectSyncReason =
   | 'NOTHING_TO_CONFIRM'
   | 'CONFIRMATIONS_QUEUED'
   | 'RECONCILE_UNAVAILABLE'
-  // 一线自己拉数据: the operator may now run steps 1 and 3, and is still refused steps 2 and 4. That
-  // refusal is a CORRECT deployment state for them, not a fault, so it gets its own reason rather
-  // than borrowing RECONCILE_UNAVAILABLE's "try again later" — there is no later in which a
-  // 403 becomes a 200 for this caller, and telling them to retry would be a lie.
+  // 一线自己拉数据: round-2 (decision C13) additionally admitted the operator tier on reconcile, so
+  // an ordinary stock-prep operator now reaches steps 1, 2 and 3 and is refused only step 4
+  // (mvp-persist/archive). This reason is for whoever still lands on a 401/403 here — a caller
+  // holding neither the legacy admin tier nor the stock-prep operator tier, or an operator refused
+  // by the tenant-scope door — for whom that refusal is a CORRECT deployment state, not a fault, so
+  // it gets its own reason rather than borrowing RECONCILE_UNAVAILABLE's "try again later" — there
+  // is no later in which the SAME caller's 403 becomes a 200, and telling them to retry would be a
+  // lie.
   | 'RECONCILE_NOT_PERMITTED'
   // 3. 写入
   | 'IMPORTED'
@@ -726,14 +734,17 @@ export async function runStockPreparationProjectSync(
       }))
     } catch (error) {
       // Reconcile is the queue's REFRESH, not its only writer: rows an earlier run already ledgered
-      // are still in the queue. A refusal here (a lease held by another run, a caller without the
-      // platform-admin tier the route keeps) therefore costs the operator freshness, not the queue —
-      // so it is a SKIP that still points at the tab, never a failure of the import.
+      // are still in the queue. A refusal here (a lease held by another run, a caller holding neither
+      // the platform-admin tier nor the stock-prep operator tier the route now also admits) therefore
+      // costs the operator freshness, not the queue — so it is a SKIP that still points at the tab,
+      // never a failure of the import.
       //
-      // 一线自己拉数据 SPLITS THAT SKIP IN TWO. A stock-prep operator now reaches steps 1 and 3 and is
-      // still, by the owner's ruling, refused this one. For them a 401/403 is a permanent and CORRECT
-      // deployment state, not a transient one — so it gets a reason that says who runs this step
-      // instead of「稍后再试」, which for this caller would never come true.
+      // 一线自己拉数据 SPLITS THAT SKIP IN TWO. Round-2 (decision C13) admitted the stock-prep operator
+      // tier on this route, so an ordinary operator now reaches steps 1, 2 and 3 and is refused only
+      // step 4. Whoever still lands here with a 401/403 — a caller in neither tier, or an operator
+      // refused by the tenant-scope door — is in a permanent and CORRECT deployment state, not a
+      // transient one — so it gets a reason that says who runs this step instead of「稍后再试」, which
+      // for this caller would never come true.
       const status = statusOf(error)
       const detail: Record<string, string | number> = { status }
       const code = codeOf(error)

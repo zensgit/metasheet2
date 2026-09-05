@@ -25,17 +25,20 @@
 //   M-04 ALIGNMENT, both directions, per actor: rendered-capability set == answered-route set
 //   M-05 the degenerate grant `stock-prep:operate` WITHOUT `stock-prep:read` confers NOTHING on
 //        either side — the conjunction is what makes M-04 hold for every subset, not just tidy ones
-//   M-06 reconcile and ensure did NOT move: both still refuse every stock-prep code holder
+//   M-06 IN THIS MANIFEST, reconcile and ensure did NOT move: both still refuse every stock-prep
+//        code holder through the confirmation-queue control set. (The reconcile ROUTE gained a
+//        second, additive tier under the operator pull split — round-2 C13, see M-10 — but that is
+//        a different request shape than the one this manifest governs.)
 //   M-07 the gate refuses BEFORE any host work (no provisioning/records call on a refused request)
 //   M-08 every `stock-prep:*` token appearing in a requireAccess() call in http-routes.cjs is a
 //        member of the frozen vocabulary, and every manifest route is really registered
 //   M-09 the value-entry read is on OPERATE, not READ: a read-only actor is refused it, and the
 //        values-free queue stays readable to them (the deliberate split, pinned)
 //   M-10 项目接入 + THE OPERATOR PULL SPLIT: the four table-action routes the project-sync entry
-//        drives keep their LEGACY gates; dry-run and apply additionally admit the stock-prep operator
-//        tier for ONE frozen action id; reconcile and mvp-persist did not move and refuse it; the
-//        split is not a wildcard over the table-action namespace; and every refusal still costs no
-//        host work
+//        drives keep their LEGACY gates; dry-run, apply and reconcile additionally admit the
+//        stock-prep operator tier for ONE frozen action id (reconcile joined in round-2 C13); only
+//        mvp-persist did not move and still refuses it; the split is not a wildcard over the
+//        table-action namespace; and every refusal still costs no host work
 //   M-11 W4 THE TENANT-CLAIM HARD DOOR, over the whole manifest: with
 //        MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED armed, the capabilities whose tenancy the shared
 //        helpers decide refuse a CARRIED tenant (403 OPERATOR_SCOPE_TENANT_REQUIRED, zero host work,
@@ -917,20 +920,23 @@ async function valueEntryIsOperateNotRead() {
  *
  * WHAT THE OWNER THEN CHANGED, AND WHAT THEY DID NOT. 项目备料页 carries a ruling that a floor
  * operator may SELF-SERVE the pull: without it the page opens on a project whose BOM nobody on the
- * floor can bring in, and 「找平台管理员」 is not an answer at 07:00 on a shop floor. Two of the four
- * routes therefore gained a SECOND admitted tier. Two did not — and the pair that did not is exactly
- * the pair R-11(b) names as owner-level. So this block pins the SPLIT rather than the old uniform
- * refusal. Same job, sharper claim:
+ * floor can bring in, and 「找平台管理员」 is not an answer at 07:00 on a shop floor. Round-1 gave
+ * dry-run and apply a SECOND admitted tier; round-2 (decision C13) additionally moved reconcile,
+ * because leaving it admin-only put an operator whose plan had human-confirm rows into a closed
+ * loop. mvp-persist alone did not move — the one route R-11(b) still names as owner-level. So this
+ * block pins the SPLIT rather than the old uniform refusal. Same job, sharper claim:
  *
- *   M-10a the four routes keep their LEGACY gates unchanged, read out of the SOURCE. dry-run and
- *         apply reach them through `requireTableActionAccess`, which consults the operator tier ONLY
- *         after the legacy gate has already refused — so a gate quietly relaxed the other way (a bare
- *         `requireAccess(req, STOCK_PREP_OPERATE)`, which would widen these GENERIC routes to every
- *         table action on the deployment) still reddens here.
- *   M-10b THE TWO THAT STAYED, STAYED. The operator tier is refused at the gate on reconcile (a
- *         SOURCE READ that consumes a B2a claim when armed) and on mvp-persist, and neither handler
- *         may even mention the split helper. Everything below the operator tier is still refused on
- *         all four — including an operate-WITHOUT-read grant, because the tier is a CONJUNCTION.
+ *   M-10a the four routes keep their LEGACY gates unchanged, read out of the SOURCE. dry-run, apply
+ *         and reconcile reach them through `requireTableActionAccess`, which consults the operator
+ *         tier ONLY after the legacy gate has already refused — so a gate quietly relaxed the other
+ *         way (a bare `requireAccess(req, STOCK_PREP_OPERATE)`, which would widen these GENERIC
+ *         routes to every table action on the deployment) still reddens here.
+ *   M-10b THE ONE THAT STAYED, STAYED. The operator tier is refused at the gate on mvp-persist alone,
+ *         and its handler may not even mention the split helper. Everything below the operator tier
+ *         is still refused on all four — including an operate-WITHOUT-read grant, because the tier is
+ *         a CONJUNCTION. (Reconcile's manifest-rendered capability — the confirmation-queue admin
+ *         button, a SOURCE READ that consumes a B2a claim when armed — is a separate request shape
+ *         governed by STOCK_PREP_WORKBENCH_CAPABILITIES and did not move; see M-06.)
  *   M-10c THE SPLIT IS SCOPED TO ONE ACTION ID. The same operator on any other actionId is refused
  *         on all four: the widening is not a wildcard over the table-action namespace.
  *   M-10d and every refusal still costs nothing — no provisioning or records call is made on the way
@@ -975,10 +981,10 @@ const NON_STOCK_PREP_ACTION_ID = 'k3.material.pull.v1'
 function projectSyncGatesAreUnchanged() {
   for (const route of PROJECT_SYNC_ROUTES) {
     // The gate is the FIRST gate call in the handler body. Matching on the handler name keeps the
-    // assertion attached to the route rather than to a line number. The two split routes name their
-    // legacy token as the third argument of `requireTableActionAccess`; the two that stayed name it
-    // as the second argument of `requireAccess`. Either way the TOKEN must be the one the route has
-    // always used.
+    // assertion attached to the route rather than to a line number. The three split routes name
+    // their legacy token as the third argument of `requireTableActionAccess`; the one that stayed
+    // names it as the second argument of `requireAccess`. Either way the TOKEN must be the one the
+    // route has always used.
     const pattern = route.operatorMayRun
       ? new RegExp(`async ${route.handler}\\(req, res\\) \\{[\\s\\S]{0,400}?await requireTableActionAccess\\(req, [A-Za-z]+, '([a-z]+)'`)
       : new RegExp(`async ${route.handler}\\(req, res\\) \\{[\\s\\S]{0,400}?requireAccess\\(req, '([a-z]+)'\\)`)
@@ -995,7 +1001,7 @@ function projectSyncGatesAreUnchanged() {
       `M-10a: ${route.path} is registered in the route table`,
     )
   }
-  // The two that stayed must not have acquired the split helper at all.
+  // The one that stayed (mvp-persist) must not have acquired the split helper at all.
   for (const route of PROJECT_SYNC_ROUTES.filter((entry) => !entry.operatorMayRun)) {
     const body = new RegExp(`async ${route.handler}\\(req, res\\) \\{[\\s\\S]{0,400}`).exec(HTTP_ROUTES_SOURCE)
     assert.ok(body, `M-10b: ${route.handler} body is readable`)

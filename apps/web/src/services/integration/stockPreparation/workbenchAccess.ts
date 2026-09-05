@@ -122,7 +122,9 @@ export const STOCK_PREP_OPERATOR_PULL_STEPS: readonly { step: string; method: st
   }),
 ])
 
-/** The pull steps that STAYED platform-admin. The web orchestration skips over both with a reason. */
+/** The pull step that STAYED platform-admin (reconcile joined the operator split in round-2 C13
+ *  and moved to STOCK_PREP_OPERATOR_PULL_STEPS above). The web orchestration skips over it with a
+ *  reason. */
 export const STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS: readonly { step: string; method: string; path: string; legacyGate: string }[] = Object.freeze([
   Object.freeze({
     step: 'mvp-persist',
@@ -343,20 +345,23 @@ export function canRunStockPrepInstall(hasPermission: StockPrepPermissionProbe):
  *   reconcile   'admin'  platform admin ONLY
  *   mvp-persist 'admin'  platform admin ONLY
  *
- * 一线自己拉数据 CHANGED THAT, by the owner's ruling: the two routes that DO the pull now additionally
- * admit the stock-prep operator tier (operate ∧ read), for the pull-bom action id only, and the two
- * that stayed platform-admin are precisely the two the run can finish without —
+ * 一线自己拉数据 CHANGED THAT, by the owner's ruling. Round-1 additionally admitted the stock-prep
+ * operator tier (operate ∧ read) on the two routes that DO the pull, for the pull-bom action id
+ * only; round-2 (decision C13, #5460) additionally moved reconcile, because leaving it admin-only
+ * put an operator whose plan had human-confirm rows into a closed loop. mvp-persist alone stayed
+ * platform-admin — the one step the run can finish without —
  *
  *   dry-run     'read'  OR stock-prep operate ∧ read     <- the operator's step 1
+ *   reconcile   'admin' OR stock-prep operate ∧ read     <- the operator's step 2 (round-2 C13)
  *   apply       'write' OR stock-prep operate ∧ read     <- the operator's step 3
- *   reconcile   'admin'                                  <- SKIPPED with a reason for them
  *   mvp-persist 'admin'                                  <- SKIPPED with a reason for them
  *
  * — so an operator's run reaches 「导进去了吗?」 honestly rather than 403-ing partway. R-11's
  * "visible must be actionable" therefore still holds for this control: what the operator can press,
- * the server answers; the two steps they cannot run are not controls at all, they are lines in the
- * step list that say who runs them (`RECONCILE_NOT_PERMITTED` / `BATCH_ARCHIVE_NOT_PERMITTED` in
- * plainLanguage.ts).
+ * the server answers; the one step they cannot run is not a control at all, it is a line in the
+ * step list that says who runs it (`BATCH_ARCHIVE_NOT_PERMITTED` in plainLanguage.ts;
+ * `RECONCILE_NOT_PERMITTED` still exists for a caller in neither tier, or an operator refused by the
+ * tenant-scope door).
  *
  * The disjunction is written out here rather than delegated because it is a disjunction of two
  * different vocabularies — the legacy `integration:*` tier and the stock-prep tier — and neither

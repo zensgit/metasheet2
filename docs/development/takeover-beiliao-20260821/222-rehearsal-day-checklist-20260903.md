@@ -38,8 +38,8 @@ pg_dump $env:DATABASE_URL -Fc -f "$backupDir\pre-upgrade-db.dump"
 | 角色 | 干什么 |
 |---|---|
 | 我方工程师 | §1 部署、§2 绑定、§6 回退 |
-| 平台管理员(`role:admin` / `integration:admin`) | §3 授权限+命名空间准入;`mvp-persist`;`confirmation-decisions/reconcile` |
-| 客户一线操作员(`stock-prep:operate` **且** `stock-prep:read`) | §4 四步 |
+| 平台管理员(`role:admin` / `integration:admin`) | §3 授权限+命名空间准入;`mvp-persist` |
+| 客户一线操作员(`stock-prep:operate` **且** `stock-prep:read`) | §4 四步(含 `confirmation-decisions/reconcile`,见 :204 3-3) |
 
 > r7 订正:§2/§3 的 admin API 调用用的 token 由宿主内 `scripts/ops/attendance-window-runner-mint-token.mjs`(复制到 `packages/core-backend/scripts/` 下再跑,`--find-admin` 找已存在的 admin,`--mint --user-id <id> --roles admin --expires-in 3600 --tenant-id default`,用完删掉)现签,不碰密码;**用 `--tenant-id default` 签发后令牌自带 tenant claim**,`x-tenant-id` 头可以继续带但不再是租户来源;flag 开启后不带 tenant claim 的令牌会被 403。
 | owner | 全程在场 —— 半生产机,考勤/审批是真实在跑的业务数据 |
