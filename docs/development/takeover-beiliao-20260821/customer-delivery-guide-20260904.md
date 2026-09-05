@@ -81,7 +81,7 @@ PathExAttrInfo.FileCode(NodeType=2 项目节点) → PathInfo → OrderHeadInfo 
 | 2 | 外部系统绑定该连接 | 该连接对应的"外部系统"记录,`kind` 必须是 `data-source:sql-readonly`,且其 `connectionId` 必须非空并指向第 1 步新建的连接(#5452 起的约束)。若沿用一条历史遗留的外部系统记录(未打 `dataSourceOwnerId` 标记),source-preflight 会报 `CONNECTION_LEGACY_FALLBACK_DENIED`;修法:`GET /api/integration/external-systems/:id` 取出原样公开字段(`id`/`tenantId`/`name`/`kind`/`role`/`status`/`config`/`capabilities`),补上 `connectionId = config.dataSourceId` 后 `POST /api/integration/external-systems` 回写(需 admin token + `x-tenant-id` 请求头)。 |
 | 3 | 源绑定切换 | `POST /api/integration/stock-preparation/source-binding`,body 只能带一个字段:<br>`{ "externalSystemId": "<第 2 步的外部系统 id>" }`<br>需要 `integration:admin` 权限。响应 `takesEffectWithoutRestart: true`,**不需要 `pm2 restart`**,立即生效。 |
 | 4 | 验证绑定生效 | `GET /api/integration/stock-preparation/source-binding` 应读到新值;`GET /api/integration/stock-preparation/audit` 应能看到一条 `action: 'source_binding_set'` 的记录。 |
-| 5 | 源预检 | `GET /api/integration/stock-preparation/source-preflight?externalSystemId=<同上>`,期望 `verdict: 'go'`、`blockers: []`。 |
+| 5 | 源预检 | `GET /api/integration/stock-preparation/source-preflight?externalSystemId=<同上>`。**对本客户的 PLM,预期就是 `verdict: 'no-go'` 且带一条 `bom_store_signals_conflict` —— 这不是故障,也不阻断拉取**,原因与处置见 §7 ⑤。其它拦截码(如 `source_unreachable`、`entry_table_missing`、`no_project_numbers`、`CONNECTION_LEGACY_FALLBACK_DENIED`)才是真问题,须逐条修掉。 |
 
 **source-binding 请求体的窄接口纪律**:body 只接受 `externalSystemId` 一个键,不能带 `kind`/`readPlan`/`target` 等字段(400 `SOURCE_BINDING_REQUEST_INVALID`)——选源只能换"读哪个源",不能顺带改"怎么读"。绑定目标必须是**已存在、kind 落在只读集合**(`data-source:sql-readonly` / `bridge:legacy-sql-readonly`)的外部系统。
 
@@ -182,6 +182,28 @@ PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
 | ② | 旧模板建的表缺新字段 | 用旧模板(早期版本)建的沙箱备料表,遇到新版本模板新增字段时,`sandbox-target/ensure` 只解析已有字段、不补新增字段,会在写入子件行时报"未知字段"类错误。**用补字段脚本修**(`scripts/ops/stock-preparation-sandbox-add-missing-template-fields.cjs`,先不带 `--execute` 看计划,确认无误后再加 `--execute`),**不要手工建列**(手工建的列 id 与系统生成的稳定 id 不一致,会导致写入器仍然找不到字段)。 |
 | ③ | `x-tenant-id` 请求头在无租户声明 token 下可定租户 | 部分早期 token 不带租户声明时,系统会用请求头 `x-tenant-id` 来判定租户身份,理论上存在跨租户泄漏风险。系统性修复正在推进中。**单租户内网部署下该风险可控**(部署内只有一个租户,请求头无论传什么都落在同一个租户),但仍建议客户环境按最小暴露原则配置(不对外网开放管理类接口),交付时应向客户说明这一状态,不隐瞒。 |
 | ④ | 钉钉待办、宜搭推送、"通知下一步"接力链的通知投递本期不交付 | "通知下一步"按钮本身若配置了接力链(可选功能)可以推进"轮到谁"的状态,但钉钉待办、宜搭消息推送、以及接力链更完整的通知下一环功能均**不在本期交付范围**,客户若需要这类集成需另行排期。若不配置接力链,"通知下一步"按钮直接不出现,不影响拉取/填报/导出主线。 |
+| ⑤ | **源预检对本客户 PLM 必然报 `bom_store_signals_conflict`(no-go),但不阻断拉取** | 客户 PLM 里有**两套** BOM 存储:`DN_PDM_BomDetailsInfo`(约 1319 行)与 `DN_PDM_DesignBom`(约 2570 行)。预检对每套只抽样 200 行,两边都抽满,因此"哪套行数更多"这一信号**无法判定**;虽然"权威"和"列形状"两个信号都指向 `BomDetailsInfo`,预检仍按设计拒绝下结论,以免用抽样上限制造出虚假的一致。**2026-09-04 在 222 上对客户测试库实测**:不声明、声明 `declaredBridge=order-module` 两种情况都是 `no-go` 且拦截码不变;声明 `design-bom` 反而多一条 `declared_bridge_contradicts_measurement`。**当前没有"声明 BOM 存储"的入口可以消掉这条拦截。** 处置:①**照常继续**——同一时间实测的试算(dry-run)返回 HTTP 200 正常工作,预检是建议性报告而非拉取的闸门;②我方选用 `BomDetailsInfo` 是有依据的:客户旧备料系统的 mapper 只用 `BomHeadInfo`/`BomDetailsInfo`、从不引用 `DesignBom`,客户自己给出的 SQL 走法也走这一套;③若客户希望预检转 `go`,需要产品侧增加"声明权威 BOM 存储"的入口或提高抽样上限,已记录为待办。 |
+| ⑥ | **切换源绑定后必须写两次,否则"重新扫描待确认的事"会报"找不到源项目"** | 切源接口按"租户+工作区+动作"三元组存储,而**确认队列的对账**这一步不接受请求参数、只从登录身份推出工作区(为空)。若只从界面切源(界面会带工作区参数),对账读不到该绑定,会**回退到部署默认源**并对客户项目报 404「找不到源项目」——拉取明明正常,对账却说项目不存在。**2026-09-04 在 222 上实测复现并确认。** 处置:切源时**用带工作区参数与不带工作区参数各调用一次** `POST /api/integration/stock-preparation/source-binding`,使两个作用域一致;切完用同样两种方式各 `GET` 一次核对,`effectiveExternalSystemId` 必须都是新值。产品侧修复(让绑定解析与对账使用一致的作用域)已列入下一波。 |
+| ⑦ | **缺件行在确认队列里可见但当期无法确认,唯一解法是补源数据** | BOM 明细引用的零件不在物料表(`PartLibraryInfo`)时,这些行判为 `missing_component` 并挂起;跑一次对账后,它们会作为 `pending` 条目出现在确认队列里(多行同因会折叠成一条)。**但当期无法在界面上确认掉**:服务端的确认接口目前只实现了"同一键重复展开"这一种冲突的处理动作,对缺件类一律拒绝(409)。**已知缺陷:界面仍会对这些行显示"我来定…"按钮和三个下拉选项,操作员选任何一个都会失败,且错误提示会误导其更换选项——换哪个都一样。** 正确处置:**不要在队列里反复尝试**,去源端补齐缺失的零件(或修正其 `OBJ_ID`),补好后再拉取一次并对账,系统会自动关闭这些旧的挂起条目。前端按冲突类型收窄可选项/禁用按钮,已列入下一波。 |
+| ⑧ | 源绑定的读回受工作区作用域影响 | 切换源绑定后复核时,`GET /api/integration/stock-preparation/source-binding` 请**带上与写入时相同的 `workspaceId` 查询参数**。若写入与读回所带的工作区参数不一致,读回可能显示 `persistedBinding: null`、`origin: "deploy_default"`,看起来像"绑定没生效",实际已写入。以界面操作为准时两侧一致,不受影响。 |
+
+---
+
+## 7.1 规模:能拉多少行
+
+以下为代码与部署配置读出的确切数值,非估算。
+
+| 项 | 数值 | 性质 |
+|---|---|---|
+| 单次拉取展开上限 | **10000 行**(222 已于 2026-09-04 由 5000 上调) | 部署配置项 `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON` 的 `maxRows`;代码默认值即 10000,无硬上限,可继续上调 |
+| BOM 层数上限 | 20 层 | 同上,配置项 `maxDepth` |
+| 单次拉取翻页上限 | 100 页 | 代码默认 |
+| Excel 导出上限 | 20000 行 | 代码常量 |
+| 超过 `maxRows` 时 | **不报错、不截断**,转入"大 BOM 分批"路径 | 界面有专门面板;后端按每批 100–1000 行写入 |
+
+**必须如实告知的一点**:上限以内走的是本说明 §6 描述、且已实测验证的那条路径。**超过上限后的"大 BOM 分批"路径,代码与界面都具备,但我方尚未实测。**若客户单个项目展开后可能超过 10000 行,请在正式使用前告知我方,由我方先行验证该路径,或据实际规模继续上调 `maxRows`。
+
+调整方法(需重启后端,约一分钟):改 `dockerpp.env` 中该 JSON 的 `maxRows`,`pm2 restart metasheet-backend --update-env`。生效核对:任跑一次试算,响应 `evidence.expansion.maxRows` 即为当前生效值。
 
 ---
 
