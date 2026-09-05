@@ -611,3 +611,70 @@ GET /api/multitable/... (该 sheet 的记录列表,sheetId 取自 Step 0-7 actio
 - 打包脚本 / 包校验脚本(Step 0):`scripts/ops/multitable-onprem-package-build.sh`、`scripts/ops/multitable-onprem-package-verify.sh`
 - 既有部署预检 / 验收脚本(Step 3):`plugins/plugin-integration-core/lib/stock-preparation-preflight.cjs`、`scripts/ops/stock-prep-acceptance-bootstrap.mjs`
 - r6/r7 既有升级执行单(本文延续同一批约定):`r6-upgrade-222-runbook.md`、`r7-build-manifest.md`
+
+---
+
+## 大 BOM 分批路径实测(准备)
+
+> **地位**:这一节只覆盖"把超过 `maxRows` 的合成数据灌进 222 的合成 PLM 库"这一步准备工作,不是完整的 dry-run/apply 验收程序——那一段仍然照 §3-§8 的既有步骤走,唯一区别是这次源里的项目号展开后 >10000 行,预期会走 `largeBom: true` 的分批预览分支(`isLargeBomBoundedExpansion`,
+> `plugins/plugin-integration-core/lib/stock-preparation-bom-expansion.cjs:514-518`),而不是 §3 描述的一次性 `expanded` 结果。这条路径此前**从未实测过**——见
+> `plugins/plugin-integration-core/fixtures/stock-preparation-synthetic-sql-source/README.md`
+> "what it deliberately does not cover" 一节:该目录下的合成夹具"tens of rows by design",明确不覆盖
+> `max_rows_exceeded` / large-BOM bounded path。本节的生成器就是补这个洞用的。
+
+### 怎么生成
+
+```
+node scripts/ops/stock-preparation-synth-large-bom.mjs \
+  --out /tmp/stock-prep-synth-large-bom.sql \
+  --fanout 25,25,20 \
+  --project SYN-PROJ-LARGE-0001
+```
+
+`--fanout` 省略时就是默认的 `25,25,20`(根件下 25 个一级子件,每个一级子件下 25 个二级子件,每个二级
+子件下 20 个三级子件),展开行数按层相乘:`25 + 625 + 12500 = 13150`(三层子件之和,超过默认
+`maxRows` 10000);算上根件自己那一行(真实 dry-run 的 `evidence.expansion.rowsExpanded` 口径),
+合计 13151 行。命令结束会在 stdout 打印每张表的行数、按公式算出的预期展开行数(两种口径都打印,见脚本
+内注释)、以及预期的总数量之和(数量在每个父级下按 1→2→3 循环,便于手工核对滚算结果)。
+
+所有由该生成器创建的对象 id(路径 id、订单 id、零件 `OBJ_ID`、BOM id)一律带 `SYNL-` 前缀——与
+`stock-preparation-synthetic-sql-source/` 目录下既有夹具用的 `SYN-` 前缀**刻意不同**,两者可以同时
+灌进同一个库互不干扰、互不清空。生成的 SQL 本身是幂等的:每张表先按 `SYNL-` 前缀 `DELETE`,再
+`INSERT`,同名参数重跑、或换一组 `--fanout`/`--project` 重跑,都会先清掉上一次这个生成器留下的行。
+
+### 怎么灌进 `synth_plm`
+
+```
+psql -h <222-HOST> -d synth_plm -v ON_ERROR_STOP=1 -f /tmp/stock-prep-synth-large-bom.sql
+```
+
+（沿用 `stock-preparation-synthetic-sql-source/README.md` §1 同样的加载约定;这里不重复连接参数,
+照现场既有的 `synth_plm` 连接方式来,本文不记录主机名/账号/密码。)
+
+### 灌完怎么确认(三条 SELECT count)
+
+```sql
+-- 期望 = 生成时打印的 part 行数(默认 fanout 下是 13151)
+SELECT count(*) FROM DN_PDM_PartLibraryInfo WHERE OBJ_ID LIKE 'SYNL-%';
+
+-- 期望 = 生成时打印的 bomDetail 行数(默认 fanout 下是 13150,即 25+625+12500)
+SELECT count(*) FROM DN_PDM_BomDetailsInfo WHERE bom_pid LIKE 'SYNL-%';
+
+-- 期望 = 1(只有一个项目入口:DN_PDM_PathExAttrInfo.FileCode = 本次 --project 的值)
+SELECT count(*) FROM DN_PDM_PathExAttrInfo WHERE Parent_OBJ_ID LIKE 'SYNL-%';
+```
+
+三条都对得上生成器 stdout 打印的数字,再按 §5-§6 选源、按 §6 对本次 `--project` 的值跑 dry-run。这份数据
+是干净的(不缺件、不歧义、版本号统一),所以预期看到的不是别的守卫,恰好是 `max_rows_exceeded`:
+展开在推到第 10001 行时停止(`pushRow`,`lib/stock-preparation-bom-expansion.cjs:746-753`),顶层
+`status` 变成 `failed`(有一条全局错误即失败,`:977`),`largeBom` 为 `true`
+(`isLargeBomBoundedExpansion`,`:514-518`)、附带 `boundedPreview`,`canApply` 为 `false`、不签发
+`dryRunToken`(有全局错误就不可 apply,`stock-preparation-table-actions.cjs:1251`)——而不是 §3 描述的
+`canApply: true` 干净结果。这正是本节要实测、此前从未跑过的分支。
+
+### 实测后怎么清
+
+生成的 SQL 文件开头有 `-- ==== CLEANUP-START ====` 到 `-- ==== CLEANUP-END ====` 之间的一段 —— 就是
+那 7 条按 `SYNL-%` 前缀过滤的 `DELETE`,单独摘出来对 `synth_plm` 跑一遍即可清空这次生成的全部行,不影响
+`stock-preparation-synthetic-sql-source/` 目录下 `SYN-` 前缀的既有夹具数据。也可以直接用同一份文件重新
+跑一次完整生成命令(脚本本身先删后插,天然幂等),效果等价。
