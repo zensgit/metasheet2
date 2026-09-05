@@ -148,10 +148,21 @@ const STOCK_PREPARATION_BOM_SOURCE_KINDS = Object.freeze([
 // by NOTHING that hashes, stores or evidences — it is read only by `summarizeMissingComponents`
 // below, for the dry-run response's opt-in `missingComponents` key (gated operate ∧ proven tenant).
 //
-// The cap is on the COLLECTOR, not just on the summary: a 10k-row BOM against an empty part library
-// would otherwise accumulate 10k part numbers in memory on a read that is supposed to be bounded.
-// Past the cap the probes are still counted (every one still emits its rowError), they just stop
-// carrying a value — which is what `truncated` on the summary reports.
+// THE CAP IS ON DISTINCT PART NUMBERS, NOT ON PROBES, and that distinction is the whole guard.
+//
+// A 10k-row BOM against an empty part library must not accumulate 10k detail objects on a read whose
+// contract is that it is bounded — hence a cap. But an earlier cut capped the number of PROBES, and
+// that was a correctness bug, not merely a smaller list: a BOM with 199 positions wanting part A and
+// then 300 positions wanting part B produced `[A:199, B:1]`, and one more A position made B vanish
+// from the list entirely. The operator would then create every part the list named, re-run, and find
+// the project still held — by a part the list had silently dropped. Worse, the ordering ("create the
+// most-blocking part first") inverted in exactly the case it exists for.
+//
+// So the collector is KEYED BY PART NUMBER: at most 200 distinct part numbers carry detail, and a
+// part number already retained keeps accumulating its occurrence and parent counts however many
+// times it is probed. `missingComponentDistinctCount` counts EVERY distinct part number — including
+// the ones past the cap that carry no detail — so the summary's `distinctCount` is a true total and
+// `truncated` can say honestly that the list is not the whole set.
 const MISSING_COMPONENT_DETAIL_LIMIT = 200
 
 const FORBIDDEN_PLAN_KEYS = Object.freeze([
@@ -891,7 +902,7 @@ function rowFromPart(plan, { projectNo, parentSourceId, pathTokens, depth, partR
   }
 }
 
-function failureResult({ projectNoPresent, matchField, status = 'failed', rows, errors, rowErrors, missingComponents = [], readStats, rootMatches, maxDepth, maxRows, maxPages, maxReadCount, maxElapsedMs, subtree }) {
+function failureResult({ projectNoPresent, matchField, status = 'failed', rows, errors, rowErrors, missingComponents = [], missingComponentDistinctCount = 0, readStats, rootMatches, maxDepth, maxRows, maxPages, maxReadCount, maxElapsedMs, subtree }) {
   return {
     valid: false,
     status,
@@ -899,9 +910,10 @@ function failureResult({ projectNoPresent, matchField, status = 'failed', rows, 
     errors,
     rowErrors,
     // Present on EVERY return path (see the constant's header), so a consumer never has to ask
-    // whether this particular expansion has the key. It is deliberately NOT passed to makeSummary:
+    // whether this particular expansion has the keys. Deliberately NOT passed to makeSummary:
     // `summary` is the values-free projection and stays that way.
     missingComponents,
+    missingComponentDistinctCount,
     summary: makeSummary({
       projectNoPresent,
       matchField,
@@ -981,10 +993,18 @@ async function expandPlmProjectBom(input = {}) {
       rootQuantitySource: { orderDetail: 0, subtreeDefault: 0 },
     }
     : undefined
-  // The side channel. Bounded at MISSING_COMPONENT_DETAIL_LIMIT entries; every probe past that is
-  // still counted by its rowError, so the summary can report a truthful total while carrying no
-  // more than `limit` part numbers.
+  // The side channel, keyed by part number — see MISSING_COMPONENT_DETAIL_LIMIT's header. Three
+  // structures, because three different questions have to stay answerable:
+  //   * `missingComponents`        the DETAIL that leaves this module, at most one entry per distinct
+  //                               part number and at most MISSING_COMPONENT_DETAIL_LIMIT of them;
+  //   * `missingComponentParents`  the distinct parents per retained part (a Set, so `parentCount`
+  //                               counts places-it-is-wanted rather than probes);
+  //   * `missingComponentIds`      EVERY distinct part number probed, capped by nothing, so the
+  //                               reported `distinctCount` is the truth and not the page size.
   const missingComponents = []
+  const missingComponentIndex = new Map()
+  const missingComponentParents = new Map()
+  const missingComponentIds = new Set()
 
   const read = (object, filters) => readAll(sourceAdapter, object, filters, options, readStats)
   const addGlobalError = (type, details = {}) => {
@@ -1008,9 +1028,30 @@ async function expandPlmProjectBom(input = {}) {
   }
   // Deliberately separate from `addRowError`: the two payloads have different audiences and
   // different rules, and merging them is exactly the mistake this design exists to prevent.
-  const addMissingComponent = (entry) => {
-    if (missingComponents.length >= MISSING_COMPONENT_DETAIL_LIMIT) return
-    missingComponents.push(entry)
+  //
+  // AGGREGATES AT THE POINT OF COLLECTION. Creating a part in PLM is a per-part job, so the unit of
+  // this list is the part number, not the BOM position. A part number already retained keeps
+  // counting no matter how many positions want it — the cap can cost the list a WHOLE PART, never a
+  // wrong count for a part that is on it.
+  const addMissingComponent = ({ componentSourceId, parentSourceId, bomId, path, depth }) => {
+    missingComponentIds.add(componentSourceId)
+    let entry = missingComponentIndex.get(componentSourceId)
+    if (!entry) {
+      // Only a NEW part number can be refused by the cap, and `missingComponentIds` has already
+      // recorded it so `distinctCount` still counts it.
+      if (missingComponents.length >= MISSING_COMPONENT_DETAIL_LIMIT) return
+      // parent / bom / path / depth are the FIRST place this part was wanted, and stay so.
+      entry = { componentSourceId, parentSourceId, bomId, path, depth, occurrenceCount: 0, parentCount: 0 }
+      missingComponents.push(entry)
+      missingComponentIndex.set(componentSourceId, entry)
+      missingComponentParents.set(componentSourceId, new Set())
+    }
+    entry.occurrenceCount += 1
+    const parents = missingComponentParents.get(componentSourceId)
+    // `null` for the BOM root ("wanted directly by the order"), which is a distinct place a part is
+    // wanted and is counted as one. It can never collide with a String() parent id.
+    parents.add(parentSourceId === null || parentSourceId === undefined ? null : String(parentSourceId))
+    entry.parentCount = parents.size
   }
   const pushRow = (row) => {
     if (rows.length + 1 > options.maxRows) {
@@ -1051,6 +1092,7 @@ async function expandPlmProjectBom(input = {}) {
       errors,
       rowErrors,
       missingComponents,
+      missingComponentDistinctCount: missingComponentIds.size,
       readStats,
       rootMatches: 0,
       maxDepth: options.maxDepth,
@@ -1070,6 +1112,7 @@ async function expandPlmProjectBom(input = {}) {
       errors: [],
       rowErrors: [],
       missingComponents: [],
+      missingComponentDistinctCount: 0,
       summary: makeSummary({
         projectNoPresent: true,
         matchField: plan.matchField,
@@ -1512,8 +1555,9 @@ async function expandPlmProjectBom(input = {}) {
     errors,
     rowErrors,
     // Same on the bounded (large-BOM) path, which reaches this return with its scale error in
-    // `errors`: the key is always present, empty when nothing was missing.
+    // `errors`: the keys are always present, empty/zero when nothing was missing.
     missingComponents,
+    missingComponentDistinctCount: missingComponentIds.size,
     summary: makeSummary({
       projectNoPresent: true,
       matchField: plan.matchField,
@@ -1542,56 +1586,59 @@ async function expandPlmProjectBom(input = {}) {
  * and the single most valuable property it has is that no part number can reach it. Sharing code
  * between the two is how that property gets lost in a later refactor, so they share none.
  *
- * ONE ROW PER PART NUMBER, not per probe. Creating a part in PLM is a per-part job, so a list that
- * repeated a part once per BOM position would be a worklist with the same work written out fifty
- * times. The parent / BOM / path / depth reported are the FIRST place the part was wanted;
- * `parentCount` says how many distinct parents wanted it, which is the "this one is holding up
- * several assemblies" signal.
+ * ONE ROW PER PART NUMBER, not per probe — and the deduplication has ALREADY HAPPENED, in the
+ * expander's keyed collector. Creating a part in PLM is a per-part job, so a list that repeated a
+ * part once per BOM position would be a worklist with the same work written out fifty times. The
+ * parent / BOM / path / depth reported are the FIRST place the part was wanted; `parentCount` says
+ * how many distinct parents wanted it, which is the "this one is holding up several assemblies"
+ * signal. This function ranks, bounds and reports; it does not re-derive counts the collector is the
+ * only thing in a position to get right (it sees the probes the cap dropped detail for).
  *
  * ORDER: `occurrenceCount` descending (do the most-blocking part first), ties broken by
  * `componentSourceId` ascending — total, so the same expansion always summarizes identically.
  *
- * TOTALS ARE TRUE TOTALS. `probeCount` counts every missing-component probe the expansion made,
- * taken from the rowErrors (one per probe, uncapped) rather than from the capped detail array, so a
- * BOM that overran MISSING_COMPONENT_DETAIL_LIMIT still reports how bad it really is.
- * `distinctCount` is the number of distinct part numbers among the details that were RETAINED.
- * `truncated` is true whenever either cap bit: details were dropped at collection, or `limit` cut the
- * item list here. A truncated list is a "use the export / fix these first" signal, not a total.
+ * TOTALS ARE TRUE TOTALS.
+ *   `distinctCount` — every distinct missing part number, from the expander's uncapped id set, so a
+ *                     BOM whose missing parts overran the detail cap still reports how many there
+ *                     really are rather than the page size.
+ *   `probeCount`    — every missing-component probe, counted off the rowErrors (one per probe,
+ *                     uncapped), for the same reason.
+ *   `truncated`     — true whenever the items are not the whole set: distinct parts beyond the
+ *                     collector's cap, or `limit` cutting the list here. A truncated list is a
+ *                     "fix these first, export for the rest" signal, never a total.
  */
 function summarizeMissingComponents(expansion = {}, { limit = MISSING_COMPONENT_DETAIL_LIMIT } = {}) {
   const entries = Array.isArray(expansion.missingComponents) ? expansion.missingComponents : []
   const rowErrors = Array.isArray(expansion.rowErrors) ? expansion.rowErrors : []
   const boundedLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : MISSING_COMPONENT_DETAIL_LIMIT
 
+  const positiveInt = (value, fallback) => (Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback)
+
   const byComponent = new Map()
-  const parentsByComponent = new Map()
   let retainedProbes = 0
   for (const entry of entries) {
     if (!isPlainObject(entry)) continue
     const componentSourceId = toKey(entry.componentSourceId)
     if (componentSourceId === null) continue
-    retainedProbes += 1
-    let item = byComponent.get(componentSourceId)
-    if (!item) {
-      item = {
-        componentSourceId,
-        parentSourceId: entry.parentSourceId === undefined ? null : entry.parentSourceId,
-        bomId: entry.bomId === undefined ? null : entry.bomId,
-        path: entry.path === undefined ? null : entry.path,
-        depth: Number.isFinite(entry.depth) ? Number(entry.depth) : null,
-        occurrenceCount: 0,
-        parentCount: 0,
-      }
-      byComponent.set(componentSourceId, item)
-      parentsByComponent.set(componentSourceId, new Set())
+    // Defensive against a second entry for the same part (the collector never emits one, but this
+    // function is also handed hand-built objects): fold rather than shadow.
+    const existing = byComponent.get(componentSourceId)
+    const occurrenceCount = positiveInt(entry.occurrenceCount, 1)
+    retainedProbes += occurrenceCount
+    if (existing) {
+      existing.occurrenceCount += occurrenceCount
+      existing.parentCount = Math.max(existing.parentCount, positiveInt(entry.parentCount, 1))
+      continue
     }
-    item.occurrenceCount += 1
-    // The ROOT case (`parentSourceId: null`) is a distinct parent too — "wanted directly by the
-    // order" is one of the places a part is wanted — so it is counted rather than skipped.
-    parentsByComponent.get(componentSourceId).add(entry.parentSourceId === null || entry.parentSourceId === undefined ? null : String(entry.parentSourceId))
-  }
-  for (const [componentSourceId, item] of byComponent) {
-    item.parentCount = parentsByComponent.get(componentSourceId).size
+    byComponent.set(componentSourceId, {
+      componentSourceId,
+      parentSourceId: entry.parentSourceId === undefined ? null : entry.parentSourceId,
+      bomId: entry.bomId === undefined ? null : entry.bomId,
+      path: entry.path === undefined ? null : entry.path,
+      depth: Number.isFinite(entry.depth) ? Number(entry.depth) : null,
+      occurrenceCount,
+      parentCount: positiveInt(entry.parentCount, 1),
+    })
   }
 
   const ranked = [...byComponent.values()].sort((a, b) => {
@@ -1603,15 +1650,20 @@ function summarizeMissingComponents(expansion = {}, { limit = MISSING_COMPONENT_
   for (const rowError of rowErrors) {
     if (isPlainObject(rowError) && rowError.type === 'missing_component') probeCount += 1
   }
-  // A caller may hand this function a bare `{ missingComponents }` with no rowErrors at all (the
-  // frontend clamp tests do). Never report fewer probes than details actually seen.
+  // A caller may hand this function a bare `{ missingComponents }` with no rowErrors and no id count
+  // at all (the frontend clamp tests do). Never report fewer than what the details themselves show.
   if (retainedProbes > probeCount) probeCount = retainedProbes
+  const distinctCount = Math.max(
+    Number.isFinite(expansion.missingComponentDistinctCount) ? Math.floor(expansion.missingComponentDistinctCount) : 0,
+    ranked.length,
+  )
+  const items = ranked.slice(0, boundedLimit)
 
   return {
-    distinctCount: ranked.length,
+    distinctCount,
     probeCount,
-    truncated: ranked.length > boundedLimit || probeCount > retainedProbes,
-    items: ranked.slice(0, boundedLimit),
+    truncated: distinctCount > items.length,
+    items,
   }
 }
 

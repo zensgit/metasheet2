@@ -794,34 +794,31 @@ async function testMissingComponentDetailNeverReachesTheHashedSurfaces() {
     'no part number reaches the rowError array by any route',
   )
 
-  // The side channel itself, in the shape the response contract froze.
+  // The side channel itself, in the shape the response contract froze. ONE ENTRY PER PART NUMBER:
+  // the collector is keyed, so the counts are already aggregated when the detail leaves the expander.
   assert.ok(Array.isArray(result.missingComponents), 'the side channel is a top-level array')
-  assert.equal(result.missingComponents.length, 3, 'one entry per PROBE — dedup happens in the summary')
-  const rootless = result.missingComponents.filter((entry) => entry.componentSourceId === 'PART-Z')
-  assert.deepEqual(
-    rootless.map((entry) => entry.parentSourceId).sort(),
-    ['PART-A', 'PART-C'],
-    'each probe records the parent it happened under',
-  )
-  assert.deepEqual(
-    rootless.map((entry) => entry.bomId).sort(),
-    ['BOM-A', 'BOM-C'],
-    'and the BOM head that pointed at it',
-  )
+  assert.equal(result.missingComponents.length, 2, 'one entry per distinct PART NUMBER, not per probe')
+  assert.equal(result.missingComponentDistinctCount, 2, 'and the uncapped id count agrees with it here')
+  const zed = result.missingComponents.find((entry) => entry.componentSourceId === 'PART-Z')
+  assert.equal(zed.occurrenceCount, 2, 'PART-Z was wanted by two BOM positions')
+  assert.equal(zed.parentCount, 2, '…under two different parents')
+  assert.equal(zed.parentSourceId, 'PART-A', 'the FIRST place it was wanted is what the entry names')
+  assert.equal(zed.bomId, 'BOM-A')
   for (const entry of result.missingComponents) {
     assert.deepEqual(
       Object.keys(entry),
-      ['componentSourceId', 'parentSourceId', 'bomId', 'path', 'depth'],
+      ['componentSourceId', 'parentSourceId', 'bomId', 'path', 'depth', 'occurrenceCount', 'parentCount'],
       'the frozen detail shape',
     )
     assert.equal(entry.depth, 1, 'these are all first-level children')
     assert.deepEqual(JSON.parse(entry.path)[1], entry.componentSourceId, 'path ends at the part that was wanted')
   }
 
-  // M-02 THE REVISION DOES NOT MOVE. Compared against the SAME expansion with the key deleted —
+  // M-02 THE REVISION DOES NOT MOVE. Compared against the SAME expansion with the keys deleted —
   // which is exactly the object shape this module produced before W3a — through the real hasher.
   const stripped = clone(result)
   delete stripped.missingComponents
+  delete stripped.missingComponentDistinctCount
   assert.equal(Object.prototype.hasOwnProperty.call(stripped, 'missingComponents'), false)
   const revisionArgs = (expansion) => ({
     action: REVISION_ACTION,
@@ -872,6 +869,11 @@ async function testMissingComponentsKeyIsPresentOnEveryReturnPath() {
   const { adapter: boundedAdapter } = createAdapter(missingComponentData())
   const bounded = await expandPlmProjectBom({ sourceAdapter: boundedAdapter, projectNo: 'P-001', maxRows: 1 })
   assert.ok(Array.isArray(bounded.missingComponents), 'the bounded path carries the key too')
+
+  // …and so does the companion count, on every one of them.
+  for (const [label, expansion] of [['not_found', notFound], ['failed root read', failing], ['clean', ok], ['bounded', bounded]]) {
+    assert.equal(typeof expansion.missingComponentDistinctCount, 'number', `${label} carries the distinct count`)
+  }
 }
 
 // A missing part named DIRECTLY by the order detail: depth 0, no parent, no BOM head.
@@ -887,6 +889,8 @@ async function testMissingRootComponentCarriesNullParentAndBom() {
     bomId: null,
     path: JSON.stringify(['PART-ROOTLESS']),
     depth: 0,
+    occurrenceCount: 1,
+    parentCount: 1,
   }])
   const summary = summarizeMissingComponents(result)
   assert.equal(summary.items[0].parentCount, 1, '"wanted directly by the order" is one place it is wanted')
@@ -955,22 +959,34 @@ async function testMissingComponentSummaryContract() {
   assert.deepEqual(summarizeMissingComponents({}), { distinctCount: 0, probeCount: 0, truncated: false, items: [] })
 }
 
-// THE COLLECTOR IS CAPPED, not just the summary: an empty part library against a wide BOM must not
-// accumulate an unbounded pile of part numbers on a read whose whole contract is that it is bounded.
-async function testMissingComponentCollectionIsCapped() {
-  const overflow = MISSING_COMPONENT_DETAIL_LIMIT + 37
+/** A BOM under PART-A whose child positions are `[partId, howManyPositions]`, none of them in stock. */
+function bomOfMissingParts(spec) {
   const data = missingComponentData()
   data.DN_PDM_OrderDetailInfo = [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '1', sort_id: 1 }]
-  data.DN_PDM_BomDetailsInfo = Array.from({ length: overflow }, (_unused, index) => ({
-    bom_pid: 'BOM-A',
-    part_id: `PART-GONE-${String(index).padStart(4, '0')}`,
-    Bom_ExAttr1: '1',
-    sort_id: index,
-  }))
+  const details = []
+  for (const [partId, count] of spec) {
+    for (let i = 0; i < count; i += 1) {
+      details.push({ bom_pid: 'BOM-A', part_id: partId, Bom_ExAttr1: '1', sort_id: details.length })
+    }
+  }
+  data.DN_PDM_BomDetailsInfo = details
+  return data
+}
+
+// THE COLLECTOR IS CAPPED BY DISTINCT PART NUMBER, not by probe — and the difference is correctness,
+// not list length. An empty part library against a wide BOM must not accumulate an unbounded pile of
+// part numbers on a read whose whole contract is that it is bounded; but the cap must cost the list
+// a WHOLE PART, never a wrong count for a part that IS on it.
+async function testMissingComponentCollectionIsCappedByDistinctPart() {
+  const overflow = MISSING_COMPONENT_DETAIL_LIMIT + 37
+  const data = bomOfMissingParts(
+    Array.from({ length: overflow }, (_unused, index) => [`PART-GONE-${String(index).padStart(4, '0')}`, 1]),
+  )
   const { adapter } = createAdapter(data)
   const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
 
-  assert.equal(result.missingComponents.length, MISSING_COMPONENT_DETAIL_LIMIT, 'the collector stops carrying values at the cap')
+  assert.equal(result.missingComponents.length, MISSING_COMPONENT_DETAIL_LIMIT, 'the collector stops carrying DETAIL at the cap')
+  assert.equal(result.missingComponentDistinctCount, overflow, 'but it keeps counting distinct part numbers past it')
   assert.equal(
     result.rowErrors.filter((entry) => entry.type === 'missing_component').length,
     overflow,
@@ -978,9 +994,39 @@ async function testMissingComponentCollectionIsCapped() {
   )
 
   const summary = summarizeMissingComponents(result)
-  assert.equal(summary.distinctCount, MISSING_COMPONENT_DETAIL_LIMIT)
-  assert.equal(summary.probeCount, overflow, 'the total is the truth, taken from the uncapped rowErrors')
+  assert.equal(summary.distinctCount, overflow, 'distinctCount is the TRUE total, not the page size')
+  assert.equal(summary.items.length, MISSING_COMPONENT_DETAIL_LIMIT, 'while the items stay bounded')
+  assert.equal(summary.probeCount, overflow, 'the probe total is the truth, taken from the uncapped rowErrors')
   assert.equal(summary.truncated, true, 'and the caller is told the list is not the whole story')
+}
+
+/**
+ * THE COUNTING BUG THE PER-PROBE CAP HAD, as two witnesses. Both were RED before the collector was
+ * keyed by part number, and the second is the one that would have cost an operator a whole day:
+ *
+ *   199 positions want A, then 300 want B  ->  the list said [A:199, B:1]
+ *   200 positions want A, then 300 want B  ->  B WAS NOT IN THE LIST AT ALL
+ *
+ * The operator creates every part the list names, re-runs, and the project is still held — by the
+ * part the list dropped. And the ordering ("create the most-blocking part first") inverted in
+ * exactly the wide-BOM case the ordering exists for.
+ */
+async function testTheCapCostsAWholePartNeverAWrongCount() {
+  for (const [label, aPositions] of [['under the cap', 199], ['exactly at the cap', MISSING_COMPONENT_DETAIL_LIMIT]]) {
+    const { adapter } = createAdapter(bomOfMissingParts([['PART-A-MISSING', aPositions], ['PART-B-MISSING', 300]]))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+    const summary = summarizeMissingComponents(result)
+
+    assert.equal(summary.distinctCount, 2, `${label}: two parts are missing, however many positions want them`)
+    assert.equal(summary.probeCount, aPositions + 300, `${label}: every position is counted`)
+    assert.equal(summary.truncated, false, `${label}: nothing was dropped — two parts fit in any cap`)
+    assert.deepEqual(
+      summary.items.map((item) => [item.componentSourceId, item.occurrenceCount]),
+      [['PART-B-MISSING', 300], ['PART-A-MISSING', aPositions]],
+      `${label}: B is present with its REAL count, and sorts first because it blocks the most`,
+    )
+    assert.equal(summary.items[0].parentCount, 1, `${label}: all 300 positions are under the one parent`)
+  }
 }
 
 async function main() {
@@ -989,7 +1035,8 @@ async function main() {
   await testMissingRootComponentCarriesNullParentAndBom()
   await testAmbiguousComponentOpensNoValueChannel()
   await testMissingComponentSummaryContract()
-  await testMissingComponentCollectionIsCapped()
+  await testMissingComponentCollectionIsCappedByDistinctPart()
+  await testTheCapCostsAWholePartNeverAWrongCount()
   await testSpecAndCreateTimeAreDeclaredNotGuessed()
   await testDeclaredNativeSpecColumnReachesTheMainTableRow()
   await testSuccessfulExpansion()
