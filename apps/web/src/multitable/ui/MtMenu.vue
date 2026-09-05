@@ -90,10 +90,14 @@ function onMenuKeydown(event: KeyboardEvent) {
   if (items.length === 0) return
   const active = document.activeElement as HTMLElement | null
   const currentIndex = active ? items.indexOf(active) : -1
-  // Round 3 (2026-09-05, refuter finding): `currentIndex === -1` means NO item is focused yet — focus
-  // is still on the trigger / the `role="menu"` container / body (the window between the menu
-  // rendering and the `watch(isOpen)` auto-focus above landing a nextTick later, or after focus was
-  // moved off the items). The pre-fix branches fed -1 straight into the wrap arithmetic: ArrowDown's
+  // Round 3 (2026-09-05, refuter finding): `currentIndex === -1` means NO menu item is focused. This
+  // handler is bound on the `role="menu"` element, which is Teleported to `document.body` and is not
+  // itself focusable, so in a real browser a keydown only reaches it when focus is on a focusable
+  // NON-menuitem descendant inside the menu (a custom item body, a nested control) — focus on the
+  // trigger, on `document.body`, or on the container itself never bubbles through here at all. (A
+  // test can also reach it synthetically by dispatching the keydown straight at the menu element.)
+  // Round 4 (2026-09-05, refuter NIT) corrected this comment; the code below is unchanged since
+  // round 3. The pre-fix branches fed -1 straight into the wrap arithmetic: ArrowDown's
   // `(-1 + 1) % n === 0` was right only by accident, and ArrowUp's `(-1 - 1 + n) % n === n - 2`
   // landed on the SECOND-TO-LAST item, silently skipping the last one. Both entry points are now
   // named explicitly; the wrap math below runs only when an item really is focused.

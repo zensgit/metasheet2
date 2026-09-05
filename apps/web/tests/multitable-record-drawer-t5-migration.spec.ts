@@ -146,8 +146,12 @@ async function openKebabMenu(root: HTMLElement) {
   // micro-repro (same stamp → outer handler skipped while the inner one runs; +1ms → both run; run
   // and deleted, see the round-3 commit body). Fix: let ≥1ms of REAL time elapse after mount before
   // the click, so `Date.now()` has moved past every `attached` stamp. (No test in this file uses fake
-  // timers, so a real-timer wait is safe here.)
-  await new Promise<void>((resolve) => setTimeout(resolve, 2))
+  // timers, so a real-timer wait is safe here.) Round 4 (2026-09-05, NIT): an EXACT wait — spin (1ms
+  // timer per round, capped at 50) until `Date.now()` has actually advanced past the value it held
+  // here, i.e. past every `attached` stamp written during mount — rather than a fixed `setTimeout(2)`
+  // that only makes the advance likely.
+  const start = Date.now()
+  for (let i = 0; i < 50 && Date.now() <= start; i += 1) await new Promise<void>((resolve) => setTimeout(resolve, 1))
   trigger!.click()
   await flushUi()
   // Bounded settle, kept alongside the fix: wait until the Teleported `.mt-menu` is actually in

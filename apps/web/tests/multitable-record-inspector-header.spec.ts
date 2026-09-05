@@ -184,7 +184,11 @@ async function openKebab(root: HTMLElement) {
   // because the inner MtButton `@click` stamps the event first. Not yet observed failing in THIS file,
   // but every kebab-opening test here mounts the same component and clicks the same MtIconButton the
   // same way, so the latent flake is closed here too: let ≥1ms of real time elapse before clicking.
-  await new Promise<void>((resolve) => setTimeout(resolve, 2))
+  // Round 4 (2026-09-05, NIT): an EXACT wait — spin (1ms timer per round, capped at 50) until
+  // `Date.now()` has actually advanced past the value it held here, i.e. past every `attached` stamp
+  // written during mount — rather than a fixed `setTimeout(2)` that only makes the advance likely.
+  const start = Date.now()
+  for (let i = 0; i < 50 && Date.now() <= start; i += 1) await new Promise<void>((resolve) => setTimeout(resolve, 1))
   trigger.click()
   await flushUi()
 }
@@ -764,6 +768,90 @@ describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
 
       opener1.remove()
       opener2.remove()
+    })
+  })
+
+  // Round 4 (2026-09-05, refuter P2 — stale opener, reproduced in Chromium): the workbench now hands
+  // this component `openerEl: null` for an open that has no opener element (a comment click-through,
+  // a deep link) instead of whatever element opened an EARLIER, already-closed panel. This block pins
+  // what the component does with that `null`, against the REAL component in the real-workbench shape
+  // (one persistent instance, `visible` toggling): `captureOpenerAndFocusTitle` prefers
+  // `props.openerEl` and otherwise captures `document.activeElement` at the open edge (unless that is
+  // `document.body`); `restoreFocusToOpener` falls back to `.meta-grid` only when the captured target
+  // is missing or disconnected. Mutations: replace `props.openerEl ?? (active && …)` with
+  // `props.openerEl ?? null` → the first test reds at "restores C" (focus lands on `.meta-grid`);
+  // delete the `props.openerEl ??` preference → the same test reds at its positive control (focus
+  // lands on the decoy, not A).
+  describe('openerEl === null falls back to the pre-open activeElement, not a stale opener (round 4)', () => {
+    it('open #1 with opener A (focus elsewhere) → close restores A; open #2 with openerEl null while C is focused → close restores C, not A and not .meta-grid', async () => {
+      const gridRoot = document.createElement('div')
+      gridRoot.className = 'meta-grid'
+      gridRoot.tabIndex = -1
+      document.body.appendChild(gridRoot)
+      const decoy = document.createElement('button')
+      decoy.textContent = 'decoy-focused-at-open-1'
+      document.body.appendChild(decoy)
+      const openerA = document.createElement('button')
+      openerA.textContent = 'row-1-expand-icon'
+      document.body.appendChild(openerA)
+      const commentBtnC = document.createElement('button')
+      commentBtnC.textContent = 'row-2-comment-button'
+      document.body.appendChild(commentBtnC)
+
+      const { container, setVisible, setOpener } = mountToggleableInspector()
+      await flushUi()
+      expect(container.querySelector('.meta-record-drawer')).toBeNull() // starts closed
+
+      // --- open #1 — expand-icon shape: WB hands A as the opener. Focus is deliberately on a DECOY, so
+      // a restore that reaches A can only have come from the `props.openerEl` preference.
+      decoy.focus()
+      expect(document.activeElement).toBe(decoy)
+      setOpener(openerA)
+      setVisible(true)
+      await flushUi()
+      expect(document.activeElement).toBe(container.querySelector('.meta-record-drawer__title-input')) // autofocus
+      setVisible(false)
+      await flushUi()
+      expect(document.activeElement).toBe(openerA) // positive control — the round-2 P1 restore-to-opener holds
+
+      // --- open #2 — comment click-through shape: C is focused (a real click leaves it so) and WB
+      // hands `null` (round 4), NOT the previous open's A.
+      commentBtnC.focus()
+      expect(document.activeElement).toBe(commentBtnC)
+      setOpener(null)
+      setVisible(true)
+      await flushUi()
+      expect(document.activeElement).toBe(container.querySelector('.meta-record-drawer__title-input')) // autofocus again
+      setVisible(false)
+      await flushUi()
+      expect(document.activeElement).toBe(commentBtnC) // the element focused at the open edge — the documented fallback
+      expect(document.activeElement).not.toBe(openerA) // not the stale expand icon
+      expect(document.activeElement).not.toBe(gridRoot) // and not the last-resort grid root
+
+      gridRoot.remove()
+      decoy.remove()
+      openerA.remove()
+      commentBtnC.remove()
+    })
+
+    it('openerEl null with NOTHING focused (document.body) at the open edge falls back to the .meta-grid root on close', async () => {
+      const gridRoot = document.createElement('div')
+      gridRoot.className = 'meta-grid'
+      gridRoot.tabIndex = -1
+      document.body.appendChild(gridRoot)
+
+      const { setVisible, setOpener } = mountToggleableInspector()
+      await flushUi()
+      ;(document.activeElement as HTMLElement | null)?.blur()
+      expect(document.activeElement).toBe(document.body)
+      setOpener(null)
+      setVisible(true)
+      await flushUi()
+      setVisible(false)
+      await flushUi()
+      expect(document.activeElement).toBe(gridRoot)
+
+      gridRoot.remove()
     })
   })
 

@@ -955,10 +955,15 @@ const selectedRecordId = ref<string | null>(null)
 // `<MetaRecordInspector>` below). Session-only (no storage, OD-W2-2 discipline) — a fresh mount
 // always starts closed regardless of what a previous tab session left it at.
 const inspectorOpen = ref(false)
-// Captured by `openRecord` below (see its own comment) and forwarded to the inspector's `openerEl`
-// prop for focus-restore-on-close; `null` for a caller that has no natural opener element (a
-// deep-link/comment-click-through open) — the inspector itself falls back to `document.activeElement`
-// at its own mount in that case (see MetaRecordInspector.vue's own `onMounted` comment).
+// Captured by `openRecord` below (see its own comment), written by `selectRecord`'s open branch, and
+// forwarded to the inspector's `openerEl` prop for focus-restore-on-close; `null` for a caller that
+// has no natural opener element (a deep-link/comment-click-through open) — the inspector itself
+// falls back to the element focused at the moment it becomes visible in that case (see
+// MetaRecordInspector.vue's `captureOpenerAndFocusTitle`). Round 4 (2026-09-05, refuter P2): this
+// ref describes the CURRENT open only — `onCloseDrawer` clears it, and a fresh open reached without
+// an opener resets it to `null` inside `selectRecord` — so an opener from an earlier, already-closed
+// open can never be handed to a later open that did not come from that element (expand-icon open →
+// close → comment click-through open used to restore focus to the expand icon on Escape).
 const inspectorOpenerEl = ref<HTMLElement | null>(null)
 
 /** Record inspector v3 (2026-09-05, PR-A §1.1): the SINGLE explicit-open entry point — every
@@ -972,12 +977,16 @@ const inspectorOpenerEl = ref<HTMLElement | null>(null)
  *  `inspectorOpen` itself is set INSIDE `selectRecord` (via `{ open: true }`), AFTER that
  *  function's own discard-guard passes — not here, eagerly — so a DECLINED discard-changes prompt
  *  (navigating away from an unsaved edit on a different record) cancels the open too, instead of
- *  opening the panel on the record that was never actually navigated away from. `inspectorOpenerEl`
- *  is set here regardless of that outcome — it is read only once the panel actually mounts, so a
- *  value written ahead of a cancelled open is simply never consulted. */
+ *  opening the panel on the record that was never actually navigated away from. Round 4
+ *  (2026-09-05, refuter P2): the resolved opener is now THREADED through `selectRecord`'s opts (not
+ *  written eagerly here) so the single open branch there is the ONE writer of `inspectorOpenerEl`
+ *  and can tell "this open has an opener" (this caller) from "this open has none" (deep-link /
+ *  comment click-through) — the latter must not inherit a stale opener from an earlier open. A
+ *  consequence: a DECLINED discard prompt now leaves the opener untouched too (the panel it kept
+ *  open was opened by something else, and that is what Escape should restore focus to). */
 function openRecord(recordId: string, opener?: HTMLElement | null) {
-  inspectorOpenerEl.value = opener ?? (typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null)
-  void selectRecord(recordId, { open: true })
+  const openerEl = opener ?? (typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null)
+  void selectRecord(recordId, { open: true, opener: openerEl })
 }
 
 function onExpandRecord(recordId: string) {
@@ -2189,7 +2198,7 @@ async function ensureCommentMentionSuggestions(force = false) {
 // every one of those callers already threads it through this single function. `select-record` from
 // the grid (plain click/arrow navigation, `openComments` absent) is UNCHANGED — it still only moves
 // the cursor (see `onSelectRecord` below), never this branch.
-async function selectRecord(recordId: string, opts?: { openComments?: boolean; open?: boolean; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null }) {
+async function selectRecord(recordId: string, opts?: { openComments?: boolean; open?: boolean; opener?: HTMLElement | null; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null }) {
   if (recordId !== selectedRecordId.value && !confirmDiscardRecordChanges()) return
   selectedRecordId.value = recordId
   // `open` (from `openRecord`/`resolveDeepLink`) or `openComments` — set ONLY after the discard
@@ -2197,7 +2206,24 @@ async function selectRecord(recordId: string, opts?: { openComments?: boolean; o
   // DECLINED discard leave `inspectorOpen=true` with the navigation itself cancelled, opening the
   // panel on the PREVIOUS record instead of the one the user actually navigated away from. See
   // `openRecord`'s own comment for the two callers this fixes.
-  if (opts?.open || opts?.openComments) inspectorOpen.value = true
+  if (opts?.open || opts?.openComments) {
+    // Round 4 (2026-09-05, refuter P2 — stale opener): this is the ONLY place `inspectorOpen` flips
+    // to true, so it is also the one place that can keep `inspectorOpenerEl` honest for every open
+    // path. A caller that has an opener (`openRecord`, via `opts.opener` — possibly `null` when it
+    // could not resolve one) always writes it, open or already-open alike, exactly as before. A
+    // caller with NO opener (`resolveDeepLink`, the `openComments: true` click-through callers) on a
+    // FRESH open (panel currently closed) resets it to `null`, so the inspector's own
+    // pre-open-activeElement fallback runs instead of restoring focus to whatever element opened
+    // some EARLIER, already-closed panel. `onCloseDrawer` clears it on close as well, but two close
+    // paths bypass `onCloseDrawer` (the rail-drawer watcher and the `selectedRecordId → null`
+    // force-close watcher, both below), so a close-side reset alone is not sufficient — this
+    // open-side check covers those too. An opener-less call while the panel is ALREADY open (e.g. a
+    // comment click-through on another row from inside an open panel) leaves the current open's
+    // opener in place, unchanged from before.
+    if (opts.opener !== undefined) inspectorOpenerEl.value = opts.opener
+    else if (!inspectorOpen.value) inspectorOpenerEl.value = null
+    inspectorOpen.value = true
+  }
   commentDraft.value = ''
   if (!opts?.openComments) {
     selectedCommentFieldId.value = null
@@ -3309,13 +3335,18 @@ function flushActiveFieldEdit() {
 // (× or Esc, routed through `onInspectorKeydown` → this same `close` emit) now sets
 // `inspectorOpen=false` and RETAINS `selectedRecordId` — a graft from P2/P3 (row highlight/collab
 // cursor survive; Shift+Space reopens instantly). The `flushActiveFieldEdit` → discard-guard →
-// `showComments=false` → `resetCommentInteractionState` order is unchanged.
+// `showComments=false` → `resetCommentInteractionState` order is unchanged. Round 4 (2026-09-05,
+// refuter P2): the opener is consumed by this close — the inspector restores focus from the target it
+// captured on ITS open edge, not from the prop at close time — so it is cleared here, last, and can
+// no longer be inherited by a later open that did not come from that element (see `selectRecord`'s
+// open branch for the open-side half of the same fix).
 function onCloseDrawer() {
   flushActiveFieldEdit()
   if (!confirmDiscardRecordChanges()) return
   inspectorOpen.value = false
   showComments.value = false
   resetCommentInteractionState()
+  inspectorOpenerEl.value = null
 }
 
 // W2 S4 (OD-W2-7=b, lock "收编 showComments 分支"): comments is now a tab inside the single

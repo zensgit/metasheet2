@@ -373,6 +373,17 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
           },
           'open-comments',
         ),
+        // Round 4 (2026-09-05, stale-opener P2): a second row's comment click-through, so the
+        // "expand-open row 1 → close → comment-open row 2" sequence can be driven end to end
+        // (mirrors the real grid's per-row `.meta-grid__comment-action` button → `open-comments`).
+        h(
+          'button',
+          {
+            'data-open-comments': 'rec_2',
+            onClick: () => this.$emit('open-comments', 'rec_2'),
+          },
+          'open-comments-2',
+        ),
         h(
           'button',
           {
@@ -3403,7 +3414,7 @@ describe('MultitableWorkbench view wiring', () => {
   // binding. The stub near the top of this file now declares `openerEl` and records the exact object
   // it was rendered with (`inspectorStubSeen`), so this asserts the wiring by IDENTITY.
   describe('opener-el wiring: openRecord\'s captured opener reaches <MetaRecordInspector openerEl> by identity (§1.1, round 3)', () => {
-    it('expand-record with a focused opener passes that exact element as openerEl; after the inspector emits close the workbench RETAINS it (not cleared)', async () => {
+    it('expand-record with a focused opener passes that exact element as openerEl; after the inspector emits close the workbench CLEARS it (null)', async () => {
       mountWorkbench()
       await flushUi()
       expect(inspectorStubSeen.renders).toBeGreaterThan(0) // the stub really rendered (holder is live)
@@ -3427,22 +3438,124 @@ describe('MultitableWorkbench view wiring', () => {
       expect(inspectorStubSeen.openerEl).toBe(opener) // IDENTITY — the exact element, not a stringified attr
       const rendersWhileOpen = inspectorStubSeen.renders
 
-      // Close via the inspector's own `close` emit (× and Esc both route to `onCloseDrawer`). Current
-      // behaviour, asserted explicitly: `onCloseDrawer` sets `inspectorOpen=false` and RETAINS
-      // `selectedRecordId` — and does NOT touch `inspectorOpenerEl`, so the child keeps receiving the
-      // same opener after close. That is safe by construction: the inspector captures its
-      // restore-focus target on the OPEN edge of its own `watch(visible)`, and every later open goes
-      // through `openRecord`, which overwrites `inspectorOpenerEl` BEFORE `selectRecord` flips
-      // `inspectorOpen` — so a retained value is never consulted stale. Pinned here so a future
-      // "clear on close" is a visible, deliberate contract change rather than a silent one.
+      // Close via the inspector's own `close` emit (× and Esc both route to `onCloseDrawer`).
+      // `onCloseDrawer` sets `inspectorOpen=false`, RETAINS `selectedRecordId`, and — round 4
+      // (2026-09-05, refuter P2) — CLEARS `inspectorOpenerEl`, so the child is handed `null` after
+      // close. Round 3 pinned the opposite ("retained") with a "safe by construction" argument that
+      // was false: not every later open goes through `openRecord` (the `openComments: true`
+      // click-through callers and `resolveDeepLink` do not), so a retained opener WAS consulted stale
+      // — see the next two tests.
       container!.querySelector<HTMLButtonElement>('[data-close-drawer="true"]')!.click()
       await flushUi()
       expect(container!.querySelector('[data-record-drawer]')).toBeNull() // panel closed
       expect(inspectorStubSeen.renders).toBeGreaterThan(rendersWhileOpen) // the stub DID re-render on close…
-      expect(inspectorStubSeen.openerEl).toBe(opener) // …and was still handed the same opener (retained)
-      expect(opener.isConnected).toBe(true) // and that element is still a valid, connected target
+      expect(inspectorStubSeen.openerEl).toBeNull() // …and was handed null — the opener is consumed by the close
+      expect(opener.isConnected).toBe(true) // (the element itself is untouched — only the workbench's reference is dropped)
 
       opener.remove()
+    })
+
+    // Round 4 (2026-09-05, refuter P2, reproduced in Chromium on the round-3 head): expand-icon open
+    // (opener A) → Escape → focus back on A (correct) → focus + click row 2's grid comment button C
+    // (`.meta-grid__comment-action`) → panel opens on record 2 via `onOpenRecordComments` →
+    // `selectRecord(rec_2, { openComments: true })`, which never goes through `openRecord` → Escape →
+    // focus landed on A (row 1's stale expand icon), not on C. Root cause: `inspectorOpenerEl` kept A
+    // across the close and the comment path never overwrote it, so the inspector's
+    // `props.openerEl ?? <activeElement at open>` preference picked the stale A over C. Fixed on both
+    // sides: `onCloseDrawer` nulls the opener, and `selectRecord`'s open branch nulls it on any
+    // opener-less FRESH open. The inspector's own fallback then restores focus to C — pinned against
+    // the real component in multitable-record-inspector-header.spec.ts (round 4 block).
+    it('stale opener: expand-open (opener A) → close → comment click-through open hands the inspector openerEl === null, not A', async () => {
+      mountWorkbench()
+      await flushUi()
+
+      const openerA = document.createElement('button')
+      openerA.textContent = 'row-1-expand-icon'
+      document.body.appendChild(openerA)
+      openerA.focus()
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy()
+      expect(inspectorStubSeen.openerEl).toBe(openerA) // positive control: the expand path DOES pass A
+
+      container!.querySelector<HTMLButtonElement>('[data-close-drawer="true"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer]')).toBeNull()
+
+      // Row 2's comment button, focused the way a real click leaves it, then the grid's
+      // `open-comments` emit → `onOpenRecordComments` → `selectRecord(rec_2, { openComments: true })`.
+      const commentBtnC = document.createElement('button')
+      commentBtnC.textContent = 'row-2-comment-button'
+      document.body.appendChild(commentBtnC)
+      commentBtnC.focus()
+      expect(document.activeElement).toBe(commentBtnC)
+      container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_2"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy() // panel open on record 2
+      expect(inspectorStubSeen.openerEl).toBeNull() // NOT openerA — the stale-opener bug itself
+      expect(inspectorStubSeen.openerEl).not.toBe(openerA)
+
+      openerA.remove()
+      commentBtnC.remove()
+    })
+
+    // The open-side half of the fix is independently load-bearing: two close paths bypass
+    // `onCloseDrawer` entirely (the rail-drawer watcher, and the `selectedRecordId → null` force-close
+    // watcher that a record delete trips — see the P3-5 block below), so a close-side reset alone
+    // would leave A behind for the next opener-less open. Mutation: delete only the
+    // `inspectorOpenerEl.value = null` in `onCloseDrawer` → this test stays green; delete only the
+    // `else if (!inspectorOpen.value) inspectorOpenerEl.value = null` in `selectRecord` → this reds.
+    it('stale opener via a close that bypasses onCloseDrawer: expand-open (A) → record deleted (force-close) → comment click-through open hands openerEl === null', async () => {
+      gridMock.deleteRecord.mockResolvedValueOnce(true)
+      mountWorkbench()
+      await flushUi()
+
+      const openerA = document.createElement('button')
+      document.body.appendChild(openerA)
+      openerA.focus()
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      expect(inspectorStubSeen.openerEl).toBe(openerA)
+
+      container!.querySelector<HTMLButtonElement>('[data-delete-record="true"]')!.click()
+      await flushUi()
+      expect(gridMock.deleteRecord).toHaveBeenCalledWith('rec_1')
+      expect(container!.querySelector('[data-record-drawer]')).toBeNull() // force-closed by the watcher, not via onCloseDrawer
+
+      const commentBtnC = document.createElement('button')
+      document.body.appendChild(commentBtnC)
+      commentBtnC.focus()
+      container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_2"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+      expect(inspectorStubSeen.openerEl).toBeNull()
+
+      openerA.remove()
+      commentBtnC.remove()
+    })
+
+    // Preserved behaviour (not a fix): an opener-less call while the panel is ALREADY open — a comment
+    // click-through on another row from inside an open panel — leaves the CURRENT open's opener in
+    // place; only a fresh (closed → open) opener-less open resets it. Pinned so the round-4 reset is
+    // visibly scoped to the closed→open edge, not "every openComments call nulls the opener".
+    it('an opener-less comment click-through while the panel is already open keeps the current opener (only a fresh open resets it)', async () => {
+      mountWorkbench()
+      await flushUi()
+
+      const openerA = document.createElement('button')
+      document.body.appendChild(openerA)
+      openerA.focus()
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy()
+      expect(inspectorStubSeen.openerEl).toBe(openerA)
+
+      container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_2"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy() // panel followed to record 2, still open
+      expect(inspectorStubSeen.openerEl).toBe(openerA) // unchanged — this open never closed
+
+      openerA.remove()
     })
   })
 

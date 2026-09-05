@@ -706,11 +706,12 @@ function restoreFocusToOpener() {
   document.querySelector<HTMLElement>('.meta-grid')?.focus()
 }
 
-// The live mechanism (P1 fix): every false→true edge captures a FRESH opener (WB writes a new
-// `inspectorOpenerEl` before each `openRecord` call, so a second open's opener is never the first
-// open's stale value) and refocuses the title; every true→false edge restores focus to whichever
-// opener THAT open captured. No `immediate` — the mount-time fallback below covers the initial
-// value instead, so the two never both fire for the same edge.
+// The live mechanism (P1 fix): every false→true edge captures a FRESH opener (WB's `selectRecord`
+// open branch writes `inspectorOpenerEl` for every open — the caller's opener when it has one, `null`
+// on a fresh open without one — and `onCloseDrawer` clears it on close, so a second open's opener is
+// never the first open's stale value; round 4, 2026-09-05) and refocuses the title; every true→false
+// edge restores focus to whichever opener THAT open captured. No `immediate` — the mount-time
+// fallback below covers the initial value instead, so the two never both fire for the same edge.
 watch(() => props.visible, (isVisible, wasVisible) => {
   if (isVisible && !wasVisible) captureOpenerAndFocusTitle()
   else if (!isVisible && wasVisible) restoreFocusToOpener()
