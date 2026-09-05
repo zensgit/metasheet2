@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { usePlmExportActions } from '../src/views/plm/usePlmExportActions'
+import { downloadCsvFile, escapeCsvCell } from '../src/views/plm/plmCsv'
 
 describe('usePlmExportActions', () => {
   function createActions(overrides: Partial<ReturnType<typeof createDefaults>> = {}) {
@@ -147,5 +148,57 @@ describe('usePlmExportActions', () => {
         ['LINE-1', 'ALT-1', 'ALT-PN', 'Alt Part', 'released', 'SRC-1', 'SRC-PN', 'Source Part', 'active', '1', 'preferred', 'REL-1'],
       ],
     )
+  })
+})
+
+// B3 (adversarial review of the W3a missing-components PR): `escapeCsvCell`/`downloadCsvFile` moved
+// from this module's `plmCsv.ts` into the new `stockPrepCsv.ts`, kept here as a re-export. The move
+// ALSO added a CSV/formula-injection guard for the new missing-components panel — a guard that must
+// NOT reach these eight PLM export actions above, which back real numeric fields (a BOM line quantity
+// of `-1` is unremarkable data here, not an attack). The guard is opt-in (`{ guardFormulas: true }`,
+// default off); every call in `usePlmExportActions.ts` (via `PlmProductView.vue`'s `downloadCsv`)
+// goes through the DEFAULT path with no options, so this pins that default path is byte-for-byte
+// identical to what shipped before this move — a negative quantity and an `=`-prefixed cell both
+// pass through completely unguarded, exactly as they did on main.
+describe('plmCsv.ts default export path carries no formula-injection guard (B3)', () => {
+  const OriginalBlob = Blob
+  let createdBlobParts: string[]
+
+  beforeEach(() => {
+    createdBlobParts = []
+    globalThis.Blob = class TestBlob extends OriginalBlob {
+      constructor(parts?: BlobPart[], options?: BlobPropertyBag) {
+        createdBlobParts = Array.isArray(parts) ? parts.map((part) => String(part)) : []
+        super(parts, options)
+      }
+    } as typeof Blob
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:plm-csv-test') })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    globalThis.Blob = OriginalBlob
+    vi.restoreAllMocks()
+  })
+
+  it('escapeCsvCell: a negative number and a formula-prefixed string pass through UNCHANGED with no options', () => {
+    expect(escapeCsvCell(-1)).toBe('-1')
+    expect(escapeCsvCell('=SUM(A1:A2)')).toBe('=SUM(A1:A2)')
+    expect(escapeCsvCell('+86 138 0000 0000')).toBe('+86 138 0000 0000')
+    expect(escapeCsvCell('@handle')).toBe('@handle')
+  })
+
+  it('escapeCsvCell: comma/quote/newline content is still CSV-quoted regardless of the guard flag', () => {
+    expect(escapeCsvCell('a,b')).toBe('"a,b"')
+    expect(escapeCsvCell('say "hi"')).toBe('"say ""hi"""')
+  })
+
+  it('downloadCsvFile: default output is byte-for-byte the pre-W3a shape for a representative PLM row', () => {
+    // A comma-free formula-shaped cell, so the assertion isolates the GUARD (off by default) from the
+    // pre-existing, guard-independent comma-quoting rule (a `,` inside a cell was always quoted).
+    downloadCsvFile('plm-bom-1.csv', ['Qty', 'Note'], [[-1, '=A1+A2']])
+    const text = createdBlobParts.join('')
+    expect(text).toBe('\ufeffQty,Note\n-1,=A1+A2')
   })
 })

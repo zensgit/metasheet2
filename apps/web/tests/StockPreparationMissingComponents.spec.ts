@@ -10,29 +10,49 @@ import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vu
 //               String()-coerced and cut at 128 characters, `items` is capped at 200 even when the
 //               server sends more, numeric fields fall back to 0, and `truncated` is true only for
 //               the literal boolean `true`.
-//   G-01/G-02   the CSV/formula-injection guard (stockPrepCsv.ts) prefixes a leading =, +, -, @, tab
-//               or CR with an apostrophe, in both the CSV and the TSV cell escapers.
+//   C-08        a non-object entry, or one whose id/parent/bom/path field is itself an object, is
+//               DROPPED, never mapped into a blank/garbage row (adversarial-review fix #6).
+//   G-01/G-02   the CSV/formula-injection guard (stockPrepCsv.ts) is OPT-IN (`{ guardFormulas: true
+//               }`, adversarial-review fix B3) and prefixes a leading =, +, -, @ or tab with an
+//               apostrophe; a leading CR gets the same prefix AND is quote-wrapped (fix #5 — `\r` now
+//               also triggers CSV quoting).
 //   R-01        a plan WITH missing components renders the container, the bilingual summary
-//               sentence, one row per item, and the "(+N 处)" parent badge only when parentCount > 1.
-//   R-02        a plan with NO missing components (key absent, or distinctCount 0) renders nothing —
-//               not even an empty shell.
-//   R-03        `truncated` renders its own notice naming the REAL distinctCount, not "200".
+//               sentence, one row per item, and the on-screen "(+N 处)" parent badge only when
+//               parentCount > 1.
+//   R-02/R-02b  a plan with NO missing components (key absent, or a GENUINELY empty list) renders
+//               nothing — not even an empty shell.
+//   R-03        `truncated` renders its own HONEST notice (fix B2: never claims the export is "全量"
+//               — the client holds at most 200 rows, so the export IS those same 200), and exporting
+//               a truncated list produces exactly 201 lines (header + 200), never "all N".
+//   M5-01/M5-02 a clamped-to-0 `distinctCount` never hides a non-empty `items` list (falls back to
+//               `items.length` for the displayed count); an inconsistent `{distinctCount:5,items:[]}`
+//               renders the count line but no empty table/actions (adversarial-review fix M5).
 //   V-01        values-free carries past this feature too: the technical disclosure (step details)
 //               never contains a component id, even on a run that DID surface one on screen.
-//   X-01        复制 puts a TAB-separated block on the clipboard — header + rows — with the injection
-//               guard live in it.
+//   X-01        复制 puts a TAB-separated block on the clipboard — 7-column header + rows, parent
+//               column RAW (no on-screen badge text) — with the injection guard live (fix #8).
 //   X-02        复制 falls back to selecting the table and changes its own label when the Clipboard
 //               API is unavailable, rather than failing silently.
+//   X-03        the copy button's transient label resets to idle 3s later (fix #9).
 //   E-01        导出 CSV drives the REAL downloadCsvFile (Blob + anchor click, not mocked away) to a
-//               file named `missing-components-{projectNo}-{YYYYMMDD}.csv`, guard live in the file.
+//               file named `missing-components-{projectNo}-{YYYYMMDD}.csv`, 7 columns, guard live.
+//   E-02        a project number containing filesystem-hostile characters is sanitized in the
+//               downloaded filename (fix #9).
+//   B1-01/02/03 `createStockPreparationProjectSyncApi`'s dry run retries ONCE without
+//               `includeMissingComponents` on exactly the two failures that mean "the flag itself was
+//               refused" (400 TABLE_ACTION_REQUEST_INVALID, 403 OPERATOR_SCOPE_*) — merging this PR
+//               alone (server-side W3a PR not yet merged) must not 400 every sync on main — and does
+//               NOT retry an ordinary dry-run failure.
 //
 // Same mock/flush idiom as the sibling suite in this directory (StockPreparationUnconfirmableHold.
 // spec.ts): useLocale/useAuth mocked via vi.hoisted state, and a single `setTimeout(0) → nextTick()`
-// flush rather than a manual multi-tick loop.
+// flush rather than a manual multi-tick loop (X-03's fake-timer test is the one deliberate exception —
+// see its own comment).
 
 const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
   permissions: ['integration:admin'] as string[],
+  apiFetch: vi.fn(),
 }))
 
 vi.mock('../src/composables/useLocale', () => ({
@@ -52,9 +72,17 @@ vi.mock('../src/composables/useAuth', () => ({
   }),
 }))
 
+// Only the B1 describe block below actually exercises this — every other test injects a
+// `StockPreparationProjectSyncApi` double straight into the panel and never reaches real `apiFetch`.
+vi.mock('../src/utils/api', () => ({
+  apiFetch: (...args: unknown[]) => h.apiFetch(...args),
+}))
+
 import StockPreparationProjectSyncPanel from '../src/components/integration/stockPreparation/StockPreparationProjectSyncPanel.vue'
 import {
+  createStockPreparationProjectSyncApi,
   missingComponentsOf,
+  runStockPreparationProjectSync,
   type StockPreparationProjectSyncApi,
 } from '../src/services/integration/stockPreparation/projectSync'
 import { escapeCsvCell, escapeTsvCell } from '../src/services/integration/stockPreparation/stockPrepCsv'
@@ -133,7 +161,7 @@ async function runWithDryRun(dryRun: Record<string, unknown>): Promise<HTMLDivEl
 }
 
 // =============================================================================================
-// C-01..C-07 — missingComponentsOf() clamp, no DOM
+// C-01..C-08 — missingComponentsOf() clamp, no DOM
 // =============================================================================================
 
 describe('missingComponentsOf — strict clamp at the API boundary', () => {
@@ -211,28 +239,54 @@ describe('missingComponentsOf — strict clamp at the API boundary', () => {
     })
     expect(realTrue?.truncated).toBe(true)
   })
+
+  it('C-08: a non-object entry, or one whose string field is itself an object, is DROPPED — never a blank row', () => {
+    const result = missingComponentsOf({
+      missingComponents: {
+        distinctCount: 4,
+        probeCount: 4,
+        truncated: false,
+        items: [null, 3, 'x', { componentSourceId: {} }],
+      },
+    })
+    // 0 rows: `null`/`3`/`"x"` are not objects at all, and `{componentSourceId:{}}` IS an object but
+    // its id field is itself an object — `String({})` would have produced "[object Object]", a
+    // rendering artifact, not the customer's data, so the whole entry is discarded rather than kept
+    // with a garbage id.
+    expect(result?.items.length).toBe(0)
+  })
 })
 
 // =============================================================================================
-// G-01/G-02 — the CSV/TSV formula-injection guard, no DOM
+// G-01/G-02 — the CSV/TSV formula-injection guard, opt-in, no DOM
 // =============================================================================================
 
-describe('CSV/TSV formula-injection guard (stockPrepCsv.ts)', () => {
-  it('G-01: a leading =, +, -, @, tab or CR gets an apostrophe prefix in a CSV cell', () => {
-    for (const prefix of ['=', '+', '-', '@', '\t', '\r']) {
-      expect(escapeCsvCell(`${prefix}cmd`)).toBe(`'${prefix}cmd`)
+describe('CSV/TSV formula-injection guard (stockPrepCsv.ts) — opt-in, default off (B3)', () => {
+  it('G-01: with the guard ON, a leading =, +, -, @ or tab gets an apostrophe prefix in a CSV cell', () => {
+    for (const prefix of ['=', '+', '-', '@', '\t']) {
+      expect(escapeCsvCell(`${prefix}cmd`, { guardFormulas: true })).toBe(`'${prefix}cmd`)
     }
-    expect(escapeCsvCell('PN-0001')).toBe('PN-0001')
+    expect(escapeCsvCell('PN-0001', { guardFormulas: true })).toBe('PN-0001')
   })
 
-  it('G-02: the same guard applies to TSV cells, and embedded tabs/newlines become spaces', () => {
-    expect(escapeTsvCell('=cmd')).toBe("'=cmd")
+  it('G-01b: a leading CR gets the apostrophe prefix AND is quote-wrapped (fix #5: CR now also triggers CSV quoting)', () => {
+    expect(escapeCsvCell('\rcmd', { guardFormulas: true })).toBe('"\'\rcmd"')
+  })
+
+  it('G-01c: with the guard OFF (default — no options), nothing is prefixed, even for a formula-shaped cell', () => {
+    expect(escapeCsvCell('=cmd')).toBe('=cmd')
+    expect(escapeCsvCell('-1')).toBe('-1')
+  })
+
+  it('G-02: the same guard applies to TSV cells (opt-in), and embedded tabs/newlines become spaces regardless', () => {
+    expect(escapeTsvCell('=cmd', { guardFormulas: true })).toBe("'=cmd")
+    expect(escapeTsvCell('=cmd')).toBe('=cmd') // guard OFF by default
     expect(escapeTsvCell('a\tb\r\nc')).toBe('a b  c')
   })
 })
 
 // =============================================================================================
-// R-01..V-01 — rendering
+// R-01..M5-02, V-01 — rendering
 // =============================================================================================
 
 describe('StockPreparationProjectSyncPanel — 缺件清单 rendering', () => {
@@ -251,7 +305,7 @@ describe('StockPreparationProjectSyncPanel — 缺件清单 rendering', () => {
     vi.clearAllMocks()
   })
 
-  it('R-01: renders the container, the bilingual summary, one row per item, and the parentCount badge', async () => {
+  it('R-01: renders the container, the bilingual summary, one row per item, and the on-screen parentCount badge', async () => {
     const list = {
       distinctCount: 2,
       probeCount: 5,
@@ -276,7 +330,7 @@ describe('StockPreparationProjectSyncPanel — 缺件清单 rendering', () => {
     // parentCount === 1 → no badge on the first row.
     expect(rows[0].textContent).not.toContain('+')
     expect(rows[1].textContent).toContain('PN-2002')
-    // parentCount === 4 → the badge on the second row.
+    // parentCount === 4 → the ON-SCREEN badge on the second row (export/copy do NOT carry this — see X-01).
     expect(rows[1].textContent).toContain('(+4 处)')
   })
 
@@ -285,18 +339,79 @@ describe('StockPreparationProjectSyncPanel — 缺件清单 rendering', () => {
     expect(q(root, 'stock-prep-project-sync-missing-components')).toBeNull()
   })
 
-  it('R-02b: distinctCount 0 → the container does not render even though the key is present', async () => {
+  it('R-02b: distinctCount 0 AND an empty items list (genuinely empty) → the container does not render', async () => {
     const root = await runWithDryRun(planWithMissing({ distinctCount: 0, probeCount: 0, truncated: false, items: [] }))
     expect(q(root, 'stock-prep-project-sync-missing-components')).toBeNull()
   })
 
-  it('R-03: truncated renders its own notice naming the REAL distinctCount, not "200"', async () => {
-    const items = Array.from({ length: 3 }, (_, i) => rawItem({ componentSourceId: `PN-${i}` }))
-    const root = await runWithDryRun(planWithMissing({ distinctCount: 240, probeCount: 500, truncated: true, items }))
-    const notice = q(root, 'stock-prep-project-sync-missing-components-truncated')
-    expect(notice).not.toBeNull()
-    expect(notice!.textContent).toContain('200')
-    expect(notice!.textContent).toContain('240')
+  it('M5-01: a garbage-clamped distinctCount (0) does not hide a non-empty items list; the count falls back to items.length', async () => {
+    const list = {
+      distinctCount: 'lots', // missingComponentsOf clamps this to 0 via intOf
+      probeCount: 5,
+      truncated: false,
+      items: [rawItem({ componentSourceId: 'PN-9001' }), rawItem({ componentSourceId: 'PN-9002' })],
+    }
+    const root = await runWithDryRun(planWithMissing(list))
+
+    const box = q(root, 'stock-prep-project-sync-missing-components')
+    expect(box, 'items are present even though distinctCount clamped to 0 — must still render').not.toBeNull()
+    expect(box!.textContent).toContain('缺件 2 种')
+    expect(qa(root, 'stock-prep-project-sync-missing-components-row').length).toBe(2)
+  })
+
+  it('M5-02: {distinctCount:5, items:[]} renders the count line but NOT an empty table or dead buttons', async () => {
+    const root = await runWithDryRun(planWithMissing({ distinctCount: 5, probeCount: 5, truncated: false, items: [] }))
+
+    const box = q(root, 'stock-prep-project-sync-missing-components')
+    expect(box, 'distinctCount > 0 alone is enough to render the disclosure').not.toBeNull()
+    expect(box!.textContent).toContain('缺件 5 种')
+    // ...but there is nothing to list or act on.
+    expect(qa(root, 'stock-prep-project-sync-missing-components-row').length).toBe(0)
+    expect(q(root, 'stock-prep-project-sync-missing-components-copy')).toBeNull()
+    expect(q(root, 'stock-prep-project-sync-missing-components-export')).toBeNull()
+  })
+
+  it('R-03 (B2): truncated renders an HONEST notice, and exporting it yields exactly 201 lines (header + 200), never "全量"', async () => {
+    // Self-contained Blob/URL/anchor mocking (not shared with the E-01 describe below) so this test
+    // can stay under the plain rendering describe while still driving the real export.
+    const OriginalBlob = Blob
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    let createdBlobParts: string[] = []
+    globalThis.Blob = class TestBlob extends OriginalBlob {
+      constructor(parts?: BlobPart[], options?: BlobPropertyBag) {
+        createdBlobParts = Array.isArray(parts) ? parts.map((part) => String(part)) : []
+        super(parts, options)
+      }
+    } as typeof Blob
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:r03') })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+    try {
+      const items = Array.from({ length: 205 }, (_, i) => rawItem({ componentSourceId: `PN-${i}` }))
+      const root = await runWithDryRun(planWithMissing({ distinctCount: 205, probeCount: 500, truncated: true, items }))
+
+      const notice = q(root, 'stock-prep-project-sync-missing-components-truncated')
+      expect(notice).not.toBeNull()
+      expect(notice!.textContent).toContain('200')
+      expect(notice!.textContent).toContain('205')
+      // The design's original wording claimed the export was "全量" (the full list) — it is not; the
+      // client holds at most 200 rows, and the export is exactly those 200.
+      expect(notice!.textContent).not.toContain('全量')
+
+      ;(q(root, 'stock-prep-project-sync-missing-components-export') as HTMLButtonElement).click()
+      await flush()
+
+      const csvText = createdBlobParts.join('')
+      const lines = csvText.replace(/^\ufeff/, '').split('\n')
+      expect(lines.length).toBe(201) // header + 200 rows — NEVER "all 205"
+    } finally {
+      globalThis.Blob = OriginalBlob
+      Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
+      clickSpy.mockRestore()
+    }
   })
 
   it('V-01: values-free survives this feature too — a component id never reaches the technical disclosure', async () => {
@@ -316,7 +431,7 @@ describe('StockPreparationProjectSyncPanel — 缺件清单 rendering', () => {
 })
 
 // =============================================================================================
-// X-01/X-02 — 复制 (clipboard)
+// X-01/X-02 — 复制 (clipboard); X-03 uses fake timers for the 3s auto-reset (fix #9)
 // =============================================================================================
 
 describe('StockPreparationProjectSyncPanel — 缺件清单复制', () => {
@@ -336,7 +451,7 @@ describe('StockPreparationProjectSyncPanel — 缺件清单复制', () => {
     vi.clearAllMocks()
   })
 
-  it('X-01: 复制 puts a TAB-separated block on the clipboard — header + rows — guard live', async () => {
+  it('X-01: 复制 puts a TAB-separated 7-column block on the clipboard — RAW parent id, no on-screen badge — guard live', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
 
@@ -344,7 +459,15 @@ describe('StockPreparationProjectSyncPanel — 缺件清单复制', () => {
       distinctCount: 1,
       probeCount: 1,
       truncated: false,
-      items: [rawItem({ componentSourceId: '=cmd|A1', parentSourceId: 'ASM-A', bomId: 'BOM-1', depth: 1, occurrenceCount: 1, parentCount: 1 })],
+      items: [rawItem({
+        componentSourceId: '=cmd|A1',
+        parentSourceId: 'ASM-A',
+        bomId: 'BOM-1',
+        path: 'ASM-A/=cmd|A1',
+        depth: 1,
+        occurrenceCount: 1,
+        parentCount: 3, // > 1 — would show the "(+3 处)" badge ON SCREEN; must NOT appear in the copy.
+      })],
     }
     const root = await runWithDryRun(planWithMissing(list))
 
@@ -354,9 +477,18 @@ describe('StockPreparationProjectSyncPanel — 缺件清单复制', () => {
     expect(writeText).toHaveBeenCalledTimes(1)
     const tsv = writeText.mock.calls[0][0] as string
     const lines = tsv.split('\n')
-    expect(lines[0].split('\t')).toEqual(['零件号', '父件', '所在 BOM', '层级', '次数'])
+    expect(lines[0].split('\t')).toEqual(['零件号', '父件', '所在 BOM', '层级', '次数', '涉及父件数', '路径'])
+    const cells = lines[1].split('\t')
     // The injection guard is LIVE in the copied text, not only in the CSV export path.
-    expect(lines[1].split('\t')[0]).toBe("'=cmd|A1")
+    expect(cells[0]).toBe("'=cmd|A1")
+    // Parent column is the RAW id — no badge text, no "处" anywhere in the row.
+    expect(cells[1]).toBe('ASM-A')
+    expect(cells[2]).toBe('BOM-1')
+    expect(cells[3]).toBe('1')
+    expect(cells[4]).toBe('1')
+    expect(cells[5]).toBe('3') // parentCount as its OWN column
+    expect(cells[6]).toBe('ASM-A/=cmd|A1') // path, screen-invisible, present in the export
+    expect(tsv).not.toContain('处')
 
     const button = q(root, 'stock-prep-project-sync-missing-components-copy') as HTMLButtonElement
     expect(button.textContent).toContain('已复制')
@@ -373,10 +505,50 @@ describe('StockPreparationProjectSyncPanel — 缺件清单复制', () => {
 
     expect(button.textContent).toContain('请按 Ctrl/Cmd+C')
   })
+
+  it('X-03 (fix #9): the copy button label resets to idle 3 seconds later', async () => {
+    // Fake timers ONLY for this test (restored in `finally`) — the shared `flush()` helper relies on
+    // a REAL `setTimeout(0)` to drain the run's promise chain, so it is not used here. Vue's own
+    // scheduler and the mocked API's resolved promises are plain microtasks, which fake timers do not
+    // affect, so plain `await Promise.resolve()` / `await nextTick()` cycles flush them regardless.
+    vi.useFakeTimers()
+    try {
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+
+      const root = mountPanel(api({
+        dryRun: vi.fn().mockResolvedValue(planWithMissing({
+          distinctCount: 1, probeCount: 1, truncated: false, items: [rawItem()],
+        })),
+      }))
+      const input = q(root, 'stock-prep-project-sync-project-no') as HTMLInputElement
+      input.value = PROJECT_NO
+      input.dispatchEvent(new Event('input'))
+      await nextTick()
+      ;(q(root, 'stock-prep-project-sync-run') as HTMLButtonElement).click()
+      for (let i = 0; i < 8; i += 1) { await Promise.resolve(); await nextTick() }
+
+      const button = q(root, 'stock-prep-project-sync-missing-components-copy') as HTMLButtonElement
+      button.click()
+      for (let i = 0; i < 8; i += 1) { await Promise.resolve(); await nextTick() }
+      expect(button.textContent).toContain('已复制')
+
+      await vi.advanceTimersByTimeAsync(2999)
+      await nextTick()
+      expect(button.textContent, 'still shows "已复制" a moment before 3s').toContain('已复制')
+
+      await vi.advanceTimersByTimeAsync(1)
+      await nextTick()
+      expect(button.textContent, 'reset to the idle "复制" label at 3s').not.toContain('已复制')
+      expect(button.textContent).toContain('复制')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
 
 // =============================================================================================
-// E-01 — 导出 CSV, driving the REAL downloadCsvFile (Blob captured, anchor click spied — not
+// E-01/E-02 — 导出 CSV, driving the REAL downloadCsvFile (Blob captured, anchor click spied — not
 // mocked away), the same pattern userManagementView.spec.ts uses for its own CSV/MD downloads.
 // =============================================================================================
 
@@ -419,7 +591,7 @@ describe('StockPreparationProjectSyncPanel — 缺件清单导出 CSV', () => {
     vi.restoreAllMocks()
   })
 
-  it('E-01: downloads missing-components-{projectNo}-{YYYYMMDD}.csv, guard live in the file', async () => {
+  it('E-01: downloads missing-components-{projectNo}-{YYYYMMDD}.csv, 7 columns, RAW parent id, guard live', async () => {
     const list = {
       distinctCount: 1,
       probeCount: 1,
@@ -436,9 +608,137 @@ describe('StockPreparationProjectSyncPanel — 缺件清单导出 CSV', () => {
     expect(clickedAnchors[0].download).toMatch(new RegExp(`^missing-components-${PROJECT_NO}-\\d{8}\\.csv$`))
 
     const csvText = createdBlobParts.join('')
-    expect(csvText).toContain('零件号,父件,所在 BOM,层级,次数')
+    expect(csvText).toContain('零件号,父件,所在 BOM,层级,次数,涉及父件数,路径')
     // The injection guard fired on the exported file too.
     expect(csvText).toContain("'=cmd|A1")
+    // Full row check: RAW parent id (no badge), plus the parentCount/path columns the table hides.
+    expect(csvText).toContain("'=cmd|A1,ASM-A,BOM-1,2,3,1,ASM-100/PN-0001")
     expect(revokeObjectURLMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('E-02 (fix #9): a project number with filesystem-hostile characters is sanitized in the filename', async () => {
+    const root = mountPanel(api({
+      dryRun: vi.fn().mockResolvedValue(planWithMissing({
+        distinctCount: 1, probeCount: 1, truncated: false, items: [rawItem()],
+      })),
+    }))
+    const dirtyProjectNo = 'P/2026:007?"<>|*'
+    const input = q(root, 'stock-prep-project-sync-project-no') as HTMLInputElement
+    input.value = dirtyProjectNo
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    ;(q(root, 'stock-prep-project-sync-run') as HTMLButtonElement).click()
+    await flush()
+
+    ;(q(root, 'stock-prep-project-sync-missing-components-export') as HTMLButtonElement).click()
+    await flush()
+
+    expect(clickedAnchors.length).toBe(1)
+    const filename = clickedAnchors[0].download
+    expect(filename).not.toMatch(/[\\/:*?"<>|]/)
+    // 'P/2026:007?"<>|*' → each of / : ? " < > | * becomes its own '_' (6 of them run together after "007").
+    expect(filename).toMatch(/^missing-components-P_2026_007_{6}-\d{8}\.csv$/)
+  })
+})
+
+// =============================================================================================
+// B1 — dry-run flag fallback: merging THIS PR alone (server-side W3a PR not merged yet, or this
+// caller's operator-scope check refused) must not sink the sync. `createStockPreparationProjectSyncApi`
+// retries the SAME dry-run once, without `includeMissingComponents`, for exactly two reasons — and
+// the whole 4-step run completes normally afterward. Drives the REAL wire-level api (apiFetch mocked
+// at the module boundary, not the injected `StockPreparationProjectSyncApi` double the rest of this
+// file uses) because the retry logic lives inside `createStockPreparationProjectSyncApi`'s `dryRun`.
+// =============================================================================================
+
+describe('createStockPreparationProjectSyncApi — dry-run flag fallback (B1)', () => {
+  beforeEach(() => {
+    h.apiFetch.mockReset()
+  })
+
+  function bodyOf(call: unknown[]): Record<string, unknown> {
+    const init = call[1] as RequestInit | undefined
+    return JSON.parse(String(init?.body ?? '{}'))
+  }
+
+  /** Wires apiFetch: dry-run answers come from `dryRunResponses` in order; apply/mvp-persist succeed trivially. */
+  function wireApi(dryRunResponses: Response[]): unknown[][] {
+    const calls: unknown[][] = []
+    let dryRunCallIndex = 0
+    h.apiFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      calls.push([url, init])
+      const route = String(url)
+      if (route.includes('/dry-run')) {
+        const response = dryRunResponses[Math.min(dryRunCallIndex, dryRunResponses.length - 1)]
+        dryRunCallIndex += 1
+        return response
+      }
+      if (route.includes('/apply')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: { status: 'succeeded', apply: { counts: { created: 0, updated: 0, inactive: 0, skipped: 0, held: 0, failed: 0 } } },
+        }), { status: 200 })
+      }
+      if (route.includes('/mvp-persist')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: { status: 'created', persisted: true, created: { batch: 1, lines: 1, run: 1 } },
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ ok: true, data: {} }), { status: 200 })
+    })
+    return calls
+  }
+
+  it('B1-01: 400 TABLE_ACTION_REQUEST_INVALID retries once without the flag → server_unsupported, all 4 steps complete', async () => {
+    const calls = wireApi([
+      new Response(JSON.stringify({ ok: false, error: { code: 'TABLE_ACTION_REQUEST_INVALID' } }), { status: 400 }),
+      new Response(JSON.stringify({ ok: true, data: { status: 'ready', canApply: true, dryRunToken: 'tok', counts: {} } }), { status: 200 }),
+    ])
+    const apiClient = createStockPreparationProjectSyncApi({})
+    const report = await runStockPreparationProjectSync(apiClient, 'P1')
+
+    const dryRunCalls = calls.filter((call) => String(call[0]).includes('/dry-run'))
+    expect(dryRunCalls.length).toBe(2)
+    expect(bodyOf(dryRunCalls[0]).includeMissingComponents).toBe(true)
+    // The SECOND request body carries NO flag at all.
+    expect(bodyOf(dryRunCalls[1]).includeMissingComponents).toBeUndefined()
+
+    expect(report.missingComponents).toBeNull()
+    expect(report.missingComponentsUnavailableReason).toBe('server_unsupported')
+    // 四步照常 — the add-on feature failing never sinks the sync itself.
+    expect(report.steps.length).toBe(4)
+    expect(report.pass).toBe(true)
+    expect(report.steps[0].status).toBe('ok')
+  })
+
+  it('B1-02: 403 OPERATOR_SCOPE_* retries once without the flag → scope_denied, all 4 steps complete', async () => {
+    const calls = wireApi([
+      new Response(JSON.stringify({ ok: false, error: { code: 'OPERATOR_SCOPE_TENANT_REQUIRED' } }), { status: 403 }),
+      new Response(JSON.stringify({ ok: true, data: { status: 'ready', canApply: true, dryRunToken: 'tok', counts: {} } }), { status: 200 }),
+    ])
+    const apiClient = createStockPreparationProjectSyncApi({})
+    const report = await runStockPreparationProjectSync(apiClient, 'P1')
+
+    const dryRunCalls = calls.filter((call) => String(call[0]).includes('/dry-run'))
+    expect(dryRunCalls.length).toBe(2)
+    expect(bodyOf(dryRunCalls[1]).includeMissingComponents).toBeUndefined()
+
+    expect(report.missingComponents).toBeNull()
+    expect(report.missingComponentsUnavailableReason).toBe('scope_denied')
+    expect(report.steps.length).toBe(4)
+    expect(report.pass).toBe(true)
+  })
+
+  it('B1-03: an ORDINARY dry-run failure (not a flag-support problem) is NOT retried and surfaces normally', async () => {
+    const calls = wireApi([
+      new Response(JSON.stringify({ ok: false, error: { code: 'TABLE_ACTION_SOURCE_NOT_ACTIVE' } }), { status: 404 }),
+    ])
+    const apiClient = createStockPreparationProjectSyncApi({})
+    const report = await runStockPreparationProjectSync(apiClient, 'P1')
+
+    const dryRunCalls = calls.filter((call) => String(call[0]).includes('/dry-run'))
+    expect(dryRunCalls.length, 'no silent retry for a REAL failure').toBe(1)
+    expect(report.pass).toBe(false)
+    expect(report.missingComponentsUnavailableReason).toBeNull()
   })
 })
