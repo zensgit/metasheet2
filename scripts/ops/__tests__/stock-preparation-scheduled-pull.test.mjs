@@ -218,9 +218,23 @@ async function withMockFetch(handler, run) {
       })
     })().catch(settleReject)
   })
+  // `AbortSignal.timeout(...)`'s own internal timer is deliberately UNREF'd — proved directly (not
+  // inferred) by `node -e "AbortSignal.timeout(500); "`, which exits immediately without ever waiting
+  // for the timer, on every Node version this repo runs (18/20/25 all behave the same way). That is
+  // fine for the real script (a scheduled run must not be kept alive by its own timeout machinery),
+  // but a TEST whose only other pending work is a promise that never resolves on its own (the raw
+  // "never settles" handler above, or `hangBody`'s `.json()`) has NOTHING ref'd left once that
+  // synchronous setup returns — and `node:test`'s own runner does not uniformly keep enough alive
+  // across every Node version to paper over that: it did on this workstation, but Node 18.x/20.x in
+  // CI hit exactly this and cancelled the test mid-flight ("Promise resolution is still pending but
+  // the event loop has already resolved"). A trivial REF'D interval for the duration of the mocked
+  // call does nothing on its own — it exists purely to keep the loop alive long enough for the
+  // UNREF'd abort timer to fire on its own schedule, which is all either kind of test here needs.
+  const keepEventLoopAlive = setInterval(() => {}, 1000)
   try {
     return { requests, result: await run() }
   } finally {
+    clearInterval(keepEventLoopAlive)
     globalThis.fetch = original
   }
 }
