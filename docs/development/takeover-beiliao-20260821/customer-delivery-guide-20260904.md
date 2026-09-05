@@ -345,8 +345,8 @@ PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
 - **根因**:后台展开作业当时复用了交互试算的**同一套上限**。进入这条路径的唯一方式就是超过交互上限,后台再撞同一个数字,于是任何大到需要这条路径的项目都必然在这条路径里失败——按构造不可能成功。
 - **修法**(#5501):后台展开作业改用自己的一套独立上限,交互试算行为**不变**。
 - **复测通过(2026-09-06,r11,合成 13151 行项目)**:交互试算 `large_bom_bounded`(10000 行封顶,`readCount=20502`,`canApply=false`)→ 后台展开作业 `completed`(`rowsExpanded=13151`、`readCount=26959`、`frontierRemaining=0`,预算 `maxRows=200000`/`maxPages=1000`/`maxReadCount=600000`/`maxElapsedMs=3600000`,`errorTypes` 为空)→ 规划 `valid`(`add=13151`、`existingRows=0`、`manual_confirm=0`)→ 分批写入作业 `succeeded`:132 批 × 100,`created=13151`、`failed=0`,`hitGuardLimit=false`。用时:试算 6.7s、展开 8.5s、规划 2.3s、写入循环 453.6s(≈3.4s/批,主要是 HTTP 往返 + 每批落库),驱动脚本总耗时 472.8s。
-- **唯一的坑,必须提前check**:动作配置里的 `projectSubtree` 块(§3.1)是**为客户 PLM 的列名写的**(`pathInfo.parentIdField=Parent_OBJ_ID`、`bomHead.pathIdField=path_id`)。如果切到的源(例如验证用的合成源)**没有这两列**,订单展开完成后一进入子树阶段,第一次读 `bomHead` 就会 SQL 报错,整份后台作业判 `status=failed`、`errorTypes=[read_failed]`(**不是规模类错误**),`authoritative=false`,plan 同样 422——现象和"规模超限"很像,但根因完全不同,不能按 §7.1 的预算表去调。2026-09-05 首次实测大 BOM 时就踩了这个坑(合成源当时缺这两列),交互试算的 10000 行上限在进入子树阶段之前就已经 `large_bom_bounded` 早退,所以这个坑此前从未暴露。**接手排查时先看是不是切换到了缺这两列的源**,不要先怀疑预算配置。
-- **诊断缺口(#5507,截至本文核对时对抗核验已判可合,仅剩注释措辞未收尾)**:此前作业证据把 `readDiagnostics` 砍成布尔值、失败对象与错误码不落库也不打日志,任何 `read_failed` 都无法事后诊断,只能翻 PG 服务端日志(见新增的"运维排障"一节)。#5507 合入后,`GET` 作业记录会带上 `evidence.readFailures` / `errorDetails`(至多 20 条,**只含对象名、错误码、原因类**,永不含原始 `message`,保持 values-free)。
+- **唯一的坑,必须提前check**:动作配置里的 `projectSubtree` 块(§3.1)是**为客户 PLM 的列名写的**(`pathInfo.parentIdField=Parent_OBJ_ID`、`bomHead.pathIdField=path_id`)。如果切到的源(例如验证用的合成源)**没有这两列**,订单展开完成后一进入子树阶段,第一次读 `bomHead` 就会 SQL 报错,整份后台作业判 `status=failed`、`errorTypes=[read_failed]`(**不是规模类错误**),`authoritative=false`,plan 同样 422——现象和"规模超限"很像,但根因完全不同,不能按 §7.1 的预算表去调。2026-09-05 首次实测大 BOM 时就踩了这个坑(合成源当时缺这两列),交互试算的 10000 行上限在进入子树阶段之前就已经 `large_bom_bounded` 早退,所以这个坑此前从未暴露。**接手排查时先看是不是切换到了缺这两列的源**,不要先怀疑预算配置。222 上当时是手工 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` 补的这两列;永久修法是合成 PLM 生成器本身补齐这两列(PR #5508,截至 2026-09-06 04:30 为 ready 状态,rebase 后 pin 已重算完,等 CI,head `54f10f8c1`),合入后新生成的合成源不会再缺这两列。
+- **诊断缺口(#5507,截至 2026-09-06 04:30 为 ready 状态,复核判定可合,等 CI 自动合,head `f15d774a9`)**:此前作业证据把 `readDiagnostics` 砍成布尔值、失败对象与错误码不落库也不打日志,任何 `read_failed` 都无法事后诊断,只能翻 PG 服务端日志(见新增的"运维排障"一节)。#5507 合入后,`GET` 作业记录会带上 `evidence.readFailures` / `errorDetails`(至多 20 条,**只含对象名、错误码、原因类**,永不含原始 `message`,保持 values-free)。
 
 ### 后台上限:缺省推导公式与 222 现行值
 
@@ -430,7 +430,7 @@ pg_restore --clean --if-exists -d $env:DATABASE_URL "$backupDir\pre-upgrade-db.d
 
 `audit_logs` 表按月分区(`audit_logs_YYYY_MM`),数据库里有一个 `create_audit_partition()` 函数负责建**下个月**的分区,应用代码里还有一段自愈逻辑(`AuditRepository.ensureCurrentMonthPartition`)——写入时如果撞上"当月分区不存在",会自动尝试建当月分区再重试一次。
 
-**这个自愈逻辑在中文 locale 的部署上从未真正触发过**:它靠一段英文正则(`/no partition of relation "audit_logs" found/i`)匹配 PostgreSQL 抛出的错误信息来判断"是不是缺分区这个原因",但中文 locale 下 PostgreSQL 返回的是中文报错文案,英文正则永远不命中,于是每一条本该触发自愈的写入都直接失败退出,不会自动建分区。**产品修复 PR #5506**:改成按 PostgreSQL 的 SQLSTATE(`23514`)识别"缺分区"这类错误,不再依赖报错文案的语言,中英文正则作为兜底(截至本文核对时状态为 OPEN,9 例测试绿)。
+**这个自愈逻辑在中文 locale 的部署上从未真正触发过**:它靠一段英文正则(`/no partition of relation "audit_logs" found/i`)匹配 PostgreSQL 抛出的错误信息来判断"是不是缺分区这个原因",但中文 locale 下 PostgreSQL 返回的是中文报错文案,英文正则永远不命中,于是每一条本该触发自愈的写入都直接失败退出,不会自动建分区。**产品修复 PR #5506 已合入 main**(`66d40c2fb`,2026-09-06 04:20):改成按 PostgreSQL 的 SQLSTATE(`23514`)识别"缺分区"这类错误,不再依赖报错文案的语言,中英文正则作为兜底(9 例测试绿)。
 
 另外,`create_audit_partition()` 这个函数**目前没有任何调用者**——不在应用启动流程里,也没有接到每日调度上,纯手工才会被执行到;是否要把它接到启动检查或每日调度,记入 `48h-autonomous-run-record-20260906.md` 的待拍板清单。
 
@@ -443,7 +443,7 @@ CREATE TABLE IF NOT EXISTS audit_logs_2026_10 PARTITION OF audit_logs FOR VALUES
 
 **已在 222 上实证有效**(2026-09-06):手工建好 2026_09/2026_10 两个分区后,重跑一次会写 `audit_logs` 的操作(两次 RBAC 授权 + 命名空间准入),`audit_logs_2026_09` 从 0 行变成 3 行,PG 服务端日志从此再没有新的 `audit_logs` 相关报错;补分区之前的两个时间点(当天 03:06:59 / 03:18:10)各有 3 条报错,与同一类授权写入一一对应。
 
-**运维建议**:不论 #5506 合入与否,建议**每月检查一次下一个月的分区是否已存在**(`SELECT to_regclass('audit_logs_<下月 YYYY_MM>')` 不为空即已存在),提前手工建好,不要等到写入失败才发现——尤其在自愈逻辑修复上线前,这是唯一的保险手段。
+**运维建议**:即使 #5506 已合入,自愈依然是"撞上缺分区错误后才建",不是提前预建;建议**每月检查一次下一个月的分区是否已存在**(`SELECT to_regclass('audit_logs_<下月 YYYY_MM>')` 不为空即已存在),提前手工建好,不要等到写入失败才发现——这仍是唯一的保险手段。
 
 ---
 
