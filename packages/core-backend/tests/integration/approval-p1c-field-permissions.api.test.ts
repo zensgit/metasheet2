@@ -9,6 +9,7 @@ import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
 type JsonRecord = Record<string, unknown>
+const FORM_FIELD_APPROVER_ID = 'p1c-manager-driven'
 
 async function canListenOnEphemeralPort(): Promise<boolean> {
   return await new Promise((resolve) => {
@@ -177,6 +178,13 @@ describeIfDatabase('Approval P1-C node field permissions (hidden subset) API', (
     const canListen = await canListenOnEphemeralPort()
     expect(canListen).toBe(true)
     await ensureApprovalSchemaReady()
+    const pool = poolManager.get()
+    await pool.query(
+      `INSERT INTO users (id, email, password_hash, is_active)
+       VALUES ($1, $2, 'x', TRUE)
+       ON CONFLICT (id) DO UPDATE SET is_active = TRUE`,
+      [FORM_FIELD_APPROVER_ID, `${FORM_FIELD_APPROVER_ID}@x.test`],
+    )
     server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
     await server.start()
     const address = server.getAddress()
@@ -199,6 +207,7 @@ describeIfDatabase('Approval P1-C node field permissions (hidden subset) API', (
         await pool.query('DELETE FROM approval_template_versions WHERE template_id = ANY($1::uuid[])', [templateIds])
         await pool.query('DELETE FROM approval_templates WHERE id = ANY($1::uuid[])', [templateIds])
       }
+      await pool.query('DELETE FROM users WHERE id = $1', [FORM_FIELD_APPROVER_ID])
     } catch {
       // ignore cleanup failures
     }
@@ -355,7 +364,7 @@ describeIfDatabase('Approval P1-C node field permissions (hidden subset) API', (
     const formSchema = {
       fields: [
         { id: 'reason', type: 'text', label: '事由', required: true },
-        { id: 'approver', type: 'user', label: '审批人' },
+        { id: 'approver', type: 'user', label: '审批人', required: true },
       ],
     }
     // approval_1 resolves its approver FROM `approver` AND hides `approver`. The assignee is resolved
@@ -386,7 +395,7 @@ describeIfDatabase('Approval P1-C node field permissions (hidden subset) API', (
       `p1c-driver-${Date.now()}`,
       formSchema,
       graph,
-      { reason: 'trip', approver: 'p1c-manager-driven' },
+      { reason: 'trip', approver: FORM_FIELD_APPROVER_ID },
       bookkeeping,
     )
     expect(created.currentNodeKey).toBe('approval_1')
@@ -401,7 +410,7 @@ describeIfDatabase('Approval P1-C node field permissions (hidden subset) API', (
     expect(body.formSnapshot).not.toHaveProperty('approver')
     expect(body.formSnapshot).toHaveProperty('reason', 'trip')
     // ...but the assignee was resolved from its stored value (routing unaffected).
-    expect(body.assignments.some((assignment) => assignment.assigneeId === 'p1c-manager-driven' && assignment.isActive)).toBe(true)
+    expect(body.assignments.some((assignment) => assignment.assigneeId === FORM_FIELD_APPROVER_ID && assignment.isActive)).toBe(true)
   })
 
   it('routes a downstream condition on a hidden driver field unchanged while redacting it at the hiding node', async () => {

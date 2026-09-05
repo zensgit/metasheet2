@@ -35,6 +35,103 @@ export const STOCK_PREP_PERMISSION_CODES: readonly string[] = Object.freeze([
 /** The route-meta gate for `/stock-prep`: reachability is exactly the queue READ code. */
 export const STOCK_PREP_ROUTE_PERMISSION = STOCK_PREP_READ
 
+/**
+ * 一线自己拉数据 — the ONE table action a stock-prep operator may self-serve. Mirrored from
+ * `STOCK_PREP_OPERATOR_PULL_ACTION_ID` in the plugin module and asserted byte-equal against it, so a
+ * server-side scoping change reddens a test instead of silently widening the button.
+ */
+export const STOCK_PREP_OPERATOR_PULL_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
+
+/**
+ * The pull steps that MOVED to the operator tier, each naming the legacy gate it also still keeps.
+ *
+ * The eight `large-bom-*` members are the BOUNDED BACKGROUND CHANNEL — the same pull, taken in
+ * pieces because the BOM is too big to expand in one request. The panel switches to them BY ITSELF,
+ * so leaving them out of the split (as the first cut did) meant the operator was admitted to the
+ * easy pull and refused the hard one, underneath copy promising 「不用重新点同步,也不用联系我们」.
+ */
+export const STOCK_PREP_OPERATOR_PULL_STEPS: readonly { step: string; method: string; path: string; legacyGate: string }[] = Object.freeze([
+  Object.freeze({
+    step: 'dry-run',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/dry-run',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'apply',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/apply',
+    legacyGate: 'write',
+  }),
+  Object.freeze({
+    step: 'large-bom-expansion-start',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'large-bom-expansion-get',
+    method: 'GET',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'large-bom-expansion-run',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'large-bom-expansion-plan',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/plan',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'large-bom-apply-start',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs',
+    legacyGate: 'write',
+  }),
+  Object.freeze({
+    step: 'large-bom-apply-get',
+    method: 'GET',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'large-bom-apply-run',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId/run',
+    legacyGate: 'write',
+  }),
+  Object.freeze({
+    step: 'large-bom-expansion-cancel',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/cancel',
+    legacyGate: 'write',
+  }),
+  // RECONCILE — the step that puts HELD rows into the confirmation queue. Without it, a plan with
+  // uncertain rows left the operator in a closed loop: nothing queued, nothing written, and a page
+  // pointing them at a queue that could never contain their work.
+  Object.freeze({
+    step: 'reconcile',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/confirmation-decisions/reconcile',
+    legacyGate: PLATFORM_ADMIN_GATE,
+  }),
+])
+
+/** The pull steps that STAYED platform-admin. The web orchestration skips over both with a reason. */
+export const STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS: readonly { step: string; method: string; path: string; legacyGate: string }[] = Object.freeze([
+  Object.freeze({
+    step: 'mvp-persist',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/mvp-persist',
+    legacyGate: PLATFORM_ADMIN_GATE,
+  }),
+])
+
 export interface StockPrepCapability {
   /** Stable id, shared verbatim with the backend manifest. */
   capability: string
@@ -84,6 +181,56 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     method: 'GET',
     path: '/api/integration/stock-preparation/prep-lines/export',
     control: 'stock-prep-confirmation-export',
+  }),
+  Object.freeze({
+    // 一线看得见自己工厂的项目 — the operator's OWN-TENANT project directory / worklist. VALUE-BEARING
+    // (project numbers and names), so it rides the OPERATE tier for the same reason
+    // confirmationQueue.valueEntry and confirmationQueue.export do. The values-free
+    // GET /stock-preparation/projects route is a separate, untouched platform/admin surface and is
+    // deliberately not a member of this manifest.
+    capability: 'confirmationQueue.projectDirectory',
+    code: STOCK_PREP_OPERATE,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/operator/projects',
+    control: 'stock-prep-operator-project-directory',
+  }),
+  Object.freeze({
+    // 通知下一步 — whose turn it is on this project. VALUES-FREE (step keys, indices, booleans,
+    // handler counts — never a material name or quantity), so it rides the broad READ queue-watcher
+    // tier like the rest of the values-free stock-prep read surface.
+    //
+    // `control: null` is deliberate and is NOT an oversight. Every other control here is presence-
+    // equivalent to its permission, which is what lets the F-04 matrix assert rendered === granted
+    // in both directions. These two are additionally gated on RUNTIME TURN STATE (the caller must be
+    // the current handler), so a permitted principal who is not whose-turn-it-is legitimately sees no
+    // control — presence would not equal grant and F-04 would red for a correct UI. Their visibility
+    // is covered by StockPreparationHandoff.spec.ts instead.
+    capability: 'handoff.read',
+    code: STOCK_PREP_READ,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/handoff',
+    control: null,
+  }),
+  Object.freeze({
+    // 通知下一步 — the advance itself. Rides the OPERATE write tier, the same notch as
+    // confirmationQueue.confirm: it mutates durable turn state and dispatches a notification.
+    capability: 'handoff.advance',
+    code: STOCK_PREP_OPERATE,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/handoff/advance',
+    control: null,
+  }),
+  Object.freeze({
+    // 项目备料页 — ONE PROJECT'S BOARD, the operator's landing view. VALUE-BEARING (this project's
+    // number and name), so it rides OPERATE for the same reason valueEntry, export and the project
+    // directory do. It belongs in this manifest because it is gated on a stock-prep code and has a
+    // control of its own — the reverse assertion in the matrix suite (every OPERATE-gated
+    // stock-prep route is a member) is what now makes that non-optional.
+    capability: 'confirmationQueue.projectBoard',
+    code: STOCK_PREP_OPERATE,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/board',
+    control: 'stock-prep-operator-project-board',
   }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
@@ -188,27 +335,80 @@ export function canRunStockPrepInstall(hasPermission: StockPrepPermissionProbe):
 /**
  * 项目接入 — who may press 「同步这个项目」.
  *
- * The entry drives FOUR existing routes, and the widest gate among them is what decides this:
+ * The entry drives FOUR existing routes. It used to render for a platform admin ALONE, because the
+ * narrowest of the four decided it and a stock-prep operator was refused at the very first call:
  *
- *   dry-run     requireAccess(req, 'read')    integration:read | :write | platform admin
- *   apply       requireAccess(req, 'write')   integration:write | platform admin
- *   reconcile   requireAccess(req, 'admin')   platform admin ONLY
- *   mvp-persist requireAccess(req, 'admin')   platform admin ONLY
+ *   dry-run     'read'   integration:read | :write | platform admin
+ *   apply       'write'  integration:write | platform admin
+ *   reconcile   'admin'  platform admin ONLY
+ *   mvp-persist 'admin'  platform admin ONLY
  *
- * so a caller below platform admin would get partway through and 403 — which is the "visible but not
- * actionable" half of R-11. The control therefore renders only for a platform admin, and everyone
- * else is told, in words, who runs it.
+ * 一线自己拉数据 CHANGED THAT, by the owner's ruling: the two routes that DO the pull now additionally
+ * admit the stock-prep operator tier (operate ∧ read), for the pull-bom action id only, and the two
+ * that stayed platform-admin are precisely the two the run can finish without —
  *
- * NOTE THE TIER THIS EXCLUDES, deliberately: the stock-prep OPERATOR (`stock-prep:operate` +
- * `stock-prep:read`) holds no `integration:*` code at all — R-11's mapping is zero-automatic — so the
- * server refuses them at the very first call, the dry run. Hiding the button is this file agreeing
- * with that refusal, not substituting for it. An operator's job on this surface is the confirmation
- * queue; pulling a customer's BOM off their PLM is an owner-level act and stays where it is.
+ *   dry-run     'read'  OR stock-prep operate ∧ read     <- the operator's step 1
+ *   apply       'write' OR stock-prep operate ∧ read     <- the operator's step 3
+ *   reconcile   'admin'                                  <- SKIPPED with a reason for them
+ *   mvp-persist 'admin'                                  <- SKIPPED with a reason for them
+ *
+ * — so an operator's run reaches 「导进去了吗?」 honestly rather than 403-ing partway. R-11's
+ * "visible must be actionable" therefore still holds for this control: what the operator can press,
+ * the server answers; the two steps they cannot run are not controls at all, they are lines in the
+ * step list that say who runs them (`RECONCILE_NOT_PERMITTED` / `BATCH_ARCHIVE_NOT_PERMITTED` in
+ * plainLanguage.ts).
+ *
+ * The disjunction is written out here rather than delegated because it is a disjunction of two
+ * different vocabularies — the legacy `integration:*` tier and the stock-prep tier — and neither
+ * implies the other.
  *
  * Deliberately NOT a member of STOCK_PREP_WORKBENCH_CAPABILITIES, for the same reason
  * `canRunStockPrepInstall` is not: that manifest is the confirmation-queue control set, asserted
  * control-for-control against the queue view by the permission-matrix suites on both sides.
  */
 export function canRunStockPrepProjectSync(hasPermission: StockPrepPermissionProbe): boolean {
-  return hasPermission(INTEGRATION_ADMIN)
+  if (hasPermission(INTEGRATION_ADMIN)) return true
+  return hasPermission(STOCK_PREP_OPERATE) && hasPermission(STOCK_PREP_READ)
+}
+
+/**
+ * 项目备料页 — who may OPEN the project board tab.
+ *
+ * Exactly the tier the board READ is gated on server-side (`stock-prep:operate` ∧ `stock-prep:read`,
+ * satisfied through the ladder by `stock-prep:admin` and by a platform admin). For a TENANT-BOUND
+ * holder of that tier every control the tab carries is answerable — the board read itself, the pull
+ * (see above), the export (already on the operator tier), and the handoff button, which hides itself
+ * when its route is absent or unconfigured — so R-11's "visible must be actionable" holds.
+ *
+ * ONE PRINCIPAL IS THE EXCEPTION, and it is an inherited one rather than a new one: a TENANTLESS
+ * platform admin passes the RBAC ladder here and is then refused by the server for having no tenant
+ * of its own (403 OPERATOR_SCOPE_TENANT_REQUIRED — see stock-preparation-operator-scope.cjs). That is
+ * the deliberate posture #5445 shipped for the whole operator VALUE plane, not a gap this tab opens:
+ * the existing `confirmationQueue.projectDirectory` control has exactly the same property, on exactly
+ * the same tier, for exactly the same reason. Their values-free surfaces are untouched and still
+ * answer for every tenant. Narrowing this predicate to exclude them is a change to that posture and
+ * belongs with it, not here.
+ *
+ * A `stock-prep:read` holder does NOT see it. That is the correct answer rather than a limitation:
+ * the board carries project numbers and names, and the read tier is the values-free queue-watcher
+ * tier. They keep the confirmation queue, which is what that tier was for.
+ *
+ * Deliberately NOT a manifest member — a tab-level predicate, the same shape as
+ * `canOpenStockPrepInstallView`, mirrored by its own test.
+ */
+export function canOpenStockPrepProjectBoard(hasPermission: StockPrepPermissionProbe): boolean {
+  return hasPermission(STOCK_PREP_OPERATE) && hasPermission(STOCK_PREP_READ)
+}
+
+/**
+ * 项目备料页 — whose LANDING tab it is.
+ *
+ * The shell's rule is "the landing tab is the first VISIBLE tab", and that rule alone would put every
+ * principal on the board. A platform admin keeps today's landing (确认队列): their job on this page
+ * is the queue and the install/health surfaces, and moving their landing would be a change nobody
+ * asked for. An operator lands on the board, because it is the page they came for.
+ */
+export function landsOnStockPrepProjectBoard(hasPermission: StockPrepPermissionProbe): boolean {
+  if (hasPermission(INTEGRATION_ADMIN)) return false
+  return canOpenStockPrepProjectBoard(hasPermission)
 }

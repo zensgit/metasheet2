@@ -353,17 +353,35 @@ export class DingTalkGroupDestinationService {
       .execute()
   }
 
-  async testSend(
-    id: string,
-    userId: string,
-    input: DingTalkGroupTestSendInput,
-    sheetId?: string,
-    orgId?: string,
-  ): Promise<{ ok: true }> {
-    const row = await this.loadAuthorizedDestination(id, userId, sheetId, orgId)
-
-    const subject = input.subject?.trim() || 'MetaSheet DingTalk group test'
-    const content = input.content?.trim() || 'This is a standard DingTalk group destination test message.'
+  /**
+   * The ONE webhook POST in this service.
+   *
+   * Both public send surfaces — the operator's manual `testSend` and the server-originated
+   * `sendToDestination` — funnel through here, so the DT-HARDEN-03 decrypt-at-rest step, the 5s
+   * AbortController timeout, `validateDingTalkRobotResponse` and the delivery-ledger bookkeeping
+   * exist EXACTLY ONCE. A second copy of this body is how one path quietly loses the timeout, or
+   * the response validation, or stops recording history, while the other keeps them — which is the
+   * whole reason it lives here instead of being pasted per caller.
+   *
+   * What it deliberately does NOT own: authorization (the caller decides whether it is loading on
+   * behalf of a user or of the server) and the `last_test_*` columns (those describe a MANUAL TEST
+   * and belong to `testSend` alone — a server-originated notification must never overwrite the
+   * operator's last-test verdict). It throws `new Error(message)` on any failure, after the failed
+   * delivery row has already been recorded, so a caller's own catch can add its bookkeeping without
+   * having to re-derive what went wrong.
+   */
+  private async dispatchToDestinationRow(
+    row: DingTalkGroupDestinationRow,
+    params: {
+      subject: string
+      content: string
+      sourceType: 'manual_test' | 'automation'
+      initiatedBy?: string | null
+    },
+  ): Promise<void> {
+    const { subject, content, sourceType } = params
+    const initiatedBy = params.initiatedBy ?? null
+    const id = row.id
     const payload = buildDingTalkMarkdown(subject, content)
     let deliveryRecorded = false
     let responseStatus: number | null = null
@@ -399,10 +417,10 @@ export class DingTalkGroupDestinationService {
         deliveryRecorded = true
         await this.recordDeliverySafely({
           destinationId: id,
-          sourceType: 'manual_test',
+          sourceType,
           subject,
           content,
-          initiatedBy: userId,
+          initiatedBy,
           success: false,
           httpStatus: response.status,
           responseBody,
@@ -416,10 +434,10 @@ export class DingTalkGroupDestinationService {
         deliveryRecorded = true
         await this.recordDeliverySafely({
           destinationId: id,
-          sourceType: 'manual_test',
+          sourceType,
           subject,
           content,
-          initiatedBy: userId,
+          initiatedBy,
           success: false,
           httpStatus: response.status,
           responseBody,
@@ -430,13 +448,51 @@ export class DingTalkGroupDestinationService {
       deliveryRecorded = true
       await this.recordDeliverySafely({
         destinationId: id,
-        sourceType: 'manual_test',
+        sourceType,
         subject,
         content,
-        initiatedBy: userId,
+        initiatedBy,
         success: true,
         httpStatus: response.status,
         responseBody,
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error'
+      if (!deliveryRecorded) {
+        await this.recordDeliverySafely({
+          destinationId: id,
+          sourceType,
+          subject,
+          content,
+          initiatedBy,
+          success: false,
+          httpStatus: responseStatus,
+          responseBody,
+          errorMessage: message,
+        })
+      }
+      throw new Error(message)
+    }
+  }
+
+  async testSend(
+    id: string,
+    userId: string,
+    input: DingTalkGroupTestSendInput,
+    sheetId?: string,
+    orgId?: string,
+  ): Promise<{ ok: true }> {
+    const row = await this.loadAuthorizedDestination(id, userId, sheetId, orgId)
+
+    const subject = input.subject?.trim() || 'MetaSheet DingTalk group test'
+    const content = input.content?.trim() || 'This is a standard DingTalk group destination test message.'
+
+    try {
+      await this.dispatchToDestinationRow(row, {
+        subject,
+        content,
+        sourceType: 'manual_test',
+        initiatedBy: userId,
       })
 
       await this.db.updateTable('dingtalk_group_destinations')
@@ -455,19 +511,8 @@ export class DingTalkGroupDestinationService {
       return { ok: true }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error'
-      if (!deliveryRecorded) {
-        await this.recordDeliverySafely({
-          destinationId: id,
-          sourceType: 'manual_test',
-          subject,
-          content,
-          initiatedBy: userId,
-          success: false,
-          httpStatus: responseStatus,
-          responseBody,
-          errorMessage: message,
-        })
-      }
+      // `last_test_*` is the MANUAL-TEST verdict and is written here only. `dispatchToDestinationRow`
+      // has already recorded the failed delivery row by the time this runs.
       await this.db.updateTable('dingtalk_group_destinations')
         .set({
           updated_at: nowTimestamp(),
@@ -479,6 +524,84 @@ export class DingTalkGroupDestinationService {
         .execute()
       throw new Error(message)
     }
+  }
+
+  /**
+   * 通知下一步 / server-originated send: deliver ONE message to ONE destination on behalf of the
+   * SERVER, not an end user.
+   *
+   * Why there is no authorization argument here: `loadAuthorizedDestination` answers "may THIS user
+   * reach this private/sheet/org-scoped destination", and a host-side notifier has no such user —
+   * the caller is core itself, acting on a deploy-time configured destination id that an operator
+   * put in a config file. Passing a fabricated userId through the per-user check would be a lie, so
+   * this path skips it deliberately and instead keeps the three guards that still mean something
+   * without a user:
+   *   - a MISSING destination throws (a config typo must be loud, never a silent success),
+   *   - a DISABLED destination throws (`enabled=false` is an operator saying "stop sending here";
+   *     the server has no standing to override that, and unlike `testSend` — where a human is
+   *     deliberately poking a destination they can see — nobody is watching this send), and
+   *   - a destination that is NOT ORGANIZATION-SCOPED throws. That third one is the STRUCTURAL
+   *     SUBSTITUTE for the user check this path cannot make, and it exists because dropping the
+   *     user check without replacing it left a real hole:
+   *
+   *       POST /api/multitable/dingtalk-groups requires org-admin ONLY when `scope === 'org'`, and
+   *       PATCH /:id passes an orgId (and therefore reaches `requireOrgAdminAccess`) only when the
+   *       request carries one. So ANY authenticated user can create a PRIVATE-scope row —
+   *       `org_id: null`, `created_by: themselves` — and later rewrite its `webhookUrl`, `secret`
+   *       or `enabled` through `loadAuthorizedDestination`'s `created_by === userId` branch, with
+   *       no admin anywhere in the loop. If an operator ever pastes such a row's id into the
+   *       `stockPreparationHandoff` config, that ordinary user owns the terminal 仓库/采购 fan-out:
+   *       they can silently repoint it at a DingTalk group of their choosing, or disable it, and
+   *       the only visible symptom is that the right people stop being told.
+   *
+   *     An ORG-scoped row (`org_id !== null`) is the one shape whose CREATE and UPDATE are both
+   *     admin-gated: create goes through `requireOrgAdminAccess` because `scope === 'org'`, and
+   *     `loadAuthorizedDestination` refuses an org row unless a matching `orgId` was supplied —
+   *     which the PATCH route only does after the same admin check. So "the row lives in the
+   *     admin-only scope" is a property this method can verify from the row alone, with no user in
+   *     hand, and it is what keeps a server-originated send on an admin-managed destination.
+   *
+   *     Note the asymmetry with `testSend`, and that it is correct: a human test-sending to their
+   *     own private group is that human choosing to poke their own webhook. A SERVER send to a
+   *     private group is core lending its authority to whoever happens to own the row.
+   *
+   * The ledger row is `source_type: 'automation'` (the only non-manual value `recordDelivery`
+   * accepts), so a server notification is never mistaken for someone's manual test — and, by
+   * construction, never touches `last_tested_at` / `last_test_status` / `last_test_error`.
+   */
+  async sendToDestination(
+    id: string,
+    input: { subject?: string; content?: string; initiatedBy?: string | null },
+  ): Promise<{ ok: true }> {
+    const row = await this.db.selectFrom('dingtalk_group_destinations')
+      .selectAll()
+      .where('id', '=', id)
+      .executeTakeFirst()
+    if (!row) throw new Error('Destination not found')
+    if (!row.enabled) throw new Error('Destination is disabled')
+    // See the doc comment: private (`org_id`/`sheet_id` both null) and sheet-scoped rows are
+    // writable by non-admins, so a server-originated send must not ride one. Loud, never silent —
+    // a config pointing at the wrong scope has to be fixed, not worked around.
+    if (row.org_id === null) {
+      throw new Error(
+        'Destination is not organization-scoped; server-originated sends ride only admin-managed destinations',
+      )
+    }
+
+    const subject = input.subject?.trim() || 'MetaSheet notification'
+    const content = input.content?.trim() || subject
+
+    await this.dispatchToDestinationRow(row, {
+      subject,
+      content,
+      sourceType: 'automation',
+      initiatedBy: input.initiatedBy ?? null,
+    })
+
+    logger.info(
+      `DingTalk group destination notification sent to ${maskDingTalkWebhookUrl(decryptDingTalkDestinationWebhookUrl(row.webhook_url))}`,
+    )
+    return { ok: true }
   }
 
   private async recordDelivery(input: {

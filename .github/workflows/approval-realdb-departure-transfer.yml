@@ -7,8 +7,8 @@ name: Approval departure transfer real-DB acceptance (Lock-4 F4-E gates E-1/E-2/
 # resolvable; a delegation-substituted seat is not re-transferred on the delegator's departure but
 # IS transferred on the delegatee's own departure; plus a constructed two-connection concurrency
 # race). Ephemeral first-party PostgreSQL container; no customer source, no deployment, no flag
-# change — `applyApprovalDepartureTransfer` is invoked only by this suite's explicit test-visible
-# entry point, not wired to any directory-sync trigger.
+# change. Production invocation remains behind the default-off directory deprovision gate; this
+# lane pins the planner/ledger signal producer, post-commit dispatcher, and transfer writer together.
 #
 # WHY A STANDALONE FILE, not a plugin-tests.yml allowlist entry: plugin-tests.yml is an s6a
 # sha256-pinned provenance input (sealed-export-package-provenance.cjs PINNED_EVIDENCE_FILES), so
@@ -32,23 +32,37 @@ on:
     # filter keeps it off unrelated PRs.
     paths:
       - 'packages/core-backend/tests/integration/approval-departure-transfer.db.test.ts'
+      - 'packages/core-backend/tests/integration/directory-sync-orchestration.db.test.ts'
       - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
       - 'packages/core-backend/src/services/ApprovalProductService.ts'
       - 'packages/core-backend/src/services/ApprovalAssigneeResolver.ts'
       - 'packages/core-backend/src/services/ApprovalDirectoryOrg.ts'
+      - 'packages/core-backend/src/directory/directory-sync.ts'
+      - 'packages/core-backend/src/directory/deprovision-ledger.ts'
+      - 'packages/core-backend/src/directory/deprovision-planner.ts'
+      - 'packages/core-backend/src/approvals/approval-departure-transfer-dispatch.ts'
       - 'packages/core-backend/src/routes/approvals.ts'
       - 'packages/core-backend/src/types/approval-product.ts'
+      - 'packages/core-backend/tests/unit/approval-departure-transfer-dispatch.test.ts'
+      - 'packages/core-backend/tests/unit/approval-departure-transfer-ci-wiring.test.ts'
       - '.github/workflows/approval-realdb-departure-transfer.yml'
   push:
     branches: [main]
     paths:
       - 'packages/core-backend/tests/integration/approval-departure-transfer.db.test.ts'
+      - 'packages/core-backend/tests/integration/directory-sync-orchestration.db.test.ts'
       - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
       - 'packages/core-backend/src/services/ApprovalProductService.ts'
       - 'packages/core-backend/src/services/ApprovalAssigneeResolver.ts'
       - 'packages/core-backend/src/services/ApprovalDirectoryOrg.ts'
+      - 'packages/core-backend/src/directory/directory-sync.ts'
+      - 'packages/core-backend/src/directory/deprovision-ledger.ts'
+      - 'packages/core-backend/src/directory/deprovision-planner.ts'
+      - 'packages/core-backend/src/approvals/approval-departure-transfer-dispatch.ts'
       - 'packages/core-backend/src/routes/approvals.ts'
       - 'packages/core-backend/src/types/approval-product.ts'
+      - 'packages/core-backend/tests/unit/approval-departure-transfer-dispatch.test.ts'
+      - 'packages/core-backend/tests/unit/approval-departure-transfer-ci-wiring.test.ts'
       - '.github/workflows/approval-realdb-departure-transfer.yml'
 
 permissions:
@@ -109,7 +123,7 @@ jobs:
           MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
         run: pnpm --filter @metasheet/core-backend db:migrate
 
-      - name: Run Lock-4 F4-E departure transfer real-DB acceptance (whole file)
+      - name: Run Lock-4 F4-E departure transfer real-DB acceptance (whole files)
         # WHOLE FILE, --reporter=verbose: a name filter matching zero tests would exit green and
         # hide regressions; verbose prints every collected test so an empty collection shows in the
         # log instead of reading as green.
@@ -117,13 +131,14 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest
           --config vitest.integration.config.ts run
           tests/integration/approval-departure-transfer.db.test.ts
+          tests/integration/directory-sync-orchestration.db.test.ts
           --reporter=verbose
 
       - name: Values-free evidence (this job)
         run: |
           {
             echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
-            echo "suite=approval-departure-transfer.db.test.ts"
+            echo "suites=approval-departure-transfer.db.test.ts,directory-sync-orchestration.db.test.ts"
             echo "lock=approval-lock4-flow-policies-20260817 F4-E / OD-L4-9(a)"
             echo "gates=E-1,E-2,E-3"
             echo "sentinelArmed=EXPECT_DB=1"

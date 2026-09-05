@@ -392,14 +392,30 @@ describe('collectPlatformApps — install-page manifest sections', () => {
     expect(app.posture?.mode).toBe('reported-not-installed')
     expect(app.posture?.installerMayModify).toBe(false)
     expect((app.posture?.entries ?? []).map((entry) => entry.id).sort())
-      .toEqual(['b2aTrialRegistry', 'k3ExternalWrite', 'outboundHttpWrite', 'productionApply'])
+      .toEqual(['b2aTrialRegistry', 'carryTargetBinding', 'k3ExternalWrite', 'outboundHttpWrite', 'productionApply'])
 
-    // Deployment data the page must MARK as such rather than offer a field for.
+    // Deployment data the page must MARK as such rather than offer a field for. `stockPrepHandoff`
+    // (通知下一步) is deployment data of exactly this class: an uncommitted JSON file on the deploy
+    // host, named to the page by env var, never a field the installer types into.
     expect((app.configSurfaces ?? []).map((surface) => surface.id).sort())
-      .toEqual(['customerPack', 'extFieldMapping', 'sandboxWriteAuthorization'])
+      .toEqual(['customerPack', 'extFieldMapping', 'sandboxWriteAuthorization', 'stockPrepHandoff'])
     for (const surface of app.configSurfaces ?? []) {
       expect(surface.committed).toBe(false)
     }
+
+    // THE SHIPPED COPY COUNTS THEM, so the count is pinned. `boundedContext.description` is not a
+    // code comment: collectPlatformApps copies it verbatim into the install-page projection, and an
+    // installer reads it to learn how many files they have to prepare on the deploy host. It said
+    // "two deployment-data config surfaces" for a while after this app grew a third, which is how an
+    // installer ends up preparing two files and never learning the third exists.
+    const deploymentDataSurfaces = (app.configSurfaces ?? []).filter(
+      (surface) => surface.kind === 'deployment-data-file',
+    )
+    expect(deploymentDataSurfaces.map((surface) => surface.id).sort())
+      .toEqual(['customerPack', 'extFieldMapping', 'stockPrepHandoff'])
+    const spelled = ['zero', 'one', 'two', 'three', 'four', 'five', 'six'][deploymentDataSurfaces.length]
+    expect(app.boundedContext?.description ?? '')
+      .toContain(`${spelled} deployment-data config surfaces`)
 
     expect(app.acceptance?.verifiedBy.script).toBe('scripts/ops/stock-prep-acceptance-bootstrap.mjs')
     expect((app.acceptance?.criteria ?? []).map((criterion) => criterion.id))
@@ -436,15 +452,27 @@ describe('collectPlatformApps — install-page manifest sections', () => {
     // Every env var the shipped manifest NAMES, set to a sentinel that could not occur in a
     // manifest. A projection that resolved a name to its value would carry one of these; a
     // projection that copies the manifest cannot.
+    //
+    // THE LIST IS DERIVED FROM THE MANIFEST, NOT TYPED HERE, and that is the fix rather than a
+    // tidy-up. It used to be six hand-written names, so when the handoff PR added a FOURTH config
+    // surface with its own `envVar` the guard simply did not cover it: a leak through
+    // INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH passed this test, demonstrably (injecting one
+    // into the projection left P-03 green, and adding the name by hand turned it red). A hand-kept
+    // list of the things a guard must watch silently stops watching the next one.
     const SENTINEL = 'SENTINEL_DEPLOYMENT_VALUE_bd41c2'
+    const manifestJson = JSON.parse(
+      fs.readFileSync(path.join(REPO_ROOT, 'plugins', 'plugin-integration-core', 'app.manifest.json'), 'utf8'),
+    ) as {
+      configSurfaces?: { envVar?: string; envVars?: string[] }[]
+      posture?: { entries?: { envVar?: string; envVars?: string[] }[] }
+    }
     const named = [
-      'INTEGRATION_CORE_STOCK_PREPARATION_CUSTOMER_PACKS_PATH',
-      'INTEGRATION_CORE_STOCK_PREPARATION_EXT_FIELD_MAPPING_PATH',
-      'STOCK_PREP_SANDBOX_MODE',
-      'STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS',
-      'INTEGRATION_CORE_B2A_REGISTRY_PATH',
-      'INTEGRATION_CORE_OUTBOUND_HTTP_WRITE_TARGETS',
-    ]
+      ...(manifestJson.configSurfaces ?? []),
+      ...(manifestJson.posture?.entries ?? []),
+    ].flatMap((entry) => [...(entry.envVar ? [entry.envVar] : []), ...(entry.envVars ?? [])])
+    // A derived list that came back empty would make the whole assertion vacuous.
+    expect(named.length).toBeGreaterThanOrEqual(6)
+    expect(named).toContain('INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH')
     const saved = new Map(named.map((name) => [name, process.env[name]]))
     for (const name of named) process.env[name] = `${SENTINEL}_${name}`
 

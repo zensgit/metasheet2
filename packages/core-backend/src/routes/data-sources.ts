@@ -215,6 +215,16 @@ function resolveUserId(req: Request): string | undefined {
 }
 
 /**
+ * Return only the tenant attached by JWT verification. Do not fall back to
+ * req.user.tenantId: tenantless legacy tokens may receive that field from a
+ * caller-controlled x-tenant-id compatibility header.
+ */
+function resolveAuthenticatedTenantId(req: Request): string | undefined {
+  const tenantId = req.authenticatedTenantId
+  return typeof tenantId === 'string' && tenantId.trim().length > 0 ? tenantId.trim() : undefined
+}
+
+/**
  * Resolve the MANAGEMENT actor for this request (the authority model).
  *
  * `platformAdmin` mirrors the rbac global-admin bypass's request-user check
@@ -446,11 +456,23 @@ export function dataSourcesRouter(): Router {
           error: { code: 'UNAUTHENTICATED', message: 'Authentication required' }
         })
       }
+      const tenantId = resolveAuthenticatedTenantId(req)
+      if (!tenantId) {
+        return res.status(401).json({
+          ok: false,
+          error: { code: 'AUTHENTICATED_TENANT_REQUIRED', message: 'Authenticated tenant context required' }
+        })
+      }
       const manager = getManager()
       const config = parse.data as DataSourceConfig
-      // A0.1: own the source; workspace_id stays null (no clean workspace
-      // context on req — workspace-shared access is a follow-up).
-      const adapter = await manager.addDataSource(config, { ownerId: userId })
+      // Tenant authority comes only from the verified JWT claim. Never accept
+      // a body/options tenantId or req.user.tenantId (which can be populated by
+      // the legacy x-tenant-id compatibility header).
+      const adapter = await manager.addDataSource(config, {
+        ownerId: userId,
+        tenantId,
+        scopeKind: 'private'
+      })
 
       await auditLog({
         actorId: req.user?.id?.toString(),

@@ -1,0 +1,306 @@
+<!-- This page was authored for the Claude artifact viewer (https://claude.ai/code/artifact/05b3319e-4108-43a9-a5cb-084c2f70a5b4), which renders mermaid fences natively. Opened standalone (outside that viewer) the mermaid code blocks below will render as plain text/code unless you load a mermaid renderer (e.g. mermaid.js) yourself. -->
+<title>备料数据地图</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&family=Noto+Sans+SC:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --ground:#F5F7FA; --panel:#FFFFFF; --ink:#1C2530; --ink-2:#4A5666; --line:#D6DCE3; --line-2:#E9EDF2;
+  --plm:#1F6F8B; --plm-soft:#E1F0F5; --human:#B8781D; --human-soft:#FBF0DC; --gate:#6B4C9A; --gate-soft:#EFE9F7;
+  --warn:#B3261E; --warn-soft:#FBE7E5; --ok:#2E7D4F;
+  --mono:"IBM Plex Mono","Cascadia Mono",Consolas,monospace;
+  --sans:"Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  --serif:"Noto Serif SC","Songti SC","SimSun",serif;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --ground:#0F151C; --panel:#151D26; --ink:#E4E9EF; --ink-2:#A6B1BF; --line:#2A3441; --line-2:#1E2731;
+  --plm:#5FB3D0; --plm-soft:#12303B; --human:#E0A64A; --human-soft:#3A2A0F; --gate:#B79BE0; --gate-soft:#2B2140;
+  --warn:#F28B82; --warn-soft:#3B1A18; --ok:#7BC99A;
+}}
+:root[data-theme="dark"]{
+  --ground:#0F151C; --panel:#151D26; --ink:#E4E9EF; --ink-2:#A6B1BF; --line:#2A3441; --line-2:#1E2731;
+  --plm:#5FB3D0; --plm-soft:#12303B; --human:#E0A64A; --human-soft:#3A2A0F; --gate:#B79BE0; --gate-soft:#2B2140;
+  --warn:#F28B82; --warn-soft:#3B1A18; --ok:#7BC99A;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.75}
+.wrap{max-width:980px;margin:0 auto;padding:40px 24px 80px}
+header{border-bottom:1px solid var(--line);padding-bottom:22px;margin-bottom:34px}
+.eyebrow{font-family:var(--mono);font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2)}
+h1{font-family:var(--serif);font-size:38px;line-height:1.15;margin:8px 0 10px;text-wrap:balance;letter-spacing:.01em}
+.sub{color:var(--ink-2);max-width:72ch;margin:0}
+h2{font-family:var(--serif);font-size:24px;margin:52px 0 12px;text-wrap:balance;padding-top:8px}
+h3{font-size:16px;font-weight:700;margin:26px 0 8px}
+p{max-width:72ch;margin:0 0 12px}
+.thesis{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--plm);padding:18px 22px;margin:18px 0 6px;max-width:none}
+.thesis p{font-family:var(--serif);font-size:19px;line-height:1.6;max-width:none;margin:0}
+.thesis small{display:block;margin-top:8px;color:var(--ink-2);font-family:var(--sans);font-size:13.5px}
+.chip{display:inline-block;font-family:var(--mono);font-size:11.5px;padding:1px 8px;border-radius:999px;border:1px solid transparent;vertical-align:middle;white-space:nowrap}
+.chip.plm{background:var(--plm-soft);color:var(--plm);border-color:color-mix(in srgb,var(--plm) 35%,transparent)}
+.chip.human{background:var(--human-soft);color:var(--human);border-color:color-mix(in srgb,var(--human) 35%,transparent)}
+.chip.gate{background:var(--gate-soft);color:var(--gate);border-color:color-mix(in srgb,var(--gate) 35%,transparent)}
+.chip.warn{background:var(--warn-soft);color:var(--warn);border-color:color-mix(in srgb,var(--warn) 35%,transparent)}
+.chip.flight{background:transparent;color:var(--ink-2);border-color:var(--line);border-style:dashed}
+code,.k{font-family:var(--mono);font-size:12.5px;background:var(--line-2);padding:1px 5px;border-radius:4px}
+.legend{display:flex;gap:14px;flex-wrap:wrap;margin:6px 0 14px;color:var(--ink-2);font-size:13px}
+.legend span::before{content:"";display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+.legend .l-plm::before{background:var(--plm)} .legend .l-human::before{background:var(--human)} .legend .l-gate::before{background:var(--gate)}
+.scroll{overflow-x:auto;border:1px solid var(--line);border-radius:6px;background:var(--panel);margin:10px 0 18px}
+pre.mermaid{margin:0;padding:18px;min-width:720px;background:transparent}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th,td{text-align:left;vertical-align:top;padding:9px 10px;border-bottom:1px solid var(--line-2)}
+th{font-size:12px;letter-spacing:.04em;color:var(--ink-2);font-weight:600;background:var(--panel);position:sticky;top:0}
+td.k{white-space:nowrap}
+tbody tr:hover{background:color-mix(in srgb,var(--line-2) 55%,transparent)}
+.chain{display:grid;grid-template-columns:repeat(6,minmax(140px,1fr));gap:10px;margin:14px 0 6px}
+.chain .step{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px 12px;font-size:13px;position:relative}
+.chain .step b{display:block;font-size:14px;margin-bottom:4px}
+.chain .step .k{display:block;margin-top:6px;font-size:11.5px;white-space:normal;word-break:break-all}
+.chain .step:not(:last-child)::after{content:"→";position:absolute;right:-13px;top:38%;color:var(--ink-2)}
+@media (max-width:820px){.chain{grid-template-columns:repeat(2,1fr)} .chain .step::after{display:none}}
+ol.steps{padding-left:22px;max-width:76ch} ol.steps li{margin:4px 0}
+.flow{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px 18px;margin:12px 0}
+.flow h3{margin:0 0 6px} .flow .meta{font-size:13px;color:var(--ink-2);margin:0 0 8px}
+.flow .meta b{color:var(--ink)}
+.gap{border-left:3px solid var(--line);padding:6px 14px;margin:10px 0;max-width:76ch}
+.gap.p0{border-left-color:var(--warn)} .gap.p1{border-left-color:var(--human)} .gap.rule{border-left-color:var(--gate)}
+.gap b{display:block;margin-bottom:2px}
+.note{font-size:13px;color:var(--ink-2);max-width:76ch}
+footer{margin-top:60px;border-top:1px solid var(--line);padding-top:16px;font-size:13px;color:var(--ink-2)}
+a{color:var(--plm)} a:focus-visible{outline:2px solid var(--plm);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){*{transition:none!important}}
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">metasheet · 备料线 · 核对于 origin/main 2026-09-02(#5447 合入后;#5442 在飞)</div>
+  <h1>备料数据地图</h1>
+  <p class="sub">备料工作台的九个页面、十几张多维表、四条写入管线与守卫之间的读写和键连关系。每条结论都由五路取证对着代码核过;凡是"设计里有、代码里没有"的,标了出来。</p>
+</header>
+
+<section>
+  <div class="eyebrow">一句话模型</div>
+  <div class="thesis">
+    <p>PLM 是<b>结构</b>的权威(谁是谁的儿子、图号、材料、数量);人是<b>自己那几列</b>的权威(备料情况、需求日期、采购/仓库完成标记);系统的活儿只有一件:每次重拉 BOM 时,让这两件事<b>同时为真</b>。</p>
+    <small>PLM 改了要跟着改;人填过的东西一个字都不能被覆盖。整套代码里最重的那堵墙(人列墙)就是为这一句话立的。</small>
+  </div>
+  <div class="legend"><span class="l-plm">plm_system:机器写、人不该写</span><span class="l-human">human_preserved:人写、机器绝不写</span><span class="l-gate">守卫 / 门</span></div>
+</section>
+
+<section>
+  <h2>一根 BOM 线,在系统里有两个身体</h2>
+  <p>一次展开产出一批"展开行"。同一行会分叉成两条<b>完全不同的落地</b>——一条是可变的工作行(人在上面填字),一条是不可变的版本记录(PLM 当时说了什么)。它们只由"同一批展开行喂出来"这个事实相连,<b>没有任何键把两张表 join 起来</b>。</p>
+  <div class="chain">
+    <div class="step"><b>展开行</b>PLM 树递归、SysVer 钉版本<span class="k">path / componentSourceId / totalQuantity</span></div>
+    <div class="step"><b>主表行</b><span class="chip plm">20</span> <span class="chip human">13</span> 人在这里填<span class="k">idempotencyKey = {projectNo, componentSourceId, parentSourceId, path}(字面 JSON)</span></div>
+    <div class="step"><b>快照行</b>不可变、create-only<span class="k">snapshotLineId = hash(batchId | pathKey)</span></div>
+    <div class="step"><b>账本行</b>人对冲突的裁决<span class="k">rowIdentity = idempotencyKey;decisionId = hash(stableKey, fingerprint)</span></div>
+    <div class="step"><b>备料行</b>生成物,ERP 单位<span class="k">stockPrepLineId = hash(batchId | snapshotLineId)</span></div>
+    <div class="step"><b>导出行</b>12 列 Excel<span class="k">读主表,按 projectNo 过滤</span></div>
+  </div>
+  <p class="note">主表的键里天然嵌着项目号——结转的防伪、账本的命名空间隔离都靠这一点。快照行的 <code>sourceFingerprint</code> 只存哈希,原值绝不入列。</p>
+
+  <h3>同一个概念,两套字段名</h3>
+  <p>不是随意的:租户 <code>ext_</code> 扩展列与冻结模板 id 是<b>互斥命名空间</b>,出厂客户包已经占了 <code>ext_parentDrawingNo / ext_parentName / ext_spec</code>;主表若也叫 <code>spec</code>,每个装了包的部署都会在自检时炸(<code>FIELD_ID_TEMPLATE_COLLISION</code>)。所以主表只能另起一套词。</p>
+  <div class="scroll"><table>
+    <thead><tr><th>中文</th><th>主表 plm_stock_preparation_main</th><th>快照行 _bom_snapshot_line</th></tr></thead>
+    <tbody>
+      <tr><td>父组件图号</td><td class="k">parentComponentCode</td><td class="k">parentDrawingNo</td></tr>
+      <tr><td>图号</td><td class="k">componentCode</td><td class="k">childDrawingNo</td></tr>
+      <tr><td>名称</td><td class="k">componentName</td><td class="k">childName</td></tr>
+      <tr><td>规格</td><td class="k">componentSpec</td><td class="k">spec</td></tr>
+      <tr><td>单层用量</td><td class="k">rawQuantity</td><td class="k">designQty</td></tr>
+      <tr><td>版本</td><td class="k">sourceVersion</td><td class="k">childVersion</td></tr>
+      <tr><td>行键</td><td class="k">idempotencyKey</td><td class="k">snapshotLineId</td></tr>
+      <tr><td>项目</td><td class="k">projectNo(业务号)</td><td class="k">projectId(哈希内部号)</td></tr>
+      <tr><td>材料 / 总数量</td><td class="k" colspan="2">material / totalQuantity —— 两边相同</td></tr>
+    </tbody></table></div>
+  <p class="note">主表上的父组件图号/父组件名称/规格是<b>反规范化的副本</b>,不是权威;权威始终是快照行(模板注释 <code>stock-preparation-templates.cjs:701-703</code>)。"不合并两条管线"是 R2 裁决,出处是计划文档,代码里对应的就是这条注释。</p>
+</section>
+
+<section>
+  <h2>表与表:谁写谁读,靠什么键连</h2>
+  <div class="scroll"><pre class="mermaid">
+erDiagram
+    STOCK_PREP_MAIN {
+        string idempotencyKey PK "JSON literal"
+        string projectNo "business no"
+        string componentCode
+        string parentComponentCode "denormalized"
+        string stockPreparationStatus "human band"
+    }
+    SNAPSHOT_BATCH {
+        string snapshotBatchId PK
+        string projectId FK
+        int snapshotVersion "order key"
+    }
+    SNAPSHOT_LINE {
+        string snapshotLineId PK
+        string snapshotBatchId FK
+        string pathKey "pairing key"
+        string childDrawingNo
+        string sourceFingerprint "hash only"
+    }
+    DECISION {
+        string decisionId PK
+        string stableDecisionKey
+        string rowIdentity "= idempotencyKey"
+        string inputFingerprint
+        string status "pending confirmed superseded"
+    }
+    PROJECT {
+        string projectId PK "hash handle"
+        string sourceProjectNo "business no"
+        string owner "human band"
+    }
+    PREP_LINE {
+        string stockPrepLineId PK
+        string snapshotLineId FK
+        string projectId FK
+    }
+    STOCK_PREP_MAIN ||--|| SANDBOX_TWIN : "same template restamped"
+    STOCK_PREP_MAIN ||--o{ DECISION : "rowIdentity"
+    STOCK_PREP_MAIN ||--o{ FIELD_PERMISSIONS : "sheetId + fieldId"
+    STOCK_PREP_MAIN ||--o| HANDOFF : "projectNo (in-flight)"
+    STOCK_PREP_MAIN }o--o| PROJECT : "sourceProjectNo = projectNo (only join)"
+    PACK_INSTALLS ||--o{ STOCK_PREP_MAIN : "ext_ columns"
+    SOURCE_BINDING ||--o| STOCK_PREP_MAIN : "actionId to source"
+    DECISION ||--o| RECONCILE_LEASE : "scopeKey"
+    DECISION ||--o{ AUDIT : "values-free trail"
+    PROJECT ||--o{ SNAPSHOT_BATCH : "projectId"
+    PROJECT ||--o{ RUN : "projectId"
+    SNAPSHOT_BATCH ||--o{ SNAPSHOT_LINE : "snapshotBatchId"
+    SNAPSHOT_LINE ||--o| PREP_LINE : "snapshotLineId"
+    SNAPSHOT_LINE ||--o{ EXCEPTION : "snapshotLineId"
+    PREP_LINE }o--o| MATERIAL_MAPPING : "drawing to material"
+    PREP_LINE }o--o| UNIT_RULE : "unit conversion"
+    MATERIAL_MAPPING }o--o| ERP_MATERIAL : "erpMaterialId"
+  </pre></div>
+
+  <div class="scroll"><table>
+    <thead><tr><th>表</th><th>干什么</th><th>键</th><th>列带</th><th>谁写</th><th>谁读</th></tr></thead>
+    <tbody>
+      <tr><td class="k">plm_stock_preparation_main</td><td>操作员真正干活的工作表;全系统唯一既有机器列又有人列的表</td><td class="k">idempotencyKey(字面 JSON,嵌 projectNo)</td><td><span class="chip plm">20</span> <span class="chip human">13</span></td><td>apply-writer(刷新唯一写入口);carry 执行器(只写人列,带 expectedVersion);人在网格里手改</td><td>dry-run 回读;导出;确认前置校验;交接存在性探针</td></tr>
+      <tr><td class="k">plm_stock_preparation_sandbox*</td><td><b>默认装机下行真正落地的地方</b>——正式主表是空的</td><td>与主表逐字节相同,只换 objectId</td><td>同主表</td><td>同主表</td><td>同主表(导出跟着 action.target 走,自动一致)</td></tr>
+      <tr><td class="k">_confirmation_decision</td><td>把"人对某次冲突的裁决"绑定到某个源版本;显式不属于冻结九表</td><td class="k">decisionId = hash(stableKey, fingerprint)</td><td><span class="chip plm">12</span> <span class="chip human">4</span></td><td>reconcile(建/作废/重开);confirm;carry confirm</td><td>确认队列;值回读;dry-run 的 resolver;目录 pending 计数</td></tr>
+      <tr><td class="k">_project</td><td>快照管线侧的项目台账;前端项目选择器读它</td><td class="k">projectId = hash(tenant, action, projectNo)</td><td><span class="chip plm">7</span> <span class="chip human">1</span></td><td>sync-run-persist(唯一允许 patch 的 MVP 表,三键闭集)</td><td>平台层 values-free 读;操作员目录(唯一给出 projectNo+名称)</td></tr>
+      <tr><td class="k">_bom_snapshot_batch</td><td>每次真正落库的拉取 = 一行</td><td class="k">snapshotBatchId(同时是幂等键、锁键、子 id 哈希输入)</td><td><span class="chip plm">9</span></td><td>sync-run-persist,只 create</td><td>快照读/对比;生成;目录</td></tr>
+      <tr><td class="k">_bom_snapshot_line</td><td>PLM 在那一刻说了什么;不可变、带版本</td><td class="k">snapshotLineId = hash(batchId | pathKey)</td><td><span class="chip plm">19</span></td><td>sync-run-persist,create-only 永不改删</td><td>快照对比(值无关);生成的输入</td></tr>
+      <tr><td class="k">_line(备料行)</td><td>快照行经映射+单位规则解算成 ERP 可发料数量后的行</td><td class="k">stockPrepLineId = hash(batchId | snapshotLineId)</td><td><span class="chip plm">21</span> 无人列</td><td>generation-runtime upsert</td><td>备料行 Tab(值无关);目录</td></tr>
+      <tr><td class="k">_exception_confirmation</td><td>生成过程中的异常与人的处置</td><td class="k">exceptionId = hash(batch|line|type|index)</td><td><span class="chip plm">8</span> <span class="chip human">3</span></td><td>generation create;resolve/bulkResolve 只写人列</td><td>异常队列;阻断严重度计数</td></tr>
+      <tr><td class="k">_run</td><td>每次同步/生成/ERP 同步一行</td><td class="k">runId</td><td><span class="chip plm">8</span></td><td>三个写手(sync / generation / erp-sync)</td><td>快照读;运行句柄</td></tr>
+      <tr><td class="k">_erp_material_master</td><td>K3/ERP 物料主数据本地缓存(只有单位,无供应商/库存)</td><td class="k">erpMaterialId(patch 时 key 不可改写)</td><td><span class="chip plm">11</span></td><td>erp-material-sync-persist</td><td>生成;映射候选</td></tr>
+      <tr><td class="k">_material_mapping</td><td>图号 → ERP 物料,带人工确认;软退役永不删</td><td class="k">mappingId</td><td><span class="chip plm">15</span> <span class="chip human">3</span></td><td>候选同步/确认/手工建/退役</td><td>物料映射 Tab;生成</td></tr>
+      <tr><td class="k">_unit_conversion_rule</td><td>PLM 单位 → ERP 发料单位,损耗/取整/生效窗</td><td class="k">conversionRuleId</td><td><span class="chip plm">13</span> <span class="chip human">2</span></td><td>确认/手工/退役(候选现算不落库)</td><td>单位换算 Tab;生成</td></tr>
+      <tr><td class="k">integration_stock_prep_audit</td><td>值无关审计流水(插件自己的 Postgres 表,不是多维表)</td><td class="k">id;action 12 项闭集</td><td>—</td><td>audit-store append(唯一写手;结构性值无关门 + DB 触发器兜底)</td><td>只有 list</td></tr>
+      <tr><td class="k">integration_stock_prep_pack_installs</td><td>某租户某项目某表装了哪个客户包、装出哪些 ext_ 列</td><td class="k">(tenant, project, object, pack)</td><td>—</td><td>pack-install-store UPSERT</td><td>包感知的可写列推导</td></tr>
+      <tr><td class="k">field_permissions(平台表)</td><td>列级写权限行;<b>只管网格/Yjs 写路径,不管插件自己的写手</b></td><td class="k">(sheet, field, subject)</td><td>—</td><td>#5447 宿主端口 UPSERT(只写不读、只增不撤、带来源标记)</td><td>网格写门 isFieldWriteForbidden</td></tr>
+      <tr><td class="k">integration_stock_prep_handoff <span class="chip flight">#5442 在飞</span></td><td>"轮到谁"的游标,一个项目一行</td><td class="k">(tenant, workspace, projectNo)</td><td>—</td><td>advance 路由(行锁 + step_index 双 CAS)</td><td>GET handoff;交接按钮</td></tr>
+    </tbody></table></div>
+</section>
+
+<section>
+  <h2>四条写入管线(加四条辅线),各动哪张表</h2>
+  <div class="scroll"><pre class="mermaid">
+flowchart LR
+    PLM["PLM 源库"] --> EXP["BOM 展开 铸 idempotencyKey"]
+    EXP --> PLAN["冲突计划 人列不可写"]
+    PLAN --> GATE{"apply 门"}
+    GATE -->|"默认装机"| SBX[("沙箱孪生表")]
+    GATE -->|"需服务端策略 目前无配置通道"| MAIN[("备料主表")]
+    PLAN --> LEDGER[("确认裁决账本")]
+    EXP --> PGATE{"mvp-persist 开关"}
+    PGATE -->|"默认关 什么都不写"| BATCH[("快照批次")]
+    BATCH -->|"snapshotBatchId"| LINE[("快照行 不可变")]
+    LINE --> GEN["生成运行"]
+    GEN --> PREPL[("备料行")]
+    GEN --> EXC[("异常表")]
+    MAIN --> GRID["多维表格网格 人工填写"]
+    SBX --> GRID
+    MAIN -->|"按 projectNo 过滤"| XLSX["物料 Excel 导出"]
+    LEDGER --> TABQ["确认队列 Tab 操作员唯一入口"]
+    TABQ -.->|"导出按钮"| XLSX
+    LINE --> TABDIFF["快照对比 Tab 值无关"]
+    PREPL --> TABPL["备料行 Tab 仅管理员"]
+  </pre></div>
+
+  <div class="flow"><h3>A · 拉取刷新(主表管线)——按下"同步这个项目"时真正发生的事</h3>
+    <p class="meta"><b>默认:</b>沙箱专用。没有服务端生产策略时 apply 门无条件拒绝正式主表。<b>动:</b>读写主表(或沙箱);账本由第 2 步 reconcile 单独写;审计。</p>
+    <ol class="steps"><li>B2a 读授权门(未设登记表则休眠)</li><li>载入源适配器、解密凭据</li><li>ext 字段映射与动作一致性断言</li><li><code>expandPlmProjectBom</code> 从外部 PLM 展开,铸出 idempotencyKey</li><li>按 projectNo 回读现有主表行</li><li>重复诊断 + 冲突计划;规划器顺带把父图号/父名称/规格反规范化到载荷</li><li>可选合入账本 resolver 并重算</li><li>铸出 revision 与一次性 dryRunToken(以上全程零写)</li><li>apply:先过沙箱/生产门,再过 B2a,再消耗 token(取出即删),然后写</li></ol></div>
+
+  <div class="flow"><h3>B · 快照留痕(九张冻结 MVP 表管线)</h3>
+    <p class="meta"><b>默认:</b>工作台那条腿默认<b>关</b>——mvp-persist 路由需要 env 字面量 <code>'true'</code>。<b>动:</b>批次/快照行/运行/项目,全部 create-only(只有项目表允许 patch)。</p>
+    <ol class="steps"><li>路由铸身份:projectId = hash(tenant\naction\nprojectNo)、syncRunId、legacyBatchId</li><li>按 <code>readPlan.batchIdentity.mode</code> 决定 snapshotBatchId(默认 source_revision;按小时分批 opt-in)</li><li>同一事务:先取正式表栅栏,再取项目锁与批次锁</li><li>锁内分配 snapshotVersion = max+1,严格单调守卫</li><li>顺序写 batch(1 行)→ line(N 行)→ run → project 三键 patch</li></ol>
+    <p class="note">注意:另有两个落库入口只由 admin 门控、没有 env 开关(老的 <code>/mvp/sync/persist</code>、PLM source-run 自动落库桥)。"快照管线关着"对工作台成立,对整个表族不成立。</p></div>
+
+  <div class="flow"><h3>C · 裁决账本——人对冲突的答案怎么被记住并复用</h3>
+    <p class="meta"><b>默认:</b>人填的值是只读参考,机器永不消费;唯一把人填的值写回主表的路径是 carry 确认。<b>动:</b>账本、对账租约表、审计。</p>
+    <ol class="steps"><li>reconcile 服务端重跑只读计划(故意不带 resolver,让 revision 稳定)</li><li>取对账租约,抢不到即 409 BUSY</li><li>从计划的 manual_confirm 派生三类候选:keyed 重复键、匿名保留、carry 保留</li><li>逐候选:命中活行不动;同 stableDecisionKey 但指纹变了 ⇒ 旧行 superseded + 新建;命中作废行 ⇒ 重开</li><li>人在确认队列 confirm,写 resolutionAction / resolvedValue / notes</li><li>下一次 dry-run 时 resolver 读回账本,把对应 hold 解成决定</li></ol></div>
+
+  <div class="flow"><h3>D · 生成备料行</h3>
+    <p class="meta"><b>默认:</b>依赖快照管线的产物——默认装机下无输入可跑。<b>动:</b>读五张(批次/快照行/ERP 物料/映射/规则),写备料行、异常、运行。</p>
+    <ol class="steps"><li>取一个完整批次的快照行(不完整即拒)</li><li>读 ERP 物料、映射、规则及现有备料行/异常行</li><li>逐行解算成 ERP 可发料数量</li><li>按 stockPrepLineId upsert 备料行,并显式清空模板缺席列(重跑不留混血行)</li><li>异常 create-only,人处置三件套被剥离</li><li>重新统计未解决的阻断异常得出 ready</li></ol></div>
+
+  <div class="flow"><h3>E · 主数据(ERP 物料 / 图号映射 / 单位换算)</h3><p class="meta"><b>默认:</b>三张表的所有读写路由全部 admin,操作员一个都碰不到。映射候选必须显式给版本策略;退役 = isActive:false,永不删。</p></div>
+
+  <div class="flow"><h3>F · 导出——交到车间手里的那张 Excel</h3>
+    <p class="meta"><b>门:</b>stock-prep:operate + 租户由宿主背书成员关系。<b>动:</b>只读主表(经绑定的 action.target,与写手同一条缝);审计。</p>
+    <ol class="steps"><li>取 action.target(不再硬编码正式主表——第一版正因此每个项目都 404)</li><li>按物理 projectNo 过滤、active≠false,分页 500×100,上限 20000</li><li>12 列固定顺序投影;三列原生值为空时逐行退回 ext_ 兜底</li><li>未绑定的列以 <code>unresolvedColumns</code> 值无关地报出,把"空白"和"没接线"分开</li></ol>
+    <p class="note">零行 ⇒ 404;有行但全 inactive ⇒ 合法的只有表头的导出。无租户的平台管理员在这里 403——看得见最多 Tab 的人反而导不出数据,这是刻意的。</p></div>
+
+  <div class="flow"><h3>G · 客户包安装与列写权限</h3><p class="meta"><b>默认:</b>出厂的两个包都只声明 roleViews(藏列),<b>没有一个声明 fieldWritePolicies</b>——列写权限是已交付的能力,不是已交付的配置。声明了才会:角色预检(未知角色 422,此时一列未建)→ 逻辑列 id 翻物理 id → 宿主端口写 field_permissions(宿主没注入端口就 503)→ 陈旧写域普查只报告。</p></div>
+
+  <div class="flow"><h3>H · 交接棒 <span class="chip flight">#5442 在飞</span></h3><p class="meta"><b>默认:</b>双重 fail-closed——无服务端配置在碰 DB 之前就 501,表永远为空;无行读作游标 0。projectNo 先做形状校验(它会被插进钉钉 markdown)→ 存在性探针 → 事务内行锁 + step_index / notified_step_index 双 CAS,零行更新即 409 → store 确认后才写审计 → 发群通知(dispatch 永不抛,只返枚举)。</p></div>
+</section>
+
+<section>
+  <h2>九个页面,分别在看哪张表</h2>
+  <p>工作台是个薄壳:九个 Tab 分三层可见性。<b>没有任何可编辑面</b>——人真正填字的地方是多维表格网格。</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Tab</th><th>谁能看</th><th>读</th><th>写</th><th>出不出值</th></tr></thead>
+    <tbody>
+      <tr><td><b>确认队列</b></td><td><b>操作员唯一可见的 Tab</b>(stock-prep:read)</td><td>账本(队列/就绪/状态枚举)· 主表(值回读、按项目导出)· 项目台账目录(号+名 datalist)</td><td>confirm → 账本人列</td><td>队列值无关;值回读/导出/目录<b>出值</b>,需 stock-prep:operate 且租户经宿主背书</td></tr>
+      <tr><td><b>安装 / 体检</b></td><td>stock-prep:admin 开 Tab;里面几乎每个按钮要 integration:admin</td><td>应用清单、部署预检、源预检</td><td>建账本表、建沙箱目标、装客户包、选源、列映射副驾确认</td><td>预检出列名(客户值),其余值无关</td></tr>
+      <tr><td><b>项目工作台</b></td><td>平台管理员(四个路由里最宽的门说了算)</td><td>项目台账</td><td>"同步这个项目"依次:dry-run(read)→ reconcile(admin,账本)→ apply(write,主表/沙箱)→ mvp-persist(admin + env,快照四表)</td><td>值无关</td></tr>
+      <tr><td>总览</td><td>管理员</td><td>五个阶段读并行(计数)</td><td>—</td><td>值无关</td></tr>
+      <tr><td>快照对比</td><td>管理员</td><td>批次 + 快照行(14 种变化类型,含材质/图号具名)</td><td>—</td><td>值无关(只出 token)</td></tr>
+      <tr><td>物料映射 · 单位换算</td><td>管理员</td><td>映射表 / 规则表 + 快照行</td><td>候选同步、确认、退役</td><td>值无关摘要</td></tr>
+      <tr><td>备料行</td><td>管理员</td><td><code>_line</code>(<b>不是导出读的那张</b>)</td><td>触发 generation/run</td><td>值无关</td></tr>
+      <tr><td>异常队列</td><td>管理员</td><td>异常表</td><td>处理 / 批量处理(服务端盖章)</td><td>值无关</td></tr>
+      <tr><td><b>项目备料页</b> <span class="chip flight">在建</span></td><td>操作员默认落地</td><td>目录 + 拉取状态 + 游标 + 最近导出(board 聚合读)</td><td>拉取 / 通知下一步 / 导出;填写走按项目过滤的网格</td><td>号、名、计数、步骤键、时间戳、句柄——不出行值</td></tr>
+    </tbody></table></div>
+  <p class="note">两个容易混的点:"备料行 Tab"读 <code>_line</code>(快照管线的产物),"导出按钮"读<b>主表</b>——模块名叫 prep-line-export,名字有误导性。</p>
+</section>
+
+<section>
+  <h2>守卫:哪一道拦哪张表</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>守卫</th><th>保护的表 / 列</th><th>怎么拦</th><th>不覆盖什么</th></tr></thead>
+    <tbody>
+      <tr><td><span class="chip gate">人列墙</span> assertNoHumanFields</td><td>主表 13 个人列</td><td>规划器拒绝<b>构造</b>带人列的载荷;写手写前<b>再查一遍</b>;白名单必须与模板人带完全相等,不等整个计划抛。真运行时断言</td><td>不覆盖反方向:人在网格里改机器列(靠列写权限,见下)</td></tr>
+      <tr><td><span class="chip gate">沙箱 / 生产 apply 门</span></td><td>决定 apply 能写哪个 objectId</td><td>默认无条件拒绝正式主表;生产策略 7 天窗 + requireFreshDryRun</td><td><b>宿主没有加载器</b>把策略送进 context.config——门是对的,没人能给钥匙</td></tr>
+      <tr><td><span class="chip gate">值承载读的租户门</span> resolveOperatorValueScope</td><td>值回读、导出、操作员目录(全系统仅三个出值的读)</td><td>拒绝阶梯全在 IO 之前;成员关系必须宿主背书(没目录就 501);无租户的平台管理员 403</td><td>导出表是部署级共享,行上无租户列——多租户部署项目号撞车会串</td></tr>
+      <tr><td><span class="chip gate">审计值无关门</span></td><td>integration_stock_prep_audit</td><td>detail 只允许标量 + 一层计数图,非法键名也报错;应用 append-only + DB 触发器兜底</td><td>projectNo 这种纯数字句柄能过形状门</td></tr>
+      <tr><td><span class="chip gate">列写权限</span> field_permissions(#5447)</td><td>主表列的<b>网格写路径</b></td><td>只写不读(visible 硬编码 true,结构上不能藏列)、只增不撤、带来源标记</td><td><b>不管插件自己的写手</b>(它们走 records API,只认模板所有权墙);无人认领的机器列零拒写行;出厂包未声明</td></tr>
+      <tr><td><span class="chip gate">B2a 读授权门</span></td><td>对外部 PLM 的读</td><td>env 登记表武装</td><td>未设即休眠——一处不拦(宽松方向)</td></tr>
+      <tr><td>九张 MVP 表的守卫</td><td>快照/备料行/项目等</td><td>objectId 白名单 + 结构性省略(如 project.owner 靠"不出现在三键 patch 里")</td><td>不是断言,不会抛;将来谁加第四个键就没了</td></tr>
+    </tbody></table></div>
+</section>
+
+<section>
+  <h2>直言缺口</h2>
+  <div class="gap p0"><b>沙箱孪生才是行真正落地的地方。</b>默认装机下 apply 无条件拒绝正式主表,行落在 <code>plm_stock_preparation_sandbox*</code>,正式主表是空的。任何"我们主表里有数据"的说法,先确认这台机器装的是哪张。</div>
+  <div class="gap p0"><b>生产 apply 门没有宿主配置通道。</b>门是完整的 fail-closed 代码,但宿主唯一的 config 装配点只产出六个键,不含 <code>stockPrepApplyProduction</code>。演示与首个窗口落沙箱表(D1=B);加载器是演示后事项。</div>
+  <div class="gap p0"><b>结转执行器与写手解析目标的方式不同。</b>carry 用 <code>findObjectSheet(…, 'plm_stock_preparation_main')</code> 钉死正式表;写手和导出走 <code>action.target</code>。默认沙箱装机下这是两张表——结转可能 409 或对着空表干活。导出曾为同样原因被修过,结转没有。<span class="chip warn">已派修</span></div>
+  <div class="gap p1"><b>#5447 的四个部门字段没进导出。</b>EXPORT_COLUMNS 仍是 12 列——仓库拿到的 Excel 有备料情况,没有同一个 PR 刚交付的完成标记与实际到货日期。<span class="chip warn">已派修</span></div>
+  <div class="gap p1"><b>工作台没有可编辑面。</b>九个 Tab 全是只读 + 按钮;人改人列的唯一地方是多维表格网格,而"到多维表看数据"只跳首页。操作员的日常横跨两个产品面——"项目备料页"正在补这一条。</div>
+  <div class="gap p1"><b>两套字段词表并存,没有键把两张表连起来。</b>主表 projectNo(业务号)vs 九张 MVP 表 projectId(哈希);唯一连接点是操作员目录靠 <code>sourceProjectNo</code> 字符串相等——在快照腿没开的部署上这个 join 永远是空的。</div>
+  <div class="gap p1"><b>列写权限是能力不是配置。</b>出厂两个包都没声明 fieldWritePolicies;默认装机一行 deny 都不写。而且它只管网格写路径,插件写手走另一套墙——两者保护同一批列但从不相遇。</div>
+  <div class="gap rule"><b>陈旧写域按端口而非按包定范围。</b>改包挪走某列归属时,v1 的 deny 留在 v2 旁边,该列对所有角色都拒写;installer 只能报告(收窄需平台加 pack id)。<span class="chip flight">"真正收回"版本作为后续 PR 在做</span></div>
+  <div class="gap rule"><b>确认队列上两个平台管理员按钮没接线。</b>ensure / reconcile 只 emit 事件,没人监听,点了不发任何请求。</div>
+  <div class="gap rule"><b>#5442 的迁移注释已被 #5447 打脸</b>("stock-prep 没有按列写权限")——论据不成立,结论仍成立;rebase 时订正注释。</div>
+  <div class="gap"><b>规格的源槽默认未声明</b>(宁可缺席不猜列);没配的部署两条管线都不落 spec,导出的规格列完全依赖 ext_spec 兜底。<b>run 表时间戳</b>在 sync 路径仍为空(代码明写 owner 待决)。<b>封存导出的包指纹校验</b>是潜伏代码(模块自述 LATENT),别当成在跑的供应链保证。</div>
+</section>
+
+<footer>
+  核对基线:origin/main @ 2026-09-02(#5447 合入之后);在飞:#5442 交接棒、项目备料页、field_permissions 收回版、222 runbook D1 订正。五路取证 + 一路合成,追踪员分歧处已实测裁定(#5447 已在 main)。凡未独立验证的项(222 机器上的 env 实态、B2a 封存腿、对账租约的 fencing)已在正文标注为"只做了记录"。
+</footer>
+</div>

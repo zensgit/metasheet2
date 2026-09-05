@@ -148,6 +148,7 @@ const FIELD_LABELS: Record<AuthorableFieldType, string> = {
   select: '单选',
   'multi-select': '多选',
   user: '人员',
+  department: '部门',
   detail: '明细',
   'record-link': '关联记录',
   date_range: '日期区间',
@@ -334,6 +335,16 @@ export function addFormField(
     // L8-A: an empty explanation body is a draft-only state; both authoring surfaces expose the
     // multiline body and publish keeps the non-empty boundary.
     explanationText: '',
+    departmentSelection: 'single',
+    departmentDisplay: 'leaf_only',
+    departmentDefaultMode: '',
+    departmentDefaultIds: [],
+    departmentMaxSelectionsText: '',
+    userAllowSelf: false,
+    userSelection: 'single',
+    userDefaultMode: '',
+    userDefaultIds: [],
+    userMaxSelectionsText: '',
   }
 
   const fields = [...draft.fields]
@@ -677,6 +688,16 @@ export interface FormFieldPropertyPatch {
   readonly dateRangeEndLabel?: string
   readonly dateRangeDurationLabel?: string
   readonly explanationText?: string
+  readonly departmentSelection?: FieldAuthoringDraft['departmentSelection']
+  readonly departmentDisplay?: FieldAuthoringDraft['departmentDisplay']
+  readonly departmentDefaultMode?: FieldAuthoringDraft['departmentDefaultMode']
+  readonly departmentDefaultIds?: readonly string[]
+  readonly departmentMaxSelectionsText?: string
+  readonly userAllowSelf?: boolean
+  readonly userSelection?: FieldAuthoringDraft['userSelection']
+  readonly userDefaultMode?: FieldAuthoringDraft['userDefaultMode']
+  readonly userDefaultIds?: readonly string[]
+  readonly userMaxSelectionsText?: string
 }
 
 /** Typed patch for one detail column (type changes go through `retypeFormDetailColumn`). */
@@ -715,6 +736,15 @@ export function updateFormFieldProperties(
   )
     return rejected('unsupported_field_type')
   if (
+    (patch.userAllowSelf !== undefined ||
+      patch.userSelection !== undefined ||
+      patch.userDefaultMode !== undefined ||
+      patch.userDefaultIds !== undefined ||
+      patch.userMaxSelectionsText !== undefined) &&
+    current.type !== 'user'
+  )
+    return rejected('unsupported_field_type')
+  if (
     (patch.numberCurrencySymbol !== undefined ||
       patch.numberThousandsSeparator !== undefined ||
       patch.numberUppercaseCny !== undefined) &&
@@ -730,6 +760,15 @@ export function updateFormFieldProperties(
   )
     return rejected('unsupported_field_type')
   if (patch.explanationText !== undefined && current.type !== 'explanation')
+    return rejected('unsupported_field_type')
+  if (
+    (patch.departmentSelection !== undefined ||
+      patch.departmentDisplay !== undefined ||
+      patch.departmentDefaultMode !== undefined ||
+      patch.departmentDefaultIds !== undefined ||
+      patch.departmentMaxSelectionsText !== undefined) &&
+    current.type !== 'department'
+  )
     return rejected('unsupported_field_type')
   if (
     patch.dateRangeDateType !== undefined &&
@@ -778,6 +817,36 @@ export function updateFormFieldProperties(
       : {}),
     ...(patch.explanationText !== undefined
       ? { explanationText: patch.explanationText }
+      : {}),
+    ...(patch.departmentSelection !== undefined
+      ? { departmentSelection: patch.departmentSelection }
+      : {}),
+    ...(patch.departmentDisplay !== undefined
+      ? { departmentDisplay: patch.departmentDisplay }
+      : {}),
+    ...(patch.departmentDefaultMode !== undefined
+      ? { departmentDefaultMode: patch.departmentDefaultMode }
+      : {}),
+    ...(patch.departmentDefaultIds !== undefined
+      ? { departmentDefaultIds: [...patch.departmentDefaultIds] }
+      : {}),
+    ...(patch.departmentMaxSelectionsText !== undefined
+      ? { departmentMaxSelectionsText: patch.departmentMaxSelectionsText }
+      : {}),
+    ...(patch.userAllowSelf !== undefined
+      ? { userAllowSelf: patch.userAllowSelf }
+      : {}),
+    ...(patch.userSelection !== undefined
+      ? { userSelection: patch.userSelection }
+      : {}),
+    ...(patch.userDefaultMode !== undefined
+      ? { userDefaultMode: patch.userDefaultMode }
+      : {}),
+    ...(patch.userDefaultIds !== undefined
+      ? { userDefaultIds: [...patch.userDefaultIds] }
+      : {}),
+    ...(patch.userMaxSelectionsText !== undefined
+      ? { userMaxSelectionsText: patch.userMaxSelectionsText }
       : {}),
   }
   const fields = [...draft.fields]

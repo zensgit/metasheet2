@@ -623,12 +623,16 @@ const MVP_TEMPLATE_BY_OBJECT_ID = new Map(
   // scoped records API translates logical keys exactly like the MVP tables'.
   // It is NOT thereby part of the frozen nine-table MVP surface.
   //
-  // W4 carry: the CANONICAL main-table template rides it too, for exactly one
-  // consumer — confirm-writes' applyCarryViaConfirm, whose K2 confirm write
-  // addresses the provisioning-managed canonical sheet by logical field keys.
-  // Membership here grants TRANSLATION only, never authorization: each module's
-  // own object-id guard (confirm-writes MVP_OBJECT_ID_SET, the ledger's pinned
-  // OBJECT_ID, the carry executor's single canonical id) stays the wall.
+  // The CANONICAL main-table template rides it too. It was added for ONE consumer
+  // — confirm-writes' applyCarryViaConfirm, whose K2 confirm write used to address
+  // a provisioning-resolved canonical sheet by logical field keys — and that
+  // consumer NO LONGER USES IT: the carry executor now takes the bound table
+  // action's `target` and translates through the target's own `fieldIdMap`,
+  // because this registry is keyed by objectId and a sandbox twin's restamped
+  // objectId is not in it (see that module's carry header). The entry is retained
+  // rather than removed: membership grants TRANSLATION only, never authorization,
+  // and each module's own guard (confirm-writes MVP_OBJECT_ID_SET, the ledger's
+  // pinned OBJECT_ID, the carry executor's bound target) stays the wall.
   [...STOCK_PREPARATION_MVP_TABLE_TEMPLATES, STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE]
     .map((template) => [template.objectId, template]),
 )

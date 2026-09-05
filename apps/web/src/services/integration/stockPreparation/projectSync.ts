@@ -71,6 +71,11 @@ export type StockPreparationProjectSyncReason =
   | 'NOTHING_TO_CONFIRM'
   | 'CONFIRMATIONS_QUEUED'
   | 'RECONCILE_UNAVAILABLE'
+  // 一线自己拉数据: the operator may now run steps 1 and 3, and is still refused steps 2 and 4. That
+  // refusal is a CORRECT deployment state for them, not a fault, so it gets its own reason rather
+  // than borrowing RECONCILE_UNAVAILABLE's "try again later" — there is no later in which a
+  // 403 becomes a 200 for this caller, and telling them to retry would be a lie.
+  | 'RECONCILE_NOT_PERMITTED'
   // 3. 写入
   | 'IMPORTED'
   | 'ALREADY_UP_TO_DATE'
@@ -84,6 +89,7 @@ export type StockPreparationProjectSyncReason =
   | 'BATCH_ARCHIVE_OUTCOME_UNKNOWN'
   | 'BATCH_ARCHIVE_DISABLED'
   | 'BATCH_ARCHIVE_NOT_ATTEMPTED'
+  | 'BATCH_ARCHIVE_NOT_PERMITTED'
   | 'BATCH_ARCHIVE_FAILED'
 
 export interface StockPreparationProjectSyncStepDescriptor {
@@ -492,10 +498,17 @@ export async function runStockPreparationProjectSync(
       // are still in the queue. A refusal here (a lease held by another run, a caller without the
       // platform-admin tier the route keeps) therefore costs the operator freshness, not the queue —
       // so it is a SKIP that still points at the tab, never a failure of the import.
-      const detail: Record<string, string | number> = { status: statusOf(error) }
+      //
+      // 一线自己拉数据 SPLITS THAT SKIP IN TWO. A stock-prep operator now reaches steps 1 and 3 and is
+      // still, by the owner's ruling, refused this one. For them a 401/403 is a permanent and CORRECT
+      // deployment state, not a transient one — so it gets a reason that says who runs this step
+      // instead of「稍后再试」, which for this caller would never come true.
+      const status = statusOf(error)
+      const detail: Record<string, string | number> = { status }
       const code = codeOf(error)
       if (code) detail.code = code
-      record(result(2, 'confirm-queue', 'skip', 'RECONCILE_UNAVAILABLE', detail))
+      const reason = status === 401 || status === 403 ? 'RECONCILE_NOT_PERMITTED' : 'RECONCILE_UNAVAILABLE'
+      record(result(2, 'confirm-queue', 'skip', reason, detail))
     }
   }
 
@@ -584,6 +597,13 @@ export async function runStockPreparationProjectSync(
     // which is a setting, not a fault.
     if (code === BATCH_ARCHIVE_DISABLED_CODE) {
       record(result(4, 'archive', 'skip', 'BATCH_ARCHIVE_DISABLED', detail))
+    } else if (statusOf(error) === 401 || statusOf(error) === 403) {
+      // 一线自己拉数据: this step stayed platform-admin, so for a stock-prep operator a refusal here
+      // is the deployment working as ruled — the rows they came for are already in the sheet
+      // (`report.imported` is true and stays true) and what is missing is a housekeeping copy
+      // somebody else keeps. A red FAIL on the last line of an otherwise successful import would
+      // read as "the import broke", which is the opposite of what happened. SKIP, with the reason.
+      record(result(4, 'archive', 'skip', 'BATCH_ARCHIVE_NOT_PERMITTED', detail))
     } else {
       // VISIBLE, and NON-FATAL. `report.imported` is already true and stays true: the rows are in the
       // sheet. What is missing is this run's entry in 批次与差异, and that is what the step says.

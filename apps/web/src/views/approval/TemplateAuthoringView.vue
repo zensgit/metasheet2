@@ -874,6 +874,7 @@
                 <el-option label="单人通过" value="single" />
                 <el-option label="全部通过" value="all" />
                 <el-option label="任一通过" value="any" />
+                <el-option label="依次审批" value="sequential" data-testid="approval-step-mode-sequential-option" />
                 <!-- P1-C (T2-4 N-of-M / 门槛会签). Linear graphs are BY CONSTRUCTION never inside a
                      parallel region (the linear editor admits no `parallel` node), so this option is
                      always offered here — the backend's linear-only constraint is satisfied by
@@ -2053,6 +2054,8 @@ function nodeConfigSummary(node: ApprovalNode): string[] {
     const approvalConfig = config as { approvalMode?: ApprovalMode; approvalThreshold?: number; timeout?: NodeTimeoutConfig }
     if (approvalConfig.approvalMode === 'threshold' && Number.isInteger(approvalConfig.approvalThreshold)) {
       lines.push(`审批模式：门槛会签（需 ${approvalConfig.approvalThreshold} 人同意）`)
+    } else if (approvalConfig.approvalMode === 'sequential') {
+      lines.push('审批模式：依次审批')
     }
     if (approvalConfig.timeout) {
       const effectLabel = nodeTimeoutEffectLabel(approvalConfig.timeout.effect)
@@ -2102,6 +2105,7 @@ const conditionFieldOptions = computed(() =>
       && field.type !== 'detail'
       && field.type !== 'date_range'
       && field.type !== 'explanation'
+      && field.type !== 'department'
     ))
     .map((field) => ({ id: field.id.trim(), label: fieldDisplayLabel(field) })),
 )
@@ -2320,7 +2324,7 @@ function setApprovalNodeMode(nodeKey: string, mode: ApprovalMode): void {
   // green for a threshold edit inside a parallel region). Mutation-proven for what it DOES guard:
   // approval-template-authoring-canvas-inspector.spec.ts's "setApprovalNodeMode refuses threshold…"
   // test reds if this line is removed.
-  if (mode === 'threshold' && approvalNodeInParallelRegion(nodeKey)) return
+  if ((mode === 'threshold' || mode === 'sequential') && approvalNodeInParallelRegion(nodeKey)) return
   edit.approvalMode = mode
 }
 // P1-C (T2-4 N-of-M / 门槛会签). Meaningful only when `approvalNodeMode(nodeKey) === 'threshold'`.
@@ -3567,6 +3571,7 @@ const FIELD_PALETTE_LABELS: Record<AuthorableFieldType, string> = {
   select: '单选',
   'multi-select': '多选',
   user: '人员',
+  department: '部门',
   detail: '明细',
   'record-link': '关联记录',
   date_range: '日期区间',
@@ -3581,6 +3586,7 @@ const FIELD_PALETTE_MARKS: Record<AuthorableFieldType, string> = {
   select: '○',
   'multi-select': '☑',
   user: '人',
+  department: '部',
   detail: '表',
   'record-link': '链',
   date_range: '区',
@@ -3596,7 +3602,7 @@ const fieldPaletteGroups = [
   { id: 'number', label: '数值', types: ['number'] },
   { id: 'choice', label: '选项', types: ['select', 'multi-select'] },
   { id: 'date', label: '日期', types: ['date', 'datetime', 'date_range'] },
-  { id: 'other', label: '其他', types: ['user', 'detail', 'record-link', 'explanation'] },
+  { id: 'other', label: '其他', types: ['user', 'department', 'detail', 'record-link', 'explanation'] },
 ].map((group) => ({
   ...group,
   entries: group.types.map((type) => ({
@@ -3748,7 +3754,7 @@ function visibilityFieldOptions(current: FieldAuthoringDraft) {
   for (const field of draft.value.fields) {
     if (field.localId === current.localId) continue
     if (!field.id.trim()) continue
-    if (field.type === 'record-link' || field.type === 'detail') continue
+    if (field.type === 'record-link' || field.type === 'detail' || field.type === 'department') continue
     // Lock-8 L8-A (§1.1): explanation carries no value at all — never offered, bare or dotted (it
     // has no endpoints, unlike date_range).
     if (field.type === 'explanation') continue
@@ -3792,6 +3798,7 @@ function invalidateStaleRecordLinkDependencies(changedField: FieldAuthoringDraft
     // Lock-8 L8-A (§1.1): explanation matches record-link/detail's ONE-direction shape — nothing
     // could ever validly have depended on it, so only "became explanation" needs clearing.
     || changedField.type === 'explanation'
+    || changedField.type === 'department'
   const stillDateRange = changedField.type === 'date_range'
   for (const field of draft.value.fields) {
     const dependsOn = field.visibility.dependsOnFieldId.trim()

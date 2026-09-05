@@ -102,6 +102,7 @@ export const AUTHORABLE_FIELD_TYPES: AuthorableFieldType[] = [
   'select',
   'multi-select',
   'user',
+  'department',
   'detail',
   'record-link',
   // Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2): start+end date pair.
@@ -176,6 +177,16 @@ export interface FieldAuthoringDraft {
    * silently defaults it.
    */
   explanationText: string
+  departmentSelection: 'single' | 'multi'
+  departmentDisplay: 'leaf_only' | 'full_path'
+  departmentDefaultMode: '' | 'requester_department' | 'designated'
+  departmentDefaultIds: string[]
+  departmentMaxSelectionsText: string
+  userAllowSelf: boolean
+  userSelection: 'single' | 'multi'
+  userDefaultMode: '' | 'requester' | 'designated'
+  userDefaultIds: string[]
+  userMaxSelectionsText: string
   original?: FormField
 }
 
@@ -390,6 +401,16 @@ export function createEmptyFieldDraft(index = 1): FieldAuthoringDraft {
     dateRangeEndLabel: '',
     dateRangeDurationLabel: '',
     explanationText: '',
+    departmentSelection: 'single',
+    departmentDisplay: 'leaf_only',
+    departmentDefaultMode: '',
+    departmentDefaultIds: [],
+    departmentMaxSelectionsText: '',
+    userAllowSelf: false,
+    userSelection: 'single',
+    userDefaultMode: '',
+    userDefaultIds: [],
+    userMaxSelectionsText: '',
   }
 }
 
@@ -622,6 +643,37 @@ function fieldDraftFromField(field: FormField): FieldAuthoringDraft | null {
     // non-blank `props.text` at publish, so a freshly-saved template can never reach this hydration
     // path with a malformed value; this stays defensive for out-of-band data.
     explanationText: field.type === 'explanation' && typeof props.text === 'string' ? props.text : '',
+    departmentSelection:
+      field.type === 'department' && props.selection === 'multi' ? 'multi' : 'single',
+    departmentDisplay:
+      field.type === 'department' && props.display === 'full_path' ? 'full_path' : 'leaf_only',
+    departmentDefaultMode:
+      field.type === 'department'
+      && (props.defaultMode === 'requester_department' || props.defaultMode === 'designated')
+        ? props.defaultMode
+        : '',
+    departmentDefaultIds:
+      field.type === 'department' && Array.isArray(props.defaultDepartmentIds)
+        ? props.defaultDepartmentIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+        : [],
+    departmentMaxSelectionsText:
+      field.type === 'department' && typeof props.maxSelections === 'number'
+        ? String(props.maxSelections)
+        : '',
+    userAllowSelf: field.type === 'user' && props.allowSelf === true,
+    userSelection: field.type === 'user' && props.selection === 'multi' ? 'multi' : 'single',
+    userDefaultMode:
+      field.type === 'user' && (props.defaultMode === 'requester' || props.defaultMode === 'designated')
+        ? props.defaultMode
+        : '',
+    userDefaultIds:
+      field.type === 'user' && Array.isArray(props.defaultUserIds)
+        ? props.defaultUserIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+        : [],
+    userMaxSelectionsText:
+      field.type === 'user' && typeof props.maxSelections === 'number'
+        ? String(props.maxSelections)
+        : '',
     original: field,
   }
 }
@@ -1287,7 +1339,7 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     // string is what blocks `persistDraft` from ever re-saving it.
     if (
       config.approvalMode !== undefined
-      && !['single', 'all', 'any', 'threshold'].includes(config.approvalMode as string)
+      && !['single', 'all', 'any', 'threshold', 'sequential'].includes(config.approvalMode as string)
     ) return true
     if (thresholdConfigHasBackendDrop(config)) return true
     if (config.approvalMode === 'threshold' && !(Number.isInteger(config.approvalThreshold) && (config.approvalThreshold as number) >= 1)) return true
@@ -1582,6 +1634,29 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
         // unwritten draft emits an empty string, and publish's non-blank check rejects it rather
         // than the client silently picking a placeholder body.
         next.props = { text: field.explanationText.trim() }
+      } else if (field.type === 'department') {
+        const maxSelections = field.departmentMaxSelectionsText.trim()
+        next.props = {
+          selection: field.departmentSelection,
+          display: field.departmentDisplay,
+          ...(field.departmentDefaultMode ? { defaultMode: field.departmentDefaultMode } : {}),
+          ...(field.departmentDefaultMode === 'designated' && field.departmentDefaultIds.length > 0
+            ? { defaultDepartmentIds: [...field.departmentDefaultIds] }
+            : {}),
+          ...(maxSelections ? { maxSelections: Number(maxSelections) } : {}),
+        }
+      } else if (field.type === 'user') {
+        const maxSelections = field.userMaxSelectionsText.trim()
+        const props: Record<string, unknown> = {}
+        if (field.userAllowSelf) props.allowSelf = true
+        if (field.userSelection === 'multi') props.selection = 'multi'
+        if (field.userDefaultMode) props.defaultMode = field.userDefaultMode
+        if (field.userDefaultMode === 'designated' && field.userDefaultIds.length > 0) {
+          props.defaultUserIds = [...field.userDefaultIds]
+        }
+        if (maxSelections) props.maxSelections = Number(maxSelections)
+        if (Object.keys(props).length === 0) delete next.props
+        else next.props = props
       } else if (next.props && typeof next.props === 'object') {
         // Drop record-link pins + L8-C display keys + L8-B date_range keys + L8-A explanation
         // text when type changes away; keep other type-specific props only if still meaningful (do
@@ -1594,6 +1669,11 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
         delete props.thousandsSeparator
         delete props.uppercaseCny
         delete props.dateType
+        delete props.allowSelf
+        delete props.selection
+        delete props.defaultMode
+        delete props.defaultUserIds
+        delete props.maxSelections
         delete props.startLabel
         delete props.endLabel
         delete props.durationLabel
@@ -2099,6 +2179,30 @@ export function validateTemplateFormFields(
         if (pinError) errors.push(pinError)
       }
     }
+    if (field.type === 'user') {
+      const maxText = field.userMaxSelectionsText.trim()
+      const maxSelections = Number(maxText)
+      if (
+        field.userSelection === 'multi'
+        && (!maxText || !Number.isInteger(maxSelections) || maxSelections < 1)
+      ) {
+        errors.push(`${authorLabel}（联系人）多选时需要填写不小于 1 的最多可选人数`)
+      }
+      if (field.userSelection === 'single' && field.userDefaultIds.length > 1) {
+        errors.push(`${authorLabel}（联系人）单选时最多设置一个默认人员`)
+      }
+      if (
+        field.userSelection === 'multi'
+        && Number.isInteger(maxSelections)
+        && maxSelections > 0
+        && field.userDefaultIds.length > maxSelections
+      ) {
+        errors.push(`${authorLabel}（联系人）的默认人员超过最多可选人数`)
+      }
+      if (field.userDefaultMode === 'requester' && !field.userAllowSelf) {
+        errors.push(`${authorLabel}（联系人）默认申请人时必须允许选择本人`)
+      }
+    }
   })
   // Mirror the server visibility-rule reject-set (normalizeFormFieldVisibilityRule +
   // validateFormFieldVisibilityRules): dependency must reference an existing field,
@@ -2235,14 +2339,38 @@ export function validateTemplateApprovalFlow(
       : undefined
     errors.push(...validateApprovalNodeEdits(draft.approvalNodeEdits, draft.fields, parallelRegionNodeKeys, approvalNodeKeys))
   }
-  const userFieldIds = new Set(draft.fields.filter((field) => field.type === 'user').map((field) => field.id.trim()))
+  const userFieldsById = new Map(
+    draft.fields
+      .filter((field) => field.type === 'user')
+      .map((field) => [field.id.trim(), field]),
+  )
   draft.steps.forEach((step, index) => {
     const label = step.name.trim() || `审批步骤 ${index + 1}`
     if ((step.sourceKind === 'static_user' || step.sourceKind === 'static_role') && parseIdsText(step.idsText).length === 0) {
       errors.push(`${label} 需要填写用户/角色 id`)
     }
-    if (step.sourceKind === 'form_field_user' && !userFieldIds.has(step.fieldId.trim())) {
-      errors.push(`${label} 的表单用户字段无效`)
+    if (
+      step.sourceKind === 'form_field_user'
+      || step.sourceKind === 'form_field_user_manager'
+      || step.sourceKind === 'form_field_user_dept_head'
+    ) {
+      const userField = userFieldsById.get(step.fieldId.trim())
+      if (!userField) {
+        errors.push(`${label} 的表单用户字段无效`)
+      } else {
+        if (!userField.required) errors.push(`${label} 的联系人路由字段必须设为必填`)
+        if (userField.visibility.dependsOnFieldId.trim()) {
+          errors.push(`${label} 的联系人路由字段不能设置显示条件`)
+        }
+        if (
+          userField.userSelection === 'multi'
+          && (!userField.userMaxSelectionsText.trim()
+            || !Number.isInteger(Number(userField.userMaxSelectionsText.trim()))
+            || Number(userField.userMaxSelectionsText.trim()) < 1)
+        ) {
+          errors.push(`${label} 的多选联系人路由字段需要设置最多可选人数`)
+        }
+      }
     }
     // Lock-1 §K2 PREVIEW (backend normalize is the final arbiter): a members/role scope needs
     // at least one configured id — the backend rejects an empty scope list the same way.

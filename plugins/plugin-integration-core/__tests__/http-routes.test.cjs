@@ -815,7 +815,54 @@ async function testExternalSystemRoutes() {
     // P2-A: the route attaches the AUTHENTICATED principal (never a body value) so the
     // registry can validate + attribute a config.dataSourceId binding.
     principal: 'user_write',
+    runAs: 'user',
   })
+
+  const canonicalSqlBody = {
+    id: 'sys_sql_canonical',
+    workspaceId: 'workspace_1',
+    name: 'Canonical SQL source',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    status: 'active',
+    connectionId: 'connection_1',
+    config: { schema: 'dbo' },
+  }
+  const canonicalSqlCallCount = findCalls(calls, 'upsertExternalSystem').length
+  res = await invoke(routes, 'POST', '/api/integration/external-systems', {
+    user: WRITE_USER,
+    body: canonicalSqlBody,
+  })
+  assertOkResponse(res, 201)
+  assert.deepEqual(findCalls(calls, 'upsertExternalSystem')[canonicalSqlCallCount][1], {
+    ...canonicalSqlBody,
+    principal: 'user_write',
+    runAs: 'user',
+    tenantId: 'tenant_1',
+  }, 'integration:write may author a canonical SQL binding in its authenticated tenant')
+
+  const readOnlyCanonicalSql = await invoke(routes, 'POST', '/api/integration/external-systems', {
+    user: READ_USER,
+    body: canonicalSqlBody,
+  })
+  assertErrorResponse(readOnlyCanonicalSql, [403])
+  assert.equal(
+    findCalls(calls, 'upsertExternalSystem').length,
+    canonicalSqlCallCount + 1,
+    'integration:read never reaches canonical SQL binding persistence',
+  )
+
+  const crossTenantCanonicalSql = await invoke(routes, 'POST', '/api/integration/external-systems', {
+    user: WRITE_USER,
+    body: { ...canonicalSqlBody, tenantId: 'tenant_other' },
+  })
+  assertErrorResponse(crossTenantCanonicalSql, [403])
+  assert.equal(crossTenantCanonicalSql.body.error.code, 'TENANT_MISMATCH')
+  assert.equal(
+    findCalls(calls, 'upsertExternalSystem').length,
+    canonicalSqlCallCount + 1,
+    'request-body tenant steering never reaches canonical SQL binding persistence',
+  )
 
   res = await invoke(routes, 'GET', '/api/integration/external-systems/:id', {
     user: READ_USER,
@@ -853,6 +900,8 @@ async function testExternalSystemRoutes() {
   assertOkResponse(res, 200)
   assert.deepEqual(findCall(calls, 'getExternalSystemForAdapter')[1], {
     id: 'sys_2',
+    principal: 'user_write',
+    runAs: 'user',
     tenantId: 'tenant_1',
     workspaceId: 'workspace_1',
   })
@@ -862,8 +911,9 @@ async function testExternalSystemRoutes() {
   assert.equal(res.body.data.system.credentials, undefined, 'test response system does not leak credentials')
   assert.equal(res.body.data.system.credentialsEncrypted, undefined, 'test response system does not leak ciphertext')
   const statusUpdates = findCalls(calls, 'upsertExternalSystem')
-  assert.equal(statusUpdates.length, 2, 'external system create plus test status update were persisted')
-  assert.deepEqual(statusUpdates[1][1], {
+  assert.equal(statusUpdates.length, 3, 'two external system creates plus test status update were persisted')
+  const testStatusUpdate = statusUpdates[statusUpdates.length - 1][1]
+  assert.deepEqual(testStatusUpdate, {
     id: 'sys_2',
     tenantId: 'tenant_1',
     workspaceId: 'workspace_1',
@@ -872,10 +922,10 @@ async function testExternalSystemRoutes() {
     kind: 'erp',
     role: 'target',
     status: 'active',
-    lastTestedAt: statusUpdates[1][1].lastTestedAt,
+    lastTestedAt: testStatusUpdate.lastTestedAt,
     lastError: null,
   })
-  assert.ok(!Number.isNaN(Date.parse(statusUpdates[1][1].lastTestedAt)), 'test status update stores ISO timestamp')
+  assert.ok(!Number.isNaN(Date.parse(testStatusUpdate.lastTestedAt)), 'test status update stores ISO timestamp')
 
   calls.length = 0
   const { routes: conflictRoutes } = mountRoutes(createMockServices({
@@ -1095,6 +1145,8 @@ async function testExternalSystemTestRequiresSavedSystem() {
   assertErrorResponse(res, [404])
   assert.deepEqual(findCall(calls, 'getExternalSystemForAdapter')[1], {
     id: 'missing_sys',
+    principal: 'user_write',
+    runAs: 'user',
     tenantId: 'tenant_1',
     workspaceId: 'workspace_1',
   })
@@ -1343,6 +1395,8 @@ async function testDiscoveryRoutes() {
   assertOkResponse(res, 200)
   assert.deepEqual(findCall(calls, 'getExternalSystemForAdapter')[1], {
     id: 'crm_1',
+    principal: 'user_read',
+    runAs: 'user',
     tenantId: 'tenant_1',
     workspaceId: 'workspace_1',
   })
@@ -1456,6 +1510,8 @@ async function testDiscoveryRoutesRejectUnknownSystem() {
   assert.equal(res.body.error.code, 'ExternalSystemNotFoundError')
   assert.deepEqual(findCall(calls, 'getExternalSystemForAdapter')[1], {
     id: 'missing_sys',
+    principal: 'user_read',
+    runAs: 'user',
     tenantId: 'tenant_1',
     workspaceId: 'workspace_1',
   })
@@ -1681,6 +1737,7 @@ async function testPipelineRoutes() {
     mode: 'manual',
     pipelineId: 'pipe_1',
     triggeredBy: 'api',
+    runAs: 'user',
   })
   assert.equal('allowInactive' in runCall[1], false)
   assert.equal('sourceRecords' in runCall[1], false)
@@ -1700,6 +1757,7 @@ async function testPipelineRoutes() {
   const dryRunCall = findCalls(calls, 'runPipeline')[1]
   assert.equal(dryRunCall[1].pipelineId, 'pipe_1')
   assert.equal(dryRunCall[1].triggeredBy, 'api')
+  assert.equal(dryRunCall[1].runAs, 'user')
   assert.equal(dryRunCall[1].dryRun, true)
   assert.equal(dryRunCall[1].sampleLimit, 2)
   assert.equal(res.body.data.metrics.rowsWritten, 0, 'dry-run response does not report target writes')
@@ -3268,6 +3326,7 @@ async function testRunAndDeadLetterRoutes() {
     mode: 'replay',
     id: 'dl_1',
     triggeredBy: 'api',
+    runAs: 'user',
   })
   assert.equal('allowInactive' in findCall(calls, 'replayDeadLetter')[1], false)
   assert.equal('sourceRecords' in findCall(calls, 'replayDeadLetter')[1], false)
@@ -4258,7 +4317,31 @@ async function testStockPreparationTargetProvisioningRoutes() {
   assert.equal(res.body.data.ready, true)
   assert.equal(res.body.data.mode, 'sandbox_create')
   assert.equal(res.body.data.targetBindingAvailable, true)
-  assert.equal(Object.prototype.hasOwnProperty.call(res.body.data, 'targetBinding'), false, 'sandbox route never exposes target binding')
+  // THE BINDING THE DEPLOYER MUST PASTE. This route is the sanctioned generator: the 222 window
+  // runbook tells an operator to run it and paste the resulting `target` into the table-action
+  // config, and until it returned one that instruction dead-ended.
+  //
+  // WHY RETURNING IT IS NOT A LEAK, given this route used to hide it:
+  //   * `objectId` is the caller's OWN request body (see the call above) — handing back an input is
+  //     not disclosure;
+  //   * `sheetId` and every `fieldIdMap` entry are pure functions of (projectId, objectId), both
+  //     caller-supplied, and scripts/ops/stock-preparation-derive-target-binding.mjs prints all 33
+  //     of them offline with no authentication at all;
+  //   * the canonical sibling route already returns exactly this shape, at exactly this admin tier
+  //     (publicStockPreparationTargetResult). The asymmetry was the anomaly.
+  // The values-free EVIDENCE channel is untouched below — still hashed, still carrying no option
+  // values or labels — because that channel travels further than this response does.
+  assert.ok(res.body.data.targetBinding, 'sandbox ensure returns the binding it created')
+  assert.equal(res.body.data.targetBinding.sheetId, 'sheet_stock_canonical_created')
+  assert.equal(res.body.data.targetBinding.objectId, sandboxObjectId)
+  assert.equal(res.body.data.targetBinding.keyField, 'idempotencyKey')
+  assert.ok(
+    Object.keys(res.body.data.targetBinding.fieldIdMap).length >= 33,
+    'sandbox ensure returns the WHOLE fieldIdMap, human columns included — a partial map is what the carry blocker exists to catch',
+  )
+  for (const humanField of ['notes', 'procurementReply', 'warehouseDone', 'actualArrivalDate']) {
+    assert.ok(res.body.data.targetBinding.fieldIdMap[humanField], `sandbox ensure binds ${humanField}`)
+  }
   assert.equal(res.body.data.evidence.fieldMapMode, 'sandbox')
   assert.equal(res.body.data.evidence.target.fieldIdMapEmpty, false)
   assert.ok(res.body.data.evidence.objectIdHash, 'sandbox route returns object hash evidence')
@@ -4266,8 +4349,10 @@ async function testStockPreparationTargetProvisioningRoutes() {
   assert.ok(res.body.data.optionSync.target.objectIdHash, 'sandbox option sync returns target hash evidence')
   assert.equal(Object.prototype.hasOwnProperty.call(res.body.data.optionSync.target, 'objectId'), false)
   assert.equal(res.body.data.optionSync.evidence.fields.length, 4, 'sandbox route seeds contract + three config_info option fields')
-  assert.equal(JSON.stringify(res.body.data).includes(sandboxObjectId), false, 'sandbox route response hides object id')
-  assert.equal(JSON.stringify(res.body.data).includes('sheet_stock_canonical_created'), false, 'sandbox route response hides sheet id')
+  // The EVIDENCE half stays values-free and identifier-free: it is the half that ends up in issue
+  // reports and support threads, and it still hashes the objectId rather than naming it.
+  assert.equal(JSON.stringify(res.body.data.evidence).includes(sandboxObjectId), false, 'sandbox evidence hides object id')
+  assert.equal(JSON.stringify(res.body.data.evidence).includes('sheet_stock_canonical_created'), false, 'sandbox evidence hides sheet id')
   assert.equal(JSON.stringify(res.body.data).includes('plate'), false, 'sandbox route response hides option values')
   assert.equal(JSON.stringify(res.body.data).includes('Casting'), false, 'sandbox route response hides option labels')
   const sandboxEnsureCall = findCalls(sandboxProvisioning.calls, 'ensureObject')[0]
@@ -5284,8 +5369,24 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
   assert.equal(res.statusCode, 400)
   assert.equal(res.body.error.code, 'TABLE_ACTION_REQUEST_INVALID', 'run rejects browser-supplied source scope')
 
+  // A STORED JOB IS RUN BY ITS OWN CREATOR (#5460 round-2 C4). Every scope this route uses comes
+  // from the stored artifact — including the identity the customer-source read is performed under —
+  // so letting any caller who can reach the route drive somebody else's job meant driving it under
+  // somebody else's data-source ownership. That was latent while only `integration:*` holders could
+  // reach it; the stock-prep operator split admitted a new tier and made it reachable. The scope
+  // guarantee below is UNCHANGED and still asserted — the run still reads as the job's stored
+  // principal, never as the triggering request user — it is now simply also true that the triggering
+  // user must BE the creator.
   res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run', {
     user: OTHER_READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+  })
+  assert.equal(res.statusCode, 403, 'a stored large-BOM job is not runnable by another user')
+  assert.equal(res.body.error.code, 'LARGE_BOM_JOB_ACTOR_MISMATCH')
+  assert.equal(findCalls(calls, 'createAdapter').length, 0, 'and it is refused before any adapter is created')
+
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run', {
+    user: READ_USER,
     params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
   })
   assertOkResponse(res, 200)

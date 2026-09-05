@@ -146,6 +146,78 @@ async function main() {
     assert.equal(db.inserted.length, 1)
   })
 
+  // WHICH COLUMNS THE SHAPE GATE MAY GOVERN — and why applying it to the rest was a fail-closed bug.
+  //
+  // The gate exists so a values-free trail stays values-free. But a shape gate is only safe on a
+  // column whose contents the SERVER generates. Round 2 of this PR applied it to all five nullable
+  // TEXT columns, including the two that carry CALLER and CUSTOMER data, and that turned a
+  // values-free guarantee into an availability bug in two directions:
+  //
+  //   * project_id is where the export route stamps the customer's own projectNo — deliberately,
+  //     it is that route's subject. A customer whose project numbers contain a Chinese character, a
+  //     space or a slash is not exotic; with the gate on that column their export 422s. The workbook
+  //     they came for is refused to protect a trail from a value the trail is SUPPOSED to carry.
+  //   * eight write routes append AFTER their effect. A 422 there does not prevent anything — the
+  //     write already happened — it only destroys the audit row that was supposed to record it. The
+  //     gate would convert "audited write" into "unaudited write plus an error", which is strictly
+  //     worse than the thing it was guarding against.
+  //
+  // So the gate is confined to the columns the SERVER controls and that are closed by construction:
+  // `mode` (a closed enum, chosen from a frozen set in code) and `subject_id` (a content handle).
+  // `project_id`, `workspace_id` and `actor` go back to `optionalString`. The values-free property
+  // for those is kept where it belongs and where it can be kept without refusing real work — AT THE
+  // ROUTES, which no longer forward a caller's raw `?workspaceId` at all.
+  await run('the shape gate governs the SERVER-generated columns, and only those', async () => {
+    const { db, store } = newStore()
+    const base = { tenantId: 'tenant_1', action: 'generation_run' }
+
+    // GATED: mode and subject_id. Both are server-chosen, so a non-conforming value is a bug in this
+    // repository, not a customer's data — fail closed, name the column, never echo the value.
+    for (const column of ['subjectId', 'mode']) {
+      const error = await expectAuditError(store.append({ ...base, [column]: SECRET }), 'AUDIT_FIELD_INVALID')
+      assert.ok(
+        !JSON.stringify(error.details || {}).includes(SECRET),
+        `${column}: the refusal must name the column, never echo the value`,
+      )
+      assert.equal(error.details && error.details.field, column, `${column}: the offending column is named`)
+      await expectAuditError(store.append({ ...base, [column]: 'x'.repeat(81) }), 'AUDIT_FIELD_INVALID')
+      await expectAuditError(store.append({ ...base, [column]: 'has space' }), 'AUDIT_FIELD_INVALID')
+    }
+    assert.equal(db.inserted.length, 0, 'a refused server-generated value never reaches the table')
+
+    // NOT GATED: the columns that carry caller/customer data. A free-text projectNo is exactly what
+    // the export route stamps, and refusing it would refuse the export.
+    for (const [column, value] of [
+      ['projectId', '注射水缓冲罐 / RY2-2023'],
+      ['workspaceId', 'my workspace (2026)'],
+      ['actor', 'ops.lead+beiliao@example.com'],
+      ['actor', '张三'],
+    ]) {
+      const before = db.inserted.length
+      await store.append({ ...base, [column]: value })
+      assert.equal(
+        db.inserted.length,
+        before + 1,
+        `${column}: a caller/customer value must be STORED, not refused — the gate here would only `
+        + 'destroy the audit row of work that already happened',
+      )
+      const row = db.inserted[db.inserted.length - 1].row
+      const stored = column === 'projectId' ? row.project_id : (column === 'workspaceId' ? row.workspace_id : row.actor)
+      assert.equal(stored, value, `${column}: stored verbatim`)
+    }
+
+    // And the shapes real call sites pass still go through.
+    await store.append({
+      ...base,
+      workspaceId: 'workspace-default',
+      projectId: 'tenant_1:integration-core',
+      subjectId: 'sha16:0000000000000001',
+      mode: 'created',
+      actor: 'ops.lead@example.com',
+    })
+    await store.append({ ...base })
+  })
+
   await run('list filters by tenant/action/project, clamps limit, and maps public entries', async () => {
     const { db, store } = newStore()
     await store.append({ tenantId: 'tenant_1', projectId: 'proj_1', action: 'unit_confirm', subjectId: 'rule_1', mode: 'created', actor: 'user_admin_1', detail: { persisted: true } })

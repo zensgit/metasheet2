@@ -22,12 +22,77 @@ export interface DirectoryRoleOption {
   name: string
 }
 
+export interface ApprovalDepartmentOption {
+  id: string
+  name: string
+  fullPath: string
+  parentId?: string
+  hasChildren: boolean
+}
+
 const MAX_LIMIT = 50
 const DEFAULT_LIMIT = 20
 
 function clampLimit(limit: number): number {
   if (!Number.isFinite(limit)) return DEFAULT_LIMIT
   return Math.min(Math.max(Math.trunc(limit), 1), MAX_LIMIT)
+}
+
+export async function listApprovalDepartments(
+  integrationId: string,
+  q: string,
+  limit: number,
+  treeParentId?: string | null,
+): Promise<ApprovalDepartmentOption[]> {
+  const anchor = integrationId.trim()
+  if (!anchor) return []
+  const safeLimit = clampLimit(limit)
+  const term = q.trim() ? `%${q.trim()}%` : null
+  const result = await query<{
+    id: string
+    name: string
+    full_path: string | null
+    parent_id: string | null
+    has_children: boolean
+  }>(
+    `SELECT d.id::text AS id,
+            d.name,
+            d.full_path,
+            p.id::text AS parent_id,
+            EXISTS (
+              SELECT 1
+                FROM directory_departments child
+               WHERE child.integration_id = d.integration_id
+                 AND child.external_parent_department_id = d.external_department_id
+                 AND child.is_active = true
+            ) AS has_children
+       FROM directory_departments d
+       LEFT JOIN directory_departments p
+         ON p.integration_id = d.integration_id
+        AND p.external_department_id = d.external_parent_department_id
+        AND p.is_active = true
+      WHERE d.integration_id = $1::uuid
+        AND d.is_active = true
+        AND (
+          $4::boolean = false
+          AND ($2::text IS NULL OR d.name ILIKE $2 OR COALESCE(d.full_path, '') ILIKE $2)
+          OR $4::boolean = true
+          AND (
+            ($5::uuid IS NULL AND p.id IS NULL)
+            OR p.id = $5::uuid
+          )
+        )
+      ORDER BY COALESCE(d.full_path, d.name), d.id
+      LIMIT $3`,
+    [anchor, term, safeLimit, treeParentId !== undefined, treeParentId ?? null],
+  )
+  return result.rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    fullPath: row.full_path?.trim() || row.name,
+    ...(row.parent_id ? { parentId: row.parent_id } : {}),
+    hasChildren: row.has_children,
+  }))
 }
 
 /**
