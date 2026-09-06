@@ -4687,7 +4687,7 @@ components:
     ElearningCapabilityFlags:
       type: object
       additionalProperties: false
-      required: [content, assignment, assessment, incentive, analytics, media]
+      required: [content, assignment, assessment, incentive, analytics, media, enrollment]
       properties:
         content: { type: boolean }
         assignment: { type: boolean }
@@ -4699,6 +4699,9 @@ components:
           type: boolean
           description: Reported from ELEARNING_ANALYTICS_ENABLED. Parked for V0.1; not part of readiness.
         media: { type: boolean }
+        enrollment:
+          type: boolean
+          description: Reported from ELEARNING_ENROLLMENT_ENABLED. Requires content and gates audit-only self-study registration.
     ElearningCapabilities:
       type: object
       additionalProperties: false
@@ -6832,6 +6835,41 @@ components:
         assignedAt:
           type: string
           format: date-time
+    ElearningLearnerEnrollment:
+      type: object
+      additionalProperties: false
+      required: [status, enrolledAt]
+      properties:
+        status:
+          type: string
+          enum: [enrolled]
+        enrolledAt:
+          type: string
+          format: date-time
+    ElearningCourseEnrollmentRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId]
+      properties:
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+    ElearningCourseEnrollmentResult:
+      type: object
+      additionalProperties: false
+      required: [enrollmentId, courseId, courseVersionId, status, enrolledAt]
+      properties:
+        enrollmentId:
+          $ref: '#/components/schemas/ElearningUuid'
+        courseId:
+          $ref: '#/components/schemas/ElearningUuid'
+        courseVersionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        status:
+          type: string
+          enum: [enrolled]
+        enrolledAt:
+          type: string
+          format: date-time
     ElearningLearnerAccess:
       type: object
       additionalProperties: false
@@ -6915,7 +6953,7 @@ components:
     ElearningLearnerAssessmentCourse:
       type: object
       additionalProperties: false
-      required: [courseId, courseVersionId, title, access, assignment, video, exam, completed]
+      required: [courseId, courseVersionId, title, access, assignment, enrollment, video, exam, completed]
       properties:
         courseId:
           $ref: '#/components/schemas/ElearningUuid'
@@ -6929,6 +6967,10 @@ components:
         assignment:
           allOf:
             - $ref: '#/components/schemas/ElearningLearnerAssignment'
+          nullable: true
+        enrollment:
+          allOf:
+            - $ref: '#/components/schemas/ElearningLearnerEnrollment'
           nullable: true
         video:
           $ref: '#/components/schemas/ElearningLearnerVideo'
@@ -6988,7 +7030,7 @@ components:
     ElearningLearnerContentCourse:
       type: object
       additionalProperties: false
-      required: [courseId, courseVersionId, title, access, assignment, items, completed]
+      required: [courseId, courseVersionId, title, access, assignment, enrollment, items, completed]
       properties:
         courseId:
           $ref: '#/components/schemas/ElearningUuid'
@@ -7003,6 +7045,10 @@ components:
         assignment:
           allOf:
             - $ref: '#/components/schemas/ElearningLearnerAssignment'
+          nullable: true
+        enrollment:
+          allOf:
+            - $ref: '#/components/schemas/ElearningLearnerEnrollment'
           nullable: true
         items:
           type: array
@@ -7065,6 +7111,85 @@ components:
           type: integer
           minimum: 0
         duplicate: { type: boolean }
+        challenge:
+          allOf:
+            - $ref: '#/components/schemas/ElearningWatchChallenge'
+          nullable: true
+    ElearningWatchChallenge:
+      type: object
+      additionalProperties: false
+      required: [challengeId, deadlineAt, ordinal, status, promptVersion, imagePngBase64, imageWidth, imageHeight, options]
+      properties:
+        challengeId:
+          $ref: '#/components/schemas/ElearningUuid'
+        deadlineAt:
+          type: string
+          format: date-time
+        ordinal:
+          type: integer
+          minimum: 1
+        status:
+          type: string
+          enum: [challenged, paused]
+        promptVersion:
+          type: string
+          enum: [raster-position-v2]
+        imagePngBase64:
+          type: string
+          format: byte
+          minLength: 12
+          maxLength: 88000
+          pattern: '^iVBORw0KGgo[A-Za-z0-9+/]*={0,2}$'
+        imageWidth:
+          type: integer
+          enum: [360]
+        imageHeight:
+          type: integer
+          enum: [260]
+        options:
+          type: array
+          minItems: 6
+          maxItems: 6
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/ElearningWatchChallengeOption'
+    ElearningWatchChallengeOption:
+      type: object
+      additionalProperties: false
+      required: [optionId, x, y, width, height]
+      properties:
+        optionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        x:
+          type: integer
+          minimum: 0
+          maximum: 359
+        y:
+          type: integer
+          minimum: 0
+          maximum: 259
+        width:
+          type: integer
+          minimum: 1
+          maximum: 360
+        height:
+          type: integer
+          minimum: 1
+          maximum: 260
+    ElearningWatchChallengeAckRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, selections]
+      properties:
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+        selections:
+          type: array
+          minItems: 2
+          maxItems: 2
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/ElearningUuid'
     ElearningHeartbeatRequest:
       type: object
       additionalProperties: false

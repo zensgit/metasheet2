@@ -8398,7 +8398,7 @@ export interface paths {
          * Report e-learning master and capability flags
          * @description Plugin route. JWT session is required by the global `/api` gate.
          *     Returns `{ enabled, capabilities }` with keys content, assignment,
-         *     assessment, incentive, analytics, media. V0.1 readiness is enabled
+         *     assessment, incentive, analytics, media, enrollment. V0.1 readiness is enabled
          *     plus content/assignment/assessment/media only; incentive and analytics
          *     stay parked. Secondary master-off after registration is a values-free
          *     404 FEATURE_DISABLED (no flag names, no capabilities object).
@@ -9444,6 +9444,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/me/courses/{courseId}/enrollments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Register the current learner for one visible self-study course
+         * @description Requires master, content, and enrollment flags to each equal exact
+         *     `true`, plus learner read RBAC. Organization and learner are derived
+         *     from the authenticated session. Registration appends immutable audit
+         *     evidence only: it never creates an assignment, grants access, assigns
+         *     a deadline, awards credit, or records completion. Current active
+         *     visibility is rechecked by the existing course-access authority.
+         */
+        post: operations["enrollMyElearningCourse"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/watch/items/{itemId}/start": {
         parameters: {
             query?: never;
@@ -9480,6 +9505,33 @@ export interface paths {
          *     playing (boolean). Unknown keys are invalid_input. JSON limit 16 KiB.
          */
         post: operations["recordElearningWatchHeartbeat"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/watch/sessions/{sessionId}/challenges/{challengeId}/ack": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Confirm an active or timed-out watch challenge
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires the master, content, media,
+         *     and watch-challenge flags to equal the exact literal `true`. The server derives organization and actor.
+         *     The server issues an immutable PNG prompt with six randomly bound hit regions. The response exposes only
+         *     raster pixels, region geometry, and opaque option identifiers; target symbols, option labels, and the
+         *     expected selection are never returned as structured fields. The client submits exactly two distinct opaque
+         *     option identifiers. An on-time correct acknowledgement commits only the provisional eligible watch interval; a late acknowledgement
+         *     discards that interval and resumes the existing watch session. Same requestId and logical payload replay
+         *     the stored result; a different payload with the same requestId returns a values-free conflict.
+         */
+        post: operations["acknowledgeElearningWatchChallenge"];
         delete?: never;
         options?: never;
         head?: never;
@@ -18567,6 +18619,8 @@ export interface components {
             /** @description Reported from ELEARNING_ANALYTICS_ENABLED. Parked for V0.1; not part of readiness. */
             analytics: boolean;
             media: boolean;
+            /** @description Reported from ELEARNING_ENROLLMENT_ENABLED. Requires content and gates audit-only self-study registration. */
+            enrollment: boolean;
         };
         /**
          * @description Plugin GET /api/elearning/capabilities payload. V0.1 readiness is enabled
@@ -19415,6 +19469,24 @@ export interface components {
             /** Format: date-time */
             assignedAt: string;
         };
+        ElearningLearnerEnrollment: {
+            /** @enum {string} */
+            status: "enrolled";
+            /** Format: date-time */
+            enrolledAt: string;
+        };
+        ElearningCourseEnrollmentRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+        };
+        ElearningCourseEnrollmentResult: {
+            enrollmentId: components["schemas"]["ElearningUuid"];
+            courseId: components["schemas"]["ElearningUuid"];
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            /** @enum {string} */
+            status: "enrolled";
+            /** Format: date-time */
+            enrolledAt: string;
+        };
         ElearningLearnerAccess: {
             /** @enum {string} */
             kind: "assignment" | "visibility";
@@ -19458,6 +19530,7 @@ export interface components {
             title: string;
             access: components["schemas"]["ElearningLearnerAccess"];
             assignment: components["schemas"]["ElearningLearnerAssignment"] | null;
+            enrollment: components["schemas"]["ElearningLearnerEnrollment"] | null;
             video: components["schemas"]["ElearningLearnerVideo"];
             exam: components["schemas"]["ElearningLearnerExam"];
             completed: boolean;
@@ -19495,6 +19568,7 @@ export interface components {
             title: string;
             access: components["schemas"]["ElearningLearnerAccess"];
             assignment: components["schemas"]["ElearningLearnerAssignment"] | null;
+            enrollment: components["schemas"]["ElearningLearnerEnrollment"] | null;
             items: components["schemas"]["ElearningLearnerContentItem"][];
             completed: boolean;
         };
@@ -19513,6 +19587,35 @@ export interface components {
             durationMs: number;
             creditedMs: number;
             duplicate: boolean;
+            challenge?: components["schemas"]["ElearningWatchChallenge"] | null;
+        };
+        ElearningWatchChallenge: {
+            challengeId: components["schemas"]["ElearningUuid"];
+            /** Format: date-time */
+            deadlineAt: string;
+            ordinal: number;
+            /** @enum {string} */
+            status: "challenged" | "paused";
+            /** @enum {string} */
+            promptVersion: "raster-position-v2";
+            /** Format: byte */
+            imagePngBase64: string;
+            /** @enum {integer} */
+            imageWidth: 360;
+            /** @enum {integer} */
+            imageHeight: 260;
+            options: components["schemas"]["ElearningWatchChallengeOption"][];
+        };
+        ElearningWatchChallengeOption: {
+            optionId: components["schemas"]["ElearningUuid"];
+            x: number;
+            y: number;
+            width: number;
+            height: number;
+        };
+        ElearningWatchChallengeAckRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            selections: components["schemas"]["ElearningUuid"][];
         };
         ElearningHeartbeatRequest: {
             sequence: number;
@@ -22677,6 +22780,44 @@ export interface operations {
             503: components["responses"]["ElearningError"];
         };
     };
+    enrollMyElearningCourse: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                courseId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningCourseEnrollmentRequest"];
+            };
+        };
+        responses: {
+            /** @description New registration, exact request replay, or existing course registration. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCourseEnrollmentResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, not_enrollable, or insufficient read permission */
+            403: components["responses"]["ElearningError"];
+            /** @description Course not found or enrollment surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description already_assigned or requestId conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
     startElearningWatch: {
         parameters: {
             query?: never;
@@ -22750,6 +22891,47 @@ export interface operations {
             /** @description not_found or watch flags off */
             404: components["responses"]["ElearningError"];
             /** @description course_withdrawn, conflict, sequence_gap, or session_inactive */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    acknowledgeElearningWatchChallenge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: components["schemas"]["ElearningUuid"];
+                challengeId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningWatchChallengeAckRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated server-derived watch state; challenge is null after acknowledgement. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningWatchState"];
+                };
+            };
+            /** @description invalid_input or unsupported policy */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or watch-challenge flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description challenge_incorrect, challenge_mismatch, challenge_stale, conflict, course_withdrawn, or session_inactive */
             409: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];

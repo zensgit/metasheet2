@@ -39,6 +39,7 @@ on:
       - 'apps/web/src/views/ElearningCertificateAdminSection.vue'
       - 'apps/web/src/views/ElearningCertificateWalletSection.vue'
       - 'apps/web/src/views/ElearningLearnerView.vue'
+      - 'apps/web/src/views/ElearningWatchChallengePrompt.vue'
       - 'apps/web/src/views/ElearningManualGradingView.vue'
       - 'apps/web/src/views/ElearningManualGradingAttempt.vue'
       - 'apps/web/src/views/ElearningLearningProfileSection.vue'
