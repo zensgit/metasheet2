@@ -561,6 +561,29 @@ npx vitest run multitable-recovery-archive-client multitable-recovery-archive-mo
 # in either direction (checked the full token list in this file).
 npx vitest run my-apps-landing-view featureFlags.plm.spec.ts --reporter=dot
 
+# 审批详情实例一致性 (instance consistency), 2026-09-06: TWO new tokens.
+#   * `approval-detail-instance-consistency` — the mounted ApprovalDetailView + REAL approval store
+#     spec (route switch clears the outgoing instance, write verbs act on the displayed instance,
+#     failed load shows the error state with a retry).
+#   * `approval-store-detail-generation` — the approvals-store unit spec (out-of-order detail and
+#     history responses, switch/failure clearing, action-result publication).
+#
+# Both are BARE BASENAMES, as packages/core-backend/tests/unit/approval-ci-coverage-enumeration.ts
+# requires (its T1 tier reds any apps/web/tests/approval*.spec.ts whose basename is not an exact
+# token here — an incidental substring match is explicitly rejected). That constraint interacts with
+# vitest's default include glob, which DOES collect apps/web/verification/*.spec.ts (Playwright
+# files that fail to collect under vitest): the browser-lane sibling for this change is therefore
+# named `approval-instance-consistency-race.spec.ts`, which neither token matches as a substring —
+# verified by running each token in isolation ("Test Files 1 passed").
+#
+# SUBSTRING COLLISIONS, checked mechanically in BOTH directions against all 377 tokens already in
+# this file: neither new token contains, nor is contained by, any existing one. In particular the
+# three pre-existing `approval-detail-*` tokens (approval-detail-field,
+# approval-detail-record-table, approval-detail-column-row-key) are unrelated to
+# `approval-detail-instance-consistency` in both directions. Both verified green in isolation
+# (`npx vitest run <token> --reporter=dot` → "Test Files 1 passed") and in this batch before wiring.
+npx vitest run approval-detail-instance-consistency approval-store-detail-generation --reporter=dot
+
 # 源就绪预检 + 拓扑自测 (source readiness + topology self-test), 2026-09-01: ONE token added to the
 # batch below, StockPreparationSourcePreflight — a NEW spec
 # (apps/web/tests/StockPreparationSourcePreflight.spec.ts) over the same StockPreparationInstallView

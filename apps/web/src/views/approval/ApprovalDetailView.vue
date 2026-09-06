@@ -95,7 +95,7 @@
            inline el-skeleton blocks (3-row form + 6-row timeline) moved verbatim into the shared
            AsyncStateBlock; same texture, one reusable renderer. -->
       <AsyncStateBlock
-        v-if="!approval && store.loading"
+        v-if="!approval && detailPending"
         state="loading"
         :skeleton-rows="[3, 6]"
         data-testid="detail-skeleton"
@@ -562,6 +562,7 @@
               v-if="canAct"
               type="success"
               :loading="inFlightAction === 'approve'"
+              :disabled="!actionsEnabled"
               data-testid="approval-approve-button"
               @click="openActionDialog('approve')"
             >
@@ -571,6 +572,7 @@
               v-if="canAct"
               type="danger"
               :loading="inFlightAction === 'reject'"
+              :disabled="!actionsEnabled"
               data-testid="approval-reject-button"
               @click="openActionDialog('reject')"
             >
@@ -587,6 +589,7 @@
               v-if="canAct && !isMobileLayout && returnableNodes.length > 0 && allowReturn"
               type="warning"
               :loading="inFlightAction === 'return'"
+              :disabled="!actionsEnabled"
               data-testid="approval-return-button"
               @click="openReturnDialog"
             >
@@ -596,6 +599,7 @@
               v-if="canAct && !isMobileLayout && allowTransfer"
               type="warning"
               :loading="inFlightAction === 'transfer'"
+              :disabled="!actionsEnabled"
               data-testid="approval-transfer-button"
               @click="openTransferDialog"
             >
@@ -607,6 +611,7 @@
               type="primary"
               plain
               :loading="inFlightAction === 'add_sign'"
+              :disabled="!actionsEnabled"
               data-testid="approval-add-sign-button"
               @click="openAddSignDialog"
             >
@@ -619,6 +624,7 @@
               type="primary"
               plain
               :loading="inFlightAction === 'reduce_sign'"
+              :disabled="!actionsEnabled"
               data-testid="approval-reduce-sign-button"
               @click="openReduceSignDialog"
             >
@@ -632,6 +638,7 @@
               type="primary"
               plain
               :loading="remindLoading"
+              :disabled="!actionsEnabled"
               data-testid="approval-remind-button"
               @click="handleRemind"
             >
@@ -654,6 +661,7 @@
                 <el-button
                   type="info"
                   :loading="inFlightAction === 'revoke'"
+                  :disabled="!actionsEnabled"
                   data-testid="approval-revoke-button"
                 >
                   撤回
@@ -663,6 +671,7 @@
             <el-button
               plain
               :loading="inFlightAction === 'comment'"
+              :disabled="!actionsEnabled"
               data-testid="approval-comment-button"
               @click="openCommentDialog"
             >
@@ -745,7 +754,7 @@
         <el-button
           :type="currentAction === 'approve' ? 'success' : 'danger'"
           :loading="inFlightAction === currentAction"
-          :disabled="actionConfirmDisabled"
+          :disabled="actionConfirmDisabled || !actionsEnabled"
           data-testid="approval-action-dialog-confirm"
           @click="submitAction"
         >
@@ -798,7 +807,7 @@
         <el-button
           type="warning"
           :loading="inFlightAction === 'transfer'"
-          :disabled="!transferUserId"
+          :disabled="!transferUserId || !actionsEnabled"
           data-testid="approval-transfer-submit"
           @click="submitTransfer"
         >
@@ -875,7 +884,7 @@
         <el-button
           type="primary"
           :loading="inFlightAction === 'add_sign'"
-          :disabled="addSignUserIds.length === 0"
+          :disabled="addSignUserIds.length === 0 || !actionsEnabled"
           data-testid="approval-add-sign-submit"
           @click="submitAddSign"
         >
@@ -936,7 +945,7 @@
         <el-button
           type="primary"
           :loading="inFlightAction === 'reduce_sign'"
-          :disabled="!reduceSignUserId"
+          :disabled="!reduceSignUserId || !actionsEnabled"
           data-testid="approval-reduce-sign-submit"
           @click="submitReduceSign"
         >
@@ -1026,7 +1035,7 @@
         <el-button
           type="primary"
           :loading="inFlightAction === 'comment'"
-          :disabled="!actionComment.trim() || commentAttachmentUploading"
+          :disabled="!actionComment.trim() || commentAttachmentUploading || !actionsEnabled"
           data-testid="approval-comment-submit"
           @click="submitComment"
         >
@@ -1084,7 +1093,7 @@
         <el-button
           type="warning"
           :loading="inFlightAction === 'return'"
-          :disabled="!returnTargetNodeKey"
+          :disabled="!returnTargetNodeKey || !actionsEnabled"
           data-testid="approval-return-submit"
           @click="submitReturn"
         >
@@ -1222,6 +1231,51 @@ const approval = computed(() => store.activeApproval)
 // PageHeader requires a non-optional title; before the detail loads (or on error) fall back to
 // the same generic copy the original hand-rolled `<h1 v-if="approval">` used.
 const headerTitle = computed(() => approval.value?.title ?? '审批详情')
+
+// ---------------------------------------------------------------------------
+// Instance consistency (2026-09-06)
+// ---------------------------------------------------------------------------
+// This component is REUSED across a params-only navigation (下一条 →, deep link, ApprovalCenter
+// row click) — see the `route.params.id` watcher at the bottom of this file. The detail load for
+// the incoming instance is asynchronous, so between the route change and its response there is a
+// window in which the route already says B. Every write verb used to read `route.params.id`
+// directly at submit time while the page still rendered whatever the store held, so a submit in
+// that window could be sent for an instance the reader was not looking at.
+//
+// The rule is now one predicate, defined once and reused by every consumer below: an action is
+// available only when the instance that is ACTUALLY DISPLAYED is the route's instance and no detail
+// request is in flight. `actionInstanceId()` is the single source of the id every verb sends — no
+// handler reads `route.params.id` for a write any more (the read-only page-level helpers —
+// mark-read, retry, the comments panel key, 下一条 — legitimately still do, since they are about
+// the route, not about acting on a loaded instance).
+const routeInstanceId = computed(() => (typeof route.params.id === 'string' ? route.params.id : ''))
+const displayedInstanceId = computed(() => approval.value?.id ?? null)
+// `store.detailLoading` is the detail-scoped in-flight flag (the shared `store.loading` is also set
+// by history/list loads). `=== true` rather than a truthy read so a store double that predates the
+// flag behaves exactly as it did before it existed.
+const detailLoadInFlight = computed(() => store.detailLoading === true)
+const instanceConsistent = computed(
+  () => routeInstanceId.value !== '' && displayedInstanceId.value === routeInstanceId.value,
+)
+const actionsEnabled = computed(() => instanceConsistent.value && !detailLoadInFlight.value)
+
+/**
+ * The id every write verb acts on: the instance actually on screen, or `null` when the page is
+ * mid-switch / mid-load. Callers early-return on `null` — that is the defense-in-depth half of the
+ * same gate the disabled controls express in the template, and it also covers the affordances that
+ * cannot be disabled (the 撤回 popconfirm fires its own `@confirm`, not a button click).
+ */
+function actionInstanceId(): string | null {
+  if (!actionsEnabled.value) return null
+  return displayedInstanceId.value
+}
+
+// First-paint / switching state. `store.detailLoading` when present, otherwise the pre-existing
+// shared flag, so a store double without the new field keeps today's exact skeleton behaviour.
+// This must NOT read the shared `store.loading` alone: `loadDetailPage` runs the detail and history
+// loads in parallel and whichever settles first clears it, which would flash the not-found state
+// while the detail request for the new instance is still outstanding.
+const detailPending = computed(() => store.detailLoading ?? store.loading)
 
 // ---------------------------------------------------------------------------
 // UI-6 (master §4 UI-6 / P5 "add detail tabs/record projection … only from
@@ -1734,10 +1788,9 @@ const commentDialogVisible = ref(false)
 // close-watcher below only ever DELETEs uploads that were never submitted.
 const commentStagedAttachments = ref<Array<{ id: string; name: string }>>([])
 const commentAttachmentUploading = ref(false)
-const commentAttachmentContextCurrent = computed(() => {
-  const routeInstanceId = route.params.id
-  return typeof routeInstanceId === 'string' && routeInstanceId !== '' && approval.value?.id === routeInstanceId
-})
+// Same "the displayed instance is the route's instance" rule as the action gate — one definition
+// (`instanceConsistent`, declared with the gate above) so the two cannot drift apart.
+const commentAttachmentContextCurrent = instanceConsistent
 // Captured at each pick; incremented (invalidated) by retract BEFORE staged cleanup so a later-
 // resolving upload cannot append into a closed/unmounted/switched context. Empty staged lists
 // still invalidate — that is the in-flight-pick case (nothing to retract yet).
@@ -2367,7 +2420,10 @@ async function refreshAfterStaleMobileAction(id: string, error: unknown): Promis
 async function submitAction() {
   if (actionConfirmDisabled.value) return
   if (inFlightAction.value) return
-  const id = route.params.id as string
+  // Instance-consistency gate: act on the instance actually displayed, never on whatever the
+  // route happens to say right now. `null` = mid-switch / mid-load, so this verb does nothing.
+  const id = actionInstanceId()
+  if (!id) return
   actionDialogError.value = null
   inFlightAction.value = currentAction.value
   try {
@@ -2429,7 +2485,10 @@ function handleMemberActionFailure(
 async function submitTransfer() {
   if (!transferUserId.value) return
   if (inFlightAction.value) return
-  const id = route.params.id as string
+  // Instance-consistency gate: act on the instance actually displayed, never on whatever the
+  // route happens to say right now. `null` = mid-switch / mid-load, so this verb does nothing.
+  const id = actionInstanceId()
+  if (!id) return
   actionDialogError.value = null
   inFlightAction.value = 'transfer'
   try {
@@ -2486,7 +2545,10 @@ function removeAddSignUser(id: string): void {
 async function submitAddSign() {
   if (addSignUserIds.value.length === 0) return
   if (inFlightAction.value) return
-  const id = route.params.id as string
+  // Instance-consistency gate: act on the instance actually displayed, never on whatever the
+  // route happens to say right now. `null` = mid-switch / mid-load, so this verb does nothing.
+  const id = actionInstanceId()
+  if (!id) return
   actionDialogError.value = null
   inFlightAction.value = 'add_sign'
   try {
@@ -2523,7 +2585,10 @@ async function submitReduceSign() {
   const target = reducibleAssignees.value.find((a) => a.assigneeId === reduceSignUserId.value)
   if (!target || target.disabled) return
   if (inFlightAction.value) return
-  const id = route.params.id as string
+  // Instance-consistency gate: act on the instance actually displayed, never on whatever the
+  // route happens to say right now. `null` = mid-switch / mid-load, so this verb does nothing.
+  const id = actionInstanceId()
+  if (!id) return
   actionDialogError.value = null
   inFlightAction.value = 'reduce_sign'
   try {
@@ -2546,7 +2611,10 @@ async function submitComment() {
   if (!actionComment.value.trim()) return
   if (commentAttachmentUploading.value) return
   if (inFlightAction.value) return
-  const id = route.params.id as string
+  // Instance-consistency gate: act on the instance actually displayed, never on whatever the
+  // route happens to say right now. `null` = mid-switch / mid-load, so this verb does nothing.
+  const id = actionInstanceId()
+  if (!id) return
   actionDialogError.value = null
   inFlightAction.value = 'comment'
   // Lock-9 OD-L9-10(a): key PRESENCE, not an empty array — mirrors the backend's own
@@ -2579,7 +2647,10 @@ async function submitComment() {
 async function submitReturn() {
   if (!returnTargetNodeKey.value) return
   if (inFlightAction.value) return
-  const id = route.params.id as string
+  // Instance-consistency gate: act on the instance actually displayed, never on whatever the
+  // route happens to say right now. `null` = mid-switch / mid-load, so this verb does nothing.
+  const id = actionInstanceId()
+  if (!id) return
   actionDialogError.value = null
   inFlightAction.value = 'return'
   try {
@@ -2607,7 +2678,10 @@ async function submitReturn() {
 // still renders something instead of a blank toast.
 async function handleRevoke() {
   if (inFlightAction.value) return
-  const id = route.params.id as string
+  // Instance-consistency gate: act on the instance actually displayed, never on whatever the
+  // route happens to say right now. `null` = mid-switch / mid-load, so this verb does nothing.
+  const id = actionInstanceId()
+  if (!id) return
   inFlightAction.value = 'revoke'
   try {
     await store.executeAction(id, { action: 'revoke' })
@@ -2679,8 +2753,11 @@ function formatRemindAgo(lastRemindedAt?: string): string {
 }
 
 async function handleRemind() {
-  const id = route.params.id as string
   if (remindLoading.value) return
+  // Instance-consistency gate: act on the instance actually displayed, never on whatever the
+  // route happens to say right now. `null` = mid-switch / mid-load, so this verb does nothing.
+  const id = actionInstanceId()
+  if (!id) return
   remindLoading.value = true
   try {
     const result = await remindApproval(id)
