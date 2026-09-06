@@ -165,6 +165,34 @@ const STOCK_PREPARATION_BOM_SOURCE_KINDS = Object.freeze([
 // `truncated` can say honestly that the list is not the whole set.
 const MISSING_COMPONENT_DETAIL_LIMIT = 200
 
+// D-C — THE CAP ON `rowErrors`, and why the overflow is a HASHED FACT rather than a silent drop.
+//
+// `rowErrors` had no bound at all. One bad project — an empty part library, a BOM whose quantity
+// column is prose, a mapping whose coercion refuses every cell — produces one entry per BOM
+// POSITION, so a 40k-position project produced 40k entries. That array is not a local: it is
+// returned in the dry-run response, hashed WHOLE into the dry-run revision
+// (stock-preparation-table-actions.cjs `buildRevision`), and handed to the conflict planner, which
+// emits one `manualConfirm` decision — with its own anonymous-hold identity — per entry. So the
+// unbounded array became an unbounded response, an unbounded plan and an unbounded ledger.
+//
+// THE CAP IS ON RETAINED ENTRIES, NOT ON THE COUNTS. Past the limit `addRowError` stops appending
+// but keeps counting, so `rowErrorsTotal` and the per-type totals in `rowErrorTypeCounts` are TRUE
+// TOTALS and `summary.errorTypes` still names a type whose every occurrence was dropped. An
+// operator reading a truncated expansion learns the real size of the problem; what they lose is the
+// per-position enumeration of a project that was never actionable position-by-position anyway.
+//
+// BYTE-IDENTITY BELOW THE CAP IS THE OTHER HALF OF THE CONTRACT. The three summary keys and the
+// revision's projection of them are mounted CONDITIONALLY, exactly like `subtree`: a project with
+// 4999 rowErrors gets the same array, the same summary key set, the same evidence and the same
+// revision hash it got before this change. Only a project that actually overflowed moves — and it
+// must move, because otherwise two different overflowing projects sharing their first 5000 entries
+// would hash the same and one's dry-run token would apply the other's plan.
+//
+// The ceiling exists so `rowErrorLimit` in a deploy config cannot un-bound the array by writing a
+// big number: configuration may lower the cap or raise it within reach of the ceiling, never past.
+const ROW_ERROR_LIMIT = 5000
+const ROW_ERROR_LIMIT_CEILING = 20000
+
 const FORBIDDEN_PLAN_KEYS = Object.freeze([
   'sql',
   'rawSql',
@@ -775,7 +803,35 @@ function subtreeSummaryOf(counters) {
   }
 }
 
-function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootMatches, maxDepth, maxRows, maxPages, maxReadCount, maxElapsedMs, readStats, errors, rowErrors, subtree }) {
+/**
+ * The D-C overflow stanza, or `undefined` when nothing overflowed.
+ *
+ * `undefined` is the whole point: an expansion under the cap mounts NO key, which is what keeps its
+ * summary — and therefore its evidence and its revision hash — byte-identical to the pre-cap one.
+ *
+ * VALUES-FREE by construction. The keys of `rowErrorTypeCounts` are rowError `type` tokens, the
+ * same closed vocabulary `summary.errorTypes` has always published; the values are integers.
+ */
+function rowErrorTruncationOf({ total, retained, typeTotals }) {
+  if (!(Number.isFinite(total) && Number.isFinite(retained) && total > retained)) return undefined
+  const rowErrorTypeCounts = {}
+  for (const type of Array.from(typeTotals.keys()).sort()) rowErrorTypeCounts[type] = typeTotals.get(type)
+  return {
+    rowErrorsTotal: total,
+    rowErrorsRetained: retained,
+    rowErrorsTruncated: true,
+    rowErrorTypeCounts,
+  }
+}
+
+// The types whose entries the cap dropped. Empty (and therefore invisible to the `Set` below) when
+// nothing overflowed, so `errorTypes` is unchanged for every expansion under the cap.
+function truncatedRowErrorTypes(rowErrorTruncation) {
+  if (!isPlainObject(rowErrorTruncation)) return []
+  return Object.keys(rowErrorTruncation.rowErrorTypeCounts || {})
+}
+
+function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootMatches, maxDepth, maxRows, maxPages, maxReadCount, maxElapsedMs, readStats, errors, rowErrors, subtree, rowErrorTruncation }) {
   const summary = {
     projectNoPresent,
     matchField,
@@ -790,7 +846,10 @@ function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootM
     readObjects: Array.from(new Set(readStats.map((entry) => entry.object))).sort(),
     readCount: readStats.length,
     readDiagnostics: readStats.map(readDiagnostic),
-    errorTypes: Array.from(new Set([...(errors || []), ...(rowErrors || [])].map((entry) => entry.type || entry.code).filter(Boolean))).sort(),
+    // `.concat` of the DROPPED types keeps this honest under the cap: a type whose every occurrence
+    // was refused an array slot still has to be named here, or the summary would say the project has
+    // no such defect. Empty concat under the cap => the identical set => the identical hash.
+    errorTypes: Array.from(new Set([...(errors || []), ...(rowErrors || [])].map((entry) => entry.type || entry.code).concat(truncatedRowErrorTypes(rowErrorTruncation)).filter(Boolean))).sort(),
     actions: makeActions(status === 'expanded' ? rowsExpanded : 0),
   }
   if (status === 'not_found') {
@@ -806,6 +865,9 @@ function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootM
   // preceding key order is untouched.
   const subtreeCounts = subtreeSummaryOf(subtree)
   if (subtreeCounts) summary.subtree = subtreeCounts
+  // CONDITIONAL KEYS — see ROW_ERROR_LIMIT's header. Mounted only by an expansion that actually
+  // overflowed, and appended after `subtree` so neither conditional block can move the other.
+  if (isPlainObject(rowErrorTruncation)) Object.assign(summary, rowErrorTruncation)
   return summary
 }
 
@@ -902,7 +964,7 @@ function rowFromPart(plan, { projectNo, parentSourceId, pathTokens, depth, partR
   }
 }
 
-function failureResult({ projectNoPresent, matchField, status = 'failed', rows, errors, rowErrors, missingComponents = [], missingComponentDistinctCount = 0, readStats, rootMatches, maxDepth, maxRows, maxPages, maxReadCount, maxElapsedMs, subtree }) {
+function failureResult({ projectNoPresent, matchField, status = 'failed', rows, errors, rowErrors, missingComponents = [], missingComponentDistinctCount = 0, readStats, rootMatches, maxDepth, maxRows, maxPages, maxReadCount, maxElapsedMs, subtree, rowErrorTruncation }) {
   return {
     valid: false,
     status,
@@ -929,6 +991,7 @@ function failureResult({ projectNoPresent, matchField, status = 'failed', rows, 
       errors,
       rowErrors,
       subtree,
+      rowErrorTruncation,
     }),
   }
 }
@@ -974,10 +1037,23 @@ async function expandPlmProjectBom(input = {}) {
     // Opt-in, and only the B2a seam opts in. Default `false` keeps every existing caller — every
     // fixture, every demo, every dormant deployment — on the loop it already had.
     requireCompleteBatch: input.requireCompleteBatch === true,
+    // D-C. Configuration may move this within reach of the ceiling and no further — see
+    // ROW_ERROR_LIMIT's header. The clamp lives HERE, in the only place that enforces the cap, so a
+    // caller that forgot to clamp cannot un-bound the array by threading a big number through.
+    rowErrorLimit: Math.min(
+      positiveInteger(input.rowErrorLimit, 'rowErrorLimit', ROW_ERROR_LIMIT),
+      ROW_ERROR_LIMIT_CEILING,
+    ),
   }
   const readStats = []
   const errors = []
   const rowErrors = []
+  // D-C counters. `rowErrorsTotal` counts EVERY call to `addRowError`, including the ones the cap
+  // refused an array slot; `rowErrorTypeTotals` does the same per type. Both are read only through
+  // `rowErrorTruncationOf`, which returns `undefined` — and therefore mounts nothing — when the
+  // expansion stayed under the cap.
+  let rowErrorsTotal = 0
+  const rowErrorTypeTotals = new Map()
   const rows = []
   // Zeroed the moment the block is enabled — so "enabled" and "the summary carries subtree counts"
   // are the same fact on every exit path, including `not_found` and an entry-read failure. Stays
@@ -1023,9 +1099,23 @@ async function expandPlmProjectBom(input = {}) {
     // call it "incomplete" when it is specifically "timed out".
     addGlobalError('read_failed', { object, causeClass: safeErrorCode(err), message: err && err.message })
   }
+  // COUNT FIRST, APPEND SECOND (D-C). Every caller keeps being counted; only the array is bounded.
+  // The type key mirrors `makeSummary`'s `entry.type || entry.code` exactly, so the per-type totals
+  // and `errorTypes` can never disagree about what a rowError's type is.
   const addRowError = (error) => {
+    rowErrorsTotal += 1
+    const type = isPlainObject(error) ? (error.type || error.code) : undefined
+    if (type) rowErrorTypeTotals.set(type, (rowErrorTypeTotals.get(type) || 0) + 1)
+    // Deterministic truncation: the array keeps the FIRST `rowErrorLimit` entries in production
+    // order, so the same input produces the same retained prefix and the same revision every time.
+    if (rowErrors.length >= options.rowErrorLimit) return
     rowErrors.push(error)
   }
+  const rowErrorTruncation = () => rowErrorTruncationOf({
+    total: rowErrorsTotal,
+    retained: rowErrors.length,
+    typeTotals: rowErrorTypeTotals,
+  })
   // Deliberately separate from `addRowError`: the two payloads have different audiences and
   // different rules, and merging them is exactly the mistake this design exists to prevent.
   //
@@ -1101,6 +1191,7 @@ async function expandPlmProjectBom(input = {}) {
       maxReadCount: options.maxReadCount,
       maxElapsedMs: options.maxElapsedMs,
       subtree: subtreeCounters,
+      rowErrorTruncation: rowErrorTruncation(),
     })
   }
 
@@ -1547,7 +1638,10 @@ async function expandPlmProjectBom(input = {}) {
     }
   }
 
-  const status = errors.length > 0 || rowErrors.length > 0 ? 'failed' : 'expanded'
+  // `rowErrorsTotal`, not `rowErrors.length`: a project whose rowErrors were ALL past the cap is
+  // still a failed project. (Unreachable today — the cap is 5000 and the array fills before it
+  // overflows — but the status must follow the truth, not the retained sample.)
+  const status = errors.length > 0 || rowErrorsTotal > 0 ? 'failed' : 'expanded'
   return {
     valid: status === 'expanded',
     status,
@@ -1573,6 +1667,7 @@ async function expandPlmProjectBom(input = {}) {
       errors,
       rowErrors,
       subtree: subtreeCounters,
+      rowErrorTruncation: rowErrorTruncation(),
     }),
   }
 }
@@ -1693,6 +1788,17 @@ function summarizeBomExpansionForEvidence(result = {}) {
   // key set is byte-identical to the pre-feature one.
   const subtree = subtreeSummaryOf(summary.subtree)
   if (subtree) evidence.subtree = subtree
+  // D-C. Same conditional discipline, and values-free by the same argument the summary makes: four
+  // integers, a boolean, and type tokens `errorTypes` already publishes. An expansion under the cap
+  // mounts nothing, so its evidence stanza is byte-identical to the pre-cap one.
+  if (summary.rowErrorsTruncated === true) {
+    evidence.rowErrorsTotal = Number(summary.rowErrorsTotal || 0)
+    evidence.rowErrorsRetained = Number(summary.rowErrorsRetained || 0)
+    evidence.rowErrorsTruncated = true
+    evidence.rowErrorTypeCounts = isPlainObject(summary.rowErrorTypeCounts)
+      ? { ...summary.rowErrorTypeCounts }
+      : {}
+  }
   return evidence
 }
 
@@ -1704,6 +1810,8 @@ module.exports = {
   LARGE_BOM_BOUNDED_ERROR_TYPES,
   INCOMPLETE_READ_ERROR_TYPES,
   MISSING_COMPONENT_DETAIL_LIMIT,
+  ROW_ERROR_LIMIT,
+  ROW_ERROR_LIMIT_CEILING,
   READ_CURSOR_BROKEN_ERROR_TYPE,
   SUBTREE_CYCLE_DETECTED_ERROR_TYPE,
   SUBTREE_NODE_LIMIT_EXCEEDED_ERROR_TYPE,

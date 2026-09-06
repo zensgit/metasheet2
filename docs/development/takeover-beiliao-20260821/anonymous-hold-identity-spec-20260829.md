@@ -228,6 +228,16 @@ C2 的 `cell` 粒度同理：一个 (ext 目标列 × 源列 × 声明类型 × 
 
 分组内 `conflictSummary` 的代表性：同一身份组的成员按构造**必然携带完全相同的 `conflictSummary`**——身份 context 是 `conflictSummary` 细节的超集（`locus` 含 `field`/`depth`/`relation`，`cell` 含 `depth`；A/B 族的 `conflictSummary` 只有 `{type}`）。故取组内首条作代表与顺序无关。
 
+> 脚注（2026-09-06，D-C `rowErrors` 封顶）：第 1 步的「同一 `rowErrors`」现在是**同一有界样本**。`stock-preparation-bom-expansion.cjs` 的 `addRowError` 在 `ROW_ERROR_LIMIT`（默认 5000，`rowErrorLimit` 可由 action 配置覆盖，上限 `ROW_ERROR_LIMIT_CEILING` = 20000）之后**只计数不追加**：数组保留**生产顺序的前 5000 条**，所以截断是确定性的，第 1→5 步的推理逐段照旧成立，身份配方、`stableDecisionKey`、`inputFingerprint` 一字未动。
+>
+> 对本规格的三点影响，都在**上限以内为零**：
+>
+> 1. **上限以内字节级不变。** `rowErrorsTotal` / `rowErrorsRetained` / `rowErrorsTruncated` / `rowErrorTypeCounts` 四个键**条件挂载**（与 `subtree` 同一手法），只有真的溢出才出现。因此 ≤5000 条 rowError 的项目：`rowErrors` 内容与顺序不变、`summary` 键集不变、`summarizeBomExpansionForEvidence` 输出不变、`buildRevision` 哈希不变、`anon-hold:v1:locus:…` 身份不变、ledger details 不变——**没有任何已存 revision 移动，没有任何在飞的 hold 被 supersede**。
+> 2. **超限项目的 revision 必然移动，这是有意的。** `buildRevision` 的 expansion 投影在溢出时把 `rowErrorsTruncated` / `rowErrorsTotal` / `rowErrorTypeCounts` 一并入哈希。不入哈希才是 bug：两个前 5000 条完全相同、总数不同的超限项目会撞同一 revision，一个项目的 dryRunToken 就能验过另一个项目的计划。后果是超限项目的在飞 `dryRunToken` 会 409 MISMATCH、人工确认会 SUPERSEDED 重开——可接受，因为这类项目在封顶前本来就跑不出可用结果（数万条 rowError 撑爆响应、哈希与账本）。
+> 3. **计数保真，`errorTypes` 不失真。** 每一次 `addRowError` 都进 `rowErrorsTotal` 与按 type 的真实总数；`makeSummary` 的 `errorTypes` 会并入**被丢弃条目的类型**，所以「某一类的每一条都在上限之外」时，summary 仍然说得出这个项目有这类缺陷。`stock-preparation-table-actions.cjs` 的 `hasHardApplyBlockingRowErrors` 因此改为**先查真实按类计数、再查数组**（fail-closed）：被丢掉的 `missing_child_bom` 照样挡住 apply。
+>
+> evidence 侧仍是 values-free：新增的只有四个整数/布尔与 type 令牌，而 type 令牌是 `errorTypes` 一直就在公布的同一封闭词表。大 BOM 后台作业（`stock-preparation-large-bom-jobs.cjs`）**没有自己的 rowErrors 投影**（它给 planner 喂的是 `rowErrors: []`），溢出事实经 `expansion.summary` → `expansionArtifactRevision` 自动带到作业产物哈希里。
+
 ---
 
 ## 8. 留给后续刀次（本规格明确**不做**）

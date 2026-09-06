@@ -1246,8 +1246,168 @@ async function main() {
   await testApplySurfacesTypedValuesFreeRowFailureDiagnostics()
   await testApplyDetectsDataShiftAndManualConfirmHold()
   await testApplySandboxGateFailsClosed()
+  testRevisionCarriesTheRowErrorOverflowFacts()
+  testHardApplyBlockingRowErrorsSurviveTheCap()
+  testRowErrorLimitIsAConditionalActionConfigKey()
 
   console.log('stock-preparation-table-actions.test.cjs OK')
+}
+
+// ---------------------------------------------------------------------------------------------
+// D-C: `rowErrors` is a BOUNDED SAMPLE now, so the revision and the apply gate must both stop
+// treating "what is in the array" as "what happened".
+// ---------------------------------------------------------------------------------------------
+const ROW_ERROR_REVISION_ACTION = Object.freeze({
+  actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+  source: { externalSystemId: 'ext_plm', workspaceId: null, readPlan: null },
+  target: { sheetId: 'sheet_main', objectId: 'stockPreparationMain', fieldIdMap: {} },
+})
+
+function expansionWithRowErrors(retained, truncation) {
+  const summary = { status: 'failed', errorTypes: ['missing_component_source_id'] }
+  if (truncation) Object.assign(summary, truncation)
+  return {
+    status: 'failed',
+    rows: [],
+    errors: [],
+    rowErrors: Array.from({ length: retained }, () => ({ type: 'missing_component_source_id', field: 'part_id', depth: 1 })),
+    summary,
+  }
+}
+
+function revisionFor(expansion) {
+  return tableActionInternals.buildRevision({
+    action: ROW_ERROR_REVISION_ACTION,
+    parameters: { projectNo: 'P-001' },
+    expansion,
+    existingRows: [],
+    conflictPolicyReview: null,
+    plan: null,
+  })
+}
+
+function testRevisionCarriesTheRowErrorOverflowFacts() {
+  // UNDER THE CAP the projection reads NOTHING from the summary — stated by hashing the same
+  // expansion with its summary deleted outright. Equal hashes means the revision is blind to
+  // everything the summary carries until an overflow actually happens, which is the byte-identity
+  // promise every stored revision and every pending hold depends on.
+  const underCap = expansionWithRowErrors(3, null)
+  const summaryless = clone(underCap)
+  delete summaryless.summary
+  assert.equal(
+    revisionFor(underCap),
+    revisionFor(summaryless),
+    'the revision reads nothing from the summary until an overflow happens',
+  )
+
+  // …and the stronger half: the under-cap hash equals the PRE-D-C projection written out by hand
+  // through the same hasher. Any key added unconditionally to `buildRevision`'s expansion stanza —
+  // even one whose value is `undefined`, which stableStringify emits — turns this red, which is the
+  // only assertion that keeps "no stored revision moves, no pending hold is superseded" honest.
+  assert.equal(
+    revisionFor(underCap),
+    tableActionInternals.hashJson({
+      actionId: ROW_ERROR_REVISION_ACTION.actionId,
+      parameters: { projectNo: 'P-001' },
+      source: {
+        externalSystemId: ROW_ERROR_REVISION_ACTION.source.externalSystemId,
+        workspaceId: ROW_ERROR_REVISION_ACTION.source.workspaceId,
+        readPlan: ROW_ERROR_REVISION_ACTION.source.readPlan,
+      },
+      target: ROW_ERROR_REVISION_ACTION.target,
+      expansion: {
+        status: underCap.status,
+        rows: underCap.rows,
+        errors: underCap.errors,
+        rowErrors: underCap.rowErrors,
+      },
+      existingRows: [],
+      conflictPolicyReview: null,
+      plan: null,
+    }),
+    'an expansion that lost nothing hashes exactly as it did before the cap existed',
+  )
+
+  // OVER THE CAP the facts are in the hash — and they have to be, because the retained sample is
+  // byte-identical between these two and only the totals differ.
+  const smaller = expansionWithRowErrors(5000, {
+    rowErrorsTotal: 5001,
+    rowErrorsRetained: 5000,
+    rowErrorsTruncated: true,
+    rowErrorTypeCounts: { missing_component_source_id: 5001 },
+  })
+  const bigger = expansionWithRowErrors(5000, {
+    rowErrorsTotal: 90210,
+    rowErrorsRetained: 5000,
+    rowErrorsTruncated: true,
+    rowErrorTypeCounts: { missing_component_source_id: 90210 },
+  })
+  assert.deepEqual(smaller.rowErrors, bigger.rowErrors, 'the two samples are indistinguishable…')
+  assert.notEqual(revisionFor(smaller), revisionFor(bigger), '…so only the overflow facts can separate their revisions')
+  assert.notEqual(revisionFor(smaller), revisionFor(expansionWithRowErrors(5000, null)),
+    'and a truncated expansion never collides with an untruncated one carrying the same array')
+
+  // The per-type counts are hashed too: same total, different composition, different revision —
+  // otherwise "5001 missing parts" and "5001 unparseable quantities" would share a dry-run token.
+  const otherTypes = clone(smaller)
+  otherTypes.summary.rowErrorTypeCounts = { invalid_quantity: 5001 }
+  assert.notEqual(revisionFor(smaller), revisionFor(otherTypes), 'the per-type composition is hashed as well')
+}
+
+// FAIL-CLOSED. The hard apply-blocking check used to read the array; past the cap the array can
+// contain none of the blocking type while the project is full of it.
+function testHardApplyBlockingRowErrorsSurviveTheCap() {
+  const { hasHardApplyBlockingRowErrors } = tableActionInternals
+  assert.equal(hasHardApplyBlockingRowErrors({ rowErrors: [] }), false, 'a clean expansion blocks nothing')
+  assert.equal(
+    hasHardApplyBlockingRowErrors({ rowErrors: [{ type: 'missing_child_bom' }] }),
+    true,
+    'the array is still authority when nothing was dropped',
+  )
+  assert.equal(
+    hasHardApplyBlockingRowErrors({
+      rowErrors: [{ type: 'missing_component_source_id' }],
+      summary: {
+        rowErrorsTruncated: true,
+        rowErrorsTotal: 5001,
+        rowErrorTypeCounts: { missing_component_source_id: 5000, missing_child_bom: 1 },
+      },
+    }),
+    true,
+    'a missing_child_bom the cap dropped still blocks apply — the totals are consulted first',
+  )
+  assert.equal(
+    hasHardApplyBlockingRowErrors({
+      rowErrors: [{ type: 'missing_component_source_id' }],
+      summary: {
+        rowErrorsTruncated: true,
+        rowErrorsTotal: 5001,
+        rowErrorTypeCounts: { missing_component_source_id: 5001 },
+      },
+    }),
+    false,
+    '…and a truncated expansion with no blocking type does not become blocked by the truncation itself',
+  )
+}
+
+// The cap override is deploy config, and CONDITIONAL: an action that never asked for it keeps the
+// exact normalized shape it had, because that shape is snapshotted and hashed elsewhere.
+function testRowErrorLimitIsAConditionalActionConfigKey() {
+  const base = {
+    actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+    source: { externalSystemId: 'ext_plm', kind: 'bridge:legacy-sql-readonly' },
+    target: { sheetId: 'sheet_main', objectId: 'stockPreparationMain', fieldIdMap: {} },
+  }
+  const plain = normalizeStockPreparationActionConfig(clone(base))
+  assert.equal('rowErrorLimit' in plain, false, 'a config that never set it gains no key')
+
+  const configured = normalizeStockPreparationActionConfig({ ...clone(base), rowErrorLimit: 250 })
+  assert.equal(configured.rowErrorLimit, 250, 'a configured cap is carried on the normalized action')
+  assert.throws(
+    () => normalizeStockPreparationActionConfig({ ...clone(base), rowErrorLimit: -1 }),
+    (error) => error instanceof StockPreparationTableActionError && error.code === 'TABLE_ACTION_CONFIG_INVALID',
+    'a nonsense cap is refused at config time, not silently defaulted',
+  )
 }
 
 async function testApplySandboxGateFailsClosed() {
