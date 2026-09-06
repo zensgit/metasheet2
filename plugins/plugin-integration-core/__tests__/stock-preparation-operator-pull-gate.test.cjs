@@ -278,12 +278,22 @@ function mountWithSource({
   // `canonical` -> the row names its Connection in `connection_id` and its config carries no legacy
   // pointer, which is the 222 shape. `legacy` -> the pre-cutover `config.dataSourceId` shape.
   bindingShape = 'canonical',
-  // 对账限本人可见项目 (P-13). `null` keeps the original doubles — no MVP project sheet at all. An
+  // 对账不做按项目限制 (P-13). `null` keeps the original doubles — no MVP project sheet at all. An
   // ARRAY provisions the project sheet and fills it with exactly these project numbers, which is what
-  // lets a test say "this number is in the caller's directory and that one is not". `[]` is the third
-  // state and the one the field actually starts in: the sheet EXISTS (mvp/ensure provisions it) and
-  // holds no archived project, because the project row is written by mvp-persist alone — platform-
-  // admin and flag-gated. The reconcile gate passes through on both empty shapes.
+  // lets a test say "this number is in the caller's directory and that one is not".
+  //
+  // WHAT IT IS FOR NOW THAT THE GATE IS GONE, since "reconcile ignores the directory" could be
+  // tested with no directory at all. Two things, and the second is the load-bearing one:
+  //   - P-13 asserts the difference makes NO difference to RECONCILE, which is a claim about a
+  //     distinction that has to exist to be ignored. With the fixture at `null` the two arms would
+  //     be identical for a second reason (no sheet), and the experiment would prove less.
+  //   - it is what makes the P-13 CALIBRATION run possible: the directory route only reaches its
+  //     project-table read and its audit append when this sheet resolves, and that run is the only
+  //     thing in this file proving the `objectSheetLookups` / `auditAppends` counters can be
+  //     non-zero at all.
+  // `[]` is the third state and the one the field actually starts in: the sheet EXISTS (mvp/ensure
+  // provisions it) and holds no archived project, because the project row is written by mvp-persist
+  // alone — platform-admin and flag-gated.
   directoryProjectNos = null,
 } = {}) {
   const routes = new Map()
@@ -296,10 +306,10 @@ function mountWithSource({
   const peeks = []
   // P-13's "and it did nothing on the way out" instrument.
   const auditAppends = []
-  // P-13's OTHER instrument, and the one that measures the FLAG rather than the gate: every objectId
-  // the route asked the provisioning facade to resolve, in order. With the reconcile project gate
-  // OFF the project table must never be looked up at all — that, not merely "it was not refused", is
-  // what "the flag-off path is the one main has" is asserted on.
+  // P-13's OTHER instrument: every objectId the route asked the provisioning facade to resolve, in
+  // order. Reconcile must never look the PROJECT table up at all — that, not merely "it was not
+  // refused", is what "there is no project gate on this route" is asserted on. It measured the
+  // default-off flag while #5516's gate existed; with the gate deleted it measures the route.
   const objectSheetLookups = []
   const context = {
     api: {
@@ -885,75 +895,62 @@ async function theLegacyTiersAreExactlyWhatTheyWere() {
 }
 
 // ---------------------------------------------------------------------------
-// P-13 — 对账限本人可见项目: reconcile's projectNo must be one the operator can SEE
-//        (ENV-GATED: MULTITABLE_STOCK_PREP_RECONCILE_PROJECT_DIRECTORY_GATE, DEFAULT OFF)
+// P-13 — 对账不做按项目限制: reconcile admits ANY projectNo of the caller's own tenant,
+//        and a malformed projectNo is still 400
 // ---------------------------------------------------------------------------
 //
-// THE GAP. C13 admitted the operator tier on reconcile with the TENANT proven and nothing else, and
-// reconcile takes its `projectNo` from the body. Reconcile's orphan sweep supersedes the PENDING
-// ledger rows of whatever project it is pointed at, so the number a floor operator typed decided
-// whose confirmation queue got rewritten — anywhere inside the tenant.
+// WHAT THIS SECTION USED TO BE, so the change is legible rather than a silent shrinkage. #5516 put a
+// project-visibility gate on reconcile behind `MULTITABLE_STOCK_PREP_RECONCILE_PROJECT_DIRECTORY_GATE`
+// (default off) and this section asserted both halves of it: armed, the narrowing behaved as designed
+// (cases 1-5); off, the route was byte-for-byte the one main had (P-13f). The owner ruled on
+// 2026-09-06 that stock-prep will NOT do project ownership and that the gate be DELETED rather than
+// left as a switch nobody would turn on. Two structural reasons, both established in the design's
+// falsification round: the operator project directory is TENANT-WIDE by construction, so the
+// strongest thing the gate could prove was 限本租户的项目 — it cannot tell two operators of one
+// factory apart, which is the complaint that motivated it — and its only pass-through ("this tenant
+// has archived nothing") inverts into "a never-archived project is refused its FIRST reconcile" the
+// moment the tenant archives anything, while archiving is `mvp-persist`, which the operator's own
+// four-step pull SKIPs. See docs/development/takeover-beiliao-20260821/
+// design-project-ownership-20260906.md §2 方案 B.
 //
-// WHY THE NARROWING IS BEHIND A FLAG, AND WHY THIS SUITE THEREFORE HAS TWO HALVES. The data model
-// has no project OWNERSHIP: the operator directory is tenant-wide by construction, so the strongest
-// thing this check can prove is 限本租户的项目 — and its one pass-through ("the tenant's project
-// archive is empty") inverts the moment a tenant archives anything, at which point a never-archived
-// project is refused 403 on its FIRST operator reconcile. Archiving is platform-admin + flag-gated
-// and the operator's own four-step pull SKIPs it, so armed by default the gate would interrupt every
-// new customer project. So the code ships OFF, and BOTH halves are asserted:
-//   ON  — the narrowing behaves as designed (cases 1-5 below);
-//   OFF — the route is the one main has: no directory read at all, and a trace indistinguishable
-//         from the platform admin's on the same request (P-13f). That half is what makes the flag
-//         safe to merge, so it is asserted instrument-for-instrument rather than in the abstract.
-// The ONE thing that is NOT flag-gated is case 5, the malformed-projectNo 400: it hands back the
-// code the downstream validator would have produced anyway, and leaving it flag-gated would mean the
-// flag-off deployment keeps the exact shape that makes the flag-on gate skippable.
+// SO THIS IS NOW THE OPPOSITE ASSERTION, AND IT IS DELIBERATE RATHER THAN AN ABSENCE. A suite that
+// merely stopped mentioning the gate would leave the next reader unable to tell "ruled out" from
+// "forgotten", and the first person to notice that one operator can supersede another project's
+// PENDING rows would file it as a bug. It is not a bug; it is the boundary this route has, and the
+// answer to "who reconciled someone else's project" is the audit trail. What is pinned:
 //
-// THE FIX, and what each case pins (all of these are WITH THE FLAG ON except 5, which is asserted
-// under both):
-//   1. a project the caller's own directory lists  -> admitted, and the run goes on to the source;
-//   2. a project it does not                       -> 403, BEFORE the action lookup, the B2a fence,
-//      the source adapter and the audit append — so no external read, no credential decrypt, no
-//      lease, and no trail;
-//   3. a platform admin                            -> unchanged on both, because the legacy branch
-//      of `requireTableActionAccess` returns before any of this;
-//   4. a deployment whose project ARCHIVE IS EMPTY -> admitted, stated as the documented limit it is:
-//      the MVP project row is written by mvp-persist alone (platform-admin + flag-gated), so a
-//      deployment that has archived nothing has nothing to check a number against, and refusing there
-//      would take the confirmation loop away from the very tier C13 opened it for. Both shapes of
-//      "empty" are pinned: no project SHEET at all, and a sheet that mvp/ensure provisioned with no
-//      rows in it — the second is the ordinary post-install state and the first cut of this gate
-//      (which keyed on sheet existence) would have refused every reconcile there;
-//   5. a projectNo that is not a string            -> 400 before the action lookup, so the gate is
-//      never SKIPPED by a shape the downstream validator would have rejected anyway.
+//   1. NOT NARROWED BY PROJECT. An operator reconciling a number its own directory does NOT list is
+//      not refused, reaches the source read, and gets the SAME outcome as it does for a number the
+//      directory DOES list — the projectNo does not change the answer, which is the claim, stated as
+//      an equality rather than as the absence of one refusal code.
+//   2. THE PROJECT TABLE IS NEVER LOOKED UP. Zero `findObjectSheet` calls for it: the route does not
+//      read a directory and admit, it does not read one at all. That is the difference between "same
+//      answer" and "same code path", and only the second says the gate is gone.
+//   3. THE OPERATOR'S WHOLE HOST-CALL TRACE EQUALS THE PLATFORM ADMIN'S on the identical request —
+//      same outcome, same adapter builds, same connection resolutions, same object lookups in the
+//      same order, same audit rows. The admin branch returns from `requireTableActionAccess` before
+//      anything operator-specific, so it is the baseline, carried in the same process rather than
+//      quoted from memory. (Inherited verbatim from P-13f, which measured exactly this while the flag
+//      was off; deleting the flag makes it unconditional, not obsolete.)
+//   4. THE MALFORMED-projectNo 400 SURVIVED THE GATE. A `projectNo` that is PRESENT but not a usable
+//      string — {"projectNo": 230920006}, the shape this domain hands out constantly — is refused
+//      400 with the downstream validator's own code and field, before the action lookup, the B2a
+//      fence and the source adapter: no external read, no credential decrypt, no audit row. It was
+//      never part of the narrowing (it is the malformed-request answer the request was going to get
+//      anyway) and it did not go with it.
+//   5. DRY-RUN AND APPLY ARE UNCHANGED, as they always were.
 // ---------------------------------------------------------------------------
 
 const VISIBLE_PROJECT_NO = '2-20231625'
 const FOREIGN_PROJECT_NO = '9-99999999'
 const PROJECT_OBJECT_ID = 'plm_stock_preparation_project'
-const RECONCILE_PROJECT_GATE_FLAG = 'MULTITABLE_STOCK_PREP_RECONCILE_PROJECT_DIRECTORY_GATE'
+// The deleted gate's refusal code, kept as a NAMED constant with no producer anywhere in the tree:
+// the assertions below use it to say "this must never come back", which reads as an intention rather
+// than as a stale string somebody forgot to delete.
+const RECONCILE_PROJECT_GATE_CODE = 'STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE'
 
 function reconcileBody(projectNo) {
   return { parameters: { projectNo } }
-}
-
-/**
- * Run `fn` with the reconcile project gate in a known state, and leave the environment exactly as it
- * was found — same shape as `withTenantClaimFlag` below, and for the same reason: the flag is read
- * per request out of `process.env`, so a suite that set it and forgot would arm a default-off
- * narrowing for every test that ran afterwards.
- */
-async function withReconcileProjectGate(value, fn) {
-  const had = Object.prototype.hasOwnProperty.call(process.env, RECONCILE_PROJECT_GATE_FLAG)
-  const previous = process.env[RECONCILE_PROJECT_GATE_FLAG]
-  if (value === null) delete process.env[RECONCILE_PROJECT_GATE_FLAG]
-  else process.env[RECONCILE_PROJECT_GATE_FLAG] = value
-  try {
-    return await fn()
-  } finally {
-    if (had) process.env[RECONCILE_PROJECT_GATE_FLAG] = previous
-    else delete process.env[RECONCILE_PROJECT_GATE_FLAG]
-  }
 }
 
 /** How many times the run asked the provisioning facade for the PROJECT table. */
@@ -961,106 +958,98 @@ function projectSheetLookups(harness) {
   return harness.objectSheetLookups.filter((objectId) => objectId === PROJECT_OBJECT_ID).length
 }
 
-async function theOperatorReconcilesOnlyProjectsItCanSee() {
-  await withReconcileProjectGate('true', theOperatorReconcilesOnlyProjectsItCanSeeArmed)
-}
-
-async function theOperatorReconcilesOnlyProjectsItCanSeeArmed() {
+async function reconcileIsNotNarrowedByProject() {
   const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
+  const foreign = { ...RECONCILE, actionId: pull, body: reconcileBody(FOREIGN_PROJECT_NO) }
 
-  // (1) + (2): one mount, one directory, two numbers.
-  const seen = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
-  const seenCode = await refusalCode(seen.routes, {
+  // (1) + (2): one directory listing exactly one number, and a reconcile of a DIFFERENT one.
+  const operator = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
+  const operatorCode = await refusalCode(operator.routes, { ...foreign, user: OPERATOR })
+  assert.notEqual(
+    operatorCode,
+    RECONCILE_PROJECT_GATE_CODE,
+    `P-13: reconcile does not narrow by project — a number outside the caller's directory is admitted (got ${operatorCode})`,
+  )
+  assert.ok(
+    operator.adapterPrincipals.length > 0,
+    `P-13: ...and the run really went on to the source read (got ${operatorCode})`,
+  )
+  assert.equal(
+    projectSheetLookups(operator),
+    0,
+    'P-13: ...having never looked the project table up at all — this route reads no directory, rather than reading one that admits',
+  )
+
+  // (2') THE INSTRUMENTS, CALIBRATED — the positive control the armed half of P-13f used to be.
+  //
+  // While #5516's gate existed, this file had a branch that asserted the SAME counter was NON-zero
+  // for a refused reconcile ("...and the refusal came from an actual directory read, so P-13f's
+  // 'zero lookups' measures the flag"). Deleting the gate deleted that branch — and a zero-count
+  // assertion with nothing proving the counter can ever be non-zero is an assertion about a stopped
+  // clock. Both of P-13's own instruments were in that state, and both were measured to be, by
+  // disabling each recorder in turn and watching this suite stay green:
+  //   - `objectSheetLookups` — carries (2) above and the two deepEquals below;
+  //   - `auditAppends` — carries "appended no audit row" at (4) and "same audit rows" at (3).
+  // (`loadPrincipals`, the third, is NOT in that state: P-09/P-12 drive it off zero, and disabling
+  // its recorder turns this suite red. It needs nothing here.)
+  //
+  // So both are exercised against a route that MUST do the thing they count: the operator project
+  // directory, which reads the project table and writes a `project_directory_read` audit row, on the
+  // same harness with the same mount options and the same caller. This is not a claim about
+  // reconcile — it is the calibration that makes the reconcile claims falsifiable.
+  const directoryReader = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
+  await rawCall(directoryReader.routes, {
+    method: 'GET',
+    routePath: '/api/integration/stock-preparation/operator/projects',
+    user: OPERATOR,
+  })
+  assert.ok(
+    projectSheetLookups(directoryReader) > 0,
+    `P-13: the zeroes above are measurements, not a broken instrument — the directory route drives this same counter off zero (got ${JSON.stringify(directoryReader.objectSheetLookups)})`,
+  )
+  assert.ok(
+    directoryReader.auditAppends.length > 0,
+    `P-13: ...and the same for the audit recorder, so "appended no audit row" below is a measurement too (got ${JSON.stringify(directoryReader.auditAppends.map((row) => row && row.action))})`,
+  )
+
+  // ...and the number itself changes nothing: the SAME request with a number the directory DOES list
+  // gets the SAME answer. This is the positive form of "not narrowed by project"; the notEqual above
+  // alone would keep passing if the route grew a different refusal code for the same reason.
+  const listed = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
+  const listedCode = await refusalCode(listed.routes, {
     ...RECONCILE,
     user: OPERATOR,
     actionId: pull,
     body: reconcileBody(VISIBLE_PROJECT_NO),
   })
-  assert.notEqual(
-    seenCode,
-    'STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE',
-    `P-13: a project the operator CAN see is not refused by the visibility gate (got ${seenCode})`,
-  )
-  assert.ok(
-    seen.adapterPrincipals.length > 0,
-    `P-13: ...and the admitted run really went on to the source read (got ${seenCode})`,
-  )
-
-  const refused = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
-  // STATUS AND CODE BOTH. The code alone would keep passing if someone changed the thrown error's
-  // 403 to a 500 or a 200 — and a refusal that is not a 403 is not the refusal the FE's copy table,
-  // the delivery guide and `projectSync`'s RECONCILE_NOT_PERMITTED branch are all written against.
-  const refusedResponse = await rawCall(refused.routes, {
-    ...RECONCILE,
-    user: OPERATOR,
-    actionId: pull,
-    body: reconcileBody(FOREIGN_PROJECT_NO),
-  })
   assert.equal(
-    refusedResponse.body && refusedResponse.body.error && refusedResponse.body.error.code,
-    'STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE',
-    'P-13: a project the operator cannot see is refused',
+    operatorCode,
+    listedCode,
+    'P-13: a projectNo the directory lists and one it does not are the same request to this route',
   )
-  assert.equal(refusedResponse.statusCode, 403, 'P-13: ...as a 403, not merely with a 403-shaped code')
-  assert.equal(refused.adapterPrincipals.length, 0, 'P-13: the refusal reached no source adapter')
-  assert.equal(refused.loadPrincipals.length, 0, 'P-13: ...and no connection resolution / credential decrypt')
-  assert.deepEqual(refused.auditAppends, [], 'P-13: ...and appended no audit row')
-  // The positive control for P-13f's zero below: ARMED, the run really does read the project table.
-  assert.ok(
-    projectSheetLookups(refused) > 0,
-    'P-13: ...and the refusal came from an actual directory read, so P-13f\'s "zero lookups" measures the flag',
+  assert.deepEqual(
+    operator.objectSheetLookups,
+    listed.objectSheetLookups,
+    'P-13: ...down to the object-sheet lookups, in the same order',
   )
 
-  // (3) the platform admin is untouched — the SAME foreign number, on the same directory.
+  // (3) the platform admin is the main baseline: same request, same everything.
   const admin = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
-  assert.notEqual(
-    await refusalCode(admin.routes, {
-      ...RECONCILE,
-      user: PLATFORM_ADMIN,
-      actionId: pull,
-      body: reconcileBody(FOREIGN_PROJECT_NO),
-    }),
-    'STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE',
-    'P-13: a platform admin keeps reconcile on any project of the tenant',
+  const adminCode = await refusalCode(admin.routes, { ...foreign, user: PLATFORM_ADMIN })
+  assert.equal(
+    operatorCode,
+    adminCode,
+    "P-13: the operator's outcome is the platform admin's, whose branch returns before anything operator-specific",
   )
-  assert.ok(admin.adapterPrincipals.length > 0, 'P-13: ...and reaches the source exactly as before')
+  assert.equal(operator.adapterPrincipals.length, admin.adapterPrincipals.length, 'P-13: ...same adapter builds')
+  assert.equal(operator.loadPrincipals.length, admin.loadPrincipals.length, 'P-13: ...same connection resolutions')
+  assert.deepEqual(operator.objectSheetLookups, admin.objectSheetLookups, 'P-13: ...same object-sheet lookups, in the same order')
+  assert.equal(operator.auditAppends.length, admin.auditAppends.length, 'P-13: ...same audit rows')
 
-  // (4) the documented pass-through: an EMPTY ARCHIVE, so the question cannot be asked. Both shapes.
-  const noDirectory = mountWithSource()
-  assert.notEqual(
-    await refusalCode(noDirectory.routes, {
-      ...RECONCILE,
-      user: OPERATOR,
-      actionId: pull,
-      body: reconcileBody(FOREIGN_PROJECT_NO),
-    }),
-    'STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE',
-    'P-13: a deployment with no MVP project table admits — refusing there would kill the operator confirmation loop',
-  )
-
-  // ...and the shape that matters far more in the field: the sheet EXISTS (mvp/ensure provisions all
-  // nine frozen tables, and the post-deploy smoke runs it on every deploy) but nothing has ever been
-  // archived into it. Keying the pass-through on sheet existence made this the ARMED state on a
-  // brand-new install, which is the opposite of "the question cannot be asked".
-  const emptyArchive = mountWithSource({ directoryProjectNos: [] })
-  assert.notEqual(
-    await refusalCode(emptyArchive.routes, {
-      ...RECONCILE,
-      user: OPERATOR,
-      actionId: pull,
-      body: reconcileBody(FOREIGN_PROJECT_NO),
-    }),
-    'STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE',
-    'P-13: a provisioned-but-EMPTY project archive admits, exactly as an absent table does',
-  )
-
-  // (5) the shape that used to walk straight past the gate: a projectNo sent as a JSON NUMBER.
-  // `firstString` accepts only strings, so this left the gate's guard expression falsy and the
-  // request ran on to the action lookup, the B2a fence and the source adapter before the downstream
-  // parameter validator refused it. Now it is refused HERE, with that validator's own code, having
-  // touched nothing.
-  const numericProjectNo = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
-  const numericResponse = await rawCall(numericProjectNo.routes, {
+  // (4) the malformed projectNo: a JSON NUMBER. STATUS AND CODE BOTH — the code alone would keep
+  // passing if the thrown error's 400 became a 500 or a 200.
+  const numeric = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
+  const numericResponse = await rawCall(numeric.routes, {
     ...RECONCILE,
     user: OPERATOR,
     actionId: pull,
@@ -1072,110 +1061,39 @@ async function theOperatorReconcilesOnlyProjectsItCanSeeArmed() {
     'P-13: a non-string projectNo is refused as the malformed request it is',
   )
   assert.equal(numericResponse.statusCode, 400, 'P-13: ...with the same 400 the downstream validator would have used')
-  assert.equal(numericProjectNo.adapterPrincipals.length, 0, 'P-13: ...and it reached no source adapter')
-  assert.equal(numericProjectNo.loadPrincipals.length, 0, 'P-13: ...no connection resolution / credential decrypt')
-  assert.deepEqual(numericProjectNo.auditAppends, [], 'P-13: ...and appended no audit row')
+  assert.equal(numeric.adapterPrincipals.length, 0, 'P-13: ...and it reached no source adapter')
+  assert.equal(numeric.loadPrincipals.length, 0, 'P-13: ...no connection resolution / credential decrypt')
+  assert.deepEqual(numeric.auditAppends, [], 'P-13: ...and appended no audit row')
 
-  // ...and the OTHER two steps of the operator's own four-step run are NOT narrowed by this: only
-  // reconcile carries a projectNo whose ledger rows another person owns.
-  const untouched = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
+  // (5) the other two steps of the operator's own four-step run: unchanged, as they always were. The
+  // notEqual is kept deliberately — the gate's code has no producer left in the tree, so it now
+  // guards against the narrowing reappearing on the wrong route, while the equality beside it is what
+  // actually measures "the projectNo does not narrow these".
+  const untouchedForeign = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
+  const untouchedListed = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
   for (const route of [DRY_RUN, APPLY]) {
+    const foreignCode = await refusalCode(untouchedForeign.routes, {
+      ...route,
+      user: OPERATOR,
+      actionId: pull,
+      body: reconcileBody(FOREIGN_PROJECT_NO),
+    })
     assert.notEqual(
-      await refusalCode(untouched.routes, {
-        ...route,
-        user: OPERATOR,
-        actionId: pull,
-        body: reconcileBody(FOREIGN_PROJECT_NO),
-      }),
-      'STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE',
+      foreignCode,
+      RECONCILE_PROJECT_GATE_CODE,
       'P-13: dry-run and apply keep the behaviour they had',
     )
-  }
-}
-
-// ---------------------------------------------------------------------------
-// P-13f — THE FLAG IS OFF BY DEFAULT, AND OFF MEANS "THE ROUTE main HAS"
-// ---------------------------------------------------------------------------
-//
-// The half that makes a default-off narrowing safe to merge. It is asserted three ways, because
-// "it was not refused" alone would still pass if the gate ran, read the whole directory, and
-// happened to admit:
-//
-//   (a) the operator's request is not refused by the visibility code and reaches the source read;
-//   (b) the PROJECT TABLE IS NEVER LOOKED UP — zero `findObjectSheet` calls for it, so the gate did
-//       not merely admit, it did not run. That is the difference between "same answer" and "same
-//       code path", and only the second is what "identical to main" claims;
-//   (c) the operator's whole host-call trace EQUALS the platform admin's on the identical request —
-//       same refusal code from the inert downstream, same adapter builds, same connection
-//       resolutions, same object lookups, same audit rows. The admin branch returns from
-//       `requireTableActionAccess` before any of this change's code, so it IS the main baseline,
-//       carried in the same process rather than quoted from memory.
-//
-// WHY NOT `mount()`'s `hostCallCount`: that harness registers the lease under
-// `stockPreparationConfirmationReconcileLease`, which is not the key the route reads
-// (`stockPreparationConfirmationDecisionLease`), so reconcile 501s there before reaching any of
-// this. The four instruments above are that counter, itemised.
-//
-// FOUR NOT-'true' VALUES, because the gate is `=== 'true'` after trim+lowercase and the mistake to
-// catch is a deployment that sets the variable to something truthy-looking and believes it is off —
-// or, worse, a future edit that loosens the comparison and silently arms every deployment carrying
-// a stray value.
-async function theReconcileProjectGateIsOffByDefault() {
-  const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
-  const foreign = { ...RECONCILE, actionId: pull, body: reconcileBody(FOREIGN_PROJECT_NO) }
-
-  for (const flagValue of [null, '', 'false', '1']) {
-    const named = flagValue === null ? 'unset' : `'${flagValue}'`
-    await withReconcileProjectGate(flagValue, async () => {
-      const operator = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
-      const operatorCode = await refusalCode(operator.routes, { ...foreign, user: OPERATOR })
-      assert.notEqual(
-        operatorCode,
-        'STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE',
-        `P-13f (${named}): the visibility gate is OFF — an operator keeps the tenant-level reconcile it had`,
-      )
-      assert.ok(
-        operator.adapterPrincipals.length > 0,
-        `P-13f (${named}): ...and the run goes on to the source read, exactly as before`,
-      )
-      assert.equal(
-        projectSheetLookups(operator),
-        0,
-        `P-13f (${named}): ...having never looked the project table up at all — the gate did not run, not merely did not refuse`,
-      )
-
-      // (c) the admin branch is the main baseline: same request, same everything.
-      const admin = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
-      const adminCode = await refusalCode(admin.routes, { ...foreign, user: PLATFORM_ADMIN })
-      assert.equal(
-        operatorCode,
-        adminCode,
-        `P-13f (${named}): the operator's outcome is the platform admin's, whose branch this change never touched`,
-      )
-      assert.equal(operator.adapterPrincipals.length, admin.adapterPrincipals.length, `P-13f (${named}): ...same adapter builds`)
-      assert.equal(operator.loadPrincipals.length, admin.loadPrincipals.length, `P-13f (${named}): ...same connection resolutions`)
-      assert.deepEqual(operator.objectSheetLookups, admin.objectSheetLookups, `P-13f (${named}): ...same object-sheet lookups, in the same order`)
-      assert.equal(operator.auditAppends.length, admin.auditAppends.length, `P-13f (${named}): ...same audit rows`)
-
-      // The one check that is NOT the flag's to decide: a malformed projectNo is still 400, still
-      // before the source read. Gating it would leave the flag-off deployment carrying the shape
-      // that makes the flag-on gate skippable.
-      const numeric = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
-      const numericResponse = await rawCall(numeric.routes, {
-        ...RECONCILE,
-        user: OPERATOR,
-        actionId: pull,
-        body: { parameters: { projectNo: 99999999 } },
-      })
-      assert.equal(
-        numericResponse.body && numericResponse.body.error && numericResponse.body.error.code,
-        'TABLE_ACTION_PARAMETERS_INVALID',
-        `P-13f (${named}): a non-string projectNo is refused whatever the flag says`,
-      )
-      assert.equal(numericResponse.statusCode, 400, `P-13f (${named}): ...as a 400`)
-      assert.equal(numeric.adapterPrincipals.length, 0, `P-13f (${named}): ...and it reached no source adapter`)
-      assert.deepEqual(numeric.auditAppends, [], `P-13f (${named}): ...and appended no audit row`)
+    const listedStepCode = await refusalCode(untouchedListed.routes, {
+      ...route,
+      user: OPERATOR,
+      actionId: pull,
+      body: reconcileBody(VISIBLE_PROJECT_NO),
     })
+    assert.equal(
+      foreignCode,
+      listedStepCode,
+      `P-13: ...and neither is narrowed by which project the number belongs to (${route.routePath})`,
+    )
   }
 }
 
@@ -1788,8 +1706,7 @@ async function main() {
   await aStoredLargeBomJobIsRunOnlyByItsCreator()
   await theOperatorReachesTheBoundedBackgroundChannel()
   everyLargeBomRouteIsInTheSplit()
-  await theOperatorReconcilesOnlyProjectsItCanSee()
-  await theReconcileProjectGateIsOffByDefault()
+  await reconcileIsNotNarrowedByProject()
   await theOperatorBranchCannotBeSteeredAcrossTenants()
   await theTenantClaimDoorRefusesUnprovenTenantsWhenArmed()
   await theLegacyBranchDoorPrecedesTheRoutesOwnValidation()

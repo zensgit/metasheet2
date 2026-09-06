@@ -2972,19 +2972,34 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   // 项目备料页 added two: the board read and the project directory read. W3a added a ninth — the
   // dry-run's opt-in missing-component list. W4 added a TENTH, the confirmation-decision CONFIRM — the
   // write half of the value-entry read, which had kept `resolveAuthUserTenantId` while its two
-  // siblings were converted. 对账限本人可见项目 added an ELEVENTH: reconcile's operator branch, which
-  // resolves the scope to decide whose project directory answers "is this projectNo one of yours".
-  // That eleventh call site is ENV-GATED and off by default
-  // (`MULTITABLE_STOCK_PREP_RECONCILE_PROJECT_DIRECTORY_GATE`) — it is counted anyway, because this
-  // assertion is about what the source is written to do, and an unarmed derivation is precisely the
-  // one that would otherwise drift out of the header list unnoticed.
+  // siblings were converted. 对账限本人可见项目 briefly added an ELEVENTH — reconcile's operator
+  // branch, which resolved the scope to decide whose project directory answered "is this projectNo
+  // one of yours" — and it is GONE AGAIN: the owner ruled on 2026-09-06 that stock-prep will not do
+  // project ownership, so that gate was deleted rather than left as a default-off switch.
+  //
+  // SAID EXACTLY, because the loose version of this sentence is worse than none. What went is the
+  // SECOND resolution — the one inside reconcile's OWN handler body, which the gate needed because
+  // `requireTableActionAccess` returns only the user. The FIRST is still there and is still counted
+  // among the ten below: on the operator branch that shared helper resolves a scope for its refusals
+  // (lib/http-routes.cjs:1006), and after this deletion that is the ONLY tenancy check standing
+  // between a floor operator and this ledger write. "Reconcile no longer resolves an operator scope"
+  // would be false, and would send the next reader looking for a check that is very much there.
+  // The route's LEDGER tenant is the pre-existing `resolveAuthUserTenantId` one, unchanged.
   // The count is the whole point of the assertion — a new surface deciding tenancy on its own must
   // show up HERE, as a failure, rather than quietly becoming the nth thing the header does not
-  // mention.
-  assert.equal(callSites, 11, 'G9: eleven call sites — if this changes, the header list must too')
-  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'tableActionConfirmationDecisionsReconcile']) {
+  // mention. It cuts both ways: a call site that DISAPPEARS lands here too, which is how this line
+  // and the header list stayed in step through the deletion above.
+  assert.equal(callSites, 10, 'G9: ten call sites — if this changes, the header list must too')
+  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun']) {
     assert.ok(scope.includes(marker), `G9: the header enumerates ${marker}`)
   }
+  // ...and the entry that went with the deleted call site is GONE from the header. Dropping a name
+  // from the loop above only stops REQUIRING it; without this line a header that still enumerated
+  // reconcile would keep sending the next reader to look for a scope resolution that is not there.
+  assert.ok(
+    !scope.includes('tableActionConfirmationDecisionsReconcile'),
+    'G9: the header no longer enumerates tableActionConfirmationDecisionsReconcile — that call site was deleted with the project gate',
+  )
 }
 
 
