@@ -6178,6 +6178,10 @@ function requireStockPreparationAudit() {
         actionId,
         jobId,
         sourceAdapter,
+        // #5507 follow-up: a job that lands in `failed` is otherwise silent until an operator opens
+        // it — this is the one values-free warn that shows up in pm2 logs at the moment it happens.
+        // See `logLargeBomJobFailure` for the payload's allowed key set.
+        logger: routeLogger,
         expansionOptions: {
           ...largeBomExpansionOptionsForAction(action),
           // E3-02's 断游标 half on the background path. ARMED ONLY: a page that reports `done: false`

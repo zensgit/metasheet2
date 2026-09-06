@@ -448,6 +448,8 @@ pg_restore --clean --if-exists -d $env:DATABASE_URL "$backupDir\pre-upgrade-db.d
 
 排查任何"作业莫名其妙失败""SQL 报错但接口只给了一个笼统错误码"的场景,先按上面的方法把当天日志翻出来,搜时间戳附近的条目——2026-09-06 W3c 复测时,后台展开作业失败的真正原因(合成源缺 `path_id`/`Parent_OBJ_ID` 两列,见 §7.1)就是靠这条日志里一条"字段 \"path_id\" 不存在"的中文报错定位的,应用层的作业记录当时只给了一个 `read_failed` 的类型码。
 
+大 BOM 后台展开作业进入 `failed` 时,现在还会在 pm2 日志里打一条 values-free 的 `warn`(payload 固定含 jobId/actionId/tenantId/workspaceId/status/errorTypes/scaleErrorTypes,readFailuresTotal 与至多 20 条的 readFailures〔仅 object/errorCode〕、errorDetails〔仅 type/object/causeClass〕视该次失败是否留有对应证据而定是否出现,不含 message/cursor/行值/principal)。排查时可以先看 pm2 日志定位是哪张表、哪个错误码,但报错原文(如上面 `path_id` 那条中文报错)这条 warn 不带 message,仍要去 PG 服务端日志翻。
+
 **9.2 `audit_logs` 按月分区:自愈在中文 locale 下会失效**
 
 `audit_logs` 表按月分区(`audit_logs_YYYY_MM`),数据库里有一个 `create_audit_partition()` 函数负责建**下个月**的分区,应用代码里还有一段自愈逻辑(`AuditRepository.ensureCurrentMonthPartition`)——写入时如果撞上"当月分区不存在",会自动尝试建当月分区再重试一次。
