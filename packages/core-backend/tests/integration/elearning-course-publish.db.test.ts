@@ -47,6 +47,10 @@ import {
 } from '../../src/services/elearning-watch-progress'
 import {
   ELEARNING_COURSE_PUBLISH_REQUEST_HASH_VERSION,
+  ELEARNING_SIMPLE_WATCH_CHALLENGE_COUNT,
+  ELEARNING_SIMPLE_WATCH_CHALLENGE_MIN_DURATION_MS,
+  ELEARNING_SIMPLE_WATCH_CHALLENGE_POLICY_REVISION,
+  ELEARNING_SIMPLE_WATCH_CHALLENGE_RESPONSE_WINDOW_MS,
   ElearningCoursePublishError,
   canonicalizeElearningCoursePublishInput,
   hashElearningCoursePublishRequest,
@@ -373,7 +377,9 @@ describe('elearning V0.1 course publish service gate (real DB)', () => {
 
     const items = await pool.query(
       `SELECT id, item_type, position, media_id, exam_id,
-              completion_policy_version, completion_threshold_bps
+              completion_policy_version, completion_threshold_bps,
+              watch_challenge_policy_revision, watch_challenge_count,
+              watch_challenge_min_duration_ms, watch_challenge_response_window_ms
          FROM elearning_course_version_items
         WHERE org_id = $1 AND course_version_id = $2
         ORDER BY position ASC`,
@@ -388,6 +394,10 @@ describe('elearning V0.1 course publish service gate (real DB)', () => {
       exam_id: null,
       completion_policy_version: ELEARNING_WATCH_POLICY_VERSION,
       completion_threshold_bps: ELEARNING_WATCH_THRESHOLD_BPS,
+      watch_challenge_policy_revision: null,
+      watch_challenge_count: null,
+      watch_challenge_min_duration_ms: null,
+      watch_challenge_response_window_ms: null,
     }))
     expect(items.rows[1]).toEqual(expect.objectContaining({
       id: result.examItemId,
@@ -397,6 +407,10 @@ describe('elearning V0.1 course publish service gate (real DB)', () => {
       exam_id: result.examId,
       completion_policy_version: null,
       completion_threshold_bps: null,
+      watch_challenge_policy_revision: null,
+      watch_challenge_count: null,
+      watch_challenge_min_duration_ms: null,
+      watch_challenge_response_window_ms: null,
     }))
 
     const exam = await pool.query(
@@ -439,6 +453,33 @@ describe('elearning V0.1 course publish service gate (real DB)', () => {
     expect(revisions.rows[0].explanation).toBe('single secret')
     expect(await countOrg('elearning_questions', org)).toBe(3)
     expect(await countOrg('elearning_media', org)).toBe(1)
+  })
+
+  it('persists the simple watch challenge policy in the immutable video item', async () => {
+    const org = orgId('challenge')
+    seededOrgIds.push(org)
+    const mediaId = await seedMedia({ org })
+    const result = await publishElearningCourse(
+      db,
+      publishInput(org, mediaId),
+      { watchChallengeEnabled: true },
+    )
+
+    const policy = await pool.query(
+      `SELECT watch_challenge_policy_revision,
+              watch_challenge_count::int AS watch_challenge_count,
+              watch_challenge_min_duration_ms::int AS watch_challenge_min_duration_ms,
+              watch_challenge_response_window_ms::int AS watch_challenge_response_window_ms
+         FROM elearning_course_version_items
+        WHERE org_id = $1 AND id = $2`,
+      [org, result.videoItemId],
+    )
+    expect(policy.rows).toEqual([{
+      watch_challenge_policy_revision: ELEARNING_SIMPLE_WATCH_CHALLENGE_POLICY_REVISION,
+      watch_challenge_count: ELEARNING_SIMPLE_WATCH_CHALLENGE_COUNT,
+      watch_challenge_min_duration_ms: ELEARNING_SIMPLE_WATCH_CHALLENGE_MIN_DURATION_MS,
+      watch_challenge_response_window_ms: ELEARNING_SIMPLE_WATCH_CHALLENGE_RESPONSE_WINDOW_MS,
+    }])
   })
 
   it('rolls back to zero course graph residue for cross-org, not-ready, rejected, and invalid passScore', async () => {

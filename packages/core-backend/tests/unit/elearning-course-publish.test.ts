@@ -18,6 +18,10 @@ import {
   ELEARNING_COURSE_PUBLISH_REQUEST_DOMAIN,
   ELEARNING_COURSE_PUBLISH_REQUEST_HASH_VERSION,
   ELEARNING_COURSE_PUBLISH_TITLE_MAX,
+  ELEARNING_SIMPLE_WATCH_CHALLENGE_COUNT,
+  ELEARNING_SIMPLE_WATCH_CHALLENGE_MIN_DURATION_MS,
+  ELEARNING_SIMPLE_WATCH_CHALLENGE_POLICY_REVISION,
+  ELEARNING_SIMPLE_WATCH_CHALLENGE_RESPONSE_WINDOW_MS,
   canonicalizeElearningCoursePublishInput,
   canonicalizeElearningCoursePublishRequest,
   elearningCoursePublishLockKey,
@@ -218,6 +222,7 @@ function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningCoursePublishDb
     if (tag === 'elearning-publish:insert-exam-question') return { rows: [], rowCount: 1 }
     if (tag === 'elearning-publish:insert-video-item') {
       expect(sql).toContain("'video'")
+      expect(sql).toContain('watch_challenge_policy_revision')
       expect(params[4]).toBe(ELEARNING_WATCH_POLICY_VERSION)
       expect(params[5]).toBe(ELEARNING_WATCH_THRESHOLD_BPS)
       return { rows: [], rowCount: 1 }
@@ -947,6 +952,24 @@ describe('publishElearningCourse', () => {
     ])
     expect(JSON.parse(String(revisionParams[6]))).toEqual({ correct: ['a'] })
     expect(revisionParams[7]).toBe('secret rationale')
+    const videoItemParams = mem.params[
+      mem.queries.findIndex((sql) => tagOf(sql) === 'elearning-publish:insert-video-item')
+    ]
+    expect(videoItemParams.slice(6)).toEqual([null, null, null, null])
+  })
+
+  it('freezes the simple watch challenge policy only when explicitly enabled', async () => {
+    const { db, mem } = createMemoryDb()
+    await publishElearningCourse(db, baseInput(), { watchChallengeEnabled: true })
+    const videoItemParams = mem.params[
+      mem.queries.findIndex((sql) => tagOf(sql) === 'elearning-publish:insert-video-item')
+    ]
+    expect(videoItemParams.slice(6)).toEqual([
+      ELEARNING_SIMPLE_WATCH_CHALLENGE_POLICY_REVISION,
+      ELEARNING_SIMPLE_WATCH_CHALLENGE_COUNT,
+      ELEARNING_SIMPLE_WATCH_CHALLENGE_MIN_DURATION_MS,
+      ELEARNING_SIMPLE_WATCH_CHALLENGE_RESPONSE_WINDOW_MS,
+    ])
   })
 
   it('repeats question SQL per item then still publishes exam before version', async () => {
