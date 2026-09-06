@@ -1,65 +1,77 @@
-# MetaSheet 云课堂线上培训闭环验证报告（2026-09-01）
+# MetaSheet 云课堂最小线上培训闭环验证报告（2026-09-06）
 
-> 结论：PASS FOR LOCAL DRAFT / HOLD CANDIDATE。
+> 结论：PASS FOR LOCAL DRAFT / HOLD CLOSEOUT CANDIDATE。
 >
 > 非结论：不是 Ready、merge、feature flag、deploy、production 或真实用户验收证明。
 >
-> 被测代码：`60fb5887543dc7302642b5c716e1bd969304ef2c`，tree `7028eda069cf545fe6717b44d1ee2d393f6b619a`。
+> 被测代码：`c45194efda7ccc67ca010651989a772edf4704ac`，
+> tree `59f6e43a68a2aba2dda25f5c32befa2d8f1d6f13`。
 
-## 1. Exact-head 文件边界
+## 1. Exact topology 与文件边界
 
-相对父节点 `93c461568c165cfcf026039332039ed75c73c32c`：
+| 项目 | Exact 值 |
+|---|---|
+| first parent | #5427 旧 head `1d49c4a50ec371916585121baf213b24de3c32a6` |
+| second parent / main | `c02fef470271c2fbd6cd829d38a2bea1991875b9` |
+| merge head | `c45194efda7ccc67ca010651989a772edf4704ac` |
+| merge tree | `59f6e43a68a2aba2dda25f5c32befa2d8f1d6f13` |
 
-- 新增 1 个真实数据库闭环测试；
-- `plugin-tests.yml` 新增 1 个 post-migrate whole-file 参数；
-- `vitest.config.ts` 新增对应 no-DB exclude；
+相对 main 恰 6 个文件：
+
+- 新增真实数据库闭环测试；
+- `plugin-tests.yml` 增加 post-migrate whole-file参数；
+- `vitest.config.ts` 增加对应 no-DB exclude；
 - provenance pin 只刷新 `evidenceFiles.pluginTestsWorkflow`；
-- 产品源码、Web、OpenAPI、迁移与 feature flag 均为 byte-unchanged。
+- 新增本开发报告与验证报告；
+- 产品源码、Web、OpenAPI、迁移与 feature flag 均 byte-unchanged。
 
-## 2. 真实数据库门
+## 2. 真实 PostgreSQL 闭环门
 
-独立 PostgreSQL 15 scratch 实例：
+唯一临时库：`metasheet_ele_training_loop_20260906_01`，本机 PostgreSQL 15。
 
-- fresh 全量 migration：PASS；
-- 第二次 migration replay：PASS；
-- `elearning-online-training-loop.db.test.ts`：1 file / 2 tests PASS；
-- 报名后 assignment member 数量：0；
-- 视频完成证据：1；
-- 自动评分记录：1；
-- 课程结果：completed=true、score=10/10、passed=true；
-- 无答案键、解析或私有 explanation 泄漏；
-- 缺视频完成证据时，开考拒绝且 attempt 数量为 0。
+| 验证 | 结果 |
+|---|---|
+| fresh 全量 migration | PASS |
+| 第二次 migration replay | PASS |
+| `elearning-online-training-loop.db.test.ts` | 1 file / 2 tests PASS |
+| 结束前 active backends | 0 |
+| DROP 后 exact database residue | 0 |
+| DROP 后 prefix residue | 0 |
 
-数据库退出检查：active backends=0、fixture user residue=0、database prefix residue=0；实例停止后目录移入 Trash，DB window 已释放。
+正控串联报名、观看完成、开考、客观题提交、自动判分和成绩回读；负控证明没有服务端视频完成证据时拒绝开考且 attempt 数量保持 0。
 
-## 3. 判别 mutation
-
-- 临时移除 `startElearningExam` 的前置视频完成守卫：负控精确变红；
-- 恢复后生产文件 SHA-256 byte-identical，闭环测试 2/2 恢复绿色；
-- 移除 no-DB exclude：CI wiring 精确变红；
-- 移除 post-migrate whole-file 参数：CI wiring 精确变红；
-- 使用旧 provenance pin：provenance 正控精确变红；
-- 恢复官方生成 pin 后 frozen/live differenceCount=0。
-
-## 4. 非数据库门
+## 3. 非数据库门
 
 | 验证 | 结果 |
 |---|---|
 | e-learning 动态 wiring | 15/15 PASS |
-| core-backend type-check | PASS |
-| sealed-export package provenance | PASS |
+| core-backend `tsc --noEmit` | PASS |
+| sealed-export package provenance | 1/1 PASS |
 | full sealed-export S5 chain | PASS |
-| git diff --check | PASS |
-| exact-head 四文件反证式审阅 | P1=0 / P2=0 |
+| provenance frozen/live | `differenceCount=0` |
+| `git diff --check` | PASS |
 
-## 5. 父产品 PR 状态
+新 worktree 初次 typecheck 和 S5 分别因缺少本地 `tsc`、`mssql` 依赖链接中止；复用同仓已安装依赖后，原命令完整重跑并通过。两次均为环境姿态问题，不是测试断言失败，也没有安装或更改依赖版本。
 
-父 PR #5426 保持 OPEN、Draft/HOLD、MERGEABLE；本报告形成时 exact head 为 `93c46156...`。此前 Node 20 长门暴露两条旧测试未随报名能力更新：scope rollback 未逆序卸载报名表，以及 auth closed-capability 期望漏掉 `enrollment:false`。两项均为 test-only 修复；旧行为分别以 FK 错误和 closed-shape 不一致判红，fresh/replay scope 10/10 与 auth 21/21 恢复绿色。新 exact-head 远端矩阵仍在运行，因此本文不把本地闭环证明扩大为父 PR 的终态远端结论。
+## 4. 结构与安全复核
 
-## 6. 未验证边界
+- 闭环测试仅调用服务端 service authority，不接受客户端 `completed` 或客户端分数；
+- 在线报名不会产生 assignment member；
+- 考试前置条件依赖服务端 completion evidence；
+- 成绩读取使用公开复盘 DTO，不返回答案键、私有解析或 raw snapshot；
+- selector 在 no-DB 与 post-migrate 两处闭合，避免 skip-shaped green；
+- workflow 变化后 provenance 由官方 `computePackageProvenancePinSet` 重算，唯一漂移字段是 `evidenceFiles.pluginTestsWorkflow`。
 
-- 未执行浏览器端真实人工观看、随机挑战点击与考试 UAT；
-- 未在 staging 或 production 启用任何云课堂 flag；
-- 未验证高级视觉/DOM 自动化对挑战的绕过能力；
-- 未验证线下培训、直播、问卷、容量、候补或报名审批；
-- 不构成完整 L0–L6 发布验收。
+本地 exact-range Codex 复核：`P1=0 / P2=0`。没有发现需要扩产品范围才能关闭的问题。
+
+## 5. 仍需完成的发布门
+
+1. 普通 push 更新现有 Draft #5427；
+2. 等待新 exact-head 远端矩阵零失败、零 pending；
+3. owner 单独授权后方可 Ready/merge；
+4. 如需演示，再单独执行浏览器登录后的上传、报名、观看挑战、考试和成绩 UAT；
+5. flag 启用、部署和生产数据仍需独立授权。
+
+## 6. 明确不在本次最小收尾范围
+
+新员工自动指派/周报、讲师、学习地图、问卷、线下培训、混培、直播适配器、AI 问答，以及对 OCR/视觉模型的强反自动化保证。
