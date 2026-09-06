@@ -273,9 +273,14 @@ PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
 >
 > **为什么不做**:2026-09-06 owner 拍板。曾经做过一版按「我的项目目录」收窄的门(env 门控、默认关),这一版**已在本次删除**,原因有两条,都是结构性的,换个实现也绕不过去:(a) 项目目录本身是**按租户**给的(见 `stock-preparation-operator-scope.cjs`:作用域"不是按行的"),同一家工厂的两个操作员看到同一批项目,这道门**分不开同事**,而"分开同事"正是当初提这个需求的原因;(b) 它唯一的放行口是"本租户一个归档项目都没有",一旦本租户归档过任何项目,这个口就反转成"**从未归档过的新项目,一线对它的第一次对账被 403**",而归档(`mvp-persist`)是平台管理员 + 开关双限、一线自己的四步拉取第 4 步本来就 SKIP。真正按人归属需要一张**目前不存在**的项目归属表。设计稿:`design-project-ownership-20260906.md` §2 方案 B。
 >
-> **那争议怎么办 —— 靠审计反查**:reconcile 每次都会写审计行(动作 `generation_run`,mode `confirmation_reconcile_requested`,detail.operation `confirmation_decisions_reconcile`),且写在多维表落库**之前**,带操作人与时间。按时间 + 操作人可以查出"是谁发起过对账"。**注意当前限制**:这条审计行今天**不带项目号**(`project_id` 为空),所以只能按时间窗 + 人反查,不能直接按项目号过滤;补项目号是另一支改动。
+> **那争议怎么办 —— 靠审计反查,但要知道这条链路今天有多细**:对账**执行到落库前**会写一行审计(动作 `generation_run`,mode `confirmation_reconcile_requested`,detail.operation `confirmation_decisions_reconcile`),带操作人与时间。**注意三条当前限制**,免得把它当成比它更强的保证:
+> - 审计行**不带项目号**(`project_id` 为空),所以只能按时间窗 + 人反查,不能直接按项目号过滤;补项目号是另一支改动。
+> - 被作废的账本行本身**只写 `status: SUPERSEDED` 与 `supersededAt`,不写操作人、也不写运行号**。所以"谁作废了哪些行"**不是一次查询**,而是拿 `supersededAt` 去和同租户同一时间窗内的审计行对撞;同租户并发对账时无法判别是哪一次干的。
+> - 写审计**排在源读与 BOM 展开之后**,所以在读源阶段就失败的对账不留任何审计行(那种运行也没有作废任何行)。会造成损害的那一次(成功清扫)必然留有审计行,反查故事因此成立,但"每次都会写"这句话要收紧成"每次执行到落库前"。
 >
 > **一条始终生效的请求格式校验(与上面无关)**:项目号写成 JSON 数字(不是字符串)一律 400 `TABLE_ACTION_PARAMETERS_INVALID`,发生在读源之前(不读 PLM、不解密连接、不写审计)。这是"请求写错了"的答复(与下游参数校验同码、同字段),不是权限收窄。它是随那道门一起加的,但**不随门一起删**。
+>
+> **一条与本门无关、仍然存在的排查线索**:项目表里某一行如果缺 `projectId`(主键),目录侧会直接跳过它(`stock-preparation-operator-project-directory.cjs` 对没有主键的行 `continue`,fail-closed)。门删掉之后症状**变了但没消失**:不再是"对账 403",而是"**这个项目根本不出现在一线的『我的项目』列表里**"。项目号明明对得上却搜不到时,先看项目表该行的 `projectId` 是不是空的。
 >
 > **同一本确认账本的另外两条路由同样是租户级**:`GET …/confirmation-decisions?projectNo=<任意本租户项目>`(读档 `stock-prep:read`)会返回该项目的全部待确认行,`POST …/confirmation-decisions/confirm`(操作档)只按 `decisionId` 改判、不看项目。所以"按项目保护账本"这句话在本期任何一条路由上都不成立。
 

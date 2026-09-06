@@ -5866,10 +5866,16 @@ function requireStockPreparationAudit() {
       // produced — no external read, no credential decrypt, no lease, no audit row.
       //
       // It is a MALFORMED-REQUEST answer, not a narrowing: no caller gains or loses a capability from
-      // it, and the code and field are the ones the request was already going to get. It is scoped to
-      // the operator branch for the same reason everything else on this route is — the legacy
-      // `integration:admin` branch returns from `requireTableActionAccess` before any of this and is
-      // byte-for-byte unchanged.
+      // it, and the code and field are the ones the request was already going to get.
+      //
+      // WHY THE `!hasPermission(user, 'admin')` CONJUNCT BELOW IS LOAD-BEARING, and not the leftover
+      // it now looks like. It is what scopes this 400 to the operator branch, and it is deliberately
+      // the SAME EXPRESSION, with the same `legacyGate` value, that `requireTableActionAccess`
+      // admits on FIRST — so the two cannot disagree about which branch a caller took. (That helper
+      // RETURNS THE USER; it does not return from this route. Nothing else here excuses an admin.)
+      // Delete the conjunct and a platform admin who sends `{"projectNo": 230920006}` stops getting
+      // the late downstream 400 it gets today and starts getting an early one from here — a
+      // behaviour change on the branch this whole route promises to leave byte-for-byte alone.
       const reconcileParameters = body.parameters
       const reconcileProjectNoRaw = reconcileParameters && typeof reconcileParameters === 'object' && !Array.isArray(reconcileParameters)
         ? reconcileParameters.projectNo

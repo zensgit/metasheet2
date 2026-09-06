@@ -280,11 +280,20 @@ function mountWithSource({
   bindingShape = 'canonical',
   // 对账不做按项目限制 (P-13). `null` keeps the original doubles — no MVP project sheet at all. An
   // ARRAY provisions the project sheet and fills it with exactly these project numbers, which is what
-  // lets a test say "this number is in the caller's directory and that one is not" — still needed
-  // after the project gate was deleted, because P-13 now asserts that the difference makes NO
-  // difference to reconcile. `[]` is the third state and the one the field actually starts in: the
-  // sheet EXISTS (mvp/ensure provisions it) and holds no archived project, because the project row is
-  // written by mvp-persist alone — platform-admin and flag-gated.
+  // lets a test say "this number is in the caller's directory and that one is not".
+  //
+  // WHAT IT IS FOR NOW THAT THE GATE IS GONE, since "reconcile ignores the directory" could be
+  // tested with no directory at all. Two things, and the second is the load-bearing one:
+  //   - P-13 asserts the difference makes NO difference to RECONCILE, which is a claim about a
+  //     distinction that has to exist to be ignored. With the fixture at `null` the two arms would
+  //     be identical for a second reason (no sheet), and the experiment would prove less.
+  //   - it is what makes the P-13 CALIBRATION run possible: the directory route only reaches its
+  //     project-table read and its audit append when this sheet resolves, and that run is the only
+  //     thing in this file proving the `objectSheetLookups` / `auditAppends` counters can be
+  //     non-zero at all.
+  // `[]` is the third state and the one the field actually starts in: the sheet EXISTS (mvp/ensure
+  // provisions it) and holds no archived project, because the project row is written by mvp-persist
+  // alone — platform-admin and flag-gated.
   directoryProjectNos = null,
 } = {}) {
   const routes = new Map()
@@ -969,6 +978,38 @@ async function reconcileIsNotNarrowedByProject() {
     projectSheetLookups(operator),
     0,
     'P-13: ...having never looked the project table up at all — this route reads no directory, rather than reading one that admits',
+  )
+
+  // (2') THE INSTRUMENTS, CALIBRATED — the positive control the armed half of P-13f used to be.
+  //
+  // While #5516's gate existed, this file had a branch that asserted the SAME counter was NON-zero
+  // for a refused reconcile ("...and the refusal came from an actual directory read, so P-13f's
+  // 'zero lookups' measures the flag"). Deleting the gate deleted that branch — and a zero-count
+  // assertion with nothing proving the counter can ever be non-zero is an assertion about a stopped
+  // clock. Both of P-13's own instruments were in that state, and both were measured to be, by
+  // disabling each recorder in turn and watching this suite stay green:
+  //   - `objectSheetLookups` — carries (2) above and the two deepEquals below;
+  //   - `auditAppends` — carries "appended no audit row" at (4) and "same audit rows" at (3).
+  // (`loadPrincipals`, the third, is NOT in that state: P-09/P-12 drive it off zero, and disabling
+  // its recorder turns this suite red. It needs nothing here.)
+  //
+  // So both are exercised against a route that MUST do the thing they count: the operator project
+  // directory, which reads the project table and writes a `project_directory_read` audit row, on the
+  // same harness with the same mount options and the same caller. This is not a claim about
+  // reconcile — it is the calibration that makes the reconcile claims falsifiable.
+  const directoryReader = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
+  await rawCall(directoryReader.routes, {
+    method: 'GET',
+    routePath: '/api/integration/stock-preparation/operator/projects',
+    user: OPERATOR,
+  })
+  assert.ok(
+    projectSheetLookups(directoryReader) > 0,
+    `P-13: the zeroes above are measurements, not a broken instrument — the directory route drives this same counter off zero (got ${JSON.stringify(directoryReader.objectSheetLookups)})`,
+  )
+  assert.ok(
+    directoryReader.auditAppends.length > 0,
+    `P-13: ...and the same for the audit recorder, so "appended no audit row" below is a measurement too (got ${JSON.stringify(directoryReader.auditAppends.map((row) => row && row.action))})`,
   )
 
   // ...and the number itself changes nothing: the SAME request with a number the directory DOES list

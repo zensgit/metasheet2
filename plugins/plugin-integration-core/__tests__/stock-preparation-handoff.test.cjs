@@ -2975,9 +2975,16 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   // siblings were converted. 对账限本人可见项目 briefly added an ELEVENTH — reconcile's operator
   // branch, which resolved the scope to decide whose project directory answered "is this projectNo
   // one of yours" — and it is GONE AGAIN: the owner ruled on 2026-09-06 that stock-prep will not do
-  // project ownership, so that gate was deleted rather than left as a default-off switch, and
-  // reconcile no longer resolves an operator scope at all. Its tenancy is the pre-existing
-  // `resolveAuthUserTenantId` one, which is the boundary that route has always had.
+  // project ownership, so that gate was deleted rather than left as a default-off switch.
+  //
+  // SAID EXACTLY, because the loose version of this sentence is worse than none. What went is the
+  // SECOND resolution — the one inside reconcile's OWN handler body, which the gate needed because
+  // `requireTableActionAccess` returns only the user. The FIRST is still there and is still counted
+  // among the ten below: on the operator branch that shared helper resolves a scope for its refusals
+  // (lib/http-routes.cjs:1006), and after this deletion that is the ONLY tenancy check standing
+  // between a floor operator and this ledger write. "Reconcile no longer resolves an operator scope"
+  // would be false, and would send the next reader looking for a check that is very much there.
+  // The route's LEDGER tenant is the pre-existing `resolveAuthUserTenantId` one, unchanged.
   // The count is the whole point of the assertion — a new surface deciding tenancy on its own must
   // show up HERE, as a failure, rather than quietly becoming the nth thing the header does not
   // mention. It cuts both ways: a call site that DISAPPEARS lands here too, which is how this line
