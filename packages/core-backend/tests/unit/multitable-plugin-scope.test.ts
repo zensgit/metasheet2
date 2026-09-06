@@ -863,6 +863,41 @@ describe('multitable plugin scope request-scoped sheet-scope memo', () => {
     expect(assertSheetScope).toHaveBeenCalledTimes(8)
   })
 
+  // W9: the scope layer adds an ownership assertion, not SQL, so whether a list filter works is a
+  // property of the surface underneath. It may FORWARD that declaration and must never invent it —
+  // a plugin that trusts an invented `true` sends a list to a host that rejects it.
+  it('forwards supportsFilterValueLists only when the wrapped host declares it', async () => {
+    const records = {
+      listRecords: vi.fn(async () => []),
+      queryRecords: vi.fn(async () => []),
+      createRecord: vi.fn(async () => ({ id: 'rec_1', sheetId: 'sheet_1', version: 1, data: {} })),
+      getRecord: vi.fn(async () => ({ id: 'rec_1', sheetId: 'sheet_1', version: 1, data: {} })),
+      patchRecord: vi.fn(async () => ({ id: 'rec_1', sheetId: 'sheet_1', version: 2, data: {} })),
+      deleteRecord: vi.fn(async () => ({ id: 'rec_1', sheetId: 'sheet_1', version: 2 })),
+    }
+
+    const declaring = createPluginScopedMultitableApi(
+      { provisioning: {}, records: { ...records, supportsFilterValueLists: true } } as any,
+      'plugin-integration-core',
+      {} as any,
+    )
+    expect(declaring.records.supportsFilterValueLists).toBe(true)
+
+    const silent = createPluginScopedMultitableApi(
+      { provisioning: {}, records } as any,
+      'plugin-integration-core',
+      {} as any,
+    )
+    expect(silent.records.supportsFilterValueLists).toBeUndefined()
+
+    const denying = createPluginScopedMultitableApi(
+      { provisioning: {}, records: { ...records, supportsFilterValueLists: false } } as any,
+      'plugin-integration-core',
+      {} as any,
+    )
+    expect(denying.records.supportsFilterValueLists).toBeUndefined()
+  })
+
   it('withMetadataCache rejects a non-function operation', async () => {
     process.env[FLAG] = 'true'
     const { scoped } = buildScoped(vi.fn(async () => {}))

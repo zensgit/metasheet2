@@ -981,6 +981,13 @@ export class MetaSheetServer {
           },
         },
         records: {
+          // W9: this records surface routes `queryRecords` straight to the multitable query
+          // service, which builds `data ->> $k = ANY($v::text[])` for an array filter value. The
+          // declaration lives HERE, next to the implementation it describes, so a caller can tell
+          // "the host cannot do this" from "the query was invalid" without guessing from an error
+          // message. Wrapping surfaces (plugin-scope, the plugin's own target fence) forward it
+          // only when the surface underneath declares it.
+          supportsFilterValueLists: true,
           listRecords: async ({ sheetId, limit, offset }) => {
             const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
               const result = await poolManager.get().query(sql, params)

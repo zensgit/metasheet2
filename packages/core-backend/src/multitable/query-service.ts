@@ -13,6 +13,21 @@ export type MultitableRecordsQueryFn = (
 
 export type MultitableRecordFilterValue = string | number | boolean | null
 
+/**
+ * W9: an equality filter against a LIST of candidate values — `data ->> key = ANY(...)`, the set
+ * form of the single-value `data ->> key = $v` below. It answers exactly the question N separate
+ * single-value queries answer, in one statement; it is not a new operator and not a new predicate
+ * shape (still `->>`, still text equality, still `String(value)` on each element).
+ *
+ * Only `queryRecords` accepts it. `queryRecordsWithCursor` keeps rejecting a list, unchanged —
+ * keyset pagination over a multi-value filter is a different question that nothing asks yet.
+ */
+export type MultitableRecordFilterValueList = Array<string | number | boolean>
+
+export type MultitableRecordQueryFilterValue =
+  | MultitableRecordFilterValue
+  | MultitableRecordFilterValueList
+
 export type MultitableRecordQueryOrder = {
   fieldId?: string
   direction?: 'asc' | 'desc'
@@ -28,7 +43,7 @@ export type ListMultitableRecordsInput = {
 export type QueryMultitableRecordsInput = {
   query: MultitableRecordsQueryFn
   sheetId: string
-  filters?: Record<string, MultitableRecordFilterValue>
+  filters?: Record<string, MultitableRecordQueryFilterValue>
   search?: string
   orderBy?: MultitableRecordQueryOrder
   limit?: number
@@ -126,10 +141,19 @@ function normalizePagingValue(value: unknown, field: string): number | undefined
   return parsed
 }
 
+function isScalarFilterValue(value: unknown): value is string | number | boolean {
+  return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+}
+
 function normalizeQueryFilters(
   fields: Array<{ id: string; type: string; options?: Array<{ value: string }> }>,
-  filters: Record<string, MultitableRecordFilterValue> | undefined,
-): Array<{ fieldId: string; value: MultitableRecordFilterValue }> {
+  filters: Record<string, MultitableRecordQueryFilterValue> | undefined,
+  // W9: OFF by default, so `queryRecordsWithCursor` — which shares this normalizer but builds its
+  // own keyset SQL — keeps refusing a list with the same error it raises today. Only the caller
+  // that also learned to BUILD the `= ANY(...)` predicate opts in; the two cannot drift apart into
+  // "accepted here, silently stringified there".
+  options: { allowValueLists?: boolean } = {},
+): Array<{ fieldId: string; value: MultitableRecordFilterValue | MultitableRecordFilterValueList }> {
   const fieldIds = new Set(fields.map((field) => field.id))
   return Object.entries(filters ?? {}).map(([fieldId, value]) => {
     if (!fieldIds.has(fieldId)) {
@@ -138,7 +162,24 @@ function normalizeQueryFilters(
     if (value == null) {
       return { fieldId, value: null }
     }
-    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    if (Array.isArray(value)) {
+      if (!options.allowValueLists) {
+        throw new MultitableRecordValidationError(`Unsupported filter value for ${fieldId}`)
+      }
+      for (const entry of value) {
+        // REFUSED, not filtered out. `data ->> k = ANY(...)` is text equality and can never express
+        // "or the key is JSON null" — the single-value path spells that `data -> k IS NULL`, a
+        // different predicate. Dropping the null would silently answer a narrower question than the
+        // caller asked, and a caller that wants both must ask for both.
+        if (!isScalarFilterValue(entry)) {
+          throw new MultitableRecordValidationError(
+            `Filter value list for ${fieldId} must contain only string, number or boolean values`,
+          )
+        }
+      }
+      return { fieldId, value: value as MultitableRecordFilterValueList }
+    }
+    if (isScalarFilterValue(value)) {
       return { fieldId, value }
     }
     throw new MultitableRecordValidationError(`Unsupported filter value for ${fieldId}`)
@@ -261,11 +302,19 @@ export async function queryRecords(
 ): Promise<LoadedMultitableRecord[]> {
   const query = input.query
   const { fields } = await loadSheetAndFields(query, input.sheetId)
-  const filters = normalizeQueryFilters(fields, input.filters)
+  const filters = normalizeQueryFilters(fields, input.filters, { allowValueLists: true })
   const search = normalizeQuerySearch(input.search)
   const orderBy = normalizeQueryOrder(fields, input.orderBy)
   const limit = normalizePagingValue(input.limit, 'limit')
   const offset = normalizePagingValue(input.offset, 'offset')
+
+  // W9: an EMPTY candidate list matches nothing, by definition. Short-circuit rather than send
+  // `= ANY('{}')`: the answer is knowable without the round trip. This sits AFTER every
+  // normalization above on purpose — an unknown sheet, an unknown fieldId, a bad limit/offset and a
+  // bad list element all still raise exactly the error they raise today.
+  if (filters.some((filter) => Array.isArray(filter.value) && filter.value.length === 0)) {
+    return []
+  }
 
   const params: unknown[] = [input.sheetId]
   const where: string[] = ['sheet_id = $1']
@@ -274,6 +323,14 @@ export async function queryRecords(
     if (filter.value === null) {
       params.push(filter.fieldId)
       where.push(`data -> $${params.length} IS NULL`)
+      continue
+    }
+    if (Array.isArray(filter.value)) {
+      // Same `->>` text comparison and the same `String(value)` coercion as the single-value branch
+      // below — one row matches this predicate iff it would match the single-value predicate for at
+      // least one element of the list.
+      params.push(filter.fieldId, filter.value.map((entry) => String(entry)))
+      where.push(`data ->> $${params.length - 1} = ANY($${params.length}::text[])`)
       continue
     }
     params.push(filter.fieldId, String(filter.value))

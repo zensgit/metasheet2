@@ -470,6 +470,16 @@ export function createPluginScopedMultitableApi(
         }
         return runWithMultitableRequestMetadataCache(() => operation())
       },
+      // W9: FORWARD the wrapped host's array-filter declaration; never assert it. This scope adds
+      // an ownership assertion and nothing else — it does not build SQL — so whether a list filter
+      // works is entirely a property of `multitable.records` underneath. A host that does not
+      // declare it leaves this absent, and the plugin asks one key at a time.
+      // Read defensively: unlike every method below, this one is evaluated when the scoped API is
+      // BUILT, and callers (tests included) hand in partial `multitable` objects that only populate
+      // what they exercise. A missing `records` means "declares nothing", not a crash at wiring time.
+      ...(multitable.records?.supportsFilterValueLists === true
+        ? { supportsFilterValueLists: true }
+        : {}),
       listRecords: async (input) => {
         await assertSheetScopeOnce(input.sheetId)
         return multitable.records.listRecords(input)

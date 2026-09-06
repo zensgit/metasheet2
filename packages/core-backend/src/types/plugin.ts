@@ -577,7 +577,18 @@ export interface MultitableRecordsAPI {
   }>>
   queryRecords(input: {
     sheetId: string
-    filters?: Record<string, string | number | boolean | null>
+    /**
+     * W9: a value may be a LIST of candidates, which matches a row whose key equals ANY element —
+     * the set form of the single-value equality, answering in one statement what N single-value
+     * queries answer one at a time. An empty list matches nothing (and costs no query). A `null`
+     * ELEMENT is refused: `null` as the whole value means "the key is JSON null", which set
+     * equality cannot express, so the two are never mixed silently.
+     *
+     * ONLY use it when `supportsFilterValueLists` is true on this API — an older host rejects a
+     * list as an unsupported filter value, and there is no way to tell that apart from a real
+     * validation failure after the fact.
+     */
+    filters?: Record<string, string | number | boolean | null | Array<string | number | boolean>>
     search?: string
     orderBy?: {
       fieldId?: string
@@ -651,6 +662,14 @@ export interface MultitableRecordsAPI {
    * so a host that does not provide it simply is not memoized — call it only if it is present.
    */
   withMetadataCache?<T>(operation: () => Promise<T>): Promise<T>
+  /**
+   * W9 capability probe: `true` iff this host's `queryRecords` understands an ARRAY filter value
+   * (see `filters` above). Absent or `false` on every older host, and on any records surface that
+   * did not forward the declaration — a caller must then ask one key at a time. It is a plain
+   * declaration, not a switch: nothing turns it on, and a records surface that wraps another one
+   * may only forward it when the surface underneath declares it, never assert it on its own.
+   */
+  supportsFilterValueLists?: boolean
   /**
    * P4 stock-preparation persist hard cut. The host owns the transaction and lock order; the plugin
    * receives only the records methods needed by the existing persist algorithm.

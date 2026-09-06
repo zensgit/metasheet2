@@ -247,14 +247,200 @@ function assertNoHumanFields(payload, context, humanFields = HUMAN_PRESERVED_FIE
   }
 }
 
-async function findExistingRecord(recordsApi, target, key) {
+// The per-row lookup, unchanged: ONE key, `LIMIT 2` so that "more than one row carries this key"
+// is detectable without reading the whole match set.
+async function queryRecordsForKey(recordsApi, target, key) {
   const physicalKey = mapFieldName(target.keyField, target.fieldIdMap)
-  const records = await callRecordsApi('queryRecords', () => recordsApi.queryRecords({
+  return callRecordsApi('queryRecords', () => recordsApi.queryRecords({
     sheetId: target.sheetId,
     filters: { [physicalKey]: key },
     limit: 2,
     offset: 0,
   }))
+}
+
+// ---------------------------------------------------------------------------
+// W9: per-chunk batch idempotency-key lookup.
+//
+// WHY. `data ->> $k = $v` has no index, so the planner walks
+// `idx_meta_records_sheet_id_id` over EVERY row of the target sheet and heap-fetches each ~1.3KB
+// JSONB to evaluate the filter. Measured read-only on 222 (2026-09-07, EXPLAIN ANALYZE): 52,560
+// rows removed by filter, ~114ms per lookup, and per-row apply cost rising linearly with the rows
+// already in the target sheet — 47.07 / 62.72 / 82.99 ms per row at 13k / 26k / 39k existing rows
+// (least squares: 1.382ms per thousand rows + 28.34ms, residuals <= 1.54ms). A new key is the worst
+// case and the common one: nothing matches, so the scan always runs to the end of the table. The
+// UPDATE path pays the same, because `LIMIT 2` cannot stop until it has proven there is no second
+// row. #5524's metadata memo is orthogonal and does not touch this.
+//
+// WHAT THIS IS NOT. It is not a new behaviour and not a new predicate: one `= ANY(list)` query per
+// chunk asks precisely the union of the per-row `= $key` questions this loop asks today, and the
+// answers are then handed out per key. Same duplicate guard, same "first by id" winner, same
+// results/counts/evidence. Everything below exists to keep that equivalence provable, and every
+// case it cannot prove falls back to the per-row path rather than guessing.
+//
+// CONCURRENCY — stated plainly, because it does widen a window. Today a competing writer that
+// inserts the same key between this lookup and this row's create loses to nothing: there is no
+// unique constraint on the key and no lock, so both rows land. Prefetching moves that read to the
+// top of the chunk, so the window for one row grows from "this row's own lookup" to "this chunk"
+// (<= 1000 rows, typically 100). It is the SAME risk, wider — not a new class of failure, and not
+// one this PR closes. Closing it takes a unique index on the key plus an upsert, which is a
+// separate change (DDL, and it must pass the proven-tenant gate first).
+//
+// The same window has a second, milder shape worth naming: if a competing writer DELETES the target
+// row inside it, this path patches a row id that is gone and the decision fails
+// `target_row_not_found`, where the per-row path would have re-read, seen nothing, and created. Same
+// window, different observable outcome (`created` becomes `failed`); no row is corrupted and the
+// next apply of that key creates it.
+const BATCH_KEY_LOOKUP_ENV = 'MULTITABLE_STOCK_PREP_BATCH_KEY_LOOKUP'
+
+// The four spellings an operator reaching for a rollback handle actually types. A single accepted
+// spelling is a bad property for the ONLY off switch of a default-on behaviour: `0` or `off`
+// silently reading as "on" is exactly the failure you discover during the incident.
+const BATCH_KEY_LOOKUP_OFF_VALUES = new Set(['false', '0', 'off', 'no'])
+
+// Matches `LARGE_BOM_APPLY_MAX_CHUNK_SIZE`: the largest chunk this writer is ever handed by the
+// route that has a cap. Past it, batching stops being a batch (see `prefetchIdempotencyKeyIndex`).
+const BATCH_KEY_LOOKUP_MAX_KEYS = 1000
+
+// Default ON. The switch exists ONLY to roll back to the per-row path in production without a
+// redeploy; it is not a feature toggle for a second behaviour, because there is no second
+// behaviour to choose. Any value outside the off list (including empty/unset) leaves it on.
+function batchKeyLookupDisabled(env = process.env) {
+  const raw = env && env[BATCH_KEY_LOOKUP_ENV]
+  return BATCH_KEY_LOOKUP_OFF_VALUES.has(String(raw === undefined || raw === null ? '' : raw).trim().toLowerCase())
+}
+
+// Which key does a returned row carry? `pre_mapped` targets (both apply callers) hand the records
+// API physical ids and get physical ids back; a `logical`-mode fence translates them back to the
+// template's own ids. Those are the only two spellings of the SAME field. Anything else — no
+// `data`, key absent, a NON-STRING value, a value that is not one of the keys we asked for — is NOT
+// attributed to a guess; the caller falls back to per-row lookups for the whole chunk.
+//
+// WHY ONLY A STRING. The server decided which rows come back using `data ->> $k` — PostgreSQL's own
+// text projection of the stored JSON value. This function has to reproduce that decision to hand
+// each row to the right key, and `String(value)` is NOT the same function for non-strings: jsonb
+// keeps a number's scale, so a stored `1.0` projects to "1.0" while `String(1)` is "1", and an
+// integer past 2^53 is rounded by JS on the way in. If a row whose key is a JSON number were
+// attributed by that re-derivation, it could land under a DIFFERENT key that is also in this chunk
+// — `index.has()` would say yes, the guard below would never fire, and the row would be patched
+// with the other key's payload while its own key inserted a duplicate. Silent, and green. So a
+// non-string is simply unattributable here: PostgreSQL, not this file, gets to decide, and the
+// whole chunk goes back to the per-row path. (Reachability is narrow — `decisionKey()` always
+// yields a string and the template declares the key as `string` — but a numeric value can sit in
+// that column from a migration, a direct SQL load, or a `fieldIdMap` pointing the key at a numeric
+// column, and "narrow" is not "impossible".)
+function readRecordKeyValue(record, physicalKey, logicalKey) {
+  const data = record && record.data
+  if (!isPlainObject(data)) return null
+  const candidates = physicalKey === logicalKey ? [physicalKey] : [physicalKey, logicalKey]
+  for (const candidate of candidates) {
+    if (!Object.prototype.hasOwnProperty.call(data, candidate)) continue
+    const value = data[candidate]
+    return typeof value === 'string' ? value : null
+  }
+  return null
+}
+
+// Every key this chunk will look up, in decision order, de-duplicated. Only the three decisions
+// that actually call `findExistingRecord`; `skip` / `manual_confirm` never do (and are not required
+// to carry a key at all), and an unsupported decision throws before it gets there.
+function collectLookupKeys(plan, target) {
+  const keys = []
+  const seen = new Set()
+  for (const entry of plan.decisions) {
+    const decision = entry || {}
+    if (decision.decision !== DECISIONS.ADD
+      && decision.decision !== DECISIONS.UPDATE
+      && decision.decision !== DECISIONS.INACTIVE) continue
+    let key
+    try {
+      key = decisionKey(decision, target)
+    } catch (error) {
+      // A decision with no key fails on its own row later, with its own error, exactly as today.
+      continue
+    }
+    if (seen.has(key)) continue
+    seen.add(key)
+    keys.push(key)
+  }
+  return keys
+}
+
+/**
+ * One query for the whole chunk → `Map<key, records[]>`, or `null` meaning "use the per-row path".
+ *
+ * `null` is returned — never a partial or optimistic index — whenever the batch cannot be shown to
+ * carry the same answer as the per-row lookups: switch off, host cannot filter by a list, more keys
+ * than one chunk can hold, the query failed or returned a non-array, the row set hit its upper
+ * bound (so rows may have been cut off), or a returned row cannot be attributed to a key we asked
+ * for (which includes any non-string key value — see `readRecordKeyValue`). Falling back costs the
+ * chunk its speed-up and nothing else: the per-row path then re-runs each lookup and surfaces each
+ * failure on its own row, which is exactly today's behaviour.
+ */
+async function prefetchIdempotencyKeyIndex({ recordsApi, target, plan }) {
+  if (batchKeyLookupDisabled()) return null
+  if (recordsApi.supportsFilterValueLists !== true) return null
+  try {
+    const keys = collectLookupKeys(plan, target)
+    if (keys.length === 0) return new Map()
+    // A chunk this large is not a chunk. The large-BOM route already caps at 1000 decisions, so
+    // this is unreachable from that path; the small-BOM path is bounded only by `action.maxRows`,
+    // whose cap block allows absurd values. Rather than build a text[] with a million elements and
+    // ask the host to hand back two million rows, fall back to the per-row path — which is what a
+    // plan that big does today anyway.
+    if (keys.length > BATCH_KEY_LOOKUP_MAX_KEYS) return null
+    const logicalKey = target.keyField
+    const physicalKey = mapFieldName(logicalKey, target.fieldIdMap)
+    // Upper bound, never a silent truncation. Under the per-row semantics a key needs at most 2
+    // rows to decide (1 = hit, >1 = duplicate), so 2 rows per key is everything this index can
+    // possibly need; the `+1` makes "the host had more to give" observable instead of invisible.
+    // CONTRACT with the host: `queryRecords` must apply the `limit` it is given, unchanged. That is
+    // what the in-repo host does today (`query-service.queryRecords` pushes it straight into
+    // `LIMIT $n`, and neither `plugin-scope` nor the target fence rewrites it), and the bound below
+    // is only a truncation detector while it holds. If a future host ever CLAMPS `limit` to some
+    // ceiling of its own, a chunk asking for more than that ceiling would come back short, the
+    // `>= limit` test would not fire, and keys whose rows were cut off would be treated as new and
+    // inserted a second time. A host that wants to cap this must reject the request, not shrink it.
+    const limit = keys.length * 2 + 1
+    const records = await recordsApi.queryRecords({
+      sheetId: target.sheetId,
+      filters: { [physicalKey]: keys },
+      limit,
+      offset: 0,
+    })
+    if (!Array.isArray(records)) return null
+    if (records.length >= limit) return null
+    const index = new Map(keys.map((key) => [key, []]))
+    for (const record of records) {
+      const value = readRecordKeyValue(record, physicalKey, logicalKey)
+      if (value === null || !index.has(value)) return null
+      index.get(value).push(record)
+    }
+    return index
+  } catch (error) {
+    return null
+  }
+}
+
+// After a successful write the index must agree with the table, or a SECOND decision carrying the
+// same key inside this same chunk would still see "no such row" and insert a duplicate. A write
+// whose row id we cannot learn drops the key from the index instead of recording a lie — the next
+// lookup for it then goes back to the database.
+function rememberWrittenRow(keyIndex, key, recordId) {
+  if (!keyIndex) return
+  if (typeof recordId === 'string' && recordId.trim()) {
+    keyIndex.set(key, [{ id: recordId }])
+    return
+  }
+  keyIndex.delete(key)
+}
+
+async function findExistingRecord(recordsApi, target, key, keyIndex = null) {
+  // A key missing from the index was never prefetched (or was dropped by `rememberWrittenRow`), so
+  // it is asked for directly rather than assumed absent.
+  const records = keyIndex && keyIndex.has(key)
+    ? keyIndex.get(key)
+    : await queryRecordsForKey(recordsApi, target, key)
   if (!Array.isArray(records)) {
     throw new StockPreparationApplyWriterError('queryRecords must return an array', { field: 'recordsApi.queryRecords' })
   }
@@ -366,37 +552,41 @@ async function callRecordsApi(operation, callback) {
   }
 }
 
-async function applyAddDecision({ recordsApi, target, decision, humanFields, templateFields }) {
+async function applyAddDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex }) {
   const key = decisionKey(decision, target)
   let record = copyPayload(decision.record, 'decision.record')
   if (!Object.prototype.hasOwnProperty.call(record, target.keyField)) record[target.keyField] = key
   assertNoHumanFields(record, 'add record', humanFields)
   record = normalizePayloadForTemplate(record, templateFields)
 
-  const existing = await findExistingRecord(recordsApi, target, key)
+  const existing = await findExistingRecord(recordsApi, target, key, keyIndex)
   if (existing && existing.id) {
     const updated = await callRecordsApi('patchRecord', () => recordsApi.patchRecord({
       sheetId: target.sheetId,
       recordId: existing.id,
       changes: mapRecordFields(record, target.fieldIdMap),
     }))
-    return { status: 'updated', recordId: updated && updated.id ? updated.id : existing.id }
+    const recordId = updated && updated.id ? updated.id : existing.id
+    rememberWrittenRow(keyIndex, key, recordId)
+    return { status: 'updated', recordId }
   }
 
   const created = await callRecordsApi('createRecord', () => recordsApi.createRecord({
     sheetId: target.sheetId,
     data: mapRecordFields(record, target.fieldIdMap),
   }))
-  return { status: 'created', recordId: created && created.id }
+  const recordId = created && created.id
+  rememberWrittenRow(keyIndex, key, recordId)
+  return { status: 'created', recordId }
 }
 
-async function applyPatchDecision({ recordsApi, target, decision, humanFields, templateFields }) {
+async function applyPatchDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex }) {
   const key = decisionKey(decision, target)
   let patch = copyPayload(decision.patch, 'decision.patch')
   assertNoHumanFields(patch, `${decision.decision} patch`, humanFields)
   patch = normalizePayloadForTemplate(patch, templateFields)
 
-  const existing = await findExistingRecord(recordsApi, target, key)
+  const existing = await findExistingRecord(recordsApi, target, key, keyIndex)
   if (!existing || !existing.id) {
     throw new StockPreparationApplyWriterError(`${decision.decision} target row not found`, {
       code: 'target_row_not_found',
@@ -409,7 +599,9 @@ async function applyPatchDecision({ recordsApi, target, decision, humanFields, t
     recordId: existing.id,
     changes: mapRecordFields(patch, target.fieldIdMap),
   }))
-  return { status: 'updated', recordId: updated && updated.id ? updated.id : existing.id }
+  const recordId = updated && updated.id ? updated.id : existing.id
+  rememberWrittenRow(keyIndex, key, recordId)
+  return { status: 'updated', recordId }
 }
 
 function incrementCounts(counts, decision, status) {
@@ -547,6 +739,11 @@ async function applyStockPreparationPlan(input = {}) {
   // rows were written anyway", the contract `terminalApplyStatus` folds into `partial`. The scope
   // is NOT a transaction and takes no lock; it ends when this call returns.
   const runDecisions = async () => {
+    // W9: one lookup for the whole chunk instead of one per row. INSIDE the metadata scope on
+    // purpose, so the batch query is served by the same memoized sheet row / field list the loop
+    // uses. `null` = "index unavailable" and every lookup below goes back to the per-row query,
+    // byte-identically to the code before this change.
+    const keyIndex = await prefetchIdempotencyKeyIndex({ recordsApi, target, plan })
     for (let index = 0; index < plan.decisions.length; index += 1) {
       const decision = plan.decisions[index] || {}
       try {
@@ -561,13 +758,13 @@ async function applyStockPreparationPlan(input = {}) {
           continue
         }
         if (decision.decision === DECISIONS.ADD) {
-          const applied = await applyAddDecision({ recordsApi, target, decision, humanFields, templateFields })
+          const applied = await applyAddDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex })
           incrementCounts(counts, decision.decision, applied.status)
           results.push({ index, decision: decision.decision, idempotencyKey: decisionKey(decision, target), ...applied })
           continue
         }
         if (decision.decision === DECISIONS.UPDATE || decision.decision === DECISIONS.INACTIVE) {
-          const applied = await applyPatchDecision({ recordsApi, target, decision, humanFields, templateFields })
+          const applied = await applyPatchDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex })
           incrementCounts(counts, decision.decision, applied.status)
           results.push({ index, decision: decision.decision, idempotencyKey: decisionKey(decision, target), ...applied })
           continue
@@ -577,6 +774,23 @@ async function applyStockPreparationPlan(input = {}) {
           decision: decision.decision,
         })
       } catch (error) {
+        // W9: a failed write may still have LANDED. `createRecord`/`patchRecord` wrap a committed
+        // transaction, so a connection or pool error raised AFTER the COMMIT surfaces here while
+        // the row is already in the table — and only the success paths keep the index in step
+        // (`rememberWrittenRow`). Leaving a stale empty bucket would make a LATER decision in this
+        // same chunk carrying this same key read "no such row": on ADD it inserts a SECOND row
+        // under one idempotency key (a durable defect — every future apply of that key then fails
+        // `duplicate_target_key` and needs manual cleanup), on UPDATE/INACTIVE it reports
+        // `target_row_not_found` for a row that is right there. Dropping the key sends the next
+        // lookup back to the database, which is what the per-row path does today. Dropping a key
+        // whose write did NOT land costs one extra query and nothing else.
+        if (keyIndex) {
+          try {
+            keyIndex.delete(decisionKey(decision, target))
+          } catch (keyError) {
+            // No usable key means this decision never reached a lookup: nothing to drop.
+          }
+        }
         counts.failed += 1
         const code = errorCode(error)
         const operation = errorOperation(error)
@@ -669,8 +883,10 @@ module.exports = {
   summarizeApplyResultForEvidence,
   __internals: {
     assertNoHumanFields,
+    batchKeyLookupDisabled,
     decisionKey,
     findExistingRecord,
+    readRecordKeyValue,
     applyStatus,
     classifyTargetWriteError,
     fieldIdMapHasExplicitBindings,
