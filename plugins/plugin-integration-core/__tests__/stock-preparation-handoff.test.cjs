@@ -2974,6 +2974,10 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   // write half of the value-entry read, which had kept `resolveAuthUserTenantId` while its two
   // siblings were converted. 对账限本人可见项目 added an ELEVENTH: reconcile's operator branch, which
   // resolves the scope to decide whose project directory answers "is this projectNo one of yours".
+  // That eleventh call site is ENV-GATED and off by default
+  // (`MULTITABLE_STOCK_PREP_RECONCILE_PROJECT_DIRECTORY_GATE`) — it is counted anyway, because this
+  // assertion is about what the source is written to do, and an unarmed derivation is precisely the
+  // one that would otherwise drift out of the header list unnoticed.
   // The count is the whole point of the assertion — a new surface deciding tenancy on its own must
   // show up HERE, as a failure, rather than quietly becoming the nth thing the header does not
   // mention.

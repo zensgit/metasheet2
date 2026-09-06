@@ -334,6 +334,17 @@ async function listOperatorProjectDirectory({ recordsApi, provisioning, targetPr
  * predicate, one implementation: the directory and this gate cannot drift on who may see what.
  *
  * ---------------------------------------------------------------------------
+ * IT IS NOT CALLED BY DEFAULT
+ * ---------------------------------------------------------------------------
+ *
+ * The one caller — the reconcile route in `http-routes.cjs` — invokes this only when
+ * `MULTITABLE_STOCK_PREP_RECONCILE_PROJECT_DIRECTORY_GATE` is exactly 'true'. The flag exists
+ * because of the two limits stated below (the check can only prove 限本租户的项目, and the
+ * empty-archive pass-through inverts into "a never-archived project is refused" the moment a tenant
+ * archives anything). Read every guarantee here as conditional on that flag: with it off, this
+ * function is unreachable from HTTP and reconcile keeps the tenant-level boundary it has always had.
+ *
+ * ---------------------------------------------------------------------------
  * THE ONE PASS-THROUGH, STATED AS A LIMIT RATHER THAN HIDDEN AS A BEHAVIOUR
  * ---------------------------------------------------------------------------
  *
@@ -355,10 +366,12 @@ async function listOperatorProjectDirectory({ recordsApi, provisioning, targetPr
  * WHAT IS STILL TRUE ONCE THE ARCHIVE IS NON-EMPTY, said plainly because it is a product consequence
  * and not a bug: a project that has NEVER been archived is not in the directory, so an operator's
  * reconcile of it is refused 403. An operator's own four-step pull reaches steps 1-3 and SKIPs the
- * archive step (platform-admin), so this state is reachable in normal use and needs an owner ruling —
- * broadening the predicate to "the ledger has pending rows for this number" would NOT be that fix: it
- * would admit precisely the case the gate exists to refuse, since pending rows are exactly what the
- * orphan sweep supersedes.
+ * archive step (platform-admin), so this state is reachable in normal use — it is THE reason the
+ * caller keeps this behind a default-off flag rather than arming it: on by default it would refuse a
+ * floor operator's first reconcile of every new customer project. Broadening the predicate to "the
+ * ledger has pending rows for this number" would NOT be the fix either: it would admit precisely the
+ * case the gate exists to refuse, since pending rows are exactly what the orphan sweep supersedes.
+ * The real fix is a project-ownership store, which does not exist yet.
  *
  * The tenant door above this is unaffected and still the enforcement: a caller with no proven tenant
  * never reaches this function at all.

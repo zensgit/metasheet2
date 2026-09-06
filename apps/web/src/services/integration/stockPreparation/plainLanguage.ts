@@ -640,10 +640,15 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainText> = Object
     en: 'The request names a different factory from the one your account belongs to — switch back to your own factory.',
   }),
   // 对账限本人可见项目. The reconcile route's project-visibility 403, raised only for the operator
-  // tier (a platform admin never sees it). Worded like the board's 404 rather than like a scolding:
-  // the refusal is SHAPELESS server-side — a project of another factory and a number nobody has get
-  // the identical answer — so the copy must not claim to know which of the two it was, and must not
-  // invite a retry that will answer the same way forever.
+  // tier (a platform admin never sees it) and only on a deployment that has turned the server-side
+  // gate on — it is env-gated, `MULTITABLE_STOCK_PREP_RECONCILE_PROJECT_DIRECTORY_GATE`, DEFAULT OFF.
+  // The sentence lives here regardless: this table is the whole error vocabulary, and a code that
+  // can arrive with no copy for it falls back to the write-generic, which would tell an operator the
+  // save failed rather than which project they may scan.
+  // Worded like the board's 404 rather than like a scolding: the refusal is SHAPELESS server-side —
+  // a project of another factory and a number nobody has get the identical answer — so the copy must
+  // not claim to know which of the two it was, and must not invite a retry that will answer the same
+  // way forever.
   STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE: Object.freeze({
     zh: '这个项目号不在您能看到的项目里,所以不能对它重新扫描。请从上面的项目列表里选一个,或者找管理员。',
     en: 'That project number is not one of the projects you can see, so it cannot be re-scanned. Pick one from your project list above, or ask an administrator.',

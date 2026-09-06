@@ -352,6 +352,14 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   // to decide WHOSE project directory answers "is this projectNo one of yours" — the visibility check
   // that stops one operator's reconcile from superseding another project's pending decision rows.
   //
+  // PINNED EVEN THOUGH THE CALL IS ENV-GATED AND OFF BY DEFAULT
+  // (`MULTITABLE_STOCK_PREP_RECONCILE_PROJECT_DIRECTORY_GATE`). This whole file is a SOURCE-LEVEL
+  // scan: it asks what the handler is written to do, not what a given deployment runs. The scan
+  // finds `resolveOperatorValueScope(` in the body whatever the flag says, so leaving the handler
+  // out would fail the derived-equals-pinned check outright — and, more to the point, an unarmed
+  // code path is exactly the one that drifts unwatched. The three per-handler checks below are what
+  // stop it from acquiring another way of deciding tenancy while nobody is running it.
+  //
   // The three per-handler checks below are exactly the ones that matter for that use: the scope must
   // be the tenancy authority (no `resolveTenantId`, no raw `user.tenantId`), because a header-picked
   // tenant would pick which directory vouches for the number.
